@@ -39,6 +39,32 @@ make lint        # golangci-lint
 - Errors: wrap with context and identifiers (`fmt.Errorf("create slot %s: %w", name, err)`);
   never log-and-continue; no silent branch cases; no `nolint`; no `--no-verify`.
 
+## Go maxims
+
+- **"A little copying is better than a little dependency."** Small mechanics (retry/backoff, CA
+  loading, keepalives, tiny helpers) are hand-written or copied with an attributing comment —
+  never imported. Take pinned dependencies only for load-bearing expertise (the parser, the wire
+  protocol); a dependency inside a TCB package needs a recorded decision (see
+  [TCB.md](TCB.md)). **Never import `github.com/block/spirit` as a module** — port ideas with
+  citations, not code.
+- **Expose the smallest interface that does the job.** Export domain types and their validating
+  constructors, not internals; no re-exports or plain-delegation wrappers — callers import the
+  source package.
+- **Clear is better than clever.** No clever SQL, no dense compound predicates — extract a named
+  helper for any 3+-term or state-machine conditional. Separate error handling from state
+  decisions. This code gets read during incidents; readability outranks ease of use and
+  performance here (correctness outranks both).
+- **Minimize state; derive rather than store.** If a value can be recomputed from the database
+  or the checkpoint, don't persist it.
+- **Don't conflate causes.** No `if err != nil || value == nil` when the cases mean different
+  things; no deduping unrelated branches with `||` — separate branches calling a shared helper.
+- Concurrency: `wg.Go(...)`; `context.WithoutCancel(ctx)` for background goroutines that must
+  outlive a request; snapshot shared state under one lock acquisition, not several.
+- Cleanup: close errors are logged, not discarded — no bare `_ = x.Close()` (one exception: a
+  redundant safety closer on a handle someone else owns discards its guaranteed
+  already-closed error).
+- State comparisons use typed constants and helpers, never raw string matching.
+
 > This file grows with the codebase (see the research build-tracker task for the full
 > AGENTS.md derivation from schemabot's). Keep it short: rules earn a line here only when an
 > agent can't infer them from the code.

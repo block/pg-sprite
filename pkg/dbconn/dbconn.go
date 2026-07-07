@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -64,12 +65,8 @@ func NewPool(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	rp["statement_timeout"] = strconv.FormatInt(stmtTimeout.Milliseconds(), 10)
 	rp["application_name"] = "pg-sprite"
 
-	if cfg.CACertPath != "" {
-		tlsCfg, err := caTLSConfig(cfg.CACertPath, pc.ConnConfig.Host)
-		if err != nil {
-			return nil, err
-		}
-		pc.ConnConfig.TLSConfig = tlsCfg
+	if err := configureTLS(pc, cfg); err != nil {
+		return nil, err
 	}
 	if cfg.MaxConns > 0 {
 		pc.MaxConns = cfg.MaxConns
@@ -84,6 +81,37 @@ func NewPool(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("ping after connect: %w", err)
 	}
 	return pool, nil
+}
+
+// configureTLS decides the pool's TLS setup: an explicit CA bundle wins;
+// otherwise RDS/Aurora endpoints get TLS automatically via the embedded RDS
+// global bundle (see rds.go); everything else keeps whatever the connection
+// string asked for.
+func configureTLS(pc *pgxpool.Config, cfg Config) error {
+	switch {
+	case cfg.CACertPath != "":
+		tlsCfg, err := caTLSConfig(cfg.CACertPath, pc.ConnConfig.Host)
+		if err != nil {
+			return err
+		}
+		pc.ConnConfig.TLSConfig = tlsCfg
+	case IsRDSHost(pc.ConnConfig.Host):
+		if strings.Contains(cfg.URL, "sslmode=") {
+			// The caller chose an sslmode; honor it — but when verification
+			// was requested without a root bundle, supply the embedded RDS
+			// roots, which are not in system trust stores.
+			if tc := pc.ConnConfig.TLSConfig; tc != nil && !tc.InsecureSkipVerify && tc.RootCAs == nil {
+				tc.RootCAs = rdsRootPool()
+			}
+		} else {
+			// No explicit sslmode on an RDS/Aurora endpoint: auto-enable
+			// verify-full with the embedded bundle, and drop the plaintext
+			// fallbacks the default sslmode would otherwise allow.
+			pc.ConnConfig.TLSConfig = rdsTLSConfig(pc.ConnConfig.Host)
+			pc.ConnConfig.Fallbacks = nil
+		}
+	}
+	return nil
 }
 
 // caTLSConfig builds a verify-full TLS config trusting only the given CA
