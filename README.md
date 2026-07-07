@@ -11,13 +11,13 @@ when one exists (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default,
 a genuine table rewrite is unavoidable.
 
 **Status: Phase 0 (scaffold + test harness).** All subcommands are stubs. The
-design docs and the phased build plan currently live in the research repo
-(`research/migrations-related/aurora-postgresql/online-schema-change-engine/`)
-and will migrate here as part of the open-sourcing work.
+design docs and the phased build plan live in [docs/](docs/) — start with
+[docs/README.md](docs/README.md).
 
-The codebase is partitioned into a small trusted core and an untrusted
-periphery — **[TCB.md](TCB.md)** says which packages are which and the rules
-that apply inside the boundary. Read it before changing anything under `pkg/`.
+The codebase is partitioned into a small safety-critical core and a
+periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the
+rules that apply inside the core. Read it before changing anything under
+`pkg/`.
 
 ## Development
 

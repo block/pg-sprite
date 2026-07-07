@@ -3,13 +3,13 @@
 Guidance for AI coding agents working on pg-sprite — an online schema-change engine for Aurora
 PostgreSQL. Deliberately short: don't restate what you can infer from the code.
 
-## Read TCB.md first
+## Read SAFETY.md first
 
-This codebase is partitioned into a **trusted computing base** and an untrusted periphery.
-[TCB.md](TCB.md) lists which packages are which and the stricter rules that apply inside the
-boundary (proof types, bounded everything, `// INV:` locality, the TCB dependency list, the
-never-import-`block/spirit` rule). Before touching a `pkg/` package, check its row in TCB.md —
-the review bar and the AI-assistance posture differ by side.
+This codebase is partitioned into a **safety-critical core** and a periphery.
+[SAFETY.md](SAFETY.md) lists which packages are which and the stricter rules that apply inside
+the core (proof types, bounded everything, `// INV:` locality, the core dependency list, the
+never-import-`block/spirit` rule). Before touching a `pkg/` package, check its row in
+SAFETY.md — the review bar and the AI-assistance posture differ by side.
 
 ## Build and test
 
@@ -44,9 +44,9 @@ make lint        # golangci-lint
 - **"A little copying is better than a little dependency."** Small mechanics (retry/backoff, CA
   loading, keepalives, tiny helpers) are hand-written or copied with an attributing comment —
   never imported. Take pinned dependencies only for load-bearing expertise (the parser, the wire
-  protocol); a dependency inside a TCB package needs a recorded decision (see
-  [TCB.md](TCB.md)). **Never import `github.com/block/spirit` as a module** — port ideas with
-  citations, not code.
+  protocol); a dependency inside a core package needs a recorded decision (see
+  [SAFETY.md](SAFETY.md)). **Never import `github.com/block/spirit` as a module** — port ideas
+  with citations, not code.
 - **Expose the smallest interface that does the job.** Export domain types and their validating
   constructors, not internals; no re-exports or plain-delegation wrappers — callers import the
   source package.
@@ -65,6 +65,8 @@ make lint        # golangci-lint
   already-closed error).
 - State comparisons use typed constants and helpers, never raw string matching.
 
-> This file grows with the codebase (see the research build-tracker task for the full
-> AGENTS.md derivation from schemabot's). Keep it short: rules earn a line here only when an
-> agent can't infer them from the code.
+Design docs live in [docs/](docs/) — start at [docs/README.md](docs/README.md); the invariant
+registry is [docs/invariants.md](docs/invariants.md).
+
+> This file grows with the codebase. Keep it short: rules earn a line here only when an agent
+> can't infer them from the code.
