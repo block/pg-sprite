@@ -40,6 +40,7 @@ for how the Spirit original works and tool-pgroll.md for pgroll.
   - [2. Scope of v1](#2-scope-of-v1)
   - [3. Repo location / language](#3-repo-location--language)
   - [4. Expand/contract (pgroll) as a second execution backend](#4-expandcontract-pgroll-as-a-second-execution-backend)
+  - [5. Declarative diff engine — build on pg_query_go vs wrap pg-schema-diff](#5-declarative-diff-engine--build-on-pg_query_go-vs-wrap-pg-schema-diff)
 - [Next step](#next-step)
 
 ## Architecture: decoupled planner, router, and executors
@@ -241,6 +242,18 @@ Declarative mode lets schemas live as **reviewed, version-controlled `.sql` file
 CI compute "what would change" — while reusing the entire safe execution path (classify,
 native-vs-copy, checksum, cutover). It is purely additive: the imperative `--alter` path
 remains the primitive that everything ultimately runs through.
+
+### Build or wrap?
+
+[stripe/pg-schema-diff](https://github.com/stripe/pg-schema-diff) already implements most of
+this front-end: introspection, canonicalization (by applying the desired DDL to a **temp
+database** and letting the server itself canonicalize), dependency-ordered emission of the same
+safe idioms, per-statement timeouts, typed **hazard annotations**, and **plan validation**
+against the temp database. Whether `pkg/schemadiff` wraps it or builds on `pg_query_go`
+directly is
+[open decision #5](#5-declarative-diff-engine--build-on-pg_query_go-vs-wrap-pg-schema-diff).
+Either way its output flows through our classifier and executors unchanged — planner output is
+a request, not a permission.
 
 ## Advisory mode and the force escape hatch
 
@@ -534,6 +547,10 @@ pkg/throttler/        -> Aurora PG replica-lag / slot-lag throttle
   messages, send standby status (LSN flush) updates. This is the binlog-syncer analog.
 - **`github.com/pganalyze/pg_query_go/v5`** — parse `ALTER`/`CREATE TABLE` (libpg_query,
   the actual Postgres grammar). Analog of Spirit's TiDB parser.
+- **`github.com/stripe/pg-schema-diff`** *(candidate — open decision #5)* — declarative diff
+  engine: introspection + dependency-ordered plan emission with hazard annotations and
+  temp-database plan validation; would power `pkg/schemadiff` instead of building the diff on
+  `pg_query_go` directly.
 - **`github.com/alecthomas/kong`** — CLI, same as Spirit.
 
 ## Design decisions inherited from Spirit (safety over speed)
@@ -662,6 +679,33 @@ rewrites use copy-and-swap.
 - **Open sub-questions:** wrap pgroll as a Go library vs subprocess; how to unify the
   one-shot vs start/complete/rollback lifecycles under one `status`; and the default routing
   policy (auto-route vs explicit `--strategy`) given "decisions, not options".
+
+### 5. Declarative diff engine — build on pg_query_go vs wrap pg-schema-diff
+
+Whether `pkg/schemadiff` builds the desired-vs-live diff on `pg_query_go` + our own schema
+model, or wraps [stripe/pg-schema-diff](https://github.com/stripe/pg-schema-diff) (MIT, Go,
+PG 14–17, actively maintained) as the diff engine.
+
+- **Wrap (evaluate first):** it already does the hardest parts — introspection,
+  server-canonicalized desired state ("parse by executing" on a temp database),
+  dependency-ordered plans emitting the same safe idioms our classifier chooses, typed hazard
+  annotations (≈ our advisory mode, with an `--allow-hazards`-style CI gate), and plan
+  validation against the temp database. Plan generation is cleanly separated from application,
+  so our executors keep our own timeout/lock/retry discipline. It is a **periphery** dependency
+  (plan generation), so the TCB bar does not apply — pinned like any load-bearing dep.
+- **Costs of wrapping:** the temp-database factory is an operational precondition
+  (`CREATE DATABASE` on the target or a scratch instance — needs a deliberate answer for
+  locked-down production clusters); renames surface as drop+add and **must** sit behind our
+  destructive-diff gate and never-guess-renames refusals; type support beyond enums is missing;
+  its embedded timeout policy is replaced by ours at execution.
+- **Build:** full control and no temp-database precondition — at the cost of the hardest code
+  in Phase 2 and permanent drift risk between a hand-rolled schema model and PostgreSQL's real
+  canonicalization.
+- **Recommendation:** prototype the wrap behind our own `SchemaDiff` seam in Phase 2; adopt the
+  **hazard taxonomy** (advisory-mode vocabulary) and **plan-validation-on-a-throwaway-schema**
+  (a verification-ladder rung) regardless of which way this lands. Its declared non-goal —
+  *"stateful online migration techniques, like shadow tables, aren't yet supported"* — is
+  exactly the gap this engine's copy-and-swap fills, so the tools compose rather than compete.
 
 
 ## Next step

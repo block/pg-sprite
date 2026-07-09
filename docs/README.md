@@ -4,7 +4,9 @@ Research and design notes for building an online schema migration engine targeti
 **Aurora PostgreSQL**, by deriving and combining the best practices from established tools —
 [Spirit](https://github.com/block/spirit) (Aurora MySQL),
 [pg_osc](https://github.com/shayonj/pg-osc), [pg_repack](https://github.com/reorg/pg_repack),
-and [pgroll](https://github.com/xataio/pgroll) — rather than porting any single one of them.
+[pgroll](https://github.com/xataio/pgroll), and
+[pg-schema-diff](https://github.com/stripe/pg-schema-diff) (declarative diffing) — rather than
+porting any single one of them.
 
 ## Table of contents
 
