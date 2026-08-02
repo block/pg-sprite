@@ -28,9 +28,9 @@ changes, the router decides *which strategy*, interchangeable executors decide *
                  ╰───────┬───────╯
         ╭────────────────┼────────────────┬───────────────╮
         ▼                ▼                ▼               ▼
-   native DDL      copy-and-swap    expand/contract     refuse /
-   CONCURRENTLY    (transparent)    (reversible,        manual
-   NOT VALID …                       later)
+   native DDL      copy-and-swap    expand/contract     refuse with
+   CONCURRENTLY    (later phase)    (reversible,        not-native-safe
+   NOT VALID …                       later)              verdict
         ╰────────────────┴────────────────╯
                          │ cross-cutting: connection mgmt,
                          │ lock bounding, Aurora-aware throttling
@@ -67,7 +67,7 @@ boundary) is defined in [../SAFETY.md](../SAFETY.md).
 
 ## The copy-and-swap lifecycle
 
-When the router picks the heavy path:
+In a later phase, when the in-house heavy path is available and the router picks it:
 
 ```
  create shadow table  ─▶  start change capture   ─▶  bulk-copy existing rows

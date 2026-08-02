@@ -78,7 +78,7 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
    ┌─────────────────────▼──────────────────── PLANNER / front-end (shared) ────┐
    │  pkg/statement   parse ALTER/CREATE (pg_query_go)                          │
    │  pkg/schemadiff  introspect live schema → diff vs desired → ordered ALTERs │
-   │  classifier      per op: native-safe | copy-and-swap | refuse              │
+   │  classifier      per op: native-safe | needs-rewrite | refuse              │
    │  pkg/lint        reject unsafe/unsupported up front                        │
    │      │                                                                     │
    │      ▼  Plan (ordered steps, classified per operation)                     │
@@ -86,13 +86,13 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
           ▼
    ┌──────────────────── ROUTER  (pick an executor per change) ─────────────────┐
    │  policy + cluster facts: reversibility? app version-aware? logical repl?   │
-   │  table shape? → assigns each change to native | copy-and-swap | expand/c.  │
+   │  table shape? → native now; copy-and-swap / expand-contract in later phases│
    └──────┬─────────────────────────────────────────────────────────────────────┘
           │  pkg/executor — Executor{ Plan, Execute, Status, Abort }
    ╭──────┴───────────────┬──────────────────────────────┬─────────────────────╮
    ▼                      ▼                               ▼                     ▼
- native                copy-and-swap (Pattern A)       expand/contract        refuse /
- executor              executor — the heavy path        via pgroll (later)     manual
+ native                copy-and-swap (Pattern A)       expand/contract        refuse with
+ executor              executor — later phase           via pgroll (later)     verdict
  ┌──────────────┐      ┌───────────────────────────-┐   ┌──────────────────┐
  │CONCURRENTLY  │      │1 create shadow table       │   │versioned views,  │
  │NOT VALID +   │      │2 pkg/decode  logical slot  │   │dual schema, app  │
@@ -150,8 +150,9 @@ pattern *per migration*:
 
 The classifier, declarative diff, linting, dry-run, and status reporting are written **once**
 and shared by every backend. An `Executor` interface (`Plan`, `Execute`, `Status`, `Abort`)
-is the contract; copy-and-swap and native are the v1 implementations, pgroll is a strong
-candidate to wrap as a third.
+is the contract; native is the first implementation. Until the in-house copy-and-swap executor
+lands in a later phase, every `needs-rewrite` change is refused as **not native-safe** rather than
+delegated to an external tool. pgroll remains a possible still-later backend.
 
 ### The honest tradeoffs (why this is an *option*, not a free win)
 
@@ -178,10 +179,11 @@ Routing to pgroll buys reversibility, but the patterns are not silently intercha
 
 ### v1 stance
 
-Build the **planner + router + native + log-based copy-and-swap** first (that is the
-differentiated, missing capability). Design the `Executor` interface from day one so the **expand/contract
-(pgroll) backend can be added later** without reworking the front-end. See the
-build plan — the pgroll backend lands in a later phase.
+Build the **planner + router + native executor** first. A `needs-rewrite` result is a first-class
+**not native-safe** refusal, with the reason, a note that in-house copy-and-swap arrives in later
+phases, and a safer native alternative where one exists. It is never delegated to an external
+copy tool. Design the `Executor` interface from day one so copy-and-swap and, later,
+expand/contract can be added without reworking the front-end.
 
 ## Declarative mode (desired-state schema diff)
 
@@ -267,7 +269,8 @@ refuse based on mode and flags.
 For each parsed statement the classifier produces a record along the lines of:
 
 - `original` — the statement as the user wrote it.
-- `class` — `native-safe` · `needs-rewrite` (copy-and-swap) · `refuse`.
+- `class` — `native-safe` · `needs-rewrite` (refused until in-house copy-and-swap lands) ·
+  `refuse`.
 - `recommended` — the safe rewrite when the literal is risky but has a native equivalent
   (e.g. `CREATE INDEX` → `CREATE INDEX CONCURRENTLY`; `ADD CONSTRAINT` → `ADD … NOT VALID` +
   `VALIDATE`; `ADD PRIMARY KEY` → unique index `CONCURRENTLY` + `ADD PRIMARY KEY USING INDEX`).
@@ -284,7 +287,7 @@ mode just **surfaces** it instead of consuming it silently.
 | Invocation | Behaviour |
 | --- | --- |
 | `suggest` / `lint` / `diff --dry-run` | Print `original` → `recommended` + `risk` for every op. **Never executes.** Exit non-zero if any op needs a riskier path than policy allows (the CI gate). |
-| `migrate` (default) | If a safer `recommended` form exists, **apply the recommended idiom** (classify-first) and report what was substituted. If the literal is risky with **no** safe equivalent (a genuine rewrite), route to copy-and-swap. If unsafe/unsupported, **refuse** with the reason. The dangerous literal is **never** run by default. |
+| `migrate` (default) | If a safer `recommended` form exists, **apply the recommended idiom** (classify-first) and report what was substituted. If the literal is not native-safe, **refuse** with the reason, a later-phase copy-and-swap note, and a safer native alternative where one exists. The dangerous literal is **never** run by default, and no external copy tool is invoked. |
 | `migrate --force` | Run each statement **exactly as submitted**, bypassing the safe rewrite. Gated — see below. |
 
 The distinction the user cares about: a plain `CREATE INDEX` is never executed verbatim by
@@ -311,8 +314,9 @@ idle and a plain rewrite is acceptable); it is an escape hatch, not a shortcut, 
 
 ## Copy-and-swap executor: lifecycle
 
-> This section details the **copy-and-swap executor** (one of the executors above), the
-> heavy strategy for genuine table rewrites. The `native` and `expand/contract`
+> This section details the later-phase **copy-and-swap executor**, the planned in-house heavy
+> strategy for genuine table rewrites. Until it lands, those rewrites receive a **not
+> native-safe** refusal. The `native` and `expand/contract`
 > executors are described in the architecture section and in
 > tool-pgroll.md. The per-primitive **Spirit (MySQL) → Aurora
 > PostgreSQL mapping** this executor is built on lives in

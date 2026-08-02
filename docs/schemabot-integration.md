@@ -50,7 +50,7 @@ this mapping clean — the orchestrator's engine verbs line up almost one-to-one
 | Engine verb | `pg-sprite` responsibility |
 | --- | --- |
 | plan | **Planner**: classify the change / diff declarative schema; return an engine-neutral table change (pure, no side effects) |
-| apply | **Router + Executor**: pick native / copy-and-swap / expand-contract and run it **asynchronously** |
+| apply | **Router + Executor**: run native changes **asynchronously**; return a refusal verdict for non-native-safe changes until later-phase executors land |
 | progress | per-table rows-copied / total / percent / ETA / checksum state |
 | stop / start | checkpoint and resume (slot + copy + applier state) |
 | cutover (+ deferred cutover) | the deferred, operator-gated atomic swap |
@@ -74,13 +74,18 @@ the integration phase starts; they drift.)
 | --- | --- |
 | `Name()` | a stable identifier, e.g. `"pg-sprite"` |
 | `Plan` | run the planner: classify / declarative-diff; return a `PlanResult` whose `SchemaChange.TableChanges` are `engine.TableChange{Table, Operation (statement.StatementType), DDL, IsUnsafe, UnsafeReason}` |
-| `Apply` | start the chosen executor asynchronously; return immediately |
+| `Apply` | start the native executor asynchronously, or map a **not native-safe** refusal to `engine.ExecutionModeBlocked`; return immediately |
 | `Progress` | per-table rows-copied / total / percent / ETA / checksum state |
 | `Stop` / `Start` | checkpoint and resume (slot + copy + applier watermark) |
 | `Cutover` | the deferred, operator-gated atomic swap |
 | `Cancel` | abort and **guarantee logical-slot + shadow-table cleanup** |
 | `Volume` | map 1–11 onto chunk-time target / parallelism / throttle |
 | `Revert` / `SkipRevert` | decline for the copy-and-swap path (like Spirit); only the expand/contract backend could honour them |
+
+A refusal is a first-class planning verdict, not a delegation fallback: it includes the reason,
+notes that copy-and-swap support arrives in later phases, and names a safer native alternative
+where one exists. The adapter maps that verdict to `engine.ExecutionModeBlocked`; it never invokes
+pg-osc or another external copy tool.
 
 **Registration / selection.** The orchestrator core is `pkg/tern`; `tern.NewLocalClient` has
 built-in branches for `storage.DatabaseTypeMySQL` (Spirit) and `storage.DatabaseTypeVitess`

@@ -35,8 +35,9 @@ some changes take an `ACCESS EXCLUSIVE` lock that, behind a long transaction, ca
 whole application (the lock queue);
 and some changes **rewrite the entire table**, which a single `ALTER` cannot do online. The
 engine's job is to take the change the user wants and run it **safely** — using the cheap native
-PostgreSQL idiom when one exists, and a controlled table-copy when one doesn't — without the user
-having to know which case they are in.
+PostgreSQL idiom when one exists, and a clear **not native-safe** refusal when one doesn't —
+without the user having to know which case they are in. Later phases add an in-house controlled
+table-copy path for those refused rewrites.
 
 ## The core idea: one planner, many executors
 
@@ -71,7 +72,7 @@ not choose one pattern globally. We route each migration to the pattern whose tr
                                 │ per-change strategy
 ╭───────────────────────────────▼─────────────────────────────--╮
 │ EXECUTORS decide HOW (interchangeable)                        │
-│   native DDL · copy-and-swap · expand/contract · refuse       │
+│   native DDL · later: copy-and-swap / expand-contract · refuse│
 ╰─────────────────────────────────────────────────────────────--╯
 ```
 
@@ -100,7 +101,7 @@ implementations, and we ship them in order:
   the errors (then tried known-safe `INPLACE` options). It ships an end-to-end useful tool with
   almost no parsing logic.
 - **Classification (full, parse-based).** Parse the statement and introspect the live schema to
-  **predict the path up front** — native-safe, copy-and-swap, or refuse — without trial
+  **predict the path up front** — native-safe, needs-rewrite, or refuse — without trial
   execution. This is what powers dry-run, advisory suggestions, and the declarative diff, and it
   removes the wasted/aborted attempts that optimistic classification can incur.
 
@@ -132,10 +133,10 @@ implementations, and we ship them in order:
                  ╰───────┬───────╯
         ╭────────────────┼────────────────┬───────────────╮
         ▼                ▼                ▼               ▼
-   native DDL      copy-and-swap    expand/contract     refuse /
-   CONCURRENTLY    (Pattern A,      via pgroll          manual
-   NOT VALID …     transparent)     (Pattern B,
-   fast default                     reversible, later)
+   native DDL      copy-and-swap    expand/contract     refuse with
+   CONCURRENTLY    (Pattern A,      via pgroll          not-native-safe
+   NOT VALID …     later)           (Pattern B, later)  verdict
+   fast default
         ╰────────────────┴────────────────╯
                          │ cross-cutting: connection mgmt,
                          │ lock bounding, Aurora-aware throttling
@@ -154,9 +155,9 @@ The package-level version of this diagram (with the concrete components for each
 | Pattern | When the router picks it | Key property | Tradeoff |
 | --- | --- | --- | --- |
 | **native DDL** | The change has a safe online PostgreSQL idiom (most changes) | Cheapest correct path; no copy | None beyond bounding the brief lock |
-| **copy-and-swap** (Pattern A) | A genuine table rewrite with **no** native online path (`int→bigint`, repack, volatile-default add) | **Transparent** — same table name, no app changes | Heaviest path; needs logical replication for the low-overhead mode |
+| **copy-and-swap** (Pattern A, later) | A genuine table rewrite with **no** native online path (`int→bigint`, repack, volatile-default add) | **Transparent** — same table name, no app changes | Not yet available; needs logical replication for the low-overhead mode |
 | **expand/contract** via pgroll (Pattern B, later) | A **breaking** change where instant reversibility / two live schema versions matter | **Reversible** within the rollout window | Requires the **app to be schema-version aware** |
-| **refuse** | Unsafe or unsupported (lossy conversion, PK change, FK/trigger table in v1) | Fails fast and cheaply | n/a — it is the safe outcome |
+| **refuse** | Not native-safe, unsafe, or unsupported | First-class verdict with the reason, later-phase copy-and-swap note, and a safer native alternative where one exists | n/a — it is the safe outcome |
 
 The crucial point: **reversibility and transparency are properties of the pattern, not features
 you toggle.** copy-and-swap is transparent but not reversible-by-design; pgroll is reversible but
@@ -240,7 +241,7 @@ for the surfacing/approval mechanics.
 
 ## The copy-and-swap path, conceptually
 
-When the router picks copy-and-swap, the lifecycle is:
+When a later phase adds the in-house copy-and-swap executor, its lifecycle is:
 
 ```diagram
  build a shadow table  ─▶  capture concurrent writes  ─▶  bulk-copy existing rows
