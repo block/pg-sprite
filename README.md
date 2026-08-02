@@ -1,5 +1,12 @@
 # pg-sprite
 
+> [!WARNING]
+> **Work in progress — not ready for any use.** This project is under active
+> early-stage development. There are no releases, no stability guarantees, and
+> no support. Interfaces, behavior, on-disk/database artifacts, and the CLI
+> surface may all change without notice. Do **not** run this against any
+> database you care about.
+
 > Working name — see the naming task in the research build tracker.
 
 An online schema-change engine for **Aurora PostgreSQL** (and RDS/community
@@ -30,3 +37,12 @@ make lint        # golangci-lint
 
 Integration tests run against a real PostgreSQL via testcontainers. `PG_VERSION`
 selects the major (default 16); CI runs the matrix 14 → 18.
+
+## Contributing
+
+Not yet — see [CONTRIBUTING](.github/CONTRIBUTING.md). Safety-relevant issue
+reports are welcome even at this stage.
+
+## License
+
+[Apache 2.0](LICENSE)
