@@ -1,7 +1,6 @@
 package dbconn_test
 
 import (
-	"fmt"
 	"testing"
 	"time"
 
@@ -109,7 +108,7 @@ func TestPoolIntegration(t *testing.T) {
 		case err := <-insertDone:
 			require.NoError(t, err, "B's insert should succeed once the blocker is evicted")
 		case <-time.After(insertDeadline):
-			t.Fatal(fmt.Sprintf("B's insert still blocked %s after terminating the blocker", insertDeadline))
+			t.Fatalf("B's insert still blocked %s after terminating the blocker", insertDeadline)
 		}
 	})
 }
