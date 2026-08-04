@@ -27,7 +27,7 @@ The invariant registry (invariant IDs referenced below) lives in
 | `pkg/checkpoint` — durable resume state | ✅ core | planned (Phase 8) | ST-1, ST-2 |
 | slot lifecycle (in `pkg/decode`) — create, reap, lag ceiling | ✅ core | planned (Phase 8) | ST-3 |
 | `pkg/migration` — orchestrator, **cutover swap + fidelity gate** | ✅ core | planned (Phase 7) | LK-2, LK-4, ST-5 |
-| `pkg/statement`, `pkg/planner`, `pkg/schemadiff`, `pkg/lint` — classify/diff/route | ❌ periphery¹ | `pkg/statement` exists (Phase 1: type gate); rest planned (Phase 2) | (CO-7 holds at the parse boundary) |
+| `pkg/statement`, `pkg/planner`, `pkg/schemadiff`, `pkg/lint` — classify/diff/route | ❌ periphery¹ | `pkg/statement` (parse boundary) and `pkg/schemadiff` (introspect/diff via scratch execute-and-introspect) exist (Phase 2); `pkg/planner`, `pkg/lint` planned (Phase 2) | (CO-7 holds at the parse boundary) |
 | `pkg/verdict` — structured outcome contract, rendering, exit codes | ❌ periphery | exists (Phase 1) | — |
 | `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`/`status` exist (Phase 1); rest stubs | — |
 | status / progress / advisory rendering, metrics | ❌ periphery | planned | — |

@@ -71,7 +71,7 @@ func TestParseOneKinds(t *testing.T) {
 		{
 			name: "create table",
 			sql:  "CREATE TABLE t (id int)",
-			want: Statement{Kind: KindOther},
+			want: Statement{Kind: KindCreateTable, Table: "t"},
 		},
 		{
 			name: "dml",

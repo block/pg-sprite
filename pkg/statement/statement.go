@@ -24,6 +24,7 @@ const (
 	KindCreateIndex
 	KindDropIndex
 	KindReindex
+	KindCreateTable
 )
 
 // String returns the human-readable name of the kind.
@@ -37,6 +38,8 @@ func (k Kind) String() string {
 		return "DROP INDEX"
 	case KindReindex:
 		return "REINDEX"
+	case KindCreateTable:
+		return "CREATE TABLE"
 	default:
 		return "other"
 	}
@@ -84,6 +87,11 @@ func ParseOne(sql string) (Statement, error) {
 		st.Kind = KindAlterTable
 		st.Schema = alter.GetRelation().GetSchemaname()
 		st.Table = alter.GetRelation().GetRelname()
+	case node.GetCreateStmt() != nil:
+		rel := node.GetCreateStmt().GetRelation()
+		st.Kind = KindCreateTable
+		st.Schema = rel.GetSchemaname()
+		st.Table = rel.GetRelname()
 	case node.GetIndexStmt() != nil:
 		st.Kind = KindCreateIndex
 	case node.GetDropStmt() != nil:

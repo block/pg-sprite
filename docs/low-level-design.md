@@ -544,6 +544,15 @@ The scratch database is engine-owned and disposable: preflight may reset it (dro
 contents) at any time. Restricted environments that won't grant `CREATEDB` pre-provision
 instead.
 
+**Plan-time diffing uses a lighter mechanism.** `pkg/schemadiff` materializes the desired
+state inside a single always-rolled-back transaction in the *target* database, in a
+randomly named transaction-scoped schema (`pgsprite_scratch_<random>`). This keeps the
+same-server semantic-truth property (same version, extensions, and defaults as the live
+table) while requiring no `CREATEDB`, no pre-provisioning, and leaving zero footprint —
+appropriate because diffing is read-only planning. The durable `pg_sprite_scratch`
+database above is required only by the migration path proper (shadow-DDL derivation and
+checkpoint fingerprints), where objects must outlive a transaction.
+
 ### Postgres-only preconditions Spirit has no analog for
 
 These have **no MySQL counterpart** but are hard requirements for the logical-decoding path:

@@ -108,6 +108,10 @@ func gateVerdict(st statement.Statement) (verdict.Verdict, bool) {
 		v.Reason = verdict.ReasonIndexStatement
 		v.Detail = "a plain REINDEX blocks writes; the concurrent rebuild does not"
 		v.SaferIdiom = "REINDEX ... CONCURRENTLY"
+	case statement.KindCreateTable:
+		v.Reason = verdict.ReasonUnsupportedStatement
+		v.Detail = "migrate changes an existing table; to converge a table onto a desired-state CREATE TABLE, use the declarative front-end"
+		v.SaferIdiom = "pg-sprite diff --desired schema.sql"
 	case statement.KindOther:
 		v.Reason = verdict.ReasonUnsupportedStatement
 		v.Detail = "only ALTER TABLE statements are supported by the optimistic front door"
