@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -161,6 +162,69 @@ func TestMigrateSurfacesParseErrors(t *testing.T) {
 	err := cmd.run(t.Context(), &out)
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, verdict.ErrRefused, "a parse failure is an operational error, not a refusal")
+}
+
+// syncWriter guards the diagnostics buffer: pgx tracelog can write from pool
+// housekeeping goroutines concurrently with the command's own lifecycle logs.
+type syncWriter struct {
+	mu sync.Mutex
+	b  strings.Builder
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.Write(p)
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.String()
+}
+
+// --debug emits lifecycle events and pgx statement tracing on the diagnostics
+// stream, and never leaks them into the command's stdout output; without the
+// flag diagnostics are discarded entirely.
+func TestMigrateDebugDiagnostics(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+
+	t.Run("debug on", func(t *testing.T) {
+		cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
+		cmd.Debug = true
+		var diag syncWriter
+		cmd.diagOut = &diag
+		var out strings.Builder
+		require.NoError(t, cmd.run(t.Context(), &out))
+
+		assert.Contains(t, out.String(), "executed natively")
+		assert.NotContains(t, out.String(), "level=DEBUG",
+			"diagnostics must not leak into command output")
+
+		got := diag.String()
+		assert.Contains(t, got, "statement parsed")
+		assert.Contains(t, got, `kind="ALTER TABLE"`)
+		assert.Contains(t, got, "preflight passed")
+		assert.Contains(t, got, "total_bytes=")
+		assert.Contains(t, got, "optimistic attempt committed")
+		assert.Contains(t, got, "elapsed=")
+		assert.Contains(t, got, "msg=Query", "pgx statement tracing must be wired under --debug")
+	})
+
+	t.Run("debug off discards diagnostics", func(t *testing.T) {
+		cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age2 int", schema))
+		var diag syncWriter
+		cmd.diagOut = &diag
+		var out strings.Builder
+		require.NoError(t, cmd.run(t.Context(), &out))
+		assert.Empty(t, diag.String())
+	})
 }
 
 func TestStatusReportsNoSessions(t *testing.T) {

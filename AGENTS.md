@@ -100,8 +100,27 @@ make lint        # golangci-lint
 - Never reference internal company details (cluster names, hostnames, org names) in code,
   comments, commits, or PRs — this is a public repo.
 
+## Logging and observability
+
+- **stdout is the product's output; diagnostics go to stderr.** Command results (verdicts,
+  status) are written to the injected writer only; everything diagnostic goes through
+  `log/slog`. `--debug` on DB commands enables statement-level tracing (pgx tracelog via
+  `pkg/dbconn`) plus lifecycle events; without it, diagnostics are discarded.
+- **Log decisions and state transitions, not progress noise.** Static messages; the
+  variability goes into attrs with stable snake_case keys, and the same key means the same
+  thing everywhere (`schema`, `table`, `total_bytes`, `elapsed`).
+- **One error, one log.** Errors are wrapped and returned; only the entry point logs or
+  prints them. `pkg/` packages never log an error they also return.
+- **Never log credentials or connection strings** — a DSN/URL carries a password; log host,
+  database, and user as separate attrs when needed. Never log row data.
+- **Operational quantities ride on logs until there is a metrics runtime.** Durations,
+  sizes, and retry counts are logged as attrs. When the long-running phases need real
+  metrics, core packages emit through one narrow engine-owned interface — no direct
+  prometheus/otel imports in core (the dependency rule in SAFETY.md applies).
+
 Mechanical style rules (doc comments on exported symbols, no `init()`, no package-level
-mutable state, no `context.Context` in structs) are enforced by `.golangci.yml`, not prose.
+mutable state, no `context.Context` in structs, static slog messages with snake_case keys,
+no printing to process stdout) are enforced by `.golangci.yml`, not prose.
 
 Design docs live in [docs/](docs/) — start at [docs/README.md](docs/README.md); the invariant
 registry is [docs/invariants.md](docs/invariants.md).

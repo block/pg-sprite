@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
@@ -18,10 +19,12 @@ import (
 // verdicts are printed to out and returned as verdict.ErrRefused so the entry
 // point maps them to the refusal exit code.
 func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
+	logger := c.diag()
 	st, err := statement.ParseOne(c.Alter)
 	if err != nil {
 		return err
 	}
+	logger.Debug("statement parsed", "kind", st.Kind, "schema", st.Schema, "table", st.Table)
 	if v, refused := gateVerdict(st); refused {
 		return c.emit(out, v)
 	}
@@ -40,16 +43,23 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	logger.Debug("preflight passed",
+		"table", qualified(st), "total_bytes", pt.TotalBytes(), "limit_bytes", int64(c.MaxTableSize))
 
 	budget := executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout}
+	start := time.Now()
 	err = executor.AttemptNative(ctx, pool, pt, st.SQL, budget)
+	elapsed := time.Since(start)
 	var budgetErr *executor.BudgetError
 	if errors.As(err, &budgetErr) {
+		logger.Debug("optimistic attempt cancelled",
+			"cause", budgetErr.Cause, "budget", budgetErr.Budget, "elapsed", elapsed)
 		return c.emit(out, budgetVerdict(st, budgetErr))
 	}
 	if err != nil {
 		return err
 	}
+	logger.Debug("optimistic attempt committed", "table", qualified(st), "elapsed", elapsed)
 	return c.emit(out, verdict.Verdict{
 		Outcome:   verdict.OutcomeExecuted,
 		Statement: st.SQL,

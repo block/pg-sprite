@@ -6,6 +6,8 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"time"
 
@@ -39,16 +41,41 @@ type DBFlags struct {
 	CACert           string        `help:"CA bundle path for verify-full TLS. RDS/Aurora endpoints verify with the embedded bundle automatically." env:"PGSPRITE_CA_CERT" type:"existingfile"`
 	LockTimeout      time.Duration `help:"Session lock_timeout applied to every statement." default:"3s"`
 	StatementTimeout time.Duration `help:"Session statement_timeout applied to every statement." default:"30s"`
+	Debug            bool          `help:"Log statement-level tracing and lifecycle diagnostics to stderr."`
+
+	// diagOut overrides the diagnostics destination (stderr) in tests. Kong
+	// ignores unexported fields.
+	diagOut io.Writer
 }
 
 // Config translates the flags into the connectivity layer's configuration.
+// The tracer is wired only under --debug: dbconn skips statement tracing
+// entirely for a nil logger.
 func (f DBFlags) Config() dbconn.Config {
-	return dbconn.Config{
+	cfg := dbconn.Config{
 		URL:              f.URL,
 		CACertPath:       f.CACert,
 		LockTimeout:      f.LockTimeout,
 		StatementTimeout: f.StatementTimeout,
 	}
+	if f.Debug {
+		cfg.Logger = f.diag()
+	}
+	return cfg
+}
+
+// diag returns the diagnostics logger: debug-level text on stderr (or the
+// test override) under --debug, a discarding logger otherwise. Diagnostics
+// never share stdout with command output.
+func (f DBFlags) diag() *slog.Logger {
+	if !f.Debug {
+		return slog.New(slog.DiscardHandler)
+	}
+	out := f.diagOut
+	if out == nil {
+		out = os.Stderr
+	}
+	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
 // MigrateCmd runs a schema change (imperative front-end): the Phase 1
