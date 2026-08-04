@@ -1,0 +1,172 @@
+package cli
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/verdict"
+)
+
+// newMigrateCmd builds a MigrateCmd with the flag defaults kong would apply.
+func newMigrateCmd(url, alter string) *MigrateCmd {
+	return &MigrateCmd{
+		DBFlags: DBFlags{
+			URL:              url,
+			LockTimeout:      3 * time.Second,
+			StatementTimeout: 30 * time.Second,
+		},
+		Alter:        alter,
+		MaxTableSize: 1 << 30,
+	}
+}
+
+// Acceptance (i): an instant-eligible change runs and commits within budget.
+func TestMigrateExecutesInstantChange(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	assert.Contains(t, out.String(), "executed natively")
+
+	var typ string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT data_type FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'age'`, schema).Scan(&typ))
+	assert.Equal(t, "integer", typ)
+}
+
+// Acceptance (ii): a rewrite-requiring change is cancelled, leaves schema and
+// data unchanged, and returns the not-native-safe verdict with its reason.
+func TestMigrateRefusesRewriteWithBudgetVerdict(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"INSERT INTO %s.t SELECT g, repeat('x', 100) FROM generate_series(1, 300000) g", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.StatementTimeout = 50 * time.Millisecond
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonBudgetExceeded, v.Reason)
+	assert.Equal(t, schema+".t", v.Table)
+
+	var typ string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT data_type FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
+	assert.Equal(t, "integer", typ, "the cancelled attempt must not change the schema")
+	var count int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		fmt.Sprintf("SELECT count(*) FROM %s.t", schema)).Scan(&count))
+	assert.Equal(t, 300000, count, "the cancelled attempt must not change the data")
+}
+
+// Acceptance (iii): a table above the size threshold skips the attempt and
+// returns the same verdict class.
+func TestMigrateSizeGuardSkipsAttempt(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"INSERT INTO %s.t SELECT g, 'v' FROM generate_series(1, 1000) g", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
+	cmd.MaxTableSize = 1 // guarantees the guard fires without a big fixture
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.ReasonTableTooLarge, v.Reason)
+
+	// The attempt was skipped, so the (instant-eligible) change must not
+	// have been applied.
+	var n int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'age'`, schema).Scan(&n))
+	assert.Zero(t, n, "the size guard must skip the attempt entirely")
+}
+
+// Acceptance (iv): non-ALTER TABLE statements are refused with the safe-idiom
+// pointer and never executed. The gate needs no database at all.
+func TestMigrateGateRefusesWithoutDatabase(t *testing.T) {
+	tests := []struct {
+		name       string
+		alter      string
+		reason     verdict.Reason
+		saferIdiom string
+	}{
+		{"create index", "CREATE INDEX i ON t (c)", verdict.ReasonIndexStatement, "CREATE INDEX CONCURRENTLY"},
+		{"drop index", "DROP INDEX i", verdict.ReasonIndexStatement, "DROP INDEX CONCURRENTLY"},
+		{"reindex", "REINDEX TABLE t", verdict.ReasonIndexStatement, "REINDEX ... CONCURRENTLY"},
+		{"alter index", "ALTER INDEX i SET (fillfactor = 90)", verdict.ReasonUnsupportedStatement, ""},
+		{"create table", "CREATE TABLE t (id int)", verdict.ReasonUnsupportedStatement, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// An unroutable URL proves the gate refuses before connecting.
+			cmd := newMigrateCmd("postgres://nobody@localhost:1/nope", tt.alter)
+			cmd.JSON = true
+			var out strings.Builder
+			err := cmd.run(t.Context(), &out)
+			require.ErrorIs(t, err, verdict.ErrRefused)
+
+			var v verdict.Verdict
+			require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+			assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+			assert.Equal(t, tt.reason, v.Reason)
+			assert.Equal(t, tt.saferIdiom, v.SaferIdiom)
+		})
+	}
+}
+
+func TestMigrateSurfacesParseErrors(t *testing.T) {
+	cmd := newMigrateCmd("postgres://nobody@localhost:1/nope", "ALTER TABEL t ADD COLUMN x int")
+	var out strings.Builder
+	err := cmd.run(t.Context(), &out)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, verdict.ErrRefused, "a parse failure is an operational error, not a refusal")
+}
+
+func TestStatusReportsNoSessions(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	cmd := &StatusCmd{DBFlags: DBFlags{URL: url}}
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	assert.Contains(t, out.String(), "no active pg-sprite sessions")
+}

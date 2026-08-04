@@ -1,9 +1,12 @@
-// Package cli defines the pg-sprite command tree (Kong). Subcommand Run
-// methods are stubs; each build-plan phase fills one in.
+// Package cli defines the pg-sprite command tree (Kong). migrate and status
+// are implemented (the Phase 1 optimistic front door); the remaining
+// subcommand Run methods are stubs each build-plan phase fills in.
 package cli
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/alecthomas/kong"
@@ -48,15 +51,19 @@ func (f DBFlags) Config() dbconn.Config {
 	}
 }
 
-// MigrateCmd runs a schema change (imperative front-end).
+// MigrateCmd runs a schema change (imperative front-end): the Phase 1
+// optimistic front door. Easy changes execute directly under tight budgets;
+// everything else is refused with an explicit verdict.
 type MigrateCmd struct {
 	DBFlags `embed:""`
 
-	Alter string `help:"Imperative ALTER statement to run." name:"alter"`
+	Alter        string   `help:"Imperative ALTER statement to run." name:"alter" required:""`
+	MaxTableSize byteSize `help:"Size threshold above which the optimistic attempt is skipped (binary units: B, KiB, MiB, GiB, TiB)." default:"1GiB"`
+	JSON         bool     `help:"Emit the verdict as JSON."`
 }
 
 // Run implements the migrate subcommand.
-func (c *MigrateCmd) Run() error { return notImplemented("migrate") }
+func (c *MigrateCmd) Run() error { return c.run(context.Background(), os.Stdout) }
 
 // DiffCmd derives statements from a desired-state schema (declarative front-end).
 type DiffCmd struct {
@@ -88,4 +95,4 @@ type StatusCmd struct {
 }
 
 // Run implements the status subcommand.
-func (c *StatusCmd) Run() error { return notImplemented("status") }
+func (c *StatusCmd) Run() error { return c.run(context.Background(), os.Stdout) }
