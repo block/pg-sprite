@@ -52,7 +52,7 @@ boundary) is defined in [../SAFETY.md](../SAFETY.md).
 | `internal/cli` | Command tree and flag handling | exists (stubs) |
 | `internal/testutil` | Test harness: containerized PostgreSQL, throwaway schemas | exists |
 | `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; advisory-lock mutual exclusion lands here | exists |
-| `pkg/statement` | `pg_query_go` parsing + classification (never hand-parse SQL) | Phase 1–2 |
+| `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parsing + classification (never hand-parse SQL); shadow DDL + fingerprints come from scratch-DB execute-and-introspect | Phase 1–2 |
 | `pkg/preflight` | Precondition verification and refusals before any write | Phase 1–2 |
 | `pkg/planner` / `pkg/schemadiff` / `pkg/lint` | Shared front-end: introspect, declarative diff (may wrap [stripe/pg-schema-diff](https://github.com/stripe/pg-schema-diff) — see the low-level design's open decisions), classify, lint | Phase 2 |
 | `pkg/executor` | The `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) + native executor | Phase 2–3 |

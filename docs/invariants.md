@@ -104,8 +104,12 @@ is incomplete without this.
 
 ### CO-7 — Every statement parses, or it is an error
 
-All SQL the engine processes must parse with `pg_query_go`. No `strings.Split(";")` fallback, no
-silently skipping unparseable statements — a parse failure is surfaced to the caller as an error.
+All SQL the engine processes must parse with the real PostgreSQL grammar — `wasilibs/go-pgquery`,
+the Wasm build of `libpg_query` (the cgo `pg_query_go` is the API-compatible escape hatch). No
+`strings.Split(";")` fallback, no silently skipping unparseable statements — a parse failure is
+surfaced to the caller as an error. The invariant pins the *capability* (classified or refused);
+the parser choice is an implementation decision of the understanding layer (see
+[low-level-design](low-level-design.md#how-the-planner-understands-ddl-decided)).
 *Enforced:* `pkg/statement` boundary. *Source:* SchemaBot AGENTS.md (TiDB-parser hard
 requirement, rewritten for our parser); carried in the repo's [AGENTS.md](../AGENTS.md).
 
@@ -179,7 +183,9 @@ Resume must tell apart: (a) a readable, matching checkpoint → resume; (b) a ch
 an incompatible engine version or for a **different statement** → refuse to resume, start fresh
 (never mix state across versions/statements); (c) a *transient* read failure → retry, and never
 trigger fresh-start recovery on a blip. *Enforced:* checkpoint read/validation path (version +
-statement fingerprint stored with the watermark). *Source:* Spirit `checkpoint.IsIncompatible` +
+statement fingerprint stored with the watermark; the fingerprint hashes the scratch-introspected
+after-schema model, not SQL text, so textually-different-but-identical statements match and
+cosmetic edits don't force a fresh start). *Source:* Spirit `checkpoint.IsIncompatible` +
 "resume requires the identical ALTER".
 
 ### ST-3 — Slot cleanup is guaranteed on success, failure, and crash
@@ -212,8 +218,13 @@ risks-and-mitigations.
 
 Every knowable prerequisite is validated before the engine writes anything: logical-replication
 enablement and role, PK usability, `REPLICA IDENTITY`, slot/WAL-sender headroom, disk headroom
-(~2× the table), lock LK-1 acquired, and the RF-* refusals below. Failing hours into a copy on
-something knowable up front is a bug. *Enforced:* preflight stage. *Source:*
+(~2× the table), the [scratch database](low-level-design.md#plan-time-prerequisite-the-scratch-database)
+(pre-provisioned `pg_sprite_scratch`, or `CREATEDB` so preflight can self-provision it), lock
+LK-1 acquired, and the RF-* refusals below. Failing hours into a copy on something knowable up
+front is a bug. **Sub-obligation — server-authoritative validation:** every statement is
+validated by a PostgreSQL server (executed in a rolled-back transaction on the scratch database)
+before the first write to the target; the server is the semantic authority and client-side
+parsing is advisory. *Enforced:* preflight stage. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 
 ## Refusals and preflight (RF)

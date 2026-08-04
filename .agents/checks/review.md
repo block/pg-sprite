@@ -21,8 +21,11 @@ the reviewer's distillation.
   module — ideas are ported with citations, not code.
 - Connections go through `pkg/dbconn` (bounded `lock_timeout` / `statement_timeout`) — flag
   raw `pgx` pools in production code.
-- SQL parsing goes through `pg_query_go`; flag `strings.Split(";")` or any hand-parsing. A
-  parse failure is an error surfaced to the caller.
+- SQL parsing goes through `wasilibs/go-pgquery` (Wasm `libpg_query`); flag
+  `strings.Split(";")`, any hand-parsing, and imports of the cgo `pg_query_go` (documented
+  escape hatch, not the default). A parse failure is an error surfaced to the caller.
+  Shadow-table DDL and checkpoint fingerprints come from execute-and-introspect on the scratch
+  database — flag AST surgery that constructs the shadow schema or fingerprints SQL text.
 - Errors: wrapped with context and identifiers; no log-and-continue, no silent branch cases,
   no discarded `Close()` errors, no `nolint`, no `--no-verify`. No panics in library code —
   invariant violations return `ErrInvariantViolation` fail-closed. Postgres errors are matched
