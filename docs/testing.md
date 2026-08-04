@@ -5,6 +5,115 @@ phase is obligated to add. Core logic is validated against a **real
 PostgreSQL** — no mocked-DB tests for core logic (see
 [design-principles.md](design-principles.md)).
 
+## The coverage invariant
+
+The suite is part of the safety argument, not a formality. The standing rule,
+binding on every merge:
+
+> **No behavior lands without a test that would fail without it. Core logic
+> is proven against real PostgreSQL on every supported major. CI runs the
+> whole suite — unit, integration, TLS, and the 14 → 18 version matrix — as
+> a merge gate on every PR. Coverage only ratchets up.**
+
+Concretely:
+
+- **Same-PR tests.** New behavior and the tests proving it land in the same
+  PR — code never merges ahead of its tests, and an invariant from
+  [invariants.md](invariants.md) lands with the test named for it (see the
+  build-phase mapping there).
+- **Regression-first bug fixes.** A bug fix lands with a test that reproduces
+  the bug and fails on the pre-fix code.
+- **Real database, race-enabled.** Unit tests run with `-race`; core (`pkg/`)
+  logic is never validated against mocks — integration tests run against
+  real PostgreSQL, across every supported major in CI.
+- **The matrix is a gate, not advisory.** The `ci-ok` sentinel requires the
+  full version matrix; docs-only changes are the only path that skips it.
+- **Coverage never regresses.** Deleting or skipping a test to get green is
+  forbidden (same rule as the hooks: no `--no-verify`, no `nolint`). A
+  numeric coverage ratchet on `pkg/` packages is wired into CI once Phase 1
+  lands the first core package — until then this clause is enforced in
+  review.
+
+## Test-methodology invariants (TM)
+
+How tests are *built*, mined from the peer suites (pgroll, pg_repack,
+pg-delta — the topology survey below covers *what environments* they test;
+this covers *how*). Each rule binds from the phase noted.
+
+### TM-1 — Lifecycle fixture, not happy-path tests
+
+Every executor/migration integration test drives the **full lifecycle
+through one shared fixture** — start → assert → abort → assert → restart →
+complete → assert — so interrupted-and-retried is the default tested path,
+not a special case. Once checkpointing exists, kill → resume joins the
+lifecycle. *Binds:* Phase 2 (native executor) onward. *Source:* pgroll
+`ExecuteTests` (`pkg/migrations/op_common_test.go`).
+
+### TM-2 — Two oracles for safety-encoding SQL
+
+Generated SQL whose exact shape carries a safety property (chunk
+continuation predicates, `ON CONFLICT` arbiters, timeout preludes,
+fallback-mode trigger bodies) is **frozen by exact-string test AND proven
+behaviorally against a real database** — never just one of the two.
+*Binds:* Phase 2 onward. *Source:* pgroll trigger/backfill template tests;
+pg-delta's snapshot + roundtrip pairing.
+
+### TM-3 — Fault injection is real, and asserts durable state
+
+Contention tests hold a real `ACCESS EXCLUSIVE` lock from a second
+connection; cancellation tests use context deadlines. After any injected
+failure the test asserts the **durable state** (no wedged migration record,
+no leaked shadow objects/slots/triggers) and the ability to proceed — not
+merely the returned error type. *Binds:* Phase 2 onward; full
+phase-boundary kill/resume matrix at Phases 4–8. *Source:* pgroll's
+lock-holder pattern — and pg_repack's absence of it, the gap peers left
+that our copy-and-swap phases must fill.
+
+### TM-4 — The adversarial schema corpus only grows
+
+Integration fixtures include the shapes that break naive engines: quoted
+and whitespace identifiers, dropped-column tuple layouts, TOASTed values,
+expression/partial indexes, non-default reloptions, generated and identity
+columns, partitioned parents, tablespaces (including quoted names). The
+corpus is shared across phases and **never shrinks to make a phase land**.
+*Binds:* Phase 1 onward. *Source:* pg_repack `regress/sql/repack-setup.sql`.
+
+### TM-5 — Convergence is the diff oracle
+
+Every declarative-diff test proves, against two real databases: the derived
+plan applies cleanly; re-introspect + re-diff yields **empty**; a second
+derivation emits nothing (idempotency). Comparison is **semantic catalog
+state** (normalized), with SQL snapshots as the secondary oracle; failures
+print the residual diff and the original plan. *Binds:* Phase 3.
+*Source:* pg-delta `tests/integration/roundtrip.ts`.
+
+### TM-6 — Every mutation direction per property
+
+For each object property the diff handles: absent → present, present →
+changed, present → absent — plus replacement where PostgreSQL cannot ALTER
+in place. *Binds:* Phase 3. *Source:* pg-delta operation suites.
+
+### TM-7 — Benchmarks carry correctness assertions
+
+Performance tests (copy throughput at multiple row scales; fallback-mode
+trigger write amplification) verify post-benchmark data correctness and tag
+results with commit SHA + PG version. A fast wrong answer is a failure.
+*Binds:* Phase 4 onward. *Source:* pgroll `internal/benchmarks`.
+
+### TM-8 — A compiled-binary e2e path exists in CI
+
+Separate from Go package tests, CI runs the **built `pg-sprite` binary**
+against a real database with checked-in example inputs as the acceptance
+corpus — exit codes, output, and resulting database state asserted.
+*Binds:* Phase 2 (first executing command). *Source:* pgroll `make
+examples` CI job; pg_repack driving its CLI through `pg_regress`.
+
+**Beyond the peers:** none of the three does generative testing. From
+Phase 3 we add **seeded schema/DDL generation** (generate desired state →
+plan → apply → re-diff must be empty), printing the seed on failure and
+promoting failing seeds to fixed regression cases. This is deliberately a
+capability no peer suite has.
+
 ## How to run
 
 | Command | What it does |

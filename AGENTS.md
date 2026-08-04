@@ -27,6 +27,11 @@ make test-supported-postgres  # full suite on every major 14 -> 18
 make lint        # golangci-lint
 ```
 
+- **Coverage invariant:** no behavior lands without a test that would fail without it; bug
+  fixes land with a regression test; the full suite (unit, integration, TLS, version matrix)
+  is a merge gate. Full statement: [docs/testing.md](docs/testing.md#the-coverage-invariant);
+  test-methodology rules (lifecycle fixtures, two-oracle SQL tests, real fault injection,
+  convergence oracle) are the `TM-*` registry in the same doc.
 - Always run the full `make test` when the scope of a change is unclear.
 - Never assume a test failure is unrelated to your change; investigate it.
 - Never increase timeouts to fix flakes; find the root cause.
