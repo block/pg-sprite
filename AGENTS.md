@@ -77,6 +77,27 @@ make lint        # golangci-lint
   redundant safety closer on a handle someone else owns discards its guaranteed
   already-closed error).
 - State comparisons use typed constants and helpers, never raw string matching.
+- **Never panic in library code.** Invariant violations return `ErrInvariantViolation`
+  fail-closed (see [SAFETY.md](SAFETY.md)); panics are reserved for provable programmer error
+  at startup.
+- **Match Postgres errors by SQLSTATE** (`errors.As` → `*pgconn.PgError`, branch on `.Code`),
+  never by message text — error text varies by server version and locale. Sentinel/typed
+  errors are compared with `errors.Is`/`As` at boundaries.
+- **Every goroutine has an owner, a bounded lifetime, and a stop path** — no fire-and-forget
+  `go func()`.
+- **Core logic takes time from an injected clock**, not inline `time.Now()`/`time.Sleep` —
+  deterministic tests depend on it.
+- Comments describe *what* and *why*, never history — no bug/PR references, no
+  "previously X" notes, no counts or thresholds that go stale; move comments with the code
+  they explain.
+- Tests assert specific values, not just existence; no negative regression tests for removed
+  behavior. Log messages state what *will* happen, not what *might* ("will block", not
+  "may be blocked").
+- Never reference internal company details (cluster names, hostnames, org names) in code,
+  comments, commits, or PRs — this is a public repo.
+
+Mechanical style rules (doc comments on exported symbols, no `init()`, no package-level
+mutable state, no `context.Context` in structs) are enforced by `.golangci.yml`, not prose.
 
 Design docs live in [docs/](docs/) — start at [docs/README.md](docs/README.md); the invariant
 registry is [docs/invariants.md](docs/invariants.md).

@@ -24,7 +24,16 @@ the reviewer's distillation.
 - SQL parsing goes through `pg_query_go`; flag `strings.Split(";")` or any hand-parsing. A
   parse failure is an error surfaced to the caller.
 - Errors: wrapped with context and identifiers; no log-and-continue, no silent branch cases,
-  no discarded `Close()` errors, no `nolint`, no `--no-verify`.
+  no discarded `Close()` errors, no `nolint`, no `--no-verify`. No panics in library code —
+  invariant violations return `ErrInvariantViolation` fail-closed. Postgres errors are matched
+  by SQLSTATE (`errors.As` → `*pgconn.PgError`, `.Code`), never by message text.
+- Goroutines: every goroutine has an owner, a bounded lifetime, and a stop path — flag
+  fire-and-forget `go func()`. Core logic takes time from an injected clock — flag inline
+  `time.Now()`/`time.Sleep` in core packages.
+- Comments describe *what* and *why*, never history — flag bug/PR references,
+  "previously X" notes, and counts or thresholds that will go stale. Log messages state what
+  *will* happen, not what *might*. No internal company details (cluster names, hostnames,
+  org names) in code, comments, commits, or PRs.
 - Tests: real PostgreSQL for core logic (no mocked-DB tests), testify, `t.Context()`
   (cleanups use `context.WithoutCancel(t.Context())`), named polling deadlines — flag bare
   `time.Sleep` readiness waits and any timeout increase that masks a flake instead of fixing

@@ -1,3 +1,4 @@
+// Command pg-sprite is an online schema-change engine for Aurora PostgreSQL.
 package main
 
 import (

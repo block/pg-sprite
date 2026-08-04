@@ -16,10 +16,20 @@ linters:
     - unparam         # unused/constant function parameters and results
     - misspell        # commonly misspelled words
     - nolintlint      # ill-formed or unexplained nolint directives
+    - revive          # doc comments on exported symbols (see settings)
+    - gochecknoinits  # no init() functions
+    - gochecknoglobals # no package-level mutable state (error sentinels exempt)
+    - containedctx    # no context.Context stored in struct fields
   settings:
     usetesting:
       context-background: true
       context-todo: true
+    revive:
+      # Only the doc-comment rules; everything else revive offers is either
+      # covered by other linters or a judgment call that lives in AGENTS.md.
+      rules:
+        - name: exported
+        - name: package-comments
   exclusions:
     rules:
       # Test helpers intentionally keep uniform signatures and fixed arguments
@@ -27,6 +37,11 @@ linters:
       - path: _test\.go
         linters:
           - unparam
+      # Test files and test-only support code may use fixtures and shared
+      # state; the no-globals bar applies to production code.
+      - path: (_test\.go|^internal/testutil/)
+        linters:
+          - gochecknoglobals
 
 formatters:
   enable:
