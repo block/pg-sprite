@@ -3,6 +3,10 @@
 Guidance for AI coding agents working on pg-sprite — an online schema-change engine for Aurora
 PostgreSQL. Deliberately short: don't restate what you can infer from the code.
 
+This file is canonical. `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `.goosehints`, and
+`.github/copilot-instructions.md` are symlinks to it — edit only this file. Review-agent
+checks live in [.agents/checks/review.md](.agents/checks/review.md).
+
 ## Read SAFETY.md first
 
 This codebase is partitioned into a **safety-critical core** and a periphery.
