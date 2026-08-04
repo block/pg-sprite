@@ -170,3 +170,34 @@ func TestStatusReportsNoSessions(t *testing.T) {
 	require.NoError(t, cmd.run(t.Context(), &out))
 	assert.Contains(t, out.String(), "no active pg-sprite sessions")
 }
+
+// A live pg-sprite session (any connection made through pkg/dbconn) is
+// rendered with its pid and per-session fields. The session is held open on a
+// pinned connection so pg_stat_activity is guaranteed to contain it while
+// status runs.
+func TestStatusReportsActiveSession(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	conn, err := pool.Acquire(t.Context())
+	require.NoError(t, err)
+	defer conn.Release()
+	var pid int
+	// The marker aliases make the session's pid and last-query text
+	// deterministic for the assertions below.
+	require.NoError(t, conn.QueryRow(t.Context(),
+		"SELECT pg_backend_pid() AS pgsprite_status_marker").Scan(&pid))
+
+	cmd := &StatusCmd{DBFlags: DBFlags{URL: url}}
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	got := out.String()
+	assert.Contains(t, got, "active pg-sprite sessions:")
+	assert.Contains(t, got, fmt.Sprintf("pid=%d state=idle", pid),
+		"the held session must be listed with its pid and state")
+	assert.Contains(t, got, "pgsprite_status_marker",
+		"the session's last query must be rendered")
+}
