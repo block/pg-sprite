@@ -92,23 +92,28 @@ type MigrateCmd struct {
 // Run implements the migrate subcommand.
 func (c *MigrateCmd) Run() error { return c.run(context.Background(), os.Stdout) }
 
-// DiffCmd derives statements from a desired-state schema (declarative front-end).
+// DiffCmd derives statements from a desired-state schema (declarative
+// front-end): introspect the live table, materialize the desired state on a
+// rolled-back scratch schema, and print the ordered plan without executing
+// anything.
 type DiffCmd struct {
 	DBFlags `embed:""`
 
 	Desired string `help:"Path to the desired-state CREATE TABLE .sql file." name:"desired" type:"existingfile" required:""`
+	Schema  string `help:"Schema containing the live table." default:"public"`
+	JSON    bool   `help:"Emit the plan as JSON."`
 }
 
 // Run implements the diff subcommand.
-func (c *DiffCmd) Run() error { return notImplemented("diff") }
+func (c *DiffCmd) Run() error { return c.run(context.Background(), os.Stdout) }
 
 // FmtCmd canonicalizes a schema file. It is offline — no database flags.
 type FmtCmd struct {
-	Path string `arg:"" optional:"" help:"Schema file to format." type:"existingfile"`
+	Path string `arg:"" optional:"" help:"Schema file to format; stdin when omitted." type:"existingfile"`
 }
 
 // Run implements the fmt subcommand.
-func (c *FmtCmd) Run() error { return notImplemented("fmt") }
+func (c *FmtCmd) Run() error { return c.runFmt(os.Stdin, os.Stdout) }
 
 // LintCmd checks DDL for unsafe or unsupported patterns.
 type LintCmd struct{}
