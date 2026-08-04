@@ -40,7 +40,7 @@ selects the major (default 16); CI runs the matrix 14 → 18.
 
 ## Contributing
 
-Not yet — see [CONTRIBUTING](.github/CONTRIBUTING.md). Safety-relevant issue
+Not yet — see [CONTRIBUTING](CONTRIBUTING.md). Safety-relevant issue
 reports are welcome even at this stage.
 
 ## License

@@ -1,0 +1,8 @@
+# This CODEOWNERS file denotes the project leads
+# and encodes their responsibilities for code review.
+#
+# The format is described:
+# https://github.blog/2017-07-06-introducing-code-owners/
+
+# These owners will be the default owners for everything in the repo.
+*       @Kiran01bm
