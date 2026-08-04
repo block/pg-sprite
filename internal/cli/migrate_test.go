@@ -23,22 +23,23 @@ func TestBudgetVerdict(t *testing.T) {
 		v := budgetVerdict(st, &executor.BudgetError{Cause: executor.CauseLock, Budget: 3 * time.Second})
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonBudgetExceeded, v.Reason)
+		assert.Equal(t, verdict.CauseLockBudget, v.Cause)
 		assert.Equal(t, "billing.invoices", v.Table)
-		assert.Contains(t, v.Detail, "lock was not granted within the 3s lock budget")
-		assert.Contains(t, v.Detail, "nothing was executed")
+		assert.NotEmpty(t, v.Detail)
 	})
 
 	t.Run("statement budget", func(t *testing.T) {
 		v := budgetVerdict(st, &executor.BudgetError{Cause: executor.CauseStatement, Budget: 30 * time.Second})
 		assert.Equal(t, verdict.ReasonBudgetExceeded, v.Reason)
-		assert.Contains(t, v.Detail, "cancelled after the 30s statement budget")
-		assert.Contains(t, v.Detail, "ADD CONSTRAINT ... NOT VALID")
+		assert.Equal(t, verdict.CauseStatementBudget, v.Cause)
+		assert.NotEmpty(t, v.Detail)
 	})
 
 	t.Run("unknown cause falls back to the error text", func(t *testing.T) {
 		budgetErr := &executor.BudgetError{Budget: time.Second}
 		v := budgetVerdict(st, budgetErr)
 		assert.Equal(t, verdict.ReasonBudgetExceeded, v.Reason)
+		assert.Equal(t, verdict.CauseNone, v.Cause)
 		assert.Equal(t, budgetErr.Error(), v.Detail)
 	})
 }

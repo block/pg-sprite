@@ -119,6 +119,8 @@ func (c *LintCmd) Run() error { return notImplemented("lint") }
 // StatusCmd reports migration progress.
 type StatusCmd struct {
 	DBFlags `embed:""`
+
+	JSON bool `help:"Emit the session listing as JSON."`
 }
 
 // Run implements the status subcommand.

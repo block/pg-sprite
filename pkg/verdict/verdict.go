@@ -52,12 +52,31 @@ const (
 	ReasonBudgetExceeded Reason = "not-native-safe: budget exceeded"
 )
 
+// Cause narrows ReasonBudgetExceeded to the budget that was exceeded, so
+// automation can branch on which limit fired without parsing prose.
+type Cause string
+
+// The budget causes a refusal can carry.
+const (
+	// CauseNone is the zero cause for verdicts that are not budget refusals.
+	CauseNone Cause = ""
+	// CauseLockBudget: the lock was not granted within lock_timeout; nothing
+	// was executed.
+	CauseLockBudget Cause = "lock-budget"
+	// CauseStatementBudget: the statement ran past statement_timeout and was
+	// cancelled; the change needs a rewrite.
+	CauseStatementBudget Cause = "statement-budget"
+)
+
 // Verdict is the structured outcome of one migrate invocation.
 type Verdict struct {
 	// Outcome is what happened.
 	Outcome Outcome `json:"outcome"`
 	// Reason is the typed refusal cause; empty when executed.
 	Reason Reason `json:"reason,omitempty"`
+	// Cause narrows a budget refusal to the budget that fired; empty
+	// otherwise.
+	Cause Cause `json:"cause,omitempty"`
 	// Statement is the submitted SQL.
 	Statement string `json:"statement"`
 	// Table is the target table (schema-qualified when the statement was),

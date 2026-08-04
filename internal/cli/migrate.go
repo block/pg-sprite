@@ -141,9 +141,11 @@ func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError) verd
 	}
 	switch budgetErr.Cause {
 	case executor.CauseLock:
+		v.Cause = verdict.CauseLockBudget
 		v.Detail = fmt.Sprintf("the lock was not granted within the %s lock budget: the table is too "+
 			"contended for a blind attempt; nothing was executed", budgetErr.Budget)
 	case executor.CauseStatement:
+		v.Cause = verdict.CauseStatementBudget
 		v.Detail = fmt.Sprintf("cancelled after the %s statement budget: the change does real rewrite work, "+
 			"not an in-place catalog change, and needs a copy-and-swap rewrite that pg-sprite does not perform yet. "+
 			"If it adds a constraint, ADD CONSTRAINT ... NOT VALID followed by VALIDATE CONSTRAINT avoids the long lock",

@@ -3,6 +3,8 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -40,9 +42,14 @@ func TestMigrateExecutesInstantChange(t *testing.T) {
 	require.NoError(t, err)
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
+	cmd.JSON = true
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
-	assert.Contains(t, out.String(), "executed natively")
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.Equal(t, schema+".t", v.Table)
 
 	var typ string
 	require.NoError(t, pool.QueryRow(t.Context(),
@@ -76,6 +83,7 @@ func TestMigrateRefusesRewriteWithBudgetVerdict(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 	assert.Equal(t, verdict.ReasonBudgetExceeded, v.Reason)
+	assert.Equal(t, verdict.CauseStatementBudget, v.Cause)
 	assert.Equal(t, schema+".t", v.Table)
 
 	var typ string
@@ -198,23 +206,21 @@ func TestMigrateDebugDiagnostics(t *testing.T) {
 	t.Run("debug on", func(t *testing.T) {
 		cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
 		cmd.Debug = true
+		cmd.JSON = true
 		var diag syncWriter
 		cmd.diagOut = &diag
 		var out strings.Builder
 		require.NoError(t, cmd.run(t.Context(), &out))
 
-		assert.Contains(t, out.String(), "executed natively")
-		assert.NotContains(t, out.String(), "level=DEBUG",
-			"diagnostics must not leak into command output")
+		// A strict decode of stdout proves diagnostics did not leak into the
+		// command's output stream: any interleaved log line would break it.
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v),
+			"stdout must carry exactly the verdict, nothing else")
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
 
-		got := diag.String()
-		assert.Contains(t, got, "statement parsed")
-		assert.Contains(t, got, `kind="ALTER TABLE"`)
-		assert.Contains(t, got, "preflight passed")
-		assert.Contains(t, got, "total_bytes=")
-		assert.Contains(t, got, "optimistic attempt committed")
-		assert.Contains(t, got, "elapsed=")
-		assert.Contains(t, got, "msg=Query", "pgx statement tracing must be wired under --debug")
+		assert.NotEmpty(t, diag.String(),
+			"--debug must emit diagnostics on the diagnostics stream")
 	})
 
 	t.Run("debug off discards diagnostics", func(t *testing.T) {
@@ -227,16 +233,26 @@ func TestMigrateDebugDiagnostics(t *testing.T) {
 	})
 }
 
+// Both output modes report the empty case: an empty JSON list, and a
+// non-empty human explanation.
 func TestStatusReportsNoSessions(t *testing.T) {
 	url := testutil.StartPostgres(t)
-	cmd := &StatusCmd{DBFlags: DBFlags{URL: url}}
+
+	cmd := &StatusCmd{DBFlags: DBFlags{URL: url}, JSON: true}
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
-	assert.Contains(t, out.String(), "no active pg-sprite sessions")
+	var sessions []session
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &sessions))
+	assert.Empty(t, sessions)
+
+	cmd = &StatusCmd{DBFlags: DBFlags{URL: url}}
+	var text strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &text))
+	assert.NotEmpty(t, text.String())
 }
 
 // A live pg-sprite session (any connection made through pkg/dbconn) is
-// rendered with its pid and per-session fields. The session is held open on a
+// reported with its pid and per-session fields. The session is held open on a
 // pinned connection so pg_stat_activity is guaranteed to contain it while
 // status runs.
 func TestStatusReportsActiveSession(t *testing.T) {
@@ -249,19 +265,26 @@ func TestStatusReportsActiveSession(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Release()
 	var pid int
-	// The marker aliases make the session's pid and last-query text
-	// deterministic for the assertions below.
+	// The marker alias makes the session's last-query text deterministic
+	// for the field assertion below.
 	require.NoError(t, conn.QueryRow(t.Context(),
 		"SELECT pg_backend_pid() AS pgsprite_status_marker").Scan(&pid))
 
-	cmd := &StatusCmd{DBFlags: DBFlags{URL: url}}
+	cmd := &StatusCmd{DBFlags: DBFlags{URL: url}, JSON: true}
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
 
-	got := out.String()
-	assert.Contains(t, got, "active pg-sprite sessions:")
-	assert.Contains(t, got, fmt.Sprintf("pid=%d state=idle", pid),
-		"the held session must be listed with its pid and state")
-	assert.Contains(t, got, "pgsprite_status_marker",
-		"the session's last query must be rendered")
+	var sessions []session
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &sessions))
+	i := slices.IndexFunc(sessions, func(s session) bool { return s.PID == pid })
+	require.GreaterOrEqual(t, i, 0, "the held session must be listed")
+	assert.Equal(t, "idle", sessions[i].State)
+	assert.Contains(t, sessions[i].Query, "pgsprite_status_marker",
+		"the session's last query must be reported")
+
+	// The human rendering carries the same session.
+	cmd = &StatusCmd{DBFlags: DBFlags{URL: url}}
+	var text strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &text))
+	assert.Contains(t, text.String(), strconv.Itoa(pid))
 }

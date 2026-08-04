@@ -109,14 +109,23 @@ make lint        # golangci-lint
 - **Log decisions and state transitions, not progress noise.** Static messages; the
   variability goes into attrs with stable snake_case keys, and the same key means the same
   thing everywhere (`schema`, `table`, `total_bytes`, `elapsed`).
+- **Logs answer the triage question.** Error- and warn-path logs carry the identifiers an
+  operator needs to act — schema, table, database, the operation being attempted — as
+  attrs, not buried in prose.
 - **One error, one log.** Errors are wrapped and returned; only the entry point logs or
   prints them. `pkg/` packages never log an error they also return.
 - **Never log credentials or connection strings** — a DSN/URL carries a password; log host,
   database, and user as separate attrs when needed. Never log row data.
+- **Log output is never a test surface.** Tests assert typed outcomes — `errors.Is`/`As`,
+  verdict fields, exit codes, JSON output — never log text or human-facing wording. If a
+  behavioral difference is visible only in prose, make it machine-readable first (a typed
+  field or reason), then test that. The only exception is a renderer's own unit test.
 - **Operational quantities ride on logs until there is a metrics runtime.** Durations,
   sizes, and retry counts are logged as attrs. When the long-running phases need real
-  metrics, core packages emit through one narrow engine-owned interface — no direct
-  prometheus/otel imports in core (the dependency rule in SAFETY.md applies).
+  metrics, they arrive as OpenTelemetry instruments behind one engine-owned `pkg/metrics`
+  with `Record*` helpers — dotted `pgsprite.` names with explicit units, low-cardinality
+  snake_case attributes, counters for rare or dangerous branches operators can act on —
+  never direct exporter imports in core (the dependency rule in SAFETY.md applies).
 
 Mechanical style rules (doc comments on exported symbols, no `init()`, no package-level
 mutable state, no `context.Context` in structs, static slog messages with snake_case keys,
