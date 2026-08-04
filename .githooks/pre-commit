@@ -1,0 +1,48 @@
+#!/bin/sh
+set -e
+
+# Pre-commit: fast local feedback on staged Go files. Docs-only commits
+# (no staged .go files) skip the Go checks entirely so Markdown edits stay
+# instant. CI remains the authoritative gate.
+#
+# Enable with: make setup   (sets core.hooksPath .githooks)
+
+# Ensure we're at the worktree root (not the git common dir). Unset GIT_DIR
+# first — git sets it during hooks and it makes subprocess git commands
+# resolve the wrong repo root.
+unset GIT_DIR
+cd "$(git rev-parse --show-toplevel)"
+
+staged_go=$(git diff --cached --name-only --diff-filter=d -- '*.go')
+if [ -z "$staged_go" ]; then
+    echo "pre-commit: no staged Go files; skipping Go checks."
+    exit 0
+fi
+
+# Ensure GOROOT matches the Go version in go.mod. External tools (hermit,
+# asdf) may set GOROOT to a different version, causing "compile: version
+# does not match go tool version" errors in golangci-lint and go build.
+GO_VERSION=$(sed -n 's/^go //p' go.mod | head -1)
+if [ -n "$GO_VERSION" ]; then
+    for candidate in \
+        "/opt/homebrew/opt/go/libexec" \
+        "/usr/local/go" \
+        "$HOME/sdk/go${GO_VERSION}" \
+        "$HOME/Library/Caches/hermit/pkg/go-${GO_VERSION}"; do
+        if [ -x "$candidate/bin/go" ]; then
+            CANDIDATE_VERSION=$("$candidate/bin/go" version 2>/dev/null | grep -o "go${GO_VERSION}" || true)
+            if [ -n "$CANDIDATE_VERSION" ]; then
+                export GOROOT="$candidate"
+                export PATH="$GOROOT/bin:$PATH"
+                break
+            fi
+        fi
+    done
+fi
+export PATH="$PATH:$HOME/go/bin:/usr/local/go/bin:/opt/homebrew/bin"
+
+# Everything staged must still build.
+go build ./...
+
+# gofmt + golangci-lint on staged files: auto-fix, re-stage, verify.
+scripts/lint-fix.sh

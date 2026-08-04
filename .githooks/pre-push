@@ -1,0 +1,115 @@
+#!/bin/sh
+set -e
+
+# Pre-push: run unit tests (go test -race, integration skipped) for the
+# packages touched by the commits being pushed. Docs-only pushes skip
+# entirely. CI remains the authoritative gate and runs the full suite
+# including the PostgreSQL matrix — this hook does not replace it.
+#
+# Reads the standard pre-push stdin records:
+#   <local ref> <local sha> <remote ref> <remote sha>
+
+unset GIT_DIR
+cd "$(git rev-parse --show-toplevel)"
+
+remote_name="$1"
+
+# Ensure GOROOT matches the Go version in go.mod (see pre-commit).
+GO_VERSION=$(sed -n 's/^go //p' go.mod | head -1)
+if [ -n "$GO_VERSION" ]; then
+    for candidate in \
+        "/opt/homebrew/opt/go/libexec" \
+        "/usr/local/go" \
+        "$HOME/sdk/go${GO_VERSION}" \
+        "$HOME/Library/Caches/hermit/pkg/go-${GO_VERSION}"; do
+        if [ -x "$candidate/bin/go" ]; then
+            CANDIDATE_VERSION=$("$candidate/bin/go" version 2>/dev/null | grep -o "go${GO_VERSION}" || true)
+            if [ -n "$CANDIDATE_VERSION" ]; then
+                export GOROOT="$candidate"
+                export PATH="$GOROOT/bin:$PATH"
+                break
+            fi
+        fi
+    done
+fi
+export PATH="$PATH:$HOME/go/bin:/usr/local/go/bin:/opt/homebrew/bin"
+
+# Resolve a base ref for new-branch pushes (no remote sha yet): prefer the
+# push remote's default branch, then origin/main, then main.
+base_ref=""
+for cand in "refs/remotes/$remote_name/HEAD" "refs/remotes/$remote_name/main" "refs/remotes/origin/main" "main"; do
+    if git rev-parse --verify --quiet "$cand" >/dev/null 2>&1; then
+        base_ref="$cand"
+        break
+    fi
+done
+
+# is_zero_sha returns success when the sha is all zeros (branch create/delete
+# sentinel), independent of SHA-1 vs SHA-256 length.
+is_zero_sha() {
+    case "$1" in
+        *[!0]*) return 1 ;;
+        *) return 0 ;;
+    esac
+}
+
+changed_go_files=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+    # Skip branch deletions — nothing to test.
+    if is_zero_sha "$local_sha"; then
+        continue
+    fi
+
+    if is_zero_sha "$remote_sha"; then
+        # New branch on the remote: test what this branch introduces relative
+        # to the base. Fall back to the single tip commit if no base exists.
+        if [ -n "$base_ref" ]; then
+            range_base=$(git merge-base "$base_ref" "$local_sha" 2>/dev/null || true)
+        else
+            range_base=""
+        fi
+        if [ -z "$range_base" ]; then
+            range_base="${local_sha}~1"
+        fi
+    else
+        range_base="$remote_sha"
+    fi
+
+    files=$(git diff --name-only --diff-filter=d "$range_base" "$local_sha" -- '*.go' 2>/dev/null || true)
+    if [ -n "$files" ]; then
+        if [ -z "$changed_go_files" ]; then
+            changed_go_files="$files"
+        else
+            changed_go_files="$changed_go_files
+$files"
+        fi
+    fi
+done
+
+changed_go_files=$(printf '%s\n' "$changed_go_files" | sed '/^$/d' | sort -u)
+if [ -z "$changed_go_files" ]; then
+    echo "pre-push: no Go changes in pushed commits; skipping unit tests."
+    exit 0
+fi
+
+# Map changed files to package directories that still exist and contain Go
+# source for the default build.
+pkgs=""
+for dir in $(printf '%s\n' "$changed_go_files" | xargs -n1 dirname | sort -u); do
+    testable_pkg=$(go list -e -f '{{if or (or .GoFiles .TestGoFiles) .XTestGoFiles}}{{.ImportPath}}{{end}}' "./$dir" 2>/dev/null || true)
+    if [ -d "$dir" ] && [ -n "$testable_pkg" ]; then
+        pkgs="$pkgs ./$dir"
+    fi
+done
+
+pkgs=$(printf '%s' "$pkgs" | sed 's/^ *//')
+if [ -z "$pkgs" ]; then
+    echo "pre-push: changed Go files map to no testable packages; skipping unit tests."
+    exit 0
+fi
+
+echo "pre-push: running unit tests (race, integration skipped) for changed packages:"
+for p in $pkgs; do echo "  $p"; done
+
+# shellcheck disable=SC2086
+SKIP_INTEGRATION=1 go test -race -count=1 $pkgs

@@ -2,6 +2,33 @@ version: "2"
 
 linters:
   enable:
-    - bodyclose
-    - misspell
-    - nolintlint
+    - errcheck        # unchecked errors
+    - govet           # suspicious constructs
+    - staticcheck     # comprehensive static analysis
+    - ineffassign     # useless assignments
+    - unused          # unused code
+    - gocritic        # opinionated but catches real bugs
+    - errorlint       # proper error wrapping/comparison
+    - modernize       # suggest modern Go idioms (wg.Go, etc.)
+    - noctx           # requests without context
+    - bodyclose       # unclosed HTTP response bodies
+    - usetesting      # enforce t.Context() over context.Background() in tests
+    - unparam         # unused/constant function parameters and results
+    - misspell        # commonly misspelled words
+    - nolintlint      # ill-formed or unexplained nolint directives
+  settings:
+    usetesting:
+      context-background: true
+      context-todo: true
+  exclusions:
+    rules:
+      # Test helpers intentionally keep uniform signatures and fixed arguments
+      # for readability, so unused/constant params there are not worth churn.
+      - path: _test\.go
+        linters:
+          - unparam
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

@@ -14,9 +14,12 @@ SAFETY.md — the review bar and the AI-assistance posture differ by side.
 ## Build and test
 
 ```sh
+make setup       # one-time: configure git hooks (core.hooksPath .githooks)
 make build       # build ./... and bin/pg-sprite
 make test        # full suite; integration tests need Docker
 make test-unit   # SKIP_INTEGRATION=1, no Docker
+make test-db     # suite against the compose DB (make db-up first); PG_DSN
+make test-supported-postgres  # full suite on every major 14 -> 18
 make lint        # golangci-lint
 ```
 
@@ -33,9 +36,10 @@ make lint        # golangci-lint
   Every session runs under bounded `lock_timeout` / `statement_timeout`.
 - All SQL parsing goes through `pg_query_go` (once `pkg/statement` exists). No
   `strings.Split(";")`, no hand-parsing; a parse failure is an error surfaced to the caller.
-- Tests use testify (`require` for setup, `assert` for verification), `t.Context()` (except in
-  cleanups, which run after the context is cancelled), and named polling deadlines — no bare
-  `time.Sleep` readiness waits.
+- Tests use testify (`require` for setup, `assert` for verification), `t.Context()` (in
+  cleanups, which run after the context is cancelled, use
+  `context.WithoutCancel(t.Context())`), and named polling deadlines — no bare `time.Sleep`
+  readiness waits.
 - Errors: wrap with context and identifiers (`fmt.Errorf("create slot %s: %w", name, err)`);
   never log-and-continue; no silent branch cases; no `nolint`; no `--no-verify`.
 

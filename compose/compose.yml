@@ -1,0 +1,21 @@
+# Local development database — the long-lived analogue of the testcontainers
+# harness. `make db-up PG_VERSION=14` starts one PostgreSQL major on
+# localhost; `make test-db` points the integration suite at it via PG_DSN so
+# no per-test containers are started. This is a test database: durability is
+# deliberately relaxed and all state is discarded on `make db-down`.
+services:
+  postgres:
+    image: postgres:${PG_VERSION:-16}
+    environment:
+      POSTGRES_USER: ${PG_USER:-pgsprite}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-pgsprite}
+      POSTGRES_DB: ${PG_DATABASE:-pgsprite}
+    ports:
+      - "${PG_PORT:-5432}:5432"
+    # Test-only speed settings; never carry these to a real deployment.
+    command: ["postgres", "-c", "fsync=off", "-c", "full_page_writes=off"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 1s
+      timeout: 3s
+      retries: 60
