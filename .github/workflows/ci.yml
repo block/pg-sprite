@@ -60,7 +60,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v6
+      # Pin the same golangci-lint major used locally (v2 config format);
+      # the action's default binary lags and cannot load a v2 config.
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
 
   build:
     needs: changes
@@ -79,6 +83,7 @@ jobs:
   # images — real Aurora engine-version validation is a separate gate that
   # cannot run in public CI.
   test:
+    name: test (PostgreSQL ${{ matrix.pg }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
