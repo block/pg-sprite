@@ -1,0 +1,45 @@
+version: 2
+
+builds:
+  - id: pg-sprite
+    main: ./cmd/pg-sprite
+    binary: pg-sprite
+    # The SQL parser is Wasm (wasilibs/go-pgquery), so the binary is pure Go
+    # and cross-compiles without cgo.
+    env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -X main.version={{.Tag}}
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: darwin
+        goarch: amd64
+
+archives:
+  - id: pg-sprite
+    builds:
+      - pg-sprite
+    format: tar.gz
+    name_template: "pg-sprite_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+release:
+  # If a release already exists for the tag, replace its assets rather than
+  # failing. This handles the case where a release is created via the GitHub
+  # UI before the workflow runs.
+  mode: replace
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
