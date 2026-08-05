@@ -2,14 +2,13 @@ package cli
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -40,24 +39,27 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	plan, err := planner.Classify(st.SQL, facts)
+	classified, err := planner.Classify(st.SQL, facts)
 	if err != nil {
 		return err
 	}
-	routed := router.Route([]planner.Plan{plan})
+	routed := router.Route([]planner.Plan{classified})
 	logger.Debug("statement routed",
-		"route", string(plan.Route), "disposition", string(routed.Disposition))
+		"route", string(classified.Route), "disposition", string(routed.Disposition))
+
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema = st.Schema
+	report.Table = st.Table
+	report.Disposition = routed.Disposition
+	for _, rs := range routed.Statements {
+		report.Statements = append(report.Statements, plan.FromRouted(rs))
+	}
 
 	if c.JSON {
-		enc := json.NewEncoder(out)
-		enc.SetIndent("", "  ")
-		if err := enc.Encode(routed); err != nil {
-			return fmt.Errorf("write dry-run plan: %w", err)
-		}
-		return nil
+		return writeJSON(out, report)
 	}
-	for _, rs := range routed.Statements {
-		if err := writeChangeText(out, plannedFromRouted(rs)); err != nil {
+	for _, ps := range report.Statements {
+		if err := writeChangeText(out, ps); err != nil {
 			return err
 		}
 	}
@@ -83,16 +85,4 @@ func dryRunFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 		return planner.Facts{}, err
 	}
 	return liveFacts(live), nil
-}
-
-// plannedFromRouted adapts a routed statement to the shared text renderer.
-func plannedFromRouted(rs router.Statement) plannedChange {
-	return plannedChange{
-		Change:      schemadiff.Change{SQL: rs.Statement},
-		Route:       rs.Route,
-		Backend:     rs.Backend,
-		Disposition: rs.Disposition,
-		Decisions:   rs.Decisions,
-		ExecSQL:     rs.ExecSQL,
-	}
 }

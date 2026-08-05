@@ -11,21 +11,24 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 )
 
-// dryRunPlan runs migrate --dry-run --json and decodes the routed plan.
-func dryRunPlan(t *testing.T, url, alter string) router.Plan {
+// dryRunPlan runs migrate --dry-run --json and decodes the plan report.
+func dryRunPlan(t *testing.T, url, alter string) plan.Report {
 	t.Helper()
 	cmd := newMigrateCmd(url, alter)
 	cmd.DryRun = true
 	cmd.JSON = true
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
-	var plan router.Plan
-	require.NoError(t, json.Unmarshal([]byte(out.String()), &plan))
-	return plan
+	var report plan.Report
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
+	require.Equal(t, plan.FormatVersion, report.FormatVersion)
+	require.Equal(t, plan.SourceAlter, report.Source)
+	return report
 }
 
 // A rewrite-requiring change dry-runs to the copy-and-swap backend as
@@ -39,10 +42,10 @@ func TestMigrateDryRunRoutesRewriteWithoutExecuting(t *testing.T) {
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
 
-	plan := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
-	assert.Equal(t, router.DispositionUnavailable, plan.Disposition)
-	require.Len(t, plan.Statements, 1)
-	st := plan.Statements[0]
+	report := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	st := report.Statements[0]
 	assert.Equal(t, planner.RouteCopyAndSwap, st.Route)
 	assert.Equal(t, router.BackendCopyAndSwap, st.Backend)
 	assert.Empty(t, st.ExecSQL)
@@ -67,10 +70,10 @@ func TestMigrateDryRunUsesLiveFacts(t *testing.T) {
 	require.NoError(t, err)
 
 	alter := fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN name TYPE varchar(50)", schema)
-	plan := dryRunPlan(t, url, alter)
-	assert.Equal(t, router.DispositionExecute, plan.Disposition)
-	require.Len(t, plan.Statements, 1)
-	st := plan.Statements[0]
+	report := dryRunPlan(t, url, alter)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	st := report.Statements[0]
 	assert.Equal(t, planner.RouteNative, st.Route)
 	assert.Equal(t, router.BackendNative, st.Backend)
 	require.Len(t, st.Decisions, 1)
@@ -97,10 +100,10 @@ func TestMigrateDryRunSuggestsConcurrentIndex(t *testing.T) {
 	require.NoError(t, err)
 
 	submitted := fmt.Sprintf("CREATE INDEX t_id_idx ON %s.t (id)", schema)
-	plan := dryRunPlan(t, url, submitted)
-	assert.Equal(t, router.DispositionExecute, plan.Disposition)
-	require.Len(t, plan.Statements, 1)
-	st := plan.Statements[0]
+	report := dryRunPlan(t, url, submitted)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	st := report.Statements[0]
 	assert.Equal(t, planner.RouteNative, st.Route)
 	require.Len(t, st.Decisions, 1)
 	assert.Equal(t, planner.ReasonSaferIdiom, st.Decisions[0].Reason)
@@ -119,8 +122,8 @@ func TestMigrateDryRunSuggestsConcurrentIndex(t *testing.T) {
 func TestMigrateDryRunMissingTableIsConservative(t *testing.T) {
 	url := testutil.StartPostgres(t)
 
-	plan := dryRunPlan(t, url, "ALTER TABLE missing ALTER COLUMN v TYPE varchar(50)")
-	assert.Equal(t, router.DispositionUnavailable, plan.Disposition)
-	require.Len(t, plan.Statements, 1)
-	assert.Equal(t, planner.RouteCopyAndSwap, plan.Statements[0].Route)
+	report := dryRunPlan(t, url, "ALTER TABLE missing ALTER COLUMN v TYPE varchar(50)")
+	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, planner.RouteCopyAndSwap, report.Statements[0].Route)
 }

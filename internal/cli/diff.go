@@ -10,71 +10,31 @@ import (
 	"strings"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
-// diffReport is the diff command's JSON output contract.
-type diffReport struct {
-	// Schema is the live schema the diff targeted.
-	Schema string `json:"schema"`
-	// Table is the desired (and live) table name.
-	Table string `json:"table"`
-	// TableExists reports whether the live table was found; when false the
-	// changes are the full desired schema.
-	TableExists bool `json:"table_exists"`
-	// Disposition is the routed plan's aggregate disposition: what would
-	// happen if the engine executed this plan now.
-	Disposition router.Disposition `json:"disposition"`
-	// Changes is the ordered statement plan; empty means the live table
-	// already matches the desired state.
-	Changes []plannedChange `json:"changes"`
-}
-
-// plannedChange is one diff statement with its classification and routing:
-// the derived SQL plus where the engine would send it and what would run.
-type plannedChange struct {
-	schemadiff.Change
-	// Route is the planner's aggregate route for the statement.
-	Route planner.Route `json:"route"`
-	// Backend is the assigned execution strategy; empty for refusals.
-	Backend router.Backend `json:"backend,omitempty"`
-	// Disposition is what execution would do with the statement now.
-	Disposition router.Disposition `json:"disposition"`
-	// Decisions are the planner's per-operation classifications.
-	Decisions []planner.Decision `json:"decisions"`
-	// ExecSQL is the ordered SQL the native backend would run — the safer
-	// sequence when the planner constructed one. Empty for non-native
-	// routes.
-	ExecSQL []string `json:"exec_sql,omitempty"`
-}
-
 // classifyChanges routes every derived change through the shared
 // classify-and-route pipeline. facts sharpen type-change classification;
 // the zero value is valid and strictly more conservative.
-func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plannedChange, router.Disposition, error) {
+func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.Statement, router.Disposition, error) {
 	plans := make([]planner.Plan, 0, len(changes))
 	for _, ch := range changes {
-		plan, err := planner.Classify(ch.SQL, facts)
+		classified, err := planner.Classify(ch.SQL, facts)
 		if err != nil {
 			return nil, "", fmt.Errorf("classify derived statement %q: %w", ch.SQL, err)
 		}
-		plans = append(plans, plan)
+		plans = append(plans, classified)
 	}
 	routed := router.Route(plans)
-	planned := make([]plannedChange, 0, len(changes))
+	planned := make([]plan.Statement, 0, len(changes))
 	for i, ch := range changes {
-		st := routed.Statements[i]
-		planned = append(planned, plannedChange{
-			Change:      ch,
-			Route:       st.Route,
-			Backend:     st.Backend,
-			Disposition: st.Disposition,
-			Decisions:   st.Decisions,
-			ExecSQL:     st.ExecSQL,
-		})
+		ps := plan.FromRouted(routed.Statements[i])
+		ps.Destructive = ch.Destructive
+		planned = append(planned, ps)
 	}
 	return planned, routed.Disposition, nil
 }
@@ -111,7 +71,10 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	}
 	defer pool.Close()
 
-	report := diffReport{Schema: c.Schema, Table: ds.Table, TableExists: true}
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema = c.Schema
+	report.Table = ds.Table
+	tableExists := true
 	var changes []schemadiff.Change
 	var facts planner.Facts
 	live, err := schemadiff.Introspect(ctx, pool, c.Schema, ds.Table)
@@ -120,7 +83,7 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		// No live table: the plan is the desired schema itself, qualified
 		// onto the target schema, classified with zero facts (there are no
 		// live columns to sharpen type-change decisions).
-		report.TableExists = false
+		tableExists = false
 		if changes, err = qualifiedDesired(ds, c.Schema); err != nil {
 			return err
 		}
@@ -136,12 +99,13 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 			return err
 		}
 	}
-	if report.Changes, report.Disposition, err = classifyChanges(changes, facts); err != nil {
+	report.TableExists = &tableExists
+	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
 		return err
 	}
 	logger.Debug("diff derived",
-		"schema", c.Schema, "table", ds.Table, "changes", len(report.Changes),
-		"table_exists", report.TableExists, "disposition", string(report.Disposition))
+		"schema", c.Schema, "table", ds.Table, "changes", len(report.Statements),
+		"table_exists", tableExists, "disposition", string(report.Disposition))
 
 	if c.JSON {
 		return writeJSON(out, report)
@@ -163,15 +127,15 @@ func qualifiedDesired(ds statement.DesiredSchema, schema string) ([]schemadiff.C
 	return changes, nil
 }
 
-// writeJSON emits the report as JSON.
-func writeJSON(out io.Writer, report diffReport) error {
-	if report.Changes == nil {
-		report.Changes = []plannedChange{}
+// writeJSON emits the plan report as JSON.
+func writeJSON(out io.Writer, report plan.Report) error {
+	if report.Statements == nil {
+		report.Statements = []plan.Statement{}
 	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(report); err != nil {
-		return fmt.Errorf("write diff report: %w", err)
+		return fmt.Errorf("write plan report: %w", err)
 	}
 	return nil
 }
@@ -182,21 +146,21 @@ func writeJSON(out io.Writer, report diffReport) error {
 // stays valid SQL. Safer sequences appear as comment lines — never
 // substituted into the script body, which stays the literal convergence
 // plan (a CONCURRENTLY rewrite could not run inside a transaction block).
-func writePlanText(out io.Writer, report diffReport) error {
-	if len(report.Changes) == 0 {
+func writePlanText(out io.Writer, report plan.Report) error {
+	if len(report.Statements) == 0 {
 		if _, err := fmt.Fprintln(out, "-- no changes: live table matches the desired schema"); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
 		return nil
 	}
-	if !report.TableExists {
+	if report.TableExists != nil && !*report.TableExists {
 		if _, err := fmt.Fprintf(out, "-- table %s.%s does not exist; the plan is the full desired schema\n",
 			report.Schema, report.Table); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
 	}
-	for _, ch := range report.Changes {
-		if err := writeChangeText(out, ch); err != nil {
+	for _, ps := range report.Statements {
+		if err := writeChangeText(out, ps); err != nil {
 			return err
 		}
 	}
@@ -204,26 +168,26 @@ func writePlanText(out io.Writer, report diffReport) error {
 }
 
 // writeChangeText emits one annotated statement of the text plan.
-func writeChangeText(out io.Writer, ch plannedChange) error {
-	if _, err := fmt.Fprintf(out, "-- %s\n", annotate(ch)); err != nil {
+func writeChangeText(out io.Writer, ps plan.Statement) error {
+	if _, err := fmt.Fprintf(out, "-- %s\n", annotate(ps)); err != nil {
 		return fmt.Errorf("write plan: %w", err)
 	}
-	if len(ch.ExecSQL) > 0 && ch.ExecSQL[0] != ch.SQL {
+	if len(ps.ExecSQL) > 0 && ps.ExecSQL[0] != ps.SQL {
 		if _, err := fmt.Fprintln(out, "-- the engine would run instead:"); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
-		for _, safer := range ch.ExecSQL {
+		for _, safer := range ps.ExecSQL {
 			if _, err := fmt.Fprintf(out, "--   %s;\n", safer); err != nil {
 				return fmt.Errorf("write plan: %w", err)
 			}
 		}
 	}
-	if ch.Destructive {
+	if ps.Destructive {
 		if _, err := fmt.Fprintln(out, "-- destructive"); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
 	}
-	if _, err := fmt.Fprintf(out, "%s;\n", ch.SQL); err != nil {
+	if _, err := fmt.Fprintf(out, "%s;\n", ps.SQL); err != nil {
 		return fmt.Errorf("write plan: %w", err)
 	}
 	return nil
@@ -232,18 +196,18 @@ func writeChangeText(out io.Writer, ch plannedChange) error {
 // annotate renders one statement's route annotation: the route, the
 // distinct decision reasons, and the availability note for backends this
 // build does not implement.
-func annotate(ch plannedChange) string {
+func annotate(ps plan.Statement) string {
 	var reasons []string
 	seen := map[planner.Reason]bool{}
-	for _, d := range ch.Decisions {
+	for _, d := range ps.Decisions {
 		if !seen[d.Reason] {
 			seen[d.Reason] = true
 			reasons = append(reasons, string(d.Reason))
 		}
 	}
-	s := fmt.Sprintf("%s (%s)", ch.Route, strings.Join(reasons, ", "))
-	if ch.Disposition == router.DispositionUnavailable {
-		s += ": needs the " + string(ch.Backend) + " backend, which is not implemented yet"
+	s := fmt.Sprintf("%s (%s)", ps.Route, strings.Join(reasons, ", "))
+	if ps.Disposition == router.DispositionUnavailable {
+		s += ": needs the " + string(ps.Backend) + " backend, which is not implemented yet"
 	}
 	return s
 }
