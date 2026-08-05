@@ -32,7 +32,8 @@ maintenance gets a pointer to the `CONCURRENTLY` idiom, and changes that need
 a table rewrite — caught by the size guard or a cancelled bounded attempt —
 get an explicit **not native-safe** verdict. `diff`, `fmt`, and `lint` are
 still stubs. The design docs and the phased build plan live in
-[docs/](docs/) — start with [docs/README.md](docs/README.md).
+[docs/](docs/) — start with [docs/README.md](docs/README.md); the vision —
+what pg-sprite is and is not — is [docs/vision.md](docs/vision.md).
 
 The codebase is partitioned into a small safety-critical core and a
 periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the

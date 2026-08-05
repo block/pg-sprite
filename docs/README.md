@@ -35,6 +35,7 @@ checkpoint/resume, tuned for Aurora. That is the gap this engine targets.
 
 | Doc | Contents |
 | --- | --- |
+| [vision.md](vision.md) | The **vision statement** — what pg-sprite is (the reliable execution engine under a GitOps front-end like [SchemaBot](https://github.com/block/schemabot), as [Spirit](https://github.com/block/spirit) is for MySQL) and what it deliberately is not. Five pillars, success criteria, and explicit non-goals. Start here for the why. |
 | [architecture.md](architecture.md) | The **one-screen codebase map** — the three layers, the package map with build status, the copy-and-swap lifecycle, and where to read more. Start here for orientation. |
 | [postgres-online-ddl-reference.md](postgres-online-ddl-reference.md) | The Aurora PostgreSQL equivalent of MySQL's [InnoDB Online DDL Operations](https://dev.mysql.com/doc/refman/8.4/en/innodb-online-ddl-operations.html) reference — lock levels, rewrite/scan behaviour, and concurrent-DML safety per operation. |
 | [high-level-design.md](high-level-design.md) | The **high-level design** — the conceptual overview: the problem, the planner → router → executor philosophy, the execution patterns and when each is chosen, and coverage at a glance. No package/interface detail. Start here for the architecture. |
