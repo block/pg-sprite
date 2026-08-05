@@ -1,10 +1,11 @@
-# SchemaBot integration
+# Future SchemaBot integration
 
-pg-sprite is **orchestrator-neutral**: the engine is a standalone CLI, and an orchestrator
-drives it through a thin adapter — nothing in the core engine changes for it. The reference
+pg-sprite is **orchestrator-neutral**: the engine is a standalone CLI, and a future orchestrator
+will drive it through a thin SchemaBot-side adapter — nothing in the core engine changes for it.
+No integration code lives in this repository today. The reference
 orchestrator is [SchemaBot](https://github.com/block/schemabot), which already drives
 [Spirit](https://github.com/block/spirit) for Aurora MySQL through a pluggable engine
-abstraction; `pg-sprite` ships as a new engine behind that same interface. This doc is the
+abstraction; `pg-sprite` will ship as a new engine behind that same interface. This doc is the
 **single home** for that integration — everywhere else the doc set says "the orchestrator" and
 points here.
 
@@ -23,8 +24,8 @@ surfacing:
 
 - SchemaBot's **migration-engine interface** is the plug-in boundary: plan, apply, progress,
   and the control verbs (stop / start / cutover / cancel / revert / volume). Spirit
-  (`type: mysql`) and PlanetScale (`type: vitess`) are existing implementations; `pg-sprite`
-  becomes a third (e.g. `type: postgres`).
+  (`type: mysql`) and PlanetScale (`type: vitess`) are existing implementations; a future
+  adapter will register `pg-sprite` as a third (e.g. `type: postgres`).
 - The **orchestration layer** is engine-neutral. It hands each change to the engine, polls
   progress, and turns control requests (`stop` / `start` / `cutover`, volume 1–11) into
   durable, owner-processed operations. Engines are selected by database `type`.
@@ -49,7 +50,7 @@ this mapping clean — the orchestrator's engine verbs line up almost one-to-one
 
 | Engine verb | `pg-sprite` responsibility |
 | --- | --- |
-| plan | **Planner**: classify the change / diff declarative schema; return an engine-neutral table change (pure, no side effects) |
+| plan | **Parse → declarative diff (when applicable) → classify → route**; declarative desired DDL executes only in the rolled-back scratch environment for introspection, with no writes to the target schema; return an engine-neutral table change |
 | apply | **Router + Executor**: run native changes **asynchronously**; return a refusal verdict for non-native-safe changes until later-phase executors land |
 | progress | per-table rows-copied / total / percent / ETA / checksum state |
 | stop / start | checkpoint and resume (slot + copy + applier state) |
@@ -58,9 +59,10 @@ this mapping clean — the orchestrator's engine verbs line up almost one-to-one
 | cancel | abort and **guarantee logical-slot + shadow-table cleanup** |
 | revert | only if the chosen executor supports it (Spirit declines this; see the [reversibility principle](design-principles.md#correctness-and-safety)) |
 
-## The concrete contract
+## The proposed SchemaBot-side contract
 
-**The interface to implement.** `engine.Engine` in `github.com/block/schemabot/pkg/engine`:
+pg-sprite does not implement or import this interface today. **The proposed interface for the
+SchemaBot-side adapter to implement** is `engine.Engine` in `github.com/block/schemabot/pkg/engine`:
 `Name`, `Plan`, `Apply` (async), `Progress`, and the controls `Stop` / `Start` / `Cutover` /
 `Cancel` / `Revert` / `SkipRevert` / `Volume` (1=slowest … 11=fastest). A PostgreSQL stub
 already exists at `pkg/engine/postgres` (`postgres.New()`, methods currently return *"postgres
@@ -73,7 +75,7 @@ the integration phase starts; they drift.)
 | `engine.Engine` method | `pg-sprite` implementation |
 | --- | --- |
 | `Name()` | a stable identifier, e.g. `"pg-sprite"` |
-| `Plan` | run the planner: classify / declarative-diff; return a `PlanResult` whose `SchemaChange.TableChanges` are `engine.TableChange{Table, Operation (statement.StatementType), DDL, IsUnsafe, UnsafeReason}` |
+| `Plan` | run parse → declarative diff when applicable → classify → route; return a `PlanResult` whose `SchemaChange.TableChanges` are `engine.TableChange{Table, Operation (statement.StatementType), DDL, IsUnsafe, UnsafeReason}` |
 | `Apply` | start the native executor asynchronously, or map a **not native-safe** refusal to `engine.ExecutionModeBlocked`; return immediately |
 | `Progress` | per-table rows-copied / total / percent / ETA / checksum state |
 | `Stop` / `Start` | checkpoint and resume (slot + copy + applier watermark) |
@@ -112,9 +114,10 @@ These shape the engine's state and API surface from day one, long before the ada
 they are registered as the `OC-*` invariants in
 [invariants § orchestration / control-plane](invariants.md#orchestration--control-plane-oc):
 
-- **Keep PostgreSQL-only machinery inside the adapter.** Logical-decoding slot create/cleanup,
-  `REPLICA IDENTITY`, `rds.logical_replication` preflight, and the trigger fallback all live
-  behind `Apply`/`Stop`/`Cancel` so the engine-neutral orchestration layer stays untouched
+- **Keep PostgreSQL-only machinery inside the adapter.** When the copy-and-swap backend and
+  adapter exist, logical-decoding slot create/cleanup, `REPLICA IDENTITY`, logical-replication
+  preflight, and the trigger fallback will all live behind `Apply`/`Stop`/`Cancel` so the
+  engine-neutral orchestration layer stays untouched
   (OC-6).
 - **Shared types stay engine-agnostic** — engine-specific data rides in generic
   `Metadata map[string]string` fields (OC-6).

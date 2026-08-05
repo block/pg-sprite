@@ -129,7 +129,7 @@ Spirit's hard-won connection rules carried over:
 - **Losing the lock is fail-closed:** if the lock cannot be confirmed held, the migration aborts
   rather than continuing unprotected.
 
-*Enforced:* `pkg/dbconn` lock type, verified before any write and monitored throughout.
+*Planned enforcement:* `pkg/dbconn` lock type, verified before any write and monitored throughout.
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
@@ -173,8 +173,8 @@ spirit-architecture-notes).
 
 The checkpoint table keeps **one row** (upsert on a fixed key) so a crash can never leave *zero*
 checkpoints or a partial pair — there is always exactly one, and it is either the old or the new
-one. Unbounded append-style checkpoint history is not used. *Enforced:* `pkg/checkpoint` write
-path (`INSERT … ON CONFLICT (id) DO UPDATE`, the REPLACE analog). *Source:* Spirit
+one. Unbounded append-style checkpoint history is not used. *Planned enforcement (Phase 8):*
+`pkg/checkpoint` write path (`INSERT … ON CONFLICT (id) DO UPDATE`, the REPLACE analog). *Source:* Spirit
 `pkg/checkpoint` (single-row REPLACE on `id=1`).
 
 ### ST-2 — An incompatible checkpoint is distinguishable from a transient read error
@@ -183,8 +183,8 @@ Resume must tell apart: (a) a readable, matching checkpoint → resume; (b) a ch
 an incompatible engine version or for a **different statement** → refuse to resume, start fresh
 (never mix state across versions/statements); (c) a *transient* read failure → retry, and never
 trigger fresh-start recovery on a blip. *Enforced:* checkpoint read/validation path (version +
-statement fingerprint stored with the watermark; the fingerprint hashes the scratch-introspected
-after-schema model, not SQL text, so textually-different-but-identical statements match and
+statement fingerprint stored with the watermark; the fingerprint will hash the
+execute-and-introspect after-schema model, not SQL text, so textually-different-but-identical statements match and
 cosmetic edits don't force a fresh start). *Source:* Spirit `checkpoint.IsIncompatible` +
 "resume requires the identical ALTER".
 
@@ -221,10 +221,12 @@ enablement and role, PK usability, `REPLICA IDENTITY`, slot/WAL-sender headroom,
 (~2× the table), the [scratch database](low-level-design.md#plan-time-prerequisite-the-scratch-database)
 (pre-provisioned `pg_sprite_scratch`, or `CREATEDB` so preflight can self-provision it), lock
 LK-1 acquired, and the RF-* refusals below. Failing hours into a copy on something knowable up
-front is a bug. **Sub-obligation — server-authoritative validation:** every statement is
-validated by a PostgreSQL server (executed in a rolled-back transaction on the scratch database)
+front is a bug. **Sub-obligation — server-authoritative validation:** declarative desired-state
+SQL is already executed and introspected in a rolled-back, transaction-scoped scratch schema.
+The decided end state validates every execution path against the engine-owned scratch database
 before the first write to the target; the server is the semantic authority and client-side
-parsing is advisory. *Enforced:* preflight stage. *Source:*
+parsing is advisory. *Enforced today:* declarative diff. *Planned enforcement:* all execution
+paths in preflight. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 
 ## Refusals and preflight (RF)

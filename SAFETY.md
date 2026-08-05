@@ -17,7 +17,7 @@ The invariant registry (invariant IDs referenced below) lives in
 
 | Package | Core? | Status | Invariants enforced |
 | --- | --- | --- | --- |
-| `pkg/dbconn` — pool defaults, advisory lock, terminate-blockers, retries, RDS TLS | ✅ core | exists (Phase 0) | LK-1, LK-2 primitives |
+| `pkg/dbconn` — pool defaults, terminate-blockers, retries, RDS TLS; advisory table lock planned | ✅ core | exists; advisory table lock planned | LK-2 primitives; LK-1 planned |
 | `pkg/preflight` — precondition verifier, refusals | ✅ core | exists (Phase 1: table-size guard); grows through Phase 2 | ST-6, RF-1..RF-5 |
 | `pkg/executor` — bounded optimistic attempt; native executor later | ✅ core | exists (Phase 1: attempt-under-budget); Executor contract at Phase 2–3 | LK-2 (attempt bound) |
 | `pkg/checksum` — chunk verifier, continuous checker, repair | ✅ core | planned (Phase 5) | CO-1, CO-2, CO-3 |
@@ -27,16 +27,17 @@ The invariant registry (invariant IDs referenced below) lives in
 | `pkg/checkpoint` — durable resume state | ✅ core | planned (Phase 8) | ST-1, ST-2 |
 | slot lifecycle (in `pkg/decode`) — create, reap, lag ceiling | ✅ core | planned (Phase 8) | ST-3 |
 | `pkg/migration` — orchestrator, **cutover swap + fidelity gate** | ✅ core | planned (Phase 7) | LK-2, LK-4, ST-5 |
-| `pkg/statement`, `pkg/planner`, `pkg/schemadiff`, `pkg/router`, `pkg/lint` — classify/diff/route | ❌ periphery¹ | `pkg/statement` (parse boundary), `pkg/schemadiff` (introspect/diff via scratch execute-and-introspect), `pkg/planner` (classifier), and `pkg/router` (backend assignment + availability policy) exist (Phase 2); `pkg/lint` planned (Phase 2) | (CO-7 holds at the parse boundary) |
+| `pkg/statement`, `pkg/planner`, `pkg/schemadiff`, `pkg/router`, `pkg/lint` — classify/diff/route | ❌ periphery¹ | `pkg/statement` (parse boundary), `pkg/schemadiff` (introspect/diff via scratch execute-and-introspect), `pkg/planner` (classifier), and `pkg/router` (backend assignment + availability policy) exist (Phases 2.1–2.4); `pkg/lint` planned | (CO-7 holds at the parse boundary) |
 | `pkg/verdict` — structured outcome contract, rendering, exit codes | ❌ periphery | exists (Phase 1) | — |
-| `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`/`status` exist (Phase 1); rest stubs | — |
+| `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`, `status`, `diff`, and `fmt` exist; `lint` is a stub | — |
 | status / progress / advisory rendering, metrics | ❌ periphery | planned | — |
 | orchestrator adapter | ❌ periphery | planned (Phase 11) | OC-* hold *at* the boundary |
 | `internal/testutil` | ❌ test-only | exists | — |
 
 ¹ **The planner is deliberately outside the core.** Its verdicts are *requests*, not
-permissions: a wrong "native-safe" verdict is capped by the executor's own `lock_timeout` bound;
-a wrong "copy" verdict produces a wasteful but *correct* migration (the checksum still gates).
+permissions: a wrong "native-safe" verdict is capped by the executor's own `lock_timeout` bound.
+Today a "copy" route reports unavailable; once copy-and-swap exists, a wrong "copy" verdict will
+produce a wasteful but *correct* migration because the checksum will still gate it.
 The core executors re-verify their own preconditions and never trust that the planner checked.
 
 ## Rules inside the core
@@ -46,18 +47,18 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
 - **Never trust callers.** Every dangerous operation re-verifies its preconditions, whoever the
   requester is (CLI, planner, orchestrator). The periphery may request; the core enforces.
 - **Domain types make illegal states unrepresentable.** Validating passages return proof types
-  with package-private constructors (`statement.Classified`, `PreflightedTable`,
-  `VerifiedShadow`, `CleanWatermark`, `TableLock`); dangerous APIs accept only proof types —
-  e.g. the cutover swap accepts only a `VerifiedShadow`.
+  with package-private constructors (today `preflight.PreflightedTable`; later phases add
+  `VerifiedShadow`, `CleanWatermark`, and `TableLock`); dangerous APIs accept only proof types —
+  e.g. the planned cutover swap will accept only a `VerifiedShadow`.
 - **Put a limit on everything.** Every loop bounded, every queue bounded, every retry counted,
   every wait deadlined. An unbounded anything in a core package is a review-blocking defect.
 - **Assert the positive and the negative space; pair assertions across boundaries.** Invariant
-  violations use a distinct error class (`ErrInvariantViolation`) naming the invariant ID, and
-  always abort fail-closed — never a warning, never retried.
+  violations will use a distinct error class (`ErrInvariantViolation`) naming the invariant ID
+  once the executor phases land, and always abort fail-closed — never a warning, never retried.
 - **Locality of behavior.** The enforcement point of an invariant carries a `// INV: <id>`
   comment so a reviewer or agent can grep the ID and see the whole enforcement in one screen.
 - **Dependencies inside the core become part of the core.** Current core dependency list:
-  `pgx/v5`, `pglogrepl`, stdlib. Adding one requires a recorded decision (see the rubric in
+  `pgx/v5`, stdlib. The future decode path will add `pglogrepl`. Adding one requires a recorded decision (see the rubric in
   [docs/tcb-model.md](docs/tcb-model.md) — copy small things, take pinned dependencies only
   for load-bearing expertise).
   pg-sprite **never imports `block/spirit` as a module**: we port ideas with citations, not

@@ -14,8 +14,8 @@ PostgreSQL 14+): a decoupled **planner → router → executor** design where th
 planner classifies each change, the router picks a strategy, and
 interchangeable executors carry it out — the cheap native PostgreSQL idiom
 when one exists (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default,
-`USING INDEX`), and a log-based, checksum-gated, resumable copy-and-swap when
-a genuine table rewrite is unavoidable.
+`USING INDEX`), while a log-based, checksum-gated, resumable copy-and-swap for
+genuine table rewrites lands in a later phase.
 
 The planner is PostgreSQL's missing `ALGORITHM=` / `LOCK=` declaration: MySQL
 lets authors assert a cost bracket and a concurrency impact and fails closed
@@ -25,15 +25,14 @@ change to the safest sequence that exists, and refuses with a structured
 verdict when it can't prove one (see
 [docs/postgres-online-ddl-reference.md](docs/postgres-online-ddl-reference.md)).
 
-**Status: Phase 1 (optimistic front door).** `pg-sprite migrate --alter '…'`
-runs easy `ALTER TABLE` changes directly under tight lock/statement budgets
-and refuses everything else with a structured verdict (exit code 2): index
-maintenance gets a pointer to the `CONCURRENTLY` idiom, and changes that need
-a table rewrite — caught by the size guard or a cancelled bounded attempt —
-get an explicit **not native-safe** verdict. `diff`, `fmt`, and `lint` are
-still stubs. The design docs and the phased build plan live in
-[docs/](docs/) — start with [docs/README.md](docs/README.md); the vision —
-what pg-sprite is and is not — is [docs/vision.md](docs/vision.md).
+**Status: Phases 1 and 2.1–2.4.** The parse boundary, declarative diff,
+classifier, and router seam are implemented. `pg-sprite migrate --alter '…'`
+runs a bounded optimistic native attempt; routed execution beyond that attempt
+lands in Phase 3. Changes without an available backend get a structured
+refusal (exit code 2). `lint` is still a stub. The design docs and the phased
+build plan live in [docs/](docs/) — start with
+[docs/README.md](docs/README.md); the vision — what pg-sprite is and is not —
+is [docs/vision.md](docs/vision.md).
 
 The codebase is partitioned into a small safety-critical core and a
 periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the

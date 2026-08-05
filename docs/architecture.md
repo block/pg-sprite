@@ -92,8 +92,8 @@ judged by the same rules regardless of how it arrived:
 | **Classify** | `pkg/planner` | each operation + introspected facts → native-safe · needs-rewrite · refuse, with the safer native sequence where one exists | The safety decision lives in one pure, testable place — PostgreSQL's missing `ALGORITHM=`/`LOCK=` declaration ([design-principles.md](design-principles.md)) |
 | **Lint** | `pkg/lint` | classified operations → pass or structured refusal | Policy-level rejection of unsafe or unsupported changes *before* any write — separate from the mechanical can-this-run-online judgment |
 
-Parse exists today (Phase 1 type gate); introspect, diff, classify, and lint land in
-Phase 2 (see the [package map](#package-map) for per-package status).
+Parse, introspect, diff, and classify exist today (Phases 1–2); lint is the one stage not
+yet built (see the [package map](#package-map) for per-package status).
 
 The planner's verdicts are **requests, not permissions** — executors re-verify their own
 preconditions. Which components are safety-critical (and the stricter rules inside that
@@ -103,15 +103,18 @@ boundary) is defined in [../SAFETY.md](../SAFETY.md).
 
 | Package | Role | Status |
 | --- | --- | --- |
-| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `diff` · `fmt` · `lint` · `status` | `migrate`/`status` exist; rest stubs |
-| `internal/cli` | Command tree and flag handling | `migrate`/`status` exist; rest stubs |
+| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `diff` · `fmt` · `lint` · `status` | `migrate` · `diff` · `fmt` · `status` exist; `lint` is a stub |
+| `internal/cli` | Command tree and flag handling | `migrate` · `diff` · `fmt` · `status` exist; `lint` is a stub |
 | `internal/testutil` | Test harness: containerized PostgreSQL, throwaway schemas | exists |
 | `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; advisory-lock mutual exclusion lands here | exists |
-| `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parsing + classification (never hand-parse SQL); shadow DDL + fingerprints come from scratch-DB execute-and-introspect | exists (Phase 1: type gate); classification at Phase 2 |
+| `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parse boundary, typed per-operation descriptors, and advisory rewrites (never hand-parse SQL); migration-time shadow DDL + fingerprints are derived by `pkg/schemadiff` via scratch-DB execute-and-introspect | exists |
 | `pkg/preflight` | Precondition verification and refusals before any write | exists (Phase 1: table-size guard); grows through Phase 2 |
 | `pkg/verdict` | Structured outcome contract (executed / refused + reason + safer idiom), rendering, exit codes | exists (Phase 1) |
-| `pkg/planner` / `pkg/schemadiff` / `pkg/lint` | Shared front-end: introspect, declarative diff (may wrap [stripe/pg-schema-diff](https://github.com/stripe/pg-schema-diff) — see the low-level design's open decisions), classify, lint | Phase 2 |
-| `pkg/executor` | The `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) + native executor | exists (Phase 1: bounded optimistic attempt); contract at Phase 2–3 |
+| `pkg/schemadiff` | Execute-and-introspect desired state, introspect the live catalog, and produce an ordered declarative diff | exists |
+| `pkg/planner` | Classify typed operations and emit safer native SQL | exists |
+| `pkg/lint` | Policy-level rejection of unsafe or unsupported operations | planned |
+| `pkg/router` | Route classified statements to native / copy-and-swap / refuse dispositions; copy-and-swap reports unavailable until that backend lands | exists (Phase 2.4) |
+| `pkg/executor` | Bounded optimistic native attempt; the `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) lands in Phase 3 | bounded optimistic attempt exists |
 | `pkg/table` | PK-range chunkers (single-column fast path, composite), dynamic time-based sizing | Phase 4 |
 | `pkg/copier` | Parallel chunked copy into the shadow table (never overwrites) | Phase 4 |
 | `pkg/checksum` | The mandatory correctness gate; continuous checker; repair primitive | Phase 5 |
@@ -145,7 +148,7 @@ and domain-type design are in [tcb-model.md](tcb-model.md).
 - [high-level-design.md](high-level-design.md) — the conceptual design: why one planner and
   many executors, when each pattern is chosen, advisory mode.
 - [low-level-design.md](low-level-design.md) — interfaces, lifecycle internals, coverage
-  matrix, open decisions.
+  matrix, decisions remaining for later phases.
 - [design-principles.md](design-principles.md) — the principles everything traces back to.
 - [invariants.md](invariants.md) — the testable MUST-statements, with per-phase test
   obligations.

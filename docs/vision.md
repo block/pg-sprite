@@ -48,7 +48,8 @@ yields the same plan, so the hazard-annotated plan a reviewer approves on the PR
 plan that executes), machine-readable verdicts and progress, idempotent crash-resume, and
 no interactive operator judgment required mid-flight. The desired schema stays plain
 `CREATE TABLE` SQL in git — no DSL, no migration numbering, no imperative up/down scripts;
-SchemaBot diffs and orchestrates; pg-sprite plans and executes
+SchemaBot handles GitOps orchestration, pull requests, and approvals; pg-sprite diffs,
+classifies, routes, and executes
 ([schemabot-integration.md](schemabot-integration.md)).
 
 ### 3. Developer-friendly, application-invisible

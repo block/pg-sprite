@@ -57,7 +57,8 @@ or a missed optimization, it is periphery.
 .app / cold-storage pattern from the TCB model: transaction *generation* is untrusted because the
 signer enforces policy. Concretely: if the classifier wrongly says "native-safe", the native
 executor's own `lock_timeout` bound (LK-2) caps the damage; if it wrongly says "copy", the result
-is a wasteful but *correct* migration (checksum still gates). The router may choose a bad
+will be a wasteful but *correct* migration once copy-and-swap exists (checksum will still gate).
+Today the router reports that route unavailable. The router may choose a bad
 strategy; it must never be *able* to cause a wrong result. This is also why the copy-and-swap
 executor re-runs preflight itself rather than trusting that the planner did.
 
@@ -88,15 +89,15 @@ to obtain the type is through the function that validates it.
 
 | Raw / untrusted | Validating passage | Domain type (proof) | Encodes |
 | --- | --- | --- | --- |
-| `string` (user SQL) | `statement.Parse` | `statement.Classified` | CO-7 — nothing downstream touches unparsed SQL |
+| `string` (user SQL) | `statement.ParseOne` / `statement.ParseOps`, then `planner.Classify` | `planner.Plan` / `planner.Decision` | CO-7 — classification consumes parsed operation descriptors |
 | table name | preflight | `PreflightedTable` (carries the proven facts: PK, no FKs/views, replica identity, headroom) | ST-6, RF-* |
-| shadow table | full checksum pass | `VerifiedShadow` — constructor private to `pkg/checksum`; `cutover.Swap` accepts **only** this type | CO-1 in the type system |
-| chunker low-watermark | all-checkers-clean pass | `CleanWatermark` — unobtainable in a pass that repaired anything | CO-2 |
-| — | `dbconn.AcquireTableLock` | `TableLock` token, a required parameter of every mutating operation | LK-1 |
+| shadow table | full checksum pass (planned) | `VerifiedShadow` — its constructor will be private to `pkg/checksum`; the planned `cutover.Swap` will accept **only** this type | CO-1 in the type system |
+| chunker low-watermark | all-checkers-clean pass (planned) | `CleanWatermark` — will be unobtainable in a pass that repaired anything | CO-2 |
+| — | planned table-lock acquisition | `TableLock` token, planned as a required parameter of every mutating operation | LK-1 |
 | orchestrator proto/request | adapter validation at the edge | engine domain types; proto types never cross into the engine | OC-5, OC-6 |
 
-The compile-time effect: **the cutover cannot be called with an unverified shadow because no such
-call type-checks.** An LLM (or a tired human) writing periphery code cannot hand a raw string to
+The intended compile-time effect of the future cutover API: **the cutover cannot be called with
+an unverified shadow because no such call type-checks.** An LLM (or a tired human) writing periphery code cannot hand a raw string to
 the router or a fresh shadow to the swap — the types refuse. This is the cheapest, most durable
 enforcement we have; runtime assertions (below) are the second layer for what Go's types can't
 express.
@@ -110,9 +111,10 @@ Performance. When a trade-off is hard, the higher priority wins. This is
 [safety over speed](design-principles.md) made operational for code review.
 
 **Put a limit on everything (TIGER_STYLE).** Every loop bounded, every queue bounded, every
-retry counted, every wait deadlined. We already have instances — bounded change buffer, retry
-attempts, chunk target time, slot-lag ceiling, `lock_timeout` on everything — the rule makes
-them the *default*: an unbounded anything in a TCB package is a review-blocking defect. Where a
+retry counted, every wait deadlined. Existing instances include bounded native attempts, retry
+budgets, and `lock_timeout` / `statement_timeout` on every session. The future copy-and-swap
+path will also bound its change buffer, chunk target time, and slot-lag ceiling. The rule makes
+limits the *default*: an unbounded anything in a TCB package is a review-blocking defect. Where a
 loop is intentionally endless (the applier's consume loop), that must be stated and its exit
 conditions asserted.
 
@@ -126,8 +128,9 @@ not. Concretely:
   asserted where the copier produces them *and* where the checksum consumes them; the LSN
   asserted where decode records it *and* where the drain claims completion; row counts asserted
   before write and after read-back.
-- Invariant violations map to a distinct error class (`ErrInvariantViolation`) that always
-  aborts fail-closed and names the [invariants](invariants.md) ID — never a warning, never retried.
+- Invariant violations will map to a distinct error class (`ErrInvariantViolation`) in the
+  executor phases, always aborting fail-closed and naming the [invariants](invariants.md) ID —
+  never a warning, never retried.
 
 **Simple, explicit control flow (s2n-tls + TIGER_STYLE).** Linear happy path, branch on failure
 (Go's early-return idiom is s2n's `GUARD` pattern natively); treat `else` with suspicion; push
@@ -136,7 +139,7 @@ functions stay pure; no recursion in TCB packages; explicit state machines with 
 rather than booleans that can disagree.
 
 **Minimize state (TIGER_STYLE).** Derive rather than store; re-derive rather
-than persist when possible. The checkpoint (ST-1) holds the *minimum* resumable state —
+than persist when possible. The planned checkpoint (ST-1) will hold the *minimum* resumable state —
 watermark, slot name, LSN, statement fingerprint, engine version — everything else is
 reconstructed from the database on resume. Small state is what makes "work out all system state
 by hand" possible during an incident.
@@ -160,8 +163,8 @@ short:
 | Dependency | Status | Treatment |
 | --- | --- | --- |
 | `pgx/v5` / `pgconn` | TCB (unavoidable — the wire) | pin, review upgrades like TCB changes, changelog read before bump |
-| `pglogrepl` | TCB (decode path) | same |
-| `go-pgquery` (Wasm `libpg_query`) | boundary (parses untrusted input into `Classified`) | fuzz at our boundary; parse failure is an error (CO-7), never a fallback; a parser crash is a Wasm trap surfaced as a Go error, not a process crash; verify wasilibs' reproducible-build provenance on every bump (cgo `pg_query_go` is the API-compatible escape hatch) |
+| `pglogrepl` | planned TCB dependency (future decode path; not currently imported) | pin and review upgrades like TCB changes when added |
+| `go-pgquery` (Wasm `libpg_query`) | boundary (parses untrusted input into typed operation descriptors) | fuzz at our boundary; parse failure is an error (CO-7), never a fallback; a parser crash is a Wasm trap surfaced as a Go error, not a process crash; verify wasilibs' reproducible-build provenance on every bump (cgo `pg_query_go` supplies AST types only) |
 | `kong`, `testcontainers`, testify | periphery / test-only | normal hygiene |
 
 Rule: **no new dependency inside TCB packages without an explicit recorded decision.** CI
@@ -243,8 +246,8 @@ The AI-assistance posture differs per side of the boundary:
    bitcoin-core discipline).
 2. **`cutover`/`swap` API takes domain types only** — the `VerifiedShadow`/`CleanWatermark`/
    `TableLock` types land with their producing packages (Phases 4–7), not retrofitted.
-3. **`ErrInvariantViolation`** error class + the `// INV: <id>` convention land in Phase 0/1
-   code as it grows.
+3. **The `// INV: <id>` convention has landed; `ErrInvariantViolation`** lands with the
+   executor phases.
 4. **The enforcement backlog:** [SAFETY.md](../SAFETY.md) + depguard + CODEOWNERS, the
    property/fuzz suites per rung above, and the optional TLA+ models for cutover and resume.
 5. **The periphery stays free.** None of this doc applies review friction to status text, CLI
