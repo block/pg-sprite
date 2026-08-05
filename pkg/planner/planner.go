@@ -5,6 +5,12 @@
 // column of docs/postgres-online-ddl-reference.md, applied conservatively:
 // anything the planner cannot prove safe routes to copy-and-swap or refuse.
 // Classification predicts; executors keep their own protections regardless.
+//
+// In MySQL terms, the planner is PostgreSQL's missing ALGORITHM= / LOCK=
+// declaration: MySQL lets authors assert the cost bracket
+// (INSTANT/INPLACE/COPY) and the lock impact (NONE/SHARED/EXCLUSIVE) and
+// fails closed; PostgreSQL has no such clause, so the planner proves both
+// dimensions before execution and routes to the safest sequence that exists.
 package planner
 
 import (

@@ -9,6 +9,11 @@ PostgreSQL has **no** `ALGORITHM={INSTANT,INPLACE,COPY}` knob. What matters inst
 2. **Whether it rewrites the table** (or does a full scan), and therefore how long it holds
    that lock.
 
+These are exactly the two dimensions MySQL lets authors *assert* with `ALGORITHM=` and
+`LOCK=` (failing closed when either can't be honored). PostgreSQL offers no such clause —
+pg-sprite's planner is that missing declaration: it proves both dimensions before
+execution instead of letting the author discover them in production.
+
 The rest of this document breaks down both dimensions per operation. 
 
 ## Table of contents

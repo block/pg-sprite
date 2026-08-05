@@ -17,6 +17,14 @@ when one exists (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default,
 `USING INDEX`), and a log-based, checksum-gated, resumable copy-and-swap when
 a genuine table rewrite is unavoidable.
 
+The planner is PostgreSQL's missing `ALGORITHM=` / `LOCK=` declaration: MySQL
+lets authors assert a cost bracket and a concurrency impact and fails closed
+when either can't be honored — PostgreSQL silently runs whichever cost
+applies. pg-sprite proves both dimensions before execution, routes each
+change to the safest sequence that exists, and refuses with a structured
+verdict when it can't prove one (see
+[docs/postgres-online-ddl-reference.md](docs/postgres-online-ddl-reference.md)).
+
 **Status: Phase 1 (optimistic front door).** `pg-sprite migrate --alter '…'`
 runs easy `ALTER TABLE` changes directly under tight lock/statement budgets
 and refuses everything else with a structured verdict (exit code 2): index
