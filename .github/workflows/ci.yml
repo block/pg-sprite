@@ -13,7 +13,11 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - uses: golangci/golangci-lint-action@v6
+      # Pin the same golangci-lint major used locally (v2 config format);
+      # the action's default binary lags and cannot load a v2 config.
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.12.2
 
   build:
     runs-on: ubuntu-latest
