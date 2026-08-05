@@ -90,10 +90,10 @@ judged by the same rules regardless of how it arrived:
 | **Introspect** | `pkg/schemadiff` | live catalog (and desired DDL applied to a scratch schema) → schema models | The classifier and diff need *facts*, not text: column types, defaults, and constraint state come from PostgreSQL's own catalog, not a reimplementation of its semantics |
 | **Diff** | `pkg/schemadiff` | desired model vs live model → ordered DDL operations | Declarative mode is a front-end that *produces statements*; its output enters the same pipeline as hand-written DDL, so both modes get identical safety treatment |
 | **Classify** | `pkg/planner` | each operation + introspected facts → native-safe · needs-rewrite · refuse, with the safer native sequence where one exists | The safety decision lives in one pure, testable place — PostgreSQL's missing `ALGORITHM=`/`LOCK=` declaration ([design-principles.md](design-principles.md)) |
-| **Lint** | `pkg/lint` | classified operations → pass or structured refusal | Policy-level rejection of unsafe or unsupported changes *before* any write — separate from the mechanical can-this-run-online judgment |
+| **Lint** | `pkg/lint` | classified operations → typed findings (errors refuse, warnings advise) | Policy-level rejection of unsafe or unsupported changes *before* any write — separate from the mechanical can-this-run-online judgment |
 
-Parse, introspect, diff, and classify exist today (Phases 1–2); lint is the one stage not
-yet built (see the [package map](#package-map) for per-package status).
+All five stages exist today (Phases 1–2.5); see the [package map](#package-map) for
+per-package status.
 
 The planner's verdicts are **requests, not permissions** — executors re-verify their own
 preconditions. Which components are safety-critical (and the stricter rules inside that
@@ -103,8 +103,8 @@ boundary) is defined in [../SAFETY.md](../SAFETY.md).
 
 | Package | Role | Status |
 | --- | --- | --- |
-| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `diff` · `fmt` · `lint` · `status` | `migrate` · `diff` · `fmt` · `status` exist; `lint` is a stub |
-| `internal/cli` | Command tree and flag handling | `migrate` · `diff` · `fmt` · `status` exist; `lint` is a stub |
+| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `diff` · `fmt` · `lint` · `status` | all five exist |
+| `internal/cli` | Command tree and flag handling | all five exist |
 | `internal/testutil` | Test harness: containerized PostgreSQL, throwaway schemas | exists |
 | `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; advisory-lock mutual exclusion lands here | exists |
 | `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parse boundary, typed per-operation descriptors, and advisory rewrites (never hand-parse SQL); migration-time shadow DDL + fingerprints are derived by `pkg/schemadiff` via scratch-DB execute-and-introspect | exists |
@@ -112,7 +112,7 @@ boundary) is defined in [../SAFETY.md](../SAFETY.md).
 | `pkg/verdict` | Structured outcome contract (executed / refused + reason + safer idiom), rendering, exit codes | exists (Phase 1) |
 | `pkg/schemadiff` | Execute-and-introspect desired state, introspect the live catalog, and produce an ordered declarative diff | exists |
 | `pkg/planner` | Classify typed operations and emit safer native SQL | exists |
-| `pkg/lint` | Policy-level rejection of unsafe or unsupported operations | planned |
+| `pkg/lint` | Offline lint findings with typed codes: unsupported operations are errors; blocking idioms, rewrites, and destructive drops are warnings | exists (Phase 2.5) |
 | `pkg/plan` | Versioned machine-readable dry-run plan report — the one JSON contract both front doors emit and an orchestrator consumes | exists (Phase 2.5) |
 | `pkg/router` | Route classified statements to native / copy-and-swap / refuse dispositions; copy-and-swap reports unavailable until that backend lands | exists (Phase 2.4) |
 | `pkg/executor` | Bounded optimistic native attempt; the `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) lands in Phase 3 | bounded optimistic attempt exists |
