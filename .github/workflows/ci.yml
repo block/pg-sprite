@@ -1,4 +1,4 @@
-name: ci
+name: CI
 
 on:
   push:
@@ -100,9 +100,10 @@ jobs:
           go-version-file: go.mod
       - run: make test
 
-  # Single required status for branch protection. Succeeds when nothing
-  # failed — including docs-only PRs where the heavy jobs were skipped.
-  ci-ok:
+  # Single required status for branch protection ("all-green" is the
+  # context to require). Succeeds when nothing failed — including
+  # docs-only PRs where the heavy jobs were skipped.
+  all-green:
     if: always()
     needs: [changes, lint, build, test]
     runs-on: ubuntu-latest
