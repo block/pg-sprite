@@ -1,6 +1,6 @@
 # Architecture
 
-The one-screen map of the codebase: what the layers are, where each responsibility lives, and
+The map of the codebase: what the layers are, where each responsibility lives, and
 what exists today versus what each build phase adds. For the design rationale behind this shape
 start with [high-level-design.md](high-level-design.md); for interfaces and lifecycle internals
 see [low-level-design.md](low-level-design.md).
@@ -8,37 +8,92 @@ see [low-level-design.md](low-level-design.md).
 ## The three layers
 
 pg-sprite is a decoupled **planner → router → executor** engine. The planner decides *what*
-changes, the router decides *which strategy*, interchangeable executors decide *how*:
+changes, the router decides *which strategy*, interchangeable executors decide *how*.
+
+The planner is itself a pipeline of five distinct stages. The two front-ends enter it at
+different points — an imperative `--alter` already *is* DDL, so it goes straight to parse;
+a declarative `--desired` schema must first be compared against the live database to
+*produce* DDL — but both converge on the same classify → lint tail, so every operation is
+judged by the same rules regardless of how it arrived:
 
 ```
-        user: --alter "..."  OR  --desired schema.sql
-                         │
-              ╭──────────▼───────────╮
-              │ CLI: migrate · diff ·│
-              │ fmt · lint · status  │
-              ╰──────────┬───────────╯
-                         ▼
-                 ╭───────────────╮      shared front-end:
-                 │   PLANNER     │      parse · introspect ·
-                 │  (classify)   │      diff · classify · lint
-                 ╰───────┬───────╯
-                         ▼
-                 ╭───────────────╮
-                 │    ROUTER     │      policy + cluster facts
-                 ╰───────┬───────╯
-        ╭────────────────┼────────────────┬───────────────╮
-        ▼                ▼                ▼               ▼
-   native DDL      copy-and-swap    expand/contract     refuse with
-   CONCURRENTLY    (later phase)    (reversible,        not-native-safe
-   NOT VALID …                       later)              verdict
-        ╰────────────────┴────────────────╯
-                         │ cross-cutting: connection mgmt,
-                         │ lock bounding, Aurora-aware throttling
-                         ▼
-              ╭─────────────────────╮
-              │  Aurora PostgreSQL  │
-              ╰─────────────────────╯
+   user: --alter "ALTER TABLE …"           user: --desired schema.sql
+     (imperative: statements)               (declarative: whole schema)
+                  │                                      │
+        ╭─────────▼──────────────────────────────────────▼─────────╮
+        │        CLI: migrate · diff · fmt · lint · status         │
+        ╰─────────┬──────────────────────────────────────┬─────────╯
+                  │                                      │
+   ┌──────────────▼───── PLANNER (shared front-end) ─────▼──────────────┐
+   │                                                                    │
+   │  ╭─────────────────────╮            ╭─────────────────────────╮    │
+   │  │ PARSE               │            │ INTROSPECT              │    │
+   │  │ pkg/statement       │            │ pkg/schemadiff          │    │
+   │  │ real PG grammar     │            │ read the live catalog;  │    │
+   │  │ (go-pgquery) →      │            │ apply desired DDL to a  │    │
+   │  │ typed per-operation │            │ scratch schema and      │    │
+   │  │ descriptors         │            │ introspect that too     │    │
+   │  ╰──────────┬──────────╯            ╰────────────┬────────────╯    │
+   │             │                                    │ two schema      │
+   │             │                                    ▼ models          │
+   │             │                       ╭─────────────────────────╮    │
+   │             │                       │ DIFF                    │    │
+   │             │                       │ pkg/schemadiff          │    │
+   │             │                       │ desired vs live →       │    │
+   │             │                       │ ordered DDL operations  │    │
+   │             │                       ╰────────────┬────────────╯    │
+   │             │ operations                         │ operations      │
+   │             ╰──────────────────┬─────────────────╯                 │
+   │                                ▼                                   │
+   │                   ╭─────────────────────────╮                      │
+   │                   │ CLASSIFY                │                      │
+   │                   │ pkg/planner             │                      │
+   │                   │ per op: native-safe ·   │                      │
+   │                   │ needs-rewrite · refuse; │                      │
+   │                   │ emit the safer native   │                      │
+   │                   │ sequence where one      │                      │
+   │                   │ exists                  │                      │
+   │                   ╰────────────┬────────────╯                      │
+   │                                ▼                                   │
+   │                   ╭─────────────────────────╮                      │
+   │                   │ LINT                    │                      │
+   │                   │ pkg/lint                │                      │
+   │                   │ reject unsafe or        │                      │
+   │                   │ unsupported operations  │                      │
+   │                   │ before any write        │                      │
+   │                   ╰────────────┬────────────╯                      │
+   │                                │ Plan (ordered, classified steps)  │
+   └────────────────────────────────┼───────────────────────────────────┘
+                                    ▼
+                            ╭───────────────╮
+                            │    ROUTER     │      policy + cluster facts
+                            ╰───────┬───────╯
+           ╭────────────────────────┼───────────────┬────────────────╮
+           ▼                        ▼               ▼                ▼
+      native DDL             copy-and-swap    expand/contract    refuse with
+      CONCURRENTLY           (later phase)    (reversible,       not-native-safe
+      NOT VALID …                              later)            verdict
+           ╰────────────────────────┴───────────────╯
+                                    │ cross-cutting: connection mgmt,
+                                    │ lock bounding, Aurora-aware throttling
+                                    ▼
+                         ╭─────────────────────╮
+                         │  Aurora PostgreSQL  │
+                         ╰─────────────────────╯
 ```
+
+### The five front-end stages
+
+| Stage | Package | Input → output | Why it is a separate stage |
+| --- | --- | --- | --- |
+| **Parse** | `pkg/statement` | SQL text → typed per-operation descriptors | One parse boundary using the real PostgreSQL grammar — no hand-parsing anywhere else; a parse failure is an error surfaced to the caller, never a guess |
+| **Introspect** | `pkg/schemadiff` | live catalog (and desired DDL applied to a scratch schema) → schema models | The classifier and diff need *facts*, not text: column types, defaults, and constraint state come from PostgreSQL's own catalog, not a reimplementation of its semantics |
+| **Diff** | `pkg/schemadiff` | desired model vs live model → ordered DDL operations | Declarative mode is a front-end that *produces statements*; its output enters the same pipeline as hand-written DDL, so both modes get identical safety treatment |
+| **Classify** | `pkg/planner` | each operation + introspected facts → native-safe · needs-rewrite · refuse, with the safer native sequence where one exists | The safety decision lives in one pure, testable place — PostgreSQL's missing `ALGORITHM=`/`LOCK=` declaration ([design-principles.md](design-principles.md)) |
+| **Lint** | `pkg/lint` | classified operations → pass or structured refusal | Policy-level rejection of unsafe or unsupported changes *before* any write — separate from the mechanical can-this-run-online judgment |
+
+Parse exists today (Phase 1 type gate); introspect, diff, classify, and lint land in
+Phase 2 (see the [package map](#package-map) for per-package status).
 
 The planner's verdicts are **requests, not permissions** — executors re-verify their own
 preconditions. Which components are safety-critical (and the stricter rules inside that
