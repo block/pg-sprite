@@ -62,12 +62,48 @@ func ministackImage() string {
 	return "ministackorg/ministack:1.4.13-full"
 }
 
+// AuroraCluster is a provisioned Ministack aurora-postgresql cluster and
+// the control-plane client that owns it. Tests drive further control-plane
+// operations (rotation, duplicate creation, discovery of unknown
+// identifiers) through Client against ClusterID and InstanceID.
+type AuroraCluster struct {
+	// Client is the RDS control-plane client bound to the Ministack gateway.
+	Client *rds.Client
+	// ClusterID is the DBClusterIdentifier of the provisioned cluster.
+	ClusterID string
+	// InstanceID is the DBInstanceIdentifier of the cluster's sole instance.
+	InstanceID string
+
+	dbPort int
+}
+
+// URL returns a connection URL for the cluster's database using the
+// fixture master password the cluster was provisioned with.
+func (c *AuroraCluster) URL() string {
+	return c.URLWithPassword(fixturePassword)
+}
+
+// URLWithPassword returns a connection URL using the given master
+// password, for tests that rotate credentials via ModifyDBCluster.
+//
+// The control-plane endpoint address is container-internal; the URL uses
+// the pinned host-published port instead (see ProvisionAuroraPostgres).
+//
+// sslmode=disable: the sibling database container runs plain PostgreSQL
+// without TLS, and the endpoint is not an *.rds.amazonaws.com hostname,
+// so the production TLS path is out of scope for this tier (it is
+// proven by pkg/dbconn's TLS integration tests).
+func (c *AuroraCluster) URLWithPassword(password string) string {
+	return fmt.Sprintf("postgres://%s:%s@localhost:%d/%s?sslmode=disable",
+		fixtureUser, password, c.dbPort, fixtureDatabase)
+}
+
 // ProvisionAuroraPostgres starts a Ministack container, provisions an
 // aurora-postgresql cluster and instance through the real RDS control-plane
-// API, waits until the instance is available, and returns a connection URL
-// for the cluster's database. The PostgreSQL major follows PG_VERSION: the
-// cluster's database is a real postgres container of that major.
-func ProvisionAuroraPostgres(t *testing.T) string {
+// API, waits until the instance is available, and returns the cluster
+// handle. The PostgreSQL major follows PG_VERSION: the cluster's database
+// is a real postgres container of that major.
+func ProvisionAuroraPostgres(t *testing.T) *AuroraCluster {
 	t.Helper()
 	if os.Getenv("SKIP_INTEGRATION") != "" {
 		t.Skip("SKIP_INTEGRATION set; skipping test that needs Docker")
@@ -174,15 +210,12 @@ func ProvisionAuroraPostgres(t *testing.T) string {
 	require.NotZero(t, aws.ToInt32(clusters.DBClusters[0].Port),
 		"cluster endpoint port must be discoverable")
 
-	// The discovered endpoint address is container-internal; connect via the
-	// pinned host-published port instead (see dbPort above).
-	//
-	// sslmode=disable: the sibling database container runs plain PostgreSQL
-	// without TLS, and the endpoint is not an *.rds.amazonaws.com hostname,
-	// so the production TLS path is out of scope for this tier (it is
-	// proven by pkg/dbconn's TLS integration tests).
-	return fmt.Sprintf("postgres://%s:%s@localhost:%d/%s?sslmode=disable",
-		fixtureUser, fixturePassword, dbPort, fixtureDatabase)
+	return &AuroraCluster{
+		Client:     client,
+		ClusterID:  clusterID,
+		InstanceID: instanceID,
+		dbPort:     dbPort,
+	}
 }
 
 // freePort reserves an ephemeral TCP port and returns it for reuse. The
