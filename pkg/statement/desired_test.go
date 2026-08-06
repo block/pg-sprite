@@ -40,6 +40,9 @@ func TestParseDesiredRefusals(t *testing.T) {
 		{"qualified index", "CREATE TABLE t (id int); CREATE INDEX i ON prod.t (id)", ErrQualifiedName},
 		{"concurrent index", "CREATE TABLE t (id int); CREATE INDEX CONCURRENTLY i ON t (id)", ErrConcurrentIndex},
 		{"index on another table", "CREATE TABLE t (id int); CREATE INDEX i ON other (id)", ErrWrongIndexTarget},
+		{"column foreign key", "CREATE TABLE child (id int PRIMARY KEY, pid int REFERENCES parent(id))", ErrForeignKey},
+		{"table foreign key", "CREATE TABLE child (id int PRIMARY KEY, pid int, FOREIGN KEY (pid) REFERENCES parent(id))", ErrForeignKey},
+		{"self-referencing foreign key", "CREATE TABLE node (id int PRIMARY KEY, parent_id int REFERENCES node(id))", ErrForeignKey},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

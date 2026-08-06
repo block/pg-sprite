@@ -88,7 +88,11 @@ func qualifiedDesired(ds statement.DesiredSchema, schema string) ([]schemadiff.C
 		if err != nil {
 			return nil, fmt.Errorf("qualify desired statement: %w", err)
 		}
-		changes = append(changes, schemadiff.Change{SQL: qualified})
+		kind := schemadiff.ChangeCreateTable
+		if st.Kind() == statement.KindCreateIndex {
+			kind = schemadiff.ChangeCreateIndex
+		}
+		changes = append(changes, schemadiff.Change{SQL: qualified, Kind: kind})
 	}
 	return changes, nil
 }
@@ -107,15 +111,23 @@ func writeJSON(out io.Writer, report diffReport) error {
 }
 
 // writePlanText emits the plan as an executable SQL script: one statement
-// per line, destructive statements flagged with a leading comment line, and
-// SQL comments for the no-change and missing-table cases so the output stays
-// valid SQL.
+// per line, destructive and lock-hazardous statements flagged with leading
+// comment lines, and SQL comments for the no-change and missing-table cases
+// so the output stays valid SQL. The header points at migrate as the
+// executing front door: running this script directly bypasses the gate that
+// refuses blocking statements.
 func writePlanText(out io.Writer, report diffReport) error {
 	if len(report.Changes) == 0 {
 		if _, err := fmt.Fprintln(out, "-- no changes: live table matches the desired schema"); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
 		return nil
+	}
+	if _, err := fmt.Fprintln(out, "-- plan derived by pg-sprite diff; execute statements via pg-sprite migrate,"); err != nil {
+		return fmt.Errorf("write plan: %w", err)
+	}
+	if _, err := fmt.Fprintln(out, "-- which refuses blocking forms — running this script directly bypasses that gate"); err != nil {
+		return fmt.Errorf("write plan: %w", err)
 	}
 	if !report.TableExists {
 		if _, err := fmt.Fprintf(out, "-- table %s.%s does not exist; the plan is the full desired schema\n",
@@ -129,6 +141,11 @@ func writePlanText(out io.Writer, report diffReport) error {
 				return fmt.Errorf("write plan: %w", err)
 			}
 		}
+		if hazard := lockHazard(ch.Kind); hazard != "" {
+			if _, err := fmt.Fprintf(out, "-- %s\n", hazard); err != nil {
+				return fmt.Errorf("write plan: %w", err)
+			}
+		}
 		if _, err := fmt.Fprintf(out, "%s;\n", ch.SQL); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
@@ -136,9 +153,29 @@ func writePlanText(out io.Writer, report diffReport) error {
 	return nil
 }
 
+// lockHazard describes the blocking behavior of a change kind, empty when
+// the statement is not expected to block writers. This is presentation for
+// the text plan; the machine contract is the kind itself.
+func lockHazard(kind schemadiff.ChangeKind) string {
+	switch kind {
+	case schemadiff.ChangeAlterType:
+		return "rewrites the table under ACCESS EXCLUSIVE, blocking reads and writes"
+	case schemadiff.ChangeSetNotNull:
+		return "full table scan under ACCESS EXCLUSIVE"
+	case schemadiff.ChangeAddConstraint:
+		return "validation scan or index build that blocks writes"
+	case schemadiff.ChangeCreateIndex:
+		return "blocks writes for the whole index build"
+	default:
+		return ""
+	}
+}
+
 // runFmt canonicalizes a desired-state schema file: every statement is
 // parsed through the PostgreSQL grammar, admitted by the same rules as diff,
 // and printed back in the deparser's canonical form. Offline — no database.
+// Commented input is refused (statement.ErrCommentLoss): the parser drops
+// comments, and a formatter must never silently discard content.
 func (c *FmtCmd) runFmt(in io.Reader, out io.Writer) error {
 	var src []byte
 	var err error
@@ -148,6 +185,9 @@ func (c *FmtCmd) runFmt(in io.Reader, out io.Writer) error {
 		}
 	} else if src, err = os.ReadFile(c.Path); err != nil {
 		return fmt.Errorf("read schema file: %w", err)
+	}
+	if err := statement.CheckNoComments(string(src)); err != nil {
+		return err
 	}
 	ds, err := statement.ParseDesired(string(src))
 	if err != nil {

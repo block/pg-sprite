@@ -52,6 +52,55 @@ func TestIntrospectDesiredMatchesLiveIntrospection(t *testing.T) {
 		"live introspection and scratch execute-and-introspect must agree on the canonical model")
 }
 
+// Converging a plain integer column onto serial would emit a SET DEFAULT
+// referencing a sequence that only ever existed inside the rolled-back
+// scratch transaction — a plan that cannot execute. The diff refuses it as
+// an unsupported change instead.
+func TestDiffRefusesSerialAdoption(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+
+	ds, err := statement.ParseDesired("CREATE TABLE t (id serial PRIMARY KEY, v text)")
+	require.NoError(t, err)
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+	require.NoError(t, err)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	require.NoError(t, err)
+
+	_, err = schemadiff.Diff(schema, live, desired)
+	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+}
+
+// A serial table that already matches its desired file must converge to no
+// changes: both sides decompile the sequence default identically under
+// their introspection search_path.
+func TestDiffSerialTableConverges(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id serial PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+
+	ds, err := statement.ParseDesired("CREATE TABLE t (id serial PRIMARY KEY, v text)")
+	require.NoError(t, err)
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+	require.NoError(t, err)
+	assert.True(t, live.Columns[0].SequenceDefault, "serial column default must be marked sequence-backed")
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	require.NoError(t, err)
+
+	changes, err := schemadiff.Diff(schema, live, desired)
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+}
+
 // Cosmetically different spellings of the same schema must introspect to the
 // same canonical model: the server's decompilers are the canonicalizer.
 func TestIntrospectCanonicalizesTypeAliases(t *testing.T) {

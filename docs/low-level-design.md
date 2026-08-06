@@ -249,15 +249,28 @@ live schema (introspected)  ─┘                          │
 4. **Diff** the two models and emit the minimal set of statements: `ADD/DROP/ALTER COLUMN`,
    `ADD/DROP CONSTRAINT`, `CREATE/DROP INDEX`, default/nullability changes, etc., in a
    **dependency-correct order** (e.g. add a column before an index that references it).
+   Columns are compared **by name**: a live table whose columns are ordered differently from
+   the desired file converges to "no changes". Attribute order carries no semantics in
+   PostgreSQL and cannot be changed in place, so — unlike some declarative MySQL tooling —
+   column order is deliberately out of scope for convergence.
 5. **Hand the derived statements to the same classifier**, so a declarative change that turns
    out to be, say, a binary-coercible type widening still takes the native fast path, and only
    a genuine rewrite triggers a copy.
 
 ### Safety rules (inherited philosophy: surprise-free, decisions-not-options)
 
-- **Destructive diffs are gated.** Dropping a column or constraint, or anything that loses
-  data, requires an explicit confirmation flag — never inferred silently from "it's missing in
-  the desired file".
+- **Destructive diffs are gated.** Dropping a column, constraint, or index — anything that
+  loses data or a guarantee (a unique index discards the same uniqueness guarantee as a unique
+  constraint) — requires an explicit confirmation flag — never inferred silently from "it's
+  missing in the desired file".
+- **Unsupported constructs are refused, never guessed.** The desired file admits one
+  unqualified `CREATE TABLE` plus `CREATE INDEX` statements on it; each rule is a typed error.
+  Foreign keys are refused at admission — a `REFERENCES` clause cannot be faithfully executed
+  in the transaction-scoped scratch schema (an unqualified reference resolves against the
+  scratch search_path, not the target schema), and FK support needs its own design. Changes
+  the plan cannot express — identity or generation changes on an existing column, adopting a
+  sequence-backed (serial) default whose sequence only existed in the rolled-back scratch
+  transaction — are refused as unsupported rather than emitted as an unexecutable plan.
 - **Renames are ambiguous and are not guessed.** A column present in live but absent in desired
   plus a new column in desired is, by default, a *drop + add*, not a rename. Rename intent must
   be stated explicitly (the engine will not heuristically pair columns), mirroring Spirit's

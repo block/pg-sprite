@@ -3,6 +3,13 @@
 // front door needs. In Phase 1 that is a statement-type gate only: which kind
 // of statement this is and, for ALTER TABLE, which table it targets. No
 // schema model, no classification.
+//
+// Two canonical forms coexist deliberately: this package's deparser prints
+// grammar-canonical SQL (e.g. varchar(50)) for formatting, while
+// pkg/schemadiff models carry server-decompiled text (character
+// varying(50)) for comparison. The two canons never mix: models only ever
+// compare server output against server output, and deparser output must not
+// feed a model comparison or a schema fingerprint.
 package statement
 
 import (
