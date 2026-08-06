@@ -23,6 +23,12 @@ the reviewer's distillation.
   raw `pgx` pools in production code.
 - SQL parsing goes through `pg_query_go`; flag `strings.Split(";")` or any hand-parsing. A
   parse failure is an error surfaced to the caller.
+- Generated SQL quotes every user-supplied or introspected identifier
+  (`pgx.Identifier{...}.Sanitize()` / `quote_ident()`) — flag raw interpolation of names into
+  SQL. Connection strings are parsed and re-serialized (`pgx.ParseConfig`), never
+  string-manipulated.
+- Terminology: "schema change", not "migration", in code, CLI output, error messages, and new
+  docs — flag new occurrences except citations of external sources.
 - Errors: wrapped with context and identifiers; no log-and-continue, no silent branch cases,
   no discarded `Close()` errors, no `nolint`, no `--no-verify`. No panics in library code —
   invariant violations return `ErrInvariantViolation` fail-closed. Postgres errors are matched
