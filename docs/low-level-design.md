@@ -297,9 +297,13 @@ For each parsed statement the classifier produces a record along the lines of:
 - `original` — the statement as the user wrote it.
 - `class` — `native-safe` · `needs-rewrite` (refused until in-house copy-and-swap lands) ·
   `refuse`.
-- `recommended` — the safe rewrite when the literal is risky but has a native equivalent
+- `recommended` — the safer native form when the literal is risky as written
   (e.g. `CREATE INDEX` → `CREATE INDEX CONCURRENTLY`; `ADD CONSTRAINT` → `ADD … NOT VALID` +
   `VALIDATE`; `ADD PRIMARY KEY` → unique index `CONCURRENTLY` + `ADD PRIMARY KEY USING INDEX`).
+  The recommendation converges on the same declared end state but is **not** a semantic
+  equivalent of the original — it carries different locking, transactionality, and failure
+  modes (a failed `CONCURRENTLY` build leaves an `INVALID` index the executor must detect via
+  `pg_index.indisvalid` and recover), so executing it is the engine's job, not the user's.
 - Richer `risk`, `reversible`, and `requires_app_coordination` metadata is a future extension.
 
 Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operations and

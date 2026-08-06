@@ -56,7 +56,7 @@ func writeLintText(out io.Writer, report lint.Report) error {
 			return fmt.Errorf("write lint report: %w", err)
 		}
 		if len(f.Suggestion) > 0 {
-			if _, err := fmt.Fprintf(out, "  run instead: %s;\n",
+			if _, err := fmt.Fprintf(out, "  safer form (not equivalent — see docs/postgres-online-ddl-reference.md): %s;\n",
 				strings.Join(f.Suggestion, ";\n  ")); err != nil {
 				return fmt.Errorf("write lint report: %w", err)
 			}
