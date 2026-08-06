@@ -288,7 +288,9 @@ request, not a permission.
 The [advisory behaviour](high-level-design.md#advisory-mode-suggest-the-safe-rewrite-dont-silently-run-the-risky-one)
 is a property of the **planner's classifier output**, not a separate code path. Every current
 `planner.Decision` carries the operation, route, typed reason, and safer SQL where applicable.
-The CLI renders that output in `diff` and `migrate --dry-run`.
+The CLI renders that output in `diff` and `migrate --dry-run`, and the offline `suggest`
+command (`pkg/suggest`) emits it as a standalone advisory report — original → recommended
+with typed reason and caveat metadata, never executing anything.
 
 ### What the classifier emits per operation
 
