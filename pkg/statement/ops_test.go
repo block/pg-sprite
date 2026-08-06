@@ -189,6 +189,11 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpCreateIndex, Name: "i", Concurrent: true, Unique: true},
 		},
 		{
+			name: "create index if not exists",
+			sql:  "CREATE INDEX IF NOT EXISTS i ON t (a)",
+			want: statement.Op{Kind: statement.OpCreateIndex, Name: "i", IfNotExists: true},
+		},
+		{
 			name: "drop index",
 			sql:  "DROP INDEX i",
 			want: statement.Op{Kind: statement.OpDropIndex},

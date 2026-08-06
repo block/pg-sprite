@@ -757,12 +757,17 @@ introspection and an ordered declarative diff complete the plan.
 ## Next step
 
 Phases 1 and 2.1–2.4, including the CLI front ends, classifier, router, and declarative diff, are
-implemented. The next implementation phase is Phase 3 native execution:
+implemented. Phase 3 native execution is in progress: the `CREATE INDEX CONCURRENTLY` execution
+path exists in `pkg/executor` — session-scoped, outside any transaction, under the CONCURRENTLY
+wait policy (no per-lock timeout, one overall deadline), with invalid-index detection that
+fails closed into a typed outcome naming the operator's explicit recovery (the executor never
+drops an index: a name-based drop cannot prove ownership until the LK-1 lease exists).
+Remaining Phase 3 work:
 
 - execute classifier-produced safer sequences through the routed native path,
-- add the `CREATE INDEX CONCURRENTLY` execution path,
-- bound lock acquisition with timeout and retry,
-- add substitution, the guarded `--force` escape hatch, and progress reporting.
+- the remaining native idioms (`NOT VALID`+`VALIDATE`, `ADD PK USING INDEX`, fast-default),
+- bound lock acquisition with timeout and retry for the blocking idioms,
+- substitution by default, the guarded `--force` escape hatch, and progress reporting.
 
 The copy-and-swap backend, including change capture, copying, applying, checksumming, and
 cutover, follows Phase 3.
