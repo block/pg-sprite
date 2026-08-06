@@ -185,7 +185,7 @@ diff algorithm and its safety rules are detailed in the
 ## Advisory mode: suggest the safe rewrite, don't silently run the risky one
 
 The classifier doesn't only choose an execution path — it can also act as a **suggestion
-engine**. When a submitted statement is risky *as written* but has a safer native equivalent,
+engine**. When a submitted statement is risky *as written* but has a safer native form,
 the engine's default is to **return the recommendation and stop**, rather than execute the
 literal statement:
 
@@ -202,7 +202,7 @@ literal statement:
    ┌──────────────────────────────────────────────────────────-┐
    │  RECOMMENDATION (does NOT execute):                       │
    │   you asked:   CREATE INDEX idx ON orders (customer_id)   │
-   │   run instead: CREATE INDEX CONCURRENTLY idx ON orders …  │
+   │   safer form:  CREATE INDEX CONCURRENTLY idx ON orders …  │
    │   why: a plain CREATE INDEX takes SHARE and blocks writes │
    │        for the whole build; CONCURRENTLY does not.        │
    └──────────────────────────────────────────────────────────-┘
@@ -223,10 +223,15 @@ Examples of what it suggests (the same idioms the classifier already knows):
 
 Two principles govern this:
 
-- **Never silently execute the dangerous literal.** If a safer equivalent exists, the engine
+- **Never silently execute the dangerous literal.** If a safer form exists, the engine
   surfaces it rather than running the risky form behind the user's back. This is the
   transparent, review-friendly counterpart to *classify-first* — the user still doesn't need to
-  know the idiom (the engine names it), but nothing dangerous runs unannounced.
+  know the idiom (the engine names it), but nothing dangerous runs unannounced. The safer form
+  is not a semantic equivalent: it reaches the same end state with different locking,
+  transactionality, and failure modes (a failed `CONCURRENTLY` build leaves an `INVALID` index
+  that must be detected and rebuilt — see the
+  [online DDL reference](postgres-online-ddl-reference.md)), which is why the engine owns
+  executing it rather than handing it to the user to run manually.
 - **The planned force route is loud and explicit.** Phase 3 adds a `--force`
   (run-as-submitted) flag for the rare case where the operator genuinely wants the literal
   statement. It will be gated behind

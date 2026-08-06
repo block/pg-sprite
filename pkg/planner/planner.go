@@ -95,7 +95,11 @@ type Decision struct {
 	Reason Reason `json:"reason"`
 	// SaferSQL is the ordered native sequence to run instead of the
 	// submitted form, present only for safer-idiom decisions where the
-	// planner could construct it.
+	// planner could construct it. It is a safer form, not a semantic
+	// equivalent: a CONCURRENTLY build runs outside a transaction and a
+	// failure leaves an invalid index that must be detected
+	// (pg_index.indisvalid) and rebuilt — the executor owns that check
+	// (see docs/postgres-online-ddl-reference.md).
 	SaferSQL []string `json:"safer_sql,omitempty"`
 }
 
@@ -210,7 +214,10 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 
 // concurrentlyDecision routes an operation that is online in its
 // CONCURRENTLY form: already concurrent is the idiom; otherwise native with
-// the concurrent rewrite as the safer sequence.
+// the concurrent rewrite as the safer sequence. The rewrite trades the
+// blocking lock for a different failure mode — non-transactional, and a
+// failed build leaves an invalid index — which the executor, not the
+// planner, guards.
 func concurrentlyDecision(d Decision, concurrent bool, sql string, single bool) Decision {
 	if concurrent {
 		d.Route, d.Reason = RouteNative, ReasonOnlineIdiom
