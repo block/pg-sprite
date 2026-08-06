@@ -1,9 +1,14 @@
-// Package cli defines the pg-sprite command tree (Kong). Subcommand Run
-// methods are stubs; each build-plan phase fills one in.
+// Package cli defines the pg-sprite command tree (Kong). migrate and status
+// are implemented (the Phase 1 optimistic front door); the remaining
+// subcommand Run methods are stubs each build-plan phase fills in.
 package cli
 
 import (
+	"context"
 	"fmt"
+	"io"
+	"log/slog"
+	"os"
 	"time"
 
 	"github.com/alecthomas/kong"
@@ -19,7 +24,7 @@ type CLI struct {
 	Diff    DiffCmd    `cmd:"" help:"Diff a desired-state schema file against the live schema."`
 	Fmt     FmtCmd     `cmd:"" help:"Canonicalize a schema file."`
 	Lint    LintCmd    `cmd:"" help:"Lint DDL for unsafe patterns."`
-	Status  StatusCmd  `cmd:"" help:"Report the status of a running migration."`
+	Status  StatusCmd  `cmd:"" help:"Report the status of a running schema change."`
 }
 
 // New returns an empty command tree for kong.Parse.
@@ -36,27 +41,56 @@ type DBFlags struct {
 	CACert           string        `help:"CA bundle path for verify-full TLS. RDS/Aurora endpoints verify with the embedded bundle automatically." env:"PGSPRITE_CA_CERT" type:"existingfile"`
 	LockTimeout      time.Duration `help:"Session lock_timeout applied to every statement." default:"3s"`
 	StatementTimeout time.Duration `help:"Session statement_timeout applied to every statement." default:"30s"`
+	Debug            bool          `help:"Log statement-level tracing and lifecycle diagnostics to stderr."`
+
+	// diagOut overrides the diagnostics destination (stderr) in tests. Kong
+	// ignores unexported fields.
+	diagOut io.Writer
 }
 
 // Config translates the flags into the connectivity layer's configuration.
+// The tracer is wired only under --debug: dbconn skips statement tracing
+// entirely for a nil logger.
 func (f DBFlags) Config() dbconn.Config {
-	return dbconn.Config{
+	cfg := dbconn.Config{
 		URL:              f.URL,
 		CACertPath:       f.CACert,
 		LockTimeout:      f.LockTimeout,
 		StatementTimeout: f.StatementTimeout,
 	}
+	if f.Debug {
+		cfg.Logger = f.diag()
+	}
+	return cfg
 }
 
-// MigrateCmd runs a schema change (imperative front-end).
+// diag returns the diagnostics logger: debug-level text on stderr (or the
+// test override) under --debug, a discarding logger otherwise. Diagnostics
+// never share stdout with command output.
+func (f DBFlags) diag() *slog.Logger {
+	if !f.Debug {
+		return slog.New(slog.DiscardHandler)
+	}
+	out := f.diagOut
+	if out == nil {
+		out = os.Stderr
+	}
+	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
+
+// MigrateCmd runs a schema change (imperative front-end): the Phase 1
+// optimistic front door. Easy changes execute directly under tight budgets;
+// everything else is refused with an explicit verdict.
 type MigrateCmd struct {
 	DBFlags `embed:""`
 
-	Alter string `help:"Imperative ALTER statement to run." name:"alter"`
+	Alter        string   `help:"Imperative ALTER statement to run." name:"alter" required:""`
+	MaxTableSize byteSize `help:"Size threshold above which the optimistic attempt is skipped, measured as the table's full on-disk footprint: heap, indexes, and TOAST, all partitions (binary units: B, KiB, MiB, GiB, TiB)." default:"1GiB"`
+	JSON         bool     `help:"Emit the verdict as JSON."`
 }
 
 // Run implements the migrate subcommand.
-func (c *MigrateCmd) Run() error { return notImplemented("migrate") }
+func (c *MigrateCmd) Run() error { return c.run(context.Background(), os.Stdout) }
 
 // DiffCmd derives statements from a desired-state schema (declarative front-end).
 type DiffCmd struct {
@@ -82,10 +116,12 @@ type LintCmd struct{}
 // Run implements the lint subcommand.
 func (c *LintCmd) Run() error { return notImplemented("lint") }
 
-// StatusCmd reports migration progress.
+// StatusCmd reports schema-change progress.
 type StatusCmd struct {
 	DBFlags `embed:""`
+
+	JSON bool `help:"Emit the session listing as JSON."`
 }
 
 // Run implements the status subcommand.
-func (c *StatusCmd) Run() error { return notImplemented("status") }
+func (c *StatusCmd) Run() error { return c.run(context.Background(), os.Stdout) }

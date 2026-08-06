@@ -116,8 +116,9 @@ rows that the operation demonstrably spans the observation or injection
 point — otherwise the operation can finish before the fault lands and the
 test passes without testing anything. Vacuous runs are a failure: the test
 asserts the interruption actually hit mid-operation (e.g. the checkpoint
-shows partial progress), not just the final state. *Binds:* Phase 4
-(copy-and-swap kill/resume) onward. *Source:* SchemaBot's in-flight
+shows partial progress), not just the final state. *Binds:* Phase 1
+(budget-cancellation fixtures, which seed enough rows that a rewrite cannot
+finish inside its statement budget) onward. *Source:* SchemaBot's in-flight
 progress tests, which seed large row counts so an operation spans a poll
 interval.
 

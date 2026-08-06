@@ -20,7 +20,16 @@ linters:
     - gochecknoinits  # no init() functions
     - gochecknoglobals # no package-level mutable state (error sentinels exempt)
     - containedctx    # no context.Context stored in struct fields
+    - sloglint        # structured-logging hygiene: static messages, snake_case keys
+    - forbidigo       # no printing to process stdout; output goes to the injected writer
   settings:
+    sloglint:
+      static-msg: true
+      key-naming-case: snake
+    forbidigo:
+      forbid:
+        - pattern: ^(fmt\.Print(f|ln)?|print|println)$
+          msg: command output goes to the injected io.Writer and diagnostics to slog, never process stdout
     usetesting:
       context-background: true
       context-todo: true
@@ -32,6 +41,13 @@ linters:
         - name: package-comments
   exclusions:
     rules:
+      # The tracelog adapter forwards pgx's own message strings; the
+      # static-message rule applies to messages we author, not to a bridge
+      # for a foreign logger.
+      - path: pkg/dbconn/dbconn\.go
+        linters:
+          - sloglint
+        text: message should be a string literal
       # Test helpers intentionally keep uniform signatures and fixed arguments
       # for readability, so unused/constant params there are not worth churn.
       - path: _test\.go

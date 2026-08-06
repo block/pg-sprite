@@ -18,23 +18,25 @@ The invariant registry (invariant IDs referenced below) lives in
 | Package | Core? | Status | Invariants enforced |
 | --- | --- | --- | --- |
 | `pkg/dbconn` — pool defaults, advisory lock, terminate-blockers, retries, RDS TLS | ✅ core | exists (Phase 0) | LK-1, LK-2 primitives |
-| `pkg/preflight` — precondition verifier, refusals | ✅ core | planned (Phase 1–2) | ST-6, RF-1..RF-5 |
+| `pkg/preflight` — precondition verifier, refusals | ✅ core | exists (Phase 1: table-size guard); grows through Phase 2 | ST-6, RF-1..RF-5 |
+| `pkg/executor` — bounded optimistic attempt; native executor later | ✅ core | exists (Phase 1: attempt-under-budget); Executor contract at Phase 2–3 | LK-2 (attempt bound) |
 | `pkg/checksum` — chunk verifier, continuous checker, repair | ✅ core | planned (Phase 5) | CO-1, CO-2, CO-3 |
 | `pkg/copier` — shadow-table chunked copy | ✅ core | planned (Phase 4) | CO-4, LK-3 |
 | `pkg/applier` — change apply, buffer, flush scheduling | ✅ core | planned (Phase 6) | CO-4, CO-5, CO-6, LK-3 |
 | `pkg/decode` — logical decoding, LSN/position accounting | ✅ core | planned (Phase 6) | ST-4, CO-4 |
 | `pkg/checkpoint` — durable resume state | ✅ core | planned (Phase 8) | ST-1, ST-2 |
 | slot lifecycle (in `pkg/decode`) — create, reap, lag ceiling | ✅ core | planned (Phase 8) | ST-3 |
-| `pkg/migration` — orchestrator, **cutover swap + fidelity gate** | ✅ core | planned (Phase 7) | LK-2, LK-4, ST-5 |
-| `pkg/statement`, `pkg/planner`, `pkg/schemadiff`, `pkg/lint` — classify/diff/route | ❌ periphery¹ | planned (Phase 1–2) | (CO-7 holds at the parse boundary) |
-| `internal/cli` — CLI, flags, help, prompts | ❌ periphery | exists (stubs) | — |
+| `pkg/schemachange` — orchestrator, **cutover swap + fidelity gate** | ✅ core | planned (Phase 7) | LK-2, LK-4, ST-5 |
+| `pkg/statement`, `pkg/planner`, `pkg/schemadiff`, `pkg/lint` — classify/diff/route | ❌ periphery¹ | `pkg/statement` exists (Phase 1: type gate); rest planned (Phase 2) | (CO-7 holds at the parse boundary) |
+| `pkg/verdict` — structured outcome contract, rendering, exit codes | ❌ periphery | exists (Phase 1) | — |
+| `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`/`status` exist (Phase 1); rest stubs | — |
 | status / progress / advisory rendering, metrics | ❌ periphery | planned | — |
 | orchestrator adapter | ❌ periphery | planned (Phase 11) | OC-* hold *at* the boundary |
 | `internal/testutil` | ❌ test-only | exists | — |
 
 ¹ **The planner is deliberately outside the core.** Its verdicts are *requests*, not
 permissions: a wrong "native-safe" verdict is capped by the executor's own `lock_timeout` bound;
-a wrong "copy" verdict produces a wasteful but *correct* migration (the checksum still gates).
+a wrong "copy" verdict produces a wasteful but *correct* schema change (the checksum still gates).
 The core executors re-verify their own preconditions and never trust that the planner checked.
 
 ## Rules inside the core

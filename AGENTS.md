@@ -7,6 +7,18 @@ This file is canonical. `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `.goosehints`,
 `.github/copilot-instructions.md` are symlinks to it — edit only this file. Review-agent
 checks live in [.agents/checks/review.md](.agents/checks/review.md).
 
+## Two lenses on every change
+
+Judge every PR, design, and review through both lenses — a change that serves one at the
+expense of the other needs an explicit decision, not a silent trade:
+
+1. **OSS-first.** pg-sprite aims to be the preferred PostgreSQL online-DDL tool in its own
+   right: the CLI works standalone with no orchestrator setup, docs and error messages are
+   written for external users, and nothing assumes a Block-internal environment.
+2. **Clean SchemaBot integration.** pg-sprite must slot into SchemaBot as an engine behind a
+   stable seam: keep the library API, verdict/plan JSON contracts, and error taxonomy
+   adapter-friendly, and never let the core depend on SchemaBot (or any orchestrator).
+
 ## Read SAFETY.md first
 
 This codebase is partitioned into a **safety-critical core** and a periphery.
@@ -51,8 +63,12 @@ make lint        # golangci-lint
   generated SQL goes through `pgx.Identifier{...}.Sanitize()` (or `quote_ident()` server-side).
 - Never string-manipulate connection strings/DSNs — parse (`pgx.ParseConfig`), modify fields,
   re-serialize; string ops break on passwords containing `/`, `@`, or `%`.
-- All SQL parsing goes through `pg_query_go` (once `pkg/statement` exists). No
-  `strings.Split(";")`, no hand-parsing; a parse failure is an error surfaced to the caller.
+- All SQL parsing goes through the real PostgreSQL grammar via `wasilibs/go-pgquery` (Wasm
+  `libpg_query`; the cgo `pg_query_go` is the API-compatible escape hatch, not the default),
+  with `pkg/statement` as the parse boundary. No `strings.Split(";")`, no hand-parsing; a parse failure is an
+  error surfaced to the caller. Shadow-table DDL and checkpoint fingerprints are derived by
+  execute-and-introspect on the engine-owned scratch database, never by AST transformation
+  (see [docs/low-level-design.md](docs/low-level-design.md#how-the-planner-understands-ddl-decided)).
 - Tests use testify (`require` for setup, `assert` for verification), `t.Context()` (in
   cleanups, which run after the context is cancelled, use
   `context.WithoutCancel(t.Context())`), and named polling deadlines — no bare `time.Sleep`
@@ -104,8 +120,36 @@ make lint        # golangci-lint
 - Never reference internal company details (cluster names, hostnames, org names) in code,
   comments, commits, or PRs — this is a public repo.
 
+## Logging and observability
+
+- **stdout is the product's output; diagnostics go to stderr.** Command results (verdicts,
+  status) are written to the injected writer only; everything diagnostic goes through
+  `log/slog`. `--debug` on DB commands enables statement-level tracing (pgx tracelog via
+  `pkg/dbconn`) plus lifecycle events; without it, diagnostics are discarded.
+- **Log decisions and state transitions, not progress noise.** Static messages; the
+  variability goes into attrs with stable snake_case keys, and the same key means the same
+  thing everywhere (`schema`, `table`, `total_bytes`, `elapsed`).
+- **Logs answer the triage question.** Error- and warn-path logs carry the identifiers an
+  operator needs to act — schema, table, database, the operation being attempted — as
+  attrs, not buried in prose.
+- **One error, one log.** Errors are wrapped and returned; only the entry point logs or
+  prints them. `pkg/` packages never log an error they also return.
+- **Never log credentials or connection strings** — a DSN/URL carries a password; log host,
+  database, and user as separate attrs when needed. Never log row data.
+- **Log output is never a test surface.** Tests assert typed outcomes — `errors.Is`/`As`,
+  verdict fields, exit codes, JSON output — never log text or human-facing wording. If a
+  behavioral difference is visible only in prose, make it machine-readable first (a typed
+  field or reason), then test that. The only exception is a renderer's own unit test.
+- **Operational quantities ride on logs until there is a metrics runtime.** Durations,
+  sizes, and retry counts are logged as attrs. When the long-running phases need real
+  metrics, they arrive as OpenTelemetry instruments behind one engine-owned `pkg/metrics`
+  with `Record*` helpers — dotted `pgsprite.` names with explicit units, low-cardinality
+  snake_case attributes, counters for rare or dangerous branches operators can act on —
+  never direct exporter imports in core (the dependency rule in SAFETY.md applies).
+
 Mechanical style rules (doc comments on exported symbols, no `init()`, no package-level
-mutable state, no `context.Context` in structs) are enforced by `.golangci.yml`, not prose.
+mutable state, no `context.Context` in structs, static slog messages with snake_case keys,
+no printing to process stdout) are enforced by `.golangci.yml`, not prose.
 
 ## Git and PRs
 

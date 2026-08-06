@@ -17,9 +17,14 @@ when one exists (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default,
 `USING INDEX`), and a log-based, checksum-gated, resumable copy-and-swap when
 a genuine table rewrite is unavoidable.
 
-**Status: Phase 0 (scaffold + test harness).** All subcommands are stubs. The
-design docs and the phased build plan live in [docs/](docs/) — start with
-[docs/README.md](docs/README.md).
+**Status: Phase 1 (optimistic front door).** `pg-sprite migrate --alter '…'`
+runs easy `ALTER TABLE` changes directly under tight lock/statement budgets
+and refuses everything else with a structured verdict (exit code 2): index
+maintenance gets a pointer to the `CONCURRENTLY` idiom, and changes that need
+a table rewrite — caught by the size guard or a cancelled bounded attempt —
+get an explicit **not native-safe** verdict. `diff`, `fmt`, and `lint` are
+still stubs. The design docs and the phased build plan live in
+[docs/](docs/) — start with [docs/README.md](docs/README.md).
 
 The codebase is partitioned into a small safety-critical core and a
 periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the
