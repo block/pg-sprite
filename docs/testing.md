@@ -168,22 +168,39 @@ upgrades or mirrors.
 
 ### How much of the suite runs on Ministack
 
-Deliberately almost none: exactly one end-to-end test
-([ministack_integration_test.go](../internal/testutil/ministack_integration_test.go))
-covering provision → instance `available` → endpoint discovery →
-`dbconn` connect → PG-major assertion → DDL smoke. Everything else — all
-parser, planner, executor, and connection behavior — runs on the
-data-plane tier against real PostgreSQL. That split is policy, not
-accident: Ministack exists only for the seam where the engine talks to
-AWS APIs, and its share grows only when AWS-facing features land, never
-by moving core-logic tests onto it. Planned growth, in dependency order:
+Deliberately almost none: three tests
+([ministack_integration_test.go](../internal/testutil/ministack_integration_test.go)),
+each pinned to an AWS seam —
+
+- **provision & connect** — provision → instance `available` → endpoint
+  discovery → `dbconn` connect → PG-major assertion → DDL smoke;
+- **control-plane error contract** — unknown identifiers and duplicate
+  creations surface as the AWS SDK's typed RDS faults, matched with
+  `errors.As` (one documented emulator divergence: the duplicate-instance
+  wire code carries a `Fault` suffix real AWS omits, so that case matches
+  by error-code prefix);
+- **password-rotation seam** — `ModifyDBCluster` applies a new master
+  password to the running database; the stale password is refused with
+  SQLSTATE `28P01`, the new one connects.
+
+Everything else — all parser, planner, executor, and connection
+behavior — runs on the data-plane tier against real PostgreSQL. That
+split is policy, not accident: Ministack exists only for the seam where
+the engine talks to AWS APIs, and its share grows only when AWS-facing
+features land, never by moving core-logic tests onto it. Planned growth,
+in dependency order:
 
 - reader/writer topology tests — writer-endpoint targeting with a reader
-  present, endpoint re-discovery after a global-cluster failover — once
-  the engine has endpoint-selection logic to test;
+  present, endpoint re-discovery after a global-cluster failover
+  (metadata-level: every Ministack endpoint resolves to one shared
+  container) — once the engine has endpoint-selection logic to test;
 - Secrets Manager DSN resolution, when that feature lands;
-- RDS IAM-auth token connections (`dbconn.Config.BeforeConnect`), when
-  that feature lands.
+- rotation *recovery* — the engine re-resolving credentials and
+  reconnecting mid-migration — once `pkg/dbconn` grows a
+  credential-refresh hook.
+
+Logical-replication behavior is a data-plane concern and is tested on
+real PostgreSQL, never on this tier.
 
 The tier runs in CI as the `aws-boundary` merge-gate job and inside
 `make test` when Docker is available. It is intentionally **not** part
@@ -201,7 +218,7 @@ the authoritative gate.
 | Verify-full TLS against a live TLS-only server | [pkg/dbconn/tls_integration_test.go](../pkg/dbconn/tls_integration_test.go) |
 | Targeted blocker termination | [pkg/dbconn/dbconn_integration_test.go](../pkg/dbconn/dbconn_integration_test.go) |
 | Test harness self-checks | [internal/testutil](../internal/testutil/postgres_test.go) |
-| RDS control-plane provisioning → endpoint discovery → `dbconn` connect (Ministack) | [internal/testutil/ministack_integration_test.go](../internal/testutil/ministack_integration_test.go) |
+| RDS control-plane provisioning → endpoint discovery → `dbconn` connect, error contract, password-rotation seam (Ministack) | [internal/testutil/ministack_integration_test.go](../internal/testutil/ministack_integration_test.go) |
 | Parse boundary, typed operations, and advisory rewrites | [pkg/statement](../pkg/statement/statement_test.go), [operation tests](../pkg/statement/ops_test.go) |
 | Native / copy-and-swap / refuse classification and safer SQL | [pkg/planner](../pkg/planner/planner_test.go) |
 | Backend routing and copy-and-swap unavailable disposition | [pkg/router](../pkg/router/router_test.go) |
