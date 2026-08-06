@@ -24,6 +24,7 @@ make test        # full suite; integration tests need Docker
 make test-unit   # SKIP_INTEGRATION=1, no Docker
 make test-db     # suite against the compose DB (make db-up first); PG_DSN
 make test-supported-postgres  # full suite on every major 14 -> 18
+make test-aws-boundary   # AWS-boundary tier (Ministack RDS/Aurora); needs Docker
 make lint        # golangci-lint
 ```
 

@@ -100,12 +100,30 @@ jobs:
           go-version-file: go.mod
       - run: make test
 
+  # AWS-boundary tests against Ministack's RDS/Aurora control plane.
+  # Ministack is MIT-licensed and tokenless, so this tier runs on every
+  # code PR — including forks — as a real merge gate. The Ministack
+  # container mounts the runner's Docker socket to start the sibling
+  # PostgreSQL container backing the provisioned cluster; that is safe on
+  # an ephemeral GitHub-hosted runner but is why this job must stay on
+  # ubuntu-latest, never a shared self-hosted runner.
+  aws-boundary:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: make test-aws-boundary
+
   # Single required status for branch protection ("all-green" is the
   # context to require). Succeeds when nothing failed — including
   # docs-only PRs where the heavy jobs were skipped.
   all-green:
     if: always()
-    needs: [changes, lint, build, test]
+    needs: [changes, lint, build, test, aws-boundary]
     runs-on: ubuntu-latest
     steps:
       - name: Check job results

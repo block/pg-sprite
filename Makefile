@@ -11,7 +11,7 @@ PG_DATABASE ?= pgsprite
 # Localhost-only test credentials, parameterized above — not a real secret.
 PG_DSN_LOCAL = postgres://$(PG_USER):$(PG_PASSWORD)@localhost:$(PG_PORT)/$(PG_DATABASE)?sslmode=disable# sadscan:disable np.postgres.1
 
-.PHONY: build test test-unit test-db test-supported-postgres lint setup db-up db-down clean
+.PHONY: build test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down clean
 
 build:
 	$(GO) build -o bin/pg-sprite ./cmd/pg-sprite
@@ -36,6 +36,12 @@ test-supported-postgres:
 		echo "=== PostgreSQL $$v ==="; \
 		PG_VERSION=$$v $(GO) test -race -count=1 ./... || exit 1; \
 	done
+
+# AWS-boundary tests against Ministack's RDS/Aurora control plane
+# (docs/testing.md). Needs Docker only — Ministack is MIT-licensed and
+# tokenless. PG_VERSION selects the major of the provisioned database.
+test-aws-boundary:
+	$(GO) test -race -count=1 -run 'AuroraControlPlane' -v ./internal/testutil/
 
 lint:
 	golangci-lint run
