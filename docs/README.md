@@ -1,6 +1,6 @@
 # Online schema change engine for Aurora PostgreSQL
 
-Research and design notes for building an online schema migration engine targeting
+Research and design notes for building an online schema-change engine targeting
 **Aurora PostgreSQL**, by deriving and combining the best practices from established tools —
 [Spirit](https://github.com/block/spirit) (Aurora MySQL),
 [pg_osc](https://github.com/shayonj/pg-osc), [pg_repack](https://github.com/reorg/pg_repack),
@@ -44,6 +44,7 @@ checkpoint/resume, tuned for Aurora. That is the gap this engine targets.
 | [change-capture-tradeoff.md](change-capture-tradeoff.md) | The canonical **triggers vs logical-decoding** trade-off for copy-and-swap — overhead, failover survival, WAL risk, and whether either lets us drop the checksum/checkpoint (answer: keep the checksum; triggers simplify but don't remove the checkpoint). Any doc proposing logical decoding as the default points here. |
 | [invariants.md](invariants.md) | The canonical **invariant registry** — testable runtime MUST-statements (correctness, locking, state/resume, refusals, orchestration), each with its enforcement point and source. Mined from this doc set plus [Spirit](https://github.com/block/spirit)'s stated safety invariants and [SchemaBot](https://github.com/block/schemabot)'s control-plane discipline; the build plan's phases carry per-invariant test obligations. |
 | [tcb-model.md](tcb-model.md) | The **TCB model** — the trusted-computing-base partition of the engine: which components are the small trusted core that enforces the invariant registry vs the untrusted periphery, the never-trust-callers rule, domain types that make illegal states unrepresentable, the in-TCB engineering rules (from TigerBeetle TIGER_STYLE, s2n-tls, qmail, bitcoin-core), the verification ladder, and the per-side AI-assisted development policy. |
+| [testing.md](testing.md) | The **test-suite guide** — how to run the suite (unit, per-major, all supported majors, compose database), what Phase 0 covers today, the per-phase deferred test obligations, and the vanilla-PostgreSQL-matrix vs real-Aurora validation boundary. |
 | [schemabot-integration.md](schemabot-integration.md) | The **single home for orchestrator integration** — how SchemaBot (the reference orchestrator) drives the engine: the pluggable-engine overview, the verb mappings, the concrete adapter contract, and the design constraints (OC-* invariants) the integration imposes on the core. |
 
 ## TL;DR recommendation
