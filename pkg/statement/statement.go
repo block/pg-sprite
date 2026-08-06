@@ -51,12 +51,13 @@ type Statement struct {
 	SQL string
 	// Kind is the statement-type bucket.
 	Kind Kind
-	// Schema is the target table's schema qualification for ALTER TABLE
-	// statements; empty when the statement was unqualified (search_path
-	// resolves it) or when the kind has no single table target.
+	// Schema is the target table's schema qualification for ALTER TABLE,
+	// CREATE TABLE, and CREATE INDEX statements; empty when the statement
+	// was unqualified (search_path resolves it) or when the kind has no
+	// single table target.
 	Schema string
-	// Table is the target table name for ALTER TABLE statements; empty for
-	// other kinds.
+	// Table is the target table name for ALTER TABLE, CREATE TABLE, and
+	// CREATE INDEX statements; empty for other kinds.
 	Table string
 }
 
@@ -93,7 +94,10 @@ func ParseOne(sql string) (Statement, error) {
 		st.Schema = rel.GetSchemaname()
 		st.Table = rel.GetRelname()
 	case node.GetIndexStmt() != nil:
+		rel := node.GetIndexStmt().GetRelation()
 		st.Kind = KindCreateIndex
+		st.Schema = rel.GetSchemaname()
+		st.Table = rel.GetRelname()
 	case node.GetDropStmt() != nil:
 		if node.GetDropStmt().GetRemoveType() == pganalyze.ObjectType_OBJECT_INDEX {
 			st.Kind = KindDropIndex
