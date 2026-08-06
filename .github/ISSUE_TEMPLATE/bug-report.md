@@ -1,31 +1,29 @@
 ---
-name: 🐛 Bug Report
-about: Thank you for taking the time, please report a reproducible bug
-title: "[Bug] <Bug Title Here>"
+name: 🐛 Bug / safety report
+about: Report a bug — especially anything that looks like a safety problem
+title: "[Bug] <title>"
 labels: bug
-assignees: add codeowner's @name here 
+assignees: Kiran01bm
 
 ---
 
+> pg-sprite is in early-stage development and we are not accepting external
+> contributions yet — but bug reports, **especially safety problems** (a path
+> where the engine could take a lock it shouldn't, lose data, or misclassify
+> a change as native-safe), are welcome even now.
+
 **Describe the bug**
-*A clear and concise description of what the bug is.*
+A clear and concise description of what the bug is.
 
-**To Reproduce:**
-*Steps to reproduce the behavior:*
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
+**To reproduce**
+Steps to reproduce the behavior (DDL, table shape, pg-sprite command).
 
-**Expected behavior:**
-*A clear and concise description of what you expected to happen.*
+**Expected behavior**
+What you expected to happen.
 
-**Supporting Material**
-*If applicable, add screenshots, output log and/or other documentation to help explain your problem.*
-
-**Environment (please complete the following information):**
- - OS: [ex: iOS]
- - Version 
+**Environment**
+- pg-sprite version / commit:
+- PostgreSQL version (and Aurora/RDS/community):
 
 **Additional context**
-Add any other context that you feel is relevant about the problem here.
+Logs, output, or anything else relevant.

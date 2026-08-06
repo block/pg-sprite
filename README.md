@@ -1,36 +1,48 @@
-# pg-sprite README
+# pg-sprite
 
-Congrats, project leads! You got a new project to grow!
+> [!WARNING]
+> **Work in progress — not ready for any use.** This project is under active
+> early-stage development. There are no releases, no stability guarantees, and
+> no support. Interfaces, behavior, on-disk/database artifacts, and the CLI
+> surface may all change without notice. Do **not** run this against any
+> database you care about.
 
-This stub is meant to help you form a strong community around your work. It's yours to adapt, and may 
-diverge from this initial structure. Just keep the files seeded in this repo, and the rest is yours to evolve! 
+> Working name — see the naming task in the research build tracker.
 
-## Introduction
+An online schema-change engine for **Aurora PostgreSQL** (and RDS/community
+PostgreSQL 14+): a decoupled **planner → router → executor** design where the
+planner classifies each change, the router picks a strategy, and
+interchangeable executors carry it out — the cheap native PostgreSQL idiom
+when one exists (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default,
+`USING INDEX`), and a log-based, checksum-gated, resumable copy-and-swap when
+a genuine table rewrite is unavoidable.
 
-Orient users to the project here. This is a good place to start with an assumption
-that the user knows very little - so start with the Big Picture and show how this
-project fits into it.
+**Status: Phase 0 (scaffold + test harness).** All subcommands are stubs. The
+design docs and the phased build plan live in [docs/](docs/) — start with
+[docs/README.md](docs/README.md).
 
-Then maybe a dive into what this project does.
+The codebase is partitioned into a small safety-critical core and a
+periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the
+rules that apply inside the core. Read it before changing anything under
+`pkg/`.
 
-Diagrams and other visuals are helpful here. Perhaps code snippets showing usage.
+## Development
 
-Project leads should complete, alongside this `README`:
+```sh
+make build       # build ./... and the bin/pg-sprite binary
+make test        # full suite; integration tests need Docker
+make test-unit   # unit tests only (SKIP_INTEGRATION=1)
+make lint        # golangci-lint
+```
 
-* [CODEOWNERS](./CODEOWNERS) - set project lead(s)
-* [CONTRIBUTING.md](./CONTRIBUTING.md) - Fill out how to: install prereqs, build, test, run, access CI, chat, discuss, file issues
-* [Bug-report.md](.github/ISSUE_TEMPLATE/bug-report.md) - Fill out `Assignees` add codeowners @names
-* [config.yml](.github/ISSUE_TEMPLATE/config.yml) - remove "(/add your discord channel..)" and replace the url with your Discord channel if applicable
+Integration tests run against a real PostgreSQL via testcontainers. `PG_VERSION`
+selects the major (default 16); CI runs the matrix 14 → 18.
 
-The other files in this template repo may be used as-is:
+## Contributing
 
-* [GOVERNANCE.md](./GOVERNANCE.md)
-* [LICENSE](./LICENSE)
+Not yet — see [CONTRIBUTING](CONTRIBUTING.md). Safety-relevant issue
+reports are welcome even at this stage.
 
-## Project Resources
+## License
 
-| Resource                                   | Description                                                                    |
-| ------------------------------------------ | ------------------------------------------------------------------------------ |
-| [CODEOWNERS](./CODEOWNERS)                 | Outlines the project lead(s)                                                   |
-| [GOVERNANCE.md](./GOVERNANCE.md)           | Project governance                                                             |
-| [LICENSE](./LICENSE)                       | Apache License, Version 2.0                                                    |
+[Apache 2.0](LICENSE)
