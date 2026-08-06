@@ -26,6 +26,12 @@ the reviewer's distillation.
   escape hatch, not the default). A parse failure is an error surfaced to the caller.
   Shadow-table DDL and checkpoint fingerprints come from execute-and-introspect on the scratch
   database — flag AST surgery that constructs the shadow schema or fingerprints SQL text.
+- Generated SQL quotes every user-supplied or introspected identifier
+  (`pgx.Identifier{...}.Sanitize()` / `quote_ident()`) — flag raw interpolation of names into
+  SQL. Connection strings are parsed and re-serialized (`pgx.ParseConfig`), never
+  string-manipulated.
+- Terminology: "schema change", not "migration", in code, CLI output, error messages, and new
+  docs — flag new occurrences except citations of external sources.
 - Errors: wrapped with context and identifiers; no log-and-continue, no silent branch cases,
   no discarded `Close()` errors, no `nolint`, no `--no-verify`. No panics in library code —
   invariant violations return `ErrInvariantViolation` fail-closed. Postgres errors are matched
