@@ -7,6 +7,18 @@ This file is canonical. `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `.goosehints`,
 `.github/copilot-instructions.md` are symlinks to it — edit only this file. Review-agent
 checks live in [.agents/checks/review.md](.agents/checks/review.md).
 
+## Two lenses on every change
+
+Judge every PR, design, and review through both lenses — a change that serves one at the
+expense of the other needs an explicit decision, not a silent trade:
+
+1. **OSS-first.** pg-sprite aims to be the preferred PostgreSQL online-DDL tool in its own
+   right: the CLI works standalone with no orchestrator setup, docs and error messages are
+   written for external users, and nothing assumes a Block-internal environment.
+2. **Clean SchemaBot integration.** pg-sprite must slot into SchemaBot as an engine behind a
+   stable seam: keep the library API, verdict/plan JSON contracts, and error taxonomy
+   adapter-friendly, and never let the core depend on SchemaBot (or any orchestrator).
+
 ## Read SAFETY.md first
 
 This codebase is partitioned into a **safety-critical core** and a periphery.

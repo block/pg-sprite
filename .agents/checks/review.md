@@ -4,6 +4,12 @@ Checks for AI review agents. The authoritative rules live in [SAFETY.md](../../S
 [AGENTS.md](../../AGENTS.md), and [docs/tcb-model.md](../../docs/tcb-model.md) — this file is
 the reviewer's distillation.
 
+- Judge the change through both project lenses: (a) OSS-first — pg-sprite as the preferred
+  standalone PostgreSQL online-DDL tool (CLI usable without an orchestrator, external-user
+  docs and errors, no Block-internal assumptions); (b) clean SchemaBot integration — a stable
+  adapter-friendly seam (library API, verdict/plan JSON, error taxonomy) with the core never
+  depending on SchemaBot. Flag changes that serve one lens at the other's expense without a
+  recorded decision.
 - Look up every touched `pkg/` package in the SAFETY.md partition table first — the review bar
   differs between the safety-critical core and the periphery. Flag core changes with 🌶️ and
   state the blast radius (data corruption, lost writes, wrong-table swap, stranded slot).
