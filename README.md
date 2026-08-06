@@ -26,8 +26,8 @@ verdict when it can't prove one (see
 [docs/postgres-online-ddl-reference.md](docs/postgres-online-ddl-reference.md)).
 
 **Status: Phases 1 and 2.1–2.5.** The parse boundary, declarative diff,
-classifier, router seam, versioned dry-run plan report, and offline linter
-are implemented. `pg-sprite migrate --alter '…'` runs a bounded optimistic
+classifier, router seam, versioned dry-run plan report, offline linter, and
+advisory `suggest` command are implemented. `pg-sprite migrate --alter '…'` runs a bounded optimistic
 native attempt; routed execution beyond that attempt lands in Phase 3.
 Changes without an available backend get a structured refusal (exit code 2).
 The design docs and the phased

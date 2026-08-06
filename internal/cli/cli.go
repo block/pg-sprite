@@ -1,6 +1,6 @@
 // Package cli defines the pg-sprite command tree (Kong): migrate and
 // status (the optimistic front door), diff and fmt (the declarative front
-// door), and lint (the offline checker).
+// door), and lint and suggest (the offline checker and advisor).
 package cli
 
 import (
@@ -23,6 +23,7 @@ type CLI struct {
 	Diff    DiffCmd    `cmd:"" help:"Diff a desired-state schema file against the live schema."`
 	Fmt     FmtCmd     `cmd:"" help:"Canonicalize a schema file."`
 	Lint    LintCmd    `cmd:"" help:"Lint DDL for unsafe patterns."`
+	Suggest SuggestCmd `cmd:"" help:"Recommend safer native forms for risky DDL."`
 	Status  StatusCmd  `cmd:"" help:"Report the status of a running migration."`
 }
 
@@ -120,6 +121,17 @@ type LintCmd struct {
 
 // Run implements the lint subcommand.
 func (c *LintCmd) Run() error { return c.runLint(os.Stdin, os.Stdout) }
+
+// SuggestCmd maps risky-as-written DDL to the safer native form the engine
+// would run instead, with typed caveats. It is offline and advisory — no
+// database flags, nothing executes, and it always exits zero.
+type SuggestCmd struct {
+	Path string `arg:"" optional:"" help:"DDL file to advise on; stdin when omitted." type:"existingfile"`
+	JSON bool   `help:"Emit the suggestions report as JSON."`
+}
+
+// Run implements the suggest subcommand.
+func (c *SuggestCmd) Run() error { return c.runSuggest(os.Stdin, os.Stdout) }
 
 // StatusCmd reports migration progress.
 type StatusCmd struct {
