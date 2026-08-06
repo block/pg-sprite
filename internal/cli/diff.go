@@ -84,7 +84,7 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 func qualifiedDesired(ds statement.DesiredSchema, schema string) ([]schemadiff.Change, error) {
 	changes := make([]schemadiff.Change, 0, len(ds.Statements))
 	for _, st := range ds.Statements {
-		qualified, err := statement.Qualify(st.SQL, schema)
+		qualified, err := statement.Qualify(st.SQL(), schema)
 		if err != nil {
 			return nil, fmt.Errorf("qualify desired statement: %w", err)
 		}
@@ -154,7 +154,7 @@ func (c *FmtCmd) runFmt(in io.Reader, out io.Writer) error {
 		return err
 	}
 	for _, st := range ds.Statements {
-		if _, err := fmt.Fprintf(out, "%s;\n", st.SQL); err != nil {
+		if _, err := fmt.Fprintf(out, "%s;\n", st.SQL()); err != nil {
 			return fmt.Errorf("write formatted schema: %w", err)
 		}
 	}

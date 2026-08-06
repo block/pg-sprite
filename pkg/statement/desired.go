@@ -63,10 +63,10 @@ func ParseDesired(sql string) (DesiredSchema, error) {
 		if err != nil {
 			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
-		if st.Kind == KindCreateTable {
-			ds.Table = st.Table
+		if st.kind == KindCreateTable {
+			ds.Table = st.table
 		}
-		if st.SQL, err = deparseOne(raw.GetStmt()); err != nil {
+		if st.sql, err = deparseOne(raw.GetStmt()); err != nil {
 			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
 		ds.Statements = append(ds.Statements, st)
@@ -75,9 +75,9 @@ func ParseDesired(sql string) (DesiredSchema, error) {
 		return DesiredSchema{}, ErrNoCreateTable
 	}
 	for _, st := range ds.Statements {
-		if st.Kind == KindCreateIndex && st.Table != ds.Table {
+		if st.kind == KindCreateIndex && st.table != ds.Table {
 			return DesiredSchema{}, fmt.Errorf("%w: index on %q, desired table is %q",
-				ErrWrongIndexTarget, st.Table, ds.Table)
+				ErrWrongIndexTarget, st.table, ds.Table)
 		}
 	}
 	return ds, nil
@@ -96,7 +96,7 @@ func admitDesiredStatement(node *pganalyze.Node, seenTable string) (Statement, e
 		if seenTable != "" {
 			return Statement{}, ErrMultipleCreateTables
 		}
-		return Statement{Kind: KindCreateTable, Table: rel.GetRelname()}, nil
+		return Statement{kind: KindCreateTable, table: rel.GetRelname()}, nil
 	case node.GetIndexStmt() != nil:
 		idx := node.GetIndexStmt()
 		if idx.GetConcurrent() {
@@ -106,7 +106,7 @@ func admitDesiredStatement(node *pganalyze.Node, seenTable string) (Statement, e
 		if rel.GetSchemaname() != "" {
 			return Statement{}, fmt.Errorf("%w: %s.%s", ErrQualifiedName, rel.GetSchemaname(), rel.GetRelname())
 		}
-		return Statement{Kind: KindCreateIndex, Table: rel.GetRelname()}, nil
+		return Statement{kind: KindCreateIndex, table: rel.GetRelname()}, nil
 	default:
 		return Statement{}, ErrDisallowedStatement
 	}

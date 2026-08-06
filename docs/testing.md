@@ -43,7 +43,7 @@ this covers *how*). Each rule binds from the phase noted.
 
 ### TM-1 — Lifecycle fixture, not happy-path tests
 
-Every executor/migration integration test drives the **full lifecycle
+Every executor/schema-change integration test drives the **full lifecycle
 through one shared fixture** — start → assert → abort → assert → restart →
 complete → assert — so interrupted-and-retried is the default tested path,
 not a special case. Once checkpointing exists, kill → resume joins the
@@ -63,7 +63,7 @@ pg-delta's snapshot + roundtrip pairing.
 
 Contention tests hold a real `ACCESS EXCLUSIVE` lock from a second
 connection; cancellation tests use context deadlines. After any injected
-failure the test asserts the **durable state** (no wedged migration record,
+failure the test asserts the **durable state** (no wedged schema-change record,
 no leaked shadow objects/slots/triggers) and the ability to proceed — not
 merely the returned error type. *Binds:* Phase 2 onward; full
 phase-boundary kill/resume matrix at Phases 4–8. *Source:* pgroll's
@@ -108,6 +108,20 @@ against a real database with checked-in example inputs as the acceptance
 corpus — exit codes, output, and resulting database state asserted.
 *Binds:* Phase 2 (first executing command). *Source:* pgroll `make
 examples` CI job; pg_repack driving its CLI through `pg_regress`.
+
+### TM-9 — The operation must outlive the observer
+
+Any test that observes or interrupts an operation **in flight** (progress
+polling, kill/resume mid-copy, injected faults between phases) seeds enough
+rows that the operation demonstrably spans the observation or injection
+point — otherwise the operation can finish before the fault lands and the
+test passes without testing anything. Vacuous runs are a failure: the test
+asserts the interruption actually hit mid-operation (e.g. the checkpoint
+shows partial progress), not just the final state. *Binds:* Phase 1
+(budget-cancellation fixtures, which seed enough rows that a rewrite cannot
+finish inside its statement budget) onward. *Source:* SchemaBot's in-flight
+progress tests, which seed large row counts so an operation spans a poll
+interval.
 
 **Beyond the peers:** none of the three does generative testing. From
 Phase 3 we add **seeded schema/DDL generation** (generate desired state →

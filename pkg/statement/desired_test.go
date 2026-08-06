@@ -17,10 +17,10 @@ create index events_name_idx on events (name);`)
 
 	assert.Equal(t, "events", ds.Table)
 	require.Len(t, ds.Statements, 2)
-	assert.Equal(t, KindCreateTable, ds.Statements[0].Kind)
-	assert.Equal(t, "CREATE TABLE events (id bigint PRIMARY KEY, name varchar(50) NOT NULL)", ds.Statements[0].SQL)
-	assert.Equal(t, KindCreateIndex, ds.Statements[1].Kind)
-	assert.Equal(t, "CREATE INDEX events_name_idx ON events USING btree (name)", ds.Statements[1].SQL)
+	assert.Equal(t, KindCreateTable, ds.Statements[0].Kind())
+	assert.Equal(t, "CREATE TABLE events (id bigint PRIMARY KEY, name varchar(50) NOT NULL)", ds.Statements[0].SQL())
+	assert.Equal(t, KindCreateIndex, ds.Statements[1].Kind())
+	assert.Equal(t, "CREATE INDEX events_name_idx ON events USING btree (name)", ds.Statements[1].SQL())
 }
 
 func TestParseDesiredRefusals(t *testing.T) {
@@ -81,7 +81,7 @@ func TestQualifyRefusesOtherStatements(t *testing.T) {
 func TestParseOneRecognizesCreateTable(t *testing.T) {
 	st, err := ParseOne("CREATE TABLE prod.events (id int)")
 	require.NoError(t, err)
-	assert.Equal(t, KindCreateTable, st.Kind)
-	assert.Equal(t, "prod", st.Schema)
-	assert.Equal(t, "events", st.Table)
+	assert.Equal(t, KindCreateTable, st.Kind())
+	assert.Equal(t, "prod", st.Schema())
+	assert.Equal(t, "events", st.Table())
 }

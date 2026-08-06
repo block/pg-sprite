@@ -37,7 +37,7 @@ func TestIntrospectDesiredMatchesLiveIntrospection(t *testing.T) {
 	ds, err := statement.ParseDesired(desiredSQL)
 	require.NoError(t, err)
 	for _, st := range ds.Statements {
-		qualified, err := statement.Qualify(st.SQL, schema)
+		qualified, err := statement.Qualify(st.SQL(), schema)
 		require.NoError(t, err)
 		_, err = pool.Exec(t.Context(), qualified)
 		require.NoError(t, err)

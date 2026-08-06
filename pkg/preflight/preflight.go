@@ -31,7 +31,7 @@ var ErrNotTable = errors.New("not an ordinary or partitioned table")
 // operational failure.
 type SizeError struct {
 	// TotalBytes is the table's measured on-disk size (all partitions,
-	// including TOAST).
+	// including indexes and TOAST).
 	TotalBytes int64
 	// LimitBytes is the threshold that was exceeded.
 	LimitBytes int64
@@ -59,7 +59,8 @@ func (t PreflightedTable) Schema() string { return t.schema }
 // Table returns the verified table name.
 func (t PreflightedTable) Table() string { return t.table }
 
-// TotalBytes returns the measured on-disk size across all partitions.
+// TotalBytes returns the measured on-disk size across all partitions,
+// including indexes and TOAST.
 func (t PreflightedTable) TotalBytes() int64 { return t.totalBytes }
 
 // RelTuples returns the planner's row estimate (-1 when the table has never
@@ -75,18 +76,22 @@ func CheckTable(ctx context.Context, pool *pgxpool.Pool, schema, table string, l
 	if limitBytes <= 0 {
 		return PreflightedTable{}, fmt.Errorf("size limit must be positive, got %d", limitBytes)
 	}
-	// INV: ST-6 — size facts are measured on-disk bytes (pg_table_size,
-	// which includes TOAST), summed over pg_partition_tree so a partitioned
-	// parent (whose own relation is 0 bytes) cannot fail open. Stale planner
-	// statistics (relpages) are never the guard's authority.
+	// INV: ST-6 — size facts are measured on-disk bytes
+	// (pg_total_relation_size: heap, indexes, and TOAST — the rewrite the
+	// guard fears rebuilds every index under the same ACCESS EXCLUSIVE
+	// lock, so an index-heavy table must not sail under the threshold),
+	// summed over pg_partition_tree so a partitioned parent (whose own
+	// relation is 0 bytes) cannot fail open. Stale planner statistics
+	// (relpages) are never the guard's authority.
 	// The table's own size plus every descendant in its partition tree:
 	// pg_partition_tree returns no rows for a plain table (its own
-	// pg_table_size carries the total) and the parent's own relation is 0
-	// bytes for a partitioned table (the descendants carry the total).
+	// pg_total_relation_size carries the total) and the parent's own
+	// relation is 0 bytes for a partitioned table (the descendants carry
+	// the total).
 	const q = `
 		SELECT c.relkind::text,
-		       pg_table_size(c.oid) +
-		       (SELECT COALESCE(sum(pg_table_size(p.relid)), 0)
+		       pg_total_relation_size(c.oid) +
+		       (SELECT COALESCE(sum(pg_total_relation_size(p.relid)), 0)
 		          FROM pg_partition_tree(c.oid) p
 		         WHERE p.relid <> c.oid),
 		       c.reltuples
