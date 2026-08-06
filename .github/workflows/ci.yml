@@ -1,4 +1,4 @@
-name: ci
+name: CI
 
 on:
   push:
@@ -91,6 +91,7 @@ jobs:
   # images — real Aurora engine-version validation is a separate gate that
   # cannot run in public CI.
   test:
+    name: test (PostgreSQL ${{ matrix.pg }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
@@ -107,9 +108,10 @@ jobs:
           go-version-file: go.mod
       - run: make test
 
-  # Single required status for branch protection. Succeeds when nothing
-  # failed — including docs-only PRs where the heavy jobs were skipped.
-  ci-ok:
+  # Single required status for branch protection ("all-green" is the
+  # context to require). Succeeds when nothing failed — including
+  # docs-only PRs where the heavy jobs were skipped.
+  all-green:
     if: always()
     needs: [changes, lint, build, test]
     runs-on: ubuntu-latest

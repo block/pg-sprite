@@ -26,8 +26,9 @@ Concretely:
 - **Real database, race-enabled.** Unit tests run with `-race`; core (`pkg/`)
   logic is never validated against mocks — integration tests run against
   real PostgreSQL, across every supported major in CI.
-- **The matrix is a gate, not advisory.** The `ci-ok` sentinel requires the
-  full version matrix; docs-only changes are the only path that skips it.
+- **The matrix is a gate, not advisory.** The `all-green` sentinel job
+  requires the full version matrix; docs-only changes are the only path
+  that skips it.
 - **Coverage never regresses.** Deleting or skipping a test to get green is
   forbidden (same rule as the hooks: no `--no-verify`, no `nolint`). A
   numeric coverage ratchet on `pkg/` packages is wired into CI once Phase 1

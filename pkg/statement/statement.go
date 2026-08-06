@@ -3,6 +3,13 @@
 // front door needs. In Phase 1 that is a statement-type gate only: which kind
 // of statement this is and, for ALTER TABLE, which table it targets. No
 // schema model, no classification.
+//
+// Two canonical forms coexist deliberately: this package's deparser prints
+// grammar-canonical SQL (e.g. varchar(50)) for formatting, while
+// pkg/schemadiff models carry server-decompiled text (character
+// varying(50)) for comparison. The two canons never mix: models only ever
+// compare server output against server output, and deparser output must not
+// feed a model comparison or a schema fingerprint.
 package statement
 
 import (
@@ -25,6 +32,7 @@ const (
 	KindCreateIndex
 	KindDropIndex
 	KindReindex
+	KindCreateTable
 )
 
 // String returns the human-readable name of the kind.
@@ -38,6 +46,8 @@ func (k Kind) String() string {
 		return "DROP INDEX"
 	case KindReindex:
 		return "REINDEX"
+	case KindCreateTable:
+		return "CREATE TABLE"
 	default:
 		return "other"
 	}
@@ -101,6 +111,11 @@ func ParseOne(sql string) (Statement, error) {
 		st.kind = KindAlterTable
 		st.schema = alter.GetRelation().GetSchemaname()
 		st.table = alter.GetRelation().GetRelname()
+	case node.GetCreateStmt() != nil:
+		rel := node.GetCreateStmt().GetRelation()
+		st.kind = KindCreateTable
+		st.schema = rel.GetSchemaname()
+		st.table = rel.GetRelname()
 	case node.GetRenameStmt() != nil:
 		// ALTER TABLE ... RENAME TO / RENAME COLUMN / RENAME CONSTRAINT
 		// parse as RenameStmt, not AlterTableStmt. Only table-targeted
