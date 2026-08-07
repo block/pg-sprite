@@ -540,6 +540,11 @@ this section states *why* and pins the analog to the underlying primitive.
 
 ### Plan-time prerequisite: the scratch database
 
+**This prerequisite belongs to the copy-and-swap path (shadow-DDL derivation and checkpoint
+fingerprints, later phases). Nothing shipped today requires it — declarative diffing uses
+the transaction-scoped scratch schema described below, which needs no `CREATEDB` and no
+pre-provisioning.**
+
 [Execute-and-introspect](#how-the-planner-understands-ddl-decided) (semantic validation,
 shadow-DDL derivation, checkpoint fingerprints) needs a scratch database **on the target
 cluster** — server version and extension parity hold by construction, and the storage cost is

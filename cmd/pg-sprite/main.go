@@ -1,4 +1,4 @@
-// Command pg-sprite is an online schema-change engine for Aurora PostgreSQL.
+// Command pg-sprite is an online schema-change engine for PostgreSQL.
 package main
 
 import (
@@ -17,7 +17,7 @@ var version = "dev"
 func main() {
 	k := kong.Parse(cli.New(),
 		kong.Name("pg-sprite"),
-		kong.Description("An online schema-change engine for Aurora PostgreSQL."),
+		kong.Description("An online schema-change engine for PostgreSQL."),
 		kong.UsageOnError(),
 		kong.Vars{"version": version},
 	)

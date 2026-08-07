@@ -99,6 +99,25 @@ The planner's verdicts are **requests, not permissions** — executors re-verify
 preconditions. Which components are safety-critical (and the stricter rules inside that
 boundary) is defined in [../SAFETY.md](../SAFETY.md).
 
+### What a consumer may depend on
+
+A consumer deciding between shelling out to the CLI and importing a package is making an
+architectural decision; this is the permission slip. Two integration surfaces exist, at
+different levels of commitment:
+
+- **The CLI and its JSON output** — the intended seam for orchestrators. `diff` and
+  `--dry-run` emit machine-readable verdicts and plans; the plan report freezes as a
+  single versioned contract (an explicit schema-version field, additive-only changes
+  within a version) in Phase 2.5. Until that lands its shape may change in any PR — wait
+  for the versioned report rather than pinning the interim shape.
+- **The Go packages** — everything under `pkg/` is importable, and the front-end seams
+  (`pkg/statement`, `pkg/schemadiff`, `pkg/planner`, `pkg/router`, `pkg/verdict`) are
+  each designed as a standalone entry point; `internal/` is unimportable by
+  construction. Before a v1 module tag the Go API carries no compatibility promise: the
+  JSON contract is the stability boundary, the Go API follows at v1. (The
+  [SAFETY.md](../SAFETY.md) core/periphery split answers a different question — review
+  bar, not import permission.)
+
 ## Package map
 
 | Package | Role | Status |

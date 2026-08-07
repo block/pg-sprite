@@ -219,7 +219,9 @@ risks-and-mitigations.
 Every knowable prerequisite is validated before the engine writes anything: logical-replication
 enablement and role, PK usability, `REPLICA IDENTITY`, slot/WAL-sender headroom, disk headroom
 (~2× the table), the [scratch database](low-level-design.md#plan-time-prerequisite-the-scratch-database)
-(pre-provisioned `pg_sprite_scratch`, or `CREATEDB` so preflight can self-provision it), lock
+(pre-provisioned `pg_sprite_scratch`, or `CREATEDB` so preflight can self-provision it — a
+copy-and-swap prerequisite only; every capability shipped today uses a transaction-scoped
+scratch *schema* that needs neither), lock
 LK-1 acquired, and the RF-* refusals below. Failing hours into a copy on something knowable up
 front is a bug. **Sub-obligation — server-authoritative validation:** declarative desired-state
 SQL is already executed and introspected in a rolled-back, transaction-scoped scratch schema.
