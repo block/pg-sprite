@@ -2,6 +2,7 @@ package statement
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	pganalyze "github.com/pganalyze/pg_query_go/v6"
@@ -136,7 +137,7 @@ func (o Op) Describe() string {
 	case OpDropColumn:
 		return "DROP COLUMN " + o.Column
 	case OpAlterColumnType:
-		return "ALTER COLUMN " + o.Column + " TYPE " + o.NewType
+		return "ALTER COLUMN " + o.Column + " TYPE " + formatType(o.NewType, o.NewTypeMods)
 	case OpSetDefault:
 		return "ALTER COLUMN " + o.Column + " SET DEFAULT"
 	case OpDropDefault:
@@ -170,14 +171,47 @@ func (o Op) Describe() string {
 	case OpDetachPartition:
 		return "DETACH PARTITION"
 	case OpCreateIndex:
-		return "CREATE INDEX " + o.Name
+		// An unnamed CREATE INDEX (the server auto-names it) labels
+		// without a trailing name; TrimSpace keeps the label clean.
+		return strings.TrimSpace("CREATE INDEX " + o.Name)
 	case OpDropIndex:
-		return "DROP INDEX " + o.Name
+		return strings.TrimSpace("DROP INDEX " + o.Name)
 	case OpReindex:
-		return "REINDEX " + o.Name
+		return strings.TrimSpace("REINDEX " + o.Name)
 	default:
 		return "unrecognized operation"
 	}
+}
+
+// dropIndexNames renders the dropped index names for the operation label:
+// each object's qualified name, comma-separated when one statement drops
+// several. The name identifies which structure the plan discards, so a
+// label without it would leave a destructive decision anonymous.
+func dropIndexNames(drop *pganalyze.DropStmt) string {
+	names := make([]string, 0, len(drop.GetObjects()))
+	for _, obj := range drop.GetObjects() {
+		parts := make([]string, 0, len(obj.GetList().GetItems()))
+		for _, item := range obj.GetList().GetItems() {
+			parts = append(parts, item.GetString_().GetSval())
+		}
+		names = append(names, strings.Join(parts, "."))
+	}
+	return strings.Join(names, ", ")
+}
+
+// formatType renders a type name with its modifiers — varchar(50),
+// numeric(12,2) — exactly as the grammar spells the target type. The
+// modifier is what distinguishes a widen from a narrow, so a rendering
+// that drops it would collapse changes that route in opposite directions.
+func formatType(name string, mods []int32) string {
+	if len(mods) == 0 {
+		return name
+	}
+	parts := make([]string, len(mods))
+	for i, m := range mods {
+		parts[i] = strconv.FormatInt(int64(m), 10)
+	}
+	return name + "(" + strings.Join(parts, ",") + ")"
 }
 
 // ParseOps parses one SQL statement and returns its typed operations. An
@@ -223,7 +257,7 @@ func ParseOps(sql string) ([]Op, error) {
 		if drop.GetRemoveType() != pganalyze.ObjectType_OBJECT_INDEX {
 			return []Op{{Kind: OpUnrecognized}}, nil
 		}
-		return []Op{{Kind: OpDropIndex, Concurrent: drop.GetConcurrent()}}, nil
+		return []Op{{Kind: OpDropIndex, Name: dropIndexNames(drop), Concurrent: drop.GetConcurrent()}}, nil
 	case node.GetReindexStmt() != nil:
 		re := node.GetReindexStmt()
 		return []Op{{

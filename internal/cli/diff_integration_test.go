@@ -14,6 +14,7 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -53,24 +54,29 @@ func TestDiffPrintsOrderedPlanJSON(t *testing.T) {
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
 
-	var report diffReport
+	var report plan.Report
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
+	assert.Equal(t, plan.FormatVersion, report.FormatVersion)
+	assert.Equal(t, plan.SourceDiff, report.Source)
 	assert.Equal(t, schema, report.Schema)
 	assert.Equal(t, "events", report.Table)
-	assert.True(t, report.TableExists)
+	require.NotNil(t, report.TableExists)
+	assert.True(t, *report.TableExists)
 
 	var sqls []string
 	var kinds []schemadiff.ChangeKind
 	var destructive []bool
-	for _, ch := range report.Changes {
+	for _, ch := range report.Statements {
 		sqls = append(sqls, ch.SQL)
 		kinds = append(kinds, ch.Kind)
 		destructive = append(destructive, ch.Destructive)
 	}
+	// Diff-derived SQL is canonicalized through the engine's parser, so both
+	// front doors report the same rendering for equivalent statements.
 	assert.Equal(t, []string{
-		fmt.Sprintf(`ALTER TABLE "%s"."events" DROP COLUMN "legacy"`, schema),
-		fmt.Sprintf(`ALTER TABLE "%s"."events" ALTER COLUMN "name" TYPE character varying(50)`, schema),
-		fmt.Sprintf(`ALTER TABLE "%s"."events" ALTER COLUMN "name" SET NOT NULL`, schema),
+		fmt.Sprintf("ALTER TABLE %s.events DROP legacy", schema),
+		fmt.Sprintf("ALTER TABLE %s.events ALTER COLUMN name TYPE varchar(50)", schema),
+		fmt.Sprintf("ALTER TABLE %s.events ALTER COLUMN name SET NOT NULL", schema),
 		fmt.Sprintf("CREATE INDEX events_name_idx ON %s.events USING btree (name)", schema),
 	}, sqls)
 	assert.Equal(t, []schemadiff.ChangeKind{
@@ -85,8 +91,8 @@ func TestDiffPrintsOrderedPlanJSON(t *testing.T) {
 	// binary-coercible by the live facts, SET NOT NULL and CREATE INDEX
 	// carry their safer native sequences, and the whole plan would execute.
 	assert.Equal(t, router.DispositionExecute, report.Disposition)
-	routes := make([]planner.Route, 0, len(report.Changes))
-	for _, ch := range report.Changes {
+	routes := make([]planner.Route, 0, len(report.Statements))
+	for _, ch := range report.Statements {
 		routes = append(routes, ch.Route)
 		assert.Equal(t, router.BackendNative, ch.Backend, ch.SQL)
 		assert.Equal(t, router.DispositionExecute, ch.Disposition, ch.SQL)
@@ -95,14 +101,14 @@ func TestDiffPrintsOrderedPlanJSON(t *testing.T) {
 	assert.Equal(t, []planner.Route{
 		planner.RouteNative, planner.RouteNative, planner.RouteNative, planner.RouteNative,
 	}, routes)
-	assert.Equal(t, planner.ReasonBinaryCoercible, report.Changes[1].Decisions[0].Reason,
+	assert.Equal(t, planner.ReasonBinaryCoercible, report.Statements[1].Decisions[0].Reason,
 		"live column types must feed the classifier")
-	assert.Equal(t, planner.ReasonSaferIdiom, report.Changes[2].Decisions[0].Reason)
-	assert.NotEqual(t, []string{report.Changes[2].SQL}, report.Changes[2].ExecSQL,
+	assert.Equal(t, planner.ReasonSaferIdiom, report.Statements[2].Decisions[0].Reason)
+	assert.NotEqual(t, []string{report.Statements[2].SQL}, report.Statements[2].ExecSQL,
 		"SET NOT NULL carries its safer native sequence")
-	assert.Equal(t, planner.ReasonSaferIdiom, report.Changes[3].Decisions[0].Reason)
-	require.Len(t, report.Changes[3].ExecSQL, 1)
-	assert.NotEqual(t, report.Changes[3].SQL, report.Changes[3].ExecSQL[0],
+	assert.Equal(t, planner.ReasonSaferIdiom, report.Statements[3].Decisions[0].Reason)
+	require.Len(t, report.Statements[3].ExecSQL, 1)
+	assert.NotEqual(t, report.Statements[3].SQL, report.Statements[3].ExecSQL[0],
 		"CREATE INDEX carries its concurrent rewrite")
 }
 
@@ -124,11 +130,11 @@ func TestDiffRoutesRewriteToCopyAndSwap(t *testing.T) {
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
 
-	var report diffReport
+	var report plan.Report
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
 	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
-	require.Len(t, report.Changes, 1)
-	ch := report.Changes[0]
+	require.Len(t, report.Statements, 1)
+	ch := report.Statements[0]
 	assert.Equal(t, planner.RouteCopyAndSwap, ch.Route)
 	assert.Equal(t, router.BackendCopyAndSwap, ch.Backend)
 	assert.Equal(t, router.DispositionUnavailable, ch.Disposition)
@@ -181,10 +187,11 @@ func TestDiffNoChangesEmptyPlan(t *testing.T) {
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
 
-	var report diffReport
+	var report plan.Report
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
-	assert.True(t, report.TableExists)
-	assert.Empty(t, report.Changes)
+	require.NotNil(t, report.TableExists)
+	assert.True(t, *report.TableExists)
+	assert.Empty(t, report.Statements)
 }
 
 func TestDiffMissingTableEmitsFullDesiredSchema(t *testing.T) {
@@ -200,11 +207,12 @@ func TestDiffMissingTableEmitsFullDesiredSchema(t *testing.T) {
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
 
-	var report diffReport
+	var report plan.Report
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
-	assert.False(t, report.TableExists)
+	require.NotNil(t, report.TableExists)
+	assert.False(t, *report.TableExists)
 	var sqls []string
-	for _, ch := range report.Changes {
+	for _, ch := range report.Statements {
 		sqls = append(sqls, ch.SQL)
 	}
 	assert.Equal(t, []string{
@@ -235,7 +243,7 @@ func TestDiffTextPlanIsExecutableSQL(t *testing.T) {
 	cmd2.JSON = true
 	var out2 strings.Builder
 	require.NoError(t, cmd2.run(t.Context(), &out2))
-	var report diffReport
+	var report plan.Report
 	require.NoError(t, json.Unmarshal([]byte(out2.String()), &report))
-	assert.Empty(t, report.Changes, "executing the text plan must converge the table")
+	assert.Empty(t, report.Statements, "executing the text plan must converge the table")
 }

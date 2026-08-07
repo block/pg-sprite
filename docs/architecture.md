@@ -132,6 +132,7 @@ different levels of commitment:
 | `pkg/schemadiff` | Execute-and-introspect desired state, introspect the live catalog, and produce an ordered declarative diff | exists |
 | `pkg/planner` | Classify typed operations and emit safer native SQL | exists |
 | `pkg/lint` | Policy-level rejection of unsafe or unsupported operations | planned |
+| `pkg/plan` | Versioned machine-readable dry-run plan report — the one JSON contract both front doors emit and an orchestrator consumes | exists (Phase 2.5) |
 | `pkg/router` | Route classified statements to native / copy-and-swap / refuse dispositions; copy-and-swap reports unavailable until that backend lands | exists (Phase 2.4) |
 | `pkg/executor` | Bounded optimistic native attempt; the `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) lands in Phase 3 | bounded optimistic attempt exists |
 | `pkg/table` | PK-range chunkers (single-column fast path, composite), dynamic time-based sizing | Phase 4 |

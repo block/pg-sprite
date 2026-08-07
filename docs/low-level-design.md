@@ -599,6 +599,7 @@ pkg/statement/        -> Wasm go-pgquery boundary + typed operation descriptors 
 pkg/schemadiff/       -> execute-and-introspect desired state + live introspection + ordered diff
 pkg/planner/          -> classify each operation and construct safer native SQL
 pkg/router/           -> assign classified statements to available backends
+pkg/plan/             -> versioned machine-readable dry-run plan report (both front doors)
 pkg/executor/         -> bounded optimistic native attempt only
 pkg/dbconn/           -> bounded database connections
 pkg/preflight/        -> migration preflight checks

@@ -27,7 +27,7 @@ The invariant registry (invariant IDs referenced below) lives in
 | `pkg/checkpoint` — durable resume state | ✅ core | planned (Phase 8) | ST-1, ST-2 |
 | slot lifecycle (in `pkg/decode`) — create, reap, lag ceiling | ✅ core | planned (Phase 8) | ST-3 |
 | `pkg/schemachange` — orchestrator, **cutover swap + fidelity gate** | ✅ core | planned (Phase 7) | LK-2, LK-4, ST-5 |
-| `pkg/statement`, `pkg/planner`, `pkg/schemadiff`, `pkg/router`, `pkg/lint` — classify/diff/route | ❌ periphery¹ | `pkg/statement` (parse boundary), `pkg/schemadiff` (introspect/diff via scratch execute-and-introspect), `pkg/planner` (classifier), and `pkg/router` (backend assignment + availability policy) exist (Phases 2.1–2.4); `pkg/lint` planned | (CO-7 holds at the parse boundary) |
+| `pkg/statement`, `pkg/planner`, `pkg/schemadiff`, `pkg/router`, `pkg/plan`, `pkg/lint` — classify/diff/route/report | ❌ periphery¹ | `pkg/statement` (parse boundary), `pkg/schemadiff` (introspect/diff via scratch execute-and-introspect), `pkg/planner` (classifier), `pkg/router` (backend assignment + availability policy), and `pkg/plan` (versioned dry-run plan report) exist (Phases 2.1–2.5); `pkg/lint` planned | (CO-7 holds at the parse boundary) |
 | `pkg/verdict` — structured outcome contract, rendering, exit codes | ❌ periphery | exists (Phase 1) | — |
 | `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`, `status`, `diff`, and `fmt` exist; `lint` is a stub | — |
 | status / progress / advisory rendering, metrics | ❌ periphery | planned | — |
