@@ -2,7 +2,7 @@
 
 > **This is the detailed / low-level design** — package layout, the `Executor` interface,
 > library choices, the copy-and-swap lifecycle internals, the full coverage matrix, table
-> requirements, and the open decisions to settle before writing core code. For the conceptual
+> requirements, and the decisions remaining for later execution phases. For the conceptual
 > overview (the problem, the three-layer architecture, when each pattern is used) start with
 > the **[high-level design](high-level-design.md)**. This doc is what you read when
 > designing the interfaces and packages.
@@ -31,17 +31,17 @@ for how the Spirit original works and tool-pgroll.md for pgroll.
 - [Copy and apply ordering (the core correctness subtlety)](#copy-and-apply-ordering-the-core-correctness-subtlety)
 - [Coverage and limitations (does this cover all of Aurora PostgreSQL?)](#coverage-and-limitations-does-this-cover-all-of-aurora-postgresql)
 - [Table requirements and unsupported operations (Aurora PostgreSQL analogs)](#table-requirements-and-unsupported-operations-aurora-postgresql-analogs)
-- [Illustrative component layout (one possible structure, not a goal)](#illustrative-component-layout-one-possible-structure-not-a-goal)
+- [Illustrative component layout (existing and planned)](#illustrative-component-layout-existing-and-planned)
 - [Library choices (Go)](#library-choices-go)
 - [Design decisions inherited from Spirit (safety over speed)](#design-decisions-inherited-from-spirit-safety-over-speed)
 - [Postgres-specific risks to design around](#postgres-specific-risks-to-design-around)
 - [Failover during migration: what survives and what doesn't](#failover-during-migration-what-survives-and-what-doesnt)
-- [Open decisions (need a call before writing core code)](#open-decisions-need-a-call-before-writing-core-code)
-  - [1. CDC mechanism — logical decoding vs triggers vs both](#1-cdc-mechanism--logical-decoding-vs-triggers-vs-both)
+- [Decisions for later execution phases](#decisions-for-later-execution-phases)
+  - [1. CDC mechanism — logical decoding with trigger fallback](#1-cdc-mechanism--logical-decoding-with-trigger-fallback)
   - [2. Scope of v1](#2-scope-of-v1)
   - [3. Repo location / language](#3-repo-location--language)
   - [4. Expand/contract (pgroll) as a second execution backend](#4-expandcontract-pgroll-as-a-second-execution-backend)
-  - [5. Declarative diff engine — build on go-pgquery vs wrap pg-schema-diff](#5-declarative-diff-engine--build-on-go-pgquery-vs-wrap-pg-schema-diff)
+  - [5. Declarative diff engine (decided)](#5-declarative-diff-engine-decided)
 - [Next step](#next-step)
 
 ## Architecture: decoupled planner, router, and executors
@@ -58,7 +58,7 @@ strategies rather than the whole product:
   required? app schema-version aware? logical replication available? table shape?), **choose
   the executor** for each change. The router decides **which strategy**, and is the single
   place migration policy lives.
-- **Executors** — interchangeable implementations behind one `Executor` interface
+- **Executors** — planned interchangeable implementations behind one `Executor` interface
   (`Plan`/`Execute`/`Status`/`Abort`) that decide **how**: `native` DDL,
   **copy-and-swap** (the heavy rewrite executor), and **expand/contract** (pgroll-derived, reversible).
   New strategies can be added without touching the planner or router.
@@ -79,8 +79,8 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
    ┌─────────────────────▼──────────────────── PLANNER / front-end (shared) ────┐
    │  pkg/statement   parse ALTER/CREATE (go-pgquery)                           │
    │  pkg/schemadiff  introspect live schema → diff vs desired → ordered ALTERs │
-   │  classifier      per op: native-safe | needs-rewrite | refuse              │
-   │  pkg/lint        reject unsafe/unsupported up front                        │
+   │  pkg/planner     per op: native-safe | needs-rewrite | refuse              │
+   │  pkg/lint        reject unsafe/unsupported up front (planned)              │
    │      │                                                                     │
    │      ▼  Plan (ordered steps, classified per operation)                     │
    └──────┬─────────────────────────────────────────────────────────────────────┘
@@ -89,7 +89,7 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
    │  policy + cluster facts: reversibility? app version-aware? logical repl?   │
    │  table shape? → native now; copy-and-swap / expand-contract in later phases│
    └──────┬─────────────────────────────────────────────────────────────────────┘
-          │  pkg/executor — Executor{ Plan, Execute, Status, Abort }
+          │  planned Executor{ Plan, Execute, Status, Abort }
    ╭──────┴───────────────┬──────────────────────────────┬─────────────────────╮
    ▼                      ▼                               ▼                     ▼
  native                copy-and-swap (Pattern A)       expand/contract        refuse with
@@ -107,7 +107,7 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
         │                            │
    ┌────┴────────────────────────────┴──── cross-cutting ──────────────────────┐
    │  pkg/dbconn   pgx pool · TLS/RDS CA · pg_terminate_backend · retries      │
-   │  pkg/throttler   Aurora reader lag · replication-slot lag · WAL gen       │
+   │  pkg/throttler   Aurora reader lag · replication-slot lag · WAL gen       │ planned
    └────┬──────────────────────────────────────────────────────────────────────┘
         │
    ╭────▼──────────────────────── Aurora PostgreSQL ───────────────────────────╮
@@ -151,15 +151,14 @@ that serves it best:
   module is embedded at build time (`go:embed`); nothing is downloaded at runtime. The cgo
   [`pg_query_go`](https://github.com/pganalyze/pg_query_go) is the documented escape hatch —
   API-compatible, a one-file swap.
-- **Shadow-table DDL and checkpoint fingerprints** come from **execute-and-introspect**: apply
-  the change inside a rolled-back transaction on the engine-owned
-  [scratch database](#plan-time-prerequisite-the-scratch-database) hydrated to the
-  before-schema, then read the canonical after-state back from the catalogs (`pg_get_*def`).
-  No AST surgery — correctness of the after-schema is delegated to PostgreSQL itself, and the
-  resume fingerprint (ST-2) hashes the introspected model, not SQL text.
-- **Refusals (RF-1..5)** use both layers: parse-level lint for what the AST shows (dangerous
-  literals, ambiguous renames), scratch execution for semantic truth (syntax *and* semantics,
-  with the server's own SQLSTATEs). Refusal messages quote the server error where one exists.
+- **Declarative desired-state input** uses **execute-and-introspect** today: execute the desired
+  DDL in a transaction-scoped scratch schema, introspect the canonical model from PostgreSQL's
+  catalogs, and always roll back. This supplies semantic validation without AST transformation.
+- **Migration-time shadow-table DDL and checkpoint fingerprints** will also use
+  execute-and-introspect, but in an engine-owned
+  [scratch database](#plan-time-prerequisite-the-scratch-database), because those artifacts must
+  outlive a transaction. Broader scratch-backed refusal checks (RF-1..5), including surfacing
+  server SQLSTATEs, are planned with that execution path.
 
 Classification still *predicts* lock/rewrite behaviour — an empty scratch table reveals nothing
 about a 2 TB rewrite — so execute-and-introspect complements the classifier, never replaces it.
@@ -178,9 +177,10 @@ pattern *per migration*:
 - **expand/contract via pgroll** for prod-critical breaking changes where **instant
   reversibility** and **two live schema versions** matter more than transparency.
 
-The classifier, declarative diff, linting, dry-run, and status reporting are written **once**
-and shared by every backend. An `Executor` interface (`Plan`, `Execute`, `Status`, `Abort`)
-is the contract; native is the first implementation. Until the in-house copy-and-swap executor
+The classifier, declarative diff, dry-run, and status reporting are shared by every backend;
+linting remains planned. An `Executor` interface (`Plan`, `Execute`, `Status`, `Abort`) is also
+planned; `pkg/executor` currently provides only the bounded optimistic native attempt. Until the
+in-house copy-and-swap executor
 lands in a later phase, every `needs-rewrite` change is refused as **not native-safe** rather than
 delegated to an external tool. pgroll remains a possible still-later backend.
 
@@ -238,8 +238,10 @@ live schema (introspected)  ─┘                          │
 
 ### How the diff is derived
 
-1. **Parse desired state** with `go-pgquery` into a normalized table model (columns, types,
-   defaults, nullability, identity/sequences, constraints, indexes).
+1. **Parse desired state** at the `pkg/statement` boundary for admission and scoping, then
+   execute it in a transaction-scoped scratch schema and introspect the catalogs into a
+   normalized table model (columns, types, defaults, nullability, identity/sequences,
+   constraints, indexes).
 2. **Introspect live state** from the catalogs (`pg_attribute`, `pg_constraint`, `pg_index`,
    `pg_attrdef`, …) into the same normalized model.
 3. **Canonicalize both** so the comparison ignores cosmetic differences — type aliases
@@ -259,10 +261,11 @@ live schema (introspected)  ─┘                          │
 
 ### Safety rules (inherited philosophy: surprise-free, decisions-not-options)
 
-- **Destructive diffs are gated.** Dropping a column, constraint, or index — anything that
-  loses data or a guarantee (a unique index discards the same uniqueness guarantee as a unique
-  constraint) — requires an explicit confirmation flag — never inferred silently from "it's
-  missing in the desired file".
+- **Destructive-diff confirmation is planned.** The future flag will gate dropping a column,
+  constraint, or index — anything that loses data or a guarantee (a unique index discards the
+  same uniqueness guarantee as a unique constraint) — never inferred silently from "it's
+  missing in the desired file"; no such confirmation flag exists today (destructive statements
+  are flagged in the plan output).
 - **Unsupported constructs are refused, never guessed.** The desired file admits one
   unqualified `CREATE TABLE` plus `CREATE INDEX` statements on it; each rule is a typed error.
   Foreign keys are refused at admission — a `REFERENCES` clause cannot be faithfully executed
@@ -273,10 +276,10 @@ live schema (introspected)  ─┘                          │
   transaction — are refused as unsupported rather than emitted as an unexecutable plan.
 - **Renames are ambiguous and are not guessed.** A column present in live but absent in desired
   plus a new column in desired is, by default, a *drop + add*, not a rename. Rename intent must
-  be stated explicitly (the engine will not heuristically pair columns), mirroring Spirit's
-  refusal to auto-handle dangerous rename patterns.
-- **Dry-run first.** `diff` prints the derived statements (and whether each takes the native or
-  copy path) without executing — the same review step as Spirit, and the natural hook for CI.
+  eventually be stated explicitly; no rename-intent flag exists today. The engine does not
+  heuristically pair columns.
+- **Diff is review-only.** `diff` prints every derived statement and its classified route without
+  executing. Copy-and-swap routes render as unavailable until that backend exists.
 - **Out-of-band drift is surfaced, not steamrolled.** If the live table differs from what the
   desired file's base assumed, the diff makes that visible rather than blindly forcing the
   end state.
@@ -284,28 +287,23 @@ live schema (introspected)  ─┘                          │
 ### Why this matters
 
 Declarative mode lets schemas live as **reviewed, version-controlled `.sql` files** and lets
-CI compute "what would change" — while reusing the entire safe execution path (classify,
-native-vs-copy, checksum, cutover). It is purely additive: the imperative `--alter` path
-remains the primitive that everything ultimately runs through.
+CI compute "what would change" — while reusing classify → route today and the planned execution
+backends later. It is purely additive: the imperative `--alter` path remains the execution
+primitive.
 
-### Build or wrap?
+### Diff engine
 
-[stripe/pg-schema-diff](https://github.com/stripe/pg-schema-diff) already implements most of
-this front-end: introspection, canonicalization (by applying the desired DDL to a **temp
-database** and letting the server itself canonicalize), dependency-ordered emission of the same
-safe idioms, per-statement timeouts, typed **hazard annotations**, and **plan validation**
-against the temp database. Whether `pkg/schemadiff` wraps it or builds on `go-pgquery`
-directly is
-[open decision #5](#5-declarative-diff-engine--build-on-go-pgquery-vs-wrap-pg-schema-diff).
-Either way its output flows through our classifier and executors unchanged — planner output is
-a request, not a permission.
+`pkg/schemadiff` is an in-house execute-and-introspect implementation. It executes desired DDL
+in a transaction-scoped scratch schema, introspects desired and live catalogs, and emits an
+ordered declarative diff. It does not wrap `stripe/pg-schema-diff`; planner output remains a
+request, not a permission.
 
 ## Advisory mode and the force escape hatch
 
 The [advisory behaviour](high-level-design.md#advisory-mode-suggest-the-safe-rewrite-dont-silently-run-the-risky-one)
-is a property of the **planner's classifier output**, not a separate code path. Every classified
-operation carries a recommendation, and the CLI decides whether to apply it, suggest it, or
-refuse based on mode and flags.
+is a property of the **planner's classifier output**, not a separate code path. Every current
+`planner.Decision` carries the operation, route, typed reason, and safer SQL where applicable.
+The CLI renders that output in `diff` and `migrate --dry-run`.
 
 ### What the classifier emits per operation
 
@@ -317,29 +315,27 @@ For each parsed statement the classifier produces a record along the lines of:
 - `recommended` — the safe rewrite when the literal is risky but has a native equivalent
   (e.g. `CREATE INDEX` → `CREATE INDEX CONCURRENTLY`; `ADD CONSTRAINT` → `ADD … NOT VALID` +
   `VALIDATE`; `ADD PRIMARY KEY` → unique index `CONCURRENTLY` + `ADD PRIMARY KEY USING INDEX`).
-- `risk` — what the literal would do (lock mode held, whether it blocks reads/writes, expected
-  duration class) and *why* the recommendation is safer.
-- `reversible` / `requires_app_coordination` — populated when a pattern other than native is in
-  play (feeds the router).
+- Richer `risk`, `reversible`, and `requires_app_coordination` metadata is a future extension.
 
-This is what `pkg/lint` and `pkg/statement` already need to compute in order to route; advisory
-mode just **surfaces** it instead of consuming it silently.
+Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operations and
+`pkg/lint` remains a stub.
 
 ### CLI behaviour (modes)
 
 | Invocation | Behaviour |
 | --- | --- |
-| `suggest` / `lint` / `diff --dry-run` | Print `original` → `recommended` + `risk` for every op. **Never executes.** Exit non-zero if any op needs a riskier path than policy allows (the CI gate). |
-| `migrate` (default) | If a safer `recommended` form exists, **apply the recommended idiom** (classify-first) and report what was substituted. If the literal is not native-safe, **refuse** with the reason, a later-phase copy-and-swap note, and a safer native alternative where one exists. The dangerous literal is **never** run by default, and no external copy tool is invoked. |
-| `migrate --force` | Run each statement **exactly as submitted**, bypassing the safe rewrite. Gated — see below. |
+| `lint` | Stub; no lint engine is implemented yet. |
+| `diff` / `migrate --dry-run` | Print the classified, routed plan and safer SQL where applicable. **Never executes.** `diff` has no `--dry-run` flag because it never executes. |
+| `migrate` (default) | Run the Phase 1 statement gate, preflight, and bounded optimistic native attempt. It does not yet execute classifier-produced safer SQL. |
+| `migrate --force` (planned Phase 3) | Run each statement **exactly as submitted**, bypassing the safe rewrite. Gated — see below. |
 
-The distinction the user cares about: a plain `CREATE INDEX` is never executed verbatim by
-default. The engine either applies `CREATE INDEX CONCURRENTLY` for you (and says so) or, in
-`suggest`/dry-run, hands back the recommendation without touching the database.
+The classifier constructs `CREATE INDEX CONCURRENTLY` and other safer sequences today, but only
+`diff` and `migrate --dry-run` render them. Phase 3 makes the classified route drive execution.
 
 ### The `--force` gate
 
-`--force` is deliberately high-friction:
+This entire gate is planned Phase 3 behavior; no `--force` flag exists today. It is deliberately
+high-friction:
 
 1. Print a prominent **DANGER / CAUTION** block: the exact statement, the lock it will take, what
    it blocks (reads? writes?), and the expected/worst-case duration and lock-queue impact
@@ -351,7 +347,7 @@ default. The engine either applies `CREATE INDEX CONCURRENTLY` for you (and says
    guardrail".
 4. **Log the override** (who, when, what statement, what the recommendation was) for audit.
 
-Force exists for the rare legitimate case (e.g. a maintenance window where the table is known
+Force is planned for the rare legitimate case (e.g. a maintenance window where the table is known
 idle and a plain rewrite is acceptable); it is an escape hatch, not a shortcut, consistent with
 *decisions, not options*.
 
@@ -544,6 +540,11 @@ this section states *why* and pins the analog to the underlying primitive.
 
 ### Plan-time prerequisite: the scratch database
 
+**This prerequisite belongs to the copy-and-swap path (shadow-DDL derivation and checkpoint
+fingerprints, later phases). Nothing shipped today requires it — declarative diffing uses
+the transaction-scoped scratch schema described below, which needs no `CREATEDB` and no
+pre-provisioning.**
+
 [Execute-and-introspect](#how-the-planner-understands-ddl-decided) (semantic validation,
 shadow-DDL derivation, checkpoint fingerprints) needs a scratch database **on the target
 cluster** — server version and extension parity hold by construction, and the storage cost is
@@ -583,33 +584,36 @@ These have **no MySQL counterpart** but are hard requirements for the logical-de
 > no FKs/triggers, no PK change, no lossy change* — with the Postgres-specific additions of
 > logical-replication enablement, slot/role privileges, and the unchanged-TOAST handling.
 
-## Illustrative component layout (one possible structure, not a goal)
+## Illustrative component layout (existing and planned)
 
 > We intend to mirror Spirit's **design philosophy** (see
 > [Design decisions inherited from Spirit](#design-decisions-inherited-from-spirit-safety-over-speed)),
-> **not** its package layout. The structure below is just one illustrative way to organise
-> the components so the responsibilities are clear; the real code will follow whatever is
-> idiomatic for a Postgres + logical-decoding tool.
+> **not** its package layout. The existing packages establish the front end; the later-phase
+> packages show the intended execution architecture.
 
 ```
 cmd/pg-sprite/         -> CLI (migrate, diff, fmt, lint, status) - Kong, like Spirit
-pkg/planner/          -> shared front-end: parse/introspect/diff + classify each op -> Plan
-pkg/router/           -> picks an Executor per change from policy + cluster facts
-pkg/executor/         -> Executor interface (Plan/Execute/Status/Abort) + implementations:
-                           native (CONCURRENTLY / NOT VALID …), copyswap (Pattern A),
-                           later: expandcontract (wraps pgroll, Pattern B / reversible)
-pkg/migration/        -> orchestrator + runner + cutover (drives the copyswap executor)
-pkg/decode/           -> logical-decoding client (replaces Spirit's pkg/change/binlog)  <- the hard part
-pkg/copier/           -> parallel chunked copy (INSERT...SELECT...ON CONFLICT)
-pkg/applier/          -> ON CONFLICT upsert + delete apply
-pkg/table/            -> PK-range chunkers (optimistic + composite), dynamic sizing
-pkg/checksum/         -> md5/row-text chunked verification
-pkg/dbconn/           -> pgx pool, retries, lock_timeout, RDS CA, pg_terminate_backend
-pkg/statement/        -> go-pgquery parsing + "is this natively safe?" classifier
-pkg/schemadiff/       -> declarative mode: introspect live schema, diff vs desired
-                         CREATE TABLE, derive ordered ALTER/CREATE statements (+ fmt)
-pkg/lint/             -> unsafe-DDL linters (PG flavored)
-pkg/throttler/        -> Aurora PG replica-lag / slot-lag throttle
+
+Existing:
+pkg/statement/        -> Wasm go-pgquery boundary + typed operation descriptors and rewrites
+pkg/schemadiff/       -> execute-and-introspect desired state + live introspection + ordered diff
+pkg/planner/          -> classify each operation and construct safer native SQL
+pkg/router/           -> assign classified statements to available backends
+pkg/executor/         -> bounded optimistic native attempt only
+pkg/dbconn/           -> bounded database connections
+pkg/preflight/        -> migration preflight checks
+pkg/verdict/          -> typed outcomes
+
+Planned:
+pkg/lint/             -> unsafe-DDL linters (currently a CLI stub)
+pkg/migration/        -> orchestrator + runner + cutover
+pkg/decode/           -> logical-decoding client
+pkg/copier/           -> parallel chunked copy
+pkg/applier/          -> captured-change apply
+pkg/table/            -> PK-range chunkers and dynamic sizing
+pkg/checksum/         -> chunked verification and cutover gate
+pkg/throttler/        -> replica-lag / slot-lag throttle
+Executor              -> Plan/Execute/Status/Abort backend interface
 ```
 
 ## Library choices (Go)
@@ -620,13 +624,11 @@ pkg/throttler/        -> Aurora PG replica-lag / slot-lag throttle
   messages, send standby status (LSN flush) updates. This is the binlog-syncer analog.
 - **`github.com/wasilibs/go-pgquery`** — parse `ALTER`/`CREATE TABLE` with the actual Postgres
   grammar (`libpg_query` compiled to Wasm, executed by wazero: pure-Go builds, parser crashes
-  contained). Analog of Spirit's TiDB parser. The cgo `github.com/pganalyze/pg_query_go/v5` is
+  contained). Analog of Spirit's TiDB parser. The cgo `github.com/pganalyze/pg_query_go/v6` is
   the API-compatible escape hatch (see
   [How the planner understands DDL](#how-the-planner-understands-ddl-decided)).
-- **`github.com/stripe/pg-schema-diff`** *(candidate — open decision #5)* — declarative diff
-  engine: introspection + dependency-ordered plan emission with hazard annotations and
-  temp-database plan validation; would power `pkg/schemadiff` instead of building the diff on
-  `go-pgquery` directly.
+- **In-house `pkg/schemadiff`** — declarative execute-and-introspect, live-catalog introspection,
+  and dependency-ordered plan emission; `stripe/pg-schema-diff` is not used.
 - **`github.com/alecthomas/kong`** — CLI, same as Spirit.
 
 ## Design decisions inherited from Spirit (safety over speed)
@@ -642,7 +644,7 @@ pkg/throttler/        -> Aurora PG replica-lag / slot-lag throttle
 - **Dynamic chunking by target time** (default ~500ms), not a fixed row count.
 - **Checkpoint/resume**: persist `{last copied PK watermark, slot name, confirmed LSN}` so an
   interrupted migration resumes with ~1 minute of lost work. (Postgres-specific risk: the
-  slot must survive; see open decisions.)
+  slot must survive; see the later-phase decisions.)
 
 ## Postgres-specific risks to design around
 
@@ -678,11 +680,11 @@ of preference:
    create a new slot at the current LSN, then run a **full checksum + repair pass** (re-sync only
    the chunks that differ) before resuming CDC from the new slot. This salvages days of bulk-copy
    work; the cost is one comparison sweep, bounded by *checksum* cost, not *copy* cost. The
-   mandatory checksum gate already exists — this reuses it as a repair primitive.
+   planned mandatory checksum gate will also serve as a repair primitive.
 2. **Restart from scratch.** New slot + new snapshot + full re-copy. Always correct, but throws
    away all progress; acceptable only for small tables.
 3. **Don't use logical decoding here.** For clusters where failover risk during a multi-day
-   migration is unacceptable, route to the **trigger fallback** (open decision #1): the trigger +
+   migration is unacceptable, route to the **trigger fallback** (decision #1): the trigger +
    queue table are ordinary data that survive failover, so the migration simply resumes.
 
 Design implications the rest of the system must honour:
@@ -696,9 +698,13 @@ Design implications the rest of the system must honour:
 - **Make the trade explicit to the operator:** on logical-decoding clusters, a long migration is
   exposed to failover/maintenance windows; the trigger path is the robustness escape hatch.
 
-## Open decisions (need a call before writing core code)
+## Decisions for later execution phases
 
-### 1. CDC mechanism — logical decoding vs triggers vs both
+The parser (`wasilibs/go-pgquery`), declarative diff engine (in-house `pkg/schemadiff`), and
+execute-and-introspect mechanism are decided and implemented. The topics below either define the
+future copy-and-swap backend or retain execution-policy details to settle when that backend lands.
+
+### 1. CDC mechanism — logical decoding with trigger fallback
 
 - **Logical decoding** (recommended primary): faithful Spirit port, **no synchronous write
   overhead** on the source; this is what makes the tool better than pg_osc. Costs: needs
@@ -713,8 +719,8 @@ Design implications the rest of the system must honour:
   robustness escape hatch for clusters that can't enable logical replication or can't accept
   [slot loss on failover](#failover-during-migration-what-survives-and-what-doesnt) during a
   multi-day migration — not a strictly-safer option.
-- **Recommendation:** define a `decode.Source` interface (mirroring Spirit's `change.Source`
-  seam) with **logical decoding as primary and trigger-based as fallback** — and treat the
+- **Decision:** the future `decode.Source` seam uses **logical decoding as primary and
+  trigger-based capture as fallback** — and treats the
   fallback as a first-class robustness path on Aurora, not a vestige. The full comparison
   (overhead, failover survival, and why neither lets us drop the checksum) is in
   [change-capture-tradeoff.md](change-capture-tradeoff.md).
@@ -725,15 +731,12 @@ Target the highest-value rewrite cases first: general `ALTER COLUMN TYPE`, volat
 `ADD COLUMN`, `STORED` generated column, and full-table repack — plus the **classifier** that
 routes natively-safe operations to direct DDL. PK-required, no-FK-on-migrated-table for v1.
 
-**Build the declarative front-end first; imperative is the thin add-on** — settled, matching the
+Both the declarative and imperative front ends exist and share classify → route, matching the
 [README TL;DR](README.md#tldr-recommendation),
 [high-level-design](high-level-design.md#two-front-ends-declarative-and-imperative), and
-build-plan Phase 2. Declarative
-does the harder work (introspect + diff + ordering) and exercises the full
-classify → route → execute pipeline; the imperative `--alter` path is the **same** pipeline with
-the diff step skipped, so it falls out almost for free. The imperative statement remains the
-primitive that everything ultimately executes — declarative only *produces* statements — which is
-why building declarative first costs nothing on the execution side.
+build-plan Phase 2. Declarative performs introspection, diff, and ordering; the imperative
+`--alter` path uses the same classifier with the diff step skipped. Phase 3 makes their classified
+routes drive native execution.
 
 ### 3. Repo location / language
 
@@ -747,7 +750,7 @@ Whether to ship the engine as a **planner + pluggable executors** (see
 breaking changes can route to pgroll's reversible expand/contract pattern while heavy physical
 rewrites use copy-and-swap.
 
-- **Recommendation:** yes in principle — define the `Executor` interface from day one — but
+- **Recommendation:** yes in principle — add the planned `Executor` interface — but
   **defer the pgroll backend itself** past v1. The differentiated, currently-missing
   capability is the log-based copy-and-swap executor; pgroll already exists and can be used
   directly today. Adding it as a backend is mostly about a unified planner/UX, not new
@@ -756,42 +759,23 @@ rewrites use copy-and-swap.
   one-shot vs start/complete/rollback lifecycles under one `status`; and the default routing
   policy (auto-route vs explicit `--strategy`) given "decisions, not options".
 
-### 5. Declarative diff engine — build on go-pgquery vs wrap pg-schema-diff
+### 5. Declarative diff engine (decided)
 
-Whether `pkg/schemadiff` builds the desired-vs-live diff on `go-pgquery` + our own schema
-model, or wraps [stripe/pg-schema-diff](https://github.com/stripe/pg-schema-diff) (MIT, Go,
-PG 14–17, actively maintained) as the diff engine.
-
-- **Wrap (evaluate first):** it already does the hardest parts — introspection,
-  server-canonicalized desired state ("parse by executing" on a temp database),
-  dependency-ordered plans emitting the same safe idioms our classifier chooses, typed hazard
-  annotations (≈ our advisory mode, with an `--allow-hazards`-style CI gate), and plan
-  validation against the temp database. Plan generation is cleanly separated from application,
-  so our executors keep our own timeout/lock/retry discipline. It is a **periphery** dependency
-  (plan generation), so the TCB bar does not apply — pinned like any load-bearing dep.
-- **Costs of wrapping:** the temp-database factory is an operational precondition — answered:
-  the engine-owned [scratch database](#plan-time-prerequisite-the-scratch-database) is already
-  a preflight-verified prerequisite for execute-and-introspect, so wrapping adds no new
-  operational demand; renames surface as drop+add and **must** sit behind our
-  destructive-diff gate and never-guess-renames refusals; type support beyond enums is missing;
-  its embedded timeout policy is replaced by ours at execution.
-- **Build:** full control and no temp-database precondition — at the cost of the hardest code
-  in Phase 2 and permanent drift risk between a hand-rolled schema model and PostgreSQL's real
-  canonicalization.
-- **Recommendation:** prototype the wrap behind our own `SchemaDiff` seam in Phase 2; adopt the
-  **hazard taxonomy** (advisory-mode vocabulary) and **plan-validation-on-a-throwaway-schema**
-  (a verification-ladder rung) regardless of which way this lands. Its declared non-goal —
-  *"stateful online migration techniques, like shadow tables, aren't yet supported"* — is
-  exactly the gap this engine's copy-and-swap fills, so the tools compose rather than compete.
+The engine uses in-house `pkg/schemadiff`, not `stripe/pg-schema-diff`. Desired DDL crosses the
+`pkg/statement` parse boundary for admission and scoping, then executes in a transaction-scoped
+scratch schema. Catalog introspection produces the normalized desired model; live-catalog
+introspection and an ordered declarative diff complete the plan.
 
 
 ## Next step
 
-Once the decisions above are settled, scaffold:
+Phases 1 and 2.1–2.4, including the CLI front ends, classifier, router, and declarative diff, are
+implemented. The next implementation phase is Phase 3 native execution:
 
-- CLI skeleton (`migrate` subcommand),
-- `decode.Source` interface + a first logical-decoding implementation,
-- PK-range chunker + parallel copier,
-- transactional cutover,
-- an end-to-end working path for a single `ALTER COLUMN TYPE` against a local Postgres in
-  Docker, with an integration test.
+- execute classifier-produced safer sequences through the routed native path,
+- add the `CREATE INDEX CONCURRENTLY` execution path,
+- bound lock acquisition with timeout and retry,
+- add substitution, the guarded `--force` escape hatch, and progress reporting.
+
+The copy-and-swap backend, including change capture, copying, applying, checksumming, and
+cutover, follows Phase 3.

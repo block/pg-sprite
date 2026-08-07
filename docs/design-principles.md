@@ -104,7 +104,7 @@ the phased build plan should be traceable back to one of these.
   hatch, not a convenience (see
   [high-level-design's advisory mode](high-level-design.md#advisory-mode-suggest-the-safe-rewrite-dont-silently-run-the-risky-one)).
 - **One planner, pluggable execution backends — choose the right pattern per migration.** The
-  shared front-end (classify + declarative diff) decides *what* changes and *which strategy*
+  shared front-end (parse → declarative diff when declarative → classify → route) decides *what* changes and *which strategy*
   fits; interchangeable executors decide *how*: native DDL, log-based copy-and-swap, and
   (later) expand/contract via pgroll for reversible breaking changes. We don't pick one pattern
   globally — the planner routes each migration to the executor whose tradeoffs fit, behind a
@@ -115,7 +115,7 @@ the phased build plan should be traceable back to one of these.
 
 - **One pipeline, two front-ends — declarative first.** Build the declarative desired-state
   `diff` as the primary front-end; the imperative `--alter` path is then a thin add-on — the
-  **same** classify → native-or-copy pipeline with the diff step skipped (the user's `ALTER`
+  **same** parse → classify → route pipeline with the diff step skipped (the user's `ALTER`
   goes straight into the classifier). Both feed the identical executor.
 - **Dry-run first.** `diff`/`--dry-run` prints the exact statements and their classification
   (native vs copy-and-swap) **without executing** — the natural review and CI hook.
@@ -125,7 +125,8 @@ the phased build plan should be traceable back to one of these.
 
 ## PostgreSQL / Aurora-specific
 
-- **Log-based CDC, not triggers — but cluster-dependently so.** Capture concurrent writes via
+- **Log-based CDC, not triggers — but cluster-dependently so.** The future copy-and-swap backend
+  captures concurrent writes via
   **logical decoding** (a replication slot), which adds near-zero synchronous overhead to the
   source — the key differentiator versus trigger-based tools like pg_osc. A trigger-based path is a
   **first-class fallback** (it survives failover and runs anywhere), not a vestige; the default is
@@ -154,7 +155,7 @@ enforcement mechanics) live in [tcb-model](tcb-model.md); the repo-process versi
   *other* way for load-bearing expertise: the parser and the wire protocol are taken as pinned
   dependencies, because a hand-rolled substitute there is the unsafe choice. Full rubric:
   [tcb-model § dependencies](tcb-model.md#dependencies-inside-the-tcb-become-part-of-the-tcb).
-- **Expose the smallest interface that does the job.** The `Executor` contract is
+- **Expose the smallest interface that does the job.** The planned `Executor` contract is
   `Plan`/`Execute`/`Status`/`Abort` and nothing more; packages export domain types and their
   validating constructors, not internals — the narrow interface is what keeps the
   [TCB boundary](tcb-model.md#the-boundary) small enough to audit.

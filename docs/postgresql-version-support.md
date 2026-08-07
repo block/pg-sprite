@@ -77,7 +77,7 @@ Aurora-supported matrix 14 → 18 (currently centring on 16/17 LTS).**
 
 Why 14 is the right floor:
 
-- **It matches the most restrictive reusable backend.** pgroll (our expand/contract executor)
+- **It matches the most restrictive reusable backend.** pgroll (a possible future expand/contract backend)
   hard-requires `>= 14`; picking any lower floor would mean the pgroll path is unavailable on
   part of our supported range — an inconsistent engine.
 - **It matches Aurora reality.** 14 is the oldest Aurora major still under standard support;
@@ -104,7 +104,7 @@ What this *excludes* and why it's fine:
   still cover those engines if a one-off change is ever needed there, so we lose nothing by
   not targeting them ourselves.
 - **`security_invoker`-dependent RLS on PG 14.** Only affects the optional pgroll backend on
-  exactly PG 14; the native and copy-and-swap executors are unaffected, and PG 15+ removes the
+  exactly PG 14; the planned native and copy-and-swap executors would be unaffected, and PG 15+ removes the
   limitation entirely.
 
 See why-build-this-engine.md for why we reuse these tools as

@@ -3,7 +3,7 @@
 The conceptual design. It frames the problem, the architecture philosophy, the three layers and
 their responsibilities, the execution patterns and when each is chosen, and the coverage at a
 glance — **without** package names, interface signatures, or library choices. Those, plus the
-full coverage matrix and the open decisions, live in the
+full coverage matrix and the remaining later-phase decisions, live in the
 **[low-level design](low-level-design.md)**, which is what you read when designing the
 interfaces and packages.
 
@@ -18,7 +18,7 @@ reasons to build.
 - [The problem in one paragraph](#the-problem-in-one-paragraph)
 - [The core idea: one planner, many executors](#the-core-idea-one-planner-many-executors)
 - [The three layers](#the-three-layers)
-- [Two ways to classify: optimistic vs full](#two-ways-to-classify-optimistic-vs-full)
+- [Two migration front doors: optimistic vs classified](#two-migration-front-doors-optimistic-vs-classified)
 - [Architecture at a glance](#architecture-at-a-glance)
 - [The execution patterns (and when each is chosen)](#the-execution-patterns-and-when-each-is-chosen)
 - [Two front-ends: declarative and imperative](#two-front-ends-declarative-and-imperative)
@@ -82,15 +82,15 @@ not choose one pattern globally. We route each migration to the pattern whose tr
 - **Executors** — decide *how*, behind one common contract, so a new strategy slots in without
   reworking the front-end.
 
-The classifier, declarative diff, linting, dry-run, and status reporting are written **once** and
-shared by every executor.
+The classifier, declarative diff, dry-run, and status reporting are written **once** and shared
+by every executor. Linting is part of this shared front-end design but is not built yet.
 
-## Two ways to classify: optimistic vs full
+## Two migration front doors: optimistic vs classified
 
-The planner's classifier — the **front door** that decides each change's path — has two
-implementations, and we ship them in order:
+The current CLI has two migration front doors; the optimistic path is not an implementation of
+the planner's classifier:
 
-- **Optimistic classification (build first, minimal parsing).** No schema model and no
+- **Bounded optimistic migrate path (Phase 1).** No schema model and no
   classification logic — just a cheap **statement-type gate** (`ALTER TABLE` only — the
   statements the instant path can help; index/constraint statements are refused with the
   safe-idiom pointer rather than run as risky literals) and a **table-size guard**, then **attempt the
@@ -99,11 +99,11 @@ implementations, and we ship them in order:
   quickly, or the work would exceed the budget) we **cancel and treat it as needing a rewrite**.
   This mirrors Spirit's original front door, which simply tried `ALGORITHM=INSTANT` and handled
   the errors (then tried known-safe `INPLACE` options). It ships an end-to-end useful tool with
-  almost no parsing logic.
-- **Classification (full, parse-based).** Parse the statement and introspect the live schema to
+  almost no parsing logic. This path lives at the `migrate` front door.
+- **Classified planning path (Phases 2.1–2.4).** Parse the statement and introspect the live schema to
   **predict the path up front** — native-safe, needs-rewrite, or refuse — without trial
-  execution. This is what powers dry-run, advisory suggestions, and the declarative diff, and it
-  removes the wasted/aborted attempts that optimistic classification can incur.
+  execution. The planner drives `diff` and `migrate --dry-run`; Phase 3 will make its classified
+  route drive execution and remove the wasted/aborted attempts that the optimistic path can incur.
 
 > **PostgreSQL caveat.** Unlike MySQL's `ALGORITHM=INSTANT`, PostgreSQL has **no assertion** that
 > forces a change to be instant-or-error — a rewrite attempt acquires `ACCESS EXCLUSIVE` and does
@@ -171,16 +171,15 @@ The engine accepts a change two ways, both feeding the **same** planner pipeline
 
 - **Declarative** — the user supplies the **desired end-state** (a checked-in `CREATE TABLE`
   `.sql` file); the engine **derives** the `ALTER` by diffing desired vs live, then runs it
-  through the classify → route → execute path. This is the front-end we build first.
+  through classify → route. Phase 3 adds execution of the classified route.
 - **Imperative** — the user supplies the `ALTER` directly. It is the **same** pipeline with the
-  diff step skipped, so once declarative works, adding imperative is trivial.
+  diff step skipped.
 
-We **build declarative first** because it does the harder work (introspect + diff + ordering)
-and exercises the full classify → route → execute path; the imperative path then falls out
-almost for free, since it just hands the user's statement to the *same* classifier. Schemas can
-therefore live as reviewed, version-controlled files and CI can compute "what would change".
-Destructive diffs are gated and renames are never guessed. The diff algorithm and its safety
-rules are detailed in the
+Declarative did the harder front-end work (introspect + diff + ordering); both front-ends now
+share classify → route, with imperative input handing the user's statement to the *same*
+classifier. Schemas can therefore live as reviewed, version-controlled files and CI can compute
+"what would change". Destructive-diff confirmation and explicit rename intent are planned. The
+diff algorithm and its safety rules are detailed in the
 [low-level design](low-level-design.md#declarative-mode-desired-state-schema-diff).
 
 ## Advisory mode: suggest the safe rewrite, don't silently run the risky one
@@ -207,10 +206,10 @@ literal statement:
    │   why: a plain CREATE INDEX takes SHARE and blocks writes │
    │        for the whole build; CONCURRENTLY does not.        │
    └──────────────────────────────────────────────────────────-┘
-        │ apply the recommendation            │ insist on the literal
+        │ Phase 3: apply recommendation       │ Phase 3: insist on literal
         ▼                                      ▼
-   engine runs the safe idiom            --force  ⇒  DANGER prompt +
-   (classify-first does the work)        explicit approval, then runs as-is
+   execute the safe idiom                 --force  ⇒  DANGER prompt +
+   (classified sequence)                 explicit approval, then run as-is
 ```
 
 Examples of what it suggests (the same idioms the classifier already knows):
@@ -228,11 +227,16 @@ Two principles govern this:
   surfaces it rather than running the risky form behind the user's back. This is the
   transparent, review-friendly counterpart to *classify-first* — the user still doesn't need to
   know the idiom (the engine names it), but nothing dangerous runs unannounced.
-- **The force route is loud and explicit.** A `--force` (run-as-submitted) flag exists for the
-  rare case where the operator genuinely wants the literal statement. It is gated behind
+- **The planned force route is loud and explicit.** Phase 3 adds a `--force`
+  (run-as-submitted) flag for the rare case where the operator genuinely wants the literal
+  statement. It will be gated behind
   prominent **DANGER / CAUTION** output explaining exactly what will block and for how long, and
   an **explicit confirmation** (typed acknowledgement, not a bare `-y`), and the override is
   logged. Force is an escape hatch, not a convenience.
+
+Today the classifier constructs safer sequences and `diff` / `migrate --dry-run` render them;
+default `migrate` still uses the bounded optimistic Phase 1 path. Phase 3 adds substitution and
+execution of classifier-produced SQL.
 
 In non-interactive contexts (CI), advisory mode is a natural gate: the engine prints the
 recommended rewrites and exits non-zero if a submitted statement would need a riskier path than
@@ -311,6 +315,6 @@ The choices that shape everything else (the full categorized list is in
 - How an orchestrator drives the engine (verbs, adapter contract, constraints) →
   **[schemabot-integration.md](schemabot-integration.md)**.
 - The detailed interfaces, package layout, libraries, lifecycle internals, full coverage matrix,
-  and open decisions → **[low-level-design.md](low-level-design.md)**.
+  and later-phase decisions → **[low-level-design.md](low-level-design.md)**.
 - How Spirit (the inspiration) works → spirit-architecture-notes.md.
 - The phased plan to build it → build-plan.md.

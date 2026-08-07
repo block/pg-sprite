@@ -31,9 +31,8 @@ Concretely:
   that skips it.
 - **Coverage never regresses.** Deleting or skipping a test to get green is
   forbidden (same rule as the hooks: no `--no-verify`, no `nolint`). A
-  numeric coverage ratchet on `pkg/` packages is wired into CI once Phase 1
-  lands the first core package — until then this clause is enforced in
-  review.
+  numeric coverage ratchet on `pkg/` packages is not yet wired into CI, so
+  this clause remains enforced in review.
 
 ## Test-methodology invariants (TM)
 
@@ -47,7 +46,7 @@ Every executor/schema-change integration test drives the **full lifecycle
 through one shared fixture** — start → assert → abort → assert → restart →
 complete → assert — so interrupted-and-retried is the default tested path,
 not a special case. Once checkpointing exists, kill → resume joins the
-lifecycle. *Binds:* Phase 2 (native executor) onward. *Source:* pgroll
+lifecycle. *Binds:* Phase 3 (native executor) onward. *Source:* pgroll
 `ExecuteTests` (`pkg/migrations/op_common_test.go`).
 
 ### TM-2 — Two oracles for safety-encoding SQL
@@ -56,7 +55,7 @@ Generated SQL whose exact shape carries a safety property (chunk
 continuation predicates, `ON CONFLICT` arbiters, timeout preludes,
 fallback-mode trigger bodies) is **frozen by exact-string test AND proven
 behaviorally against a real database** — never just one of the two.
-*Binds:* Phase 2 onward. *Source:* pgroll trigger/backfill template tests;
+*Binds:* Phase 3 onward. *Source:* pgroll trigger/backfill template tests;
 pg-delta's snapshot + roundtrip pairing.
 
 ### TM-3 — Fault injection is real, and asserts durable state
@@ -65,7 +64,7 @@ Contention tests hold a real `ACCESS EXCLUSIVE` lock from a second
 connection; cancellation tests use context deadlines. After any injected
 failure the test asserts the **durable state** (no wedged schema-change record,
 no leaked shadow objects/slots/triggers) and the ability to proceed — not
-merely the returned error type. *Binds:* Phase 2 onward; full
+merely the returned error type. *Binds:* Phase 3 onward; full
 phase-boundary kill/resume matrix at Phases 4–8. *Source:* pgroll's
 lock-holder pattern — and pg_repack's absence of it, the gap peers left
 that our copy-and-swap phases must fill.
@@ -85,14 +84,14 @@ Every declarative-diff test proves, against two real databases: the derived
 plan applies cleanly; re-introspect + re-diff yields **empty**; a second
 derivation emits nothing (idempotency). Comparison is **semantic catalog
 state** (normalized), with SQL snapshots as the secondary oracle; failures
-print the residual diff and the original plan. *Binds:* Phase 3.
+print the residual diff and the original plan. *Binds:* Phase 2 declarative diff onward.
 *Source:* pg-delta `tests/integration/roundtrip.ts`.
 
 ### TM-6 — Every mutation direction per property
 
 For each object property the diff handles: absent → present, present →
 changed, present → absent — plus replacement where PostgreSQL cannot ALTER
-in place. *Binds:* Phase 3. *Source:* pg-delta operation suites.
+in place. *Binds:* Phase 2 declarative diff onward. *Source:* pg-delta operation suites.
 
 ### TM-7 — Benchmarks carry correctness assertions
 
@@ -101,12 +100,13 @@ trigger write amplification) verify post-benchmark data correctness and tag
 results with commit SHA + PG version. A fast wrong answer is a failure.
 *Binds:* Phase 4 onward. *Source:* pgroll `internal/benchmarks`.
 
-### TM-8 — A compiled-binary e2e path exists in CI
+### TM-8 — A compiled-binary e2e path is required in CI
 
 Separate from Go package tests, CI runs the **built `pg-sprite` binary**
 against a real database with checked-in example inputs as the acceptance
 corpus — exit codes, output, and resulting database state asserted.
-*Binds:* Phase 2 (first executing command). *Source:* pgroll `make
+This obligation is not yet wired into CI: CI builds the binary but does not
+run this acceptance path. *Binds:* Phase 2 (first executing command). *Source:* pgroll `make
 examples` CI job; pg_repack driving its CLI through `pg_regress`.
 
 ### TM-9 — The operation must outlive the observer
@@ -159,7 +159,7 @@ loss) cannot be exercised in public CI. Validation against real Aurora
 engine versions is a separate, environment-specific gate that lives outside
 this repository's CI.
 
-## Current coverage (Phase 0)
+## Current coverage (Phases 1 and 2.1–2.4)
 
 | Area | Tests |
 | --- | --- |
@@ -170,24 +170,29 @@ this repository's CI.
 | Verify-full TLS against a live TLS-only server | [pkg/dbconn/tls_integration_test.go](../pkg/dbconn/tls_integration_test.go) |
 | Targeted blocker termination | [pkg/dbconn/dbconn_integration_test.go](../pkg/dbconn/dbconn_integration_test.go) |
 | Test harness self-checks | [internal/testutil](../internal/testutil/postgres_test.go) |
+| Parse boundary, typed operations, and advisory rewrites | [pkg/statement](../pkg/statement/statement_test.go), [operation tests](../pkg/statement/ops_test.go) |
+| Native / copy-and-swap / refuse classification and safer SQL | [pkg/planner](../pkg/planner/planner_test.go) |
+| Backend routing and copy-and-swap unavailable disposition | [pkg/router](../pkg/router/router_test.go) |
+| Scratch execute-and-introspect, ordered diff, and convergence (`TestDiffConverges`) | [pkg/schemadiff](../pkg/schemadiff/schemadiff_integration_test.go), [diff tests](../pkg/schemadiff/diff_test.go) |
+| CLI `diff`, `fmt`, and classified `migrate --dry-run`, including applying text output and re-diffing to empty (`TestDiffTextPlanIsExecutableSQL`) | [diff integration](../internal/cli/diff_integration_test.go), [fmt](../internal/cli/diff_test.go), [dry-run integration](../internal/cli/dryrun_integration_test.go) |
+| Bounded optimistic native attempt and table preflight | [pkg/executor](../pkg/executor/optimistic_integration_test.go), [pkg/preflight](../pkg/preflight/preflight_integration_test.go) |
 
-## Deferred test obligations (Phases 1–3)
+## Landed and deferred test obligations
 
-These are owed when the corresponding implementation lands — they are not
-written speculatively against unimplemented behavior. The authoritative
+Completed obligations are recorded alongside those owed when the corresponding implementation
+lands; tests are not written speculatively against unimplemented behavior. The authoritative
 per-phase test lists live in the build plan; the invariant registry
 ([invariants.md](invariants.md)) carries the per-invariant enforcement
 points.
 
-| Phase | Test obligations (summary) |
+| Status | Test obligations (summary) |
 | --- | --- |
-| 1 — statement/classifier | Parse-based classification per DDL form; refusal (`not-native-safe`) contract; every classification decision tested against the reference table in [postgres-online-ddl-reference.md](postgres-online-ddl-reference.md). |
-| 2 — native executor | Each native idiom (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default, `USING INDEX`) exercised against all supported majors; bounded lock behavior under contention; invalid-index cleanup. |
-| 3 — declarative diff | Desired-state → `ALTER` derivation correctness; diff idempotency (no-op on converged schema); refusal propagation through the diff path. |
+| Done — Phases 2.1–2.4 | Parse-based operation descriptors and classification, refusal contracts, declarative desired-state → ordered `ALTER` derivation, routing, and convergence testing against real PostgreSQL. |
+| Remaining — Phase 3 native executor | Each native idiom (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default, `USING INDEX`) exercised against all supported majors; bounded lock behavior under contention; invalid-index cleanup. |
+| Remaining — later copy-and-swap phases | Shadow table, CDC, checksum-gate, cutover, checkpoint/resume, and fault-injection obligations land with their implementations. |
 
-Copy-and-swap (shadow table, CDC, checksum gate, cutover, resume) is
-Phases 4–7 and carries its own obligations, including checksum-gate and
-checkpoint/resume fault-injection tests.
+Copy-and-swap obligations include checksum-gate and checkpoint/resume
+fault-injection tests.
 
 ## Topology obligations from peer-tool CIs
 

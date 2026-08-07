@@ -9,6 +9,11 @@ PostgreSQL has **no** `ALGORITHM={INSTANT,INPLACE,COPY}` knob. What matters inst
 2. **Whether it rewrites the table** (or does a full scan), and therefore how long it holds
    that lock.
 
+These are exactly the two dimensions MySQL lets authors *assert* with `ALGORITHM=` and
+`LOCK=` (failing closed when either can't be honored). PostgreSQL offers no such clause —
+pg-sprite's `diff` and `migrate --dry-run` are that missing declaration today: they classify
+and route the change. Routed execution lands with the Phase 3 executor.
+
 The rest of this document breaks down both dimensions per operation. 
 
 ## Table of contents
@@ -75,8 +80,9 @@ online path, so the heavy **shadow-copy + atomic cutover** path is required ·
 - ❌ No = metadata-only or already online, just guard with `lock_timeout`.
 
 > **`Needs copy-and-swap? = No` does not mean "don't use the engine".** The engine still
-> helps on the ➖ and ❌ rows — it classifies the change and runs the correct *native*
-> sequence for you instead of a copy. Only the ✅ rows force a full copy. See
+> helps on the ➖ and ❌ rows — it classifies the change and shows the correct *native*
+> sequence; automated execution of routed sequences lands with the Phase 3 executor. Only the
+> ✅ rows force a full copy. See
 > 03-why-build-this-engine.md § The engine helps on every change, not just rewrites.
 
 > GitHub-rendered markdown tables are not interactively sortable (no client-side JS). The
@@ -210,8 +216,8 @@ cutover) are the **table-rewrite** ones, because PostgreSQL cannot do them onlin
 **Everything else can be done natively-safe** with PostgreSQL's own
 `CONCURRENTLY` / `NOT VALID`+`VALIDATE` / fast-default / `USING INDEX` patterns. By the
 [*classify-before-copy* principle](design-principles.md#classify-first-leverage-native-postgresql),
-the engine **detects those and routes them to native DDL**
-instead of doing a copy — the same bypass Spirit applies when it attempts `INSTANT`/`INPLACE`
+the plan **detects those and routes them to native DDL** instead of a copy; executing the routed
+backend lands in Phase 3 — the same bypass Spirit applies when it attempts `INSTANT`/`INPLACE`
 before falling back to a table copy. A shadow-table copy is the last resort, used only when no
 native online path exists.
 
