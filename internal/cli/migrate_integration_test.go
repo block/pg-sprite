@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	neturl "net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -56,6 +57,34 @@ func TestMigrateExecutesInstantChange(t *testing.T) {
 		`SELECT data_type FROM information_schema.columns
 		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'age'`, schema).Scan(&typ))
 	assert.Equal(t, "integer", typ)
+}
+
+// ALTER TABLE ... RENAME COLUMN parses as a RenameStmt, not an
+// AlterTableStmt, but is a table-targeted instant catalog change: the front
+// door must route it through, not refuse it as unsupported.
+func TestMigrateExecutesRenameColumn(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, a int)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t RENAME COLUMN a TO b", schema))
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+
+	var n int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'b'`, schema).Scan(&n))
+	assert.Equal(t, 1, n, "the rename must have committed")
 }
 
 // Acceptance (ii): a rewrite-requiring change is cancelled, leaves schema and
@@ -143,6 +172,11 @@ func TestMigrateGateRefusesWithoutDatabase(t *testing.T) {
 		{"create index", "CREATE INDEX i ON t (c)", verdict.ReasonIndexStatement, "CREATE INDEX CONCURRENTLY"},
 		{"drop index", "DROP INDEX i", verdict.ReasonIndexStatement, "DROP INDEX CONCURRENTLY"},
 		{"reindex", "REINDEX TABLE t", verdict.ReasonIndexStatement, "REINDEX ... CONCURRENTLY"},
+		// The already-concurrent forms carry no safer idiom: suggesting the
+		// statement the user submitted would loop a resubmitting automation.
+		{"create index concurrently", "CREATE INDEX CONCURRENTLY i ON t (c)", verdict.ReasonIndexStatement, ""},
+		{"drop index concurrently", "DROP INDEX CONCURRENTLY i", verdict.ReasonIndexStatement, ""},
+		{"reindex concurrently", "REINDEX TABLE CONCURRENTLY t", verdict.ReasonIndexStatement, ""},
 		{"alter index", "ALTER INDEX i SET (fillfactor = 90)", verdict.ReasonUnsupportedStatement, ""},
 		{"create table", "CREATE TABLE t (id int)", verdict.ReasonUnsupportedStatement, "pg-sprite diff --desired schema.sql"},
 	}
@@ -249,6 +283,41 @@ func TestStatusReportsNoSessions(t *testing.T) {
 	var text strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &text))
 	assert.NotEmpty(t, text.String())
+}
+
+// pg_stat_activity nulls out state and query for other roles' backends when
+// the viewer lacks pg_read_all_stats — the read-only-operator shape. status
+// must render those sessions, not crash the scan.
+func TestStatusHandlesOtherRolesSessions(t *testing.T) {
+	superURL := testutil.StartPostgres(t)
+	superPool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: superURL})
+	require.NoError(t, err)
+	defer superPool.Close()
+
+	_, err = superPool.Exec(t.Context(), "CREATE ROLE limited LOGIN PASSWORD 'limited-test-only'")
+	require.NoError(t, err)
+
+	// Hold a superuser pg-sprite session open on a pinned connection so
+	// pg_stat_activity is guaranteed to contain a foreign-role row while
+	// status runs.
+	conn, err := superPool.Acquire(t.Context())
+	require.NoError(t, err)
+	defer conn.Release()
+	var pid int
+	require.NoError(t, conn.QueryRow(t.Context(), "SELECT pg_backend_pid()").Scan(&pid))
+
+	u, err := neturl.Parse(superURL)
+	require.NoError(t, err)
+	u.User = neturl.UserPassword("limited", "limited-test-only")
+
+	cmd := &StatusCmd{DBFlags: DBFlags{URL: u.String()}, JSON: true}
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var sessions []session
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &sessions))
+	i := slices.IndexFunc(sessions, func(s session) bool { return s.PID == pid })
+	require.GreaterOrEqual(t, i, 0, "the other role's session must be listed, not crash the scan")
 }
 
 // A live pg-sprite session (any connection made through pkg/dbconn) is

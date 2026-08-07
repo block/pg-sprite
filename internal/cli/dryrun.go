@@ -28,7 +28,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	logger.Debug("statement parsed", "kind", st.Kind, "schema", st.Schema, "table", st.Table)
+	logger.Debug("statement parsed", "kind", st.Kind(), "schema", st.Schema(), "table", st.Table())
 
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {
@@ -40,7 +40,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	plan, err := planner.Classify(st.SQL, facts)
+	plan, err := planner.Classify(st.SQL(), facts)
 	if err != nil {
 		return err
 	}
@@ -68,14 +68,14 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 // facts. Statements without a single table target (index maintenance) and
 // missing tables classify with zero facts.
 func dryRunFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Statement) (planner.Facts, error) {
-	if st.Table == "" {
+	if st.Table() == "" {
 		return planner.Facts{}, nil
 	}
-	schema := st.Schema
+	schema := st.Schema()
 	if schema == "" {
 		schema = "public"
 	}
-	live, err := schemadiff.Introspect(ctx, pool, schema, st.Table)
+	live, err := schemadiff.Introspect(ctx, pool, schema, st.Table())
 	switch {
 	case errors.Is(err, schemadiff.ErrTableNotFound):
 		return planner.Facts{}, nil

@@ -1,6 +1,6 @@
 # Online schema change engine for Aurora PostgreSQL
 
-Research and design notes for building an online schema migration engine targeting
+Research and design notes for building an online schema-change engine targeting
 **Aurora PostgreSQL**, by deriving and combining the best practices from established tools —
 [Spirit](https://github.com/block/spirit) (Aurora MySQL),
 [pg_osc](https://github.com/shayonj/pg-osc), [pg_repack](https://github.com/reorg/pg_repack),

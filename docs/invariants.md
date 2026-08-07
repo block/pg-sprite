@@ -229,6 +229,16 @@ parsing is advisory. *Enforced today:* declarative diff. *Planned enforcement:* 
 paths in preflight. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 
+### ST-7 — The executor runs exactly the statement that was gated
+
+The executor accepts only a parsed `statement.Statement` — constructible solely by `ParseOne`,
+which enforces exactly one statement through the real grammar — and refuses, before anything
+executes, any statement whose target table does not match the preflight proof it was handed.
+A proof for one table can never smuggle SQL against another, and a multi-statement string can
+never reach the database through the executor (pgx's simple protocol would happily run all of
+it). *Enforced:* `pkg/executor` (`AttemptNative`), `pkg/statement` (proof construction).
+*Source:* adversarial review of the optimistic front door.
+
 ## Refusals and preflight (RF)
 
 Each refusal is a preflight **error with a stated reason** — never a warning, never attempted.
@@ -320,4 +330,5 @@ about **how we write and review the code**.
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |
 | ST-1, ST-2, ST-3, ST-4 | 8 | kill/resume, cross-version refuse, orphan-slot reap, failover reconcile |
 | ST-6 | 1 onward, complete by 8 | preflight matrix |
+| ST-7 | 1 | target-mismatch refusal + single-statement-by-construction tests |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

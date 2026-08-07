@@ -64,6 +64,43 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpAddColumn, Column: "total", NewType: "numeric", GeneratedStored: true},
 		},
 		{
+			name: "add column inline unique",
+			sql:  "ALTER TABLE t ADD COLUMN c int UNIQUE",
+			want: statement.Op{Kind: statement.OpAddColumn, Column: "c", NewType: "int4",
+				InlineConstraints: []statement.ConstraintKind{statement.ConstraintUnique}},
+		},
+		{
+			name: "add column inline primary key",
+			sql:  "ALTER TABLE t ADD COLUMN c int PRIMARY KEY",
+			want: statement.Op{Kind: statement.OpAddColumn, Column: "c", NewType: "int4",
+				InlineConstraints: []statement.ConstraintKind{statement.ConstraintPrimaryKey}},
+		},
+		{
+			name: "add column inline foreign key",
+			sql:  "ALTER TABLE t ADD COLUMN c int REFERENCES parent (id)",
+			want: statement.Op{Kind: statement.OpAddColumn, Column: "c", NewType: "int4",
+				InlineConstraints: []statement.ConstraintKind{statement.ConstraintForeignKey}},
+		},
+		{
+			name: "add column inline check",
+			sql:  "ALTER TABLE t ADD COLUMN c int CHECK (c > 0)",
+			want: statement.Op{Kind: statement.OpAddColumn, Column: "c", NewType: "int4",
+				InlineConstraints: []statement.ConstraintKind{statement.ConstraintCheck}},
+		},
+		{
+			name: "add column inline check with constant default",
+			sql:  "ALTER TABLE t ADD COLUMN c int DEFAULT 0 CHECK (c > 0)",
+			want: statement.Op{Kind: statement.OpAddColumn, Column: "c", NewType: "int4",
+				Default:           statement.DefaultConstant,
+				InlineConstraints: []statement.ConstraintKind{statement.ConstraintCheck}},
+		},
+		{
+			name: "add column not null carries no inline constraint",
+			sql:  "ALTER TABLE t ADD COLUMN c int NOT NULL DEFAULT 0",
+			want: statement.Op{Kind: statement.OpAddColumn, Column: "c", NewType: "int4",
+				Default: statement.DefaultConstant},
+		},
+		{
 			name: "drop column",
 			sql:  "ALTER TABLE t DROP COLUMN age",
 			want: statement.Op{Kind: statement.OpDropColumn, Column: "age"},
