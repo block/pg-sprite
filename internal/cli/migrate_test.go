@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -12,12 +13,8 @@ import (
 )
 
 func TestBudgetVerdict(t *testing.T) {
-	st := statement.Statement{
-		SQL:    "ALTER TABLE billing.invoices ALTER COLUMN id TYPE bigint",
-		Kind:   statement.KindAlterTable,
-		Schema: "billing",
-		Table:  "invoices",
-	}
+	st, err := statement.ParseOne("ALTER TABLE billing.invoices ALTER COLUMN id TYPE bigint")
+	require.NoError(t, err)
 
 	t.Run("lock budget", func(t *testing.T) {
 		v := budgetVerdict(st, &executor.BudgetError{Cause: executor.CauseLock, Budget: 3 * time.Second})

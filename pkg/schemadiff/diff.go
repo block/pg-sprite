@@ -18,13 +18,71 @@ var ErrUnsupportedChange = errors.New("unsupported schema change")
 // tables — a caller bug, refused rather than diffed.
 var ErrDifferentTables = errors.New("models describe different tables")
 
+// ChangeKind classifies a derived statement so a consumer can gate whole
+// classes of change (destructive, rewriting, index-building) without
+// parsing SQL.
+type ChangeKind string
+
+// The change kinds a plan can contain.
+const (
+	// ChangeCreateTable creates the table (missing-table plans only).
+	ChangeCreateTable ChangeKind = "create-table"
+	// ChangeDropIndex drops an index.
+	ChangeDropIndex ChangeKind = "drop-index"
+	// ChangeDropConstraint drops a table constraint.
+	ChangeDropConstraint ChangeKind = "drop-constraint"
+	// ChangeDropColumn drops a column.
+	ChangeDropColumn ChangeKind = "drop-column"
+	// ChangeAddColumn adds a column.
+	ChangeAddColumn ChangeKind = "add-column"
+	// ChangeAlterType changes a column's type.
+	ChangeAlterType ChangeKind = "alter-type"
+	// ChangeSetDefault sets or replaces a column default.
+	ChangeSetDefault ChangeKind = "set-default"
+	// ChangeDropDefault drops a column default.
+	ChangeDropDefault ChangeKind = "drop-default"
+	// ChangeSetNotNull adds the NOT NULL attribute.
+	ChangeSetNotNull ChangeKind = "set-not-null"
+	// ChangeDropNotNull removes the NOT NULL attribute.
+	ChangeDropNotNull ChangeKind = "drop-not-null"
+	// ChangeAddConstraint adds a table constraint.
+	ChangeAddConstraint ChangeKind = "add-constraint"
+	// ChangeCreateIndex creates an index.
+	ChangeCreateIndex ChangeKind = "create-index"
+)
+
+// ChangeKinds returns the closed set of ChangeKind values. It is part of
+// the plan-report contract (docs/plan-report.md): the set changes only with
+// a format_version bump, and a consumer that meets an unrecognized value
+// must treat the statement as unknown and refuse it.
+func ChangeKinds() []ChangeKind {
+	return []ChangeKind{
+		ChangeCreateTable,
+		ChangeDropIndex,
+		ChangeDropConstraint,
+		ChangeDropColumn,
+		ChangeAddColumn,
+		ChangeAlterType,
+		ChangeSetDefault,
+		ChangeDropDefault,
+		ChangeSetNotNull,
+		ChangeDropNotNull,
+		ChangeAddConstraint,
+		ChangeCreateIndex,
+	}
+}
+
 // Change is one derived statement of the ordered plan.
 type Change struct {
 	// SQL is the literal statement, without a trailing semicolon.
 	SQL string `json:"sql"`
-	// Destructive marks statements that discard data or constraints
-	// (column and constraint drops). Destructive changes are gated by the
-	// caller, never executed silently.
+	// Kind classifies the statement for consumers that gate by class.
+	Kind ChangeKind `json:"kind"`
+	// Destructive marks statements that discard data, constraints, or
+	// indexes (column, constraint, and index drops — dropping a unique
+	// index discards the same guarantee as dropping a unique constraint).
+	// Destructive changes are gated by the caller, never executed
+	// silently.
 	Destructive bool `json:"destructive,omitempty"`
 }
 
@@ -34,7 +92,9 @@ type Change struct {
 // creates — so an added column exists before an index or constraint that
 // references it. Within each bucket the order is deterministic: attribute
 // order for columns, name order for constraints and indexes. schema
-// qualifies the emitted statements' table references.
+// qualifies the emitted statements' table references. Columns are compared
+// by name only: attribute order carries no semantics in PostgreSQL and is
+// deliberately out of scope for convergence.
 func Diff(schema string, live, desired Model) ([]Change, error) {
 	if live.Table != desired.Table {
 		return nil, fmt.Errorf("%w: %q vs %q", ErrDifferentTables, live.Table, desired.Table)
@@ -56,7 +116,9 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		want, ok := desiredIdx[ix.Name]
 		if !ok || want.Def != ix.Def {
 			changes = append(changes, Change{
-				SQL: "DROP INDEX " + pgx.Identifier{schema, ix.Name}.Sanitize(),
+				SQL:         "DROP INDEX " + pgx.Identifier{schema, ix.Name}.Sanitize(),
+				Kind:        ChangeDropIndex,
+				Destructive: true,
 			})
 		}
 	}
@@ -67,6 +129,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if !ok || want.Def != con.Def {
 			changes = append(changes, Change{
 				SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
+				Kind:        ChangeDropConstraint,
 				Destructive: true,
 			})
 		}
@@ -79,16 +142,24 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if _, ok := desiredCols[col.Name]; !ok {
 			changes = append(changes, Change{
 				SQL:         "ALTER TABLE " + table + " DROP COLUMN " + pgx.Identifier{col.Name}.Sanitize(),
+				Kind:        ChangeDropColumn,
 				Destructive: true,
 			})
 		}
 	}
 
-	// Columns to add.
+	// Columns to add. A sequence-backed default (serial) cannot be added:
+	// the desired-side sequence existed only inside the rolled-back
+	// scratch transaction, so the emitted default would reference a
+	// relation the plan never creates.
 	for _, col := range desired.Columns {
 		if _, ok := liveCols[col.Name]; !ok {
+			if col.SequenceDefault {
+				return nil, fmt.Errorf("%w: column %q has a sequence-backed default (serial); the plan cannot create its sequence", ErrUnsupportedChange, col.Name)
+			}
 			changes = append(changes, Change{
-				SQL: "ALTER TABLE " + table + " ADD COLUMN " + columnDef(col),
+				SQL:  "ALTER TABLE " + table + " ADD COLUMN " + columnDef(col),
+				Kind: ChangeAddColumn,
 			})
 		}
 	}
@@ -111,7 +182,8 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		had, ok := liveCons[con.Name]
 		if !ok || had.Def != con.Def {
 			changes = append(changes, Change{
-				SQL: "ALTER TABLE " + table + " ADD CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize() + " " + con.Def,
+				SQL:  "ALTER TABLE " + table + " ADD CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize() + " " + con.Def,
+				Kind: ChangeAddConstraint,
 			})
 		}
 	}
@@ -126,7 +198,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			if err != nil {
 				return nil, fmt.Errorf("qualify index %s: %w", ix.Name, err)
 			}
-			changes = append(changes, Change{SQL: qualified})
+			changes = append(changes, Change{SQL: qualified, Kind: ChangeCreateIndex})
 		}
 	}
 
@@ -150,28 +222,41 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	var changes []Change
 	if live.Type != desired.Type {
 		changes = append(changes, Change{
-			SQL: "ALTER TABLE " + table + " ALTER COLUMN " + col + " TYPE " + desired.Type,
+			SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " TYPE " + desired.Type,
+			Kind: ChangeAlterType,
 		})
 	}
 	if !desired.Generated && desired.Identity == IdentityNone && live.Default != desired.Default {
+		// A sequence-backed desired default (serial adoption) is refused:
+		// the sequence existed only inside the rolled-back scratch
+		// transaction, so the emitted SET DEFAULT would reference a
+		// relation the plan never creates — or worse, silently bind to an
+		// unrelated live sequence of the same name.
+		if desired.SequenceDefault {
+			return nil, fmt.Errorf("%w: column %q would adopt a sequence-backed default (serial); the plan cannot create its sequence", ErrUnsupportedChange, live.Name)
+		}
 		if desired.Default == "" {
 			changes = append(changes, Change{
-				SQL: "ALTER TABLE " + table + " ALTER COLUMN " + col + " DROP DEFAULT",
+				SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " DROP DEFAULT",
+				Kind: ChangeDropDefault,
 			})
 		} else {
 			changes = append(changes, Change{
-				SQL: "ALTER TABLE " + table + " ALTER COLUMN " + col + " SET DEFAULT " + desired.Default,
+				SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " SET DEFAULT " + desired.Default,
+				Kind: ChangeSetDefault,
 			})
 		}
 	}
 	if live.NotNull != desired.NotNull {
 		if desired.NotNull {
 			changes = append(changes, Change{
-				SQL: "ALTER TABLE " + table + " ALTER COLUMN " + col + " SET NOT NULL",
+				SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " SET NOT NULL",
+				Kind: ChangeSetNotNull,
 			})
 		} else {
 			changes = append(changes, Change{
-				SQL: "ALTER TABLE " + table + " ALTER COLUMN " + col + " DROP NOT NULL",
+				SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " DROP NOT NULL",
+				Kind: ChangeDropNotNull,
 			})
 		}
 	}

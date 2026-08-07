@@ -78,3 +78,22 @@ func NewSchema(t *testing.T, pool *pgxpool.Pool) string {
 	})
 	return name
 }
+
+// NewPublicTable creates a uniquely named throwaway table in the public
+// schema — for tests that exercise unqualified-statement resolution, where
+// a dedicated schema would defeat the point — and returns its name. The
+// unique name keeps a shared PG_DSN database safe; cleanup drops the table.
+func NewPublicTable(t *testing.T, pool *pgxpool.Pool, columns string) string {
+	t.Helper()
+	name := fmt.Sprintf("t_%d_%d", os.Getpid(), schemaSeq.Add(1))
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE public.%s %s", name, columns))
+	require.NoError(t, err, "create throwaway public table")
+	t.Cleanup(func() {
+		// t.Context is cancelled by cleanup time; strip the cancellation.
+		_, err := pool.Exec(context.WithoutCancel(t.Context()), fmt.Sprintf("DROP TABLE IF EXISTS public.%s", name))
+		if err != nil {
+			t.Logf("drop throwaway public table %s: %v", name, err)
+		}
+	})
+	return name
+}

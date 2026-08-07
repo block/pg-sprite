@@ -29,6 +29,14 @@ var (
 	// ErrConcurrentIndex is returned for CREATE INDEX CONCURRENTLY, which
 	// cannot run inside the scratch transaction.
 	ErrConcurrentIndex = errors.New("CONCURRENTLY cannot be used in a desired schema")
+	// ErrForeignKey is returned when the CREATE TABLE carries a REFERENCES
+	// clause. The scratch transaction cannot faithfully execute a foreign
+	// key: an unqualified reference resolves against the scratch
+	// search_path, not the target schema, so it either fails or silently
+	// binds to the wrong table. Foreign-key support needs its own design
+	// (cross-file ordering, lock behavior, qualification policy); until
+	// then the admission gate refuses it.
+	ErrForeignKey = errors.New("foreign keys are not supported in a desired schema")
 	// ErrWrongIndexTarget is returned when an index targets a table other
 	// than the desired CREATE TABLE.
 	ErrWrongIndexTarget = errors.New("index must target the desired table")
@@ -63,10 +71,10 @@ func ParseDesired(sql string) (DesiredSchema, error) {
 		if err != nil {
 			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
-		if st.Kind == KindCreateTable {
-			ds.Table = st.Table
+		if st.kind == KindCreateTable {
+			ds.Table = st.table
 		}
-		if st.SQL, err = deparseOne(raw.GetStmt()); err != nil {
+		if st.sql, err = deparseOne(raw.GetStmt()); err != nil {
 			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
 		ds.Statements = append(ds.Statements, st)
@@ -75,9 +83,9 @@ func ParseDesired(sql string) (DesiredSchema, error) {
 		return DesiredSchema{}, ErrNoCreateTable
 	}
 	for _, st := range ds.Statements {
-		if st.Kind == KindCreateIndex && st.Table != ds.Table {
+		if st.kind == KindCreateIndex && st.table != ds.Table {
 			return DesiredSchema{}, fmt.Errorf("%w: index on %q, desired table is %q",
-				ErrWrongIndexTarget, st.Table, ds.Table)
+				ErrWrongIndexTarget, st.table, ds.Table)
 		}
 	}
 	return ds, nil
@@ -89,14 +97,18 @@ func ParseDesired(sql string) (DesiredSchema, error) {
 func admitDesiredStatement(node *pganalyze.Node, seenTable string) (Statement, error) {
 	switch {
 	case node.GetCreateStmt() != nil:
-		rel := node.GetCreateStmt().GetRelation()
+		create := node.GetCreateStmt()
+		rel := create.GetRelation()
 		if rel.GetSchemaname() != "" {
 			return Statement{}, fmt.Errorf("%w: %s.%s", ErrQualifiedName, rel.GetSchemaname(), rel.GetRelname())
 		}
 		if seenTable != "" {
 			return Statement{}, ErrMultipleCreateTables
 		}
-		return Statement{Kind: KindCreateTable, Table: rel.GetRelname()}, nil
+		if err := refuseForeignKeys(create); err != nil {
+			return Statement{}, err
+		}
+		return Statement{kind: KindCreateTable, table: rel.GetRelname()}, nil
 	case node.GetIndexStmt() != nil:
 		idx := node.GetIndexStmt()
 		if idx.GetConcurrent() {
@@ -106,10 +118,31 @@ func admitDesiredStatement(node *pganalyze.Node, seenTable string) (Statement, e
 		if rel.GetSchemaname() != "" {
 			return Statement{}, fmt.Errorf("%w: %s.%s", ErrQualifiedName, rel.GetSchemaname(), rel.GetRelname())
 		}
-		return Statement{Kind: KindCreateIndex, Table: rel.GetRelname()}, nil
+		return Statement{kind: KindCreateIndex, table: rel.GetRelname()}, nil
 	default:
 		return Statement{}, ErrDisallowedStatement
 	}
+}
+
+// refuseForeignKeys returns ErrForeignKey when the CREATE TABLE carries a
+// REFERENCES clause, in either its column-constraint or table-constraint
+// form. This inspects constraint kinds only — no semantics are derived.
+func refuseForeignKeys(create *pganalyze.CreateStmt) error {
+	for _, elt := range create.GetTableElts() {
+		if con := elt.GetConstraint(); con != nil && con.GetContype() == pganalyze.ConstrType_CONSTR_FOREIGN {
+			return fmt.Errorf("%w: table constraint on %q", ErrForeignKey, create.GetRelation().GetRelname())
+		}
+		col := elt.GetColumnDef()
+		if col == nil {
+			continue
+		}
+		for _, c := range col.GetConstraints() {
+			if con := c.GetConstraint(); con != nil && con.GetContype() == pganalyze.ConstrType_CONSTR_FOREIGN {
+				return fmt.Errorf("%w: column %q", ErrForeignKey, col.GetColname())
+			}
+		}
+	}
+	return nil
 }
 
 // Qualify returns sql with its target relation qualified by schema; an
