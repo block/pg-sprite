@@ -13,7 +13,8 @@ points here.
 
 - [Overview](#overview)
 - [Verb mapping (conceptual)](#verb-mapping-conceptual)
-- [The concrete contract](#the-concrete-contract)
+- [The proposed SchemaBot-side contract](#the-proposed-schemabot-side-contract)
+- [Execution-mode verdicts and direct execution](#execution-mode-verdicts-and-direct-execution)
 - [Design constraints the integration imposes](#design-constraints-the-integration-imposes)
 
 ## Overview
@@ -75,8 +76,8 @@ the integration phase starts; they drift.)
 | `engine.Engine` method | `pg-sprite` implementation |
 | --- | --- |
 | `Name()` | a stable identifier, e.g. `"pg-sprite"` |
-| `Plan` | run parse → declarative diff when applicable → classify → route; return a `PlanResult` whose `SchemaChange.TableChanges` are `engine.TableChange{Table, Operation (statement.StatementType), DDL, IsUnsafe, UnsafeReason}` |
-| `Apply` | start the native executor asynchronously, or map a **not native-safe** refusal to `engine.ExecutionModeBlocked`; return immediately |
+| `Plan` | run parse → declarative diff when applicable → classify → route; return a `PlanResult` whose `SchemaChange.TableChanges` are `engine.TableChange{Table, Operation (statement.StatementType), DDL, IsUnsafe, UnsafeReason, ExecutionMode, ModeReason}`; map a **not native-safe** refusal to `engine.ExecutionModeBlocked` with the refusal reason as `ModeReason` (see [execution-mode verdicts](#execution-mode-verdicts-and-direct-execution)) |
+| `Apply` | start the native executor asynchronously and return immediately; re-resolve the routing decision at execution time rather than trusting the stored plan-time verdict (see [execution-mode verdicts](#execution-mode-verdicts-and-direct-execution)) |
 | `Progress` | per-table rows-copied / total / percent / ETA / checksum state |
 | `Stop` / `Start` | checkpoint and resume (slot + copy + applier watermark) |
 | `Cutover` | the deferred, operator-gated atomic swap |
@@ -86,8 +87,8 @@ the integration phase starts; they drift.)
 
 A refusal is a first-class planning verdict, not a delegation fallback: it includes the reason,
 notes that copy-and-swap support arrives in later phases, and names a safer native alternative
-where one exists. The adapter maps that verdict to `engine.ExecutionModeBlocked`; it never invokes
-pg-osc or another external copy tool.
+where one exists. The adapter maps that verdict to `engine.ExecutionModeBlocked` at plan time; it
+never invokes pg-osc or another external copy tool.
 
 **Registration / selection.** The orchestrator core is `pkg/tern`; `tern.NewLocalClient` has
 built-in branches for `storage.DatabaseTypeMySQL` (Spirit) and `storage.DatabaseTypeVitess`
@@ -107,6 +108,58 @@ package. Landing this is one of:
 - `engine.DeferredCutoverSignalChecker` — `DeferredCutoverSignalExists` for durable
   deferred-cutover recovery (Spirit implements it).
 - `engine.Drainer` — `Drain()` to flush in-flight background work on sequential resume.
+
+## Execution-mode verdicts and direct execution
+
+SchemaBot records a per-statement **execution-mode verdict** on each planned `TableChange`:
+empty means the engine's default path, `blocked` means the engine deterministically refuses
+(the apply will fail), and `direct` means a standing `direct_execution` policy routes the
+refused statement to native DDL run directly on the target. The verdict vocabulary lives in
+[`pkg/engine`](https://github.com/block/schemabot/blob/main/pkg/engine/engine.go), so the
+adapter speaks it without touching anything MySQL-specific, and the engine-adoption contract
+is codified upstream in SchemaBot's
+[direct-execution doc](https://github.com/block/schemabot/blob/main/docs/direct-execution.md#engine-compatibility)
+— written with PostgreSQL explicitly in mind (it names the `pg_class.reltuples = -1` sentinel
+and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
+
+- **Refusal source.** On the Spirit side the refused-statement signal is Spirit's own refusal;
+  here it is pg-sprite's classify verdict. `Plan` maps a pg-sprite *refuse* →
+  `engine.ExecutionModeBlocked` with the refusal reason as `ModeReason`. Only after that
+  mapping could a direct-execution policy upgrade the verdict to `direct` — and the v1
+  decision is that PostgreSQL targets do **not** get `direct_execution` at all: on MySQL a
+  small-table direct ALTER blocks only writes, but the PostgreSQL native route holds
+  `ACCESS EXCLUSIVE` and blocks reads too, so the policy's risk framing does not transfer.
+- **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
+  operators learn about engine limitations at plan time, but it is estimate-based and stale by
+  apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement
+  at apply time, and the adoption contract requires the same of any adopting engine:
+  pg-sprite's `Apply` must re-resolve the routing decision at execution time and act on that
+  fresh decision — never treat the stored plan-time verdict as execution authority. This is
+  [OC-4](invariants.md#oc-4--toctou-discipline-on-all-async-state) applied to the verdict.
+- **Partition ordering.** SchemaBot partitions the ALTER phase and fixes the execution order:
+  all direct-routed statements run first, then all engine-driven ones, regardless of their
+  relative order in the plan — and a statement in one partition that depends on one in the
+  other fails the apply (fail closed, never reorder to satisfy a dependency). pg-sprite's
+  router must mirror that ordering or explicitly document its own.
+- **Transactional DDL is a PostgreSQL advantage here.** The MySQL executor keeps no durable
+  record of completed direct statements, so a resume/retry of a failed apply can re-execute
+  one — a contract question every adopting engine inherits. On PostgreSQL the answer is
+  cleaner: run the direct statement inside a transaction, and a failed apply leaves nothing
+  behind — the only residual ambiguity is the commit boundary on a dropped connection, which
+  [LK-4](invariants.md#lk-4--an-ambiguous-cutover-outcome-is-resolved-by-inspection-never-assumed)
+  already resolves by catalog inspection.
+- **Consent copy is engine-keyed, and PostgreSQL's must not inherit MySQL's revertibility
+  framing.** SchemaBot pins a disclosure to its consent comment whose wording is selected per
+  database type; unregistered engines get a conservative engine-neutral fallback: "each table
+  is unavailable while its statement runs" + "not revertible". For PostgreSQL the availability
+  half is exactly right (`ACCESS EXCLUSIVE` blocks reads and writes), but the blanket "not
+  revertible" is conservatively wrong for the **failure** case: PostgreSQL DDL is
+  transactional, so a failed or cancelled direct statement rolls back cleanly. When the
+  PostgreSQL consent copy is registered, the outcome sentence should split — *if it fails it
+  rolls back cleanly; if it succeeds it is not revertible* — so the transactional-DDL
+  advantage is visible in the disclosure rather than flattened into MySQL's indeterminacy.
+  MySQL-only semantics ("revertible via rollback", "reads still work") must never leak into
+  the shared fallback.
 
 ## Design constraints the integration imposes
 
