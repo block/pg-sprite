@@ -137,6 +137,7 @@ capability no peer suite has.
 | `make test` | Full suite; integration tests start disposable PostgreSQL containers (testcontainers). `PG_VERSION` selects the major (default 16). |
 | `make test-supported-postgres` | Full suite against every supported major, 14 → 18 — the local mirror of the CI matrix. |
 | `make db-up` / `make test-db` / `make db-down` | Long-lived compose database on localhost; the suite connects to it via `PG_DSN` instead of starting per-test containers. Fastest loop for repeated integration runs. |
+| `make test-aws-boundary` | AWS-boundary tests against Ministack's RDS/Aurora control plane. Needs Docker only; see the tier table below. |
 
 The harness is [internal/testutil](../internal/testutil/postgres.go):
 `StartPostgres` returns a connection URL (container, or `PG_DSN` when set)
@@ -148,16 +149,60 @@ generated CA for verify-full tests. The harness has its own tests proving
 the version selected by `PG_VERSION` is the version actually running, and
 that throwaway schemas are isolated.
 
-## Version matrix vs real Aurora
+## Aurora-shaped environments: three tiers, each proving what it can
 
 CI runs the matrix against **vanilla PostgreSQL 14 → 18 images** — the floor
 promised in [postgresql-version-support.md](postgresql-version-support.md) is
 enforced by CI, not just documented. Vanilla PostgreSQL is *not* Aurora:
-storage internals, replication, and failover behavior differ, and some
-Aurora-specific behavior (e.g. `rds.logical_replication`, failover slot
-loss) cannot be exercised in public CI. Validation against real Aurora
-engine versions is a separate, environment-specific gate that lives outside
-this repository's CI.
+storage internals, replication, and failover behavior differ. The suite is
+explicit about which environment proves which claim, and never lets a
+cheaper tier stand in for a claim it cannot prove:
+
+| Tier | Environment | Proves | Cannot prove |
+| --- | --- | --- | --- |
+| Data plane | Real PostgreSQL containers, majors 14 → 18 (the CI matrix) | All core SQL/DDL/catalog behavior | Aurora-only semantics |
+| AWS boundary | [Ministack](https://github.com/ministackorg/ministack) (`ProvisionAuroraPostgres` in [internal/testutil](../internal/testutil/ministack.go)) | The RDS/Aurora **control plane**: cluster + instance provisioning through the real RDS API, endpoint discovery, connecting to the discovered endpoint through `pkg/dbconn` | Aurora data-plane behavior — the database behind the endpoint is real vanilla PostgreSQL in a sibling container, not Aurora, and it does not serve TLS |
+| Real Aurora | Environment-specific gate outside public CI | Aurora-only semantics: `rds.logical_replication`, failover slot loss, storage-level replication, fast DDL | — |
+
+The AWS-boundary tier is **never** a substitute for the data-plane tier:
+core logic keeps its no-mocked-DB rule and runs against real PostgreSQL.
+Ministack earns its keep only at the seam where the engine talks to AWS —
+today the provisioning/discovery flow, and as those features land, Secrets
+Manager DSN resolution and RDS IAM-auth token connections
+(`dbconn.Config.BeforeConnect`).
+
+Ministack is MIT-licensed and needs no auth token, so the tier runs
+anywhere Docker runs — locally and on every CI PR, forks included. The
+provisioned database is a real `postgres` container whose major follows
+`PG_VERSION`, so the tier covers the same 14 → 18 range as the matrix.
+The Ministack container mounts the host Docker socket to start that
+sibling container; run it only on Docker hosts you own (CI uses ephemeral
+GitHub-hosted runners). `MINISTACK_IMAGE` overrides the pinned image for
+upgrades or mirrors.
+
+### How much of the suite runs on Ministack
+
+Deliberately almost none: exactly one end-to-end test
+([ministack_integration_test.go](../internal/testutil/ministack_integration_test.go))
+covering provision → instance `available` → endpoint discovery →
+`dbconn` connect → PG-major assertion → DDL smoke. Everything else — all
+parser, planner, executor, and connection behavior — runs on the
+data-plane tier against real PostgreSQL. That split is policy, not
+accident: Ministack exists only for the seam where the engine talks to
+AWS APIs, and its share grows only when AWS-facing features land, never
+by moving core-logic tests onto it. Planned growth, in dependency order:
+
+- reader/writer topology tests — writer-endpoint targeting with a reader
+  present, endpoint re-discovery after a global-cluster failover — once
+  the engine has endpoint-selection logic to test;
+- Secrets Manager DSN resolution, when that feature lands;
+- RDS IAM-auth token connections (`dbconn.Config.BeforeConnect`), when
+  that feature lands.
+
+The tier runs in CI as the `aws-boundary` merge-gate job and inside
+`make test` when Docker is available. It is intentionally **not** part
+of the pre-push hook, which stays unit-only so pushes remain fast; CI is
+the authoritative gate.
 
 ## Current coverage (Phases 1 and 2.1–2.4)
 
@@ -170,6 +215,7 @@ this repository's CI.
 | Verify-full TLS against a live TLS-only server | [pkg/dbconn/tls_integration_test.go](../pkg/dbconn/tls_integration_test.go) |
 | Targeted blocker termination | [pkg/dbconn/dbconn_integration_test.go](../pkg/dbconn/dbconn_integration_test.go) |
 | Test harness self-checks | [internal/testutil](../internal/testutil/postgres_test.go) |
+| RDS control-plane provisioning → endpoint discovery → `dbconn` connect (Ministack) | [internal/testutil/ministack_integration_test.go](../internal/testutil/ministack_integration_test.go) |
 | Parse boundary, typed operations, and advisory rewrites | [pkg/statement](../pkg/statement/statement_test.go), [operation tests](../pkg/statement/ops_test.go) |
 | Native / copy-and-swap / refuse classification and safer SQL | [pkg/planner](../pkg/planner/planner_test.go) |
 | Backend routing and copy-and-swap unavailable disposition | [pkg/router](../pkg/router/router_test.go) |
