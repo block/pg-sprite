@@ -86,7 +86,8 @@ type MigrateCmd struct {
 
 	Alter        string   `help:"Imperative ALTER statement to run." name:"alter" required:""`
 	MaxTableSize byteSize `help:"Size threshold above which the optimistic attempt is skipped, measured as the table's full on-disk footprint: heap, indexes, and TOAST, all partitions (binary units: B, KiB, MiB, GiB, TiB)." default:"1GiB"`
-	JSON         bool     `help:"Emit the verdict as JSON."`
+	DryRun       bool     `help:"Classify and route the statement, print the plan, and execute nothing."`
+	JSON         bool     `help:"Emit the verdict (or dry-run plan) as JSON."`
 }
 
 // Run implements the migrate subcommand.

@@ -7,8 +7,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
@@ -22,9 +25,68 @@ type diffReport struct {
 	// TableExists reports whether the live table was found; when false the
 	// changes are the full desired schema.
 	TableExists bool `json:"table_exists"`
+	// Disposition is the routed plan's aggregate disposition: what would
+	// happen if the engine executed this plan now.
+	Disposition router.Disposition `json:"disposition"`
 	// Changes is the ordered statement plan; empty means the live table
 	// already matches the desired state.
-	Changes []schemadiff.Change `json:"changes"`
+	Changes []plannedChange `json:"changes"`
+}
+
+// plannedChange is one diff statement with its classification and routing:
+// the derived SQL plus where the engine would send it and what would run.
+type plannedChange struct {
+	schemadiff.Change
+	// Route is the planner's aggregate route for the statement.
+	Route planner.Route `json:"route"`
+	// Backend is the assigned execution strategy; empty for refusals.
+	Backend router.Backend `json:"backend,omitempty"`
+	// Disposition is what execution would do with the statement now.
+	Disposition router.Disposition `json:"disposition"`
+	// Decisions are the planner's per-operation classifications.
+	Decisions []planner.Decision `json:"decisions"`
+	// ExecSQL is the ordered SQL the native backend would run — the safer
+	// sequence when the planner constructed one. Empty for non-native
+	// routes.
+	ExecSQL []string `json:"exec_sql,omitempty"`
+}
+
+// classifyChanges routes every derived change through the shared
+// classify-and-route pipeline. facts sharpen type-change classification;
+// the zero value is valid and strictly more conservative.
+func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plannedChange, router.Disposition, error) {
+	plans := make([]planner.Plan, 0, len(changes))
+	for _, ch := range changes {
+		plan, err := planner.Classify(ch.SQL, facts)
+		if err != nil {
+			return nil, "", fmt.Errorf("classify derived statement %q: %w", ch.SQL, err)
+		}
+		plans = append(plans, plan)
+	}
+	routed := router.Route(plans)
+	planned := make([]plannedChange, 0, len(changes))
+	for i, ch := range changes {
+		st := routed.Statements[i]
+		planned = append(planned, plannedChange{
+			Change:      ch,
+			Route:       st.Route,
+			Backend:     st.Backend,
+			Disposition: st.Disposition,
+			Decisions:   st.Decisions,
+			ExecSQL:     st.ExecSQL,
+		})
+	}
+	return planned, routed.Disposition, nil
+}
+
+// liveFacts extracts the planner facts the live model provides: the
+// canonical type of every live column.
+func liveFacts(live schemadiff.Model) planner.Facts {
+	types := make(map[string]string, len(live.Columns))
+	for _, col := range live.Columns {
+		types[col.Name] = col.Type
+	}
+	return planner.Facts{ColumnTypes: types}
 }
 
 // run is the diff flow: parse and admit the desired file, introspect the
@@ -50,28 +112,36 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	defer pool.Close()
 
 	report := diffReport{Schema: c.Schema, Table: ds.Table, TableExists: true}
+	var changes []schemadiff.Change
+	var facts planner.Facts
 	live, err := schemadiff.Introspect(ctx, pool, c.Schema, ds.Table)
 	switch {
 	case errors.Is(err, schemadiff.ErrTableNotFound):
 		// No live table: the plan is the desired schema itself, qualified
-		// onto the target schema.
+		// onto the target schema, classified with zero facts (there are no
+		// live columns to sharpen type-change decisions).
 		report.TableExists = false
-		if report.Changes, err = qualifiedDesired(ds, c.Schema); err != nil {
+		if changes, err = qualifiedDesired(ds, c.Schema); err != nil {
 			return err
 		}
 	case err != nil:
 		return err
 	default:
+		facts = liveFacts(live)
 		desired, err := schemadiff.IntrospectDesired(ctx, pool, ds)
 		if err != nil {
 			return err
 		}
-		if report.Changes, err = schemadiff.Diff(c.Schema, live, desired); err != nil {
+		if changes, err = schemadiff.Diff(c.Schema, live, desired); err != nil {
 			return err
 		}
 	}
+	if report.Changes, report.Disposition, err = classifyChanges(changes, facts); err != nil {
+		return err
+	}
 	logger.Debug("diff derived",
-		"schema", c.Schema, "table", ds.Table, "changes", len(report.Changes), "table_exists", report.TableExists)
+		"schema", c.Schema, "table", ds.Table, "changes", len(report.Changes),
+		"table_exists", report.TableExists, "disposition", string(report.Disposition))
 
 	if c.JSON {
 		return writeJSON(out, report)
@@ -100,7 +170,7 @@ func qualifiedDesired(ds statement.DesiredSchema, schema string) ([]schemadiff.C
 // writeJSON emits the report as JSON.
 func writeJSON(out io.Writer, report diffReport) error {
 	if report.Changes == nil {
-		report.Changes = []schemadiff.Change{}
+		report.Changes = []plannedChange{}
 	}
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
@@ -111,11 +181,13 @@ func writeJSON(out io.Writer, report diffReport) error {
 }
 
 // writePlanText emits the plan as an executable SQL script: one statement
-// per line, destructive and lock-hazardous statements flagged with leading
-// comment lines, and SQL comments for the no-change and missing-table cases
-// so the output stays valid SQL. The header points at migrate as the
-// executing front door: running this script directly bypasses the gate that
-// refuses blocking statements.
+// per line, each annotated with its route, destructive statements flagged,
+// and SQL comments for the no-change and missing-table cases so the output
+// stays valid SQL. Safer sequences appear as comment lines — never
+// substituted into the script body, which stays the literal convergence
+// plan (a CONCURRENTLY rewrite could not run inside a transaction block).
+// The header points at migrate as the executing front door: running this
+// script directly bypasses the gate that refuses blocking statements.
 func writePlanText(out io.Writer, report diffReport) error {
 	if len(report.Changes) == 0 {
 		if _, err := fmt.Fprintln(out, "-- no changes: live table matches the desired schema"); err != nil {
@@ -136,39 +208,59 @@ func writePlanText(out io.Writer, report diffReport) error {
 		}
 	}
 	for _, ch := range report.Changes {
-		if ch.Destructive {
-			if _, err := fmt.Fprintln(out, "-- destructive"); err != nil {
-				return fmt.Errorf("write plan: %w", err)
-			}
-		}
-		if hazard := lockHazard(ch.Kind); hazard != "" {
-			if _, err := fmt.Fprintf(out, "-- %s\n", hazard); err != nil {
-				return fmt.Errorf("write plan: %w", err)
-			}
-		}
-		if _, err := fmt.Fprintf(out, "%s;\n", ch.SQL); err != nil {
-			return fmt.Errorf("write plan: %w", err)
+		if err := writeChangeText(out, ch); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// lockHazard describes the blocking behavior of a change kind, empty when
-// the statement is not expected to block writers. This is presentation for
-// the text plan; the machine contract is the kind itself.
-func lockHazard(kind schemadiff.ChangeKind) string {
-	switch kind {
-	case schemadiff.ChangeAlterType:
-		return "rewrites the table under ACCESS EXCLUSIVE, blocking reads and writes"
-	case schemadiff.ChangeSetNotNull:
-		return "full table scan under ACCESS EXCLUSIVE"
-	case schemadiff.ChangeAddConstraint:
-		return "validation scan or index build that blocks writes"
-	case schemadiff.ChangeCreateIndex:
-		return "blocks writes for the whole index build"
-	default:
-		return ""
+// writeChangeText emits one annotated statement of the text plan.
+func writeChangeText(out io.Writer, ch plannedChange) error {
+	if _, err := fmt.Fprintf(out, "-- %s\n", annotate(ch)); err != nil {
+		return fmt.Errorf("write plan: %w", err)
 	}
+	if len(ch.ExecSQL) > 0 && ch.ExecSQL[0] != ch.SQL {
+		if _, err := fmt.Fprintln(out, "-- the engine would run instead:"); err != nil {
+			return fmt.Errorf("write plan: %w", err)
+		}
+		for _, safer := range ch.ExecSQL {
+			if _, err := fmt.Fprintf(out, "--   %s;\n", safer); err != nil {
+				return fmt.Errorf("write plan: %w", err)
+			}
+		}
+	}
+	if ch.Destructive {
+		if _, err := fmt.Fprintln(out, "-- destructive"); err != nil {
+			return fmt.Errorf("write plan: %w", err)
+		}
+	}
+	if _, err := fmt.Fprintf(out, "%s;\n", ch.SQL); err != nil {
+		return fmt.Errorf("write plan: %w", err)
+	}
+	return nil
+}
+
+// annotate renders one statement's route annotation: the route, the
+// distinct decision reasons, and the availability note for backends this
+// build does not implement.
+func annotate(ch plannedChange) string {
+	var reasons []string
+	seen := map[planner.Reason]bool{}
+	for _, d := range ch.Decisions {
+		if !seen[d.Reason] {
+			seen[d.Reason] = true
+			reasons = append(reasons, string(d.Reason))
+		}
+	}
+	s := fmt.Sprintf("%s (%s)", ch.Route, strings.Join(reasons, ", "))
+	switch ch.Disposition {
+	case router.DispositionUnavailable:
+		s += ": needs the " + string(ch.Backend) + " backend, which is not implemented yet"
+	case router.DispositionRewriteRequired:
+		s += ": blocks as submitted and no online rewrite was constructed — the engine will not run it"
+	}
+	return s
 }
 
 // runFmt canonicalizes a desired-state schema file: every statement is

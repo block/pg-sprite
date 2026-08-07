@@ -14,6 +14,8 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 )
 
@@ -78,6 +80,61 @@ func TestDiffPrintsOrderedPlanJSON(t *testing.T) {
 		schemadiff.ChangeCreateIndex,
 	}, kinds)
 	assert.Equal(t, []bool{true, false, false, false}, destructive)
+
+	// Every derived statement is classified and routed: the widen is proven
+	// binary-coercible by the live facts, SET NOT NULL and CREATE INDEX
+	// carry their safer native sequences, and the whole plan would execute.
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+	routes := make([]planner.Route, 0, len(report.Changes))
+	for _, ch := range report.Changes {
+		routes = append(routes, ch.Route)
+		assert.Equal(t, router.BackendNative, ch.Backend, ch.SQL)
+		assert.Equal(t, router.DispositionExecute, ch.Disposition, ch.SQL)
+		require.NotEmpty(t, ch.Decisions, ch.SQL)
+	}
+	assert.Equal(t, []planner.Route{
+		planner.RouteNative, planner.RouteNative, planner.RouteNative, planner.RouteNative,
+	}, routes)
+	assert.Equal(t, planner.ReasonBinaryCoercible, report.Changes[1].Decisions[0].Reason,
+		"live column types must feed the classifier")
+	assert.Equal(t, planner.ReasonSaferIdiom, report.Changes[2].Decisions[0].Reason)
+	assert.NotEqual(t, []string{report.Changes[2].SQL}, report.Changes[2].ExecSQL,
+		"SET NOT NULL carries its safer native sequence")
+	assert.Equal(t, planner.ReasonSaferIdiom, report.Changes[3].Decisions[0].Reason)
+	require.Len(t, report.Changes[3].ExecSQL, 1)
+	assert.NotEqual(t, report.Changes[3].SQL, report.Changes[3].ExecSQL[0],
+		"CREATE INDEX carries its concurrent rewrite")
+}
+
+// A desired state that needs a table rewrite routes to the copy-and-swap
+// backend, and the routed plan says that backend is unavailable in this
+// build — the plan is honest about what execution would do.
+func TestDiffRoutesRewriteToCopyAndSwap(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.events (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+
+	cmd := newDiffCmd(t, url, schema, "CREATE TABLE events (id bigint PRIMARY KEY)")
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var report diffReport
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
+	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
+	require.Len(t, report.Changes, 1)
+	ch := report.Changes[0]
+	assert.Equal(t, planner.RouteCopyAndSwap, ch.Route)
+	assert.Equal(t, router.BackendCopyAndSwap, ch.Backend)
+	assert.Equal(t, router.DispositionUnavailable, ch.Disposition)
+	assert.Empty(t, ch.ExecSQL)
+	require.Len(t, ch.Decisions, 1)
+	assert.Equal(t, planner.ReasonTypeRewrite, ch.Decisions[0].Reason)
 }
 
 // diff must never write: the live table is bit-identical before and after.

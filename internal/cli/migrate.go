@@ -17,8 +17,12 @@ import (
 // run is the migrate flow: gate the statement type, size-guard the table,
 // attempt the change under budget, and end in exactly one verdict. Refusal
 // verdicts are printed to out and returned as verdict.ErrRefused so the entry
-// point maps them to the refusal exit code.
+// point maps them to the refusal exit code. --dry-run diverts to the
+// classify-and-route plan instead.
 func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
+	if c.DryRun {
+		return c.runDryRun(ctx, out)
+	}
 	logger := c.diag()
 	st, err := statement.ParseOne(c.Alter)
 	if err != nil {
