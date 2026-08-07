@@ -62,7 +62,7 @@ boundary) is defined in [../SAFETY.md](../SAFETY.md).
 | `pkg/checksum` | The mandatory correctness gate; continuous checker; repair primitive | Phase 5 |
 | `pkg/decode` | Logical-decoding change capture, LSN accounting, slot lifecycle | Phase 6, 8 |
 | `pkg/applier` | Change apply onto the shadow (always wins), buffer/dedup, flush scheduling | Phase 6 |
-| `pkg/migration` | Orchestrator: lifecycle, cutover swap + fidelity gate, checkpoint/resume | Phase 7–8 |
+| `pkg/schemachange` | Orchestrator: lifecycle, cutover swap + fidelity gate, checkpoint/resume | Phase 7–8 |
 | `pkg/checkpoint` | Durable single-row resume state | Phase 8 |
 | `pkg/throttler` | Aurora reader-lag / slot-lag / WAL throttling | Phase 8 |
 

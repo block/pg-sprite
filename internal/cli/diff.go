@@ -154,11 +154,15 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 func qualifiedDesired(ds statement.DesiredSchema, schema string) ([]schemadiff.Change, error) {
 	changes := make([]schemadiff.Change, 0, len(ds.Statements))
 	for _, st := range ds.Statements {
-		qualified, err := statement.Qualify(st.SQL, schema)
+		qualified, err := statement.Qualify(st.SQL(), schema)
 		if err != nil {
 			return nil, fmt.Errorf("qualify desired statement: %w", err)
 		}
-		changes = append(changes, schemadiff.Change{SQL: qualified})
+		kind := schemadiff.ChangeCreateTable
+		if st.Kind() == statement.KindCreateIndex {
+			kind = schemadiff.ChangeCreateIndex
+		}
+		changes = append(changes, schemadiff.Change{SQL: qualified, Kind: kind})
 	}
 	return changes, nil
 }
@@ -182,12 +186,20 @@ func writeJSON(out io.Writer, report diffReport) error {
 // stays valid SQL. Safer sequences appear as comment lines — never
 // substituted into the script body, which stays the literal convergence
 // plan (a CONCURRENTLY rewrite could not run inside a transaction block).
+// The header points at migrate as the executing front door: running this
+// script directly bypasses the gate that refuses blocking statements.
 func writePlanText(out io.Writer, report diffReport) error {
 	if len(report.Changes) == 0 {
 		if _, err := fmt.Fprintln(out, "-- no changes: live table matches the desired schema"); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
 		return nil
+	}
+	if _, err := fmt.Fprintln(out, "-- plan derived by pg-sprite diff; execute statements via pg-sprite migrate,"); err != nil {
+		return fmt.Errorf("write plan: %w", err)
+	}
+	if _, err := fmt.Fprintln(out, "-- which refuses blocking forms — running this script directly bypasses that gate"); err != nil {
+		return fmt.Errorf("write plan: %w", err)
 	}
 	if !report.TableExists {
 		if _, err := fmt.Fprintf(out, "-- table %s.%s does not exist; the plan is the full desired schema\n",
@@ -251,6 +263,8 @@ func annotate(ch plannedChange) string {
 // runFmt canonicalizes a desired-state schema file: every statement is
 // parsed through the PostgreSQL grammar, admitted by the same rules as diff,
 // and printed back in the deparser's canonical form. Offline — no database.
+// Commented input is refused (statement.ErrCommentLoss): the parser drops
+// comments, and a formatter must never silently discard content.
 func (c *FmtCmd) runFmt(in io.Reader, out io.Writer) error {
 	var src []byte
 	var err error
@@ -261,12 +275,15 @@ func (c *FmtCmd) runFmt(in io.Reader, out io.Writer) error {
 	} else if src, err = os.ReadFile(c.Path); err != nil {
 		return fmt.Errorf("read schema file: %w", err)
 	}
+	if err := statement.CheckNoComments(string(src)); err != nil {
+		return err
+	}
 	ds, err := statement.ParseDesired(string(src))
 	if err != nil {
 		return err
 	}
 	for _, st := range ds.Statements {
-		if _, err := fmt.Fprintf(out, "%s;\n", st.SQL); err != nil {
+		if _, err := fmt.Fprintf(out, "%s;\n", st.SQL()); err != nil {
 			return fmt.Errorf("write formatted schema: %w", err)
 		}
 	}

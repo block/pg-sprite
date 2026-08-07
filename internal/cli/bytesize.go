@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -46,6 +47,9 @@ func (b *byteSize) UnmarshalText(text []byte) error {
 	}
 	if n <= 0 {
 		return fmt.Errorf("size must be positive, got %q", string(text))
+	}
+	if n > math.MaxInt64/mult {
+		return fmt.Errorf("size %q overflows int64 bytes", string(text))
 	}
 	*b = byteSize(n * mult)
 	return nil

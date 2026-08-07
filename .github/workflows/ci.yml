@@ -76,6 +76,14 @@ jobs:
         with:
           go-version-file: go.mod
       - run: make build
+      # The no-cgo promise is a contract: the Wasm parser keeps `go install`
+      # toolchain-free. One accidental import of the cgo escape hatch
+      # (pg_query_go's parser) would silently start requiring a C toolchain
+      # on every contributor's machine.
+      - name: Build with CGO disabled
+        run: go build ./...
+        env:
+          CGO_ENABLED: "0"
 
   # The integration suite runs against every Aurora-supported PostgreSQL
   # major (see docs/postgresql-version-support.md): the version floor is a

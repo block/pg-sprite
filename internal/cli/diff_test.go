@@ -33,6 +33,20 @@ func TestFmtRefusesDisallowedStatements(t *testing.T) {
 	assert.Empty(t, out.String(), "nothing is written when the input is refused")
 }
 
+func TestFmtRefusesCommentedInput(t *testing.T) {
+	cmd := &FmtCmd{}
+	var out strings.Builder
+	err := cmd.runFmt(strings.NewReader(`-- events: one row per business event
+CREATE TABLE events (
+  id bigint PRIMARY KEY,
+  name varchar(50) NOT NULL -- display name
+);
+-- covering index for the dashboard query
+CREATE INDEX events_name_idx ON events (name);`), &out)
+	require.ErrorIs(t, err, statement.ErrCommentLoss)
+	assert.Empty(t, out.String(), "a formatter must never emit output that lost content")
+}
+
 func TestFmtRefusesInvalidSQL(t *testing.T) {
 	cmd := &FmtCmd{}
 	var out strings.Builder

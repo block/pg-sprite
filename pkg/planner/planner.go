@@ -377,10 +377,10 @@ func parseTypeText(s string) typeShape {
 // tableIdent renders the statement's target table as a quoted identifier,
 // schema-qualified when the statement was.
 func tableIdent(st statement.Statement) string {
-	if st.Schema != "" {
-		return pgx.Identifier{st.Schema, st.Table}.Sanitize()
+	if st.Schema() != "" {
+		return pgx.Identifier{st.Schema(), st.Table()}.Sanitize()
 	}
-	return pgx.Identifier{st.Table}.Sanitize()
+	return pgx.Identifier{st.Table()}.Sanitize()
 }
 
 // setNotNullSequence is the native four-step SET NOT NULL pattern: prove
@@ -388,7 +388,7 @@ func tableIdent(st statement.Statement) string {
 // scaffold.
 func setNotNullSequence(st statement.Statement, column string) []string {
 	table := tableIdent(st)
-	conName := fmt.Sprintf("%s_%s_not_null", st.Table, column)
+	conName := fmt.Sprintf("%s_%s_not_null", st.Table(), column)
 	con := pgx.Identifier{conName}.Sanitize()
 	col := pgx.Identifier{column}.Sanitize()
 	return []string{
@@ -411,7 +411,7 @@ func usingIndexSequence(st statement.Statement, op statement.Op) []string {
 	}
 	name := op.Name
 	if name == "" {
-		name = st.Table + "_" + strings.Join(op.Columns, "_") + suffix
+		name = st.Table() + "_" + strings.Join(op.Columns, "_") + suffix
 	}
 	idx := pgx.Identifier{name}.Sanitize()
 	cols := make([]string, len(op.Columns))
