@@ -23,9 +23,16 @@ import (
 func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.Statement, router.Disposition, error) {
 	plans := make([]planner.Plan, 0, len(changes))
 	for _, ch := range changes {
-		classified, err := planner.Classify(ch.SQL, facts)
+		// Canonicalize before classifying so the report carries the
+		// engine's canonical rendering — the same string the alter front
+		// door would report for the same change.
+		canonical, err := statement.Canonical(ch.SQL)
 		if err != nil {
-			return nil, "", fmt.Errorf("classify derived statement %q: %w", ch.SQL, err)
+			return nil, "", fmt.Errorf("canonicalize derived statement %q: %w", ch.SQL, err)
+		}
+		classified, err := planner.Classify(canonical, facts)
+		if err != nil {
+			return nil, "", fmt.Errorf("classify derived statement %q: %w", canonical, err)
 		}
 		plans = append(plans, classified)
 	}
@@ -33,7 +40,7 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 	planned := make([]plan.Statement, 0, len(changes))
 	for i, ch := range changes {
 		ps := plan.FromRouted(routed.Statements[i])
-		ps.Destructive = ch.Destructive
+		ps.Kind = ch.Kind
 		planned = append(planned, ps)
 	}
 	return planned, routed.Disposition, nil
@@ -74,6 +81,9 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	report := plan.NewReport(plan.SourceDiff)
 	report.Schema = c.Schema
 	report.Table = ds.Table
+	if report.ServerVersion, err = serverVersion(ctx, pool); err != nil {
+		return err
+	}
 	tableExists := true
 	var changes []schemadiff.Change
 	var facts planner.Facts
@@ -103,6 +113,7 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
 		return err
 	}
+	report.Fingerprint = plan.Fingerprint(report.Statements)
 	logger.Debug("diff derived",
 		"schema", c.Schema, "table", ds.Table, "changes", len(report.Statements),
 		"table_exists", tableExists, "disposition", string(report.Disposition))

@@ -31,6 +31,33 @@ func classifyOne(t *testing.T, sql string) planner.Decision {
 	return plan.Decisions[0]
 }
 
+// Destructive is a decision-level fact derived from the operation shape:
+// drops of columns, constraints, and indexes discard live structure, and
+// every front door that routes through the classifier inherits the same
+// marking — including DROP INDEX, whose drop discards the index's
+// guarantee (uniqueness, for a unique index) however it is submitted.
+func TestClassifyMarksDropsDestructive(t *testing.T) {
+	destructive := []string{
+		"ALTER TABLE t DROP COLUMN age",
+		"ALTER TABLE t DROP CONSTRAINT t_age_check",
+		"DROP INDEX t_v_idx",
+		"DROP INDEX CONCURRENTLY t_v_idx",
+	}
+	for _, sql := range destructive {
+		assert.True(t, classifyOne(t, sql).Destructive, sql)
+	}
+	nonDestructive := []string{
+		"ALTER TABLE t ADD COLUMN age int",
+		"ALTER TABLE t ALTER COLUMN v50 TYPE varchar(100)",
+		"ALTER TABLE t ALTER COLUMN age DROP DEFAULT",
+		"ALTER TABLE t ALTER COLUMN age DROP NOT NULL",
+		"CREATE INDEX t_v_idx ON t (v50)",
+	}
+	for _, sql := range nonDestructive {
+		assert.False(t, classifyOne(t, sql).Destructive, sql)
+	}
+}
+
 // TestClassifyReferenceRows is the golden mapping: one case per row of
 // docs/postgres-online-ddl-reference.md. saferSteps is the length of the
 // expected safer sequence (0 when the decision carries none).
@@ -221,4 +248,31 @@ func TestClassifyGeneratedNamesFitIdentifierLimit(t *testing.T) {
 	// Deterministic: the same input yields the same fitted name.
 	dA2 := classifyOne(t, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL", table, colA))
 	assert.Equal(t, dA.SaferSQL, dA2.SaferSQL)
+}
+
+// The route and reason vocabularies are closed sets a consumer branches on;
+// both are pinned to plan-report format_version 1 (docs/plan-report.md). A
+// new value here without a format_version bump is a contract break.
+func TestRoutesVocabularyPinned(t *testing.T) {
+	assert.Equal(t, []planner.Route{
+		planner.RouteNative,
+		planner.RouteCopyAndSwap,
+		planner.RouteRefuse,
+	}, planner.Routes())
+}
+
+func TestReasonsVocabularyPinned(t *testing.T) {
+	assert.Equal(t, []planner.Reason{
+		planner.ReasonMetadataOnly,
+		planner.ReasonOnlineIdiom,
+		planner.ReasonFastDefault,
+		planner.ReasonBinaryCoercible,
+		planner.ReasonSaferIdiom,
+		planner.ReasonVolatileDefault,
+		planner.ReasonGeneratedStored,
+		planner.ReasonTypeRewrite,
+		planner.ReasonRelocation,
+		planner.ReasonPartitionParentLock,
+		planner.ReasonUnsupportedOperation,
+	}, planner.Reasons())
 }

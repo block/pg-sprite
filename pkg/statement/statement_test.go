@@ -175,3 +175,36 @@ func TestKindString(t *testing.T) {
 	assert.Equal(t, "REINDEX", KindReindex.String())
 	assert.Equal(t, "other", KindOther.String())
 }
+
+// Canonical is the report's one rendering per change: the diff door's
+// quoted generation and the alter door's hand-written text converge on the
+// same string, so a consumer hashing or displaying report SQL sees one
+// spelling regardless of front door.
+func TestCanonicalConvergesQuotingAcrossFrontDoors(t *testing.T) {
+	generated, err := Canonical(`ALTER TABLE "t_1"."t" DROP COLUMN "doomed"`)
+	require.NoError(t, err)
+	submitted, err := Canonical("ALTER TABLE t_1.t DROP COLUMN doomed")
+	require.NoError(t, err)
+	assert.Equal(t, generated, submitted)
+
+	// Identifiers that need quoting keep it.
+	kept, err := Canonical(`ALTER TABLE "Mixed Case" DROP COLUMN c`)
+	require.NoError(t, err)
+	assert.Contains(t, kept, `"Mixed Case"`)
+}
+
+func TestCanonicalRefusesNotExactlyOneStatement(t *testing.T) {
+	_, err := Canonical("ALTER TABLE t DROP COLUMN a; ALTER TABLE t DROP COLUMN b")
+	require.ErrorIs(t, err, ErrNotOneStatement)
+	_, err = Canonical("not sql")
+	require.Error(t, err)
+}
+
+// Reprinting through the deparser drops comments, so Canonical refuses
+// commented input rather than silently discarding content.
+func TestCanonicalRefusesCommentedInput(t *testing.T) {
+	_, err := Canonical("ALTER TABLE t DROP COLUMN a -- doomed")
+	require.ErrorIs(t, err, ErrCommentLoss)
+	_, err = Canonical("ALTER TABLE t /* keep */ DROP COLUMN a")
+	require.ErrorIs(t, err, ErrCommentLoss)
+}

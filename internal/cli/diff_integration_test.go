@@ -71,10 +71,12 @@ func TestDiffPrintsOrderedPlanJSON(t *testing.T) {
 		kinds = append(kinds, ch.Kind)
 		destructive = append(destructive, ch.Destructive)
 	}
+	// Diff-derived SQL is canonicalized through the engine's parser, so both
+	// front doors report the same rendering for equivalent statements.
 	assert.Equal(t, []string{
-		fmt.Sprintf(`ALTER TABLE "%s"."events" DROP COLUMN "legacy"`, schema),
-		fmt.Sprintf(`ALTER TABLE "%s"."events" ALTER COLUMN "name" TYPE character varying(50)`, schema),
-		fmt.Sprintf(`ALTER TABLE "%s"."events" ALTER COLUMN "name" SET NOT NULL`, schema),
+		fmt.Sprintf("ALTER TABLE %s.events DROP legacy", schema),
+		fmt.Sprintf("ALTER TABLE %s.events ALTER COLUMN name TYPE varchar(50)", schema),
+		fmt.Sprintf("ALTER TABLE %s.events ALTER COLUMN name SET NOT NULL", schema),
 		fmt.Sprintf("CREATE INDEX events_name_idx ON %s.events USING btree (name)", schema),
 	}, sqls)
 	assert.Equal(t, []schemadiff.ChangeKind{

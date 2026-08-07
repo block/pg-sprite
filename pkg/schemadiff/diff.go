@@ -51,6 +51,27 @@ const (
 	ChangeCreateIndex ChangeKind = "create-index"
 )
 
+// ChangeKinds returns the closed set of ChangeKind values. It is part of
+// the plan-report contract (docs/plan-report.md): the set changes only with
+// a format_version bump, and a consumer that meets an unrecognized value
+// must treat the statement as unknown and refuse it.
+func ChangeKinds() []ChangeKind {
+	return []ChangeKind{
+		ChangeCreateTable,
+		ChangeDropIndex,
+		ChangeDropConstraint,
+		ChangeDropColumn,
+		ChangeAddColumn,
+		ChangeAlterType,
+		ChangeSetDefault,
+		ChangeDropDefault,
+		ChangeSetNotNull,
+		ChangeDropNotNull,
+		ChangeAddConstraint,
+		ChangeCreateIndex,
+	}
+}
+
 // Change is one derived statement of the ordered plan.
 type Change struct {
 	// SQL is the literal statement, without a trailing semicolon.
