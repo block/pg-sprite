@@ -5,12 +5,23 @@
 // column of docs/postgres-online-ddl-reference.md, applied conservatively:
 // anything the planner cannot prove safe routes to copy-and-swap or refuse.
 // Classification predicts; executors keep their own protections regardless.
+//
+// The rules assume PostgreSQL 14, the oldest major the test matrix runs;
+// every rule holds unconditionally across the supported range (14–18).
+// Rules that were version-dependent below that floor — fast default
+// (PG 11+), SET NOT NULL proven by a validated CHECK (PG 12+), DETACH
+// PARTITION CONCURRENTLY (PG 14+) — carry no version annotation because
+// the floor makes them unconditional. A rule that varies within the
+// supported range must carry an explicit version fact before it lands.
 package planner
 
 import (
+	"crypto/sha256"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -74,6 +85,10 @@ const (
 	// ReasonRelocation: SET TABLESPACE moves the heap — a rewrite-scale
 	// copy.
 	ReasonRelocation Reason = "relocation"
+	// ReasonPartitionParentLock: creating a partition takes a brief ACCESS
+	// EXCLUSIVE on the partitioned parent — no scan, but it queues behind
+	// and then blocks every query on the parent while held.
+	ReasonPartitionParentLock Reason = "partition-parent-lock"
 	// ReasonUnsupportedOperation: the planner does not recognize the
 	// operation or knows no safe path for it.
 	ReasonUnsupportedOperation Reason = "unsupported-operation"
@@ -89,8 +104,21 @@ type Decision struct {
 	Reason Reason `json:"reason"`
 	// SaferSQL is the ordered native sequence to run instead of the
 	// submitted form, present only for safer-idiom decisions where the
-	// planner could construct it.
+	// planner could construct it. Execution contract: the steps run one at
+	// a time, in order, each in its own implicit transaction — never inside
+	// an enclosing transaction block, which the CONCURRENTLY forms refuse.
+	// Each sequence constructor documents what a failed step leaves behind
+	// and how a retry resumes.
 	SaferSQL []string `json:"safer_sql,omitempty"`
+}
+
+// ExecutableAsSubmitted reports whether the operation's submitted form is
+// itself safe to run. It is false exactly for safer-idiom decisions: their
+// submitted form blocks and must be replaced by the safer sequence —
+// whether or not one was constructed. Routing fails closed on the
+// combination of a false ExecutableAsSubmitted and an empty SaferSQL.
+func (d Decision) ExecutableAsSubmitted() bool {
+	return d.Reason != ReasonSaferIdiom
 }
 
 // Plan is the classification of one statement: one decision per operation
@@ -105,9 +133,13 @@ type Plan struct {
 	Decisions []Decision `json:"decisions"`
 }
 
-// Facts are introspected properties of the live table that sharpen
-// classification. The zero value is valid: with no facts the planner is
-// strictly more conservative (every type change becomes copy-and-swap).
+// Facts are properties of the live table that sharpen classification, and
+// they are trusted as stated: the CLI fills them by introspecting the
+// target database, and a library caller may supply facts it already holds —
+// but they must describe the database the change will run on, because a
+// wrong fact can upgrade a rewrite to native. Missing facts are always
+// safe: the zero value is valid and classifies strictly more
+// conservatively (every type change becomes copy-and-swap).
 type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
@@ -143,15 +175,33 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	d := Decision{Operation: op.Describe()}
 	switch op.Kind {
 	case statement.OpCreateTable:
-		// A new table has no readers to lock out.
-		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+		if op.PartitionOf {
+			// Creating a partition locks the partitioned parent ACCESS
+			// EXCLUSIVE — briefly and without a scan, but it queues behind
+			// any long-running query and then blocks every reader of the
+			// parent while held.
+			d.Route, d.Reason = RouteNative, ReasonPartitionParentLock
+		} else {
+			// A brand-new standalone table has no readers to lock out.
+			d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+		}
 
 	case statement.OpAddColumn:
 		switch {
+		case hasUnrecognizedConstraint(op.InlineConstraints):
+			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
 		case op.GeneratedStored:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonGeneratedStored
 		case op.Default == statement.DefaultExpression:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonVolatileDefault
+		case len(op.InlineConstraints) > 0:
+			// An inline UNIQUE / PRIMARY KEY / FOREIGN KEY / CHECK does the
+			// same index build or validation as its ADD CONSTRAINT form,
+			// under the ADD COLUMN's ACCESS EXCLUSIVE lock. The safer path
+			// splits the column addition from an online constraint build;
+			// the planner does not construct multi-statement splits, so the
+			// decision carries no rewrite and routing fails closed.
+			d.Route, d.Reason = RouteNative, ReasonSaferIdiom
 		case op.Default == statement.DefaultConstant:
 			d.Route, d.Reason = RouteNative, ReasonFastDefault
 		default:
@@ -374,6 +424,34 @@ func parseTypeText(s string) typeShape {
 	return shape
 }
 
+// hasUnrecognizedConstraint reports whether an added column carries an
+// inline constraint family the engine does not model.
+func hasUnrecognizedConstraint(kinds []statement.ConstraintKind) bool {
+	return slices.Contains(kinds, statement.ConstraintUnrecognized)
+}
+
+// maxIdentifierBytes is PostgreSQL's NAMEDATALEN-1: the server silently
+// truncates longer identifiers, which would let a generated name collide
+// with the table itself or with a sibling scaffold.
+const maxIdentifierBytes = 63
+
+// fitIdentifier returns name unchanged when it fits PostgreSQL's identifier
+// limit, otherwise a deterministic variant that does: the head of the name
+// plus an 8-hex-digit hash of the full name, so distinct inputs stay
+// distinct after fitting.
+func fitIdentifier(name string) string {
+	if len(name) <= maxIdentifierBytes {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	suffix := fmt.Sprintf("_%x", sum[:4])
+	head := name[:maxIdentifierBytes-len(suffix)]
+	for !utf8.ValidString(head) {
+		head = head[:len(head)-1]
+	}
+	return head + suffix
+}
+
 // tableIdent renders the statement's target table as a quoted identifier,
 // schema-qualified when the statement was.
 func tableIdent(st statement.Statement) string {
@@ -386,9 +464,16 @@ func tableIdent(st statement.Statement) string {
 // setNotNullSequence is the native four-step SET NOT NULL pattern: prove
 // the invariant online with a NOT VALID CHECK, flip the column, drop the
 // scaffold.
+//
+// Partial-failure contract: step 1 leaves a NOT VALID CHECK under the
+// generated scaffold name, and re-running step 1 then fails with SQLSTATE
+// 42710 (duplicate_object) — a retry resumes at step 2. A failed VALIDATE
+// (step 2) leaves the same scaffold and is safe to re-run. Steps 3 and 4
+// are metadata-only and safe to re-run; a leftover scaffold is removed by
+// running step 4 alone.
 func setNotNullSequence(st statement.Statement, column string) []string {
 	table := tableIdent(st)
-	conName := fmt.Sprintf("%s_%s_not_null", st.Table(), column)
+	conName := fitIdentifier(fmt.Sprintf("%s_%s_not_null", st.Table(), column))
 	con := pgx.Identifier{conName}.Sanitize()
 	col := pgx.Identifier{column}.Sanitize()
 	return []string{
@@ -402,6 +487,12 @@ func setNotNullSequence(st statement.Statement, column string) []string {
 // usingIndexSequence is the native two-step ADD PRIMARY KEY / UNIQUE
 // pattern: build the unique index concurrently, then attach it as the
 // constraint under a brief lock.
+//
+// Partial-failure contract: a failed CREATE INDEX CONCURRENTLY (step 1)
+// leaves an INVALID index under the generated name, and re-running step 1
+// then fails with SQLSTATE 42P07 (duplicate_table) — the retry path is
+// DROP INDEX, then re-run step 1. Step 2 consumes the index into the
+// constraint under a brief lock and does not scan.
 func usingIndexSequence(st statement.Statement, op statement.Op) []string {
 	suffix := "_key"
 	keyword := "UNIQUE"
@@ -411,7 +502,10 @@ func usingIndexSequence(st statement.Statement, op statement.Op) []string {
 	}
 	name := op.Name
 	if name == "" {
-		name = st.Table() + "_" + strings.Join(op.Columns, "_") + suffix
+		// A user-supplied name is used as-is: the server truncates it the
+		// same way in every step. A generated name is built to fit so it
+		// cannot truncate into the table's own name or a sibling's.
+		name = fitIdentifier(st.Table() + "_" + strings.Join(op.Columns, "_") + suffix)
 	}
 	idx := pgx.Identifier{name}.Sanitize()
 	cols := make([]string, len(op.Columns))

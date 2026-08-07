@@ -254,8 +254,11 @@ func annotate(ch plannedChange) string {
 		}
 	}
 	s := fmt.Sprintf("%s (%s)", ch.Route, strings.Join(reasons, ", "))
-	if ch.Disposition == router.DispositionUnavailable {
+	switch ch.Disposition {
+	case router.DispositionUnavailable:
 		s += ": needs the " + string(ch.Backend) + " backend, which is not implemented yet"
+	case router.DispositionRewriteRequired:
+		s += ": blocks as submitted and no online rewrite was constructed — the engine will not run it"
 	}
 	return s
 }

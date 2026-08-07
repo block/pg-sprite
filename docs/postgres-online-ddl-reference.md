@@ -57,6 +57,7 @@ the same dynamic via metadata locks. Read it first if any of that is unfamiliar.
 | `ADD COLUMN ... DEFAULT <constant>` | ACCESS EXCLUSIVE (brief) | **No** (PG 11+) | Yes | ❌ No | "Fast default" stored in catalog; pre-PG11 this rewrote |
 | `ADD COLUMN ... DEFAULT <volatile>` (e.g. `now()`, `random()`, `uuid_generate_v4()`) | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** | The expensive case |
 | `ADD COLUMN ... GENERATED ALWAYS AS (...) STORED` | ACCESS EXCLUSIVE | Yes | No | ✅ **Yes** | Values must be computed |
+| `ADD COLUMN ... UNIQUE` / `PRIMARY KEY` / `REFERENCES` / `CHECK` (inline constraint) | ACCESS EXCLUSIVE + index build or validation | No | No | ➖ Native pattern | Same work as the `ADD CONSTRAINT` form, under the `ADD COLUMN` lock — split: add the column first, then build the constraint online (`CONCURRENTLY` + `USING INDEX`, or `NOT VALID` + `VALIDATE`) |
 | `DROP COLUMN` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | Metadata only; disk space reclaimed lazily by VACUUM |
 | `ALTER COLUMN TYPE` — binary-coercible (`varchar(50)→varchar(100)`, `varchar→text`, `numeric(10,2)→numeric(12,2)`) | ACCESS EXCLUSIVE (brief) | **No** | No (brief) | ❌ No | No scan when binary-coercible and no length restriction is added |
 | `ALTER COLUMN TYPE` — general (`int→bigint`, `text→jsonb`, `timestamp→timestamptz` w/ conversion) | ACCESS EXCLUSIVE | **Yes** (rewrite + reindex + revalidate FKs) | No | ✅ **Yes** | The classic "needs a tool" case |
@@ -96,6 +97,7 @@ online path, so the heavy **shadow-copy + atomic cutover** path is required ·
 | `ALTER COLUMN SET STATISTICS` / `SET STORAGE` / `SET (n_distinct=...)` | No | varies | ❌ No | SHARE UPDATE EXCLUSIVE / ACCESS EXCLUSIVE |
 | `ALTER COLUMN TYPE` — binary-coercible | No | No (brief) | ❌ No | ACCESS EXCLUSIVE (brief) |
 | `ALTER COLUMN SET NOT NULL` | No, but full scan | No | ➖ Native pattern | ACCESS EXCLUSIVE |
+| `ADD COLUMN ...` (inline constraint) | No, but index build / validation | No | ➖ Native pattern | ACCESS EXCLUSIVE |
 | `ADD COLUMN ... DEFAULT <volatile>` | Yes | No | ✅ **Yes** | ACCESS EXCLUSIVE |
 | `ADD COLUMN ... GENERATED ALWAYS AS (...) STORED` | Yes | No | ✅ **Yes** | ACCESS EXCLUSIVE |
 | `ALTER COLUMN TYPE` — general | Yes | No | ✅ **Yes** | ACCESS EXCLUSIVE |
@@ -116,6 +118,7 @@ online path, so the heavy **shadow-copy + atomic cutover** path is required ·
 | `ALTER COLUMN SET STATISTICS` / `SET STORAGE` / `SET (n_distinct=...)` | varies | No | ❌ No | SHARE UPDATE EXCLUSIVE / ACCESS EXCLUSIVE |
 | `ALTER COLUMN TYPE` — binary-coercible | No (brief) | No | ❌ No | ACCESS EXCLUSIVE (brief) |
 | `ALTER COLUMN SET NOT NULL` | No | No, but full scan | ➖ Native pattern | ACCESS EXCLUSIVE |
+| `ADD COLUMN ...` (inline constraint) | No | No, but index build / validation | ➖ Native pattern | ACCESS EXCLUSIVE |
 | `ADD COLUMN ... DEFAULT <volatile>` | No | Yes | ✅ **Yes** | ACCESS EXCLUSIVE |
 | `ADD COLUMN ... GENERATED ALWAYS AS (...) STORED` | No | Yes | ✅ **Yes** | ACCESS EXCLUSIVE |
 | `ALTER COLUMN TYPE` — general | No | Yes | ✅ **Yes** | ACCESS EXCLUSIVE |
@@ -188,6 +191,7 @@ ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY USING INDEX t_pkey;  -- brief lo
 | `SET TABLESPACE` | ACCESS EXCLUSIVE | **Yes** (moves heap) | No | ✅ **Yes** (repack-style) | Rewrite/move; use a repack-style copy instead |
 | `SET (fillfactor=...)` and most reloptions | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | Applies to new rows |
 | `CLUSTER` / `VACUUM FULL` | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** (`pg_repack`) | Use `pg_repack` |
+| `CREATE TABLE ... PARTITION OF` | ACCESS EXCLUSIVE on **parent** (brief) | No | Blocked on parent while held | ❌ No | Brief and no scan, but it queues behind long-running queries and then blocks every reader of the parent |
 | `ATTACH PARTITION` | SHARE UPDATE EXCLUSIVE on parent + scan of child | No | Yes | ➖ Native pattern | Add a validated `CHECK` matching the bound on the child first to skip the scan |
 | `DETACH PARTITION` | ACCESS EXCLUSIVE | No | No | ➖ Use `CONCURRENTLY` | |
 | `DETACH PARTITION CONCURRENTLY` | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | PG 14+ |
