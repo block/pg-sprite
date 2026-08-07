@@ -2,6 +2,64 @@ version: "2"
 
 linters:
   enable:
-    - bodyclose
-    - misspell
-    - nolintlint
+    - errcheck        # unchecked errors
+    - govet           # suspicious constructs
+    - staticcheck     # comprehensive static analysis
+    - ineffassign     # useless assignments
+    - unused          # unused code
+    - gocritic        # opinionated but catches real bugs
+    - errorlint       # proper error wrapping/comparison
+    - modernize       # suggest modern Go idioms (wg.Go, etc.)
+    - noctx           # requests without context
+    - bodyclose       # unclosed HTTP response bodies
+    - usetesting      # enforce t.Context() over context.Background() in tests
+    - unparam         # unused/constant function parameters and results
+    - misspell        # commonly misspelled words
+    - nolintlint      # ill-formed or unexplained nolint directives
+    - revive          # doc comments on exported symbols (see settings)
+    - gochecknoinits  # no init() functions
+    - gochecknoglobals # no package-level mutable state (error sentinels exempt)
+    - containedctx    # no context.Context stored in struct fields
+    - sloglint        # structured-logging hygiene: static messages, snake_case keys
+    - forbidigo       # no printing to process stdout; output goes to the injected writer
+  settings:
+    sloglint:
+      static-msg: true
+      key-naming-case: snake
+    forbidigo:
+      forbid:
+        - pattern: ^(fmt\.Print(f|ln)?|print|println)$
+          msg: command output goes to the injected io.Writer and diagnostics to slog, never process stdout
+    usetesting:
+      context-background: true
+      context-todo: true
+    revive:
+      # Only the doc-comment rules; everything else revive offers is either
+      # covered by other linters or a judgment call that lives in AGENTS.md.
+      rules:
+        - name: exported
+        - name: package-comments
+  exclusions:
+    rules:
+      # The tracelog adapter forwards pgx's own message strings; the
+      # static-message rule applies to messages we author, not to a bridge
+      # for a foreign logger.
+      - path: pkg/dbconn/dbconn\.go
+        linters:
+          - sloglint
+        text: message should be a string literal
+      # Test helpers intentionally keep uniform signatures and fixed arguments
+      # for readability, so unused/constant params there are not worth churn.
+      - path: _test\.go
+        linters:
+          - unparam
+      # Test files and test-only support code may use fixtures and shared
+      # state; the no-globals bar applies to production code.
+      - path: (_test\.go|^internal/testutil/)
+        linters:
+          - gochecknoglobals
+
+formatters:
+  enable:
+    - gofmt
+    - goimports

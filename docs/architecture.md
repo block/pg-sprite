@@ -48,20 +48,21 @@ boundary) is defined in [../SAFETY.md](../SAFETY.md).
 
 | Package | Role | Status |
 | --- | --- | --- |
-| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `diff` · `fmt` · `lint` · `status` | exists (stubs) |
-| `internal/cli` | Command tree and flag handling | exists (stubs) |
+| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `diff` · `fmt` · `lint` · `status` | `migrate`/`status` exist; rest stubs |
+| `internal/cli` | Command tree and flag handling | `migrate`/`status` exist; rest stubs |
 | `internal/testutil` | Test harness: containerized PostgreSQL, throwaway schemas | exists |
 | `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; advisory-lock mutual exclusion lands here | exists |
-| `pkg/statement` | `pg_query_go` parsing + classification (never hand-parse SQL) | Phase 1–2 |
-| `pkg/preflight` | Precondition verification and refusals before any write | Phase 1–2 |
+| `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parsing + classification (never hand-parse SQL); shadow DDL + fingerprints come from scratch-DB execute-and-introspect | exists (Phase 1: type gate); classification at Phase 2 |
+| `pkg/preflight` | Precondition verification and refusals before any write | exists (Phase 1: table-size guard); grows through Phase 2 |
+| `pkg/verdict` | Structured outcome contract (executed / refused + reason + safer idiom), rendering, exit codes | exists (Phase 1) |
 | `pkg/planner` / `pkg/schemadiff` / `pkg/lint` | Shared front-end: introspect, declarative diff (may wrap [stripe/pg-schema-diff](https://github.com/stripe/pg-schema-diff) — see the low-level design's open decisions), classify, lint | Phase 2 |
-| `pkg/executor` | The `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) + native executor | Phase 2–3 |
+| `pkg/executor` | The `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) + native executor | exists (Phase 1: bounded optimistic attempt); contract at Phase 2–3 |
 | `pkg/table` | PK-range chunkers (single-column fast path, composite), dynamic time-based sizing | Phase 4 |
 | `pkg/copier` | Parallel chunked copy into the shadow table (never overwrites) | Phase 4 |
 | `pkg/checksum` | The mandatory correctness gate; continuous checker; repair primitive | Phase 5 |
 | `pkg/decode` | Logical-decoding change capture, LSN accounting, slot lifecycle | Phase 6, 8 |
 | `pkg/applier` | Change apply onto the shadow (always wins), buffer/dedup, flush scheduling | Phase 6 |
-| `pkg/migration` | Orchestrator: lifecycle, cutover swap + fidelity gate, checkpoint/resume | Phase 7–8 |
+| `pkg/schemachange` | Orchestrator: lifecycle, cutover swap + fidelity gate, checkpoint/resume | Phase 7–8 |
 | `pkg/checkpoint` | Durable single-row resume state | Phase 8 |
 | `pkg/throttler` | Aurora reader-lag / slot-lag / WAL throttling | Phase 8 |
 

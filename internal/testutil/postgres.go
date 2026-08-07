@@ -29,17 +29,24 @@ func PGVersion() string {
 	return DefaultPGVersion
 }
 
-// StartPostgres starts a disposable PostgreSQL container for the test and
-// returns its connection URL. The container is terminated when the test ends.
-// Set SKIP_INTEGRATION=1 to skip tests that need Docker.
+// StartPostgres returns a PostgreSQL connection URL for the test.
+//
+// By default it starts a disposable container (terminated when the test
+// ends). When PG_DSN is set, that external server is used instead and no
+// container is started — the compose/ workflow and CI variants that run a
+// long-lived server use this. Set SKIP_INTEGRATION=1 to skip tests that need
+// a database entirely.
 func StartPostgres(t *testing.T) string {
 	t.Helper()
 	if os.Getenv("SKIP_INTEGRATION") != "" {
-		t.Skip("SKIP_INTEGRATION set; skipping test that needs Docker")
+		t.Skip("SKIP_INTEGRATION set; skipping test that needs a database")
 	}
-	// The container must outlive t.Context (which is cancelled before
-	// cleanups run), so use Background and terminate via t.Cleanup.
-	ctx := context.Background()
+	if dsn := os.Getenv("PG_DSN"); dsn != "" {
+		return dsn
+	}
+	// t.Context only governs the start request; the running container is
+	// not tied to it and is terminated via t.Cleanup below.
+	ctx := t.Context()
 	ctr, err := tcpostgres.Run(ctx, "postgres:"+PGVersion(), tcpostgres.BasicWaitStrategies())
 	require.NoError(t, err, "start postgres container")
 	t.Cleanup(func() {
@@ -63,8 +70,8 @@ func NewSchema(t *testing.T, pool *pgxpool.Pool) string {
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE SCHEMA %s", name))
 	require.NoError(t, err, "create throwaway schema")
 	t.Cleanup(func() {
-		// t.Context is done by cleanup time; use a fresh context.
-		_, err := pool.Exec(context.Background(), fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", name))
+		// t.Context is cancelled by cleanup time; strip the cancellation.
+		_, err := pool.Exec(context.WithoutCancel(t.Context()), fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", name))
 		if err != nil {
 			t.Logf("drop throwaway schema %s: %v", name, err)
 		}

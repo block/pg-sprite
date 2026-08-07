@@ -21,6 +21,7 @@ for how the Spirit original works and tool-pgroll.md for pgroll.
 - [Architecture: decoupled planner, router, and executors](#architecture-decoupled-planner-router-and-executors)
   - [Proposed architecture (end-to-end)](#proposed-architecture-end-to-end)
   - [Routing view (which executor handles what)](#routing-view-which-executor-handles-what)
+  - [How the planner understands DDL (decided)](#how-the-planner-understands-ddl-decided)
   - [Why this is the right shape](#why-this-is-the-right-shape)
   - [The honest tradeoffs (why this is an *option*, not a free win)](#the-honest-tradeoffs-why-this-is-an-option-not-a-free-win)
   - [v1 stance](#v1-stance)
@@ -40,7 +41,7 @@ for how the Spirit original works and tool-pgroll.md for pgroll.
   - [2. Scope of v1](#2-scope-of-v1)
   - [3. Repo location / language](#3-repo-location--language)
   - [4. Expand/contract (pgroll) as a second execution backend](#4-expandcontract-pgroll-as-a-second-execution-backend)
-  - [5. Declarative diff engine — build on pg_query_go vs wrap pg-schema-diff](#5-declarative-diff-engine--build-on-pg_query_go-vs-wrap-pg-schema-diff)
+  - [5. Declarative diff engine — build on go-pgquery vs wrap pg-schema-diff](#5-declarative-diff-engine--build-on-go-pgquery-vs-wrap-pg-schema-diff)
 - [Next step](#next-step)
 
 ## Architecture: decoupled planner, router, and executors
@@ -76,7 +77,7 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
         ╰────────────────┬─────────────────────────────────────────────────────╯
                          │
    ┌─────────────────────▼──────────────────── PLANNER / front-end (shared) ────┐
-   │  pkg/statement   parse ALTER/CREATE (pg_query_go)                          │
+   │  pkg/statement   parse ALTER/CREATE (go-pgquery)                           │
    │  pkg/schemadiff  introspect live schema → diff vs desired → ordered ALTERs │
    │  classifier      per op: native-safe | needs-rewrite | refuse              │
    │  pkg/lint        reject unsafe/unsupported up front                        │
@@ -135,6 +136,35 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
    CONCURRENTLY   executor          (Pattern B, reversible)
    NOT VALID …    (Pattern A)
 ```
+
+### How the planner understands DDL (decided)
+
+The DDL-understanding mechanism — the equivalent of Spirit's TiDB parser — is a **layered
+hybrid**, decided deliberately rather than inherited, mapping each function to the mechanism
+that serves it best:
+
+- **Classification** parses with the real PostgreSQL grammar via
+  [`wasilibs/go-pgquery`](https://github.com/wasilibs/go-pgquery) — `libpg_query` compiled to
+  WebAssembly, executed in-process by wazero. Same grammar as the server, pure-Go builds (no
+  cgo toolchain), and a parser crash is a recoverable Go error rather than a process-wide
+  segfault — containment that matters in a shared process owning in-flight migrations. The Wasm
+  module is embedded at build time (`go:embed`); nothing is downloaded at runtime. The cgo
+  [`pg_query_go`](https://github.com/pganalyze/pg_query_go) is the documented escape hatch —
+  API-compatible, a one-file swap.
+- **Shadow-table DDL and checkpoint fingerprints** come from **execute-and-introspect**: apply
+  the change inside a rolled-back transaction on the engine-owned
+  [scratch database](#plan-time-prerequisite-the-scratch-database) hydrated to the
+  before-schema, then read the canonical after-state back from the catalogs (`pg_get_*def`).
+  No AST surgery — correctness of the after-schema is delegated to PostgreSQL itself, and the
+  resume fingerprint (ST-2) hashes the introspected model, not SQL text.
+- **Refusals (RF-1..5)** use both layers: parse-level lint for what the AST shows (dangerous
+  literals, ambiguous renames), scratch execution for semantic truth (syntax *and* semantics,
+  with the server's own SQLSTATEs). Refusal messages quote the server error where one exists.
+
+Classification still *predicts* lock/rewrite behaviour — an empty scratch table reveals nothing
+about a 2 TB rewrite — so execute-and-introspect complements the classifier, never replaces it.
+A structured operations DSL (pgroll-style) and catalog-snapshot diffing are noted as possible
+future *additional* front doors for declarative mode, not the primary.
 
 ### Why this is the right shape
 
@@ -208,7 +238,7 @@ live schema (introspected)  ─┘                          │
 
 ### How the diff is derived
 
-1. **Parse desired state** with `pg_query_go` into a normalized table model (columns, types,
+1. **Parse desired state** with `go-pgquery` into a normalized table model (columns, types,
    defaults, nullability, identity/sequences, constraints, indexes).
 2. **Introspect live state** from the catalogs (`pg_attribute`, `pg_constraint`, `pg_index`,
    `pg_attrdef`, …) into the same normalized model.
@@ -219,15 +249,28 @@ live schema (introspected)  ─┘                          │
 4. **Diff** the two models and emit the minimal set of statements: `ADD/DROP/ALTER COLUMN`,
    `ADD/DROP CONSTRAINT`, `CREATE/DROP INDEX`, default/nullability changes, etc., in a
    **dependency-correct order** (e.g. add a column before an index that references it).
+   Columns are compared **by name**: a live table whose columns are ordered differently from
+   the desired file converges to "no changes". Attribute order carries no semantics in
+   PostgreSQL and cannot be changed in place, so — unlike some declarative MySQL tooling —
+   column order is deliberately out of scope for convergence.
 5. **Hand the derived statements to the same classifier**, so a declarative change that turns
    out to be, say, a binary-coercible type widening still takes the native fast path, and only
    a genuine rewrite triggers a copy.
 
 ### Safety rules (inherited philosophy: surprise-free, decisions-not-options)
 
-- **Destructive diffs are gated.** Dropping a column or constraint, or anything that loses
-  data, requires an explicit confirmation flag — never inferred silently from "it's missing in
-  the desired file".
+- **Destructive diffs are gated.** Dropping a column, constraint, or index — anything that
+  loses data or a guarantee (a unique index discards the same uniqueness guarantee as a unique
+  constraint) — requires an explicit confirmation flag — never inferred silently from "it's
+  missing in the desired file".
+- **Unsupported constructs are refused, never guessed.** The desired file admits one
+  unqualified `CREATE TABLE` plus `CREATE INDEX` statements on it; each rule is a typed error.
+  Foreign keys are refused at admission — a `REFERENCES` clause cannot be faithfully executed
+  in the transaction-scoped scratch schema (an unqualified reference resolves against the
+  scratch search_path, not the target schema), and FK support needs its own design. Changes
+  the plan cannot express — identity or generation changes on an existing column, adopting a
+  sequence-backed (serial) default whose sequence only existed in the rolled-back scratch
+  transaction — are refused as unsupported rather than emitted as an unexecutable plan.
 - **Renames are ambiguous and are not guessed.** A column present in live but absent in desired
   plus a new column in desired is, by default, a *drop + add*, not a rename. Rename intent must
   be stated explicitly (the engine will not heuristically pair columns), mirroring Spirit's
@@ -251,9 +294,9 @@ remains the primitive that everything ultimately runs through.
 this front-end: introspection, canonicalization (by applying the desired DDL to a **temp
 database** and letting the server itself canonicalize), dependency-ordered emission of the same
 safe idioms, per-statement timeouts, typed **hazard annotations**, and **plan validation**
-against the temp database. Whether `pkg/schemadiff` wraps it or builds on `pg_query_go`
+against the temp database. Whether `pkg/schemadiff` wraps it or builds on `go-pgquery`
 directly is
-[open decision #5](#5-declarative-diff-engine--build-on-pg_query_go-vs-wrap-pg-schema-diff).
+[open decision #5](#5-declarative-diff-engine--build-on-go-pgquery-vs-wrap-pg-schema-diff).
 Either way its output flows through our classifier and executors unchanged — planner output is
 a request, not a permission.
 
@@ -460,7 +503,9 @@ matrix is part of the "decisions, not options" philosophy.
   of which comes along by creating a table with the right columns. Miss the grants and
   application roles **lose access at the instant of cutover**. The cutover refuses to swap until
   this fidelity checklist passes; OID-bound dependents (views, publications) are refused up
-  front in v1 (see the schema-shape matrix above).
+  front in v1 (see the schema-shape matrix above). The shadow's column definition itself comes
+  from [execute-and-introspect](#how-the-planner-understands-ddl-decided) on the scratch
+  database, not from AST transformation of the user's `ALTER`.
 
 ### What "tuned for Aurora" actually means here
 
@@ -496,6 +541,30 @@ this section states *why* and pins the analog to the underlying primitive.
 | **RENAME column** (dangerous overlap cases) | Refuse the dangerous cases; allow only simple, unambiguous non-PK renames | A rename that reuses an old name (`RENAME a→b, ADD a …`) makes column identity ambiguous between the source row image and the shadow schema, risking silent data misplacement during apply. Same correctness hazard exists in PG. |
 | **Lossy conversions** (shorten `VARCHAR` below longest value, add `NOT NULL` w/o default, add `UNIQUE` on non-unique data) | Refuse; require the data be fixed first | These can fail or truncate *during the copy or the constraint validation*, after work is spent. PG surfaces them as `VALIDATE CONSTRAINT` / cast failures; better to reject up front. |
 | Read-replica `<10s` lag fidelity | Not a goal | Like Spirit, the engine prioritizes copy throughput; it observes Aurora reader/slot lag only to throttle and protect DR, not to guarantee replica freshness. |
+
+### Plan-time prerequisite: the scratch database
+
+[Execute-and-introspect](#how-the-planner-understands-ddl-decided) (semantic validation,
+shadow-DDL derivation, checkpoint fingerprints) needs a scratch database **on the target
+cluster** — server version and extension parity hold by construction, and the storage cost is
+schema-only (no data ever lands in scratch). Preflight (ST-6) verifies one of two acceptable
+states and refuses with a stated reason otherwise:
+
+1. **`pg_sprite_scratch` is pre-provisioned** (engine-role-owned), or
+2. the engine role holds **`CREATEDB`**, so preflight can self-provision it.
+
+The scratch database is engine-owned and disposable: preflight may reset it (drop/recreate
+contents) at any time. Restricted environments that won't grant `CREATEDB` pre-provision
+instead.
+
+**Plan-time diffing uses a lighter mechanism.** `pkg/schemadiff` materializes the desired
+state inside a single always-rolled-back transaction in the *target* database, in a
+randomly named transaction-scoped schema (`pgsprite_scratch_<random>`). This keeps the
+same-server semantic-truth property (same version, extensions, and defaults as the live
+table) while requiring no `CREATEDB`, no pre-provisioning, and leaving zero footprint —
+appropriate because diffing is read-only planning. The durable `pg_sprite_scratch`
+database above is required only by the migration path proper (shadow-DDL derivation and
+checkpoint fingerprints), where objects must outlive a transaction.
 
 ### Postgres-only preconditions Spirit has no analog for
 
@@ -536,7 +605,7 @@ pkg/applier/          -> ON CONFLICT upsert + delete apply
 pkg/table/            -> PK-range chunkers (optimistic + composite), dynamic sizing
 pkg/checksum/         -> md5/row-text chunked verification
 pkg/dbconn/           -> pgx pool, retries, lock_timeout, RDS CA, pg_terminate_backend
-pkg/statement/        -> pg_query_go parsing + "is this natively safe?" classifier
+pkg/statement/        -> go-pgquery parsing + "is this natively safe?" classifier
 pkg/schemadiff/       -> declarative mode: introspect live schema, diff vs desired
                          CREATE TABLE, derive ordered ALTER/CREATE statements (+ fmt)
 pkg/lint/             -> unsafe-DDL linters (PG flavored)
@@ -549,12 +618,15 @@ pkg/throttler/        -> Aurora PG replica-lag / slot-lag throttle
   `pgconn`/`pglogrepl` building blocks for logical replication.
 - **`github.com/jackc/pglogrepl`** — start replication, parse `pgoutput`/`wal2json`
   messages, send standby status (LSN flush) updates. This is the binlog-syncer analog.
-- **`github.com/pganalyze/pg_query_go/v5`** — parse `ALTER`/`CREATE TABLE` (libpg_query,
-  the actual Postgres grammar). Analog of Spirit's TiDB parser.
+- **`github.com/wasilibs/go-pgquery`** — parse `ALTER`/`CREATE TABLE` with the actual Postgres
+  grammar (`libpg_query` compiled to Wasm, executed by wazero: pure-Go builds, parser crashes
+  contained). Analog of Spirit's TiDB parser. The cgo `github.com/pganalyze/pg_query_go/v5` is
+  the API-compatible escape hatch (see
+  [How the planner understands DDL](#how-the-planner-understands-ddl-decided)).
 - **`github.com/stripe/pg-schema-diff`** *(candidate — open decision #5)* — declarative diff
   engine: introspection + dependency-ordered plan emission with hazard annotations and
   temp-database plan validation; would power `pkg/schemadiff` instead of building the diff on
-  `pg_query_go` directly.
+  `go-pgquery` directly.
 - **`github.com/alecthomas/kong`** — CLI, same as Spirit.
 
 ## Design decisions inherited from Spirit (safety over speed)
@@ -665,7 +737,7 @@ why building declarative first costs nothing on the execution side.
 
 ### 3. Repo location / language
 
-Go (reuse `pgx` + `pglogrepl` + `pg_query_go`; matches Spirit's language and idioms). Fresh
+Go (reuse `pgx` + `pglogrepl` + `go-pgquery`; matches Spirit's language and idioms). Fresh
 standalone repo — this repository.
 
 ### 4. Expand/contract (pgroll) as a second execution backend
@@ -684,9 +756,9 @@ rewrites use copy-and-swap.
   one-shot vs start/complete/rollback lifecycles under one `status`; and the default routing
   policy (auto-route vs explicit `--strategy`) given "decisions, not options".
 
-### 5. Declarative diff engine — build on pg_query_go vs wrap pg-schema-diff
+### 5. Declarative diff engine — build on go-pgquery vs wrap pg-schema-diff
 
-Whether `pkg/schemadiff` builds the desired-vs-live diff on `pg_query_go` + our own schema
+Whether `pkg/schemadiff` builds the desired-vs-live diff on `go-pgquery` + our own schema
 model, or wraps [stripe/pg-schema-diff](https://github.com/stripe/pg-schema-diff) (MIT, Go,
 PG 14–17, actively maintained) as the diff engine.
 
@@ -697,9 +769,10 @@ PG 14–17, actively maintained) as the diff engine.
   validation against the temp database. Plan generation is cleanly separated from application,
   so our executors keep our own timeout/lock/retry discipline. It is a **periphery** dependency
   (plan generation), so the TCB bar does not apply — pinned like any load-bearing dep.
-- **Costs of wrapping:** the temp-database factory is an operational precondition
-  (`CREATE DATABASE` on the target or a scratch instance — needs a deliberate answer for
-  locked-down production clusters); renames surface as drop+add and **must** sit behind our
+- **Costs of wrapping:** the temp-database factory is an operational precondition — answered:
+  the engine-owned [scratch database](#plan-time-prerequisite-the-scratch-database) is already
+  a preflight-verified prerequisite for execute-and-introspect, so wrapping adds no new
+  operational demand; renames surface as drop+add and **must** sit behind our
   destructive-diff gate and never-guess-renames refusals; type support beyond enums is missing;
   its embedded timeout policy is replaced by ours at execution.
 - **Build:** full control and no temp-database precondition — at the cost of the hardest code

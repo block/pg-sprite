@@ -161,14 +161,14 @@ short:
 | --- | --- | --- |
 | `pgx/v5` / `pgconn` | TCB (unavoidable — the wire) | pin, review upgrades like TCB changes, changelog read before bump |
 | `pglogrepl` | TCB (decode path) | same |
-| `pg_query_go` | boundary (parses untrusted input into `Classified`) | fuzz at our boundary; parse failure is an error (CO-7), never a fallback |
+| `go-pgquery` (Wasm `libpg_query`) | boundary (parses untrusted input into `Classified`) | fuzz at our boundary; parse failure is an error (CO-7), never a fallback; a parser crash is a Wasm trap surfaced as a Go error, not a process crash; verify wasilibs' reproducible-build provenance on every bump (cgo `pg_query_go` is the API-compatible escape hatch) |
 | `kong`, `testcontainers`, testify | periphery / test-only | normal hygiene |
 
 Rule: **no new dependency inside TCB packages without an explicit recorded decision.** CI
 enforces the import boundary (below), so a periphery-only dep physically cannot creep into the
 core. The decision rubric, in order:
 
-1. **Is it load-bearing expertise?** A real SQL grammar (`pg_query_go`), the wire protocol
+1. **Is it load-bearing expertise?** A real SQL grammar (`go-pgquery`), the wire protocol
    (`pgx`/`pglogrepl`), crypto — take the dependency, pin it, treat it as TCB. Hand-rolling a
    SQL parser to avoid a dependency would be the *opposite* of safety (CO-7 exists because
    string-splitting SQL is how tools corrupt data).
