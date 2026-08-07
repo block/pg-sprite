@@ -82,30 +82,21 @@ PG 14→18 — the fleet floor, not the newest release
 
 ## Where the existing ecosystem stops
 
-pg-sprite exists because each current tool covers one slice and stops exactly where the
-next is needed:
+pg-sprite exists because today the whole surface is covered only by assembling a
+toolchain, and each piece stops where the next is needed. Declarative diff-and-plan
+tools generate and apply native DDL, but hand a genuine table rewrite to PostgreSQL
+as-is. Expand/contract tools execute rewrites online by serving multiple schema
+versions — a real capability, bought with the application coupling pg-sprite refuses:
+per-change opt-in and a multi-version window. Online repack tools copy-and-swap a
+table without changing its definition. Versioned-file frameworks own the workflow
+this vision rejects and delegate the execution mechanics entirely.
 
-- **[pg-schema-diff](https://github.com/stripe/pg-schema-diff)** diffs a declarative
-  schema and applies the native DDL it generates, with hazard annotations — but a change
-  that genuinely rewrites the table runs as PostgreSQL runs it. No copy-and-swap, no
-  checksum gate, no crash-resume.
-- **[pgroll](https://github.com/xataio/pgroll)** and
-  **[reshape](https://github.com/fabianlindfors/reshape)** execute expand/contract with
-  dual schema versions served through views — a real capability, bought with exactly the
-  app-coupling pg-sprite refuses: applications opt in via `search_path` and every change
-  holds a multi-version window open. Neither proves the data by checksum before the
-  contract step.
-- **[pg_repack](https://github.com/reorg/pg_repack)** does an online copy-and-swap — of
-  the *same* table definition (bloat, clustering). It is not a schema-change tool: no
-  diff, no classification, no altered target schema.
-- **Rails/Django/Alembic/Flyway-style frameworks** own the versioned-file workflow this
-  vision rejects, and delegate the hard part: an `ALTER` that rewrites a large hot table
-  runs as-is, locks included.
-
-No existing tool combines classify-first routing, a mandatory checksum gate before any
-destructive step, durable crash-resume, and application invisibility in one engine. That
-combination — not any single feature — is why pg-sprite is built rather than assembled
-(the in-house-diff vs `pg-schema-diff` decision is recorded in
+Each of these is excellent at its slice — [README.md](README.md) credits the specific
+tools whose practices this engine deliberately mines. What none of them combine is
+classify-first routing, a mandatory checksum gate before any destructive step, durable
+crash-resume, and application invisibility in one engine. That combination — not any
+single feature — is why pg-sprite is built rather than assembled (the diff-engine
+build-vs-adopt decision is recorded in
 [low-level-design.md](low-level-design.md#5-declarative-diff-engine-decided)).
 
 ## What "go-to" means
