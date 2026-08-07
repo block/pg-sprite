@@ -58,6 +58,34 @@ func TestClassifyMarksDropsDestructive(t *testing.T) {
 	}
 }
 
+// Unverified separates "the planner proved a rewrite" from "the planner
+// failed closed for lack of facts": the same conversion is a proven
+// relabel with a column fact, and an unverified rewrite without one. A
+// USING clause is a rewrite regardless of facts, so it is never
+// unverified.
+func TestClassifyUnverifiedMarksFactlessTypeChanges(t *testing.T) {
+	verified, err := planner.Classify(
+		"ALTER TABLE t ALTER COLUMN v50 TYPE varchar(100)", facts)
+	require.NoError(t, err)
+	require.Len(t, verified.Decisions, 1)
+	assert.Equal(t, planner.RouteNative, verified.Decisions[0].Route)
+	assert.False(t, verified.Decisions[0].Unverified)
+
+	factless, err := planner.Classify(
+		"ALTER TABLE t ALTER COLUMN v50 TYPE varchar(100)", planner.Facts{})
+	require.NoError(t, err)
+	require.Len(t, factless.Decisions, 1)
+	assert.Equal(t, planner.RouteCopyAndSwap, factless.Decisions[0].Route)
+	assert.True(t, factless.Decisions[0].Unverified)
+
+	using, err := planner.Classify(
+		"ALTER TABLE t ALTER COLUMN txt TYPE jsonb USING txt::jsonb", planner.Facts{})
+	require.NoError(t, err)
+	require.Len(t, using.Decisions, 1)
+	assert.Equal(t, planner.RouteCopyAndSwap, using.Decisions[0].Route)
+	assert.False(t, using.Decisions[0].Unverified)
+}
+
 // TestClassifyReferenceRows is the golden mapping: one case per row of
 // docs/postgres-online-ddl-reference.md. saferSteps is the length of the
 // expected safer sequence (0 when the decision carries none).

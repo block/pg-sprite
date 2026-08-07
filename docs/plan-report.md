@@ -17,6 +17,10 @@ kinds) and the fingerprint serialization are all pinned to it. Adding a vocabula
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
+The [lint report](lint-report.md) is a separate contract with its own `format_version`; the
+two version independently. Lint findings embed this contract's Reasons vocabulary — the lint
+`format_version` pins the reason set for lint consumers, as this one does for plan consumers.
+
 ## Consumer behavior for unknown values
 
 Every enum field in the report draws from a closed vocabulary listed here. A consumer that
@@ -59,6 +63,7 @@ with SQL it does not fully understand.
 | `destructive` | bool | always | Whether this operation discards live structure. Always emitted, never omitted. |
 | `route` | string | always | Where the operation goes (see Routes). |
 | `reason` | string | always | The typed cause of the routing decision (see Reasons). Automation branches on this, never on prose. |
+| `unverified` | bool | when true | The planner failed closed to this route for lack of live facts — the route is what the engine would do, not a proven property of the change. With facts (a live introspection or a supplied column type) the same operation may classify as native. Absent means the decision is proven. |
 | `safer_sql` | array | safer-idiom only | The ordered native sequence to run instead of the submitted form, when the planner could construct it. |
 
 ## Closed vocabularies
