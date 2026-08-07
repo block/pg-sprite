@@ -17,6 +17,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 )
 
 // newDiffCmd builds a DiffCmd with the flag defaults kong would apply,
@@ -63,9 +64,11 @@ func TestDiffPrintsOrderedPlanJSON(t *testing.T) {
 	assert.True(t, *report.TableExists)
 
 	var sqls []string
+	var kinds []schemadiff.ChangeKind
 	var destructive []bool
 	for _, ch := range report.Statements {
 		sqls = append(sqls, ch.SQL)
+		kinds = append(kinds, ch.Kind)
 		destructive = append(destructive, ch.Destructive)
 	}
 	assert.Equal(t, []string{
@@ -74,6 +77,12 @@ func TestDiffPrintsOrderedPlanJSON(t *testing.T) {
 		fmt.Sprintf(`ALTER TABLE "%s"."events" ALTER COLUMN "name" SET NOT NULL`, schema),
 		fmt.Sprintf("CREATE INDEX events_name_idx ON %s.events USING btree (name)", schema),
 	}, sqls)
+	assert.Equal(t, []schemadiff.ChangeKind{
+		schemadiff.ChangeDropColumn,
+		schemadiff.ChangeAlterType,
+		schemadiff.ChangeSetNotNull,
+		schemadiff.ChangeCreateIndex,
+	}, kinds)
 	assert.Equal(t, []bool{true, false, false, false}, destructive)
 
 	// Every derived statement is classified and routed: the widen is proven

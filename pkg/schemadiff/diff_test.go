@@ -69,6 +69,77 @@ func TestDiffDropColumnIsDestructive(t *testing.T) {
 	assert.True(t, changes[0].Destructive)
 }
 
+func TestDiffDropIndexIsDestructive(t *testing.T) {
+	desired := base()
+	desired.Indexes = nil
+	changes, err := Diff("public", base(), desired)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`DROP INDEX "public"."events_name_idx"`,
+	}, sqls(changes))
+	assert.True(t, changes[0].Destructive)
+	assert.Equal(t, ChangeDropIndex, changes[0].Kind)
+}
+
+func TestDiffRefusesSequenceDefaultAdoption(t *testing.T) {
+	desired := base()
+	desired.Columns[0].Default = "nextval('events_id_seq'::regclass)"
+	desired.Columns[0].SequenceDefault = true
+	_, err := Diff("public", base(), desired)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+}
+
+func TestDiffRefusesSequenceDefaultOnAddedColumn(t *testing.T) {
+	desired := base()
+	desired.Columns = append(desired.Columns, Column{
+		Name: "seq_col", Type: "integer",
+		Default: "nextval('events_seq_col_seq'::regclass)", SequenceDefault: true,
+	})
+	_, err := Diff("public", base(), desired)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+}
+
+func TestDiffIdenticalSequenceDefaultsConverge(t *testing.T) {
+	withSerial := func() Model {
+		m := base()
+		m.Columns[0].Default = "nextval('events_id_seq'::regclass)"
+		m.Columns[0].SequenceDefault = true
+		return m
+	}
+	changes, err := Diff("public", withSerial(), withSerial())
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+}
+
+func TestDiffChangeKinds(t *testing.T) {
+	live := base()
+	live.Columns = append(live.Columns, Column{Name: "legacy", Type: "integer"})
+
+	desired := base()
+	desired.Columns[1] = Column{Name: "name", Type: "text", NotNull: true}
+	desired.Columns = append(desired.Columns, Column{Name: "email", Type: "text"})
+	desired.Constraints = append(desired.Constraints, Constraint{
+		Name: "events_email_key", Def: "UNIQUE (email)",
+	})
+	desired.Indexes = append(desired.Indexes, Index{
+		Name: "events_email_idx", Def: "CREATE INDEX events_email_idx ON events USING btree (email)",
+	})
+
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	kinds := make([]ChangeKind, len(changes))
+	for i, c := range changes {
+		kinds[i] = c.Kind
+	}
+	assert.Equal(t, []ChangeKind{
+		ChangeDropColumn,
+		ChangeAddColumn,
+		ChangeAlterType,
+		ChangeAddConstraint,
+		ChangeCreateIndex,
+	}, kinds)
+}
+
 func TestDiffColumnAlterations(t *testing.T) {
 	desired := base()
 	desired.Columns[1] = Column{Name: "name", Type: "text", NotNull: false, Default: "'unnamed'::text"}

@@ -251,14 +251,29 @@ live schema (introspected)  ─┘                          │
 4. **Diff** the two models and emit the minimal set of statements: `ADD/DROP/ALTER COLUMN`,
    `ADD/DROP CONSTRAINT`, `CREATE/DROP INDEX`, default/nullability changes, etc., in a
    **dependency-correct order** (e.g. add a column before an index that references it).
+   Columns are compared **by name**: a live table whose columns are ordered differently from
+   the desired file converges to "no changes". Attribute order carries no semantics in
+   PostgreSQL and cannot be changed in place, so — unlike some declarative MySQL tooling —
+   column order is deliberately out of scope for convergence.
 5. **Hand the derived statements to the same classifier**, so a declarative change that turns
    out to be, say, a binary-coercible type widening still takes the native fast path, and only
    a genuine rewrite triggers a copy.
 
 ### Safety rules (inherited philosophy: surprise-free, decisions-not-options)
 
-- **Destructive-diff confirmation is planned.** The future flag will gate dropping a column or
-  constraint, or anything that loses data; no such confirmation flag exists today.
+- **Destructive-diff confirmation is planned.** The future flag will gate dropping a column,
+  constraint, or index — anything that loses data or a guarantee (a unique index discards the
+  same uniqueness guarantee as a unique constraint) — never inferred silently from "it's
+  missing in the desired file"; no such confirmation flag exists today (destructive statements
+  are flagged in the plan output).
+- **Unsupported constructs are refused, never guessed.** The desired file admits one
+  unqualified `CREATE TABLE` plus `CREATE INDEX` statements on it; each rule is a typed error.
+  Foreign keys are refused at admission — a `REFERENCES` clause cannot be faithfully executed
+  in the transaction-scoped scratch schema (an unqualified reference resolves against the
+  scratch search_path, not the target schema), and FK support needs its own design. Changes
+  the plan cannot express — identity or generation changes on an existing column, adopting a
+  sequence-backed (serial) default whose sequence only existed in the rolled-back scratch
+  transaction — are refused as unsupported rather than emitted as an unexecutable plan.
 - **Renames are ambiguous and are not guessed.** A column present in live but absent in desired
   plus a new column in desired is, by default, a *drop + add*, not a rename. Rename intent must
   eventually be stated explicitly; no rename-intent flag exists today. The engine does not
@@ -524,6 +539,11 @@ this section states *why* and pins the analog to the underlying primitive.
 | Read-replica `<10s` lag fidelity | Not a goal | Like Spirit, the engine prioritizes copy throughput; it observes Aurora reader/slot lag only to throttle and protect DR, not to guarantee replica freshness. |
 
 ### Plan-time prerequisite: the scratch database
+
+**This prerequisite belongs to the copy-and-swap path (shadow-DDL derivation and checkpoint
+fingerprints, later phases). Nothing shipped today requires it — declarative diffing uses
+the transaction-scoped scratch schema described below, which needs no `CREATEDB` and no
+pre-provisioning.**
 
 [Execute-and-introspect](#how-the-planner-understands-ddl-decided) (semantic validation,
 shadow-DDL derivation, checkpoint fingerprints) needs a scratch database **on the target

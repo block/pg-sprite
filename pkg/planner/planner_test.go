@@ -1,12 +1,15 @@
 package planner_test
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // facts mirrors a live table whose column types exercise both sides of the
@@ -46,6 +49,10 @@ func TestClassifyReferenceRows(t *testing.T) {
 		{"add column volatile default random", "ALTER TABLE t ADD COLUMN r float8 DEFAULT random()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, 0},
 		{"add column volatile default uuid", "ALTER TABLE t ADD COLUMN id uuid DEFAULT uuid_generate_v4()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, 0},
 		{"add column generated stored", "ALTER TABLE t ADD COLUMN total numeric GENERATED ALWAYS AS (price * qty) STORED", planner.RouteCopyAndSwap, planner.ReasonGeneratedStored, 0},
+		{"add column inline unique", "ALTER TABLE t ADD COLUMN c int UNIQUE", planner.RouteNative, planner.ReasonSaferIdiom, 0},
+		{"add column inline primary key", "ALTER TABLE t ADD COLUMN c int PRIMARY KEY", planner.RouteNative, planner.ReasonSaferIdiom, 0},
+		{"add column inline foreign key", "ALTER TABLE t ADD COLUMN c int REFERENCES p (id)", planner.RouteNative, planner.ReasonSaferIdiom, 0},
+		{"add column inline check", "ALTER TABLE t ADD COLUMN c int CHECK (c > 0)", planner.RouteNative, planner.ReasonSaferIdiom, 0},
 		{"drop column", "ALTER TABLE t DROP COLUMN age", planner.RouteNative, planner.ReasonMetadataOnly, 0},
 		{"alter type widen varchar", "ALTER TABLE t ALTER COLUMN v50 TYPE varchar(100)", planner.RouteNative, planner.ReasonBinaryCoercible, 0},
 		{"alter type varchar to text", "ALTER TABLE t ALTER COLUMN v50 TYPE text", planner.RouteNative, planner.ReasonBinaryCoercible, 0},
@@ -98,6 +105,7 @@ func TestClassifyReferenceRows(t *testing.T) {
 		{"attach partition", "ALTER TABLE t ATTACH PARTITION p FOR VALUES FROM (1) TO (10)", planner.RouteNative, planner.ReasonSaferIdiom, 0},
 		{"detach partition", "ALTER TABLE t DETACH PARTITION p", planner.RouteNative, planner.ReasonSaferIdiom, 1},
 		{"detach partition concurrently", "ALTER TABLE t DETACH PARTITION p CONCURRENTLY", planner.RouteNative, planner.ReasonOnlineIdiom, 0},
+		{"create table partition of", "CREATE TABLE p PARTITION OF t FOR VALUES FROM (1) TO (10)", planner.RouteNative, planner.ReasonPartitionParentLock, 0},
 
 		// Non-DDL and unknown statements.
 		{"dml", "INSERT INTO t VALUES (1)", planner.RouteRefuse, planner.ReasonUnsupportedOperation, 0},
@@ -176,4 +184,41 @@ func TestClassifyNoFactsIsConservative(t *testing.T) {
 func TestClassifyParseErrorSurfaces(t *testing.T) {
 	_, err := planner.Classify("ALTER TABLE", planner.Facts{})
 	assert.Error(t, err)
+}
+
+// generatedConstraintName parses a safer-sequence ADD CONSTRAINT step back
+// through the statement parser and returns the typed constraint name, so
+// the test asserts identifier facts rather than SQL prose.
+func generatedConstraintName(t *testing.T, step string) string {
+	t.Helper()
+	ops, err := statement.ParseOps(step)
+	require.NoError(t, err)
+	require.Len(t, ops, 1)
+	require.Equal(t, statement.OpAddConstraint, ops[0].Kind)
+	require.NotEmpty(t, ops[0].Name)
+	return ops[0].Name
+}
+
+func TestClassifyGeneratedNamesFitIdentifierLimit(t *testing.T) {
+	// Long enough that table + column + suffix would exceed PostgreSQL's
+	// 63-byte identifier limit, where the server would silently truncate.
+	table := strings.Repeat("t", 40)
+	colA := strings.Repeat("a", 40)
+	colB := strings.Repeat("b", 40)
+
+	dA := classifyOne(t, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL", table, colA))
+	dB := classifyOne(t, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL", table, colB))
+	require.NotEmpty(t, dA.SaferSQL)
+	require.NotEmpty(t, dB.SaferSQL)
+
+	nameA := generatedConstraintName(t, dA.SaferSQL[0])
+	nameB := generatedConstraintName(t, dB.SaferSQL[0])
+	assert.LessOrEqual(t, len(nameA), 63, "generated names must fit PostgreSQL's identifier limit")
+	assert.LessOrEqual(t, len(nameB), 63)
+	assert.NotEqual(t, nameA, nameB,
+		"columns differing only past the truncation point must not collide")
+
+	// Deterministic: the same input yields the same fitted name.
+	dA2 := classifyOne(t, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL", table, colA))
+	assert.Equal(t, dA.SaferSQL, dA2.SaferSQL)
 }

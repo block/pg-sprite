@@ -117,6 +117,35 @@ func TestMigrateDryRunSuggestsConcurrentIndex(t *testing.T) {
 	assert.Equal(t, 0, indexes, "dry-run must not create the index")
 }
 
+// A safer-idiom decision without a constructed rewrite dry-runs to
+// rewrite-required with no executable SQL, and nothing executes: the
+// engine must not fall back to the submitted blocking form.
+func TestMigrateDryRunInlineConstraintIsRewriteRequired(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+
+	plan := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN c int UNIQUE", schema))
+	assert.Equal(t, router.DispositionRewriteRequired, plan.Disposition)
+	require.Len(t, plan.Statements, 1)
+	st := plan.Statements[0]
+	assert.Equal(t, planner.RouteNative, st.Route)
+	assert.Equal(t, router.BackendNative, st.Backend)
+	require.Len(t, st.Decisions, 1)
+	assert.Equal(t, planner.ReasonSaferIdiom, st.Decisions[0].Reason)
+	assert.Empty(t, st.ExecSQL, "no executable SQL for an unconstructed rewrite")
+
+	var columns int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'c'`, schema).Scan(&columns))
+	assert.Equal(t, 0, columns, "dry-run must not add the column")
+}
+
 // A dry-run against a table that does not exist classifies with zero facts:
 // the unprovable type change routes conservatively instead of failing.
 func TestMigrateDryRunMissingTableIsConservative(t *testing.T) {

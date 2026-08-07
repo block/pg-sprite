@@ -99,6 +99,15 @@ type Op struct {
 	Unique bool
 	// GeneratedStored is true for ADD COLUMN ... GENERATED ... STORED.
 	GeneratedStored bool
+	// InlineConstraints are the table-constraint families an added column
+	// carries inline (UNIQUE, PRIMARY KEY, REFERENCES, CHECK) — each does
+	// the same index build or validation scan as its ADD CONSTRAINT form.
+	// An inline constraint the engine does not model is reported as
+	// ConstraintUnrecognized so the classifier can refuse it.
+	InlineConstraints []ConstraintKind
+	// PartitionOf is true for CREATE TABLE ... PARTITION OF, which locks
+	// the partitioned parent, not just the new relation.
+	PartitionOf bool
 	// Default is the DEFAULT shape for OpAddColumn.
 	Default DefaultKind
 	// NewType is the target type for OpAlterColumnType and the column type
@@ -118,6 +127,9 @@ type Op struct {
 func (o Op) Describe() string {
 	switch o.Kind {
 	case OpCreateTable:
+		if o.PartitionOf {
+			return "CREATE TABLE PARTITION OF"
+		}
 		return "CREATE TABLE"
 	case OpAddColumn:
 		return "ADD COLUMN " + o.Column
@@ -194,7 +206,10 @@ func ParseOps(sql string) ([]Op, error) {
 		}
 		return ops, nil
 	case node.GetCreateStmt() != nil:
-		return []Op{{Kind: OpCreateTable}}, nil
+		return []Op{{
+			Kind:        OpCreateTable,
+			PartitionOf: node.GetCreateStmt().GetPartbound() != nil,
+		}}, nil
 	case node.GetIndexStmt() != nil:
 		idx := node.GetIndexStmt()
 		return []Op{{
@@ -283,9 +298,13 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 }
 
 // addColumnOp extracts the shape facts of an added column: its DEFAULT
-// shape and whether it is a stored generated column. Identity and serial
-// columns are reported as expression defaults — their values come from a
-// sequence, which fast default cannot cover.
+// shape, whether it is a stored generated column, and any inline table
+// constraints it carries. Identity and serial columns are reported as
+// expression defaults — their values come from a sequence, which fast
+// default cannot cover. Nullability clauses and the deferrability
+// attributes that modify a preceding FOREIGN KEY add no work of their own
+// and are not reported; any constraint family the engine does not model
+// is reported as ConstraintUnrecognized so the classifier fails closed.
 func addColumnOp(def *pganalyze.ColumnDef) Op {
 	op := Op{Kind: OpAddColumn, Column: def.GetColname()}
 	op.NewType, op.NewTypeMods = typeRef(def.GetTypeName())
@@ -305,6 +324,23 @@ func addColumnOp(def *pganalyze.ColumnDef) Op {
 			op.Default = DefaultExpression
 		case pganalyze.ConstrType_CONSTR_GENERATED:
 			op.GeneratedStored = true
+		case pganalyze.ConstrType_CONSTR_NULL,
+			pganalyze.ConstrType_CONSTR_NOTNULL,
+			pganalyze.ConstrType_CONSTR_ATTR_DEFERRABLE,
+			pganalyze.ConstrType_CONSTR_ATTR_NOT_DEFERRABLE,
+			pganalyze.ConstrType_CONSTR_ATTR_DEFERRED,
+			pganalyze.ConstrType_CONSTR_ATTR_IMMEDIATE:
+			// No scan and no index build of their own.
+		case pganalyze.ConstrType_CONSTR_UNIQUE:
+			op.InlineConstraints = append(op.InlineConstraints, ConstraintUnique)
+		case pganalyze.ConstrType_CONSTR_PRIMARY:
+			op.InlineConstraints = append(op.InlineConstraints, ConstraintPrimaryKey)
+		case pganalyze.ConstrType_CONSTR_FOREIGN:
+			op.InlineConstraints = append(op.InlineConstraints, ConstraintForeignKey)
+		case pganalyze.ConstrType_CONSTR_CHECK:
+			op.InlineConstraints = append(op.InlineConstraints, ConstraintCheck)
+		default:
+			op.InlineConstraints = append(op.InlineConstraints, ConstraintUnrecognized)
 		}
 	}
 	return op
