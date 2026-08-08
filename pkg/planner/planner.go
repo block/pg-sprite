@@ -117,10 +117,11 @@ const (
 	// ReasonAppBreakingRename: PostgreSQL executes the rename as a brief
 	// metadata-only catalog flip, but it cannot land atomically across
 	// running application instances — code still referencing the old
-	// column name starts erroring the instant it commits. The safe
-	// sequence is expand/contract: add the new column, dual-write and
-	// backfill, switch reads, then drop the old column as its own
-	// reviewed change.
+	// column or table name starts erroring the instant it commits. For a
+	// column the safe sequence is expand/contract: add the new column,
+	// dual-write and backfill, switch reads, then drop the old column as
+	// its own reviewed change. For a table, coordinate the rename with
+	// the application deploy that adopts the new name.
 	ReasonAppBreakingRename Reason = "app-breaking-rename"
 	// ReasonVolatileDefault: ADD COLUMN whose default the planner cannot
 	// prove constant — PostgreSQL rewrites the table.
@@ -271,17 +272,19 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		}
 
 	case statement.OpDropColumn, statement.OpSetDefault, statement.OpDropDefault,
-		statement.OpDropNotNull, statement.OpRenameTable,
+		statement.OpDropNotNull,
 		statement.OpRenameIndex, statement.OpSetColumnOptions, statement.OpSetRelOptions,
 		statement.OpSetSchema, statement.OpDropConstraint:
 		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
 
-	case statement.OpRenameColumn:
+	case statement.OpRenameColumn, statement.OpRenameTable:
 		// Metadata-only for PostgreSQL, but not for the application: a
 		// rename cannot land atomically across deployed instances, so
 		// code querying the old name breaks the instant it commits. The
 		// engine still executes it when asked; the typed reason lets
-		// lint and plan consumers steer to expand/contract instead.
+		// lint and plan consumers steer to a safe sequence instead.
+		// Index renames stay metadata-only above — SQL never references
+		// an index by name.
 		d.Route, d.Reason = RouteNative, ReasonAppBreakingRename
 
 	case statement.OpAlterColumnType:

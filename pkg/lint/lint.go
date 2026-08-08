@@ -54,12 +54,13 @@ const (
 	// database would prove. The route is what the engine would do, not a
 	// proven property of the change.
 	CodePossibleTableRewrite Code = "possible-table-rewrite"
-	// CodeAppBreakingRename: the statement renames a column in place —
-	// metadata-only for PostgreSQL, but running application code still
-	// referencing the old name breaks the instant it commits. The safe
-	// sequence is expand/contract: add the new column, dual-write and
-	// backfill, switch reads, then drop the old column as its own
-	// reviewed change.
+	// CodeAppBreakingRename: the statement renames a column or table in
+	// place — metadata-only for PostgreSQL, but running application code
+	// still referencing the old name breaks the instant it commits. For
+	// a column the safe sequence is expand/contract: add the new column,
+	// dual-write and backfill, switch reads, then drop the old column as
+	// its own reviewed change. For a table, coordinate the rename with
+	// the application deploy that adopts the new name.
 	CodeAppBreakingRename Code = "app-breaking-rename"
 	// CodeDestructive: the operation discards live structure (a column,
 	// constraint, or index drop) and cannot be undone by re-running the
