@@ -54,6 +54,13 @@ const (
 	// database would prove. The route is what the engine would do, not a
 	// proven property of the change.
 	CodePossibleTableRewrite Code = "possible-table-rewrite"
+	// CodeAppBreakingRename: the statement renames a column in place —
+	// metadata-only for PostgreSQL, but running application code still
+	// referencing the old name breaks the instant it commits. The safe
+	// sequence is expand/contract: add the new column, dual-write and
+	// backfill, switch reads, then drop the old column as its own
+	// reviewed change.
+	CodeAppBreakingRename Code = "app-breaking-rename"
 	// CodeDestructive: the operation discards live structure (a column,
 	// constraint, or index drop) and cannot be undone by re-running the
 	// schema. Index drops are included because the linter cannot see
@@ -188,9 +195,13 @@ func decisionFinding(d planner.Decision) (Finding, bool) {
 		f.Code, f.Severity = CodeTableRewrite, SeverityWarning
 		return f, true
 	case planner.RouteNative:
-		if d.Reason == planner.ReasonSaferIdiom {
+		switch d.Reason {
+		case planner.ReasonSaferIdiom:
 			f.Code, f.Severity = CodeBlockingIdiom, SeverityWarning
 			f.Suggestion = d.SaferSQL
+			return f, true
+		case planner.ReasonAppBreakingRename:
+			f.Code, f.Severity = CodeAppBreakingRename, SeverityWarning
 			return f, true
 		}
 		return Finding{}, false

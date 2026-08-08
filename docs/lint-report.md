@@ -77,6 +77,7 @@ codes make the conservatism visible instead of burying it:
 | `blocking-idiom` | warning | `CREATE INDEX i ON t (c)` | The submitted form blocks readers or writers and a safer native form exists; `suggestion` carries it when the linter can construct one. |
 | `table-rewrite` | warning | `ALTER TABLE t ALTER COLUMN c TYPE jsonb USING c::jsonb` | The operation provably rewrites the table — only the engine's copy-and-swap path can run it online. |
 | `possible-table-rewrite` | warning | `ALTER TABLE t ALTER COLUMN c TYPE bigint` | The linter cannot verify the operation against live column facts, so the engine would fail closed to the rewrite path — but the change may be a free relabel a live database would prove. |
+| `app-breaking-rename` | warning | `ALTER TABLE t RENAME COLUMN email TO email_address` | PostgreSQL runs the rename as a metadata-only catalog flip, but a rename cannot land atomically across running application instances — code still referencing the old name breaks the instant it commits. Expand/contract instead: add the new column, dual-write and backfill, switch reads, then drop the old column as its own reviewed change. |
 | `destructive` | warning | `ALTER TABLE t DROP COLUMN legacy` | The operation discards live structure (a column, constraint, or index drop) and cannot be undone by re-running the schema. |
 
 ## Severities (`severity`)

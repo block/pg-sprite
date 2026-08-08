@@ -58,6 +58,36 @@ func TestDiffAddColumn(t *testing.T) {
 	assert.False(t, changes[0].Destructive)
 }
 
+// A rename expressed declaratively — the old column name gone, a new one
+// present — is a drop plus an add, never an inferred rename: the differ
+// does not heuristically pair columns, and the drop stays destructive so
+// the caller gates it. Carrying the data over is expand/contract work
+// (add, dual-write and backfill, switch reads, drop), not a diff.
+func TestDiffRenameShapeIsDropPlusAdd(t *testing.T) {
+	live := Model{
+		Table: "users",
+		Columns: []Column{
+			{Name: "id", Type: "bigint", NotNull: true},
+			{Name: "email", Type: "text"},
+		},
+	}
+	desired := Model{
+		Table: "users",
+		Columns: []Column{
+			{Name: "id", Type: "bigint", NotNull: true},
+			{Name: "email_address", Type: "text"},
+		},
+	}
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`ALTER TABLE "public"."users" DROP COLUMN "email"`,
+		`ALTER TABLE "public"."users" ADD COLUMN "email_address" text`,
+	}, sqls(changes))
+	assert.True(t, changes[0].Destructive)
+	assert.False(t, changes[1].Destructive)
+}
+
 func TestDiffDropColumnIsDestructive(t *testing.T) {
 	desired := base()
 	desired.Columns = desired.Columns[:1] // drop "name"

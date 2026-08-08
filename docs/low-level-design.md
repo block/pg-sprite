@@ -277,7 +277,10 @@ live schema (introspected)  ─┘                          │
 - **Renames are ambiguous and are not guessed.** A column present in live but absent in desired
   plus a new column in desired is, by default, a *drop + add*, not a rename. Rename intent must
   eventually be stated explicitly; no rename-intent flag exists today. The engine does not
-  heuristically pair columns.
+  heuristically pair columns. The imperative path executes a direct `RENAME COLUMN` when asked —
+  it is metadata-only for PostgreSQL — but classifies it `app-breaking-rename`: the rename cannot
+  land atomically across running application instances, so the safe sequence is expand/contract
+  (add the new column, dual-write and backfill, switch reads, drop the old column separately).
 - **Diff is review-only.** `diff` prints every derived statement and its classified route without
   executing. Copy-and-swap routes render as unavailable until that backend exists.
 - **Out-of-band drift is surfaced, not steamrolled.** If the live table differs from what the

@@ -92,6 +92,7 @@ with SQL it does not fully understand.
 | `fast-default` | ADD COLUMN with a constant default — the catalog stores the default, no rewrite. |
 | `binary-coercible` | A type change PostgreSQL relabels without a rewrite (widen varchar, varchar to text, widen numeric precision). |
 | `safer-idiom` | Native, but the submitted form blocks; `safer_sql` carries the online rewrite when one can be constructed. |
+| `app-breaking-rename` | A column rename — metadata-only for PostgreSQL, but running application code still referencing the old name breaks the instant it commits. The safe sequence is expand/contract: add the new column, dual-write and backfill, switch reads, then drop the old column as its own reviewed change. |
 | `volatile-default` | ADD COLUMN whose default the planner cannot prove constant — PostgreSQL rewrites the table. |
 | `generated-stored` | Adding a stored generated column computes every row — a full rewrite. |
 | `type-rewrite` | A type conversion PostgreSQL cannot relabel — rewrite plus reindex. |

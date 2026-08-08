@@ -114,6 +114,14 @@ const (
 	// ReasonSaferIdiom: native, but the submitted form blocks; SaferSQL
 	// carries the online rewrite when one can be constructed.
 	ReasonSaferIdiom Reason = "safer-idiom"
+	// ReasonAppBreakingRename: PostgreSQL executes the rename as a brief
+	// metadata-only catalog flip, but it cannot land atomically across
+	// running application instances — code still referencing the old
+	// column name starts erroring the instant it commits. The safe
+	// sequence is expand/contract: add the new column, dual-write and
+	// backfill, switch reads, then drop the old column as its own
+	// reviewed change.
+	ReasonAppBreakingRename Reason = "app-breaking-rename"
 	// ReasonVolatileDefault: ADD COLUMN whose default the planner cannot
 	// prove constant — PostgreSQL rewrites the table.
 	ReasonVolatileDefault Reason = "volatile-default"
@@ -263,10 +271,18 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		}
 
 	case statement.OpDropColumn, statement.OpSetDefault, statement.OpDropDefault,
-		statement.OpDropNotNull, statement.OpRenameColumn, statement.OpRenameTable,
+		statement.OpDropNotNull, statement.OpRenameTable,
 		statement.OpRenameIndex, statement.OpSetColumnOptions, statement.OpSetRelOptions,
 		statement.OpSetSchema, statement.OpDropConstraint:
 		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+
+	case statement.OpRenameColumn:
+		// Metadata-only for PostgreSQL, but not for the application: a
+		// rename cannot land atomically across deployed instances, so
+		// code querying the old name breaks the instant it commits. The
+		// engine still executes it when asked; the typed reason lets
+		// lint and plan consumers steer to expand/contract instead.
+		d.Route, d.Reason = RouteNative, ReasonAppBreakingRename
 
 	case statement.OpAlterColumnType:
 		d.Route, d.Reason, d.Unverified = classifyTypeChange(op, facts)
