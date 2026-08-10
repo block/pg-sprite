@@ -3,63 +3,23 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
-	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
-// classifyChanges routes every derived change through the shared
-// classify-and-route pipeline. facts sharpen type-change classification;
-// the zero value is valid and strictly more conservative.
-func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.Statement, router.Disposition, error) {
-	plans := make([]planner.Plan, 0, len(changes))
-	for _, ch := range changes {
-		// Canonicalize before classifying so the report carries the
-		// engine's canonical rendering — the same string the alter front
-		// door would report for the same change.
-		canonical, err := statement.Canonical(ch.SQL)
-		if err != nil {
-			return nil, "", fmt.Errorf("canonicalize derived statement %q: %w", ch.SQL, err)
-		}
-		classified, err := planner.Classify(canonical, facts)
-		if err != nil {
-			return nil, "", fmt.Errorf("classify derived statement %q: %w", canonical, err)
-		}
-		plans = append(plans, classified)
-	}
-	routed := router.Route(plans)
-	planned := make([]plan.Statement, 0, len(changes))
-	for i, ch := range changes {
-		ps := plan.FromRouted(routed.Statements[i])
-		ps.Kind = ch.Kind
-		planned = append(planned, ps)
-	}
-	return planned, routed.Disposition, nil
-}
-
-// liveFacts extracts the planner facts the live model provides: the
-// canonical type of every live column.
-func liveFacts(live schemadiff.Model) planner.Facts {
-	types := make(map[string]string, len(live.Columns))
-	for _, col := range live.Columns {
-		types[col.Name] = col.Type
-	}
-	return planner.Facts{ColumnTypes: types}
-}
-
-// run is the diff flow: parse and admit the desired file, introspect the
-// live table and the desired state (execute-and-introspect on a rolled-back
-// scratch schema), and print the ordered plan. Nothing is ever executed
-// against the live table.
+// run is the diff flow: parse and admit the desired file, derive the routed
+// convergence plan through the exported pipeline (pkg/diffplan — the same
+// front door orchestrators call as a library), and print the ordered plan.
+// Nothing is ever executed against the live table.
 func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	logger := c.diag()
 	raw, err := os.ReadFile(c.Desired)
@@ -78,68 +38,19 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	}
 	defer pool.Close()
 
-	report := plan.NewReport(plan.SourceDiff)
-	report.Schema = c.Schema
-	report.Table = ds.Table
-	if report.ServerVersion, err = serverVersion(ctx, pool); err != nil {
+	report, err := diffplan.Plan(ctx, pool, c.Schema, ds)
+	if err != nil {
 		return err
 	}
-	tableExists := true
-	var changes []schemadiff.Change
-	var facts planner.Facts
-	live, err := schemadiff.Introspect(ctx, pool, c.Schema, ds.Table)
-	switch {
-	case errors.Is(err, schemadiff.ErrTableNotFound):
-		// No live table: the plan is the desired schema itself, qualified
-		// onto the target schema, classified with zero facts (there are no
-		// live columns to sharpen type-change decisions).
-		tableExists = false
-		if changes, err = qualifiedDesired(ds, c.Schema); err != nil {
-			return err
-		}
-	case err != nil:
-		return err
-	default:
-		facts = liveFacts(live)
-		desired, err := schemadiff.IntrospectDesired(ctx, pool, ds)
-		if err != nil {
-			return err
-		}
-		if changes, err = schemadiff.Diff(c.Schema, live, desired); err != nil {
-			return err
-		}
-	}
-	report.TableExists = &tableExists
-	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
-		return err
-	}
-	report.Fingerprint = plan.Fingerprint(report.Statements)
 	logger.Debug("diff derived",
-		"schema", c.Schema, "table", ds.Table, "changes", len(report.Statements),
-		"table_exists", tableExists, "disposition", string(report.Disposition))
+		"schema", report.Schema, "table", report.Table, "changes", len(report.Statements),
+		"table_exists", report.TableExists != nil && *report.TableExists,
+		"disposition", string(report.Disposition))
 
 	if c.JSON {
 		return writeJSON(out, report)
 	}
 	return writePlanText(out, report)
-}
-
-// qualifiedDesired renders the desired statements as the plan for a table
-// that does not exist yet, qualified onto the target schema.
-func qualifiedDesired(ds statement.DesiredSchema, schema string) ([]schemadiff.Change, error) {
-	changes := make([]schemadiff.Change, 0, len(ds.Statements))
-	for _, st := range ds.Statements {
-		qualified, err := statement.Qualify(st.SQL(), schema)
-		if err != nil {
-			return nil, fmt.Errorf("qualify desired statement: %w", err)
-		}
-		kind := schemadiff.ChangeCreateTable
-		if st.Kind() == statement.KindCreateIndex {
-			kind = schemadiff.ChangeCreateIndex
-		}
-		changes = append(changes, schemadiff.Change{SQL: qualified, Kind: kind})
-	}
-	return changes, nil
 }
 
 // writeJSON emits the plan report as JSON.
