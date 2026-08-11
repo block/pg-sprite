@@ -58,6 +58,20 @@ func TestLintReadsFromFile(t *testing.T) {
 	assert.Equal(t, 1, report.Warnings)
 }
 
+// The text renderer emits the conventional name:line:column: shape so CI
+// systems and editors can jump to the finding. This is the renderer's own
+// unit test — everything else asserts typed fields.
+func TestLintTextFindingsCarryPositions(t *testing.T) {
+	var out strings.Builder
+	cmd := LintCmd{}
+	err := cmd.runLint(strings.NewReader(
+		"CREATE TABLE ok (id int);\nALTER TABLE t DROP COLUMN legacy;\n"), &out)
+	require.NoError(t, err)
+	assert.Equal(t,
+		"<stdin>:2:1: warning: destructive — DROP COLUMN legacy\n",
+		out.String())
+}
+
 func TestLintParseFailureIsErrorNotFinding(t *testing.T) {
 	var out strings.Builder
 	cmd := LintCmd{}

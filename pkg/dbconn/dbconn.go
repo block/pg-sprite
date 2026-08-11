@@ -96,6 +96,17 @@ func NewPool(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	return pool, nil
 }
 
+// ServerVersion reads the connected server's server_version setting.
+// Plan reports carry it because classification is version-sensitive: a
+// stored report names the server whose rules produced it.
+func ServerVersion(ctx context.Context, pool *pgxpool.Pool) (string, error) {
+	var v string
+	if err := pool.QueryRow(ctx, "SELECT current_setting('server_version')").Scan(&v); err != nil {
+		return "", fmt.Errorf("read server_version: %w", err)
+	}
+	return v, nil
+}
+
 // buildPoolConfig translates Config into a pgxpool configuration. It is pure
 // (no dialing), so every option's wiring is unit-testable without a server.
 func buildPoolConfig(cfg Config) (*pgxpool.Config, error) {

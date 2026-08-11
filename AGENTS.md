@@ -7,6 +7,18 @@ This file is canonical. `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `.goosehints`,
 `.github/copilot-instructions.md` are symlinks to it — edit only this file. Review-agent
 checks live in [.agents/checks/review.md](.agents/checks/review.md).
 
+## Two lenses on every change
+
+Judge every PR, design, and review through both lenses — a change that serves one at the
+expense of the other needs an explicit decision, not a silent trade:
+
+1. **OSS-first.** pg-sprite aims to be the preferred PostgreSQL online-DDL tool in its own
+   right: the CLI works standalone with no orchestrator setup, docs and error messages are
+   written for external users, and nothing assumes a Block-internal environment.
+2. **Clean SchemaBot integration.** pg-sprite must slot into SchemaBot as an engine behind a
+   stable seam: keep the library API, verdict/plan JSON contracts, and error taxonomy
+   adapter-friendly, and never let the core depend on SchemaBot (or any orchestrator).
+
 ## Read SAFETY.md first
 
 This codebase is partitioned into a **safety-critical core** and a periphery.
@@ -35,15 +47,23 @@ make lint        # golangci-lint
   convergence oracle) are the `TM-*` registry in the same doc.
 - Always run the full `make test` when the scope of a change is unclear.
 - Never assume a test failure is unrelated to your change; investigate it.
-- Never increase timeouts to fix flakes; find the root cause.
+- Never increase timeouts to fix flakes; find the root cause — then prove the fix holds with
+  `scripts/test-flaky.sh <TestName> [iterations] [package]` before declaring it fixed.
 - Integration tests run against real PostgreSQL (testcontainers); `PG_VERSION` selects the
   major (default 16), CI runs the matrix 14 → 18. Core logic is validated against a real
   database — no mocked-DB tests for core logic.
 
 ## Conventions
 
+- Say **"schema change"**, not "migration", in code, CLI output, error messages, and new docs —
+  pg-sprite strings surface through orchestrators that ban "migration". Use "migration" only
+  when citing external sources (Spirit's `pkg/migration`, peer tools, PostgreSQL docs).
 - Use `pkg/dbconn` for connections — never raw `pgx` pools in production code (tests excepted).
   Every session runs under bounded `lock_timeout` / `statement_timeout`.
+- Never build SQL by interpolating raw identifiers: any user-supplied or introspected name in
+  generated SQL goes through `pgx.Identifier{...}.Sanitize()` (or `quote_ident()` server-side).
+- Never string-manipulate connection strings/DSNs — parse (`pgx.ParseConfig`), modify fields,
+  re-serialize; string ops break on passwords containing `/`, `@`, or `%`.
 - All SQL parsing goes through the real PostgreSQL grammar via `wasilibs/go-pgquery` (Wasm
   `libpg_query`; the cgo `pg_query_go` is the API-compatible escape hatch, not the default),
   with `pkg/statement` as the parse boundary. No `strings.Split(";")`, no hand-parsing; a parse failure is an
@@ -131,6 +151,24 @@ make lint        # golangci-lint
 Mechanical style rules (doc comments on exported symbols, no `init()`, no package-level
 mutable state, no `context.Context` in structs, static slog messages with snake_case keys,
 no printing to process stdout) are enforced by `.golangci.yml`, not prose.
+
+## Git and PRs
+
+- Do not create PRs automatically — pushing a branch is fine; opening the PR is the author's
+  decision. When asked, create PRs as drafts (`gh pr create --draft`); the author marks ready.
+- Never squash or rewrite history after a human has reviewed (comments or approval) — add
+  commits so reviewers can see increments. Squash freely before review.
+- Agent disclosure lines (agent name + model) go at the *bottom* of PR bodies and issue
+  bodies, after the content.
+- Never reply to, post on, or resolve *human* review threads without the author's explicit
+  approval — agents do not speak for the author. Automated reviewer (e.g. Copilot) comments
+  may be replied to and resolved without separate approval, provided each reply describes the
+  fix with a commit link (or a reasoned rejection), is prefixed 🤖, and carries the agent
+  disclosure — resolve only after the reply is posted.
+- After pushing new commits, refresh the PR title/summary to match — unless a human has
+  edited it.
+- Upstream large branches with the leaf approach: map the dependency graph, peel off leaf
+  changes as small independent PRs first, in topological order.
 
 Design docs live in [docs/](docs/) — start at [docs/README.md](docs/README.md); the invariant
 registry is [docs/invariants.md](docs/invariants.md).

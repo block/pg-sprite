@@ -38,7 +38,7 @@ func (c *LintCmd) runLint(in io.Reader, out io.Writer) error {
 		if err := enc.Encode(report); err != nil {
 			return fmt.Errorf("write lint report: %w", err)
 		}
-	} else if err := writeLintText(out, report); err != nil {
+	} else if err := writeLintText(out, c.sourceName(), report); err != nil {
 		return err
 	}
 	if report.Errors > 0 {
@@ -47,12 +47,23 @@ func (c *LintCmd) runLint(in io.Reader, out io.Writer) error {
 	return nil
 }
 
-// writeLintText renders the findings, one per line with any suggestion
-// indented beneath it. A clean report prints nothing.
-func writeLintText(out io.Writer, report lint.Report) error {
+// sourceName names the linted source for text findings: the file path, or
+// the conventional "<stdin>" when the script came from the pipe.
+func (c *LintCmd) sourceName() string {
+	if c.Path == "" {
+		return "<stdin>"
+	}
+	return c.Path
+}
+
+// writeLintText renders the findings in the conventional linter shape —
+// name:line:column: severity — one per line with any suggestion indented
+// beneath it, so CI systems and editors can jump to the source. A clean
+// report prints nothing.
+func writeLintText(out io.Writer, name string, report lint.Report) error {
 	for _, f := range report.Findings {
-		if _, err := fmt.Fprintf(out, "statement %d: %s: %s — %s\n",
-			f.Statement, f.Severity, f.Code, f.Operation); err != nil {
+		if _, err := fmt.Fprintf(out, "%s:%d:%d: %s: %s — %s\n",
+			name, f.Line, f.Column, f.Severity, f.Code, f.Operation); err != nil {
 			return fmt.Errorf("write lint report: %w", err)
 		}
 		if len(f.Suggestion) > 0 {

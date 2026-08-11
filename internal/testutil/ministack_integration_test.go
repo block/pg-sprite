@@ -1,8 +1,9 @@
+//go:build ministack
+
 package testutil_test
 
 import (
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
@@ -18,14 +19,25 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 )
 
-// TestAuroraControlPlaneProvisionAndConnect proves the AWS-boundary flow
-// end to end: an aurora-postgresql cluster provisioned through the real RDS
-// control-plane API is discoverable, its endpoint accepts connections
-// through pkg/dbconn (bounded session defaults included), the server runs
-// the requested PostgreSQL major, and DDL executes.
-func TestAuroraControlPlaneProvisionAndConnect(t *testing.T) {
+// TestAuroraControlPlane proves the AWS-boundary seams against one shared
+// provisioned cluster: provisioning a cluster costs minutes, so the
+// subtests share it rather than provisioning three times. They run in
+// order, and PasswordRotation runs last because it changes the cluster's
+// master password.
+func TestAuroraControlPlane(t *testing.T) {
 	cluster := testutil.ProvisionAuroraPostgres(t)
 
+	t.Run("ProvisionAndConnect", func(t *testing.T) { provisionAndConnect(t, cluster) })
+	t.Run("ErrorContract", func(t *testing.T) { errorContract(t, cluster) })
+	t.Run("PasswordRotation", func(t *testing.T) { passwordRotation(t, cluster) })
+}
+
+// provisionAndConnect proves the AWS-boundary flow end to end: an
+// aurora-postgresql cluster provisioned through the real RDS control-plane
+// API is discoverable, its endpoint accepts connections through pkg/dbconn
+// (bounded session defaults included), the server runs the requested
+// PostgreSQL major, and DDL executes.
+func provisionAndConnect(t *testing.T, cluster *testutil.AuroraCluster) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{
 		URL:         cluster.URL(),
 		LockTimeout: 300 * time.Millisecond,
@@ -56,12 +68,11 @@ func TestAuroraControlPlaneProvisionAndConnect(t *testing.T) {
 	assert.NotNil(t, oid, "created table must be visible in the catalog")
 }
 
-// TestAuroraControlPlaneErrorContract proves the control-plane error
-// contract the engine's discovery code will rely on: unknown identifiers
-// and duplicate creations surface as the AWS SDK's typed RDS faults,
-// matchable with errors.As — never by message text.
-func TestAuroraControlPlaneErrorContract(t *testing.T) {
-	cluster := testutil.ProvisionAuroraPostgres(t)
+// errorContract proves the control-plane error contract the engine's
+// discovery code will rely on: unknown identifiers and duplicate creations
+// surface as the AWS SDK's typed RDS faults, matchable with errors.As —
+// never by message text.
+func errorContract(t *testing.T, cluster *testutil.AuroraCluster) {
 	ctx := t.Context()
 
 	_, err := cluster.Client.DescribeDBClusters(ctx, &rds.DescribeDBClustersInput{
@@ -87,63 +98,72 @@ func TestAuroraControlPlaneErrorContract(t *testing.T) {
 		Engine:               aws.String("aurora-postgresql"),
 		DBInstanceClass:      aws.String("db.t3.medium"),
 	})
-	// Real AWS emits wire code "DBInstanceAlreadyExists" (which the SDK maps
-	// to types.DBInstanceAlreadyExistsFault); Ministack emits
-	// "DBInstanceAlreadyExistsFault", which the SDK leaves as a generic API
-	// error. Match the code prefix so the assertion holds against both the
-	// emulator and a real endpoint — engine code consuming this error must
-	// do the same.
+	// Real AWS emits wire code "DBInstanceAlreadyExists", which the SDK
+	// maps to types.DBInstanceAlreadyExistsFault — production code must
+	// match that typed fault with errors.As, exactly like the two cases
+	// above. Ministack diverges: it emits "DBInstanceAlreadyExistsFault",
+	// which the SDK leaves as a generic API error. Pin the divergent code
+	// exactly so this assertion fails the day the emulator is fixed, and
+	// this workaround is replaced by the typed errors.As match.
 	var apiErr smithy.APIError
 	require.ErrorAs(t, err, &apiErr,
 		"creating a duplicate instance must surface an RDS API error")
-	assert.True(t, strings.HasPrefix(apiErr.ErrorCode(), "DBInstanceAlreadyExists"),
-		"duplicate instance error code must identify the already-exists fault, got %q", apiErr.ErrorCode())
+	require.Equal(t, "DBInstanceAlreadyExistsFault", apiErr.ErrorCode(),
+		"emulator no longer emits its divergent duplicate-instance code — assert types.DBInstanceAlreadyExistsFault with errors.As instead of this pin")
 }
 
-// TestAuroraControlPlanePasswordRotation proves the rotation seam the
-// credential test theme builds on: ModifyDBCluster applies a new master
-// password to the running database, after which the stale password is
-// refused with SQLSTATE 28P01 (invalid_password) and the new one connects.
-func TestAuroraControlPlanePasswordRotation(t *testing.T) {
-	// Named polling bounds for the rotation to land on the real database.
-	const (
-		rotationDeadline = time.Minute
-		rotationPoll     = time.Second
-	)
-
-	cluster := testutil.ProvisionAuroraPostgres(t)
-	ctx := t.Context()
-
-	const rotatedPassword = "test-password-rotated-do-not-use"
-	_, err := cluster.Client.ModifyDBCluster(ctx, &rds.ModifyDBClusterInput{
-		DBClusterIdentifier: aws.String(cluster.ClusterID),
-		MasterUserPassword:  aws.String(rotatedPassword),
-		ApplyImmediately:    aws.Bool(true),
-	})
-	require.NoError(t, err, "rotate master password via ModifyDBCluster")
-
-	// The rotation must land on the real database, not just the metadata:
-	// poll until the new password opens a connection through dbconn.
-	require.Eventuallyf(t, func() bool {
-		pool, err := dbconn.NewPool(ctx, dbconn.Config{
-			URL:         cluster.URLWithPassword(rotatedPassword),
-			LockTimeout: 300 * time.Millisecond,
-		})
-		if err != nil {
-			return false
-		}
-		pool.Close()
-		return true
-	}, rotationDeadline, rotationPoll,
-		"rotated master password did not become usable within the deadline")
-
-	// The stale password is refused by authentication — the exact failure
-	// a mid-migration connection hits after a production rotation.
-	_, err = dbconn.NewPool(ctx, dbconn.Config{
+// passwordRotation proves what a master-password rotation does to a
+// running schema change, and pins pg-sprite's contract for the failure.
+// PostgreSQL never re-authenticates an established session, so in-flight
+// work keeps running through the rotation; the stale credentials fail on
+// the next dial — a pool recycle, growth past the idle set, or a
+// reconnect — with SQLSTATE 28P01, which pg-sprite classifies as
+// terminal: one clean failure, never a retry storm against an
+// auth-failing endpoint.
+func passwordRotation(t *testing.T, cluster *testutil.AuroraCluster) {
+	// A pool dialed with the pre-rotation password, with one session
+	// checked out — a schema change in flight.
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{
 		URL:         cluster.URL(),
 		LockTimeout: 300 * time.Millisecond,
 	})
+	require.NoError(t, err, "connect with the pre-rotation password")
+	t.Cleanup(pool.Close)
+	held, err := pool.Acquire(t.Context())
+	require.NoError(t, err, "check out a session before the rotation")
+	var result int
+	require.NoError(t, held.QueryRow(t.Context(), "SELECT 1").Scan(&result))
+
+	const rotatedPassword = "test-password-rotated-do-not-use"
+	cluster.Rotate(t, rotatedPassword)
+
+	// The established session sails through the rotation: PostgreSQL
+	// authenticates at connection time only.
+	require.NoError(t, held.QueryRow(t.Context(), "SELECT 2").Scan(&result),
+		"an established session must keep working through a rotation")
+	assert.Equal(t, 2, result)
+	held.Release()
+
+	// The failure lands on the next dial. Reset stands in for the ways a
+	// pool re-dials in production — MaxConnLifetime expiry, growth past
+	// the idle set, a reconnect after a network blip.
+	pool.Reset()
+	_, err = pool.Acquire(t.Context())
 	var pgErr *pgconn.PgError
-	require.ErrorAs(t, err, &pgErr, "stale password must fail with a server auth error")
+	require.ErrorAs(t, err, &pgErr, "a dial with the stale password must fail with a server auth error")
 	assert.Equal(t, "28P01", pgErr.Code, "stale password must be refused as invalid_password")
+
+	// pg-sprite's own contract for that failure: auth errors are terminal,
+	// not transient — the engine surfaces one clean failure instead of
+	// retrying against an endpoint that will keep refusing it.
+	assert.False(t, dbconn.Retryable(err), "an auth failure must not be classified as retryable")
+
+	// The rotated credentials connect through dbconn; the handle's URL
+	// reflects them after Rotate.
+	fresh, err := dbconn.NewPool(t.Context(), dbconn.Config{
+		URL:         cluster.URL(),
+		LockTimeout: 300 * time.Millisecond,
+	})
+	require.NoError(t, err, "connect with the rotated password")
+	fresh.Close()
 }

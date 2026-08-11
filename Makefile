@@ -41,7 +41,7 @@ test-supported-postgres:
 # (docs/testing.md). Needs Docker only — Ministack is MIT-licensed and
 # tokenless. PG_VERSION selects the major of the provisioned database.
 test-aws-boundary:
-	$(GO) test -race -count=1 -run 'AuroraControlPlane' -v ./internal/testutil/
+	$(GO) test -tags ministack -race -count=1 -run 'AuroraControlPlane' -v ./internal/testutil/
 
 lint:
 	golangci-lint run

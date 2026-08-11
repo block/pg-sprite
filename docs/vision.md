@@ -1,24 +1,25 @@
 # pg-sprite vision
 
-> **pg-sprite is the go-to engine for PostgreSQL schema changes: every migration — from an
+> **pg-sprite is the go-to engine for PostgreSQL schema changes: every change — from an
 > instant `ADD COLUMN` to a full online table rewrite — planned deterministically, executed
 > online with provable safety, and invisible to the applications it serves. It is the
 > reliable PostgreSQL execution layer for a GitOps front-end like
 > [SchemaBot](https://github.com/block/schemabot) — what
-> [Spirit](https://github.com/block/spirit) is for MySQL.**
+> [Spirit](https://github.com/block/spirit) is for MySQL — and a standalone CLI any
+> engineer can pick up today, no GitOps layer required.**
 
-One tool, one mental model, for *all* PostgreSQL schema migrations. Today teams assemble a
+One tool, one mental model, for *all* PostgreSQL schema changes. Today teams assemble a
 toolchain: one tool to diff and plan the easy DDL, another to copy-and-swap the genuine
 rewrites, an app-coordinated pattern for expand/contract, and hand-rolled scripts for
 everything else. Each covers one slice. pg-sprite covers the whole surface in one engine —
 and adds, deliberately, what no slice of that toolchain ships: data proven identical by
-checksum before any destructive step, a durable checkpoint so a mid-migration crash resumes
+checksum before any destructive step, a durable checkpoint so a mid-change crash resumes
 instead of orphaning, and managed-platform failover (Aurora) treated as a modeled state
 rather than an unhandled surprise.
 
 ## The five pillars
 
-### 1. All migrations, one engine
+### 1. All schema changes, one engine
 
 Classify-first ([design-principles.md](design-principles.md)): every requested change is
 routed to exactly one of three outcomes — a **native-safe idiom** (`CONCURRENTLY`,
@@ -52,11 +53,24 @@ SchemaBot handles GitOps orchestration, pull requests, and approvals; pg-sprite 
 classifies, routes, and executes
 ([schemabot-integration.md](schemabot-integration.md)).
 
+**GitOps-ready, not GitOps-required.** The same properties that make pg-sprite drivable by
+an orchestrator — deterministic plans, typed verdicts, bounded locks — make it a safe
+*direct* tool: an engineer with a DSN and the CLI gets the same engine, without adopting
+SchemaBot first. What that buys today is the refusal discipline: every session runs under
+a bounded `lock_timeout`, and a change the engine cannot prove safe ends in seconds with a
+typed verdict — not a hand-typed `ALTER` in a bare `psql` session holding an
+`ACCESS EXCLUSIVE` lock on a hot table. Each capability the phased plan lands
+(copy-and-swap, the checksum gate, durable crash-resume) reaches the direct user the
+moment it ships, because both front doors are held to one design rule: every capability is
+reachable from the CLI, and the CLI consumes the same plan, verdict, and lint contracts an
+orchestrator would. Meeting users where they are is part of the point: standalone CLI use
+is a supported front door, not a demo mode.
+
 ### 3. Developer-friendly, application-invisible
 
-Zero migration-mechanism app-coupling: no `search_path` opt-ins, no deploy-ordering
+Zero app-coupling to the change mechanism: no `search_path` opt-ins, no deploy-ordering
 entanglement with N application teams, no dual-version application code. The table keeps
-its identity for the entire migration; the application cannot tell a migration happened. A
+its identity for the entire schema change; the application cannot tell a change happened. A
 developer's whole job is: edit the SQL, open the PR, read the verdict.
 
 ### 4. Safety is the product
@@ -80,18 +94,42 @@ decoding is the default capture mode with triggers as a deliberate fallback
 PG 14→18 — the fleet floor, not the newest release
 ([postgresql-version-support.md](postgresql-version-support.md)).
 
+## Where the existing ecosystem stops
+
+pg-sprite exists because today the whole surface is covered only by assembling a
+toolchain, and each piece stops where the next is needed. Declarative diff-and-plan
+tools generate and apply native DDL, but hand a genuine table rewrite to PostgreSQL
+as-is. Expand/contract tools execute rewrites online by serving multiple schema
+versions — a real capability, bought with the application coupling pg-sprite refuses:
+per-change opt-in and a multi-version window. Online repack tools copy-and-swap a
+table without changing its definition. Versioned-file frameworks own the workflow
+this vision rejects and delegate the execution mechanics entirely.
+
+Each of these is excellent at its slice — [README.md](README.md) credits the specific
+tools whose practices this engine deliberately mines. What none of them combine is
+classify-first routing, a mandatory checksum gate before any destructive step, durable
+crash-resume, and application invisibility in one engine. That combination — not any
+single feature — is why pg-sprite is built rather than assembled (the diff-engine
+build-vs-adopt decision is recorded in
+[low-level-design.md](low-level-design.md#5-declarative-diff-engine-decided)).
+
 ## What "go-to" means
 
 pg-sprite has succeeded when:
 
 - a team's *entire* schema-change workflow — through SchemaBot, with pg-sprite executing —
   is "edit SQL, merge PR": for every change type, on every table size, with no
-  per-migration operator judgment;
+  per-change operator judgment;
+- an engineer with nothing but a DSN reaches for the pg-sprite CLI *instead of* a raw
+  `psql` session — first for day-to-day changes on teams that haven't adopted a GitOps
+  layer, and, once the tool has earned that trust, for the urgent mid-incident change
+  where bounded locks, a typed verdict, and crash-resume matter most — and gets the same
+  engine and the same guarantees as the fleet;
 - the SchemaBot fleet drives PostgreSQL changes through pg-sprite the way it drives MySQL
   changes through [Spirit](https://github.com/block/spirit) — same declarative front-end,
   same orchestration, same safety posture;
-- "we verified the data before cutover" is the *expected* baseline for PostgreSQL migrations
-  in the OSS ecosystem, because a shipped tool made it table stakes;
+- "we verified the data before cutover" is the *expected* baseline for PostgreSQL schema
+  changes in the OSS ecosystem, because a shipped tool made it table stakes;
 - the safety differentiators this doc set claims — the checksum gate, durable resume,
   bounded locks — read "proven", each backed by a landed test, not "(design)".
 

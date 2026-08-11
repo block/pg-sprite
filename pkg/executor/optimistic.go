@@ -6,8 +6,11 @@
 // BudgetError the caller turns into a not-native-safe verdict.
 //
 // This is a safety-critical core package: see SAFETY.md. It never trusts the
-// caller's classification — its own protection is the budget, applied with
-// SET LOCAL inside the attempt's transaction regardless of session defaults.
+// caller's classification — its own protections are the budget, applied with
+// SET LOCAL inside the attempt's transaction regardless of session defaults,
+// and the statement binding: it accepts only a parsed statement.Statement
+// (exactly one statement by construction) whose target matches the
+// preflighted table (invariant ST-7).
 package executor
 
 import (
@@ -21,7 +24,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/statement"
 )
+
+// ErrInvariantViolation is the fail-closed error class for breaches of the
+// registry in docs/invariants.md (see SAFETY.md); the message names the
+// invariant ID. It is never a warning and never retried.
+var ErrInvariantViolation = errors.New("invariant violation")
 
 // SQLSTATE codes the attempt maps to budget outcomes. Postgres errors are
 // matched by SQLSTATE, never by message text.
@@ -70,8 +79,9 @@ func (e *BudgetError) Error() string {
 	return fmt.Sprintf("optimistic attempt exceeded its %s (%s) and was cancelled", e.Cause, e.Budget)
 }
 
-// Budget bounds one optimistic attempt. Both limits must be positive: an
-// unbounded attempt is exactly the stall the front door exists to prevent.
+// Budget bounds one optimistic attempt. Both limits must be at least
+// minBudget: an unbounded attempt is exactly the stall the front door exists
+// to prevent.
 type Budget struct {
 	// LockTimeout bounds how long the attempt may wait in the lock queue.
 	LockTimeout time.Duration
@@ -79,28 +89,45 @@ type Budget struct {
 	StatementTimeout time.Duration
 }
 
-// validate rejects budgets that would leave the attempt unbounded.
+// minBudget is the smallest expressible budget: budgets are applied to
+// PostgreSQL in whole milliseconds, and a sub-millisecond value would
+// truncate to 0 — which disables the corresponding limit entirely.
+const minBudget = time.Millisecond
+
+// validate rejects budgets that would leave the attempt unbounded. Rejecting
+// a sub-millisecond budget is more fail-closed than silently rounding it up.
 func (b Budget) validate() error {
-	// INV: LK-2 — the attempt is bounded by construction; a zero or negative
-	// timeout would disable the corresponding PostgreSQL limit.
-	if b.LockTimeout <= 0 {
-		return fmt.Errorf("lock budget must be positive, got %s", b.LockTimeout)
+	// INV: LK-2 — the attempt is bounded by construction; a zero, negative,
+	// or sub-millisecond timeout would disable the corresponding PostgreSQL
+	// limit after millisecond truncation.
+	if b.LockTimeout < minBudget {
+		return fmt.Errorf("lock budget must be at least %s, got %s", minBudget, b.LockTimeout)
 	}
-	if b.StatementTimeout <= 0 {
-		return fmt.Errorf("statement budget must be positive, got %s", b.StatementTimeout)
+	if b.StatementTimeout < minBudget {
+		return fmt.Errorf("statement budget must be at least %s, got %s", minBudget, b.StatementTimeout)
 	}
 	return nil
 }
 
-// AttemptNative runs sql once, directly, inside a transaction bounded by b.
-// The table must have passed preflight — the proof parameter makes skipping
-// the size guard unrepresentable. On success the change is committed: it was
-// effectively instant. If a budget is exceeded the statement is cancelled by
-// the server, the transaction rolls back, and a *BudgetError is returned.
-// Any other failure is surfaced as an operational error.
-func AttemptNative(ctx context.Context, pool *pgxpool.Pool, _ preflight.PreflightedTable, sql string, b Budget) error {
+// AttemptNative runs st once, directly, inside a transaction bounded by b.
+// The table must have passed preflight and the statement must target it —
+// both proofs make the unsafe call unrepresentable: a statement.Statement
+// can only come from ParseOne (exactly one statement, parsed by the real
+// grammar), and a target mismatch is refused before anything executes, so a
+// proof for one table cannot smuggle SQL against another. On success the
+// change is committed: it was effectively instant. If a budget is exceeded
+// the statement is cancelled by the server, the transaction rolls back, and
+// a *BudgetError is returned. Any other failure is surfaced as an
+// operational error.
+func AttemptNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget) error {
 	if err := b.validate(); err != nil {
 		return err
+	}
+	// INV: ST-7 — the executor runs exactly the statement that was gated,
+	// and only against the table the preflight proof verified.
+	if st.Table() == "" || st.Schema() != pt.Schema() || st.Table() != pt.Table() {
+		return fmt.Errorf("%w: ST-7: statement targets %q but preflight verified %q",
+			ErrInvariantViolation, qualifiedName(st.Schema(), st.Table()), qualifiedName(pt.Schema(), pt.Table()))
 	}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -124,7 +151,7 @@ func AttemptNative(ctx context.Context, pool *pgxpool.Pool, _ preflight.Prefligh
 		return fmt.Errorf("set attempt budgets: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, sql); err != nil {
+	if _, err := tx.Exec(ctx, st.SQL()); err != nil {
 		if budgetErr := asBudgetError(err, b); budgetErr != nil {
 			return budgetErr
 		}
@@ -134,6 +161,15 @@ func AttemptNative(ctx context.Context, pool *pgxpool.Pool, _ preflight.Prefligh
 		return fmt.Errorf("commit optimistic attempt: %w", err)
 	}
 	return nil
+}
+
+// qualifiedName renders schema.table for error messages, omitting the dot
+// when the name is unqualified.
+func qualifiedName(schema, table string) string {
+	if schema == "" {
+		return table
+	}
+	return schema + "." + table
 }
 
 // asBudgetError maps a PostgreSQL error to the budget it exceeded, or nil
