@@ -43,7 +43,7 @@ func TestPlanDerivesOrderedRoutedPlan(t *testing.T) {
 	ds := parseDesired(t,
 		"CREATE TABLE events (id bigint PRIMARY KEY, name varchar(50) NOT NULL);\n"+
 			"CREATE INDEX events_name_idx ON events (name);")
-	report, err := diffplan.Plan(t.Context(), pool, schema, ds)
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
 	require.NoError(t, err)
 
 	assert.Equal(t, plan.FormatVersion, report.FormatVersion)
@@ -83,7 +83,7 @@ func TestPlanDerivesOrderedRoutedPlan(t *testing.T) {
 		"live column types must feed the classifier")
 
 	require.NotEmpty(t, report.Fingerprint)
-	again, err := diffplan.Plan(t.Context(), pool, schema, ds)
+	again, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
 	require.NoError(t, err)
 	assert.Equal(t, report.Fingerprint, again.Fingerprint,
 		"the same desired state against the same live table plans deterministically")
@@ -102,8 +102,10 @@ func TestPlanRoutesRewriteToCopyAndSwap(t *testing.T) {
 		"CREATE TABLE %s.events (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
 
-	report, err := diffplan.Plan(t.Context(), pool, schema,
-		parseDesired(t, "CREATE TABLE events (id bigint PRIMARY KEY)"))
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{
+		Schema:  schema,
+		Desired: parseDesired(t, "CREATE TABLE events (id bigint PRIMARY KEY)"),
+	})
 	require.NoError(t, err)
 
 	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
@@ -130,8 +132,10 @@ func TestPlanNeverWrites(t *testing.T) {
 		"INSERT INTO %s.events SELECT g, g FROM generate_series(1, 10) g", schema))
 	require.NoError(t, err)
 
-	_, err = diffplan.Plan(t.Context(), pool, schema,
-		parseDesired(t, "CREATE TABLE events (id bigint PRIMARY KEY, name text NOT NULL)"))
+	_, err = diffplan.Plan(t.Context(), pool, diffplan.Request{
+		Schema:  schema,
+		Desired: parseDesired(t, "CREATE TABLE events (id bigint PRIMARY KEY, name text NOT NULL)"),
+	})
 	require.NoError(t, err)
 
 	var cols int
@@ -155,8 +159,10 @@ func TestPlanNoChangesEmptyPlan(t *testing.T) {
 		"CREATE TABLE %s.events (id bigint PRIMARY KEY, name text NOT NULL)", schema))
 	require.NoError(t, err)
 
-	report, err := diffplan.Plan(t.Context(), pool, schema,
-		parseDesired(t, "CREATE TABLE events (id bigint PRIMARY KEY, name text NOT NULL)"))
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{
+		Schema:  schema,
+		Desired: parseDesired(t, "CREATE TABLE events (id bigint PRIMARY KEY, name text NOT NULL)"),
+	})
 	require.NoError(t, err)
 
 	require.NotNil(t, report.TableExists)
@@ -173,8 +179,11 @@ func TestPlanMissingTableEmitsFullDesiredSchema(t *testing.T) {
 	defer pool.Close()
 	schema := testutil.NewSchema(t, pool)
 
-	report, err := diffplan.Plan(t.Context(), pool, schema, parseDesired(t,
-		"CREATE TABLE events (id bigint PRIMARY KEY);\nCREATE INDEX events_id_idx ON events (id);"))
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{
+		Schema: schema,
+		Desired: parseDesired(t,
+			"CREATE TABLE events (id bigint PRIMARY KEY);\nCREATE INDEX events_id_idx ON events (id);"),
+	})
 	require.NoError(t, err)
 
 	require.NotNil(t, report.TableExists)

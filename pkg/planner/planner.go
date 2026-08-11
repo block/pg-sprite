@@ -31,6 +31,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -185,6 +186,18 @@ type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
 	ColumnTypes map[string]string
+}
+
+// FactsFrom extracts the facts a live introspection model provides: the
+// canonical type of every live column. Every front door — the declarative
+// diff and the imperative dry-run — extracts facts through this one
+// function so equivalent changes classify identically.
+func FactsFrom(live schemadiff.Model) Facts {
+	types := make(map[string]string, len(live.Columns))
+	for _, col := range live.Columns {
+		types[col.Name] = col.Type
+	}
+	return Facts{ColumnTypes: types}
 }
 
 // Classify parses one statement and routes each of its operations. A parse

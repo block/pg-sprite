@@ -7,7 +7,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/diffplan"
-	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -16,25 +15,16 @@ import (
 func TestPlanRejectsEmptySchema(t *testing.T) {
 	ds, err := statement.ParseDesired("CREATE TABLE events (id bigint PRIMARY KEY)")
 	require.NoError(t, err)
-	_, err = diffplan.Plan(t.Context(), nil, "", ds)
+	_, err = diffplan.Plan(t.Context(), nil, diffplan.Request{Desired: ds})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "schema name is required")
 }
 
+// The zero DesiredSchema — the only one a caller can build without
+// statement.ParseDesired — is refused, so every plan that reaches the
+// database went through the parse-boundary admission rules.
 func TestPlanRejectsDesiredStateWithoutTable(t *testing.T) {
-	_, err := diffplan.Plan(t.Context(), nil, "public", statement.DesiredSchema{})
+	_, err := diffplan.Plan(t.Context(), nil, diffplan.Request{Schema: "public"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "names no table")
-}
-
-func TestLiveFactsExtractsColumnTypes(t *testing.T) {
-	live := schemadiff.Model{Columns: []schemadiff.Column{
-		{Name: "id", Type: "bigint"},
-		{Name: "name", Type: "character varying(50)"},
-	}}
-	facts := diffplan.LiveFacts(live)
-	assert.Equal(t, map[string]string{
-		"id":   "bigint",
-		"name": "character varying(50)",
-	}, facts.ColumnTypes)
 }

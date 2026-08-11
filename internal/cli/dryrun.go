@@ -8,7 +8,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
-	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
@@ -104,5 +103,5 @@ func dryRunFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	case err != nil:
 		return planner.Facts{}, err
 	}
-	return diffplan.LiveFacts(live), nil
+	return planner.FactsFrom(live), nil
 }

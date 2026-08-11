@@ -30,7 +30,7 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	logger.Debug("desired schema parsed", "table", ds.Table, "statements", len(ds.Statements))
+	logger.Debug("desired schema parsed", "table", ds.Table(), "statements", len(ds.Statements()))
 
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {
@@ -38,7 +38,7 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	}
 	defer pool.Close()
 
-	report, err := diffplan.Plan(ctx, pool, c.Schema, ds)
+	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: c.Schema, Desired: ds})
 	if err != nil {
 		return err
 	}
@@ -171,7 +171,7 @@ func (c *FmtCmd) runFmt(in io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	for _, st := range ds.Statements {
+	for _, st := range ds.Statements() {
 		if _, err := fmt.Fprintf(out, "%s;\n", st.SQL()); err != nil {
 			return fmt.Errorf("write formatted schema: %w", err)
 		}

@@ -5,9 +5,14 @@
 //
 // Callers own the boundary concerns: parse the desired file through
 // [statement.ParseDesired] (refusals surface at the caller) and build the
-// connection through [dbconn.NewPool]. Plan never executes anything against
-// the live table — desired state is realized by execute-and-introspect on a
-// rolled-back scratch schema.
+// connection through [dbconn.NewPool]. Plan never writes the live table,
+// but it is not read-only either — desired state is realized by
+// execute-and-introspect on a rolled-back scratch schema, so the
+// connection requirements on [Plan] apply.
+//
+// Before a v1 module tag the Go API carries no compatibility promise: the
+// JSON [plan.Report] is the stability boundary, the Go API follows at v1
+// (see docs/architecture.md).
 package diffplan
 
 import (
@@ -25,23 +30,40 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
+// Request names the inputs to [Plan]. Zero-value fields are invalid: the
+// schema must be set, and the desired state must come from
+// [statement.ParseDesired] — the zero DesiredSchema is refused.
+type Request struct {
+	// Schema is the target schema the desired table lives in.
+	Schema string
+	// Desired is the parsed desired-state schema for the table.
+	Desired statement.DesiredSchema
+}
+
 // Plan derives the ordered, classified, and routed convergence plan for the
 // desired schema against the live database: introspect the live table,
 // derive the changes (the full qualified desired schema when the table does
 // not exist yet), classify each change with live-column facts, route the
 // set, and stamp the report with the server version and fingerprint.
-// Nothing is ever executed against the live table.
-func Plan(ctx context.Context, pool *pgxpool.Pool, schema string, ds statement.DesiredSchema) (plan.Report, error) {
-	if schema == "" {
+//
+// Plan needs more than a read-only connection: desired state is realized by
+// executing the desired DDL in a scratch schema inside a transaction that
+// is always rolled back, so the pool must connect read-write (not a hot
+// standby) as a role with CREATE privilege on the target database. The live
+// table is introspected only — never written. Plan does not close the pool;
+// one pool serves any number of calls.
+func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, error) {
+	if req.Schema == "" {
 		return plan.Report{}, errors.New("plan desired schema: schema name is required")
 	}
-	if ds.Table == "" {
+	ds := req.Desired
+	if ds.Table() == "" {
 		return plan.Report{}, errors.New("plan desired schema: desired state names no table")
 	}
 
 	report := plan.NewReport(plan.SourceDiff)
-	report.Schema = schema
-	report.Table = ds.Table
+	report.Schema = req.Schema
+	report.Table = ds.Table()
 	var err error
 	if report.ServerVersion, err = dbconn.ServerVersion(ctx, pool); err != nil {
 		return plan.Report{}, err
@@ -50,25 +72,25 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, schema string, ds statement.D
 	tableExists := true
 	var changes []schemadiff.Change
 	var facts planner.Facts
-	live, err := schemadiff.Introspect(ctx, pool, schema, ds.Table)
+	live, err := schemadiff.Introspect(ctx, pool, req.Schema, ds.Table())
 	switch {
 	case errors.Is(err, schemadiff.ErrTableNotFound):
 		// No live table: the plan is the desired schema itself, qualified
 		// onto the target schema, classified with zero facts (there are no
 		// live columns to sharpen type-change decisions).
 		tableExists = false
-		if changes, err = qualifiedDesired(ds, schema); err != nil {
+		if changes, err = qualifiedDesired(ds, req.Schema); err != nil {
 			return plan.Report{}, err
 		}
 	case err != nil:
 		return plan.Report{}, err
 	default:
-		facts = LiveFacts(live)
+		facts = planner.FactsFrom(live)
 		desired, err := schemadiff.IntrospectDesired(ctx, pool, ds)
 		if err != nil {
 			return plan.Report{}, err
 		}
-		if changes, err = schemadiff.Diff(schema, live, desired); err != nil {
+		if changes, err = schemadiff.Diff(req.Schema, live, desired); err != nil {
 			return plan.Report{}, err
 		}
 	}
@@ -78,18 +100,6 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, schema string, ds statement.D
 	}
 	report.Fingerprint = plan.Fingerprint(report.Statements)
 	return report, nil
-}
-
-// LiveFacts extracts the planner facts the live model provides: the
-// canonical type of every live column. Both front doors — the declarative
-// diff and the imperative dry-run — extract facts through this one function
-// so equivalent changes classify identically.
-func LiveFacts(live schemadiff.Model) planner.Facts {
-	types := make(map[string]string, len(live.Columns))
-	for _, col := range live.Columns {
-		types[col.Name] = col.Type
-	}
-	return planner.Facts{ColumnTypes: types}
 }
 
 // classifyChanges routes every derived change through the shared
@@ -124,8 +134,9 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 // qualifiedDesired renders the desired statements as the plan for a table
 // that does not exist yet, qualified onto the target schema.
 func qualifiedDesired(ds statement.DesiredSchema, schema string) ([]schemadiff.Change, error) {
-	changes := make([]schemadiff.Change, 0, len(ds.Statements))
-	for _, st := range ds.Statements {
+	statements := ds.Statements()
+	changes := make([]schemadiff.Change, 0, len(statements))
+	for _, st := range statements {
 		qualified, err := statement.Qualify(st.SQL(), schema)
 		if err != nil {
 			return nil, fmt.Errorf("qualify desired statement: %w", err)
