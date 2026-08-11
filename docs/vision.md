@@ -54,14 +54,17 @@ classifies, routes, and executes
 ([schemabot-integration.md](schemabot-integration.md)).
 
 **GitOps-ready, not GitOps-required.** The same properties that make pg-sprite drivable by
-an orchestrator — deterministic plans, typed verdicts, bounded locks, idempotent
-crash-resume, no mid-flight operator judgment — make it a safe *direct* tool: an engineer
-with a DSN and the CLI gets the full engine (`lint`, `diff`, execution) without adopting
-SchemaBot first. That matters most at the worst moment: when a schema change has to happen
-*right now* and the alternative is hand-typed DDL in a `psql` session — unbounded locks, no
-verdict, no resume — the safe path should also be the path of least resistance. Meeting
-users where they are is part of the point: standalone CLI use is a supported front door,
-not a demo mode.
+an orchestrator — deterministic plans, typed verdicts, bounded locks — make it a safe
+*direct* tool: an engineer with a DSN and the CLI gets the same engine, without adopting
+SchemaBot first. What that buys today is the refusal discipline: every session runs under
+a bounded `lock_timeout`, and a change the engine cannot prove safe ends in seconds with a
+typed verdict — not a hand-typed `ALTER` in a bare `psql` session holding an
+`ACCESS EXCLUSIVE` lock on a hot table. Each capability the phased plan lands
+(copy-and-swap, the checksum gate, durable crash-resume) reaches the direct user the
+moment it ships, because both front doors are held to one design rule: every capability is
+reachable from the CLI, and the CLI consumes the same plan, verdict, and lint contracts an
+orchestrator would. Meeting users where they are is part of the point: standalone CLI use
+is a supported front door, not a demo mode.
 
 ### 3. Developer-friendly, application-invisible
 
@@ -118,9 +121,10 @@ pg-sprite has succeeded when:
   is "edit SQL, merge PR": for every change type, on every table size, with no
   per-change operator judgment;
 - an engineer with nothing but a DSN reaches for the pg-sprite CLI *instead of* a raw
-  `psql` session — for day-to-day changes on teams that haven't adopted a GitOps layer, and
-  for the urgent mid-incident change where bounded locks, a verdict, and crash-resume
-  matter most — and gets the same engine and the same guarantees as the fleet;
+  `psql` session — first for day-to-day changes on teams that haven't adopted a GitOps
+  layer, and, once the tool has earned that trust, for the urgent mid-incident change
+  where bounded locks, a typed verdict, and crash-resume matter most — and gets the same
+  engine and the same guarantees as the fleet;
 - the SchemaBot fleet drives PostgreSQL changes through pg-sprite the way it drives MySQL
   changes through [Spirit](https://github.com/block/spirit) — same declarative front-end,
   same orchestration, same safety posture;
