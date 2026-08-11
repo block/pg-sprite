@@ -89,6 +89,8 @@ func TestAttemptNativeCancelsWhenLockBlocked(t *testing.T) {
 	require.ErrorAs(t, err, &budgetErr)
 	assert.Equal(t, executor.CauseLock, budgetErr.Cause)
 	assert.Equal(t, budget.LockTimeout, budgetErr.Budget)
+	assert.Equal(t, executor.DefaultRetryPolicy().MaxAttempts, budgetErr.Attempts,
+		"an actually blocked DDL must exhaust the bounded retry policy")
 }
 
 func TestAttemptNativeCancelsRewriteAndLeavesTableUnchanged(t *testing.T) {

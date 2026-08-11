@@ -51,8 +51,9 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 		"table", qualified(st), "total_bytes", pt.TotalBytes(), "limit_bytes", int64(c.MaxTableSize))
 
 	budget := executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout}
+	retry := c.retryPolicy()
 	start := time.Now()
-	err = executor.AttemptNative(ctx, pool, pt, st, budget)
+	err = executor.ExecuteNative(ctx, pool, pt, st, budget, retry)
 	elapsed := time.Since(start)
 	var budgetErr *executor.BudgetError
 	if errors.As(err, &budgetErr) {
@@ -71,6 +72,16 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 		Detail: fmt.Sprintf("committed within budgets (lock %s, statement %s): the change was effectively instant",
 			budget.LockTimeout, budget.StatementTimeout),
 	})
+}
+
+func (c *MigrateCmd) retryPolicy() executor.RetryPolicy {
+	// Programmatic callers do not pass through Kong's default population.
+	// Preserve the safe defaults for a zero-valued command while rejecting
+	// partially configured or invalid policies in the executor.
+	if c.LockAttempts == 0 && c.LockBackoff == 0 && c.LockBackoffMax == 0 {
+		return executor.DefaultRetryPolicy()
+	}
+	return executor.RetryPolicy{MaxAttempts: c.LockAttempts, InitialBackoff: c.LockBackoff, MaxBackoff: c.LockBackoffMax}
 }
 
 // emit prints the verdict in the selected format and returns ErrRefused for
