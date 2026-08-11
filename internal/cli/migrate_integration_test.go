@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	neturl "net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -268,9 +271,11 @@ func TestMigrateDebugDiagnostics(t *testing.T) {
 }
 
 // Both output modes report the empty case: an empty JSON list, and a
-// non-empty human explanation.
+// non-empty human explanation. The test gets a database of its own —
+// status scopes to the connected database, and on a shared server other
+// tests' pg-sprite sessions would otherwise show up here.
 func TestStatusReportsNoSessions(t *testing.T) {
-	url := testutil.StartPostgres(t)
+	url := testutil.NewDatabase(t, testutil.StartPostgres(t))
 
 	cmd := &StatusCmd{DBFlags: DBFlags{URL: url}, JSON: true}
 	var out strings.Builder
@@ -292,10 +297,23 @@ func TestStatusHandlesOtherRolesSessions(t *testing.T) {
 	superURL := testutil.StartPostgres(t)
 	superPool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: superURL})
 	require.NoError(t, err)
-	defer superPool.Close()
+	t.Cleanup(superPool.Close)
 
-	_, err = superPool.Exec(t.Context(), "CREATE ROLE limited LOGIN PASSWORD 'limited-test-only'")
+	// Roles are cluster-global, so a unique name plus a cleanup drop keeps
+	// a long-lived shared server reusable — even after a killed run that
+	// never reached its cleanups.
+	role := fmt.Sprintf("limited_%d", os.Getpid())
+	_, err = superPool.Exec(t.Context(),
+		"CREATE ROLE "+pgx.Identifier{role}.Sanitize()+" LOGIN PASSWORD 'limited-test-only'")
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		// t.Context is cancelled by cleanup time; strip the cancellation.
+		_, err := superPool.Exec(context.WithoutCancel(t.Context()),
+			"DROP ROLE IF EXISTS "+pgx.Identifier{role}.Sanitize())
+		if err != nil {
+			t.Logf("drop role %s: %v", role, err)
+		}
+	})
 
 	// Hold a superuser pg-sprite session open on a pinned connection so
 	// pg_stat_activity is guaranteed to contain a foreign-role row while
@@ -308,7 +326,7 @@ func TestStatusHandlesOtherRolesSessions(t *testing.T) {
 
 	u, err := neturl.Parse(superURL)
 	require.NoError(t, err)
-	u.User = neturl.UserPassword("limited", "limited-test-only")
+	u.User = neturl.UserPassword(role, "limited-test-only")
 
 	cmd := &StatusCmd{DBFlags: DBFlags{URL: u.String()}, JSON: true}
 	var out strings.Builder
@@ -318,6 +336,34 @@ func TestStatusHandlesOtherRolesSessions(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &sessions))
 	i := slices.IndexFunc(sessions, func(s session) bool { return s.PID == pid })
 	require.GreaterOrEqual(t, i, 0, "the other role's session must be listed, not crash the scan")
+}
+
+// A pg-sprite session on another database of the same server belongs to
+// another change: status scopes to the connected database.
+func TestStatusScopesToConnectedDatabase(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	dbURL := testutil.NewDatabase(t, serverURL)
+
+	// Hold a pg-sprite session open on the server's default database on a
+	// pinned connection so pg_stat_activity is guaranteed to contain a
+	// foreign-database row while status runs.
+	otherPool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	defer otherPool.Close()
+	conn, err := otherPool.Acquire(t.Context())
+	require.NoError(t, err)
+	defer conn.Release()
+	var pid int
+	require.NoError(t, conn.QueryRow(t.Context(), "SELECT pg_backend_pid()").Scan(&pid))
+
+	cmd := &StatusCmd{DBFlags: DBFlags{URL: dbURL}, JSON: true}
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var sessions []session
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &sessions))
+	i := slices.IndexFunc(sessions, func(s session) bool { return s.PID == pid })
+	assert.Equal(t, -1, i, "a session on another database must not be listed")
 }
 
 // A live pg-sprite session (any connection made through pkg/dbconn) is

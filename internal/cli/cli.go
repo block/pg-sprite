@@ -1,18 +1,16 @@
 // Package cli defines the pg-sprite command tree (Kong): migrate and
 // status (the optimistic front door), diff and fmt (the declarative front
-// door), and lint (the offline checker).
+// door), and lint and suggest (the offline checker and advisor).
 package cli
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 )
@@ -25,6 +23,7 @@ type CLI struct {
 	Diff    DiffCmd    `cmd:"" help:"Diff a desired-state schema file against the live schema."`
 	Fmt     FmtCmd     `cmd:"" help:"Canonicalize a schema file."`
 	Lint    LintCmd    `cmd:"" help:"Lint DDL for unsafe patterns."`
+	Suggest SuggestCmd `cmd:"" help:"Recommend safer native forms for risky DDL."`
 	Status  StatusCmd  `cmd:"" help:"Report the status of a running schema change."`
 }
 
@@ -59,17 +58,6 @@ func (f DBFlags) Config() dbconn.Config {
 		cfg.Logger = f.diag()
 	}
 	return cfg
-}
-
-// serverVersion reads the connected server's server_version setting for
-// the plan report: classification is version-sensitive, so a stored report
-// names the server whose rules produced it.
-func serverVersion(ctx context.Context, pool *pgxpool.Pool) (string, error) {
-	var v string
-	if err := pool.QueryRow(ctx, "SELECT current_setting('server_version')").Scan(&v); err != nil {
-		return "", fmt.Errorf("read server_version: %w", err)
-	}
-	return v, nil
 }
 
 // diag returns the diagnostics logger: debug-level text on stderr (or the
@@ -133,6 +121,17 @@ type LintCmd struct {
 
 // Run implements the lint subcommand.
 func (c *LintCmd) Run() error { return c.runLint(os.Stdin, os.Stdout) }
+
+// SuggestCmd maps risky-as-written DDL to the safer native form the engine
+// would run instead, with typed caveats. It is offline and advisory — no
+// database flags, nothing executes, and it always exits zero.
+type SuggestCmd struct {
+	Path string `arg:"" optional:"" help:"DDL file to advise on; stdin when omitted." type:"existingfile"`
+	JSON bool   `help:"Emit the suggestions report as JSON."`
+}
+
+// Run implements the suggest subcommand.
+func (c *SuggestCmd) Run() error { return c.runSuggest(os.Stdin, os.Stdout) }
 
 // StatusCmd reports schema-change progress.
 type StatusCmd struct {

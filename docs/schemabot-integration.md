@@ -75,7 +75,7 @@ the integration phase starts; they drift.)
 | `engine.Engine` method | `pg-sprite` implementation |
 | --- | --- |
 | `Name()` | a stable identifier, e.g. `"pg-sprite"` |
-| `Plan` | run parse → declarative diff when applicable → classify → route; return a `PlanResult` whose `SchemaChange.TableChanges` are `engine.TableChange{Table, Operation (statement.StatementType), DDL, IsUnsafe, UnsafeReason}` |
+| `Plan` | run parse → declarative diff when applicable → classify → route — exported as `diffplan.Plan` in [`pkg/diffplan`](../pkg/diffplan/diffplan.go) (parse via `statement.ParseDesired`, connect via `dbconn.NewPool`, inputs named by `diffplan.Request{Schema, Desired}`); return a `PlanResult` whose `SchemaChange.TableChanges` are `engine.TableChange{Table, Operation (statement.StatementType), DDL, IsUnsafe, UnsafeReason}` |
 | `Apply` | start the native executor asynchronously, or map a **not native-safe** refusal to `engine.ExecutionModeBlocked`; return immediately |
 | `Progress` | per-table rows-copied / total / percent / ETA / checksum state |
 | `Stop` / `Start` | checkpoint and resume (slot + copy + applier watermark) |
@@ -88,6 +88,30 @@ A refusal is a first-class planning verdict, not a delegation fallback: it inclu
 notes that copy-and-swap support arrives in later phases, and names a safer native alternative
 where one exists. The adapter maps that verdict to `engine.ExecutionModeBlocked`; it never invokes
 pg-osc or another external copy tool.
+
+**Adapter design notes for the `Plan` row** (recorded here so they are not rediscovered at
+implementation time):
+
+- **Disposition mapping is safety-critical.** `DispositionRefuse` maps to execution mode
+  `blocked`. `DispositionUnavailable` — a backend the plan needs has not landed — is *not*
+  "this change is fine" and must also surface as `blocked`, never as a green plan a merge
+  gate can pass. Pin this with a test at the adapter boundary, not just a mapping table.
+- **Plan needs a write-capable connection.** SchemaBot's plan path is generally understood as
+  read-only against the target, but `diffplan.Plan` executes the desired DDL in an
+  always-rolled-back scratch schema on the target database, so the engine role needs `CREATE`
+  there and cannot use a hot standby (the live table is never written). This is a
+  credential-posture question for every deployment — raise it while the adapter is a design,
+  not during a least-privilege review.
+- **Fan-out is per table.** A `DesiredSchema` is one `CREATE TABLE` plus its indexes, while
+  SchemaBot's declarative roots are directories of many tables: the adapter loops `Plan` per
+  table and merges into one `PlanResult`. One pool serves the whole fan-out (`Plan` does not
+  close it), but each table costs one scratch transaction per plan, and cross-table ordering
+  is the adapter's responsibility.
+- **Store the whole `plan.Report`, not just its statements.** Engine-specific fields
+  (`ServerVersion`, `Fingerprint`, `TableExists`, `Disposition`) ride in
+  `SchemaChange.Metadata`. `plan.Fingerprint` is deterministic across front doors, so it is
+  exactly the re-plan comparison SchemaBot needs when a PR head moves and it must decide
+  whether the new plan differs materially from the one an operator approved.
 
 **Registration / selection.** The orchestrator core is `pkg/tern`; `tern.NewLocalClient` has
 built-in branches for `storage.DatabaseTypeMySQL` (Spirit) and `storage.DatabaseTypeVitess`

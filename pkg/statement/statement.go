@@ -71,13 +71,14 @@ func (s Statement) SQL() string { return s.sql }
 // Kind returns the statement-type bucket.
 func (s Statement) Kind() Kind { return s.kind }
 
-// Schema returns the target table's schema qualification for ALTER TABLE
-// statements; empty when the statement was unqualified (search_path resolves
-// it) or when the kind has no single table target.
+// Schema returns the target table's schema qualification for ALTER TABLE,
+// CREATE TABLE, and CREATE INDEX statements; empty when the statement was
+// unqualified (search_path resolves it) or when the kind has no single
+// table target.
 func (s Statement) Schema() string { return s.schema }
 
-// Table returns the target table name for ALTER TABLE statements; empty for
-// other kinds.
+// Table returns the target table name for ALTER TABLE, CREATE TABLE, and
+// CREATE INDEX statements; empty for other kinds.
 func (s Statement) Table() string { return s.table }
 
 // Concurrent reports whether an index statement used its CONCURRENTLY form.
@@ -163,7 +164,10 @@ func ParseOne(sql string) (Statement, error) {
 		st.schema = move.GetRelation().GetSchemaname()
 		st.table = move.GetRelation().GetRelname()
 	case node.GetIndexStmt() != nil:
+		rel := node.GetIndexStmt().GetRelation()
 		st.kind = KindCreateIndex
+		st.schema = rel.GetSchemaname()
+		st.table = rel.GetRelname()
 		st.concurrent = node.GetIndexStmt().GetConcurrent()
 	case node.GetDropStmt() != nil:
 		if node.GetDropStmt().GetRemoveType() == pganalyze.ObjectType_OBJECT_INDEX {

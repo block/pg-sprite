@@ -308,7 +308,9 @@ request, not a permission.
 The [advisory behaviour](high-level-design.md#advisory-mode-suggest-the-safe-rewrite-dont-silently-run-the-risky-one)
 is a property of the **planner's classifier output**, not a separate code path. Every current
 `planner.Decision` carries the operation, route, typed reason, and safer SQL where applicable.
-The CLI renders that output in `diff` and `migrate --dry-run`.
+The CLI renders that output in `diff` and `migrate --dry-run`, and the offline `suggest`
+command (`pkg/suggest`) emits it as a standalone advisory report — original → recommended
+with typed reason and caveat metadata, never executing anything.
 
 ### What the classifier emits per operation
 
@@ -317,9 +319,13 @@ For each parsed statement the classifier produces a record along the lines of:
 - `original` — the statement as the user wrote it.
 - `class` — `native-safe` · `needs-rewrite` (refused until in-house copy-and-swap lands) ·
   `refuse`.
-- `recommended` — the safe rewrite when the literal is risky but has a native equivalent
+- `recommended` — the safer native form when the literal is risky as written
   (e.g. `CREATE INDEX` → `CREATE INDEX CONCURRENTLY`; `ADD CONSTRAINT` → `ADD … NOT VALID` +
   `VALIDATE`; `ADD PRIMARY KEY` → unique index `CONCURRENTLY` + `ADD PRIMARY KEY USING INDEX`).
+  The recommendation converges on the same declared end state but is **not** a semantic
+  equivalent of the original — it carries different locking, transactionality, and failure
+  modes (a failed `CONCURRENTLY` build leaves an `INVALID` index the executor must detect via
+  `pg_index.indisvalid` and recover), so executing it is the engine's job, not the user's.
 - Richer `risk`, `reversible`, and `requires_app_coordination` metadata is a future extension.
 
 Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operations and
@@ -330,7 +336,7 @@ Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operatio
 | Invocation | Behaviour |
 | --- | --- |
 | `lint` | Offline (no database): classify every statement with zero live facts and report typed findings — unsupported operations are errors (non-zero exit), blocking idioms (with the safer SQL), conservative rewrites, and destructive drops are warnings. |
-| `diff` / `migrate --dry-run` | Print the classified, routed plan and safer SQL where applicable. **Never executes.** `diff` has no `--dry-run` flag because it never executes. |
+| `diff` / `migrate --dry-run` | Print the classified, routed plan and safer SQL where applicable. **Never writes the live table.** `diff` has no `--dry-run` flag because it never executes the plan (its desired-state diff does run the desired DDL in an always-rolled-back scratch transaction — see the scratch-schema note above). |
 | `migrate` (default) | Run the Phase 1 statement gate, preflight, and bounded optimistic native attempt. It does not yet execute classifier-produced safer SQL. |
 | `migrate --force` (planned Phase 3) | Run each statement **exactly as submitted**, bypassing the safe rewrite. Gated — see below. |
 
@@ -568,7 +574,9 @@ state inside a single always-rolled-back transaction in the *target* database, i
 randomly named transaction-scoped schema (`pgsprite_scratch_<random>`). This keeps the
 same-server semantic-truth property (same version, extensions, and defaults as the live
 table) while requiring no `CREATEDB`, no pre-provisioning, and leaving zero footprint —
-appropriate because diffing is read-only planning. The durable `pg_sprite_scratch`
+appropriate because diffing never writes the live table (it is not read-only: the desired
+DDL executes in that rolled-back transaction, so the role needs `CREATE` on the target
+database). The durable `pg_sprite_scratch`
 database above is required only by the migration path proper (shadow-DDL derivation and
 checkpoint fingerprints), where objects must outlive a transaction.
 
@@ -776,12 +784,27 @@ introspection and an ordered declarative diff complete the plan.
 ## Next step
 
 Phases 1 and 2.1–2.4, including the CLI front ends, classifier, router, and declarative diff, are
-implemented. The next implementation phase is Phase 3 native execution:
+implemented. Phase 3 native execution is in progress: the `CREATE INDEX CONCURRENTLY` execution
+path exists in `pkg/executor` — session-scoped, outside any transaction, under the CONCURRENTLY
+wait policy (no per-lock timeout, one overall deadline), with invalid-index detection that
+fails closed into a typed, state-specific outcome (the executor never drops an index: a
+name-based drop cannot prove ownership until the LK-1 lease exists; the operator runbook is
+[invalid-index-recovery.md](invalid-index-recovery.md)). The executor is deliberately not yet
+reachable from the CLI — the engine lands first, the front door next. Remaining Phase 3 work,
+roughly in order:
 
+- the CLI front door for the native path: `migrate` routing an admitted statement to the
+  executor, resolving an unqualified table name once against the session's `search_path` and
+  re-emitting the qualified statement (the library-level `ErrUnqualifiedTable` refusal stays;
+  the CLI moves the qualification burden off the user), and rendering the typed outcomes —
+  each executor outcome gaining a stable string code in the report contracts, the same
+  treatment `pkg/lint` gave its findings, so orchestrators branch on one vocabulary,
 - execute classifier-produced safer sequences through the routed native path,
-- add the `CREATE INDEX CONCURRENTLY` execution path,
-- bound lock acquisition with timeout and retry,
-- add substitution, the guarded `--force` escape hatch, and progress reporting.
+- the remaining native idioms (`NOT VALID`+`VALIDATE`, `ADD PK USING INDEX`, fast-default),
+- bound lock acquisition with timeout and retry for the blocking idioms,
+- substitution by default, the guarded `--force` escape hatch, and progress reporting
+  (`pg_stat_progress_create_index` by the build's backend PID, which the executor already
+  captures for its ownership proof).
 
 The copy-and-swap backend, including change capture, copying, applying, checksumming, and
 cutover, follows Phase 3.

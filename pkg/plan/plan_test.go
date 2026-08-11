@@ -45,6 +45,8 @@ func TestFromRoutedMapsEveryRoutedField(t *testing.T) {
 	assert.Equal(t, router.DispositionExecute, st.Disposition)
 	assert.Equal(t, rs.Decisions, st.Decisions)
 	assert.Equal(t, rs.ExecSQL, st.ExecSQL)
+	assert.Equal(t, planner.ExecutionAutocommit, st.Execution,
+		"exec_sql carries its execution contract")
 	assert.False(t, st.Destructive, "no destructive decision means a non-destructive statement")
 }
 
@@ -64,8 +66,10 @@ func TestFromRoutedDerivesDestructiveFromDecisions(t *testing.T) {
 		Backend:     router.BackendNative,
 		Disposition: router.DispositionExecute,
 	}
-	assert.True(t, plan.FromRouted(rs).Destructive,
+	st := plan.FromRouted(rs)
+	assert.True(t, st.Destructive,
 		"one destructive decision makes the statement destructive")
+	assert.Empty(t, st.Execution, "no exec_sql means no execution contract")
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
@@ -94,7 +98,8 @@ func TestReportJSONShape(t *testing.T) {
 					Route:       planner.RouteNative,
 					Reason:      planner.ReasonSaferIdiom,
 				}},
-				ExecSQL: []string{"DROP INDEX CONCURRENTLY t_c_idx"},
+				ExecSQL:   []string{"DROP INDEX CONCURRENTLY t_c_idx"},
+				Execution: planner.ExecutionAutocommit,
 			},
 			{
 				SQL:         "ALTER TABLE t NO SUCH THING",
@@ -131,7 +136,8 @@ func TestReportJSONShape(t *testing.T) {
 				"decisions": [
 					{"operation": "drop index", "destructive": true, "route": "native", "reason": "safer-idiom"}
 				],
-				"exec_sql": ["DROP INDEX CONCURRENTLY t_c_idx"]
+				"exec_sql": ["DROP INDEX CONCURRENTLY t_c_idx"],
+				"execution": "autocommit-each-step"
 			},
 			{
 				"sql": "ALTER TABLE t NO SUCH THING",

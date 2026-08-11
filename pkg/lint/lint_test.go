@@ -193,7 +193,8 @@ func TestReportJSONShape(t *testing.T) {
 				"code": "blocking-idiom",
 				"severity": "warning",
 				"reason": "safer-idiom",
-				"suggestion": `+string(suggestion)+`
+				"suggestion": `+string(suggestion)+`,
+				"suggestion_execution": "autocommit-each-step"
 			}
 		],
 		"errors": 0,

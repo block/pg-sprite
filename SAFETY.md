@@ -19,7 +19,7 @@ The invariant registry (invariant IDs referenced below) lives in
 | --- | --- | --- | --- |
 | `pkg/dbconn` — pool defaults, terminate-blockers, retries, RDS TLS; advisory table lock planned | ✅ core | exists; advisory table lock planned | LK-2 primitives; LK-1 planned |
 | `pkg/preflight` — precondition verifier, refusals | ✅ core | exists (Phase 1: table-size guard); grows through Phase 2 | ST-6, RF-1..RF-5 |
-| `pkg/executor` — bounded optimistic attempt; native executor later | ✅ core | exists (Phase 1: attempt-under-budget); Executor contract at Phase 2–3 | LK-2 (attempt bound) |
+| `pkg/executor` — bounded optimistic attempt; native concurrent index build with invalid-index recovery; remaining native idioms at Phase 3 | ✅ core | exists (Phase 1: attempt-under-budget; Phase 3.1: concurrent index build) | LK-2 (attempt bound + the CONCURRENTLY wait-policy exception) |
 | `pkg/checksum` — chunk verifier, continuous checker, repair | ✅ core | planned (Phase 5) | CO-1, CO-2, CO-3 |
 | `pkg/copier` — shadow-table chunked copy | ✅ core | planned (Phase 4) | CO-4, LK-3 |
 | `pkg/applier` — change apply, buffer, flush scheduling | ✅ core | planned (Phase 6) | CO-4, CO-5, CO-6, LK-3 |
@@ -27,9 +27,10 @@ The invariant registry (invariant IDs referenced below) lives in
 | `pkg/checkpoint` — durable resume state | ✅ core | planned (Phase 8) | ST-1, ST-2 |
 | slot lifecycle (in `pkg/decode`) — create, reap, lag ceiling | ✅ core | planned (Phase 8) | ST-3 |
 | `pkg/schemachange` — orchestrator, **cutover swap + fidelity gate** | ✅ core | planned (Phase 7) | LK-2, LK-4, ST-5 |
-| `pkg/statement`, `pkg/planner`, `pkg/schemadiff`, `pkg/router`, `pkg/plan`, `pkg/lint` — classify/diff/route/report | ❌ periphery¹ | `pkg/statement` (parse boundary), `pkg/schemadiff` (introspect/diff via scratch execute-and-introspect), `pkg/planner` (classifier), `pkg/router` (backend assignment + availability policy), `pkg/plan` (versioned dry-run plan report), and `pkg/lint` (offline typed findings) exist (Phases 2.1–2.5) | (CO-7 holds at the parse boundary) |
+| `pkg/statement`, `pkg/planner`, `pkg/schemadiff`, `pkg/router`, `pkg/plan`, `pkg/lint`, `pkg/suggest` — classify/diff/route/report | ❌ periphery¹ | `pkg/statement` (parse boundary), `pkg/schemadiff` (introspect/diff via scratch execute-and-introspect), `pkg/planner` (classifier), `pkg/router` (backend assignment + availability policy), `pkg/plan` (versioned dry-run plan report), `pkg/lint` (offline typed findings), and `pkg/suggest` (advisory rewrites with typed caveats) exist (Phases 2.1–2.5) | (CO-7 holds at the parse boundary) |
 | `pkg/verdict` — structured outcome contract, rendering, exit codes | ❌ periphery | exists (Phase 1) | — |
-| `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`, `status`, `diff`, `fmt`, and `lint` exist | — |
+| `pkg/diffplan` — desired schema → routed convergence plan, the declarative front door as a library (the CLI `diff` and embedding orchestrators share it) | ❌ periphery | exists | — |
+| `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`, `status`, `diff`, `fmt`, `lint`, and `suggest` exist | — |
 | status / progress / advisory rendering, metrics | ❌ periphery | planned | — |
 | orchestrator adapter | ❌ periphery | planned (Phase 11) | OC-* hold *at* the boundary |
 | `internal/testutil` | ❌ test-only | exists | — |
@@ -58,9 +59,16 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
 - **Locality of behavior.** The enforcement point of an invariant carries a `// INV: <id>`
   comment so a reviewer or agent can grep the ID and see the whole enforcement in one screen.
 - **Dependencies inside the core become part of the core.** Current core dependency list:
-  `pgx/v5`, stdlib. The future decode path will add `pglogrepl`. Adding one requires a recorded decision (see the rubric in
+  `pgx/v5`, the parse boundary (`pkg/statement` → `wasilibs/go-pgquery`, the real PostgreSQL
+  grammar — the native executor re-verifies statement shape itself rather than trusting the
+  caller's classification; the grammar is load-bearing expertise, not copyable mechanics),
+  stdlib. The future decode path will add `pglogrepl`. Adding one requires a recorded decision (see the rubric in
   [docs/tcb-model.md](docs/tcb-model.md) — copy small things, take pinned dependencies only
   for load-bearing expertise).
+  Recorded decision: the AWS SDK (`aws-sdk-go-v2`) is a test-harness-only dependency, confined
+  behind the `ministack` build tag in `internal/testutil` — it never appears in the core, in
+  `cmd/pg-sprite`, or in any ordinary build; a plain `go build ./...` / `go test ./...` never
+  compiles it.
   pg-sprite **never imports `block/spirit` as a module**: we port ideas with citations, not
   code.
 - **Priorities when trade-offs are hard:** Correctness → Readability → Ease of use →

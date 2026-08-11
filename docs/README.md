@@ -1,35 +1,22 @@
-# Online schema change engine for Aurora PostgreSQL
+# pg-sprite documentation
 
-Research and design notes for building an online schema-change engine targeting
-**Aurora PostgreSQL**, by deriving and combining the best practices from established tools —
-[Spirit](https://github.com/block/spirit) (Aurora MySQL),
-[pg_osc](https://github.com/shayonj/pg-osc), [pg_repack](https://github.com/reorg/pg_repack),
-[pgroll](https://github.com/xataio/pgroll), and
-[pg-schema-diff](https://github.com/stripe/pg-schema-diff) (declarative diffing) — rather than
-porting any single one of them.
+> **pg-sprite is the go-to engine for PostgreSQL schema changes: every change — from an
+> instant `ADD COLUMN` to a full online table rewrite — planned deterministically, executed
+> online with provable safety, and invisible to the applications it serves. It is the
+> reliable PostgreSQL execution layer for a GitOps front-end like
+> [SchemaBot](https://github.com/block/schemabot) — what
+> [Spirit](https://github.com/block/spirit) is for MySQL.**
 
-## Table of contents
-
-- [Motivation](#motivation)
-- [Documents](#documents)
-- [TL;DR recommendation](#tldr-recommendation)
-
-## Motivation
-
-[Spirit](https://github.com/block/spirit) (block/spirit) is an excellent online schema
-change tool, but it is **MySQL / Aurora MySQL only** — there is no PostgreSQL support.
-
-On the PostgreSQL side, the existing OSS tools either:
-
-- use the **expand/contract + views** model (pgroll, Reshape) — great, but the application
-  must become schema-version aware; or
-- use the **shadow-table + swap** model (pg_osc, pg_repack) — but all of them capture
-  concurrent writes with **triggers**, which add synchronous write amplification to the
-  source table.
-
-**Nobody** ships the full **log-based copy-and-swap** combination for Postgres: multi-threaded chunked copy +
-**log-based CDC (logical decoding, not triggers)** + checksum-gated atomic cutover +
-checkpoint/resume, tuned for Aurora. That is the gap this engine targets.
+pg-sprite derives and combines the best practices of established tools rather than porting
+any single one of them: [Spirit](https://github.com/block/spirit) (the copy-and-swap
+lifecycle and operator model), [pg_osc](https://github.com/shayonj/pg-osc) and
+[pg_repack](https://github.com/reorg/pg_repack) (the shadow-table and repack mechanics),
+[pgroll](https://github.com/xataio/pgroll) (expand/contract execution), and
+[pg-schema-diff](https://github.com/stripe/pg-schema-diff) (declarative diffing). On top of
+what it mines, the engine adds the combination nothing ships for PostgreSQL today:
+multi-threaded chunked copy, **log-based CDC** (logical decoding, not triggers), a
+**checksum-gated atomic cutover**, and **checkpoint/resume** — tuned for Aurora. Why that
+combination is the product is [vision.md](vision.md); start there.
 
 ## Documents
 
@@ -47,52 +34,48 @@ checkpoint/resume, tuned for Aurora. That is the gap this engine targets.
 | [tcb-model.md](tcb-model.md) | The **TCB model** — the trusted-computing-base partition of the engine: which components are the small trusted core that enforces the invariant registry vs the untrusted periphery, the never-trust-callers rule, domain types that make illegal states unrepresentable, the in-TCB engineering rules (from TigerBeetle TIGER_STYLE, s2n-tls, qmail, bitcoin-core), the verification ladder, and the per-side AI-assisted development policy. |
 | [plan-report.md](plan-report.md) | The **plan report contract** — the versioned JSON shape both front doors emit for dry-run plans: fields, closed vocabularies, the fingerprint identity, required consumer behavior for unknown versions/values, and one generated example per source (pinned by test). |
 | [lint-report.md](lint-report.md) | The **lint report contract** — the versioned JSON shape `pg-sprite lint` emits for offline CI gating: finding fields (verbatim SQL, line/column), the codes table, severities and exit behavior, the offline-conservatism rules, and how the contract versions relative to the plan report. |
+| [suggest-report.md](suggest-report.md) | The **suggest report contract** — the versioned JSON shape `pg-sprite suggest` emits for offline advice: the typed caveat vocabulary (what changes about how you must run a safer form, and what a failed step leaves behind), the typed guidance codes for rewrites the planner cannot construct, and the operation → safer form → caveats table (pinned by test). |
+| [invalid-index-recovery.md](invalid-index-recovery.md) | The **operator runbook** for the one native-path outcome that needs a human — an invalid index the executor found or may have left. What each typed state licenses: when `DROP INDEX CONCURRENTLY` is proven safe, when the entry may be another actor's healthy in-flight build, and what to check when the executor could prove nothing. |
 | [testing.md](testing.md) | The **test-suite guide** — how to run the suite (unit, per-major, all supported majors, compose database), current coverage, the remaining executor-phase test obligations, and the vanilla-PostgreSQL-matrix vs real-Aurora validation boundary. |
 | [schemabot-integration.md](schemabot-integration.md) | The **single home for orchestrator integration** — how SchemaBot (the reference orchestrator) drives the engine: the pluggable-engine overview, the verb mappings, the concrete adapter contract, and the design constraints (OC-* invariants) the integration imposes on the core. |
 
-## TL;DR recommendation
+## The decided shape
 
-Build a Go tool (`pg-sprite`, working name) as a **decoupled planner → router → executor**
-engine — **not** a one-to-one Spirit port. The planner decides *what* changes, the router
-decides *which strategy*, and interchangeable executors (`native`, **copy-and-swap**,
-**expand/contract**) decide *how*. We **derive design philosophies from several tools** —
-Spirit (the copy-and-swap lifecycle and operator model), pg_osc (the shadow-table + trigger
-fallback shape), and pgroll (the **expand/contract executor**) — rather than copying any one of
-them; pg_repack informs the repack path. The
-philosophy we adopt: *safety over speed*, *decisions not options* (sensible defaults over
-config knobs), a *mandatory checksum correctness gate* before cutover, *dynamic time-based
-chunking*, and *checkpoint/resume*.
+pg-sprite is a **decoupled planner → router → executor** engine — not a port of any one
+tool. The planner decides *what* changes, the router decides *which strategy*, and
+interchangeable executors (`native`, **copy-and-swap**, **expand/contract**) decide *how*.
+The governing philosophy ([design-principles.md](design-principles.md)): *safety over
+speed*, *decisions not options* (sensible defaults over config knobs), a *mandatory
+checksum correctness gate* before cutover, *dynamic time-based chunking*, and
+*checkpoint/resume*.
 
 1. **Classify first — optimistically, then fully.** The
-   [classifier](high-level-design.md#two-ways-to-classify-optimistic-vs-full) is the front
-   door, and we ship it in two forms. **Optimistic classification** (build first, minimal
-   parsing — a statement-type gate + table-size guard, no schema model)
-   simply *attempts* the change under a tight `lock_timeout` + `statement_timeout`; if it
-   completes it was effectively instant/in-place, and if it can't it is cancelled and treated as
-   a rewrite. This is the analog of Spirit's "attempt INSTANT/INPLACE first" — adapted to a
-   database with no instant-or-error assertion. **Full classification** (parse-based) is
-   implemented in `pkg/planner` and *predicts* the path up front (`CREATE INDEX CONCURRENTLY`,
-   `ADD ... NOT VALID` + `VALIDATE`, PG11+ fast default, `ADD PK USING INDEX`, binary-coercible
-   type change), powering dry-run, advisory, and the declarative diff.
-2. **Otherwise copy — refuse honestly until the engine exists.** For genuine table rewrites
-   (`ALTER COLUMN TYPE` general, volatile-default `ADD COLUMN`, `STORED` generated column,
-   repack), the **near-term** stance is a clear **refusal with the classification and reason** —
-   no delegation to external copy tools. The **longer-term** path is our own **log-based,
-   checksum-gated, resumable copy-and-swap** (shadow table + chunked parallel copy + CDC
-   catch-up + checksum + atomic transactional cutover) that lifts those refusals. We have the
-   runway for this because PostgreSQL does far more changes as native instant operations than
-   MySQL, so refusing the rewrite cases still leaves the tool useful for the majority of changes
-   from day one.
-3. **CDC via a change-capture abstraction** with **logical decoding** as the primary
-   implementation (the differentiator vs pg_osc) and a **trigger-based** fallback for
+   [classifier](high-level-design.md#two-migration-front-doors-optimistic-vs-classified) is the front
+   door, in two forms. **Optimistic classification** (a statement-type gate + table-size
+   guard, no schema model) *attempts* the change under a tight `lock_timeout` +
+   `statement_timeout`; if it completes it was effectively instant/in-place, and if it
+   can't it is cancelled and treated as a rewrite — the analog of Spirit's "attempt
+   INSTANT/INPLACE first", adapted to a database with no instant-or-error assertion.
+   **Full classification** (parse-based, `pkg/planner`) *predicts* the path up front
+   (`CREATE INDEX CONCURRENTLY`, `ADD ... NOT VALID` + `VALIDATE`, fast defaults,
+   `ADD PK USING INDEX`, binary-coercible type change), powering dry-run, lint, and the
+   declarative diff.
+2. **Otherwise copy — refuse honestly until the copy engine lands.** Genuine table
+   rewrites (`ALTER COLUMN TYPE` general, volatile-default `ADD COLUMN`, `STORED`
+   generated column, repack) get a clear **refusal with the classification and reason** —
+   no delegation to external copy tools — until our own **log-based, checksum-gated,
+   resumable copy-and-swap** lifts those refusals. PostgreSQL does far more changes as
+   native instant operations than MySQL, so refusing the rewrite cases still leaves the
+   tool useful for the majority of changes from day one.
+3. **Change capture is log-based by default.** A change-capture abstraction with
+   **logical decoding** as the primary implementation and a **trigger-based** fallback for
    environments that cannot enable `rds.logical_replication` or can't accept slot loss on
-   failover. This default is cluster-dependent, not absolute — see the
-   [change-capture trade-off](change-capture-tradeoff.md).
-4. **Two front-ends, one pipeline.** *Declarative* (`diff`/`fmt`)
-   lets the user submit a desired `CREATE TABLE` and derives the `ALTER` by diffing against the
-   live schema (the analog of Spirit's declarative workflow). It and the *imperative*
-   (`--alter`) path both exist and share the **same** classify → route pipeline; declarative
-   mode adds the diff step, while imperative mode skips it.
+   failover. The default is cluster-dependent, not absolute — see
+   [change-capture-tradeoff.md](change-capture-tradeoff.md).
+4. **Two front doors, one pipeline.** *Declarative* (`diff`/`fmt`) takes a desired
+   `CREATE TABLE` and derives the change by diffing against the live schema; *imperative*
+   (`migrate`) takes the DDL as written. Both share the **same** classify → route
+   pipeline; declarative mode adds the diff step, imperative mode skips it.
 
 See [high-level-design.md](high-level-design.md) for the conceptual architecture, then
 [low-level-design.md](low-level-design.md) for the package/interface detail and the open

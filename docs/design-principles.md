@@ -96,9 +96,13 @@ the phased build plan should be traceable back to one of these.
   volatile-default `ADD COLUMN`, `STORED` generated columns, repack). "Needs copy-and-swap? =
   No" never means "don't use the engine" — it means the engine runs the native idiom for you.
 - **Advise, never silently run the dangerous literal; force is loud and explicit.** When a
-  submitted statement is risky as written but has a safer native equivalent (`CREATE INDEX` →
+  submitted statement is risky as written but has a safer native form (`CREATE INDEX` →
   `CREATE INDEX CONCURRENTLY`, etc.), the engine surfaces the recommendation and applies the
-  safe idiom — it does **not** execute the risky literal behind the user's back. Running a
+  safe idiom — it does **not** execute the risky literal behind the user's back. The safer
+  form reaches the same end state but is not a semantic equivalent — it has different locking,
+  transactionality, and failure modes, which is exactly why the engine (not the user) owns
+  running it (see the
+  [online DDL reference](postgres-online-ddl-reference.md)). Running a
   statement exactly as submitted requires an explicit `--force`, gated by prominent DANGER/CAUTION
   output, a typed acknowledgement (not a bare `-y`), and an audit log entry. Force is an escape
   hatch, not a convenience (see

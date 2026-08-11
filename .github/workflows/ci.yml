@@ -31,6 +31,11 @@ jobs:
         continue-on-error: true
         uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
         with:
+          # 'every' makes a file count as code only when it satisfies all
+          # three patterns (is anything AND not-md AND not-docs). The
+          # default 'some' ORs the patterns independently, so '**' alone
+          # matches every file and the exclusions are dead.
+          predicate-quantifier: every
           filters: |
             code:
               - '**'
@@ -99,6 +104,13 @@ jobs:
   # promise CI enforces, not documentation. These are vanilla PostgreSQL
   # images — real Aurora engine-version validation is a separate gate that
   # cannot run in public CI.
+  #
+  # Each job runs one long-lived server (make db-up + make test-db) rather
+  # than per-test containers: dozens of concurrent container starts
+  # oversubscribe the runner and get containers killed mid-test, and the
+  # throwaway-schema harness keeps tests isolated on a shared server
+  # anyway. TLS tests are the exception — they still start their own
+  # containers because they control the server's TLS posture.
   test:
     name: test (PostgreSQL ${{ matrix.pg }})
     needs: changes
@@ -117,7 +129,42 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
-      - run: make test
+      - name: Start the test database
+        run: make db-up
+      - name: Test against the long-lived database
+        run: make test-db
+
+  # AWS-boundary tests against Ministack's RDS/Aurora control plane.
+  # Ministack is MIT-licensed and tokenless, so this tier runs on every
+  # code PR — including forks. It is a signal job, deliberately NOT in
+  # all-green's required set: no production code makes AWS API calls yet,
+  # so an emulator or infrastructure failure here should not block a
+  # merge. Promote it to the required set when the first AWS-facing
+  # feature (Secrets Manager DSN resolution) lands. The Ministack
+  # container mounts the runner's Docker socket to start the sibling
+  # PostgreSQL container backing the provisioned cluster; that is safe
+  # only on an ephemeral GitHub-hosted runner — the guard step enforces
+  # it instead of trusting the runs-on label to never change.
+  aws-boundary:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse non-GitHub-hosted runners
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+        run: |
+          if [ "$RUNNER_ENV" != "github-hosted" ]; then
+            echo "aws-boundary mounts the Docker socket; it must only run on ephemeral GitHub-hosted runners (got: $RUNNER_ENV)"
+            exit 1
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - run: make test-aws-boundary
 
   # Single required status for branch protection ("all-green" is the
   # context to require). Succeeds when nothing failed — including

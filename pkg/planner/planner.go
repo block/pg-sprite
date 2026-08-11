@@ -31,6 +31,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -144,6 +145,33 @@ const (
 	ReasonUnsupportedOperation Reason = "unsupported-operation"
 )
 
+// Execution is the typed execution contract for a planner-produced SQL
+// sequence; automation branches on it, never on prose. It tells a consumer
+// how the steps must run and that a failed step can leave partial state
+// the runner owns detecting and recovering.
+type Execution string
+
+// The execution contracts a sequence can carry.
+const (
+	// ExecutionAutocommit: the steps run one at a time, in order, each in
+	// its own implicit transaction — never inside an enclosing transaction
+	// block. The CONCURRENTLY forms refuse an enclosing block outright,
+	// and a multi-step sequence inside one block holds every earlier
+	// step's locks across the steps designed to avoid them. A failed step
+	// leaves partial state the runner must detect and recover before
+	// retrying (a failed CONCURRENTLY build leaves an invalid index,
+	// pg_index.indisvalid = false).
+	ExecutionAutocommit Execution = "autocommit-each-step"
+)
+
+// Executions returns the closed set of Execution values. It is part of the
+// plan-report contract (docs/plan-report.md): the set changes only with a
+// format_version bump, and a consumer that meets an unrecognized value must
+// treat the sequence as unknown and refuse to run it.
+func Executions() []Execution {
+	return []Execution{ExecutionAutocommit}
+}
+
 // Decision is the classification of one operation.
 type Decision struct {
 	// Operation is the operator-facing label (display only).
@@ -165,14 +193,23 @@ type Decision struct {
 	// of the change: with facts (a live introspection or a supplied
 	// column type) the same operation may classify as native.
 	Unverified bool `json:"unverified,omitempty"`
-	// SaferSQL is the ordered native sequence to run instead of the
-	// submitted form, present only for safer-idiom decisions where the
-	// planner could construct it. Execution contract: the steps run one at
-	// a time, in order, each in its own implicit transaction — never inside
-	// an enclosing transaction block, which the CONCURRENTLY forms refuse.
-	// Each sequence constructor documents what a failed step leaves behind
-	// and how a retry resumes.
+	// SaferSQL is the ordered safer native sequence, present only for
+	// safer-idiom decisions where the planner could construct it. It is a
+	// safer form of the submitted statement, not a semantic equivalent: it
+	// converges on the same declared end state with different locking,
+	// transactionality, and failure modes. SaferSQLExecution carries the
+	// execution contract: the steps run one at a time, in order, each in
+	// its own implicit transaction — never inside an enclosing transaction
+	// block, which the CONCURRENTLY forms refuse. Each sequence constructor
+	// documents what a failed step leaves behind and how a retry resumes
+	// (a failed CONCURRENTLY build leaves an invalid index the runner must
+	// detect via pg_index.indisvalid and rebuild).
 	SaferSQL []string `json:"safer_sql,omitempty"`
+	// SaferSQLExecution is the typed execution contract for SaferSQL,
+	// present exactly when SaferSQL is. Automation branches on it instead
+	// of prose — it is what tells a consumer the sequence must not be
+	// wrapped in a transaction block.
+	SaferSQLExecution Execution `json:"safer_sql_execution,omitempty"`
 }
 
 // ExecutableAsSubmitted reports whether the operation's submitted form is
@@ -209,6 +246,18 @@ type Facts struct {
 	ColumnTypes map[string]string
 }
 
+// FactsFrom extracts the facts a live introspection model provides: the
+// canonical type of every live column. Every front door — the declarative
+// diff and the imperative dry-run — extracts facts through this one
+// function so equivalent changes classify identically.
+func FactsFrom(live schemadiff.Model) Facts {
+	types := make(map[string]string, len(live.Columns))
+	for _, col := range live.Columns {
+		types[col.Name] = col.Type
+	}
+	return Facts{ColumnTypes: types}
+}
+
 // Classify parses one statement and routes each of its operations. A parse
 // failure is an error; an unrecognized operation is not — it comes back as
 // a refuse decision so the caller can render the whole plan.
@@ -227,6 +276,12 @@ func Classify(sql string, facts Facts) (Plan, error) {
 	single := len(ops) == 1
 	for _, op := range ops {
 		d := classifyOp(op, st, facts, sql, single)
+		if len(d.SaferSQL) > 0 {
+			// Stamped here, in the one place every decision passes
+			// through, so a constructed sequence can never ship without
+			// its execution contract.
+			d.SaferSQLExecution = ExecutionAutocommit
+		}
 		plan.Route = worse(plan.Route, d.Route)
 		plan.Decisions = append(plan.Decisions, d)
 	}
@@ -341,7 +396,10 @@ func destructiveOp(kind statement.OpKind) bool {
 
 // concurrentlyDecision routes an operation that is online in its
 // CONCURRENTLY form: already concurrent is the idiom; otherwise native with
-// the concurrent rewrite as the safer sequence.
+// the concurrent rewrite as the safer sequence. The rewrite trades the
+// blocking lock for a different failure mode — non-transactional, and a
+// failed build leaves an invalid index — which the executor, not the
+// planner, guards.
 func concurrentlyDecision(d Decision, concurrent bool, sql string, single bool) Decision {
 	if concurrent {
 		d.Route, d.Reason = RouteNative, ReasonOnlineIdiom

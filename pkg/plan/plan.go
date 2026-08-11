@@ -73,6 +73,14 @@ type Statement struct {
 	// sequence when the planner constructed one. Empty for non-native
 	// routes.
 	ExecSQL []string `json:"exec_sql,omitempty"`
+	// Execution is the typed execution contract for ExecSQL
+	// (planner.Execution), present exactly when ExecSQL is. A consumer
+	// that runs the statements itself branches on it — it is what says
+	// each step runs in its own implicit transaction, never inside an
+	// enclosing transaction block. It is derived from ExecSQL's presence,
+	// so it is excluded from the fingerprint like the other explanatory
+	// fields.
+	Execution planner.Execution `json:"execution,omitempty"`
 }
 
 // Report is the dry-run plan for one change against one table.
@@ -132,6 +140,9 @@ func FromRouted(rs router.Statement) Statement {
 		Disposition: rs.Disposition,
 		Decisions:   rs.Decisions,
 		ExecSQL:     rs.ExecSQL,
+	}
+	if len(st.ExecSQL) > 0 {
+		st.Execution = planner.ExecutionAutocommit
 	}
 	for _, d := range rs.Decisions {
 		if d.Destructive {
