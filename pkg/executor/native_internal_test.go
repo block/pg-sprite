@@ -6,10 +6,13 @@
 package executor
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -27,7 +30,6 @@ func TestClassifyBackendState(t *testing.T) {
 		{name: "idle in transaction is stopped", state: new("idle in transaction"), want: backendStopped},
 		{name: "idle in aborted transaction is stopped", state: new("idle in transaction (aborted)"), want: backendStopped},
 		{name: "active keeps polling", state: new("active"), want: backendRunning},
-		{name: "starting keeps polling", state: new("starting"), want: backendRunning},
 		{name: "fastpath function call keeps polling", state: new("fastpath function call"), want: backendRunning},
 		{name: "NULL state is unprovable: the backend is hidden", state: nil, want: backendUnprovable},
 		{name: "disabled is unprovable: track_activities is off", state: new("disabled"), want: backendUnprovable},
@@ -38,6 +40,117 @@ func TestClassifyBackendState(t *testing.T) {
 			assert.Equal(t, tt.want, classifyBackendState(tt.state))
 		})
 	}
+}
+
+// TestAsConcurrentBudgetError covers the 57014 disambiguation: SQLSTATE
+// 57014 is query_canceled generally, so only a cancellation arriving at or
+// after the overall budget can be the budget's own statement_timeout; an
+// earlier one is an external cancellation and must not read as budget
+// exhaustion — a consumer branching on *BudgetError escalates to a heavier
+// strategy, which is the wrong reaction to a deliberate operator cancel.
+func TestAsConcurrentBudgetError(t *testing.T) {
+	budget := ConcurrentBudget{Overall: time.Minute}
+	cancelled := &pgconn.PgError{Code: sqlstateQueryCanceled}
+
+	t.Run("57014 at or past the budget is budget exhaustion", func(t *testing.T) {
+		err := asConcurrentBudgetError(cancelled, budget, time.Minute+time.Second)
+		var budgetErr *BudgetError
+		require.ErrorAs(t, err, &budgetErr)
+		assert.Equal(t, CauseStatement, budgetErr.Cause)
+		assert.NotErrorIs(t, err, ErrCancelledExternally)
+	})
+
+	t.Run("57014 before the budget is an external cancellation", func(t *testing.T) {
+		err := asConcurrentBudgetError(cancelled, budget, 2*time.Second)
+		require.ErrorIs(t, err, ErrCancelledExternally)
+		var budgetErr *BudgetError
+		assert.False(t, errors.As(err, &budgetErr), "an external cancel must not read as budget exhaustion")
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, err, &pgErr, "the server error must stay reachable for SQLSTATE branching")
+		assert.Equal(t, sqlstateQueryCanceled, pgErr.Code)
+	})
+
+	t.Run("any other failure is neither", func(t *testing.T) {
+		err := asConcurrentBudgetError(&pgconn.PgError{Code: "42P07"}, budget, 2*time.Second)
+		assert.NotErrorIs(t, err, ErrCancelledExternally)
+		var budgetErr *BudgetError
+		assert.False(t, errors.As(err, &budgetErr))
+	})
+}
+
+// TestInvalidIndexErrorAdviceMatchesProof is the renderer's own unit test:
+// the message may name a DROP INDEX CONCURRENTLY only in the one state
+// where the entry is proven this build's own leftover. Every other state
+// must not hand the operator a destructive statement — the index under
+// that name may be healthy or another actor's build in progress.
+func TestInvalidIndexErrorAdviceMatchesProof(t *testing.T) {
+	tests := []struct {
+		name      string
+		cleanup   error
+		wantsDrop bool
+	}{
+		{name: "proven own leftover names the drop", cleanup: ErrBuildLeftInvalidIndex, wantsDrop: true},
+		{name: "pre-existing invalid entry does not", cleanup: ErrPreexistingInvalidIndex, wantsDrop: false},
+		{name: "changed target identity does not", cleanup: ErrTargetIdentityChanged, wantsDrop: false},
+		{name: "an inspection failure does not", cleanup: errors.New("inspect index s.i: closed pool"), wantsDrop: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := (&InvalidIndexError{Schema: "s", Index: "i", Cleanup: tt.cleanup}).Error()
+			if tt.wantsDrop {
+				assert.Contains(t, msg, `DROP INDEX CONCURRENTLY "s"."i"`)
+			} else {
+				assert.NotContains(t, msg, "DROP INDEX")
+			}
+		})
+	}
+}
+
+// TestVerifiedBuildReportFailsClosed covers the success-path
+// verification's fail-closed branches, which no admissible statement can
+// reach through the public API on current server versions (the one shape
+// that leaves an invalid entry on success — the concurrent
+// partitioned-parent build — is refused by the server itself): an invalid
+// entry under the build's name, and an unreadable catalog. Both must
+// surface as *InvalidIndexError, never as a clean report.
+func TestVerifiedBuildReportFailsClosed(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+
+	build := concurrentIndexBuild{index: "idx_c", tableSchema: schema, table: "t"}
+	target := indexTarget{schema: schema}
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.t (id int PRIMARY KEY, c int); INSERT INTO %s.t VALUES (1, 7), (2, 7)", schema, schema))
+	require.NoError(t, err)
+	// The real invalid entry a failed concurrent build leaves behind.
+	_, err = pool.Exec(t.Context(),
+		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_c ON %s.t (c)", schema))
+	require.Error(t, err, "a unique build over duplicates must fail")
+
+	conn, err := pool.Acquire(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(conn.Release)
+
+	t.Run("an invalid entry under the build's name fails closed", func(t *testing.T) {
+		_, err := verifiedBuildReport(t.Context(), conn, build, target, time.Second)
+		require.ErrorIs(t, err, ErrBuildLeftInvalidIndex)
+		var invalidErr *InvalidIndexError
+		require.ErrorAs(t, err, &invalidErr)
+		assert.Equal(t, schema, invalidErr.Schema)
+		assert.Equal(t, "idx_c", invalidErr.Index)
+	})
+
+	t.Run("an unreadable catalog fails closed", func(t *testing.T) {
+		cancelledCtx, cancel := context.WithCancel(t.Context())
+		cancel()
+		_, err := verifiedBuildReport(cancelledCtx, conn, build, target, time.Second)
+		var invalidErr *InvalidIndexError
+		require.ErrorAs(t, err, &invalidErr)
+		assert.NotErrorIs(t, err, ErrBuildLeftInvalidIndex, "an unreadable catalog cannot prove a leftover")
+		require.NotNil(t, invalidErr.Cleanup, "the verification failure must be reported as the recovery cause")
+	})
 }
 
 // TestFailedBuildVerdictFailsClosedOnChangedTargetIdentity covers the

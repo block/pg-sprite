@@ -51,19 +51,23 @@ var (
 	ErrIfNotExistsUnsupported = errors.New("CREATE INDEX CONCURRENTLY IF NOT EXISTS is not supported: a name-only no-op cannot prove the existing index is valid or even the requested one")
 	// ErrPreexistingInvalidIndex is returned when an invalid index with the
 	// requested name already exists in the target schema — on any table.
-	// The executor cannot prove who owns that debris — it may be another
-	// actor's build still in progress — and after a failure of its own it
-	// could never distinguish that debris from its own, so it refuses to
-	// build; the recovery is the operator's explicit DROP INDEX
-	// CONCURRENTLY, named by the wrapping *InvalidIndexError.
+	// The executor cannot prove who owns that entry — an in-progress
+	// concurrent build by another actor is invalid until it finishes — and
+	// after a failure of its own it could never distinguish that entry
+	// from its own leftover, so it refuses to build. This state is not a
+	// drop instruction: the index may be healthy and mid-build (see
+	// docs/invalid-index-recovery.md).
 	ErrPreexistingInvalidIndex = errors.New("an invalid index with this name already exists in the target schema")
 	// ErrBuildLeftInvalidIndex is returned (inside an *InvalidIndexError)
-	// when a failed build left an invalid catalog entry behind. The
-	// executor never removes it automatically: PostgreSQL drops by name,
-	// not identity, so an automatic drop could destroy another actor's
-	// index registered under the same name in the same window. The
-	// recovery is the operator's explicit DROP INDEX CONCURRENTLY.
-	ErrBuildLeftInvalidIndex = errors.New("the failed build left an invalid index behind")
+	// when this executor's own build left an invalid catalog entry behind:
+	// after a failure, once the build's backend provably stopped, or after
+	// a reported success whose validity verification found the entry
+	// invalid. The executor never removes it automatically: PostgreSQL
+	// drops by name, not identity, so an automatic drop could destroy
+	// another actor's index registered under the same name in the same
+	// window. The recovery is the operator's explicit DROP INDEX
+	// CONCURRENTLY (see docs/invalid-index-recovery.md).
+	ErrBuildLeftInvalidIndex = errors.New("the build left an invalid index behind")
 	// ErrTargetIdentityChanged is returned (inside an *InvalidIndexError)
 	// when the target table no longer resolves to the OID the build was
 	// admitted against: it was dropped, replaced, or renamed while the
@@ -71,18 +75,42 @@ var (
 	// left debris — the verdict is indeterminate, and indeterminate fails
 	// closed.
 	ErrTargetIdentityChanged = errors.New("the target table was dropped or replaced during the build: the catalog cannot prove whether the failed build left an invalid index")
+	// ErrTableNotFound is returned when the statement's qualified table
+	// resolves to nothing before the build starts; it distinguishes a
+	// missing table from an inspection failure so callers can branch with
+	// errors.Is instead of matching message text.
+	ErrTableNotFound = errors.New("table not found")
+	// ErrPoolTooSmall is returned at admission when the pool cannot hold
+	// the build session and the verdict session at once. The verdict is a
+	// correctness dependency, not a nicety: without a reserved second
+	// connection, every failed build would resolve indeterminate. Like an
+	// unbounded budget, an unusable verdict is refused by construction.
+	ErrPoolTooSmall = errors.New("concurrent index build needs a pool of at least two connections: one for the build session, one reserved for the catalog verdict")
+	// ErrCancelledExternally is returned when the build's statement was
+	// cancelled (SQLSTATE 57014) before its overall budget elapsed: the
+	// executor's statement_timeout cannot have fired yet, so the
+	// cancellation came from outside — an operator's pg_cancel_backend, an
+	// administrative tool. It is deliberately not a *BudgetError: a budget
+	// exhaustion invites escalation to a heavier strategy, while a
+	// deliberate cancel usually means the change should be left alone.
+	ErrCancelledExternally = errors.New("the build was cancelled from outside the executor before its budget elapsed")
 )
-
-// errTableNotFound distinguishes "the name resolves to nothing" from an
-// inspection failure inside resolveTarget; the post-failure verdict maps it
-// to ErrTargetIdentityChanged.
-var errTableNotFound = errors.New("table not found")
 
 // sessionCleanupTimeout bounds the client-side session housekeeping around
 // a build: resetting the budget overrides and closing a session that must
 // be discarded. It is deliberately separate from the build budget — a
 // wedged socket must not hang the executor for the whole build budget.
 const sessionCleanupTimeout = 5 * time.Second
+
+// verdictTimeout bounds the post-failure catalog verdict: a backend-stop
+// poll and one catalog snapshot, on a connection reserved before the build
+// started. It is deliberately independent of the build budget — the
+// verdict's work does not scale with the build's, so a build that fails in
+// milliseconds must not hold its caller for an hours-long budget. The cost
+// of the bound is one rare shape: a backend that outlives its client
+// failure longer than this (a lost cancel signal) resolves indeterminate —
+// fail-closed — instead of eventually proven.
+const verdictTimeout = 30 * time.Second
 
 // ConcurrentBudget bounds one CONCURRENTLY statement (index build or drop).
 //
@@ -122,36 +150,67 @@ func (b ConcurrentBudget) validate() error {
 	return nil
 }
 
-// IndexBuildReport says what a concurrent build did, machine-readably.
+// IndexBuildReport says what a concurrent build did, machine-readably. It
+// is returned only after the executor re-read the catalog and verified the
+// built index is valid — it means "verified valid", not "the server did
+// not complain" — so it is evidence an orchestrator can store or forward.
 type IndexBuildReport struct {
 	// Schema is the schema the index lives in, resolved from the target
 	// table (an index is always created in its table's schema).
 	Schema string
 	// Index is the index name from the statement.
 	Index string
+	// IndexOID is the verified index's catalog identity: the durable
+	// handle a later reconciliation can use where the name alone could
+	// have been reassigned.
+	IndexOID uint32
+	// Duration is the wall-clock time of the build statement itself,
+	// excluding session setup and the validity verification.
+	Duration time.Duration
+	// ServerVersion is the server_version of the PostgreSQL server that
+	// ran the build.
+	ServerVersion string
 }
 
 // InvalidIndexError reports that an invalid index exists (or may remain)
 // and the executor will not or cannot remove it: the one outcome that
 // needs an operator. Build carries the failure that produced the leftover,
-// nil when the leftover predates this run; Cleanup carries why automatic
-// recovery was refused, failed, or could not be proven.
+// nil when there is no build failure to carry (the entry predates this
+// run, or a reported success failed its validity verification); Cleanup
+// carries why automatic recovery was refused, failed, or could not be
+// proven.
 type InvalidIndexError struct {
 	// Schema and Index identify the possibly-invalid index.
 	Schema string
 	Index  string
-	// Build is the build failure that left the index invalid; nil when the
-	// invalid index was left behind by an earlier run.
+	// Build is the build failure that left the index invalid; nil when
+	// there is no build failure to carry.
 	Build error
 	// Cleanup is why the recovery drop was refused, failed, or could not
 	// be verified.
 	Cleanup error
 }
 
-// Error implements the error interface, naming the recovery statement.
+// Error implements the error interface. The advice is as state-specific as
+// the type: a name-based drop is named only when the entry is proven this
+// build's own leftover (ErrBuildLeftInvalidIndex) — the same ownership
+// standard the executor holds itself to when it refuses to drop
+// automatically. An unproven or uninspected state gets investigation
+// steps, never a statement to copy-paste: the index under that name may be
+// healthy, or another actor's build still in progress.
 func (e *InvalidIndexError) Error() string {
-	return fmt.Sprintf("index %s.%s may be invalid and needs explicit recovery; verify pg_index.indisvalid and recover with DROP INDEX CONCURRENTLY %s: %v",
-		e.Schema, e.Index, pgx.Identifier{e.Schema, e.Index}.Sanitize(), e.Cleanup)
+	name := fmt.Sprintf("%s.%s", e.Schema, e.Index)
+	switch {
+	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):
+		return fmt.Sprintf("index %s is this build's own invalid leftover; recover with DROP INDEX CONCURRENTLY %s, see docs/invalid-index-recovery.md: %v",
+			name, pgx.Identifier{e.Schema, e.Index}.Sanitize(), e.Cleanup)
+	case errors.Is(e.Cleanup, ErrPreexistingInvalidIndex):
+		return fmt.Sprintf("index %s is invalid but not proven abandoned — it may be another actor's build still in progress; check pg_stat_activity for a running CREATE INDEX CONCURRENTLY before any recovery, see docs/invalid-index-recovery.md: %v",
+			name, e.Cleanup)
+	default:
+		return fmt.Sprintf("index %s may be invalid but the catalog state could not be proven; inspect pg_index.indisvalid and pg_stat_activity yourself before any recovery, see docs/invalid-index-recovery.md: %v",
+			name, e.Cleanup)
+	}
 }
 
 // Unwrap exposes the underlying failures to errors.Is/As.
@@ -169,17 +228,18 @@ func (e *InvalidIndexError) Unwrap() []error {
 // BuildIndexConcurrently runs one named CREATE INDEX ... CONCURRENTLY on a
 // schema-qualified table, on its own session, outside any transaction,
 // bounded by b. The pool must come from pkg/dbconn (raw pools may carry a
-// reset baseline the session hygiene here cannot vouch for) and needs a
-// second connection free for the post-failure verdict; a fully busy pool
-// resolves the verdict indeterminate — fail-closed — when its detached
-// deadline expires. It never drops an
-// index: PostgreSQL drops by name, not identity, so no automatic drop can
+// reset baseline the session hygiene here cannot vouch for) and must allow
+// at least two connections: the post-failure verdict's session is acquired
+// up front, alongside the build session, so the verdict can never starve
+// on a busy pool — a pool configured below two is refused at admission
+// (ErrPoolTooSmall), and both acquisitions are bounded by ctx. It never
+// drops an index: PostgreSQL drops by name, not identity, so no automatic drop can
 // prove it is destroying this build's own debris rather than another
 // actor's same-name index registered in the same window (the engine's
 // one-migration-per-table lease — planned invariant LK-1 — would close
 // that; once it exists this API should demand its proof). Every invalid
-// index is instead surfaced as a typed, fail-closed outcome naming the
-// operator's explicit recovery statement:
+// index is instead surfaced as a typed, fail-closed outcome carrying
+// state-specific operator guidance (see docs/invalid-index-recovery.md):
 //
 //   - a pre-existing invalid index with the requested name refuses to
 //     build (ErrPreexistingInvalidIndex);
@@ -189,12 +249,16 @@ func (e *InvalidIndexError) Unwrap() []error {
 //   - a failed build that provably left nothing returns its failure alone
 //     — a retry can start immediately.
 //
-// Cancellation by the overall budget surfaces as a *BudgetError. Caller
-// cancellation is a race: the client returns while the cancel signal
+// Cancellation by the overall budget surfaces as a *BudgetError; a
+// cancellation arriving before the budget elapsed cannot be the budget's
+// own statement_timeout and surfaces as ErrCancelledExternally instead.
+// Caller cancellation is a race: the client returns while the cancel signal
 // travels to the server, so a build cancelled at the finish line may still
 // complete. The guarantee is about the catalog, not the race: after this
 // function returns without an *InvalidIndexError, the index is either
-// valid or absent.
+// valid or absent — success is returned only after re-reading the catalog
+// and verifying pg_index.indisvalid on the built index, a guard against
+// server-version drift in what "success" leaves behind.
 //
 // Unlike the optimistic attempt, no size-guard proof is required: the size
 // guard exists because a blocking attempt holds ACCESS EXCLUSIVE for its
@@ -209,6 +273,12 @@ func BuildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	if err != nil {
 		return rep, err
 	}
+	// INV: LK-2 — the verdict is bounded by construction too: a pool that
+	// cannot hold the build session and the verdict session at once would
+	// make every failed build indeterminate.
+	if pool.Config().MaxConns < 2 {
+		return rep, ErrPoolTooSmall
+	}
 
 	// One session carries resolution, the pre-build inspection, and the
 	// build itself, so the names the statement will resolve (search_path,
@@ -218,6 +288,17 @@ func BuildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 		return rep, err
 	}
 	defer release()
+
+	// The verdict session is reserved before the build starts, under the
+	// pool's baseline budgets: the post-failure verdict is a correctness
+	// dependency, and hoping a connection is free after an hours-long
+	// build is not a reservation. Concurrent builds sharing one pool each
+	// hold two connections; acquisition contention is bounded by ctx.
+	verdictConn, err := pool.Acquire(ctx)
+	if err != nil {
+		return rep, fmt.Errorf("acquire verdict session: %w", err)
+	}
+	defer verdictConn.Release()
 
 	target, err := resolveTarget(ctx, conn, build)
 	if err != nil {
@@ -242,11 +323,13 @@ func BuildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	// waits for this backend to stop before trusting the catalog.
 	pid := conn.Conn().PgConn().PID()
 
+	start := time.Now()
 	_, buildErr := conn.Exec(ctx, sql)
+	elapsed := time.Since(start)
 	if buildErr == nil {
-		return rep, nil
+		return verifiedBuildReport(ctx, conn, build, target, elapsed)
 	}
-	buildErr = asConcurrentBudgetError(buildErr, b)
+	buildErr = asConcurrentBudgetError(buildErr, b, elapsed)
 
 	// Every failure gets the catalog verdict — no error is exempt. Even a
 	// name-collision SQLSTATE cannot prove the statement created nothing:
@@ -255,9 +338,41 @@ func BuildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	// verdict runs under its own bounded detached context, because the
 	// build's context may be cancelled — and that cancellation may be
 	// exactly why the build failed.
-	verdictCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), b.Overall+sessionCleanupTimeout)
+	verdictCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), verdictTimeout)
 	defer cancel()
-	return rep, failedBuildVerdict(verdictCtx, pool, build, target, pid, buildErr)
+	return rep, failedBuildVerdict(verdictCtx, verdictConn, build, target, pid, buildErr)
+}
+
+// verifiedBuildReport turns a build the server reported successful into
+// evidence: it re-reads the catalog on the build's own session and returns
+// a report only when the built index exists and is valid. The read closes
+// a version-drift gap — today no admissible statement can succeed and
+// leave an invalid entry (the concurrent partitioned-parent build, which
+// does, is refused by the server), but that is a fact about current server
+// versions, not about this executor's contract. A reported success that
+// cannot be verified fails closed as an *InvalidIndexError.
+func verifiedBuildReport(ctx context.Context, conn *pgxpool.Conn, build concurrentIndexBuild, target indexTarget, elapsed time.Duration) (IndexBuildReport, error) {
+	rep := IndexBuildReport{Schema: target.schema, Index: build.index}
+	var oid uint32
+	var valid bool
+	err := conn.QueryRow(ctx,
+		`SELECT c.oid, i.indisvalid
+		   FROM pg_catalog.pg_index i
+		   JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
+		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		  WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`,
+		target.schema, build.index).Scan(&oid, &valid)
+	if err != nil {
+		return rep, &InvalidIndexError{Schema: target.schema, Index: build.index,
+			Cleanup: fmt.Errorf("verify built index %s.%s: %w", target.schema, build.index, err)}
+	}
+	if !valid {
+		return rep, &InvalidIndexError{Schema: target.schema, Index: build.index, Cleanup: ErrBuildLeftInvalidIndex}
+	}
+	rep.IndexOID = oid
+	rep.Duration = elapsed
+	rep.ServerVersion = conn.Conn().PgConn().ParameterStatus("server_version")
+	return rep, nil
 }
 
 // failedBuildVerdict decides, read-only, what a failed build left behind: a
@@ -274,11 +389,11 @@ func BuildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 //  2. Read one catalog snapshot — a single statement, so the identity
 //     proof and the index inspection cannot straddle a concurrent
 //     replacement — and trust it only whole (see catalogVerdict).
-func failedBuildVerdict(ctx context.Context, pool *pgxpool.Pool, build concurrentIndexBuild, target indexTarget, pid uint32, buildErr error) error {
-	if err := awaitBackendStopped(ctx, pool, pid); err != nil {
+func failedBuildVerdict(ctx context.Context, q querier, build concurrentIndexBuild, target indexTarget, pid uint32, buildErr error) error {
+	if err := awaitBackendStopped(ctx, q, pid); err != nil {
 		return &InvalidIndexError{Schema: target.schema, Index: build.index, Build: buildErr, Cleanup: err}
 	}
-	return catalogVerdict(ctx, pool, build, target, buildErr)
+	return catalogVerdict(ctx, q, build, target, buildErr)
 }
 
 // catalogVerdict reads one catalog snapshot and decides what the failed
@@ -352,8 +467,8 @@ func admitConcurrentIndexBuild(sql string) (concurrentIndexBuild, error) {
 	if err != nil {
 		return build, err
 	}
-	if st.Kind != statement.KindCreateIndex {
-		return build, fmt.Errorf("%w: got %s", ErrNotConcurrentIndexBuild, st.Kind)
+	if st.Kind() != statement.KindCreateIndex {
+		return build, fmt.Errorf("%w: got %s", ErrNotConcurrentIndexBuild, st.Kind())
 	}
 	ops, err := statement.ParseOps(sql)
 	if err != nil {
@@ -373,10 +488,10 @@ func admitConcurrentIndexBuild(sql string) (concurrentIndexBuild, error) {
 	if ops[0].IfNotExists {
 		return build, ErrIfNotExistsUnsupported
 	}
-	if st.Schema == "" {
+	if st.Schema() == "" {
 		return build, ErrUnqualifiedTable
 	}
-	return concurrentIndexBuild{index: ops[0].Name, tableSchema: st.Schema, table: st.Table}, nil
+	return concurrentIndexBuild{index: ops[0].Name, tableSchema: st.Schema(), table: st.Table()}, nil
 }
 
 // indexTarget is the resolved identity the recovery paths key on: the
@@ -415,7 +530,7 @@ func resolveTarget(ctx context.Context, q querier, build concurrentIndexBuild) (
 		  WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)`,
 		ref.Sanitize()).Scan(&target.tableOID, &target.schema)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return target, fmt.Errorf("resolve table %s: %w", ref.Sanitize(), errTableNotFound)
+		return target, fmt.Errorf("resolve table %s: %w", ref.Sanitize(), ErrTableNotFound)
 	}
 	if err != nil {
 		return target, fmt.Errorf("resolve table %s: %w", ref.Sanitize(), err)
@@ -460,11 +575,11 @@ func invalidIndexByName(ctx context.Context, q querier, schema, index string) (b
 // polling until ctx expires, and a state with no visibility (activity
 // tracking disabled, hidden backend) refuses immediately — it will never
 // become provable by waiting.
-func awaitBackendStopped(ctx context.Context, pool *pgxpool.Pool, pid uint32) error {
+func awaitBackendStopped(ctx context.Context, q querier, pid uint32) error {
 	const pollInterval = 50 * time.Millisecond
 	for {
 		var state *string
-		err := pool.QueryRow(ctx,
+		err := q.QueryRow(ctx,
 			`SELECT state FROM pg_catalog.pg_stat_activity WHERE pid OPERATOR(pg_catalog.=) $1`,
 			int64(pid)).Scan(&state)
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -507,10 +622,13 @@ const (
 )
 
 // classifyBackendState maps one observed pg_stat_activity state to its
-// verdict. Only positive evidence counts as stopped; a NULL state (hidden
-// backend), "disabled" (track_activities off), and unknown states are
-// unprovable — treating them as stopped would let the verdict race a build
-// that is in fact still running.
+// verdict. The cases are the documented pg_stat_activity.state vocabulary
+// (PostgreSQL 14–18): the idle states, "active" and "fastpath function
+// call" (may still be executing), NULL (hidden backend), and "disabled"
+// (track_activities off). Only positive evidence counts as stopped;
+// NULL, "disabled", and any state outside the vocabulary are unprovable —
+// treating them as stopped would let the verdict race a build that is in
+// fact still running.
 func classifyBackendState(state *string) backendVerdict {
 	if state == nil {
 		return backendUnprovable
@@ -518,7 +636,7 @@ func classifyBackendState(state *string) backendVerdict {
 	switch *state {
 	case "idle", "idle in transaction", "idle in transaction (aborted)":
 		return backendStopped
-	case "active", "starting", "fastpath function call":
+	case "active", "fastpath function call":
 		return backendRunning
 	default:
 		return backendUnprovable
@@ -584,12 +702,23 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 	return conn, release, nil
 }
 
-// asConcurrentBudgetError maps a cancellation by the overall deadline to the
-// typed budget error; anything else is wrapped as an operational failure.
-func asConcurrentBudgetError(err error, b ConcurrentBudget) error {
+// asConcurrentBudgetError types the build failure. SQLSTATE 57014 is
+// query_canceled generally, not statement_timeout specifically — an
+// operator's pg_cancel_backend raises the same code — so the elapsed build
+// time corroborates: the budget's own statement_timeout cannot fire before
+// the budget elapses, so a 57014 arriving earlier is an external
+// cancellation (ErrCancelledExternally), not budget exhaustion. The
+// boundary is approximate by network latency — a cancel landing within
+// that sliver of the deadline reads as the budget — but the two truths
+// coincide there. Anything else is wrapped as an operational failure.
+func asConcurrentBudgetError(err error, b ConcurrentBudget, elapsed time.Duration) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == sqlstateQueryCanceled {
-		return &BudgetError{Cause: CauseStatement, Budget: b.Overall}
+		if elapsed >= b.Overall {
+			return &BudgetError{Cause: CauseStatement, Budget: b.Overall}
+		}
+		return fmt.Errorf("%w (after %s of a %s budget): %w",
+			ErrCancelledExternally, elapsed.Round(time.Millisecond), b.Overall, err)
 	}
 	return fmt.Errorf("concurrent index build: %w", err)
 }

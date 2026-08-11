@@ -15,12 +15,31 @@ func TestParseDesiredAdmitsTableAndIndexes(t *testing.T) {
 create index events_name_idx on events (name);`)
 	require.NoError(t, err)
 
-	assert.Equal(t, "events", ds.Table)
-	require.Len(t, ds.Statements, 2)
-	assert.Equal(t, KindCreateTable, ds.Statements[0].Kind)
-	assert.Equal(t, "CREATE TABLE events (id bigint PRIMARY KEY, name varchar(50) NOT NULL)", ds.Statements[0].SQL)
-	assert.Equal(t, KindCreateIndex, ds.Statements[1].Kind)
-	assert.Equal(t, "CREATE INDEX events_name_idx ON events USING btree (name)", ds.Statements[1].SQL)
+	assert.Equal(t, "events", ds.Table())
+	statements := ds.Statements()
+	require.Len(t, statements, 2)
+	assert.Equal(t, KindCreateTable, statements[0].Kind())
+	assert.Equal(t, "CREATE TABLE events (id bigint PRIMARY KEY, name varchar(50) NOT NULL)", statements[0].SQL())
+	assert.Equal(t, KindCreateIndex, statements[1].Kind())
+	assert.Equal(t, "CREATE INDEX events_name_idx ON events USING btree (name)", statements[1].SQL())
+}
+
+// Statements returns a copy: mutating the returned slice must not change
+// what a later caller observes, so a validated DesiredSchema stays valid.
+func TestDesiredSchemaStatementsIsDefensiveCopy(t *testing.T) {
+	ds, err := ParseDesired("CREATE TABLE events (id bigint PRIMARY KEY);\n" +
+		"CREATE INDEX events_id_idx ON events (id);")
+	require.NoError(t, err)
+
+	got := ds.Statements()
+	require.Len(t, got, 2)
+	got[0] = Statement{}
+	got[1] = Statement{}
+
+	again := ds.Statements()
+	require.Len(t, again, 2)
+	assert.Equal(t, KindCreateTable, again[0].Kind())
+	assert.Equal(t, KindCreateIndex, again[1].Kind())
 }
 
 func TestParseDesiredRefusals(t *testing.T) {
@@ -40,6 +59,9 @@ func TestParseDesiredRefusals(t *testing.T) {
 		{"qualified index", "CREATE TABLE t (id int); CREATE INDEX i ON prod.t (id)", ErrQualifiedName},
 		{"concurrent index", "CREATE TABLE t (id int); CREATE INDEX CONCURRENTLY i ON t (id)", ErrConcurrentIndex},
 		{"index on another table", "CREATE TABLE t (id int); CREATE INDEX i ON other (id)", ErrWrongIndexTarget},
+		{"column foreign key", "CREATE TABLE child (id int PRIMARY KEY, pid int REFERENCES parent(id))", ErrForeignKey},
+		{"table foreign key", "CREATE TABLE child (id int PRIMARY KEY, pid int, FOREIGN KEY (pid) REFERENCES parent(id))", ErrForeignKey},
+		{"self-referencing foreign key", "CREATE TABLE node (id int PRIMARY KEY, parent_id int REFERENCES node(id))", ErrForeignKey},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -81,7 +103,7 @@ func TestQualifyRefusesOtherStatements(t *testing.T) {
 func TestParseOneRecognizesCreateTable(t *testing.T) {
 	st, err := ParseOne("CREATE TABLE prod.events (id int)")
 	require.NoError(t, err)
-	assert.Equal(t, KindCreateTable, st.Kind)
-	assert.Equal(t, "prod", st.Schema)
-	assert.Equal(t, "events", st.Table)
+	assert.Equal(t, KindCreateTable, st.Kind())
+	assert.Equal(t, "prod", st.Schema())
+	assert.Equal(t, "events", st.Table())
 }

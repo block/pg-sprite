@@ -67,17 +67,95 @@ func TestBuildIndexConcurrentlyBuildsValidIndex(t *testing.T) {
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_c ON %s.t (c)", schema), buildBudget)
 	require.NoError(t, err)
 
-	assert.Equal(t, executor.IndexBuildReport{Schema: schema, Index: "idx_c"}, rep)
+	assert.Equal(t, schema, rep.Schema)
+	assert.Equal(t, "idx_c", rep.Index)
+	assert.Positive(t, rep.Duration, "the report must carry the build's wall-clock time")
+	assert.NotEmpty(t, rep.ServerVersion, "the report must carry the server version that ran the build")
+	// The reported OID must be the built index's catalog identity.
+	var oid uint32
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT c.oid FROM pg_class c
+		   JOIN pg_namespace n ON n.oid = c.relnamespace
+		  WHERE n.nspname = $1 AND c.relname = $2`, schema, "idx_c").Scan(&oid))
+	assert.Equal(t, oid, rep.IndexOID)
 	exists, valid := indexState(t, pool, schema, "idx_c")
 	assert.True(t, exists, "the index must exist")
 	assert.True(t, valid, "the index must be valid")
+}
+
+// TestBuildIndexConcurrentlyRefusesSingleConnectionPool covers the
+// admission-time pool guard: the verdict session is a correctness
+// dependency reserved alongside the build session, so a pool that cannot
+// hold two connections is refused before anything executes.
+func TestBuildIndexConcurrentlyRefusesSingleConnectionPool(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t), MaxConns: 1})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_c ON %s.t (c)", schema), buildBudget)
+
+	require.ErrorIs(t, err, executor.ErrPoolTooSmall)
+	exists, _ := indexState(t, pool, schema, "idx_c")
+	assert.False(t, exists, "the refusal must precede any execution")
+}
+
+// TestBuildIndexConcurrentlyOperatorCancelIsNotBudgetExhaustion covers the
+// 57014 disambiguation end to end: an operator's pg_cancel_backend seconds
+// into a generous budget must surface as ErrCancelledExternally, never as
+// a *BudgetError — a consumer reading budget exhaustion would escalate to
+// a heavier strategy when a human deliberately stopped the build.
+func TestBuildIndexConcurrentlyOperatorCancelIsNotBudgetExhaustion(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+
+	// A repeatable-read snapshot blocks the build in its wait phase, so
+	// there is a window to cancel it from another session.
+	blocker, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	require.NoError(t, err)
+	var n int
+	require.NoError(t, blocker.QueryRow(t.Context(),
+		fmt.Sprintf("SELECT count(*) FROM %s.t", schema)).Scan(&n))
+	t.Cleanup(func() {
+		require.NoError(t, blocker.Rollback(context.WithoutCancel(t.Context())))
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := executor.BuildIndexConcurrently(t.Context(), pool,
+			fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_op ON %s.t (c)", schema), buildBudget)
+		done <- err
+	}()
+
+	// Cancel the build's backend once it is provably executing.
+	require.Eventually(t, func() bool {
+		var cancelled bool
+		err := pool.QueryRow(t.Context(),
+			`SELECT pg_cancel_backend(pid) FROM pg_stat_activity
+			  WHERE query LIKE 'CREATE INDEX CONCURRENTLY idx_op%' AND state = 'active'`).Scan(&cancelled)
+		return err == nil && cancelled
+	}, 30*time.Second, 50*time.Millisecond, "the build's backend must be found and cancelled")
+
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, executor.ErrCancelledExternally)
+		var budgetErr *executor.BudgetError
+		assert.False(t, errors.As(err, &budgetErr), "an operator cancel must not read as budget exhaustion")
+	case <-time.After(time.Minute):
+		t.Fatal("the cancelled build did not return")
+	}
 }
 
 func TestBuildIndexConcurrentlyMissingTable(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := executor.BuildIndexConcurrently(t.Context(), pool,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx ON %s.missing_table (c)", schema), buildBudget)
-	require.Error(t, err)
+	require.ErrorIs(t, err, executor.ErrTableNotFound)
 }
 
 func TestBuildIndexConcurrentlyFailedBuildReportsItsLeftover(t *testing.T) {
@@ -148,7 +226,11 @@ func TestBuildIndexConcurrentlyFailsClosedOnPreexistingInvalidLeftover(t *testin
 	rep, err := executor.BuildIndexConcurrently(t.Context(), pool,
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema), buildBudget)
 	require.NoError(t, err)
-	assert.Equal(t, executor.IndexBuildReport{Schema: schema, Index: "idx_left"}, rep)
+	assert.Equal(t, schema, rep.Schema)
+	assert.Equal(t, "idx_left", rep.Index)
+	assert.NotZero(t, rep.IndexOID)
+	assert.Positive(t, rep.Duration)
+	assert.NotEmpty(t, rep.ServerVersion)
 	exists, valid = indexState(t, pool, schema, "idx_left")
 	assert.True(t, exists)
 	assert.True(t, valid)
@@ -450,7 +532,9 @@ func TestBuildIndexConcurrentlyProofsResistCatalogShadowing(t *testing.T) {
 	rep, err := executor.BuildIndexConcurrently(t.Context(), pool,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_ok ON %s.t (id)", schema), buildBudget)
 	require.NoError(t, err, "target resolution must see the real catalog through the impostors")
-	assert.Equal(t, executor.IndexBuildReport{Schema: schema, Index: "idx_ok"}, rep)
+	assert.Equal(t, schema, rep.Schema)
+	assert.Equal(t, "idx_ok", rep.Index)
+	assert.NotZero(t, rep.IndexOID)
 
 	// The failure verdict: the impostor pg_class would resolve no table
 	// and yield an identity verdict; the impostor pg_stat_activity would

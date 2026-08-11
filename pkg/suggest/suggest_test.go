@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/lint"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/suggest"
 )
@@ -42,9 +43,11 @@ func TestAdviseCreateIndexGetsConcurrentRewrite(t *testing.T) {
 	assert.Equal(t, planner.ReasonSaferIdiom, s.Reason)
 	require.Len(t, s.Recommended, 1)
 	assert.NotEqual(t, s.Original, s.Recommended[0], "the recommendation is the concurrent rewrite")
+	assert.Equal(t, planner.ExecutionAutocommit, s.Execution)
 	assert.Equal(t,
 		[]suggest.Caveat{suggest.CaveatNonTransactional, suggest.CaveatInvalidIndexOnFailure},
 		s.Caveats)
+	assert.Empty(t, s.Guidance, "a constructed rewrite carries no guidance")
 }
 
 func TestAdviseAddCheckGetsNotValidValidateSequence(t *testing.T) {
@@ -53,8 +56,10 @@ func TestAdviseAddCheckGetsNotValidValidateSequence(t *testing.T) {
 	require.Len(t, report.Suggestions, 1)
 	s := report.Suggestions[0]
 	require.Len(t, s.Recommended, 2, "NOT VALID then VALIDATE")
+	assert.Equal(t, planner.ExecutionAutocommit, s.Execution)
 	assert.Equal(t,
-		[]suggest.Caveat{suggest.CaveatSeparateTransactions, suggest.CaveatValidationScan},
+		[]suggest.Caveat{suggest.CaveatSeparateTransactions, suggest.CaveatValidationScan,
+			suggest.CaveatScaffoldConstraintOnFailure},
 		s.Caveats)
 }
 
@@ -64,8 +69,10 @@ func TestAdviseAddPrimaryKeyGetsUsingIndexSequence(t *testing.T) {
 	require.Len(t, report.Suggestions, 1)
 	s := report.Suggestions[0]
 	require.Len(t, s.Recommended, 2, "concurrent unique index build then USING INDEX attach")
+	assert.Equal(t, planner.ExecutionAutocommit, s.Execution)
 	assert.Equal(t,
-		[]suggest.Caveat{suggest.CaveatNonTransactional, suggest.CaveatInvalidIndexOnFailure},
+		[]suggest.Caveat{suggest.CaveatNonTransactional, suggest.CaveatSeparateTransactions,
+			suggest.CaveatInvalidIndexOnFailure},
 		s.Caveats)
 }
 
@@ -75,8 +82,10 @@ func TestAdviseSetNotNullGetsConstraintSequence(t *testing.T) {
 	require.Len(t, report.Suggestions, 1)
 	s := report.Suggestions[0]
 	require.Len(t, s.Recommended, 4, "add NOT VALID, validate, set not null, drop scaffold")
+	assert.Equal(t, planner.ExecutionAutocommit, s.Execution)
 	assert.Equal(t,
-		[]suggest.Caveat{suggest.CaveatSeparateTransactions, suggest.CaveatValidationScan},
+		[]suggest.Caveat{suggest.CaveatSeparateTransactions, suggest.CaveatValidationScan,
+			suggest.CaveatScaffoldConstraintOnFailure},
 		s.Caveats)
 }
 
@@ -94,13 +103,116 @@ func TestAdviseSkipsNonRewritableStatements(t *testing.T) {
 	assert.Empty(t, report.Suggestions)
 }
 
-// A multi-operation statement gets no partial rewrite; a rewrite of one
-// subcommand of a compound ALTER would be misleading.
-func TestAdviseSkipsMultiOperationStatements(t *testing.T) {
+// A multi-operation statement gets no partial rewrite — a rewrite of one
+// subcommand of a compound ALTER would be misleading — but it is not
+// silent: each risky operation carries split-statement guidance.
+func TestAdviseMultiOperationStatementsGetSplitGuidance(t *testing.T) {
 	report, err := suggest.Advise(
 		"ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d int")
 	require.NoError(t, err)
-	assert.Empty(t, report.Suggestions)
+	require.Len(t, report.Suggestions, 1, "only the risky operation gets advice")
+	s := report.Suggestions[0]
+	assert.Equal(t, planner.ReasonSaferIdiom, s.Reason)
+	assert.Empty(t, s.Recommended)
+	assert.Empty(t, s.Execution)
+	assert.Empty(t, s.Caveats)
+	assert.Equal(t, suggest.GuidanceSplitStatement, s.Guidance)
+}
+
+// ATTACH PARTITION has a safer native pattern the planner cannot construct
+// (the proving CHECK depends on the partition bound); the suggestion names
+// the manual path instead of staying silent.
+func TestAdviseAttachPartitionGetsPrevalidatedCheckGuidance(t *testing.T) {
+	report, err := suggest.Advise(
+		"ALTER TABLE orders ATTACH PARTITION orders_2026 FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')")
+	require.NoError(t, err)
+	require.Len(t, report.Suggestions, 1)
+	s := report.Suggestions[0]
+	assert.Empty(t, s.Recommended)
+	assert.Equal(t, suggest.GuidancePrevalidatedCheck, s.Guidance)
+}
+
+// An inline constraint on ADD COLUMN builds under the ADD COLUMN's ACCESS
+// EXCLUSIVE lock; the advice is to split the column addition from an
+// online constraint build.
+func TestAdviseInlineConstraintGetsAddColumnThenConstraintGuidance(t *testing.T) {
+	report, err := suggest.Advise("ALTER TABLE t ADD COLUMN email text UNIQUE")
+	require.NoError(t, err)
+	require.Len(t, report.Suggestions, 1)
+	s := report.Suggestions[0]
+	assert.Empty(t, s.Recommended)
+	assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, s.Guidance)
+}
+
+// lint and suggest agree about the same script: every blocking-idiom
+// finding has a suggestion for the same statement — a constructed rewrite
+// or typed guidance, never silence. This is the workflow contract: lint
+// says what is risky, suggest says what to do about it.
+func TestAdviseCoversEveryBlockingIdiomLintFinding(t *testing.T) {
+	script := `ALTER TABLE orders ALTER COLUMN paid_at SET NOT NULL, ALTER COLUMN shipped_at SET NOT NULL;
+ALTER TABLE orders ATTACH PARTITION orders_2026 FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+CREATE INDEX orders_ref_idx ON orders (reference);`
+
+	lintReport, err := lint.Check(script)
+	require.NoError(t, err)
+	var flagged []int
+	for _, f := range lintReport.Findings {
+		if f.Code == lint.CodeBlockingIdiom {
+			flagged = append(flagged, f.Statement)
+		}
+	}
+	require.Len(t, flagged, 4, "the script exercises the compound, attach, and index paths")
+
+	report, err := suggest.Advise(script)
+	require.NoError(t, err)
+	var advised []int
+	for _, s := range report.Suggestions {
+		advised = append(advised, s.Statement)
+		hasRewrite := len(s.Recommended) > 0
+		hasGuidance := s.Guidance != ""
+		assert.True(t, hasRewrite != hasGuidance,
+			"statement %d: exactly one of recommended and guidance is present", s.Statement)
+	}
+	assert.Equal(t, flagged, advised,
+		"one suggestion per blocking-idiom finding, in the same statement order")
+}
+
+// Every suggestion is complete: a constructed rewrite carries caveats and
+// its execution contract, a non-constructible one carries guidance. The
+// statements cover every safer-idiom path the planner produces, so an
+// unmapped caveat or guidance entry fails here, in CI, not in a consumer's
+// report.
+func TestAdviseEverySaferIdiomPathIsMapped(t *testing.T) {
+	for _, sql := range []string{
+		"CREATE INDEX t_c_idx ON t (c)",
+		"DROP INDEX t_c_idx",
+		"REINDEX INDEX t_c_idx",
+		"ALTER TABLE t DETACH PARTITION p",
+		"ALTER TABLE t ALTER COLUMN c SET NOT NULL",
+		"ALTER TABLE t ADD PRIMARY KEY (id)",
+		"ALTER TABLE t ADD CONSTRAINT t_c_key UNIQUE (c)",
+		"ALTER TABLE t ADD CONSTRAINT t_age_pos CHECK (age > 0)",
+		"ALTER TABLE t ADD CONSTRAINT t_fk FOREIGN KEY (o) REFERENCES orders (id)",
+		"ALTER TABLE t ATTACH PARTITION p FOR VALUES FROM (1) TO (10)",
+		"ALTER TABLE t ADD COLUMN email text UNIQUE",
+		"ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d int",
+	} {
+		report, err := suggest.Advise(sql)
+		require.NoError(t, err, "statement: %s", sql)
+		require.NotEmpty(t, report.Suggestions, "statement: %s", sql)
+		for _, s := range report.Suggestions {
+			if len(s.Recommended) > 0 {
+				assert.NotEmpty(t, s.Caveats, "constructed rewrite without caveats: %s", sql)
+				assert.Equal(t, planner.ExecutionAutocommit, s.Execution,
+					"constructed rewrite without its execution contract: %s", sql)
+				assert.Empty(t, s.Guidance, "rewrite and guidance are exclusive: %s", sql)
+			} else {
+				assert.NotEmpty(t, s.Guidance, "non-constructible advice without guidance: %s", sql)
+				assert.Empty(t, s.Caveats, "caveats describe a recommendation: %s", sql)
+				assert.Empty(t, s.Execution, "execution describes a recommendation: %s", sql)
+			}
+		}
+	}
 }
 
 // Suggestion indexes track the statement position in the script, not the
@@ -132,11 +244,43 @@ func TestReportJSONShape(t *testing.T) {
 		"suggestions": [
 			{
 				"statement": 1,
-				"original": "CREATE INDEX t_c_idx ON t USING btree (c)",
+				"line": 1,
+				"column": 1,
+				"original": "CREATE INDEX t_c_idx ON t (c)",
 				"operation": "CREATE INDEX t_c_idx",
 				"reason": "safer-idiom",
 				"recommended": `+string(recommended)+`,
+				"execution": "autocommit-each-step",
 				"caveats": ["non-transactional", "invalid-index-on-failure"]
+			}
+		]
+	}`, string(raw))
+}
+
+// A guidance suggestion omits the rewrite-only keys entirely — recommended,
+// execution, and caveats are absent, not null or empty.
+func TestReportJSONGuidanceShape(t *testing.T) {
+	report, err := suggest.Advise(
+		"ALTER TABLE orders ATTACH PARTITION orders_2026 FOR VALUES FROM ('2026-01-01') TO ('2027-01-01')")
+	require.NoError(t, err)
+	raw, err := json.Marshal(report)
+	require.NoError(t, err)
+	require.Len(t, report.Suggestions, 1)
+	original, err := json.Marshal(report.Suggestions[0].Original)
+	require.NoError(t, err)
+	operation, err := json.Marshal(report.Suggestions[0].Operation)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"format_version": 1,
+		"suggestions": [
+			{
+				"statement": 1,
+				"line": 1,
+				"column": 1,
+				"original": `+string(original)+`,
+				"operation": `+string(operation)+`,
+				"reason": "safer-idiom",
+				"guidance": "pre-add-validated-check"
 			}
 		]
 	}`, string(raw))
