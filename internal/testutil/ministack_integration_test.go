@@ -10,7 +10,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/rds/types"
-	"github.com/aws/smithy-go"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -98,18 +97,9 @@ func errorContract(t *testing.T, cluster *testutil.AuroraCluster) {
 		Engine:               aws.String("aurora-postgresql"),
 		DBInstanceClass:      aws.String("db.t3.medium"),
 	})
-	// Real AWS emits wire code "DBInstanceAlreadyExists", which the SDK
-	// maps to types.DBInstanceAlreadyExistsFault — production code must
-	// match that typed fault with errors.As, exactly like the two cases
-	// above. Ministack diverges: it emits "DBInstanceAlreadyExistsFault",
-	// which the SDK leaves as a generic API error. Pin the divergent code
-	// exactly so this assertion fails the day the emulator is fixed, and
-	// this workaround is replaced by the typed errors.As match.
-	var apiErr smithy.APIError
-	require.ErrorAs(t, err, &apiErr,
-		"creating a duplicate instance must surface an RDS API error")
-	require.Equal(t, "DBInstanceAlreadyExistsFault", apiErr.ErrorCode(),
-		"emulator no longer emits its divergent duplicate-instance code — assert types.DBInstanceAlreadyExistsFault with errors.As instead of this pin")
+	var instanceExists *types.DBInstanceAlreadyExistsFault
+	require.ErrorAs(t, err, &instanceExists,
+		"creating a duplicate instance must surface the typed already-exists fault")
 }
 
 // passwordRotation proves what a master-password rotation does to a
