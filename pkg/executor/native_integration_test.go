@@ -83,6 +83,46 @@ func TestBuildIndexConcurrentlyBuildsValidIndex(t *testing.T) {
 	assert.True(t, valid, "the index must be valid")
 }
 
+func TestExecuteNativeSequenceAppliesSafeDDLIdioms(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.customers (id int PRIMARY KEY);
+		CREATE TABLE %[1]s.orders (id int, customer_id int, amount int);
+		INSERT INTO %[1]s.customers VALUES (1);
+		INSERT INTO %[1]s.orders VALUES (1, 1, 10)`, schema))
+	require.NoError(t, err)
+
+	sql := []string{
+		fmt.Sprintf("ALTER TABLE %s.orders ADD CONSTRAINT amount_positive CHECK (amount > 0) NOT VALID", schema),
+		fmt.Sprintf("ALTER TABLE %s.orders VALIDATE CONSTRAINT amount_positive", schema),
+		fmt.Sprintf("ALTER TABLE %s.orders ADD CONSTRAINT orders_customer_fk FOREIGN KEY (customer_id) REFERENCES %s.customers (id) NOT VALID", schema, schema),
+		fmt.Sprintf("ALTER TABLE %s.orders VALIDATE CONSTRAINT orders_customer_fk", schema),
+		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY orders_pkey ON %s.orders (id)", schema),
+		fmt.Sprintf("ALTER TABLE %s.orders ADD CONSTRAINT orders_pkey PRIMARY KEY USING INDEX orders_pkey", schema),
+		fmt.Sprintf("ALTER TABLE %s.orders ADD COLUMN region text DEFAULT 'emea'", schema),
+		fmt.Sprintf("ALTER TABLE %s.orders ALTER COLUMN region SET DEFAULT 'apac'", schema),
+	}
+	require.NoError(t, executor.ExecuteNativeSequence(t.Context(), pool, sql, buildBudget))
+
+	var validatedCheck, validatedFK, primaryKey bool
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT bool_and(convalidated) FILTER (WHERE conname = 'amount_positive'),
+		       bool_and(convalidated) FILTER (WHERE conname = 'orders_customer_fk'),
+		       bool_or(contype = 'p')
+		  FROM pg_constraint
+		 WHERE conrelid = $1::regclass`, fmt.Sprintf("%s.orders", schema)).Scan(
+		&validatedCheck, &validatedFK, &primaryKey))
+	assert.True(t, validatedCheck)
+	assert.True(t, validatedFK)
+	assert.True(t, primaryKey)
+
+	var existing, defaultValue string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		fmt.Sprintf("SELECT region, pg_get_expr(d.adbin, d.adrelid) FROM %s.orders o JOIN pg_attrdef d ON d.adrelid = '%s.orders'::regclass JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum WHERE a.attname = 'region'", schema, schema)).Scan(&existing, &defaultValue))
+	assert.Equal(t, "emea", existing, "the fast default must be visible on the existing row")
+	assert.Equal(t, "'apac'::text", defaultValue, "the metadata-only SET DEFAULT must update the catalog default")
+}
+
 // TestBuildIndexConcurrentlyRefusesSingleConnectionPool covers the
 // admission-time pool guard: the verdict session is a correctness
 // dependency reserved alongside the build session, so a pool that cannot
