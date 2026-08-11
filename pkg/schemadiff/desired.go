@@ -46,12 +46,12 @@ func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, desired statement.
 	if _, err := tx.Exec(ctx, setPath); err != nil {
 		return Model{}, fmt.Errorf("set scratch search_path: %w", err)
 	}
-	for _, st := range desired.Statements {
+	for _, st := range desired.Statements() {
 		if _, err := tx.Exec(ctx, st.SQL()); err != nil {
 			return Model{}, fmt.Errorf("execute desired statement on scratch schema: %w", err)
 		}
 	}
-	m, err := introspectInTx(ctx, tx, scratch, desired.Table)
+	m, err := introspectInTx(ctx, tx, scratch, desired.Table())
 	if err != nil {
 		return Model{}, fmt.Errorf("introspect desired state: %w", err)
 	}
