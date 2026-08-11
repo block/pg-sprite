@@ -31,6 +31,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -48,6 +49,34 @@ const (
 	// RouteRefuse: no known safe path; not executed.
 	RouteRefuse Route = "refuse"
 )
+
+// Routes returns the closed set of Route values, in severity order. It is
+// part of the plan-report contract (docs/plan-report.md): the set changes
+// only with a format_version bump, and a consumer that meets an
+// unrecognized value must treat the statement as unknown and refuse it.
+func Routes() []Route {
+	return []Route{RouteNative, RouteCopyAndSwap, RouteRefuse}
+}
+
+// Reasons returns the closed set of Reason values. It is part of the
+// plan-report contract (docs/plan-report.md): the set changes only with a
+// format_version bump, and a consumer that meets an unrecognized value must
+// treat the decision as unknown and refuse it.
+func Reasons() []Reason {
+	return []Reason{
+		ReasonMetadataOnly,
+		ReasonOnlineIdiom,
+		ReasonFastDefault,
+		ReasonBinaryCoercible,
+		ReasonSaferIdiom,
+		ReasonVolatileDefault,
+		ReasonGeneratedStored,
+		ReasonTypeRewrite,
+		ReasonRelocation,
+		ReasonPartitionParentLock,
+		ReasonUnsupportedOperation,
+	}
+}
 
 // worse orders routes for aggregation: refuse > copy-and-swap > native.
 func worse(a, b Route) Route {
@@ -104,6 +133,13 @@ const (
 type Decision struct {
 	// Operation is the operator-facing label (display only).
 	Operation string `json:"operation"`
+	// Destructive marks operations that discard live structure — a dropped
+	// column, constraint, or index. It is derived from the operation shape
+	// here, in the one place every front door shares, so a plan reports the
+	// same statement as destructive no matter how it was submitted. It is
+	// always emitted, never omitted: a safety flag a consumer gates on must
+	// be explicit even when false.
+	Destructive bool `json:"destructive"`
 	// Route is where the operation goes.
 	Route Route `json:"route"`
 	// Reason is why.
@@ -152,6 +188,18 @@ type Facts struct {
 	ColumnTypes map[string]string
 }
 
+// FactsFrom extracts the facts a live introspection model provides: the
+// canonical type of every live column. Every front door — the declarative
+// diff and the imperative dry-run — extracts facts through this one
+// function so equivalent changes classify identically.
+func FactsFrom(live schemadiff.Model) Facts {
+	types := make(map[string]string, len(live.Columns))
+	for _, col := range live.Columns {
+		types[col.Name] = col.Type
+	}
+	return Facts{ColumnTypes: types}
+}
+
 // Classify parses one statement and routes each of its operations. A parse
 // failure is an error; an unrecognized operation is not — it comes back as
 // a refuse decision so the caller can render the whole plan.
@@ -178,7 +226,7 @@ func Classify(sql string, facts Facts) (Plan, error) {
 
 // classifyOp routes one operation per the reference table.
 func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string, single bool) Decision {
-	d := Decision{Operation: op.Describe()}
+	d := Decision{Operation: op.Describe(), Destructive: destructiveOp(op.Kind)}
 	switch op.Kind {
 	case statement.OpCreateTable:
 		if op.PartitionOf {
@@ -256,6 +304,20 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
 	}
 	return d
+}
+
+// destructiveOp reports whether an operation shape discards live
+// structure. A drop is destructive regardless of how it routes: a dropped
+// column discards data, a dropped constraint discards a guarantee the
+// schema was providing, and a dropped index discards a structure that is
+// expensive to rebuild (and, for a unique index, the uniqueness guarantee).
+func destructiveOp(kind statement.OpKind) bool {
+	switch kind {
+	case statement.OpDropColumn, statement.OpDropConstraint, statement.OpDropIndex:
+		return true
+	default:
+		return false
+	}
 }
 
 // concurrentlyDecision routes an operation that is online in its

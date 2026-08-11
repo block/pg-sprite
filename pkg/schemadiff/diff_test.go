@@ -263,3 +263,23 @@ func TestDiffGeneratedColumnAddRendersGenerationExpression(t *testing.T) {
 		`ALTER TABLE "public"."events" ADD COLUMN "name_upper" text GENERATED ALWAYS AS (upper((name)::text)) STORED`,
 	}, sqls(changes))
 }
+
+// The change-kind vocabulary is a closed set a consumer branches on; it is
+// pinned to plan-report format_version 1 (docs/plan-report.md). A new value
+// here without a format_version bump is a contract break.
+func TestChangeKindsVocabularyPinned(t *testing.T) {
+	assert.Equal(t, []ChangeKind{
+		ChangeCreateTable,
+		ChangeDropIndex,
+		ChangeDropConstraint,
+		ChangeDropColumn,
+		ChangeAddColumn,
+		ChangeAlterType,
+		ChangeSetDefault,
+		ChangeDropDefault,
+		ChangeSetNotNull,
+		ChangeDropNotNull,
+		ChangeAddConstraint,
+		ChangeCreateIndex,
+	}, ChangeKinds())
+}

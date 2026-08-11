@@ -26,6 +26,14 @@ const (
 	BackendCopyAndSwap Backend = "copy-and-swap"
 )
 
+// Backends returns the closed set of Backend values. It is part of the
+// plan-report contract (docs/plan-report.md): the set changes only with a
+// format_version bump, and a consumer that meets an unrecognized value must
+// treat the statement as unknown and refuse it.
+func Backends() []Backend {
+	return []Backend{BackendNative, BackendCopyAndSwap}
+}
+
 // available reports whether the backend is implemented in this build. This
 // is the routing policy for backends: copy-and-swap is a known strategy the
 // planner routes to, but until its executor exists the router marks the
@@ -56,6 +64,19 @@ const (
 	// assigned.
 	DispositionRefuse Disposition = "refuse"
 )
+
+// Dispositions returns the closed set of Disposition values, in severity
+// order. It is part of the plan-report contract (docs/plan-report.md): the
+// set changes only with a format_version bump, and a consumer that meets an
+// unrecognized value must treat the statement as unknown and refuse it.
+func Dispositions() []Disposition {
+	return []Disposition{
+		DispositionExecute,
+		DispositionRewriteRequired,
+		DispositionUnavailable,
+		DispositionRefuse,
+	}
+}
 
 // worse orders dispositions for aggregation:
 // refuse > unavailable > rewrite-required > execute.

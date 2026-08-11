@@ -146,3 +146,23 @@ func TestRouteEmptyPlanExecutes(t *testing.T) {
 	assert.Equal(t, router.DispositionExecute, routed.Disposition,
 		"a plan with nothing to do has nothing blocking execution")
 }
+
+// The backend and disposition vocabularies are closed sets a consumer
+// branches on; both are pinned to plan-report format_version 1
+// (docs/plan-report.md). A new value here without a format_version bump is
+// a contract break.
+func TestBackendsVocabularyPinned(t *testing.T) {
+	assert.Equal(t, []router.Backend{
+		router.BackendNative,
+		router.BackendCopyAndSwap,
+	}, router.Backends())
+}
+
+func TestDispositionsVocabularyPinned(t *testing.T) {
+	assert.Equal(t, []router.Disposition{
+		router.DispositionExecute,
+		router.DispositionRewriteRequired,
+		router.DispositionUnavailable,
+		router.DispositionRefuse,
+	}, router.Dispositions())
+}

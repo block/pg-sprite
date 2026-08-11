@@ -3,6 +3,7 @@ package statement
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	pganalyze "github.com/pganalyze/pg_query_go/v6"
 	pgquery "github.com/wasilibs/go-pgquery"
@@ -46,12 +47,22 @@ var (
 // CREATE TABLE plus any number of CREATE INDEX statements on that table.
 // Statement SQL is canonical (parsed and deparsed through the PostgreSQL
 // grammar), in input order, one statement per entry.
+//
+// Only [ParseDesired] produces a non-zero value, so holding one is proof
+// the set-level admission rules held: a single unqualified CREATE TABLE,
+// every index on that table, none of them CONCURRENTLY.
 type DesiredSchema struct {
-	// Table is the unqualified name of the single CREATE TABLE target.
-	Table string
-	// Statements are the admitted statements, the CREATE TABLE among them.
-	Statements []Statement
+	table      string
+	statements []Statement
 }
+
+// Table returns the unqualified name of the single CREATE TABLE target.
+func (ds DesiredSchema) Table() string { return ds.table }
+
+// Statements returns the admitted statements in input order, the CREATE
+// TABLE among them. The slice is a copy: mutating it cannot invalidate the
+// admission proof the value carries.
+func (ds DesiredSchema) Statements() []Statement { return slices.Clone(ds.statements) }
 
 // ParseDesired parses a desired-state schema file and admits only what the
 // declarative front door can execute on a scratch schema: one unqualified
@@ -67,25 +78,25 @@ func ParseDesired(sql string) (DesiredSchema, error) {
 	}
 	var ds DesiredSchema
 	for i, raw := range tree.GetStmts() {
-		st, err := admitDesiredStatement(raw.GetStmt(), ds.Table)
+		st, err := admitDesiredStatement(raw.GetStmt(), ds.table)
 		if err != nil {
 			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
 		if st.kind == KindCreateTable {
-			ds.Table = st.table
+			ds.table = st.table
 		}
 		if st.sql, err = deparseOne(raw.GetStmt()); err != nil {
 			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
-		ds.Statements = append(ds.Statements, st)
+		ds.statements = append(ds.statements, st)
 	}
-	if ds.Table == "" {
+	if ds.table == "" {
 		return DesiredSchema{}, ErrNoCreateTable
 	}
-	for _, st := range ds.Statements {
-		if st.kind == KindCreateIndex && st.table != ds.Table {
+	for _, st := range ds.statements {
+		if st.kind == KindCreateIndex && st.table != ds.table {
 			return DesiredSchema{}, fmt.Errorf("%w: index on %q, desired table is %q",
-				ErrWrongIndexTarget, st.table, ds.Table)
+				ErrWrongIndexTarget, st.table, ds.table)
 		}
 	}
 	return ds, nil

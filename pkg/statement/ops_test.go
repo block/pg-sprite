@@ -228,12 +228,12 @@ func TestParseOpsShapes(t *testing.T) {
 		{
 			name: "drop index",
 			sql:  "DROP INDEX i",
-			want: statement.Op{Kind: statement.OpDropIndex},
+			want: statement.Op{Kind: statement.OpDropIndex, Name: "i"},
 		},
 		{
 			name: "drop index concurrently",
 			sql:  "DROP INDEX CONCURRENTLY i",
-			want: statement.Op{Kind: statement.OpDropIndex, Concurrent: true},
+			want: statement.Op{Kind: statement.OpDropIndex, Name: "i", Concurrent: true},
 		},
 		{
 			name: "reindex",
@@ -265,6 +265,24 @@ func TestParseOpsShapes(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, parseOneOp(t, tc.sql))
 		})
+	}
+}
+
+// Describe must render the type modifier: the modifier is what
+// distinguishes a widen (varchar(100), routes native) from a narrow
+// (varchar(30), routes copy-and-swap), and a label that drops it would
+// render changes that route in opposite directions identically.
+func TestDescribeRendersTypeModifiers(t *testing.T) {
+	cases := []struct {
+		sql  string
+		want string
+	}{
+		{"ALTER TABLE t ALTER COLUMN v TYPE varchar(100)", "ALTER COLUMN v TYPE varchar(100)"},
+		{"ALTER TABLE t ALTER COLUMN p TYPE numeric(12,2)", "ALTER COLUMN p TYPE numeric(12,2)"},
+		{"ALTER TABLE t ALTER COLUMN v TYPE text", "ALTER COLUMN v TYPE text"},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, parseOneOp(t, tc.sql).Describe(), tc.sql)
 	}
 }
 
@@ -328,4 +346,28 @@ func TestAddNotValidRefusals(t *testing.T) {
 			assert.ErrorIs(t, err, statement.ErrNotValidNotApplicable)
 		})
 	}
+}
+
+// A drop-index operation names what it discards: the label carries the
+// (qualified) index name so a destructive decision is never anonymous.
+func TestParseOpsDropIndexCapturesName(t *testing.T) {
+	ops, err := statement.ParseOps("DROP INDEX app.orders_legacy_idx")
+	require.NoError(t, err)
+	require.Len(t, ops, 1)
+	assert.Equal(t, statement.OpDropIndex, ops[0].Kind)
+	assert.Equal(t, "app.orders_legacy_idx", ops[0].Name)
+	assert.Equal(t, "DROP INDEX app.orders_legacy_idx", ops[0].Describe())
+
+	multi, err := statement.ParseOps("DROP INDEX a_idx, b_idx")
+	require.NoError(t, err)
+	require.Len(t, multi, 1)
+	assert.Equal(t, "a_idx, b_idx", multi[0].Name)
+}
+
+// An unnamed CREATE INDEX labels cleanly, without a dangling space.
+func TestDescribeUnnamedCreateIndexHasNoTrailingSpace(t *testing.T) {
+	ops, err := statement.ParseOps("CREATE INDEX ON t (c)")
+	require.NoError(t, err)
+	require.Len(t, ops, 1)
+	assert.Equal(t, "CREATE INDEX", ops[0].Describe())
 }

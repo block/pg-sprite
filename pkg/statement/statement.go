@@ -88,6 +88,25 @@ func (s Statement) Concurrent() bool { return s.concurrent }
 // exactly one SQL statement.
 var ErrNotOneStatement = errors.New("input must contain exactly one SQL statement")
 
+// Canonical reprints one statement through the PostgreSQL deparser:
+// grammar-canonical spelling, unnecessary quoting dropped. Commented input
+// is refused (ErrCommentLoss): the parser drops comments, and reprinting
+// must never silently discard content. It is the rendering the plan report
+// carries, so both front doors describe the same change with the same
+// string. Deparser output never feeds a model comparison or a schema
+// fingerprint (see the package comment); the plan report's fingerprint is
+// a plan identity, not a schema fingerprint.
+func Canonical(sql string) (string, error) {
+	if err := CheckNoComments(sql); err != nil {
+		return "", err
+	}
+	node, err := parseSingle(sql)
+	if err != nil {
+		return "", err
+	}
+	return deparseOne(node)
+}
+
 // ParseOne parses sql with the PostgreSQL grammar and requires exactly one
 // statement. A parse failure is surfaced to the caller, never guessed around.
 func ParseOne(sql string) (Statement, error) {
