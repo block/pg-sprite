@@ -205,11 +205,11 @@ password rotation last. Each subtest pins one AWS seam:
   discovery → `dbconn` connect → PG-major assertion → DDL smoke;
 - **control-plane error contract** — unknown identifiers and duplicate
   creations surface as the AWS SDK's typed RDS faults, matched with
-  `errors.As`. One documented emulator divergence: Ministack emits the
-  duplicate-instance wire code with a `Fault` suffix real AWS omits, so
-  the SDK leaves it a generic API error. The test pins the divergent code
-  exactly — it fails the day the emulator is fixed, forcing the
-  workaround's removal in favor of the typed match production code uses;
+  `errors.As` — exactly the match production code uses. (An earlier
+  emulator divergence — a `Fault` suffix on the duplicate-instance wire
+  code that real AWS omits — was fixed upstream in Ministack v1.4.14 at
+  pg-sprite's request; the pinned image carries the fix, so no divergence
+  workaround remains);
 - **password rotation** — what a rotation does to a running schema change
   (see below), plus pg-sprite's contract that the resulting auth failure
   is terminal, not retryable.

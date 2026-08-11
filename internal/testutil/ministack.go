@@ -88,30 +88,33 @@ func ministackImage() string {
 	if img := os.Getenv("MINISTACK_IMAGE"); img != "" {
 		return img
 	}
-	return "ministackorg/ministack:1.4.13-full"
+	return "ministackorg/ministack:1.4.15-full"
 }
 
 // auroraEngineVersion returns a real aurora-postgresql engine version for
-// the requested major. Real RDS requires a full version string ("16.6"),
-// not a bare major — Ministack is lenient, but this tier exists to
-// rehearse calls the way the real control plane requires, so the request
-// is constructed as AWS would accept it. The exact minor is immaterial:
-// Ministack derives the sibling database image from the major, and the
-// test asserts the running server's major independently.
+// the requested major. Real RDS requires a full version string ("16.14"),
+// not a bare major, and Ministack validates the version against its
+// creatable catalog at create time — an unknown version fails with the
+// AWS-exact InvalidParameterCombination, so each entry here must be a
+// version the pinned image advertises via DescribeDBEngineVersions. The
+// exact minor is immaterial beyond that: Ministack derives the sibling
+// database image from the major, and the test asserts the running
+// server's major independently.
 func auroraEngineVersion(major int) string {
 	versions := map[int]string{
-		14: "14.15",
-		15: "15.10",
-		16: "16.6",
-		17: "17.4",
-		18: "18.3",
+		14: "14.23",
+		15: "15.18",
+		16: "16.14",
+		17: "17.10",
+		18: "18.4",
 	}
 	if v, ok := versions[major]; ok {
 		return v
 	}
-	// A major newer than this map: fall back to "<major>.1" so the call
-	// still carries a full version string.
-	return fmt.Sprintf("%d.1", major)
+	// A major newer than this map: fall back to the bare major, which the
+	// emulator's validator accepts as a dot-boundary prefix of any
+	// catalog entry for that major.
+	return strconv.Itoa(major)
 }
 
 // AuroraCluster is a provisioned Ministack aurora-postgresql cluster and
