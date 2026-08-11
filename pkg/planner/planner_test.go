@@ -187,6 +187,13 @@ func TestClassifyReferenceRows(t *testing.T) {
 			assert.Equal(t, tc.route, d.Route)
 			assert.Equal(t, tc.reason, d.Reason)
 			assert.Len(t, d.SaferSQL, tc.saferSteps)
+			if tc.saferSteps > 0 {
+				assert.Equal(t, planner.ExecutionAutocommit, d.SaferSQLExecution,
+					"a constructed sequence carries its execution contract")
+			} else {
+				assert.Empty(t, d.SaferSQLExecution,
+					"the contract is present exactly when SaferSQL is")
+			}
 		})
 	}
 }

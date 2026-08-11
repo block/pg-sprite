@@ -15,6 +15,11 @@ import (
 // findings, so the process exits non-zero; warnings alone pass.
 var ErrLintFindings = errors.New("lint found errors")
 
+// onlineDDLReferenceURL is where output that recommends a safer form sends
+// the reader. A URL rather than a repo path: an installed build has no
+// docs/ tree, so the reference must be reachable from the string alone.
+const onlineDDLReferenceURL = "https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md"
+
 // runLint lints a DDL script: parse every statement through the PostgreSQL
 // grammar, classify it with zero live facts, and report typed findings.
 // Offline — no database. A clean script prints nothing.
@@ -67,8 +72,12 @@ func writeLintText(out io.Writer, name string, report lint.Report) error {
 			return fmt.Errorf("write lint report: %w", err)
 		}
 		if len(f.Suggestion) > 0 {
-			if _, err := fmt.Fprintf(out, "  run instead: %s;\n",
-				strings.Join(f.Suggestion, ";\n  ")); err != nil {
+			if _, err := fmt.Fprintf(out, "  safer form (not equivalent — see %s): %s;\n",
+				onlineDDLReferenceURL, strings.Join(f.Suggestion, ";\n  ")); err != nil {
+				return fmt.Errorf("write lint report: %w", err)
+			}
+			if _, err := fmt.Fprintln(out,
+				"  run each statement in its own transaction, never one block; after a failed CONCURRENTLY build, check pg_index.indisvalid and rebuild"); err != nil {
 				return fmt.Errorf("write lint report: %w", err)
 			}
 		}

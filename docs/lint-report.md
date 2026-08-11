@@ -67,7 +67,8 @@ codes make the conservatism visible instead of burying it:
 | `code` | string | always | The typed finding kind (see Codes). Automation branches on this, never on prose. |
 | `severity` | string | always | What the engine would do about it (see Severities). |
 | `reason` | string | classifier findings | The planner's typed cause, drawn from the plan report's Reasons vocabulary. Absent for destructive findings, which are a property of the operation, not a routing decision. |
-| `suggestion` | array | when constructible | The ordered safer SQL to run instead, present only for `blocking-idiom` findings where the planner constructed the rewrite. Its absence still means the submitted form blocks — the planner does not construct rewrites for multi-operation statements or for operations that need catalog knowledge (ATTACH PARTITION's proving CHECK). |
+| `suggestion` | array | when constructible | The ordered safer SQL, present only for `blocking-idiom` findings where the planner constructed the rewrite. A safer form of the submitted statement, not a semantic equivalent — running it by hand forgoes the engine's execution-time guards (invalid-index detection after a concurrent build). Its absence still means the submitted form blocks — the planner does not construct rewrites for multi-operation statements or for operations that need catalog knowledge (ATTACH PARTITION's proving CHECK). |
+| `suggestion_execution` | string | with `suggestion` | The typed execution contract for `suggestion`, drawn from the plan report's Execution contracts vocabulary (`autocommit-each-step`: each step in its own implicit transaction, never inside an enclosing transaction block; a failed step leaves partial state the runner must detect and recover). A consumer that runs the suggestion branches on this. Present exactly when `suggestion` is. |
 
 ## Codes (`code`)
 

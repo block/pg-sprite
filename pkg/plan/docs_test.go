@@ -98,6 +98,9 @@ func TestDocListsEveryVocabularyValue(t *testing.T) {
 	for _, r := range planner.Reasons() {
 		values = append(values, string(r))
 	}
+	for _, e := range planner.Executions() {
+		values = append(values, string(e))
+	}
 	for _, b := range router.Backends() {
 		values = append(values, string(b))
 	}

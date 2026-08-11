@@ -107,7 +107,8 @@ func writeChangeText(out io.Writer, ps plan.Statement) error {
 		return fmt.Errorf("write plan: %w", err)
 	}
 	if len(ps.ExecSQL) > 0 && ps.ExecSQL[0] != ps.SQL {
-		if _, err := fmt.Fprintln(out, "-- the engine would run instead:"); err != nil {
+		if _, err := fmt.Fprintf(out, "-- safer form the engine would run (not equivalent; each step in its own transaction — see %s):\n",
+			onlineDDLReferenceURL); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
 		for _, safer := range ps.ExecSQL {

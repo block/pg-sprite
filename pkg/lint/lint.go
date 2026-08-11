@@ -42,7 +42,9 @@ const (
 	CodeUnsupportedOperation Code = "unsupported-operation"
 	// CodeBlockingIdiom: the submitted form blocks readers or writers and
 	// a safer native form exists; Suggestion carries it when the linter
-	// can construct one.
+	// can construct one. The safer form is not a semantic equivalent —
+	// a CONCURRENTLY build is non-transactional and a failure leaves an
+	// invalid index the engine detects and rebuilds at execution time.
 	CodeBlockingIdiom Code = "blocking-idiom"
 	// CodeTableRewrite: the operation needs a full table rewrite — only
 	// the engine's copy-and-swap path can run it online. Reason carries
@@ -85,9 +87,17 @@ type Finding struct {
 	// Reason is the classifier's typed cause, present for findings the
 	// classifier produced (blocking-idiom, table-rewrite, unsupported).
 	Reason planner.Reason `json:"reason,omitempty"`
-	// Suggestion is the ordered safer SQL to run instead, present only
-	// for blocking-idiom findings where the linter could construct it.
+	// Suggestion is the ordered safer SQL, present only for
+	// blocking-idiom findings where the linter could construct it. It is
+	// advisory: a safer form, not a semantic equivalent — running it by
+	// hand forgoes the engine's execution-time guards (invalid-index
+	// detection after a concurrent build).
 	Suggestion []string `json:"suggestion,omitempty"`
+	// SuggestionExecution is the typed execution contract for Suggestion
+	// (planner.Execution), present exactly when Suggestion is. A consumer
+	// that runs the suggestion branches on it — it is what says the steps
+	// must not be wrapped in a transaction block.
+	SuggestionExecution planner.Execution `json:"suggestion_execution,omitempty"`
 }
 
 // Report is the lint result for one script.
@@ -190,7 +200,7 @@ func decisionFinding(d planner.Decision) (Finding, bool) {
 	case planner.RouteNative:
 		if d.Reason == planner.ReasonSaferIdiom {
 			f.Code, f.Severity = CodeBlockingIdiom, SeverityWarning
-			f.Suggestion = d.SaferSQL
+			f.Suggestion, f.SuggestionExecution = d.SaferSQL, d.SaferSQLExecution
 			return f, true
 		}
 		return Finding{}, false
