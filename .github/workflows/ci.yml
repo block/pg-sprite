@@ -136,18 +136,32 @@ jobs:
 
   # AWS-boundary tests against Ministack's RDS/Aurora control plane.
   # Ministack is MIT-licensed and tokenless, so this tier runs on every
-  # code PR — including forks — as a real merge gate. The Ministack
+  # code PR — including forks. It is a signal job, deliberately NOT in
+  # all-green's required set: no production code makes AWS API calls yet,
+  # so an emulator or infrastructure failure here should not block a
+  # merge. Promote it to the required set when the first AWS-facing
+  # feature (Secrets Manager DSN resolution) lands. The Ministack
   # container mounts the runner's Docker socket to start the sibling
-  # PostgreSQL container backing the provisioned cluster; that is safe on
-  # an ephemeral GitHub-hosted runner but is why this job must stay on
-  # ubuntu-latest, never a shared self-hosted runner.
+  # PostgreSQL container backing the provisioned cluster; that is safe
+  # only on an ephemeral GitHub-hosted runner — the guard step enforces
+  # it instead of trusting the runs-on label to never change.
   aws-boundary:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - name: Refuse non-GitHub-hosted runners
+        env:
+          RUNNER_ENV: ${{ runner.environment }}
+        run: |
+          if [ "$RUNNER_ENV" != "github-hosted" ]; then
+            echo "aws-boundary mounts the Docker socket; it must only run on ephemeral GitHub-hosted runners (got: $RUNNER_ENV)"
+            exit 1
+          fi
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - run: make test-aws-boundary
@@ -157,7 +171,7 @@ jobs:
   # docs-only PRs where the heavy jobs were skipped.
   all-green:
     if: always()
-    needs: [changes, lint, build, test, aws-boundary]
+    needs: [changes, lint, build, test]
     runs-on: ubuntu-latest
     steps:
       - name: Check job results

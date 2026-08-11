@@ -62,6 +62,10 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   `pgx/v5`, stdlib. The future decode path will add `pglogrepl`. Adding one requires a recorded decision (see the rubric in
   [docs/tcb-model.md](docs/tcb-model.md) — copy small things, take pinned dependencies only
   for load-bearing expertise).
+  Recorded decision: the AWS SDK (`aws-sdk-go-v2`) is a test-harness-only dependency, confined
+  behind the `ministack` build tag in `internal/testutil` — it never appears in the core, in
+  `cmd/pg-sprite`, or in any ordinary build; a plain `go build ./...` / `go test ./...` never
+  compiles it.
   pg-sprite **never imports `block/spirit` as a module**: we port ideas with citations, not
   code.
 - **Priorities when trade-offs are hard:** Correctness → Readability → Ease of use →

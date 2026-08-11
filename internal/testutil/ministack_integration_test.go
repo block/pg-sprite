@@ -1,3 +1,5 @@
+//go:build ministack
+
 package testutil_test
 
 import (

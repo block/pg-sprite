@@ -1,7 +1,16 @@
+//go:build ministack
+
+// The ministack build tag confines this harness — and the AWS SDK it pulls
+// in — to explicit opt-in via `make test-aws-boundary`. A plain `go test
+// ./...` never compiles it, so the default suite needs no Docker-socket
+// mount and the AWS SDK stays out of every ordinary build.
+
 package testutil
 
 import (
 	"context"
+	"crypto/sha1" // not cryptographic: reproduces Ministack's container-name derivation
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -10,10 +19,11 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
+	"github.com/moby/moby/client"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -35,6 +45,15 @@ const (
 	auroraProvisionPoll     = 2 * time.Second
 	// rdsStatusAvailable is the RDS API status of a usable instance.
 	rdsStatusAvailable = "available"
+	// endpointDialTimeout bounds the reachability probe of the discovered
+	// endpoint. The instance is already available — Ministack marks it so
+	// only after an authenticated probe query succeeds — so a reachable
+	// address accepts immediately and a timeout means a routing gap, not a
+	// database that is still starting.
+	endpointDialTimeout = 3 * time.Second
+	// siblingDBPort is the PostgreSQL port inside the sibling database
+	// container, which Ministack also publishes on the Docker host.
+	siblingDBPort = "5432/tcp"
 	// dockerSocket is mounted into the Ministack container so it can start
 	// the sibling PostgreSQL container that backs the provisioned cluster.
 	// This grants the emulator access to the host Docker daemon — fine for
@@ -47,6 +66,11 @@ const (
 	fixtureUser     = "pgsprite"
 	fixturePassword = "test-password-do-not-use"
 	fixtureDatabase = "pgsprite"
+	// awsAccountID and awsRegion identify the emulator's default account.
+	// Ministack scopes the sibling container's name by
+	// sha1(account:region), so these also feed siblingHostAddr.
+	awsAccountID = "000000000000"
+	awsRegion    = "us-east-1"
 )
 
 // ministackImage returns the Ministack image to run, pinned for
@@ -62,6 +86,29 @@ func ministackImage() string {
 	return "ministackorg/ministack:1.4.13-full"
 }
 
+// auroraEngineVersion returns a real aurora-postgresql engine version for
+// the requested major. Real RDS requires a full version string ("16.6"),
+// not a bare major — Ministack is lenient, but this tier exists to
+// rehearse calls the way the real control plane requires, so the request
+// is constructed as AWS would accept it. The exact minor is immaterial:
+// Ministack derives the sibling database image from the major, and the
+// test asserts the running server's major independently.
+func auroraEngineVersion(major int) string {
+	versions := map[int]string{
+		14: "14.15",
+		15: "15.10",
+		16: "16.6",
+		17: "17.4",
+		18: "18.3",
+	}
+	if v, ok := versions[major]; ok {
+		return v
+	}
+	// A major newer than this map: fall back to "<major>.1" so the call
+	// still carries a full version string.
+	return fmt.Sprintf("%d.1", major)
+}
+
 // ProvisionAuroraPostgres starts a Ministack container, provisions an
 // aurora-postgresql cluster and instance through the real RDS control-plane
 // API, waits until the instance is available, and returns a connection URL
@@ -74,21 +121,18 @@ func ProvisionAuroraPostgres(t *testing.T) string {
 	}
 
 	ctx := t.Context()
-	// The sibling database container publishes its port on the Docker host
-	// starting at RDS_BASE_PORT. Pinning that base to a port this process
-	// picked keeps the database reachable at a known localhost address on
-	// every platform — container IPs are not routable from the host on
-	// macOS, so the endpoint address the API returns cannot be used
-	// directly.
-	dbPort := freePort(t)
+	// No MINISTACK_RDS_PUBLIC_ENDPOINT: in public-endpoint mode a
+	// containerized Ministack probes instance readiness at its own
+	// loopback, where the host-published sibling port does not exist, so
+	// the instance never becomes available. In the default mode the
+	// sibling database joins Ministack's Docker network, readiness probes
+	// its container IP, and the discovered endpoint is that
+	// container-internal address.
 	ctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		Started: true,
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        ministackImage(),
 			ExposedPorts: []string{fmt.Sprintf("%d/tcp", ministackGatewayPort)},
-			Env: map[string]string{
-				"RDS_BASE_PORT": strconv.Itoa(dbPort),
-			},
 			HostConfigModifier: func(hc *container.HostConfig) {
 				hc.Binds = append(hc.Binds, dockerSocket+":"+dockerSocket)
 			},
@@ -103,15 +147,15 @@ func ProvisionAuroraPostgres(t *testing.T) string {
 		}
 	})
 
-	client := rdsClient(t, ctr)
+	clnt := rdsClient(t, ctr)
 	major, err := strconv.Atoi(PGVersion())
 	require.NoError(t, err, "PG_VERSION must be a PostgreSQL major number")
 
 	const clusterID = "pgsprite-test"
-	_, err = client.CreateDBCluster(ctx, &rds.CreateDBClusterInput{
+	_, err = clnt.CreateDBCluster(ctx, &rds.CreateDBClusterInput{
 		DBClusterIdentifier: aws.String(clusterID),
 		Engine:              aws.String("aurora-postgresql"),
-		EngineVersion:       aws.String(strconv.Itoa(major)),
+		EngineVersion:       aws.String(auroraEngineVersion(major)),
 		DatabaseName:        aws.String(fixtureDatabase),
 		MasterUsername:      aws.String(fixtureUser),
 		MasterUserPassword:  aws.String(fixturePassword),
@@ -125,7 +169,7 @@ func ProvisionAuroraPostgres(t *testing.T) string {
 	// while it still has instances.
 	t.Cleanup(func() {
 		cleanupCtx := context.WithoutCancel(t.Context())
-		if _, err := client.DeleteDBCluster(cleanupCtx, &rds.DeleteDBClusterInput{
+		if _, err := clnt.DeleteDBCluster(cleanupCtx, &rds.DeleteDBClusterInput{
 			DBClusterIdentifier: aws.String(clusterID),
 			SkipFinalSnapshot:   aws.Bool(true),
 		}); err != nil {
@@ -134,7 +178,7 @@ func ProvisionAuroraPostgres(t *testing.T) string {
 	})
 
 	instanceID := clusterID + "-1"
-	_, err = client.CreateDBInstance(ctx, &rds.CreateDBInstanceInput{
+	_, err = clnt.CreateDBInstance(ctx, &rds.CreateDBInstanceInput{
 		DBInstanceIdentifier: aws.String(instanceID),
 		DBClusterIdentifier:  aws.String(clusterID),
 		Engine:               aws.String("aurora-postgresql"),
@@ -143,7 +187,7 @@ func ProvisionAuroraPostgres(t *testing.T) string {
 	require.NoError(t, err, "create aurora-postgresql instance")
 	t.Cleanup(func() {
 		cleanupCtx := context.WithoutCancel(t.Context())
-		if _, err := client.DeleteDBInstance(cleanupCtx, &rds.DeleteDBInstanceInput{
+		if _, err := clnt.DeleteDBInstance(cleanupCtx, &rds.DeleteDBInstanceInput{
 			DBInstanceIdentifier: aws.String(instanceID),
 			SkipFinalSnapshot:    aws.Bool(true),
 		}); err != nil {
@@ -152,7 +196,7 @@ func ProvisionAuroraPostgres(t *testing.T) string {
 	})
 
 	require.Eventuallyf(t, func() bool {
-		out, err := client.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{
+		out, err := clnt.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{
 			DBInstanceIdentifier: aws.String(instanceID),
 		})
 		if err != nil || len(out.DBInstances) == 0 {
@@ -163,39 +207,83 @@ func ProvisionAuroraPostgres(t *testing.T) string {
 		"instance %s did not become %s within the provision deadline", instanceID, rdsStatusAvailable)
 
 	// Read the endpoint back from the control plane rather than trusting the
-	// request: the discovery flow is the behavior under test.
-	clusters, err := client.DescribeDBClusters(ctx, &rds.DescribeDBClustersInput{
+	// request: the discovery flow is the behavior under test, and the
+	// address it returns is the address the test connects to. The one
+	// exception is a host that cannot route to container IPs (macOS, where
+	// Docker runs in a VM) — there the connection falls back to the
+	// sibling's host-published port, and only the reachability of the
+	// discovered address goes unproven locally; CI runs on Linux, where the
+	// discovered endpoint is used directly.
+	clusters, err := clnt.DescribeDBClusters(ctx, &rds.DescribeDBClustersInput{
 		DBClusterIdentifier: aws.String(clusterID),
 	})
 	require.NoError(t, err, "describe cluster after provisioning")
 	require.Len(t, clusters.DBClusters, 1, "provisioned cluster must be discoverable")
-	require.NotEmpty(t, aws.ToString(clusters.DBClusters[0].Endpoint),
-		"cluster endpoint address must be discoverable")
-	require.NotZero(t, aws.ToInt32(clusters.DBClusters[0].Port),
-		"cluster endpoint port must be discoverable")
+	endpoint := aws.ToString(clusters.DBClusters[0].Endpoint)
+	port := aws.ToInt32(clusters.DBClusters[0].Port)
+	require.NotEmpty(t, endpoint, "cluster endpoint address must be discoverable")
+	require.NotZero(t, port, "cluster endpoint port must be discoverable")
 
-	// The discovered endpoint address is container-internal; connect via the
-	// pinned host-published port instead (see dbPort above).
-	//
+	addr := net.JoinHostPort(endpoint, strconv.Itoa(int(port)))
+	if !tcpReachable(t, addr) {
+		addr = siblingHostAddr(t, ctr, clusterID)
+	}
+
 	// sslmode=disable: the sibling database container runs plain PostgreSQL
 	// without TLS, and the endpoint is not an *.rds.amazonaws.com hostname,
 	// so the production TLS path is out of scope for this tier (it is
 	// proven by pkg/dbconn's TLS integration tests).
-	return fmt.Sprintf("postgres://%s:%s@localhost:%d/%s?sslmode=disable",
-		fixtureUser, fixturePassword, dbPort, fixtureDatabase)
+	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
+		fixtureUser, fixturePassword, addr, fixtureDatabase)
 }
 
-// freePort reserves an ephemeral TCP port and returns it for reuse. The
-// port is released before returning, so a collision is possible but
-// unlikely within a test's lifetime.
-func freePort(t *testing.T) int {
+// tcpReachable reports whether addr accepts a TCP connection within
+// endpointDialTimeout.
+func tcpReachable(t *testing.T, addr string) bool {
 	t.Helper()
-	var lc net.ListenConfig
-	l, err := lc.Listen(t.Context(), "tcp", "127.0.0.1:0")
-	require.NoError(t, err, "reserve a free TCP port")
-	port := l.Addr().(*net.TCPAddr).Port
-	require.NoError(t, l.Close(), "release the reserved port")
-	return port
+	dialer := net.Dialer{Timeout: endpointDialTimeout}
+	conn, err := dialer.DialContext(t.Context(), "tcp", addr)
+	if err != nil {
+		return false
+	}
+	if err := conn.Close(); err != nil {
+		t.Logf("close reachability probe to %s: %v", addr, err)
+	}
+	return true
+}
+
+// siblingHostAddr resolves the host-published address of the sibling
+// database container backing the cluster. Ministack publishes the
+// sibling's PostgreSQL port on the Docker host, so a host that cannot
+// route to container IPs connects through that mapping. The container
+// name — "ministack-rds-<sha1(account:region)[:12]>-cluster-<cluster ID>"
+// — is an emulator implementation detail this fallback accepts coupling
+// to; it is exercised only on hosts where the discovered endpoint is
+// unreachable.
+func siblingHostAddr(t *testing.T, ctr testcontainers.Container, clusterID string) string {
+	t.Helper()
+	ctx := t.Context()
+	docker, err := testcontainers.NewDockerClientWithOpts(ctx)
+	require.NoError(t, err, "create Docker client")
+	defer func() {
+		if err := docker.Close(); err != nil {
+			t.Logf("close Docker client: %v", err)
+		}
+	}()
+
+	scope := sha1.Sum([]byte(awsAccountID + ":" + awsRegion))
+	name := fmt.Sprintf("ministack-rds-%s-cluster-%s", hex.EncodeToString(scope[:])[:12], clusterID)
+	inspect, err := docker.ContainerInspect(ctx, name, client.ContainerInspectOptions{})
+	require.NoErrorf(t, err, "inspect sibling database container %s", name)
+
+	dbPort, err := network.ParsePort(siblingDBPort)
+	require.NoError(t, err, "parse sibling database port")
+	bindings := inspect.Container.NetworkSettings.Ports[dbPort]
+	require.NotEmptyf(t, bindings, "sibling container %s must publish %s on the host", name, siblingDBPort)
+
+	host, err := ctr.Host(ctx)
+	require.NoError(t, err, "resolve Docker host address")
+	return net.JoinHostPort(host, bindings[0].HostPort)
 }
 
 // rdsClient returns an RDS API client pointed at the container's gateway
@@ -209,11 +297,16 @@ func rdsClient(t *testing.T, ctr testcontainers.Container) *rds.Client {
 	require.NoError(t, err, "resolve mapped gateway port")
 	endpoint := fmt.Sprintf("http://%s:%d", host, gateway.Num())
 
-	cfg, err := config.LoadDefaultConfig(ctx,
-		config.WithRegion("us-east-1"),
-		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
-	)
-	require.NoError(t, err, "load AWS SDK config")
+	// The config is constructed directly, not via config.LoadDefaultConfig:
+	// the default loader reads ~/.aws/config, AWS_PROFILE, and the EC2
+	// instance-metadata endpoint, so a developer's real AWS environment
+	// would leak into a test that must stay hermetic — and it drags the
+	// whole credential-discovery chain into go.mod for a client that only
+	// ever uses static fixture credentials against the emulator.
+	cfg := aws.Config{
+		Region:      awsRegion,
+		Credentials: credentials.NewStaticCredentialsProvider("test", "test", ""),
+	}
 	return rds.NewFromConfig(cfg, func(o *rds.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
 	})
