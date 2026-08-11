@@ -38,6 +38,12 @@ type Column struct {
 	// Default is the canonical default expression (pg_get_expr), empty when
 	// none. For a generated column it is the generation expression.
 	Default string
+	// SequenceDefault reports that the default expression depends on a
+	// sequence (per pg_depend) — a serial column or a hand-written nextval
+	// default. In a desired-state model that sequence exists only inside
+	// the rolled-back scratch transaction, so no derived plan can
+	// reference it.
+	SequenceDefault bool
 	// Identity is the identity kind, IdentityNone for plain columns.
 	Identity Identity
 	// Generated reports GENERATED ALWAYS AS (...) STORED.

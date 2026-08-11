@@ -28,7 +28,7 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	logger.Debug("statement parsed", "kind", st.Kind, "schema", st.Schema, "table", st.Table)
+	logger.Debug("statement parsed", "kind", st.Kind(), "schema", st.Schema(), "table", st.Table())
 	if v, refused := gateVerdict(st); refused {
 		return c.emit(out, v)
 	}
@@ -39,7 +39,7 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	}
 	defer pool.Close()
 
-	pt, err := preflight.CheckTable(ctx, pool, st.Schema, st.Table, int64(c.MaxTableSize))
+	pt, err := preflight.CheckTable(ctx, pool, st.Schema(), st.Table(), int64(c.MaxTableSize))
 	var sizeErr *preflight.SizeError
 	if errors.As(err, &sizeErr) {
 		return c.emit(out, sizeGuardVerdict(st, sizeErr))
@@ -52,7 +52,7 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 
 	budget := executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout}
 	start := time.Now()
-	err = executor.AttemptNative(ctx, pool, pt, st.SQL, budget)
+	err = executor.AttemptNative(ctx, pool, pt, st, budget)
 	elapsed := time.Since(start)
 	var budgetErr *executor.BudgetError
 	if errors.As(err, &budgetErr) {
@@ -66,7 +66,7 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	logger.Debug("optimistic attempt committed", "table", qualified(st), "elapsed", elapsed)
 	return c.emit(out, verdict.Verdict{
 		Outcome:   verdict.OutcomeExecuted,
-		Statement: st.SQL,
+		Statement: st.SQL(),
 		Table:     qualified(st),
 		Detail: fmt.Sprintf("committed within budgets (lock %s, statement %s): the change was effectively instant",
 			budget.LockTimeout, budget.StatementTimeout),
@@ -96,22 +96,13 @@ func (c *MigrateCmd) emit(out io.Writer, v verdict.Verdict) error {
 // index maintenance is pointed at its concurrent idiom, everything else is
 // unsupported. Refused statements are never executed.
 func gateVerdict(st statement.Statement) (verdict.Verdict, bool) {
-	v := verdict.Verdict{Outcome: verdict.OutcomeRefused, Statement: st.SQL}
-	switch st.Kind {
+	v := verdict.Verdict{Outcome: verdict.OutcomeRefused, Statement: st.SQL()}
+	switch st.Kind() {
 	case statement.KindAlterTable:
 		return verdict.Verdict{}, false
-	case statement.KindCreateIndex:
+	case statement.KindCreateIndex, statement.KindDropIndex, statement.KindReindex:
 		v.Reason = verdict.ReasonIndexStatement
-		v.Detail = "a plain CREATE INDEX blocks writes for the whole build; the concurrent build does not"
-		v.SaferIdiom = "CREATE INDEX CONCURRENTLY"
-	case statement.KindDropIndex:
-		v.Reason = verdict.ReasonIndexStatement
-		v.Detail = "a plain DROP INDEX takes ACCESS EXCLUSIVE on the table; the concurrent drop does not"
-		v.SaferIdiom = "DROP INDEX CONCURRENTLY"
-	case statement.KindReindex:
-		v.Reason = verdict.ReasonIndexStatement
-		v.Detail = "a plain REINDEX blocks writes; the concurrent rebuild does not"
-		v.SaferIdiom = "REINDEX ... CONCURRENTLY"
+		v.Detail, v.SaferIdiom = indexAdvice(st)
 	case statement.KindCreateTable:
 		v.Reason = verdict.ReasonUnsupportedStatement
 		v.Detail = "migrate changes an existing table; to converge a table onto a desired-state CREATE TABLE, use the declarative front-end"
@@ -123,17 +114,37 @@ func gateVerdict(st statement.Statement) (verdict.Verdict, bool) {
 	return v, true
 }
 
+// indexAdvice explains an index-statement refusal. The already-concurrent
+// forms carry no safer idiom: suggesting the statement the user submitted
+// would confuse a human once and send a resubmitting automation into a loop.
+func indexAdvice(st statement.Statement) (detail, saferIdiom string) {
+	if st.Concurrent() {
+		return "this is already the safe concurrent idiom; pg-sprite does not drive index maintenance yet — run it directly against the database", ""
+	}
+	switch st.Kind() {
+	case statement.KindCreateIndex:
+		return "a plain CREATE INDEX blocks writes for the whole build; the concurrent build does not", "CREATE INDEX CONCURRENTLY"
+	case statement.KindDropIndex:
+		return "a plain DROP INDEX takes ACCESS EXCLUSIVE on the table; the concurrent drop does not", "DROP INDEX CONCURRENTLY"
+	case statement.KindReindex:
+		return "a plain REINDEX blocks writes; the concurrent rebuild does not", "REINDEX ... CONCURRENTLY"
+	default:
+		return "", ""
+	}
+}
+
 // sizeGuardVerdict is the refusal for tables above the size threshold, where
 // even a budget-bounded attempt would visibly stall the table.
 func sizeGuardVerdict(st statement.Statement, sizeErr *preflight.SizeError) verdict.Verdict {
 	return verdict.Verdict{
 		Outcome:   verdict.OutcomeRefused,
 		Reason:    verdict.ReasonTableTooLarge,
-		Statement: st.SQL,
+		Statement: st.SQL(),
 		Table:     qualified(st),
-		Detail: fmt.Sprintf("table is %d bytes on disk, above the %d-byte --max-table-size threshold: "+
-			"a cancelled attempt is not a free probe — it would hold ACCESS EXCLUSIVE doing rewrite work "+
-			"for the whole budget. This change needs a copy-and-swap rewrite, which pg-sprite does not perform yet",
+		Detail: fmt.Sprintf("table is %d bytes on disk (heap, indexes, and TOAST), above the %d-byte "+
+			"--max-table-size threshold. pg-sprite cannot yet prove this change is instant on a table this "+
+			"size; if it requires a rewrite, a cancelled attempt is not a free probe — it would hold "+
+			"ACCESS EXCLUSIVE doing rewrite work for the whole budget",
 			sizeErr.TotalBytes, sizeErr.LimitBytes),
 	}
 }
@@ -144,7 +155,7 @@ func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError) verd
 	v := verdict.Verdict{
 		Outcome:   verdict.OutcomeRefused,
 		Reason:    verdict.ReasonBudgetExceeded,
-		Statement: st.SQL,
+		Statement: st.SQL(),
 		Table:     qualified(st),
 	}
 	switch budgetErr.Cause {
@@ -167,11 +178,11 @@ func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError) verd
 // qualified renders the statement's target table for the verdict, empty when
 // the statement has none.
 func qualified(st statement.Statement) string {
-	if st.Table == "" {
+	if st.Table() == "" {
 		return ""
 	}
-	if st.Schema == "" {
-		return st.Table
+	if st.Schema() == "" {
+		return st.Table()
 	}
-	return st.Schema + "." + st.Table
+	return st.Schema() + "." + st.Table()
 }
