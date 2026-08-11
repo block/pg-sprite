@@ -136,7 +136,7 @@ capability no peer suite has.
 | `make test-unit` | Race-enabled unit tests, no Docker (`SKIP_INTEGRATION=1`). |
 | `make test` | Full suite; integration tests start disposable PostgreSQL containers (testcontainers). `PG_VERSION` selects the major (default 16). |
 | `make test-supported-postgres` | Full suite against every supported major, 14 → 18 — the local mirror of the CI matrix. |
-| `make db-up` / `make test-db` / `make db-down` | Long-lived compose database on localhost; the suite connects to it via `PG_DSN` instead of starting per-test containers. Fastest loop for repeated integration runs. |
+| `make db-up` / `make test-db` / `make db-down` | Long-lived compose database on localhost; the suite connects to it via `PG_DSN` instead of starting per-test containers. Fastest loop for repeated integration runs, and the path CI's version matrix uses — per-test containers oversubscribe a small CI runner and get killed mid-test. |
 
 The harness is [internal/testutil](../internal/testutil/postgres.go):
 `StartPostgres` returns a connection URL (container, or `PG_DSN` when set)
@@ -178,6 +178,7 @@ this repository's CI.
 | Script splitting through the grammar (canonical statements, parse failures) | [pkg/statement](../pkg/statement/split_test.go) |
 | Scratch execute-and-introspect, ordered diff, and convergence (`TestDiffConverges`) | [pkg/schemadiff](../pkg/schemadiff/schemadiff_integration_test.go), [diff tests](../pkg/schemadiff/diff_test.go) |
 | CLI `diff`, `fmt`, and classified `migrate --dry-run`, including applying text output and re-diffing to empty (`TestDiffTextPlanIsExecutableSQL`) | [diff integration](../internal/cli/diff_integration_test.go), [fmt](../internal/cli/diff_test.go), [dry-run integration](../internal/cli/dryrun_integration_test.go) |
+| Library front door (`diffplan.Plan`): ordered routed plan, missing-table, no-op, copy-and-swap refusal, never-writes, deterministic fingerprint | [diffplan unit](../pkg/diffplan/diffplan_test.go), [diffplan integration](../pkg/diffplan/diffplan_integration_test.go) |
 | Bounded optimistic native attempt and table preflight | [pkg/executor](../pkg/executor/optimistic_integration_test.go), [pkg/preflight](../pkg/preflight/preflight_integration_test.go) |
 
 ## Landed and deferred test obligations

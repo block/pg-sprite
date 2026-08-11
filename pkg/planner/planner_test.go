@@ -9,8 +9,23 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
+
+// FactsFrom is the one seam between live introspection and classification:
+// every column's canonical type must come through so type-narrowing
+// decisions see the real live types.
+func TestFactsFromExtractsColumnTypes(t *testing.T) {
+	live := schemadiff.Model{Columns: []schemadiff.Column{
+		{Name: "id", Type: "bigint"},
+		{Name: "name", Type: "character varying(50)"},
+	}}
+	assert.Equal(t, planner.Facts{ColumnTypes: map[string]string{
+		"id":   "bigint",
+		"name": "character varying(50)",
+	}}, planner.FactsFrom(live))
+}
 
 // facts mirrors a live table whose column types exercise both sides of the
 // binary-coercible rules.

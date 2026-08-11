@@ -47,11 +47,13 @@ func (c *StatusCmd) run(ctx context.Context, out io.Writer) error {
 	return renderSessions(out, sessions)
 }
 
-// querySessions lists the live pg-sprite backends other than the one running
-// the status query itself. pg_stat_activity nulls out state and query for
-// other roles' backends unless the viewer has pg_read_all_stats — exactly
-// the read-only-operator-checking-on-the-engine-role shape — so those
-// columns are coalesced instead of crashing the scan.
+// querySessions lists the live pg-sprite backends on the connected database,
+// other than the one running the status query itself. pg_stat_activity is
+// cluster-wide, but a schema change targets one database — sessions on other
+// databases are another change's business. pg_stat_activity nulls out state
+// and query for other roles' backends unless the viewer has
+// pg_read_all_stats — exactly the read-only-operator-checking-on-the-engine-
+// role shape — so those columns are coalesced instead of crashing the scan.
 func querySessions(ctx context.Context, pool *pgxpool.Pool) ([]session, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT pid,
@@ -60,7 +62,9 @@ func querySessions(ctx context.Context, pool *pgxpool.Pool) ([]session, error) {
 		       COALESCE(now() - query_start, '0'::interval)::text,
 		       COALESCE(left(query, 80), '<insufficient privilege>')
 		FROM pg_stat_activity
-		WHERE application_name = 'pg-sprite' AND pid <> pg_backend_pid()
+		WHERE application_name = 'pg-sprite'
+		  AND datname = current_database()
+		  AND pid <> pg_backend_pid()
 		ORDER BY query_start`)
 	if err != nil {
 		return nil, fmt.Errorf("query pg_stat_activity: %w", err)

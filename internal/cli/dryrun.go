@@ -57,7 +57,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema = resolvedSchema(st)
 	report.Table = st.Table()
-	if report.ServerVersion, err = serverVersion(ctx, pool); err != nil {
+	if report.ServerVersion, err = dbconn.ServerVersion(ctx, pool); err != nil {
 		return err
 	}
 	report.Disposition = routed.Disposition
@@ -103,5 +103,5 @@ func dryRunFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	case err != nil:
 		return planner.Facts{}, err
 	}
-	return liveFacts(live), nil
+	return planner.FactsFrom(live), nil
 }

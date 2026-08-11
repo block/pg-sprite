@@ -325,7 +325,7 @@ Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operatio
 | Invocation | Behaviour |
 | --- | --- |
 | `lint` | Offline (no database): classify every statement with zero live facts and report typed findings — unsupported operations are errors (non-zero exit), blocking idioms (with the safer SQL), conservative rewrites, and destructive drops are warnings. |
-| `diff` / `migrate --dry-run` | Print the classified, routed plan and safer SQL where applicable. **Never executes.** `diff` has no `--dry-run` flag because it never executes. |
+| `diff` / `migrate --dry-run` | Print the classified, routed plan and safer SQL where applicable. **Never writes the live table.** `diff` has no `--dry-run` flag because it never executes the plan (its desired-state diff does run the desired DDL in an always-rolled-back scratch transaction — see the scratch-schema note above). |
 | `migrate` (default) | Run the Phase 1 statement gate, preflight, and bounded optimistic native attempt. It does not yet execute classifier-produced safer SQL. |
 | `migrate --force` (planned Phase 3) | Run each statement **exactly as submitted**, bypassing the safe rewrite. Gated — see below. |
 
@@ -563,7 +563,9 @@ state inside a single always-rolled-back transaction in the *target* database, i
 randomly named transaction-scoped schema (`pgsprite_scratch_<random>`). This keeps the
 same-server semantic-truth property (same version, extensions, and defaults as the live
 table) while requiring no `CREATEDB`, no pre-provisioning, and leaving zero footprint —
-appropriate because diffing is read-only planning. The durable `pg_sprite_scratch`
+appropriate because diffing never writes the live table (it is not read-only: the desired
+DDL executes in that rolled-back transaction, so the role needs `CREATE` on the target
+database). The durable `pg_sprite_scratch`
 database above is required only by the migration path proper (shadow-DDL derivation and
 checkpoint fingerprints), where objects must outlive a transaction.
 

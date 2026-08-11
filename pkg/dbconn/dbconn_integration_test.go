@@ -31,6 +31,15 @@ func TestPoolIntegration(t *testing.T) {
 		assert.Equal(t, "500ms", stmtTimeout)
 	})
 
+	t.Run("server version reads server_version", func(t *testing.T) {
+		version, err := dbconn.ServerVersion(t.Context(), pool)
+		require.NoError(t, err)
+		var want string
+		require.NoError(t, pool.QueryRow(t.Context(),
+			"SELECT current_setting('server_version')").Scan(&want))
+		assert.Equal(t, want, version)
+	})
+
 	t.Run("statement_timeout cancels runaway work", func(t *testing.T) {
 		_, err := pool.Exec(t.Context(), "SELECT pg_sleep(5)")
 		require.Error(t, err)

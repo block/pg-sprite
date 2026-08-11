@@ -133,6 +133,7 @@ different levels of commitment:
 | `pkg/planner` | Classify typed operations and emit safer native SQL | exists |
 | `pkg/lint` | Offline lint findings with typed codes: unsupported operations are errors; blocking idioms, rewrites, and destructive drops are warnings | exists (Phase 2.5) |
 | `pkg/plan` | Versioned machine-readable dry-run plan report — the one JSON contract both front doors emit and an orchestrator consumes | exists (Phase 2.5) |
+| `pkg/diffplan` | The declarative front door as a library: desired schema in, routed `plan.Report` out — the CLI `diff` and embedding orchestrators share this one pipeline | exists |
 | `pkg/router` | Route classified statements to native / copy-and-swap / refuse dispositions; copy-and-swap reports unavailable until that backend lands | exists (Phase 2.4) |
 | `pkg/executor` | Bounded optimistic native attempt; the `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) lands in Phase 3 | bounded optimistic attempt exists |
 | `pkg/table` | PK-range chunkers (single-column fast path, composite), dynamic time-based sizing | Phase 4 |

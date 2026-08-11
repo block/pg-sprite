@@ -5,14 +5,12 @@ package cli
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"time"
 
 	"github.com/alecthomas/kong"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 )
@@ -59,17 +57,6 @@ func (f DBFlags) Config() dbconn.Config {
 		cfg.Logger = f.diag()
 	}
 	return cfg
-}
-
-// serverVersion reads the connected server's server_version setting for
-// the plan report: classification is version-sensitive, so a stored report
-// names the server whose rules produced it.
-func serverVersion(ctx context.Context, pool *pgxpool.Pool) (string, error) {
-	var v string
-	if err := pool.QueryRow(ctx, "SELECT current_setting('server_version')").Scan(&v); err != nil {
-		return "", fmt.Errorf("read server_version: %w", err)
-	}
-	return v, nil
 }
 
 // diag returns the diagnostics logger: debug-level text on stderr (or the
