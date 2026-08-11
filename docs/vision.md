@@ -5,7 +5,8 @@
 > online with provable safety, and invisible to the applications it serves. It is the
 > reliable PostgreSQL execution layer for a GitOps front-end like
 > [SchemaBot](https://github.com/block/schemabot) — what
-> [Spirit](https://github.com/block/spirit) is for MySQL.**
+> [Spirit](https://github.com/block/spirit) is for MySQL — and a standalone CLI any
+> engineer can pick up today, no GitOps layer required.**
 
 One tool, one mental model, for *all* PostgreSQL schema changes. Today teams assemble a
 toolchain: one tool to diff and plan the easy DDL, another to copy-and-swap the genuine
@@ -51,6 +52,19 @@ no interactive operator judgment required mid-flight. The desired schema stays p
 SchemaBot handles GitOps orchestration, pull requests, and approvals; pg-sprite diffs,
 classifies, routes, and executes
 ([schemabot-integration.md](schemabot-integration.md)).
+
+**GitOps-ready, not GitOps-required.** The same properties that make pg-sprite drivable by
+an orchestrator — deterministic plans, typed verdicts, bounded locks — make it a safe
+*direct* tool: an engineer with a DSN and the CLI gets the same engine, without adopting
+SchemaBot first. What that buys today is the refusal discipline: every session runs under
+a bounded `lock_timeout`, and a change the engine cannot prove safe ends in seconds with a
+typed verdict — not a hand-typed `ALTER` in a bare `psql` session holding an
+`ACCESS EXCLUSIVE` lock on a hot table. Each capability the phased plan lands
+(copy-and-swap, the checksum gate, durable crash-resume) reaches the direct user the
+moment it ships, because both front doors are held to one design rule: every capability is
+reachable from the CLI, and the CLI consumes the same plan, verdict, and lint contracts an
+orchestrator would. Meeting users where they are is part of the point: standalone CLI use
+is a supported front door, not a demo mode.
 
 ### 3. Developer-friendly, application-invisible
 
@@ -106,6 +120,11 @@ pg-sprite has succeeded when:
 - a team's *entire* schema-change workflow — through SchemaBot, with pg-sprite executing —
   is "edit SQL, merge PR": for every change type, on every table size, with no
   per-change operator judgment;
+- an engineer with nothing but a DSN reaches for the pg-sprite CLI *instead of* a raw
+  `psql` session — first for day-to-day changes on teams that haven't adopted a GitOps
+  layer, and, once the tool has earned that trust, for the urgent mid-incident change
+  where bounded locks, a typed verdict, and crash-resume matter most — and gets the same
+  engine and the same guarantees as the fleet;
 - the SchemaBot fleet drives PostgreSQL changes through pg-sprite the way it drives MySQL
   changes through [Spirit](https://github.com/block/spirit) — same declarative front-end,
   same orchestration, same safety posture;
