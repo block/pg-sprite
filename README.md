@@ -25,11 +25,12 @@ change to the safest sequence that exists, and refuses with a structured
 verdict when it can't prove one (see
 [docs/postgres-online-ddl-reference.md](docs/postgres-online-ddl-reference.md)).
 
-**Status: Phases 1 and 2.1–2.4.** The parse boundary, declarative diff,
-classifier, and router seam are implemented. `pg-sprite migrate --alter '…'`
-runs a bounded optimistic native attempt; routed execution beyond that attempt
-lands in Phase 3. Changes without an available backend get a structured
-refusal (exit code 2). `lint` is still a stub. The design docs and the phased
+**Status: Phases 1 and 2.1–2.5.** The parse boundary, declarative diff,
+classifier, router seam, versioned dry-run plan report, and offline linter
+are implemented. `pg-sprite migrate --alter '…'` runs a bounded optimistic
+native attempt; routed execution beyond that attempt lands in Phase 3.
+Changes without an available backend get a structured refusal (exit code 2).
+The design docs and the phased
 build plan live in [docs/](docs/) — start with
 [docs/README.md](docs/README.md); the vision — what pg-sprite is and is not —
 is [docs/vision.md](docs/vision.md).

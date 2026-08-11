@@ -35,6 +35,13 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
+// RulesPostgresVersions is the inclusive PostgreSQL major-version range
+// the classification rules are derived for (see the package comment and
+// docs/postgresql-version-support.md). Offline consumers such as the
+// linter stamp it into their reports so a stored result names the
+// assumptions behind it.
+const RulesPostgresVersions = "14-18"
+
 // Route is where an operation is sent.
 type Route string
 
@@ -144,6 +151,12 @@ type Decision struct {
 	Route Route `json:"route"`
 	// Reason is why.
 	Reason Reason `json:"reason"`
+	// Unverified marks a decision the planner took without the live facts
+	// needed to prove a cheaper one — it failed closed to the heavier
+	// route. The route is what the engine would do, not a proven property
+	// of the change: with facts (a live introspection or a supplied
+	// column type) the same operation may classify as native.
+	Unverified bool `json:"unverified,omitempty"`
 	// SaferSQL is the ordered native sequence to run instead of the
 	// submitted form, present only for safer-idiom decisions where the
 	// planner could construct it. Execution contract: the steps run one at
@@ -269,7 +282,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
 
 	case statement.OpAlterColumnType:
-		d.Route, d.Reason = classifyTypeChange(op, facts)
+		d.Route, d.Reason, d.Unverified = classifyTypeChange(op, facts)
 
 	case statement.OpSetNotNull:
 		// Native pattern: prove the invariant with a NOT VALID CHECK plus
@@ -381,18 +394,21 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, 
 // classifyTypeChange routes ALTER COLUMN TYPE: binary-coercible changes are
 // a brief catalog relabel; everything else — or anything the planner cannot
 // verify against live column facts — is a rewrite.
-func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason) {
+func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 	if op.HasUsing {
-		return RouteCopyAndSwap, ReasonTypeRewrite
+		return RouteCopyAndSwap, ReasonTypeRewrite, false
 	}
 	oldType, ok := facts.ColumnTypes[op.Column]
 	if !ok {
-		return RouteCopyAndSwap, ReasonTypeRewrite
+		// No live type for the column: fail closed to the rewrite route,
+		// but say so — the conversion may be a free relabel that a fact
+		// would prove.
+		return RouteCopyAndSwap, ReasonTypeRewrite, true
 	}
 	if binaryCoercible(parseTypeText(oldType), typeShape{name: normalizeTypeName(op.NewType), mods: op.NewTypeMods}) {
-		return RouteNative, ReasonBinaryCoercible
+		return RouteNative, ReasonBinaryCoercible, false
 	}
-	return RouteCopyAndSwap, ReasonTypeRewrite
+	return RouteCopyAndSwap, ReasonTypeRewrite, false
 }
 
 // typeShape is a normalized type family plus its modifiers, comparable

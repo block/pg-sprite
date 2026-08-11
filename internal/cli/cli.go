@@ -1,11 +1,10 @@
-// Package cli defines the pg-sprite command tree (Kong). migrate and status
-// are implemented (the Phase 1 optimistic front door); the remaining
-// subcommand Run methods are stubs each build-plan phase fills in.
+// Package cli defines the pg-sprite command tree (Kong): migrate and
+// status (the optimistic front door), diff and fmt (the declarative front
+// door), and lint (the offline checker).
 package cli
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -29,10 +28,6 @@ type CLI struct {
 
 // New returns an empty command tree for kong.Parse.
 func New() *CLI { return &CLI{} }
-
-func notImplemented(cmd string) error {
-	return fmt.Errorf("%s: not implemented yet (Phase 0 stub)", cmd)
-}
 
 // DBFlags are the connection flags shared by every command that talks to the
 // database, so every entry point carries the same bounded session defaults.
@@ -116,11 +111,15 @@ type FmtCmd struct {
 // Run implements the fmt subcommand.
 func (c *FmtCmd) Run() error { return c.runFmt(os.Stdin, os.Stdout) }
 
-// LintCmd checks DDL for unsafe or unsupported patterns.
-type LintCmd struct{}
+// LintCmd checks a DDL script for patterns the engine would refuse,
+// rewrite, or gate. It is offline — no database flags.
+type LintCmd struct {
+	Path string `arg:"" optional:"" help:"DDL file to lint; stdin when omitted." type:"existingfile"`
+	JSON bool   `help:"Emit the findings report as JSON."`
+}
 
 // Run implements the lint subcommand.
-func (c *LintCmd) Run() error { return notImplemented("lint") }
+func (c *LintCmd) Run() error { return c.runLint(os.Stdin, os.Stdout) }
 
 // StatusCmd reports schema-change progress.
 type StatusCmd struct {

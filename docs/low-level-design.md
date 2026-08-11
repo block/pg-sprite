@@ -80,7 +80,7 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
    │  pkg/statement   parse ALTER/CREATE (go-pgquery)                           │
    │  pkg/schemadiff  introspect live schema → diff vs desired → ordered ALTERs │
    │  pkg/planner     per op: native-safe | needs-rewrite | refuse              │
-   │  pkg/lint        reject unsafe/unsupported up front (planned)              │
+   │  pkg/lint        reject unsafe/unsupported up front (offline findings)     │
    │      │                                                                     │
    │      ▼  Plan (ordered steps, classified per operation)                     │
    └──────┬─────────────────────────────────────────────────────────────────────┘
@@ -177,8 +177,8 @@ pattern *per migration*:
 - **expand/contract via pgroll** for prod-critical breaking changes where **instant
   reversibility** and **two live schema versions** matter more than transparency.
 
-The classifier, declarative diff, dry-run, and status reporting are shared by every backend;
-linting remains planned. An `Executor` interface (`Plan`, `Execute`, `Status`, `Abort`) is also
+The classifier, declarative diff, dry-run, lint, and status reporting are shared by every
+backend. An `Executor` interface (`Plan`, `Execute`, `Status`, `Abort`) is also
 planned; `pkg/executor` currently provides only the bounded optimistic native attempt. Until the
 in-house copy-and-swap executor
 lands in a later phase, every `needs-rewrite` change is refused as **not native-safe** rather than
@@ -318,13 +318,13 @@ For each parsed statement the classifier produces a record along the lines of:
 - Richer `risk`, `reversible`, and `requires_app_coordination` metadata is a future extension.
 
 Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operations and
-`pkg/lint` remains a stub.
+`pkg/lint` maps the classifier's decisions to offline findings with typed codes.
 
 ### CLI behaviour (modes)
 
 | Invocation | Behaviour |
 | --- | --- |
-| `lint` | Stub; no lint engine is implemented yet. |
+| `lint` | Offline (no database): classify every statement with zero live facts and report typed findings — unsupported operations are errors (non-zero exit), blocking idioms (with the safer SQL), conservative rewrites, and destructive drops are warnings. |
 | `diff` / `migrate --dry-run` | Print the classified, routed plan and safer SQL where applicable. **Never writes the live table.** `diff` has no `--dry-run` flag because it never executes the plan (its desired-state diff does run the desired DDL in an always-rolled-back scratch transaction — see the scratch-schema note above). |
 | `migrate` (default) | Run the Phase 1 statement gate, preflight, and bounded optimistic native attempt. It does not yet execute classifier-produced safer SQL. |
 | `migrate --force` (planned Phase 3) | Run each statement **exactly as submitted**, bypassing the safe rewrite. Gated — see below. |
@@ -602,13 +602,13 @@ pkg/schemadiff/       -> execute-and-introspect desired state + live introspecti
 pkg/planner/          -> classify each operation and construct safer native SQL
 pkg/router/           -> assign classified statements to available backends
 pkg/plan/             -> versioned machine-readable dry-run plan report (both front doors)
+pkg/lint/             -> offline typed lint findings (errors refuse, warnings advise)
 pkg/executor/         -> bounded optimistic native attempt only
 pkg/dbconn/           -> bounded database connections
 pkg/preflight/        -> migration preflight checks
 pkg/verdict/          -> typed outcomes
 
 Planned:
-pkg/lint/             -> unsafe-DDL linters (currently a CLI stub)
 pkg/migration/        -> orchestrator + runner + cutover
 pkg/decode/           -> logical-decoding client
 pkg/copier/           -> parallel chunked copy

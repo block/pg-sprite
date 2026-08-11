@@ -174,6 +174,8 @@ this repository's CI.
 | Native / copy-and-swap / refuse classification and safer SQL | [pkg/planner](../pkg/planner/planner_test.go) |
 | Backend routing and copy-and-swap unavailable disposition | [pkg/router](../pkg/router/router_test.go) |
 | Plan report contract: exact JSON shape, versioning, field omissions | [pkg/plan](../pkg/plan/plan_test.go) |
+| Offline lint findings: typed codes, severities, counts, JSON contract; CLI exit contract | [pkg/lint](../pkg/lint/lint_test.go), [CLI lint](../internal/cli/lint_test.go) |
+| Script splitting through the grammar (canonical statements, parse failures) | [pkg/statement](../pkg/statement/split_test.go) |
 | Scratch execute-and-introspect, ordered diff, and convergence (`TestDiffConverges`) | [pkg/schemadiff](../pkg/schemadiff/schemadiff_integration_test.go), [diff tests](../pkg/schemadiff/diff_test.go) |
 | CLI `diff`, `fmt`, and classified `migrate --dry-run`, including applying text output and re-diffing to empty (`TestDiffTextPlanIsExecutableSQL`) | [diff integration](../internal/cli/diff_integration_test.go), [fmt](../internal/cli/diff_test.go), [dry-run integration](../internal/cli/dryrun_integration_test.go) |
 | Library front door (`diffplan.Plan`): ordered routed plan, missing-table, no-op, copy-and-swap refusal, never-writes, deterministic fingerprint | [diffplan unit](../pkg/diffplan/diffplan_test.go), [diffplan integration](../pkg/diffplan/diffplan_integration_test.go) |
