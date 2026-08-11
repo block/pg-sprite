@@ -21,6 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
+	"github.com/jackc/pgx/v5"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
@@ -43,6 +44,10 @@ const (
 	// the sibling database container, which dominates this budget.
 	auroraProvisionDeadline = 5 * time.Minute
 	auroraProvisionPoll     = 2 * time.Second
+	// rotationDeadline bounds how long a rotated master password may take
+	// to land on the running database after ModifyDBCluster returns.
+	rotationDeadline = time.Minute
+	rotationPoll     = time.Second
 	// rdsStatusAvailable is the RDS API status of a usable instance.
 	rdsStatusAvailable = "available"
 	// endpointDialTimeout bounds the reachability probe of the discovered
@@ -109,12 +114,87 @@ func auroraEngineVersion(major int) string {
 	return fmt.Sprintf("%d.1", major)
 }
 
+// AuroraCluster is a provisioned Ministack aurora-postgresql cluster and
+// the control-plane client that owns it. Tests drive further control-plane
+// operations (rotation, duplicate creation, discovery of unknown
+// identifiers) through Client against ClusterID and InstanceID.
+type AuroraCluster struct {
+	// Client is the RDS control-plane client bound to the Ministack gateway.
+	Client *rds.Client
+	// ClusterID is the DBClusterIdentifier of the provisioned cluster.
+	ClusterID string
+	// InstanceID is the DBInstanceIdentifier of the cluster's sole instance.
+	InstanceID string
+
+	// addr is the host:port the test connects to — the discovered cluster
+	// endpoint when reachable, otherwise the sibling container's
+	// host-published address (see ProvisionAuroraPostgres).
+	addr string
+	// password is the master password the cluster currently accepts.
+	// Rotate keeps it in sync with the control plane so URL never goes
+	// silently stale after a rotation.
+	password string
+}
+
+// URL returns a connection URL for the cluster's database using the
+// master password the cluster currently accepts. After Rotate, that is
+// the rotated password.
+func (c *AuroraCluster) URL() string {
+	return c.URLWithPassword(c.password)
+}
+
+// URLWithPassword returns a connection URL using the given master
+// password — for tests that deliberately present stale or wrong
+// credentials.
+//
+// sslmode=disable: the sibling database container runs plain PostgreSQL
+// without TLS, and the endpoint is not an *.rds.amazonaws.com hostname,
+// so the production TLS path is out of scope for this tier (it is
+// proven by pkg/dbconn's TLS integration tests).
+func (c *AuroraCluster) URLWithPassword(password string) string {
+	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
+		fixtureUser, password, c.addr, fixtureDatabase)
+}
+
+// Rotate changes the cluster's master password through ModifyDBCluster,
+// waits until the running database accepts the new password, and updates
+// the handle so URL reflects the credentials the cluster now accepts.
+// The previous password remains available to the caller for
+// deliberately-stale connections via URLWithPassword.
+func (c *AuroraCluster) Rotate(t *testing.T, newPassword string) {
+	t.Helper()
+	ctx := t.Context()
+	_, err := c.Client.ModifyDBCluster(ctx, &rds.ModifyDBClusterInput{
+		DBClusterIdentifier: aws.String(c.ClusterID),
+		MasterUserPassword:  aws.String(newPassword),
+		ApplyImmediately:    aws.Bool(true),
+	})
+	require.NoError(t, err, "rotate master password via ModifyDBCluster")
+
+	// The rotation must land on the real database, not just the control
+	// plane's metadata: poll until the new password authenticates.
+	rotatedURL := c.URLWithPassword(newPassword)
+	require.Eventuallyf(t, func() bool {
+		conn, err := pgx.Connect(ctx, rotatedURL)
+		if err != nil {
+			return false
+		}
+		if err := conn.Close(ctx); err != nil {
+			t.Logf("close rotation probe connection: %v", err)
+		}
+		return true
+	}, rotationDeadline, rotationPoll,
+		"rotated master password did not become usable within the deadline")
+
+	c.password = newPassword
+}
+
 // ProvisionAuroraPostgres starts a Ministack container, provisions an
 // aurora-postgresql cluster and instance through the real RDS control-plane
-// API, waits until the instance is available, and returns a connection URL
-// for the cluster's database. The PostgreSQL major follows PG_VERSION: the
-// cluster's database is a real postgres container of that major.
-func ProvisionAuroraPostgres(t *testing.T) string {
+// API, waits until the instance is available, and returns the cluster
+// handle. The PostgreSQL major follows PG_VERSION: the cluster's database
+// is a real postgres container of that major.
+func ProvisionAuroraPostgres(t *testing.T) *AuroraCluster {
 	t.Helper()
 	if os.Getenv("SKIP_INTEGRATION") != "" {
 		t.Skip("SKIP_INTEGRATION set; skipping test that needs Docker")
@@ -229,12 +309,13 @@ func ProvisionAuroraPostgres(t *testing.T) string {
 		addr = siblingHostAddr(t, ctr, clusterID)
 	}
 
-	// sslmode=disable: the sibling database container runs plain PostgreSQL
-	// without TLS, and the endpoint is not an *.rds.amazonaws.com hostname,
-	// so the production TLS path is out of scope for this tier (it is
-	// proven by pkg/dbconn's TLS integration tests).
-	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
-		fixtureUser, fixturePassword, addr, fixtureDatabase)
+	return &AuroraCluster{
+		Client:     clnt,
+		ClusterID:  clusterID,
+		InstanceID: instanceID,
+		addr:       addr,
+		password:   fixturePassword,
+	}
 }
 
 // tcpReachable reports whether addr accepts a TCP connection within

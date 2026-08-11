@@ -196,24 +196,67 @@ mirrors.
 
 ### How much of the suite runs on Ministack
 
-Deliberately almost none: exactly one end-to-end test
-([ministack_integration_test.go](../internal/testutil/ministack_integration_test.go))
-covering provision → instance `available` → endpoint discovery →
-`dbconn` connect → PG-major assertion → DDL smoke. Everything else — all
-parser, planner, executor, and connection behavior — runs on the
-data-plane tier against real PostgreSQL. That split is policy, not
-accident: Ministack exists only for the seam where the engine talks to
-AWS APIs, and its share grows only when AWS-facing features land, never
-by moving core-logic tests onto it. Planned growth, in dependency order:
+Deliberately almost none: one test, three subtests sharing one provisioned
+cluster ([ministack_integration_test.go](../internal/testutil/ministack_integration_test.go))
+— provisioning costs minutes, so the tier provisions once and orders the
+password rotation last. Each subtest pins one AWS seam:
+
+- **provision & connect** — provision → instance `available` → endpoint
+  discovery → `dbconn` connect → PG-major assertion → DDL smoke;
+- **control-plane error contract** — unknown identifiers and duplicate
+  creations surface as the AWS SDK's typed RDS faults, matched with
+  `errors.As`. One documented emulator divergence: Ministack emits the
+  duplicate-instance wire code with a `Fault` suffix real AWS omits, so
+  the SDK leaves it a generic API error. The test pins the divergent code
+  exactly — it fails the day the emulator is fixed, forcing the
+  workaround's removal in favor of the typed match production code uses;
+- **password rotation** — what a rotation does to a running schema change
+  (see below), plus pg-sprite's contract that the resulting auth failure
+  is terminal, not retryable.
+
+### What a password rotation does to a running schema change
+
+PostgreSQL authenticates a session at connection time only, so a master
+password rotation does **not** break a schema change in flight — the
+established sessions keep working, possibly for hours. The failure lands
+on the next *dial*: the pool growing past its idle set, a
+`MaxConnLifetime` recycle, or a reconnect after a network blip. That
+delayed failure carries no causal link to the rotation an operator will
+remember, which is exactly why it is pinned by a test: the stale
+credentials fail with SQLSTATE `28P01`, and `dbconn.Retryable` classifies
+that as terminal, so the engine surfaces one clean failure rather than
+retrying against an endpoint that will keep refusing it.
+
+This is the design input for the planned credential-refresh hook: because
+the failure is per-dial, the hook must resolve credentials per-dial
+(`BeforeConnect`), not capture a password at pool construction. It matters
+most where the engine dials twice far apart — an executor that acquires a
+fresh connection for a post-failure verdict, hours into an index build,
+must not lose a provable verdict to a rotation that happened in between.
+
+Everything else — all parser, planner, executor, and connection
+behavior — runs on the data-plane tier against real PostgreSQL. That
+split is policy, not accident: Ministack exists only for the seam where
+the engine talks to AWS APIs, and its share grows only when AWS-facing
+features land, never by moving core-logic tests onto it. Planned growth,
+in dependency order:
 
 - reader/writer topology tests — writer-endpoint targeting with a reader
-  present, endpoint re-discovery after a global-cluster failover — once
-  the engine has endpoint-selection logic to test. Which endpoint a schema
-  change targets is a *safety* property, not a performance one: DDL against
-  a reader endpoint fails in confusing ways, and against the wrong cluster
-  member is worse — so when endpoint selection lands it must be visible in
-  the plan report, not just inside `dbconn`;
-- Secrets Manager DSN resolution, when that feature lands.
+  present, endpoint re-discovery after a global-cluster failover
+  (metadata-level: every Ministack endpoint resolves to one shared
+  container) — once the engine has endpoint-selection logic to test. Which
+  endpoint a schema change targets is a *safety* property, not a
+  performance one: DDL against a reader endpoint fails in confusing ways,
+  and against the wrong cluster member is worse — so when endpoint
+  selection lands it must be visible in the plan report, not just inside
+  `dbconn`;
+- Secrets Manager DSN resolution, when that feature lands;
+- rotation *recovery* — the engine re-resolving credentials and
+  reconnecting mid-schema-change — once `pkg/dbconn` grows a
+  credential-refresh hook (per-dial, for the reason above).
+
+Logical-replication behavior is a data-plane concern and is tested on
+real PostgreSQL, never on this tier.
 
 The harness and its test are behind the `ministack` build tag: a plain
 `go test ./...` (and therefore `make test`) never compiles them, so the
@@ -239,7 +282,7 @@ stays unit-only so pushes remain fast.
 | Verify-full TLS against a live TLS-only server | [pkg/dbconn/tls_integration_test.go](../pkg/dbconn/tls_integration_test.go) |
 | Targeted blocker termination | [pkg/dbconn/dbconn_integration_test.go](../pkg/dbconn/dbconn_integration_test.go) |
 | Test harness self-checks | [internal/testutil](../internal/testutil/postgres_test.go) |
-| RDS control-plane provisioning → endpoint discovery → `dbconn` connect (Ministack) | [internal/testutil/ministack_integration_test.go](../internal/testutil/ministack_integration_test.go) |
+| RDS control-plane provisioning → endpoint discovery → `dbconn` connect, error contract, password-rotation behavior (Ministack) | [internal/testutil/ministack_integration_test.go](../internal/testutil/ministack_integration_test.go) |
 | Parse boundary, typed operations, and advisory rewrites | [pkg/statement](../pkg/statement/statement_test.go), [operation tests](../pkg/statement/ops_test.go) |
 | Native / copy-and-swap / refuse classification and safer SQL | [pkg/planner](../pkg/planner/planner_test.go) |
 | Backend routing and copy-and-swap unavailable disposition | [pkg/router](../pkg/router/router_test.go) |
