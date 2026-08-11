@@ -19,7 +19,7 @@ The invariant registry (invariant IDs referenced below) lives in
 | --- | --- | --- | --- |
 | `pkg/dbconn` — pool defaults, terminate-blockers, retries, RDS TLS; advisory table lock planned | ✅ core | exists; advisory table lock planned | LK-2 primitives; LK-1 planned |
 | `pkg/preflight` — precondition verifier, refusals | ✅ core | exists (Phase 1: table-size guard); grows through Phase 2 | ST-6, RF-1..RF-5 |
-| `pkg/executor` — bounded optimistic attempt; native executor later | ✅ core | exists (Phase 1: attempt-under-budget); Executor contract at Phase 2–3 | LK-2 (attempt bound) |
+| `pkg/executor` — bounded optimistic attempt; native concurrent index build with invalid-index recovery; remaining native idioms at Phase 3 | ✅ core | exists (Phase 1: attempt-under-budget; Phase 3.1: concurrent index build) | LK-2 (attempt bound + the CONCURRENTLY wait-policy exception) |
 | `pkg/checksum` — chunk verifier, continuous checker, repair | ✅ core | planned (Phase 5) | CO-1, CO-2, CO-3 |
 | `pkg/copier` — shadow-table chunked copy | ✅ core | planned (Phase 4) | CO-4, LK-3 |
 | `pkg/applier` — change apply, buffer, flush scheduling | ✅ core | planned (Phase 6) | CO-4, CO-5, CO-6, LK-3 |
@@ -59,7 +59,10 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
 - **Locality of behavior.** The enforcement point of an invariant carries a `// INV: <id>`
   comment so a reviewer or agent can grep the ID and see the whole enforcement in one screen.
 - **Dependencies inside the core become part of the core.** Current core dependency list:
-  `pgx/v5`, stdlib. The future decode path will add `pglogrepl`. Adding one requires a recorded decision (see the rubric in
+  `pgx/v5`, the parse boundary (`pkg/statement` → `wasilibs/go-pgquery`, the real PostgreSQL
+  grammar — the native executor re-verifies statement shape itself rather than trusting the
+  caller's classification; the grammar is load-bearing expertise, not copyable mechanics),
+  stdlib. The future decode path will add `pglogrepl`. Adding one requires a recorded decision (see the rubric in
   [docs/tcb-model.md](docs/tcb-model.md) — copy small things, take pinned dependencies only
   for load-bearing expertise).
   Recorded decision: the AWS SDK (`aws-sdk-go-v2`) is a test-harness-only dependency, confined

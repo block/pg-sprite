@@ -90,8 +90,8 @@ func resolvedSchema(st statement.Statement) string {
 }
 
 // dryRunFacts introspects the statement's target table for classifier
-// facts. Statements without a single table target (index maintenance) and
-// missing tables classify with zero facts.
+// facts. Statements without a single table target (index drops, REINDEX)
+// and missing tables classify with zero facts.
 func dryRunFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Statement) (planner.Facts, error) {
 	if st.Table() == "" {
 		return planner.Facts{}, nil

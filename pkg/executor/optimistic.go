@@ -1,9 +1,11 @@
-// Package executor runs schema changes against the database. In Phase 1 it
-// holds the optimistic front door: attempt the change directly under a tight
+// Package executor runs schema changes against the database. It holds the
+// optimistic front door — attempt the change directly under a tight
 // lock_timeout and statement_timeout so it can only succeed if it is
-// effectively an instant / in-place change. A budget overrun cancels the
-// statement cleanly — nothing is executed — and surfaces as a typed
-// BudgetError the caller turns into a not-native-safe verdict.
+// effectively an instant / in-place change; a budget overrun cancels the
+// statement cleanly, nothing is executed, and a typed BudgetError surfaces
+// for the caller to turn into a not-native-safe verdict — and the native
+// executors for the classified safe idioms, starting with the concurrent
+// index build (see native.go).
 //
 // This is a safety-critical core package: see SAFETY.md. It never trusts the
 // caller's classification — its own protections are the budget, applied with
@@ -64,9 +66,9 @@ func (c BudgetCause) String() string {
 	}
 }
 
-// BudgetError reports that the optimistic attempt exceeded one of its budgets
-// and was cancelled cleanly: the statement did not execute and the
-// transaction rolled back. It is a refusal input, not an operational failure.
+// BudgetError reports that an execution attempt exceeded one of its budgets
+// and was cancelled cleanly by the server: the statement did not take
+// effect. It is a refusal input, not an operational failure.
 type BudgetError struct {
 	// Cause is the budget that was exceeded.
 	Cause BudgetCause
@@ -76,7 +78,7 @@ type BudgetError struct {
 
 // Error implements the error interface.
 func (e *BudgetError) Error() string {
-	return fmt.Sprintf("optimistic attempt exceeded its %s (%s) and was cancelled", e.Cause, e.Budget)
+	return fmt.Sprintf("execution exceeded its %s (%s) and was cancelled", e.Cause, e.Budget)
 }
 
 // Budget bounds one optimistic attempt. Both limits must be at least
