@@ -99,6 +99,13 @@ jobs:
   # promise CI enforces, not documentation. These are vanilla PostgreSQL
   # images — real Aurora engine-version validation is a separate gate that
   # cannot run in public CI.
+  #
+  # Each job runs one long-lived server (make db-up + make test-db) rather
+  # than per-test containers: dozens of concurrent container starts
+  # oversubscribe the runner and get containers killed mid-test, and the
+  # throwaway-schema harness keeps tests isolated on a shared server
+  # anyway. TLS tests are the exception — they still start their own
+  # containers because they control the server's TLS posture.
   test:
     name: test (PostgreSQL ${{ matrix.pg }})
     needs: changes
@@ -117,7 +124,10 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
-      - run: make test
+      - name: Start the test database
+        run: make db-up
+      - name: Test against the long-lived database
+        run: make test-db
 
   # Single required status for branch protection ("all-green" is the
   # context to require). Succeeds when nothing failed — including
