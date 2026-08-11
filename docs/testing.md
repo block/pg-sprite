@@ -136,7 +136,7 @@ capability no peer suite has.
 | `make test-unit` | Race-enabled unit tests, no Docker (`SKIP_INTEGRATION=1`). |
 | `make test` | Full suite; integration tests start disposable PostgreSQL containers (testcontainers). `PG_VERSION` selects the major (default 16). |
 | `make test-supported-postgres` | Full suite against every supported major, 14 → 18 — the local mirror of the CI matrix. |
-| `make db-up` / `make test-db` / `make db-down` | Long-lived compose database on localhost; the suite connects to it via `PG_DSN` instead of starting per-test containers. Fastest loop for repeated integration runs. |
+| `make db-up` / `make test-db` / `make db-down` | Long-lived compose database on localhost; the suite connects to it via `PG_DSN` instead of starting per-test containers. Fastest loop for repeated integration runs, and the path CI's version matrix uses — per-test containers oversubscribe a small CI runner and get killed mid-test. |
 
 The harness is [internal/testutil](../internal/testutil/postgres.go):
 `StartPostgres` returns a connection URL (container, or `PG_DSN` when set)

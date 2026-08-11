@@ -7,10 +7,12 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"sync/atomic"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
@@ -60,6 +62,38 @@ func StartPostgres(t *testing.T) string {
 }
 
 var schemaSeq atomic.Int64
+
+// NewDatabase creates a unique throwaway database on the server at serverURL,
+// sets it up for cleanup, and returns a URL that connects to it. Throwaway
+// schemas do not isolate pg_stat_activity, so a test that must observe an
+// exact session set (e.g. none) on a shared server gets a database of its
+// own. serverURL must be in URL form (postgres://...), which StartPostgres
+// always returns.
+func NewDatabase(t *testing.T, serverURL string) string {
+	t.Helper()
+	name := fmt.Sprintf("db_%d_%d", os.Getpid(), schemaSeq.Add(1))
+
+	pool, err := pgxpool.New(t.Context(), serverURL)
+	require.NoError(t, err, "connect to create throwaway database")
+	t.Cleanup(pool.Close)
+	_, err = pool.Exec(t.Context(), "CREATE DATABASE "+pgx.Identifier{name}.Sanitize())
+	require.NoError(t, err, "create throwaway database")
+	t.Cleanup(func() {
+		// t.Context is cancelled by cleanup time; strip the cancellation.
+		// FORCE terminates any connection a test leaked into the database.
+		ctx := context.WithoutCancel(t.Context())
+		_, err := pool.Exec(ctx, "DROP DATABASE IF EXISTS "+pgx.Identifier{name}.Sanitize()+" WITH (FORCE)")
+		if err != nil {
+			t.Logf("drop throwaway database %s: %v", name, err)
+		}
+	})
+
+	u, err := url.Parse(serverURL)
+	require.NoError(t, err, "parse server URL")
+	require.NotEmpty(t, u.Scheme, "NewDatabase needs a URL-form DSN (postgres://...)")
+	u.Path = "/" + name
+	return u.String()
+}
 
 // NewSchema creates a unique throwaway schema on pool, sets it up for
 // cleanup, and returns its name. Tests qualify their objects with it so
