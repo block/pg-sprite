@@ -31,6 +31,11 @@ jobs:
         continue-on-error: true
         uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
         with:
+          # 'every' makes a file count as code only when it satisfies all
+          # three patterns (is anything AND not-md AND not-docs). The
+          # default 'some' ORs the patterns independently, so '**' alone
+          # matches every file and the exclusions are dead.
+          predicate-quantifier: every
           filters: |
             code:
               - '**'
