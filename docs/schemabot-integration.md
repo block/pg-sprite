@@ -102,6 +102,14 @@ implementation time):
   there and cannot use a hot standby (the live table is never written). This is a
   credential-posture question for every deployment — raise it while the adapter is a design,
   not during a least-privilege review.
+- **The engine role's access is tiered and per-target.** Target databases routinely have
+  their DDL owned by a role that is not the orchestrator's connection user; the engine does
+  not need to *be* that owner — it needs membership in the owning role, plus schema
+  `CREATE` and replication access depending on the strategy (the full contract, including
+  what the role must *not* have, is [engine-role.md](engine-role.md)). The adapter surfaces
+  this per target: each configured database names its engine-role credentials, and a target
+  whose grants stop at Tier 1 can still run in-place changes while copy-and-swap refuses
+  with the exact missing `GRANT`.
 - **Fan-out is per table.** A `DesiredSchema` is one `CREATE TABLE` plus its indexes, while
   SchemaBot's declarative roots are directories of many tables: the adapter loops `Plan` per
   table and merges into one `PlanResult`. One pool serves the whole fan-out (`Plan` does not

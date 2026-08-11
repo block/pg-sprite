@@ -469,7 +469,7 @@ matrix is part of the "decisions, not options" philosophy.
 | --- | --- | --- |
 | `rds.logical_replication = 1` (static → reboot) ⇒ `wal_level = logical` | logical-decoding CDC path | Fall back to **trigger-based** CDC |
 | `rds_replication` role granted (Aurora gives no `SUPERUSER`) | creating slot / starting replication | Use trigger fallback, or request the grant |
-| Ownership / `CREATE` on the schema | shadow table, triggers, swap | Migration cannot run |
+| Owning-role membership + schema `CREATE` (the tiered [engine-role contract](engine-role.md)) | all owner-gated DDL: in-place `ALTER`, index builds, shadow table / triggers / swap | Preflight refuses, naming the missing `GRANT` |
 | `max_replication_slots` / `max_wal_senders` headroom | concurrent migrations | Serialize migrations |
 | `REPLICA IDENTITY` = PK (default) or `FULL` | correct UPDATE/DELETE capture; unchanged-TOAST columns | v1 requires a PK, so default identity suffices |
 
