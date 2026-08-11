@@ -33,7 +33,8 @@ const (
 	OutcomeRefused Outcome = "refused"
 )
 
-// Reason is the typed cause of a refusal.
+// Reason is the typed cause of a refusal. Reasons are flat kebab-case
+// tokens — they are what automation switches on; prose belongs in Detail.
 type Reason string
 
 // The refusal reasons Phase 1 can emit.
@@ -46,10 +47,10 @@ const (
 	// (CONCURRENTLY) and is never attempted here.
 	ReasonIndexStatement Reason = "index-statement"
 	// ReasonTableTooLarge: the size guard skipped the optimistic attempt.
-	ReasonTableTooLarge Reason = "not-native-safe: table too large"
+	ReasonTableTooLarge Reason = "not-native-safe-table-too-large"
 	// ReasonBudgetExceeded: the optimistic attempt exceeded its lock or
 	// statement budget and was cancelled.
-	ReasonBudgetExceeded Reason = "not-native-safe: budget exceeded"
+	ReasonBudgetExceeded Reason = "not-native-safe-budget-exceeded"
 )
 
 // Cause narrows ReasonBudgetExceeded to the budget that was exceeded, so

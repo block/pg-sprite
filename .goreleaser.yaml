@@ -16,9 +16,6 @@ builds:
     goarch:
       - amd64
       - arm64
-    ignore:
-      - goos: darwin
-        goarch: amd64
 
 archives:
   - id: pg-sprite
@@ -28,10 +25,12 @@ archives:
     name_template: "pg-sprite_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
 
 release:
-  # If a release already exists for the tag, replace its assets rather than
-  # failing. This handles the case where a release is created via the GitHub
-  # UI before the workflow runs.
-  mode: replace
+  # A published version is a fixed artifact: never replace the assets of an
+  # existing release, so re-running the workflow for a tag cannot silently
+  # swap binaries under a version people may have pinned. If a draft release
+  # was created via the GitHub UI before the workflow ran, delete the draft
+  # and re-run the workflow.
+  mode: keep-existing
 
 checksum:
   name_template: "checksums.txt"

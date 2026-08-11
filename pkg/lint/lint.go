@@ -48,8 +48,17 @@ const (
 	// the engine's copy-and-swap path can run it online. Reason carries
 	// the specific cause.
 	CodeTableRewrite Code = "table-rewrite"
-	// CodeDestructive: the operation discards live structure (a column or
-	// constraint drop) and cannot be undone by re-running the schema.
+	// CodePossibleTableRewrite: the linter cannot verify the operation
+	// against live column facts, so the engine would fail closed to the
+	// rewrite path — but the change may be a free relabel that a live
+	// database would prove. The route is what the engine would do, not a
+	// proven property of the change.
+	CodePossibleTableRewrite Code = "possible-table-rewrite"
+	// CodeDestructive: the operation discards live structure (a column,
+	// constraint, or index drop) and cannot be undone by re-running the
+	// schema. Index drops are included because the linter cannot see
+	// whether an index is unique — and a dropped unique index whose gap
+	// admitted duplicates cannot be recreated at all.
 	CodeDestructive Code = "destructive"
 )
 
@@ -58,7 +67,13 @@ const (
 type Finding struct {
 	// Statement is the 1-based index of the statement in the script.
 	Statement int `json:"statement"`
-	// SQL is the canonical text of that statement.
+	// Line is the 1-based source line of the statement's first token, so
+	// a CI system can annotate the finding onto the file it came from.
+	Line int `json:"line"`
+	// Column is the 1-based source column of the statement's first token.
+	Column int `json:"column"`
+	// SQL is the verbatim source text of that statement, so it can be
+	// found in the source by exact match.
 	SQL string `json:"sql"`
 	// Operation is the operator-facing label of the flagged operation
 	// (display only).
@@ -79,6 +94,11 @@ type Finding struct {
 type Report struct {
 	// FormatVersion is the report contract version; always FormatVersion.
 	FormatVersion int `json:"format_version"`
+	// PostgresVersions is the inclusive PostgreSQL major-version range
+	// the offline rules are derived for (planner.RulesPostgresVersions).
+	// The linter never sees a server, so a stored report names the
+	// assumptions behind it instead.
+	PostgresVersions string `json:"postgres_versions"`
 	// Findings are the results in statement order; empty means the script
 	// is clean.
 	Findings []Finding `json:"findings"`
@@ -97,7 +117,11 @@ func Check(sql string) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	report := Report{FormatVersion: FormatVersion, Findings: []Finding{}}
+	report := Report{
+		FormatVersion:    FormatVersion,
+		PostgresVersions: planner.RulesPostgresVersions,
+		Findings:         []Finding{},
+	}
 	for i, stmt := range stmts {
 		findings, err := checkStatement(i+1, stmt)
 		if err != nil {
@@ -115,34 +139,31 @@ func Check(sql string) (Report, error) {
 	return report, nil
 }
 
-// checkStatement produces the findings for one statement: classifier
-// findings from its routing decisions plus destructive findings from its
-// parsed operations.
-func checkStatement(index int, sql string) ([]Finding, error) {
-	classified, err := planner.Classify(sql, planner.Facts{})
-	if err != nil {
-		return nil, err
-	}
-	ops, err := statement.ParseOps(sql)
+// checkStatement produces the findings for one statement, all derived
+// from the classifier's routing decisions: a routing finding where the
+// route warrants one, and a destructive finding where the decision is
+// marked destructive. The classifier is the single rulebook — the linter
+// adds severity and presentation, never a second opinion.
+func checkStatement(index int, stmt statement.SourceStatement) ([]Finding, error) {
+	classified, err := planner.Classify(stmt.SQL, planner.Facts{})
 	if err != nil {
 		return nil, err
 	}
 	var findings []Finding
+	place := func(f Finding) Finding {
+		f.Statement, f.Line, f.Column, f.SQL = index, stmt.Line, stmt.Column, stmt.SQL
+		return f
+	}
 	for _, d := range classified.Decisions {
 		if f, flagged := decisionFinding(d); flagged {
-			f.Statement, f.SQL = index, sql
-			findings = append(findings, f)
+			findings = append(findings, place(f))
 		}
-	}
-	for _, op := range ops {
-		if isDestructive(op) {
-			findings = append(findings, Finding{
-				Statement: index,
-				SQL:       sql,
-				Operation: op.Describe(),
+		if d.Destructive {
+			findings = append(findings, place(Finding{
+				Operation: d.Operation,
 				Code:      CodeDestructive,
 				Severity:  SeverityWarning,
-			})
+			}))
 		}
 	}
 	return findings, nil
@@ -157,6 +178,13 @@ func decisionFinding(d planner.Decision) (Finding, bool) {
 		f.Code, f.Severity = CodeUnsupportedOperation, SeverityError
 		return f, true
 	case planner.RouteCopyAndSwap:
+		if d.Unverified {
+			// The planner failed closed for lack of facts: report "the
+			// engine would take the heavy path", not "this rewrites the
+			// table" — only the second is a property of the change.
+			f.Code, f.Severity = CodePossibleTableRewrite, SeverityWarning
+			return f, true
+		}
 		f.Code, f.Severity = CodeTableRewrite, SeverityWarning
 		return f, true
 	case planner.RouteNative:
@@ -172,12 +200,4 @@ func decisionFinding(d planner.Decision) (Finding, bool) {
 		f.Code, f.Severity = CodeUnsupportedOperation, SeverityError
 		return f, true
 	}
-}
-
-// isDestructive reports whether an operation discards live structure. The
-// definition matches the declarative differ's: column and constraint
-// drops. An index drop is not destructive — the index is recreatable from
-// the schema.
-func isDestructive(op statement.Op) bool {
-	return op.Kind == statement.OpDropColumn || op.Kind == statement.OpDropConstraint
 }

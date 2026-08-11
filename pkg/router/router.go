@@ -26,6 +26,14 @@ const (
 	BackendCopyAndSwap Backend = "copy-and-swap"
 )
 
+// Backends returns the closed set of Backend values. It is part of the
+// plan-report contract (docs/plan-report.md): the set changes only with a
+// format_version bump, and a consumer that meets an unrecognized value must
+// treat the statement as unknown and refuse it.
+func Backends() []Backend {
+	return []Backend{BackendNative, BackendCopyAndSwap}
+}
+
 // available reports whether the backend is implemented in this build. This
 // is the routing policy for backends: copy-and-swap is a known strategy the
 // planner routes to, but until its executor exists the router marks the
@@ -43,6 +51,12 @@ const (
 	// DispositionExecute: the assigned backend is available; the statement
 	// would run.
 	DispositionExecute Disposition = "execute"
+	// DispositionRewriteRequired: the planner says the submitted form
+	// blocks and must run as a safer idiom, but no executable rewrite was
+	// constructed (a multi-operation statement, or a pattern the planner
+	// cannot build). The statement will be refused at execution rather
+	// than run in its blocking form.
+	DispositionRewriteRequired Disposition = "rewrite-required"
 	// DispositionUnavailable: the change needs a backend this build does
 	// not implement; the statement would be refused at execution.
 	DispositionUnavailable Disposition = "unavailable"
@@ -51,9 +65,28 @@ const (
 	DispositionRefuse Disposition = "refuse"
 )
 
-// worse orders dispositions for aggregation: refuse > unavailable > execute.
+// Dispositions returns the closed set of Disposition values, in severity
+// order. It is part of the plan-report contract (docs/plan-report.md): the
+// set changes only with a format_version bump, and a consumer that meets an
+// unrecognized value must treat the statement as unknown and refuse it.
+func Dispositions() []Disposition {
+	return []Disposition{
+		DispositionExecute,
+		DispositionRewriteRequired,
+		DispositionUnavailable,
+		DispositionRefuse,
+	}
+}
+
+// worse orders dispositions for aggregation:
+// refuse > unavailable > rewrite-required > execute.
 func worse(a, b Disposition) Disposition {
-	rank := map[Disposition]int{DispositionExecute: 0, DispositionUnavailable: 1, DispositionRefuse: 2}
+	rank := map[Disposition]int{
+		DispositionExecute:         0,
+		DispositionRewriteRequired: 1,
+		DispositionUnavailable:     2,
+		DispositionRefuse:          3,
+	}
 	if rank[b] > rank[a] {
 		return b
 	}
@@ -70,7 +103,11 @@ type Statement struct {
 	Disposition Disposition `json:"disposition"`
 	// ExecSQL is the ordered SQL the native backend would run: the
 	// planner's safer sequence when it constructed one, otherwise the
-	// submitted statement. Empty for non-native routes.
+	// submitted statement. Execution contract: the steps run one at a
+	// time, in order, each in its own implicit transaction — never wrapped
+	// in an enclosing transaction block, which the CONCURRENTLY forms
+	// refuse. Empty for non-native routes and for statements the engine
+	// will not run (DispositionRewriteRequired).
 	ExecSQL []string `json:"exec_sql,omitempty"`
 }
 
@@ -105,7 +142,6 @@ func routeStatement(p planner.Plan) Statement {
 	switch p.Route {
 	case planner.RouteNative:
 		st.Backend = BackendNative
-		st.ExecSQL = nativeExecSQL(p)
 	case planner.RouteCopyAndSwap:
 		st.Backend = BackendCopyAndSwap
 	case planner.RouteRefuse:
@@ -121,6 +157,14 @@ func routeStatement(p planner.Plan) Statement {
 		st.Disposition = DispositionUnavailable
 		return st
 	}
+	if st.Backend == BackendNative {
+		sql, ok := nativeExecSQL(p)
+		if !ok {
+			st.Disposition = DispositionRewriteRequired
+			return st
+		}
+		st.ExecSQL = sql
+	}
 	st.Disposition = DispositionExecute
 	return st
 }
@@ -128,10 +172,17 @@ func routeStatement(p planner.Plan) Statement {
 // nativeExecSQL is the literal SQL the native backend would run for a
 // native-routed statement: the planner's safer sequence when it constructed
 // one (only single-operation statements carry one), otherwise the submitted
-// form.
-func nativeExecSQL(p planner.Plan) []string {
+// form — but only when every decision is safe to run as submitted. A
+// safer-idiom decision without a constructed rewrite yields no executable
+// SQL: running the submitted form would falsify the plan's own reason.
+func nativeExecSQL(p planner.Plan) ([]string, bool) {
 	if len(p.Decisions) == 1 && len(p.Decisions[0].SaferSQL) > 0 {
-		return p.Decisions[0].SaferSQL
+		return p.Decisions[0].SaferSQL, true
 	}
-	return []string{p.Statement}
+	for _, d := range p.Decisions {
+		if !d.ExecutableAsSubmitted() {
+			return nil, false
+		}
+	}
+	return []string{p.Statement}, true
 }

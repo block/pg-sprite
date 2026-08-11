@@ -5,6 +5,11 @@ on:
     branches: [main]
   pull_request:
 
+# Read-only by default; the one job that needs more (changes) grants it
+# job-scoped.
+permissions:
+  contents: read
+
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
@@ -26,6 +31,11 @@ jobs:
         continue-on-error: true
         uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
         with:
+          # 'every' makes a file count as code only when it satisfies all
+          # three patterns (is anything AND not-md AND not-docs). The
+          # default 'some' ORs the patterns independently, so '**' alone
+          # matches every file and the exclusions are dead.
+          predicate-quantifier: every
           filters: |
             code:
               - '**'
@@ -56,8 +66,10 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       # Pin the same golangci-lint major used locally (v2 config format);
@@ -71,17 +83,34 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       - run: make build
+      # The no-cgo promise is a contract: the Wasm parser keeps `go install`
+      # toolchain-free. One accidental import of the cgo escape hatch
+      # (pg_query_go's parser) would silently start requiring a C toolchain
+      # on every contributor's machine.
+      - name: Build with CGO disabled
+        run: go build ./...
+        env:
+          CGO_ENABLED: "0"
 
   # The integration suite runs against every Aurora-supported PostgreSQL
   # major (see docs/postgresql-version-support.md): the version floor is a
   # promise CI enforces, not documentation. These are vanilla PostgreSQL
   # images — real Aurora engine-version validation is a separate gate that
   # cannot run in public CI.
+  #
+  # Each job runs one long-lived server (make db-up + make test-db) rather
+  # than per-test containers: dozens of concurrent container starts
+  # oversubscribe the runner and get containers killed mid-test, and the
+  # throwaway-schema harness keeps tests isolated on a shared server
+  # anyway. TLS tests are the exception — they still start their own
+  # containers because they control the server's TLS posture.
   test:
     name: test (PostgreSQL ${{ matrix.pg }})
     needs: changes
@@ -94,11 +123,16 @@ jobs:
     env:
       PG_VERSION: ${{ matrix.pg }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
-      - run: make test
+      - name: Start the test database
+        run: make db-up
+      - name: Test against the long-lived database
+        run: make test-db
 
   # Single required status for branch protection ("all-green" is the
   # context to require). Succeeds when nothing failed — including
