@@ -277,7 +277,12 @@ live schema (introspected)  ─┘                          │
 - **Renames are ambiguous and are not guessed.** A column present in live but absent in desired
   plus a new column in desired is, by default, a *drop + add*, not a rename. Rename intent must
   eventually be stated explicitly; no rename-intent flag exists today. The engine does not
-  heuristically pair columns.
+  heuristically pair columns. The imperative path executes a direct column or table rename when
+  asked — it is metadata-only for PostgreSQL — but classifies it `app-breaking-rename`: the
+  rename cannot land atomically across running application instances. For a column the safe
+  sequence is expand/contract (add the new column, dual-write and backfill, switch reads, drop
+  the old column separately); for a table, coordinate the rename with the application deploy
+  that adopts the new name.
 - **Diff is review-only.** `diff` prints every derived statement and its classified route without
   executing. Copy-and-swap routes render as unavailable until that backend exists.
 - **Out-of-band drift is surfaced, not steamrolled.** If the live table differs from what the
@@ -779,12 +784,27 @@ introspection and an ordered declarative diff complete the plan.
 ## Next step
 
 Phases 1 and 2.1–2.4, including the CLI front ends, classifier, router, and declarative diff, are
-implemented. The next implementation phase is Phase 3 native execution:
+implemented. Phase 3 native execution is in progress: the `CREATE INDEX CONCURRENTLY` execution
+path exists in `pkg/executor` — session-scoped, outside any transaction, under the CONCURRENTLY
+wait policy (no per-lock timeout, one overall deadline), with invalid-index detection that
+fails closed into a typed, state-specific outcome (the executor never drops an index: a
+name-based drop cannot prove ownership until the LK-1 lease exists; the operator runbook is
+[invalid-index-recovery.md](invalid-index-recovery.md)). The executor is deliberately not yet
+reachable from the CLI — the engine lands first, the front door next. Remaining Phase 3 work,
+roughly in order:
 
+- the CLI front door for the native path: `migrate` routing an admitted statement to the
+  executor, resolving an unqualified table name once against the session's `search_path` and
+  re-emitting the qualified statement (the library-level `ErrUnqualifiedTable` refusal stays;
+  the CLI moves the qualification burden off the user), and rendering the typed outcomes —
+  each executor outcome gaining a stable string code in the report contracts, the same
+  treatment `pkg/lint` gave its findings, so orchestrators branch on one vocabulary,
 - execute classifier-produced safer sequences through the routed native path,
-- add the `CREATE INDEX CONCURRENTLY` execution path,
-- bound lock acquisition with timeout and retry,
-- add substitution, the guarded `--force` escape hatch, and progress reporting.
+- the remaining native idioms (`NOT VALID`+`VALIDATE`, `ADD PK USING INDEX`, fast-default),
+- bound lock acquisition with timeout and retry for the blocking idioms,
+- substitution by default, the guarded `--force` escape hatch, and progress reporting
+  (`pg_stat_progress_create_index` by the build's backend PID, which the executor already
+  captures for its ownership proof).
 
 The copy-and-swap backend, including change capture, copying, applying, checksumming, and
 cutover, follows Phase 3.

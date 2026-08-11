@@ -81,12 +81,17 @@ func TestParseOneKinds(t *testing.T) {
 		{
 			name: "create index",
 			sql:  "CREATE INDEX idx_users_email ON users (email)",
-			want: Statement{kind: KindCreateIndex},
+			want: Statement{kind: KindCreateIndex, table: "users"},
+		},
+		{
+			name: "create index schema-qualified",
+			sql:  "CREATE INDEX idx_users_email ON billing.users (email)",
+			want: Statement{kind: KindCreateIndex, schema: "billing", table: "users"},
 		},
 		{
 			name: "create unique index concurrently is a concurrent index statement",
 			sql:  "CREATE UNIQUE INDEX CONCURRENTLY idx ON users (email)",
-			want: Statement{kind: KindCreateIndex, concurrent: true},
+			want: Statement{kind: KindCreateIndex, table: "users", concurrent: true},
 		},
 		{
 			name: "drop index",

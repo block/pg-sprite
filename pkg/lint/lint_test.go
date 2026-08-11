@@ -88,6 +88,29 @@ func TestCheckFlagsUnsupportedAsError(t *testing.T) {
 	assert.Equal(t, 0, report.Warnings)
 }
 
+// A column or table rename is metadata-only for PostgreSQL but breaks
+// running application code the instant it commits; the finding steers to
+// a safe sequence without blocking execution. Index renames stay clean —
+// SQL never references an index by name.
+func TestCheckFlagsRenamesAsAppBreaking(t *testing.T) {
+	report, err := lint.Check(`
+		ALTER TABLE t RENAME COLUMN a TO b;
+		ALTER TABLE t RENAME TO t2;
+		ALTER INDEX i RENAME TO i2;
+	`)
+	require.NoError(t, err)
+	require.Len(t, report.Findings, 2)
+	for i, f := range report.Findings {
+		assert.Equal(t, i+1, f.Statement)
+		assert.Equal(t, lint.CodeAppBreakingRename, f.Code)
+		assert.Equal(t, lint.SeverityWarning, f.Severity)
+		assert.Equal(t, planner.ReasonAppBreakingRename, f.Reason)
+		assert.Empty(t, f.Suggestion)
+	}
+	assert.Equal(t, 0, report.Errors)
+	assert.Equal(t, 2, report.Warnings)
+}
+
 // Destructive findings come from the classifier's destructive flag, so
 // the linter and the plan report mark the same operations by
 // construction. Index drops are destructive even in the concurrent form:
