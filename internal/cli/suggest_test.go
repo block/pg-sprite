@@ -52,7 +52,8 @@ func TestSuggestReadsFromFile(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
 	require.Len(t, report.Suggestions, 1)
 	assert.Equal(t,
-		[]suggest.Caveat{suggest.CaveatSeparateTransactions, suggest.CaveatValidationScan},
+		[]suggest.Caveat{suggest.CaveatSeparateTransactions, suggest.CaveatValidationScan,
+			suggest.CaveatScaffoldConstraintOnFailure},
 		report.Suggestions[0].Caveats)
 }
 
@@ -75,4 +76,17 @@ func TestSuggestTextRendering(t *testing.T) {
 	assert.Contains(t, text, "CONCURRENTLY")
 	assert.Contains(t, text, string(suggest.CaveatNonTransactional))
 	assert.Contains(t, text, string(suggest.CaveatInvalidIndexOnFailure))
+}
+
+// A suggestion without a constructible rewrite renders its guidance code —
+// the manual path — instead of an empty safer-form block.
+func TestSuggestTextRendersGuidance(t *testing.T) {
+	var out strings.Builder
+	cmd := SuggestCmd{}
+	err := cmd.runSuggest(strings.NewReader(
+		"ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d int"), &out)
+	require.NoError(t, err)
+	text := out.String()
+	assert.Contains(t, text, string(suggest.GuidanceSplitStatement))
+	assert.NotContains(t, text, "safer form")
 }

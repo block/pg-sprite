@@ -1,13 +1,31 @@
 package planner_test
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/statement"
 )
+
+// FactsFrom is the one seam between live introspection and classification:
+// every column's canonical type must come through so type-narrowing
+// decisions see the real live types.
+func TestFactsFromExtractsColumnTypes(t *testing.T) {
+	live := schemadiff.Model{Columns: []schemadiff.Column{
+		{Name: "id", Type: "bigint"},
+		{Name: "name", Type: "character varying(50)"},
+	}}
+	assert.Equal(t, planner.Facts{ColumnTypes: map[string]string{
+		"id":   "bigint",
+		"name": "character varying(50)",
+	}}, planner.FactsFrom(live))
+}
 
 // facts mirrors a live table whose column types exercise both sides of the
 // binary-coercible rules.
@@ -28,6 +46,61 @@ func classifyOne(t *testing.T, sql string) planner.Decision {
 	return plan.Decisions[0]
 }
 
+// Destructive is a decision-level fact derived from the operation shape:
+// drops of columns, constraints, and indexes discard live structure, and
+// every front door that routes through the classifier inherits the same
+// marking — including DROP INDEX, whose drop discards the index's
+// guarantee (uniqueness, for a unique index) however it is submitted.
+func TestClassifyMarksDropsDestructive(t *testing.T) {
+	destructive := []string{
+		"ALTER TABLE t DROP COLUMN age",
+		"ALTER TABLE t DROP CONSTRAINT t_age_check",
+		"DROP INDEX t_v_idx",
+		"DROP INDEX CONCURRENTLY t_v_idx",
+	}
+	for _, sql := range destructive {
+		assert.True(t, classifyOne(t, sql).Destructive, sql)
+	}
+	nonDestructive := []string{
+		"ALTER TABLE t ADD COLUMN age int",
+		"ALTER TABLE t ALTER COLUMN v50 TYPE varchar(100)",
+		"ALTER TABLE t ALTER COLUMN age DROP DEFAULT",
+		"ALTER TABLE t ALTER COLUMN age DROP NOT NULL",
+		"CREATE INDEX t_v_idx ON t (v50)",
+	}
+	for _, sql := range nonDestructive {
+		assert.False(t, classifyOne(t, sql).Destructive, sql)
+	}
+}
+
+// Unverified separates "the planner proved a rewrite" from "the planner
+// failed closed for lack of facts": the same conversion is a proven
+// relabel with a column fact, and an unverified rewrite without one. A
+// USING clause is a rewrite regardless of facts, so it is never
+// unverified.
+func TestClassifyUnverifiedMarksFactlessTypeChanges(t *testing.T) {
+	verified, err := planner.Classify(
+		"ALTER TABLE t ALTER COLUMN v50 TYPE varchar(100)", facts)
+	require.NoError(t, err)
+	require.Len(t, verified.Decisions, 1)
+	assert.Equal(t, planner.RouteNative, verified.Decisions[0].Route)
+	assert.False(t, verified.Decisions[0].Unverified)
+
+	factless, err := planner.Classify(
+		"ALTER TABLE t ALTER COLUMN v50 TYPE varchar(100)", planner.Facts{})
+	require.NoError(t, err)
+	require.Len(t, factless.Decisions, 1)
+	assert.Equal(t, planner.RouteCopyAndSwap, factless.Decisions[0].Route)
+	assert.True(t, factless.Decisions[0].Unverified)
+
+	using, err := planner.Classify(
+		"ALTER TABLE t ALTER COLUMN txt TYPE jsonb USING txt::jsonb", planner.Facts{})
+	require.NoError(t, err)
+	require.Len(t, using.Decisions, 1)
+	assert.Equal(t, planner.RouteCopyAndSwap, using.Decisions[0].Route)
+	assert.False(t, using.Decisions[0].Unverified)
+}
+
 // TestClassifyReferenceRows is the golden mapping: one case per row of
 // docs/postgres-online-ddl-reference.md. saferSteps is the length of the
 // expected safer sequence (0 when the decision carries none).
@@ -46,6 +119,10 @@ func TestClassifyReferenceRows(t *testing.T) {
 		{"add column volatile default random", "ALTER TABLE t ADD COLUMN r float8 DEFAULT random()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, 0},
 		{"add column volatile default uuid", "ALTER TABLE t ADD COLUMN id uuid DEFAULT uuid_generate_v4()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, 0},
 		{"add column generated stored", "ALTER TABLE t ADD COLUMN total numeric GENERATED ALWAYS AS (price * qty) STORED", planner.RouteCopyAndSwap, planner.ReasonGeneratedStored, 0},
+		{"add column inline unique", "ALTER TABLE t ADD COLUMN c int UNIQUE", planner.RouteNative, planner.ReasonSaferIdiom, 0},
+		{"add column inline primary key", "ALTER TABLE t ADD COLUMN c int PRIMARY KEY", planner.RouteNative, planner.ReasonSaferIdiom, 0},
+		{"add column inline foreign key", "ALTER TABLE t ADD COLUMN c int REFERENCES p (id)", planner.RouteNative, planner.ReasonSaferIdiom, 0},
+		{"add column inline check", "ALTER TABLE t ADD COLUMN c int CHECK (c > 0)", planner.RouteNative, planner.ReasonSaferIdiom, 0},
 		{"drop column", "ALTER TABLE t DROP COLUMN age", planner.RouteNative, planner.ReasonMetadataOnly, 0},
 		{"alter type widen varchar", "ALTER TABLE t ALTER COLUMN v50 TYPE varchar(100)", planner.RouteNative, planner.ReasonBinaryCoercible, 0},
 		{"alter type varchar to text", "ALTER TABLE t ALTER COLUMN v50 TYPE text", planner.RouteNative, planner.ReasonBinaryCoercible, 0},
@@ -98,6 +175,7 @@ func TestClassifyReferenceRows(t *testing.T) {
 		{"attach partition", "ALTER TABLE t ATTACH PARTITION p FOR VALUES FROM (1) TO (10)", planner.RouteNative, planner.ReasonSaferIdiom, 0},
 		{"detach partition", "ALTER TABLE t DETACH PARTITION p", planner.RouteNative, planner.ReasonSaferIdiom, 1},
 		{"detach partition concurrently", "ALTER TABLE t DETACH PARTITION p CONCURRENTLY", planner.RouteNative, planner.ReasonOnlineIdiom, 0},
+		{"create table partition of", "CREATE TABLE p PARTITION OF t FOR VALUES FROM (1) TO (10)", planner.RouteNative, planner.ReasonPartitionParentLock, 0},
 
 		// Non-DDL and unknown statements.
 		{"dml", "INSERT INTO t VALUES (1)", planner.RouteRefuse, planner.ReasonUnsupportedOperation, 0},
@@ -109,6 +187,13 @@ func TestClassifyReferenceRows(t *testing.T) {
 			assert.Equal(t, tc.route, d.Route)
 			assert.Equal(t, tc.reason, d.Reason)
 			assert.Len(t, d.SaferSQL, tc.saferSteps)
+			if tc.saferSteps > 0 {
+				assert.Equal(t, planner.ExecutionAutocommit, d.SaferSQLExecution,
+					"a constructed sequence carries its execution contract")
+			} else {
+				assert.Empty(t, d.SaferSQLExecution,
+					"the contract is present exactly when SaferSQL is")
+			}
 		})
 	}
 }
@@ -176,4 +261,68 @@ func TestClassifyNoFactsIsConservative(t *testing.T) {
 func TestClassifyParseErrorSurfaces(t *testing.T) {
 	_, err := planner.Classify("ALTER TABLE", planner.Facts{})
 	assert.Error(t, err)
+}
+
+// generatedConstraintName parses a safer-sequence ADD CONSTRAINT step back
+// through the statement parser and returns the typed constraint name, so
+// the test asserts identifier facts rather than SQL prose.
+func generatedConstraintName(t *testing.T, step string) string {
+	t.Helper()
+	ops, err := statement.ParseOps(step)
+	require.NoError(t, err)
+	require.Len(t, ops, 1)
+	require.Equal(t, statement.OpAddConstraint, ops[0].Kind)
+	require.NotEmpty(t, ops[0].Name)
+	return ops[0].Name
+}
+
+func TestClassifyGeneratedNamesFitIdentifierLimit(t *testing.T) {
+	// Long enough that table + column + suffix would exceed PostgreSQL's
+	// 63-byte identifier limit, where the server would silently truncate.
+	table := strings.Repeat("t", 40)
+	colA := strings.Repeat("a", 40)
+	colB := strings.Repeat("b", 40)
+
+	dA := classifyOne(t, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL", table, colA))
+	dB := classifyOne(t, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL", table, colB))
+	require.NotEmpty(t, dA.SaferSQL)
+	require.NotEmpty(t, dB.SaferSQL)
+
+	nameA := generatedConstraintName(t, dA.SaferSQL[0])
+	nameB := generatedConstraintName(t, dB.SaferSQL[0])
+	assert.LessOrEqual(t, len(nameA), 63, "generated names must fit PostgreSQL's identifier limit")
+	assert.LessOrEqual(t, len(nameB), 63)
+	assert.NotEqual(t, nameA, nameB,
+		"columns differing only past the truncation point must not collide")
+
+	// Deterministic: the same input yields the same fitted name.
+	dA2 := classifyOne(t, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN %s SET NOT NULL", table, colA))
+	assert.Equal(t, dA.SaferSQL, dA2.SaferSQL)
+}
+
+// The route and reason vocabularies are closed sets a consumer branches on;
+// both are pinned to plan-report format_version 1 (docs/plan-report.md). A
+// new value here without a format_version bump is a contract break.
+func TestRoutesVocabularyPinned(t *testing.T) {
+	assert.Equal(t, []planner.Route{
+		planner.RouteNative,
+		planner.RouteCopyAndSwap,
+		planner.RouteRefuse,
+	}, planner.Routes())
+}
+
+func TestReasonsVocabularyPinned(t *testing.T) {
+	assert.Equal(t, []planner.Reason{
+		planner.ReasonMetadataOnly,
+		planner.ReasonOnlineIdiom,
+		planner.ReasonFastDefault,
+		planner.ReasonBinaryCoercible,
+		planner.ReasonSaferIdiom,
+		planner.ReasonVolatileDefault,
+		planner.ReasonGeneratedStored,
+		planner.ReasonTypeRewrite,
+		planner.ReasonRelocation,
+		planner.ReasonPartitionParentLock,
+		planner.ReasonUnsupportedOperation,
+	}, planner.Reasons())
 }

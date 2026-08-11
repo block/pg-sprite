@@ -2,6 +2,7 @@ package statement
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	pganalyze "github.com/pganalyze/pg_query_go/v6"
@@ -99,6 +100,15 @@ type Op struct {
 	Unique bool
 	// GeneratedStored is true for ADD COLUMN ... GENERATED ... STORED.
 	GeneratedStored bool
+	// InlineConstraints are the table-constraint families an added column
+	// carries inline (UNIQUE, PRIMARY KEY, REFERENCES, CHECK) — each does
+	// the same index build or validation scan as its ADD CONSTRAINT form.
+	// An inline constraint the engine does not model is reported as
+	// ConstraintUnrecognized so the classifier can refuse it.
+	InlineConstraints []ConstraintKind
+	// PartitionOf is true for CREATE TABLE ... PARTITION OF, which locks
+	// the partitioned parent, not just the new relation.
+	PartitionOf bool
 	// Default is the DEFAULT shape for OpAddColumn.
 	Default DefaultKind
 	// NewType is the target type for OpAlterColumnType and the column type
@@ -118,13 +128,16 @@ type Op struct {
 func (o Op) Describe() string {
 	switch o.Kind {
 	case OpCreateTable:
+		if o.PartitionOf {
+			return "CREATE TABLE PARTITION OF"
+		}
 		return "CREATE TABLE"
 	case OpAddColumn:
 		return "ADD COLUMN " + o.Column
 	case OpDropColumn:
 		return "DROP COLUMN " + o.Column
 	case OpAlterColumnType:
-		return "ALTER COLUMN " + o.Column + " TYPE " + o.NewType
+		return "ALTER COLUMN " + o.Column + " TYPE " + formatType(o.NewType, o.NewTypeMods)
 	case OpSetDefault:
 		return "ALTER COLUMN " + o.Column + " SET DEFAULT"
 	case OpDropDefault:
@@ -158,14 +171,47 @@ func (o Op) Describe() string {
 	case OpDetachPartition:
 		return "DETACH PARTITION"
 	case OpCreateIndex:
-		return "CREATE INDEX " + o.Name
+		// An unnamed CREATE INDEX (the server auto-names it) labels
+		// without a trailing name; TrimSpace keeps the label clean.
+		return strings.TrimSpace("CREATE INDEX " + o.Name)
 	case OpDropIndex:
-		return "DROP INDEX " + o.Name
+		return strings.TrimSpace("DROP INDEX " + o.Name)
 	case OpReindex:
-		return "REINDEX " + o.Name
+		return strings.TrimSpace("REINDEX " + o.Name)
 	default:
 		return "unrecognized operation"
 	}
+}
+
+// dropIndexNames renders the dropped index names for the operation label:
+// each object's qualified name, comma-separated when one statement drops
+// several. The name identifies which structure the plan discards, so a
+// label without it would leave a destructive decision anonymous.
+func dropIndexNames(drop *pganalyze.DropStmt) string {
+	names := make([]string, 0, len(drop.GetObjects()))
+	for _, obj := range drop.GetObjects() {
+		parts := make([]string, 0, len(obj.GetList().GetItems()))
+		for _, item := range obj.GetList().GetItems() {
+			parts = append(parts, item.GetString_().GetSval())
+		}
+		names = append(names, strings.Join(parts, "."))
+	}
+	return strings.Join(names, ", ")
+}
+
+// formatType renders a type name with its modifiers — varchar(50),
+// numeric(12,2) — exactly as the grammar spells the target type. The
+// modifier is what distinguishes a widen from a narrow, so a rendering
+// that drops it would collapse changes that route in opposite directions.
+func formatType(name string, mods []int32) string {
+	if len(mods) == 0 {
+		return name
+	}
+	parts := make([]string, len(mods))
+	for i, m := range mods {
+		parts[i] = strconv.FormatInt(int64(m), 10)
+	}
+	return name + "(" + strings.Join(parts, ",") + ")"
 }
 
 // ParseOps parses one SQL statement and returns its typed operations. An
@@ -194,7 +240,10 @@ func ParseOps(sql string) ([]Op, error) {
 		}
 		return ops, nil
 	case node.GetCreateStmt() != nil:
-		return []Op{{Kind: OpCreateTable}}, nil
+		return []Op{{
+			Kind:        OpCreateTable,
+			PartitionOf: node.GetCreateStmt().GetPartbound() != nil,
+		}}, nil
 	case node.GetIndexStmt() != nil:
 		idx := node.GetIndexStmt()
 		return []Op{{
@@ -208,7 +257,7 @@ func ParseOps(sql string) ([]Op, error) {
 		if drop.GetRemoveType() != pganalyze.ObjectType_OBJECT_INDEX {
 			return []Op{{Kind: OpUnrecognized}}, nil
 		}
-		return []Op{{Kind: OpDropIndex, Concurrent: drop.GetConcurrent()}}, nil
+		return []Op{{Kind: OpDropIndex, Name: dropIndexNames(drop), Concurrent: drop.GetConcurrent()}}, nil
 	case node.GetReindexStmt() != nil:
 		re := node.GetReindexStmt()
 		return []Op{{
@@ -283,9 +332,13 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 }
 
 // addColumnOp extracts the shape facts of an added column: its DEFAULT
-// shape and whether it is a stored generated column. Identity and serial
-// columns are reported as expression defaults — their values come from a
-// sequence, which fast default cannot cover.
+// shape, whether it is a stored generated column, and any inline table
+// constraints it carries. Identity and serial columns are reported as
+// expression defaults — their values come from a sequence, which fast
+// default cannot cover. Nullability clauses and the deferrability
+// attributes that modify a preceding FOREIGN KEY add no work of their own
+// and are not reported; any constraint family the engine does not model
+// is reported as ConstraintUnrecognized so the classifier fails closed.
 func addColumnOp(def *pganalyze.ColumnDef) Op {
 	op := Op{Kind: OpAddColumn, Column: def.GetColname()}
 	op.NewType, op.NewTypeMods = typeRef(def.GetTypeName())
@@ -305,6 +358,23 @@ func addColumnOp(def *pganalyze.ColumnDef) Op {
 			op.Default = DefaultExpression
 		case pganalyze.ConstrType_CONSTR_GENERATED:
 			op.GeneratedStored = true
+		case pganalyze.ConstrType_CONSTR_NULL,
+			pganalyze.ConstrType_CONSTR_NOTNULL,
+			pganalyze.ConstrType_CONSTR_ATTR_DEFERRABLE,
+			pganalyze.ConstrType_CONSTR_ATTR_NOT_DEFERRABLE,
+			pganalyze.ConstrType_CONSTR_ATTR_DEFERRED,
+			pganalyze.ConstrType_CONSTR_ATTR_IMMEDIATE:
+			// No scan and no index build of their own.
+		case pganalyze.ConstrType_CONSTR_UNIQUE:
+			op.InlineConstraints = append(op.InlineConstraints, ConstraintUnique)
+		case pganalyze.ConstrType_CONSTR_PRIMARY:
+			op.InlineConstraints = append(op.InlineConstraints, ConstraintPrimaryKey)
+		case pganalyze.ConstrType_CONSTR_FOREIGN:
+			op.InlineConstraints = append(op.InlineConstraints, ConstraintForeignKey)
+		case pganalyze.ConstrType_CONSTR_CHECK:
+			op.InlineConstraints = append(op.InlineConstraints, ConstraintCheck)
+		default:
+			op.InlineConstraints = append(op.InlineConstraints, ConstraintUnrecognized)
 		}
 	}
 	return op

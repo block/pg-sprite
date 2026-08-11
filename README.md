@@ -9,8 +9,8 @@
 
 > Working name — see the naming task in the research build tracker.
 
-An online schema-change engine for **Aurora PostgreSQL** (and RDS/community
-PostgreSQL 14+): a decoupled **planner → router → executor** design where the
+An online schema-change engine for **PostgreSQL** (community, RDS, and
+Aurora; 14+): a decoupled **planner → router → executor** design where the
 planner classifies each change, the router picks a strategy, and
 interchangeable executors carry it out — the cheap native PostgreSQL idiom
 when one exists (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default,
@@ -39,6 +39,18 @@ The codebase is partitioned into a small safety-critical core and a
 periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the
 rules that apply inside the core. Read it before changing anything under
 `pkg/`.
+
+## Install
+
+Release archives for linux/darwin on amd64/arm64, with `checksums.txt`, are
+published on the [releases page](https://github.com/block/pg-sprite/releases)
+once tags exist. The binary is pure Go (the SQL parser is Wasm), so on any
+other platform — or without waiting for a release — `go install` works with
+no C toolchain:
+
+```sh
+go install github.com/block/pg-sprite/cmd/pg-sprite@latest
+```
 
 ## Development
 

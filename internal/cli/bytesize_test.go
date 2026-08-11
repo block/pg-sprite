@@ -33,7 +33,8 @@ func TestByteSizeUnmarshal(t *testing.T) {
 }
 
 func TestByteSizeUnmarshalRejectsInvalid(t *testing.T) {
-	for _, in := range []string{"", "GiB", "1XB", "-5MiB", "0", "1.5GiB"} {
+	// The last two would overflow int64 bytes after unit multiplication.
+	for _, in := range []string{"", "GiB", "1XB", "-5MiB", "0", "1.5GiB", "9999999999GiB", "9223372036854775807KiB"} {
 		t.Run(in, func(t *testing.T) {
 			var b byteSize
 			assert.Error(t, b.UnmarshalText([]byte(in)))
