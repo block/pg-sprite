@@ -93,6 +93,15 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 		       format_type(a.atttypid, a.atttypmod),
 		       a.attnotnull,
 		       COALESCE(pg_get_expr(d.adbin, d.adrelid), ''),
+		       COALESCE((
+		           SELECT true
+		           FROM pg_depend dep
+		           JOIN pg_class s ON s.oid = dep.refobjid AND s.relkind = 'S'
+		           WHERE dep.classid = 'pg_attrdef'::regclass
+		             AND dep.objid = d.oid
+		             AND dep.refclassid = 'pg_class'::regclass
+		           LIMIT 1
+		       ), false),
 		       a.attidentity::text,
 		       a.attgenerated::text
 		FROM pg_attribute a
@@ -107,7 +116,7 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 	for rows.Next() {
 		var c Column
 		var identity, generated string
-		if err := rows.Scan(&c.Name, &c.Type, &c.NotNull, &c.Default, &identity, &generated); err != nil {
+		if err := rows.Scan(&c.Name, &c.Type, &c.NotNull, &c.Default, &c.SequenceDefault, &identity, &generated); err != nil {
 			return nil, fmt.Errorf("scan column: %w", err)
 		}
 		c.Identity = Identity(identity)

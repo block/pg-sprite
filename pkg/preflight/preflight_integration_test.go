@@ -75,6 +75,42 @@ func TestCheckTableSumsPartitions(t *testing.T) {
 	require.ErrorAs(t, err, &sizeErr, "a populated partitioned table must exceed a 1-byte limit")
 }
 
+// The rewrite the guard fears rebuilds every index under the same ACCESS
+// EXCLUSIVE lock, so the measured footprint must include index bytes: a
+// heavily indexed table exceeds a threshold its heap alone would fit under.
+func TestCheckTableCountsIndexBytes(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, a text, b text)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"INSERT INTO %s.t SELECT g, md5(g::text), md5((g+1)::text) FROM generate_series(1, 20000) g", schema))
+	require.NoError(t, err)
+	for _, idx := range []string{
+		fmt.Sprintf("CREATE INDEX ON %s.t (a, b)", schema),
+		fmt.Sprintf("CREATE INDEX ON %s.t (b, a)", schema),
+	} {
+		_, err = pool.Exec(t.Context(), idx)
+		require.NoError(t, err)
+	}
+
+	var heap, total int64
+	require.NoError(t, pool.QueryRow(t.Context(),
+		"SELECT pg_table_size($1::regclass), pg_total_relation_size($1::regclass)",
+		schema+".t").Scan(&heap, &total))
+	require.Greater(t, total, heap, "the fixture's indexes must add measurable bytes")
+
+	// A limit the heap alone would fit under must still refuse, and the
+	// reported size must be the full footprint.
+	_, err = preflight.CheckTable(t.Context(), pool, schema, "t", heap)
+	var sizeErr *preflight.SizeError
+	require.ErrorAs(t, err, &sizeErr)
+	assert.Equal(t, total, sizeErr.TotalBytes)
+}
+
 func TestCheckTableMissingTable(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)

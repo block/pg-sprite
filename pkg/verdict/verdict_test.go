@@ -33,6 +33,21 @@ func TestJSONOmitsEmptyOptionalFields(t *testing.T) {
 	assert.NotContains(t, s, "safer_idiom")
 }
 
+// Reason and Cause values are the machine contract automation switches on:
+// flat kebab-case tokens, no spaces or colons — prose belongs in Detail.
+func TestReasonAndCauseTokensAreFlat(t *testing.T) {
+	for _, tok := range []string{
+		string(ReasonUnsupportedStatement),
+		string(ReasonIndexStatement),
+		string(ReasonTableTooLarge),
+		string(ReasonBudgetExceeded),
+		string(CauseLockBudget),
+		string(CauseStatementBudget),
+	} {
+		assert.Regexp(t, `^[a-z0-9]+(-[a-z0-9]+)*$`, tok)
+	}
+}
+
 func TestStringExecuted(t *testing.T) {
 	s := Verdict{
 		Outcome:   OutcomeExecuted,

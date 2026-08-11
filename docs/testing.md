@@ -42,7 +42,7 @@ this covers *how*). Each rule binds from the phase noted.
 
 ### TM-1 — Lifecycle fixture, not happy-path tests
 
-Every executor/migration integration test drives the **full lifecycle
+Every executor/schema-change integration test drives the **full lifecycle
 through one shared fixture** — start → assert → abort → assert → restart →
 complete → assert — so interrupted-and-retried is the default tested path,
 not a special case. Once checkpointing exists, kill → resume joins the
@@ -62,7 +62,7 @@ pg-delta's snapshot + roundtrip pairing.
 
 Contention tests hold a real `ACCESS EXCLUSIVE` lock from a second
 connection; cancellation tests use context deadlines. After any injected
-failure the test asserts the **durable state** (no wedged migration record,
+failure the test asserts the **durable state** (no wedged schema-change record,
 no leaked shadow objects/slots/triggers) and the ability to proceed — not
 merely the returned error type. *Binds:* Phase 3 onward; full
 phase-boundary kill/resume matrix at Phases 4–8. *Source:* pgroll's
@@ -109,6 +109,20 @@ This obligation is not yet wired into CI: CI builds the binary but does not
 run this acceptance path. *Binds:* Phase 2 (first executing command). *Source:* pgroll `make
 examples` CI job; pg_repack driving its CLI through `pg_regress`.
 
+### TM-9 — The operation must outlive the observer
+
+Any test that observes or interrupts an operation **in flight** (progress
+polling, kill/resume mid-copy, injected faults between phases) seeds enough
+rows that the operation demonstrably spans the observation or injection
+point — otherwise the operation can finish before the fault lands and the
+test passes without testing anything. Vacuous runs are a failure: the test
+asserts the interruption actually hit mid-operation (e.g. the checkpoint
+shows partial progress), not just the final state. *Binds:* Phase 1
+(budget-cancellation fixtures, which seed enough rows that a rewrite cannot
+finish inside its statement budget) onward. *Source:* SchemaBot's in-flight
+progress tests, which seed large row counts so an operation spans a poll
+interval.
+
 **Beyond the peers:** none of the three does generative testing. From
 Phase 3 we add **seeded schema/DDL generation** (generate desired state →
 plan → apply → re-diff must be empty), printing the seed on failure and
@@ -122,7 +136,7 @@ capability no peer suite has.
 | `make test-unit` | Race-enabled unit tests, no Docker (`SKIP_INTEGRATION=1`). |
 | `make test` | Full suite; integration tests start disposable PostgreSQL containers (testcontainers). `PG_VERSION` selects the major (default 16). |
 | `make test-supported-postgres` | Full suite against every supported major, 14 → 18 — the local mirror of the CI matrix. |
-| `make db-up` / `make test-db` / `make db-down` | Long-lived compose database on localhost; the suite connects to it via `PG_DSN` instead of starting per-test containers. Fastest loop for repeated integration runs. |
+| `make db-up` / `make test-db` / `make db-down` | Long-lived compose database on localhost; the suite connects to it via `PG_DSN` instead of starting per-test containers. Fastest loop for repeated integration runs, and the path CI's version matrix uses — per-test containers oversubscribe a small CI runner and get killed mid-test. |
 | `make test-aws-boundary` | AWS-boundary tests against Ministack's RDS/Aurora control plane. Needs Docker only; see the tier table below. |
 
 The harness is [internal/testutil](../internal/testutil/postgres.go):
@@ -210,6 +224,7 @@ the authoritative gate.
 | Script splitting through the grammar (canonical statements, parse failures) | [pkg/statement](../pkg/statement/split_test.go) |
 | Scratch execute-and-introspect, ordered diff, and convergence (`TestDiffConverges`) | [pkg/schemadiff](../pkg/schemadiff/schemadiff_integration_test.go), [diff tests](../pkg/schemadiff/diff_test.go) |
 | CLI `diff`, `fmt`, and classified `migrate --dry-run`, including applying text output and re-diffing to empty (`TestDiffTextPlanIsExecutableSQL`) | [diff integration](../internal/cli/diff_integration_test.go), [fmt](../internal/cli/diff_test.go), [dry-run integration](../internal/cli/dryrun_integration_test.go) |
+| Library front door (`diffplan.Plan`): ordered routed plan, missing-table, no-op, copy-and-swap refusal, never-writes, deterministic fingerprint | [diffplan unit](../pkg/diffplan/diffplan_test.go), [diffplan integration](../pkg/diffplan/diffplan_integration_test.go) |
 | Bounded optimistic native attempt and table preflight | [pkg/executor](../pkg/executor/optimistic_integration_test.go), [pkg/preflight](../pkg/preflight/preflight_integration_test.go) |
 
 ## Landed and deferred test obligations

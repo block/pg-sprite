@@ -117,6 +117,97 @@ func TestMigrateDryRunSuggestsConcurrentIndex(t *testing.T) {
 	assert.Equal(t, 0, indexes, "dry-run must not create the index")
 }
 
+// A safer-idiom decision without a constructed rewrite dry-runs to
+// rewrite-required with no executable SQL, and nothing executes: the
+// engine must not fall back to the submitted blocking form.
+func TestMigrateDryRunInlineConstraintIsRewriteRequired(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+
+	plan := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN c int UNIQUE", schema))
+	assert.Equal(t, router.DispositionRewriteRequired, plan.Disposition)
+	require.Len(t, plan.Statements, 1)
+	st := plan.Statements[0]
+	assert.Equal(t, planner.RouteNative, st.Route)
+	assert.Equal(t, router.BackendNative, st.Backend)
+	require.Len(t, st.Decisions, 1)
+	assert.Equal(t, planner.ReasonSaferIdiom, st.Decisions[0].Reason)
+	assert.Empty(t, st.ExecSQL, "no executable SQL for an unconstructed rewrite")
+
+	var columns int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'c'`, schema).Scan(&columns))
+	assert.Equal(t, 0, columns, "dry-run must not add the column")
+}
+
+// Both front doors must agree on destructiveness: the same DROP COLUMN is
+// destructive whether a human submits it directly (the riskier door) or the
+// diff derives it from a reviewed desired-state file. Destructive is derived
+// from the classifier's decisions, so the agreement holds by construction.
+func TestDryRunAndDiffAgreeOnDestructive(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.t (id int PRIMARY KEY, doomed text)", schema))
+	require.NoError(t, err)
+
+	alterReport := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN doomed", schema))
+	require.Len(t, alterReport.Statements, 1)
+	alterSt := alterReport.Statements[0]
+	assert.True(t, alterSt.Destructive, "the submitted DROP COLUMN must be marked destructive")
+
+	cmd := newDiffCmd(t, url, schema, "CREATE TABLE t (id int PRIMARY KEY);")
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var diffReport plan.Report
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &diffReport))
+	require.Len(t, diffReport.Statements, 1)
+	diffSt := diffReport.Statements[0]
+
+	assert.Equal(t, alterSt.Destructive, diffSt.Destructive, "front doors must agree on destructive")
+	assert.Equal(t, alterSt.Route, diffSt.Route)
+	assert.Equal(t, alterSt.Backend, diffSt.Backend)
+	assert.Equal(t, alterSt.Disposition, diffSt.Disposition)
+	assert.Equal(t, alterSt.SQL, diffSt.SQL,
+		"both doors must render the same change as the same canonical string")
+	assert.Equal(t, alterReport.Fingerprint, diffReport.Fingerprint,
+		"the same plan must carry the same identity through either door")
+	assert.NotEmpty(t, alterReport.Fingerprint)
+}
+
+// An unqualified statement resolves to the schema the engine actually
+// introspected — public — and the report says so: a stored plan must not
+// depend on the reader's search_path to name its target. The report also
+// stamps the server version its classification was derived against.
+func TestDryRunResolvesUnqualifiedSchemaAndStampsServerVersion(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	// A uniquely named table in public: unqualified statements resolve
+	// there, and the unique name keeps a shared PG_DSN database safe.
+	table := testutil.NewPublicTable(t, pool, "(id int PRIMARY KEY, v varchar(50))")
+
+	report := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s ALTER COLUMN v TYPE varchar(100)", table))
+	assert.Equal(t, "public", report.Schema,
+		"the report must name the schema the engine introspected, not echo the submitted qualification")
+	assert.NotEmpty(t, report.ServerVersion,
+		"the report must stamp the server version its classification came from")
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, planner.ReasonBinaryCoercible, report.Statements[0].Decisions[0].Reason,
+		"resolving to public must feed the live facts to the classifier")
+}
+
 // A dry-run against a table that does not exist classifies with zero facts:
 // the unprovable type change routes conservatively instead of failing.
 func TestMigrateDryRunMissingTableIsConservative(t *testing.T) {
