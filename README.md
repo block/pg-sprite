@@ -27,9 +27,11 @@ verdict when it can't prove one (see
 
 **Status: Phases 1 and 2.1–2.5.** The parse boundary, declarative diff,
 classifier, router seam, versioned dry-run plan report, offline linter, and
-advisory `suggest` command are implemented. `pg-sprite migrate --alter '…'` runs a bounded optimistic
-native attempt; routed execution beyond that attempt lands in Phase 3.
-Changes without an available backend get a structured refusal (exit code 2).
+advisory `suggest` command are implemented. `pg-sprite migrate --alter '…'` classifies and
+routes the statement, then executes the routed SQL — the planner's safer native sequence by
+default when the submitted form blocks (reported in the verdict's `executed_sql`), a bounded
+optimistic native attempt otherwise. A gated `--force` runs the submitted form as-is under the
+same budgets. Changes without an available backend get a structured refusal (exit code 2).
 The design docs and the phased
 build plan live in [docs/](docs/) — start with
 [docs/README.md](docs/README.md); the vision — what pg-sprite is and is not —

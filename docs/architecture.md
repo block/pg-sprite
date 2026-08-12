@@ -135,7 +135,7 @@ different levels of commitment:
 | `pkg/plan` | Versioned machine-readable dry-run plan report — the one JSON contract both front doors emit and an orchestrator consumes | exists (Phase 2.5) |
 | `pkg/diffplan` | The declarative front door as a library: desired schema in, routed `plan.Report` out — the CLI `diff` and embedding orchestrators share this one pipeline | exists |
 | `pkg/router` | Route classified statements to native / copy-and-swap / refuse dispositions; copy-and-swap reports unavailable until that backend lands | exists (Phase 2.4) |
-| `pkg/executor` | Bounded optimistic native attempt; the `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) lands in Phase 3 | bounded optimistic attempt exists |
+| `pkg/executor` | Bounded optimistic native attempt, the concurrent index build, and the autocommit safer-sequence runner, with stable outcome codes; the full `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) arrives with the copy-and-swap backend | native execution exists |
 | `pkg/table` | PK-range chunkers (single-column fast path, composite), dynamic time-based sizing | Phase 4 |
 | `pkg/copier` | Parallel chunked copy into the shadow table (never overwrites) | Phase 4 |
 | `pkg/checksum` | The mandatory correctness gate; continuous checker; repair primitive | Phase 5 |

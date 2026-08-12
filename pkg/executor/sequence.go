@@ -137,22 +137,22 @@ func (b SequenceBudget) validate() error {
 // StepReport says what one committed step did, machine-readably.
 type StepReport struct {
 	// SQL is the step's statement as submitted.
-	SQL string
+	SQL string `json:"sql"`
 	// Kind is the execution class the step ran under.
-	Kind StepKind
+	Kind StepKind `json:"kind"`
 	// Duration is the wall-clock time of the step, session setup and
-	// verification included.
-	Duration time.Duration
+	// verification included. It encodes as integer nanoseconds.
+	Duration time.Duration `json:"duration_ns"`
 	// Index carries the concurrent build's verified report; nil for every
 	// other step kind.
-	Index *IndexBuildReport
+	Index *IndexBuildReport `json:"index,omitempty"`
 }
 
 // SequenceReport is the record of a completed sequence run: one report per
 // step, in execution order. It is returned only when every step committed.
 type SequenceReport struct {
 	// Steps are the per-step reports, in execution order.
-	Steps []StepReport
+	Steps []StepReport `json:"steps"`
 }
 
 // SequenceStepError reports that a step failed and the run stopped there.

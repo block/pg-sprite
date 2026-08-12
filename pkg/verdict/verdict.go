@@ -51,6 +51,15 @@ const (
 	// ReasonBudgetExceeded: the optimistic attempt exceeded its lock or
 	// statement budget and was cancelled.
 	ReasonBudgetExceeded Reason = "not-native-safe-budget-exceeded"
+	// ReasonRewriteRequired: the submitted form blocks and must run as a
+	// safer native sequence, but the planner could not construct one (a
+	// multi-operation statement, or a pattern it cannot build). Running
+	// the submitted form would falsify the plan's own reason, so the
+	// engine refuses instead.
+	ReasonRewriteRequired Reason = "not-native-safe-rewrite-required"
+	// ReasonBackendUnavailable: the change routes to an execution strategy
+	// this build does not implement (copy-and-swap).
+	ReasonBackendUnavailable Reason = "backend-unavailable"
 )
 
 // Cause narrows ReasonBudgetExceeded to the budget that was exceeded, so
@@ -88,6 +97,16 @@ type Verdict struct {
 	// SaferIdiom is a native alternative to the refused statement, when one
 	// exists (e.g. CREATE INDEX CONCURRENTLY, ADD CONSTRAINT ... NOT VALID).
 	SaferIdiom string `json:"safer_idiom,omitempty"`
+	// ExecutedSQL is the ordered SQL the engine actually ran when it
+	// substituted the planner's safer native sequence for the submitted
+	// form. Empty when the submitted form ran as-is — a non-empty value is
+	// what tells automation a substitution happened.
+	ExecutedSQL []string `json:"executed_sql,omitempty"`
+	// Forced reports that --force overrode the engine's routing: the
+	// submitted form ran as-is instead of a safer substitution or a
+	// strategy refusal. It is the machine-readable audit record of the
+	// override.
+	Forced bool `json:"forced,omitempty"`
 }
 
 // JSON renders the verdict as a single JSON object.
@@ -119,6 +138,15 @@ func (v Verdict) String() string {
 	}
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  safer:     %s", v.SaferIdiom)
+	}
+	if v.Forced {
+		b.WriteString("\n  forced:    the submitted form ran as-is (--force)")
+	}
+	if len(v.ExecutedSQL) > 0 {
+		b.WriteString("\n  executed as:")
+		for i, sql := range v.ExecutedSQL {
+			fmt.Fprintf(&b, "\n    %d. %s", i+1, sql)
+		}
 	}
 	return b.String()
 }
