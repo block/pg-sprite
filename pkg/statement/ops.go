@@ -92,8 +92,9 @@ type Op struct {
 	Constraint ConstraintKind
 	// NotValid is true for ADD CONSTRAINT ... NOT VALID.
 	NotValid bool
-	// UsingIndex is true for ADD CONSTRAINT ... USING INDEX.
-	UsingIndex bool
+	// IndexName is the prebuilt backing index for ADD CONSTRAINT ...
+	// USING INDEX; empty when the constraint builds its own index.
+	IndexName string
 	// Concurrent is true when the statement carries CONCURRENTLY.
 	Concurrent bool
 	// Unique is true for CREATE UNIQUE INDEX.
@@ -386,10 +387,10 @@ func addColumnOp(def *pganalyze.ColumnDef) Op {
 // addConstraintOp extracts the shape facts of an ADD CONSTRAINT.
 func addConstraintOp(con *pganalyze.Constraint) Op {
 	op := Op{
-		Kind:       OpAddConstraint,
-		Name:       con.GetConname(),
-		NotValid:   con.GetSkipValidation(),
-		UsingIndex: con.GetIndexname() != "",
+		Kind:      OpAddConstraint,
+		Name:      con.GetConname(),
+		NotValid:  con.GetSkipValidation(),
+		IndexName: con.GetIndexname(),
 	}
 	switch con.GetContype() {
 	case pganalyze.ConstrType_CONSTR_PRIMARY:

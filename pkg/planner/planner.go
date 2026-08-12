@@ -418,7 +418,7 @@ func concurrentlyDecision(d Decision, concurrent bool, sql string, single bool) 
 func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, single bool) Decision {
 	d := Decision{Operation: op.Describe()}
 	switch {
-	case op.UsingIndex, op.NotValid:
+	case op.IndexName != "", op.NotValid:
 		// Already the safe pattern's cheap step.
 		d.Route, d.Reason = RouteNative, ReasonOnlineIdiom
 

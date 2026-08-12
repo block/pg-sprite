@@ -87,7 +87,7 @@ func TestExecuteNativeSequenceAppliesSafeDDLIdioms(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.customers (id int PRIMARY KEY);
-		CREATE TABLE %[1]s.orders (id int, customer_id int, amount int);
+		CREATE TABLE %[1]s.orders (id int NOT NULL, customer_id int, amount int);
 		INSERT INTO %[1]s.customers VALUES (1);
 		INSERT INTO %[1]s.orders VALUES (1, 1, 10)`, schema))
 	require.NoError(t, err)
@@ -99,28 +99,162 @@ func TestExecuteNativeSequenceAppliesSafeDDLIdioms(t *testing.T) {
 		fmt.Sprintf("ALTER TABLE %s.orders VALIDATE CONSTRAINT orders_customer_fk", schema),
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY orders_pkey ON %s.orders (id)", schema),
 		fmt.Sprintf("ALTER TABLE %s.orders ADD CONSTRAINT orders_pkey PRIMARY KEY USING INDEX orders_pkey", schema),
+		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY orders_amount_key ON %s.orders (amount)", schema),
+		fmt.Sprintf("ALTER TABLE %s.orders ADD CONSTRAINT orders_amount_key UNIQUE USING INDEX orders_amount_key", schema),
+		fmt.Sprintf("CREATE INDEX CONCURRENTLY orders_customer_idx ON %s.orders (customer_id)", schema),
 		fmt.Sprintf("ALTER TABLE %s.orders ADD COLUMN region text DEFAULT 'emea'", schema),
 		fmt.Sprintf("ALTER TABLE %s.orders ALTER COLUMN region SET DEFAULT 'apac'", schema),
 	}
-	require.NoError(t, executor.ExecuteNativeSequence(t.Context(), pool, sql, buildBudget))
+	require.NoError(t, executor.ExecuteNativeSequence(t.Context(), pool, sql, budget, buildBudget))
 
-	var validatedCheck, validatedFK, primaryKey bool
+	var validatedCheck, validatedFK, primaryKey, unique bool
 	require.NoError(t, pool.QueryRow(t.Context(), `
 		SELECT bool_and(convalidated) FILTER (WHERE conname = 'amount_positive'),
 		       bool_and(convalidated) FILTER (WHERE conname = 'orders_customer_fk'),
-		       bool_or(contype = 'p')
+		       bool_or(contype = 'p'),
+		       bool_or(contype = 'u')
 		  FROM pg_constraint
 		 WHERE conrelid = $1::regclass`, fmt.Sprintf("%s.orders", schema)).Scan(
-		&validatedCheck, &validatedFK, &primaryKey))
+		&validatedCheck, &validatedFK, &primaryKey, &unique))
 	assert.True(t, validatedCheck)
 	assert.True(t, validatedFK)
 	assert.True(t, primaryKey)
+	assert.True(t, unique, "the UNIQUE USING INDEX attachment must land")
+
+	exists, valid := indexState(t, pool, schema, "orders_customer_idx")
+	assert.True(t, exists, "the plain concurrent index must exist")
+	assert.True(t, valid, "the plain concurrent index must be valid")
 
 	var existing, defaultValue string
 	require.NoError(t, pool.QueryRow(t.Context(),
 		fmt.Sprintf("SELECT region, pg_get_expr(d.adbin, d.adrelid) FROM %s.orders o JOIN pg_attrdef d ON d.adrelid = '%s.orders'::regclass JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum WHERE a.attname = 'region'", schema, schema)).Scan(&existing, &defaultValue))
 	assert.Equal(t, "emea", existing, "the fast default must be visible on the existing row")
 	assert.Equal(t, "'apac'::text", defaultValue, "the metadata-only SET DEFAULT must update the catalog default")
+}
+
+// TestExecuteNativeSequenceRefusesNullablePrimaryKeyUsingIndex covers the
+// execution-time catalog proof: attaching a PRIMARY KEY over a nullable key
+// column would make PostgreSQL run an implicit full-table SET NOT NULL scan
+// under ACCESS EXCLUSIVE, so the step is refused. It also proves the
+// documented partial-progress contract: the earlier committed step — the
+// concurrent index build — remains, visible to the caller.
+func TestExecuteNativeSequenceRefusesNullablePrimaryKeyUsingIndex(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %[1]s.orders (id int, amount int); INSERT INTO %[1]s.orders VALUES (1, 10)", schema))
+	require.NoError(t, err)
+
+	sql := []string{
+		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY orders_pkey ON %s.orders (id)", schema),
+		fmt.Sprintf("ALTER TABLE %s.orders ADD CONSTRAINT orders_pkey PRIMARY KEY USING INDEX orders_pkey", schema),
+	}
+	err = executor.ExecuteNativeSequence(t.Context(), pool, sql, budget, buildBudget)
+
+	require.ErrorIs(t, err, executor.ErrBackingIndexNotProven)
+	assert.ErrorContains(t, err, "execute native step 2")
+
+	exists, valid := indexState(t, pool, schema, "orders_pkey")
+	assert.True(t, exists, "the committed earlier step must remain")
+	assert.True(t, valid, "the committed earlier step must remain valid")
+	var primaryKey bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT COALESCE(bool_or(contype = 'p'), false) FROM pg_constraint WHERE conrelid = $1::regclass`,
+		fmt.Sprintf("%s.orders", schema)).Scan(&primaryKey))
+	assert.False(t, primaryKey, "the refused attachment must not have executed")
+}
+
+// TestExecuteNativeSequenceUsingIndexProofRunsUnderTableLock covers the
+// proof-then-act coupling: the backing-index proof runs only after the
+// attachment's ACCESS EXCLUSIVE lock is held, so a concurrent session can
+// never invalidate the proof between inspection and execution. With another
+// session holding the table lock, the step must surface the bounded lock
+// budget — not a refusal computed from a snapshot the ALTER would not see.
+func TestExecuteNativeSequenceUsingIndexProofRunsUnderTableLock(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %[1]s.orders (id int, amount int); INSERT INTO %[1]s.orders VALUES (1, 10)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE UNIQUE INDEX CONCURRENTLY orders_pkey ON %s.orders (id)", schema))
+	require.NoError(t, err)
+
+	blocker, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, blocker.Rollback(context.WithoutCancel(t.Context())))
+	})
+	_, err = blocker.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.orders IN ACCESS EXCLUSIVE MODE", schema))
+	require.NoError(t, err)
+
+	// The nullable id column would be refused by the proof — but the proof
+	// must not run until the lock is granted, so the bounded lock wait
+	// fires first.
+	sql := []string{fmt.Sprintf(
+		"ALTER TABLE %s.orders ADD CONSTRAINT orders_pkey PRIMARY KEY USING INDEX orders_pkey", schema)}
+	err = executor.ExecuteNativeSequence(t.Context(), pool, sql, budget, buildBudget)
+
+	require.NotErrorIs(t, err, executor.ErrBackingIndexNotProven,
+		"the proof must not read a snapshot the locked ALTER would not see")
+	var budgetErr *executor.BudgetError
+	require.ErrorAs(t, err, &budgetErr)
+	assert.Equal(t, executor.CauseLock, budgetErr.Cause)
+	assert.Equal(t, budget.LockTimeout, budgetErr.Budget)
+}
+
+// TestExecuteNativeSequenceDirectStepLockBudget covers invariant LK-2 on
+// the direct path: a direct step blocked on its lock is cancelled by the
+// executor-applied lock_timeout and surfaces as a typed *BudgetError, no
+// matter how the pool's session defaults are configured.
+func TestExecuteNativeSequenceDirectStepLockBudget(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int)", schema))
+	require.NoError(t, err)
+
+	blocker, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, blocker.Rollback(context.WithoutCancel(t.Context())))
+	})
+	_, err = blocker.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.t IN ACCESS EXCLUSIVE MODE", schema))
+	require.NoError(t, err)
+
+	sql := []string{fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT c CHECK (id > 0) NOT VALID", schema)}
+	err = executor.ExecuteNativeSequence(t.Context(), pool, sql, budget, buildBudget)
+
+	var budgetErr *executor.BudgetError
+	require.ErrorAs(t, err, &budgetErr)
+	assert.Equal(t, executor.CauseLock, budgetErr.Cause)
+	assert.Equal(t, budget.LockTimeout, budgetErr.Budget)
+}
+
+// TestExecuteNativeSequenceValidateRunsUnderOverallDeadline covers the LK-2
+// exception policy on the validate path: a blocked VALIDATE CONSTRAINT is
+// bounded by the overall deadline (CauseStatement), never cancelled by a
+// per-lock timeout (CauseLock) — the wait policy that keeps a healthy
+// long validation from being killed mid-wait.
+func TestExecuteNativeSequenceValidateRunsUnderOverallDeadline(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (id int);
+		ALTER TABLE %[1]s.t ADD CONSTRAINT c CHECK (id IS NOT NULL) NOT VALID`, schema))
+	require.NoError(t, err)
+
+	blocker, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, blocker.Rollback(context.WithoutCancel(t.Context())))
+	})
+	_, err = blocker.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.t IN ACCESS EXCLUSIVE MODE", schema))
+	require.NoError(t, err)
+
+	sql := []string{fmt.Sprintf("ALTER TABLE %s.t VALIDATE CONSTRAINT c", schema)}
+	tight := executor.ConcurrentBudget{Overall: 500 * time.Millisecond}
+	err = executor.ExecuteNativeSequence(t.Context(), pool, sql, budget, tight)
+
+	var budgetErr *executor.BudgetError
+	require.ErrorAs(t, err, &budgetErr)
+	assert.Equal(t, executor.CauseStatement, budgetErr.Cause, "the overall deadline must fire, not a lock timeout")
+	assert.Equal(t, tight.Overall, budgetErr.Budget)
 }
 
 // TestBuildIndexConcurrentlyRefusesSingleConnectionPool covers the
@@ -550,6 +684,7 @@ func TestBuildIndexConcurrentlyProofsResistCatalogShadowing(t *testing.T) {
 		CREATE TABLE %[1]s.pg_class (oid oid, relname name, relnamespace oid);
 		CREATE TABLE %[1]s.pg_namespace (oid oid, nspname name);
 		CREATE TABLE %[1]s.pg_index (indexrelid oid, indisvalid boolean);
+		CREATE TABLE %[1]s.pg_attribute (attrelid oid, attnum smallint, attnotnull boolean);
 		CREATE TABLE %[1]s.pg_stat_activity (pid int, state text);
 		CREATE FUNCTION %[1]s.to_regclass(text) RETURNS regclass
 			LANGUAGE sql IMMUTABLE AS 'SELECT NULL::regclass';
@@ -593,6 +728,21 @@ func TestBuildIndexConcurrentlyProofsResistCatalogShadowing(t *testing.T) {
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_dup ON %s.t (c)", schema), buildBudget)
 	require.ErrorIs(t, err, executor.ErrPreexistingInvalidIndex,
 		"the pre-build inspection must see the real catalog through the impostors")
+
+	// The USING INDEX attachment proof: the impostor pg_index and
+	// to_regclass would find no backing index and refuse a safe
+	// attachment; the impostor pg_attribute would hide every NOT NULL. The
+	// proof must see the real catalogs and admit this attachment.
+	err = executor.ExecuteNativeSequence(t.Context(), pool, []string{
+		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY t_id_key ON %s.t (id)", schema),
+		fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT t_id_key UNIQUE USING INDEX t_id_key", schema),
+	}, budget, buildBudget)
+	require.NoError(t, err, "the attachment proof must see the real catalog through the impostors")
+	var attached bool
+	require.NoError(t, bootstrap.QueryRow(t.Context(),
+		`SELECT COALESCE(bool_or(contype = 'u'), false) FROM pg_constraint WHERE conrelid = $1::regclass`,
+		fmt.Sprintf("%s.t", schema)).Scan(&attached))
+	assert.True(t, attached, "the UNIQUE constraint must be attached")
 }
 
 func TestBuildIndexConcurrentlyTerminatedBackendReportsItsLeftover(t *testing.T) {

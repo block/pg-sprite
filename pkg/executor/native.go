@@ -112,9 +112,10 @@ const sessionCleanupTimeout = 5 * time.Second
 // fail-closed — instead of eventually proven.
 const verdictTimeout = 30 * time.Second
 
-// ConcurrentBudget bounds one CONCURRENTLY statement (index build or drop).
+// ConcurrentBudget bounds one statement under the overall-deadline wait
+// policy: a CONCURRENTLY index build or drop, or a VALIDATE CONSTRAINT.
 //
-// CONCURRENTLY statements get their own wait policy instead of the blanket
+// These statements get their own wait policy instead of the blanket
 // per-lock timeout: their waits for other transactions' snapshots are lock
 // waits by implementation, so a session lock_timeout would cancel a healthy
 // build mid-wait — and that cancellation is exactly what creates the invalid
@@ -482,16 +483,29 @@ func admitConcurrentIndexBuild(sql string) (concurrentIndexBuild, error) {
 	if !ops[0].Concurrent {
 		return build, fmt.Errorf("%w: the statement is a plain CREATE INDEX", ErrNotConcurrentIndexBuild)
 	}
-	if ops[0].Name == "" {
-		return build, ErrUnnamedIndex
-	}
-	if ops[0].IfNotExists {
-		return build, ErrIfNotExistsUnsupported
-	}
-	if st.Schema() == "" {
-		return build, ErrUnqualifiedTable
+	if err := admitConcurrentIndexShape(ops[0], st.Schema()); err != nil {
+		return build, err
 	}
 	return concurrentIndexBuild{index: ops[0].Name, tableSchema: st.Schema(), table: st.Table()}, nil
+}
+
+// admitConcurrentIndexShape holds the statement-shape refusals a concurrent
+// build can prove with no database: a name (recovery and verification key on
+// it), no IF NOT EXISTS (a name-only no-op proves nothing), and a
+// schema-qualified table (session-independent resolution). Shared by the
+// build's own admission and by sequence preparation, so a statically
+// refusable step is refused before any earlier step executes.
+func admitConcurrentIndexShape(op statement.Op, schema string) error {
+	if op.Name == "" {
+		return ErrUnnamedIndex
+	}
+	if op.IfNotExists {
+		return ErrIfNotExistsUnsupported
+	}
+	if schema == "" {
+		return ErrUnqualifiedTable
+	}
+	return nil
 }
 
 // indexTarget is the resolved identity the recovery paths key on: the
@@ -712,13 +726,23 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 // that sliver of the deadline reads as the budget — but the two truths
 // coincide there. Anything else is wrapped as an operational failure.
 func asConcurrentBudgetError(err error, b ConcurrentBudget, elapsed time.Duration) error {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == sqlstateQueryCanceled {
-		if elapsed >= b.Overall {
-			return &BudgetError{Cause: CauseStatement, Budget: b.Overall}
-		}
-		return fmt.Errorf("%w (after %s of a %s budget): %w",
-			ErrCancelledExternally, elapsed.Round(time.Millisecond), b.Overall, err)
+	if typed := typeOverallBudgetError(err, b, elapsed); typed != nil {
+		return typed
 	}
 	return fmt.Errorf("concurrent index build: %w", err)
+}
+
+// typeOverallBudgetError performs the 57014 disambiguation for any
+// statement running under an overall-deadline budget, and returns nil when
+// the error is not a cancellation — the caller supplies its own wrap.
+func typeOverallBudgetError(err error, b ConcurrentBudget, elapsed time.Duration) error {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != sqlstateQueryCanceled {
+		return nil
+	}
+	if elapsed >= b.Overall {
+		return &BudgetError{Cause: CauseStatement, Budget: b.Overall}
+	}
+	return fmt.Errorf("%w (after %s of a %s budget): %w",
+		ErrCancelledExternally, elapsed.Round(time.Millisecond), b.Overall, err)
 }

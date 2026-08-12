@@ -178,7 +178,7 @@ func TestParseOpsShapes(t *testing.T) {
 		{
 			name: "add unique using index",
 			sql:  "ALTER TABLE t ADD CONSTRAINT u UNIQUE USING INDEX u_idx",
-			want: statement.Op{Kind: statement.OpAddConstraint, Name: "u", Constraint: statement.ConstraintUnique, UsingIndex: true},
+			want: statement.Op{Kind: statement.OpAddConstraint, Name: "u", Constraint: statement.ConstraintUnique, IndexName: "u_idx"},
 		},
 		{
 			name: "add check not valid",
