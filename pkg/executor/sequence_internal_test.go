@@ -85,6 +85,16 @@ func TestAdmitStepRefusals(t *testing.T) {
 			wantErr: ErrUnsupportedSequenceStep,
 		},
 		{
+			name:    "an unnamed concurrent build is refused at admission, not mid-run",
+			sql:     `CREATE UNIQUE INDEX CONCURRENTLY ON s.t (v)`,
+			wantErr: ErrUnnamedIndex,
+		},
+		{
+			name:    "IF NOT EXISTS on a concurrent build is refused at admission, not mid-run",
+			sql:     `CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS i ON s.t (v)`,
+			wantErr: ErrIfNotExistsUnsupported,
+		},
+		{
 			name:    "DROP INDEX CONCURRENTLY is not driven",
 			sql:     `DROP INDEX CONCURRENTLY s.i`,
 			wantErr: ErrUnsupportedSequenceStep,
@@ -115,9 +125,9 @@ func TestAdmitStepRefusals(t *testing.T) {
 			wantErr: ErrInvariantViolation,
 		},
 		{
-			name:    "an unqualified index build against a qualified preflight breaks the binding",
+			name:    "an unqualified index build is refused by the build admission before the target check",
 			sql:     `CREATE UNIQUE INDEX CONCURRENTLY i ON t (v)`,
-			wantErr: ErrInvariantViolation,
+			wantErr: ErrUnqualifiedTable,
 		},
 	}
 	for _, tt := range tests {
@@ -126,6 +136,16 @@ func TestAdmitStepRefusals(t *testing.T) {
 			require.ErrorIs(t, err, tt.wantErr)
 		})
 	}
+}
+
+// TestAdmitStepRefusesUnqualifiedBuildUnderUnqualifiedPreflight covers the
+// one build-qualification gap the ST-7 target check cannot see: with an
+// unqualified preflight, an unqualified build's schemas match ("" == ""),
+// so only the delegated executor's own admission refuses it — and that
+// refusal must fire here, before anything executes.
+func TestAdmitStepRefusesUnqualifiedBuildUnderUnqualifiedPreflight(t *testing.T) {
+	_, err := admitStep("", "t", `CREATE UNIQUE INDEX CONCURRENTLY i ON t (v)`)
+	require.ErrorIs(t, err, ErrUnqualifiedTable)
 }
 
 func TestAdmitSequenceNamesTheOffendingStep(t *testing.T) {

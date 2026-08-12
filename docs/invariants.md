@@ -139,10 +139,15 @@ The cutover swap is the only `ACCESS EXCLUSIVE` acquisition in the happy path, a
 strong-lock acquisition (swap, catalog flips, trigger install in fallback mode) runs under
 `lock_timeout` + bounded retry/backoff so the engine never sits at the head of the lock queue
 (mysql-vs-postgresql § the lock queue).
-**Exception policy required:** `CREATE INDEX CONCURRENTLY` (and `REINDEX CONCURRENTLY`,
-`VALIDATE CONSTRAINT`) wait on other transactions via lock waits that a naive `lock_timeout`
-cancels — leaving an `INVALID` index. These statements get their own wait policy rather than the
-blanket timeout. *Enforced:* every DDL execution path in the native and copy-and-swap executors.
+**Exception policy required:** `CREATE INDEX CONCURRENTLY` and `REINDEX CONCURRENTLY` wait on
+other transactions via lock waits that a naive `lock_timeout` cancels — leaving an `INVALID`
+index — so they get their own wait policy (no per-lock timeout, one overall statement deadline)
+rather than the blanket timeout. `VALIDATE CONSTRAINT` is different in kind: its cancellation is
+transactionally clean (the constraint simply stays `NOT VALID`; no debris), so the sequence
+executor's validate class deliberately keeps a bounded per-lock timeout — queueing behind a
+conflicting lock holder must not stall a sequence for the whole scan budget — while the scan
+itself runs under its own generous overall budget. *Enforced:* every DDL execution path in the
+native and copy-and-swap executors.
 *Source:* [design-principles](design-principles.md#correctness-and-safety), mysql-vs-postgresql;
 CIC exception from the validation review.
 
@@ -238,7 +243,9 @@ which enforces exactly one statement through the real grammar — and refuses, b
 executes, any statement whose target table does not match the preflight proof it was handed.
 A proof for one table can never smuggle SQL against another, and a multi-statement string can
 never reach the database through the executor (pgx's simple protocol would happily run all of
-it). *Enforced:* `pkg/executor` (`AttemptNative`), `pkg/statement` (proof construction).
+it). *Enforced:* `pkg/executor` (`AttemptNative`; `RunSequence` admission re-proves every step's
+target against the preflight proof before the first step executes), `pkg/statement` (proof
+construction).
 *Source:* adversarial review of the optimistic front door.
 
 ## Refusals and preflight (RF)

@@ -38,6 +38,24 @@ func TestRunSequenceRejectsUnboundedBudgets(t *testing.T) {
 				b.Validate.Overall = time.Duration(math.MaxInt32)*time.Millisecond + time.Millisecond
 			},
 		},
+		{
+			name: "validate lock budget above the server ceiling",
+			mutate: func(b *executor.SequenceBudget) {
+				b.Validate.LockTimeout = time.Duration(math.MaxInt32)*time.Millisecond + time.Millisecond
+			},
+		},
+		{
+			name: "brief statement budget above the server ceiling",
+			mutate: func(b *executor.SequenceBudget) {
+				b.Brief.StatementTimeout = time.Duration(math.MaxInt32)*time.Millisecond + time.Millisecond
+			},
+		},
+		{
+			name: "brief lock budget above the server ceiling",
+			mutate: func(b *executor.SequenceBudget) {
+				b.Brief.LockTimeout = time.Duration(math.MaxInt32)*time.Millisecond + time.Millisecond
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

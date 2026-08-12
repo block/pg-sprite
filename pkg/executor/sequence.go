@@ -95,6 +95,9 @@ func (b ValidateBudget) validate() error {
 	if b.LockTimeout < minBudget {
 		return fmt.Errorf("validate lock budget must be at least %s, got %s", minBudget, b.LockTimeout)
 	}
+	if b.LockTimeout > maxOverallBudget {
+		return fmt.Errorf("validate lock budget must be at most %s, got %s", maxOverallBudget, b.LockTimeout)
+	}
 	if b.Overall < minBudget {
 		return fmt.Errorf("validate overall budget must be at least %s, got %s", minBudget, b.Overall)
 	}
@@ -215,6 +218,14 @@ func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 	if err != nil {
 		return rep, err
 	}
+	// INV: LK-2 — the concurrent executor's pool guard is re-proven for
+	// the whole sequence before the first step executes: a too-small pool
+	// is decidable now, and letting BuildIndexConcurrently discover it
+	// mid-run would leave a committed prefix behind a refusal this
+	// executor could have made up front.
+	if sequenceHasConcurrentBuild(admitted) && pool.Config().MaxConns < 2 {
+		return rep, ErrPoolTooSmall
+	}
 	for i, step := range admitted {
 		start := time.Now()
 		var indexReport *IndexBuildReport
@@ -230,6 +241,7 @@ func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 				LockTimeout:      b.Validate.LockTimeout,
 				StatementTimeout: b.Validate.Overall,
 			})
+			err = corroborateValidateCancel(err, b.Validate, time.Since(start))
 		case StepBrief:
 			err = AttemptNative(ctx, pool, pt, step.st, b.Brief)
 		default:
@@ -248,6 +260,43 @@ func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 		})
 	}
 	return rep, nil
+}
+
+// sequenceHasConcurrentBuild reports whether any admitted step is a
+// concurrent index build — the class whose executor needs the two-connection
+// pool guarantee.
+func sequenceHasConcurrentBuild(steps []sequenceStep) bool {
+	for _, s := range steps {
+		if s.kind == StepConcurrentIndexBuild {
+			return true
+		}
+	}
+	return false
+}
+
+// corroborateValidateCancel disambiguates a statement-cancellation verdict
+// on a validate step. SQLSTATE 57014 is query_canceled generally — an
+// operator's pg_cancel_backend raises the same code as statement_timeout —
+// and the brief mapping reads it as statement-budget exhaustion. That
+// conflation is tolerable inside a seconds-scale brief budget, but wrong
+// across the validate class's generous budget: a deliberate cancel hours
+// early would read as exhaustion, and exhaustion invites escalation to a
+// heavier strategy when the cancel means the change should be left alone.
+// As in the concurrent build executor, elapsed time corroborates: the
+// executor's own statement_timeout cannot fire before the budget elapses,
+// so an earlier cancellation came from outside. The original verdict is
+// folded into the message, not the chain — the whole point is that this
+// failure is not a *BudgetError.
+func corroborateValidateCancel(err error, b ValidateBudget, elapsed time.Duration) error {
+	var budgetErr *BudgetError
+	if !errors.As(err, &budgetErr) || budgetErr.Cause != CauseStatement {
+		return err
+	}
+	if elapsed >= b.Overall {
+		return err
+	}
+	return fmt.Errorf("%w (after %s of a %s budget): %s",
+		ErrCancelledExternally, elapsed.Round(time.Millisecond), b.Overall, err.Error())
 }
 
 // admitSequence re-parses and classifies every step and verifies each
@@ -288,6 +337,14 @@ func admitStep(schema, table, sql string) (sequenceStep, error) {
 			// A blocking CREATE INDEX never belongs in a safer sequence;
 			// the planner emits only the concurrent form.
 			return sequenceStep{}, fmt.Errorf("blocking CREATE INDEX: %w", ErrUnsupportedSequenceStep)
+		}
+		// The delegated executor's statically-decidable admission
+		// requirements — a named index, no IF NOT EXISTS, a
+		// schema-qualified table — are proven here too: a refusal
+		// decidable before anything executes must never fire mid-run
+		// after earlier steps committed.
+		if _, err := admitConcurrentIndexBuild(sql); err != nil {
+			return sequenceStep{}, err
 		}
 		step = sequenceStep{st: st, kind: StepConcurrentIndexBuild}
 	case statement.KindAlterTable:

@@ -341,11 +341,14 @@ Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operatio
 | `migrate --force` (planned Phase 3) | Run each statement **exactly as submitted**, bypassing the safe rewrite. Gated — see below. |
 
 The classifier constructs `CREATE INDEX CONCURRENTLY` and other safer sequences today, and the
-library can execute them — `pkg/executor`'s sequence executor runs a safer sequence under the
-autocommit-each-step contract (brief steps bounded like an optimistic attempt, the validation
-scan and concurrent builds under their own budgets). The CLI front door does not yet route to
-it: `diff` and `migrate --dry-run` render the sequences, and Phase 3's substitution work wires
-the classified route into execution.
+library executes the multi-step idiom families — `pkg/executor`'s sequence executor runs a safer
+sequence under the autocommit-each-step contract (brief steps bounded like an optimistic
+attempt, the validation scan and concurrent builds under their own budgets). The one-step
+`CONCURRENTLY` rewrites the classifier also emits (`DROP INDEX`, `REINDEX`,
+`DETACH PARTITION`) are not yet driven: the sequence executor refuses them typed, because a
+cancelled wait leaves recovery states it does not yet own. The CLI front door does not yet
+route to it: `diff` and `migrate --dry-run` render the sequences, and Phase 3's substitution
+work wires the classified route into execution.
 
 ### The `--force` gate
 
