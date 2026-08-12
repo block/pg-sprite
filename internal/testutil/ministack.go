@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"testing"
@@ -27,6 +28,7 @@ import (
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -46,8 +48,11 @@ const (
 	// the sibling database container, which dominates this budget.
 	auroraProvisionDeadline = 5 * time.Minute
 	auroraProvisionPoll     = 2 * time.Second
-	// rotationDeadline bounds how long a rotated master password may take
-	// to land on the running database after managed rotation returns.
+	// rotationDeadline bounds each phase of the managed-password flow
+	// separately: how long a written secret may take to become resolvable
+	// through the control plane, and how long a rotated password may take
+	// to land on the running database. A rotation that exhausts both
+	// budgets therefore takes up to twice this value.
 	rotationDeadline = time.Minute
 	rotationPoll     = time.Second
 	// rdsStatusAvailable is the RDS API status of a usable instance.
@@ -147,20 +152,28 @@ type AuroraCluster struct {
 // master password the cluster currently accepts. After Rotate, that is
 // the rotated password.
 func (c *AuroraCluster) URL() string {
-	return c.URLWithPassword(c.password)
+	return c.urlWithPassword(c.password)
 }
 
-// URLWithPassword returns a connection URL using the given master
-// password — for tests that deliberately present stale or wrong
-// credentials.
+// urlWithPassword returns a connection URL using the given master
+// password. The password is RDS-generated — the harness does not choose
+// it — so it may contain URL-reserved characters; the URL is assembled
+// with net/url, which escapes each component, never by string
+// interpolation.
 //
 // sslmode=disable: the sibling database container runs plain PostgreSQL
 // without TLS, and the endpoint is not an *.rds.amazonaws.com hostname,
 // so the production TLS path is out of scope for this tier (it is
 // proven by pkg/dbconn's TLS integration tests).
-func (c *AuroraCluster) URLWithPassword(password string) string {
-	return fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=disable",
-		fixtureUser, password, c.addr, fixtureDatabase)
+func (c *AuroraCluster) urlWithPassword(password string) string {
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     url.UserPassword(fixtureUser, password),
+		Host:     c.addr,
+		Path:     "/" + fixtureDatabase,
+		RawQuery: "sslmode=disable",
+	}
+	return u.String()
 }
 
 // Rotate asks RDS to generate a new managed master password, resolves it
@@ -176,27 +189,11 @@ func (c *AuroraCluster) Rotate(t *testing.T) {
 	})
 	require.NoError(t, err, "rotate RDS-managed master password")
 
-	// Rotation and the secret write are the control plane's to sequence:
-	// poll until the secret no longer resolves to the pre-rotation
-	// password, rather than assuming the write landed before
-	// ModifyDBCluster returned.
-	var rotated string
-	require.Eventuallyf(t, func() bool {
-		password, err := resolveManagedMasterPassword(ctx, c.Client, c.secrets, c.ClusterID)
-		if err != nil {
-			return false
-		}
-		if password == c.password {
-			return false
-		}
-		rotated = password
-		return true
-	}, rotationDeadline, rotationPoll,
-		"managed rotation did not produce a new password within the deadline")
+	rotated := awaitManagedMasterPassword(t, c.Client, c.secrets, c.ClusterID, c.password)
 
 	// The rotation must land on the real database, not just the control
 	// plane's metadata: poll until the new password authenticates.
-	rotatedURL := c.URLWithPassword(rotated)
+	rotatedURL := c.urlWithPassword(rotated)
 	require.Eventuallyf(t, func() bool {
 		conn, err := pgx.Connect(ctx, rotatedURL)
 		if err != nil {
@@ -264,13 +261,14 @@ func ProvisionAuroraPostgres(t *testing.T) *AuroraCluster {
 		ManageMasterUserPassword: aws.Bool(true),
 	})
 	require.NoError(t, err, "create aurora-postgresql cluster")
-	password := managedMasterPassword(t, clnt, secrets, clusterID)
 	// The database backing the cluster is a sibling Docker container, not a
 	// child of the Ministack container — terminating Ministack alone would
 	// leak it. Deleting the cluster through the API reaps it. Cleanups run
 	// last-in-first-out, so the instance delete registered below runs
 	// before this — matching the RDS rule that a cluster cannot be deleted
-	// while it still has instances.
+	// while it still has instances. Registered before anything fallible
+	// touches the cluster, so a failure later in provisioning cannot leak
+	// the sibling container.
 	t.Cleanup(func() {
 		cleanupCtx := context.WithoutCancel(t.Context())
 		if _, err := clnt.DeleteDBCluster(cleanupCtx, &rds.DeleteDBClusterInput{
@@ -280,6 +278,7 @@ func ProvisionAuroraPostgres(t *testing.T) *AuroraCluster {
 			t.Logf("delete cluster %s: %v", clusterID, err)
 		}
 	})
+	password := awaitManagedMasterPassword(t, clnt, secrets, clusterID, "")
 
 	instanceID := clusterID + "-1"
 	_, err = clnt.CreateDBInstance(ctx, &rds.CreateDBInstanceInput{
@@ -422,13 +421,30 @@ func awsClients(t *testing.T, ctr testcontainers.Container) (*rds.Client, *secre
 	return rdsClient, secretsClient
 }
 
-// managedMasterPassword resolves the cluster's RDS-managed master password,
-// failing the test on any resolution error.
-func managedMasterPassword(t *testing.T, rdsClient *rds.Client, secretsClient *secretsmanager.Client, clusterID string) string {
+// awaitManagedMasterPassword polls until the cluster's RDS-managed master
+// password resolves through the control plane and differs from previous,
+// then returns it. The secret write is the control plane's to sequence —
+// after CreateDBCluster and after a rotation alike, the caller cannot
+// assume the write landed before the API call returned, so a transient
+// resolution failure is retried rather than failing the test. Pass
+// previous "" during provisioning, when any resolved password is
+// acceptable. A deadline failure reports the last resolution error.
+func awaitManagedMasterPassword(t *testing.T, rdsClient *rds.Client, secretsClient *secretsmanager.Client, clusterID, previous string) string {
 	t.Helper()
-	password, err := resolveManagedMasterPassword(t.Context(), rdsClient, secretsClient, clusterID)
-	require.NoError(t, err, "resolve managed master password")
-	return password
+	var resolved string
+	require.EventuallyWithTf(t, func(collect *assert.CollectT) {
+		password, err := resolveManagedMasterPassword(t.Context(), rdsClient, secretsClient, clusterID)
+		if !assert.NoErrorf(collect, err, "resolve managed master password for cluster %s", clusterID) {
+			return
+		}
+		if !assert.NotEqual(collect, previous, password,
+			"managed secret still resolves to the previous password") {
+			return
+		}
+		resolved = password
+	}, rotationDeadline, rotationPoll,
+		"managed master password for cluster %s did not become resolvable within the deadline", clusterID)
+	return resolved
 }
 
 // resolveManagedMasterPassword discovers the cluster's managed master-user
