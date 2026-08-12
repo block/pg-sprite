@@ -172,11 +172,14 @@ func (c *MigrateCmd) auditForce(st statement.Statement, rs router.Statement) {
 }
 
 // execute runs execSQL through the sequence executor: the planner's safer
-// sequence when one was substituted, otherwise the submitted form. Blind
-// attempts of the submitted form — including forced ones — are size-guarded;
-// substituted sequences and planner-proven online idioms are not — long work
-// on large tables is their purpose, and every brief step is still
-// budget-bounded.
+// sequence when one was substituted, otherwise the submitted form. A forced
+// run bypasses the sequence executor's shape admission — the acknowledged
+// override runs the submitted form as one blind bounded attempt, whatever
+// its kind — so it goes through the optimistic executor directly, under the
+// same brief budgets. Blind attempts of the submitted form — including
+// forced ones — are size-guarded; substituted sequences and planner-proven
+// online idioms are not — long work on large tables is their purpose, and
+// every brief step is still budget-bounded.
 func (c *MigrateCmd) execute(ctx context.Context, out io.Writer, pool *pgxpool.Pool,
 	st statement.Statement, execSQL []string, plan planner.Plan,
 	substituted, forced bool, logger *slog.Logger) error {
@@ -187,7 +190,7 @@ func (c *MigrateCmd) execute(ctx context.Context, out io.Writer, pool *pgxpool.P
 	pt, err := preflight.CheckTable(ctx, pool, st.Schema(), st.Table(), limit)
 	var sizeErr *preflight.SizeError
 	if errors.As(err, &sizeErr) {
-		return c.emit(out, sizeGuardVerdict(st, sizeErr))
+		return c.emit(out, sizeGuardVerdict(st, sizeErr, forced))
 	}
 	if err != nil {
 		return err
@@ -205,22 +208,22 @@ func (c *MigrateCmd) execute(ctx context.Context, out io.Writer, pool *pgxpool.P
 		Validate:   executor.ValidateBudget{LockTimeout: c.LockTimeout, Overall: c.ValidateTimeout},
 	}
 	start := time.Now()
-	_, err = executor.RunSequence(ctx, pool, pt, execSQL, budget)
+	if forced {
+		err = executor.AttemptNative(ctx, pool, pt, st, budget.Brief)
+	} else {
+		_, err = executor.RunSequence(ctx, pool, pt, execSQL, budget)
+	}
 	elapsed := time.Since(start)
-	var budgetErr *executor.BudgetError
-	if err != nil && !substituted && errors.As(err, &budgetErr) {
-		// The blind attempt of the submitted form exceeded a budget and was
-		// cancelled without committing — the Phase 1 refusal contract. A
-		// forced attempt is bounded by the same budgets: --force overrides
-		// routing, never the executor's protections.
-		logger.Debug("optimistic attempt cancelled",
-			"cause", budgetErr.Cause, "budget", budgetErr.Budget, "elapsed", elapsed)
-		return c.emit(out, budgetVerdict(st, budgetErr))
+	if v, refused := execRefusal(st, err, substituted, forced, onlineIdiomPlan(plan)); refused {
+		logger.Debug("execution refused",
+			"reason", string(v.Reason), "cause", string(v.Cause), "elapsed", elapsed)
+		return c.emit(out, v)
 	}
 	if err != nil {
-		// A failed substituted step is an operational failure, not a
-		// refusal: the typed *SequenceStepError names the failed step and
-		// the committed prefix that remains.
+		// Everything else is an operational failure, not a refusal: the
+		// typed *SequenceStepError names the failed step and the committed
+		// prefix that remains, and an *InvalidIndexError carries the
+		// operator recovery guidance.
 		return fmt.Errorf("run schema change on %s: %w", qualified(st), err)
 	}
 	logger.Debug("schema change committed",
@@ -246,22 +249,70 @@ func (c *MigrateCmd) execute(ctx context.Context, out io.Writer, pool *pgxpool.P
 	return c.emit(out, v)
 }
 
+// execRefusal maps an execution failure to its refusal verdict, when the
+// failure belongs to the refusal contract rather than the operational-error
+// exit: a static admission refusal (decided before anything executed), or a
+// budget cancellation of a non-substituted attempt. An *InvalidIndexError
+// is never a refusal, even when a budget cancellation is buried inside it —
+// invalid-index debris is the one outcome that needs an operator, and its
+// typed error carries the recovery guidance a budget verdict would conceal.
+func execRefusal(st statement.Statement, err error,
+	substituted, forced, online bool) (verdict.Verdict, bool) {
+	if err == nil {
+		return verdict.Verdict{}, false
+	}
+	if isAdmissionRefusal(err) {
+		return admissionRefusalVerdict(st, err, forced), true
+	}
+	var invalidErr *executor.InvalidIndexError
+	if errors.As(err, &invalidErr) {
+		return verdict.Verdict{}, false
+	}
+	var budgetErr *executor.BudgetError
+	if !substituted && errors.As(err, &budgetErr) {
+		// The blind attempt of the submitted form exceeded a budget and was
+		// cancelled without committing — the Phase 1 refusal contract. A
+		// forced attempt is bounded by the same budgets: --force overrides
+		// routing, never the executor's protections.
+		return budgetVerdict(st, budgetErr, forced, online), true
+	}
+	return verdict.Verdict{}, false
+}
+
+// isAdmissionRefusal reports whether err is one of the executor's static
+// admission refusals: decided from the statement's shape before anything
+// executes, so it maps to a refusal verdict, not an operational error. A
+// *SequenceStepError wrapper means execution started, which is never an
+// admission refusal.
+func isAdmissionRefusal(err error) bool {
+	var stepErr *executor.SequenceStepError
+	if errors.As(err, &stepErr) {
+		return false
+	}
+	return errors.Is(err, executor.ErrUnsupportedSequenceStep) ||
+		errors.Is(err, executor.ErrUnnamedIndex) ||
+		errors.Is(err, executor.ErrIfNotExistsUnsupported)
+}
+
+// onlineIdiomPlan reports whether the plan proved every operation an online
+// idiom (CONCURRENTLY, NOT VALID, VALIDATE): the submitted form already is
+// the safe pattern, and running long on a large table is its purpose.
+func onlineIdiomPlan(p planner.Plan) bool {
+	for _, d := range p.Decisions {
+		if d.Reason != planner.ReasonOnlineIdiom {
+			return false
+		}
+	}
+	return true
+}
+
 // sizeGuardApplies reports whether the size guard protects this run. It
 // guards exactly the blind attempt of the submitted form: when the engine
 // substituted the planner's safer sequence, or when the plan proved every
-// operation an online idiom (CONCURRENTLY, NOT VALID, VALIDATE), long work
-// on a large table is the pattern's purpose and the guard would refuse the
-// very tables the pattern serves.
+// operation an online idiom, long work on a large table is the pattern's
+// purpose and the guard would refuse the very tables the pattern serves.
 func sizeGuardApplies(p planner.Plan, substituted bool) bool {
-	if substituted {
-		return false
-	}
-	for _, d := range p.Decisions {
-		if d.Reason != planner.ReasonOnlineIdiom {
-			return true
-		}
-	}
-	return false
+	return !substituted && !onlineIdiomPlan(p)
 }
 
 // emit prints the verdict in the selected format and returns ErrRefused for
@@ -376,13 +427,16 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 }
 
 // sizeGuardVerdict is the refusal for tables above the size threshold, where
-// even a budget-bounded attempt would visibly stall the table.
-func sizeGuardVerdict(st statement.Statement, sizeErr *preflight.SizeError) verdict.Verdict {
+// even a budget-bounded attempt would visibly stall the table. A refused
+// forced attempt still records the override: the operator asked for the
+// submitted form and the guard said no.
+func sizeGuardVerdict(st statement.Statement, sizeErr *preflight.SizeError, forced bool) verdict.Verdict {
 	return verdict.Verdict{
 		Outcome:   verdict.OutcomeRefused,
 		Reason:    verdict.ReasonTableTooLarge,
 		Statement: st.SQL(),
 		Table:     qualified(st),
+		Forced:    forced,
 		Detail: fmt.Sprintf("table is %d bytes on disk (heap, indexes, and TOAST), above the %d-byte "+
 			"--max-table-size threshold. pg-sprite cannot yet prove this change is instant on a table this "+
 			"size; if it requires a rewrite, a cancelled attempt is not a free probe — it would hold "+
@@ -391,26 +445,53 @@ func sizeGuardVerdict(st statement.Statement, sizeErr *preflight.SizeError) verd
 	}
 }
 
+// admissionRefusalVerdict is the refusal for a statement the gate admits but
+// the executor's static admission refuses before anything executes: an
+// unnamed index build, IF NOT EXISTS on a concurrent build, or a substituted
+// step shape the sequence executor does not drive yet (DETACH PARTITION
+// CONCURRENTLY). The typed error carries the explanation.
+func admissionRefusalVerdict(st statement.Statement, err error, forced bool) verdict.Verdict {
+	return verdict.Verdict{
+		Outcome:   verdict.OutcomeRefused,
+		Reason:    verdict.ReasonUnsupportedStatement,
+		Statement: st.SQL(),
+		Table:     qualified(st),
+		Forced:    forced,
+		Detail:    fmt.Sprintf("the engine cannot run this statement safely: %v; nothing was executed", err),
+	}
+}
+
 // budgetVerdict is the refusal for an attempt that exceeded its lock or
-// statement budget and was cancelled without executing.
-func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError) verdict.Verdict {
+// statement budget and was cancelled without executing. online tailors the
+// statement-budget advice: a submitted form the plan proved an online idiom
+// (a concurrent build, a lone VALIDATE) needs a larger budget, not a
+// different strategy, while a blind attempt that ran past its budget is
+// doing rewrite work. A refused forced attempt still records the override.
+func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError, forced, online bool) verdict.Verdict {
 	v := verdict.Verdict{
 		Outcome:   verdict.OutcomeRefused,
 		Reason:    verdict.ReasonBudgetExceeded,
 		Statement: st.SQL(),
 		Table:     qualified(st),
+		Forced:    forced,
 	}
 	switch budgetErr.Cause {
 	case executor.CauseLock:
 		v.Cause = verdict.CauseLockBudget
 		v.Detail = fmt.Sprintf("the lock was not granted within the %s lock budget: the table is too "+
-			"contended for a blind attempt; nothing was executed", budgetErr.Budget)
+			"contended right now; nothing was executed", budgetErr.Budget)
 	case executor.CauseStatement:
 		v.Cause = verdict.CauseStatementBudget
-		v.Detail = fmt.Sprintf("cancelled after the %s statement budget: the change does real rewrite work, "+
-			"not an in-place catalog change, and needs a copy-and-swap rewrite that pg-sprite does not perform yet. "+
-			"If it adds a constraint, ADD CONSTRAINT ... NOT VALID followed by VALIDATE CONSTRAINT avoids the long lock",
-			budgetErr.Budget)
+		if online {
+			v.Detail = fmt.Sprintf("cancelled after the %s budget: the statement already is the safe online "+
+				"idiom — the work needs more time, not a different strategy; retry with a larger budget for "+
+				"this step class", budgetErr.Budget)
+		} else {
+			v.Detail = fmt.Sprintf("cancelled after the %s statement budget: the change does real rewrite work, "+
+				"not an in-place catalog change, and needs a copy-and-swap rewrite that pg-sprite does not perform yet. "+
+				"If it adds a constraint, ADD CONSTRAINT ... NOT VALID followed by VALIDATE CONSTRAINT avoids the long lock",
+				budgetErr.Budget)
+		}
 	default:
 		v.Detail = budgetErr.Error()
 	}

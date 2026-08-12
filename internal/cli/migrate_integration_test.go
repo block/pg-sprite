@@ -458,12 +458,200 @@ func TestMigrateForceKeepsSizeGuard(t *testing.T) {
 	var v verdict.Verdict
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 	assert.Equal(t, verdict.ReasonTableTooLarge, v.Reason)
+	assert.True(t, v.Forced, "a refused forced attempt must still record the override machine-readably")
 
 	var typ string
 	require.NoError(t, pool.QueryRow(t.Context(),
 		`SELECT data_type FROM information_schema.columns
 		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
 	assert.Equal(t, "integer", typ, "the guarded change must not have executed")
+}
+
+// The flagship force case from the design docs: a blocking CREATE INDEX,
+// forced past its concurrent-build substitution, runs as-is as a blind
+// bounded attempt and commits.
+func TestMigrateForceRunsBlockingCreateIndex(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("CREATE INDEX t_forced_idx ON %s.t (c)", schema))
+	cmd.Force = schema + ".t"
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.True(t, v.Forced, "the verdict must record the override")
+	assert.Empty(t, v.ExecutedSQL, "the submitted form ran as-is; no substitution to report")
+
+	var valid bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT i.indisvalid FROM pg_index i
+		 WHERE i.indexrelid = ($1 || '.t_forced_idx')::regclass`, schema).Scan(&valid))
+	assert.True(t, valid, "the forced blocking build must have committed a valid index")
+}
+
+// A forced blind attempt that runs past its statement budget is cancelled
+// and refused with the typed cause — the statement-budget refusal contract
+// end to end — and the refusal still records the override.
+func TestMigrateForcedRewriteRefusedByStatementBudget(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"INSERT INTO %s.t SELECT g, repeat('x', 100) FROM generate_series(1, 300000) g", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.Force = schema + ".t"
+	cmd.StatementTimeout = 50 * time.Millisecond
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonBudgetExceeded, v.Reason)
+	assert.Equal(t, verdict.CauseStatementBudget, v.Cause)
+	assert.True(t, v.Forced, "a refused forced attempt must still record the override machine-readably")
+
+	var typ string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT data_type FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
+	assert.Equal(t, "integer", typ, "the cancelled attempt must not change the schema")
+}
+
+// A planner refusal (no known safe path) is not forceable: --force with a
+// valid acknowledgement still ends in the refusal verdict and nothing
+// executes.
+func TestMigrateForceIgnoredForRefusedRoute(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, room int)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf(
+		"ALTER TABLE %s.t ADD CONSTRAINT ex EXCLUDE USING gist (room WITH =)", schema))
+	cmd.Force = schema + ".t"
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+	assert.False(t, v.Forced, "nothing ran, and no override was honored")
+
+	var n int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_constraint con
+		   JOIN pg_class c ON c.oid = con.conrelid
+		   JOIN pg_namespace ns ON ns.oid = c.relnamespace
+		  WHERE ns.nspname = $1 AND c.relname = 't' AND con.conname = 'ex'`, schema).Scan(&n))
+	assert.Zero(t, n, "the refused change must not execute")
+}
+
+// Statements the gate admits but the executor's static admission refuses end
+// in a typed refusal verdict, not a raw operational error — the "exactly one
+// verdict" contract holds for every gate-admitted statement, and nothing
+// executes.
+func TestMigrateRefusesExecutorAdmissionStatically(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	t.Run("unnamed index build", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+		require.NoError(t, err)
+
+		cmd := newMigrateCmd(url, fmt.Sprintf("CREATE INDEX ON %s.t (c)", schema))
+		cmd.JSON = true
+		var out strings.Builder
+		err = cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, verdict.ErrRefused)
+
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+
+		var n int
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM pg_indexes WHERE schemaname = $1 AND tablename = 't' AND indexname <> 't_pkey'`,
+			schema).Scan(&n))
+		assert.Zero(t, n, "the refused build must not create an index")
+	})
+
+	t.Run("if not exists index build", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+		require.NoError(t, err)
+
+		cmd := newMigrateCmd(url, fmt.Sprintf("CREATE INDEX IF NOT EXISTS t_c_idx ON %s.t (c)", schema))
+		cmd.JSON = true
+		var out strings.Builder
+		err = cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, verdict.ErrRefused)
+
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+
+		var n int
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM pg_indexes WHERE schemaname = $1 AND indexname = 't_c_idx'`,
+			schema).Scan(&n))
+		assert.Zero(t, n, "the refused build must not create an index")
+	})
+
+	t.Run("detach partition", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(
+			"CREATE TABLE %s.p (id int PRIMARY KEY) PARTITION BY RANGE (id)", schema))
+		require.NoError(t, err)
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(
+			"CREATE TABLE %s.p1 PARTITION OF %s.p FOR VALUES FROM (0) TO (100)", schema, schema))
+		require.NoError(t, err)
+
+		cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.p DETACH PARTITION p1", schema))
+		cmd.JSON = true
+		var out strings.Builder
+		err = cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, verdict.ErrRefused)
+
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+
+		var attached bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM pg_inherits
+			  WHERE inhrelid = ($1 || '.p1')::regclass AND inhparent = ($1 || '.p')::regclass)`,
+			schema).Scan(&attached))
+		assert.True(t, attached, "the refused detach must leave the partition attached")
+	})
 }
 
 // The size guard protects blind attempts only: a substituted safer sequence

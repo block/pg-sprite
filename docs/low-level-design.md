@@ -347,7 +347,8 @@ builds under their own budgets). The one-step `CONCURRENTLY` rewrites the classi
 emits (`DROP INDEX`, `REINDEX`, `DETACH PARTITION`) are not driven: `migrate`'s statement gate
 refuses `DROP INDEX` and `REINDEX` with the safer-idiom pointer, and the sequence executor's
 whole-sequence admission refuses a substituted `DETACH PARTITION CONCURRENTLY` typed before
-anything executes — a cancelled wait leaves recovery states it does not yet own. When the
+anything executes — a cancelled wait leaves recovery states it does not yet own — which
+`migrate` reports as a refusal verdict, not an operational error. When the
 planner says a safer sequence is required but cannot construct one, `migrate` refuses
 (`not-native-safe-rewrite-required`) rather than run the blocking form the plan itself
 flagged.
@@ -803,10 +804,11 @@ path is wired: `migrate` routes an admitted statement through classify → route
 unqualified table name once against the session's `search_path` and re-emits the qualified
 statement (the library-level `ErrUnqualifiedTable` refusal stays; the CLI moves the
 qualification burden off the user), substitutes and executes classifier-produced safer
-sequences by default with the guarded `--force` escape hatch, and renders the typed outcomes —
-each executor outcome carries a stable string code in the report contracts
-(`executor.OutcomeCode`), the same treatment `pkg/lint` gave its findings, so orchestrators
-branch on one vocabulary. Remaining Phase 3 work, roughly in order:
+sequences by default with the guarded `--force` escape hatch, and renders the typed outcomes.
+At the library seam, each executor outcome maps to a stable string code
+(`executor.OutcomeCode`), the same treatment `pkg/lint` gave its findings, so an orchestrator
+embedding `pkg/executor` branches on one vocabulary; the CLI's verdict JSON does not carry
+the executor codes yet. Remaining Phase 3 work, roughly in order:
 
 - bound lock acquisition with timeout and retry for the blocking idioms,
 - progress reporting (`pg_stat_progress_create_index` by the build's backend PID, which the
