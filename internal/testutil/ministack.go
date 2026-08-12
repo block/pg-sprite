@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/sha1" // not cryptographic: reproduces Ministack's container-name derivation
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
@@ -21,6 +22,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
+	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
 	"github.com/jackc/pgx/v5"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
@@ -45,7 +47,7 @@ const (
 	auroraProvisionDeadline = 5 * time.Minute
 	auroraProvisionPoll     = 2 * time.Second
 	// rotationDeadline bounds how long a rotated master password may take
-	// to land on the running database after ModifyDBCluster returns.
+	// to land on the running database after managed rotation returns.
 	rotationDeadline = time.Minute
 	rotationPoll     = time.Second
 	// rdsStatusAvailable is the RDS API status of a usable instance.
@@ -65,11 +67,10 @@ const (
 	// a test harness, but the reason this tier must never run against a
 	// shared Docker host it does not own.
 	dockerSocket = "/var/run/docker.sock"
-	// fixtureUser, fixturePassword, and fixtureDatabase are emulator-only
-	// test fixtures, never real credentials: Ministack hands them to the
-	// sibling database container it creates for the cluster.
+	// fixtureUser and fixtureDatabase are emulator-only test fixtures:
+	// Ministack hands them to the sibling database container it creates for
+	// the cluster. The master password is generated and managed by RDS.
 	fixtureUser     = "pgsprite"
-	fixturePassword = "test-password-do-not-use"
 	fixtureDatabase = "pgsprite"
 	// awsAccountID and awsRegion identify the emulator's default account.
 	// Ministack scopes the sibling container's name by
@@ -137,6 +138,9 @@ type AuroraCluster struct {
 	// Rotate keeps it in sync with the control plane so URL never goes
 	// silently stale after a rotation.
 	password string
+	// secrets is the Secrets Manager client used to resolve the RDS-managed
+	// master password through the same gateway.
+	secrets *secretsmanager.Client
 }
 
 // URL returns a connection URL for the cluster's database using the
@@ -159,24 +163,40 @@ func (c *AuroraCluster) URLWithPassword(password string) string {
 		fixtureUser, password, c.addr, fixtureDatabase)
 }
 
-// Rotate changes the cluster's master password through ModifyDBCluster,
-// waits until the running database accepts the new password, and updates
-// the handle so URL reflects the credentials the cluster now accepts.
-// The previous password remains available to the caller for
-// deliberately-stale connections via URLWithPassword.
-func (c *AuroraCluster) Rotate(t *testing.T, newPassword string) {
+// Rotate asks RDS to generate a new managed master password, resolves it
+// from Secrets Manager, waits until the running database accepts it, and
+// updates the handle so URL reflects the credentials the cluster now accepts.
+func (c *AuroraCluster) Rotate(t *testing.T) {
 	t.Helper()
 	ctx := t.Context()
 	_, err := c.Client.ModifyDBCluster(ctx, &rds.ModifyDBClusterInput{
-		DBClusterIdentifier: aws.String(c.ClusterID),
-		MasterUserPassword:  aws.String(newPassword),
-		ApplyImmediately:    aws.Bool(true),
+		DBClusterIdentifier:      aws.String(c.ClusterID),
+		RotateMasterUserPassword: aws.Bool(true),
+		ApplyImmediately:         aws.Bool(true),
 	})
-	require.NoError(t, err, "rotate master password via ModifyDBCluster")
+	require.NoError(t, err, "rotate RDS-managed master password")
+
+	// Rotation and the secret write are the control plane's to sequence:
+	// poll until the secret no longer resolves to the pre-rotation
+	// password, rather than assuming the write landed before
+	// ModifyDBCluster returned.
+	var rotated string
+	require.Eventuallyf(t, func() bool {
+		password, err := resolveManagedMasterPassword(ctx, c.Client, c.secrets, c.ClusterID)
+		if err != nil {
+			return false
+		}
+		if password == c.password {
+			return false
+		}
+		rotated = password
+		return true
+	}, rotationDeadline, rotationPoll,
+		"managed rotation did not produce a new password within the deadline")
 
 	// The rotation must land on the real database, not just the control
 	// plane's metadata: poll until the new password authenticates.
-	rotatedURL := c.URLWithPassword(newPassword)
+	rotatedURL := c.URLWithPassword(rotated)
 	require.Eventuallyf(t, func() bool {
 		conn, err := pgx.Connect(ctx, rotatedURL)
 		if err != nil {
@@ -189,7 +209,7 @@ func (c *AuroraCluster) Rotate(t *testing.T, newPassword string) {
 	}, rotationDeadline, rotationPoll,
 		"rotated master password did not become usable within the deadline")
 
-	c.password = newPassword
+	c.password = rotated
 }
 
 // ProvisionAuroraPostgres starts a Ministack container, provisions an
@@ -230,20 +250,21 @@ func ProvisionAuroraPostgres(t *testing.T) *AuroraCluster {
 		}
 	})
 
-	clnt := rdsClient(t, ctr)
+	clnt, secrets := awsClients(t, ctr)
 	major, err := strconv.Atoi(PGVersion())
 	require.NoError(t, err, "PG_VERSION must be a PostgreSQL major number")
 
 	const clusterID = "pgsprite-test"
 	_, err = clnt.CreateDBCluster(ctx, &rds.CreateDBClusterInput{
-		DBClusterIdentifier: aws.String(clusterID),
-		Engine:              aws.String("aurora-postgresql"),
-		EngineVersion:       aws.String(auroraEngineVersion(major)),
-		DatabaseName:        aws.String(fixtureDatabase),
-		MasterUsername:      aws.String(fixtureUser),
-		MasterUserPassword:  aws.String(fixturePassword),
+		DBClusterIdentifier:      aws.String(clusterID),
+		Engine:                   aws.String("aurora-postgresql"),
+		EngineVersion:            aws.String(auroraEngineVersion(major)),
+		DatabaseName:             aws.String(fixtureDatabase),
+		MasterUsername:           aws.String(fixtureUser),
+		ManageMasterUserPassword: aws.Bool(true),
 	})
 	require.NoError(t, err, "create aurora-postgresql cluster")
+	password := managedMasterPassword(t, clnt, secrets, clusterID)
 	// The database backing the cluster is a sibling Docker container, not a
 	// child of the Ministack container — terminating Ministack alone would
 	// leak it. Deleting the cluster through the API reaps it. Cleanups run
@@ -317,7 +338,8 @@ func ProvisionAuroraPostgres(t *testing.T) *AuroraCluster {
 		ClusterID:  clusterID,
 		InstanceID: instanceID,
 		addr:       addr,
-		password:   fixturePassword,
+		password:   password,
+		secrets:    secrets,
 	}
 }
 
@@ -370,9 +392,9 @@ func siblingHostAddr(t *testing.T, ctr testcontainers.Container, clusterID strin
 	return net.JoinHostPort(host, bindings[0].HostPort)
 }
 
-// rdsClient returns an RDS API client pointed at the container's gateway
-// with the emulator's conventional static test credentials.
-func rdsClient(t *testing.T, ctr testcontainers.Container) *rds.Client {
+// awsClients returns RDS and Secrets Manager clients pointed at the
+// container's gateway with the emulator's conventional static credentials.
+func awsClients(t *testing.T, ctr testcontainers.Container) (*rds.Client, *secretsmanager.Client) {
 	t.Helper()
 	ctx := t.Context()
 	host, err := ctr.Host(ctx)
@@ -391,7 +413,60 @@ func rdsClient(t *testing.T, ctr testcontainers.Container) *rds.Client {
 		Region:      awsRegion,
 		Credentials: credentials.NewStaticCredentialsProvider("test", "test", ""),
 	}
-	return rds.NewFromConfig(cfg, func(o *rds.Options) {
+	rdsClient := rds.NewFromConfig(cfg, func(o *rds.Options) {
 		o.BaseEndpoint = aws.String(endpoint)
 	})
+	secretsClient := secretsmanager.NewFromConfig(cfg, func(o *secretsmanager.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+	})
+	return rdsClient, secretsClient
+}
+
+// managedMasterPassword resolves the cluster's RDS-managed master password,
+// failing the test on any resolution error.
+func managedMasterPassword(t *testing.T, rdsClient *rds.Client, secretsClient *secretsmanager.Client, clusterID string) string {
+	t.Helper()
+	password, err := resolveManagedMasterPassword(t.Context(), rdsClient, secretsClient, clusterID)
+	require.NoError(t, err, "resolve managed master password")
+	return password
+}
+
+// resolveManagedMasterPassword discovers the cluster's managed master-user
+// secret through the RDS control plane and decodes the credentials it holds
+// in Secrets Manager, verifying the secret belongs to the fixture master
+// user. It returns errors rather than asserting so pollers can retry it.
+func resolveManagedMasterPassword(ctx context.Context, rdsClient *rds.Client, secretsClient *secretsmanager.Client, clusterID string) (string, error) {
+	clusters, err := rdsClient.DescribeDBClusters(ctx, &rds.DescribeDBClustersInput{
+		DBClusterIdentifier: aws.String(clusterID),
+	})
+	if err != nil {
+		return "", fmt.Errorf("describe cluster %s: %w", clusterID, err)
+	}
+	if len(clusters.DBClusters) != 1 {
+		return "", fmt.Errorf("describe cluster %s: expected one cluster, got %d", clusterID, len(clusters.DBClusters))
+	}
+	secretMeta := clusters.DBClusters[0].MasterUserSecret
+	if secretMeta == nil || aws.ToString(secretMeta.SecretArn) == "" {
+		return "", fmt.Errorf("cluster %s exposes no managed master-user secret ARN", clusterID)
+	}
+	secret, err := secretsClient.GetSecretValue(ctx, &secretsmanager.GetSecretValueInput{
+		SecretId: secretMeta.SecretArn,
+	})
+	if err != nil {
+		return "", fmt.Errorf("get managed master-user secret for cluster %s: %w", clusterID, err)
+	}
+	var creds struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.Unmarshal([]byte(aws.ToString(secret.SecretString)), &creds); err != nil {
+		return "", fmt.Errorf("decode managed master-user secret for cluster %s: %w", clusterID, err)
+	}
+	if creds.Username != fixtureUser {
+		return "", fmt.Errorf("managed secret username %q does not match master user %q", creds.Username, fixtureUser)
+	}
+	if creds.Password == "" {
+		return "", fmt.Errorf("managed secret for cluster %s holds an empty password", clusterID)
+	}
+	return creds.Password, nil
 }
