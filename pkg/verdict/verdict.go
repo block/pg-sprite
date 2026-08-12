@@ -48,6 +48,10 @@ const (
 	ReasonIndexStatement Reason = "index-statement"
 	// ReasonTableTooLarge: the size guard skipped the optimistic attempt.
 	ReasonTableTooLarge Reason = "not-native-safe-table-too-large"
+	// ReasonInsufficientPrivileges: the connected role lacks the access
+	// the change needs; Detail names the exact missing GRANT (see
+	// docs/engine-role.md).
+	ReasonInsufficientPrivileges Reason = "insufficient-privileges"
 	// ReasonBudgetExceeded: the optimistic attempt exceeded its lock or
 	// statement budget and was cancelled.
 	ReasonBudgetExceeded Reason = "not-native-safe-budget-exceeded"

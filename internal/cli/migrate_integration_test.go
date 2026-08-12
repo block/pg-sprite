@@ -163,6 +163,54 @@ func TestMigrateSizeGuardSkipsAttempt(t *testing.T) {
 	assert.Zero(t, n, "the size guard must skip the attempt entirely")
 }
 
+// A connected role without membership in the owning role is refused up
+// front with a typed privilege verdict — instead of the server's mid-change
+// "must be owner" error — and the same change executes once the exact
+// membership the refusal names is granted.
+func TestMigrateRefusesInsufficientPrivileges(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	defer admin.Close()
+
+	owner := testutil.NewRole(t, admin, "NOLOGIN")
+	const password = "engine-test-password"
+	engine := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
+	schema := testutil.NewSchema(t, admin)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.t OWNER TO %s",
+		schema, pgx.Identifier{owner}.Sanitize()))
+	require.NoError(t, err)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s",
+		schema, pgx.Identifier{engine}.Sanitize()))
+	require.NoError(t, err)
+
+	u, err := neturl.Parse(serverURL)
+	require.NoError(t, err)
+	u.User = neturl.UserPassword(engine, password)
+	cmd := newMigrateCmd(u.String(), fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
+	cmd.JSON = true
+
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonInsufficientPrivileges, v.Reason)
+	assert.Equal(t, schema+".t", v.Table)
+
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("GRANT %s TO %s",
+		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{engine}.Sanitize()))
+	require.NoError(t, err)
+
+	out.Reset()
+	require.NoError(t, cmd.run(t.Context(), &out))
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+}
+
 // Acceptance (iv): non-ALTER TABLE statements are refused with the safe-idiom
 // pointer and never executed. The gate needs no database at all.
 func TestMigrateGateRefusesWithoutDatabase(t *testing.T) {

@@ -39,6 +39,19 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	}
 	defer pool.Close()
 
+	// The native path is in-place ALTER TABLE: owner-gated, no WAL
+	// decoding — Tier 1 of the engine-role contract.
+	priv, err := preflight.CheckPrivileges(ctx, pool, st.Schema(), st.Table(),
+		preflight.Requirement{Tier: preflight.TierAlterInPlace})
+	var privErr *preflight.PrivilegeError
+	if errors.As(err, &privErr) {
+		return c.emit(out, privilegeVerdict(st, privErr))
+	}
+	if err != nil {
+		return err
+	}
+	logger.Debug("privilege preflight passed", "role", priv.Role(), "owner", priv.Owner())
+
 	pt, err := preflight.CheckTable(ctx, pool, st.Schema(), st.Table(), int64(c.MaxTableSize))
 	var sizeErr *preflight.SizeError
 	if errors.As(err, &sizeErr) {
@@ -130,6 +143,19 @@ func indexAdvice(st statement.Statement) (detail, saferIdiom string) {
 		return "a plain REINDEX blocks writes; the concurrent rebuild does not", "REINDEX ... CONCURRENTLY"
 	default:
 		return "", ""
+	}
+}
+
+// privilegeVerdict is the refusal for a connected role that lacks the access
+// the change needs. The error already names the failed catalog check and the
+// exact provisioning statement, so it is the detail verbatim.
+func privilegeVerdict(st statement.Statement, privErr *preflight.PrivilegeError) verdict.Verdict {
+	return verdict.Verdict{
+		Outcome:   verdict.OutcomeRefused,
+		Reason:    verdict.ReasonInsufficientPrivileges,
+		Statement: st.SQL(),
+		Table:     qualified(st),
+		Detail:    privErr.Error(),
 	}
 }
 
