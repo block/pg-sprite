@@ -210,8 +210,9 @@ password rotation last. Each subtest pins one AWS seam:
   code that real AWS omits — was fixed upstream in Ministack v1.4.14 at
   pg-sprite's request; the pinned image carries the fix, so no divergence
   workaround remains);
-- **password rotation** — what a rotation does to a running schema change
-  (see below), plus pg-sprite's contract that the resulting auth failure
+- **password rotation** — RDS-managed password generation, rotation, and
+  Secrets Manager resolution, plus what a rotation does to a running schema
+  change (see below) and pg-sprite's contract that the resulting auth failure
   is terminal, not retryable.
 
 ### What a password rotation does to a running schema change

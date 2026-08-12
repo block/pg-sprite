@@ -113,8 +113,9 @@ func errorContract(t *testing.T, cluster *testutil.AuroraCluster) {
 func passwordRotation(t *testing.T, cluster *testutil.AuroraCluster) {
 	// A pool dialed with the pre-rotation password, with one session
 	// checked out — a schema change in flight.
+	staleURL := cluster.URL()
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{
-		URL:         cluster.URL(),
+		URL:         staleURL,
 		LockTimeout: 300 * time.Millisecond,
 	})
 	require.NoError(t, err, "connect with the pre-rotation password")
@@ -124,8 +125,7 @@ func passwordRotation(t *testing.T, cluster *testutil.AuroraCluster) {
 	var result int
 	require.NoError(t, held.QueryRow(t.Context(), "SELECT 1").Scan(&result))
 
-	const rotatedPassword = "test-password-rotated-do-not-use"
-	cluster.Rotate(t, rotatedPassword)
+	cluster.Rotate(t)
 
 	// The established session sails through the rotation: PostgreSQL
 	// authenticates at connection time only.
