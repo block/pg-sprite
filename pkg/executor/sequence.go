@@ -208,10 +208,19 @@ type sequenceStep struct {
 // Like the concurrent build — and unlike a blind optimistic attempt — no
 // size-guard proof is required beyond the preflight itself: long scans on
 // large tables are the sequence pattern's purpose, and every brief step is
-// still individually bounded by the brief budgets.
-func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget) (SequenceReport, error) {
+// still individually bounded by the brief budgets. retry bounds
+// lock_timeout retries on each owner-gated step, exactly as in
+// ExecuteNative.
+func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy) (SequenceReport, error) {
 	var rep SequenceReport
 	if err := b.validate(); err != nil {
+		return rep, err
+	}
+	// A defective retry policy is decidable at admission; ExecuteNative
+	// would refuse it anyway, but discovering that mid-run would leave a
+	// committed prefix behind a refusal this executor could have made up
+	// front.
+	if err := retry.validate(); err != nil {
 		return rep, err
 	}
 	admitted, err := admitSequence(pt.Schema(), pt.Table(), steps)
@@ -237,13 +246,13 @@ func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 				indexReport = &r
 			}
 		case StepValidateConstraint:
-			err = AttemptNative(ctx, pool, pt, step.st, Budget{
+			err = ExecuteNative(ctx, pool, pt, step.st, Budget{
 				LockTimeout:      b.Validate.LockTimeout,
 				StatementTimeout: b.Validate.Overall,
-			})
+			}, retry)
 			err = corroborateValidateCancel(err, b.Validate, time.Since(start))
 		case StepBrief:
-			err = AttemptNative(ctx, pool, pt, step.st, b.Brief)
+			err = ExecuteNative(ctx, pool, pt, step.st, b.Brief, retry)
 		default:
 			// Admission produces only the three kinds above; an unknown
 			// kind here is a programming error and aborts fail-closed.
