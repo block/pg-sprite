@@ -67,8 +67,16 @@ func TestRetryPolicyRejectsUnboundedValues(t *testing.T) {
 		{MaxAttempts: 0, InitialBackoff: time.Millisecond, MaxBackoff: time.Second},
 		{MaxAttempts: 1, InitialBackoff: -time.Millisecond, MaxBackoff: time.Second},
 		{MaxAttempts: 1, InitialBackoff: time.Second, MaxBackoff: time.Millisecond},
+		// Retries with no backoff would re-enter the lock queue back-to-back.
+		{MaxAttempts: 3, InitialBackoff: 0, MaxBackoff: 0},
+		{MaxAttempts: 2, InitialBackoff: 0, MaxBackoff: time.Second},
 	}
 	for _, policy := range tests {
 		require.Error(t, policy.validate())
 	}
+}
+
+// A single attempt never sleeps, so it needs no backoff to be bounded.
+func TestRetryPolicyAcceptsSingleAttemptWithoutBackoff(t *testing.T) {
+	require.NoError(t, RetryPolicy{MaxAttempts: 1}.validate())
 }

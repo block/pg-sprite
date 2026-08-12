@@ -58,7 +58,7 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	var budgetErr *executor.BudgetError
 	if errors.As(err, &budgetErr) {
 		logger.Debug("optimistic attempt cancelled",
-			"cause", budgetErr.Cause, "budget", budgetErr.Budget, "elapsed", elapsed)
+			"cause", budgetErr.Cause, "budget", budgetErr.Budget, "attempts", budgetErr.Attempts, "elapsed", elapsed)
 		return c.emit(out, budgetVerdict(st, budgetErr))
 	}
 	if err != nil {
@@ -172,6 +172,13 @@ func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError) verd
 	switch budgetErr.Cause {
 	case executor.CauseLock:
 		v.Cause = verdict.CauseLockBudget
+		v.Attempts = budgetErr.Attempts
+		if budgetErr.Attempts > 1 {
+			v.Detail = fmt.Sprintf("the lock was not granted within the %s lock budget on any of %d bounded "+
+				"attempts: the table is too contended for a blind attempt; nothing was executed",
+				budgetErr.Budget, budgetErr.Attempts)
+			break
+		}
 		v.Detail = fmt.Sprintf("the lock was not granted within the %s lock budget: the table is too "+
 			"contended for a blind attempt; nothing was executed", budgetErr.Budget)
 	case executor.CauseStatement:

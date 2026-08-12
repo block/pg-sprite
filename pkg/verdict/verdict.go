@@ -78,6 +78,10 @@ type Verdict struct {
 	// Cause narrows a budget refusal to the budget that fired; empty
 	// otherwise.
 	Cause Cause `json:"cause,omitempty"`
+	// Attempts is how many bounded attempts ran before a lock-budget
+	// refusal, so automation can tell an exhausted bounded retry from a
+	// single cancelled attempt; zero for every other verdict.
+	Attempts int `json:"attempts,omitempty"`
 	// Statement is the submitted SQL.
 	Statement string `json:"statement"`
 	// Table is the target table (schema-qualified when the statement was),
@@ -114,6 +118,9 @@ func (v Verdict) String() string {
 		fmt.Fprintf(&b, "\n  table:     %s", v.Table)
 	}
 	fmt.Fprintf(&b, "\n  statement: %s", v.Statement)
+	if v.Attempts > 0 {
+		fmt.Fprintf(&b, "\n  attempts:  %d", v.Attempts)
+	}
 	if v.Detail != "" {
 		fmt.Fprintf(&b, "\n  detail:    %s", v.Detail)
 	}

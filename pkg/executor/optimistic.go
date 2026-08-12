@@ -112,6 +112,12 @@ func (p RetryPolicy) validate() error {
 	if p.InitialBackoff < 0 {
 		return fmt.Errorf("initial retry backoff must not be negative, got %s", p.InitialBackoff)
 	}
+	// Zero backoff with retries enabled would re-enter the lock queue
+	// back-to-back, each occupancy blocking queued traffic for the full
+	// lock budget with no pause for the blocker to drain.
+	if p.MaxAttempts > 1 && p.InitialBackoff == 0 {
+		return fmt.Errorf("initial retry backoff must be positive when retries are enabled, got %d attempts with no backoff", p.MaxAttempts)
+	}
 	if p.MaxBackoff < p.InitialBackoff {
 		return fmt.Errorf("maximum retry backoff %s must be at least initial backoff %s", p.MaxBackoff, p.InitialBackoff)
 	}
@@ -148,26 +154,20 @@ func (b Budget) validate() error {
 	return nil
 }
 
-// AttemptNative runs st once, directly, inside a transaction bounded by b.
-// The table must have passed preflight and the statement must target it —
-// both proofs make the unsafe call unrepresentable: a statement.Statement
-// can only come from ParseOne (exactly one statement, parsed by the real
-// grammar), and a target mismatch is refused before anything executes, so a
-// proof for one table cannot smuggle SQL against another. On success the
-// change is committed: it was effectively instant. If a budget is exceeded
-// the statement is cancelled by the server, the transaction rolls back, and
-// a *BudgetError is returned. Any other failure is surfaced as an
-// operational error.
-func AttemptNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget) error {
-	return ExecuteNative(ctx, pool, pt, st, b, DefaultRetryPolicy())
-}
-
 // ExecuteNative runs transactional native DDL under transaction-local
-// budgets and retries only lock_timeout failures. Each retry starts a new
-// transaction, so neither an aborted transaction nor its settings can leak
-// through the pool. Statement timeouts and all other failures return
-// immediately: repeating work that exceeded its execution budget is not a
-// lock-acquisition strategy.
+// budgets and retries only lock_timeout failures, bounded by retry. The
+// table must have passed preflight and the statement must target it — both
+// proofs make the unsafe call unrepresentable: a statement.Statement can
+// only come from ParseOne (exactly one statement, parsed by the real
+// grammar), and a target mismatch is refused before anything executes, so a
+// proof for one table cannot smuggle SQL against another. Each attempt is a
+// new transaction, so neither an aborted transaction nor its settings can
+// leak through the pool. On success the change is committed: it was
+// effectively instant. If the lock budget is exhausted across all bounded
+// attempts, a *BudgetError carrying the attempt count is returned.
+// Statement timeouts and all other failures return immediately: repeating
+// work that exceeded its execution budget is not a lock-acquisition
+// strategy.
 func ExecuteNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy) error {
 	if err := b.validate(); err != nil {
 		return err
