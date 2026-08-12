@@ -151,6 +151,16 @@ func (b Budget) validate() error {
 	if b.StatementTimeout < minBudget {
 		return fmt.Errorf("statement budget must be at least %s, got %s", minBudget, b.StatementTimeout)
 	}
+	// Both settings are int32-millisecond server GUCs sent raw via
+	// SET LOCAL: a value beyond the server ceiling would be rejected
+	// mid-attempt as an out-of-range setting — an operational error where
+	// a budget defect decidable here should refuse at admission.
+	if b.LockTimeout > maxOverallBudget {
+		return fmt.Errorf("lock budget must be at most %s, got %s", maxOverallBudget, b.LockTimeout)
+	}
+	if b.StatementTimeout > maxOverallBudget {
+		return fmt.Errorf("statement budget must be at most %s, got %s", maxOverallBudget, b.StatementTimeout)
+	}
 	return nil
 }
 

@@ -239,9 +239,10 @@ Two principles govern this:
   an **explicit confirmation** (typed acknowledgement, not a bare `-y`), and the override is
   logged. Force is an escape hatch, not a convenience.
 
-Today the classifier constructs safer sequences and `diff` / `migrate --dry-run` render them;
-default `migrate` still uses the bounded optimistic Phase 1 path. Phase 3 adds substitution and
-execution of classifier-produced SQL.
+Today the classifier constructs safer sequences, `diff` / `migrate --dry-run` render them, and
+the library's sequence executor runs them under the autocommit-each-step contract; default
+`migrate` still uses the bounded optimistic Phase 1 path. Phase 3's remaining work is the
+substitution wiring that routes the classified sequences into `migrate`.
 
 In non-interactive contexts (CI), advisory mode is a natural gate: the engine prints the
 recommended rewrites and exits non-zero if a submitted statement would need a riskier path than
