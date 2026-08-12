@@ -340,8 +340,12 @@ Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operatio
 | `migrate` (default) | Run the Phase 1 statement gate, preflight, and bounded optimistic native attempt. It does not yet execute classifier-produced safer SQL. |
 | `migrate --force` (planned Phase 3) | Run each statement **exactly as submitted**, bypassing the safe rewrite. Gated — see below. |
 
-The classifier constructs `CREATE INDEX CONCURRENTLY` and other safer sequences today, but only
-`diff` and `migrate --dry-run` render them. Phase 3 makes the classified route drive execution.
+The classifier constructs `CREATE INDEX CONCURRENTLY` and other safer sequences today, and the
+library can execute them — `pkg/executor`'s sequence executor runs a safer sequence under the
+autocommit-each-step contract (brief steps bounded like an optimistic attempt, the validation
+scan and concurrent builds under their own budgets). The CLI front door does not yet route to
+it: `diff` and `migrate --dry-run` render the sequences, and Phase 3's substitution work wires
+the classified route into execution.
 
 ### The `--force` gate
 
@@ -800,7 +804,6 @@ roughly in order:
   each executor outcome gaining a stable string code in the report contracts, the same
   treatment `pkg/lint` gave its findings, so orchestrators branch on one vocabulary,
 - execute classifier-produced safer sequences through the routed native path,
-- the remaining native idioms (`NOT VALID`+`VALIDATE`, `ADD PK USING INDEX`, fast-default),
 - bound lock acquisition with timeout and retry for the blocking idioms,
 - substitution by default, the guarded `--force` escape hatch, and progress reporting
   (`pg_stat_progress_create_index` by the build's backend PID, which the executor already
