@@ -74,11 +74,54 @@ type BudgetError struct {
 	Cause BudgetCause
 	// Budget is the configured limit for that cause.
 	Budget time.Duration
+	// Attempts is the number of bounded transactions tried. It is greater
+	// than one when lock acquisition retries were exhausted.
+	Attempts int
 }
 
 // Error implements the error interface.
 func (e *BudgetError) Error() string {
+	if e.Attempts > 1 {
+		return fmt.Sprintf("execution exceeded its %s (%s) after %d bounded attempts", e.Cause, e.Budget, e.Attempts)
+	}
 	return fmt.Sprintf("execution exceeded its %s (%s) and was cancelled", e.Cause, e.Budget)
+}
+
+// RetryPolicy bounds retries after lock_timeout expires. Backoff doubles
+// after each failed attempt and is capped at MaxBackoff.
+type RetryPolicy struct {
+	MaxAttempts    int
+	InitialBackoff time.Duration
+	MaxBackoff     time.Duration
+}
+
+// DefaultRetryPolicy returns the safe native-DDL retry policy used by
+// callers that do not need to tune lock acquisition.
+func DefaultRetryPolicy() RetryPolicy {
+	return RetryPolicy{
+		MaxAttempts:    3,
+		InitialBackoff: 100 * time.Millisecond,
+		MaxBackoff:     time.Second,
+	}
+}
+
+func (p RetryPolicy) validate() error {
+	if p.MaxAttempts < 1 {
+		return fmt.Errorf("retry attempts must be at least 1, got %d", p.MaxAttempts)
+	}
+	if p.InitialBackoff < 0 {
+		return fmt.Errorf("initial retry backoff must not be negative, got %s", p.InitialBackoff)
+	}
+	// Zero backoff with retries enabled would re-enter the lock queue
+	// back-to-back, each occupancy blocking queued traffic for the full
+	// lock budget with no pause for the blocker to drain.
+	if p.MaxAttempts > 1 && p.InitialBackoff == 0 {
+		return fmt.Errorf("initial retry backoff must be positive when retries are enabled, got %d attempts with no backoff", p.MaxAttempts)
+	}
+	if p.MaxBackoff < p.InitialBackoff {
+		return fmt.Errorf("maximum retry backoff %s must be at least initial backoff %s", p.MaxBackoff, p.InitialBackoff)
+	}
+	return nil
 }
 
 // Budget bounds one optimistic attempt. Both limits must be at least
@@ -111,18 +154,25 @@ func (b Budget) validate() error {
 	return nil
 }
 
-// AttemptNative runs st once, directly, inside a transaction bounded by b.
-// The table must have passed preflight and the statement must target it —
-// both proofs make the unsafe call unrepresentable: a statement.Statement
-// can only come from ParseOne (exactly one statement, parsed by the real
+// ExecuteNative runs transactional native DDL under transaction-local
+// budgets and retries only lock_timeout failures, bounded by retry. The
+// table must have passed preflight and the statement must target it — both
+// proofs make the unsafe call unrepresentable: a statement.Statement can
+// only come from ParseOne (exactly one statement, parsed by the real
 // grammar), and a target mismatch is refused before anything executes, so a
-// proof for one table cannot smuggle SQL against another. On success the
-// change is committed: it was effectively instant. If a budget is exceeded
-// the statement is cancelled by the server, the transaction rolls back, and
-// a *BudgetError is returned. Any other failure is surfaced as an
-// operational error.
-func AttemptNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget) error {
+// proof for one table cannot smuggle SQL against another. Each attempt is a
+// new transaction, so neither an aborted transaction nor its settings can
+// leak through the pool. On success the change is committed: it was
+// effectively instant. If the lock budget is exhausted across all bounded
+// attempts, a *BudgetError carrying the attempt count is returned.
+// Statement timeouts and all other failures return immediately: repeating
+// work that exceeded its execution budget is not a lock-acquisition
+// strategy.
+func ExecuteNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy) error {
 	if err := b.validate(); err != nil {
+		return err
+	}
+	if err := retry.validate(); err != nil {
 		return err
 	}
 	// INV: ST-7 — the executor runs exactly the statement that was gated,
@@ -131,6 +181,12 @@ func AttemptNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		return fmt.Errorf("%w: ST-7: statement targets %q but preflight verified %q",
 			ErrInvariantViolation, qualifiedName(st.Schema(), st.Table()), qualifiedName(pt.Schema(), pt.Table()))
 	}
+	return executeWithLockRetry(ctx, retry, func(ctx context.Context) error {
+		return executeNativeAttempt(ctx, pool, st, b)
+	}, sleepContext)
+}
+
+func executeNativeAttempt(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin optimistic attempt: %w", err)
@@ -163,6 +219,54 @@ func AttemptNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		return fmt.Errorf("commit optimistic attempt: %w", err)
 	}
 	return nil
+}
+
+type sleepFunc func(context.Context, time.Duration) error
+
+func executeWithLockRetry(ctx context.Context, policy RetryPolicy, attempt func(context.Context) error, sleep sleepFunc) error {
+	for i := 1; i <= policy.MaxAttempts; i++ {
+		err := attempt(ctx)
+		if err == nil {
+			return nil
+		}
+		var budgetErr *BudgetError
+		if !errors.As(err, &budgetErr) || budgetErr.Cause != CauseLock {
+			return err
+		}
+		if i == policy.MaxAttempts {
+			budgetErr.Attempts = i
+			return budgetErr
+		}
+		if err := sleep(ctx, retryBackoff(policy, i)); err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("%w: LK-2: retry loop escaped its bounded attempts", ErrInvariantViolation)
+}
+
+func retryBackoff(policy RetryPolicy, failedAttempts int) time.Duration {
+	delay := policy.InitialBackoff
+	for i := 1; i < failedAttempts && delay < policy.MaxBackoff; i++ {
+		if delay > policy.MaxBackoff/2 {
+			return policy.MaxBackoff
+		}
+		delay *= 2
+	}
+	if delay > policy.MaxBackoff {
+		return policy.MaxBackoff
+	}
+	return delay
+}
+
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 // qualifiedName renders schema.table for error messages, omitting the dot

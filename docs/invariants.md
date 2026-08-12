@@ -238,7 +238,7 @@ which enforces exactly one statement through the real grammar — and refuses, b
 executes, any statement whose target table does not match the preflight proof it was handed.
 A proof for one table can never smuggle SQL against another, and a multi-statement string can
 never reach the database through the executor (pgx's simple protocol would happily run all of
-it). *Enforced:* `pkg/executor` (`AttemptNative`), `pkg/statement` (proof construction).
+it). *Enforced:* `pkg/executor` (`ExecuteNative`), `pkg/statement` (proof construction).
 *Source:* adversarial review of the optimistic front door.
 
 ## Refusals and preflight (RF)
