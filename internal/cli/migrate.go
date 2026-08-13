@@ -64,13 +64,14 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 		"table", qualified(st), "total_bytes", pt.TotalBytes(), "limit_bytes", int64(c.MaxTableSize))
 
 	budget := executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout}
+	retry := c.retryPolicy()
 	start := time.Now()
-	err = executor.AttemptNative(ctx, pool, pt, st, budget)
+	err = executor.ExecuteNative(ctx, pool, pt, st, budget, retry)
 	elapsed := time.Since(start)
 	var budgetErr *executor.BudgetError
 	if errors.As(err, &budgetErr) {
 		logger.Debug("optimistic attempt cancelled",
-			"cause", budgetErr.Cause, "budget", budgetErr.Budget, "elapsed", elapsed)
+			"cause", budgetErr.Cause, "budget", budgetErr.Budget, "attempts", budgetErr.Attempts, "elapsed", elapsed)
 		return c.emit(out, budgetVerdict(st, budgetErr))
 	}
 	if err != nil {
@@ -84,6 +85,16 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 		Detail: fmt.Sprintf("committed within budgets (lock %s, statement %s): the change was effectively instant",
 			budget.LockTimeout, budget.StatementTimeout),
 	})
+}
+
+func (c *MigrateCmd) retryPolicy() executor.RetryPolicy {
+	// Programmatic callers do not pass through Kong's default population.
+	// Preserve the safe defaults for a zero-valued command while rejecting
+	// partially configured or invalid policies in the executor.
+	if c.LockAttempts == 0 && c.LockBackoff == 0 && c.LockBackoffMax == 0 {
+		return executor.DefaultRetryPolicy()
+	}
+	return executor.RetryPolicy{MaxAttempts: c.LockAttempts, InitialBackoff: c.LockBackoff, MaxBackoff: c.LockBackoffMax}
 }
 
 // emit prints the verdict in the selected format and returns ErrRefused for
@@ -187,6 +198,13 @@ func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError) verd
 	switch budgetErr.Cause {
 	case executor.CauseLock:
 		v.Cause = verdict.CauseLockBudget
+		v.Attempts = budgetErr.Attempts
+		if budgetErr.Attempts > 1 {
+			v.Detail = fmt.Sprintf("the lock was not granted within the %s lock budget on any of %d bounded "+
+				"attempts: the table is too contended for a blind attempt; nothing was executed",
+				budgetErr.Budget, budgetErr.Attempts)
+			break
+		}
 		v.Detail = fmt.Sprintf("the lock was not granted within the %s lock budget: the table is too "+
 			"contended for a blind attempt; nothing was executed", budgetErr.Budget)
 	case executor.CauseStatement:

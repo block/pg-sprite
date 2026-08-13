@@ -340,8 +340,15 @@ Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operatio
 | `migrate` (default) | Run the Phase 1 statement gate, preflight, and bounded optimistic native attempt. It does not yet execute classifier-produced safer SQL. |
 | `migrate --force` (planned Phase 3) | Run each statement **exactly as submitted**, bypassing the safe rewrite. Gated — see below. |
 
-The classifier constructs `CREATE INDEX CONCURRENTLY` and other safer sequences today, but only
-`diff` and `migrate --dry-run` render them. Phase 3 makes the classified route drive execution.
+The classifier constructs `CREATE INDEX CONCURRENTLY` and other safer sequences today, and the
+library executes the multi-step idiom families — `pkg/executor`'s sequence executor runs a safer
+sequence under the autocommit-each-step contract (brief steps bounded like an optimistic
+attempt, the validation scan and concurrent builds under their own budgets). The one-step
+`CONCURRENTLY` rewrites the classifier also emits (`DROP INDEX`, `REINDEX`,
+`DETACH PARTITION`) are not yet driven: the sequence executor refuses them typed, because a
+cancelled wait leaves recovery states it does not yet own. The CLI front door does not yet
+route to it: `diff` and `migrate --dry-run` render the sequences, and Phase 3's substitution
+work wires the classified route into execution.
 
 ### The `--force` gate
 
@@ -543,7 +550,7 @@ this section states *why* and pins the analog to the underlying primitive.
 
 | Spirit refuses | Aurora PG engine v1 stance | Postgres-specific reason |
 | --- | --- | --- |
-| **ALTER / DROP PRIMARY KEY** | Refuse — PK must be unchanged by the migration | The PK is simultaneously the chunk key, the CDC conflict target, and the resume watermark. Changing it mid-flight breaks all three. (A PK *change* can still be done as a separate expand/contract migration.) |
+| **ALTER / DROP PRIMARY KEY** | Refuse — PK must be unchanged by the migration | The PK is simultaneously the chunk key, the CDC conflict target, and the resume watermark. Changing it mid-flight breaks all three. **Route decision:** a PK *change* is done as a separate expand/contract schema change. SchemaBot's [direct-execution doc](https://github.com/block/schemabot/blob/main/docs/direct-execution.md) calls small-table PK reshape its canonical direct-execution case — a legitimate answer on MySQL, deliberately **not** ours on PostgreSQL, where the native route holds `ACCESS EXCLUSIVE` and blocks reads (see [schemabot-integration.md § execution-mode verdicts](schemabot-integration.md#execution-mode-verdicts-and-direct-execution)). |
 | **FOREIGN KEYS or TRIGGERS on the migrated table** | Refuse in v1 | Inbound FKs (other tables referencing this one) must be re-pointed at cutover under the `ACCESS EXCLUSIVE` window — error-prone and lengthens the lock. Triggers/rules on the source would also have to be recreated on the shadow with exact firing order, and could fire during the copy. Both are deferred, same as Spirit. |
 | **RENAME column** (dangerous overlap cases) | Refuse the dangerous cases; allow only simple, unambiguous non-PK renames | A rename that reuses an old name (`RENAME a→b, ADD a …`) makes column identity ambiguous between the source row image and the shadow schema, risking silent data misplacement during apply. Same correctness hazard exists in PG. |
 | **Lossy conversions** (shorten `VARCHAR` below longest value, add `NOT NULL` w/o default, add `UNIQUE` on non-unique data) | Refuse; require the data be fixed first | These can fail or truncate *during the copy or the constraint validation*, after work is spent. PG surfaces them as `VALIDATE CONSTRAINT` / cast failures; better to reject up front. |
@@ -800,7 +807,6 @@ roughly in order:
   each executor outcome gaining a stable string code in the report contracts, the same
   treatment `pkg/lint` gave its findings, so orchestrators branch on one vocabulary,
 - execute classifier-produced safer sequences through the routed native path,
-- the remaining native idioms (`NOT VALID`+`VALIDATE`, `ADD PK USING INDEX`, fast-default),
 - bound lock acquisition with timeout and retry for the blocking idioms,
 - substitution by default, the guarded `--force` escape hatch, and progress reporting
   (`pg_stat_progress_create_index` by the build's backend PID, which the executor already

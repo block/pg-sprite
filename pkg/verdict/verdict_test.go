@@ -16,6 +16,7 @@ func TestJSONRoundTrip(t *testing.T) {
 		Table:      "t",
 		Detail:     "the optimistic attempt exceeded its statement budget",
 		SaferIdiom: "ADD CONSTRAINT ... NOT VALID; VALIDATE CONSTRAINT",
+		Attempts:   3,
 	}
 	s, err := v.JSON()
 	require.NoError(t, err)
@@ -31,6 +32,7 @@ func TestJSONOmitsEmptyOptionalFields(t *testing.T) {
 	assert.NotContains(t, s, "reason")
 	assert.NotContains(t, s, "table")
 	assert.NotContains(t, s, "safer_idiom")
+	assert.NotContains(t, s, "attempts")
 }
 
 // Reason and Cause values are the machine contract automation switches on:
@@ -69,4 +71,17 @@ func TestStringRefusedIncludesReasonAndIdiom(t *testing.T) {
 	}.String()
 	assert.Contains(t, s, "refused (index-statement)")
 	assert.Contains(t, s, "CREATE INDEX CONCURRENTLY")
+}
+
+func TestStringIncludesAttemptsWhenSet(t *testing.T) {
+	v := Verdict{
+		Outcome:   OutcomeRefused,
+		Reason:    ReasonBudgetExceeded,
+		Statement: "ALTER TABLE t ADD COLUMN x int",
+		Attempts:  3,
+	}
+	assert.Contains(t, v.String(), "attempts:  3")
+
+	v.Attempts = 0
+	assert.NotContains(t, v.String(), "attempts")
 }
