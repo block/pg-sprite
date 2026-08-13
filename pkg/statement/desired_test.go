@@ -84,6 +84,10 @@ func TestQualify(t *testing.T) {
 	got, err = Qualify("CREATE TABLE t (id int)", "s1")
 	require.NoError(t, err)
 	assert.Equal(t, "CREATE TABLE s1.t (id int)", got)
+
+	got, err = Qualify("ALTER TABLE t ADD COLUMN c int", "s1")
+	require.NoError(t, err)
+	assert.Equal(t, "ALTER TABLE s1.t ADD COLUMN c int", got)
 }
 
 func TestQualifyEmptySchemaStripsQualification(t *testing.T) {
@@ -93,7 +97,7 @@ func TestQualifyEmptySchemaStripsQualification(t *testing.T) {
 }
 
 func TestQualifyRefusesOtherStatements(t *testing.T) {
-	_, err := Qualify("ALTER TABLE t ADD COLUMN c int", "s1")
+	_, err := Qualify("DROP INDEX i", "s1")
 	require.ErrorIs(t, err, ErrDisallowedStatement)
 
 	_, err = Qualify("CREATE TABLE a (id int); CREATE TABLE b (id int)", "s1")

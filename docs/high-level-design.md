@@ -102,8 +102,9 @@ the planner's classifier:
   almost no parsing logic. This path lives at the `migrate` front door.
 - **Classified planning path (Phases 2.1–2.4).** Parse the statement and introspect the live schema to
   **predict the path up front** — native-safe, needs-rewrite, or refuse — without trial
-  execution. The planner drives `diff` and `migrate --dry-run`; Phase 3 will make its classified
-  route drive execution and remove the wasted/aborted attempts that the optimistic path can incur.
+  execution. The planner drives `diff` and `migrate --dry-run`, and its classified route drives
+  `migrate`'s execution: a blocking submitted form is substituted with the planner's safer
+  native sequence instead of incurring a wasted/aborted blind attempt.
 
 > **PostgreSQL caveat.** Unlike MySQL's `ALGORITHM=INSTANT`, PostgreSQL has **no assertion** that
 > forces a change to be instant-or-error — a rewrite attempt acquires `ACCESS EXCLUSIVE` and does
@@ -171,7 +172,7 @@ The engine accepts a change two ways, both feeding the **same** planner pipeline
 
 - **Declarative** — the user supplies the **desired end-state** (a checked-in `CREATE TABLE`
   `.sql` file); the engine **derives** the `ALTER` by diffing desired vs live, then runs it
-  through classify → route. Phase 3 adds execution of the classified route.
+  through classify → route — the same classified route `migrate` executes.
 - **Imperative** — the user supplies the `ALTER` directly. It is the **same** pipeline with the
   diff step skipped.
 
@@ -200,16 +201,18 @@ literal statement:
                           │ yes
                           ▼
    ┌──────────────────────────────────────────────────────────-┐
-   │  RECOMMENDATION (does NOT execute):                       │
+   │  RECOMMENDATION (dry-run does NOT execute):               │
    │   you asked:   CREATE INDEX idx ON orders (customer_id)   │
    │   safer form:  CREATE INDEX CONCURRENTLY idx ON orders …  │
    │   why: a plain CREATE INDEX takes SHARE and blocks writes │
    │        for the whole build; CONCURRENTLY does not.        │
    └──────────────────────────────────────────────────────────-┘
-        │ Phase 3: apply recommendation       │ Phase 3: insist on literal
-        ▼                                      ▼
-   execute the safe idiom                 --force  ⇒  DANGER prompt +
-   (classified sequence)                 explicit approval, then run as-is
+        │ migrate (default):                  │ migrate --force <table>:
+        │ apply recommendation                │ insist on literal
+        ▼                                     ▼
+   execute the safe idiom                typed acknowledgement of the
+   (classified sequence)                 resolved table, then run as-is
+                                         under the same budgets
 ```
 
 Examples of what it suggests (the same idioms the classifier already knows):
@@ -232,17 +235,17 @@ Two principles govern this:
   that must be detected and rebuilt — see the
   [online DDL reference](postgres-online-ddl-reference.md)), which is why the engine owns
   executing it rather than handing it to the user to run manually.
-- **The planned force route is loud and explicit.** Phase 3 adds a `--force`
-  (run-as-submitted) flag for the rare case where the operator genuinely wants the literal
-  statement. It will be gated behind
-  prominent **DANGER / CAUTION** output explaining exactly what will block and for how long, and
-  an **explicit confirmation** (typed acknowledgement, not a bare `-y`), and the override is
-  logged. Force is an escape hatch, not a convenience.
+- **The force route is loud and explicit.** `--force` (run-as-submitted) exists for the rare
+  case where the operator genuinely wants the literal statement. It is gated behind an
+  **explicit typed acknowledgement** — the flag's value must name the resolved schema-qualified
+  target table, not a bare `-y` — the override is logged unconditionally and recorded in the
+  verdict's `forced` field, and the statement still runs under the executor's budgets and the
+  size guard. Force is an escape hatch, not a convenience (mechanics in the
+  [low-level design](low-level-design.md#the---force-gate)).
 
-Today the classifier constructs safer sequences, `diff` / `migrate --dry-run` render them, and
-the library's sequence executor runs them under the autocommit-each-step contract; default
-`migrate` still uses the bounded optimistic Phase 1 path. Phase 3's remaining work is the
-substitution wiring that routes the classified sequences into `migrate`.
+The classifier constructs safer sequences, `diff` / `migrate --dry-run` render them, and
+default `migrate` substitutes and executes them; the submitted form runs as-is only when it is
+already the safe idiom or under an acknowledged `--force`.
 
 In non-interactive contexts (CI), advisory mode is a natural gate: the engine prints the
 recommended rewrites and exits non-zero if a submitted statement would need a riskier path than
