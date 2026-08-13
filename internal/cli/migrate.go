@@ -24,7 +24,9 @@ import (
 // exactly as dry-run would, execute the routed SQL — the planner's safer
 // native sequence by default when the submitted form blocks — and end in
 // exactly one verdict. Refusal verdicts are printed to out and returned as
-// verdict.ErrRefused so the entry point maps them to the refusal exit code.
+// verdict.ErrRefused so the entry point maps them to the refusal exit code;
+// an execution failure prints a failed verdict — the stable executor code
+// plus the committed prefix — and still returns the operational error.
 // --dry-run diverts to the classify-and-route plan instead.
 func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	if c.DryRun {
@@ -209,10 +211,11 @@ func (c *MigrateCmd) execute(ctx context.Context, out io.Writer, pool *pgxpool.P
 	}
 	retry := c.retryPolicy()
 	start := time.Now()
+	var rep executor.SequenceReport
 	if forced {
 		err = executor.ExecuteNative(ctx, pool, pt, st, budget.Brief, retry)
 	} else {
-		_, err = executor.RunSequence(ctx, pool, pt, execSQL, budget, retry)
+		rep, err = executor.RunSequence(ctx, pool, pt, execSQL, budget, retry)
 	}
 	elapsed := time.Since(start)
 	if v, refused := execRefusal(st, err, substituted, forced, onlineIdiomPlan(plan)); refused {
@@ -224,7 +227,16 @@ func (c *MigrateCmd) execute(ctx context.Context, out io.Writer, pool *pgxpool.P
 		// Everything else is an operational failure, not a refusal: the
 		// typed *SequenceStepError names the failed step and the committed
 		// prefix that remains, and an *InvalidIndexError carries the
-		// operator recovery guidance.
+		// operator recovery guidance. The failed verdict is the error's
+		// machine-readable twin on stdout — the stable executor code, the
+		// failed step, and the committed prefix — while the error itself
+		// still returns, so the process exits 1, not the refusal code.
+		v := failureVerdict(st, err, rep, forced)
+		logger.Debug("execution failed",
+			"code", v.Code, "failed_step", v.FailedStep, "committed_steps", len(v.ExecutedSQL), "elapsed", elapsed)
+		if emitErr := c.emit(out, v); emitErr != nil {
+			return emitErr
+		}
 		return fmt.Errorf("run schema change on %s: %w", qualified(st), err)
 	}
 	logger.Debug("schema change committed",
@@ -248,6 +260,42 @@ func (c *MigrateCmd) execute(ctx context.Context, out io.Writer, pool *pgxpool.P
 			c.LockTimeout, c.StatementTimeout)
 	}
 	return c.emit(out, v)
+}
+
+// failureVerdict maps an operational execution failure to its failed
+// verdict: the executor's stable outcome code, and for a mid-sequence
+// failure the failed step and the committed prefix whose state remains.
+// It is the machine-readable twin of the returned error — automation
+// branches on Code and ExecutedSQL instead of parsing stderr prose. A
+// single bounded attempt (the submitted form, forced or not) rolls back on
+// failure, so it carries no step and an empty committed prefix.
+func failureVerdict(st statement.Statement, err error,
+	rep executor.SequenceReport, forced bool) verdict.Verdict {
+	v := verdict.Verdict{
+		Outcome:   verdict.OutcomeFailed,
+		Code:      string(executor.OutcomeCode(err)),
+		Statement: st.SQL(),
+		Table:     qualified(st),
+		Forced:    forced,
+		Detail:    "execution failed; nothing committed — a started bounded attempt rolls back",
+	}
+	var stepErr *executor.SequenceStepError
+	if !errors.As(err, &stepErr) {
+		return v
+	}
+	v.FailedStep = stepErr.Step
+	v.FailedStepSQL = stepErr.SQL
+	for _, s := range rep.Steps {
+		v.ExecutedSQL = append(v.ExecutedSQL, s.SQL)
+	}
+	if len(v.ExecutedSQL) > 0 {
+		v.Detail = fmt.Sprintf("sequence step %d of %d failed; the %d committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes",
+			stepErr.Step, stepErr.Total, len(v.ExecutedSQL))
+	} else {
+		v.Detail = fmt.Sprintf("sequence step %d of %d failed; no earlier steps had committed — Code names the outcome and any state the failed step itself left",
+			stepErr.Step, stepErr.Total)
+	}
+	return v
 }
 
 // execRefusal maps an execution failure to its refusal verdict, when the

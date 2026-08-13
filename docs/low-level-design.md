@@ -807,8 +807,11 @@ qualification burden off the user), substitutes and executes classifier-produced
 sequences by default with the guarded `--force` escape hatch, and renders the typed outcomes.
 At the library seam, each executor outcome maps to a stable string code
 (`executor.OutcomeCode`), the same treatment `pkg/lint` gave its findings, so an orchestrator
-embedding `pkg/executor` branches on one vocabulary; the CLI's verdict JSON does not carry
-the executor codes yet. Remaining Phase 3 work, roughly in order:
+embedding `pkg/executor` branches on one vocabulary; the CLI's verdict JSON carries the same
+codes — an execution failure ends in a `failed` verdict (exit 1, distinct from the refusal
+exit 2) with the code, the failed step, and the committed prefix in `executed_sql`, so
+automation can distinguish nothing-committed from partial state left behind. Remaining
+Phase 3 work, roughly in order:
 
 - bound lock acquisition with timeout and retry for the blocking idioms,
 - progress reporting (`pg_stat_progress_create_index` by the build's backend PID, which the

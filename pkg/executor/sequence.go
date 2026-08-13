@@ -148,8 +148,10 @@ type StepReport struct {
 	Index *IndexBuildReport `json:"index,omitempty"`
 }
 
-// SequenceReport is the record of a completed sequence run: one report per
-// step, in execution order. It is returned only when every step committed.
+// SequenceReport is the record of a sequence run: one report per committed
+// step, in execution order. On success it covers every step; alongside a
+// *SequenceStepError it covers exactly the committed prefix, so a caller
+// can disclose what already happened.
 type SequenceReport struct {
 	// Steps are the per-step reports, in execution order.
 	Steps []StepReport `json:"steps"`
@@ -203,7 +205,8 @@ type sequenceStep struct {
 // started. On success every step committed and the report says what each
 // did. On failure the run stops at the failing step and returns a typed
 // *SequenceStepError; the committed prefix remains, per the planner's
-// documented partial-failure contracts.
+// documented partial-failure contracts, and the returned report covers
+// exactly that prefix.
 //
 // Like the concurrent build — and unlike a blind optimistic attempt — no
 // size-guard proof is required beyond the preflight itself: long scans on

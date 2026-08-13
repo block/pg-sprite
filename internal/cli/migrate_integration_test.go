@@ -19,6 +19,7 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -207,6 +208,50 @@ func TestMigrateSubstitutesSetNotNullSequence(t *testing.T) {
 		   JOIN pg_namespace n ON n.oid = c.relnamespace
 		  WHERE n.nspname = $1 AND c.relname = 't' AND con.contype = 'c'`, schema).Scan(&scaffolds))
 	assert.Zero(t, scaffolds, "the scaffold CHECK constraint must be dropped")
+}
+
+// A substituted sequence that fails mid-way emits a failed verdict whose
+// typed fields — the stable executor code, the failed step, and the
+// committed prefix — let automation distinguish "nothing happened" from
+// "partial state left behind" without parsing stderr prose. The run still
+// returns an operational error, not a refusal.
+func TestMigrateFailedSequenceEmitsFailedVerdict(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+	// The NULL row makes the sequence's VALIDATE CONSTRAINT step fail after
+	// the scaffold CHECK ... NOT VALID step has already committed.
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s.t VALUES (1, NULL)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN v SET NOT NULL", schema))
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.Error(t, err, "an execution failure is an operational error")
+	require.NotErrorIs(t, err, verdict.ErrRefused, "a failure is not a refusal")
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+	assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
+	assert.Equal(t, 2, v.FailedStep, "the VALIDATE CONSTRAINT step is the second of the four")
+	assert.Len(t, v.ExecutedSQL, 1, "exactly the scaffold step committed before the failure")
+	assert.False(t, v.Forced)
+
+	// The verdict's committed prefix must describe real state: the scaffold
+	// CHECK constraint survives the failed run.
+	var scaffolds int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_constraint con
+		   JOIN pg_class c ON c.oid = con.conrelid
+		   JOIN pg_namespace n ON n.oid = c.relnamespace
+		  WHERE n.nspname = $1 AND c.relname = 't' AND con.contype = 'c'`, schema).Scan(&scaffolds))
+	assert.Equal(t, 1, scaffolds, "the committed scaffold constraint must remain, per the partial-failure contract")
 }
 
 // A blocking CREATE INDEX is substituted with its concurrent build and

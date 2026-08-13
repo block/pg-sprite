@@ -101,6 +101,54 @@ func TestBudgetVerdict(t *testing.T) {
 	})
 }
 
+func TestFailureVerdict(t *testing.T) {
+	st, err := statement.ParseOne("ALTER TABLE billing.invoices ALTER COLUMN status SET NOT NULL")
+	require.NoError(t, err)
+
+	t.Run("a mid-sequence failure discloses the step and the committed prefix", func(t *testing.T) {
+		stepErr := &executor.SequenceStepError{
+			Step:  2,
+			Total: 4,
+			Kind:  executor.StepValidateConstraint,
+			SQL:   "ALTER TABLE billing.invoices VALIDATE CONSTRAINT c",
+			Err:   fmt.Errorf("server error"),
+		}
+		rep := executor.SequenceReport{Steps: []executor.StepReport{
+			{SQL: "ALTER TABLE billing.invoices ADD CONSTRAINT c CHECK (status IS NOT NULL) NOT VALID", Kind: executor.StepBrief},
+		}}
+		v := failureVerdict(st, fmt.Errorf("wrapped: %w", stepErr), rep, false)
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
+		assert.Equal(t, 2, v.FailedStep)
+		assert.Equal(t, stepErr.SQL, v.FailedStepSQL)
+		assert.Equal(t, []string{rep.Steps[0].SQL}, v.ExecutedSQL,
+			"the committed prefix is what distinguishes partial state from nothing happened")
+		assert.Equal(t, "billing.invoices", v.Table)
+		assert.False(t, v.Forced)
+	})
+
+	t.Run("the failed step's typed cause maps to its own stable code", func(t *testing.T) {
+		stepErr := &executor.SequenceStepError{
+			Step: 2, Total: 4, Kind: executor.StepValidateConstraint,
+			SQL: "ALTER TABLE billing.invoices VALIDATE CONSTRAINT c",
+			Err: &executor.BudgetError{Cause: executor.CauseStatement, Budget: time.Minute},
+		}
+		v := failureVerdict(st, stepErr, executor.SequenceReport{}, false)
+		assert.Equal(t, string(executor.CodeBudgetStatementExceeded), v.Code)
+		assert.Empty(t, v.ExecutedSQL, "an empty committed prefix means nothing committed")
+	})
+
+	t.Run("a non-sequence failure carries no step and an empty prefix", func(t *testing.T) {
+		v := failureVerdict(st, fmt.Errorf("server error"), executor.SequenceReport{}, true)
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
+		assert.Zero(t, v.FailedStep)
+		assert.Empty(t, v.FailedStepSQL)
+		assert.Empty(t, v.ExecutedSQL)
+		assert.True(t, v.Forced, "the machine-readable audit record must survive a failure")
+	})
+}
+
 func TestExecRefusal(t *testing.T) {
 	st, err := statement.ParseOne("CREATE INDEX CONCURRENTLY i ON billing.invoices (customer_id)")
 	require.NoError(t, err)
