@@ -2,6 +2,7 @@ package preflight_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -101,12 +102,18 @@ func TestCheckPrivilegesWalksTheTierLadder(t *testing.T) {
 	assert.Equal(t, f.owner, proof.Owner())
 	assert.Equal(t, preflight.TierConnect, proof.Tier())
 
-	// Tier 1: no owning-role membership yet.
+	// Tier 1: no owning-role membership yet. On 16+ the grant carries the
+	// INHERIT option explicitly, so it also repairs a non-inheriting
+	// membership; below 16 inheritance is the grantee's role attribute.
 	_, err = preflight.CheckPrivileges(ctx, f.engine, f.schema, "target", preflight.Requirement{Tier: preflight.TierAlterInPlace})
 	require.ErrorAs(t, err, &privErr)
 	assert.Equal(t, preflight.TierAlterInPlace, privErr.Tier)
-	assert.Equal(t, fmt.Sprintf("GRANT %s TO %s",
-		pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()), privErr.Grant)
+	tier1Grant := fmt.Sprintf("GRANT %s TO %s",
+		pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize())
+	if serverVersionNum(t, f.admin) >= 160000 {
+		tier1Grant += " WITH INHERIT TRUE"
+	}
+	assert.Equal(t, tier1Grant, privErr.Grant)
 
 	f.grant(t, privErr.Grant)
 	_, err = preflight.CheckPrivileges(ctx, f.engine, f.schema, "target", preflight.Requirement{Tier: preflight.TierAlterInPlace})
@@ -129,6 +136,92 @@ func TestCheckPrivilegesWalksTheTierLadder(t *testing.T) {
 	proof, err = preflight.CheckPrivileges(ctx, f.engine, f.schema, "target", preflight.Requirement{Tier: preflight.TierCopyAndSwap})
 	require.NoError(t, err)
 	assert.Equal(t, preflight.TierCopyAndSwap, proof.Tier())
+}
+
+// A NOINHERIT engine role's Tier-1 refusal must name a remediation that
+// actually flips the failed check: re-running a plain GRANT changes
+// nothing when the membership already exists but does not inherit. Below
+// 16 the fix is the rolinherit role attribute; on 16+ it is the
+// membership's INHERIT option.
+func TestCheckPrivilegesRemediatesNonInheritingMembership(t *testing.T) {
+	f := newPrivilegeFixture(t)
+	ctx := t.Context()
+	f.grant(t, fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s",
+		f.schema, pgx.Identifier{f.role}.Sanitize()))
+	f.grant(t, fmt.Sprintf("ALTER ROLE %s NOINHERIT", pgx.Identifier{f.role}.Sanitize()))
+	f.grant(t, fmt.Sprintf("GRANT %s TO %s",
+		pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()))
+
+	// The membership exists but confers nothing without inheritance.
+	_, err := preflight.CheckPrivileges(ctx, f.engine, f.schema, "target",
+		preflight.Requirement{Tier: preflight.TierAlterInPlace})
+	var privErr *preflight.PrivilegeError
+	require.ErrorAs(t, err, &privErr)
+	assert.Equal(t, preflight.TierAlterInPlace, privErr.Tier)
+	if serverVersionNum(t, f.admin) >= 160000 {
+		assert.Equal(t, fmt.Sprintf("GRANT %s TO %s WITH INHERIT TRUE",
+			pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()), privErr.Grant)
+	} else {
+		assert.Equal(t, fmt.Sprintf("ALTER ROLE %s INHERIT",
+			pgx.Identifier{f.role}.Sanitize()), privErr.Grant)
+	}
+
+	// Applying exactly the refusal's remediation flips the check.
+	f.grant(t, privErr.Grant)
+	_, err = preflight.CheckPrivileges(ctx, f.engine, f.schema, "target",
+		preflight.Requirement{Tier: preflight.TierAlterInPlace})
+	require.NoError(t, err)
+}
+
+// A view owned by a role the engine lacks membership in is ErrNotTable,
+// never a privilege refusal: GRANT advice for a non-table would send the
+// operator through a useless provisioning loop before the real answer.
+func TestCheckPrivilegesRefusesViewAsNotTable(t *testing.T) {
+	f := newPrivilegeFixture(t)
+	ctx := t.Context()
+	f.grant(t, fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s",
+		f.schema, pgx.Identifier{f.role}.Sanitize()))
+	f.grant(t, fmt.Sprintf("CREATE VIEW %s.v AS SELECT 1 AS one", f.schema))
+	f.grant(t, fmt.Sprintf("ALTER VIEW %s.v OWNER TO %s",
+		f.schema, pgx.Identifier{f.owner}.Sanitize()))
+
+	_, err := preflight.CheckPrivileges(ctx, f.engine, f.schema, "v",
+		preflight.Requirement{Tier: preflight.TierAlterInPlace})
+	assert.ErrorIs(t, err, preflight.ErrNotTable)
+	var privErr *preflight.PrivilegeError
+	assert.False(t, errors.As(err, &privErr), "a non-table must not surface as a privilege refusal")
+}
+
+// Unqualified targets resolve through search_path: migrate passes them
+// straight through, so the facts query's empty-schema branch and the
+// unqualified not-found return are production-reachable and pinned here.
+func TestCheckPrivilegesResolvesUnqualifiedNames(t *testing.T) {
+	f := newPrivilegeFixture(t)
+	ctx := t.Context()
+	table := testutil.NewPublicTable(t, f.admin, "(id int PRIMARY KEY)")
+	f.grant(t, fmt.Sprintf("ALTER TABLE public.%s OWNER TO %s",
+		table, pgx.Identifier{f.owner}.Sanitize()))
+
+	// public carries USAGE for every role, so the unqualified name
+	// resolves; the engine still lacks owning-role membership.
+	_, err := preflight.CheckPrivileges(ctx, f.engine, "", table,
+		preflight.Requirement{Tier: preflight.TierAlterInPlace})
+	var privErr *preflight.PrivilegeError
+	require.ErrorAs(t, err, &privErr)
+	assert.Equal(t, preflight.TierAlterInPlace, privErr.Tier)
+
+	f.grant(t, privErr.Grant)
+	proof, err := preflight.CheckPrivileges(ctx, f.engine, "", table,
+		preflight.Requirement{Tier: preflight.TierAlterInPlace})
+	require.NoError(t, err)
+	assert.Equal(t, f.owner, proof.Owner())
+
+	// A genuinely absent unqualified name is not-found: search_path
+	// resolution already skipped what the role cannot see, so there is
+	// no single schema for a refusal to name.
+	_, err = preflight.CheckPrivileges(ctx, f.engine, "", "no_such_table_anywhere",
+		preflight.Requirement{Tier: preflight.TierConnect})
+	assert.ErrorIs(t, err, preflight.ErrTableNotFound)
 }
 
 // PostgreSQL 16 made SET a distinct membership option: a WITH SET FALSE

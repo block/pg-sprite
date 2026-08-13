@@ -201,8 +201,21 @@ func TestMigrateRefusesInsufficientPrivileges(t *testing.T) {
 	assert.Equal(t, verdict.ReasonInsufficientPrivileges, v.Reason)
 	assert.Equal(t, schema+".t", v.Table)
 
-	_, err = admin.Exec(t.Context(), fmt.Sprintf("GRANT %s TO %s",
-		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{engine}.Sanitize()))
+	// The detail carries the exact provisioning statement, and the fix
+	// below executes that same statement — the closed loop the verdict
+	// promises an operator. The expected grant is version-dependent: 16+
+	// membership grants carry the INHERIT option explicitly.
+	grant := fmt.Sprintf("GRANT %s TO %s",
+		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{engine}.Sanitize())
+	var versionNum int
+	require.NoError(t, admin.QueryRow(t.Context(),
+		"SELECT current_setting('server_version_num')::int").Scan(&versionNum))
+	if versionNum >= 160000 {
+		grant += " WITH INHERIT TRUE"
+	}
+	assert.Contains(t, v.Detail, grant, "the refusal detail must name the exact remediation")
+
+	_, err = admin.Exec(t.Context(), grant)
 	require.NoError(t, err)
 
 	out.Reset()

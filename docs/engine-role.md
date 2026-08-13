@@ -71,10 +71,12 @@ GRANT rds_replication TO pgsprite_engine;
 ```
 
 One membership grant per owning role: a database where every schema is owned by one
-application role needs exactly one `GRANT`. On PostgreSQL 16+ the membership defaults
-include `SET TRUE` and `INHERIT TRUE`, which this contract relies on; grants issued with
-`WITH SET FALSE` or to a `NOINHERIT` engine role break Tiers 1 and 3 and are caught by the
-preflight checks above.
+application role needs exactly one `GRANT`. This contract relies on the membership being
+inheritable and `SET ROLE`-capable; grants issued `WITH SET FALSE` or to a `NOINHERIT`
+engine role break Tiers 1 and 3, and the preflight refuses them naming the statement that
+actually repairs the option — `GRANT ... WITH INHERIT TRUE` / `WITH SET TRUE` on
+PostgreSQL 16+, `ALTER ROLE ... INHERIT` on 14–15, where inheritance is a role attribute
+that `GRANT` cannot change.
 
 ## What the engine role must not have
 

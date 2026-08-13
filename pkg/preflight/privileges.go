@@ -114,12 +114,13 @@ type accessFacts struct {
 	versionNum   int
 	database     string
 	schema       string
+	relkind      string
 	owner        string
 	canConnect   bool
 	schemaUsage  bool
 	schemaCreate bool
 	ownerUsage   bool
-	ownerMember  bool
+	roleInherit  bool
 }
 
 // CheckPrivileges verifies the connected role holds the access the
@@ -158,19 +159,22 @@ func CheckPrivileges(ctx context.Context, pool *pgxpool.Pool, schema, table stri
 // and snapshots every privilege fact in one query. A target that does not
 // resolve is separated into its causes: schema missing, schema USAGE
 // missing (which hides tables from search_path resolution), or the table
-// genuinely absent.
+// genuinely absent. A target that resolves to something other than an
+// ordinary or partitioned table is ErrNotTable — GRANT advice for a view
+// would conflate the causes.
 func gatherAccessFacts(ctx context.Context, pool *pgxpool.Pool, schema, table string) (accessFacts, error) {
 	const q = `
 		SELECT current_user::text,
 		       current_setting('server_version_num')::int,
 		       current_database()::text,
 		       n.nspname::text,
+		       c.relkind::text,
 		       r.rolname::text,
 		       has_database_privilege(current_user, current_database(), 'CONNECT'),
 		       has_schema_privilege(current_user, n.nspname, 'USAGE'),
 		       has_schema_privilege(current_user, n.nspname, 'CREATE'),
 		       pg_has_role(current_user, c.relowner, 'USAGE'),
-		       pg_has_role(current_user, c.relowner, 'MEMBER')
+		       (SELECT rolinherit FROM pg_roles WHERE rolname = current_user)
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		JOIN pg_roles r ON r.oid = c.relowner
@@ -179,8 +183,8 @@ func gatherAccessFacts(ctx context.Context, pool *pgxpool.Pool, schema, table st
 			     ELSE quote_ident($1) || '.' || quote_ident($2) END)`
 	var f accessFacts
 	err := pool.QueryRow(ctx, q, schema, table).Scan(
-		&f.role, &f.versionNum, &f.database, &f.schema, &f.owner,
-		&f.canConnect, &f.schemaUsage, &f.schemaCreate, &f.ownerUsage, &f.ownerMember)
+		&f.role, &f.versionNum, &f.database, &f.schema, &f.relkind, &f.owner,
+		&f.canConnect, &f.schemaUsage, &f.schemaCreate, &f.ownerUsage, &f.roleInherit)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return accessFacts{}, unresolvedTargetCause(ctx, pool, schema, table)
 	}
@@ -193,6 +197,13 @@ func gatherAccessFacts(ctx context.Context, pool *pgxpool.Pool, schema, table st
 	}
 	if err != nil {
 		return accessFacts{}, fmt.Errorf("gather access facts for %s: %w", qualifiedName(schema, table), err)
+	}
+	// relkind 'r' is an ordinary table, 'p' a partitioned parent; anything
+	// else (view, matview, foreign table, sequence) is refused as
+	// ErrNotTable in the same snapshot, so a view owned by an unrelated
+	// role is never refused with GRANT advice.
+	if f.relkind != "r" && f.relkind != "p" {
+		return accessFacts{}, fmt.Errorf("%w: %s has relkind %q", ErrNotTable, qualifiedName(schema, table), f.relkind)
 	}
 	return f, nil
 }
@@ -234,6 +245,11 @@ func unresolvedTargetCause(ctx context.Context, pool *pgxpool.Pool, schema, tabl
 // and returns the first missing access as a typed refusal. Bottom-up order
 // makes the refusal actionable: the operator fixes the foundational grant
 // before discovering the next one.
+//
+// INV: ST-6 — every role prerequisite the plan's tier needs is verified
+// against the live catalog before the first write; a missing access is a
+// typed refusal naming the exact provisioning statement, never a
+// mid-change server error.
 func checkTierLadder(ctx context.Context, pool *pgxpool.Pool, f accessFacts, tier Tier) error {
 	if !f.canConnect {
 		return &PrivilegeError{
@@ -255,12 +271,7 @@ func checkTierLadder(ctx context.Context, pool *pgxpool.Pool, f accessFacts, tie
 		return nil
 	}
 	if !f.ownerUsage {
-		return &PrivilegeError{
-			Tier:  TierAlterInPlace,
-			Check: fmt.Sprintf("pg_has_role(%s, %s, 'USAGE')", f.role, f.owner),
-			Grant: fmt.Sprintf("GRANT %s TO %s",
-				pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()),
-		}
+		return ownerMembershipRefusal(f)
 	}
 	if tier < TierIndexBuild {
 		return nil
@@ -283,21 +294,47 @@ func checkTierLadder(ctx context.Context, pool *pgxpool.Pool, f accessFacts, tie
 	return checkSetRoleAccess(ctx, pool, f)
 }
 
+// ownerMembershipRefusal is the Tier-1 refusal, with the remediation that
+// actually flips the failed check. On 14–15 inheritance is the grantee's
+// rolinherit attribute, which GRANT cannot change — a NOINHERIT role must
+// be altered first, then (a re-run refuses again if needed) granted
+// membership. On 16+ inheritance is a membership option, and GRANT ...
+// WITH INHERIT TRUE both creates a missing membership and updates an
+// existing non-inheriting one.
+func ownerMembershipRefusal(f accessFacts) *PrivilegeError {
+	const pg16 = 160000
+	if f.versionNum >= pg16 {
+		return &PrivilegeError{
+			Tier:  TierAlterInPlace,
+			Check: fmt.Sprintf("pg_has_role(%s, %s, 'USAGE')", f.role, f.owner),
+			Grant: fmt.Sprintf("GRANT %s TO %s WITH INHERIT TRUE",
+				pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()),
+		}
+	}
+	if !f.roleInherit {
+		return &PrivilegeError{
+			Tier:  TierAlterInPlace,
+			Check: fmt.Sprintf("pg_roles.rolinherit for %s", f.role),
+			Grant: fmt.Sprintf("ALTER ROLE %s INHERIT", pgx.Identifier{f.role}.Sanitize()),
+		}
+	}
+	return &PrivilegeError{
+		Tier:  TierAlterInPlace,
+		Check: fmt.Sprintf("pg_has_role(%s, %s, 'USAGE')", f.role, f.owner),
+		Grant: fmt.Sprintf("GRANT %s TO %s",
+			pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()),
+	}
+}
+
 // checkSetRoleAccess verifies the owning-role membership is usable with
 // SET ROLE, so shadow objects are born with the correct owner. PostgreSQL
 // 16 made SET a distinct membership option (pg_has_role mode 'SET'); on
-// 14–15 plain membership is what SET ROLE consults.
+// 14–15 SET ROLE consults plain membership, which the Tier-1 USAGE rung
+// already proved — an inheriting membership chain is a membership chain —
+// so there is nothing further to check below 16.
 func checkSetRoleAccess(ctx context.Context, pool *pgxpool.Pool, f accessFacts) error {
 	const pg16 = 160000
 	if f.versionNum < pg16 {
-		if !f.ownerMember {
-			return &PrivilegeError{
-				Tier:  TierCopyAndSwap,
-				Check: fmt.Sprintf("pg_has_role(%s, %s, 'MEMBER')", f.role, f.owner),
-				Grant: fmt.Sprintf("GRANT %s TO %s",
-					pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()),
-			}
-		}
 		return nil
 	}
 	const q = `SELECT pg_has_role(current_user, r.oid, 'SET') FROM pg_roles r WHERE r.rolname = $1`
