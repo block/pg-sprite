@@ -337,35 +337,38 @@ Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operatio
 | --- | --- |
 | `lint` | Offline (no database): classify every statement with zero live facts and report typed findings — unsupported operations are errors (non-zero exit), blocking idioms (with the safer SQL), conservative rewrites, and destructive drops are warnings. |
 | `diff` / `migrate --dry-run` | Print the classified, routed plan and safer SQL where applicable. **Never writes the live table.** `diff` has no `--dry-run` flag because it never executes the plan (its desired-state diff does run the desired DDL in an always-rolled-back scratch transaction — see the scratch-schema note above). |
-| `migrate` (default) | Run the Phase 1 statement gate, preflight, and bounded optimistic native attempt. It does not yet execute classifier-produced safer SQL. |
-| `migrate --force` (planned Phase 3) | Run each statement **exactly as submitted**, bypassing the safe rewrite. Gated — see below. |
+| `migrate` (default) | Run the statement gate, classify and route exactly as dry-run would, then execute the routed SQL: the planner's **safer native sequence by default** when the submitted form blocks, the submitted form as a bounded optimistic attempt otherwise. The verdict's `executed_sql` reports the substitution. |
+| `migrate --force` | Run the statement **exactly as submitted**, overriding a safer-sequence substitution or a rewrite-required / backend-unavailable refusal. Gated — see below. |
 
-The classifier constructs `CREATE INDEX CONCURRENTLY` and other safer sequences today, and the
-library executes the multi-step idiom families — `pkg/executor`'s sequence executor runs a safer
-sequence under the autocommit-each-step contract (brief steps bounded like an optimistic
-attempt, the validation scan and concurrent builds under their own budgets). The one-step
-`CONCURRENTLY` rewrites the classifier also emits (`DROP INDEX`, `REINDEX`,
-`DETACH PARTITION`) are not yet driven: the sequence executor refuses them typed, because a
-cancelled wait leaves recovery states it does not yet own. The CLI front door does not yet
-route to it: `diff` and `migrate --dry-run` render the sequences, and Phase 3's substitution
-work wires the classified route into execution.
+The classifier constructs `CREATE INDEX CONCURRENTLY` and other safer sequences, and `migrate`
+executes them through `pkg/executor`'s sequence executor under the autocommit-each-step
+contract (brief steps bounded like an optimistic attempt, the validation scan and concurrent
+builds under their own budgets). The one-step `CONCURRENTLY` rewrites the classifier also
+emits (`DROP INDEX`, `REINDEX`, `DETACH PARTITION`) are not driven: `migrate`'s statement gate
+refuses `DROP INDEX` and `REINDEX` with the safer-idiom pointer, and the sequence executor's
+whole-sequence admission refuses a substituted `DETACH PARTITION CONCURRENTLY` typed before
+anything executes — a cancelled wait leaves recovery states it does not yet own — which
+`migrate` reports as a refusal verdict, not an operational error. When the
+planner says a safer sequence is required but cannot construct one, `migrate` refuses
+(`not-native-safe-rewrite-required`) rather than run the blocking form the plan itself
+flagged.
 
 ### The `--force` gate
 
-This entire gate is planned Phase 3 behavior; no `--force` flag exists today. It is deliberately
-high-friction:
+`--force` is deliberately high-friction:
 
-1. Print a prominent **DANGER / CAUTION** block: the exact statement, the lock it will take, what
-   it blocks (reads? writes?), and the expected/worst-case duration and lock-queue impact
-   (cross-link to 12-mysql-vs-postgresql.md § the lock queue).
-2. Require an **explicit typed acknowledgement** (e.g. type the table name, or
-   `--i-understand-the-risk`), not a bare `-y`/`--yes`.
-3. Still wrap the statement in `lock_timeout` + bounded retry unless the user *also* opts out of
-   that explicitly (a second, separate flag) — force means "run my statement", not "remove every
-   guardrail".
-4. **Log the override** (who, when, what statement, what the recommendation was) for audit.
+1. Require an **explicit typed acknowledgement**: the flag's value must name the resolved
+   schema-qualified target table exactly — the operator names the relation whose lock they are
+   accepting. A mismatch is a usage error; nothing executes.
+2. Still run under `lock_timeout` / `statement_timeout` budgets and the table-size guard —
+   force overrides the *routing*, never the executor's protections. There is no opt-out:
+   force means "run my statement", not "remove every guardrail".
+3. **Log the override** unconditionally (warn-level, not gated by `--debug`) and record it
+   machine-readably in the verdict's `forced` field for audit.
+4. Planner refusals (no known safe path) and unsupported statement kinds are **not** forceable —
+   there is nothing bounded to acknowledge.
 
-Force is planned for the rare legitimate case (e.g. a maintenance window where the table is known
+Force exists for the rare legitimate case (e.g. a maintenance window where the table is known
 idle and a plain rewrite is acceptable); it is an escape hatch, not a shortcut, consistent with
 *decisions, not options*.
 
@@ -796,21 +799,23 @@ path exists in `pkg/executor` — session-scoped, outside any transaction, under
 wait policy (no per-lock timeout, one overall deadline), with invalid-index detection that
 fails closed into a typed, state-specific outcome (the executor never drops an index: a
 name-based drop cannot prove ownership until the LK-1 lease exists; the operator runbook is
-[invalid-index-recovery.md](invalid-index-recovery.md)). The executor is deliberately not yet
-reachable from the CLI — the engine lands first, the front door next. Remaining Phase 3 work,
-roughly in order:
+[invalid-index-recovery.md](invalid-index-recovery.md)). The CLI front door for the native
+path is wired: `migrate` routes an admitted statement through classify → route, resolves an
+unqualified table name once against the session's `search_path` and re-emits the qualified
+statement (the library-level `ErrUnqualifiedTable` refusal stays; the CLI moves the
+qualification burden off the user), substitutes and executes classifier-produced safer
+sequences by default with the guarded `--force` escape hatch, and renders the typed outcomes.
+At the library seam, each executor outcome maps to a stable string code
+(`executor.OutcomeCode`), the same treatment `pkg/lint` gave its findings, so an orchestrator
+embedding `pkg/executor` branches on one vocabulary; the CLI's verdict JSON carries the same
+codes — an execution failure ends in a `failed` verdict (exit 1, distinct from the refusal
+exit 2) with the code, the failed step, and the committed prefix in `executed_sql`, so
+automation can distinguish nothing-committed from partial state left behind. Remaining
+Phase 3 work, roughly in order:
 
-- the CLI front door for the native path: `migrate` routing an admitted statement to the
-  executor, resolving an unqualified table name once against the session's `search_path` and
-  re-emitting the qualified statement (the library-level `ErrUnqualifiedTable` refusal stays;
-  the CLI moves the qualification burden off the user), and rendering the typed outcomes —
-  each executor outcome gaining a stable string code in the report contracts, the same
-  treatment `pkg/lint` gave its findings, so orchestrators branch on one vocabulary,
-- execute classifier-produced safer sequences through the routed native path,
 - bound lock acquisition with timeout and retry for the blocking idioms,
-- substitution by default, the guarded `--force` escape hatch, and progress reporting
-  (`pg_stat_progress_create_index` by the build's backend PID, which the executor already
-  captures for its ownership proof).
+- progress reporting (`pg_stat_progress_create_index` by the build's backend PID, which the
+  executor already captures for its ownership proof).
 
 The copy-and-swap backend, including change capture, copying, applying, checksumming, and
 cutover, follows Phase 3.

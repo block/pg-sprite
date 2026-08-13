@@ -158,9 +158,9 @@ func refuseForeignKeys(create *pganalyze.CreateStmt) error {
 
 // Qualify returns sql with its target relation qualified by schema; an
 // empty schema strips an existing qualification instead. It supports exactly
-// one CREATE TABLE or CREATE INDEX statement. This touches qualification
-// only — no semantics are ever derived or transformed at the AST level
-// (that is the scratch database's job).
+// one CREATE TABLE, CREATE INDEX, or ALTER TABLE statement. This touches
+// qualification only — no semantics are ever derived or transformed at the
+// AST level (that is the scratch database's job).
 func Qualify(sql, schema string) (string, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
@@ -176,6 +176,8 @@ func Qualify(sql, schema string) (string, error) {
 		rel = node.GetCreateStmt().GetRelation()
 	case node.GetIndexStmt() != nil:
 		rel = node.GetIndexStmt().GetRelation()
+	case node.GetAlterTableStmt() != nil:
+		rel = node.GetAlterTableStmt().GetRelation()
 	default:
 		return "", ErrDisallowedStatement
 	}

@@ -157,19 +157,20 @@ func (b ConcurrentBudget) validate() error {
 type IndexBuildReport struct {
 	// Schema is the schema the index lives in, resolved from the target
 	// table (an index is always created in its table's schema).
-	Schema string
+	Schema string `json:"schema"`
 	// Index is the index name from the statement.
-	Index string
+	Index string `json:"index"`
 	// IndexOID is the verified index's catalog identity: the durable
 	// handle a later reconciliation can use where the name alone could
 	// have been reassigned.
-	IndexOID uint32
+	IndexOID uint32 `json:"index_oid"`
 	// Duration is the wall-clock time of the build statement itself,
-	// excluding session setup and the validity verification.
-	Duration time.Duration
+	// excluding session setup and the validity verification. It encodes
+	// as integer nanoseconds.
+	Duration time.Duration `json:"duration_ns"`
 	// ServerVersion is the server_version of the PostgreSQL server that
 	// ran the build.
-	ServerVersion string
+	ServerVersion string `json:"server_version"`
 }
 
 // InvalidIndexError reports that an invalid index exists (or may remain)
