@@ -46,9 +46,9 @@ requires — nothing higher.
 | --- | --- | --- | --- |
 | 0 | Connect and resolve the target | `LOGIN`; `CONNECT` on the database; `USAGE` on the target schema (directly or via membership) | `has_database_privilege`, `has_schema_privilege(..., 'USAGE')` |
 | 1 | In-place `ALTER TABLE` (the instant and fast native paths) | Inheritable **membership in the owning role** — sufficient on its own | `pg_has_role(current_user, <owner>, 'USAGE')` |
-| 2 | Index builds (`CREATE INDEX [CONCURRENTLY]`) | Tier 1 + **`CREATE` on the target schema** — table ownership alone is refused with `permission denied for schema` | `has_schema_privilege(..., 'CREATE')` |
-| 3 | Copy-and-swap | Tier 2 + membership usable with `SET ROLE` (for owner-correct shadow objects); for logical-decoding CDC: `rds_replication` membership (Aurora/RDS) or the `REPLICATION` attribute (self-managed) | `pg_has_role(..., 'MEMBER')` (14–15) / `pg_has_role(..., 'SET')` (16+); `pg_has_role(current_user, 'rds_replication', 'MEMBER')` |
-| 4 | Planner scratch database (execute-and-introspect) | A pre-provisioned `pg_sprite_scratch` owned by the engine role, **or** `CREATEDB` | `pg_database` ownership or `pg_roles.rolcreatedb` |
+| 2 | Index builds: `CREATE INDEX [CONCURRENTLY]`, and the `ALTER TABLE` shapes that build one — `ADD CONSTRAINT UNIQUE` / `PRIMARY KEY` / `EXCLUDE` without `USING INDEX`, or `ADD COLUMN` with an inline `UNIQUE` / `PRIMARY KEY` | Tier 1 + **`CREATE` on the target schema** — table ownership alone is refused with `permission denied for schema` | `has_schema_privilege(..., 'CREATE')` |
+| 3 | Copy-and-swap | Tier 2 + membership usable with `SET ROLE` (for owner-correct shadow objects); for logical-decoding CDC: `rds_replication` membership (Aurora/RDS) or the `REPLICATION` attribute (self-managed) | `pg_has_role(..., 'SET')` (16+; on 14–15 the Tier 1 `USAGE` check already proves `SET ROLE` access — membership options arrive in 16); `pg_has_role(current_user, 'rds_replication', 'MEMBER')` |
+| 4 | Planner scratch database (execute-and-introspect) | A pre-provisioned `pg_sprite_scratch` owned by the engine role, **or** `CREATEDB` | *Not yet implemented* — a missing scratch database surfaces at scratch creation, not in the preflight |
 
 Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are checked in the
 same preflight: `wal_level = logical` (`rds.logical_replication = 1` on Aurora/RDS, a
@@ -69,6 +69,11 @@ GRANT USAGE, CREATE ON SCHEMA app TO app_owner;  -- if the owner lacks it
 -- Tier 3: only when copy-and-swap with logical decoding is in play (Aurora/RDS)
 GRANT rds_replication TO pgsprite_engine;
 ```
+
+The contract covers the target table's own access. A `FOREIGN KEY` that references a
+table owned by a *different* role additionally needs `REFERENCES` on the referenced
+table (`GRANT REFERENCES ON <referenced> TO <owning role>`), which the preflight does
+not check — where every table shares one owning role, the owner already holds it.
 
 One membership grant per owning role: a database where every schema is owned by one
 application role needs exactly one `GRANT`. This contract relies on the membership being

@@ -241,6 +241,43 @@ func TestRequiredTier(t *testing.T) {
 			},
 			tier: preflight.TierIndexBuild,
 		},
+		// The ALTER TABLE shapes that build a new index as a side effect
+		// need schema CREATE exactly like an explicit CREATE INDEX — the
+		// server refuses them with "permission denied for schema" on
+		// ownership alone.
+		{
+			name:    "add unique constraint builds its backing index",
+			execSQL: []string{"ALTER TABLE s.t ADD CONSTRAINT t_c_key UNIQUE (c)"},
+			tier:    preflight.TierIndexBuild,
+		},
+		{
+			name:    "add primary key builds its backing index",
+			execSQL: []string{"ALTER TABLE s.t ADD CONSTRAINT t_pkey PRIMARY KEY (c)"},
+			tier:    preflight.TierIndexBuild,
+		},
+		{
+			name:    "add exclusion constraint builds its backing index",
+			execSQL: []string{"ALTER TABLE s.t ADD CONSTRAINT t_excl EXCLUDE USING gist (c WITH =)"},
+			tier:    preflight.TierIndexBuild,
+		},
+		{
+			name:    "add column with inline unique builds its backing index",
+			execSQL: []string{"ALTER TABLE s.t ADD COLUMN e int UNIQUE"},
+			tier:    preflight.TierIndexBuild,
+		},
+		// The counterparts that must stay owner-gated: USING INDEX adopts
+		// an existing index, and a rewriting type change only rebuilds
+		// existing indexes — the server allows both without schema CREATE.
+		{
+			name:    "using index adoption builds nothing",
+			execSQL: []string{"ALTER TABLE s.t ADD CONSTRAINT t_c_key UNIQUE USING INDEX t_c_key"},
+			tier:    preflight.TierAlterInPlace,
+		},
+		{
+			name:    "rewriting type change rebuilds existing indexes only",
+			execSQL: []string{"ALTER TABLE s.t ALTER COLUMN c TYPE bigint"},
+			tier:    preflight.TierAlterInPlace,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

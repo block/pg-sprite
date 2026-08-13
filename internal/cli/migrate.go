@@ -456,11 +456,12 @@ func indexAdvice(st statement.Statement) (detail, saferIdiom string) {
 }
 
 // requiredTier derives the engine-role tier the routed exec SQL needs: an
-// in-place ALTER TABLE step is owner-gated (Tier 1), and any index build
-// additionally needs CREATE on the schema (Tier 2), so the requirement is
-// the most demanding step's tier — the ladder check covers every rung below
-// it. A step shape the engine does not execute fails closed here, before
-// anything runs.
+// in-place ALTER TABLE step is owner-gated (Tier 1), and any step that
+// builds a new index — every CREATE INDEX, and the ALTER TABLE shapes that
+// build one as a side effect — additionally needs CREATE on the schema
+// (Tier 2), so the requirement is the most demanding step's tier — the
+// ladder check covers every rung below it. A step shape the engine does not
+// execute fails closed here, before anything runs.
 func requiredTier(execSQL []string) (preflight.Tier, error) {
 	tier := preflight.TierAlterInPlace
 	for _, sql := range execSQL {
@@ -469,11 +470,10 @@ func requiredTier(execSQL []string) (preflight.Tier, error) {
 			return 0, fmt.Errorf("derive privilege tier: %w", err)
 		}
 		switch st.Kind() {
-		case statement.KindAlterTable:
-			// Owner-gated in-place step: already covered by the
-			// TierAlterInPlace floor.
-		case statement.KindCreateIndex:
-			tier = preflight.TierIndexBuild
+		case statement.KindAlterTable, statement.KindCreateIndex:
+			if st.BuildsIndex() {
+				tier = preflight.TierIndexBuild
+			}
 		default:
 			return 0, fmt.Errorf("derive privilege tier for step %q: kind %s is not a shape the engine executes",
 				sql, st.Kind())

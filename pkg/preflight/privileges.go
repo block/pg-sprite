@@ -24,7 +24,11 @@ type Tier int
 // The contract's tiers, lowest to highest.
 const (
 	// TierConnect covers connecting and resolving the target: CONNECT on
-	// the database and USAGE on the target schema.
+	// the database and USAGE on the target schema. The CONNECT rung
+	// documents the contract rather than catching live failures — a role
+	// missing it fails at connection time, before any check runs — while
+	// the USAGE rung is load-bearing: without it a qualified target
+	// masquerades as "table not found".
 	TierConnect Tier = iota
 	// TierAlterInPlace covers owner-gated in-place ALTER TABLE (the
 	// instant and fast native paths): inheritable membership in the
@@ -78,12 +82,20 @@ type PrivilegeError struct {
 	Check string
 	// Grant is the exact statement that would satisfy the check.
 	Grant string
+	// Hint explains the remediation when the Grant alone would surprise
+	// the operator — for example when its grantee differs from the role
+	// the Check names. Empty when the Grant speaks for itself.
+	Hint string
 }
 
 // Error implements the error interface.
 func (e *PrivilegeError) Error() string {
-	return fmt.Sprintf("engine role lacks access for %s: %s is false; provision with: %s (see docs/engine-role.md)",
+	msg := fmt.Sprintf("engine role lacks access for %s: %s is false; provision with: %s",
 		e.Tier, e.Check, e.Grant)
+	if e.Hint != "" {
+		msg += " — " + e.Hint
+	}
+	return msg + " (see docs/engine-role.md)"
 }
 
 // PrivilegedRole proves the connected role holds every access the
@@ -156,7 +168,9 @@ func CheckPrivileges(ctx context.Context, pool *pgxpool.Pool, schema, table stri
 }
 
 // gatherAccessFacts resolves the target's schema and owner from the catalog
-// and snapshots every privilege fact in one query. A target that does not
+// and snapshots the tier 0–2 privilege facts in one query, so those checks
+// cannot disagree with each other; the SET ROLE and replication probes are
+// separate follow-up queries, each still fail-closed. A target that does not
 // resolve is separated into its causes: schema missing, schema USAGE
 // missing (which hides tables from search_path resolution), or the table
 // genuinely absent. A target that resolves to something other than an
@@ -286,6 +300,7 @@ func checkTierLadder(ctx context.Context, pool *pgxpool.Pool, f accessFacts, tie
 			Check: fmt.Sprintf("has_schema_privilege(%s, %s, 'CREATE')", f.role, f.schema),
 			Grant: fmt.Sprintf("GRANT CREATE ON SCHEMA %s TO %s",
 				pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{f.owner}.Sanitize()),
+			Hint: "the grant targets the owning role, which the engine inherits through its Tier 1 membership",
 		}
 	}
 	if tier < TierCopyAndSwap {

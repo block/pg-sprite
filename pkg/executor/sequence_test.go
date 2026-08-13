@@ -77,3 +77,15 @@ func TestRunSequenceRefusesEmptySequence(t *testing.T) {
 		executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrEmptySequence)
 }
+
+// The renderer's own unit test: a step-1 failure must not claim earlier
+// steps committed, because none did.
+func TestSequenceStepErrorNamesTheCommittedPrefix(t *testing.T) {
+	cause := errors.New("boom")
+	first := &executor.SequenceStepError{Step: 1, Total: 3, Kind: executor.StepBrief, Err: cause}
+	assert.Contains(t, first.Error(), "no earlier steps had committed")
+	assert.NotContains(t, first.Error(), "steps before it committed")
+
+	later := &executor.SequenceStepError{Step: 2, Total: 3, Kind: executor.StepBrief, Err: cause}
+	assert.Contains(t, later.Error(), "steps before it committed and their state remains")
+}

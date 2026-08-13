@@ -81,17 +81,17 @@ func TestParseOneKinds(t *testing.T) {
 		{
 			name: "create index",
 			sql:  "CREATE INDEX idx_users_email ON users (email)",
-			want: Statement{kind: KindCreateIndex, table: "users"},
+			want: Statement{kind: KindCreateIndex, table: "users", buildsIndex: true},
 		},
 		{
 			name: "create index schema-qualified",
 			sql:  "CREATE INDEX idx_users_email ON billing.users (email)",
-			want: Statement{kind: KindCreateIndex, schema: "billing", table: "users"},
+			want: Statement{kind: KindCreateIndex, schema: "billing", table: "users", buildsIndex: true},
 		},
 		{
 			name: "create unique index concurrently is a concurrent index statement",
 			sql:  "CREATE UNIQUE INDEX CONCURRENTLY idx ON users (email)",
-			want: Statement{kind: KindCreateIndex, table: "users", concurrent: true},
+			want: Statement{kind: KindCreateIndex, table: "users", concurrent: true, buildsIndex: true},
 		},
 		{
 			name: "drop index",
@@ -212,4 +212,34 @@ func TestCanonicalRefusesCommentedInput(t *testing.T) {
 	require.ErrorIs(t, err, ErrCommentLoss)
 	_, err = Canonical("ALTER TABLE t /* keep */ DROP COLUMN a")
 	require.ErrorIs(t, err, ErrCommentLoss)
+}
+
+func TestBuildsIndex(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{"create index", "CREATE INDEX i ON s.t (c)", true},
+		{"create index concurrently", "CREATE INDEX CONCURRENTLY i ON s.t (c)", true},
+		{"add unique constraint", "ALTER TABLE s.t ADD CONSTRAINT u UNIQUE (c)", true},
+		{"add primary key", "ALTER TABLE s.t ADD CONSTRAINT p PRIMARY KEY (c)", true},
+		{"add exclusion constraint", "ALTER TABLE s.t ADD CONSTRAINT x EXCLUDE USING gist (c WITH =)", true},
+		{"add column with inline unique", "ALTER TABLE s.t ADD COLUMN e int UNIQUE", true},
+		{"add column with inline primary key", "ALTER TABLE s.t ADD COLUMN e int PRIMARY KEY", true},
+		{"unique using index adopts an existing index", "ALTER TABLE s.t ADD CONSTRAINT u UNIQUE USING INDEX u", false},
+		{"primary key using index adopts an existing index", "ALTER TABLE s.t ADD CONSTRAINT p PRIMARY KEY USING INDEX p", false},
+		{"plain add column", "ALTER TABLE s.t ADD COLUMN e int", false},
+		{"check constraint builds nothing", "ALTER TABLE s.t ADD CONSTRAINT c CHECK (e > 0)", false},
+		{"foreign key builds nothing on the referencing table", "ALTER TABLE s.t ADD CONSTRAINT fk FOREIGN KEY (e) REFERENCES s.p (id)", false},
+		{"rewriting type change rebuilds existing indexes only", "ALTER TABLE s.t ALTER COLUMN c TYPE bigint", false},
+		{"set not null", "ALTER TABLE s.t ALTER COLUMN c SET NOT NULL", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, err := ParseOne(tt.sql)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, st.BuildsIndex())
+		})
+	}
 }
