@@ -77,7 +77,7 @@ func TestRunSequenceValidatesCheckConstraintOnline(t *testing.T) {
 	pt := mustPreflight(t, pool, schema, "t")
 
 	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0)", schema))
-	rep, err := executor.RunSequence(t.Context(), pool, pt, steps, runBudget)
+	rep, err := executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 
 	require.Len(t, rep.Steps, 2)
@@ -97,7 +97,7 @@ func TestRunSequenceSetNotNullLeavesNoScaffold(t *testing.T) {
 	pt := mustPreflight(t, pool, schema, "t")
 
 	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN v SET NOT NULL", schema))
-	rep, err := executor.RunSequence(t.Context(), pool, pt, steps, runBudget)
+	rep, err := executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 	require.Len(t, rep.Steps, 4)
 
@@ -123,7 +123,7 @@ func TestRunSequenceAddsPrimaryKeyOverConcurrentBuild(t *testing.T) {
 	pt := mustPreflight(t, pool, schema, "t")
 
 	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD PRIMARY KEY (id)", schema))
-	rep, err := executor.RunSequence(t.Context(), pool, pt, steps, runBudget)
+	rep, err := executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 
 	require.Len(t, rep.Steps, 2)
@@ -151,14 +151,14 @@ func TestRunSequenceRunsSingleStepChanges(t *testing.T) {
 	// A fast-default ADD COLUMN and a metadata-only change are one-step
 	// sequences: the executor covers them without a dedicated path.
 	rep, err := executor.RunSequence(t.Context(), pool, pt,
-		[]string{fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int NOT NULL DEFAULT 0", schema)}, runBudget)
+		[]string{fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int NOT NULL DEFAULT 0", schema)}, runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 	require.Len(t, rep.Steps, 1)
 	assert.Equal(t, executor.StepBrief, rep.Steps[0].Kind)
 	assert.Equal(t, "integer", columnType(t, pool, schema, "t", "age"))
 
 	rep, err = executor.RunSequence(t.Context(), pool, pt,
-		[]string{fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN age DROP DEFAULT", schema)}, runBudget)
+		[]string{fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN age DROP DEFAULT", schema)}, runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 	require.Len(t, rep.Steps, 1)
 }
@@ -175,7 +175,7 @@ func TestRunSequenceStopsAtFailingStepAndReportsPartialState(t *testing.T) {
 	// (the validation scan) fail: the documented partial state is the
 	// constraint left NOT VALID.
 	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0)", schema))
-	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget)
+	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
 
 	var stepErr *executor.SequenceStepError
 	require.ErrorAs(t, err, &stepErr)
@@ -195,7 +195,7 @@ func TestRunSequenceStopsAtFailingStepAndReportsPartialState(t *testing.T) {
 	// the typed error's own step number.
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("UPDATE %s.t SET v = 1 WHERE v <= 0", schema))
 	require.NoError(t, err)
-	rep, err := executor.RunSequence(t.Context(), pool, pt, steps[stepErr.Step-1:], runBudget)
+	rep, err := executor.RunSequence(t.Context(), pool, pt, steps[stepErr.Step-1:], runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err, "resuming from the failed step must complete the sequence")
 	require.Len(t, rep.Steps, 1)
 	assert.Equal(t, executor.StepValidateConstraint, rep.Steps[0].Kind)
@@ -223,7 +223,7 @@ func TestRunSequenceBudgetCancelsBlockedBriefStep(t *testing.T) {
 	require.NoError(t, err)
 
 	steps := []string{fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN v", schema)}
-	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget)
+	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
 
 	var stepErr *executor.SequenceStepError
 	require.ErrorAs(t, err, &stepErr)
@@ -241,7 +241,7 @@ func TestRunSequenceBudgetCancelsBlockedBriefStep(t *testing.T) {
 	// TM-3: after the fault clears, the same sequence must proceed to
 	// completion.
 	require.NoError(t, blocker.Rollback(context.WithoutCancel(t.Context())))
-	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget)
+	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err, "the sequence must complete once the lock holder is gone")
 	assert.False(t, columnExists(t, pool, schema, "t", "v"))
 }
@@ -283,7 +283,7 @@ func TestRunSequenceValidateRunsUnderValidateBudget(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = executor.RunSequence(t.Context(), pool, pt,
-		[]string{fmt.Sprintf("ALTER TABLE %s.t VALIDATE CONSTRAINT v_positive", schema)}, runBudget)
+		[]string{fmt.Sprintf("ALTER TABLE %s.t VALIDATE CONSTRAINT v_positive", schema)}, runBudget, executor.DefaultRetryPolicy())
 
 	var stepErr *executor.SequenceStepError
 	require.ErrorAs(t, err, &stepErr)
@@ -325,7 +325,8 @@ func TestRunSequenceOperatorCancelOfValidateIsNotBudgetExhaustion(t *testing.T) 
 	done := make(chan error, 1)
 	go func() {
 		_, err := executor.RunSequence(t.Context(), pool, pt,
-			[]string{fmt.Sprintf("ALTER TABLE %s.t VALIDATE CONSTRAINT v_positive", schema)}, b)
+			[]string{fmt.Sprintf("ALTER TABLE %s.t VALIDATE CONSTRAINT v_positive", schema)}, b,
+			executor.DefaultRetryPolicy())
 		done <- err
 	}()
 
@@ -370,7 +371,7 @@ func TestRunSequenceSurfacesFailedConcurrentBuildStep(t *testing.T) {
 		fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0) NOT VALID", schema),
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY i_v ON %s.t (v)", schema),
 	}
-	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget)
+	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
 
 	var stepErr *executor.SequenceStepError
 	require.ErrorAs(t, err, &stepErr)
@@ -402,7 +403,7 @@ func TestRunSequenceRefusesSingleConnectionPoolBeforeAnyStep(t *testing.T) {
 		fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0) NOT VALID", schema),
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY i_v ON %s.t (v)", schema),
 	}
-	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget)
+	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
 
 	require.ErrorIs(t, err, executor.ErrPoolTooSmall)
 	var stepErr *executor.SequenceStepError

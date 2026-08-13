@@ -64,7 +64,7 @@ func TestRunSequenceRejectsUnboundedBudgets(t *testing.T) {
 			// A nil pool proves the refusal happens at admission, before
 			// any database access.
 			_, err := executor.RunSequence(t.Context(), nil, preflight.PreflightedTable{},
-				[]string{"ALTER TABLE s.t DROP CONSTRAINT c"}, b)
+				[]string{"ALTER TABLE s.t DROP CONSTRAINT c"}, b, executor.DefaultRetryPolicy())
 			require.Error(t, err)
 			var stepErr *executor.SequenceStepError
 			assert.False(t, errors.As(err, &stepErr), "a budget refusal must precede any step execution")
@@ -73,6 +73,7 @@ func TestRunSequenceRejectsUnboundedBudgets(t *testing.T) {
 }
 
 func TestRunSequenceRefusesEmptySequence(t *testing.T) {
-	_, err := executor.RunSequence(t.Context(), nil, preflight.PreflightedTable{}, nil, sequenceBudget)
+	_, err := executor.RunSequence(t.Context(), nil, preflight.PreflightedTable{}, nil, sequenceBudget,
+		executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrEmptySequence)
 }

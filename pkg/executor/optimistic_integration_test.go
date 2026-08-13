@@ -54,19 +54,19 @@ func columnType(t *testing.T, pool *pgxpool.Pool, schema, table, column string) 
 	return typ
 }
 
-func TestAttemptNativeCommitsInstantChange(t *testing.T) {
+func TestExecuteNativeCommitsInstantChange(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
 	pt := mustPreflight(t, pool, schema, "t")
 
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int NOT NULL DEFAULT 0", schema))
-	require.NoError(t, executor.AttemptNative(t.Context(), pool, pt, st, budget))
+	require.NoError(t, executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy()))
 
 	assert.Equal(t, "integer", columnType(t, pool, schema, "t", "age"), "the committed change must be visible")
 }
 
-func TestAttemptNativeCancelsWhenLockBlocked(t *testing.T) {
+func TestExecuteNativeCancelsWhenLockBlocked(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
@@ -83,15 +83,17 @@ func TestAttemptNativeCancelsWhenLockBlocked(t *testing.T) {
 	require.NoError(t, err)
 
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
-	err = executor.AttemptNative(t.Context(), pool, pt, st, budget)
+	err = executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy())
 
 	var budgetErr *executor.BudgetError
 	require.ErrorAs(t, err, &budgetErr)
 	assert.Equal(t, executor.CauseLock, budgetErr.Cause)
 	assert.Equal(t, budget.LockTimeout, budgetErr.Budget)
+	assert.Equal(t, executor.DefaultRetryPolicy().MaxAttempts, budgetErr.Attempts,
+		"an actually blocked DDL must exhaust the bounded retry policy")
 }
 
-func TestAttemptNativeCancelsRewriteAndLeavesTableUnchanged(t *testing.T) {
+func TestExecuteNativeCancelsRewriteAndLeavesTableUnchanged(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
 	require.NoError(t, err)
@@ -105,7 +107,7 @@ func TestAttemptNativeCancelsRewriteAndLeavesTableUnchanged(t *testing.T) {
 	// int -> bigint forces a full table rewrite under ACCESS EXCLUSIVE.
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
 	tight := executor.Budget{LockTimeout: budget.LockTimeout, StatementTimeout: 50 * time.Millisecond}
-	err = executor.AttemptNative(t.Context(), pool, pt, st, tight)
+	err = executor.ExecuteNative(t.Context(), pool, pt, st, tight, executor.DefaultRetryPolicy())
 
 	var budgetErr *executor.BudgetError
 	require.ErrorAs(t, err, &budgetErr)
@@ -119,7 +121,7 @@ func TestAttemptNativeCancelsRewriteAndLeavesTableUnchanged(t *testing.T) {
 	assert.Equal(t, 300000, count)
 }
 
-func TestAttemptNativeSurfacesOperationalErrors(t *testing.T) {
+func TestExecuteNativeSurfacesOperationalErrors(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
@@ -128,7 +130,7 @@ func TestAttemptNativeSurfacesOperationalErrors(t *testing.T) {
 	// Dropping a column that does not exist is a plain SQL error, not a
 	// budget overrun.
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN nope", schema))
-	err = executor.AttemptNative(t.Context(), pool, pt, st, budget)
+	err = executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy())
 	require.Error(t, err)
 	var budgetErr *executor.BudgetError
 	assert.NotErrorAs(t, err, &budgetErr)
@@ -136,7 +138,7 @@ func TestAttemptNativeSurfacesOperationalErrors(t *testing.T) {
 
 // Sub-millisecond budgets are as unbounded as zero ones: they truncate to
 // PostgreSQL's 0ms, which disables the corresponding limit entirely.
-func TestAttemptNativeRejectsUnboundedBudgets(t *testing.T) {
+func TestExecuteNativeRejectsUnboundedBudgets(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
@@ -151,7 +153,7 @@ func TestAttemptNativeRejectsUnboundedBudgets(t *testing.T) {
 	}
 	for name, b := range unbounded {
 		t.Run(name, func(t *testing.T) {
-			require.Error(t, executor.AttemptNative(t.Context(), pool, pt, st, b))
+			require.Error(t, executor.ExecuteNative(t.Context(), pool, pt, st, b, executor.DefaultRetryPolicy()))
 		})
 	}
 
@@ -165,7 +167,7 @@ func TestAttemptNativeRejectsUnboundedBudgets(t *testing.T) {
 	})
 	_, err = blocker.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.t IN ACCESS EXCLUSIVE MODE", schema))
 	require.NoError(t, err)
-	err = executor.AttemptNative(t.Context(), pool, pt, st, executor.Budget{LockTimeout: time.Millisecond, StatementTimeout: time.Second})
+	err = executor.ExecuteNative(t.Context(), pool, pt, st, executor.Budget{LockTimeout: time.Millisecond, StatementTimeout: time.Second}, executor.DefaultRetryPolicy())
 	var budgetErr *executor.BudgetError
 	require.ErrorAs(t, err, &budgetErr)
 	assert.Equal(t, executor.CauseLock, budgetErr.Cause)
@@ -173,7 +175,7 @@ func TestAttemptNativeRejectsUnboundedBudgets(t *testing.T) {
 
 // INV: ST-7 — a preflight proof for one table can never execute a statement
 // against another, and a statement without a table target never executes.
-func TestAttemptNativeRefusesTargetMismatch(t *testing.T) {
+func TestExecuteNativeRefusesTargetMismatch(t *testing.T) {
 	pool, schema := newPool(t)
 	for _, ddl := range []string{
 		fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema),
@@ -186,7 +188,7 @@ func TestAttemptNativeRefusesTargetMismatch(t *testing.T) {
 
 	t.Run("statement targets a different table", func(t *testing.T) {
 		st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.victim ADD COLUMN a int", schema))
-		err := executor.AttemptNative(t.Context(), pool, pt, st, budget)
+		err := executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy())
 		require.ErrorIs(t, err, executor.ErrInvariantViolation)
 
 		var n int
@@ -200,13 +202,13 @@ func TestAttemptNativeRefusesTargetMismatch(t *testing.T) {
 		// Fail-closed: the proof verified schema.t, the statement names a
 		// bare t that search_path could resolve elsewhere.
 		st := mustParse(t, "ALTER TABLE t ADD COLUMN a int")
-		err := executor.AttemptNative(t.Context(), pool, pt, st, budget)
+		err := executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy())
 		require.ErrorIs(t, err, executor.ErrInvariantViolation)
 	})
 
 	t.Run("statement without a table target", func(t *testing.T) {
 		st := mustParse(t, "CREATE TABLE elsewhere (id int)")
-		err := executor.AttemptNative(t.Context(), pool, pt, st, budget)
+		err := executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy())
 		require.ErrorIs(t, err, executor.ErrInvariantViolation)
 	})
 }
