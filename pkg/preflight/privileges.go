@@ -78,9 +78,13 @@ type Requirement struct {
 type PrivilegeError struct {
 	// Tier is the access level the failed check belongs to.
 	Tier Tier
-	// Check is the catalog predicate that returned false.
+	// Check is the catalog predicate that returned false. It is display
+	// prose: identifiers appear unquoted, so a renderer embedding it in
+	// structured output (a markdown table, a PR comment) owns escaping it.
 	Check string
-	// Grant is the exact statement that would satisfy the check.
+	// Grant is the exact statement that would satisfy the check. Every
+	// identifier in it is Sanitize()-quoted, so it is safe to echo
+	// verbatim as executable SQL.
 	Grant string
 	// Hint explains the remediation when the Grant alone would surprise
 	// the operator — for example when its grantee differs from the role

@@ -188,7 +188,7 @@ func (c *MigrateCmd) auditForce(st statement.Statement, rs router.Statement) {
 func (c *MigrateCmd) execute(ctx context.Context, out io.Writer, pool *pgxpool.Pool,
 	st statement.Statement, execSQL []string, plan planner.Plan,
 	substituted, forced bool, logger *slog.Logger) error {
-	tier, err := requiredTier(execSQL)
+	tier, err := preflight.RequiredTier(execSQL)
 	if err != nil {
 		return err
 	}
@@ -453,33 +453,6 @@ func indexAdvice(st statement.Statement) (detail, saferIdiom string) {
 	default:
 		return "", ""
 	}
-}
-
-// requiredTier derives the engine-role tier the routed exec SQL needs: an
-// in-place ALTER TABLE step is owner-gated (Tier 1), and any step that
-// builds a new index — every CREATE INDEX, and the ALTER TABLE shapes that
-// build one as a side effect — additionally needs CREATE on the schema
-// (Tier 2), so the requirement is the most demanding step's tier — the
-// ladder check covers every rung below it. A step shape the engine does not
-// execute fails closed here, before anything runs.
-func requiredTier(execSQL []string) (preflight.Tier, error) {
-	tier := preflight.TierAlterInPlace
-	for _, sql := range execSQL {
-		st, err := statement.ParseOne(sql)
-		if err != nil {
-			return 0, fmt.Errorf("derive privilege tier: %w", err)
-		}
-		switch st.Kind() {
-		case statement.KindAlterTable, statement.KindCreateIndex:
-			if st.BuildsIndex() {
-				tier = preflight.TierIndexBuild
-			}
-		default:
-			return 0, fmt.Errorf("derive privilege tier for step %q: kind %s is not a shape the engine executes",
-				sql, st.Kind())
-		}
-	}
-	return tier, nil
 }
 
 // privilegeVerdict is the refusal for a connected role that lacks the access
