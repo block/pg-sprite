@@ -26,6 +26,44 @@ func TestJSONRoundTrip(t *testing.T) {
 	assert.Equal(t, v, got)
 }
 
+func TestJSONRoundTripFailed(t *testing.T) {
+	v := Verdict{
+		Outcome:       OutcomeFailed,
+		Code:          "budget-statement-exceeded",
+		Statement:     "ALTER TABLE t ALTER COLUMN v SET NOT NULL",
+		Table:         "t",
+		FailedStep:    2,
+		FailedStepSQL: "ALTER TABLE t VALIDATE CONSTRAINT c",
+		ExecutedSQL:   []string{"ALTER TABLE t ADD CONSTRAINT c CHECK (v IS NOT NULL) NOT VALID"},
+		Detail:        "step 2 of 4 failed; the committed step's state remains",
+	}
+	s, err := v.JSON()
+	require.NoError(t, err)
+
+	var got Verdict
+	require.NoError(t, json.Unmarshal([]byte(s), &got))
+	assert.Equal(t, v, got)
+}
+
+// The failed verdict's JSON keys are the machine contract automation reads;
+// renaming a Go field must not silently rename a key.
+func TestFailedJSONKeysArePinned(t *testing.T) {
+	s, err := Verdict{
+		Outcome:       OutcomeFailed,
+		Code:          "execution-failed",
+		Statement:     "ALTER TABLE t ALTER COLUMN v SET NOT NULL",
+		FailedStep:    2,
+		FailedStepSQL: "ALTER TABLE t VALIDATE CONSTRAINT c",
+		ExecutedSQL:   []string{"ALTER TABLE t ADD CONSTRAINT c CHECK (v IS NOT NULL) NOT VALID"},
+	}.JSON()
+	require.NoError(t, err)
+	for _, key := range []string{
+		`"outcome": "failed"`, `"code"`, `"failed_step"`, `"failed_step_sql"`, `"executed_sql"`,
+	} {
+		assert.Contains(t, s, key)
+	}
+}
+
 func TestJSONOmitsEmptyOptionalFields(t *testing.T) {
 	s, err := Verdict{Outcome: OutcomeExecuted, Statement: "ALTER TABLE t ADD COLUMN x int"}.JSON()
 	require.NoError(t, err)
@@ -33,6 +71,8 @@ func TestJSONOmitsEmptyOptionalFields(t *testing.T) {
 	assert.NotContains(t, s, "table")
 	assert.NotContains(t, s, "safer_idiom")
 	assert.NotContains(t, s, "attempts")
+	assert.NotContains(t, s, "code")
+	assert.NotContains(t, s, "failed_step")
 }
 
 // Reason and Cause values are the machine contract automation switches on:
@@ -72,6 +112,22 @@ func TestStringRefusedIncludesReasonAndIdiom(t *testing.T) {
 	}.String()
 	assert.Contains(t, s, "refused (index-statement)")
 	assert.Contains(t, s, "CREATE INDEX CONCURRENTLY")
+}
+
+func TestStringFailedIncludesCodeStepAndCommittedPrefix(t *testing.T) {
+	s := Verdict{
+		Outcome:       OutcomeFailed,
+		Code:          "execution-failed",
+		Statement:     "ALTER TABLE t ALTER COLUMN v SET NOT NULL",
+		Table:         "t",
+		FailedStep:    2,
+		FailedStepSQL: "ALTER TABLE t VALIDATE CONSTRAINT c",
+		ExecutedSQL:   []string{"ALTER TABLE t ADD CONSTRAINT c CHECK (v IS NOT NULL) NOT VALID"},
+	}.String()
+	assert.Contains(t, s, "failed (execution-failed)")
+	assert.Contains(t, s, "failed at: step 2: ALTER TABLE t VALIDATE CONSTRAINT c")
+	assert.Contains(t, s, "committed before the failure")
+	assert.NotContains(t, s, "executed as:", "a committed prefix is not a completed substitution")
 }
 
 func TestStringIncludesAttemptsWhenSet(t *testing.T) {

@@ -19,6 +19,8 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -30,8 +32,10 @@ func newMigrateCmd(url, alter string) *MigrateCmd {
 			LockTimeout:      3 * time.Second,
 			StatementTimeout: 30 * time.Second,
 		},
-		Alter:        alter,
-		MaxTableSize: 1 << 30,
+		Alter:             alter,
+		MaxTableSize:      1 << 30,
+		IndexBuildTimeout: time.Minute,
+		ValidateTimeout:   time.Minute,
 	}
 }
 
@@ -90,9 +94,459 @@ func TestMigrateExecutesRenameColumn(t *testing.T) {
 	assert.Equal(t, 1, n, "the rename must have committed")
 }
 
-// Acceptance (ii): a rewrite-requiring change is cancelled, leaves schema and
-// data unchanged, and returns the not-native-safe verdict with its reason.
-func TestMigrateRefusesRewriteWithBudgetVerdict(t *testing.T) {
+// Acceptance (ii): a rewrite-requiring change is refused up front — the
+// planner classifies the type change as copy-and-swap before anything runs,
+// so no attempt ever holds ACCESS EXCLUSIVE doing rewrite work.
+func TestMigrateRefusesTypeRewriteAsUnavailable(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"INSERT INTO %s.t SELECT g, repeat('x', 100) FROM generate_series(1, 1000) g", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonBackendUnavailable, v.Reason)
+	assert.Equal(t, schema+".t", v.Table)
+
+	var typ string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT data_type FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
+	assert.Equal(t, "integer", typ, "the refused change must not touch the schema")
+	var count int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		fmt.Sprintf("SELECT count(*) FROM %s.t", schema)).Scan(&count))
+	assert.Equal(t, 1000, count, "the refused change must not touch the data")
+}
+
+// A blind attempt that cannot get its lock is cancelled by the lock budget
+// and refused with the typed cause — the Phase 1 refusal contract, now
+// reached through the routed execute path.
+func TestMigrateRefusesOnLockBudgetContention(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+
+	// An open transaction holding ACCESS SHARE on the table makes the
+	// ALTER's ACCESS EXCLUSIVE unobtainable until rollback.
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() {
+		if err := tx.Rollback(context.WithoutCancel(t.Context())); err != nil {
+			t.Logf("rollback lock-holding transaction: %v", err)
+		}
+	}()
+	_, err = tx.Exec(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s.t", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
+	cmd.LockTimeout = 100 * time.Millisecond
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonBudgetExceeded, v.Reason)
+	assert.Equal(t, verdict.CauseLockBudget, v.Cause)
+}
+
+// The engine substitutes the planner's safer sequence by default: a direct
+// SET NOT NULL runs as the NOT VALID + VALIDATE + SET NOT NULL + DROP
+// scaffold sequence, the verdict reports what actually ran, and no scaffold
+// constraint is left behind.
+func TestMigrateSubstitutesSetNotNullSequence(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"INSERT INTO %s.t SELECT g, 'v' FROM generate_series(1, 1000) g", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN v SET NOT NULL", schema))
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.Len(t, v.ExecutedSQL, 4, "the four-step SET NOT NULL sequence must be reported")
+
+	var notNull bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT attnotnull FROM pg_attribute
+		 WHERE attrelid = ($1 || '.t')::regclass AND attname = 'v'`, schema).Scan(&notNull))
+	assert.True(t, notNull, "the column must be NOT NULL")
+	var scaffolds int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_constraint con
+		   JOIN pg_class c ON c.oid = con.conrelid
+		   JOIN pg_namespace n ON n.oid = c.relnamespace
+		  WHERE n.nspname = $1 AND c.relname = 't' AND con.contype = 'c'`, schema).Scan(&scaffolds))
+	assert.Zero(t, scaffolds, "the scaffold CHECK constraint must be dropped")
+}
+
+// A substituted sequence that fails mid-way emits a failed verdict whose
+// typed fields — the stable executor code, the failed step, and the
+// committed prefix — let automation distinguish "nothing happened" from
+// "partial state left behind" without parsing stderr prose. The run still
+// returns an operational error, not a refusal.
+func TestMigrateFailedSequenceEmitsFailedVerdict(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+	// The NULL row makes the sequence's VALIDATE CONSTRAINT step fail after
+	// the scaffold CHECK ... NOT VALID step has already committed.
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s.t VALUES (1, NULL)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN v SET NOT NULL", schema))
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.Error(t, err, "an execution failure is an operational error")
+	require.NotErrorIs(t, err, verdict.ErrRefused, "a failure is not a refusal")
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+	assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
+	assert.Equal(t, 2, v.FailedStep, "the VALIDATE CONSTRAINT step is the second of the four")
+	assert.Len(t, v.ExecutedSQL, 1, "exactly the scaffold step committed before the failure")
+	assert.False(t, v.Forced)
+
+	// The verdict's committed prefix must describe real state: the scaffold
+	// CHECK constraint survives the failed run.
+	var scaffolds int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_constraint con
+		   JOIN pg_class c ON c.oid = con.conrelid
+		   JOIN pg_namespace n ON n.oid = c.relnamespace
+		  WHERE n.nspname = $1 AND c.relname = 't' AND con.contype = 'c'`, schema).Scan(&scaffolds))
+	assert.Equal(t, 1, scaffolds, "the committed scaffold constraint must remain, per the partial-failure contract")
+}
+
+// A blocking CREATE INDEX is substituted with its concurrent build and
+// driven to a verified valid index.
+func TestMigrateSubstitutesBlockingCreateIndex(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("CREATE INDEX t_c_idx ON %s.t (c)", schema))
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	require.Len(t, v.ExecutedSQL, 1, "the substituted concurrent build must be reported")
+
+	var valid bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT i.indisvalid FROM pg_index i
+		 WHERE i.indexrelid = ($1 || '.t_c_idx')::regclass`, schema).Scan(&valid))
+	assert.True(t, valid, "the index must be built and valid")
+}
+
+// A submitted CREATE INDEX CONCURRENTLY is already the online idiom: the
+// engine drives it directly, with no substitution to report.
+func TestMigrateRunsSubmittedConcurrentIndexBuild(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("CREATE INDEX CONCURRENTLY t_cic_idx ON %s.t (c)", schema))
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.Empty(t, v.ExecutedSQL, "no substitution happened, so none is reported")
+
+	var valid bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT i.indisvalid FROM pg_index i
+		 WHERE i.indexrelid = ($1 || '.t_cic_idx')::regclass`, schema).Scan(&valid))
+	assert.True(t, valid, "the index must be built and valid")
+}
+
+// A safer-idiom decision without a constructible rewrite (an inline
+// constraint on ADD COLUMN) is refused as rewrite-required — running the
+// submitted form would falsify the plan's own reason.
+func TestMigrateRefusesInlineConstraintAsRewriteRequired(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN e int UNIQUE", schema))
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+
+	var n int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'e'`, schema).Scan(&n))
+	assert.Zero(t, n, "the refused change must not execute")
+}
+
+// R3: an unqualified statement is resolved once against the session's
+// search_path and re-emitted qualified, so the substituted concurrent index
+// build — which the executor refuses to run against an unqualified name —
+// succeeds, and the verdict names the resolved relation.
+func TestMigrateResolvesUnqualifiedTableViaSearchPath(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+
+	// The command's sessions resolve the bare name through search_path.
+	u, err := neturl.Parse(url)
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("options", "-csearch_path="+schema)
+	u.RawQuery = q.Encode()
+	cmd := newMigrateCmd(u.String(), "CREATE INDEX t_c_idx ON t (c)")
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.Equal(t, schema+".t", v.Table, "the verdict must carry the resolved qualified name")
+	require.Len(t, v.ExecutedSQL, 1)
+	assert.Contains(t, v.ExecutedSQL[0], schema+".t", "the executed SQL must be schema-qualified")
+
+	var valid bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT i.indisvalid FROM pg_index i
+		 WHERE i.indexrelid = ($1 || '.t_c_idx')::regclass`, schema).Scan(&valid))
+	assert.True(t, valid, "the index must be built and valid")
+}
+
+// An unqualified name that resolves nowhere on the session search_path is an
+// operational error before anything is classified or executed.
+func TestMigrateUnresolvableTableIsAnError(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	cmd := newMigrateCmd(url, "ALTER TABLE nowhere_to_be_found ADD COLUMN c int")
+	var out strings.Builder
+	err := cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, preflight.ErrTableNotFound)
+	assert.Empty(t, out.String(), "no verdict is printed for an operational error")
+}
+
+// --force with the exact qualified-table acknowledgement runs the submitted
+// form as-is: no substitution happens, the verdict records the override, and
+// the change commits.
+func TestMigrateForceRunsSubmittedFormOverSubstitution(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"INSERT INTO %s.t SELECT g, 'v' FROM generate_series(1, 1000) g", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN v SET NOT NULL", schema))
+	cmd.Force = schema + ".t"
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.True(t, v.Forced, "the verdict must record the override")
+	assert.Empty(t, v.ExecutedSQL, "the submitted form ran as-is; no substitution to report")
+
+	var notNull bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT attnotnull FROM pg_attribute
+		 WHERE attrelid = ($1 || '.t')::regclass AND attname = 'v'`, schema).Scan(&notNull))
+	assert.True(t, notNull, "the forced change must have committed")
+}
+
+// --force also overrides a backend-unavailable refusal: the rewrite-carrying
+// type change runs as a blind bounded attempt and commits on a small table.
+func TestMigrateForceRunsUnavailableRewrite(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.Force = schema + ".t"
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.True(t, v.Forced)
+
+	var typ string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT data_type FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
+	assert.Equal(t, "bigint", typ, "the forced rewrite must have committed")
+}
+
+// A --force acknowledgement that does not name the resolved target table is
+// a usage error: nothing executes.
+func TestMigrateForceAckMismatchExecutesNothing(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN v SET NOT NULL", schema))
+	cmd.Force = "wrong.table"
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.Error(t, err)
+	require.NotErrorIs(t, err, verdict.ErrRefused, "an acknowledgement mismatch is a usage error, not a refusal")
+	assert.Empty(t, out.String(), "no verdict is printed")
+
+	var notNull bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT attnotnull FROM pg_attribute
+		 WHERE attrelid = ($1 || '.t')::regclass AND attname = 'v'`, schema).Scan(&notNull))
+	assert.False(t, notNull, "nothing must have executed")
+}
+
+// --force overrides routing only, never the executor's protections: the
+// forced blind attempt is still size-guarded.
+func TestMigrateForceKeepsSizeGuard(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"INSERT INTO %s.t SELECT g, 'v' FROM generate_series(1, 1000) g", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.Force = schema + ".t"
+	cmd.MaxTableSize = 1
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.ReasonTableTooLarge, v.Reason)
+	assert.True(t, v.Forced, "a refused forced attempt must still record the override machine-readably")
+
+	var typ string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT data_type FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
+	assert.Equal(t, "integer", typ, "the guarded change must not have executed")
+}
+
+// The flagship force case from the design docs: a blocking CREATE INDEX,
+// forced past its concurrent-build substitution, runs as-is as a blind
+// bounded attempt and commits.
+func TestMigrateForceRunsBlockingCreateIndex(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("CREATE INDEX t_forced_idx ON %s.t (c)", schema))
+	cmd.Force = schema + ".t"
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.True(t, v.Forced, "the verdict must record the override")
+	assert.Empty(t, v.ExecutedSQL, "the submitted form ran as-is; no substitution to report")
+
+	var valid bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT i.indisvalid FROM pg_index i
+		 WHERE i.indexrelid = ($1 || '.t_forced_idx')::regclass`, schema).Scan(&valid))
+	assert.True(t, valid, "the forced blocking build must have committed a valid index")
+}
+
+// A forced blind attempt that runs past its statement budget is cancelled
+// and refused with the typed cause — the statement-budget refusal contract
+// end to end — and the refusal still records the override.
+func TestMigrateForcedRewriteRefusedByStatementBudget(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
@@ -105,6 +559,7 @@ func TestMigrateRefusesRewriteWithBudgetVerdict(t *testing.T) {
 	require.NoError(t, err)
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.Force = schema + ".t"
 	cmd.StatementTimeout = 50 * time.Millisecond
 	cmd.JSON = true
 	var out strings.Builder
@@ -116,17 +571,159 @@ func TestMigrateRefusesRewriteWithBudgetVerdict(t *testing.T) {
 	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 	assert.Equal(t, verdict.ReasonBudgetExceeded, v.Reason)
 	assert.Equal(t, verdict.CauseStatementBudget, v.Cause)
-	assert.Equal(t, schema+".t", v.Table)
+	assert.True(t, v.Forced, "a refused forced attempt must still record the override machine-readably")
 
 	var typ string
 	require.NoError(t, pool.QueryRow(t.Context(),
 		`SELECT data_type FROM information_schema.columns
 		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
 	assert.Equal(t, "integer", typ, "the cancelled attempt must not change the schema")
-	var count int
+}
+
+// A planner refusal (no known safe path) is not forceable: --force with a
+// valid acknowledgement still ends in the refusal verdict and nothing
+// executes.
+func TestMigrateForceIgnoredForRefusedRoute(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, room int)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf(
+		"ALTER TABLE %s.t ADD CONSTRAINT ex EXCLUDE USING gist (room WITH =)", schema))
+	cmd.Force = schema + ".t"
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+	assert.False(t, v.Forced, "nothing ran, and no override was honored")
+
+	var n int
 	require.NoError(t, pool.QueryRow(t.Context(),
-		fmt.Sprintf("SELECT count(*) FROM %s.t", schema)).Scan(&count))
-	assert.Equal(t, 300000, count, "the cancelled attempt must not change the data")
+		`SELECT count(*) FROM pg_constraint con
+		   JOIN pg_class c ON c.oid = con.conrelid
+		   JOIN pg_namespace ns ON ns.oid = c.relnamespace
+		  WHERE ns.nspname = $1 AND c.relname = 't' AND con.conname = 'ex'`, schema).Scan(&n))
+	assert.Zero(t, n, "the refused change must not execute")
+}
+
+// Statements the gate admits but the executor's static admission refuses end
+// in a typed refusal verdict, not a raw operational error — the "exactly one
+// verdict" contract holds for every gate-admitted statement, and nothing
+// executes.
+func TestMigrateRefusesExecutorAdmissionStatically(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	t.Run("unnamed index build", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+		require.NoError(t, err)
+
+		cmd := newMigrateCmd(url, fmt.Sprintf("CREATE INDEX ON %s.t (c)", schema))
+		cmd.JSON = true
+		var out strings.Builder
+		err = cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, verdict.ErrRefused)
+
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+
+		var n int
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM pg_indexes WHERE schemaname = $1 AND tablename = 't' AND indexname <> 't_pkey'`,
+			schema).Scan(&n))
+		assert.Zero(t, n, "the refused build must not create an index")
+	})
+
+	t.Run("if not exists index build", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+		require.NoError(t, err)
+
+		cmd := newMigrateCmd(url, fmt.Sprintf("CREATE INDEX IF NOT EXISTS t_c_idx ON %s.t (c)", schema))
+		cmd.JSON = true
+		var out strings.Builder
+		err = cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, verdict.ErrRefused)
+
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+
+		var n int
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM pg_indexes WHERE schemaname = $1 AND indexname = 't_c_idx'`,
+			schema).Scan(&n))
+		assert.Zero(t, n, "the refused build must not create an index")
+	})
+
+	t.Run("detach partition", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(
+			"CREATE TABLE %s.p (id int PRIMARY KEY) PARTITION BY RANGE (id)", schema))
+		require.NoError(t, err)
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(
+			"CREATE TABLE %s.p1 PARTITION OF %s.p FOR VALUES FROM (0) TO (100)", schema, schema))
+		require.NoError(t, err)
+
+		cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.p DETACH PARTITION p1", schema))
+		cmd.JSON = true
+		var out strings.Builder
+		err = cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, verdict.ErrRefused)
+
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+
+		var attached bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM pg_inherits
+			  WHERE inhrelid = ($1 || '.p1')::regclass AND inhparent = ($1 || '.p')::regclass)`,
+			schema).Scan(&attached))
+		assert.True(t, attached, "the refused detach must leave the partition attached")
+	})
+}
+
+// The size guard protects blind attempts only: a substituted safer sequence
+// runs on a table above the threshold, because its long steps are online by
+// design and its brief steps are budget-bounded.
+func TestMigrateSizeGuardSkippedForSubstitutedSequence(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"INSERT INTO %s.t SELECT g, 'v' FROM generate_series(1, 1000) g", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN v SET NOT NULL", schema))
+	cmd.MaxTableSize = 1 // would refuse a blind attempt; must not gate the sequence
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.NotEmpty(t, v.ExecutedSQL)
 }
 
 // Acceptance (iii): a table above the size threshold skips the attempt and
@@ -224,6 +821,64 @@ func TestMigrateRefusesInsufficientPrivileges(t *testing.T) {
 	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
 }
 
+// The privilege requirement follows the routed steps: a concurrent index
+// build needs CREATE on the schema (Tier 2 of the engine-role contract), so
+// a role that clears the owner-membership rung but whose owner lacks schema
+// CREATE is refused before the build starts — not killed mid-build by the
+// server. Applying the refusal's own Grant statement verbatim unlocks the
+// build — the closed loop the verdict promises an operator.
+func TestMigrateChecksPrivilegesAtRoutedTier(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	defer admin.Close()
+
+	owner := testutil.NewRole(t, admin, "NOLOGIN")
+	const password = "engine-test-password"
+	engine := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
+	schema := testutil.NewSchema(t, admin)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.t OWNER TO %s",
+		schema, pgx.Identifier{owner}.Sanitize()))
+	require.NoError(t, err)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s",
+		schema, pgx.Identifier{engine}.Sanitize()))
+	require.NoError(t, err)
+	// Tier 1 is satisfied up front: the engine is a member of the owning
+	// role. Only the schema CREATE rung is missing.
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("GRANT %s TO %s",
+		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{engine}.Sanitize()))
+	require.NoError(t, err)
+
+	u, err := neturl.Parse(serverURL)
+	require.NoError(t, err)
+	u.User = neturl.UserPassword(engine, password)
+	cmd := newMigrateCmd(u.String(), fmt.Sprintf("CREATE INDEX CONCURRENTLY t_c_idx ON %s.t (c)", schema))
+	cmd.JSON = true
+
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonInsufficientPrivileges, v.Reason)
+	assert.Equal(t, schema+".t", v.Table)
+
+	grant := fmt.Sprintf("GRANT CREATE ON SCHEMA %s TO %s",
+		pgx.Identifier{schema}.Sanitize(), pgx.Identifier{owner}.Sanitize())
+	assert.Contains(t, v.Detail, grant, "the refusal detail must name the exact Tier-2 remediation")
+
+	_, err = admin.Exec(t.Context(), grant)
+	require.NoError(t, err)
+
+	out.Reset()
+	require.NoError(t, cmd.run(t.Context(), &out))
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+}
+
 // Acceptance (iv): non-ALTER TABLE statements are refused with the safe-idiom
 // pointer and never executed. The gate needs no database at all.
 func TestMigrateGateRefusesWithoutDatabase(t *testing.T) {
@@ -233,12 +888,13 @@ func TestMigrateGateRefusesWithoutDatabase(t *testing.T) {
 		reason     verdict.Reason
 		saferIdiom string
 	}{
-		{"create index", "CREATE INDEX i ON t (c)", verdict.ReasonIndexStatement, "CREATE INDEX CONCURRENTLY"},
 		{"drop index", "DROP INDEX i", verdict.ReasonIndexStatement, "DROP INDEX CONCURRENTLY"},
 		{"reindex", "REINDEX TABLE t", verdict.ReasonIndexStatement, "REINDEX ... CONCURRENTLY"},
 		// The already-concurrent forms carry no safer idiom: suggesting the
 		// statement the user submitted would loop a resubmitting automation.
-		{"create index concurrently", "CREATE INDEX CONCURRENTLY i ON t (c)", verdict.ReasonIndexStatement, ""},
+		// CREATE INDEX (both forms) passes the gate: the blocking form is
+		// substituted with its concurrent build, the concurrent form is
+		// driven directly.
 		{"drop index concurrently", "DROP INDEX CONCURRENTLY i", verdict.ReasonIndexStatement, ""},
 		{"reindex concurrently", "REINDEX TABLE CONCURRENTLY t", verdict.ReasonIndexStatement, ""},
 		{"alter index", "ALTER INDEX i SET (fillfactor = 90)", verdict.ReasonUnsupportedStatement, ""},

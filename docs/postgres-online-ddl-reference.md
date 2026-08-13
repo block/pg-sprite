@@ -216,8 +216,8 @@ cutover) are the **table-rewrite** ones, because PostgreSQL cannot do them onlin
 **Everything else can be done natively-safe** with PostgreSQL's own
 `CONCURRENTLY` / `NOT VALID`+`VALIDATE` / fast-default / `USING INDEX` patterns. By the
 [*classify-before-copy* principle](design-principles.md#classify-first-leverage-native-postgresql),
-the plan **detects those and routes them to native DDL** instead of a copy; executing the routed
-backend lands in Phase 3 — the same bypass Spirit applies when it attempts `INSTANT`/`INPLACE`
+the plan **detects those and routes them to native DDL** instead of a copy, and `migrate`
+executes the routed sequence — the same bypass Spirit applies when it attempts `INSTANT`/`INPLACE`
 before falling back to a table copy. A shadow-table copy is the last resort, used only when no
 native online path exists.
 

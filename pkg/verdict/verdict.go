@@ -1,8 +1,10 @@
 // Package verdict is the engine's structured outcome contract: every migrate
-// invocation ends in exactly one verdict — executed natively, or refused with
-// a typed reason and, where one exists, a safer native idiom. Refusals use a
-// distinct exit code from operational errors. This type is the seam a future
-// orchestrator adapter maps onto SchemaBot's ExecutionModeBlocked.
+// invocation ends in exactly one verdict — executed natively, refused with
+// a typed reason and, where one exists, a safer native idiom, or failed
+// during execution with the executor's stable outcome code and a disclosure
+// of what committed before the failure. Refusals use a distinct exit code
+// from operational errors. This type is the seam a future orchestrator
+// adapter maps onto SchemaBot's ExecutionModeBlocked.
 package verdict
 
 import (
@@ -24,13 +26,20 @@ var ErrRefused = errors.New("refused")
 // Outcome is what happened to the submitted change.
 type Outcome string
 
-// The two outcomes a migrate run can end in.
+// The outcomes a migrate run can end in.
 const (
 	// OutcomeExecuted means the change ran and committed natively within
 	// its budgets.
 	OutcomeExecuted Outcome = "executed-natively"
 	// OutcomeRefused means the change was not executed; Reason says why.
 	OutcomeRefused Outcome = "refused"
+	// OutcomeFailed means execution was attempted and failed: an
+	// operational error, not a refusal — the process still exits 1. Code
+	// carries the executor's stable outcome code, and for a mid-sequence
+	// failure FailedStep and ExecutedSQL disclose the failed step and the
+	// committed prefix whose state remains, so automation can distinguish
+	// "nothing happened" from "partial state left behind".
+	OutcomeFailed Outcome = "failed"
 )
 
 // Reason is the typed cause of a refusal. Reasons are flat kebab-case
@@ -55,6 +64,15 @@ const (
 	// ReasonBudgetExceeded: the optimistic attempt exceeded its lock or
 	// statement budget and was cancelled.
 	ReasonBudgetExceeded Reason = "not-native-safe-budget-exceeded"
+	// ReasonRewriteRequired: the submitted form blocks and must run as a
+	// safer native sequence, but the planner could not construct one (a
+	// multi-operation statement, or a pattern it cannot build). Running
+	// the submitted form would falsify the plan's own reason, so the
+	// engine refuses instead.
+	ReasonRewriteRequired Reason = "not-native-safe-rewrite-required"
+	// ReasonBackendUnavailable: the change routes to an execution strategy
+	// this build does not implement (copy-and-swap).
+	ReasonBackendUnavailable Reason = "backend-unavailable"
 )
 
 // Cause narrows ReasonBudgetExceeded to the budget that was exceeded, so
@@ -82,6 +100,20 @@ type Verdict struct {
 	// Cause narrows a budget refusal to the budget that fired; empty
 	// otherwise.
 	Cause Cause `json:"cause,omitempty"`
+	// Code is the executor's stable outcome code (executor.OutcomeCode)
+	// carried by a failed verdict — flat kebab-case, part of the executor's
+	// report contract. It stays a plain string here so this contract
+	// package does not depend on the executor. Empty unless Outcome is
+	// OutcomeFailed.
+	Code string `json:"code,omitempty"`
+	// FailedStep is the 1-based position of the sequence step that failed,
+	// matching the numbering the planner's partial-failure contracts use;
+	// zero when the failure was not a mid-sequence one (a single-statement
+	// attempt rolls back and commits nothing).
+	FailedStep int `json:"failed_step,omitempty"`
+	// FailedStepSQL is the failed step's statement — the step the planner's
+	// partial-failure contract says a retry resumes from.
+	FailedStepSQL string `json:"failed_step_sql,omitempty"`
 	// Attempts is how many bounded attempts ran before a lock-budget
 	// refusal, so automation can tell an exhausted bounded retry from a
 	// single cancelled attempt; zero for every other verdict.
@@ -96,6 +128,17 @@ type Verdict struct {
 	// SaferIdiom is a native alternative to the refused statement, when one
 	// exists (e.g. CREATE INDEX CONCURRENTLY, ADD CONSTRAINT ... NOT VALID).
 	SaferIdiom string `json:"safer_idiom,omitempty"`
+	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
+	// On an executed verdict it is the substituted safer native sequence
+	// (empty when the submitted form ran as-is — a non-empty value is what
+	// tells automation a substitution happened). On a failed verdict it is
+	// the committed prefix that remains: empty means nothing committed.
+	ExecutedSQL []string `json:"executed_sql,omitempty"`
+	// Forced reports that --force overrode the engine's routing: the
+	// submitted form ran as-is instead of a safer substitution or a
+	// strategy refusal. It is the machine-readable audit record of the
+	// override.
+	Forced bool `json:"forced,omitempty"`
 }
 
 // JSON renders the verdict as a single JSON object.
@@ -115,6 +158,8 @@ func (v Verdict) String() string {
 		b.WriteString("executed natively")
 	case OutcomeRefused:
 		fmt.Fprintf(&b, "refused (%s)", v.Reason)
+	case OutcomeFailed:
+		fmt.Fprintf(&b, "failed (%s)", v.Code)
 	default:
 		fmt.Fprintf(&b, "unknown outcome %q", string(v.Outcome))
 	}
@@ -130,6 +175,22 @@ func (v Verdict) String() string {
 	}
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  safer:     %s", v.SaferIdiom)
+	}
+	if v.Forced {
+		b.WriteString("\n  forced:    the submitted form ran as-is (--force)")
+	}
+	if v.FailedStep > 0 {
+		fmt.Fprintf(&b, "\n  failed at: step %d: %s", v.FailedStep, v.FailedStepSQL)
+	}
+	if len(v.ExecutedSQL) > 0 {
+		if v.Outcome == OutcomeFailed {
+			b.WriteString("\n  committed before the failure (their state remains):")
+		} else {
+			b.WriteString("\n  executed as:")
+		}
+		for i, sql := range v.ExecutedSQL {
+			fmt.Fprintf(&b, "\n    %d. %s", i+1, sql)
+		}
 	}
 	return b.String()
 }

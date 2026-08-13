@@ -13,10 +13,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// NoSizeLimit is a size limit no PostgreSQL relation can exceed. Callers
+// pass it when the check should prove only existence and kind — the online
+// sequence path, whose long steps are safe on any size by design (the size
+// guard protects blind attempts, not planner-proven online idioms).
+const NoSizeLimit int64 = math.MaxInt64
 
 // ErrTableNotFound is returned when the target table does not exist (or is
 // not visible with the session's search_path).
