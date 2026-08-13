@@ -74,19 +74,36 @@ func (f DBFlags) diag() *slog.Logger {
 	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelDebug}))
 }
 
-// MigrateCmd runs a schema change (imperative front-end): the Phase 1
-// optimistic front door. Easy changes execute directly under tight budgets;
-// everything else is refused with an explicit verdict.
+// audit returns the operator audit logger: warn-level text on stderr (or the
+// test override), always on — an audit record of a deliberate safety
+// override must not depend on --debug. The machine-readable counterpart is
+// the verdict itself.
+func (f DBFlags) audit() *slog.Logger {
+	out := f.diagOut
+	if out == nil {
+		out = os.Stderr
+	}
+	return slog.New(slog.NewTextHandler(out, &slog.HandlerOptions{Level: slog.LevelWarn}))
+}
+
+// MigrateCmd runs a schema change (imperative front-end): classify the
+// statement, substitute the planner's safer native sequence by default when
+// the submitted form blocks, and execute every step under bounded budgets.
+// Everything the engine cannot run safely is refused with an explicit
+// verdict.
 type MigrateCmd struct {
 	DBFlags `embed:""`
 
-	Alter          string        `help:"Imperative ALTER statement to run." name:"alter" required:""`
-	MaxTableSize   byteSize      `help:"Size threshold above which the optimistic attempt is skipped, measured as the table's full on-disk footprint: heap, indexes, and TOAST, all partitions (binary units: B, KiB, MiB, GiB, TiB)." default:"1GiB"`
-	DryRun         bool          `help:"Classify and route the statement, print the plan, and execute nothing."`
-	JSON           bool          `help:"Emit the verdict (or dry-run plan) as JSON."`
-	LockAttempts   int           `help:"Maximum bounded attempts when native DDL exceeds lock_timeout; 1 disables retry." default:"3"`
-	LockBackoff    time.Duration `help:"Initial exponential backoff between lock-timeout attempts." default:"100ms"`
-	LockBackoffMax time.Duration `help:"Maximum exponential backoff between lock-timeout attempts." default:"1s"`
+	Alter             string        `help:"Imperative ALTER statement to run." name:"alter" required:""`
+	MaxTableSize      byteSize      `help:"Size threshold above which the optimistic attempt is skipped, measured as the table's full on-disk footprint: heap, indexes, and TOAST, all partitions (binary units: B, KiB, MiB, GiB, TiB). Planner-proven online steps (concurrent index builds, constraint validation) are not size-guarded." default:"1GiB"`
+	IndexBuildTimeout time.Duration `help:"Overall bound (statement_timeout) for one concurrent index build step; expect large tables to need a generous value." default:"30m"`
+	ValidateTimeout   time.Duration `help:"Overall bound (statement_timeout) for one VALIDATE CONSTRAINT step; expect large tables to need a generous value." default:"30m"`
+	Force             string        `help:"Run the submitted form as-is, overriding a safer-sequence substitution or a rewrite-required/backend-unavailable refusal. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly. The forced run is still parsed, preflighted, size-guarded, and budget-bounded; planner refusals (no known safe path) and unsupported statement kinds cannot be forced." placeholder:"SCHEMA.TABLE"`
+	LockAttempts      int           `help:"Maximum bounded attempts when native DDL exceeds lock_timeout; 1 disables retry." default:"3"`
+	LockBackoff       time.Duration `help:"Initial exponential backoff between lock-timeout attempts." default:"100ms"`
+	LockBackoffMax    time.Duration `help:"Maximum exponential backoff between lock-timeout attempts." default:"1s"`
+	DryRun            bool          `help:"Classify and route the statement, print the plan, and execute nothing."`
+	JSON              bool          `help:"Emit the verdict (or dry-run plan) as JSON."`
 }
 
 // Run implements the migrate subcommand.

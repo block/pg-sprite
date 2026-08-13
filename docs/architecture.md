@@ -128,14 +128,14 @@ different levels of commitment:
 | `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; advisory-lock mutual exclusion lands here | exists |
 | `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parse boundary, typed per-operation descriptors, and advisory rewrites (never hand-parse SQL); migration-time shadow DDL + fingerprints are derived by `pkg/schemadiff` via scratch-DB execute-and-introspect | exists |
 | `pkg/preflight` | Precondition verification and refusals before any write | exists (Phase 1: table-size guard); grows through Phase 2 |
-| `pkg/verdict` | Structured outcome contract (executed / refused + reason + safer idiom), rendering, exit codes | exists (Phase 1) |
+| `pkg/verdict` | Structured outcome contract (executed / refused / failed + reason, stable executor code, and safer idiom), rendering, exit codes | exists (Phase 1) |
 | `pkg/schemadiff` | Execute-and-introspect desired state, introspect the live catalog, and produce an ordered declarative diff | exists |
 | `pkg/planner` | Classify typed operations and emit safer native SQL | exists |
 | `pkg/lint` | Offline lint findings with typed codes: unsupported operations are errors; blocking idioms, rewrites, and destructive drops are warnings | exists (Phase 2.5) |
 | `pkg/plan` | Versioned machine-readable dry-run plan report — the one JSON contract both front doors emit and an orchestrator consumes | exists (Phase 2.5) |
 | `pkg/diffplan` | The declarative front door as a library: desired schema in, routed `plan.Report` out — the CLI `diff` and embedding orchestrators share this one pipeline | exists |
 | `pkg/router` | Route classified statements to native / copy-and-swap / refuse dispositions; copy-and-swap reports unavailable until that backend lands | exists (Phase 2.4) |
-| `pkg/executor` | Bounded optimistic native attempt; the `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) lands in Phase 3 | bounded optimistic attempt exists |
+| `pkg/executor` | Bounded optimistic native attempt, the concurrent index build, and the autocommit safer-sequence runner, with stable outcome codes; the full `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) arrives with the copy-and-swap backend | native execution exists |
 | `pkg/table` | PK-range chunkers (single-column fast path, composite), dynamic time-based sizing | Phase 4 |
 | `pkg/copier` | Parallel chunked copy into the shadow table (never overwrites) | Phase 4 |
 | `pkg/checksum` | The mandatory correctness gate; continuous checker; repair primitive | Phase 5 |
