@@ -180,6 +180,10 @@ type SequenceStepError struct {
 // committed prefix, because "what already happened" is the first triage
 // question a partial sequence raises.
 func (e *SequenceStepError) Error() string {
+	if e.Step == 1 {
+		return fmt.Sprintf("sequence step 1 of %d (%s) failed; no earlier steps had committed: %v",
+			e.Total, e.Kind, e.Err)
+	}
 	return fmt.Sprintf("sequence step %d of %d (%s) failed; steps before it committed and their state remains: %v",
 		e.Step, e.Total, e.Kind, e.Err)
 }

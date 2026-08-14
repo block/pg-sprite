@@ -83,6 +83,7 @@ func TestReasonAndCauseTokensAreFlat(t *testing.T) {
 		string(ReasonIndexStatement),
 		string(ReasonTableTooLarge),
 		string(ReasonBudgetExceeded),
+		string(ReasonInsufficientPrivileges),
 		string(CauseLockBudget),
 		string(CauseStatementBudget),
 	} {

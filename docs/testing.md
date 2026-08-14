@@ -149,6 +149,14 @@ generated CA for verify-full tests. The harness has its own tests proving
 the version selected by `PG_VERSION` is the version actually running, and
 that throwaway schemas are isolated.
 
+The privilege-ladder tests additionally create throwaway **cluster-level
+roles** (`NewRole`), so the role behind an external `PG_DSN` needs
+`CREATEROLE` — a step up from "a database you can create schemas in".
+The compose database and per-test containers connect as superuser, so
+this only matters when pointing `PG_DSN` at a shared server; tests whose
+requirements go further (replication attributes) skip themselves when the
+server refuses.
+
 ## Aurora-shaped environments: three tiers, each proving what it can
 
 CI runs the matrix against **vanilla PostgreSQL 14 → 18 images** — the floor

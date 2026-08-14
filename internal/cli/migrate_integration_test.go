@@ -760,6 +760,125 @@ func TestMigrateSizeGuardSkipsAttempt(t *testing.T) {
 	assert.Zero(t, n, "the size guard must skip the attempt entirely")
 }
 
+// A connected role without membership in the owning role is refused up
+// front with a typed privilege verdict — instead of the server's mid-change
+// "must be owner" error — and the same change executes once the exact
+// membership the refusal names is granted.
+func TestMigrateRefusesInsufficientPrivileges(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	defer admin.Close()
+
+	owner := testutil.NewRole(t, admin, "NOLOGIN")
+	const password = "engine-test-password"
+	engine := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
+	schema := testutil.NewSchema(t, admin)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.t OWNER TO %s",
+		schema, pgx.Identifier{owner}.Sanitize()))
+	require.NoError(t, err)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s",
+		schema, pgx.Identifier{engine}.Sanitize()))
+	require.NoError(t, err)
+
+	u, err := neturl.Parse(serverURL)
+	require.NoError(t, err)
+	u.User = neturl.UserPassword(engine, password)
+	cmd := newMigrateCmd(u.String(), fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
+	cmd.JSON = true
+
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonInsufficientPrivileges, v.Reason)
+	assert.Equal(t, schema+".t", v.Table)
+
+	// The detail carries the exact provisioning statement, and the fix
+	// below executes that same statement — the closed loop the verdict
+	// promises an operator. The expected grant is version-dependent: 16+
+	// membership grants carry the INHERIT option explicitly.
+	grant := fmt.Sprintf("GRANT %s TO %s",
+		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{engine}.Sanitize())
+	var versionNum int
+	require.NoError(t, admin.QueryRow(t.Context(),
+		"SELECT current_setting('server_version_num')::int").Scan(&versionNum))
+	if versionNum >= 160000 {
+		grant += " WITH INHERIT TRUE"
+	}
+	assert.Contains(t, v.Detail, grant, "the refusal detail must name the exact remediation")
+
+	_, err = admin.Exec(t.Context(), grant)
+	require.NoError(t, err)
+
+	out.Reset()
+	require.NoError(t, cmd.run(t.Context(), &out))
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+}
+
+// The privilege requirement follows the routed steps: a concurrent index
+// build needs CREATE on the schema (Tier 2 of the engine-role contract), so
+// a role that clears the owner-membership rung but whose owner lacks schema
+// CREATE is refused before the build starts — not killed mid-build by the
+// server. Applying the refusal's own Grant statement verbatim unlocks the
+// build — the closed loop the verdict promises an operator.
+func TestMigrateChecksPrivilegesAtRoutedTier(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	defer admin.Close()
+
+	owner := testutil.NewRole(t, admin, "NOLOGIN")
+	const password = "engine-test-password"
+	engine := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
+	schema := testutil.NewSchema(t, admin)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("ALTER TABLE %s.t OWNER TO %s",
+		schema, pgx.Identifier{owner}.Sanitize()))
+	require.NoError(t, err)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s",
+		schema, pgx.Identifier{engine}.Sanitize()))
+	require.NoError(t, err)
+	// Tier 1 is satisfied up front: the engine is a member of the owning
+	// role. Only the schema CREATE rung is missing.
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("GRANT %s TO %s",
+		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{engine}.Sanitize()))
+	require.NoError(t, err)
+
+	u, err := neturl.Parse(serverURL)
+	require.NoError(t, err)
+	u.User = neturl.UserPassword(engine, password)
+	cmd := newMigrateCmd(u.String(), fmt.Sprintf("CREATE INDEX CONCURRENTLY t_c_idx ON %s.t (c)", schema))
+	cmd.JSON = true
+
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonInsufficientPrivileges, v.Reason)
+	assert.Equal(t, schema+".t", v.Table)
+
+	grant := fmt.Sprintf("GRANT CREATE ON SCHEMA %s TO %s",
+		pgx.Identifier{schema}.Sanitize(), pgx.Identifier{owner}.Sanitize())
+	assert.Contains(t, v.Detail, grant, "the refusal detail must name the exact Tier-2 remediation")
+
+	_, err = admin.Exec(t.Context(), grant)
+	require.NoError(t, err)
+
+	out.Reset()
+	require.NoError(t, cmd.run(t.Context(), &out))
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+}
+
 // Acceptance (iv): non-ALTER TABLE statements are refused with the safe-idiom
 // pointer and never executed. The gate needs no database at all.
 func TestMigrateGateRefusesWithoutDatabase(t *testing.T) {

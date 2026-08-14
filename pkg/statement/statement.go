@@ -58,11 +58,12 @@ func (k Kind) String() string {
 // exactly one statement through the PostgreSQL grammar — the proof the
 // executor requires before running anything (invariant ST-7).
 type Statement struct {
-	sql        string
-	kind       Kind
-	schema     string
-	table      string
-	concurrent bool
+	sql         string
+	kind        Kind
+	schema      string
+	table       string
+	concurrent  bool
+	buildsIndex bool
 }
 
 // SQL returns the original statement text as submitted.
@@ -84,6 +85,15 @@ func (s Statement) Table() string { return s.table }
 // Concurrent reports whether an index statement used its CONCURRENTLY form.
 // It is always false for non-index kinds.
 func (s Statement) Concurrent() bool { return s.concurrent }
+
+// BuildsIndex reports whether executing the statement creates a new index:
+// every CREATE INDEX, and the ALTER TABLE shapes that build one as a side
+// effect — ADD CONSTRAINT UNIQUE / PRIMARY KEY / EXCLUDE without USING
+// INDEX, and ADD COLUMN with an inline UNIQUE or PRIMARY KEY. The server
+// requires CREATE on the schema for these (the engine-role contract's index
+// build tier), unlike in-place ALTERs — including USING INDEX adoption and
+// rewrites that rebuild existing indexes, which are owner-gated only.
+func (s Statement) BuildsIndex() bool { return s.buildsIndex }
 
 // ErrNotOneStatement is returned by ParseOne when the input does not contain
 // exactly one SQL statement.
@@ -131,6 +141,7 @@ func ParseOne(sql string) (Statement, error) {
 		st.kind = KindAlterTable
 		st.schema = alter.GetRelation().GetSchemaname()
 		st.table = alter.GetRelation().GetRelname()
+		st.buildsIndex = alterBuildsIndex(alter)
 	case node.GetCreateStmt() != nil:
 		rel := node.GetCreateStmt().GetRelation()
 		st.kind = KindCreateTable
@@ -169,6 +180,7 @@ func ParseOne(sql string) (Statement, error) {
 		st.schema = rel.GetSchemaname()
 		st.table = rel.GetRelname()
 		st.concurrent = node.GetIndexStmt().GetConcurrent()
+		st.buildsIndex = true
 	case node.GetDropStmt() != nil:
 		if node.GetDropStmt().GetRemoveType() == pganalyze.ObjectType_OBJECT_INDEX {
 			st.kind = KindDropIndex
@@ -179,6 +191,47 @@ func ParseOne(sql string) (Statement, error) {
 		st.concurrent = reindexConcurrently(node.GetReindexStmt())
 	}
 	return st, nil
+}
+
+// alterBuildsIndex reports whether any of the ALTER TABLE's operations
+// creates a new index as a side effect: ADD CONSTRAINT UNIQUE / PRIMARY
+// KEY / EXCLUDE builds the constraint's backing index unless it adopts an
+// existing one with USING INDEX, and ADD COLUMN builds one for an inline
+// UNIQUE or PRIMARY KEY column constraint.
+func alterBuildsIndex(alter *pganalyze.AlterTableStmt) bool {
+	for _, node := range alter.GetCmds() {
+		cmd := node.GetAlterTableCmd()
+		switch cmd.GetSubtype() {
+		case pganalyze.AlterTableType_AT_AddConstraint:
+			if constraintBuildsIndex(cmd.GetDef().GetConstraint()) {
+				return true
+			}
+		case pganalyze.AlterTableType_AT_AddColumn:
+			for _, c := range cmd.GetDef().GetColumnDef().GetConstraints() {
+				if constraintBuildsIndex(c.GetConstraint()) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// constraintBuildsIndex reports whether the constraint builds a new backing
+// index. USING INDEX adoption carries the existing index's name and builds
+// nothing.
+func constraintBuildsIndex(con *pganalyze.Constraint) bool {
+	if con == nil || con.GetIndexname() != "" {
+		return false
+	}
+	switch con.GetContype() {
+	case pganalyze.ConstrType_CONSTR_UNIQUE,
+		pganalyze.ConstrType_CONSTR_PRIMARY,
+		pganalyze.ConstrType_CONSTR_EXCLUSION:
+		return true
+	default:
+		return false
+	}
 }
 
 // reindexConcurrently reports whether a REINDEX statement used its

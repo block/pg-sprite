@@ -113,6 +113,25 @@ func NewSchema(t *testing.T, pool *pgxpool.Pool) string {
 	return name
 }
 
+// NewRole creates a throwaway cluster-level role with the given options and
+// registers its drop. Roles are cluster-scoped, so names are unique per
+// process the same way throwaway schemas are.
+func NewRole(t *testing.T, pool *pgxpool.Pool, options string) string {
+	t.Helper()
+	name := fmt.Sprintf("r_%d_%d", os.Getpid(), schemaSeq.Add(1))
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE ROLE %s %s", pgx.Identifier{name}.Sanitize(), options))
+	require.NoError(t, err, "create throwaway role")
+	t.Cleanup(func() {
+		// t.Context is cancelled by cleanup time; strip the cancellation.
+		_, err := pool.Exec(context.WithoutCancel(t.Context()),
+			"DROP ROLE IF EXISTS "+pgx.Identifier{name}.Sanitize())
+		if err != nil {
+			t.Logf("drop throwaway role %s: %v", name, err)
+		}
+	})
+	return name
+}
+
 // NewPublicTable creates a uniquely named throwaway table in the public
 // schema — for tests that exercise unqualified-statement resolution, where
 // a dedicated schema would defeat the point — and returns its name. The

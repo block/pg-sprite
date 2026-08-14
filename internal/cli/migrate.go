@@ -181,10 +181,29 @@ func (c *MigrateCmd) auditForce(st statement.Statement, rs router.Statement) {
 // same brief budgets. Blind attempts of the submitted form — including
 // forced ones — are size-guarded; substituted sequences and planner-proven
 // online idioms are not — long work on large tables is their purpose, and
-// every brief step is still budget-bounded.
+// every brief step is still budget-bounded. Before anything runs, the
+// connected role is checked at the tier the routed steps actually need
+// (engine-role contract), so a role that would die mid-change is refused
+// with the exact provisioning statement instead.
 func (c *MigrateCmd) execute(ctx context.Context, out io.Writer, pool *pgxpool.Pool,
 	st statement.Statement, execSQL []string, plan planner.Plan,
 	substituted, forced bool, logger *slog.Logger) error {
+	tier, err := preflight.RequiredTier(execSQL)
+	if err != nil {
+		return err
+	}
+	priv, err := preflight.CheckPrivileges(ctx, pool, st.Schema(), st.Table(),
+		preflight.Requirement{Tier: tier})
+	var privErr *preflight.PrivilegeError
+	if errors.As(err, &privErr) {
+		return c.emit(out, privilegeVerdict(st, privErr, forced))
+	}
+	if err != nil {
+		return err
+	}
+	logger.Debug("privilege preflight passed",
+		"role", priv.Role(), "owner", priv.Owner(), "tier", tier.String())
+
 	limit := int64(c.MaxTableSize)
 	if !sizeGuardApplies(plan, substituted) {
 		limit = preflight.NoSizeLimit
@@ -433,6 +452,22 @@ func indexAdvice(st statement.Statement) (detail, saferIdiom string) {
 		return "a plain REINDEX blocks writes; the concurrent rebuild does not", "REINDEX ... CONCURRENTLY"
 	default:
 		return "", ""
+	}
+}
+
+// privilegeVerdict is the refusal for a connected role that lacks the access
+// the routed change needs. The error already names the failed catalog check
+// and the exact provisioning statement, so it is the detail verbatim. A
+// refused forced attempt still records the override: the operator asked for
+// the submitted form and the role could not run it.
+func privilegeVerdict(st statement.Statement, privErr *preflight.PrivilegeError, forced bool) verdict.Verdict {
+	return verdict.Verdict{
+		Outcome:   verdict.OutcomeRefused,
+		Reason:    verdict.ReasonInsufficientPrivileges,
+		Statement: st.SQL(),
+		Table:     qualified(st),
+		Forced:    forced,
+		Detail:    privErr.Error(),
 	}
 }
 
