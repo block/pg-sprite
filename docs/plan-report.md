@@ -39,6 +39,7 @@ with SQL it does not fully understand.
 | `server_version` | string | when connected | The PostgreSQL `server_version` the plan was derived against. Classification is version-sensitive; a stored or forwarded report names the server whose rules produced it. |
 | `table_exists` | bool | diff source only | Whether the live table was found. Absent means "not introspected" (alter source); `false` means the plan is the full desired schema. |
 | `disposition` | string | always | Aggregate disposition across all statements (see Dispositions). |
+| `reason` | string | target-dependent refusal only | Typed refusal cause when target facts override an otherwise executable route; currently `unsupported-partitioned-parent`. |
 | `fingerprint` | string | always | The plan's stable identity (see Fingerprint). |
 | `statements` | array | always | The ordered plan; `[]` (never `null`) means nothing to do. |
 

@@ -83,6 +83,21 @@ func TestMigratePartitionedTableAwareness(t *testing.T) {
 			fmt.Sprintf("CREATE INDEX CONCURRENTLY p_v_idx ON %s.p (v)", schema))
 	})
 
+	t.Run("forced parent plain index", func(t *testing.T) {
+		schema := createPartitionFixture(t, pool)
+		sql := fmt.Sprintf("CREATE INDEX p_v_idx ON %s.p (v)", schema)
+		cmd := newMigrateCmd(url, sql)
+		cmd.JSON = true
+		cmd.Force = schema + ".p"
+		var out strings.Builder
+		err := cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, verdict.ErrRefused)
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, v.Reason)
+		assert.True(t, v.Forced)
+	})
+
 	t.Run("parent unique constraint", func(t *testing.T) {
 		schema := createPartitionFixture(t, pool)
 		assertPartitionedParentRefusal(t, url, pool, schema,
@@ -120,6 +135,28 @@ func TestMigratePartitionedTableAwareness(t *testing.T) {
 			SELECT count(*) FROM information_schema.columns
 			WHERE table_schema = $1 AND table_name IN ('p', 'p1') AND column_name = 'added'`, schema).Scan(&columns))
 		assert.Equal(t, 2, columns)
+	})
+
+	t.Run("parent not valid foreign key follows server support", func(t *testing.T) {
+		schema := createPartitionFixture(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.ref (id int PRIMARY KEY)", schema))
+		require.NoError(t, err)
+		cmd := newMigrateCmd(url, fmt.Sprintf(
+			"ALTER TABLE %s.p ADD CONSTRAINT p_ref_fk FOREIGN KEY (id) REFERENCES %s.ref(id) NOT VALID", schema, schema))
+		cmd.JSON = true
+		var out strings.Builder
+		err = cmd.run(t.Context(), &out)
+		major, majorErr := dbconn.ServerMajor(t.Context(), pool)
+		require.NoError(t, majorErr)
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		if major < 18 {
+			require.ErrorIs(t, err, verdict.ErrRefused)
+			assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, v.Reason)
+		} else {
+			require.NoError(t, err)
+			assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		}
 	})
 }
 

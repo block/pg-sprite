@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // parseDesired parses a desired-state schema the way a library caller would
@@ -87,6 +88,25 @@ func TestPlanDerivesOrderedRoutedPlan(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, report.Fingerprint, again.Fingerprint,
 		"the same desired state against the same live table plans deterministically")
+}
+
+func TestPlanRefusesPartitionedParentIndexChange(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.events (id bigint, name text) PARTITION BY RANGE (id); "+
+			"CREATE TABLE %s.events_1 PARTITION OF %s.events FOR VALUES FROM (0) TO (100)", schema, schema, schema))
+	require.NoError(t, err)
+	ds := parseDesired(t,
+		"CREATE TABLE events (id bigint, name text) PARTITION BY RANGE (id);\n"+
+			"CREATE INDEX events_name_idx ON events (name);")
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
+	require.NoError(t, err)
+	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Reason)
 }
 
 // A desired state that needs a table rewrite routes to the copy-and-swap

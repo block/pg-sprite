@@ -58,7 +58,7 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 		}
 	}
 
-	facts, err := dryRunFacts(ctx, pool, st)
+	facts, _, err := dryRunFacts(ctx, pool, st)
 	if err != nil {
 		return err
 	}
@@ -188,6 +188,29 @@ func (c *MigrateCmd) auditForce(st statement.Statement, rs router.Statement) {
 func (c *MigrateCmd) execute(ctx context.Context, out io.Writer, pool *pgxpool.Pool,
 	st statement.Statement, execSQL []string, plan planner.Plan,
 	substituted, forced bool, logger *slog.Logger) error {
+	limit := int64(c.MaxTableSize)
+	if !sizeGuardApplies(plan, substituted) {
+		limit = preflight.NoSizeLimit
+	}
+	pt, err := preflight.CheckTable(ctx, pool, st.Schema(), st.Table(), limit)
+	var sizeErr *preflight.SizeError
+	if errors.As(err, &sizeErr) {
+		return c.emit(out, sizeGuardVerdict(st, sizeErr, forced))
+	}
+	if err != nil {
+		return err
+	}
+	serverMajor, err := dbconn.ServerMajor(ctx, pool)
+	if err != nil {
+		return err
+	}
+	if err := preflight.CheckPartitionSupport(pt, serverMajor, execSQL); err != nil {
+		var partitionErr *preflight.UnsupportedPartitionedParentError
+		if errors.As(err, &partitionErr) {
+			return c.emit(out, partitionedParentVerdict(st, partitionErr, forced))
+		}
+		return err
+	}
 	tier, err := preflight.RequiredTier(execSQL)
 	if err != nil {
 		return err
@@ -203,26 +226,6 @@ func (c *MigrateCmd) execute(ctx context.Context, out io.Writer, pool *pgxpool.P
 	}
 	logger.Debug("privilege preflight passed",
 		"role", priv.Role(), "owner", priv.Owner(), "tier", tier.String())
-
-	limit := int64(c.MaxTableSize)
-	if !sizeGuardApplies(plan, substituted) {
-		limit = preflight.NoSizeLimit
-	}
-	pt, err := preflight.CheckTable(ctx, pool, st.Schema(), st.Table(), limit)
-	var sizeErr *preflight.SizeError
-	if errors.As(err, &sizeErr) {
-		return c.emit(out, sizeGuardVerdict(st, sizeErr, forced))
-	}
-	if err != nil {
-		return err
-	}
-	if err := preflight.CheckPartitionSupport(pt, execSQL); err != nil {
-		var partitionErr *preflight.UnsupportedPartitionedParentError
-		if errors.As(err, &partitionErr) {
-			return c.emit(out, partitionedParentVerdict(st, partitionErr, forced))
-		}
-		return err
-	}
 	logger.Debug("preflight passed",
 		"table", qualified(st), "total_bytes", pt.TotalBytes(), "limit_bytes", limit)
 	if substituted {
@@ -478,7 +481,7 @@ func privilegeVerdict(st statement.Statement, privErr *preflight.PrivilegeError,
 	}
 }
 
-// partitionedParentVerdict refuses routed index-building steps on a
+// partitionedParentVerdict refuses unsupported execution steps on a
 // partitioned parent before the sequence executor runs anything.
 func partitionedParentVerdict(st statement.Statement, partitionErr *preflight.UnsupportedPartitionedParentError,
 	forced bool) verdict.Verdict {

@@ -6,35 +6,80 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
-// UnsupportedPartitionedParentError reports that a routed plan would build
-// an index on a partitioned parent. PostgreSQL does not support concurrent
-// parent-level index builds, and pg-sprite does not yet implement the
-// partition-aware sequence needed to replace one.
-type UnsupportedPartitionedParentError struct{}
+// PartitionRefusalCause identifies which unsupported shape triggered a
+// partitioned-parent refusal. The zero value means the steps are supported.
+type PartitionRefusalCause string
 
-// Error implements the error interface.
-func (*UnsupportedPartitionedParentError) Error() string {
-	return "parent-level concurrent index builds are unsupported by PostgreSQL; " +
-		"the partition-aware CREATE INDEX ON ONLY, per-partition CREATE INDEX CONCURRENTLY, " +
-		"and ATTACH PARTITION flow is not yet supported"
+const (
+	// PartitionCauseIndexBuild means a step builds an index on the parent.
+	PartitionCauseIndexBuild PartitionRefusalCause = "parent-index-build"
+	// PartitionCauseNotValidForeignKey means a step adds a NOT VALID
+	// foreign key, which the server version cannot do on a partitioned
+	// table.
+	PartitionCauseNotValidForeignKey PartitionRefusalCause = "parent-not-valid-foreign-key"
+)
+
+// UnsupportedPartitionedParentError reports that an execution plan contains
+// a step pg-sprite cannot safely run on a partitioned parent.
+type UnsupportedPartitionedParentError struct {
+	// Cause is the unsupported shape that triggered the refusal.
+	Cause PartitionRefusalCause
 }
 
-// CheckPartitionSupport verifies that the routed execution steps are safe
+// Error implements the error interface.
+func (e *UnsupportedPartitionedParentError) Error() string {
+	if e.Cause == PartitionCauseNotValidForeignKey {
+		return "PostgreSQL before version 18 cannot add a NOT VALID foreign key on a partitioned table; " +
+			"pg-sprite refuses the plan rather than failing mid-change"
+	}
+	return "PostgreSQL cannot build parent-level indexes concurrently; pg-sprite does not yet support " +
+		"the partition-aware CREATE INDEX ON ONLY, per-partition CREATE INDEX CONCURRENTLY, and ATTACH PARTITION flow, " +
+		"and refuses non-concurrent parent builds rather than running them under ACCESS EXCLUSIVE"
+}
+
+// CheckPartitionSupport verifies that the execution steps are safe
 // for the target's relation kind. Ordinary tables and leaf partitions pass
-// unchanged. Partitioned parents are refused only when a step builds an
-// index; supported in-place parent ALTER TABLE operations remain available.
-func CheckPartitionSupport(table PreflightedTable, execSQL []string) error {
+// unchanged. Supported in-place parent ALTER TABLE operations remain available.
+func CheckPartitionSupport(table PreflightedTable, serverMajor int, execSQL []string) error {
 	if !table.Partitioned() {
 		return nil
 	}
+	cause, err := RefusesPartitionedParent(serverMajor, execSQL)
+	if err != nil {
+		return err
+	}
+	if cause != "" {
+		return &UnsupportedPartitionedParentError{Cause: cause}
+	}
+	return nil
+}
+
+// RefusesPartitionedParent reports the cause that makes steps unsupported on
+// a partitioned parent, or the zero value when they are supported. It is the
+// shared static policy used by preflight, plan reporting, and executor
+// admission.
+func RefusesPartitionedParent(serverMajor int, execSQL []string) (PartitionRefusalCause, error) {
 	for _, sql := range execSQL {
 		st, err := statement.ParseOne(sql)
 		if err != nil {
-			return fmt.Errorf("check partitioned-parent support: %w", err)
+			return "", fmt.Errorf("check partitioned-parent support: %w", err)
 		}
+		// INV: RF-6 — no partitioned-parent sequence starts when pg-sprite
+		// cannot complete it without an ACCESS EXCLUSIVE index build or a
+		// server-version-unsupported NOT VALID foreign key.
 		if st.BuildsIndex() {
-			return &UnsupportedPartitionedParentError{}
+			return PartitionCauseIndexBuild, nil
+		}
+		ops, err := statement.ParseOps(sql)
+		if err != nil {
+			return "", fmt.Errorf("check partitioned-parent operations: %w", err)
+		}
+		for _, op := range ops {
+			if serverMajor < 18 && op.Kind == statement.OpAddConstraint &&
+				op.Constraint == statement.ConstraintForeignKey && op.NotValid {
+				return PartitionCauseNotValidForeignKey, nil
+			}
 		}
 	}
-	return nil
+	return "", nil
 }

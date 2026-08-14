@@ -13,6 +13,7 @@ import (
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // FormatVersion identifies the report contract. A consumer must reject a
@@ -107,6 +108,9 @@ type Report struct {
 	// Disposition is the aggregate disposition across all statements:
 	// what would happen if the engine executed this plan now.
 	Disposition router.Disposition `json:"disposition"`
+	// Reason is the typed refusal cause when target facts make an otherwise
+	// executable routed plan unsafe.
+	Reason verdict.Reason `json:"reason,omitempty"`
 	// Fingerprint is the plan's stable identity (see Fingerprint). An
 	// approver pins it when the plan is reviewed; an executor recomputes it
 	// at apply time and refuses on mismatch — that is how "the plan a
@@ -115,6 +119,26 @@ type Report struct {
 	Fingerprint string `json:"fingerprint"`
 	// Statements is the ordered plan; empty means there is nothing to do.
 	Statements []Statement `json:"statements"`
+}
+
+// RefuseUnsupportedPartitionedParent marks executable statements as refused
+// when partition-aware admission rejects their execution steps.
+func RefuseUnsupportedPartitionedParent(report *Report, refused []bool) {
+	any := false
+	for i := range report.Statements {
+		if i >= len(refused) || !refused[i] {
+			continue
+		}
+		any = true
+		report.Statements[i].Backend = ""
+		report.Statements[i].Disposition = router.DispositionRefuse
+		report.Statements[i].ExecSQL = nil
+		report.Statements[i].Execution = ""
+	}
+	if any {
+		report.Disposition = router.DispositionRefuse
+		report.Reason = verdict.ReasonUnsupportedPartitionedParent
+	}
 }
 
 // NewReport returns an empty report for source with the contract version

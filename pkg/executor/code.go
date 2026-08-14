@@ -41,6 +41,9 @@ const (
 	// CodeUnsupportedSequenceStep: a step is not a shape the sequence
 	// executor can run safely.
 	CodeUnsupportedSequenceStep Code = "unsupported-sequence-step"
+	// CodeUnsupportedPartitionedParent identifies partitioned-parent
+	// admission refusals.
+	CodeUnsupportedPartitionedParent Code = "unsupported-partitioned-parent"
 	// CodeNotConcurrentIndexBuild: the statement handed to the concurrent
 	// build executor is not a CREATE INDEX CONCURRENTLY.
 	CodeNotConcurrentIndexBuild Code = "not-concurrent-index-build"
@@ -106,6 +109,8 @@ func sentinelCode(err error) Code {
 		return CodeEmptySequence
 	case errors.Is(err, ErrUnsupportedSequenceStep):
 		return CodeUnsupportedSequenceStep
+	case errors.Is(err, ErrUnsupportedPartitionedParent):
+		return CodeUnsupportedPartitionedParent
 	case errors.Is(err, ErrNotConcurrentIndexBuild):
 		return CodeNotConcurrentIndexBuild
 	case errors.Is(err, ErrUnnamedIndex):

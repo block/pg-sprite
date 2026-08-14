@@ -14,6 +14,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // dryRunPlan runs migrate --dry-run --json and decodes the plan report.
@@ -55,6 +56,20 @@ func TestMigrateDryRunRoutesRewriteWithoutExecuting(t *testing.T) {
 		`SELECT data_type FROM information_schema.columns
 		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
 	assert.Equal(t, "integer", typ, "dry-run must not execute the change")
+}
+
+func TestMigrateDryRunRefusesPartitionedParentIndexPlan(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := createPartitionFixture(t, pool)
+	report := dryRunPlan(t, url, fmt.Sprintf("CREATE INDEX p_v_idx ON %s.p (v)", schema))
+	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Reason)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, router.DispositionRefuse, report.Statements[0].Disposition)
+	assert.Empty(t, report.Statements[0].ExecSQL)
 }
 
 // Live facts feed the imperative dry-run: a widen the classifier can only
