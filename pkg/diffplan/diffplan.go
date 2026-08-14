@@ -100,18 +100,14 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		return plan.Report{}, err
 	}
 	if tableExists {
-		pt, checkErr := preflight.CheckTable(ctx, pool, req.Schema, ds.Table(), preflight.NoSizeLimit)
+		targetFacts, checkErr := preflight.LookupTargetFacts(ctx, pool, req.Schema, ds.Table())
 		if checkErr != nil {
 			return plan.Report{}, checkErr
 		}
-		if pt.Partitioned() {
-			serverMajor, majorErr := dbconn.ServerMajor(ctx, pool)
-			if majorErr != nil {
-				return plan.Report{}, majorErr
-			}
+		if targetFacts.Partitioned() {
 			refused := make([]bool, len(report.Statements))
 			for i := range report.Statements {
-				cause, causeErr := preflight.RefusesPartitionedParent(serverMajor, report.Statements[i].ExecSQL)
+				cause, causeErr := preflight.RefusesPartitionedParent(targetFacts.ServerMajor(), report.Statements[i].ExecSQL)
 				if causeErr != nil {
 					return plan.Report{}, causeErr
 				}

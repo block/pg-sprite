@@ -297,18 +297,14 @@ func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 // sequenceTargetFacts re-verifies the relation kind and server version at
 // executor admission rather than trusting a caller's earlier classification.
 func sequenceTargetFacts(ctx context.Context, pool *pgxpool.Pool, schema, table string) (bool, int, error) {
-	const q = `
-		SELECT c.relkind::text, current_setting('server_version_num')::int / 10000
-		FROM pg_class c
-		WHERE c.oid = to_regclass(
-			CASE WHEN $1 = '' THEN quote_ident($2)
-			     ELSE quote_ident($1) || '.' || quote_ident($2) END)`
-	var relkind string
-	var serverMajor int
-	if err := pool.QueryRow(ctx, q, schema, table).Scan(&relkind, &serverMajor); err != nil {
+	facts, err := preflight.LookupTargetFacts(ctx, pool, schema, table)
+	if errors.Is(err, preflight.ErrTableNotFound) {
+		return false, 0, fmt.Errorf("admit sequence target %s: %w", qualifiedName(schema, table), ErrTableNotFound)
+	}
+	if err != nil {
 		return false, 0, fmt.Errorf("admit sequence target %s: %w", qualifiedName(schema, table), err)
 	}
-	return relkind == "p", serverMajor, nil
+	return facts.Partitioned(), facts.ServerMajor(), nil
 }
 
 // sequenceHasConcurrentBuild reports whether any admitted step is a

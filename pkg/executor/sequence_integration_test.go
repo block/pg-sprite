@@ -428,3 +428,18 @@ func TestRunSequenceRefusesPartitionedParentBeforeAnyStep(t *testing.T) {
 	exists, _ := constraintState(t, pool, schema, "p", "v_positive")
 	assert.False(t, exists, "partition refusal must precede every sequence step")
 }
+
+func TestRunSequenceReportsVanishedTargetAsTableNotFound(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int)", schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "t")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("DROP TABLE %s.t", schema))
+	require.NoError(t, err)
+
+	_, err = executor.RunSequence(t.Context(), pool, pt,
+		[]string{fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN v int", schema)},
+		runBudget, executor.DefaultRetryPolicy())
+	require.ErrorIs(t, err, executor.ErrTableNotFound)
+	assert.Equal(t, executor.CodeTableNotFound, executor.OutcomeCode(err))
+}

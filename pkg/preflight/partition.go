@@ -11,8 +11,15 @@ import (
 type PartitionRefusalCause string
 
 const (
-	// PartitionCauseIndexBuild means a step builds an index on the parent.
-	PartitionCauseIndexBuild PartitionRefusalCause = "parent-index-build"
+	// PartitionCauseConcurrentIndexBuild means a step attempts a concurrent
+	// index build on the parent.
+	PartitionCauseConcurrentIndexBuild PartitionRefusalCause = "parent-concurrent-index-build"
+	// PartitionCauseBlockingIndexBuild means a step would build an index on
+	// the parent while holding ACCESS EXCLUSIVE.
+	PartitionCauseBlockingIndexBuild PartitionRefusalCause = "parent-blocking-index-build"
+	// PartitionCauseIndexAdoption means a step adopts an existing index as a
+	// primary-key or unique constraint on the parent.
+	PartitionCauseIndexAdoption PartitionRefusalCause = "parent-index-adoption"
 	// PartitionCauseNotValidForeignKey means a step adds a NOT VALID
 	// foreign key, which the server version cannot do on a partitioned
 	// table.
@@ -20,7 +27,10 @@ const (
 )
 
 // UnsupportedPartitionedParentError reports that an execution plan contains
-// a step pg-sprite cannot safely run on a partitioned parent.
+// a step pg-sprite cannot safely run on a partitioned parent. Its rendered
+// message is a fixed English sentence with no interpolated identifiers or
+// server text, so orchestrator-facing surfaces may render it verbatim. This
+// is a deliberate property to preserve.
 type UnsupportedPartitionedParentError struct {
 	// Cause is the unsupported shape that triggered the refusal.
 	Cause PartitionRefusalCause
@@ -28,13 +38,21 @@ type UnsupportedPartitionedParentError struct {
 
 // Error implements the error interface.
 func (e *UnsupportedPartitionedParentError) Error() string {
-	if e.Cause == PartitionCauseNotValidForeignKey {
+	switch e.Cause {
+	case PartitionCauseNotValidForeignKey:
 		return "PostgreSQL before version 18 cannot add a NOT VALID foreign key on a partitioned table; " +
 			"pg-sprite refuses the plan rather than failing mid-change"
+	case PartitionCauseIndexAdoption:
+		return "PostgreSQL does not support ALTER TABLE ... ADD CONSTRAINT ... USING INDEX on partitioned tables in any supported version"
+	case PartitionCauseBlockingIndexBuild:
+		return "PostgreSQL supports a blocking parent-level index build, but pg-sprite refuses to run it under ACCESS EXCLUSIVE; " +
+			"the partition-aware concurrent flow is not yet supported"
+	case PartitionCauseConcurrentIndexBuild:
+		return "PostgreSQL cannot build parent-level indexes concurrently; pg-sprite does not yet support " +
+			"the partition-aware CREATE INDEX ON ONLY, per-partition CREATE INDEX CONCURRENTLY, and ATTACH PARTITION flow"
+	default:
+		return "pg-sprite refuses an unsupported operation on a partitioned table"
 	}
-	return "PostgreSQL cannot build parent-level indexes concurrently; pg-sprite does not yet support " +
-		"the partition-aware CREATE INDEX ON ONLY, per-partition CREATE INDEX CONCURRENTLY, and ATTACH PARTITION flow, " +
-		"and refuses non-concurrent parent builds rather than running them under ACCESS EXCLUSIVE"
 }
 
 // CheckPartitionSupport verifies that the execution steps are safe
@@ -65,20 +83,27 @@ func RefusesPartitionedParent(serverMajor int, execSQL []string) (PartitionRefus
 			return "", fmt.Errorf("check partitioned-parent support: %w", err)
 		}
 		// INV: RF-6 — no partitioned-parent sequence starts when pg-sprite
-		// cannot complete it without an ACCESS EXCLUSIVE index build or a
-		// server-version-unsupported NOT VALID foreign key.
-		if st.BuildsIndex() {
-			return PartitionCauseIndexBuild, nil
-		}
+		// cannot complete it without an ACCESS EXCLUSIVE index build, an
+		// unsupported index adoption, or a server-version-unsupported NOT
+		// VALID foreign key.
 		ops, err := statement.ParseOps(sql)
 		if err != nil {
 			return "", fmt.Errorf("check partitioned-parent operations: %w", err)
 		}
 		for _, op := range ops {
+			if op.Kind == statement.OpAddConstraint && op.UsingIndex {
+				return PartitionCauseIndexAdoption, nil
+			}
 			if serverMajor < 18 && op.Kind == statement.OpAddConstraint &&
 				op.Constraint == statement.ConstraintForeignKey && op.NotValid {
 				return PartitionCauseNotValidForeignKey, nil
 			}
+		}
+		if st.BuildsIndex() {
+			if st.Concurrent() {
+				return PartitionCauseConcurrentIndexBuild, nil
+			}
+			return PartitionCauseBlockingIndexBuild, nil
 		}
 	}
 	return "", nil

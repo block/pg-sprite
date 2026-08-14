@@ -69,7 +69,12 @@ func TestMigrateDryRunRefusesPartitionedParentIndexPlan(t *testing.T) {
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Reason)
 	require.Len(t, report.Statements, 1)
 	assert.Equal(t, router.DispositionRefuse, report.Statements[0].Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Statements[0].Reason)
 	assert.Empty(t, report.Statements[0].ExecSQL)
+	for _, decision := range report.Statements[0].Decisions {
+		assert.Empty(t, decision.SaferSQL)
+		assert.Empty(t, decision.SaferSQLExecution)
+	}
 }
 
 // Live facts feed the imperative dry-run: a widen the classifier can only

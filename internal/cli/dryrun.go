@@ -36,7 +36,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	}
 	defer pool.Close()
 
-	facts, partitioned, err := dryRunFacts(ctx, pool, st)
+	facts, targetFacts, err := dryRunFacts(ctx, pool, st)
 	if err != nil {
 		return err
 	}
@@ -65,15 +65,11 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	for _, rs := range routed.Statements {
 		report.Statements = append(report.Statements, plan.FromRouted(rs))
 	}
-	if partitioned {
-		serverMajor, err := dbconn.ServerMajor(ctx, pool)
-		if err != nil {
-			return err
-		}
+	if targetFacts.Partitioned() {
 		refused := make([]bool, len(report.Statements))
 		for i := range report.Statements {
 			var cause preflight.PartitionRefusalCause
-			cause, err = preflight.RefusesPartitionedParent(serverMajor, report.Statements[i].ExecSQL)
+			cause, err = preflight.RefusesPartitionedParent(targetFacts.ServerMajor(), report.Statements[i].ExecSQL)
 			if err != nil {
 				return err
 			}
@@ -109,20 +105,20 @@ func resolvedSchema(st statement.Statement) string {
 // dryRunFacts introspects the statement's target table for classifier
 // facts. Statements without a single table target (index drops, REINDEX)
 // and missing tables classify with zero facts.
-func dryRunFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Statement) (planner.Facts, bool, error) {
+func dryRunFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Statement) (planner.Facts, preflight.TargetFacts, error) {
 	if st.Table() == "" {
-		return planner.Facts{}, false, nil
+		return planner.Facts{}, preflight.TargetFacts{}, nil
 	}
 	live, err := schemadiff.Introspect(ctx, pool, resolvedSchema(st), st.Table())
 	switch {
 	case errors.Is(err, schemadiff.ErrTableNotFound):
-		return planner.Facts{}, false, nil
+		return planner.Facts{}, preflight.TargetFacts{}, nil
 	case err != nil:
-		return planner.Facts{}, false, err
+		return planner.Facts{}, preflight.TargetFacts{}, err
 	}
-	pt, err := preflight.CheckTable(ctx, pool, resolvedSchema(st), st.Table(), preflight.NoSizeLimit)
+	targetFacts, err := preflight.LookupTargetFacts(ctx, pool, resolvedSchema(st), st.Table())
 	if err != nil {
-		return planner.Facts{}, false, err
+		return planner.Facts{}, preflight.TargetFacts{}, err
 	}
-	return planner.FactsFrom(live), pt.Partitioned(), nil
+	return planner.FactsFrom(live), targetFacts, nil
 }

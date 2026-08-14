@@ -12,7 +12,7 @@ the examples at the end of this page.
 
 Every report carries `format_version`. A consumer that does not recognize the version must
 **reject the report** — never guess at field semantics. The version covers more than the
-field shape: the closed vocabularies below (sources, routes, reasons, backends, dispositions,
+field shape: the closed vocabularies below (sources, routes, backends, dispositions,
 kinds) and the fingerprint serialization are all pinned to it. Adding a vocabulary value or
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
@@ -23,10 +23,11 @@ two version independently. Lint findings embed this contract's Reasons vocabular
 
 ## Consumer behavior for unknown values
 
-Every enum field in the report draws from a closed vocabulary listed here. A consumer that
-meets a value it does not recognize must **treat the statement as unknown and refuse it** —
-never ignore it and proceed. This is the same fail-closed posture the engine itself takes
-with SQL it does not fully understand.
+Except for target-dependent refusal `reason` fields, every enum field in the report draws
+from a closed vocabulary listed here. Refusal reasons are open and owned by `pkg/verdict`.
+A consumer that meets any value it does not recognize must **treat the statement as unknown
+and refuse it** — never ignore it and proceed. This is the same fail-closed posture the
+engine itself takes with SQL it does not fully understand.
 
 ## Report fields
 
@@ -39,7 +40,7 @@ with SQL it does not fully understand.
 | `server_version` | string | when connected | The PostgreSQL `server_version` the plan was derived against. Classification is version-sensitive; a stored or forwarded report names the server whose rules produced it. |
 | `table_exists` | bool | diff source only | Whether the live table was found. Absent means "not introspected" (alter source); `false` means the plan is the full desired schema. |
 | `disposition` | string | always | Aggregate disposition across all statements (see Dispositions). |
-| `reason` | string | target-dependent refusal only | Typed refusal cause when target facts override an otherwise executable route; currently `unsupported-partitioned-parent`. |
+| `reason` | string | target-dependent refusal only | Aggregate typed refusal cause when target facts override an otherwise executable route. |
 | `fingerprint` | string | always | The plan's stable identity (see Fingerprint). |
 | `statements` | array | always | The ordered plan; `[]` (never `null`) means nothing to do. |
 
@@ -53,6 +54,7 @@ with SQL it does not fully understand.
 | `route` | string | always | The planner's aggregate route for the statement (see Routes). |
 | `backend` | string | except refusals | The assigned execution strategy (see Backends); absent for refusals. |
 | `disposition` | string | always | What execution would do with this statement now (see Dispositions). |
+| `reason` | string | target-dependent refusal only | Typed refusal cause for this statement; currently `unsupported-partitioned-parent`. An unknown value must be treated as refused. |
 | `decisions` | array | always | The planner's per-operation classifications (below). |
 | `exec_sql` | array | native route | The ordered SQL the native backend would run — the safer sequence when the planner constructed one. Absent for non-native routes. |
 | `execution` | string | with `exec_sql` | The typed execution contract for `exec_sql` (see Execution contracts). A consumer that runs the statements itself branches on this — it is what says the steps must not be wrapped in a transaction block. Present exactly when `exec_sql` is. |
@@ -86,7 +88,7 @@ with SQL it does not fully understand.
 | `copy-and-swap` | Needs a table rewrite; only the engine's shadow copy + cutover can do it online. |
 | `refuse` | No known safe path; not executed. |
 
-### Reasons (`reason`)
+### Planner decision reasons (`decisions[].reason`)
 
 | Value | Meaning |
 |---|---|
@@ -102,6 +104,19 @@ with SQL it does not fully understand.
 | `relocation` | SET TABLESPACE moves the heap — a rewrite-scale copy. |
 | `partition-parent-lock` | Partition attach/detach in its lock-taking form. |
 | `unsupported-operation` | The planner does not recognize the operation or knows no safe path for it. |
+
+### Target-dependent refusal reasons (`reason`, `statements[].reason`)
+
+This vocabulary is owned by `pkg/verdict` and is open: new values may appear without changing
+the meaning of existing values. A consumer that sees an unknown reason must fail closed and
+treat the statement and report as refused.
+
+| Value | Meaning |
+|---|---|
+| `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. |
+
+On the apply path, refusal checks have deterministic precedence: table size, then partition
+support, then privileges.
 
 ### Backends (`backend`)
 

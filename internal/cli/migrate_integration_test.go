@@ -104,6 +104,27 @@ func TestMigratePartitionedTableAwareness(t *testing.T) {
 			fmt.Sprintf("ALTER TABLE %s.p ADD CONSTRAINT p_id_unique UNIQUE (id)", schema))
 	})
 
+	t.Run("parent using index adoption", func(t *testing.T) {
+		schema := createPartitionFixture(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE UNIQUE INDEX ix_p_id ON %s.p (id)", schema))
+		require.NoError(t, err)
+		cmd := newMigrateCmd(url,
+			fmt.Sprintf("ALTER TABLE %s.p ADD CONSTRAINT p_pk PRIMARY KEY USING INDEX ix_p_id", schema))
+		cmd.JSON = true
+		var out strings.Builder
+		err = cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, verdict.ErrRefused)
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, v.Reason)
+		var constraints int
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT count(*) FROM pg_constraint
+			WHERE conrelid = to_regclass($1) AND conname = 'p_pk'`, schema+".p").Scan(&constraints))
+		assert.Zero(t, constraints, "refusal must not adopt the index")
+	})
+
 	t.Run("leaf index-building changes execute", func(t *testing.T) {
 		schema := createPartitionFixture(t, pool)
 		for _, sql := range []string{

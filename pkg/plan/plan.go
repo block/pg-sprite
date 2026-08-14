@@ -68,6 +68,8 @@ type Statement struct {
 	Backend router.Backend `json:"backend,omitempty"`
 	// Disposition is what execution would do with the statement now.
 	Disposition router.Disposition `json:"disposition"`
+	// Reason is the typed cause when target facts refuse this statement.
+	Reason verdict.Reason `json:"reason,omitempty"`
 	// Decisions are the planner's per-operation classifications.
 	Decisions []planner.Decision `json:"decisions"`
 	// ExecSQL is the ordered SQL the native backend would run — the safer
@@ -132,8 +134,13 @@ func RefuseUnsupportedPartitionedParent(report *Report, refused []bool) {
 		any = true
 		report.Statements[i].Backend = ""
 		report.Statements[i].Disposition = router.DispositionRefuse
+		report.Statements[i].Reason = verdict.ReasonUnsupportedPartitionedParent
 		report.Statements[i].ExecSQL = nil
 		report.Statements[i].Execution = ""
+		for j := range report.Statements[i].Decisions {
+			report.Statements[i].Decisions[j].SaferSQL = nil
+			report.Statements[i].Decisions[j].SaferSQLExecution = ""
+		}
 	}
 	if any {
 		report.Disposition = router.DispositionRefuse

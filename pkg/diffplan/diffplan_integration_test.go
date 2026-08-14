@@ -107,6 +107,13 @@ func TestPlanRefusesPartitionedParentIndexChange(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Reason)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, report.Statements[0].Reason)
+	assert.Empty(t, report.Statements[0].ExecSQL)
+	for _, decision := range report.Statements[0].Decisions {
+		assert.Empty(t, decision.SaferSQL)
+		assert.Empty(t, decision.SaferSQLExecution)
+	}
 }
 
 // A desired state that needs a table rewrite routes to the copy-and-swap

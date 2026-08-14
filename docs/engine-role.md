@@ -105,8 +105,6 @@ fail-closed posture as every other refusal in the engine, and the reason this pa
 the refusal points here, and this page says what to provision and why it is safe.
 
 Preflight also records the target's relation kind. Leaf partitions are ordinary tables and
-use the same paths as any other table. A partitioned parent may run supported in-place changes,
-except that adding a foreign key `NOT VALID` is refused on PostgreSQL before 18. Plans containing
-index-building steps are refused: PostgreSQL cannot create an index on a
-partitioned parent concurrently, and pg-sprite does not yet implement the partition-aware
-`CREATE INDEX ON ONLY` → per-partition `CREATE INDEX CONCURRENTLY` → `ATTACH PARTITION` flow.
+use the same paths as any other table. A partitioned parent may run supported in-place changes;
+the parent-specific refusal boundaries and their rationale are documented in
+[current limitations](limitations.md).

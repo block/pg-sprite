@@ -16,11 +16,30 @@ func TestCheckPartitionSupport(t *testing.T) {
 	err := CheckPartitionSupport(parent, 16, []string{"CREATE INDEX i ON s.t (id)"})
 	var unsupported *UnsupportedPartitionedParentError
 	require.ErrorAs(t, err, &unsupported)
-	assert.Equal(t, PartitionCauseIndexBuild, unsupported.Cause)
+	assert.Equal(t, PartitionCauseBlockingIndexBuild, unsupported.Cause)
 
 	err = CheckPartitionSupport(parent, 16, []string{"ALTER TABLE s.t THIS IS NOT SQL"})
 	require.Error(t, err)
 	assert.False(t, errors.As(err, &unsupported), "parse failures are operational errors, not refusals")
+}
+
+func TestRefusesPartitionedParentDistinguishesIndexBuilds(t *testing.T) {
+	cause, err := RefusesPartitionedParent(16, []string{"CREATE INDEX CONCURRENTLY i ON s.t (id)"})
+	require.NoError(t, err)
+	assert.Equal(t, PartitionCauseConcurrentIndexBuild, cause)
+
+	cause, err = RefusesPartitionedParent(16, []string{"CREATE INDEX i ON s.t (id)"})
+	require.NoError(t, err)
+	assert.Equal(t, PartitionCauseBlockingIndexBuild, cause)
+}
+
+func TestRefusesPartitionedParentAdoptsExistingIndex(t *testing.T) {
+	for _, major := range []int{14, 15, 16, 17, 18} {
+		cause, err := RefusesPartitionedParent(major,
+			[]string{`ALTER TABLE public.p ADD CONSTRAINT p_pk PRIMARY KEY USING INDEX ix_p_id`})
+		require.NoError(t, err)
+		require.Equal(t, PartitionCauseIndexAdoption, cause)
+	}
 }
 
 func TestRefusesPartitionedParentNotValidForeignKeyByServerVersion(t *testing.T) {
