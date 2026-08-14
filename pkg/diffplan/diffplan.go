@@ -25,6 +25,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -97,6 +98,23 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	report.TableExists = &tableExists
 	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
 		return plan.Report{}, err
+	}
+	if tableExists {
+		targetFacts, checkErr := preflight.LookupTargetFacts(ctx, pool, req.Schema, ds.Table())
+		if checkErr != nil {
+			return plan.Report{}, checkErr
+		}
+		if targetFacts.Partitioned() {
+			refused := make([]bool, len(report.Statements))
+			for i := range report.Statements {
+				cause, causeErr := preflight.RefusesPartitionedParent(targetFacts.ServerMajor(), report.Statements[i].ExecSQL)
+				if causeErr != nil {
+					return plan.Report{}, causeErr
+				}
+				refused[i] = cause != ""
+			}
+			plan.RefuseUnsupportedPartitionedParent(&report, refused)
+		}
 	}
 	report.Fingerprint = plan.Fingerprint(report.Statements)
 	return report, nil

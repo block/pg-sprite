@@ -8,6 +8,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed — observable outcomes for automation callers
 
+- **Index builds on partitioned parents now refuse with exit 2 and reason
+  `unsupported-partitioned-parent`** instead of reaching a mid-change exit-1
+  PostgreSQL failure. Concurrent and blocking builds carry distinct typed
+  causes; blocking builds are refused by policy even though PostgreSQL supports
+  them. Leaf partitions retain the blocking-to-`CONCURRENTLY` substitution
+  described below.
+- **Partitioned-parent `ADD CONSTRAINT ... USING INDEX` now refuses before
+  execution** on every supported PostgreSQL version, with typed cause
+  `parent-index-adoption`.
+- **Partitioned-parent foreign keys added `NOT VALID` refuse on PostgreSQL
+  before 18** with reason `unsupported-partitioned-parent`; PostgreSQL 18 and
+  later retain the supported in-place path.
+- **Dry-run and declarative diff reports now account for partitioned-parent
+  admission**, reporting disposition `refuse` and reason
+  `unsupported-partitioned-parent` instead of advertising execution. Refused
+  statements now carry the reason directly and omit impossible safer-SQL advice.
+
 - **A plain (blocking) `CREATE INDEX` now succeeds instead of refusing.**
   The engine substitutes `CREATE INDEX CONCURRENTLY` and drives it to a
   verified valid index: exit 0, with the substitution disclosed in the

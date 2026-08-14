@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 func TestNewReportStampsVersionAndEmptyStatements(t *testing.T) {
@@ -70,6 +71,34 @@ func TestFromRoutedDerivesDestructiveFromDecisions(t *testing.T) {
 	assert.True(t, st.Destructive,
 		"one destructive decision makes the statement destructive")
 	assert.Empty(t, st.Execution, "no exec_sql means no execution contract")
+}
+
+func TestRefuseUnsupportedPartitionedParentWithdrawsExecutionAdvice(t *testing.T) {
+	r := plan.Report{
+		Disposition: router.DispositionExecute,
+		Statements: []plan.Statement{{
+			Route:       planner.RouteNative,
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionExecute,
+			Decisions: []planner.Decision{{
+				Route: planner.RouteNative, Reason: planner.ReasonSaferIdiom,
+				SaferSQL:          []string{"CREATE INDEX CONCURRENTLY i ON t (c)"},
+				SaferSQLExecution: planner.ExecutionAutocommit,
+			}},
+			ExecSQL: []string{"CREATE INDEX CONCURRENTLY i ON t (c)"}, Execution: planner.ExecutionAutocommit,
+		}},
+	}
+	plan.RefuseUnsupportedPartitionedParent(&r, []bool{true})
+
+	assert.Equal(t, router.DispositionRefuse, r.Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
+	assert.Equal(t, planner.RouteNative, r.Statements[0].Route)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Statements[0].Reason)
+	assert.Empty(t, r.Statements[0].Backend)
+	assert.Empty(t, r.Statements[0].ExecSQL)
+	assert.Empty(t, r.Statements[0].Execution)
+	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQL)
+	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQLExecution)
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact

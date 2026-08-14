@@ -55,6 +55,7 @@ func (e *SizeError) Error() string {
 type PreflightedTable struct {
 	schema     string
 	table      string
+	relkind    string
 	totalBytes int64
 	relTuples  float64
 }
@@ -66,6 +67,10 @@ func (t PreflightedTable) Schema() string { return t.schema }
 // Table returns the verified table name.
 func (t PreflightedTable) Table() string { return t.table }
 
+// Partitioned reports whether the verified target is a partitioned parent.
+// Leaf partitions have relkind 'r' and therefore report false.
+func (t PreflightedTable) Partitioned() bool { return t.relkind == "p" }
+
 // TotalBytes returns the measured on-disk size across all partitions,
 // including indexes and TOAST.
 func (t PreflightedTable) TotalBytes() int64 { return t.totalBytes }
@@ -74,6 +79,43 @@ func (t PreflightedTable) TotalBytes() int64 { return t.totalBytes }
 // been vacuumed or analyzed). Reporting only — the size guard's authority is
 // bytes on disk.
 func (t PreflightedTable) RelTuples() float64 { return t.relTuples }
+
+// TargetFacts are the cheap target facts needed by planning and executor
+// admission without measuring the relation or its partition tree.
+type TargetFacts struct {
+	partitioned bool
+	serverMajor int
+}
+
+// Partitioned reports whether the target is a partitioned parent.
+func (f TargetFacts) Partitioned() bool { return f.partitioned }
+
+// ServerMajor returns the PostgreSQL server major version.
+func (f TargetFacts) ServerMajor() int { return f.serverMajor }
+
+// LookupTargetFacts verifies that the target is an ordinary or partitioned
+// table and returns its relation kind and server major in one catalog query.
+func LookupTargetFacts(ctx context.Context, pool *pgxpool.Pool, schema, table string) (TargetFacts, error) {
+	const q = `
+		SELECT c.relkind::text, current_setting('server_version_num')::int / 10000
+		FROM pg_class c
+		WHERE c.oid = to_regclass(
+			CASE WHEN $1 = '' THEN quote_ident($2)
+			     ELSE quote_ident($1) || '.' || quote_ident($2) END)`
+	var relkind string
+	var serverMajor int
+	err := pool.QueryRow(ctx, q, schema, table).Scan(&relkind, &serverMajor)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return TargetFacts{}, fmt.Errorf("%w: %s", ErrTableNotFound, qualifiedName(schema, table))
+	}
+	if err != nil {
+		return TargetFacts{}, fmt.Errorf("look up table facts %s: %w", qualifiedName(schema, table), err)
+	}
+	if relkind != "r" && relkind != "p" {
+		return TargetFacts{}, fmt.Errorf("%w: %s has relkind %q", ErrNotTable, qualifiedName(schema, table), relkind)
+	}
+	return TargetFacts{partitioned: relkind == "p", serverMajor: serverMajor}, nil
+}
 
 // CheckTable verifies that schema.table (search_path when schema is empty)
 // exists, is an ordinary or partitioned table, and is at most limitBytes on
@@ -124,7 +166,9 @@ func CheckTable(ctx context.Context, pool *pgxpool.Pool, schema, table string, l
 	if totalBytes > limitBytes {
 		return PreflightedTable{}, &SizeError{TotalBytes: totalBytes, LimitBytes: limitBytes}
 	}
-	return PreflightedTable{schema: schema, table: table, totalBytes: totalBytes, relTuples: relTuples}, nil
+	return PreflightedTable{
+		schema: schema, table: table, relkind: relkind, totalBytes: totalBytes, relTuples: relTuples,
+	}, nil
 }
 
 // qualifiedName renders schema.table for error messages, omitting the dot

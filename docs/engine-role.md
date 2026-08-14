@@ -103,3 +103,8 @@ evaluates the tier checks for the change's planned strategy. A missing requireme
 typed refusal naming the exact `GRANT` statement that would satisfy it — the same
 fail-closed posture as every other refusal in the engine, and the reason this page exists:
 the refusal points here, and this page says what to provision and why it is safe.
+
+Preflight also records the target's relation kind. Leaf partitions are ordinary tables and
+use the same paths as any other table. A partitioned parent may run supported in-place changes;
+the parent-specific refusal boundaries and their rationale are documented in
+[current limitations](limitations.md).

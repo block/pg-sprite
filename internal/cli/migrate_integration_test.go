@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -64,6 +65,153 @@ func TestMigrateExecutesInstantChange(t *testing.T) {
 		`SELECT data_type FROM information_schema.columns
 		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'age'`, schema).Scan(&typ))
 	assert.Equal(t, "integer", typ)
+}
+
+// Partitioned parents need a partition-aware online index flow. Until that
+// flow exists, preflight refuses every routed index-building shape while
+// preserving ordinary behavior for leaf partitions and parent ALTERs that
+// do not build indexes.
+func TestMigratePartitionedTableAwareness(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	t.Run("parent explicit concurrent index", func(t *testing.T) {
+		schema := createPartitionFixture(t, pool)
+		assertPartitionedParentRefusal(t, url, pool, schema,
+			fmt.Sprintf("CREATE INDEX CONCURRENTLY p_v_idx ON %s.p (v)", schema))
+	})
+
+	t.Run("forced parent plain index", func(t *testing.T) {
+		schema := createPartitionFixture(t, pool)
+		sql := fmt.Sprintf("CREATE INDEX p_v_idx ON %s.p (v)", schema)
+		cmd := newMigrateCmd(url, sql)
+		cmd.JSON = true
+		cmd.Force = schema + ".p"
+		var out strings.Builder
+		err := cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, verdict.ErrRefused)
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, v.Reason)
+		assert.True(t, v.Forced)
+	})
+
+	t.Run("parent unique constraint", func(t *testing.T) {
+		schema := createPartitionFixture(t, pool)
+		assertPartitionedParentRefusal(t, url, pool, schema,
+			fmt.Sprintf("ALTER TABLE %s.p ADD CONSTRAINT p_id_unique UNIQUE (id)", schema))
+	})
+
+	t.Run("parent using index adoption", func(t *testing.T) {
+		schema := createPartitionFixture(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE UNIQUE INDEX ix_p_id ON %s.p (id)", schema))
+		require.NoError(t, err)
+		cmd := newMigrateCmd(url,
+			fmt.Sprintf("ALTER TABLE %s.p ADD CONSTRAINT p_pk PRIMARY KEY USING INDEX ix_p_id", schema))
+		cmd.JSON = true
+		var out strings.Builder
+		err = cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, verdict.ErrRefused)
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, v.Reason)
+		var constraints int
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT count(*) FROM pg_constraint
+			WHERE conrelid = to_regclass($1) AND conname = 'p_pk'`, schema+".p").Scan(&constraints))
+		assert.Zero(t, constraints, "refusal must not adopt the index")
+	})
+
+	t.Run("leaf index-building changes execute", func(t *testing.T) {
+		schema := createPartitionFixture(t, pool)
+		for _, sql := range []string{
+			fmt.Sprintf("CREATE INDEX CONCURRENTLY p1_v_idx ON %s.p1 (v)", schema),
+			fmt.Sprintf("ALTER TABLE %s.p1 ADD CONSTRAINT p1_id_unique UNIQUE (id)", schema),
+		} {
+			cmd := newMigrateCmd(url, sql)
+			cmd.JSON = true
+			var out strings.Builder
+			require.NoError(t, cmd.run(t.Context(), &out))
+			var v verdict.Verdict
+			require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+			assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		}
+	})
+
+	t.Run("parent add column executes", func(t *testing.T) {
+		schema := createPartitionFixture(t, pool)
+		cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.p ADD COLUMN added int", schema))
+		cmd.JSON = true
+		var out strings.Builder
+		require.NoError(t, cmd.run(t.Context(), &out))
+
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		var columns int
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT count(*) FROM information_schema.columns
+			WHERE table_schema = $1 AND table_name IN ('p', 'p1') AND column_name = 'added'`, schema).Scan(&columns))
+		assert.Equal(t, 2, columns)
+	})
+
+	t.Run("parent not valid foreign key follows server support", func(t *testing.T) {
+		schema := createPartitionFixture(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.ref (id int PRIMARY KEY)", schema))
+		require.NoError(t, err)
+		cmd := newMigrateCmd(url, fmt.Sprintf(
+			"ALTER TABLE %s.p ADD CONSTRAINT p_ref_fk FOREIGN KEY (id) REFERENCES %s.ref(id) NOT VALID", schema, schema))
+		cmd.JSON = true
+		var out strings.Builder
+		err = cmd.run(t.Context(), &out)
+		major, majorErr := dbconn.ServerMajor(t.Context(), pool)
+		require.NoError(t, majorErr)
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		if major < 18 {
+			require.ErrorIs(t, err, verdict.ErrRefused)
+			assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, v.Reason)
+		} else {
+			require.NoError(t, err)
+			assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		}
+	})
+}
+
+func createPartitionFixture(t *testing.T, pool *pgxpool.Pool) string {
+	t.Helper()
+	schema := testutil.NewSchema(t, pool)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.p (id int, v text) PARTITION BY RANGE (id)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.p1 PARTITION OF %s.p FOR VALUES FROM (0) TO (100)", schema, schema))
+	require.NoError(t, err)
+	return schema
+}
+
+func assertPartitionedParentRefusal(t *testing.T, url string, pool *pgxpool.Pool, schema, sql string) {
+	t.Helper()
+	cmd := newMigrateCmd(url, sql)
+	cmd.JSON = true
+	var out strings.Builder
+	err := cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, v.Reason)
+	assert.Empty(t, v.ExecutedSQL)
+
+	var indexes int
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT count(*) FROM pg_indexes
+		WHERE schemaname = $1 AND tablename IN ('p', 'p1')`, schema).Scan(&indexes))
+	assert.Zero(t, indexes, "preflight refusal must execute no index-building step")
 }
 
 // ALTER TABLE ... RENAME COLUMN parses as a RenameStmt, not an

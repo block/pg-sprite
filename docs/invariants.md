@@ -267,6 +267,11 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
 - **RF-5** — The dangerous literal never runs silently: risky statements with a safer native
   idiom get the idiom (reported) or a recommendation; running as-submitted requires the loud,
   typed, audited `--force`. *Source:* [high-level-design § advisory mode](high-level-design.md#advisory-mode-suggest-the-safe-rewrite-dont-silently-run-the-risky-one).
+- **RF-6** — A partitioned-parent sequence is refused before its first step when it would build
+  an index, or on PostgreSQL before 18 when it would add a foreign key `NOT VALID`. pg-sprite
+  does not substitute a blocking parent build for the missing partition-aware online flow.
+  *Enforced:* preflight and sequence-executor admission. *Source:* PostgreSQL relation-kind and
+  version capabilities.
 
 ## Orchestration / control-plane (OC)
 
@@ -330,7 +335,7 @@ about **how we write and review the code**.
 
 | Invariant | Landed by phase | Test obligation |
 | --- | --- | --- |
-| CO-7, RF-1..RF-5 | 1–2 (gate/linter), full at 2 | golden refusal/parse tests |
+| CO-7, RF-1..RF-6 | 1–3 (gate/linter/executor) | golden refusal/parse and executor-admission tests |
 | LK-1 | 0–1 (before any executing mode ships) | two-instance mutual-exclusion + keepalive-loss test |
 | LK-2 | 3 (native), 7 (cutover) | lock-bounding + CIC-exception tests |
 | CO-1, CO-2, CO-3 | 5 (gate), 8 (watermark/divergence policy) | inject-divergence, repair-invalidates-watermark |

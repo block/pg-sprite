@@ -107,6 +107,15 @@ func ServerVersion(ctx context.Context, pool *pgxpool.Pool) (string, error) {
 	return v, nil
 }
 
+// ServerMajor reads the connected server's numeric major version.
+func ServerMajor(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	var major int
+	if err := pool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int / 10000").Scan(&major); err != nil {
+		return 0, fmt.Errorf("read server major version: %w", err)
+	}
+	return major, nil
+}
+
 // buildPoolConfig translates Config into a pgxpool configuration. It is pure
 // (no dialing), so every option's wiring is unit-testable without a server.
 func buildPoolConfig(cfg Config) (*pgxpool.Config, error) {

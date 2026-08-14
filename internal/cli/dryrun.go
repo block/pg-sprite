@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -35,7 +36,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	}
 	defer pool.Close()
 
-	facts, err := dryRunFacts(ctx, pool, st)
+	facts, targetFacts, err := dryRunFacts(ctx, pool, st)
 	if err != nil {
 		return err
 	}
@@ -63,6 +64,18 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	report.Disposition = routed.Disposition
 	for _, rs := range routed.Statements {
 		report.Statements = append(report.Statements, plan.FromRouted(rs))
+	}
+	if targetFacts.Partitioned() {
+		refused := make([]bool, len(report.Statements))
+		for i := range report.Statements {
+			var cause preflight.PartitionRefusalCause
+			cause, err = preflight.RefusesPartitionedParent(targetFacts.ServerMajor(), report.Statements[i].ExecSQL)
+			if err != nil {
+				return err
+			}
+			refused[i] = cause != ""
+		}
+		plan.RefuseUnsupportedPartitionedParent(&report, refused)
 	}
 	report.Fingerprint = plan.Fingerprint(report.Statements)
 
@@ -92,16 +105,20 @@ func resolvedSchema(st statement.Statement) string {
 // dryRunFacts introspects the statement's target table for classifier
 // facts. Statements without a single table target (index drops, REINDEX)
 // and missing tables classify with zero facts.
-func dryRunFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Statement) (planner.Facts, error) {
+func dryRunFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Statement) (planner.Facts, preflight.TargetFacts, error) {
 	if st.Table() == "" {
-		return planner.Facts{}, nil
+		return planner.Facts{}, preflight.TargetFacts{}, nil
 	}
 	live, err := schemadiff.Introspect(ctx, pool, resolvedSchema(st), st.Table())
 	switch {
 	case errors.Is(err, schemadiff.ErrTableNotFound):
-		return planner.Facts{}, nil
+		return planner.Facts{}, preflight.TargetFacts{}, nil
 	case err != nil:
-		return planner.Facts{}, err
+		return planner.Facts{}, preflight.TargetFacts{}, err
 	}
-	return planner.FactsFrom(live), nil
+	targetFacts, err := preflight.LookupTargetFacts(ctx, pool, resolvedSchema(st), st.Table())
+	if err != nil {
+		return planner.Facts{}, preflight.TargetFacts{}, err
+	}
+	return planner.FactsFrom(live), targetFacts, nil
 }

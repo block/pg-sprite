@@ -51,6 +51,9 @@ var (
 	// DETACH PARTITION CONCURRENTLY leaves a detach-pending partition
 	// state this executor does not own detecting or recovering.
 	ErrUnsupportedSequenceStep = errors.New("step is not a shape the sequence executor can run safely")
+	// ErrUnsupportedPartitionedParent is returned when the target is a
+	// partitioned parent and the admitted sequence is not supported there.
+	ErrUnsupportedPartitionedParent = errors.New("sequence is not supported on a partitioned parent")
 )
 
 // StepKind is the typed execution class a step was admitted under;
@@ -234,6 +237,19 @@ func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 	if err != nil {
 		return rep, err
 	}
+	partitioned, serverMajor, err := sequenceTargetFacts(ctx, pool, pt.Schema(), pt.Table())
+	if err != nil {
+		return rep, err
+	}
+	if partitioned {
+		cause, checkErr := preflight.RefusesPartitionedParent(serverMajor, steps)
+		if checkErr != nil {
+			return rep, checkErr
+		}
+		if cause != "" {
+			return rep, fmt.Errorf("%s: %w", cause, ErrUnsupportedPartitionedParent)
+		}
+	}
 	// INV: LK-2 — the concurrent executor's pool guard is re-proven for
 	// the whole sequence before the first step executes: a too-small pool
 	// is decidable now, and letting BuildIndexConcurrently discover it
@@ -276,6 +292,19 @@ func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 		})
 	}
 	return rep, nil
+}
+
+// sequenceTargetFacts re-verifies the relation kind and server version at
+// executor admission rather than trusting a caller's earlier classification.
+func sequenceTargetFacts(ctx context.Context, pool *pgxpool.Pool, schema, table string) (bool, int, error) {
+	facts, err := preflight.LookupTargetFacts(ctx, pool, schema, table)
+	if errors.Is(err, preflight.ErrTableNotFound) {
+		return false, 0, fmt.Errorf("admit sequence target %s: %w", qualifiedName(schema, table), ErrTableNotFound)
+	}
+	if err != nil {
+		return false, 0, fmt.Errorf("admit sequence target %s: %w", qualifiedName(schema, table), err)
+	}
+	return facts.Partitioned(), facts.ServerMajor(), nil
 }
 
 // sequenceHasConcurrentBuild reports whether any admitted step is a

@@ -411,3 +411,35 @@ func TestRunSequenceRefusesSingleConnectionPoolBeforeAnyStep(t *testing.T) {
 	exists, _ := constraintState(t, pool, schema, "t", "v_positive")
 	assert.False(t, exists, "nothing may execute when the sequence cannot finish")
 }
+
+func TestRunSequenceRefusesPartitionedParentBeforeAnyStep(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.p (id int, v int) PARTITION BY RANGE (id); "+
+			"CREATE TABLE %s.p1 PARTITION OF %s.p FOR VALUES FROM (0) TO (100)", schema, schema, schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "p")
+	steps := []string{
+		fmt.Sprintf("ALTER TABLE %s.p ADD CONSTRAINT v_positive CHECK (v > 0) NOT VALID", schema),
+		fmt.Sprintf("CREATE INDEX CONCURRENTLY p_v_idx ON %s.p (v)", schema),
+	}
+	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
+	require.ErrorIs(t, err, executor.ErrUnsupportedPartitionedParent)
+	exists, _ := constraintState(t, pool, schema, "p", "v_positive")
+	assert.False(t, exists, "partition refusal must precede every sequence step")
+}
+
+func TestRunSequenceReportsVanishedTargetAsTableNotFound(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int)", schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "t")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("DROP TABLE %s.t", schema))
+	require.NoError(t, err)
+
+	_, err = executor.RunSequence(t.Context(), pool, pt,
+		[]string{fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN v int", schema)},
+		runBudget, executor.DefaultRetryPolicy())
+	require.ErrorIs(t, err, executor.ErrTableNotFound)
+	assert.Equal(t, executor.CodeTableNotFound, executor.OutcomeCode(err))
+}
