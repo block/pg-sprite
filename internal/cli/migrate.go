@@ -216,6 +216,13 @@ func (c *MigrateCmd) execute(ctx context.Context, out io.Writer, pool *pgxpool.P
 	if err != nil {
 		return err
 	}
+	if err := preflight.CheckPartitionSupport(pt, execSQL); err != nil {
+		var partitionErr *preflight.UnsupportedPartitionedParentError
+		if errors.As(err, &partitionErr) {
+			return c.emit(out, partitionedParentVerdict(st, partitionErr, forced))
+		}
+		return err
+	}
 	logger.Debug("preflight passed",
 		"table", qualified(st), "total_bytes", pt.TotalBytes(), "limit_bytes", limit)
 	if substituted {
@@ -468,6 +475,20 @@ func privilegeVerdict(st statement.Statement, privErr *preflight.PrivilegeError,
 		Table:     qualified(st),
 		Forced:    forced,
 		Detail:    privErr.Error(),
+	}
+}
+
+// partitionedParentVerdict refuses routed index-building steps on a
+// partitioned parent before the sequence executor runs anything.
+func partitionedParentVerdict(st statement.Statement, partitionErr *preflight.UnsupportedPartitionedParentError,
+	forced bool) verdict.Verdict {
+	return verdict.Verdict{
+		Outcome:   verdict.OutcomeRefused,
+		Reason:    verdict.ReasonUnsupportedPartitionedParent,
+		Statement: st.SQL(),
+		Table:     qualified(st),
+		Forced:    forced,
+		Detail:    partitionErr.Error(),
 	}
 }
 

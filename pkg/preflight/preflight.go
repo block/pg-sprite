@@ -55,6 +55,7 @@ func (e *SizeError) Error() string {
 type PreflightedTable struct {
 	schema     string
 	table      string
+	relkind    string
 	totalBytes int64
 	relTuples  float64
 }
@@ -65,6 +66,10 @@ func (t PreflightedTable) Schema() string { return t.schema }
 
 // Table returns the verified table name.
 func (t PreflightedTable) Table() string { return t.table }
+
+// Partitioned reports whether the verified target is a partitioned parent.
+// Leaf partitions have relkind 'r' and therefore report false.
+func (t PreflightedTable) Partitioned() bool { return t.relkind == "p" }
 
 // TotalBytes returns the measured on-disk size across all partitions,
 // including indexes and TOAST.
@@ -124,7 +129,9 @@ func CheckTable(ctx context.Context, pool *pgxpool.Pool, schema, table string, l
 	if totalBytes > limitBytes {
 		return PreflightedTable{}, &SizeError{TotalBytes: totalBytes, LimitBytes: limitBytes}
 	}
-	return PreflightedTable{schema: schema, table: table, totalBytes: totalBytes, relTuples: relTuples}, nil
+	return PreflightedTable{
+		schema: schema, table: table, relkind: relkind, totalBytes: totalBytes, relTuples: relTuples,
+	}, nil
 }
 
 // qualifiedName renders schema.table for error messages, omitting the dot

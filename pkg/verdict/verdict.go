@@ -61,6 +61,10 @@ const (
 	// the change needs; Detail names the exact missing GRANT (see
 	// docs/engine-role.md).
 	ReasonInsufficientPrivileges Reason = "insufficient-privileges"
+	// ReasonUnsupportedPartitionedParent: the routed plan builds an index
+	// on a partitioned parent, for which the required partition-aware
+	// online sequence is not implemented.
+	ReasonUnsupportedPartitionedParent Reason = "unsupported-partitioned-parent"
 	// ReasonBudgetExceeded: the optimistic attempt exceeded its lock or
 	// statement budget and was cancelled.
 	ReasonBudgetExceeded Reason = "not-native-safe-budget-exceeded"
