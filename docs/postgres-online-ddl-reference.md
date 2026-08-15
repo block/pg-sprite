@@ -26,6 +26,7 @@ The rest of this document breaks down both dimensions per operation.
 - [Table / partition operations](#table--partition-operations)
 - [The headline takeaway (what the engine must cover)](#the-headline-takeaway-what-the-engine-must-cover)
 - [Aurora PostgreSQL specifics](#aurora-postgresql-specifics)
+- [Dry-run diagnostic codes](#dry-run-diagnostic-codes)
 
 ## Lock levels (weakest → strongest)
 
@@ -234,3 +235,113 @@ native online path exists.
   it must be enabled via the `rds.logical_replication=1` cluster parameter (static →
   requires a reboot) which sets `wal_level=logical`. See
   [low-level-design.md](low-level-design.md).
+
+## Dry-run diagnostic codes
+
+`pg-sprite migrate --dry-run` renders each finding as a compiler-style diagnostic —
+`severity[code]: message` — and links every code to its anchor below; `lint` reports
+the same codes in the conventional `file:line:column: severity: code` shape. The
+codes are the same typed values the `--json` report carries, so automation can gate
+on them without parsing prose. The dry-run exit code is part of the contract:
+**0** when every statement is executable, **2** (the refusal exit code) when any
+statement would be refused.
+
+### `metadata-only`
+
+The operation is a brief catalog-only change: it takes a short `ACCESS EXCLUSIVE`
+lock but does not scan or rewrite the table. Safe to run as written on any table
+size, provided the lock can be acquired promptly (pg-sprite runs every session
+under a bounded `lock_timeout`).
+
+### `online-idiom`
+
+The submitted form is already PostgreSQL's safe online idiom (for example
+`CREATE INDEX CONCURRENTLY` or `ADD CONSTRAINT ... NOT VALID`). It runs as
+written and does not block the table while it runs.
+
+### `fast-default`
+
+`ADD COLUMN ... DEFAULT <non-volatile>` on PostgreSQL 11+ stores the default in
+the catalog instead of rewriting the table. Catalog-only; runs as written.
+
+### `binary-coercible`
+
+The type change is binary-coercible (for example `varchar(50)` → `varchar(100)`,
+or `varchar` → `text`), so PostgreSQL relabels the column in place without a
+table rewrite. Runs as written.
+
+### `safer-idiom`
+
+The statement reaches a safe end state, but as written it holds a blocking lock
+for the whole operation (for example `ADD CONSTRAINT ... UNIQUE`, which builds
+the index under `ACCESS EXCLUSIVE`). pg-sprite substitutes the equivalent online
+sequence — such as `CREATE UNIQUE INDEX CONCURRENTLY` followed by
+`ADD CONSTRAINT ... UNIQUE USING INDEX` — with each step committing on its own.
+The sequence is not transactionally equivalent to the original statement and
+must not run inside a transaction block.
+
+### `app-breaking-rename`
+
+`RENAME COLUMN` / `RENAME TABLE` is a brief catalog change, but every query
+still using the old name fails the moment it commits. pg-sprite flags it so the
+rename is coordinated with application deploys.
+
+### `volatile-default`
+
+`ADD COLUMN ... DEFAULT <volatile>` (for example `now()`, `gen_random_uuid()`)
+must compute the default per row: a full table rewrite under `ACCESS EXCLUSIVE`
+that blocks reads and writes. Routed to the copy-and-swap backend.
+
+### `generated-stored`
+
+Adding a `GENERATED ... STORED` column computes and stores the value for every
+row: a full table rewrite under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap
+backend.
+
+### `type-rewrite`
+
+The column type change is not binary-coercible (for example `int` → `bigint`,
+`text` → `jsonb`), so PostgreSQL rewrites the whole table under
+`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend.
+
+### `relocation`
+
+The operation physically moves the table's storage (for example
+`SET TABLESPACE`): rewrite-scale I/O under an exclusive lock. Routed to the
+copy-and-swap backend.
+
+### `partition-parent-lock`
+
+The operation takes a brief exclusive lock on a partitioned parent, briefly
+blocking access to every partition. Flagged so it is scheduled deliberately.
+
+### `unsupported-operation`
+
+pg-sprite does not recognize the operation and will not run it. Fail-closed:
+an unclassified statement is never executed.
+
+### `destructive`
+
+The change discards live data or structure (`DROP COLUMN`, `DROP TABLE`,
+truncating conversions). Emitted alongside the routing decision as a warning so
+destructive intent is always visible in review.
+
+### `rewrite-required`
+
+The statement blocks as written and pg-sprite could not construct an online
+replacement (for example `ADD COLUMN ... UNIQUE`, where the column and the
+constraint arrive in one statement). Refused; rewrite the change as separate
+online steps and dry-run each one.
+
+### `backend-unavailable`
+
+The plan routes to a backend — an online shadow-table copy with a cutover —
+that this build does not implement yet. Refused; nothing executes. The
+copy-and-swap backend is on the roadmap; until it lands these changes need a
+manual online plan.
+
+### `unsupported-partitioned-parent`
+
+The routed plan builds an index concurrently, and the target is a partitioned
+parent — PostgreSQL cannot `CREATE INDEX CONCURRENTLY` on a partitioned table.
+Refused; build the index on each partition concurrently, then attach.

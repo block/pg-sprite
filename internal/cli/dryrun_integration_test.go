@@ -17,18 +17,27 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-// dryRunPlan runs migrate --dry-run --json and decodes the plan report.
+// dryRunPlan runs migrate --dry-run --json and decodes the plan report. The
+// full report is written either way; the helper enforces the dry-run exit
+// contract alongside it: an executable plan returns nil, a plan execution
+// would not run returns ErrRefused so the process exits with the refusal
+// code.
 func dryRunPlan(t *testing.T, url, alter string) plan.Report {
 	t.Helper()
 	cmd := newMigrateCmd(url, alter)
 	cmd.DryRun = true
 	cmd.JSON = true
 	var out strings.Builder
-	require.NoError(t, cmd.run(t.Context(), &out))
+	err := cmd.run(t.Context(), &out)
 	var report plan.Report
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
 	require.Equal(t, plan.FormatVersion, report.FormatVersion)
 	require.Equal(t, plan.SourceAlter, report.Source)
+	if report.Disposition == router.DispositionExecute {
+		require.NoError(t, err)
+	} else {
+		require.ErrorIs(t, err, verdict.ErrRefused)
+	}
 	return report
 }
 

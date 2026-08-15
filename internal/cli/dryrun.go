@@ -14,6 +14,7 @@ import (
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // runDryRun is the imperative dry-run flow: the identical classify-and-route
@@ -80,12 +81,17 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	report.Fingerprint = plan.Fingerprint(report.Statements)
 
 	if c.JSON {
-		return writeJSON(out, report)
-	}
-	for _, ps := range report.Statements {
-		if err := writeChangeText(out, ps); err != nil {
+		if err := writeJSON(out, report); err != nil {
 			return err
 		}
+	} else if err := writeDryRunText(out, report); err != nil {
+		return err
+	}
+	// A plan execution would not run exits with the refusal code — the same
+	// contract migrate uses for refusal verdicts — so CI can gate on the
+	// dry run without parsing the report.
+	if report.Disposition != router.DispositionExecute {
+		return verdict.ErrRefused
 	}
 	return nil
 }
