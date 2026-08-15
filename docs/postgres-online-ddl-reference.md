@@ -1,4 +1,4 @@
-# Aurora PostgreSQL online DDL operations reference
+# PostgreSQL online DDL operations reference
 
 The PostgreSQL equivalent of MySQL's
 [InnoDB Online DDL Operations](https://dev.mysql.com/doc/refman/8.4/en/innodb-online-ddl-operations.html).

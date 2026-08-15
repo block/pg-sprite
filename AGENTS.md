@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Guidance for AI coding agents working on pg-sprite — an online schema-change engine for Aurora
+Guidance for AI coding agents working on pg-sprite — an online schema-change engine for
 PostgreSQL. Deliberately short: don't restate what you can infer from the code.
 
 This file is canonical. `CLAUDE.md`, `GEMINI.md`, `.cursorrules`, `.goosehints`, and

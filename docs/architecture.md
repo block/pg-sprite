@@ -75,10 +75,10 @@ judged by the same rules regardless of how it arrived:
       NOT VALID …                              later)            verdict
            ╰────────────────────────┴───────────────╯
                                     │ cross-cutting: connection mgmt,
-                                    │ lock bounding, Aurora-aware throttling
+                                    │ lock bounding, lag-aware throttling
                                     ▼
                          ╭─────────────────────╮
-                         │  Aurora PostgreSQL  │
+                         │     PostgreSQL      │
                          ╰─────────────────────╯
 ```
 

@@ -2,7 +2,7 @@
 
 The canonical list of principles that govern the engine. They are distilled from Spirit's
 philosophy (see spirit-architecture-notes.md) and
-adapted for Aurora PostgreSQL. Everything in [low-level-design.md](low-level-design.md) and
+adapted for PostgreSQL. Everything in [low-level-design.md](low-level-design.md) and
 the phased build plan should be traceable back to one of these.
 
 > Principles say what we value; the **testable runtime MUST-statements** that follow from them —
@@ -30,7 +30,7 @@ the phased build plan should be traceable back to one of these.
 - **Mirror the design philosophy, not the package layout.** We port *how Spirit thinks* (the
   lifecycle, the gates, the refusals), not its directory structure — the code follows whatever
   is idiomatic for a Postgres + logical-decoding tool.
-- **Operator mental-model parity with Spirit.** Teams that already operate Spirit for Aurora MySQL carry its operator model. This engine deliberately mirrors Spirit's *operator surface* — the same lifecycle
+- **Operator mental-model parity with Spirit.** Teams that already operate Spirit for MySQL carry its operator model. This engine deliberately mirrors Spirit's *operator surface* — the same lifecycle
   stages, the same verbs (dry-run, defer-cutover, pause/resume, throttle, abort), the same
   refusal semantics, and the same status/observability shape — so an operator carries **one
   mental model across both engines**. Runbooks, incident response, and intuition transfer; the
@@ -50,10 +50,10 @@ the phased build plan should be traceable back to one of these.
   outage (see 12-mysql-vs-postgresql.md § Why DDL is dangerous: the lock queue).
 - **Refuse the unsafe rather than guess.** Lossy conversions, PK changes, FK/trigger tables,
   and ambiguous renames are rejected up front with a clear reason — never silently attempted
-  (see [low-level-design's requirements](low-level-design.md#table-requirements-and-unsupported-operations-aurora-postgresql-analogs)).
+  (see [low-level-design's requirements](low-level-design.md#table-requirements-and-unsupported-operations-postgresql-analogs)).
 - **Fail safe, leave no mess.** On success, failure, *and* crash, the engine cleans up its
   artifacts — most importantly the replication slot, which otherwise pins WAL and can fill the
-  Aurora volume.
+  disk (on Aurora, the cluster volume).
 - **Preflight before you touch anything.** Validate every prerequisite *before* the first
   write and fail fast with a clear, actionable reason — never abort mid-migration on something
   knowable up front: `rds.logical_replication` / `wal_level = logical`, slot-creation privilege

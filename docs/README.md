@@ -15,8 +15,8 @@ lifecycle and operator model), [pg_osc](https://github.com/shayonj/pg-osc) and
 [pg-schema-diff](https://github.com/stripe/pg-schema-diff) (declarative diffing). On top of
 what it mines, the engine adds the combination nothing ships for PostgreSQL today:
 multi-threaded chunked copy, **log-based CDC** (logical decoding, not triggers), a
-**checksum-gated atomic cutover**, and **checkpoint/resume** — tuned for Aurora. Why that
-combination is the product is [vision.md](vision.md); start there.
+**checksum-gated atomic cutover**, and **checkpoint/resume** — Aurora-aware, not
+Aurora-only. Why that combination is the product is [vision.md](vision.md); start there.
 
 ## Documents
 
@@ -24,7 +24,7 @@ combination is the product is [vision.md](vision.md); start there.
 | --- | --- |
 | [vision.md](vision.md) | The **vision statement** — what pg-sprite is (the reliable execution engine under a GitOps front-end like [SchemaBot](https://github.com/block/schemabot), as [Spirit](https://github.com/block/spirit) is for MySQL) and what it deliberately is not. Five pillars, success criteria, and explicit non-goals. Start here for the why. |
 | [architecture.md](architecture.md) | The **one-screen codebase map** — the three layers, the package map with build status, the copy-and-swap lifecycle, and where to read more. Start here for orientation. |
-| [postgres-online-ddl-reference.md](postgres-online-ddl-reference.md) | The Aurora PostgreSQL equivalent of MySQL's [InnoDB Online DDL Operations](https://dev.mysql.com/doc/refman/8.4/en/innodb-online-ddl-operations.html) reference — lock levels, rewrite/scan behaviour, and concurrent-DML safety per operation. |
+| [postgres-online-ddl-reference.md](postgres-online-ddl-reference.md) | The PostgreSQL equivalent of MySQL's [InnoDB Online DDL Operations](https://dev.mysql.com/doc/refman/8.4/en/innodb-online-ddl-operations.html) reference — lock levels, rewrite/scan behaviour, and concurrent-DML safety per operation. |
 | [high-level-design.md](high-level-design.md) | The **high-level design** — the conceptual overview: the problem, the planner → router → executor philosophy, the execution patterns and when each is chosen, and coverage at a glance. No package/interface detail. Start here for the architecture. |
 | [low-level-design.md](low-level-design.md) | The **low-level design** — the detailed engineering design: package layout, the `Executor` interface, library choices, copy-and-swap lifecycle internals, the full coverage matrix, table requirements, and the decisions remaining for later execution phases. Read this when designing the interfaces and packages. |
 | [design-principles.md](design-principles.md) | The canonical **design principles** that govern the engine — safety over speed, decisions-not-options, classify-first, mandatory checksum gate, log-based CDC, and the PostgreSQL/Aurora-specific rules everything else traces back to. |
