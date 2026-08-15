@@ -87,7 +87,8 @@ it — the honesty rule is that these claims are design-time until those tests l
 
 ### 5. Built for managed reality
 
-The design assumes Aurora/RDS, not an idealized self-hosted primary: replication-slot loss
+The design treats managed platforms (Aurora/RDS) as first-class targets rather than assuming
+an idealized self-hosted primary: replication-slot loss
 on failover is a modeled state transition with a checksum-repair path (ST-4), logical
 decoding is the default capture mode with triggers as a deliberate fallback
 ([change-capture-tradeoff.md](change-capture-tradeoff.md)), and the CI matrix proves

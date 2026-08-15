@@ -1,4 +1,4 @@
-# High-level design: a decoupled schema-migration engine for Aurora PostgreSQL
+# High-level design: a decoupled schema-migration engine for PostgreSQL
 
 The conceptual design. It frames the problem, the architecture philosophy, the three layers and
 their responsibilities, the execution patterns and when each is chosen, and the coverage at a
@@ -10,7 +10,7 @@ interfaces and packages.
 Working name: **`pg-sprite`**. It is a **separate, purpose-built PostgreSQL tool**, not "Spirit with
 PostgreSQL support" — Spirit stays MySQL-only (too many MySQL-isms to retrofit cleanly). pg-sprite
 instead **derives design practices** from several proven tools — Spirit (MySQL), pg-osc,
-pg_repack, and pgroll — and adapts them to Aurora PostgreSQL. It builds on the
+pg_repack, and pgroll — and adapts them to PostgreSQL. It builds on the
 reasons to build.
 
 ## Table of contents
@@ -30,7 +30,7 @@ reasons to build.
 
 ## The problem in one paragraph
 
-A schema change on a large, busy Aurora PostgreSQL table is dangerous for two different reasons:
+A schema change on a large, busy PostgreSQL table is dangerous for two different reasons:
 some changes take an `ACCESS EXCLUSIVE` lock that, behind a long transaction, can stall the
 whole application (the lock queue);
 and some changes **rewrite the entire table**, which a single `ALTER` cannot do online. The
@@ -140,10 +140,10 @@ the planner's classifier:
    fast default
         ╰────────────────┴────────────────╯
                          │ cross-cutting: connection mgmt,
-                         │ lock bounding, Aurora-aware throttling
+                         │ lock bounding, lag-aware throttling
                          ▼
               ╭─────────────────────╮
-              │  Aurora PostgreSQL  │  writer (DDL/copy/cutover,
+              │     PostgreSQL      │  writer (DDL/copy/cutover,
               │   writer + readers  │  logical slot) · readers (lag signal)
               ╰─────────────────────╯
 ```
@@ -280,12 +280,14 @@ mysql-vs-postgresql.md.
 
 ## What it covers (and what it deliberately does not)
 
-No single tool covers every Aurora PostgreSQL topology, configuration, and schema shape, and
+No single tool covers every PostgreSQL topology, configuration, and schema shape, and
 being explicit about the supported matrix is part of the "decisions, not options" philosophy. At
 a high level, v1 targets:
 
-- **Topology:** Aurora PostgreSQL provisioned (writer + readers) as the primary target; RDS
-  PostgreSQL as a bonus; Serverless v2 with caveats. Not Serverless v1, not Babelfish.
+- **Topology:** Aurora PostgreSQL provisioned (writer + readers) as the primary target;
+  self-managed community PostgreSQL and RDS PostgreSQL supported with the standard
+  logical-replication prerequisites; Serverless v2 with caveats. Not Serverless v1, not
+  Babelfish.
 - **Schema shape:** a single table that **has a primary key**, **no foreign keys or triggers on
   it**, **no PK change**, and **no lossy conversion** — intentionally close to Spirit's supported
   surface.
@@ -295,7 +297,7 @@ a high level, v1 targets:
 The full deployment/precondition/schema matrices, the per-constraint *reasons*, and the
 Postgres-specific preconditions (logical replication, slot/role privileges, unchanged-TOAST
 handling) are in the
-[low-level design](low-level-design.md#coverage-and-limitations-does-this-cover-all-of-aurora-postgresql).
+[low-level design](low-level-design.md#coverage-and-limitations-does-this-cover-every-postgresql-deployment).
 
 ## Key design choices
 

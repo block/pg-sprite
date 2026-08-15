@@ -4,7 +4,7 @@ pg-sprite is **orchestrator-neutral**: the engine is a standalone CLI, and a fut
 will drive it through a thin SchemaBot-side adapter — nothing in the core engine changes for it.
 No integration code lives in this repository today. The reference
 orchestrator is [SchemaBot](https://github.com/block/schemabot), which already drives
-[Spirit](https://github.com/block/spirit) for Aurora MySQL through a pluggable engine
+[Spirit](https://github.com/block/spirit) for MySQL through a pluggable engine
 abstraction; `pg-sprite` will ship as a new engine behind that same interface. This doc is the
 **single home** for that integration — everywhere else the doc set says "the orchestrator" and
 points here.
@@ -19,8 +19,8 @@ points here.
 
 ## Overview
 
-The end goal is for SchemaBot to drive `pg-sprite` for Aurora PostgreSQL exactly the way it
-drives Spirit for Aurora MySQL today — same PR workflow, same operator verbs, same status
+The end goal is for SchemaBot to drive `pg-sprite` for PostgreSQL exactly the way it
+drives Spirit for MySQL today — same PR workflow, same operator verbs, same status
 surfacing:
 
 - SchemaBot's **migration-engine interface** is the plug-in boundary: plan, apply, progress,
@@ -41,7 +41,7 @@ surfacing:
    │  control reqs    │     │  • pg-sprite   (type: postgres) │ ◀── this engine
    ╰──────────────────╯     ╰────────────────┬────────────────╯
                                              ▼
-                                   Aurora PostgreSQL
+                                       PostgreSQL
 ```
 
 ## Verb mapping (conceptual)

@@ -1,4 +1,4 @@
-# Low-level design: a decoupled schema-migration engine for Aurora PostgreSQL
+# Low-level design: a decoupled schema-migration engine for PostgreSQL
 
 > **This is the detailed / low-level design** — package layout, the `Executor` interface,
 > library choices, the copy-and-swap lifecycle internals, the full coverage matrix, table
@@ -29,8 +29,8 @@ for how the Spirit original works and tool-pgroll.md for pgroll.
 - [Advisory mode and the force escape hatch](#advisory-mode-and-the-force-escape-hatch)
 - [Copy-and-swap executor: lifecycle](#copy-and-swap-executor-lifecycle)
 - [Copy and apply ordering (the core correctness subtlety)](#copy-and-apply-ordering-the-core-correctness-subtlety)
-- [Coverage and limitations (does this cover all of Aurora PostgreSQL?)](#coverage-and-limitations-does-this-cover-all-of-aurora-postgresql)
-- [Table requirements and unsupported operations (Aurora PostgreSQL analogs)](#table-requirements-and-unsupported-operations-aurora-postgresql-analogs)
+- [Coverage and limitations (does this cover every PostgreSQL deployment?)](#coverage-and-limitations-does-this-cover-every-postgresql-deployment)
+- [Table requirements and unsupported operations (PostgreSQL analogs)](#table-requirements-and-unsupported-operations-postgresql-analogs)
 - [Illustrative component layout (existing and planned)](#illustrative-component-layout-existing-and-planned)
 - [Library choices (Go)](#library-choices-go)
 - [Design decisions inherited from Spirit (safety over speed)](#design-decisions-inherited-from-spirit-safety-over-speed)
@@ -110,7 +110,7 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
    │  pkg/throttler   Aurora reader lag · replication-slot lag · WAL gen       │ planned
    └────┬──────────────────────────────────────────────────────────────────────┘
         │
-   ╭────▼──────────────────────── Aurora PostgreSQL ───────────────────────────╮
+   ╭────▼─────────────────────────── PostgreSQL ───────────────────────────────╮
    │  WRITER  (DDL + copy + cutover; logical replication slot lives here)      │
    │  READERS (lag signal for throttling; reached via reader endpoint)         │
    ╰───────────────────────────────────────────────────────────────────────────╯
@@ -378,7 +378,7 @@ idle and a plain rewrite is acceptable); it is an escape hatch, not a shortcut, 
 > strategy for genuine table rewrites. Until it lands, those rewrites receive a **not
 > native-safe** refusal. The `native` and `expand/contract`
 > executors are described in the architecture section and in
-> tool-pgroll.md. The per-primitive **Spirit (MySQL) → Aurora
+> tool-pgroll.md. The per-primitive **Spirit (MySQL) →
 > PostgreSQL mapping** this executor is built on lives in
 > 12-mysql-vs-postgresql.md § primitive mapping.
 
@@ -457,11 +457,11 @@ dedicated convergence test per race above. The trigger fallback has its own anal
 see risks-and-mitigations § trigger-specific risks; this
 section is the logical-decoding counterpart.
 
-## Coverage and limitations (does this cover all of Aurora PostgreSQL?)
+## Coverage and limitations (does this cover every PostgreSQL deployment?)
 
 **No — and no single tool does.** The one-line pitch ("multi-threaded chunked copy +
-log-based CDC + checksum-gated atomic cutover + checkpoint/resume, tuned for Aurora")
-describes the *happy-path mechanism*, not universal coverage of every Aurora PostgreSQL
+log-based CDC + checksum-gated atomic cutover + checkpoint/resume, Aurora-aware")
+describes the *happy-path mechanism*, not universal coverage of every PostgreSQL
 deployment topology, configuration, and schema shape. Being explicit about the supported
 matrix is part of the "decisions, not options" philosophy.
 
@@ -474,6 +474,7 @@ matrix is part of the "decisions, not options" philosophy.
 | Aurora Serverless v1 | ❌ | Logical replication not available; deprecated |
 | Aurora Global Database | ⚠️ Writer region only | Slots exist only on the primary region writer; a region failover invalidates the slot → resume not possible across regions |
 | RDS PostgreSQL (non-Aurora) | ✅ Bonus | Same engine + `rds.logical_replication`; the engine should work unmodified |
+| Self-managed / community PostgreSQL | ✅ | Same engine; `wal_level = logical` and a role with the `REPLICATION` attribute replace the RDS parameter and `rds_replication` role (see [engine-role.md](engine-role.md)) |
 | RDS Proxy in front of the cluster | ⚠️ | The **replication** connection must go **direct** to the instance endpoint, not through the proxy (proxy doesn't support the replication protocol / pinning) |
 | Babelfish (TDS/SQL-Server surface) | ❌ | Out of scope |
 | Blue/Green Deployments | ⚠️ | Conceptually overlapping; running both at once needs care around slots/triggers |
@@ -524,26 +525,26 @@ matrix is part of the "decisions, not options" philosophy.
   from [execute-and-introspect](#how-the-planner-understands-ddl-decided) on the scratch
   database, not from AST transformation of the user's `ALTER`.
 
-### What "tuned for Aurora" actually means here
+### What "Aurora-aware" actually means here
 
 Aurora-specific handling (throttle on Aurora reader replica lag and on replication **slot**
 lag, RDS CA bundle for TLS, `pg_terminate_backend` to bound the cutover lock, awareness of
 the writer/reader split) — **not** a claim that every Aurora edition/topology above is
 covered. The unsupported rows are explicit non-goals for v1.
 
-## Table requirements and unsupported operations (Aurora PostgreSQL analogs)
+## Table requirements and unsupported operations (PostgreSQL analogs)
 
 Spirit publishes a short, deliberate list of things it **requires** of a table and things it
 **refuses to do** (see [its README](https://github.com/block/spirit#unsupported-features) and
 spirit-architecture-notes.md). These are not arbitrary —
 each maps to a property the copy/CDC/cutover machinery depends on. Below is the faithful
-translation of each constraint to Aurora PostgreSQL, **with the Postgres-specific reason**
+translation of each constraint to PostgreSQL, **with the Postgres-specific reason**
 (not just "because Spirit does it"). The coverage matrix above states *what* is supported;
 this section states *why* and pins the analog to the underlying primitive.
 
 ### Table-shape requirements (preconditions to even start)
 
-| Spirit (MySQL) requirement | Aurora PG analog (v1) | Postgres-specific reason |
+| Spirit (MySQL) requirement | PostgreSQL analog (v1) | Postgres-specific reason |
 | --- | --- | --- |
 | Table **must have a PRIMARY KEY** | Require a PK, or a `NOT NULL` `UNIQUE` key usable as one | Chunking needs a deterministic, range-scannable key to slice `WHERE pk BETWEEN …`; the applier needs a stable conflict target for `INSERT … ON CONFLICT (pk) DO UPDATE`; resume needs a watermark. No PK ⇒ would need `REPLICA IDENTITY FULL`, full-row matching on apply/delete, and a synthetic `ctid`-based chunker (unstable across `VACUUM`/rewrite) — unsafe for v1. |
 | PK should ideally be a single memory-comparable integer | `bigint`/`identity`/`serial` single-column PK is the fast path; composite / `uuid` / `text` PK is the slower path | The high-watermark optimization (discard captured changes above the copier's position) and the optimistic chunker rely on a monotonic, cheaply-comparable key. `uuid`/`text`/collated keys force the composite/queue path, exactly as in Spirit. |
@@ -551,13 +552,13 @@ this section states *why* and pins the analog to the underlying primitive.
 
 ### Unsupported / refused operations (mirror Spirit's blocklist)
 
-| Spirit refuses | Aurora PG engine v1 stance | Postgres-specific reason |
+| Spirit refuses | pg-sprite v1 stance | Postgres-specific reason |
 | --- | --- | --- |
 | **ALTER / DROP PRIMARY KEY** | Refuse — PK must be unchanged by the migration | The PK is simultaneously the chunk key, the CDC conflict target, and the resume watermark. Changing it mid-flight breaks all three. **Route decision:** a PK *change* is done as a separate expand/contract schema change. SchemaBot's [direct-execution doc](https://github.com/block/schemabot/blob/main/docs/direct-execution.md) calls small-table PK reshape its canonical direct-execution case — a legitimate answer on MySQL, deliberately **not** ours on PostgreSQL, where the native route holds `ACCESS EXCLUSIVE` and blocks reads (see [schemabot-integration.md § execution-mode verdicts](schemabot-integration.md#execution-mode-verdicts-and-direct-execution)). |
 | **FOREIGN KEYS or TRIGGERS on the migrated table** | Refuse in v1 | Inbound FKs (other tables referencing this one) must be re-pointed at cutover under the `ACCESS EXCLUSIVE` window — error-prone and lengthens the lock. Triggers/rules on the source would also have to be recreated on the shadow with exact firing order, and could fire during the copy. Both are deferred, same as Spirit. |
 | **RENAME column** (dangerous overlap cases) | Refuse the dangerous cases; allow only simple, unambiguous non-PK renames | A rename that reuses an old name (`RENAME a→b, ADD a …`) makes column identity ambiguous between the source row image and the shadow schema, risking silent data misplacement during apply. Same correctness hazard exists in PG. |
 | **Lossy conversions** (shorten `VARCHAR` below longest value, add `NOT NULL` w/o default, add `UNIQUE` on non-unique data) | Refuse; require the data be fixed first | These can fail or truncate *during the copy or the constraint validation*, after work is spent. PG surfaces them as `VALIDATE CONSTRAINT` / cast failures; better to reject up front. |
-| Read-replica `<10s` lag fidelity | Not a goal | Like Spirit, the engine prioritizes copy throughput; it observes Aurora reader/slot lag only to throttle and protect DR, not to guarantee replica freshness. |
+| Read-replica `<10s` lag fidelity | Not a goal | Like Spirit, the engine prioritizes copy throughput; it observes reader/slot lag only to throttle and protect DR, not to guarantee replica freshness. |
 
 ### Plan-time prerequisite: the scratch database
 
