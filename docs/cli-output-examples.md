@@ -1,9 +1,11 @@
 # CLI output examples
 
-Representative, real outputs for every shape the CLI produces: the human
-dry-run report, the JSON plan report for each disposition, and the linter.
-All were captured against the compose database (`make db-up`, PostgreSQL 16)
-with this schema:
+Representative, real JSON outputs for every shape the CLI produces: the
+plan report for each dry-run disposition, the execution verdict, the
+linter, and diff. The human text rendering of the same reports is display
+only — see the [README](../README.md) for samples; the JSON is the machine
+contract. All were captured against the compose database (`make db-up`,
+PostgreSQL 16) with this schema:
 
 ```sql
 CREATE TABLE users (id bigint PRIMARY KEY, email text);
@@ -16,49 +18,43 @@ refused. CI can gate on it without parsing JSON. The JSON report schema is
 [plan-report.md](plan-report.md); the diagnostic codes are documented at
 [postgres-online-ddl-reference.md#dry-run-diagnostic-codes](postgres-online-ddl-reference.md#dry-run-diagnostic-codes).
 
-## Human dry-run report (text)
+- [Codes used in these examples](#codes-used-in-these-examples)
+- [Migrate](#migrate)
+  - [Runs as written (`metadata-only`) — exit 0](#runs-as-written-metadata-only--exit-0)
+  - [Safer-sequence substitution (`safer-idiom`) — exit 0](#safer-sequence-substitution-safer-idiom--exit-0)
+  - [Real execution](#real-execution)
+  - [Refused: no online rewrite exists (`rewrite-required`) — exit 2](#refused-no-online-rewrite-exists-rewrite-required--exit-2)
+  - [Refused: needs a backend this build lacks (`backend-unavailable`) — exit 2](#refused-needs-a-backend-this-build-lacks-backend-unavailable--exit-2)
+  - [Refused: target facts forbid the plan (`unsupported-partitioned-parent`) — exit 2](#refused-target-facts-forbid-the-plan-unsupported-partitioned-parent--exit-2)
+  - [Executable but destructive (`destructive`) — exit 0](#executable-but-destructive-destructive--exit-0)
+- [Lint](#lint)
+  - [Blocking idioms flagged (`blocking-idiom`) — exit 0](#blocking-idioms-flagged-blocking-idiom--exit-0)
+- [Diff](#diff)
+  - [Converge to the desired state (`metadata-only`) — exit 0](#converge-to-the-desired-state-metadata-only--exit-0)
 
-Each finding is a labeled diagnostic — `severity[code]:` on its own line,
-content indented beneath it — followed by the doc anchors for every code and
-a plan summary. Here the submitted `ADD CONSTRAINT ... UNIQUE` blocks as
-written, so pg-sprite substitutes the safer online sequence (exit 0):
+## Codes used in these examples
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run
-statement 1:
-  ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);
+Every diagnostic in the examples below carries one of these typed codes. Each
+is a one-line summary; the linked reference entry is authoritative.
 
-warning[safer-idiom]:
-  ADD CONSTRAINT users_email_key — holds a blocking lock on the table for
-  the whole operation — writes (and for some forms reads) wait until it
-  finishes
+| Code | Meaning |
+|---|---|
+| [`metadata-only`](postgres-online-ddl-reference.md#metadata-only) | A brief catalog-only change: short `ACCESS EXCLUSIVE` lock, no table scan or rewrite. Runs as written. |
+| [`safer-idiom`](postgres-online-ddl-reference.md#safer-idiom) | The statement blocks as written but an equivalent online sequence exists; pg-sprite substitutes it. Each step commits on its own — the sequence is not transactionally equivalent to the original. |
+| [`type-rewrite`](postgres-online-ddl-reference.md#type-rewrite) | The column type change is not binary-coercible, so PostgreSQL rewrites the whole table under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. |
+| [`rewrite-required`](postgres-online-ddl-reference.md#rewrite-required) | The statement blocks as written and no online replacement could be constructed. Refused; split the change into separate online steps. |
+| [`backend-unavailable`](postgres-online-ddl-reference.md#backend-unavailable) | The plan routes to a backend (online shadow-table copy with cutover) this build does not implement yet. Refused; nothing executes. |
+| [`unsupported-partitioned-parent`](postgres-online-ddl-reference.md#unsupported-partitioned-parent) | The routed plan builds an index concurrently but the target is a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. Refused. |
+| [`destructive`](postgres-online-ddl-reference.md#destructive) | The change discards live data or structure (`DROP COLUMN`, `DROP TABLE`, truncating conversions). A warning alongside the routing decision, not a refusal. |
+| [`blocking-idiom`](lint-report.md#codes-code) | Lint-only code: the submitted form blocks readers or writers and a safer native form exists; the finding's `suggestion` carries the safer SQL when the linter can construct it. |
 
-help:
-  pg-sprite will run a safer online sequence instead:
-  1. CREATE UNIQUE INDEX CONCURRENTLY "users_email_key" ON "users" ("email");
-  2. ALTER TABLE "users" ADD CONSTRAINT "users_email_key" UNIQUE USING INDEX "users_email_key";
+## Migrate
 
-note:
-  each step commits on its own — not transactionally equivalent, and the
-  sequence must not run inside a transaction block
+The imperative front door: submit one DDL statement; pg-sprite classifies
+it, routes it, and either runs it, substitutes a safer online sequence, or
+refuses. `--dry-run --json` emits the plan report without executing.
 
-docs:
-  https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#safer-idiom
-
-plan:
-  public.users (PostgreSQL 16.14 (Debian 16.14-1.pgdg13+1)) — 1 statement, 2 steps to run, 0 refused
-
-dry-run:
-  nothing was executed
-
-apply:
-  re-run without --dry-run
-```
-
-Every shape below is the same report as JSON (`--json`); the text rendering
-is display only, the JSON is the machine contract.
-
-## Runs as written (`metadata-only`) — exit 0
+### Runs as written (`metadata-only`) — exit 0
 
 A safe submitted form executes unchanged: `exec_sql` is the statement
 itself.
@@ -97,11 +93,11 @@ itself.
 }
 ```
 
-## Safer-sequence substitution (`safer-idiom`) — exit 0
+### Safer-sequence substitution (`safer-idiom`) — exit 0
 
-The same report as the text example above: the decision carries the
-substituted sequence in `safer_sql`, and `exec_sql` is what `migrate` would
-run.
+The submitted `ADD CONSTRAINT ... UNIQUE` blocks as written, so pg-sprite
+plans the safer online sequence instead: the decision carries it in
+`safer_sql`, and `exec_sql` is what `migrate` would run.
 
 ```
 ~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
@@ -143,7 +139,27 @@ run.
 }
 ```
 
-## Refused: no online rewrite exists (`rewrite-required`) — exit 2
+### Real execution
+
+The same statement without `--dry-run` runs the substituted sequence for
+real. The verdict names what was executed and every step that committed
+(exit 0):
+
+```
+~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --json
+{
+  "outcome": "executed-natively",
+  "statement": "ALTER TABLE public.users ADD CONSTRAINT users_email_key UNIQUE (email)",
+  "table": "public.users",
+  "detail": "the submitted form blocks; pg-sprite ran the safer native sequence instead — all 2 steps committed",
+  "executed_sql": [
+    "CREATE UNIQUE INDEX CONCURRENTLY \"users_email_key\" ON \"public\".\"users\" (\"email\")",
+    "ALTER TABLE \"public\".\"users\" ADD CONSTRAINT \"users_email_key\" UNIQUE USING INDEX \"users_email_key\""
+  ]
+}
+```
+
+### Refused: no online rewrite exists (`rewrite-required`) — exit 2
 
 The column and its constraint arrive in one statement, so no online
 substitution can be constructed; the change must be rewritten as separate
@@ -179,7 +195,7 @@ online steps. No `exec_sql` is offered.
 }
 ```
 
-## Refused: needs a backend this build lacks (`backend-unavailable`) — exit 2
+### Refused: needs a backend this build lacks (`backend-unavailable`) — exit 2
 
 A genuine table rewrite routes to the copy-and-swap backend, which is not
 implemented yet.
@@ -214,7 +230,7 @@ implemented yet.
 }
 ```
 
-## Refused: target facts forbid the plan (`unsupported-partitioned-parent`) — exit 2
+### Refused: target facts forbid the plan (`unsupported-partitioned-parent`) — exit 2
 
 The routed plan builds an index concurrently, but the target is a
 partitioned parent — PostgreSQL cannot `CREATE INDEX CONCURRENTLY` there.
@@ -251,7 +267,7 @@ The refusal cause is the report-level `reason`.
 }
 ```
 
-## Executable but destructive (`destructive`) — exit 0
+### Executable but destructive (`destructive`) — exit 0
 
 A `DROP COLUMN` routes to execute — the destructive flag is surfaced for
 the reviewer or orchestrator to gate on; `migrate` itself does not block it.
@@ -292,9 +308,9 @@ the reviewer or orchestrator to gate on; `migrate` itself does not block it.
 
 ## Lint
 
-The offline linter needs no database: it flags blocking idioms in a DDL file
-(or stdin) in the conventional `file:line:column: severity` shape, with the
-safer form suggested beneath each finding. Given:
+The offline linter needs no database: it flags blocking idioms in a DDL
+file (or stdin) with the safer form suggested for each finding (schema:
+[lint-report.md](lint-report.md)). Given:
 
 ```sql
 -- /tmp/changes.sql
@@ -302,18 +318,7 @@ CREATE INDEX users_email_idx ON users (email);
 ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);
 ```
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite lint /tmp/changes.sql
-/tmp/changes.sql:1:1: warning: blocking-idiom — CREATE INDEX users_email_idx
-  safer form (not equivalent — see https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md): CREATE INDEX CONCURRENTLY users_email_idx ON users USING btree (email);
-  run each statement in its own transaction, never one block; after a failed CONCURRENTLY build, check pg_index.indisvalid and rebuild
-/tmp/changes.sql:2:1: warning: blocking-idiom — ADD CONSTRAINT users_email_key
-  safer form (not equivalent — see https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md): CREATE UNIQUE INDEX CONCURRENTLY "users_email_key" ON "users" ("email");
-  ALTER TABLE "users" ADD CONSTRAINT "users_email_key" UNIQUE USING INDEX "users_email_key";
-  run each statement in its own transaction, never one block; after a failed CONCURRENTLY build, check pg_index.indisvalid and rebuild
-```
-
-The same findings as JSON (schema: [lint-report.md](lint-report.md)):
+### Blocking idioms flagged (`blocking-idiom`) — exit 0
 
 ```
 ~/kiran01bm/github/pg-sprite main ./bin/pg-sprite lint /tmp/changes.sql --json
@@ -360,7 +365,8 @@ The same findings as JSON (schema: [lint-report.md](lint-report.md)):
 
 The declarative front door: point `diff` at a reviewed desired-state file
 and it emits the classified statements that converge the live table onto
-it. Given the live `users` table above and:
+it, as the same plan report (`"source": "diff"`). Given the live `users`
+table above (with the unique constraint from the execution example) and:
 
 ```sql
 -- /tmp/users.sql
@@ -368,14 +374,44 @@ CREATE TABLE users (
     id bigint PRIMARY KEY,
     email text,
     nickname text,
-    CONSTRAINT u UNIQUE (email)
+    CONSTRAINT users_email_key UNIQUE (email)
 );
 ```
 
+### Converge to the desired state (`metadata-only`) — exit 0
+
 ```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite diff --desired /tmp/users.sql
--- plan derived by pg-sprite diff; execute statements via pg-sprite migrate,
--- which refuses blocking forms — running this script directly bypasses that gate
--- native (metadata-only)
-ALTER TABLE public.users ADD COLUMN nickname text;
+~/kiran01bm/github/pg-sprite main ./bin/pg-sprite diff --desired /tmp/users.sql --json
+{
+  "format_version": 1,
+  "source": "diff",
+  "schema": "public",
+  "table": "users",
+  "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
+  "table_exists": true,
+  "disposition": "execute",
+  "fingerprint": "sha256:4c349e89a66fed63dd07f693dae62e356695f2a586306cfd5a153e6c1efcd9f9",
+  "statements": [
+    {
+      "sql": "ALTER TABLE public.users ADD COLUMN nickname text",
+      "kind": "add-column",
+      "destructive": false,
+      "route": "native",
+      "backend": "native",
+      "disposition": "execute",
+      "decisions": [
+        {
+          "operation": "ADD COLUMN nickname",
+          "destructive": false,
+          "route": "native",
+          "reason": "metadata-only"
+        }
+      ],
+      "exec_sql": [
+        "ALTER TABLE public.users ADD COLUMN nickname text"
+      ],
+      "execution": "autocommit-each-step"
+    }
+  ]
+}
 ```
