@@ -1,6 +1,7 @@
 package cli_test
 
 import (
+	"os"
 	"testing"
 	"time"
 
@@ -13,9 +14,22 @@ import (
 
 func newKong(t *testing.T, c *cli.CLI) *kong.Kong {
 	t.Helper()
+	clearFlagEnv(t)
 	k, err := kong.New(c, kong.Vars{"version": "test"})
 	require.NoError(t, err, "the command grammar must construct — a bad tag fails here, not in production")
 	return k
+}
+
+// clearFlagEnv isolates parse tests from the caller's shell: flags bound to
+// PGSPRITE_* environment variables would otherwise resolve from whatever the
+// developer last exported, making required-flag and default-value assertions
+// depend on the environment.
+func clearFlagEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{"PGSPRITE_URL", "PGSPRITE_CA_CERT"} {
+		t.Setenv(key, "")
+		require.NoError(t, os.Unsetenv(key))
+	}
 }
 
 func TestGrammarIsValid(t *testing.T) {
