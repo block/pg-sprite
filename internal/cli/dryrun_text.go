@@ -53,7 +53,11 @@ func writeDryRunText(out io.Writer, report plan.Report) error {
 				for n, sql := range ps.ExecSQL {
 					w.printf("  %d. %s;\n", n+1, sql)
 				}
-				w.diag("note", "", "each step commits on its own — not transactionally equivalent, and the sequence must not run inside a transaction block")
+				if len(ps.ExecSQL) > 1 {
+					w.diag("note", "", "each step commits on its own — not transactionally equivalent, and the sequence must not run inside a transaction block")
+				} else {
+					w.diag("note", "", "the substituted statement commits on its own and must not run inside a transaction block")
+				}
 			} else {
 				w.diag("note", "", "runs as written")
 			}
@@ -66,16 +70,29 @@ func writeDryRunText(out io.Writer, report plan.Report) error {
 			}
 		}
 	}
+	if tableMissing(report) {
+		w.diag("error", "table-not-found",
+			fmt.Sprintf("the target table %s.%s does not exist — classification fell back to zero facts (the conservative worst case), and running without --dry-run would fail", report.Schema, report.Table))
+		w.entry("docs:")
+		w.printf("  %s#table-not-found\n", onlineDDLReferenceURL)
+	}
 	w.entry("plan:")
 	w.printf("  %s — %s, %s to run, %d refused\n", targetText(report),
 		countNoun(len(report.Statements), "statement"), countNoun(steps, "step"), refused)
 	w.entry("dry-run:")
 	w.printf("  nothing was executed\n")
-	if refused == 0 && steps > 0 {
+	if refused == 0 && steps > 0 && !tableMissing(report) {
 		w.entry("apply:")
 		w.printf("  re-run without --dry-run\n")
 	}
 	return w.err
+}
+
+// tableMissing reports whether the plan's target table was introspected
+// and found absent. Unset means not introspected (no single table target),
+// which is not a missing table.
+func tableMissing(report plan.Report) bool {
+	return report.TableExists != nil && !*report.TableExists
 }
 
 // writeRefusal emits the leading error diagnostic for a statement execution
@@ -93,12 +110,15 @@ func writeRefusal(w *stickyWriter, ps plan.Statement) []string {
 		w.diag("error", "backend-unavailable", fmt.Sprintf("refused — needs the %s backend (an online shadow-table copy with a cutover), which this build does not implement yet", ps.Backend))
 		return []string{"backend-unavailable"}
 	case router.DispositionRefuse:
-		if ps.Reason != verdict.ReasonNone {
-			w.diag("error", string(ps.Reason), "refused — "+verdictText(ps.Reason))
-			return []string{string(ps.Reason)}
+		reason := ps.Reason
+		if reason == verdict.ReasonNone {
+			// A planner-level refusal carries no target-fact reason;
+			// report the same typed token the run path's refusal verdict
+			// uses so both front doors name the refusal identically.
+			reason = verdict.ReasonUnsupportedStatement
 		}
-		w.diag("error", "refuse", "refused — no known safe path for this statement")
-		return []string{"refuse"}
+		w.diag("error", string(reason), "refused — "+refuseText(ps, reason))
+		return []string{string(reason)}
 	}
 	// An unrecognized disposition is outside this build's contract: refuse
 	// loudly rather than guessing what execution would do. No docs entry —
@@ -159,9 +179,17 @@ func targetText(report plan.Report) string {
 		b.WriteString("no single table target")
 	}
 	if report.ServerVersion != "" {
-		fmt.Fprintf(&b, " (PostgreSQL %s)", report.ServerVersion)
+		fmt.Fprintf(&b, " (PostgreSQL %s)", displayVersion(report.ServerVersion))
 	}
 	return b.String()
+}
+
+// displayVersion trims a server_version banner ("16.14 (Debian …)") to the
+// bare version number for the summary line; the JSON report carries the
+// full banner.
+func displayVersion(v string) string {
+	bare, _, _ := strings.Cut(v, " ")
+	return bare
 }
 
 // substituted reports whether execution would run something other than the
@@ -213,6 +241,31 @@ func verdictText(r verdict.Reason) string {
 		return "the target is a partitioned table and this operation is not supported on partitioned parents"
 	}
 	return string(r)
+}
+
+// refuseText renders a refusal's cause. A planner-level refusal
+// (unsupported-statement) names the refused operation when the decisions
+// carry one, mirroring the run path's refusal verdict detail; target-fact
+// refusals render their verdictText.
+func refuseText(ps plan.Statement, r verdict.Reason) string {
+	if r != verdict.ReasonUnsupportedStatement {
+		return verdictText(r)
+	}
+	if op := refusedOperation(ps); op != "" {
+		return "the planner knows no safe path for " + op
+	}
+	return "the planner knows no safe path for this statement"
+}
+
+// refusedOperation names the first operation the planner refused — the
+// same operation the run path's refusal verdict names in its detail.
+func refusedOperation(ps plan.Statement) string {
+	for _, d := range ps.Decisions {
+		if d.Route == planner.RouteRefuse {
+			return d.Operation
+		}
+	}
+	return ""
 }
 
 // stickyWriter accumulates the first write error so the renderer reads as

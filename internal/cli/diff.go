@@ -87,7 +87,7 @@ func writePlanText(out io.Writer, report plan.Report) error {
 	if _, err := fmt.Fprintln(out, "-- which refuses blocking forms — running this script directly bypasses that gate"); err != nil {
 		return fmt.Errorf("write plan: %w", err)
 	}
-	if report.TableExists != nil && !*report.TableExists {
+	if tableMissing(report) {
 		if _, err := fmt.Fprintf(out, "-- table %s.%s does not exist; the plan is the full desired schema\n",
 			report.Schema, report.Table); err != nil {
 			return fmt.Errorf("write plan: %w", err)

@@ -103,9 +103,12 @@ type Report struct {
 	// forwarded report names the server whose rules produced it; empty
 	// only for sources that never connected.
 	ServerVersion string `json:"server_version,omitempty"`
-	// TableExists reports whether the live table was found. It is set
-	// only by sources that introspect for existence (diff); when false,
-	// the statements are the full desired schema.
+	// TableExists reports whether the live table was found. Set by every
+	// source that introspects the target (diff, and the alter dry run);
+	// nil means the plan has no single table target to introspect. For
+	// diff, false means the statements are the full desired schema; for
+	// an alter dry run, false means the plan was classified from zero
+	// facts and executing it would fail.
 	TableExists *bool `json:"table_exists,omitempty"`
 	// Disposition is the aggregate disposition across all statements:
 	// what would happen if the engine executed this plan now.
@@ -174,6 +177,13 @@ func FromRouted(rs router.Statement) Statement {
 	}
 	if len(st.ExecSQL) > 0 {
 		st.Execution = planner.ExecutionAutocommit
+	}
+	if st.Disposition == router.DispositionRefuse {
+		// A planner-level refusal carries no target-fact reason of its
+		// own; stamp the same typed reason the run path's refusal verdict
+		// reports, so a dry-run report and a run receipt for the same
+		// statement match on the typed field alone.
+		st.Reason = verdict.ReasonUnsupportedStatement
 	}
 	for _, d := range rs.Decisions {
 		if d.Destructive {

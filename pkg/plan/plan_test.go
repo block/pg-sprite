@@ -73,6 +73,26 @@ func TestFromRoutedDerivesDestructiveFromDecisions(t *testing.T) {
 	assert.Empty(t, st.Execution, "no exec_sql means no execution contract")
 }
 
+// A planner-level refusal carries the same typed reason the run path's
+// refusal verdict reports, so a dry-run report and a run receipt for the
+// same statement match on the typed field alone.
+func TestFromRoutedStampsUnsupportedStatementOnRefusal(t *testing.T) {
+	rs := router.Statement{
+		Plan: planner.Plan{
+			Statement: "ALTER TABLE t SET UNLOGGED",
+			Route:     planner.RouteRefuse,
+			Decisions: []planner.Decision{{
+				Operation: "unrecognized operation",
+				Route:     planner.RouteRefuse,
+				Reason:    planner.ReasonUnsupportedOperation,
+			}},
+		},
+		Disposition: router.DispositionRefuse,
+	}
+	st := plan.FromRouted(rs)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, st.Reason)
+}
+
 func TestRefuseUnsupportedPartitionedParentWithdrawsExecutionAdvice(t *testing.T) {
 	r := plan.Report{
 		Disposition: router.DispositionExecute,
@@ -181,8 +201,9 @@ func TestReportJSONShape(t *testing.T) {
 	}`, r.Fingerprint), string(raw))
 }
 
-// Optional envelope fields are omitted, not emitted as zero values: an
-// alter-source report has no table_exists, and an empty plan serializes
+// Optional envelope fields are omitted, not emitted as zero values: a
+// report that never introspected a target has no table_exists, and an
+// empty plan serializes
 // its statements as []. The fingerprint is never optional — an empty plan
 // still has a defined identity.
 func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {

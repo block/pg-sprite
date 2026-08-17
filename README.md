@@ -71,7 +71,7 @@ docs:
   https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#safer-idiom
 
 plan:
-  public.users (PostgreSQL 16.14 (Debian 16.14-1.pgdg13+1)) — 1 statement, 2 steps to run, 0 refused
+  public.users (PostgreSQL 16.14) — 1 statement, 2 steps to run, 0 refused
 
 dry-run:
   nothing was executed
@@ -82,7 +82,10 @@ apply:
 
 **Refuse: no safe path exists, so nothing runs.** A genuine table rewrite
 needs the copy-and-swap backend (a later phase); the dry run exits 2 so CI
-can gate on it without parsing JSON:
+can gate on it without parsing JSON. The exit-code gate stops refusals only —
+a destructive-but-executable change (`DROP COLUMN`) warns and exits 0, so a
+gate that must stop drops checks `.statements[].destructive` in the
+`--json` report:
 
 ```
 ~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run
@@ -102,7 +105,7 @@ docs:
   https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#type-rewrite
 
 plan:
-  public.users (PostgreSQL 16.14 (Debian 16.14-1.pgdg13+1)) — 1 statement, 0 steps to run, 1 refused
+  public.users (PostgreSQL 16.14) — 1 statement, 0 steps to run, 1 refused
 
 dry-run:
   nothing was executed

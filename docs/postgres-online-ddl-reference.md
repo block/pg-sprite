@@ -244,7 +244,15 @@ the same codes in the conventional `file:line:column: severity: code` shape. The
 codes are the same typed values the `--json` report carries, so automation can gate
 on them without parsing prose. The dry-run exit code is part of the contract:
 **0** when every statement is executable, **2** (the refusal exit code) when any
-statement would be refused.
+statement would be refused — or when the target table does not exist, because a
+plan classified from zero facts must not read as green. The exit code answers
+*should this proceed*; the report answers *why not* — exit 2 covers every
+refusal cause (no safe path, backend unavailable, target facts, missing
+table), so automation that needs the cause reads the typed `reason` and
+disposition from the `--json` report. A destructive-but-executable change
+(`DROP COLUMN`, `DROP TABLE`) is **not** a refusal: it warns and exits 0. A
+gate that must stop drops checks `.statements[].destructive` in the JSON
+report.
 
 ### `metadata-only`
 
@@ -436,7 +444,7 @@ The routed plan builds an index concurrently, and the target is a partitioned
 parent — PostgreSQL cannot `CREATE INDEX CONCURRENTLY` on a partitioned table.
 Refused; build the index on each partition concurrently, then attach.
 
-### `refuse`
+### `unsupported-statement`
 
 | Verdict | Lock | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
@@ -445,4 +453,19 @@ Refused; build the index on each partition concurrently, then attach.
 The planner found no known safe path for the statement and no more specific
 refusal cause applies (for example `CLUSTER ON`, `SET LOGGED`, or an
 `EXCLUDE` constraint). Refused; run the change through a maintenance window
-or rework it into forms the planner classifies.
+or rework it into forms the planner classifies. The dry run and the run
+path report this refusal under the same code, and both name the refused
+operation when the classifier recognized which part of the statement it
+cannot route.
+
+### `table-not-found`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The target table does not exist on the session `search_path`, so the dry
+run classified the statement from zero facts — the conservative worst
+case — and running without `--dry-run` would fail. The plan report carries
+`table_exists: false` so automation can see the same state the diagnostic
+reports. Fix the table name (or create the table) and dry-run again.

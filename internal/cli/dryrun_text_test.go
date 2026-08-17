@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -220,4 +221,132 @@ func TestDryRunTextImpactCoversAllReasons(t *testing.T) {
 	for _, r := range planner.Reasons() {
 		assert.NotEqual(t, string(r), impactText(r), "reason %s has no prose impact", r)
 	}
+}
+
+// Every rule code the dry-run renderer can emit has a matching heading in
+// the reference doc, so the docs: line lands on an entry rather than the
+// top of the page. The set is closed: every planner reason, every verdict
+// reason the dry run can carry, and the renderer's own codes.
+func TestDryRunCodesHaveDocAnchors(t *testing.T) {
+	raw, err := os.ReadFile("../../docs/postgres-online-ddl-reference.md")
+	require.NoError(t, err)
+	doc := string(raw)
+
+	codes := []string{
+		"rewrite-required",
+		"backend-unavailable",
+		"destructive",
+		"table-not-found",
+		string(verdict.ReasonUnsupportedStatement),
+		string(verdict.ReasonUnsupportedPartitionedParent),
+	}
+	for _, r := range planner.Reasons() {
+		codes = append(codes, string(r))
+	}
+	for _, c := range codes {
+		assert.Contains(t, doc, "### `"+c+"`\n", "code %s has no reference entry", c)
+	}
+}
+
+// A planner-level refusal renders the same typed token the run path's
+// refusal verdict carries — unsupported-statement — and names the refused
+// operation, so the two front doors describe one refusal identically.
+func TestDryRunTextPlannerRefusalNamesOperation(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         `ALTER TABLE "users" SET UNLOGGED`,
+		Route:       planner.RouteRefuse,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement,
+		Decisions: []planner.Decision{{
+			Operation: "unrecognized operation",
+			Route:     planner.RouteRefuse,
+			Reason:    planner.ReasonUnsupportedOperation,
+		}},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, report))
+	text := out.String()
+	assert.Contains(t, text, "error[unsupported-statement]:\n  refused — the planner knows no safe path for unrecognized operation")
+	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#unsupported-statement\n")
+	assert.NotContains(t, text, "error[refuse]")
+}
+
+// A missing target table renders its own error diagnostic, keeps the
+// apply footer off, and links the table-not-found reference entry: a plan
+// classified from zero facts must not read as ready to apply.
+func TestDryRunTextMissingTable(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "public", "nosuchtable", "16.10"
+	report.Disposition = router.DispositionExecute
+	missing := false
+	report.TableExists = &missing
+	sql := `ALTER TABLE "nosuchtable" ADD COLUMN "z" integer`
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         sql,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		Decisions: []planner.Decision{{
+			Operation: "add column",
+			Route:     planner.RouteNative,
+			Reason:    planner.ReasonMetadataOnly,
+		}},
+		ExecSQL:   []string{sql},
+		Execution: planner.ExecutionAutocommit,
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, report))
+	text := out.String()
+	assert.Contains(t, text, "error[table-not-found]:\n  the target table public.nosuchtable does not exist")
+	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#table-not-found\n")
+	assert.Contains(t, text, "dry-run:\n  nothing was executed\n")
+	assert.NotContains(t, text, "apply:")
+}
+
+// A single-step substitution carries only the transaction-block caveat:
+// the multi-step "each step commits on its own" wording would claim a
+// sequence that does not exist.
+func TestDryRunTextSingleStepSubstitutionNote(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+	report.Disposition = router.DispositionExecute
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         `CREATE INDEX "users_email_idx" ON "users" ("email")`,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		Decisions: []planner.Decision{{
+			Operation: "create index",
+			Route:     planner.RouteNative,
+			Reason:    planner.ReasonSaferIdiom,
+		}},
+		ExecSQL:   []string{`CREATE INDEX CONCURRENTLY "users_email_idx" ON "users" ("email")`},
+		Execution: planner.ExecutionAutocommit,
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, report))
+	text := out.String()
+	assert.Contains(t, text, "note:\n  the substituted statement commits on its own and must not run inside a\n  transaction block\n")
+	assert.NotContains(t, text, "each step commits on its own")
+}
+
+// The plan summary trims the server_version banner to the bare version:
+// the packaging suffix belongs in the JSON report, not the one line that
+// must stay scannable.
+func TestDryRunTextTrimsServerVersionBanner(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table = "public", "users"
+	report.ServerVersion = "16.14 (Debian 16.14-1.pgdg13+1)"
+	report.Disposition = router.DispositionExecute
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, report))
+	assert.Contains(t, out.String(), "public.users (PostgreSQL 16.14) —")
+	assert.NotContains(t, out.String(), "Debian")
 }

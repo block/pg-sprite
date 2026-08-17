@@ -49,6 +49,8 @@ func TestDocExamplesMatchPipelineOutput(t *testing.T) {
 
 	alter := plan.NewReport(plan.SourceAlter)
 	alter.Schema, alter.Table, alter.ServerVersion = "app", "orders", "16.4"
+	alterTableExists := true
+	alter.TableExists = &alterTableExists
 	routedA := router.Route([]planner.Plan{
 		classifyCanonical(t, "ALTER TABLE app.orders DROP COLUMN legacy_status"),
 	})

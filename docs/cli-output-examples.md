@@ -12,9 +12,14 @@ CREATE TABLE users (id bigint PRIMARY KEY, email text);
 CREATE TABLE events (id bigint, created date) PARTITION BY RANGE (created);
 ```
 
-`migrate` exit codes follow the dry-run contract (0 = executable, 2 = refused)
+`migrate` exit codes follow the dry-run contract (0 = executable, 2 = refused —
+including a target table that does not exist, so a typo'd name cannot gate green)
 defined with the [diagnostic codes](postgres-online-ddl-reference.md#dry-run-diagnostic-codes);
-CI can gate on the exit code without parsing JSON. The contract is
+CI can gate on the exit code without parsing JSON. The gate is refusals only: a
+destructive-but-executable change (`DROP COLUMN`) warns and exits 0 — a gate
+that must stop drops checks `.statements[].destructive` in the JSON report.
+Exit 2 covers every refusal cause; the exit code answers *should this
+proceed*, the report's typed `reason` and disposition answer *why not*. The contract is
 `migrate`'s: `lint` exits 1 when a script has error-severity findings
 (warnings alone exit 0), and `diff` prints the plan and exits 0 regardless of
 disposition. Statement kinds `migrate` does not support (`DROP INDEX`,
@@ -50,6 +55,8 @@ is a one-line summary; the linked reference entry is authoritative.
 | [`rewrite-required`](postgres-online-ddl-reference.md#rewrite-required) | The statement blocks as written and no online replacement could be constructed. Refused; split the change into separate online steps. |
 | [`backend-unavailable`](postgres-online-ddl-reference.md#backend-unavailable) | The plan routes to a backend (online shadow-table copy with cutover) this build does not implement yet. Refused; nothing executes. |
 | [`unsupported-partitioned-parent`](postgres-online-ddl-reference.md#unsupported-partitioned-parent) | The routed plan builds an index concurrently but the target is a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. Refused. |
+| [`unsupported-statement`](postgres-online-ddl-reference.md#unsupported-statement) | The planner knows no safe path for the statement (for example `SET UNLOGGED`, `CLUSTER ON`). Refused — the same typed reason the run path's refusal verdict carries. |
+| [`table-not-found`](postgres-online-ddl-reference.md#table-not-found) | The target table does not exist, so classification fell back to zero facts; running without `--dry-run` would fail. The dry run exits 2 and the report carries `table_exists: false`. |
 | [`destructive`](postgres-online-ddl-reference.md#destructive) | The change discards live data or structure (`DROP COLUMN`, `DROP TABLE`, truncating conversions). A warning alongside the routing decision, not a refusal. |
 | [`blocking-idiom`](lint-report.md#codes-code) | Lint-only code: the submitted form blocks readers or writers and a safer native form exists; the finding's `suggestion` carries the safer SQL when the linter can construct it. |
 
@@ -72,6 +79,7 @@ itself.
   "schema": "public",
   "table": "users",
   "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
+  "table_exists": true,
   "disposition": "execute",
   "fingerprint": "sha256:653b46e2647e787478db2feb7115b8fe440e392115d465278fec0cfd33892484",
   "statements": [
@@ -112,6 +120,7 @@ plans the safer online sequence instead: the decision carries it in
   "schema": "public",
   "table": "users",
   "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
+  "table_exists": true,
   "disposition": "execute",
   "fingerprint": "sha256:e2b2a51466547f4469754c9296524844f868eb5a967aba1e290ed8aa7ee63996",
   "statements": [
@@ -178,6 +187,7 @@ online steps. No `exec_sql` is offered.
   "schema": "public",
   "table": "users",
   "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
+  "table_exists": true,
   "disposition": "rewrite-required",
   "fingerprint": "sha256:9773ff32c62b04e97bacb0ae85cf0ad528164c7baafc33db66d8adf20d7a5674",
   "statements": [
@@ -213,6 +223,7 @@ implemented yet.
   "schema": "public",
   "table": "users",
   "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
+  "table_exists": true,
   "disposition": "unavailable",
   "fingerprint": "sha256:fb4836fa89efab4280be1680b8c3181fb902ec67131ae5959df3d5e872f1b3c5",
   "statements": [
@@ -249,6 +260,7 @@ The refusal cause is the report-level `reason`.
   "schema": "public",
   "table": "events",
   "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
+  "table_exists": true,
   "disposition": "refuse",
   "reason": "unsupported-partitioned-parent",
   "fingerprint": "sha256:e0cebea56d6c5577722d17be16442b06303a817af0c009913d746fd3d1c379e0",
@@ -285,6 +297,7 @@ the reviewer or orchestrator to gate on; `migrate` itself does not block it.
   "schema": "public",
   "table": "users",
   "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
+  "table_exists": true,
   "disposition": "execute",
   "fingerprint": "sha256:77caa837ce1750b23eaaf9f988ede933f624c8c4c6de1dc2fee7780bf64a4c1f",
   "statements": [

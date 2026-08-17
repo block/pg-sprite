@@ -42,7 +42,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	}
 	defer pool.Close()
 
-	facts, targetFacts, err := dryRunFacts(ctx, pool, st)
+	facts, targetFacts, tableExists, err := dryRunFacts(ctx, pool, st)
 	if err != nil {
 		return err
 	}
@@ -64,6 +64,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema = resolvedSchema(st)
 	report.Table = st.Table()
+	report.TableExists = tableExists
 	if report.ServerVersion, err = dbconn.ServerVersion(ctx, pool); err != nil {
 		return err
 	}
@@ -94,8 +95,10 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	}
 	// A plan execution would not run exits with the refusal code — the same
 	// contract migrate uses for refusal verdicts — so CI can gate on the
-	// dry run without parsing the report.
-	if report.Disposition != router.DispositionExecute {
+	// dry run without parsing the report. A missing target table carries
+	// the same code: the plan was classified from zero facts and running
+	// without --dry-run would fail, so a gate must not read it as green.
+	if report.Disposition != router.DispositionExecute || tableMissing(report) {
 		return verdict.ErrRefused
 	}
 	return nil
@@ -115,21 +118,26 @@ func resolvedSchema(st statement.Statement) string {
 
 // dryRunFacts introspects the statement's target table for classifier
 // facts. Statements without a single table target (index drops, REINDEX)
-// and missing tables classify with zero facts.
-func dryRunFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Statement) (planner.Facts, preflight.TargetFacts, error) {
+// and missing tables classify with zero facts. The returned tableExists
+// mirrors the introspection outcome for the report: true when the table
+// was found, false when it was looked up and missing, nil when the
+// statement has no single table target to introspect.
+func dryRunFacts(ctx context.Context, pool *pgxpool.Pool, st statement.Statement) (planner.Facts, preflight.TargetFacts, *bool, error) {
 	if st.Table() == "" {
-		return planner.Facts{}, preflight.TargetFacts{}, nil
+		return planner.Facts{}, preflight.TargetFacts{}, nil, nil
 	}
 	live, err := schemadiff.Introspect(ctx, pool, resolvedSchema(st), st.Table())
 	switch {
 	case errors.Is(err, schemadiff.ErrTableNotFound):
-		return planner.Facts{}, preflight.TargetFacts{}, nil
+		exists := false
+		return planner.Facts{}, preflight.TargetFacts{}, &exists, nil
 	case err != nil:
-		return planner.Facts{}, preflight.TargetFacts{}, err
+		return planner.Facts{}, preflight.TargetFacts{}, nil, err
 	}
 	targetFacts, err := preflight.LookupTargetFacts(ctx, pool, resolvedSchema(st), st.Table())
 	if err != nil {
-		return planner.Facts{}, preflight.TargetFacts{}, err
+		return planner.Facts{}, preflight.TargetFacts{}, nil, err
 	}
-	return planner.FactsFrom(live), targetFacts, nil
+	exists := true
+	return planner.FactsFrom(live), targetFacts, &exists, nil
 }
