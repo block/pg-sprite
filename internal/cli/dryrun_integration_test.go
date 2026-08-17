@@ -17,18 +17,28 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-// dryRunPlan runs migrate --dry-run --json and decodes the plan report.
+// dryRunPlan runs migrate --dry-run --json and decodes the plan report. The
+// full report is written either way; the helper enforces the dry-run exit
+// contract alongside it: an executable plan returns nil, a plan execution
+// would not run returns ErrRefused so the process exits with the refusal
+// code.
 func dryRunPlan(t *testing.T, url, alter string) plan.Report {
 	t.Helper()
 	cmd := newMigrateCmd(url, alter)
 	cmd.DryRun = true
 	cmd.JSON = true
 	var out strings.Builder
-	require.NoError(t, cmd.run(t.Context(), &out))
+	err := cmd.run(t.Context(), &out)
 	var report plan.Report
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
 	require.Equal(t, plan.FormatVersion, report.FormatVersion)
 	require.Equal(t, plan.SourceAlter, report.Source)
+	missingTable := report.TableExists != nil && !*report.TableExists
+	if report.Disposition == router.DispositionExecute && !missingTable {
+		require.NoError(t, err)
+	} else {
+		require.ErrorIs(t, err, verdict.ErrRefused)
+	}
 	return report
 }
 
@@ -223,13 +233,17 @@ func TestDryRunResolvesUnqualifiedSchemaAndStampsServerVersion(t *testing.T) {
 		"the report must name the schema the engine introspected, not echo the submitted qualification")
 	assert.NotEmpty(t, report.ServerVersion,
 		"the report must stamp the server version its classification came from")
+	require.NotNil(t, report.TableExists,
+		"a dry run that introspected the target must say so")
+	assert.True(t, *report.TableExists)
 	require.Len(t, report.Statements, 1)
 	assert.Equal(t, planner.ReasonBinaryCoercible, report.Statements[0].Decisions[0].Reason,
 		"resolving to public must feed the live facts to the classifier")
 }
 
 // A dry-run against a table that does not exist classifies with zero facts:
-// the unprovable type change routes conservatively instead of failing.
+// the unprovable type change routes conservatively instead of failing, and
+// the report records the missing target.
 func TestMigrateDryRunMissingTableIsConservative(t *testing.T) {
 	url := testutil.StartPostgres(t)
 
@@ -237,4 +251,28 @@ func TestMigrateDryRunMissingTableIsConservative(t *testing.T) {
 	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
 	require.Len(t, report.Statements, 1)
 	assert.Equal(t, planner.RouteCopyAndSwap, report.Statements[0].Route)
+	require.NotNil(t, report.TableExists)
+	assert.False(t, *report.TableExists)
+}
+
+// A statement that classifies as executable against a missing table must
+// not exit green: applying it would fail, so the dry run carries the
+// refusal exit code and marks the missing target in the report.
+func TestMigrateDryRunMissingTableRefusesExecutablePlan(t *testing.T) {
+	url := testutil.StartPostgres(t)
+
+	cmd := newMigrateCmd(url, "ALTER TABLE nosuchtable ADD COLUMN z int")
+	cmd.DryRun = true
+	cmd.JSON = true
+	var out strings.Builder
+	err := cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused,
+		"a plan classified from zero facts must not gate green")
+
+	var report plan.Report
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
+	assert.Equal(t, router.DispositionExecute, report.Disposition,
+		"the routed disposition itself is executable — the refusal exit comes from the missing target")
+	require.NotNil(t, report.TableExists)
+	assert.False(t, *report.TableExists)
 }

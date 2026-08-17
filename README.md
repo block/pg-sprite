@@ -42,6 +42,104 @@ periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the
 rules that apply inside the core. Read it before changing anything under
 `pkg/`.
 
+## What it looks like
+
+Every sample below is captured verbatim from a real session against the
+compose database (`make db-up`, PostgreSQL 16): `$` marks the command,
+everything after it is the tool's output.
+
+**Improve: a blocking form is replaced with the safer online sequence.**
+`migrate --dry-run` shows exactly what would run, as compiler-style
+diagnostics with a doc anchor per finding (exit 0 — the plan is executable):
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run
+statement 1:
+  ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);
+
+warning[safer-idiom]:
+  ADD CONSTRAINT users_email_key — holds a blocking lock on the table for
+  the whole operation — writes (and for some forms reads) wait until it
+  finishes
+
+help:
+  pg-sprite will run a safer online sequence instead:
+  1. CREATE UNIQUE INDEX CONCURRENTLY "users_email_key" ON "users" ("email");
+  2. ALTER TABLE "users" ADD CONSTRAINT "users_email_key" UNIQUE USING INDEX "users_email_key";
+
+note:
+  each step commits on its own — not transactionally equivalent, and the
+  sequence must not run inside a transaction block
+
+docs:
+  https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#safer-idiom
+
+plan:
+  public.users (PostgreSQL 16.14) — 1 statement, 2 steps to run, 0 refused
+
+dry-run:
+  nothing was executed
+
+apply:
+  re-run without --dry-run
+```
+
+**Refuse: no safe path exists, so nothing runs.** A genuine table rewrite
+needs the copy-and-swap backend (a later phase); the dry run exits 2 so CI
+can gate on it without parsing JSON. The exit-code gate stops refusals only —
+a destructive-but-executable change (`DROP COLUMN`) warns and exits 0, so a
+gate that must stop drops checks `.statements[].destructive` in the
+`--json` report:
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run
+statement 1:
+  ALTER TABLE users ALTER COLUMN id TYPE text;
+
+error[backend-unavailable]:
+  refused — needs the copy-and-swap backend (an online shadow-table copy
+  with a cutover), which this build does not implement yet
+
+note[type-rewrite]:
+  ALTER COLUMN id TYPE text — the type conversion forces a full table
+  rewrite under an exclusive lock that blocks reads and writes
+
+docs:
+  https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#backend-unavailable
+  https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#type-rewrite
+
+plan:
+  public.users (PostgreSQL 16.14) — 1 statement, 0 steps to run, 1 refused
+
+dry-run:
+  nothing was executed
+```
+
+**Lint: offline, no database needed.** Flag blocking idioms in a DDL file
+and suggest the safer form:
+
+```console
+$ pg-sprite lint changes.sql
+changes.sql:1:1: warning: blocking-idiom — CREATE INDEX users_email_idx
+  safer form (not equivalent — see https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md): CREATE INDEX CONCURRENTLY users_email_idx ON users USING btree (email);
+  run each statement in its own transaction, never one block; after a failed CONCURRENTLY build, check pg_index.indisvalid and rebuild
+```
+
+**Diff: declarative desired state in, executable plan out.** Point at a
+reviewed `CREATE TABLE` file and get the classified statements that converge
+the live table onto it:
+
+```console
+$ pg-sprite diff --desired users.sql
+-- plan derived by pg-sprite diff; execute statements via pg-sprite migrate,
+-- which refuses blocking forms — running this script directly bypasses that gate
+-- native (metadata-only)
+ALTER TABLE public.users ADD COLUMN nickname text;
+```
+
+More shapes — every disposition as JSON, destructive warnings, and exit
+codes — are in [docs/cli-output-examples.md](docs/cli-output-examples.md).
+
 ## Install
 
 Release archives for linux/darwin on amd64/arm64, with `checksums.txt`, are

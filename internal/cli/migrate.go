@@ -58,7 +58,7 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 		}
 	}
 
-	facts, _, err := dryRunFacts(ctx, pool, st)
+	facts, _, _, err := dryRunFacts(ctx, pool, st)
 	if err != nil {
 		return err
 	}
