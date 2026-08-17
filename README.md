@@ -172,6 +172,19 @@ change — every other command is read-only or fully offline.
 The offline commands have no connection flags at all, so they cannot be
 pointed at a database by accident.
 
+## Demo
+
+A runnable tour of the CLI against a local PostgreSQL (Docker required):
+
+```sh
+make demo
+```
+
+It builds the binary, starts the compose database, seeds demo tables, and
+walks every planner route (dry-run), the declarative diff, the offline
+commands, and real executions — including the safer-sequence substitutions
+and a structured refusal. Rerunnable; see [demo/README.md](demo/README.md).
+
 ## Development
 
 ```sh

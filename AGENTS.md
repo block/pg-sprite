@@ -53,6 +53,20 @@ make lint        # golangci-lint
   major (default 16), CI runs the matrix 14 → 18. Core logic is validated against a real
   database — no mocked-DB tests for core logic.
 
+## Demo tour
+
+[demo/](demo/) is a runnable product tour and CI's artifact smoke test (`make demo`
+interactively, `make demo-check` in CI's `demo` job). Go tests cover the code, not the
+artifact — the smoke test is the one check that runs the built `bin/pg-sprite` the way a
+user invokes it. It is a contract with the planner and CLI, not documentation: when a change
+adds, renames, or removes a planner route, reason, verdict outcome/reason, safer idiom, or a
+`migrate`/`diff` JSON field or exit code the demo
+asserts on, update `demo/tour.sh` (and its fixtures) in the same PR. Check mode asserts only
+on `--json` fields and exit codes — never on human-facing prose. Keep fixtures deterministic
+and rerunnable (`demo/seed.sql` resets everything). Run `make demo-check` before declaring
+such a change done. The existing Go integration suite stays the correctness oracle; the demo
+is a smoke tour of the built binary, not a second test suite.
+
 ## Conventions
 
 - Say **"schema change"**, not "migration", in code, CLI output, error messages, and new docs —
