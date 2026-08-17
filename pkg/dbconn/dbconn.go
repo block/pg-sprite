@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -114,6 +115,37 @@ func ServerMajor(ctx context.Context, pool *pgxpool.Pool) (int, error) {
 		return 0, fmt.Errorf("read server major version: %w", err)
 	}
 	return major, nil
+}
+
+// IndexBuildProgress is one server observation of a concurrent index build.
+type IndexBuildProgress struct {
+	Phase       string
+	BlocksDone  uint64
+	BlocksTotal uint64
+	TuplesDone  uint64
+	TuplesTotal uint64
+}
+
+// RowQuerier is the session capability needed for a progress observation.
+type RowQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// ConcurrentIndexProgress reads the active build owned by backendPID. The
+// boolean is false when PostgreSQL has not published the row yet or the build
+// has already left the progress view.
+func ConcurrentIndexProgress(ctx context.Context, session RowQuerier, backendPID uint32) (IndexBuildProgress, bool, error) {
+	var p IndexBuildProgress
+	err := session.QueryRow(ctx, `SELECT phase, blocks_done, blocks_total, tuples_done, tuples_total
+		FROM pg_catalog.pg_stat_progress_create_index WHERE pid = $1`, backendPID).
+		Scan(&p.Phase, &p.BlocksDone, &p.BlocksTotal, &p.TuplesDone, &p.TuplesTotal)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return p, false, nil
+	}
+	if err != nil {
+		return p, false, fmt.Errorf("read concurrent index progress for backend %d: %w", backendPID, err)
+	}
+	return p, true, nil
 }
 
 // buildPoolConfig translates Config into a pgxpool configuration. It is pure

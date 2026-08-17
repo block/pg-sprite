@@ -53,7 +53,7 @@ is a one-line summary; the linked reference entry is authoritative.
 | [`metadata-only`](postgres-online-ddl-reference.md#metadata-only) | A brief catalog-only change: at most a short `ACCESS EXCLUSIVE` lock, no table scan or rewrite. Runs as written. |
 | [`safer-idiom`](postgres-online-ddl-reference.md#safer-idiom) | The statement blocks as written but an equivalent online sequence exists; pg-sprite substitutes it. Each step commits on its own — the sequence is not transactionally equivalent to the original. |
 | [`type-rewrite`](postgres-online-ddl-reference.md#type-rewrite) | The column type change is not binary-coercible, so PostgreSQL rewrites the whole table under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. |
-| [`rewrite-required`](postgres-online-ddl-reference.md#rewrite-required) | The statement blocks as written and no online replacement could be constructed. Refused; split the change into separate online steps. The statement's `guidance` field names the typed manual path ([Guidance vocabulary](suggest-report.md#guidance-guidance)). |
+| [`rewrite-required`](postgres-online-ddl-reference.md#rewrite-required) | The statement blocks as written and no online replacement could be constructed. Refused; split the change into separate online steps. The statement's `guidance` field names the typed manual path ([Guidance vocabulary](suggest-report.md#guidance-guidance)); the run refusal verdict carries the same code. |
 | [`backend-unavailable`](postgres-online-ddl-reference.md#backend-unavailable) | The plan routes to a backend (online shadow-table copy with cutover) this build does not implement yet. Refused; nothing executes. |
 | [`unsupported-partitioned-parent`](postgres-online-ddl-reference.md#unsupported-partitioned-parent) | The routed plan builds an index concurrently but the target is a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. Refused. |
 | [`unsupported-statement`](postgres-online-ddl-reference.md#unsupported-statement) | The planner knows no safe path for the statement (for example `SET UNLOGGED`, `CLUSTER ON`). Refused — the same typed reason the run path's refusal verdict carries. |
@@ -213,6 +213,22 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' 
       "guidance": "add-column-then-constraint"
     }
   ]
+}
+```
+
+Run without `--dry-run`, the refusal verdict carries the same `guidance`
+code, so an orchestrator that goes straight to execution still receives
+the typed manual path:
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --json
+{
+  "outcome": "refused",
+  "reason": "not-native-safe-rewrite-required",
+  "statement": "ALTER TABLE public.users ADD COLUMN nickname text UNIQUE",
+  "table": "public.users",
+  "detail": "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not construct one for this statement; guidance names the manual path (run with --dry-run to see each operation's classification)",
+  "guidance": "add-column-then-constraint"
 }
 ```
 

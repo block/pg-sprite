@@ -161,13 +161,13 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   decision is that PostgreSQL targets do **not** get `direct_execution` at all: on MySQL a
   small-table direct ALTER blocks only writes, but the PostgreSQL native route holds
   `ACCESS EXCLUSIVE` and blocks reads too, so the policy's risk framing does not transfer.
-- **Recommended call sequence: dry-run, then apply.** The typed manual path for a
-  rewrite-required refusal (`guidance`), the plan `fingerprint`, and `table_exists` all live
-  on the [plan report](plan-report.md) — the dry run's output. The run verdict carries the
-  refusal reason as a typed field but its `detail` is display-only prose: an orchestrator
-  that wants the typed guidance must obtain the plan report first (dry-run for the
-  imperative front door, `diff --json` for the declarative one), then apply, and treat the
-  verdict's `detail` as presentation until the verdict carries typed guidance too.
+- **Recommended call sequence: dry-run, then apply.** The plan `fingerprint` and
+  `table_exists` live only on the [plan report](plan-report.md) — the dry run's output — so
+  the dry run stays the recommended first call (dry-run for the imperative front door,
+  `diff --json` for the declarative one). It is no longer required for the typed manual
+  path: a rewrite-required refusal verdict carries the same `guidance` code the plan report
+  does, derived from the same routing decision, so an orchestrator that goes straight to
+  apply still receives it. The verdict's `detail` remains display-only prose.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
   apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement

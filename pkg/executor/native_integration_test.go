@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 // buildBudget bounds test builds: generous enough that a healthy build on a
@@ -81,6 +83,90 @@ func TestBuildIndexConcurrentlyBuildsValidIndex(t *testing.T) {
 	exists, valid := indexState(t, pool, schema, "idx_c")
 	assert.True(t, exists, "the index must exist")
 	assert.True(t, valid, "the index must be valid")
+}
+
+func TestBuildIndexConcurrentlyReportsServerProgressAndFinishes(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.progress_t AS
+		SELECT n AS id, repeat(md5(n::text), 4) AS payload FROM generate_series(1, 1000000) n`, schema))
+	require.NoError(t, err)
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	type result struct{ err error }
+	results := make(chan result, 1)
+	var workers sync.WaitGroup
+	workers.Go(func() {
+		_, buildErr := executor.BuildIndexConcurrentlyWithProgress(t.Context(), pool,
+			fmt.Sprintf("CREATE INDEX CONCURRENTLY progress_idx ON %s.progress_t (payload)", schema), buildBudget, tracker)
+		results <- result{err: buildErr}
+	})
+	t.Cleanup(workers.Wait)
+
+	var observed progress.Snapshot
+	require.Eventually(t, func() bool {
+		var progressErr error
+		observed, progressErr = tracker.Progress(t.Context())
+		return progressErr == nil && observed.Detail.ServerPhase != ""
+	}, 30*time.Second, 10*time.Millisecond, "the active build must publish server progress")
+	require.NotNil(t, observed.Detail.Work)
+	assert.LessOrEqual(t, observed.Detail.Work.BlocksDone, observed.Detail.Work.BlocksTotal)
+	assert.LessOrEqual(t, observed.Detail.Work.TuplesDone, observed.Detail.Work.TuplesTotal)
+
+	buildResult := <-results
+	require.NoError(t, buildResult.err)
+	workers.Wait()
+	finished, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, progress.PhaseFinished, finished.Phase)
+	assert.False(t, finished.Detail.Active, "a completed build has no active progress row")
+}
+
+// TestBuildIndexConcurrentlyWithProgressFailingBuildUnderPolling covers the
+// reserved-session handoff on the failure path: a poller hammers Progress
+// for the build's entire life while the build fails, and the executor must
+// still get exclusive use of the verdict session for its catalog verdict.
+// A regression that weakens StopConcurrentBuild's drain surfaces here as a
+// wire-protocol error on the shared connection or a race-detector report.
+func TestBuildIndexConcurrentlyWithProgressFailingBuildUnderPolling(t *testing.T) {
+	pool, schema := newPool(t)
+	// Duplicates guarantee the unique build fails after creating its
+	// catalog entry; the row count gives the poller a window to overlap
+	// the build and its failure verdict.
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.t AS
+		SELECT n AS id, n %% 1000 AS c FROM generate_series(1, 100000) n`, schema))
+	require.NoError(t, err)
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	var pollers sync.WaitGroup
+	pollers.Go(func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, pollErr := tracker.Progress(t.Context())
+			assert.NoError(t, pollErr, "polling must stay clean while the build fails")
+		}
+	})
+
+	_, buildErr := executor.BuildIndexConcurrentlyWithProgress(t.Context(), pool,
+		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_dup ON %s.t (c)", schema), buildBudget, tracker)
+	close(stop)
+	pollers.Wait()
+
+	require.ErrorIs(t, buildErr, executor.ErrBuildLeftInvalidIndex,
+		"the failure verdict must be reached despite concurrent polling")
+	var invalidErr *executor.InvalidIndexError
+	require.ErrorAs(t, buildErr, &invalidErr)
+	assert.Equal(t, "idx_dup", invalidErr.Index)
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, progress.PhaseFailed, snapshot.Phase)
+	assert.False(t, snapshot.Detail.Active)
 }
 
 // TestBuildIndexConcurrentlyRefusesSingleConnectionPool covers the

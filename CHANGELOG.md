@@ -24,6 +24,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the findings that explain it, while a safer sequence pg-sprite runs itself is
   now a `note:`. Each guidance code's `docs:` line links its own anchor in
   docs/suggest-report.md. Display only — the JSON report is unchanged.
+- **Rewrite-required refusal verdicts now carry a `guidance` field** naming
+  the typed manual path, the same value the plan report's statement carries,
+  so an orchestrator running without a preceding dry run receives it too.
+  The field is omitted from every other verdict.
 - **`migrate --dry-run` now exits 2 when any statement would be refused**
   (disposition `rewrite-required`, `unavailable`, or `refuse`), matching the
   refusal exit code an apply of the same statement ends in. Previously a dry

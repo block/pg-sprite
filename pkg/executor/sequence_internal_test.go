@@ -7,9 +7,12 @@ package executor
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 func TestAdmitStepClassifiesShapes(t *testing.T) {
@@ -162,4 +165,30 @@ func TestAdmitSequenceNamesTheOffendingStep(t *testing.T) {
 func TestAdmitSequenceSurfacesParseFailures(t *testing.T) {
 	_, err := admitSequence("s", "t", []string{`ALTER TABLE s.t THIS IS NOT SQL`})
 	require.Error(t, err)
+}
+
+// skewedClock reads a fixed instant far from the wall clock, so any code
+// path that mixes it with time.Now()/time.Since produces a wildly wrong
+// elapsed value instead of a subtly wrong one.
+type skewedClock struct{ now time.Time }
+
+func (c *skewedClock) Now() time.Time { return c.now }
+
+// Elapsed values fed to budget corroboration and step reports must come
+// from the same clock that produced the start instant: a tracker's injected
+// clock when present, the wall clock otherwise.
+func TestElapsedSinceReadsTheClockThatProducedStart(t *testing.T) {
+	clock := &skewedClock{now: time.Unix(1000, 0)}
+	tracker, err := progress.NewTracker(clock)
+	require.NoError(t, err)
+
+	start := tracker.Now()
+	clock.now = clock.now.Add(5 * time.Second)
+	assert.Equal(t, 5*time.Second, elapsedSince(tracker, start),
+		"with a tracker, elapsed must be measured on its injected clock")
+
+	wallStart := time.Now()
+	elapsed := elapsedSince(nil, wallStart)
+	assert.GreaterOrEqual(t, elapsed, time.Duration(0))
+	assert.Less(t, elapsed, time.Minute, "without a tracker, elapsed must be wall-clock time since start")
 }
