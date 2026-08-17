@@ -64,7 +64,11 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	}
 	report.Disposition = routed.Disposition
 	for _, rs := range routed.Statements {
-		report.Statements = append(report.Statements, plan.FromRouted(rs))
+		ps, err := plan.FromRouted(rs)
+		if err != nil {
+			return err
+		}
+		report.Statements = append(report.Statements, ps)
 	}
 	if targetFacts.Partitioned() {
 		refused := make([]bool, len(report.Statements))

@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -39,7 +40,8 @@ func TestFromRoutedMapsEveryRoutedField(t *testing.T) {
 		Disposition: router.DispositionExecute,
 		ExecSQL:     []string{"CREATE INDEX CONCURRENTLY i ON t (c)"},
 	}
-	st := plan.FromRouted(rs)
+	st, err := plan.FromRouted(rs)
+	require.NoError(t, err)
 	assert.Equal(t, "CREATE INDEX i ON t (c)", st.SQL)
 	assert.Equal(t, planner.RouteNative, st.Route)
 	assert.Equal(t, router.BackendNative, st.Backend)
@@ -49,6 +51,39 @@ func TestFromRoutedMapsEveryRoutedField(t *testing.T) {
 	assert.Equal(t, planner.ExecutionAutocommit, st.Execution,
 		"exec_sql carries its execution contract")
 	assert.False(t, st.Destructive, "no destructive decision means a non-destructive statement")
+	assert.Empty(t, st.Guidance, "guidance is present exactly when the statement is rewrite-required")
+}
+
+// A rewrite-required statement carries the typed manual path derived from
+// the operation the refusal is about — the same Guidance vocabulary the
+// suggest report uses — so a consumer can render remediation without
+// re-parsing the SQL.
+func TestFromRoutedDerivesGuidanceForRewriteRequired(t *testing.T) {
+	routed := router.Route([]planner.Plan{
+		classifyCanonical(t, "ALTER TABLE users ADD COLUMN nickname text UNIQUE"),
+	})
+	require.Len(t, routed.Statements, 1)
+	require.Equal(t, router.DispositionRewriteRequired, routed.Statements[0].Disposition,
+		"an inline column constraint has no constructible online rewrite")
+
+	st, err := plan.FromRouted(routed.Statements[0])
+	require.NoError(t, err)
+	assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, st.Guidance)
+}
+
+// A compound rewrite-required statement advises splitting first: no safer
+// sequence can be constructed for a multi-operation statement, so the
+// manual path starts with one statement per operation.
+func TestFromRoutedCompoundRewriteRequiredAdvisesSplit(t *testing.T) {
+	routed := router.Route([]planner.Plan{
+		classifyCanonical(t, "ALTER TABLE users ADD COLUMN nickname text UNIQUE, ADD COLUMN age int"),
+	})
+	require.Len(t, routed.Statements, 1)
+	require.Equal(t, router.DispositionRewriteRequired, routed.Statements[0].Disposition)
+
+	st, err := plan.FromRouted(routed.Statements[0])
+	require.NoError(t, err)
+	assert.Equal(t, suggest.GuidanceSplitStatement, st.Guidance)
 }
 
 // Destructive is derived from the classifier's decisions — one destructive
@@ -67,7 +102,8 @@ func TestFromRoutedDerivesDestructiveFromDecisions(t *testing.T) {
 		Backend:     router.BackendNative,
 		Disposition: router.DispositionExecute,
 	}
-	st := plan.FromRouted(rs)
+	st, err := plan.FromRouted(rs)
+	require.NoError(t, err)
 	assert.True(t, st.Destructive,
 		"one destructive decision makes the statement destructive")
 	assert.Empty(t, st.Execution, "no exec_sql means no execution contract")
@@ -102,7 +138,7 @@ func TestRefuseUnsupportedPartitionedParentWithdrawsExecutionAdvice(t *testing.T
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 1 against this test.
+// omissions. A consumer pins format_version 2 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -146,7 +182,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 1,
+		"format_version": 2,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -192,7 +228,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -228,8 +264,9 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 	explained.Destructive = true
 	explained.Kind = schemadiff.ChangeAddColumn
 	explained.Decisions = []planner.Decision{{Operation: "ADD COLUMN c", Route: planner.RouteNative}}
+	explained.Guidance = suggest.GuidanceSplitStatement
 	assert.Equal(t, base, plan.Fingerprint([]plan.Statement{explained, b}),
-		"decisions, kind, and destructive are explanatory: identity unchanged")
+		"decisions, kind, destructive, and guidance are explanatory: identity unchanged")
 
 	assert.NotEqual(t, base, plan.Fingerprint([]plan.Statement{b, a}),
 		"statement order is part of identity")
@@ -247,7 +284,7 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 }
 
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 1.
+// pinned to format_version 2.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }

@@ -54,7 +54,9 @@ func TestDocExamplesMatchPipelineOutput(t *testing.T) {
 	})
 	alter.Disposition = routedA.Disposition
 	for _, rs := range routedA.Statements {
-		alter.Statements = append(alter.Statements, plan.FromRouted(rs))
+		ps, err := plan.FromRouted(rs)
+		require.NoError(t, err)
+		alter.Statements = append(alter.Statements, ps)
 	}
 	alter.Fingerprint = plan.Fingerprint(alter.Statements)
 
@@ -69,7 +71,8 @@ func TestDocExamplesMatchPipelineOutput(t *testing.T) {
 	diff.Disposition = routedD.Disposition
 	kinds := []schemadiff.ChangeKind{schemadiff.ChangeDropIndex, schemadiff.ChangeAddColumn}
 	for i, rs := range routedD.Statements {
-		ps := plan.FromRouted(rs)
+		ps, err := plan.FromRouted(rs)
+		require.NoError(t, err)
 		ps.Kind = kinds[i]
 		diff.Statements = append(diff.Statements, ps)
 	}

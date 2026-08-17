@@ -13,6 +13,11 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
+// suggestReportURL is where a rewrite-required refusal's typed guidance
+// codes are documented; the docs section links it alongside the diagnostic
+// code anchors.
+const suggestReportURL = "https://github.com/block/pg-sprite/blob/main/docs/suggest-report.md"
+
 // dryRunTextWidth is the column diagnostic prose wraps at, indent included.
 // SQL, URLs, and the plan summary are never wrapped: a statement must stay
 // greppable as one line.
@@ -64,6 +69,9 @@ func writeDryRunText(out io.Writer, report plan.Report) error {
 			for _, c := range codes {
 				w.printf("  %s#%s\n", onlineDDLReferenceURL, c)
 			}
+			if ps.Guidance != "" {
+				w.printf("  %s#guidance-guidance\n", suggestReportURL)
+			}
 		}
 	}
 	w.entry("plan:")
@@ -88,6 +96,9 @@ func writeRefusal(w *stickyWriter, ps plan.Statement) []string {
 		return nil
 	case router.DispositionRewriteRequired:
 		w.diag("error", "rewrite-required", "refused — blocks as written and no online replacement could be constructed; rewrite the change as separate online steps and dry-run each one")
+		if ps.Guidance != "" {
+			w.diag("help", string(ps.Guidance), guidanceText(ps.Guidance))
+		}
 		return []string{"rewrite-required"}
 	case router.DispositionUnavailable:
 		w.diag("error", "backend-unavailable", fmt.Sprintf("refused — needs the %s backend (an online shadow-table copy with a cutover), which this build does not implement yet", ps.Backend))
