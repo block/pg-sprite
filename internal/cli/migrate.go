@@ -13,6 +13,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
@@ -89,7 +90,11 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 		return c.execute(ctx, out, pool, st, execSQL, rs.Plan, substituted, forced, logger)
 	case router.DispositionRewriteRequired:
 		if c.Force == "" {
-			return c.emit(out, rewriteRequiredVerdict(st))
+			v, err := rewriteRequiredVerdict(st, rs)
+			if err != nil {
+				return err
+			}
+			return c.emit(out, v)
 		}
 		c.auditForce(st, rs)
 		return c.execute(ctx, out, pool, st, []string{canonical}, rs.Plan, false, true, logger)
@@ -499,7 +504,15 @@ func partitionedParentVerdict(st statement.Statement, partitionErr *preflight.Un
 // form blocks but for which the planner could not construct the safer
 // native sequence — a multi-operation statement, or a pattern it cannot
 // build. Running the submitted form would falsify the plan's own reason.
-func rewriteRequiredVerdict(st statement.Statement) verdict.Verdict {
+// The verdict carries the same typed guidance the plan report does for
+// this statement, derived through plan.FromRouted so the two surfaces can
+// never disagree; a rewrite-required statement with no derivable guidance
+// is a contract violation and fails closed.
+func rewriteRequiredVerdict(st statement.Statement, rs router.Statement) (verdict.Verdict, error) {
+	planned, err := plan.FromRouted(rs)
+	if err != nil {
+		return verdict.Verdict{}, fmt.Errorf("derive rewrite-required guidance: %w", err)
+	}
 	return verdict.Verdict{
 		Outcome:   verdict.OutcomeRefused,
 		Reason:    verdict.ReasonRewriteRequired,
@@ -508,7 +521,8 @@ func rewriteRequiredVerdict(st statement.Statement) verdict.Verdict {
 		Detail: "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not " +
 			"construct one for this statement; submit each operation as its own single-operation statement " +
 			"so the engine can build its safer form (run with --dry-run to see each operation's classification)",
-	}
+		Guidance: string(planned.Guidance),
+	}, nil
 }
 
 // backendUnavailableVerdict is the refusal for a change that routes to an

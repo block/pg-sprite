@@ -16,6 +16,7 @@ func TestJSONRoundTrip(t *testing.T) {
 		Table:      "t",
 		Detail:     "the optimistic attempt exceeded its statement budget",
 		SaferIdiom: "ADD CONSTRAINT ... NOT VALID; VALIDATE CONSTRAINT",
+		Guidance:   "add-column-then-constraint",
 		Attempts:   3,
 	}
 	s, err := v.JSON()
@@ -70,6 +71,7 @@ func TestJSONOmitsEmptyOptionalFields(t *testing.T) {
 	assert.NotContains(t, s, "reason")
 	assert.NotContains(t, s, "table")
 	assert.NotContains(t, s, "safer_idiom")
+	assert.NotContains(t, s, "guidance")
 	assert.NotContains(t, s, "attempts")
 	assert.NotContains(t, s, "code")
 	assert.NotContains(t, s, "failed_step")
@@ -113,6 +115,17 @@ func TestStringRefusedIncludesReasonAndIdiom(t *testing.T) {
 	}.String()
 	assert.Contains(t, s, "refused (index-statement)")
 	assert.Contains(t, s, "CREATE INDEX CONCURRENTLY")
+}
+
+func TestStringRefusedIncludesGuidance(t *testing.T) {
+	s := Verdict{
+		Outcome:   OutcomeRefused,
+		Reason:    ReasonRewriteRequired,
+		Statement: "ALTER TABLE t ADD COLUMN e int UNIQUE",
+		Guidance:  "add-column-then-constraint",
+	}.String()
+	assert.Contains(t, s, "refused (not-native-safe-rewrite-required)")
+	assert.Contains(t, s, "guidance:  add-column-then-constraint")
 }
 
 func TestStringFailedIncludesCodeStepAndCommittedPrefix(t *testing.T) {

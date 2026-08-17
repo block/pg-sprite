@@ -22,6 +22,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -480,6 +481,8 @@ func TestMigrateRefusesInlineConstraintAsRewriteRequired(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 	assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+	assert.Equal(t, string(suggest.GuidanceAddColumnThenConstraint), v.Guidance,
+		"the refusal must carry the same typed guidance the plan report derives")
 
 	var n int
 	require.NoError(t, pool.QueryRow(t.Context(),

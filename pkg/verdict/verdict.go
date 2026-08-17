@@ -132,6 +132,14 @@ type Verdict struct {
 	// SaferIdiom is a native alternative to the refused statement, when one
 	// exists (e.g. CREATE INDEX CONCURRENTLY, ADD CONSTRAINT ... NOT VALID).
 	SaferIdiom string `json:"safer_idiom,omitempty"`
+	// Guidance is the typed manual path for a rewrite-required refusal —
+	// the same guidance code the plan report carries for the same
+	// statement (suggest.Guidance, e.g. add-column-then-constraint), so an
+	// orchestrator that runs migrate without a preceding dry run still
+	// receives the typed advice. It stays a plain string here so this
+	// contract package does not depend on the suggest package. Empty for
+	// every other verdict.
+	Guidance string `json:"guidance,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what
@@ -179,6 +187,9 @@ func (v Verdict) String() string {
 	}
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  safer:     %s", v.SaferIdiom)
+	}
+	if v.Guidance != "" {
+		fmt.Fprintf(&b, "\n  guidance:  %s", v.Guidance)
 	}
 	if v.Forced {
 		b.WriteString("\n  forced:    the submitted form ran as-is (--force)")
