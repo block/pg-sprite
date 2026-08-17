@@ -71,7 +71,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 9, "the doc publishes nine captured outputs")
+	require.Len(t, blocks, 10, "the doc publishes ten captured outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
@@ -89,6 +89,11 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	}
 	rewriteRequired := alterReport(t, "ALTER TABLE users ADD COLUMN nickname text UNIQUE",
 		"public", "users", usersFacts())
+	// The run path schema-qualifies before classifying, so the captured
+	// verdict carries the qualified statement.
+	refusedSt, refusedRouted := routeOne(t, "ALTER TABLE public.users ADD COLUMN nickname text UNIQUE")
+	refusedVerdict, err := rewriteRequiredVerdict(refusedSt, refusedRouted)
+	require.NoError(t, err)
 	backendUnavailable := alterReport(t, "ALTER TABLE users ALTER COLUMN id TYPE text",
 		"public", "users", usersFacts())
 
@@ -129,7 +134,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	diff.Fingerprint = plan.Fingerprint(diff.Statements)
 
 	want := []any{metadataOnly, saferIdiom, executed, rewriteRequired,
-		backendUnavailable, partitioned, destructive, lintReport, diff}
+		refusedVerdict, backendUnavailable, partitioned, destructive, lintReport, diff}
 	for i, w := range want {
 		marshaled, err := json.Marshal(w)
 		require.NoError(t, err)

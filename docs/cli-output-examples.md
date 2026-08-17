@@ -220,14 +220,14 @@ Run without `--dry-run`, the refusal verdict carries the same `guidance`
 code, so an orchestrator that goes straight to execution still receives
 the typed manual path:
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --json
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --json
 {
   "outcome": "refused",
   "reason": "not-native-safe-rewrite-required",
   "statement": "ALTER TABLE public.users ADD COLUMN nickname text UNIQUE",
   "table": "public.users",
-  "detail": "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not construct one for this statement; submit each operation as its own single-operation statement so the engine can build its safer form (run with --dry-run to see each operation's classification)",
+  "detail": "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not construct one for this statement; guidance names the manual path (run with --dry-run to see each operation's classification)",
   "guidance": "add-column-then-constraint"
 }
 ```

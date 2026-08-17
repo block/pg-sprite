@@ -525,9 +525,12 @@ func rewriteRequiredVerdict(st statement.Statement, rs router.Statement) (verdic
 		Reason:    verdict.ReasonRewriteRequired,
 		Statement: st.SQL(),
 		Table:     qualified(st),
+		// Detail carries only what is true for every rewrite-required
+		// refusal; the remedy — which differs per statement shape — is
+		// the guidance field's job.
 		Detail: "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not " +
-			"construct one for this statement; submit each operation as its own single-operation statement " +
-			"so the engine can build its safer form (run with --dry-run to see each operation's classification)",
+			"construct one for this statement; guidance names the manual path " +
+			"(run with --dry-run to see each operation's classification)",
 		Guidance: string(planned.Guidance),
 	}, nil
 }

@@ -54,6 +54,12 @@ func TestRewriteRequiredVerdictCoversEveryShape(t *testing.T) {
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome, "statement: %s", tc.sql)
 		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason, "statement: %s", tc.sql)
 		assert.Equal(t, string(tc.guidance), v.Guidance, "statement: %s", tc.sql)
+		// Detail must hold only what is true for every shape; the
+		// remedy differs per shape and is the guidance field's job. A
+		// detail telling a single-operation statement to split itself
+		// contradicts the guidance printed next to it.
+		assert.NotContains(t, v.Detail, "single-operation", "statement: %s", tc.sql)
+		assert.NotContains(t, v.Detail, "split", "statement: %s", tc.sql)
 	}
 }
 

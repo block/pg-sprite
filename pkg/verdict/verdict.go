@@ -138,7 +138,9 @@ type Verdict struct {
 	// orchestrator that runs migrate without a preceding dry run still
 	// receives the typed advice. It stays a plain string here so this
 	// contract package does not depend on the suggest package. Empty for
-	// every other verdict.
+	// every other verdict — presence is itself a signal: a consumer can
+	// test this field to tell a refusal with a manual path to offer from
+	// one without, instead of matching on Reason.
 	Guidance string `json:"guidance,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
