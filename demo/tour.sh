@@ -45,17 +45,29 @@ assert_eq() {
     fi
 }
 
-# dry_run route reason destructive sql
+# dry_run route reason destructive disposition sql
 #
 # Demo mode prints the routed plan. Check mode asserts the statement's
-# route, first decision reason, and destructive flag from the JSON plan
-# report. Dry-run never writes, so these rows can rerun in any order.
+# route, first decision reason, destructive flag, and the report's
+# disposition from the JSON plan report. Dry-run never writes, so these
+# rows can rerun in any order.
+#
+# Exit code: an execute-disposition plan must exit 0. A plan that would
+# not execute (rewrite-required, unavailable, refuse) is accepted at 0 or
+# the refusal code 2, so the tour spans builds on both sides of the
+# dry-run exit-code contract; tighten to exactly 2 once every supported
+# build exits with the refusal code.
 dry_run() {
-    local route="$1" reason="$2" destructive="$3" sql="$4" out status=0
+    local route="$1" reason="$2" destructive="$3" disposition="$4" sql="$5" out status=0
     step "$sql"
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" migrate --url "$PG_DSN" --dry-run --json --alter "$sql") || status=$?
-        assert_eq "dry-run exit of [$sql]" 0 "$status"
+        if [ "$disposition" = execute ]; then
+            assert_eq "dry-run exit of [$sql]" 0 "$status"
+        elif [ "$status" != 0 ] && [ "$status" != 2 ]; then
+            fail "dry-run exit of [$sql]: expected 0 or the refusal code 2, got '$status'"
+        fi
+        assert_eq "disposition of [$sql]" "$disposition" "$(jq -r '.disposition' <<<"$out")"
         assert_eq "route of [$sql]" "$route" "$(jq -r '.statements[0].route' <<<"$out")"
         assert_eq "reason of [$sql]" "$reason" "$(jq -r '.statements[0].decisions[0].reason' <<<"$out")"
         assert_eq "destructive of [$sql]" "$destructive" "$(jq -r '.statements[0].destructive' <<<"$out")"
@@ -118,21 +130,21 @@ diff_plan() {
 
 run_dryrun() {
     heading "Classification: one statement per route and reason (dry-run, no writes)"
-    #       route          reason                 destructive
-    dry_run native         metadata-only          false "ALTER TABLE users ADD COLUMN bio text"
-    dry_run native         fast-default           false "ALTER TABLE users ADD COLUMN tier text DEFAULT 'free'"
-    dry_run native         binary-coercible       false "ALTER TABLE users ALTER COLUMN name TYPE varchar(100)"
-    dry_run native         safer-idiom            false "ALTER TABLE users ALTER COLUMN email SET NOT NULL"
-    dry_run native         safer-idiom            false "CREATE INDEX idx_users_email ON users (email)"
-    dry_run native         online-idiom           false "CREATE INDEX CONCURRENTLY idx_users_email ON users (email)"
-    dry_run native         safer-idiom            false "ALTER TABLE users ADD CONSTRAINT users_name_nonempty CHECK (char_length(name) > 0)"
-    dry_run native         safer-idiom            false "ALTER TABLE users ADD CONSTRAINT users_email_uniq UNIQUE (email)"
-    dry_run copy-and-swap  type-rewrite           false "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
-    dry_run copy-and-swap  volatile-default       false "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()"
-    dry_run native         app-breaking-rename    false "ALTER TABLE users RENAME COLUMN name TO full_name"
-    dry_run native         metadata-only          true  "ALTER TABLE users DROP COLUMN status"
-    dry_run copy-and-swap  relocation             false "ALTER TABLE users SET TABLESPACE pg_default"
-    dry_run refuse         unsupported-operation  false "ALTER TABLE users ENABLE ROW LEVEL SECURITY"
+    #       route          reason                 destructive disposition
+    dry_run native         metadata-only          false execute     "ALTER TABLE users ADD COLUMN bio text"
+    dry_run native         fast-default           false execute     "ALTER TABLE users ADD COLUMN tier text DEFAULT 'free'"
+    dry_run native         binary-coercible       false execute     "ALTER TABLE users ALTER COLUMN name TYPE varchar(100)"
+    dry_run native         safer-idiom            false execute     "ALTER TABLE users ALTER COLUMN email SET NOT NULL"
+    dry_run native         safer-idiom            false execute     "CREATE INDEX idx_users_email ON users (email)"
+    dry_run native         online-idiom           false execute     "CREATE INDEX CONCURRENTLY idx_users_email ON users (email)"
+    dry_run native         safer-idiom            false execute     "ALTER TABLE users ADD CONSTRAINT users_name_nonempty CHECK (char_length(name) > 0)"
+    dry_run native         safer-idiom            false execute     "ALTER TABLE users ADD CONSTRAINT users_email_uniq UNIQUE (email)"
+    dry_run copy-and-swap  type-rewrite           false unavailable "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
+    dry_run copy-and-swap  volatile-default       false unavailable "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()"
+    dry_run native         app-breaking-rename    false execute     "ALTER TABLE users RENAME COLUMN name TO full_name"
+    dry_run native         metadata-only          true  execute     "ALTER TABLE users DROP COLUMN status"
+    dry_run copy-and-swap  relocation             false unavailable "ALTER TABLE users SET TABLESPACE pg_default"
+    dry_run refuse         unsupported-operation  false refuse      "ALTER TABLE users ENABLE ROW LEVEL SECURITY"
 }
 
 run_diff() {
