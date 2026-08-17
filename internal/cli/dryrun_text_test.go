@@ -11,6 +11,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -148,6 +149,7 @@ func TestDryRunTextRewriteRequired(t *testing.T) {
 			Route:     planner.RouteNative,
 			Reason:    planner.ReasonSaferIdiom,
 		}},
+		Guidance: suggest.GuidanceAddColumnThenConstraint,
 	})
 
 	var out strings.Builder
@@ -155,7 +157,13 @@ func TestDryRunTextRewriteRequired(t *testing.T) {
 	text := out.String()
 	assert.Contains(t, text, "error[rewrite-required]:\n  refused — blocks as written and no online")
 	assert.Contains(t, text, "rewrite the change as separate")
+	assert.Contains(t, text, "help[add-column-then-constraint]:\n",
+		"the typed guidance renders as a help diagnostic with the code as its rule")
+	assert.Contains(t, text, "add the plain column first,",
+		"the help body carries the guidance prose (wrapped, so assert its head)")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#rewrite-required\n")
+	assert.Contains(t, text, "  "+suggestReportURL+"#guidance-guidance\n",
+		"guidance links its own doc anchor alongside the diagnostic code anchors")
 	assert.NotContains(t, text, "pg-sprite will run")
 	assert.NotContains(t, text, "apply:")
 }

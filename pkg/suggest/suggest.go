@@ -225,7 +225,7 @@ func adviseStatement(index int, stmt statement.SourceStatement) ([]Suggestion, e
 			}
 			s.Recommended, s.Execution, s.Caveats = d.SaferSQL, d.SaferSQLExecution, caveats
 		} else {
-			guidance, err := manualGuidance(ops[i], len(ops) > 1)
+			guidance, err := ManualGuidance(ops[i], len(ops) > 1)
 			if err != nil {
 				return nil, err
 			}
@@ -262,13 +262,16 @@ func rewriteCaveats(op statement.Op) ([]Caveat, error) {
 	return nil, fmt.Errorf("no caveat mapping for rewritten operation %q", op.Describe())
 }
 
-// manualGuidance maps a safer-idiom operation without a constructed
-// rewrite to the typed manual path. A safer-idiom decision this table does
-// not know is a contract violation — when the planner learns a new
-// non-constructible pattern, its guidance must be recorded here before the
-// advice ships — so it fails closed rather than staying silent about a
-// statement lint flags.
-func manualGuidance(op statement.Op, multi bool) (Guidance, error) {
+// ManualGuidance maps a safer-idiom operation without a constructed
+// rewrite to the typed manual path; multi says the operation arrived in a
+// multi-operation statement, which always advises splitting first. The
+// plan report derives its rewrite-required guidance through this same
+// function so the two surfaces can never disagree. A safer-idiom decision
+// this table does not know is a contract violation — when the planner
+// learns a new non-constructible pattern, its guidance must be recorded
+// here before the advice ships — so it fails closed rather than staying
+// silent about a statement lint flags.
+func ManualGuidance(op statement.Op, multi bool) (Guidance, error) {
 	if multi {
 		return GuidanceSplitStatement, nil
 	}
