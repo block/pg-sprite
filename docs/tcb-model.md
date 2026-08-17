@@ -246,9 +246,10 @@ The AI-assistance posture differs per side of the boundary:
    bitcoin-core discipline).
 2. **`cutover`/`swap` API takes domain types only** — the `VerifiedShadow`/`CleanWatermark`/
    `TableLock` types land with their producing packages (Phases 4–7), not retrofitted.
-3. **The `// INV: <id>` convention has landed; `ErrInvariantViolation`** lands with the
+3. **The `// INV: <id>` convention and `ErrInvariantViolation` have landed** with the
    executor phases.
-4. **The enforcement backlog:** [SAFETY.md](../SAFETY.md) + depguard + CODEOWNERS, the
-   property/fuzz suites per rung above, and the optional TLA+ models for cutover and resume.
+4. **The enforcement backlog:** [SAFETY.md](../SAFETY.md), the depguard import-boundary
+   rule (`.golangci.yml`), and CODEOWNERS have landed; still open are the property/fuzz
+   suites per rung above and the optional TLA+ models for cutover and resume.
 5. **The periphery stays free.** None of this doc applies review friction to status text, CLI
    help, or docs — that's the point of having a boundary.

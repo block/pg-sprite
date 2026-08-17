@@ -31,7 +31,7 @@ The invariant registry (invariant IDs referenced below) lives in
 | `pkg/verdict` — structured outcome contract, rendering, exit codes | ❌ periphery | exists (Phase 1) | — |
 | `pkg/diffplan` — desired schema → routed convergence plan, the declarative front door as a library (the CLI `diff` and embedding orchestrators share it) | ❌ periphery | exists | — |
 | `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`, `status`, `diff`, `fmt`, `lint`, and `suggest` exist | — |
-| `pkg/progress` — strategy-wide native progress snapshots; copy counters reserved for later | ❌ periphery | native progress exists | — |
+| `pkg/progress` — strategy-wide progress snapshots; the executors' observation seam (core imports it, so its locking discipline is core-critical); copy counters reserved for later | ✅ core | native progress exists | — |
 | orchestrator adapter | ❌ periphery | planned (Phase 11) | OC-* hold *at* the boundary |
 | `internal/testutil` | ❌ test-only | exists | — |
 
@@ -64,8 +64,10 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   caller's classification; the grammar is load-bearing expertise, not copyable mechanics),
   `pkg/progress` (the executors' progress-observation seam: they write state into a
   caller-owned tracker whose mutators take only a memory lock, and its polling reads ride
-  the reserved verdict session behind a separate poll lock — so a slow or hung observation
-  can never gate the executor's own state updates),
+  the reserved verdict session behind a separate poll lock — the executor's own state
+  updates never wait for a database read, but the verdict handoff *is* observer-gated:
+  `StopConcurrentBuild` deliberately drains an in-flight poll before the executor reclaims
+  the session, a wait bounded by the poller's context and the session's `statement_timeout`),
   stdlib. The future decode path will add `pglogrepl`. Adding one requires a recorded decision (see the rubric in
   [docs/tcb-model.md](docs/tcb-model.md) — copy small things, take pinned dependencies only
   for load-bearing expertise).

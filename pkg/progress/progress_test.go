@@ -2,6 +2,7 @@ package progress_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -104,6 +105,146 @@ func TestTrackerReportsTerminalState(t *testing.T) {
 func TestNewTrackerRequiresClock(t *testing.T) {
 	_, err := progress.NewTracker(nil)
 	require.Error(t, err)
+}
+
+// A terminal snapshot is terminal: elapsed values freeze at the instant
+// Finish recorded and do not grow with the clock, for both outcomes.
+func TestTerminalSnapshotFreezesElapsed(t *testing.T) {
+	cases := []struct {
+		name    string
+		outcome error
+		phase   progress.Phase
+	}{
+		{name: "finished", outcome: nil, phase: progress.PhaseFinished},
+		{name: "failed", outcome: errors.New("build failed"), phase: progress.PhaseFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := &fakeClock{now: time.Unix(100, 0)}
+			tracker, err := progress.NewTracker(clock)
+			require.NoError(t, err)
+			tracker.Start(1, progress.OperationOptimistic)
+			tracker.StartStep(1, progress.OperationOptimistic)
+			clock.now = clock.now.Add(3 * time.Second)
+			tracker.Finish(tc.outcome)
+
+			clock.now = clock.now.Add(time.Hour)
+			snapshot, err := tracker.Progress(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, tc.phase, snapshot.Phase)
+			assert.Equal(t, 3*time.Second, snapshot.Elapsed, "elapsed must freeze at Finish")
+			assert.Equal(t, 3*time.Second, snapshot.StepElapsed, "step elapsed must freeze at Finish")
+
+			clock.now = clock.now.Add(time.Hour)
+			again, err := tracker.Progress(t.Context())
+			require.NoError(t, err)
+			assert.Equal(t, snapshot, again, "a terminal snapshot must not change between polls")
+		})
+	}
+}
+
+// Start resets everything a prior run left behind: a reused tracker must
+// never report the previous run's step, terminal instant, or build session.
+func TestStartResetsPriorRunState(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(100, 0)}
+	tracker, err := progress.NewTracker(clock)
+	require.NoError(t, err)
+	tracker.Start(3, progress.OperationBrief)
+	tracker.StartStep(2, progress.OperationValidate)
+	tracker.SetConcurrentBuild(fakeSession{query: func(context.Context, string, ...any) pgx.Row {
+		return fakeRow{scan: func(...any) error {
+			t.Fatal("a new run must not poll the prior run's session")
+			return nil
+		}}
+	}}, 4242)
+	tracker.Finish(errors.New("first run failed"))
+
+	clock.now = clock.now.Add(time.Minute)
+	tracker.Start(1, progress.OperationConcurrentIndex)
+	clock.now = clock.now.Add(time.Second)
+
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, progress.PhaseRunning, snapshot.Phase)
+	assert.Zero(t, snapshot.Step, "the prior run's step must not leak into the new run")
+	assert.Equal(t, 1, snapshot.TotalSteps)
+	assert.Equal(t, time.Second, snapshot.Elapsed, "elapsed must restart, not resume from the prior terminal instant")
+	assert.Equal(t, progress.OperationConcurrentIndex, snapshot.Detail.Operation)
+}
+
+// The JSON shape is the adapter-facing contract: exact keys, exact
+// omissions, driven through a real poll so the test pins what a consumer
+// actually receives. A consumer pins format_version 1 against this test.
+func TestSnapshotJSONShape(t *testing.T) {
+	session := fakeSession{query: func(context.Context, string, ...any) pgx.Row {
+		return fakeRow{scan: func(dest ...any) error {
+			*(dest[0].(*string)) = "building index"
+			*(dest[1].(*uint64)) = 11 // blocks_done
+			*(dest[2].(*uint64)) = 40 // blocks_total
+			*(dest[3].(*uint64)) = 7  // tuples_done
+			*(dest[4].(*uint64)) = 21 // tuples_total
+			return nil
+		}}
+	}}
+	clock := &fakeClock{now: time.Unix(100, 0)}
+	tracker, err := progress.NewTracker(clock)
+	require.NoError(t, err)
+	tracker.Start(3, progress.OperationAdmitting)
+	clock.now = clock.now.Add(2 * time.Second)
+	tracker.StartStep(2, progress.OperationConcurrentIndex)
+	tracker.SetAttempt(2)
+	tracker.SetConcurrentBuild(session, 4242)
+	clock.now = clock.now.Add(750 * time.Millisecond)
+
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	raw, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"format_version": 1,
+		"phase": "running",
+		"step": 2,
+		"total_steps": 3,
+		"elapsed_ns": 2750000000,
+		"step_elapsed_ns": 750000000,
+		"detail": {
+			"operation": "concurrent-index-build",
+			"server_phase": "building index",
+			"active": true,
+			"attempt": 2,
+			"work": {
+				"rows_copied": 0,
+				"rows_total": 0,
+				"bytes_copied": 0,
+				"bytes_total": 0,
+				"blocks_done": 11,
+				"blocks_total": 40,
+				"tuples_done": 7,
+				"tuples_total": 21
+			}
+		}
+	}`, string(raw))
+}
+
+// Optional fields are omitted, not emitted as zero values — but the always-on
+// keys (format_version, phase, both elapsed counters, active) are present
+// even on an idle tracker, so a consumer never guesses whether zero means
+// "unset" or "omitted".
+func TestSnapshotJSONOmitsUnsetOptionalFields(t *testing.T) {
+	tracker, err := progress.NewTracker(&fakeClock{now: time.Unix(100, 0)})
+	require.NoError(t, err)
+
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	raw, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"format_version": 1,
+		"phase": "pending",
+		"elapsed_ns": 0,
+		"step_elapsed_ns": 0,
+		"detail": {"active": false}
+	}`, string(raw))
 }
 
 // The server row's columns must land on the right Work fields — distinct

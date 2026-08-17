@@ -37,10 +37,19 @@ const (
 	PhaseFailed Phase = "failed"
 )
 
+// FormatVersion identifies the snapshot contract. A consumer must reject a
+// snapshot whose format_version it does not recognize rather than guess at
+// field semantics. Adding a phase or operation value is a contract change
+// and bumps this version, even when no field is added or renamed.
+const FormatVersion = 1
+
 // Operation is the current operation's execution class.
 type Operation string
 
 const (
+	// OperationAdmitting is the pre-execution window in which a sequence's
+	// steps are still being validated; no statement has run yet.
+	OperationAdmitting Operation = "admitting"
 	// OperationOptimistic is one bounded direct native attempt.
 	OperationOptimistic Operation = "optimistic"
 	// OperationBrief is a brief transactional sequence step.
@@ -51,17 +60,20 @@ const (
 	OperationConcurrentIndex Operation = "concurrent-index-build"
 )
 
-// Work reports optional server-observed work. Rows and bytes are reserved for
-// copy-and-swap; native operations do not fabricate them.
+// Work reports server-observed work. It is present only when the server
+// published a progress row, and then every counter marshals explicitly — a
+// fresh build reports honest zeros, never an empty object a consumer must
+// guess at. Rows and bytes are reserved for copy-and-swap; native operations
+// do not fabricate them.
 type Work struct {
-	RowsCopied  uint64 `json:"rows_copied,omitempty"`
-	RowsTotal   uint64 `json:"rows_total,omitempty"`
-	BytesCopied uint64 `json:"bytes_copied,omitempty"`
-	BytesTotal  uint64 `json:"bytes_total,omitempty"`
-	BlocksDone  uint64 `json:"blocks_done,omitempty"`
-	BlocksTotal uint64 `json:"blocks_total,omitempty"`
-	TuplesDone  uint64 `json:"tuples_done,omitempty"`
-	TuplesTotal uint64 `json:"tuples_total,omitempty"`
+	RowsCopied  uint64 `json:"rows_copied"`
+	RowsTotal   uint64 `json:"rows_total"`
+	BytesCopied uint64 `json:"bytes_copied"`
+	BytesTotal  uint64 `json:"bytes_total"`
+	BlocksDone  uint64 `json:"blocks_done"`
+	BlocksTotal uint64 `json:"blocks_total"`
+	TuplesDone  uint64 `json:"tuples_done"`
+	TuplesTotal uint64 `json:"tuples_total"`
 }
 
 // Detail describes the operation currently executing.
@@ -73,14 +85,17 @@ type Detail struct {
 	Work        *Work     `json:"work,omitempty"`
 }
 
-// Snapshot is one immutable progress observation.
+// Snapshot is one immutable progress observation. For a terminal phase the
+// elapsed values are frozen at the instant Finish recorded, so a late poll
+// reports the execution's duration, not the observation's age.
 type Snapshot struct {
-	Phase       Phase         `json:"phase"`
-	Step        int           `json:"step,omitempty"`
-	TotalSteps  int           `json:"total_steps,omitempty"`
-	Elapsed     time.Duration `json:"elapsed_ns"`
-	StepElapsed time.Duration `json:"step_elapsed_ns,omitempty"`
-	Detail      Detail        `json:"detail"`
+	FormatVersion int           `json:"format_version"`
+	Phase         Phase         `json:"phase"`
+	Step          int           `json:"step,omitempty"`
+	TotalSteps    int           `json:"total_steps,omitempty"`
+	Elapsed       time.Duration `json:"elapsed_ns"`
+	StepElapsed   time.Duration `json:"step_elapsed_ns"`
+	Detail        Detail        `json:"detail"`
 }
 
 // Tracker is a concurrency-safe progress source. The caller owns it; it has
@@ -100,6 +115,7 @@ type Tracker struct {
 	phase     Phase
 	started   time.Time
 	stepStart time.Time
+	ended     time.Time
 	step      int
 	total     int
 	detail    Detail
@@ -117,22 +133,26 @@ func NewTracker(clock Clock) (*Tracker, error) {
 // Now returns the tracker's injected time for executor duration accounting.
 func (t *Tracker) Now() time.Time { return t.clock.Now() }
 
-// Start records the beginning of an execution.
+// Start records the beginning of an execution. It resets all per-execution
+// state, so a reused tracker never leaks a prior run's step, terminal time,
+// or session into the new run's snapshots.
 func (t *Tracker) Start(total int, operation Operation) {
 	now := t.clock.Now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.phase, t.started, t.stepStart = PhaseRunning, now, now
-	t.total, t.detail = total, Detail{Operation: operation, Active: true}
+	t.phase, t.started, t.stepStart, t.ended = PhaseRunning, now, now, time.Time{}
+	t.step, t.total, t.detail = 0, total, Detail{Operation: operation, Active: true}
+	t.session, t.buildPID = nil, 0
 }
 
-// StartStep advances a sequence to a 1-based step.
+// StartStep advances a sequence to a 1-based step and drops any build
+// session from a prior step, so a later step can never poll a stale build.
 func (t *Tracker) StartStep(step int, operation Operation) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.step, t.stepStart = step, t.clock.Now()
 	t.detail = Detail{Operation: operation, Active: true}
-	t.buildPID = 0
+	t.session, t.buildPID = nil, 0
 }
 
 // SetAttempt records the current bounded retry attempt.
@@ -161,8 +181,10 @@ func (t *Tracker) StopConcurrentBuild() {
 	t.session, t.buildPID = nil, 0
 }
 
-// Finish records a terminal execution outcome.
+// Finish records a terminal execution outcome and the instant it happened;
+// elapsed values in later snapshots freeze at that instant.
 func (t *Tracker) Finish(err error) {
+	now := t.clock.Now()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if err == nil {
@@ -170,8 +192,9 @@ func (t *Tracker) Finish(err error) {
 	} else {
 		t.phase = PhaseFailed
 	}
+	t.ended = now
 	t.detail.Active = false
-	t.buildPID = 0
+	t.session, t.buildPID = nil, 0
 }
 
 // Progress returns a snapshot and, for an active concurrent index build,
@@ -185,7 +208,10 @@ func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
 	defer t.pollMu.Unlock()
 	t.mu.RLock()
 	now := t.clock.Now()
-	s := Snapshot{Phase: t.phase, Step: t.step, TotalSteps: t.total, Detail: t.detail}
+	if !t.ended.IsZero() {
+		now = t.ended
+	}
+	s := Snapshot{FormatVersion: FormatVersion, Phase: t.phase, Step: t.step, TotalSteps: t.total, Detail: t.detail}
 	if !t.started.IsZero() {
 		s.Elapsed = now.Sub(t.started)
 		s.StepElapsed = now.Sub(t.stepStart)

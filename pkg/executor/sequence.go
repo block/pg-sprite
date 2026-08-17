@@ -230,9 +230,9 @@ func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 // current step and its execution class. The caller may poll concurrently.
 func RunSequenceWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, tracker *progress.Tracker) (rep SequenceReport, err error) {
 	if tracker == nil {
-		return rep, fmt.Errorf("progress tracker is required")
+		return rep, fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
 	}
-	tracker.Start(len(steps), progress.OperationBrief)
+	tracker.Start(len(steps), progress.OperationAdmitting)
 	defer func() { tracker.Finish(err) }()
 	return runSequence(ctx, pool, pt, steps, b, retry, tracker)
 }

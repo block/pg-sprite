@@ -187,7 +187,7 @@ func ExecuteNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 // tracker. The caller may poll tracker concurrently with this blocking call.
 func ExecuteNativeWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) (err error) {
 	if tracker == nil {
-		return fmt.Errorf("progress tracker is required")
+		return fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
 	}
 	tracker.Start(1, progress.OperationOptimistic)
 	tracker.StartStep(1, progress.OperationOptimistic)

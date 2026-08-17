@@ -274,7 +274,7 @@ func BuildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 // tracker. The caller may poll tracker concurrently with this blocking call.
 func BuildIndexConcurrentlyWithProgress(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget, tracker *progress.Tracker) (rep IndexBuildReport, err error) {
 	if tracker == nil {
-		return rep, fmt.Errorf("progress tracker is required")
+		return rep, fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
 	}
 	tracker.Start(1, progress.OperationConcurrentIndex)
 	tracker.StartStep(1, progress.OperationConcurrentIndex)
