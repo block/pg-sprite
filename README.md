@@ -54,6 +54,26 @@ no C toolchain:
 go install github.com/block/pg-sprite/cmd/pg-sprite@latest
 ```
 
+## Commands
+
+Half the CLI works offline on DDL text alone; the other half connects to a
+live database (`--url` / `PGSPRITE_URL`, always under bounded `lock_timeout`
+and `statement_timeout`). Only `migrate` without `--dry-run` ever commits a
+change — every other command is read-only or fully offline.
+
+| Command | Live database | What the connection is used for |
+|---|---|---|
+| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets |
+| `migrate --dry-run` | required | The same introspection as a real run — server version, target resolution, table facts — so the printed plan reflects the actual target; executes nothing |
+| `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
+| `status` | required | Read-only view over `pg_stat_activity` for live pg-sprite sessions on the connected database |
+| `fmt` | none | Canonicalize a schema file — parser only |
+| `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone |
+| `suggest` | none | Map risky DDL to the safer native form the engine would run, with typed caveats; advisory, always exits 0 |
+
+The offline commands have no connection flags at all, so they cannot be
+pointed at a database by accident.
+
 ## Development
 
 ```sh
