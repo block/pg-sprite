@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 )
 
 // planReportDoc is the human-facing contract page these tests keep honest.
@@ -56,7 +57,9 @@ func TestDocExamplesMatchPipelineOutput(t *testing.T) {
 	})
 	alter.Disposition = routedA.Disposition
 	for _, rs := range routedA.Statements {
-		alter.Statements = append(alter.Statements, plan.FromRouted(rs))
+		ps, err := plan.FromRouted(rs)
+		require.NoError(t, err)
+		alter.Statements = append(alter.Statements, ps)
 	}
 	alter.Fingerprint = plan.Fingerprint(alter.Statements)
 
@@ -71,7 +74,8 @@ func TestDocExamplesMatchPipelineOutput(t *testing.T) {
 	diff.Disposition = routedD.Disposition
 	kinds := []schemadiff.ChangeKind{schemadiff.ChangeDropIndex, schemadiff.ChangeAddColumn}
 	for i, rs := range routedD.Statements {
-		ps := plan.FromRouted(rs)
+		ps, err := plan.FromRouted(rs)
+		require.NoError(t, err)
 		ps.Kind = kinds[i]
 		diff.Statements = append(diff.Statements, ps)
 	}
@@ -112,8 +116,19 @@ func TestDocListsEveryVocabularyValue(t *testing.T) {
 	for _, k := range schemadiff.ChangeKinds() {
 		values = append(values, string(k))
 	}
+	for _, g := range suggest.Guidances() {
+		values = append(values, string(g))
+	}
 	for _, v := range values {
 		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", v),
 			"docs/plan-report.md is missing a vocabulary row for %q", v)
 	}
+}
+
+// The doc's stated current version is the constant, not prose that can
+// drift: a FormatVersion bump without the matching doc sentence fails here.
+func TestDocStatesCurrentFormatVersion(t *testing.T) {
+	doc := readDoc(t)
+	assert.Contains(t, doc, fmt.Sprintf("The current version is **%d**", plan.FormatVersion),
+		"docs/plan-report.md's stated version drifted from plan.FormatVersion")
 }

@@ -8,18 +8,22 @@ package plan
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"hash"
 
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // FormatVersion identifies the report contract. A consumer must reject a
 // report whose version it does not understand instead of guessing at the
-// field semantics.
-const FormatVersion = 1
+// field semantics. Version 2 added the guidance field on rewrite-required
+// statements.
+const FormatVersion = 2
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -84,6 +88,13 @@ type Statement struct {
 	// so it is excluded from the fingerprint like the other explanatory
 	// fields.
 	Execution planner.Execution `json:"execution,omitempty"`
+	// Guidance is the typed manual path for a rewrite-required refusal,
+	// drawn from the suggest contract's Guidance vocabulary
+	// (docs/suggest-report.md): the engine will not run the statement, and
+	// this names what to do instead. Present exactly when Disposition is
+	// rewrite-required. Explanatory, so it is excluded from the
+	// fingerprint.
+	Guidance suggest.Guidance `json:"guidance,omitempty"`
 }
 
 // Report is the dry-run plan for one change against one table.
@@ -165,8 +176,12 @@ func NewReport(source Source) Report {
 // FromRouted converts one routed statement into a plan statement.
 // Destructive is derived from the classifier's decisions — one destructive
 // operation makes the statement destructive — so every source that routes
-// through the planner reports it identically by construction.
-func FromRouted(rs router.Statement) Statement {
+// through the planner reports it identically by construction. A
+// rewrite-required statement additionally carries the typed manual path
+// (Guidance), derived through the same mapping the suggest report uses; a
+// rewrite-required decision with no known guidance is a contract violation
+// and fails closed.
+func FromRouted(rs router.Statement) (Statement, error) {
 	st := Statement{
 		SQL:         rs.Statement,
 		Route:       rs.Route,
@@ -191,7 +206,39 @@ func FromRouted(rs router.Statement) Statement {
 			break
 		}
 	}
-	return st
+	if rs.Disposition == router.DispositionRewriteRequired {
+		guidance, err := rewriteRequiredGuidance(rs)
+		if err != nil {
+			return Statement{}, err
+		}
+		st.Guidance = guidance
+	}
+	return st, nil
+}
+
+// rewriteRequiredGuidance derives the typed manual path for a statement
+// the router marked rewrite-required: the first safer-idiom decision names
+// the operation the manual path is for. A multi-operation statement always
+// advises splitting first (ManualGuidance's contract), which covers the
+// case where the rewrite exists but could not be applied to a compound
+// statement. The operation list and decision list are index-aligned by the
+// planner's contract (one decision per operation, in order); a mismatch,
+// or a rewrite-required statement with no safer-idiom decision, is a
+// contract violation and fails closed.
+func rewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
+	ops, err := statement.ParseOps(rs.Statement)
+	if err != nil {
+		return "", fmt.Errorf("parse rewrite-required statement: %w", err)
+	}
+	if len(ops) != len(rs.Decisions) {
+		return "", fmt.Errorf("planner produced %d decisions for %d operations", len(rs.Decisions), len(ops))
+	}
+	for i, d := range rs.Decisions {
+		if d.Reason == planner.ReasonSaferIdiom {
+			return suggest.ManualGuidance(ops[i], len(ops) > 1)
+		}
+	}
+	return "", fmt.Errorf("rewrite-required statement %q has no safer-idiom decision", rs.Statement)
 }
 
 // Fingerprint computes the plan's stable identity: "sha256:" plus the hex

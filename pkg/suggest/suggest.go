@@ -19,7 +19,9 @@ import (
 // FormatVersion identifies the report contract
 // (docs/suggest-report.md). A consumer must reject a report whose version
 // it does not understand instead of guessing at the field semantics.
-const FormatVersion = 1
+// Version 2 added name-constraint-then-validate and
+// unique-index-then-constraint to the Guidance vocabulary.
+const FormatVersion = 2
 
 // Caveat is a typed condition attached to a recommendation; automation
 // branches on it, never on prose. The caveats are independent — no caveat
@@ -89,7 +91,9 @@ const (
 	// GuidanceAddColumnThenConstraint: an inline UNIQUE / PRIMARY KEY /
 	// FOREIGN KEY / CHECK on ADD COLUMN builds or validates under the ADD
 	// COLUMN's ACCESS EXCLUSIVE lock. Add the plain column first, then
-	// build the constraint with its online pattern.
+	// build the constraint with its online pattern as a separate, named
+	// ADD CONSTRAINT — named, because the unnamed ADD CHECK / ADD FOREIGN
+	// KEY forms are themselves refused (GuidanceNameConstraintThenValidate).
 	GuidanceAddColumnThenConstraint Guidance = "add-column-then-constraint"
 	// GuidancePrevalidatedCheck: ATTACH PARTITION scans the child under
 	// the parent's lock unless a validated CHECK matching the partition
@@ -102,6 +106,20 @@ const (
 	// constraint is a catalog flip — the same scaffold sequence the
 	// SET NOT NULL form gets constructed.
 	GuidanceNotNullScaffold Guidance = "not-null-scaffold"
+	// GuidanceNameConstraintThenValidate: an unnamed ADD CHECK / ADD
+	// FOREIGN KEY has no constructible rewrite because the online
+	// sequence's VALIDATE CONSTRAINT step needs the constraint's name and
+	// the server assigns one only at creation. Name the constraint, add
+	// it NOT VALID, then VALIDATE it online.
+	GuidanceNameConstraintThenValidate Guidance = "name-constraint-then-validate"
+	// GuidanceUniqueIndexThenConstraint: an ADD PRIMARY KEY / ADD UNIQUE
+	// whose USING INDEX rewrite could not be constructed. Build the unique
+	// index with CREATE UNIQUE INDEX CONCURRENTLY, then attach it with
+	// ADD CONSTRAINT … USING INDEX — the same sequence the constructed
+	// rewrite emits. Keeps ManualGuidance total over every constraint kind
+	// the classifier can mark safer-idiom, so a parser shape that yields
+	// no rewrite becomes advice rather than a failed report.
+	GuidanceUniqueIndexThenConstraint Guidance = "unique-index-then-constraint"
 )
 
 // Guidances returns the closed set of Guidance values. It is part of the
@@ -114,6 +132,8 @@ func Guidances() []Guidance {
 		GuidanceAddColumnThenConstraint,
 		GuidancePrevalidatedCheck,
 		GuidanceNotNullScaffold,
+		GuidanceNameConstraintThenValidate,
+		GuidanceUniqueIndexThenConstraint,
 	}
 }
 
@@ -225,7 +245,7 @@ func adviseStatement(index int, stmt statement.SourceStatement) ([]Suggestion, e
 			}
 			s.Recommended, s.Execution, s.Caveats = d.SaferSQL, d.SaferSQLExecution, caveats
 		} else {
-			guidance, err := manualGuidance(ops[i], len(ops) > 1)
+			guidance, err := ManualGuidance(ops[i], len(ops) > 1)
 			if err != nil {
 				return nil, err
 			}
@@ -262,13 +282,16 @@ func rewriteCaveats(op statement.Op) ([]Caveat, error) {
 	return nil, fmt.Errorf("no caveat mapping for rewritten operation %q", op.Describe())
 }
 
-// manualGuidance maps a safer-idiom operation without a constructed
-// rewrite to the typed manual path. A safer-idiom decision this table does
-// not know is a contract violation — when the planner learns a new
-// non-constructible pattern, its guidance must be recorded here before the
-// advice ships — so it fails closed rather than staying silent about a
-// statement lint flags.
-func manualGuidance(op statement.Op, multi bool) (Guidance, error) {
+// ManualGuidance maps a safer-idiom operation without a constructed
+// rewrite to the typed manual path; multi says the operation arrived in a
+// multi-operation statement, which always advises splitting first. The
+// plan report derives its rewrite-required guidance through this same
+// function so the two surfaces can never disagree. A safer-idiom decision
+// this table does not know is a contract violation — when the planner
+// learns a new non-constructible pattern, its guidance must be recorded
+// here before the advice ships — so it fails closed rather than staying
+// silent about a statement lint flags.
+func ManualGuidance(op statement.Op, multi bool) (Guidance, error) {
 	if multi {
 		return GuidanceSplitStatement, nil
 	}
@@ -278,8 +301,20 @@ func manualGuidance(op statement.Op, multi bool) (Guidance, error) {
 	case statement.OpAttachPartition:
 		return GuidancePrevalidatedCheck, nil
 	case statement.OpAddConstraint:
-		if op.Constraint == statement.ConstraintNotNull {
+		switch op.Constraint {
+		case statement.ConstraintNotNull:
 			return GuidanceNotNullScaffold, nil
+		case statement.ConstraintCheck, statement.ConstraintForeignKey:
+			// Reached only for the unnamed form: a named CHECK / FOREIGN
+			// KEY gets the NOT VALID → VALIDATE rewrite constructed.
+			return GuidanceNameConstraintThenValidate, nil
+		case statement.ConstraintPrimaryKey, statement.ConstraintUnique:
+			// Reached only when the USING INDEX rewrite could not be
+			// constructed from the statement; covering the kind keeps
+			// this mapping total over every constraint kind the
+			// classifier marks safer-idiom, so the miss surfaces as
+			// advice rather than a failed report.
+			return GuidanceUniqueIndexThenConstraint, nil
 		}
 	}
 	return "", fmt.Errorf("no guidance mapping for non-constructible operation %q", op.Describe())

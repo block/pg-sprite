@@ -47,19 +47,26 @@ func TestDocExamplesMatchPipelineOutput(t *testing.T) {
 }
 
 // Every vocabulary value the contract closes over must be documented: a
-// constant added to the code without a row in docs/suggest-report.md (and
-// a format_version decision) fails here.
+// constant added to the code without its entry in docs/suggest-report.md
+// (and a format_version decision) fails here. Caveats are table rows;
+// guidance codes are headings, because each one is a stable anchor the
+// CLI's docs: lines link to.
 func TestDocListsEveryVocabularyValue(t *testing.T) {
 	doc := readDoc(t)
-	var values []string
 	for _, c := range suggest.Caveats() {
-		values = append(values, string(c))
+		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", c),
+			"docs/suggest-report.md is missing a vocabulary row for %q", c)
 	}
 	for _, g := range suggest.Guidances() {
-		values = append(values, string(g))
+		assert.Contains(t, doc, fmt.Sprintf("### `%s`", g),
+			"docs/suggest-report.md is missing an anchored heading for %q", g)
 	}
-	for _, v := range values {
-		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", v),
-			"docs/suggest-report.md is missing a vocabulary row for %q", v)
-	}
+}
+
+// The doc's stated current version is the constant, not prose that can
+// drift: a FormatVersion bump without the matching doc sentence fails here.
+func TestDocStatesCurrentFormatVersion(t *testing.T) {
+	doc := readDoc(t)
+	assert.Contains(t, doc, fmt.Sprintf("The current version is **%d**", suggest.FormatVersion),
+		"docs/suggest-report.md's stated version drifted from suggest.FormatVersion")
 }

@@ -16,6 +16,10 @@ and the closed vocabularies below (caveats, guidance codes, and the embedded pla
 reasons and execution contracts): adding a value to any of them is a contract change and
 bumps `format_version`, even if no field is added or renamed.
 
+The current version is **2**: version 2 added `name-constraint-then-validate` and
+`unique-index-then-constraint` to the
+Guidance vocabulary.
+
 ### Relationship to the plan and lint reports
 
 The suggest report, the [lint report](lint-report.md), and the
@@ -78,12 +82,67 @@ share one.)
 
 ## Guidance (`guidance`)
 
-| Value | Emitted for | Manual path |
-|---|---|---|
-| `split-statement` | Any risky operation inside a multi-operation statement | Rewrites are constructed only for single-operation statements — a partial rewrite of a compound ALTER would be misleading. Split the statement into one operation per statement and advise again. |
-| `add-column-then-constraint` | `ADD COLUMN` with an inline UNIQUE / PRIMARY KEY / FOREIGN KEY / CHECK | The inline constraint builds or validates under the ADD COLUMN's ACCESS EXCLUSIVE lock. Add the plain column first, then build the constraint with its online pattern. |
-| `pre-add-validated-check` | `ATTACH PARTITION` | The attach scans the child under the parent's lock unless a validated CHECK matching the partition bound already exists on the child. Pre-add that CHECK (NOT VALID, then VALIDATE), attach, then drop it. The bound-matching CHECK cannot be constructed from the statement alone. |
-| `not-null-scaffold` | `ADD CONSTRAINT … NOT NULL` | Prove the invariant with a NOT VALID CHECK (`col IS NOT NULL`) plus an online VALIDATE, then the NOT NULL constraint is a catalog flip — the same scaffold sequence the `SET NOT NULL` form gets constructed. |
+Each guidance code has its own heading so it has a stable anchor — the CLI's `docs:`
+lines link a refusal's guidance straight to its entry here, the same way each diagnostic
+code anchors into the
+[online-DDL reference](postgres-online-ddl-reference.md#dry-run-diagnostic-codes). The
+steps a guidance names are yours to run: unlike a constructed rewrite, pg-sprite will not
+construct or execute them.
+
+### `split-statement`
+
+**Emitted for:** any risky operation inside a multi-operation statement.
+
+Rewrites are constructed only for single-operation statements — a partial rewrite of a
+compound ALTER would be misleading. Split the statement into one operation per statement
+and advise again.
+
+### `add-column-then-constraint`
+
+**Emitted for:** `ADD COLUMN` with an inline UNIQUE / PRIMARY KEY / FOREIGN KEY / CHECK.
+
+The inline constraint builds or validates under the ADD COLUMN's ACCESS EXCLUSIVE lock.
+Add the plain column first, then build the constraint as a separate, **named**
+`ADD CONSTRAINT` with its online pattern — named, because the unnamed `ADD CHECK` /
+`ADD FOREIGN KEY` forms are themselves refused
+([`name-constraint-then-validate`](#name-constraint-then-validate)).
+
+### `pre-add-validated-check`
+
+**Emitted for:** `ATTACH PARTITION`.
+
+The attach scans the child under the parent's lock unless a validated CHECK matching the
+partition bound already exists on the child. Pre-add that CHECK (NOT VALID, then
+VALIDATE), attach, then drop it. The bound-matching CHECK cannot be constructed from the
+statement alone.
+
+### `not-null-scaffold`
+
+**Emitted for:** `ADD CONSTRAINT … NOT NULL`.
+
+Prove the invariant with a NOT VALID CHECK (`col IS NOT NULL`) plus an online VALIDATE,
+then the NOT NULL constraint is a catalog flip — the same scaffold sequence the
+`SET NOT NULL` form gets constructed.
+
+### `name-constraint-then-validate`
+
+**Emitted for:** unnamed `ADD CHECK` / `ADD FOREIGN KEY`.
+
+The online sequence's `VALIDATE CONSTRAINT` step needs the constraint's name, and the
+server assigns one only at creation — so no rewrite can be constructed from the statement
+alone. Name the constraint, add it `NOT VALID`, then `VALIDATE` it online (the same
+sequence the named form gets constructed).
+
+### `unique-index-then-constraint`
+
+**Emitted for:** `ADD PRIMARY KEY` / `ADD UNIQUE` whose `USING INDEX` rewrite could not
+be constructed from the statement.
+
+Build the unique index with `CREATE UNIQUE INDEX CONCURRENTLY`, then attach it with
+`ALTER TABLE … ADD CONSTRAINT … USING INDEX` — the same sequence the constructed rewrite
+emits. This code keeps the guidance mapping total over every constraint kind the
+classifier can mark safer-idiom: no known statement shape reaches it today, but a shape
+that yields no rewrite surfaces as this advice rather than a failed report.
 
 ## The rewrite table: operation → safer form → caveats
 
@@ -113,7 +172,7 @@ A constructed rewrite (`pg-sprite suggest --json` over
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "suggestions": [
     {
       "statement": 1,
@@ -134,7 +193,7 @@ A guidance suggestion (`ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d 
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "suggestions": [
     {
       "statement": 1,
