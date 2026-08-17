@@ -12,11 +12,10 @@ CREATE TABLE users (id bigint PRIMARY KEY, email text);
 CREATE TABLE events (id bigint, created date) PARTITION BY RANGE (created);
 ```
 
-The dry-run exit code is a contract: **0** when every statement is
-executable, **2** (the refusal exit code) when any statement would be
-refused. CI can gate on it without parsing JSON. The JSON report schema is
-[plan-report.md](plan-report.md); the diagnostic codes are documented at
-[postgres-online-ddl-reference.md#dry-run-diagnostic-codes](postgres-online-ddl-reference.md#dry-run-diagnostic-codes).
+Exit codes follow the dry-run contract (0 = executable, 2 = refused) defined
+with the [diagnostic codes](postgres-online-ddl-reference.md#dry-run-diagnostic-codes);
+CI can gate on the exit code without parsing JSON. The JSON report schema is
+[plan-report.md](plan-report.md).
 
 - [Codes used in these examples](#codes-used-in-these-examples)
 - [Migrate](#migrate)
@@ -39,7 +38,7 @@ is a one-line summary; the linked reference entry is authoritative.
 
 | Code | Meaning |
 |---|---|
-| [`metadata-only`](postgres-online-ddl-reference.md#metadata-only) | A brief catalog-only change: short `ACCESS EXCLUSIVE` lock, no table scan or rewrite. Runs as written. |
+| [`metadata-only`](postgres-online-ddl-reference.md#metadata-only) | A brief catalog-only change: at most a short `ACCESS EXCLUSIVE` lock, no table scan or rewrite. Runs as written. |
 | [`safer-idiom`](postgres-online-ddl-reference.md#safer-idiom) | The statement blocks as written but an equivalent online sequence exists; pg-sprite substitutes it. Each step commits on its own — the sequence is not transactionally equivalent to the original. |
 | [`type-rewrite`](postgres-online-ddl-reference.md#type-rewrite) | The column type change is not binary-coercible, so PostgreSQL rewrites the whole table under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. |
 | [`rewrite-required`](postgres-online-ddl-reference.md#rewrite-required) | The statement blocks as written and no online replacement could be constructed. Refused; split the change into separate online steps. |

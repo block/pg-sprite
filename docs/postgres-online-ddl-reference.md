@@ -248,29 +248,70 @@ statement would be refused.
 
 ### `metadata-only`
 
-The operation is a brief catalog-only change: it takes a short `ACCESS EXCLUSIVE`
-lock but does not scan or rewrite the table. Safe to run as written on any table
-size, provided the lock can be acquired promptly (pg-sprite runs every session
-under a bounded `lock_timeout`).
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| runs as written | at most a short `ACCESS EXCLUSIVE` (see table below) | none | 0 |
+
+The operation is a brief catalog-only change: it takes at most a short
+`ACCESS EXCLUSIVE` lock but does not scan or rewrite the table. Safe to run as
+written on any table size, provided the lock can be acquired promptly
+(pg-sprite runs every session under a bounded `lock_timeout`).
+
+`ACCESS EXCLUSIVE` is the bucket's worst case, not its uniform cost — several
+forms take only `SHARE UPDATE EXCLUSIVE`, which does not block reads or
+writes, only competing DDL and vacuum:
+
+| Operation | Lock actually taken |
+|---|---|
+| `ADD COLUMN` (plain), `DROP COLUMN`, `SET DEFAULT` / `DROP DEFAULT`, `DROP NOT NULL`, `SET SCHEMA`, `DROP CONSTRAINT` | brief `ACCESS EXCLUSIVE` |
+| `ALTER INDEX ... RENAME`, `SET STATISTICS`, `SET (attribute_option)`, `SET (storage_parameter)` | `SHARE UPDATE EXCLUSIVE` — reads and writes proceed |
+| `CREATE TABLE` (standalone, not a partition) | no lock on any existing relation |
 
 ### `online-idiom`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| runs as written | never held for the duration of a scan against readers or writers (see table below) | per operation (see table below) | 0 |
 
 The submitted form is already PostgreSQL's safe online idiom (for example
 `CREATE INDEX CONCURRENTLY` or `ADD CONSTRAINT ... NOT VALID`). It runs as
 written and does not block the table while it runs.
 
+The bucket is not uniform: the concurrent builds and `VALIDATE` hold only
+`SHARE UPDATE EXCLUSIVE` while they work, and the `NOT VALID` / `USING INDEX`
+forms take a stronger lock but only for a brief catalog change with no scan:
+
+| Operation | Lock actually taken | Scan |
+|---|---|---|
+| `CREATE INDEX CONCURRENTLY`, `DROP INDEX CONCURRENTLY`, `REINDEX CONCURRENTLY`, `DETACH PARTITION CONCURRENTLY` | `SHARE UPDATE EXCLUSIVE` — reads and writes proceed | non-blocking index build / drop |
+| `VALIDATE CONSTRAINT` | `SHARE UPDATE EXCLUSIVE` (foreign-key validation also takes `ROW SHARE` on the referenced table) | full validation scan, non-blocking |
+| `ADD CONSTRAINT ... NOT VALID` | brief `ACCESS EXCLUSIVE` for `CHECK`; a foreign key takes `SHARE ROW EXCLUSIVE` on both tables | none — validation is deferred |
+| `ADD CONSTRAINT ... USING INDEX` | brief `ACCESS EXCLUSIVE` | none — the index already exists |
+
 ### `fast-default`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| runs as written | brief `ACCESS EXCLUSIVE` | none — default stored in the catalog | 0 |
 
 `ADD COLUMN ... DEFAULT <non-volatile>` on PostgreSQL 11+ stores the default in
 the catalog instead of rewriting the table. Catalog-only; runs as written.
 
 ### `binary-coercible`
 
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| runs as written | brief `ACCESS EXCLUSIVE` | none — column relabeled in place | 0 |
+
 The type change is binary-coercible (for example `varchar(50)` → `varchar(100)`,
 or `varchar` → `text`), so PostgreSQL relabels the column in place without a
 table rewrite. Runs as written.
 
 ### `safer-idiom`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| substituted — the online sequence runs instead | brief per-step locks; no whole-operation blocking lock | non-blocking index build or validation scan | 0 |
 
 The statement reaches a safe end state, but as written it holds a blocking lock
 for the whole operation (for example `ADD CONSTRAINT ... UNIQUE`, which builds
@@ -282,11 +323,19 @@ must not run inside a transaction block.
 
 ### `app-breaking-rename`
 
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| runs as written — coordinate with application deploys | brief `ACCESS EXCLUSIVE` | none | 0 |
+
 `RENAME COLUMN` / `RENAME TABLE` is a brief catalog change, but every query
 still using the old name fails the moment it commits. pg-sprite flags it so the
 rename is coordinated with application deploys.
 
 ### `volatile-default`
+
+| Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 until the backend lands (refused `backend-unavailable`) |
 
 `ADD COLUMN ... DEFAULT <volatile>` (for example `now()`, `gen_random_uuid()`)
 must compute the default per row: a full table rewrite under `ACCESS EXCLUSIVE`
@@ -294,11 +343,19 @@ that blocks reads and writes. Routed to the copy-and-swap backend.
 
 ### `generated-stored`
 
+| Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 until the backend lands (refused `backend-unavailable`) |
+
 Adding a `GENERATED ... STORED` column computes and stores the value for every
 row: a full table rewrite under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap
 backend.
 
 ### `type-rewrite`
+
+| Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 until the backend lands (refused `backend-unavailable`) |
 
 The column type change is not binary-coercible (for example `int` → `bigint`,
 `text` → `jsonb`), so PostgreSQL rewrites the whole table under
@@ -306,27 +363,47 @@ The column type change is not binary-coercible (for example `int` → `bigint`,
 
 ### `relocation`
 
+| Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| routed to the copy-and-swap backend | exclusive lock for the whole move | rewrite-scale I/O | 2 until the backend lands (refused `backend-unavailable`) |
+
 The operation physically moves the table's storage (for example
 `SET TABLESPACE`): rewrite-scale I/O under an exclusive lock. Routed to the
 copy-and-swap backend.
 
 ### `partition-parent-lock`
 
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| runs as written — schedule deliberately | brief `ACCESS EXCLUSIVE` on the partitioned parent | none | 0 |
+
 The operation takes a brief exclusive lock on a partitioned parent, briefly
 blocking access to every partition. Flagged so it is scheduled deliberately.
 
 ### `unsupported-operation`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
 
 pg-sprite does not recognize the operation and will not run it. Fail-closed:
 an unclassified statement is never executed.
 
 ### `destructive`
 
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| warning — does not change the routing decision | per the routing decision | per the routing decision | unchanged by this code |
+
 The change discards live data or structure (`DROP COLUMN`, `DROP TABLE`,
 truncating conversions). Emitted alongside the routing decision as a warning so
 destructive intent is always visible in review.
 
 ### `rewrite-required`
+
+| Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | would block | — | 2 |
 
 The statement blocks as written and pg-sprite could not construct an online
 replacement (for example `ADD COLUMN ... UNIQUE`, where the column and the
@@ -335,12 +412,20 @@ online steps and dry-run each one.
 
 ### `backend-unavailable`
 
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — nothing executes | — | — | 2 |
+
 The plan routes to a backend — an online shadow-table copy with a cutover —
 that this build does not implement yet. Refused; nothing executes. The
 copy-and-swap backend is on the roadmap; until it lands these changes need a
 manual online plan.
 
 ### `unsupported-partitioned-parent`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
 
 The routed plan builds an index concurrently, and the target is a partitioned
 parent — PostgreSQL cannot `CREATE INDEX CONCURRENTLY` on a partitioned table.
