@@ -180,7 +180,8 @@ The column and its constraint arrive in one statement, so no online
 substitution can be constructed; the change must be rewritten as separate
 online steps. No `exec_sql` is offered. The `guidance` field names the
 typed manual path — here `add-column-then-constraint`: add the plain
-column first, then build the constraint with its online pattern (see the
+column first, then build the constraint as a separate, named
+`ADD CONSTRAINT` with its online pattern (see the
 [suggest report's Guidance vocabulary](suggest-report.md#guidance-guidance)).
 
 ```console

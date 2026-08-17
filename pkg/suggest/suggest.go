@@ -19,8 +19,8 @@ import (
 // FormatVersion identifies the report contract
 // (docs/suggest-report.md). A consumer must reject a report whose version
 // it does not understand instead of guessing at the field semantics.
-// Version 2 added name-constraint-then-validate to the Guidance
-// vocabulary.
+// Version 2 added name-constraint-then-validate and
+// unique-index-then-constraint to the Guidance vocabulary.
 const FormatVersion = 2
 
 // Caveat is a typed condition attached to a recommendation; automation
@@ -91,7 +91,9 @@ const (
 	// GuidanceAddColumnThenConstraint: an inline UNIQUE / PRIMARY KEY /
 	// FOREIGN KEY / CHECK on ADD COLUMN builds or validates under the ADD
 	// COLUMN's ACCESS EXCLUSIVE lock. Add the plain column first, then
-	// build the constraint with its online pattern.
+	// build the constraint with its online pattern as a separate, named
+	// ADD CONSTRAINT — named, because the unnamed ADD CHECK / ADD FOREIGN
+	// KEY forms are themselves refused (GuidanceNameConstraintThenValidate).
 	GuidanceAddColumnThenConstraint Guidance = "add-column-then-constraint"
 	// GuidancePrevalidatedCheck: ATTACH PARTITION scans the child under
 	// the parent's lock unless a validated CHECK matching the partition
@@ -110,6 +112,14 @@ const (
 	// the server assigns one only at creation. Name the constraint, add
 	// it NOT VALID, then VALIDATE it online.
 	GuidanceNameConstraintThenValidate Guidance = "name-constraint-then-validate"
+	// GuidanceUniqueIndexThenConstraint: an ADD PRIMARY KEY / ADD UNIQUE
+	// whose USING INDEX rewrite could not be constructed. Build the unique
+	// index with CREATE UNIQUE INDEX CONCURRENTLY, then attach it with
+	// ADD CONSTRAINT … USING INDEX — the same sequence the constructed
+	// rewrite emits. Keeps ManualGuidance total over every constraint kind
+	// the classifier can mark safer-idiom, so a parser shape that yields
+	// no rewrite becomes advice rather than a failed report.
+	GuidanceUniqueIndexThenConstraint Guidance = "unique-index-then-constraint"
 )
 
 // Guidances returns the closed set of Guidance values. It is part of the
@@ -123,6 +133,7 @@ func Guidances() []Guidance {
 		GuidancePrevalidatedCheck,
 		GuidanceNotNullScaffold,
 		GuidanceNameConstraintThenValidate,
+		GuidanceUniqueIndexThenConstraint,
 	}
 }
 
@@ -297,6 +308,13 @@ func ManualGuidance(op statement.Op, multi bool) (Guidance, error) {
 			// Reached only for the unnamed form: a named CHECK / FOREIGN
 			// KEY gets the NOT VALID → VALIDATE rewrite constructed.
 			return GuidanceNameConstraintThenValidate, nil
+		case statement.ConstraintPrimaryKey, statement.ConstraintUnique:
+			// Reached only when the USING INDEX rewrite could not be
+			// constructed from the statement; covering the kind keeps
+			// this mapping total over every constraint kind the
+			// classifier marks safer-idiom, so the miss surfaces as
+			// advice rather than a failed report.
+			return GuidanceUniqueIndexThenConstraint, nil
 		}
 	}
 	return "", fmt.Errorf("no guidance mapping for non-constructible operation %q", op.Describe())

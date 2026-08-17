@@ -62,7 +62,7 @@ warning[safer-idiom]:
   the whole operation — writes (and for some forms reads) wait until it
   finishes
 
-help:
+note:
   pg-sprite will run a safer online sequence instead:
   1. CREATE UNIQUE INDEX CONCURRENTLY "users_email_key" ON "users" ("email");
   2. ALTER TABLE "users" ADD CONSTRAINT "users_email_key" UNIQUE USING INDEX "users_email_key";

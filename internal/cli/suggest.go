@@ -78,13 +78,15 @@ func guidanceText(g suggest.Guidance) string {
 	case suggest.GuidanceSplitStatement:
 		return "split the statement into one operation per statement, then advise again"
 	case suggest.GuidanceAddColumnThenConstraint:
-		return "add the plain column first, then build the constraint with its online pattern"
+		return "add the plain column first, then build the constraint as a separate, named ADD CONSTRAINT with its online pattern"
 	case suggest.GuidancePrevalidatedCheck:
 		return "pre-add a validated CHECK matching the partition bound on the child, attach, then drop it"
 	case suggest.GuidanceNotNullScaffold:
 		return "prove the invariant with a NOT VALID CHECK plus an online VALIDATE, then SET NOT NULL is a catalog flip"
 	case suggest.GuidanceNameConstraintThenValidate:
-		return "name the constraint, add it NOT VALID, then VALIDATE CONSTRAINT online — the VALIDATE step needs the name the server would otherwise assign at creation"
+		return "name the constraint, add it NOT VALID, then VALIDATE CONSTRAINT online"
+	case suggest.GuidanceUniqueIndexThenConstraint:
+		return "build the unique index with CREATE UNIQUE INDEX CONCURRENTLY, then attach it with ADD CONSTRAINT ... USING INDEX"
 	}
 	return string(g)
 }

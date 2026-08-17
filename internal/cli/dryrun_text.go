@@ -52,9 +52,16 @@ func writeDryRunText(out io.Writer, report plan.Report) error {
 		if unverifiedDecision(ps) {
 			w.diag("note", "", "the table was not introspected, so this is the conservative classification; with live facts the same change may classify as cheaper")
 		}
+		if ps.Guidance != "" {
+			// The manual path trails the findings that explain it —
+			// compiler style, where help: follows the diagnosis. help is
+			// reserved for steps the user runs; a sequence pg-sprite runs
+			// itself is a note.
+			w.diag("help", string(ps.Guidance), guidanceText(ps.Guidance))
+		}
 		if ps.Disposition == router.DispositionExecute {
 			if substituted(ps) {
-				w.diag("help", "", "pg-sprite will run a safer online sequence instead:")
+				w.diag("note", "", "pg-sprite will run a safer online sequence instead:")
 				for n, sql := range ps.ExecSQL {
 					w.printf("  %d. %s;\n", n+1, sql)
 				}
@@ -74,7 +81,7 @@ func writeDryRunText(out io.Writer, report plan.Report) error {
 				w.printf("  %s#%s\n", onlineDDLReferenceURL, c)
 			}
 			if ps.Guidance != "" {
-				w.printf("  %s#guidance-guidance\n", suggestReportURL)
+				w.printf("  %s#%s\n", suggestReportURL, ps.Guidance)
 			}
 		}
 	}
@@ -113,9 +120,6 @@ func writeRefusal(w *stickyWriter, ps plan.Statement) []string {
 		return nil
 	case router.DispositionRewriteRequired:
 		w.diag("error", "rewrite-required", "refused — blocks as written and no online replacement could be constructed; rewrite the change as separate online steps and dry-run each one")
-		if ps.Guidance != "" {
-			w.diag("help", string(ps.Guidance), guidanceText(ps.Guidance))
-		}
 		return []string{"rewrite-required"}
 	case router.DispositionUnavailable:
 		w.diag("error", "backend-unavailable", fmt.Sprintf("refused — needs the %s backend (an online shadow-table copy with a cutover), which this build does not implement yet", ps.Backend))

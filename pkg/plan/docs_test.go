@@ -124,3 +124,11 @@ func TestDocListsEveryVocabularyValue(t *testing.T) {
 			"docs/plan-report.md is missing a vocabulary row for %q", v)
 	}
 }
+
+// The doc's stated current version is the constant, not prose that can
+// drift: a FormatVersion bump without the matching doc sentence fails here.
+func TestDocStatesCurrentFormatVersion(t *testing.T) {
+	doc := readDoc(t)
+	assert.Contains(t, doc, fmt.Sprintf("The current version is **%d**", plan.FormatVersion),
+		"docs/plan-report.md's stated version drifted from plan.FormatVersion")
+}

@@ -48,7 +48,7 @@ warning[safer-idiom]:
   add unique constraint — holds a blocking lock on the table for the whole
   operation — writes (and for some forms reads) wait until it finishes
 
-help:
+note:
   pg-sprite will run a safer online sequence instead:
   1. CREATE UNIQUE INDEX CONCURRENTLY "u" ON "users" ("email");
   2. ALTER TABLE "users" ADD CONSTRAINT "u" UNIQUE USING INDEX "u";
@@ -161,9 +161,12 @@ func TestDryRunTextRewriteRequired(t *testing.T) {
 		"the typed guidance renders as a help diagnostic with the code as its rule")
 	assert.Contains(t, text, "add the plain column first,",
 		"the help body carries the guidance prose (wrapped, so assert its head)")
+	assert.Greater(t, strings.Index(text, "help[add-column-then-constraint]:"),
+		strings.Index(text, "note[safer-idiom]:"),
+		"the manual path trails the finding that explains it — help: after the diagnosis, compiler style")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#rewrite-required\n")
-	assert.Contains(t, text, "  "+suggestReportURL+"#guidance-guidance\n",
-		"guidance links its own doc anchor alongside the diagnostic code anchors")
+	assert.Contains(t, text, "  "+suggestReportURL+"#add-column-then-constraint\n",
+		"guidance links its own per-code doc anchor alongside the diagnostic code anchors")
 	assert.NotContains(t, text, "pg-sprite will run")
 	assert.NotContains(t, text, "apply:")
 }

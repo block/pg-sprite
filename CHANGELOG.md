@@ -14,9 +14,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   unchanged.
 - **The suggest report is format version 2**: the Guidance vocabulary gains
   `name-constraint-then-validate`, emitted for an unnamed `ADD CHECK` /
-  `ADD FOREIGN KEY`. Previously those statements made `suggest` (and any
-  surface deriving guidance) fail with an internal error instead of
-  producing advice.
+  `ADD FOREIGN KEY`, and `unique-index-then-constraint`, covering an
+  `ADD PRIMARY KEY` / `ADD UNIQUE` whose `USING INDEX` rewrite could not be
+  constructed. Previously those statements made `suggest` (and any surface
+  deriving guidance) fail with an internal error instead of producing
+  advice.
+- **`migrate --dry-run` text output reserves `help:` for steps the user runs**:
+  a rewrite-required refusal's manual path renders as `help[<guidance>]:` after
+  the findings that explain it, while a safer sequence pg-sprite runs itself is
+  now a `note:`. Each guidance code's `docs:` line links its own anchor in
+  docs/suggest-report.md. Display only — the JSON report is unchanged.
 - **`migrate --dry-run` now exits 2 when any statement would be refused**
   (disposition `rewrite-required`, `unavailable`, or `refuse`), matching the
   refusal exit code an apply of the same statement ends in. Previously a dry
