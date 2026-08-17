@@ -30,6 +30,24 @@ func parseMigrate(t *testing.T, args ...string) *MigrateCmd {
 	return &c.Migrate
 }
 
+// A dry run reports the unforced plan, so pairing it with the --force
+// acknowledgement is a contradiction the grammar rejects up front rather
+// than silently ignoring the override.
+func TestForceRejectedWithDryRun(t *testing.T) {
+	c := New()
+	k, err := kong.New(c, kong.Vars{"version": "test"})
+	require.NoError(t, err)
+	_, err = k.Parse([]string{
+		"migrate",
+		"--url", "postgres://user@localhost:5432/app",
+		"--alter", "ALTER TABLE t ALTER COLUMN c TYPE text",
+		"--dry-run",
+		"--force", "public.t",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--force cannot be combined with --dry-run")
+}
+
 func TestRetryFlagsWireIntoRetryPolicy(t *testing.T) {
 	c := parseMigrate(t,
 		"--lock-attempts", "5",

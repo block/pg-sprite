@@ -101,9 +101,10 @@ func writeRefusal(w *stickyWriter, ps plan.Statement) []string {
 		return []string{"refuse"}
 	}
 	// An unrecognized disposition is outside this build's contract: refuse
-	// loudly rather than guessing what execution would do.
+	// loudly rather than guessing what execution would do. No docs entry —
+	// a code this build does not know has no anchor to link.
 	w.diag("error", "unknown-disposition", fmt.Sprintf("refused — unrecognized disposition %q; treat the statement as not executable", ps.Disposition))
-	return []string{string(ps.Disposition)}
+	return nil
 }
 
 // decisionSeverity maps one operation's classification to its diagnostic

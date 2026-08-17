@@ -5,6 +5,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -104,6 +105,17 @@ type MigrateCmd struct {
 	LockBackoffMax    time.Duration `help:"Maximum exponential backoff between lock-timeout attempts." default:"1s"`
 	DryRun            bool          `help:"Classify and route the statement, print the plan, and execute nothing."`
 	JSON              bool          `help:"Emit the verdict (or dry-run plan) as JSON."`
+}
+
+// Validate rejects flag combinations with no coherent meaning. A dry run
+// reports the plan pg-sprite would execute without an override, so --force
+// has nothing to acknowledge there; accepting it would let a forced apply
+// ship with a dry run that reported a refusal it never checked.
+func (c *MigrateCmd) Validate() error {
+	if c.DryRun && c.Force != "" {
+		return errors.New("--force cannot be combined with --dry-run: the dry run reports the unforced plan")
+	}
+	return nil
 }
 
 // Run implements the migrate subcommand.

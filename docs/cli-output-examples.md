@@ -12,9 +12,15 @@ CREATE TABLE users (id bigint PRIMARY KEY, email text);
 CREATE TABLE events (id bigint, created date) PARTITION BY RANGE (created);
 ```
 
-Exit codes follow the dry-run contract (0 = executable, 2 = refused) defined
-with the [diagnostic codes](postgres-online-ddl-reference.md#dry-run-diagnostic-codes);
-CI can gate on the exit code without parsing JSON. The JSON report schema is
+`migrate` exit codes follow the dry-run contract (0 = executable, 2 = refused)
+defined with the [diagnostic codes](postgres-online-ddl-reference.md#dry-run-diagnostic-codes);
+CI can gate on the exit code without parsing JSON. The contract is
+`migrate`'s: `lint` exits 1 when a script has error-severity findings
+(warnings alone exit 0), and `diff` prints the plan and exits 0 regardless of
+disposition. Statement kinds `migrate` does not support (`DROP INDEX`,
+`REINDEX`, `CREATE TABLE`, and anything that is not `ALTER TABLE` or
+`CREATE INDEX`) emit the same refusal verdict on `--dry-run` as on apply —
+a verdict, not a plan report — and exit 2. The JSON report schema is
 [plan-report.md](plan-report.md).
 
 - [Codes used in these examples](#codes-used-in-these-examples)

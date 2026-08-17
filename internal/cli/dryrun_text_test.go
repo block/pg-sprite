@@ -217,8 +217,7 @@ func TestDryRunTextUnverifiedNote(t *testing.T) {
 // token: an operator-facing impact line must never fall through to the
 // typed value for a reason this build knows.
 func TestDryRunTextImpactCoversAllReasons(t *testing.T) {
-	reasons := append(planner.Reasons(), planner.ReasonAppBreakingRename)
-	for _, r := range reasons {
+	for _, r := range planner.Reasons() {
 		assert.NotEqual(t, string(r), impactText(r), "reason %s has no prose impact", r)
 	}
 }

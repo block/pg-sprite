@@ -20,9 +20,11 @@ import (
 // runDryRun is the imperative dry-run flow: the identical classify-and-route
 // pipeline the declarative front-end uses, with the diff step skipped — the
 // submitted statement feeds the classifier directly. It prints the routed
-// plan and never executes anything. Introspecting the target table sharpens
-// type-change classification; a missing table means zero facts and a
-// strictly more conservative plan.
+// plan and never executes anything. The statement-type gate runs first,
+// exactly as it does on apply, so a gated kind dry-runs to the same refusal
+// verdict (and refusal exit code) the apply would end in. Introspecting the
+// target table sharpens type-change classification; a missing table means
+// zero facts and a strictly more conservative plan.
 func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	logger := c.diag()
 	st, err := statement.ParseOne(c.Alter)
@@ -30,6 +32,9 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	logger.Debug("statement parsed", "kind", st.Kind(), "schema", st.Schema(), "table", st.Table())
+	if v, refused := gateVerdict(st); refused {
+		return c.emit(out, v)
+	}
 
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {

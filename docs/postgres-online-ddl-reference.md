@@ -312,14 +312,19 @@ table rewrite. Runs as written.
 | Verdict | Lock | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
 | substituted — the online sequence runs instead | brief per-step locks; no whole-operation blocking lock | non-blocking index build or validation scan | 0 |
+| refused (`rewrite-required`) — no online sequence could be constructed | would block as written | — | 2 |
 
 The statement reaches a safe end state, but as written it holds a blocking lock
 for the whole operation (for example `ADD CONSTRAINT ... UNIQUE`, which builds
-the index under `ACCESS EXCLUSIVE`). pg-sprite substitutes the equivalent online
-sequence — such as `CREATE UNIQUE INDEX CONCURRENTLY` followed by
-`ADD CONSTRAINT ... UNIQUE USING INDEX` — with each step committing on its own.
-The sequence is not transactionally equivalent to the original statement and
-must not run inside a transaction block.
+the index under `ACCESS EXCLUSIVE`). When pg-sprite can construct the
+equivalent online sequence — such as `CREATE UNIQUE INDEX CONCURRENTLY`
+followed by `ADD CONSTRAINT ... UNIQUE USING INDEX` — it substitutes it, with
+each step committing on its own. The sequence is not transactionally
+equivalent to the original statement and must not run inside a transaction
+block. When no online sequence can be constructed (for example
+`ADD COLUMN ... UNIQUE`, `ATTACH PARTITION`, or `ADD CONSTRAINT ... NOT NULL`),
+the classification stays `safer-idiom` but the statement is refused with
+[`rewrite-required`](#rewrite-required) and exits 2.
 
 ### `app-breaking-rename`
 
@@ -430,3 +435,14 @@ manual online plan.
 The routed plan builds an index concurrently, and the target is a partitioned
 parent — PostgreSQL cannot `CREATE INDEX CONCURRENTLY` on a partitioned table.
 Refused; build the index on each partition concurrently, then attach.
+
+### `refuse`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The planner found no known safe path for the statement and no more specific
+refusal cause applies (for example `CLUSTER ON`, `SET LOGGED`, or an
+`EXCLUDE` constraint). Refused; run the change through a maintenance window
+or rework it into forms the planner classifies.

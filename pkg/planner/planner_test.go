@@ -318,6 +318,7 @@ func TestReasonsVocabularyPinned(t *testing.T) {
 		planner.ReasonFastDefault,
 		planner.ReasonBinaryCoercible,
 		planner.ReasonSaferIdiom,
+		planner.ReasonAppBreakingRename,
 		planner.ReasonVolatileDefault,
 		planner.ReasonGeneratedStored,
 		planner.ReasonTypeRewrite,

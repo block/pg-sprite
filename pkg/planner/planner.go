@@ -76,6 +76,7 @@ func Reasons() []Reason {
 		ReasonFastDefault,
 		ReasonBinaryCoercible,
 		ReasonSaferIdiom,
+		ReasonAppBreakingRename,
 		ReasonVolatileDefault,
 		ReasonGeneratedStored,
 		ReasonTypeRewrite,

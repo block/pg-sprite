@@ -8,6 +8,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed — observable outcomes for automation callers
 
+- **`migrate --dry-run` now exits 2 when any statement would be refused**
+  (disposition `rewrite-required`, `unavailable`, or `refuse`), matching the
+  refusal exit code an apply of the same statement ends in. Previously a dry
+  run always exited 0, so CI gating on the exit code saw refusals as green.
+- **Statement kinds `migrate` does not support are now gated in `--dry-run`
+  too**: `DROP INDEX`, `REINDEX`, `CREATE TABLE`, and other non-`ALTER TABLE`
+  / `CREATE INDEX` statements emit the same refusal verdict (exit 2) the
+  apply would, instead of dry-running to an executable plan.
+- **`--force` combined with `--dry-run` is now rejected at parse time.**
+  A dry run reports the unforced plan, so the acknowledgement has nothing to
+  apply to; previously the flag was silently ignored.
+- **`planner.Reasons()` now includes `app-breaking-rename`.** The value was
+  always emitted in reports and documented in the plan-report vocabulary,
+  but the programmatic enumeration omitted it, so a consumer enumerating
+  the closed set would wrongly treat a routable rename as unknown.
+
 - **Index builds on partitioned parents now refuse with exit 2 and reason
   `unsupported-partitioned-parent`** instead of reaching a mid-change exit-1
   PostgreSQL failure. Concurrent and blocking builds carry distinct typed
