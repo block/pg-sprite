@@ -349,9 +349,8 @@ func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 		start = tracker.Now()
 	}
 	_, buildErr := conn.Exec(ctx, sql)
-	elapsed := time.Since(start)
+	elapsed := elapsedSince(tracker, start)
 	if tracker != nil {
-		elapsed = tracker.Now().Sub(start)
 		tracker.StopConcurrentBuild()
 	}
 	if buildErr == nil {

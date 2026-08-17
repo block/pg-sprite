@@ -122,6 +122,53 @@ func TestBuildIndexConcurrentlyReportsServerProgressAndFinishes(t *testing.T) {
 	assert.False(t, finished.Detail.Active, "a completed build has no active progress row")
 }
 
+// TestBuildIndexConcurrentlyWithProgressFailingBuildUnderPolling covers the
+// reserved-session handoff on the failure path: a poller hammers Progress
+// for the build's entire life while the build fails, and the executor must
+// still get exclusive use of the verdict session for its catalog verdict.
+// A regression that weakens StopConcurrentBuild's drain surfaces here as a
+// wire-protocol error on the shared connection or a race-detector report.
+func TestBuildIndexConcurrentlyWithProgressFailingBuildUnderPolling(t *testing.T) {
+	pool, schema := newPool(t)
+	// Duplicates guarantee the unique build fails after creating its
+	// catalog entry; the row count gives the poller a window to overlap
+	// the build and its failure verdict.
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.t AS
+		SELECT n AS id, n %% 1000 AS c FROM generate_series(1, 100000) n`, schema))
+	require.NoError(t, err)
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	stop := make(chan struct{})
+	var pollers sync.WaitGroup
+	pollers.Go(func() {
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, pollErr := tracker.Progress(t.Context())
+			assert.NoError(t, pollErr, "polling must stay clean while the build fails")
+		}
+	})
+
+	_, buildErr := executor.BuildIndexConcurrentlyWithProgress(t.Context(), pool,
+		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_dup ON %s.t (c)", schema), buildBudget, tracker)
+	close(stop)
+	pollers.Wait()
+
+	require.ErrorIs(t, buildErr, executor.ErrBuildLeftInvalidIndex,
+		"the failure verdict must be reached despite concurrent polling")
+	var invalidErr *executor.InvalidIndexError
+	require.ErrorAs(t, buildErr, &invalidErr)
+	assert.Equal(t, "idx_dup", invalidErr.Index)
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, progress.PhaseFailed, snapshot.Phase)
+	assert.False(t, snapshot.Detail.Active)
+}
+
 // TestBuildIndexConcurrentlyRefusesSingleConnectionPool covers the
 // admission-time pool guard: the verdict session is a correctness
 // dependency reserved alongside the build session, so a pool that cannot

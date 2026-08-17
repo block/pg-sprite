@@ -86,8 +86,15 @@ type Snapshot struct {
 // Tracker is a concurrency-safe progress source. The caller owns it; it has
 // no goroutines. Progress performs the one read needed for an active index
 // build, making polling lifetime identical to the caller's context.
+//
+// Two locks split the tracker's concerns: mu guards the state fields and is
+// held only for memory access, so the executor's own updates never wait for
+// a database read; pollMu serializes observers, so the reserved session —
+// a single pgx connection that is not safe for concurrent use — only ever
+// carries one progress query at a time.
 type Tracker struct {
 	mu        sync.RWMutex
+	pollMu    sync.Mutex
 	clock     Clock
 	session   dbconn.RowQuerier
 	phase     Phase
@@ -147,9 +154,11 @@ func (t *Tracker) SetConcurrentBuild(session dbconn.RowQuerier, pid uint32) {
 // StopConcurrentBuild waits for an in-flight observation and releases the
 // reserved session back to the executor before its catalog verdict.
 func (t *Tracker) StopConcurrentBuild() {
+	t.pollMu.Lock()
+	defer t.pollMu.Unlock()
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.buildPID = 0
+	t.session, t.buildPID = nil, 0
 }
 
 // Finish records a terminal execution outcome.
@@ -166,10 +175,15 @@ func (t *Tracker) Finish(err error) {
 }
 
 // Progress returns a snapshot and, for an active concurrent index build,
-// queries PostgreSQL's progress view by the executor-owned backend PID.
+// queries PostgreSQL's progress view by the executor-owned backend PID. On a
+// query error the snapshot still carries the last-known tracker state. The
+// state lock is released before the query, so concurrent pollers serialize
+// only against each other (and StopConcurrentBuild), never against the
+// executor's own state updates.
 func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
+	t.pollMu.Lock()
+	defer t.pollMu.Unlock()
 	t.mu.RLock()
-	defer t.mu.RUnlock()
 	now := t.clock.Now()
 	s := Snapshot{Phase: t.phase, Step: t.step, TotalSteps: t.total, Detail: t.detail}
 	if !t.started.IsZero() {
@@ -177,12 +191,13 @@ func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
 		s.StepElapsed = now.Sub(t.stepStart)
 	}
 	session, pid := t.session, t.buildPID
+	t.mu.RUnlock()
 	if pid == 0 || session == nil || s.Phase != PhaseRunning {
 		return s, nil
 	}
 	p, active, err := dbconn.ConcurrentIndexProgress(ctx, session, pid)
 	if err != nil {
-		return Snapshot{}, err
+		return s, err
 	}
 	if !active {
 		s.Detail.Active = false

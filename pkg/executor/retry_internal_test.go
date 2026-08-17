@@ -80,3 +80,37 @@ func TestRetryPolicyRejectsUnboundedValues(t *testing.T) {
 func TestRetryPolicyAcceptsSingleAttemptWithoutBackoff(t *testing.T) {
 	require.NoError(t, RetryPolicy{MaxAttempts: 1}.validate())
 }
+
+// The observer sees each attempt number before that attempt runs, so a
+// progress tracker always reports the attempt actually executing.
+func TestExecuteWithLockRetryObservedReportsEachAttempt(t *testing.T) {
+	policy := RetryPolicy{MaxAttempts: 3, InitialBackoff: time.Millisecond, MaxBackoff: time.Millisecond}
+	var observed []int
+	attempts := 0
+	err := executeWithLockRetryObserved(t.Context(), policy, func(context.Context) error {
+		attempts++
+		if attempts < 3 {
+			return &BudgetError{Cause: CauseLock, Budget: time.Millisecond}
+		}
+		return nil
+	}, func(context.Context, time.Duration) error { return nil }, func(attempt int) {
+		require.Equal(t, attempts+1, attempt, "the observer must run before its attempt")
+		observed = append(observed, attempt)
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []int{1, 2, 3}, observed)
+}
+
+// A non-retryable failure still observes its one attempt: the tracker's
+// attempt counter must match what ran, not what succeeded.
+func TestExecuteWithLockRetryObservedReportsFailedOnlyAttempt(t *testing.T) {
+	var observed []int
+	err := executeWithLockRetryObserved(t.Context(), DefaultRetryPolicy(), func(context.Context) error {
+		return &BudgetError{Cause: CauseStatement, Budget: time.Second}
+	}, func(context.Context, time.Duration) error { return errors.New("unexpected sleep") }, func(attempt int) {
+		observed = append(observed, attempt)
+	})
+	var budgetErr *BudgetError
+	require.ErrorAs(t, err, &budgetErr)
+	assert.Equal(t, []int{1}, observed)
+}

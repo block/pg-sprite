@@ -237,6 +237,17 @@ func RunSequenceWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflig
 	return runSequence(ctx, pool, pt, steps, b, retry, tracker)
 }
 
+// elapsedSince reports the time since start on the tracker's injected clock
+// when one is present, falling back to the wall clock. Both the step report
+// and the typed budget corroboration must read the same clock that produced
+// start, or an injected test clock would skew the elapsed value.
+func elapsedSince(tracker *progress.Tracker, start time.Time) time.Duration {
+	if tracker != nil {
+		return tracker.Now().Sub(start)
+	}
+	return time.Since(start)
+}
+
 func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, tracker *progress.Tracker) (SequenceReport, error) {
 	var rep SequenceReport
 	if err := b.validate(); err != nil {
@@ -293,7 +304,7 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 				LockTimeout:      b.Validate.LockTimeout,
 				StatementTimeout: b.Validate.Overall,
 			}, retry, tracker)
-			err = corroborateValidateCancel(err, b.Validate, time.Since(start))
+			err = corroborateValidateCancel(err, b.Validate, elapsedSince(tracker, start))
 		case StepBrief:
 			err = executeNative(ctx, pool, pt, step.st, b.Brief, retry, tracker)
 		default:
@@ -304,10 +315,7 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 		if err != nil {
 			return rep, &SequenceStepError{Step: i + 1, Total: len(admitted), Kind: step.kind, SQL: step.st.SQL(), Err: err}
 		}
-		duration := time.Since(start)
-		if tracker != nil {
-			duration = tracker.Now().Sub(start)
-		}
+		duration := elapsedSince(tracker, start)
 		rep.Steps = append(rep.Steps, StepReport{
 			SQL:      step.st.SQL(),
 			Kind:     step.kind,

@@ -62,6 +62,10 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   `pgx/v5`, the parse boundary (`pkg/statement` → `wasilibs/go-pgquery`, the real PostgreSQL
   grammar — the native executor re-verifies statement shape itself rather than trusting the
   caller's classification; the grammar is load-bearing expertise, not copyable mechanics),
+  `pkg/progress` (the executors' progress-observation seam: they write state into a
+  caller-owned tracker whose mutators take only a memory lock, and its polling reads ride
+  the reserved verdict session behind a separate poll lock — so a slow or hung observation
+  can never gate the executor's own state updates),
   stdlib. The future decode path will add `pglogrepl`. Adding one requires a recorded decision (see the rubric in
   [docs/tcb-model.md](docs/tcb-model.md) — copy small things, take pinned dependencies only
   for load-bearing expertise).
