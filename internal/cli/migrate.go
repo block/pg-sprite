@@ -18,6 +18,7 @@ import (
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -417,6 +418,12 @@ func (c *MigrateCmd) emit(out io.Writer, v verdict.Verdict) error {
 		if text, err = v.JSON(); err != nil {
 			return err
 		}
+	} else if v.Guidance != "" {
+		// The typed token is the contract; the text form additionally
+		// spells out the manual path it names, the way the dry-run
+		// renderer does, so a human is not left to look the code up.
+		text += fmt.Sprintf("\n  help:      %s\n  reference: %s#%s",
+			guidanceText(suggest.Guidance(v.Guidance)), suggestReportURL, v.Guidance)
 	}
 	if _, err := fmt.Fprintln(out, text); err != nil {
 		return fmt.Errorf("write verdict: %w", err)
