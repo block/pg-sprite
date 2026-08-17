@@ -22,7 +22,27 @@ linters:
     - containedctx    # no context.Context stored in struct fields
     - sloglint        # structured-logging hygiene: static messages, snake_case keys
     - forbidigo       # no printing to process stdout; output goes to the injected writer
+    - depguard        # pin the TCB import boundary (SAFETY.md core dependency list)
   settings:
+    depguard:
+      rules:
+        # The safety-critical core may import only the recorded core dependency
+        # list (SAFETY.md): stdlib, pgx/v5, the parse boundary, and the other
+        # core packages. Anything else needs a recorded decision there first.
+        tcb:
+          files:
+            - "**/pkg/dbconn/**"
+            - "**/pkg/preflight/**"
+            - "**/pkg/executor/**"
+            - "**/pkg/progress/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/jackc/pgx/v5
+            - github.com/block/pg-sprite/pkg/dbconn
+            - github.com/block/pg-sprite/pkg/preflight
+            - github.com/block/pg-sprite/pkg/progress
+            - github.com/block/pg-sprite/pkg/statement
     sloglint:
       static-msg: true
       key-naming-case: snake
