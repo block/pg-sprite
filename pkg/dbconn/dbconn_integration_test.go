@@ -40,6 +40,13 @@ func TestPoolIntegration(t *testing.T) {
 		assert.Equal(t, want, version)
 	})
 
+	t.Run("absent concurrent index progress is not an error", func(t *testing.T) {
+		observation, active, err := dbconn.ConcurrentIndexProgress(t.Context(), pool, 0)
+		require.NoError(t, err)
+		assert.False(t, active)
+		assert.Empty(t, observation.Phase)
+	})
+
 	t.Run("statement_timeout cancels runaway work", func(t *testing.T) {
 		_, err := pool.Exec(t.Context(), "SELECT pg_sleep(5)")
 		require.Error(t, err)

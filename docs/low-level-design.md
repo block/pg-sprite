@@ -811,12 +811,14 @@ At the library seam, each executor outcome maps to a stable string code
 embedding `pkg/executor` branches on one vocabulary; the CLI's verdict JSON carries the same
 codes — an execution failure ends in a `failed` verdict (exit 1, distinct from the refusal
 exit 2) with the code, the failed step, and the committed prefix in `executed_sql`, so
-automation can distinguish nothing-committed from partial state left behind. Remaining
-Phase 3 work, roughly in order:
-
-- bound lock acquisition with timeout and retry for the blocking idioms,
-- progress reporting (`pg_stat_progress_create_index` by the build's backend PID, which the
-  executor already captures for its ownership proof).
+automation can distinguish nothing-committed from partial state left behind. Native execution
+exposes a caller-owned `progress.Tracker`. Embedders run a blocking executor
+call in their own bounded task and poll `Tracker.Progress(ctx)`: sequence position and elapsed
+time come from in-process state, while an active concurrent index build is read on demand from
+`pg_stat_progress_create_index` by the build's backend PID. There is no background poller to
+own or stop, and a missing progress-view row is represented as an inactive observation rather
+than an error. The same snapshot already reserves optional row and byte copy counters for the
+copy-and-swap backend.
 
 The copy-and-swap backend, including change capture, copying, applying, checksumming, and
 cutover, follows Phase 3.

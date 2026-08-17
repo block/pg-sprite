@@ -33,6 +33,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -222,6 +223,21 @@ type sequenceStep struct {
 // lock_timeout retries on each owner-gated step, exactly as in
 // ExecuteNative.
 func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy) (SequenceReport, error) {
+	return runSequence(ctx, pool, pt, steps, b, retry, nil)
+}
+
+// RunSequenceWithProgress runs a sequence while updating tracker with the
+// current step and its execution class. The caller may poll concurrently.
+func RunSequenceWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, tracker *progress.Tracker) (rep SequenceReport, err error) {
+	if tracker == nil {
+		return rep, fmt.Errorf("progress tracker is required")
+	}
+	tracker.Start(len(steps), progress.OperationBrief)
+	defer func() { tracker.Finish(err) }()
+	return runSequence(ctx, pool, pt, steps, b, retry, tracker)
+}
+
+func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, tracker *progress.Tracker) (SequenceReport, error) {
 	var rep SequenceReport
 	if err := b.validate(); err != nil {
 		return rep, err
@@ -260,22 +276,26 @@ func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 	}
 	for i, step := range admitted {
 		start := time.Now()
+		if tracker != nil {
+			tracker.StartStep(i+1, progressOperation(step.kind))
+			start = tracker.Now()
+		}
 		var indexReport *IndexBuildReport
 		switch step.kind {
 		case StepConcurrentIndexBuild:
-			r, buildErr := BuildIndexConcurrently(ctx, pool, step.st.SQL(), b.Concurrent)
+			r, buildErr := buildIndexConcurrently(ctx, pool, step.st.SQL(), b.Concurrent, tracker)
 			err = buildErr
 			if buildErr == nil {
 				indexReport = &r
 			}
 		case StepValidateConstraint:
-			err = ExecuteNative(ctx, pool, pt, step.st, Budget{
+			err = executeNative(ctx, pool, pt, step.st, Budget{
 				LockTimeout:      b.Validate.LockTimeout,
 				StatementTimeout: b.Validate.Overall,
-			}, retry)
+			}, retry, tracker)
 			err = corroborateValidateCancel(err, b.Validate, time.Since(start))
 		case StepBrief:
-			err = ExecuteNative(ctx, pool, pt, step.st, b.Brief, retry)
+			err = executeNative(ctx, pool, pt, step.st, b.Brief, retry, tracker)
 		default:
 			// Admission produces only the three kinds above; an unknown
 			// kind here is a programming error and aborts fail-closed.
@@ -284,10 +304,14 @@ func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 		if err != nil {
 			return rep, &SequenceStepError{Step: i + 1, Total: len(admitted), Kind: step.kind, SQL: step.st.SQL(), Err: err}
 		}
+		duration := time.Since(start)
+		if tracker != nil {
+			duration = tracker.Now().Sub(start)
+		}
 		rep.Steps = append(rep.Steps, StepReport{
 			SQL:      step.st.SQL(),
 			Kind:     step.kind,
-			Duration: time.Since(start),
+			Duration: duration,
 			Index:    indexReport,
 		})
 	}
@@ -305,6 +329,19 @@ func sequenceTargetFacts(ctx context.Context, pool *pgxpool.Pool, schema, table 
 		return false, 0, fmt.Errorf("admit sequence target %s: %w", qualifiedName(schema, table), err)
 	}
 	return facts.Partitioned(), facts.ServerMajor(), nil
+}
+
+func progressOperation(kind StepKind) progress.Operation {
+	switch kind {
+	case StepBrief:
+		return progress.OperationBrief
+	case StepValidateConstraint:
+		return progress.OperationValidate
+	case StepConcurrentIndexBuild:
+		return progress.OperationConcurrentIndex
+	default:
+		return ""
+	}
 }
 
 // sequenceHasConcurrentBuild reports whether any admitted step is a

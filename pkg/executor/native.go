@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -266,6 +267,22 @@ func (e *InvalidIndexError) Unwrap() []error {
 // whole budget, while a concurrent build takes only SHARE UPDATE EXCLUSIVE —
 // long builds on large tables are its purpose.
 func BuildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget) (IndexBuildReport, error) {
+	return buildIndexConcurrently(ctx, pool, sql, b, nil)
+}
+
+// BuildIndexConcurrentlyWithProgress runs a concurrent build while updating
+// tracker. The caller may poll tracker concurrently with this blocking call.
+func BuildIndexConcurrentlyWithProgress(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget, tracker *progress.Tracker) (rep IndexBuildReport, err error) {
+	if tracker == nil {
+		return rep, fmt.Errorf("progress tracker is required")
+	}
+	tracker.Start(1, progress.OperationConcurrentIndex)
+	tracker.StartStep(1, progress.OperationConcurrentIndex)
+	defer func() { tracker.Finish(err) }()
+	return buildIndexConcurrently(ctx, pool, sql, b, tracker)
+}
+
+func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget, tracker *progress.Tracker) (IndexBuildReport, error) {
 	var rep IndexBuildReport
 	if err := b.validate(); err != nil {
 		return rep, err
@@ -323,10 +340,20 @@ func BuildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	// The backend PID anchors the post-failure ownership proof: recovery
 	// waits for this backend to stop before trusting the catalog.
 	pid := conn.Conn().PgConn().PID()
+	if tracker != nil {
+		tracker.SetConcurrentBuild(verdictConn, pid)
+	}
 
 	start := time.Now()
+	if tracker != nil {
+		start = tracker.Now()
+	}
 	_, buildErr := conn.Exec(ctx, sql)
 	elapsed := time.Since(start)
+	if tracker != nil {
+		elapsed = tracker.Now().Sub(start)
+		tracker.StopConcurrentBuild()
+	}
 	if buildErr == nil {
 		return verifiedBuildReport(ctx, conn, build, target, elapsed)
 	}

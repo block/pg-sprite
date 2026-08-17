@@ -31,7 +31,7 @@ The invariant registry (invariant IDs referenced below) lives in
 | `pkg/verdict` — structured outcome contract, rendering, exit codes | ❌ periphery | exists (Phase 1) | — |
 | `pkg/diffplan` — desired schema → routed convergence plan, the declarative front door as a library (the CLI `diff` and embedding orchestrators share it) | ❌ periphery | exists | — |
 | `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`, `status`, `diff`, `fmt`, `lint`, and `suggest` exist | — |
-| status / progress / advisory rendering, metrics | ❌ periphery | planned | — |
+| `pkg/progress` — strategy-wide native progress snapshots; copy counters reserved for later | ❌ periphery | native progress exists | — |
 | orchestrator adapter | ❌ periphery | planned (Phase 11) | OC-* hold *at* the boundary |
 | `internal/testutil` | ❌ test-only | exists | — |
 
