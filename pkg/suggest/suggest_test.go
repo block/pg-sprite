@@ -144,6 +144,23 @@ func TestAdviseInlineConstraintGetsAddColumnThenConstraintGuidance(t *testing.T)
 	assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, s.Guidance)
 }
 
+// An unnamed CHECK or FOREIGN KEY has no constructible rewrite — the
+// VALIDATE step needs the name the server assigns only at creation — so
+// the advice is the typed manual path, not an error.
+func TestAdviseUnnamedCheckAndForeignKeyGetNamingGuidance(t *testing.T) {
+	for _, sql := range []string{
+		"ALTER TABLE t ADD CHECK (age > 0)",
+		"ALTER TABLE t ADD FOREIGN KEY (o) REFERENCES orders (id)",
+	} {
+		report, err := suggest.Advise(sql)
+		require.NoError(t, err, "statement: %s", sql)
+		require.Len(t, report.Suggestions, 1, "statement: %s", sql)
+		s := report.Suggestions[0]
+		assert.Empty(t, s.Recommended, "statement: %s", sql)
+		assert.Equal(t, suggest.GuidanceNameConstraintThenValidate, s.Guidance, "statement: %s", sql)
+	}
+}
+
 // lint and suggest agree about the same script: every blocking-idiom
 // finding has a suggestion for the same statement — a constructed rewrite
 // or typed guidance, never silence. This is the workflow contract: lint
@@ -193,6 +210,8 @@ func TestAdviseEverySaferIdiomPathIsMapped(t *testing.T) {
 		"ALTER TABLE t ADD CONSTRAINT t_c_key UNIQUE (c)",
 		"ALTER TABLE t ADD CONSTRAINT t_age_pos CHECK (age > 0)",
 		"ALTER TABLE t ADD CONSTRAINT t_fk FOREIGN KEY (o) REFERENCES orders (id)",
+		"ALTER TABLE t ADD CHECK (age > 0)",
+		"ALTER TABLE t ADD FOREIGN KEY (o) REFERENCES orders (id)",
 		"ALTER TABLE t ATTACH PARTITION p FOR VALUES FROM (1) TO (10)",
 		"ALTER TABLE t ADD COLUMN email text UNIQUE",
 		"ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d int",
@@ -240,7 +259,7 @@ func TestReportJSONShape(t *testing.T) {
 	recommended, err := json.Marshal(report.Suggestions[0].Recommended)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"suggestions": [
 			{
 				"statement": 1,
@@ -271,7 +290,7 @@ func TestReportJSONGuidanceShape(t *testing.T) {
 	operation, err := json.Marshal(report.Suggestions[0].Operation)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"suggestions": [
 			{
 				"statement": 1,
@@ -292,7 +311,7 @@ func TestReportJSONCleanSuggestionsAreEmptyArray(t *testing.T) {
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"suggestions": []
 	}`, string(raw))
 }

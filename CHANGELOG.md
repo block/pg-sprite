@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed — observable outcomes for automation callers
 
+- **The plan report is format version 2**: rewrite-required statements now
+  carry a `guidance` field naming the typed manual path, drawn from the
+  suggest report's Guidance vocabulary. The fingerprint definition is
+  unchanged.
+- **The suggest report is format version 2**: the Guidance vocabulary gains
+  `name-constraint-then-validate`, emitted for an unnamed `ADD CHECK` /
+  `ADD FOREIGN KEY`. Previously those statements made `suggest` (and any
+  surface deriving guidance) fail with an internal error instead of
+  producing advice.
 - **`migrate --dry-run` now exits 2 when any statement would be refused**
   (disposition `rewrite-required`, `unavailable`, or `refuse`), matching the
   refusal exit code an apply of the same statement ends in. Previously a dry

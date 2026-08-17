@@ -83,6 +83,8 @@ func guidanceText(g suggest.Guidance) string {
 		return "pre-add a validated CHECK matching the partition bound on the child, attach, then drop it"
 	case suggest.GuidanceNotNullScaffold:
 		return "prove the invariant with a NOT VALID CHECK plus an online VALIDATE, then SET NOT NULL is a catalog flip"
+	case suggest.GuidanceNameConstraintThenValidate:
+		return "name the constraint, add it NOT VALID, then VALIDATE CONSTRAINT online — the VALIDATE step needs the name the server would otherwise assign at creation"
 	}
 	return string(g)
 }

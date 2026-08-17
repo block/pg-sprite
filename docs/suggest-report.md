@@ -16,6 +16,9 @@ and the closed vocabularies below (caveats, guidance codes, and the embedded pla
 reasons and execution contracts): adding a value to any of them is a contract change and
 bumps `format_version`, even if no field is added or renamed.
 
+The current version is **2**: version 2 added `name-constraint-then-validate` to the
+Guidance vocabulary.
+
 ### Relationship to the plan and lint reports
 
 The suggest report, the [lint report](lint-report.md), and the
@@ -84,6 +87,7 @@ share one.)
 | `add-column-then-constraint` | `ADD COLUMN` with an inline UNIQUE / PRIMARY KEY / FOREIGN KEY / CHECK | The inline constraint builds or validates under the ADD COLUMN's ACCESS EXCLUSIVE lock. Add the plain column first, then build the constraint with its online pattern. |
 | `pre-add-validated-check` | `ATTACH PARTITION` | The attach scans the child under the parent's lock unless a validated CHECK matching the partition bound already exists on the child. Pre-add that CHECK (NOT VALID, then VALIDATE), attach, then drop it. The bound-matching CHECK cannot be constructed from the statement alone. |
 | `not-null-scaffold` | `ADD CONSTRAINT … NOT NULL` | Prove the invariant with a NOT VALID CHECK (`col IS NOT NULL`) plus an online VALIDATE, then the NOT NULL constraint is a catalog flip — the same scaffold sequence the `SET NOT NULL` form gets constructed. |
+| `name-constraint-then-validate` | Unnamed `ADD CHECK` / `ADD FOREIGN KEY` | The online sequence's `VALIDATE CONSTRAINT` step needs the constraint's name, and the server assigns one only at creation — so no rewrite can be constructed from the statement alone. Name the constraint, add it `NOT VALID`, then `VALIDATE` it online (the same sequence the named form gets constructed). |
 
 ## The rewrite table: operation → safer form → caveats
 
@@ -113,7 +117,7 @@ A constructed rewrite (`pg-sprite suggest --json` over
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "suggestions": [
     {
       "statement": 1,
@@ -134,7 +138,7 @@ A guidance suggestion (`ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d 
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "suggestions": [
     {
       "statement": 1,

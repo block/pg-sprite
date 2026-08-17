@@ -19,7 +19,9 @@ import (
 // FormatVersion identifies the report contract
 // (docs/suggest-report.md). A consumer must reject a report whose version
 // it does not understand instead of guessing at the field semantics.
-const FormatVersion = 1
+// Version 2 added name-constraint-then-validate to the Guidance
+// vocabulary.
+const FormatVersion = 2
 
 // Caveat is a typed condition attached to a recommendation; automation
 // branches on it, never on prose. The caveats are independent — no caveat
@@ -102,6 +104,12 @@ const (
 	// constraint is a catalog flip — the same scaffold sequence the
 	// SET NOT NULL form gets constructed.
 	GuidanceNotNullScaffold Guidance = "not-null-scaffold"
+	// GuidanceNameConstraintThenValidate: an unnamed ADD CHECK / ADD
+	// FOREIGN KEY has no constructible rewrite because the online
+	// sequence's VALIDATE CONSTRAINT step needs the constraint's name and
+	// the server assigns one only at creation. Name the constraint, add
+	// it NOT VALID, then VALIDATE it online.
+	GuidanceNameConstraintThenValidate Guidance = "name-constraint-then-validate"
 )
 
 // Guidances returns the closed set of Guidance values. It is part of the
@@ -114,6 +122,7 @@ func Guidances() []Guidance {
 		GuidanceAddColumnThenConstraint,
 		GuidancePrevalidatedCheck,
 		GuidanceNotNullScaffold,
+		GuidanceNameConstraintThenValidate,
 	}
 }
 
@@ -281,8 +290,13 @@ func ManualGuidance(op statement.Op, multi bool) (Guidance, error) {
 	case statement.OpAttachPartition:
 		return GuidancePrevalidatedCheck, nil
 	case statement.OpAddConstraint:
-		if op.Constraint == statement.ConstraintNotNull {
+		switch op.Constraint {
+		case statement.ConstraintNotNull:
 			return GuidanceNotNullScaffold, nil
+		case statement.ConstraintCheck, statement.ConstraintForeignKey:
+			// Reached only for the unnamed form: a named CHECK / FOREIGN
+			// KEY gets the NOT VALID → VALIDATE rewrite constructed.
+			return GuidanceNameConstraintThenValidate, nil
 		}
 	}
 	return "", fmt.Errorf("no guidance mapping for non-constructible operation %q", op.Describe())

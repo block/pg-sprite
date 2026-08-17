@@ -71,6 +71,25 @@ func TestFromRoutedDerivesGuidanceForRewriteRequired(t *testing.T) {
 	assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, st.Guidance)
 }
 
+// An unnamed CHECK or FOREIGN KEY is rewrite-required — the VALIDATE step
+// needs the name the server assigns only at creation — and carries the
+// naming guidance rather than failing the whole plan.
+func TestFromRoutedUnnamedConstraintCarriesNamingGuidance(t *testing.T) {
+	for _, sql := range []string{
+		"ALTER TABLE users ADD CHECK (age > 0)",
+		"ALTER TABLE users ADD FOREIGN KEY (org_id) REFERENCES orgs (id)",
+	} {
+		routed := router.Route([]planner.Plan{classifyCanonical(t, sql)})
+		require.Len(t, routed.Statements, 1, "statement: %s", sql)
+		require.Equal(t, router.DispositionRewriteRequired, routed.Statements[0].Disposition,
+			"an unnamed constraint has no constructible online rewrite: %s", sql)
+
+		st, err := plan.FromRouted(routed.Statements[0])
+		require.NoError(t, err, "statement: %s", sql)
+		assert.Equal(t, suggest.GuidanceNameConstraintThenValidate, st.Guidance, "statement: %s", sql)
+	}
+}
+
 // A compound rewrite-required statement advises splitting first: no safer
 // sequence can be constructed for a multi-operation statement, so the
 // manual path starts with one statement per operation.
