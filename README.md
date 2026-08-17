@@ -44,12 +44,16 @@ rules that apply inside the core. Read it before changing anything under
 
 ## What it looks like
 
+Every sample below is captured verbatim from a real session against the
+compose database (`make db-up`, PostgreSQL 16): `$` marks the command,
+everything after it is the tool's output.
+
 **Improve: a blocking form is replaced with the safer online sequence.**
 `migrate --dry-run` shows exactly what would run, as compiler-style
 diagnostics with a doc anchor per finding (exit 0 — the plan is executable):
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run
 statement 1:
   ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);
 
@@ -87,8 +91,8 @@ a destructive-but-executable change (`DROP COLUMN`) warns and exits 0, so a
 gate that must stop drops checks `.statements[].destructive` in the
 `--json` report:
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run
 statement 1:
   ALTER TABLE users ALTER COLUMN id TYPE text;
 
@@ -114,8 +118,8 @@ dry-run:
 **Lint: offline, no database needed.** Flag blocking idioms in a DDL file
 and suggest the safer form:
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite lint changes.sql
+```console
+$ pg-sprite lint changes.sql
 changes.sql:1:1: warning: blocking-idiom — CREATE INDEX users_email_idx
   safer form (not equivalent — see https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md): CREATE INDEX CONCURRENTLY users_email_idx ON users USING btree (email);
   run each statement in its own transaction, never one block; after a failed CONCURRENTLY build, check pg_index.indisvalid and rebuild
@@ -125,8 +129,8 @@ changes.sql:1:1: warning: blocking-idiom — CREATE INDEX users_email_idx
 reviewed `CREATE TABLE` file and get the classified statements that converge
 the live table onto it:
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite diff --desired users.sql
+```console
+$ pg-sprite diff --desired users.sql
 -- plan derived by pg-sprite diff; execute statements via pg-sprite migrate,
 -- which refuses blocking forms — running this script directly bypasses that gate
 -- native (metadata-only)

@@ -68,7 +68,7 @@ func alterReport(t *testing.T, sql, schema, table string, facts planner.Facts) p
 func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
-	blocks := regexp.MustCompile("(?s)```\n~/kiran01bm/github/pg-sprite main [^\n]*\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
+	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
 	require.Len(t, blocks, 9, "the doc publishes nine captured outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",

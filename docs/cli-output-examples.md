@@ -4,8 +4,9 @@ Representative, real JSON outputs for every shape the CLI produces: the
 plan report for each dry-run disposition, the execution verdict, the
 linter, and diff. The human text rendering of the same reports is display
 only — see the [README](../README.md) for samples; the JSON is the machine
-contract. All were captured against the compose database (`make db-up`,
-PostgreSQL 16) with this schema:
+contract. All were captured verbatim from a real session against the
+compose database (`make db-up`, PostgreSQL 16) — `$` marks the command,
+everything after it is the tool's output — with this schema:
 
 ```sql
 CREATE TABLE users (id bigint PRIMARY KEY, email text);
@@ -71,8 +72,8 @@ refuses. `--dry-run --json` emits the plan report without executing.
 A safe submitted form executes unchanged: `exec_sql` is the statement
 itself.
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
   "format_version": 1,
   "source": "alter",
@@ -112,8 +113,8 @@ The submitted `ADD CONSTRAINT ... UNIQUE` blocks as written, so pg-sprite
 plans the safer online sequence instead: the decision carries it in
 `safer_sql`, and `exec_sql` is what `migrate` would run.
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
   "format_version": 1,
   "source": "alter",
@@ -159,8 +160,8 @@ The same statement without `--dry-run` runs the substituted sequence for
 real. The verdict names what was executed and every step that committed
 (exit 0):
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --json
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --json
 {
   "outcome": "executed-natively",
   "statement": "ALTER TABLE public.users ADD CONSTRAINT users_email_key UNIQUE (email)",
@@ -179,8 +180,8 @@ The column and its constraint arrive in one statement, so no online
 substitution can be constructed; the change must be rewritten as separate
 online steps. No `exec_sql` is offered.
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
   "format_version": 1,
   "source": "alter",
@@ -215,8 +216,8 @@ online steps. No `exec_sql` is offered.
 A genuine table rewrite routes to the copy-and-swap backend, which is not
 implemented yet.
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
   "format_version": 1,
   "source": "alter",
@@ -252,8 +253,8 @@ The routed plan builds an index concurrently, but the target is a
 partitioned parent — PostgreSQL cannot `CREATE INDEX CONCURRENTLY` there.
 The refusal cause is the report-level `reason`.
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
+```console
+$ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
   "format_version": 1,
   "source": "alter",
@@ -289,8 +290,8 @@ The refusal cause is the report-level `reason`.
 A `DROP COLUMN` routes to execute — the destructive flag is surfaced for
 the reviewer or orchestrator to gate on; `migrate` itself does not block it.
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --json
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --json
 {
   "format_version": 1,
   "source": "alter",
@@ -338,8 +339,8 @@ ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);
 
 ### Blocking idioms flagged (`blocking-idiom`) — exit 0
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite lint /tmp/changes.sql --json
+```console
+$ pg-sprite lint /tmp/changes.sql --json
 {
   "format_version": 1,
   "postgres_versions": "14-18",
@@ -398,8 +399,8 @@ CREATE TABLE users (
 
 ### Converge to the desired state (`metadata-only`) — exit 0
 
-```
-~/kiran01bm/github/pg-sprite main ./bin/pg-sprite diff --desired /tmp/users.sql --json
+```console
+$ pg-sprite diff --desired /tmp/users.sql --json
 {
   "format_version": 1,
   "source": "diff",
