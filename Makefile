@@ -11,7 +11,7 @@ PG_DATABASE ?= pgsprite
 # Localhost-only test credentials, parameterized above — not a real secret.
 PG_DSN_LOCAL = postgres://$(PG_USER):$(PG_PASSWORD)@localhost:$(PG_PORT)/$(PG_DATABASE)?sslmode=disable# sadscan:disable np.postgres.1
 
-.PHONY: build test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down clean
+.PHONY: build test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down clean demo demo-seed demo-check
 
 build:
 	$(GO) build -o bin/pg-sprite ./cmd/pg-sprite
@@ -61,3 +61,23 @@ db-down:
 
 clean:
 	rm -rf bin
+
+# Runnable product tour: build the binary, start the compose database,
+# reseed the demo tables, and walk the CLI through every planner route,
+# the declarative diff, the offline commands, and real executions
+# (demo/tour.sh). Rerunnable — each run starts from the same seed. The
+# database is left running; stop it with make db-down.
+demo: build db-up demo-seed
+	PGS="$(CURDIR)/bin/pg-sprite" PG_DSN="$(PG_DSN_LOCAL)" demo/tour.sh
+
+# Reseed the demo tables to the baseline (psql runs inside the compose
+# container, so no local client is required). Depends on db-up so it works
+# standalone and never races the database under parallel make.
+demo-seed: db-up
+	$(COMPOSE_ENV) $(COMPOSE) -f compose/compose.yml exec -T postgres \
+		psql -v ON_ERROR_STOP=1 -U $(PG_USER) -d $(PG_DATABASE) < demo/seed.sql
+
+# The same tour as a packaged-binary smoke test (CI runs this): asserts on
+# --json fields and exit codes only. Needs jq.
+demo-check: build db-up demo-seed
+	CHECK=1 PGS="$(CURDIR)/bin/pg-sprite" PG_DSN="$(PG_DSN_LOCAL)" demo/tour.sh
