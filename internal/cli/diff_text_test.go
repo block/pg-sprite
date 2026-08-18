@@ -102,7 +102,9 @@ func TestDiffTextGreenfieldLeadsWithNote(t *testing.T) {
 	assert.Contains(t, text, "statement 1:\n  "+sql+";\n")
 	assert.Contains(t, text, "note:\n  runs as written\n")
 	assert.Contains(t, text, "plan:\n  public.widgets (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
-	assert.Contains(t, text, "apply:\n  run each statement via pg-sprite migrate")
+	assert.NotContains(t, text, "apply:",
+		"migrate refuses CREATE TABLE, so a greenfield plan must not point the reader at it")
+	assert.Contains(t, text, "sql:\n  re-run with --sql")
 	assert.NotContains(t, text, "error[table-not-found]")
 }
 

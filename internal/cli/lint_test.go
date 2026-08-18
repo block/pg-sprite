@@ -59,10 +59,9 @@ func TestLintReadsFromFile(t *testing.T) {
 }
 
 // The text renderer leads each flagged statement with the conventional
-// name:line:column: label so CI systems and editors can jump to the
-// finding, and renders the findings in the same diagnostic grammar as the
-// dry-run report. This is the renderer's own unit test — everything else
-// asserts typed fields.
+// name:line:column: label so a reader can jump to the finding, and renders
+// the findings in the same diagnostic grammar as the dry-run report. This
+// is the renderer's own unit test — everything else asserts typed fields.
 func TestLintTextFindingsCarryPositions(t *testing.T) {
 	var out strings.Builder
 	cmd := LintCmd{}

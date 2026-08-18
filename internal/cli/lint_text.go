@@ -9,8 +9,8 @@ import (
 
 // writeLintText renders the findings in the same compiler-diagnostic
 // grammar as the dry-run and diff reports: the flagged statement leads
-// each group under the conventional name:line:column: label so CI systems
-// and editors can jump to the source, each finding is a labeled
+// each group under the conventional name:line:column: label so a reader
+// can jump to the source, each finding is a labeled
 // severity[code]: entry beneath it, and the report closes with a lint
 // summary. Display only — the JSON report is the machine contract; the
 // codes are the same typed values the JSON report carries. A clean report

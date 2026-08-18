@@ -40,7 +40,11 @@ func writeDiffText(out io.Writer, report plan.Report) error {
 	w.printf("  nothing was executed\n")
 	w.entry("sql:")
 	w.printf("  re-run with --sql to print the plan as an executable SQL script\n")
-	if refused == 0 && steps > 0 {
+	// No apply pointer for a greenfield plan: migrate changes an existing
+	// table and refuses CREATE TABLE, so pointing the reader at it would
+	// send them in a circle — the leading note and the --sql pointer are
+	// the honest route.
+	if refused == 0 && steps > 0 && !tableMissing(report) {
 		w.entry("apply:")
 		w.printf("  run each statement via pg-sprite migrate --alter '…', which refuses\n")
 		w.printf("  blocking forms and substitutes safer online sequences\n")

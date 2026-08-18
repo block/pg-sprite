@@ -61,6 +61,11 @@ func TestDocListsEveryVocabularyValue(t *testing.T) {
 		assert.Contains(t, doc, fmt.Sprintf("### `%s`", g),
 			"docs/suggest-report.md is missing an anchored heading for %q", g)
 	}
+	// The CLI's docs: line links the caveats section itself
+	// (#caveats-caveats); pin the heading that produces the anchor so a
+	// rename cannot silently break the printed link.
+	assert.Contains(t, doc, "## Caveats (`caveats`)",
+		"the caveats heading is a stable anchor the CLI's text output links")
 }
 
 // The doc's stated current version is the constant, not prose that can

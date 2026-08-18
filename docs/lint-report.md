@@ -81,6 +81,20 @@ codes make the conservatism visible instead of burying it:
 | `app-breaking-rename` | warning | `ALTER TABLE t RENAME COLUMN email TO email_address` | PostgreSQL runs a column or table rename as a metadata-only catalog flip, but a rename cannot land atomically across running application instances — code still referencing the old name breaks the instant it commits. For a column, expand/contract instead: add the new column, dual-write and backfill, switch reads, then drop the old column as its own reviewed change. For a table, coordinate the rename with the application deploy that adopts the new name. Index renames are not flagged — SQL never references an index by name. |
 | `destructive` | warning | `ALTER TABLE t DROP COLUMN legacy` | The operation discards live structure (a column, constraint, or index drop) and cannot be undone by re-running the schema. |
 
+A lint `code` is what the finding *is*; the finding's `reason` field is the classifier's
+typed cause for it, drawn from the plan report's Reason vocabulary
+([postgres-online-ddl-reference.md#dry-run-diagnostic-codes](postgres-online-ddl-reference.md#dry-run-diagnostic-codes)) —
+the text output prints the code as the diagnostic label and links the reason's reference
+anchor. The mapping:
+
+| `code` | `reason` carried |
+|---|---|
+| `blocking-idiom` | `safer-idiom` |
+| `table-rewrite`, `possible-table-rewrite` | the specific rewrite cause: `volatile-default`, `generated-stored`, `type-rewrite`, or `relocation` |
+| `app-breaking-rename` | `app-breaking-rename` |
+| `unsupported-operation` | `unsupported-operation` |
+| `destructive` | none — destructiveness is a property of the operation, not a routing cause |
+
 ## Severities (`severity`)
 
 | Value | Meaning | Exit behavior |
@@ -95,9 +109,11 @@ inline suppression) is a planned extension and will be introduced as a contract 
 
 Without `--json`, findings render in the same compiler-diagnostic grammar as the dry-run
 and diff reports: each flagged statement leads its group under the conventional
-`name:line:column:` label (where `name` is the linted file path or `<stdin>`) so CI systems
-and editors can jump to the source, each finding is a `severity[code]:` entry beneath it
-with the impact prose, any safer form follows as a `help:` entry with its execution caveat,
-a `docs:` entry links the reference anchors, and the report closes with a `lint:` summary.
-The text form is for humans and editors; automation consumes the JSON report. A clean
-script prints nothing and exits zero.
+`name:line:column:` label (where `name` is the linted file path or `<stdin>`) so a reader
+can jump to the source, each finding is a `severity[code]:` entry beneath it with the
+impact prose, any safer form follows as a `help:` entry with its execution caveat, a
+`docs:` entry links the reference anchors, and the report closes with a `lint:` summary.
+The text form is for humans; it is not a machine surface — the one-line
+`file:line:column: severity: …` shape errorformat-style annotators parse is not emitted,
+so automation (including CI annotation) consumes the JSON report and supplies the file
+name it passed in. A clean script prints nothing and exits zero.
