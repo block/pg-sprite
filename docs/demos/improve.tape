@@ -25,7 +25,7 @@ Type "echo '    email text,' >> users.sql" Enter
 Type "echo '    nickname text,' >> users.sql" Enter
 Type "echo '    CONSTRAINT users_email_key UNIQUE (email)' >> users.sql" Enter
 Type "echo ');' >> users.sql" Enter
-Type "export PS1='\n~/pg-sprite main '" Enter
+Type "export PS1='\n~/kiran01bm/github/pg-sprite main '" Enter
 Type "clear" Enter
 Sleep 1.5s
 Show
