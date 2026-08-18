@@ -44,9 +44,8 @@ rules that apply inside the core. Read it before changing anything under
 
 ## What it looks like
 
-The sample below is captured verbatim from a real session against the
-compose database (`make db-up`, PostgreSQL 16): `$` marks the command,
-everything after it is the tool's output.
+Everything below is captured from a real session against the compose
+database (`make db-up`, PostgreSQL 16).
 
 ![pg-sprite replacing a blocking ADD CONSTRAINT with the safer online sequence: dry-run, real run, then the catalog proof](docs/demos/improve.gif)
 
@@ -60,36 +59,10 @@ reviewed `CREATE TABLE` file and get the statements that converge the live
 table onto it, reported in the same diagnostic grammar as the dry run.
 `--sql` prints the plan as an executable SQL script instead, and a plan
 containing a statement execution would refuse exits 2 — the same CI gate
-as the dry run:
-
-```console
-$ pg-sprite diff --desired users.sql
-statement 1:
-  ALTER TABLE public.users ADD COLUMN nickname text;
-
-note[metadata-only]:
-  ADD COLUMN nickname — a brief catalog-only change; takes a short
-  exclusive lock but does not scan or rewrite the table
-
-note:
-  runs as written
-
-docs:
-  https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#metadata-only
-
-plan:
-  public.users (PostgreSQL 16.14) — 1 statement, 1 step to run, 0 refused
-
-diff:
-  nothing was executed
-
-sql:
-  re-run with --sql to print the plan as an executable SQL script
-
-apply:
-  run each statement via pg-sprite migrate --alter '…', which refuses
-  blocking forms and substitutes safer online sequences
-```
+as the dry run. Watch it in
+[docs/demos/diff-greenfield.gif](docs/demos/diff-greenfield.gif); the
+machine-readable shape is in
+[docs/cli-output-examples.md](docs/cli-output-examples.md).
 
 **Improve: a blocking form is replaced with the safer online sequence.**
 `migrate --dry-run` shows exactly what would run, as compiler-style
