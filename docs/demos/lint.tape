@@ -7,7 +7,7 @@ Output lint.gif
 Set Shell "bash"
 Set FontSize 14
 Set Width 1560
-Set Height 700
+Set Height 1160
 Set Padding 16
 Set TypingSpeed 30ms
 

@@ -1,5 +1,5 @@
 # Diff, brand-new table: absent from the live database, plans as the full
-# desired schema with the "execute via pg-sprite migrate" guard comment.
+# desired schema, reported in the diagnostic grammar with the greenfield note.
 # Render from this directory: vhs diff-greenfield.tape (or `make demos` at the repo root).
 # Needs: make build && make db-up first. Hidden setup drops widgets so the
 # tape is deterministic and rerunnable.
@@ -8,7 +8,7 @@ Output diff-greenfield.gif
 Set Shell "bash"
 Set FontSize 14
 Set Width 1300
-Set Height 640
+Set Height 800
 Set Padding 16
 Set TypingSpeed 30ms
 
