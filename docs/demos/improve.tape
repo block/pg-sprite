@@ -17,6 +17,10 @@ Set Theme "Dracula"
 
 Hide
 Type `export PATH="$(git rev-parse --show-toplevel)/bin:$PATH"` Enter
+# The rendering machine's environment leaks into the recorded shell: strip
+# color suppressors so the report's --color=auto detection sees a normal
+# terminal and the GIF shows the diagnostic colors deterministically.
+Type "unset NO_COLOR && export TERM=xterm-256color" Enter
 Type "export PGSPRITE_URL='postgres://pgsprite:pgsprite@localhost:5432/pgsprite?sslmode=disable'" Enter
 Type `docker exec compose-postgres-1 psql -U pgsprite -d pgsprite -c 'DROP TABLE IF EXISTS users' -c 'CREATE TABLE users (id bigint PRIMARY KEY, email text)' -c "INSERT INTO users SELECT g, 'u'||g||'@x.com' FROM generate_series(1,1000) g" >/dev/null` Enter
 Type `demo_dir="$(mktemp -d)" && cd "$demo_dir"` Enter

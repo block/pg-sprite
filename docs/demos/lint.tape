@@ -14,6 +14,10 @@ Set Theme "Dracula"
 
 Hide
 Type `export PATH="$(git rev-parse --show-toplevel)/bin:$PATH"` Enter
+# The rendering machine's environment leaks into the recorded shell: strip
+# color suppressors so the report's --color=auto detection sees a normal
+# terminal and the GIF shows the diagnostic colors deterministically.
+Type "unset NO_COLOR && export TERM=xterm-256color" Enter
 Type "cd /tmp" Enter
 Type "echo 'CREATE INDEX users_email_idx ON users (email);' > changes.sql" Enter
 Type "echo 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);' >> changes.sql" Enter
