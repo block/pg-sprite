@@ -14,12 +14,35 @@ directory).
 
 ## Tapes
 
-| Tape | Story | Needs database |
-|---|---|---|
-| `diff-greenfield.tape` | Declarative diff for a table absent from the live database: the full desired schema planned as a diagnostic report with the greenfield note | yes |
-| `improve.tape` | Dry-run of a blocking `ADD CONSTRAINT … UNIQUE`, the real run executing the safer online sequence, `\d users` catalog proof — then the declarative loop: `diff --desired` plans the remaining change, `migrate` executes it, `diff` confirms convergence | yes |
-| `refuse.tape` | `error[rewrite-required]` refusal with typed `note`/`help` diagnostics and doc anchors, then `echo $?` showing the exit-code contract (2) | yes |
-| `lint.tape` | Offline lint of a two-statement change file — `unset PGSPRITE_URL` on camera to show no database is needed | no |
+### `diff-greenfield.tape` — declarative diff, greenfield (needs database)
+
+Declarative diff for a table absent from the live database: the full
+desired schema planned as a diagnostic report with the greenfield note.
+
+![pg-sprite diff planning a CREATE TABLE from the full desired schema, with the greenfield note](diff-greenfield.gif)
+
+### `improve.tape` — the safer online sequence, then the declarative loop (needs database)
+
+Dry-run of a blocking `ADD CONSTRAINT … UNIQUE`, the real run executing
+the safer online sequence, `\d users` catalog proof — then the declarative
+loop: `diff --desired` plans the remaining change, `migrate` executes it,
+`diff` confirms convergence.
+
+![pg-sprite replacing a blocking ADD CONSTRAINT with the safer online sequence, then converging on a desired schema via diff and migrate](improve.gif)
+
+### `refuse.tape` — refusal and the exit-code contract (needs database)
+
+`error[rewrite-required]` refusal with typed `note`/`help` diagnostics and
+doc anchors, then `echo $?` showing the exit-code contract (2).
+
+![pg-sprite refusing a change with no safe path, with typed diagnostics and exit code 2](refuse.gif)
+
+### `lint.tape` — offline lint (no database)
+
+Offline lint of a two-statement change file — `unset PGSPRITE_URL` on
+camera to show no database is needed.
+
+![pg-sprite lint flagging blocking idioms in a DDL file with no database connection](lint.gif)
 
 ## Re-rendering
 
