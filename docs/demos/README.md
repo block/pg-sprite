@@ -29,8 +29,14 @@ make demos
 ```
 
 The GIFs are committed next to the tapes so the README renders without any
-build step. When CLI output changes (the samples are pinned by renderer
-tests), re-render and commit the updated GIFs in the same change.
+build step. Nothing pins them: renderer tests pin
+`docs/cli-output-examples.md` and the contract docs, and CI's demo smoke
+test asserts on `demo/tour.sh` output, but the README samples and these
+GIFs drift silently when CLI output changes — re-rendering is a manual
+duty, done in the same change that alters the output. Each re-render
+commits whole new binary blobs (no deltas), so re-render only the tapes
+whose recorded output actually changed; if the accumulated weight starts
+to bite, the GIFs move to release assets.
 
 ## Tape-writing notes
 

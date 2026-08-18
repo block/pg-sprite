@@ -18,7 +18,7 @@ Type "export PGSPRITE_URL='postgres://pgsprite:pgsprite@localhost:5432/pgsprite?
 Type "docker exec compose-postgres-1 psql -U pgsprite -d pgsprite -c 'DROP TABLE IF EXISTS widgets' >/dev/null" Enter
 Type `demo_dir="$(mktemp -d)" && cd "$demo_dir"` Enter
 Type "echo 'CREATE TABLE widgets (id bigint PRIMARY KEY, name text NOT NULL, price numeric);' > widgets.sql" Enter
-Type "export PS1='\n~/kiran01bm/github/pg-sprite main '" Enter
+Type "export PS1='\n~/pg-sprite main '" Enter
 Type "clear" Enter
 Sleep 1.5s
 Show

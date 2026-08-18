@@ -60,9 +60,10 @@ db-down:
 	$(COMPOSE_ENV) $(COMPOSE) -f compose/compose.yml down -v
 
 # Re-render the README/docs demo GIFs from their VHS tapes (docs/demos).
-# Needs vhs (brew install vhs), a built binary (make build), and the compose
-# database (make db-up) for the database-backed tapes.
-demos:
+# Needs vhs (brew install vhs); the binary and compose database are built
+# and started as prerequisites — every tape puts bin/ on PATH, so rendering
+# without a built binary would record "command not found" into the GIFs.
+demos: build db-up
 	cd docs/demos && for t in *.tape; do vhs $$t || exit 1; done
 
 clean:
