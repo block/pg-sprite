@@ -14,6 +14,7 @@ import (
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // run is the diff flow: parse and admit the desired file, derive the routed
@@ -47,10 +48,24 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		"table_exists", report.TableExists != nil && *report.TableExists,
 		"disposition", string(report.Disposition))
 
-	if c.JSON {
-		return writeJSON(out, report)
+	switch {
+	case c.JSON:
+		err = writeJSON(out, report)
+	case c.SQL:
+		err = writePlanText(out, report)
+	default:
+		err = writeDiffText(out, report)
 	}
-	return writePlanText(out, report)
+	if err != nil {
+		return err
+	}
+	// A plan execution would refuse exits with the refusal code — the same
+	// contract the dry run uses — so CI can gate on the diff without
+	// parsing the report.
+	if diffRefused(report) {
+		return verdict.ErrRefused
+	}
+	return nil
 }
 
 // writeJSON emits the plan report as JSON.
@@ -66,10 +81,11 @@ func writeJSON(out io.Writer, report plan.Report) error {
 	return nil
 }
 
-// writePlanText emits the plan as an executable SQL script: one statement
-// per line, each annotated with its route, destructive statements flagged,
-// and SQL comments for the no-change and missing-table cases so the output
-// stays valid SQL. Safer sequences appear as comment lines — never
+// writePlanText emits the plan as an executable SQL script (the --sql
+// rendering): one statement per line, each annotated with its route,
+// destructive statements flagged, and SQL comments for the no-change and
+// missing-table cases so the output stays valid SQL. Safer sequences
+// appear as comment lines — never
 // substituted into the script body, which stays the literal convergence
 // plan (a CONCURRENTLY rewrite could not run inside a transaction block).
 // The header points at migrate as the executing front door: running this

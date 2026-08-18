@@ -28,62 +28,16 @@ const dryRunTextWidth = 74
 // own line, the content indented beneath it, a blank line between entries.
 // The typed reason is the rule code, each code gets a doc anchor, and the
 // report closes with a plan summary. Display only — the JSON report is the
-// machine contract, and diff keeps its executable SQL rendering
-// (writeChangeText). The codes are the same typed values the JSON report
+// machine contract. The codes are the same typed values the JSON report
 // carries, so the prose cross-references automation and
 // docs/postgres-online-ddl-reference.md#dry-run-diagnostic-codes.
 func writeDryRunText(out io.Writer, report plan.Report) error {
 	w := &stickyWriter{out: out}
 	steps, refused := 0, 0
 	for i, ps := range report.Statements {
-		w.entry(fmt.Sprintf("statement %d:", i+1))
-		w.printf("  %s;\n", ps.SQL)
-		codes := writeRefusal(w, ps)
-		refused += len(codes) // at most one refusal code per statement
-		for _, d := range ps.Decisions {
-			w.diag(decisionSeverity(ps, d), string(d.Reason),
-				fmt.Sprintf("%s — %s", d.Operation, impactText(d.Reason)))
-			codes = appendCode(codes, string(d.Reason))
-		}
-		if ps.Destructive {
-			w.diag("warning", "destructive", "this change discards live data or structure")
-			codes = appendCode(codes, "destructive")
-		}
-		if unverifiedDecision(ps) {
-			w.diag("note", "", "the table was not introspected, so this is the conservative classification; with live facts the same change may classify as cheaper")
-		}
-		if ps.Guidance != "" {
-			// The manual path trails the findings that explain it —
-			// compiler style, where help: follows the diagnosis. help is
-			// reserved for steps the user runs; a sequence pg-sprite runs
-			// itself is a note.
-			w.diag("help", string(ps.Guidance), guidanceText(ps.Guidance))
-		}
-		if ps.Disposition == router.DispositionExecute {
-			if substituted(ps) {
-				w.diag("note", "", "pg-sprite will run a safer online sequence instead:")
-				for n, sql := range ps.ExecSQL {
-					w.printf("  %d. %s;\n", n+1, sql)
-				}
-				if len(ps.ExecSQL) > 1 {
-					w.diag("note", "", "each step commits on its own — not transactionally equivalent, and the sequence must not run inside a transaction block")
-				} else {
-					w.diag("note", "", "the substituted statement commits on its own and must not run inside a transaction block")
-				}
-			} else {
-				w.diag("note", "", "runs as written")
-			}
-			steps += len(ps.ExecSQL)
-		}
-		if len(codes) > 0 {
-			w.entry("docs:")
-			for _, c := range codes {
-				w.printf("  %s#%s\n", onlineDDLReferenceURL, c)
-			}
-			if ps.Guidance != "" {
-				w.printf("  %s#%s\n", suggestReportURL, ps.Guidance)
-			}
-		}
+		s, r := writeStatementDiagnostics(w, i+1, ps, "pg-sprite")
+		steps += s
+		refused += r
 	}
 	if tableMissing(report) {
 		w.diag("error", "table-not-found",
@@ -101,6 +55,66 @@ func writeDryRunText(out io.Writer, report plan.Report) error {
 		w.printf("  re-run without --dry-run\n")
 	}
 	return w.err
+}
+
+// writeStatementDiagnostics renders one plan statement's labeled entries —
+// the statement itself, its refusal, its classifications, guidance, the
+// substitution notes, and the docs anchors — and returns the execution
+// steps it contributes and how many refusal codes it raised (at most one).
+// runner names what executes the plan in the substitution note: the dry-run
+// report speaks as the invocation itself ("pg-sprite" — re-run without
+// --dry-run), while the diff report never executes and routes execution
+// through the migrate front door ("pg-sprite migrate").
+func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner string) (steps, refused int) {
+	w.entry(fmt.Sprintf("statement %d:", n))
+	w.printf("  %s;\n", ps.SQL)
+	codes := writeRefusal(w, ps)
+	refused = len(codes) // at most one refusal code per statement
+	for _, d := range ps.Decisions {
+		w.diag(decisionSeverity(ps, d), string(d.Reason),
+			fmt.Sprintf("%s — %s", d.Operation, impactText(d.Reason)))
+		codes = appendCode(codes, string(d.Reason))
+	}
+	if ps.Destructive {
+		w.diag("warning", "destructive", "this change discards live data or structure")
+		codes = appendCode(codes, "destructive")
+	}
+	if unverifiedDecision(ps) {
+		w.diag("note", "", "the table was not introspected, so this is the conservative classification; with live facts the same change may classify as cheaper")
+	}
+	if ps.Guidance != "" {
+		// The manual path trails the findings that explain it —
+		// compiler style, where help: follows the diagnosis. help is
+		// reserved for steps the user runs; a sequence pg-sprite runs
+		// itself is a note.
+		w.diag("help", string(ps.Guidance), guidanceText(ps.Guidance))
+	}
+	if ps.Disposition == router.DispositionExecute {
+		if substituted(ps) {
+			w.diag("note", "", runner+" will run a safer online sequence instead:")
+			for n, sql := range ps.ExecSQL {
+				w.printf("  %d. %s;\n", n+1, sql)
+			}
+			if len(ps.ExecSQL) > 1 {
+				w.diag("note", "", "each step commits on its own — not transactionally equivalent, and the sequence must not run inside a transaction block")
+			} else {
+				w.diag("note", "", "the substituted statement commits on its own and must not run inside a transaction block")
+			}
+		} else {
+			w.diag("note", "", "runs as written")
+		}
+		steps = len(ps.ExecSQL)
+	}
+	if len(codes) > 0 {
+		w.entry("docs:")
+		for _, c := range codes {
+			w.printf("  %s#%s\n", onlineDDLReferenceURL, c)
+		}
+		if ps.Guidance != "" {
+			w.printf("  %s#%s\n", suggestReportURL, ps.Guidance)
+		}
+	}
+	return steps, refused
 }
 
 // tableMissing reports whether the plan's target table was introspected

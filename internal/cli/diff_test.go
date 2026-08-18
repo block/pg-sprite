@@ -1,14 +1,37 @@
 package cli
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/alecthomas/kong"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/statement"
 )
+
+// --json and --sql each replace the default diagnostic report with a
+// different whole-output format; combining them names no single output, so
+// the parse is rejected rather than one flag silently winning.
+func TestDiffRejectsSQLWithJSON(t *testing.T) {
+	desired := filepath.Join(t.TempDir(), "schema.sql")
+	require.NoError(t, os.WriteFile(desired, []byte("CREATE TABLE t (id bigint PRIMARY KEY)"), 0o600))
+	c := New()
+	k, err := kong.New(c, kong.Vars{"version": "test"})
+	require.NoError(t, err)
+	_, err = k.Parse([]string{
+		"diff",
+		"--url", "postgres://user@localhost:5432/app",
+		"--desired", desired,
+		"--sql",
+		"--json",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "--sql cannot be combined with --json")
+}
 
 func TestFmtCanonicalizesFromStdin(t *testing.T) {
 	cmd := &FmtCmd{}
