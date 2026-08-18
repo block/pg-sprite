@@ -11,7 +11,7 @@ PG_DATABASE ?= pgsprite
 # Localhost-only test credentials, parameterized above — not a real secret.
 PG_DSN_LOCAL = postgres://$(PG_USER):$(PG_PASSWORD)@localhost:$(PG_PORT)/$(PG_DATABASE)?sslmode=disable# sadscan:disable np.postgres.1
 
-.PHONY: build test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down clean demo demo-seed demo-check
+.PHONY: build test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check
 
 build:
 	$(GO) build -o bin/pg-sprite ./cmd/pg-sprite
@@ -58,6 +58,12 @@ db-up:
 
 db-down:
 	$(COMPOSE_ENV) $(COMPOSE) -f compose/compose.yml down -v
+
+# Re-render the README/docs demo GIFs from their VHS tapes (docs/demos).
+# Needs vhs (brew install vhs), a built binary (make build), and the compose
+# database (make db-up) for the database-backed tapes.
+demos:
+	cd docs/demos && for t in *.tape; do vhs $$t || exit 1; done
 
 clean:
 	rm -rf bin

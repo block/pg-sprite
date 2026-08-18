@@ -48,6 +48,13 @@ Every sample below is captured verbatim from a real session against the
 compose database (`make db-up`, PostgreSQL 16): `$` marks the command,
 everything after it is the tool's output.
 
+![pg-sprite replacing a blocking ADD CONSTRAINT with the safer online sequence: dry-run, real run, then the catalog proof](docs/demos/improve.gif)
+
+Animated demos for the other routes — refusal with typed help, offline lint,
+declarative diff — live in [docs/demos/](docs/demos/), rendered from committed
+[VHS](https://github.com/charmbracelet/vhs) tapes (`make demos` re-renders
+them).
+
 **Improve: a blocking form is replaced with the safer online sequence.**
 `migrate --dry-run` shows exactly what would run, as compiler-style
 diagnostics with a doc anchor per finding (exit 0 — the plan is executable):
