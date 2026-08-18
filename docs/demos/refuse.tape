@@ -25,6 +25,9 @@ Type "pg-sprite migrate --alter 'ALTER TABLE users ADD CHECK (id > 0)' --dry-run
 Sleep 500ms
 Enter
 Sleep 8s
+Enter
+Enter
+Sleep 500ms
 
 Type "echo $?"
 Sleep 500ms

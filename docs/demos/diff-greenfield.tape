@@ -27,6 +27,9 @@ Type "cat widgets.sql"
 Sleep 500ms
 Enter
 Sleep 2s
+Enter
+Enter
+Sleep 500ms
 
 Type "pg-sprite diff --desired widgets.sql"
 Sleep 500ms

@@ -16,10 +16,10 @@ directory).
 
 | Tape | Story | Needs database |
 |---|---|---|
-| `improve.tape` | Dry-run of a blocking `ADD CONSTRAINT … UNIQUE`, the real run executing the safer online sequence, then `\d users` catalog proof | yes |
+| `diff-greenfield.tape` | Declarative diff for a table absent from the live database: the full desired schema planned with the migrate guard comment | yes |
+| `improve.tape` | Dry-run of a blocking `ADD CONSTRAINT … UNIQUE`, the real run executing the safer online sequence, `\d users` catalog proof — then the declarative loop: `diff --desired` plans the remaining change, `migrate` executes it, `diff` confirms convergence | yes |
 | `refuse.tape` | `error[rewrite-required]` refusal with typed `note`/`help` diagnostics and doc anchors, then `echo $?` showing the exit-code contract (2) | yes |
 | `lint.tape` | Offline lint of a two-statement change file — `unset PGSPRITE_URL` on camera to show no database is needed | no |
-| `diff-greenfield.tape` | Declarative diff for a table absent from the live database: the full desired schema planned with the migrate guard comment | yes |
 
 ## Re-rendering
 

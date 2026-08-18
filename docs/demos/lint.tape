@@ -25,11 +25,17 @@ Type "unset PGSPRITE_URL"
 Sleep 500ms
 Enter
 Sleep 1s
+Enter
+Enter
+Sleep 500ms
 
 Type "cat changes.sql"
 Sleep 500ms
 Enter
 Sleep 2s
+Enter
+Enter
+Sleep 500ms
 
 Type "pg-sprite lint changes.sql"
 Sleep 500ms
