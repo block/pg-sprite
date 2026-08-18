@@ -42,7 +42,7 @@ func (c *LintCmd) runLint(in io.Reader, out io.Writer) error {
 		if err := enc.Encode(report); err != nil {
 			return fmt.Errorf("write lint report: %w", err)
 		}
-	} else if err := writeLintText(out, sourceName(c.Path), report); err != nil {
+	} else if err := writeLintText(out, c.palette(out), sourceName(c.Path), report); err != nil {
 		return err
 	}
 	if report.Errors > 0 {

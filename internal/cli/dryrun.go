@@ -95,7 +95,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		if err := writeJSON(out, report); err != nil {
 			return err
 		}
-	} else if err := writeDryRunText(out, report); err != nil {
+	} else if err := writeDryRunText(out, c.palette(out), report); err != nil {
 		return err
 	}
 	// A plan execution would not run exits with the refusal code — the same

@@ -40,7 +40,7 @@ func TestDryRunTextSaferIdiomSubstitution(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, report))
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	assert.Equal(t, `statement 1:
   ALTER TABLE "users" ADD CONSTRAINT "u" UNIQUE ("email");
 
@@ -94,7 +94,7 @@ func TestDryRunTextRunAsWritten(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, report))
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "note[metadata-only]:\n  add column — a brief catalog-only change")
 	assert.Contains(t, text, "note:\n  runs as written\n")
@@ -123,7 +123,7 @@ func TestDryRunTextBackendUnavailable(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, report))
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "error[backend-unavailable]:\n  refused — needs the copy-and-swap backend")
 	assert.Contains(t, text, "note[type-rewrite]:\n  alter column type — the type conversion forces a full")
@@ -153,7 +153,7 @@ func TestDryRunTextRewriteRequired(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, report))
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "error[rewrite-required]:\n  refused — blocks as written and no online")
 	assert.Contains(t, text, "rewrite the change as separate")
@@ -192,7 +192,7 @@ func TestDryRunTextRefusalAndDestructive(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, report))
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "error[unsupported-partitioned-parent]:\n  refused — the target is a partitioned table")
 	assert.Contains(t, text, "warning[destructive]:\n  this change discards live data or structure")
@@ -221,7 +221,7 @@ func TestDryRunTextUnverifiedNote(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, report))
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	assert.Contains(t, out.String(), "note:\n  the table was not introspected")
 }
 
@@ -279,7 +279,7 @@ func TestDryRunTextPlannerRefusalNamesOperation(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, report))
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "error[unsupported-statement]:\n  refused — the planner knows no safe path for unrecognized operation")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#unsupported-statement\n")
@@ -311,7 +311,7 @@ func TestDryRunTextMissingTable(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, report))
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "error[table-not-found]:\n  the target table public.nosuchtable does not exist")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#table-not-found\n")
@@ -341,7 +341,7 @@ func TestDryRunTextSingleStepSubstitutionNote(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, report))
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "note:\n  the substituted statement commits on its own and must not run inside a\n  transaction block\n")
 	assert.NotContains(t, text, "each step commits on its own")
@@ -357,7 +357,7 @@ func TestDryRunTextTrimsServerVersionBanner(t *testing.T) {
 	report.Disposition = router.DispositionExecute
 
 	var out strings.Builder
-	require.NoError(t, writeDryRunText(&out, report))
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	assert.Contains(t, out.String(), "public.users (PostgreSQL 16.14) —")
 	assert.NotContains(t, out.String(), "Debian")
 }

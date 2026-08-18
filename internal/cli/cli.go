@@ -93,7 +93,8 @@ func (f DBFlags) audit() *slog.Logger {
 // Everything the engine cannot run safely is refused with an explicit
 // verdict.
 type MigrateCmd struct {
-	DBFlags `embed:""`
+	DBFlags     `embed:""`
+	OutputFlags `embed:""`
 
 	Alter             string        `help:"Imperative ALTER statement to run." name:"alter" required:""`
 	MaxTableSize      byteSize      `help:"Size threshold above which the optimistic attempt is skipped, measured as the table's full on-disk footprint: heap, indexes, and TOAST, all partitions (binary units: B, KiB, MiB, GiB, TiB). Planner-proven online steps (concurrent index builds, constraint validation) are not size-guarded." default:"1GiB"`
@@ -126,7 +127,8 @@ func (c *MigrateCmd) Run() error { return c.run(context.Background(), os.Stdout)
 // rolled-back scratch schema, and print the ordered plan without executing
 // anything.
 type DiffCmd struct {
-	DBFlags `embed:""`
+	DBFlags     `embed:""`
+	OutputFlags `embed:""`
 
 	Desired string `help:"Path to the desired-state CREATE TABLE .sql file." name:"desired" type:"existingfile" required:""`
 	Schema  string `help:"Schema containing the live table." default:"public"`
@@ -158,6 +160,8 @@ func (c *FmtCmd) Run() error { return c.runFmt(os.Stdin, os.Stdout) }
 // LintCmd checks a DDL script for patterns the engine would refuse,
 // rewrite, or gate. It is offline — no database flags.
 type LintCmd struct {
+	OutputFlags `embed:""`
+
 	Path string `arg:"" optional:"" help:"DDL file to lint; stdin when omitted." type:"existingfile"`
 	JSON bool   `help:"Emit the findings report as JSON."`
 }
@@ -169,6 +173,8 @@ func (c *LintCmd) Run() error { return c.runLint(os.Stdin, os.Stdout) }
 // would run instead, with typed caveats. It is offline and advisory — no
 // database flags, nothing executes, and it always exits zero.
 type SuggestCmd struct {
+	OutputFlags `embed:""`
+
 	Path string `arg:"" optional:"" help:"DDL file to advise on; stdin when omitted." type:"existingfile"`
 	JSON bool   `help:"Emit the suggestions report as JSON."`
 }

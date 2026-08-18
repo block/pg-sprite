@@ -54,7 +54,7 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	case c.SQL:
 		err = writePlanText(out, report)
 	default:
-		err = writeDiffText(out, report)
+		err = writeDiffText(out, c.palette(out), report)
 	}
 	if err != nil {
 		return err

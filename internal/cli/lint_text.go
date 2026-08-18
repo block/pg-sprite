@@ -15,11 +15,11 @@ import (
 // summary. Display only — the JSON report is the machine contract; the
 // codes are the same typed values the JSON report carries. A clean report
 // prints nothing.
-func writeLintText(out io.Writer, name string, report lint.Report) error {
+func writeLintText(out io.Writer, pal palette, name string, report lint.Report) error {
 	if len(report.Findings) == 0 {
 		return nil
 	}
-	w := &stickyWriter{out: out}
+	w := &stickyWriter{out: out, pal: pal}
 	statement := 0
 	var docs []string
 	for _, f := range report.Findings {
