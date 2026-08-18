@@ -38,36 +38,51 @@ func (c *SuggestCmd) runSuggest(in io.Reader, out io.Writer) error {
 		}
 		return nil
 	}
-	return writeSuggestText(out, report)
+	return writeSuggestText(out, sourceName(c.Path), report)
 }
 
-// writeSuggestText renders each suggestion as the original, then either
-// the safer sequence with its caveats or the guidance naming the manual
-// path. A report with no suggestions prints nothing.
-func writeSuggestText(out io.Writer, report suggest.Report) error {
+// writeSuggestText renders the suggestions in the same compiler-diagnostic
+// grammar as the dry-run and diff reports: the risky statement leads each
+// group under the conventional name:line:column: label, the classification
+// is a warning entry beneath it, and the safer sequence (or the guidance
+// naming the manual path) follows as a help entry. Display only — the JSON
+// report is the machine contract; the codes are the same typed values the
+// JSON report carries. A report with no suggestions prints nothing.
+func writeSuggestText(out io.Writer, name string, report suggest.Report) error {
+	if len(report.Suggestions) == 0 {
+		return nil
+	}
+	w := &stickyWriter{out: out}
+	statement := 0
+	var docs []string
 	for _, s := range report.Suggestions {
-		if _, err := fmt.Fprintf(out, "statement %d: %s — %s\n", s.Statement, s.Operation, s.Reason); err != nil {
-			return fmt.Errorf("write suggest report: %w", err)
+		if s.Statement != statement {
+			writeDocs(w, docs)
+			docs = nil
+			w.entry(fmt.Sprintf("%s:%d:%d:", name, s.Line, s.Column))
+			w.printf("  %s;\n", s.Original)
+			statement = s.Statement
 		}
+		w.diag("warning", string(s.Reason),
+			fmt.Sprintf("%s — %s", s.Operation, impactText(s.Reason)))
+		docs = appendCode(docs, onlineDDLReferenceURL+"#"+string(s.Reason))
 		if len(s.Recommended) == 0 {
-			if _, err := fmt.Fprintf(out, "  guidance: %s — %s\n", s.Guidance, guidanceText(s.Guidance)); err != nil {
-				return fmt.Errorf("write suggest report: %w", err)
-			}
+			w.diag("help", string(s.Guidance), guidanceText(s.Guidance))
+			docs = appendCode(docs, suggestReportURL+"#"+string(s.Guidance))
 			continue
 		}
-		if _, err := fmt.Fprintf(out, "  safer form (not equivalent — see docs/postgres-online-ddl-reference.md):\n"); err != nil {
-			return fmt.Errorf("write suggest report: %w", err)
+		w.diag("help", "", "a safer online form exists — not a semantic equivalent, and running it by hand forgoes the engine's execution-time guards:")
+		for n, sql := range s.Recommended {
+			w.printf("  %d. %s;\n", n+1, sql)
 		}
-		for _, sql := range s.Recommended {
-			if _, err := fmt.Fprintf(out, "    %s;\n", sql); err != nil {
-				return fmt.Errorf("write suggest report: %w", err)
-			}
-		}
-		if _, err := fmt.Fprintf(out, "  caveats: %s\n", joinCaveats(s.Caveats)); err != nil {
-			return fmt.Errorf("write suggest report: %w", err)
-		}
+		w.diag("note", "", "caveats: "+joinCaveats(s.Caveats))
+		docs = appendCode(docs, suggestReportURL+"#caveats-caveats")
 	}
-	return nil
+	writeDocs(w, docs)
+	w.entry("suggest:")
+	w.printf("  %s — %s; advisory only, nothing was executed\n", name,
+		countNoun(len(report.Suggestions), "suggestion"))
+	return w.err
 }
 
 // guidanceText renders the manual path a guidance code names. An unknown

@@ -179,6 +179,18 @@ func appendCode(codes []string, code string) []string {
 	return append(codes, code)
 }
 
+// writeDocs emits the docs: entry linking each collected reference URL,
+// one per line in first-seen order; no entry when nothing was collected.
+func writeDocs(w *stickyWriter, urls []string) {
+	if len(urls) == 0 {
+		return
+	}
+	w.entry("docs:")
+	for _, u := range urls {
+		w.printf("  %s\n", u)
+	}
+}
+
 // unverifiedDecision reports whether any decision was taken without the
 // live facts needed to prove a cheaper route.
 func unverifiedDecision(ps plan.Statement) bool {

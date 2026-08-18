@@ -93,7 +93,11 @@ inline suppression) is a planned extension and will be introduced as a contract 
 
 ## Text output
 
-Without `--json`, findings render one per line in the conventional linter shape —
-`name:line:column: severity: code — operation` — where `name` is the linted file path or
-`<stdin>`. The text form is for humans and editors; automation consumes the JSON report.
-A clean script prints nothing and exits zero.
+Without `--json`, findings render in the same compiler-diagnostic grammar as the dry-run
+and diff reports: each flagged statement leads its group under the conventional
+`name:line:column:` label (where `name` is the linted file path or `<stdin>`) so CI systems
+and editors can jump to the source, each finding is a `severity[code]:` entry beneath it
+with the impact prose, any safer form follows as a `help:` entry with its execution caveat,
+a `docs:` entry links the reference anchors, and the report closes with a `lint:` summary.
+The text form is for humans and editors; automation consumes the JSON report. A clean
+script prints nothing and exits zero.

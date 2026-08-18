@@ -120,9 +120,28 @@ and suggest the safer form:
 
 ```console
 $ pg-sprite lint changes.sql
-changes.sql:1:1: warning: blocking-idiom — CREATE INDEX users_email_idx
-  safer form (not equivalent — see https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md): CREATE INDEX CONCURRENTLY users_email_idx ON users USING btree (email);
-  run each statement in its own transaction, never one block; after a failed CONCURRENTLY build, check pg_index.indisvalid and rebuild
+changes.sql:1:1:
+  CREATE INDEX users_email_idx ON users (email);
+
+warning[blocking-idiom]:
+  CREATE INDEX users_email_idx — holds a blocking lock on the table for
+  the whole operation — writes (and for some forms reads) wait until it
+  finishes
+
+help:
+  a safer online form exists — not a semantic equivalent, and running it
+  by hand forgoes the engine's execution-time guards:
+  1. CREATE INDEX CONCURRENTLY users_email_idx ON users USING btree (email);
+
+note:
+  run each statement in its own transaction, never one block; after a
+  failed CONCURRENTLY build, check pg_index.indisvalid and rebuild
+
+docs:
+  https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#safer-idiom
+
+lint:
+  changes.sql — 1 finding, 0 errors, 1 warning
 ```
 
 **Diff: declarative desired state in, classified plan out.** Point at a
