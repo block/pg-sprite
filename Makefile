@@ -71,8 +71,9 @@ demo: build db-up demo-seed
 	PGS="$(CURDIR)/bin/pg-sprite" PG_DSN="$(PG_DSN_LOCAL)" demo/tour.sh
 
 # Reseed the demo tables to the baseline (psql runs inside the compose
-# container, so no local client is required).
-demo-seed:
+# container, so no local client is required). Depends on db-up so it works
+# standalone and never races the database under parallel make.
+demo-seed: db-up
 	$(COMPOSE_ENV) $(COMPOSE) -f compose/compose.yml exec -T postgres \
 		psql -v ON_ERROR_STOP=1 -U $(PG_USER) -d $(PG_DATABASE) < demo/seed.sql
 

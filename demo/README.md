@@ -12,14 +12,16 @@ The tour walks four sections, each runnable on its own via
 
 | Section   | What it shows                                                                                                       | Writes?             |
 | --------- | ------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| `dryrun`  | One statement per planner route and reason: metadata-only, fast-default, binary-coercible, the safer idioms, type-rewrite, volatile-default, app-breaking-rename, destructive, relocation, and a refusal | no                  |
+| `dryrun`  | One statement per planner route, reason, and disposition: metadata-only, fast-default, binary-coercible, the safer idioms, a rewrite-required suggestion, type-rewrite, volatile-default, app-breaking-rename, destructive, relocation, and a refusal | no                  |
 | `diff`    | The declarative front door: a routed convergence plan for an existing table and for a missing one                    | no                  |
 | `offline` | `lint` (gates on error findings), `suggest` (advises), `fmt` (canonicalizes) — no database                           | no                  |
 | `exec`    | Real executions: a native add, the concurrent index substitution, the four-step `SET NOT NULL` sequence, and a structured refusal (exit code 2) for a rewrite whose backend is not yet available | yes (seeded tables) |
 
 `make demo` reseeds [seed.sql](seed.sql) first, so every run starts from the
 same state and the tour is rerunnable. The compose database is left running
-afterwards (`make db-down` stops it).
+afterwards (`make db-down` stops it). Individual sections assume that
+freshly seeded baseline: after an `exec` pass has changed the tables, run
+`make demo-seed` before invoking a section directly again.
 
 ## Check mode (CI)
 
@@ -28,9 +30,12 @@ make demo-check   # same tour, asserting on --json fields and exit codes; needs 
 ```
 
 `CHECK=1` makes the tour assert on the typed JSON contract — plan report
-routes/reasons/destructive flags, verdict outcomes and reasons, statement
-counts — and on exit codes (`0` success, `2` refusal, non-zero lint gate).
-It never asserts on human-facing prose, which is free to change. CI runs
+routes/reasons/destructive flags and `format_version`, verdict outcomes and
+reasons, the substituted `executed_sql` shape (step count plus a
+distinguishing fragment, so a regression that drops `CONCURRENTLY` or
+collapses the `SET NOT NULL` sequence turns the job red), statement counts —
+and on exit codes (`0` success, `2` refusal, `1` lint gate). It never
+asserts on human-facing prose, which is free to change. CI runs
 this as the `demo` job ("smoke test (built pg-sprite artifact)"): the
 built `bin/pg-sprite` exercised end-to-end against compose PostgreSQL.
 

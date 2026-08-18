@@ -21,6 +21,12 @@ PG_DSN="${PG_DSN:?set PG_DSN to the demo database URL}"
 CHECK="${CHECK:-0}"
 section="${1:-all}"
 
+# The tour cds into demo/ below, so anchor a relative binary path first
+# (a bare command name still resolves via PATH).
+if [[ "$PGS" == */* && "$PGS" != /* ]]; then
+    PGS="$(pwd)/$PGS"
+fi
+
 cd "$(dirname "$0")"
 
 if [ "$CHECK" = 1 ] && ! command -v jq >/dev/null 2>&1; then
@@ -52,11 +58,10 @@ assert_eq() {
 # disposition from the JSON plan report. Dry-run never writes, so these
 # rows can rerun in any order.
 #
-# Exit code: an execute-disposition plan must exit 0. A plan that would
-# not execute (rewrite-required, unavailable, refuse) is accepted at 0 or
-# the refusal code 2, so the tour spans builds on both sides of the
-# dry-run exit-code contract; tighten to exactly 2 once every supported
-# build exits with the refusal code.
+# Exit code: an execute-disposition plan exits 0; any plan that would not
+# execute (rewrite-required, unavailable, refuse) exits with the refusal
+# code 2 — the binary under test is always this tree's build, so the
+# contract is pinned exactly.
 dry_run() {
     local route="$1" reason="$2" destructive="$3" disposition="$4" sql="$5" out status=0
     step "$sql"
@@ -64,9 +69,10 @@ dry_run() {
         out=$("$PGS" migrate --url "$PG_DSN" --dry-run --json --alter "$sql") || status=$?
         if [ "$disposition" = execute ]; then
             assert_eq "dry-run exit of [$sql]" 0 "$status"
-        elif [ "$status" != 0 ] && [ "$status" != 2 ]; then
-            fail "dry-run exit of [$sql]: expected 0 or the refusal code 2, got '$status'"
+        else
+            assert_eq "dry-run refusal exit of [$sql]" 2 "$status"
         fi
+        assert_eq "plan format_version of [$sql]" 1 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "disposition of [$sql]" "$disposition" "$(jq -r '.disposition' <<<"$out")"
         assert_eq "route of [$sql]" "$route" "$(jq -r '.statements[0].route' <<<"$out")"
         assert_eq "reason of [$sql]" "$reason" "$(jq -r '.statements[0].decisions[0].reason' <<<"$out")"
@@ -76,18 +82,30 @@ dry_run() {
     fi
 }
 
-# execute_native sql
+# execute_native steps fragment sql
 #
 # Runs the schema change for real and requires the executed-natively
-# verdict — this exercises the safer-sequence runner (the concurrent index
-# build, the four-step SET NOT NULL) in the packaged binary.
+# verdict plus the shape of what actually ran. The verdict's executed_sql
+# is present only when the engine substituted a safer sequence, so
+# steps=0 pins an as-written run and steps>0 pins the substitution — the
+# step count and a distinguishing fragment (CONCURRENTLY, NOT VALID),
+# never literal SQL, because the exact steps are the engine's to choose.
+# The step shape is stable here because the demo compose pins one
+# PostgreSQL major.
 execute_native() {
-    local sql="$1" out status=0
+    local steps="$1" fragment="$2" sql="$3" out status=0
     step "execute: $sql"
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" migrate --url "$PG_DSN" --json --alter "$sql") || status=$?
         assert_eq "exit of [$sql]" 0 "$status"
         assert_eq "outcome of [$sql]" "executed-natively" "$(jq -r '.outcome' <<<"$out")"
+        assert_eq "substituted steps of [$sql]" "$steps" "$(jq -r '.executed_sql | length' <<<"$out")"
+        if [ -n "$fragment" ]; then
+            case "$(jq -r '.executed_sql | join("; ")' <<<"$out")" in
+            *"$fragment"*) ;;
+            *) fail "executed_sql of [$sql]: expected it to contain '$fragment'" ;;
+            esac
+        fi
     else
         "$PGS" migrate --url "$PG_DSN" --alter "$sql"
     fi
@@ -118,6 +136,7 @@ diff_plan() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff exit of [$desired]" 0 "$status"
+        assert_eq "diff format_version of [$desired]" 1 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
         case "$(jq -r '.statements[0].sql' <<<"$out")" in
         *"$fragment"*) ;;
@@ -139,6 +158,7 @@ run_dryrun() {
     dry_run native         online-idiom           false execute     "CREATE INDEX CONCURRENTLY idx_users_email ON users (email)"
     dry_run native         safer-idiom            false execute     "ALTER TABLE users ADD CONSTRAINT users_name_nonempty CHECK (char_length(name) > 0)"
     dry_run native         safer-idiom            false execute     "ALTER TABLE users ADD CONSTRAINT users_email_uniq UNIQUE (email)"
+    dry_run native         safer-idiom            false rewrite-required "ALTER TABLE users ADD COLUMN nick text UNIQUE"
     dry_run copy-and-swap  type-rewrite           false unavailable "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
     dry_run copy-and-swap  volatile-default       false unavailable "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()"
     dry_run native         app-breaking-rename    false execute     "ALTER TABLE users RENAME COLUMN name TO full_name"
@@ -157,30 +177,29 @@ run_offline() {
     heading "Offline commands (no database)"
     local out status
 
-    # lint gates: error-severity findings exit non-zero.
+    # lint gates: risky.sql carries exactly one error-severity finding (the
+    # refused operation), so the exit code and count are knowable — a vague
+    # "something failed" check would also pass on a missing binary.
     step "lint risky.sql"
     status=0
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" lint --json risky.sql) || status=$?
-        if [ "$status" = 0 ]; then
-            fail "lint risky.sql: expected a non-zero exit for error findings"
-        fi
-        if [ "$(jq -r '.errors' <<<"$out")" = 0 ]; then
-            fail "lint risky.sql: expected error findings"
-        fi
+        assert_eq "lint exit" 1 "$status"
+        assert_eq "lint format_version" 1 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "lint errors" 1 "$(jq -r '.errors' <<<"$out")"
     else
         "$PGS" lint risky.sql || echo "(exit $? — error findings gate, by design)"
     fi
 
-    # suggest advises: always exits zero.
+    # suggest advises: always exits zero; the fixture is fixed, so the
+    # suggestion count is knowable.
     step "suggest risky.sql"
     status=0
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" suggest --json risky.sql) || status=$?
         assert_eq "suggest exit" 0 "$status"
-        if [ "$(jq -r '.suggestions | length' <<<"$out")" = 0 ]; then
-            fail "suggest risky.sql: expected suggestions"
-        fi
+        assert_eq "suggest format_version" 1 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "suggest count" 2 "$(jq -r '.suggestions | length' <<<"$out")"
     else
         "$PGS" suggest risky.sql || echo "(exit $?)"
     fi
@@ -197,14 +216,18 @@ run_offline() {
         fi
     else
         printf '%s\n' "$out"
+        if [ "$status" != 0 ]; then
+            echo "(exit $status)"
+        fi
     fi
 }
 
 run_exec() {
     heading "Real executions against the seeded tables (make demo reseeds each run)"
-    execute_native "ALTER TABLE users ADD COLUMN bio text"
-    execute_native "CREATE INDEX idx_users_email ON users (email)"
-    execute_native "ALTER TABLE users ALTER COLUMN email SET NOT NULL"
+    #              steps fragment
+    execute_native 0     ""            "ALTER TABLE users ADD COLUMN bio text"
+    execute_native 1     CONCURRENTLY  "CREATE INDEX idx_users_email ON users (email)"
+    execute_native 4     "NOT VALID"   "ALTER TABLE users ALTER COLUMN email SET NOT NULL"
     execute_refused backend-unavailable "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
 }
 
@@ -226,4 +249,10 @@ if [ "$CHECK" = 1 ]; then
         exit 1
     fi
     printf '\ndemo tour: all checks passed\n'
+elif [ "$section" = all ]; then
+    heading "Tour complete"
+    echo "Every statement above was classified before anything ran. The"
+    echo "executions committed online — where the submitted form would have"
+    echo "blocked, pg-sprite ran the safer native sequence instead — and the"
+    echo "changes it cannot yet do safely were refused before they could hurt."
 fi
