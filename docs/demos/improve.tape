@@ -15,7 +15,7 @@ Hide
 Type `export PATH="$(git rev-parse --show-toplevel)/bin:$PATH"` Enter
 Type "export PGSPRITE_URL='postgres://pgsprite:pgsprite@localhost:5432/pgsprite?sslmode=disable'" Enter
 Type `docker exec compose-postgres-1 psql -U pgsprite -d pgsprite -c 'DROP TABLE IF EXISTS users' -c 'CREATE TABLE users (id bigint PRIMARY KEY, email text)' -c "INSERT INTO users SELECT g, 'u'||g||'@x.com' FROM generate_series(1,1000) g" >/dev/null` Enter
-Type "export PS1='~/kiran01bm/github/pg-sprite main '" Enter
+Type "export PS1='\n~/kiran01bm/github/pg-sprite main '" Enter
 Type "clear" Enter
 Sleep 1.5s
 Show

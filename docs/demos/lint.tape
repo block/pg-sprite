@@ -16,7 +16,7 @@ Type `export PATH="$(git rev-parse --show-toplevel)/bin:$PATH"` Enter
 Type "cd /tmp" Enter
 Type "echo 'CREATE INDEX users_email_idx ON users (email);' > changes.sql" Enter
 Type "echo 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);' >> changes.sql" Enter
-Type "export PS1='~/kiran01bm/github/pg-sprite main '" Enter
+Type "export PS1='\n~/kiran01bm/github/pg-sprite main '" Enter
 Type "clear" Enter
 Sleep 1.5s
 Show
