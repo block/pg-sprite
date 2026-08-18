@@ -48,6 +48,49 @@ Every sample below is captured verbatim from a real session against the
 compose database (`make db-up`, PostgreSQL 16): `$` marks the command,
 everything after it is the tool's output.
 
+![pg-sprite replacing a blocking ADD CONSTRAINT with the safer online sequence: dry-run, real run, then the catalog proof](docs/demos/improve.gif)
+
+Animated demos for the other routes — declarative diff, refusal with typed
+help, offline lint — live in [docs/demos/](docs/demos/), rendered from committed
+[VHS](https://github.com/charmbracelet/vhs) tapes (`make demos` re-renders
+them).
+
+**Diff: declarative desired state in, classified plan out.** Point at a
+reviewed `CREATE TABLE` file and get the statements that converge the live
+table onto it, reported in the same diagnostic grammar as the dry run.
+`--sql` prints the plan as an executable SQL script instead, and a plan
+containing a statement execution would refuse exits 2 — the same CI gate
+as the dry run:
+
+```console
+$ pg-sprite diff --desired users.sql
+statement 1:
+  ALTER TABLE public.users ADD COLUMN nickname text;
+
+note[metadata-only]:
+  ADD COLUMN nickname — a brief catalog-only change; takes a short
+  exclusive lock but does not scan or rewrite the table
+
+note:
+  runs as written
+
+docs:
+  https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#metadata-only
+
+plan:
+  public.users (PostgreSQL 16.14) — 1 statement, 1 step to run, 0 refused
+
+diff:
+  nothing was executed
+
+sql:
+  re-run with --sql to print the plan as an executable SQL script
+
+apply:
+  run each statement via pg-sprite migrate --alter '…', which refuses
+  blocking forms and substitutes safer online sequences
+```
+
 **Improve: a blocking form is replaced with the safer online sequence.**
 `migrate --dry-run` shows exactly what would run, as compiler-style
 diagnostics with a doc anchor per finding (exit 0 — the plan is executable):
@@ -142,42 +185,6 @@ docs:
 
 lint:
   changes.sql — 1 finding, 0 errors, 1 warning
-```
-
-**Diff: declarative desired state in, classified plan out.** Point at a
-reviewed `CREATE TABLE` file and get the statements that converge the live
-table onto it, reported in the same diagnostic grammar as the dry run.
-`--sql` prints the plan as an executable SQL script instead, and a plan
-containing a statement execution would refuse exits 2 — the same CI gate
-as the dry run:
-
-```console
-$ pg-sprite diff --desired users.sql
-statement 1:
-  ALTER TABLE public.users ADD COLUMN nickname text;
-
-note[metadata-only]:
-  ADD COLUMN nickname — a brief catalog-only change; takes a short
-  exclusive lock but does not scan or rewrite the table
-
-note:
-  runs as written
-
-docs:
-  https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#metadata-only
-
-plan:
-  public.users (PostgreSQL 16.14) — 1 statement, 1 step to run, 0 refused
-
-diff:
-  nothing was executed
-
-sql:
-  re-run with --sql to print the plan as an executable SQL script
-
-apply:
-  run each statement via pg-sprite migrate --alter '…', which refuses
-  blocking forms and substitutes safer online sequences
 ```
 
 More shapes — every disposition as JSON, destructive warnings, and exit
