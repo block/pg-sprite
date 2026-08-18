@@ -142,7 +142,10 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 	routed := router.Route(plans)
 	planned := make([]plan.Statement, 0, len(changes))
 	for i, ch := range changes {
-		ps := plan.FromRouted(routed.Statements[i])
+		ps, err := plan.FromRouted(routed.Statements[i])
+		if err != nil {
+			return nil, "", fmt.Errorf("plan derived statement %q: %w", routed.Statements[i].Statement, err)
+		}
 		ps.Kind = ch.Kind
 		planned = append(planned, ps)
 	}

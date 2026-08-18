@@ -55,7 +55,9 @@ func alterReport(t *testing.T, sql, schema, table string, facts planner.Facts) p
 	report.TableExists = &exists
 	report.Disposition = routed.Disposition
 	for _, rs := range routed.Statements {
-		report.Statements = append(report.Statements, plan.FromRouted(rs))
+		ps, err := plan.FromRouted(rs)
+		require.NoError(t, err)
+		report.Statements = append(report.Statements, ps)
 	}
 	report.Fingerprint = plan.Fingerprint(report.Statements)
 	return report
@@ -119,7 +121,8 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	routed := router.Route([]planner.Plan{classified})
 	diff.Disposition = routed.Disposition
 	for _, rs := range routed.Statements {
-		ps := plan.FromRouted(rs)
+		ps, err := plan.FromRouted(rs)
+		require.NoError(t, err)
 		ps.Kind = schemadiff.ChangeAddColumn
 		diff.Statements = append(diff.Statements, ps)
 	}

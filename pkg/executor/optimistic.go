@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -179,6 +180,22 @@ func (b Budget) validate() error {
 // work that exceeded its execution budget is not a lock-acquisition
 // strategy.
 func ExecuteNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy) error {
+	return executeNative(ctx, pool, pt, st, b, retry, nil)
+}
+
+// ExecuteNativeWithProgress runs an optimistic native attempt while updating
+// tracker. The caller may poll tracker concurrently with this blocking call.
+func ExecuteNativeWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) (err error) {
+	if tracker == nil {
+		return fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
+	}
+	tracker.Start(1, progress.OperationOptimistic)
+	tracker.StartStep(1, progress.OperationOptimistic)
+	defer func() { tracker.Finish(err) }()
+	return executeNative(ctx, pool, pt, st, b, retry, tracker)
+}
+
+func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
@@ -191,9 +208,13 @@ func ExecuteNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		return fmt.Errorf("%w: ST-7: statement targets %q but preflight verified %q",
 			ErrInvariantViolation, qualifiedName(st.Schema(), st.Table()), qualifiedName(pt.Schema(), pt.Table()))
 	}
-	return executeWithLockRetry(ctx, retry, func(ctx context.Context) error {
+	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
 		return executeNativeAttempt(ctx, pool, st, b)
-	}, sleepContext)
+	}, sleepContext, func(attempt int) {
+		if tracker != nil {
+			tracker.SetAttempt(attempt)
+		}
+	})
 }
 
 func executeNativeAttempt(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget) error {
@@ -234,7 +255,12 @@ func executeNativeAttempt(ctx context.Context, pool *pgxpool.Pool, st statement.
 type sleepFunc func(context.Context, time.Duration) error
 
 func executeWithLockRetry(ctx context.Context, policy RetryPolicy, attempt func(context.Context) error, sleep sleepFunc) error {
+	return executeWithLockRetryObserved(ctx, policy, attempt, sleep, func(int) {})
+}
+
+func executeWithLockRetryObserved(ctx context.Context, policy RetryPolicy, attempt func(context.Context) error, sleep sleepFunc, observe func(int)) error {
 	for i := 1; i <= policy.MaxAttempts; i++ {
+		observe(i)
 		err := attempt(ctx)
 		if err == nil {
 			return nil

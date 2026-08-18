@@ -17,6 +17,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 // sqlstateCheckViolation is the typed outcome a failed VALIDATE surfaces.
@@ -86,6 +87,65 @@ func TestRunSequenceValidatesCheckConstraintOnline(t *testing.T) {
 	exists, validated := constraintState(t, pool, schema, "t", "v_positive")
 	assert.True(t, exists, "the constraint must exist")
 	assert.True(t, validated, "the constraint must be validated, not left NOT VALID")
+}
+
+// The tracker must follow the sequence step by step — position, execution
+// class per step kind, and a finished terminal phase — through the public
+// RunSequenceWithProgress entry point.
+func TestRunSequenceWithProgressTracksStepsAndFinishes(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.t (id int PRIMARY KEY, v int); INSERT INTO %s.t SELECT g, g FROM generate_series(1, 100) g",
+		schema, schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "t")
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0)", schema))
+	rep, err := executor.RunSequenceWithProgress(t.Context(), pool, pt, steps, runBudget,
+		executor.DefaultRetryPolicy(), tracker)
+	require.NoError(t, err)
+	require.Len(t, rep.Steps, 2)
+
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, progress.PhaseFinished, snapshot.Phase)
+	assert.Equal(t, 2, snapshot.Step, "the tracker must have advanced to the final step")
+	assert.Equal(t, 2, snapshot.TotalSteps)
+	assert.Equal(t, progress.OperationValidate, snapshot.Detail.Operation,
+		"the last step's execution class must be the validation scan")
+	assert.False(t, snapshot.Detail.Active)
+}
+
+// A failing step leaves the tracker in a failed terminal phase still
+// pointing at the step that failed — the observable counterpart of the
+// typed SequenceStepError.
+func TestRunSequenceWithProgressReportsFailedStep(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.t (id int PRIMARY KEY, v int); INSERT INTO %s.t VALUES (1, -1)",
+		schema, schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "t")
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	// The violating row makes step 1 (the NOT VALID add) succeed and step 2
+	// (the validation scan) fail.
+	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0)", schema))
+	_, err = executor.RunSequenceWithProgress(t.Context(), pool, pt, steps, runBudget,
+		executor.DefaultRetryPolicy(), tracker)
+
+	var stepErr *executor.SequenceStepError
+	require.ErrorAs(t, err, &stepErr)
+	require.Equal(t, 2, stepErr.Step)
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, progress.PhaseFailed, snapshot.Phase)
+	assert.Equal(t, stepErr.Step, snapshot.Step, "the tracker must still point at the failed step")
+	assert.Equal(t, 2, snapshot.TotalSteps)
+	assert.False(t, snapshot.Detail.Active)
 }
 
 func TestRunSequenceSetNotNullLeavesNoScaffold(t *testing.T) {

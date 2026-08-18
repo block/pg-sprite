@@ -9,6 +9,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/lint"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/suggest"
 )
 
@@ -144,6 +145,82 @@ func TestAdviseInlineConstraintGetsAddColumnThenConstraintGuidance(t *testing.T)
 	assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, s.Guidance)
 }
 
+// An unnamed CHECK or FOREIGN KEY has no constructible rewrite — the
+// VALIDATE step needs the name the server assigns only at creation — so
+// the advice is the typed manual path, not an error.
+func TestAdviseUnnamedCheckAndForeignKeyGetNamingGuidance(t *testing.T) {
+	for _, sql := range []string{
+		"ALTER TABLE t ADD CHECK (age > 0)",
+		"ALTER TABLE t ADD FOREIGN KEY (o) REFERENCES orders (id)",
+	} {
+		report, err := suggest.Advise(sql)
+		require.NoError(t, err, "statement: %s", sql)
+		require.Len(t, report.Suggestions, 1, "statement: %s", sql)
+		s := report.Suggestions[0]
+		assert.Empty(t, s.Recommended, "statement: %s", sql)
+		assert.Equal(t, suggest.GuidanceNameConstraintThenValidate, s.Guidance, "statement: %s", sql)
+	}
+}
+
+// Following add-column-then-constraint literally must not land on a second
+// refusal: the plain column add is clean, and the separate, named ADD
+// CONSTRAINT the guidance describes gets a constructed rewrite — not
+// guidance again. This chains the two hops for both inline forms whose
+// unnamed ADD CONSTRAINT counterpart is itself refused.
+func TestAdviseAddColumnGuidanceChainEndsInConstructedRewrite(t *testing.T) {
+	for _, tc := range []struct {
+		inline string
+		named  string
+	}{
+		{
+			inline: "ALTER TABLE t ADD COLUMN x int CHECK (x > 0)",
+			named:  "ALTER TABLE t ADD CONSTRAINT t_x_chk CHECK (x > 0)",
+		},
+		{
+			inline: "ALTER TABLE t ADD COLUMN o bigint REFERENCES orders (id)",
+			named:  "ALTER TABLE t ADD CONSTRAINT t_o_fk FOREIGN KEY (o) REFERENCES orders (id)",
+		},
+	} {
+		report, err := suggest.Advise(tc.inline)
+		require.NoError(t, err, "statement: %s", tc.inline)
+		require.Len(t, report.Suggestions, 1, "statement: %s", tc.inline)
+		assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, report.Suggestions[0].Guidance,
+			"statement: %s", tc.inline)
+
+		plain, err := suggest.Advise("ALTER TABLE t ADD COLUMN x int")
+		require.NoError(t, err)
+		assert.Empty(t, plain.Suggestions, "the plain column add needs no advice")
+
+		followed, err := suggest.Advise(tc.named)
+		require.NoError(t, err, "statement: %s", tc.named)
+		require.Len(t, followed.Suggestions, 1, "statement: %s", tc.named)
+		s := followed.Suggestions[0]
+		assert.NotEmpty(t, s.Recommended,
+			"the named constraint the guidance describes gets a constructed rewrite: %s", tc.named)
+		assert.Empty(t, s.Guidance,
+			"following the guidance must not produce another manual path: %s", tc.named)
+	}
+}
+
+// ManualGuidance is total over every constraint kind the classifier can
+// mark safer-idiom: a parser shape that yields a safer-idiom decision with
+// no constructed rewrite maps to typed guidance, never an error that costs
+// a consumer its whole report.
+func TestManualGuidanceCoversEverySaferIdiomConstraintKind(t *testing.T) {
+	want := map[statement.ConstraintKind]suggest.Guidance{
+		statement.ConstraintPrimaryKey: suggest.GuidanceUniqueIndexThenConstraint,
+		statement.ConstraintUnique:     suggest.GuidanceUniqueIndexThenConstraint,
+		statement.ConstraintCheck:      suggest.GuidanceNameConstraintThenValidate,
+		statement.ConstraintForeignKey: suggest.GuidanceNameConstraintThenValidate,
+		statement.ConstraintNotNull:    suggest.GuidanceNotNullScaffold,
+	}
+	for kind, g := range want {
+		got, err := suggest.ManualGuidance(statement.Op{Kind: statement.OpAddConstraint, Constraint: kind}, false)
+		require.NoError(t, err, "constraint kind %d", kind)
+		assert.Equal(t, g, got, "constraint kind %d", kind)
+	}
+}
+
 // lint and suggest agree about the same script: every blocking-idiom
 // finding has a suggestion for the same statement — a constructed rewrite
 // or typed guidance, never silence. This is the workflow contract: lint
@@ -193,6 +270,8 @@ func TestAdviseEverySaferIdiomPathIsMapped(t *testing.T) {
 		"ALTER TABLE t ADD CONSTRAINT t_c_key UNIQUE (c)",
 		"ALTER TABLE t ADD CONSTRAINT t_age_pos CHECK (age > 0)",
 		"ALTER TABLE t ADD CONSTRAINT t_fk FOREIGN KEY (o) REFERENCES orders (id)",
+		"ALTER TABLE t ADD CHECK (age > 0)",
+		"ALTER TABLE t ADD FOREIGN KEY (o) REFERENCES orders (id)",
 		"ALTER TABLE t ATTACH PARTITION p FOR VALUES FROM (1) TO (10)",
 		"ALTER TABLE t ADD COLUMN email text UNIQUE",
 		"ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d int",
@@ -240,7 +319,7 @@ func TestReportJSONShape(t *testing.T) {
 	recommended, err := json.Marshal(report.Suggestions[0].Recommended)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"suggestions": [
 			{
 				"statement": 1,
@@ -271,7 +350,7 @@ func TestReportJSONGuidanceShape(t *testing.T) {
 	operation, err := json.Marshal(report.Suggestions[0].Operation)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"suggestions": [
 			{
 				"statement": 1,
@@ -292,7 +371,7 @@ func TestReportJSONCleanSuggestionsAreEmptyArray(t *testing.T) {
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"suggestions": []
 	}`, string(raw))
 }

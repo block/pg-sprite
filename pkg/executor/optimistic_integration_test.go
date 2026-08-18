@@ -14,6 +14,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -134,6 +135,65 @@ func TestExecuteNativeSurfacesOperationalErrors(t *testing.T) {
 	require.Error(t, err)
 	var budgetErr *executor.BudgetError
 	assert.NotErrorAs(t, err, &budgetErr)
+}
+
+func TestExecuteNativeWithProgressCommitsAndFinishes(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "t")
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int NOT NULL DEFAULT 0", schema))
+	require.NoError(t, executor.ExecuteNativeWithProgress(t.Context(), pool, pt, st, budget,
+		executor.DefaultRetryPolicy(), tracker))
+
+	assert.Equal(t, "integer", columnType(t, pool, schema, "t", "age"), "the committed change must be visible")
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, progress.PhaseFinished, snapshot.Phase)
+	assert.Equal(t, 1, snapshot.Step)
+	assert.Equal(t, 1, snapshot.TotalSteps)
+	assert.Equal(t, progress.OperationOptimistic, snapshot.Detail.Operation)
+	assert.Equal(t, 1, snapshot.Detail.Attempt, "the one successful attempt must be observed")
+	assert.False(t, snapshot.Detail.Active)
+}
+
+// A blocked attempt exhausts its bounded retries; the tracker must report
+// every retry attempt as it runs and a failed terminal phase at the end.
+func TestExecuteNativeWithProgressReportsRetriesAndFailure(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "t")
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	// A second session holds ACCESS EXCLUSIVE for the whole test, so the
+	// attempt can never be granted its lock.
+	blocker, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, blocker.Rollback(context.WithoutCancel(t.Context())))
+	})
+	_, err = blocker.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.t IN ACCESS EXCLUSIVE MODE", schema))
+	require.NoError(t, err)
+
+	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
+	retry := executor.RetryPolicy{MaxAttempts: 2, InitialBackoff: 10 * time.Millisecond, MaxBackoff: 20 * time.Millisecond}
+	tight := executor.Budget{LockTimeout: 100 * time.Millisecond, StatementTimeout: time.Second}
+	err = executor.ExecuteNativeWithProgress(t.Context(), pool, pt, st, tight, retry, tracker)
+
+	var budgetErr *executor.BudgetError
+	require.ErrorAs(t, err, &budgetErr)
+	assert.Equal(t, executor.CauseLock, budgetErr.Cause)
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, progress.PhaseFailed, snapshot.Phase)
+	assert.Equal(t, retry.MaxAttempts, snapshot.Detail.Attempt,
+		"the tracker must have observed the final bounded attempt")
+	assert.False(t, snapshot.Detail.Active)
 }
 
 // Sub-millisecond budgets are as unbounded as zero ones: they truncate to

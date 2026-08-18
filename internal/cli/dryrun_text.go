@@ -13,6 +13,11 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
+// suggestReportURL is where a rewrite-required refusal's typed guidance
+// codes are documented; the docs section links it alongside the diagnostic
+// code anchors.
+const suggestReportURL = "https://github.com/block/pg-sprite/blob/main/docs/suggest-report.md"
+
 // dryRunTextWidth is the column diagnostic prose wraps at, indent included.
 // SQL, URLs, and the plan summary are never wrapped: a statement must stay
 // greppable as one line.
@@ -47,9 +52,16 @@ func writeDryRunText(out io.Writer, report plan.Report) error {
 		if unverifiedDecision(ps) {
 			w.diag("note", "", "the table was not introspected, so this is the conservative classification; with live facts the same change may classify as cheaper")
 		}
+		if ps.Guidance != "" {
+			// The manual path trails the findings that explain it —
+			// compiler style, where help: follows the diagnosis. help is
+			// reserved for steps the user runs; a sequence pg-sprite runs
+			// itself is a note.
+			w.diag("help", string(ps.Guidance), guidanceText(ps.Guidance))
+		}
 		if ps.Disposition == router.DispositionExecute {
 			if substituted(ps) {
-				w.diag("help", "", "pg-sprite will run a safer online sequence instead:")
+				w.diag("note", "", "pg-sprite will run a safer online sequence instead:")
 				for n, sql := range ps.ExecSQL {
 					w.printf("  %d. %s;\n", n+1, sql)
 				}
@@ -67,6 +79,9 @@ func writeDryRunText(out io.Writer, report plan.Report) error {
 			w.entry("docs:")
 			for _, c := range codes {
 				w.printf("  %s#%s\n", onlineDDLReferenceURL, c)
+			}
+			if ps.Guidance != "" {
+				w.printf("  %s#%s\n", suggestReportURL, ps.Guidance)
 			}
 		}
 	}
