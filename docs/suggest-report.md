@@ -210,7 +210,11 @@ A guidance suggestion (`ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d 
 
 ## Text output
 
-Without `--json`, each suggestion renders as the statement header
-(`statement N: operation — reason`) followed by either the safer sequence with its caveat
-list or the guidance code with its manual path. The text form is for humans; automation
-consumes the JSON report. A clean script prints nothing and always exits zero.
+Without `--json`, suggestions render in the same compiler-diagnostic grammar as the
+dry-run and diff reports: each risky statement leads its group under the conventional
+`name:line:column:` label (where `name` is the advised file path or `<stdin>`), the
+classification is a `warning[reason]:` entry beneath it, the safer sequence (or the
+guidance code naming the manual path) follows as a `help:` entry with its caveats, a
+`docs:` entry links the reference anchors, and the report closes with a `suggest:`
+summary. The text form is for humans; automation consumes the JSON report. A clean
+script prints nothing and always exits zero.

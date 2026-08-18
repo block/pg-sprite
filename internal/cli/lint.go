@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
 
 	"github.com/block/pg-sprite/pkg/lint"
 )
@@ -43,7 +42,7 @@ func (c *LintCmd) runLint(in io.Reader, out io.Writer) error {
 		if err := enc.Encode(report); err != nil {
 			return fmt.Errorf("write lint report: %w", err)
 		}
-	} else if err := writeLintText(out, c.sourceName(), report); err != nil {
+	} else if err := writeLintText(out, sourceName(c.Path), report); err != nil {
 		return err
 	}
 	if report.Errors > 0 {
@@ -52,35 +51,11 @@ func (c *LintCmd) runLint(in io.Reader, out io.Writer) error {
 	return nil
 }
 
-// sourceName names the linted source for text findings: the file path, or
-// the conventional "<stdin>" when the script came from the pipe.
-func (c *LintCmd) sourceName() string {
-	if c.Path == "" {
+// sourceName names a command's DDL source for text findings: the file
+// path, or the conventional "<stdin>" when the script came from the pipe.
+func sourceName(path string) string {
+	if path == "" {
 		return "<stdin>"
 	}
-	return c.Path
-}
-
-// writeLintText renders the findings in the conventional linter shape —
-// name:line:column: severity — one per line with any suggestion indented
-// beneath it, so CI systems and editors can jump to the source. A clean
-// report prints nothing.
-func writeLintText(out io.Writer, name string, report lint.Report) error {
-	for _, f := range report.Findings {
-		if _, err := fmt.Fprintf(out, "%s:%d:%d: %s: %s — %s\n",
-			name, f.Line, f.Column, f.Severity, f.Code, f.Operation); err != nil {
-			return fmt.Errorf("write lint report: %w", err)
-		}
-		if len(f.Suggestion) > 0 {
-			if _, err := fmt.Fprintf(out, "  safer form (not equivalent — see %s): %s;\n",
-				onlineDDLReferenceURL, strings.Join(f.Suggestion, ";\n  ")); err != nil {
-				return fmt.Errorf("write lint report: %w", err)
-			}
-			if _, err := fmt.Fprintln(out,
-				"  run each statement in its own transaction, never one block; after a failed CONCURRENTLY build, check pg_index.indisvalid and rebuild"); err != nil {
-				return fmt.Errorf("write lint report: %w", err)
-			}
-		}
-	}
-	return nil
+	return path
 }

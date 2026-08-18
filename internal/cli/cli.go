@@ -131,6 +131,17 @@ type DiffCmd struct {
 	Desired string `help:"Path to the desired-state CREATE TABLE .sql file." name:"desired" type:"existingfile" required:""`
 	Schema  string `help:"Schema containing the live table." default:"public"`
 	JSON    bool   `help:"Emit the plan as JSON."`
+	SQL     bool   `help:"Print the plan as an executable SQL script instead of the diagnostic report."`
+}
+
+// Validate rejects flag combinations with no coherent meaning: --json and
+// --sql each replace the default report with a different whole-output
+// format, so combining them names no single output.
+func (c *DiffCmd) Validate() error {
+	if c.JSON && c.SQL {
+		return errors.New("--sql cannot be combined with --json: each replaces the report with a different format")
+	}
+	return nil
 }
 
 // Run implements the diff subcommand.

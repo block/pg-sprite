@@ -8,6 +8,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed — observable outcomes for automation callers
 
+- **`diff` now exits 2 when the derived plan contains a statement execution
+  would refuse**, in all three output modes (default report, `--sql`,
+  `--json`) — the same CI-gate contract as `migrate --dry-run`. Previously
+  `diff` always exited 0, so CI gating on the exit code saw refusals as
+  green. The report is still complete and valid on stdout; a caller must
+  read the plan before branching on the exit code.
+- **`diff` prints the diagnostic report by default; the executable SQL
+  script moved behind `--sql`** (`--sql --json` is rejected at parse time).
+  A caller consuming default `diff` stdout as SQL must ask for the script
+  explicitly.
+- **`lint` and `suggest` text output renders in the dry-run's diagnostic
+  grammar.** Display only — the JSON reports and exit codes are unchanged —
+  but the one-line `file:line:column: severity: …` shape is gone, so
+  errorformat-style CI annotators should consume `--json` and supply the
+  file name they passed in.
 - **The plan report is format version 2**: rewrite-required statements now
   carry a `guidance` field naming the typed manual path, drawn from the
   suggest report's Guidance vocabulary. The fingerprint definition is

@@ -22,8 +22,10 @@ that must stop drops checks `.statements[].destructive` in the JSON report.
 Exit 2 covers every refusal cause; the exit code answers *should this
 proceed*, the report's typed `reason` and disposition answer *why not*. The contract is
 `migrate`'s: `lint` exits 1 when a script has error-severity findings
-(warnings alone exit 0), and `diff` prints the plan and exits 0 regardless of
-disposition. Statement kinds `migrate` does not support (`DROP INDEX`,
+(warnings alone exit 0), and `diff` prints the plan and exits 2 when it
+contains a statement execution would refuse — a missing table is diff's
+greenfield case (the plan creates the table), not a refusal, unlike the
+dry run. Statement kinds `migrate` does not support (`DROP INDEX`,
 `REINDEX`, `CREATE TABLE`, and anything that is not `ALTER TABLE` or
 `CREATE INDEX`) emit the same refusal verdict on `--dry-run` as on apply —
 a verdict, not a plan report — and exit 2. The JSON report schema is

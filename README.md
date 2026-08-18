@@ -120,21 +120,64 @@ and suggest the safer form:
 
 ```console
 $ pg-sprite lint changes.sql
-changes.sql:1:1: warning: blocking-idiom — CREATE INDEX users_email_idx
-  safer form (not equivalent — see https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md): CREATE INDEX CONCURRENTLY users_email_idx ON users USING btree (email);
-  run each statement in its own transaction, never one block; after a failed CONCURRENTLY build, check pg_index.indisvalid and rebuild
+changes.sql:1:1:
+  CREATE INDEX users_email_idx ON users (email);
+
+warning[blocking-idiom]:
+  CREATE INDEX users_email_idx — holds a blocking lock on the table for
+  the whole operation — writes (and for some forms reads) wait until it
+  finishes
+
+help:
+  a safer online form exists — not a semantic equivalent, and running it
+  by hand forgoes the engine's execution-time guards:
+  1. CREATE INDEX CONCURRENTLY users_email_idx ON users USING btree (email);
+
+note:
+  run each statement in its own transaction, never one block; after a
+  failed CONCURRENTLY build, check pg_index.indisvalid and rebuild
+
+docs:
+  https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#safer-idiom
+
+lint:
+  changes.sql — 1 finding, 0 errors, 1 warning
 ```
 
-**Diff: declarative desired state in, executable plan out.** Point at a
-reviewed `CREATE TABLE` file and get the classified statements that converge
-the live table onto it:
+**Diff: declarative desired state in, classified plan out.** Point at a
+reviewed `CREATE TABLE` file and get the statements that converge the live
+table onto it, reported in the same diagnostic grammar as the dry run.
+`--sql` prints the plan as an executable SQL script instead, and a plan
+containing a statement execution would refuse exits 2 — the same CI gate
+as the dry run:
 
 ```console
 $ pg-sprite diff --desired users.sql
--- plan derived by pg-sprite diff; execute statements via pg-sprite migrate,
--- which refuses blocking forms — running this script directly bypasses that gate
--- native (metadata-only)
-ALTER TABLE public.users ADD COLUMN nickname text;
+statement 1:
+  ALTER TABLE public.users ADD COLUMN nickname text;
+
+note[metadata-only]:
+  ADD COLUMN nickname — a brief catalog-only change; takes a short
+  exclusive lock but does not scan or rewrite the table
+
+note:
+  runs as written
+
+docs:
+  https://github.com/block/pg-sprite/blob/main/docs/postgres-online-ddl-reference.md#metadata-only
+
+plan:
+  public.users (PostgreSQL 16.14) — 1 statement, 1 step to run, 0 refused
+
+diff:
+  nothing was executed
+
+sql:
+  re-run with --sql to print the plan as an executable SQL script
+
+apply:
+  run each statement via pg-sprite migrate --alter '…', which refuses
+  blocking forms and substitutes safer online sequences
 ```
 
 More shapes — every disposition as JSON, destructive warnings, and exit

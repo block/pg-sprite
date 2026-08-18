@@ -18,6 +18,7 @@ import (
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // newDiffCmd builds a DiffCmd with the flag defaults kong would apply,
@@ -128,7 +129,8 @@ func TestDiffRoutesRewriteToCopyAndSwap(t *testing.T) {
 	cmd := newDiffCmd(t, url, schema, "CREATE TABLE events (id bigint PRIMARY KEY)")
 	cmd.JSON = true
 	var out strings.Builder
-	require.NoError(t, cmd.run(t.Context(), &out))
+	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused,
+		"a plan execution would refuse exits with the refusal code")
 
 	var report plan.Report
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
@@ -232,10 +234,11 @@ func TestDiffTextPlanIsExecutableSQL(t *testing.T) {
 	require.NoError(t, err)
 
 	cmd := newDiffCmd(t, url, schema, "CREATE TABLE events (id bigint PRIMARY KEY, name text NOT NULL)")
+	cmd.SQL = true
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
 
-	// The text plan is an executable script: running it converges the table.
+	// The --sql plan is an executable script: running it converges the table.
 	_, err = pool.Exec(t.Context(), out.String())
 	require.NoError(t, err, "text plan must be executable SQL: %s", out.String())
 

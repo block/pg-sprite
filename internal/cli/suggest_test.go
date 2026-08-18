@@ -64,15 +64,16 @@ func TestSuggestParseFailureIsError(t *testing.T) {
 	require.Error(t, err)
 }
 
-// The text rendering is this renderer's own unit test: each suggestion
-// shows the safer sequence and its caveats.
+// The text rendering is this renderer's own unit test: the risky statement
+// leads under the conventional name:line:column: label, and each
+// suggestion shows the safer sequence and its caveats.
 func TestSuggestTextRendering(t *testing.T) {
 	var out strings.Builder
 	cmd := SuggestCmd{}
 	err := cmd.runSuggest(strings.NewReader("CREATE INDEX t_c_idx ON t (c)"), &out)
 	require.NoError(t, err)
 	text := out.String()
-	assert.Contains(t, text, "statement 1:")
+	assert.Contains(t, text, "<stdin>:1:1:")
 	assert.Contains(t, text, "CONCURRENTLY")
 	assert.Contains(t, text, string(suggest.CaveatNonTransactional))
 	assert.Contains(t, text, string(suggest.CaveatInvalidIndexOnFailure))

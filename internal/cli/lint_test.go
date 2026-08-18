@@ -58,18 +58,44 @@ func TestLintReadsFromFile(t *testing.T) {
 	assert.Equal(t, 1, report.Warnings)
 }
 
-// The text renderer emits the conventional name:line:column: shape so CI
-// systems and editors can jump to the finding. This is the renderer's own
-// unit test — everything else asserts typed fields.
+// The text renderer leads each flagged statement with the conventional
+// name:line:column: label so a reader can jump to the finding, and renders
+// the findings in the same diagnostic grammar as the dry-run report. This
+// is the renderer's own unit test — everything else asserts typed fields.
 func TestLintTextFindingsCarryPositions(t *testing.T) {
 	var out strings.Builder
 	cmd := LintCmd{}
 	err := cmd.runLint(strings.NewReader(
 		"CREATE TABLE ok (id int);\nALTER TABLE t DROP COLUMN legacy;\n"), &out)
 	require.NoError(t, err)
-	assert.Equal(t,
-		"<stdin>:2:1: warning: destructive — DROP COLUMN legacy\n",
-		out.String())
+	assert.Equal(t, `<stdin>:2:1:
+  ALTER TABLE t DROP COLUMN legacy;
+
+warning[destructive]:
+  DROP COLUMN legacy — discards live data or structure
+
+docs:
+  `+onlineDDLReferenceURL+`#destructive
+
+lint:
+  <stdin> — 1 finding, 0 errors, 1 warning
+`, out.String())
+}
+
+// Two findings on the same statement share one statement header — the
+// flagged SQL prints once, each finding as its own labeled entry beneath
+// it. This is the renderer's own unit test — everything else asserts
+// typed fields.
+func TestLintTextGroupsFindingsByStatement(t *testing.T) {
+	var out strings.Builder
+	cmd := LintCmd{}
+	err := cmd.runLint(strings.NewReader(
+		"ALTER TABLE t DROP COLUMN a, DROP COLUMN b;\n"), &out)
+	require.NoError(t, err)
+	assert.Equal(t, 1,
+		strings.Count(out.String(), "ALTER TABLE t DROP COLUMN a, DROP COLUMN b;"),
+		"the flagged statement prints once per group, not once per finding")
+	assert.Equal(t, 2, strings.Count(out.String(), "warning[destructive]:"))
 }
 
 // The suggestion block must leave an operator who runs the safer form by
