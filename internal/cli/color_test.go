@@ -9,7 +9,21 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/lint"
+	"github.com/block/pg-sprite/pkg/plan"
+	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/suggest"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
+
+// stripSGR removes every ANSI SGR sequence the palette can emit, so the
+// parity tests can compare a colored rendering with its plain layout.
+func stripSGR(s string) string {
+	for _, seq := range []string{ansiError, ansiWarning, ansiNote, ansiHelp, ansiBold, ansiReset} {
+		s = strings.ReplaceAll(s, seq, "")
+	}
+	return s
+}
 
 // devNull returns an *os.File that isTerminal reports as a terminal:
 // /dev/null is a character device, exactly the mode bit the detection
@@ -66,11 +80,123 @@ func TestLintTextColorWrapsLabelsOnly(t *testing.T) {
 
 	assert.Contains(t, colored.String(), ansiWarning)
 	assert.Contains(t, colored.String(), ansiBold)
-	stripped := colored.String()
-	for _, seq := range []string{ansiError, ansiWarning, ansiNote, ansiHelp, ansiBold, ansiReset} {
-		stripped = strings.ReplaceAll(stripped, seq, "")
+	assert.Equal(t, plain.String(), stripSGR(colored.String()))
+}
+
+// saferIdiomReport builds the substitution fixture the renderer parity
+// tests share: one blocking statement the planner replaces with its
+// concurrent sequence, exercising the warning, note, docs, and plan labels.
+func saferIdiomReport(source plan.Source) plan.Report {
+	report := plan.NewReport(source)
+	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+	report.Disposition = router.DispositionExecute
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         `ALTER TABLE "users" ADD CONSTRAINT "u" UNIQUE ("email")`,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		Decisions: []planner.Decision{{
+			Operation: "add unique constraint",
+			Route:     planner.RouteNative,
+			Reason:    planner.ReasonSaferIdiom,
+		}},
+		ExecSQL: []string{
+			`CREATE UNIQUE INDEX CONCURRENTLY "u" ON "users" ("email")`,
+			`ALTER TABLE "users" ADD CONSTRAINT "u" UNIQUE USING INDEX "u"`,
+		},
+		Execution: planner.ExecutionAutocommit,
+	})
+	return report
+}
+
+// The dry-run renderer shares lint's invariant: stripping the escape codes
+// from the colored rendering must reproduce the plain layout byte for byte.
+func TestDryRunTextColorWrapsLabelsOnly(t *testing.T) {
+	report := saferIdiomReport(plan.SourceAlter)
+
+	var plain, colored strings.Builder
+	require.NoError(t, writeDryRunText(&plain, palette{}, report))
+	require.NoError(t, writeDryRunText(&colored, palette{enabled: true}, report))
+
+	assert.Contains(t, colored.String(), ansiWarning)
+	assert.Contains(t, colored.String(), ansiBold)
+	assert.Equal(t, plain.String(), stripSGR(colored.String()))
+}
+
+// The diff renderer shares lint's invariant: stripping the escape codes
+// from the colored rendering must reproduce the plain layout byte for byte.
+func TestDiffTextColorWrapsLabelsOnly(t *testing.T) {
+	report := saferIdiomReport(plan.SourceDiff)
+	exists := true
+	report.TableExists = &exists
+
+	var plain, colored strings.Builder
+	require.NoError(t, writeDiffText(&plain, palette{}, report))
+	require.NoError(t, writeDiffText(&colored, palette{enabled: true}, report))
+
+	assert.Contains(t, colored.String(), ansiWarning)
+	assert.Contains(t, colored.String(), ansiBold)
+	assert.Equal(t, plain.String(), stripSGR(colored.String()))
+}
+
+// The suggest renderer shares lint's invariant: stripping the escape codes
+// from the colored rendering must reproduce the plain layout byte for byte.
+func TestSuggestTextColorWrapsLabelsOnly(t *testing.T) {
+	report, err := suggest.Advise("CREATE INDEX t_c_idx ON t (c)")
+	require.NoError(t, err)
+
+	var plain, colored strings.Builder
+	require.NoError(t, writeSuggestText(&plain, palette{}, "change.sql", report))
+	require.NoError(t, writeSuggestText(&colored, palette{enabled: true}, "change.sql", report))
+
+	assert.Contains(t, colored.String(), ansiBold)
+	assert.Equal(t, plain.String(), stripSGR(colored.String()))
+}
+
+// The styled verdict rendering is pinned to verdict.String twice over: the
+// plain rendering must match it byte for byte (plus the trailing newline
+// emit always wrote), and stripping the escape codes from the colored
+// rendering must reproduce the plain layout — so the two renderings cannot
+// drift and color can never change the verdict's shape.
+func TestVerdictTextColorWrapsLabelsOnly(t *testing.T) {
+	verdicts := []verdict.Verdict{
+		{
+			Outcome:   verdict.OutcomeExecuted,
+			Table:     "public.users",
+			Statement: `ALTER TABLE "users" ADD CONSTRAINT "u" UNIQUE ("email")`,
+			ExecutedSQL: []string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "u" ON "users" ("email")`,
+				`ALTER TABLE "users" ADD CONSTRAINT "u" UNIQUE USING INDEX "u"`,
+			},
+		},
+		{
+			Outcome:    verdict.OutcomeRefused,
+			Reason:     verdict.ReasonIndexStatement,
+			Statement:  "DROP INDEX i",
+			Detail:     "a plain DROP INDEX takes ACCESS EXCLUSIVE on the table; the concurrent drop does not",
+			SaferIdiom: "DROP INDEX CONCURRENTLY",
+		},
+		{
+			Outcome:       verdict.OutcomeFailed,
+			Code:          "lock-budget-exceeded",
+			Statement:     "ALTER TABLE t ADD COLUMN c int",
+			Attempts:      3,
+			Forced:        true,
+			FailedStep:    2,
+			FailedStepSQL: `ALTER TABLE "t" VALIDATE CONSTRAINT "c"`,
+			ExecutedSQL:   []string{`ALTER TABLE "t" ADD CONSTRAINT "c" CHECK (x > 0) NOT VALID`},
+		},
+		{Outcome: verdict.Outcome("mystery"), Statement: "SELECT 1"},
 	}
-	assert.Equal(t, plain.String(), stripped)
+	for _, v := range verdicts {
+		var plain, colored strings.Builder
+		require.NoError(t, writeVerdictText(&plain, palette{}, v))
+		require.NoError(t, writeVerdictText(&colored, palette{enabled: true}, v))
+
+		assert.Equal(t, v.String()+"\n", plain.String())
+		assert.NotEqual(t, plain.String(), colored.String())
+		assert.Equal(t, plain.String(), stripSGR(colored.String()))
+	}
 }
 
 // The JSON report is a machine contract: --color=always must not leak

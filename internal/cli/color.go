@@ -20,7 +20,9 @@ func (f OutputFlags) palette(out io.Writer) palette {
 
 // colorEnabled decides whether ANSI color is emitted. An explicit
 // --color=always or --color=never wins; auto colors only a terminal and
-// respects the NO_COLOR convention (https://no-color.org) and TERM=dumb.
+// respects the NO_COLOR convention (https://no-color.org — disable when
+// the variable is present and not an empty string, so NO_COLOR= re-enables
+// color per the spec) and TERM=dumb.
 func colorEnabled(mode string, out io.Writer) bool {
 	switch mode {
 	case "always":
