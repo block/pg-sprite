@@ -70,3 +70,12 @@ to bite, the GIFs move to release assets.
   before the screen clears and setup commands leak into the first frames.
 - The prompt is set in hidden setup so recorded frames show only the command
   and its output.
+- Color needs defending from the rendering machine's environment: every tape
+  sets `Set Theme "Dracula"` for consistent frames and runs a hidden
+  `unset NO_COLOR && export TERM=xterm-256color`, or a `NO_COLOR` in the
+  renderer's dotfiles silently strips the palette from the recording.
+- Escape codes in the prompt must be wrapped in `\[…\]` or readline
+  miscounts the prompt width, and the hidden
+  `trap 'printf "\033[0m"' DEBUG` resets the typed command's input style
+  before each command runs, so output renders in the theme's default color
+  instead of bleeding the prompt's.

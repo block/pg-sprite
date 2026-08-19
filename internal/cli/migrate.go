@@ -404,17 +404,19 @@ func (c *MigrateCmd) retryPolicy() executor.RetryPolicy {
 }
 
 // emit prints the verdict in the selected format and returns ErrRefused for
-// refusals so the exit code distinguishes them from operational errors.
+// refusals so the exit code distinguishes them from operational errors. The
+// JSON contract stays plain; the human rendering styles its labels.
 func (c *MigrateCmd) emit(out io.Writer, v verdict.Verdict) error {
-	text := v.String()
 	if c.JSON {
-		var err error
-		if text, err = v.JSON(); err != nil {
+		text, err := v.JSON()
+		if err != nil {
 			return err
 		}
-	}
-	if _, err := fmt.Fprintln(out, text); err != nil {
-		return fmt.Errorf("write verdict: %w", err)
+		if _, err := fmt.Fprintln(out, text); err != nil {
+			return fmt.Errorf("write verdict: %w", err)
+		}
+	} else if err := writeVerdictText(out, c.palette(out), v); err != nil {
+		return err
 	}
 	if v.Outcome == verdict.OutcomeRefused {
 		return verdict.ErrRefused

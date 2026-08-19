@@ -31,8 +31,8 @@ const dryRunTextWidth = 74
 // machine contract. The codes are the same typed values the JSON report
 // carries, so the prose cross-references automation and
 // docs/postgres-online-ddl-reference.md#dry-run-diagnostic-codes.
-func writeDryRunText(out io.Writer, report plan.Report) error {
-	w := &stickyWriter{out: out}
+func writeDryRunText(out io.Writer, pal palette, report plan.Report) error {
+	w := &stickyWriter{out: out, pal: pal}
 	steps, refused := 0, 0
 	for i, ps := range report.Statements {
 		s, r := writeStatementDiagnostics(w, i+1, ps, "pg-sprite")
@@ -310,9 +310,11 @@ func refusedOperation(ps plan.Statement) string {
 }
 
 // stickyWriter accumulates the first write error so the renderer reads as
-// layout, not error plumbing.
+// layout, not error plumbing. Its palette styles the entry labels; the
+// zero palette renders plain text.
 type stickyWriter struct {
 	out     io.Writer
+	pal     palette
 	err     error
 	started bool
 }
@@ -326,10 +328,16 @@ func (w *stickyWriter) printf(format string, args ...any) {
 	}
 }
 
-// entry starts a labeled entry: the label alone on its own line, a blank
-// line separating it from the previous entry. The caller writes the entry's
-// content indented beneath it.
+// entry starts a labeled structural entry (statement N:, plan:, docs:,
+// name:line:column:): the label alone on its own line in the structural
+// style, a blank line separating it from the previous entry. The caller
+// writes the entry's content indented beneath it.
 func (w *stickyWriter) entry(label string) {
+	w.entryStyled(w.pal.bold(label))
+}
+
+// entryStyled starts a labeled entry whose label is already styled.
+func (w *stickyWriter) entryStyled(label string) {
 	if w.started {
 		w.printf("\n")
 	}
@@ -338,14 +346,15 @@ func (w *stickyWriter) entry(label string) {
 }
 
 // diag writes one diagnostic entry: the "severity[code]:" label (or
-// "severity:" when there is no code) on its own line, the message wrapped
-// at dryRunTextWidth and indented two spaces beneath it.
+// "severity:" when there is no code) on its own line in the severity's
+// color, the message wrapped at dryRunTextWidth and indented two spaces
+// beneath it.
 func (w *stickyWriter) diag(severity, code, message string) {
 	label := severity + ":"
 	if code != "" {
 		label = fmt.Sprintf("%s[%s]:", severity, code)
 	}
-	w.entry(label)
+	w.entryStyled(w.pal.severity(severity, label))
 	for _, line := range wrapWords(message, dryRunTextWidth-2) {
 		w.printf("  %s\n", line)
 	}

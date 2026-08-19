@@ -41,7 +41,7 @@ func TestDiffTextSaferIdiomSubstitution(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDiffText(&out, report))
+	require.NoError(t, writeDiffText(&out, palette{}, report))
 	assert.Equal(t, `statement 1:
   ALTER TABLE "users" ADD CONSTRAINT "u" UNIQUE ("email");
 
@@ -95,7 +95,7 @@ func TestDiffTextGreenfieldLeadsWithNote(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDiffText(&out, report))
+	require.NoError(t, writeDiffText(&out, palette{}, report))
 	text := out.String()
 	assert.True(t, strings.HasPrefix(text, "note:\n  the table public.widgets does not exist — the plan creates it from the\n  full desired schema\n"),
 		"the greenfield note must lead the report: %s", text)
@@ -118,7 +118,7 @@ func TestDiffTextNoChanges(t *testing.T) {
 	report.TableExists = &exists
 
 	var out strings.Builder
-	require.NoError(t, writeDiffText(&out, report))
+	require.NoError(t, writeDiffText(&out, palette{}, report))
 	assert.Equal(t, `plan:
   public.users (PostgreSQL 16.10) — no changes; the live table matches the desired schema
 `, out.String())
@@ -146,7 +146,7 @@ func TestDiffTextRefusedStatementDropsApply(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDiffText(&out, report))
+	require.NoError(t, writeDiffText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "error[backend-unavailable]:\n  refused — needs the copy-and-swap backend")
 	assert.Contains(t, text, "1 statement, 0 steps to run, 1 refused\n")

@@ -38,7 +38,7 @@ func (c *SuggestCmd) runSuggest(in io.Reader, out io.Writer) error {
 		}
 		return nil
 	}
-	return writeSuggestText(out, sourceName(c.Path), report)
+	return writeSuggestText(out, c.palette(out), sourceName(c.Path), report)
 }
 
 // writeSuggestText renders the suggestions in the same compiler-diagnostic
@@ -48,11 +48,11 @@ func (c *SuggestCmd) runSuggest(in io.Reader, out io.Writer) error {
 // naming the manual path) follows as a help entry. Display only — the JSON
 // report is the machine contract; the codes are the same typed values the
 // JSON report carries. A report with no suggestions prints nothing.
-func writeSuggestText(out io.Writer, name string, report suggest.Report) error {
+func writeSuggestText(out io.Writer, pal palette, name string, report suggest.Report) error {
 	if len(report.Suggestions) == 0 {
 		return nil
 	}
-	w := &stickyWriter{out: out}
+	w := &stickyWriter{out: out, pal: pal}
 	statement := 0
 	var docs []string
 	for _, s := range report.Suggestions {

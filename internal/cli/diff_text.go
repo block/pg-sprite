@@ -17,8 +17,8 @@ import (
 // never executes, so execution is routed through the migrate front door,
 // and a missing table is the greenfield case — the plan creates the table
 // from the full desired schema — not an error.
-func writeDiffText(out io.Writer, report plan.Report) error {
-	w := &stickyWriter{out: out}
+func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
+	w := &stickyWriter{out: out, pal: pal}
 	if tableMissing(report) {
 		w.diag("note", "", fmt.Sprintf("the table %s.%s does not exist — the plan creates it from the full desired schema", report.Schema, report.Table))
 	}

@@ -4,8 +4,12 @@ Representative, real JSON outputs for every shape the CLI produces: the
 plan report for each dry-run disposition, the execution verdict, the
 linter, and diff. The human text rendering of the same reports is display
 only — see the animated demos in [demos/](demos/) for how it reads; the
-JSON is the machine contract. All were captured verbatim from a real
-session against the compose database (`make db-up`, PostgreSQL 16) —
+JSON is the machine contract. The text reports color their diagnostic
+labels when stdout is a terminal (`--color=auto|always|never`;
+[`NO_COLOR`](https://no-color.org) and `TERM=dumb` disable auto-detection);
+the JSON and `diff --sql` outputs are never colored. All were captured
+verbatim from a real session against the compose database (`make db-up`,
+PostgreSQL 16) —
 `$` marks the command, everything after it is the tool's output — with
 this schema:
 
