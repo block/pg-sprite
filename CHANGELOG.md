@@ -23,6 +23,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   but the one-line `file:line:column: severity: …` shape is gone, so
   errorformat-style CI annotators should consume `--json` and supply the
   file name they passed in.
+- **Human diagnostic reports color their labels when stdout is a terminal**
+  (`--color=auto`, the default, on `migrate`, `diff`, `lint`, and
+  `suggest`). A caller that allocates a pty — `docker run -t`, `script`, an
+  expect harness, a CI runner with tty allocation — now receives ANSI
+  escape sequences in the human reports where it previously received plain
+  text; `--color=never`, a non-empty `NO_COLOR`, or `TERM=dumb` forces
+  plain output, and `--color=always` keeps color on a pipe. The machine
+  contracts are never colored regardless of mode: the `--json` reports and
+  `diff --sql` stay escape-free, and exit codes are identical across color
+  modes.
 - **The plan report is format version 2**: rewrite-required statements now
   carry a `guidance` field naming the typed manual path, drawn from the
   suggest report's Guidance vocabulary. The fingerprint definition is

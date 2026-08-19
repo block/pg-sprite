@@ -45,7 +45,10 @@ rules that apply inside the core. Read it before changing anything under
 ## What it looks like
 
 Everything below is captured from a real session against the compose
-database (`make db-up`, PostgreSQL 16).
+database (`make db-up`, PostgreSQL 16). The reports color their labels the
+way compilers do when stdout is a terminal; `--color=never` or a non-empty
+`NO_COLOR` forces plain text, and the `--json` / `--sql` machine outputs
+are never colored.
 
 ![pg-sprite replacing a blocking ADD CONSTRAINT with the safer online sequence: dry-run, real run, then the catalog proof](docs/demos/improve.gif)
 

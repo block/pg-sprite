@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"io"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -153,6 +155,38 @@ func TestSuggestTextColorWrapsLabelsOnly(t *testing.T) {
 	assert.Equal(t, plain.String(), stripSGR(colored.String()))
 }
 
+// fullVerdict populates every exported field of Verdict at once —
+// semantically impossible as a single verdict, which is the point: it
+// makes the renderer parity lock structural rather than fixture-vigilant.
+// The reflection check fails when a field is added to Verdict without
+// setting it here, so a field rendered by only one of the two renderers
+// cannot slip past the parity test in a shape no realistic fixture sets.
+func fullVerdict(t *testing.T) verdict.Verdict {
+	t.Helper()
+	v := verdict.Verdict{
+		Outcome:       verdict.OutcomeFailed,
+		Reason:        verdict.ReasonIndexStatement,
+		Cause:         verdict.CauseLockBudget,
+		Code:          "lock-budget-exceeded",
+		FailedStep:    2,
+		FailedStepSQL: `ALTER TABLE "t" VALIDATE CONSTRAINT "c"`,
+		Attempts:      3,
+		Statement:     "ALTER TABLE t ADD COLUMN c int",
+		Table:         "public.t",
+		Detail:        "every field populated for the renderer parity lock",
+		SaferIdiom:    "DROP INDEX CONCURRENTLY",
+		ExecutedSQL:   []string{`ALTER TABLE "t" ADD CONSTRAINT "c" CHECK (x > 0) NOT VALID`},
+		Forced:        true,
+	}
+	rv := reflect.ValueOf(v)
+	for i := range rv.NumField() {
+		require.False(t, rv.Field(i).IsZero(),
+			"Verdict field %s is zero in the all-fields fixture; set it so the renderer parity lock covers it",
+			rv.Type().Field(i).Name)
+	}
+	return v
+}
+
 // The styled verdict rendering is pinned to verdict.String twice over: the
 // plain rendering must match it byte for byte (plus the trailing newline
 // emit always wrote), and stripping the escape codes from the colored
@@ -187,6 +221,7 @@ func TestVerdictTextColorWrapsLabelsOnly(t *testing.T) {
 			ExecutedSQL:   []string{`ALTER TABLE "t" ADD CONSTRAINT "c" CHECK (x > 0) NOT VALID`},
 		},
 		{Outcome: verdict.Outcome("mystery"), Statement: "SELECT 1"},
+		fullVerdict(t),
 	}
 	for _, v := range verdicts {
 		var plain, colored strings.Builder
@@ -199,13 +234,43 @@ func TestVerdictTextColorWrapsLabelsOnly(t *testing.T) {
 	}
 }
 
-// The JSON report is a machine contract: --color=always must not leak
-// escape sequences into it.
-func TestLintJSONStaysPlainUnderColorAlways(t *testing.T) {
-	var out strings.Builder
-	cmd := LintCmd{OutputFlags: OutputFlags{Color: "always"}, JSON: true}
-	require.NoError(t, cmd.runLint(strings.NewReader("ALTER TABLE t DROP COLUMN legacy"), &out))
-	assert.NotContains(t, out.String(), "\x1b[")
+// The machine outputs are contracts: --color=always must not leak escape
+// sequences into any of them. The offline commands run at the command
+// level with the flag set; the database-backed surfaces (diff --json,
+// diff --sql, migrate --dry-run --json) are exercised through the exact
+// renderers their commands dispatch to, which take no palette by
+// construction — this pins that property against a refactor that threads
+// one "for consistency".
+func TestMachineOutputsStayPlainUnderColorAlways(t *testing.T) {
+	dryRunReport := saferIdiomReport(plan.SourceAlter)
+	diffReport := saferIdiomReport(plan.SourceDiff)
+	exists := true
+	diffReport.TableExists = &exists
+
+	cases := []struct {
+		name string
+		emit func(out io.Writer) error
+	}{
+		{"lint --json", func(out io.Writer) error {
+			cmd := LintCmd{OutputFlags: OutputFlags{Color: "always"}, JSON: true}
+			return cmd.runLint(strings.NewReader("ALTER TABLE t DROP COLUMN legacy"), out)
+		}},
+		{"suggest --json", func(out io.Writer) error {
+			cmd := SuggestCmd{OutputFlags: OutputFlags{Color: "always"}, JSON: true}
+			return cmd.runSuggest(strings.NewReader("CREATE INDEX t_c_idx ON t (c)"), out)
+		}},
+		{"diff --json", func(out io.Writer) error { return writeJSON(out, diffReport) }},
+		{"diff --sql", func(out io.Writer) error { return writePlanText(out, diffReport) }},
+		{"migrate --dry-run --json", func(out io.Writer) error { return writeJSON(out, dryRunReport) }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out strings.Builder
+			require.NoError(t, tc.emit(&out))
+			require.NotEmpty(t, out.String())
+			assert.NotContains(t, out.String(), "\x1b[")
+		})
+	}
 }
 
 func TestPaletteSeverityStyles(t *testing.T) {
