@@ -1,11 +1,11 @@
 # pg-sprite
 
 > [!WARNING]
-> **Work in progress — not ready for any use.** This project is under active
-> early-stage development. There are no releases, no stability guarantees, and
-> no support. Interfaces, behavior, on-disk/database artifacts, and the CLI
-> surface may all change without notice. Do **not** run this against any
-> database you care about.
+> **Early release — not production-ready.** This project is under active
+> development. Tagged releases exist, but pre-1.0 there are no stability
+> guarantees and no support. Interfaces, behavior, on-disk/database artifacts,
+> and the CLI surface may all change between releases. Do **not** run this
+> against any database you care about.
 
 > Working name — see the naming task in the research build tracker.
 
