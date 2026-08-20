@@ -105,7 +105,8 @@ schema change as an *artifact*: an ordered DDL script that takes catalog state f
 B across a broad object model (tables, views, functions, enums, and more), executed as
 ordinary DDL when the operator chooses. **Online executors** —
 [pgroll](https://github.com/xataio/pgroll), [pg-osc](https://github.com/shayonj/pg-osc),
-and pg-sprite — treat a schema change as a *production operation*: their value is what
+and [pg-sprite](https://github.com/block/pg-sprite) — treat a schema change as a
+*production operation*: their value is what
 happens to live traffic while the change runs — the locks held, the concurrent writes
 captured, the data verified, the cutover window, the recovery story after a crash.
 
