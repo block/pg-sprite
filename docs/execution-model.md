@@ -38,6 +38,20 @@ one enclosing block (impossible / self-defeating)   autocommit-each-step
 An "atomic online schema change" is therefore a contradiction in PostgreSQL:
 the sequencing across transaction boundaries *is* the safety mechanism.
 
+"Implicit or bounded" above is the mechanical detail behind the contract —
+autocommit-each-step has two shapes in the executor:
+
+- **Brief catalog steps and `VALIDATE CONSTRAINT`** each run as one short
+  *explicit* transaction: `BEGIN` → `SET LOCAL lock_timeout` /
+  `statement_timeout` → the statement → `COMMIT` (`pkg/executor`'s bounded
+  runner). The explicit `BEGIN` exists only because the budgets are applied
+  with `SET LOCAL`, which is scoped to that transaction — functionally it is
+  still one statement, one transaction, committed immediately, rolled back
+  atomically on failure.
+- **`CREATE INDEX CONCURRENTLY`** is true autocommit on a dedicated budgeted
+  session: it refuses to run inside any transaction block and internally
+  manages multiple transactions of its own.
+
 ## The committed prefix
 
 Execution is strictly ordered, so a run that stops at step N leaves a precise
