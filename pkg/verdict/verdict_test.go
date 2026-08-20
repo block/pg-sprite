@@ -85,6 +85,10 @@ func TestReasonAndCauseTokensAreFlat(t *testing.T) {
 		string(ReasonBudgetExceeded),
 		string(ReasonInsufficientPrivileges),
 		string(ReasonUnsupportedPartitionedParent),
+		string(ReasonRewriteRequired),
+		string(ReasonBackendUnavailable),
+		string(ReasonDestructiveChange),
+		string(ReasonPlanFingerprintMismatch),
 		string(CauseLockBudget),
 		string(CauseStatementBudget),
 	} {

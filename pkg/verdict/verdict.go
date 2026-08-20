@@ -77,6 +77,16 @@ const (
 	// ReasonBackendUnavailable: the change routes to an execution strategy
 	// this build does not implement (copy-and-swap).
 	ReasonBackendUnavailable Reason = "backend-unavailable"
+	// ReasonDestructiveChange: the desired-state plan discards live
+	// structure — a dropped column, constraint, or index — and
+	// desired-state execution runs no destructive statement without an
+	// explicit path for it. The imperative front door remains the way to
+	// run a reviewed destructive statement deliberately.
+	ReasonDestructiveChange Reason = "destructive-change"
+	// ReasonPlanFingerprintMismatch: the plan recomputed at execution time
+	// does not carry the fingerprint the caller pinned, so the plan a
+	// reviewer approved is not the plan that would execute; nothing runs.
+	ReasonPlanFingerprintMismatch Reason = "plan-fingerprint-mismatch"
 )
 
 // Cause narrows ReasonBudgetExceeded to the budget that was exceeded, so

@@ -102,6 +102,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Library-level desired-state execution: `migrate.RunDesired`** converges
+  one live table onto its parsed desired schema — derive the convergence
+  plan, admit it as a whole (table existence, destructive guard, routed
+  dispositions, optional `ExpectedFingerprint` pin), then run each planned
+  statement back through the same `migrate.Run` pipeline with fresh
+  introspection and classification, stopping at the first refusal or
+  failure. The result carries the plan, per-statement verdicts, and an
+  aggregate outcome with committed-prefix detail
+  ([docs/execution-model.md](docs/execution-model.md)). Two new refusal
+  reasons enter the vocabulary: `destructive-change` (the plan discards
+  live structure; desired-state execution never runs it) and
+  `plan-fingerprint-mismatch` (the plan derived at execution time is not
+  the pinned reviewed plan). Library-only for now — the `migrate --desired`
+  CLI flag follows separately.
 - **A third verdict outcome, `failed`,** for execution failures (still exit
   1 — refusals remain exit 2). The verdict carries the executor's stable
   outcome code in `code`, and for a mid-sequence failure the 1-based
