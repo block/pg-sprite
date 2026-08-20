@@ -71,6 +71,8 @@ machine-readable shape is in
 `migrate --dry-run` shows exactly what would run, as compiler-style
 diagnostics with a doc anchor per finding (exit 0 — the plan is executable).
 The demo above records the whole flow — dry run, real run, catalog proof;
+why the substituted sequence is safer — same end state, different locking
+— is worked through in [docs/safer-sequences.md](docs/safer-sequences.md);
 the machine-readable shape is in
 [docs/cli-output-examples.md](docs/cli-output-examples.md).
 
