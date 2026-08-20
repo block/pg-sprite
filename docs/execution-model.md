@@ -11,6 +11,13 @@ The machine-readable contracts live in
 [plan-report.md](plan-report.md#execution-contracts-execution-safer_sql_execution)
 and [suggest-report.md](suggest-report.md#caveats-caveats).
 
+## Table of contents
+
+- [Why there is no wrapping transaction](#why-there-is-no-wrapping-transaction)
+- [The committed prefix](#the-committed-prefix)
+- [How a failure is reported](#how-a-failure-is-reported)
+- [Why the prefix is safe to leave](#why-the-prefix-is-safe-to-leave)
+
 ## Why there is no wrapping transaction
 
 Safer sequences run under the **autocommit-each-step** contract: one statement
