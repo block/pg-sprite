@@ -52,6 +52,9 @@ refusal — never a silently wrong or incomplete result:
   still works through the statement front door (`NOT VALID` + `VALIDATE`).
 - **Partitioned tables** support in-place statement changes, but cannot be
   expressed in or exported to desired files.
+- **Unlogged tables and explicit column collations** are outside the
+  declarative model: converging either is a table (or column) rewrite, so
+  export and diff refuse rather than plan one.
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
   which covers one ordinary table plus its indexes per file.

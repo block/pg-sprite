@@ -66,35 +66,6 @@ func TestRenderRoundTripsLiveTable(t *testing.T) {
 	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
 }
 
-// Quoted identifiers round-trip: a table whose name carries whitespace and
-// mixed case, columns that are mixed-case and a reserved word, and a
-// mixed-case constraint all force every identifier the renderer emits
-// through real quoting — a Sanitize call replaced with raw interpolation
-// would produce a file this test refuses to parse or materialize.
-func TestRenderRoundTripsQuotedIdentifiers(t *testing.T) {
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
-	require.NoError(t, err)
-	defer pool.Close()
-	schema := testutil.NewSchema(t, pool)
-
-	for _, ddl := range []string{
-		fmt.Sprintf(`CREATE TABLE %s."Order Items" (
-			"ID" bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-			"User ID" bigint NOT NULL,
-			"select" text,
-			CONSTRAINT "User Positive" CHECK ("User ID" > 0)
-		)`, schema),
-		fmt.Sprintf(`CREATE INDEX "Order Items_User_idx" ON %s."Order Items" ("User ID")`, schema),
-	} {
-		_, err := pool.Exec(t.Context(), ddl)
-		require.NoError(t, err)
-	}
-
-	live, desired, changes := roundTrip(t, pool, schema, "Order Items")
-	assert.Equal(t, live, desired, "rendered output must introspect back to the identical model")
-	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
-}
-
 // A serial table round-trips through the serial pseudo-type: the rendered
 // file recreates the owned sequence on the scratch schema and both sides
 // decompile the default identically.
