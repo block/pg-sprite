@@ -31,7 +31,7 @@ func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 		fmt.Fprintf(&b, "\n  %s     %s", pal.bold("safer:"), v.SaferIdiom)
 	}
 	if v.Forced {
-		fmt.Fprintf(&b, "\n  %s    the submitted form ran as-is (--force)", pal.bold("forced:"))
+		fmt.Fprintf(&b, "\n  %s    the submitted form ran as-is (force acknowledged)", pal.bold("forced:"))
 	}
 	if v.FailedStep > 0 {
 		fmt.Fprintf(&b, "\n  %s step %d: %s", pal.bold("failed at:"), v.FailedStep, v.FailedStepSQL)

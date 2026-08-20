@@ -181,7 +181,7 @@ func (v Verdict) String() string {
 		fmt.Fprintf(&b, "\n  safer:     %s", v.SaferIdiom)
 	}
 	if v.Forced {
-		b.WriteString("\n  forced:    the submitted form ran as-is (--force)")
+		b.WriteString("\n  forced:    the submitted form ran as-is (force acknowledged)")
 	}
 	if v.FailedStep > 0 {
 		fmt.Fprintf(&b, "\n  failed at: step %d: %s", v.FailedStep, v.FailedStepSQL)
