@@ -5,6 +5,16 @@ what exists today versus what each build phase adds. For the design rationale be
 start with [high-level-design.md](high-level-design.md); for interfaces and lifecycle internals
 see [low-level-design.md](low-level-design.md).
 
+## Table of contents
+
+- [The three layers](#the-three-layers)
+  - [The five front-end stages](#the-five-front-end-stages)
+  - [Why introspect — ask PostgreSQL, don't reimplement it?](#why-introspect--ask-postgresql-dont-reimplement-it)
+  - [What may a consumer depend on?](#what-may-a-consumer-depend-on)
+- [Package map](#package-map)
+- [The copy-and-swap lifecycle](#the-copy-and-swap-lifecycle)
+- [Where to read more](#where-to-read-more)
+
 ## The three layers
 
 pg-sprite is a decoupled **planner → router → executor** engine. The planner decides *what*
@@ -13,15 +23,16 @@ changes, the router decides *which strategy*, interchangeable executors decide *
 The planner is itself a pipeline of five distinct stages. The two front-ends enter it at
 different points — an imperative `--alter` already *is* DDL, so it goes straight to parse;
 a declarative `--desired` schema must first be compared against the live database to
-*produce* DDL — but both converge on the same classify → lint tail, so every operation is
-judged by the same rules regardless of how it arrived:
+*produce* DDL — and the derived statements then re-enter the parse boundary like any
+hand-written statement, so both routes converge on the same parse → classify → lint tail
+and every operation is judged by the same rules regardless of how it arrived:
 
 ```
    user: --alter "ALTER TABLE …"           user: --desired schema.sql
      (imperative: statements)               (declarative: whole schema)
                   │                                      │
         ╭─────────▼──────────────────────────────────────▼─────────╮
-        │        CLI: migrate · diff · fmt · lint · status         │
+        │    CLI: migrate · diff · fmt · lint · suggest · status   │
         ╰─────────┬──────────────────────────────────────┬─────────╯
                   │                                      │
    ┌──────────────▼───── PLANNER (shared front-end) ─────▼──────────────┐
@@ -29,21 +40,21 @@ judged by the same rules regardless of how it arrived:
    │  ╭─────────────────────╮            ╭─────────────────────────╮    │
    │  │ PARSE               │            │ INTROSPECT              │    │
    │  │ pkg/statement       │            │ pkg/schemadiff          │    │
-   │  │ real PG grammar     │            │ read the live catalog;  │    │
-   │  │ (go-pgquery) →      │            │ apply desired DDL to a  │    │
-   │  │ typed per-operation │            │ scratch schema and      │    │
-   │  │ descriptors         │            │ introspect that too     │    │
-   │  ╰──────────┬──────────╯            ╰────────────┬────────────╯    │
-   │             │                                    │ two schema      │
-   │             │                                    ▼ models          │
-   │             │                       ╭─────────────────────────╮    │
-   │             │                       │ DIFF                    │    │
-   │             │                       │ pkg/schemadiff          │    │
-   │             │                       │ desired vs live →       │    │
-   │             │                       │ ordered DDL operations  │    │
-   │             │                       ╰────────────┬────────────╯    │
-   │             │ operations                         │ operations      │
-   │             ╰──────────────────┬─────────────────╯                 │
+   │  │ real PG grammar     │◀───────╮   │ read the live catalog;  │    │
+   │  │ (go-pgquery) →      │        │   │ apply desired DDL to a  │    │
+   │  │ typed per-operation │        │   │ scratch schema and      │    │
+   │  │ descriptors         │        │   │ introspect that too     │    │
+   │  ╰──────────┬──────────╯        │   ╰────────────┬────────────╯    │
+   │             │           derived │                │ two schema      │
+   │             │               DDL │                ▼ models          │
+   │             │                   │   ╭─────────────────────────╮    │
+   │             │                   │   │ DIFF                    │    │
+   │             │                   │   │ pkg/schemadiff          │    │
+   │             │                   ╰───┤ desired vs live →       │    │
+   │             │                       │ ordered DDL statements  │    │
+   │             │                       ╰─────────────────────────╯    │
+   │             │ operations                                           │
+   │             ╰──────────────────╮                                   │
    │                                ▼                                   │
    │                   ╭─────────────────────────╮                      │
    │                   │ CLASSIFY                │                      │
@@ -84,22 +95,66 @@ judged by the same rules regardless of how it arrived:
 
 ### The five front-end stages
 
-| Stage | Package | Input → output | Why it is a separate stage |
-| --- | --- | --- | --- |
-| **Parse** | `pkg/statement` | SQL text → typed per-operation descriptors | One parse boundary using the real PostgreSQL grammar — no hand-parsing anywhere else; a parse failure is an error surfaced to the caller, never a guess |
-| **Introspect** | `pkg/schemadiff` | live catalog (and desired DDL applied to a scratch schema) → schema models | The classifier and diff need *facts*, not text: column types, defaults, and constraint state come from PostgreSQL's own catalog, not a reimplementation of its semantics |
-| **Diff** | `pkg/schemadiff` | desired model vs live model → ordered DDL operations | Declarative mode is a front-end that *produces statements*; its output enters the same pipeline as hand-written DDL, so both modes get identical safety treatment |
-| **Classify** | `pkg/planner` | each operation + introspected facts → native-safe · needs-rewrite · refuse, with the safer native sequence where one exists | The safety decision lives in one pure, testable place — PostgreSQL's missing `ALGORITHM=`/`LOCK=` declaration ([design-principles.md](design-principles.md)) |
-| **Lint** | `pkg/lint` | classified operations → typed findings (errors refuse, warnings advise) | Policy-level rejection of unsafe or unsupported changes *before* any write — separate from the mechanical can-this-run-online judgment |
+| Stage | Package | Live DB? | Input → output | Why it is a separate stage |
+| --- | --- | --- | --- | --- |
+| **Parse** | `pkg/statement` | No — the grammar is embedded (Wasm libpg_query) | SQL text → typed per-operation descriptors | One parse boundary using the real PostgreSQL grammar — no hand-parsing anywhere else; a parse failure is an error surfaced to the caller, never a guess |
+| **Introspect** | `pkg/schemadiff` | **Yes** — reads the target's catalog; executes desired DDL in a rolled-back scratch schema | live catalog (and desired DDL applied to a scratch schema) → schema models | The classifier and diff need *facts*, not text: column types, defaults, and constraint state come from PostgreSQL's own catalog, not a reimplementation of its semantics |
+| **Diff** | `pkg/schemadiff` | No — pure model-vs-model comparison, but both its inputs come from Introspect | desired model vs live model → ordered DDL statements | Declarative mode is a front-end that *produces statements*; its output re-enters the parse boundary and flows through the same classify → lint tail as hand-written DDL, so both modes get identical safety treatment |
+| **Classify** | `pkg/planner` | No — a pure function over parsed operations and facts gathered earlier | each operation + introspected facts → native-safe · needs-rewrite · refuse, with the safer native sequence where one exists | The safety decision lives in one pure, testable place — PostgreSQL's missing `ALGORITHM=`/`LOCK=` declaration ([design-principles.md](design-principles.md)) |
+| **Lint** | `pkg/lint` | No — pure over classified operations | classified operations → typed findings (errors refuse, warnings advise) | Policy-level rejection of unsafe or unsupported changes *before* any write — separate from the mechanical can-this-run-online judgment |
+
+Only Introspect touches the database. That is why `lint`, `suggest`, and `fmt` run fully
+offline against SQL text alone, while `diff` and `dry-run` require a connection for
+Introspect's facts — and `migrate` requires one for the facts and then to execute the change.
 
 All five stages exist today (Phases 1–2.5); see the [package map](#package-map) for
 per-package status.
+
+### Why introspect — ask PostgreSQL, don't reimplement it?
+
+The engine constantly needs two facts it must not get wrong: *what the live table actually
+looks like*, and *what a desired-state file actually means*. There are two ways to answer the
+second one. The tempting way is **AST transformation**: parse the DDL and apply it to an
+in-memory schema model in Go. But that model is only correct if it reproduces PostgreSQL's own
+semantics exactly — type-alias resolution (`varchar` is `character varying`, `int4` is
+`integer`), default-expression normalization, implicit constraint and index naming, identity
+and sequence wiring, and every place those rules shift across server versions 14 → 18. Each
+divergence is a wrong diff, and a wrong diff becomes wrong DDL against someone's production
+table.
+
+pg-sprite refuses to maintain that reimplementation. Instead it **executes and introspects**:
+hand the DDL to the one authority that cannot disagree with PostgreSQL — PostgreSQL — and read
+back what it built. Step by step, for a `diff` against a desired-state file:
+
+1. **Parse for admission.** The file goes through the `pkg/statement` parse boundary (the real
+   PostgreSQL grammar); anything unparseable is an error, never a guess.
+2. **Create a scratch schema.** Inside a transaction on the target connection, a throwaway
+   schema is created — invisible to every other session.
+3. **Execute the desired DDL there.** PostgreSQL applies its own semantics: it resolves type
+   aliases, normalizes defaults, names implicit constraints and indexes, and wires up identity
+   sequences — on the exact server version being targeted.
+4. **Introspect the result.** The catalogs (`pg_attribute`, `pg_constraint`, `pg_index`,
+   `pg_attrdef`, …) are read back into a normalized schema model.
+5. **Roll back.** The transaction is discarded; nothing persists and the live schema was never
+   touched.
+6. **Introspect the live table** into the same model shape, canonicalize both, and diff them —
+   the comparison is model vs model, never text vs text.
+7. **Re-enter the pipeline.** The derived statements go back through the parse boundary and
+   into classify → lint, exactly as if a user had submitted them with `--alter` — declarative
+   mode earns no shortcut past the safety rules.
+
+The result is a diff computed from what PostgreSQL *means*, not from what a Go reimplementation
+*thinks it means*. One honest limit: an empty scratch table reveals nothing about the size or
+lock cost of the real one, so classification still predicts rewrite and lock behaviour —
+execute-and-introspect complements the classifier, never replaces it. Mechanism details and the
+recorded decision live in
+[low-level-design.md](low-level-design.md#how-the-planner-understands-ddl-decided).
 
 The planner's verdicts are **requests, not permissions** — executors re-verify their own
 preconditions. Which components are safety-critical (and the stricter rules inside that
 boundary) is defined in [../SAFETY.md](../SAFETY.md).
 
-### What a consumer may depend on
+### What may a consumer depend on?
 
 A consumer deciding between shelling out to the CLI and importing a package is making an
 architectural decision; this is the permission slip. Two integration surfaces exist, at
@@ -122,16 +177,17 @@ different levels of commitment:
 
 | Package | Role | Status |
 | --- | --- | --- |
-| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `diff` · `fmt` · `lint` · `status` | all five exist |
-| `internal/cli` | Command tree and flag handling | all five exist |
+| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `diff` · `fmt` · `lint` · `suggest` · `status` | all six exist |
+| `internal/cli` | Command tree and flag handling (including `migrate --dry-run`) | all six exist |
 | `internal/testutil` | Test harness: containerized PostgreSQL, throwaway schemas | exists |
 | `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; advisory-lock mutual exclusion lands here | exists |
 | `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parse boundary, typed per-operation descriptors, and advisory rewrites (never hand-parse SQL); migration-time shadow DDL + fingerprints are derived by `pkg/schemadiff` via scratch-DB execute-and-introspect | exists |
-| `pkg/preflight` | Precondition verification and refusals before any write | exists (Phase 1: table-size guard); grows through Phase 2 |
+| `pkg/preflight` | Precondition verification and refusals before any write: target facts + table-size guard, tiered privilege checks (a refusal carries the exact provisioning `GRANT`), partitioned-table support gates | exists |
 | `pkg/verdict` | Structured outcome contract (executed / refused / failed + reason, stable executor code, and safer idiom), rendering, exit codes | exists (Phase 1) |
 | `pkg/schemadiff` | Execute-and-introspect desired state, introspect the live catalog, and produce an ordered declarative diff | exists |
 | `pkg/planner` | Classify typed operations and emit safer native SQL | exists |
 | `pkg/lint` | Offline lint findings with typed codes: unsupported operations are errors; blocking idioms, rewrites, and destructive drops are warnings | exists (Phase 2.5) |
+| `pkg/suggest` | Offline advisory surface: maps risky DDL to the safer native form the engine would run, with typed caveats and manual-path guidance; emits the versioned suggest report ([suggest-report.md](suggest-report.md)) | exists |
 | `pkg/plan` | Versioned machine-readable dry-run plan report — the one JSON contract both front doors emit and an orchestrator consumes | exists (Phase 2.5) |
 | `pkg/diffplan` | The declarative front door as a library: desired schema in, routed `plan.Report` out — the CLI `diff` and embedding orchestrators share this one pipeline | exists |
 | `pkg/migrate` | The imperative front door as a library: one parsed statement in — gate, resolve, classify, route, execute — one `verdict.Verdict` out; the CLI `migrate` and embedding orchestrators share this one pipeline | exists |
