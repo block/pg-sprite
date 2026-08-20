@@ -29,8 +29,10 @@ func Gate(st statement.Statement) (verdict.Verdict, bool) {
 		v.Detail, v.SaferIdiom = indexAdvice(st)
 	case statement.KindCreateTable:
 		v.Reason = verdict.ReasonUnsupportedStatement
-		v.Detail = "migrate changes an existing table; to converge a table onto a desired-state CREATE TABLE, use the declarative front-end"
-		v.SaferIdiom = "pg-sprite diff --desired schema.sql"
+		// The library names the concept; each front door attaches its own
+		// actionable spelling (the CLI points at its diff command).
+		v.Detail = "migrate changes an existing table; to converge a table onto a desired-state CREATE TABLE, " +
+			"use the declarative front door — diff the desired schema against the live database"
 	case statement.KindOther:
 		v.Reason = verdict.ReasonUnsupportedStatement
 		v.Detail = "only ALTER TABLE and CREATE INDEX statements are supported by the imperative front door"
@@ -98,7 +100,7 @@ func rewriteRequiredVerdict(st statement.Statement) verdict.Verdict {
 		Table:     qualified(st),
 		Detail: "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not " +
 			"construct one for this statement; submit each operation as its own single-operation statement " +
-			"so the engine can build its safer form (run with --dry-run to see each operation's classification)",
+			"so the engine can build its safer form (a dry-run classification shows each operation's route)",
 	}
 }
 
@@ -146,8 +148,8 @@ func sizeGuardVerdict(st statement.Statement, sizeErr *preflight.SizeError, forc
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Forced:    forced,
-		Detail: fmt.Sprintf("table is %d bytes on disk (heap, indexes, and TOAST), above the %d-byte "+
-			"--max-table-size threshold. pg-sprite cannot yet prove this change is instant on a table this "+
+		Detail: fmt.Sprintf("table is %d bytes on disk (heap, indexes, and TOAST), above the configured "+
+			"%d-byte size threshold. pg-sprite cannot yet prove this change is instant on a table this "+
 			"size; if it requires a rewrite, a cancelled attempt is not a free probe — it would hold "+
 			"ACCESS EXCLUSIVE doing rewrite work for the whole budget",
 			sizeErr.TotalBytes, sizeErr.LimitBytes),

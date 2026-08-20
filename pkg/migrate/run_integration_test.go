@@ -16,17 +16,15 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-// runOptions is a runnable policy for direct [migrate.Run] calls: the same
-// budgets the CLI's flag defaults wire, without going through the CLI.
+// runOptions is a runnable policy for direct [migrate.Run] calls: the
+// sanctioned embedding starting point, with the long-phase bounds tightened
+// the way a caller tunes them — here so a hung test fails in a minute, not
+// thirty.
 func runOptions() migrate.Options {
-	return migrate.Options{
-		MaxTableSizeBytes: 1 << 30,
-		Budget: executor.SequenceBudget{
-			Brief:      executor.Budget{LockTimeout: 3 * time.Second, StatementTimeout: 30 * time.Second},
-			Concurrent: executor.ConcurrentBudget{Overall: time.Minute},
-			Validate:   executor.ValidateBudget{LockTimeout: 3 * time.Second, Overall: time.Minute},
-		},
-	}
+	opts := migrate.DefaultOptions()
+	opts.Budget.Concurrent.Overall = time.Minute
+	opts.Budget.Validate.Overall = time.Minute
+	return opts
 }
 
 func parseOne(t *testing.T, sql string) statement.Statement {
@@ -139,6 +137,56 @@ func TestRunDispatch(t *testing.T) {
 			`SELECT EXISTS (SELECT 1 FROM information_schema.columns
 			 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'nickname')`, schema).Scan(&exists))
 		assert.False(t, exists, "the refused change must not touch the schema")
+	})
+
+	t.Run("runs the acknowledged submitted form as-is", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+		require.NoError(t, err)
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(
+			"INSERT INTO %s.t SELECT g, 'x' FROM generate_series(1, 100) g", schema))
+		require.NoError(t, err)
+
+		opts := runOptions()
+		opts.Force = schema + ".t"
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN v SET NOT NULL", schema)), opts)
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		assert.True(t, v.Forced, "the verdict must record the override")
+		assert.Empty(t, v.ExecutedSQL, "the submitted form ran as-is; no substitution to report")
+
+		var notNull bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT attnotnull FROM pg_attribute
+			 WHERE attrelid = ($1 || '.t')::regclass AND attname = 'v'`, schema).Scan(&notNull))
+		assert.True(t, notNull)
+	})
+
+	t.Run("returns the failed verdict together with the operational error", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+		require.NoError(t, err)
+		// The NULL row makes the substituted sequence's VALIDATE CONSTRAINT
+		// step fail after the scaffold CHECK ... NOT VALID has committed.
+		_, err = pool.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s.t VALUES (1, NULL)", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN v SET NOT NULL", schema)), runOptions())
+		require.Error(t, err, "an execution failure is an operational error")
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome,
+			"the failed verdict is the error's machine-readable twin — both return together")
+		assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
+		assert.Len(t, v.ExecutedSQL, 1, "exactly the scaffold step committed before the failure")
+
+		var scaffolds int
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM pg_constraint con
+			   JOIN pg_class c ON c.oid = con.conrelid
+			   JOIN pg_namespace n ON n.oid = c.relnamespace
+			  WHERE n.nspname = $1 AND c.relname = 't' AND con.contype = 'c'`, schema).Scan(&scaffolds))
+		assert.Equal(t, 1, scaffolds, "the committed prefix must describe real surviving state")
 	})
 
 	t.Run("rejects a mismatched force acknowledgement before a verdict", func(t *testing.T) {

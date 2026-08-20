@@ -11,6 +11,13 @@
 // it, so a caller that skips the early gate still cannot execute a gated
 // kind.
 //
+// [Run] takes the concrete [pgxpool.Pool] that [dbconn.NewPool] returns —
+// a deliberate concrete dependency, not an oversight: the execution paths
+// need the full pool surface (dedicated sessions for concurrent builds,
+// per-step transactions), a narrower interface would admit handles those
+// paths cannot use, and it is the same handle the declarative front door
+// (diffplan.Plan) takes, so the two front doors embed identically.
+//
 // Before a v1 module tag the Go API carries no compatibility promise: the
 // JSON [verdict.Verdict] is the stability boundary, the Go API follows at
 // v1 (see docs/architecture.md).
@@ -21,7 +28,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -39,8 +45,9 @@ import (
 // Options carries the execution policy for one [Run]: the safety budgets,
 // the retry policy, the size guard, and the operator's force
 // acknowledgement. The zero value is not a runnable policy: callers set the
-// budgets and the size guard deliberately — the CLI wires its flag
-// defaults, an embedding orchestrator wires its own.
+// budgets and the size guard deliberately — [DefaultOptions] is the
+// sanctioned starting point (the same policy the CLI's flag defaults
+// wire), an embedding orchestrator tunes from there.
 type Options struct {
 	// Force is the typed acknowledgement to run the submitted form as-is,
 	// overriding a safer-sequence substitution or a rewrite-required /
@@ -71,11 +78,30 @@ type Options struct {
 	// transitions); nil discards them.
 	Logger *slog.Logger
 
-	// Audit receives the force-override audit record. nil means stderr:
-	// an audit trail of a deliberate safety override must not depend on
-	// diagnostics being enabled. The verdict's Forced field is its
-	// machine-readable twin.
+	// Audit receives the force-override audit record; nil discards it.
+	// The verdict's Forced field is the machine-readable record and is
+	// always set, so the run's outcome never depends on this logger; the
+	// CLI wires an always-on stderr handler here so an operator's
+	// deliberate safety override is visible even without diagnostics.
 	Audit *slog.Logger
+}
+
+// DefaultOptions is the sanctioned starting point for an embedding caller:
+// the same budgets, size guard, and retry policy the CLI's flag defaults
+// wire. These are defaults to tune, not a recommendation — a large table
+// needs a more generous concurrent-build and validate bound, a hot table a
+// tighter lock budget. Force, Logger, and Audit stay zero: overriding
+// safety and receiving diagnostics are always deliberate choices.
+func DefaultOptions() Options {
+	return Options{
+		MaxTableSizeBytes: 1 << 30,
+		Budget: executor.SequenceBudget{
+			Brief:      executor.Budget{LockTimeout: 3 * time.Second, StatementTimeout: 30 * time.Second},
+			Concurrent: executor.ConcurrentBudget{Overall: 30 * time.Minute},
+			Validate:   executor.ValidateBudget{LockTimeout: 3 * time.Second, Overall: 30 * time.Minute},
+		},
+		Retry: executor.DefaultRetryPolicy(),
+	}
 }
 
 // logger returns the diagnostics logger, discarding when the caller wired
@@ -87,13 +113,26 @@ func (o Options) logger() *slog.Logger {
 	return o.Logger
 }
 
-// audit returns the audit logger, defaulting to always-on warn-level text
-// on stderr when the caller wired none.
+// audit returns the audit logger, discarding when the caller wired none —
+// the same split Logger has, so the library never writes to the host
+// process's stderr behind an embedder's logging stack.
 func (o Options) audit() *slog.Logger {
 	if o.Audit == nil {
-		return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+		return slog.New(slog.DiscardHandler)
 	}
 	return o.Audit
+}
+
+// validate rejects an unrunnable policy at the front door, before any
+// database work, so the documented "the zero value is not a runnable
+// policy" contract holds on every path — not only the paths that happen to
+// reach the size guard. Budgets and the retry policy carry their own
+// validation in the executor.
+func (o Options) validate() error {
+	if o.MaxTableSizeBytes <= 0 {
+		return fmt.Errorf("migrate: Options.MaxTableSizeBytes must be positive, got %d; DefaultOptions is the sanctioned starting point", o.MaxTableSizeBytes)
+	}
+	return nil
 }
 
 // retry returns the retry policy, preserving the safe defaults for a
@@ -123,6 +162,9 @@ func (o Options) retry() executor.RetryPolicy {
 //
 // Run does not close the pool; one pool serves any number of calls.
 func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options) (verdict.Verdict, error) {
+	if err := opts.validate(); err != nil {
+		return verdict.Verdict{}, err
+	}
 	logger := opts.logger()
 	if v, refused := Gate(st); refused {
 		return v, nil
@@ -238,7 +280,7 @@ func checkForceAck(st statement.Statement, ack string) error {
 	if ack == qualified(st) {
 		return nil
 	}
-	return fmt.Errorf("--force must acknowledge the resolved target table %q, got %q; nothing was executed",
+	return fmt.Errorf("the force acknowledgement must name the resolved target table %q, got %q; nothing was executed",
 		qualified(st), ack)
 }
 

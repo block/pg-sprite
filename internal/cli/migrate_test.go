@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/migrate"
 )
 
 // parseMigrate runs args through the real command grammar so these tests
@@ -58,6 +59,20 @@ func TestRetryFlagsWireIntoRetryPolicy(t *testing.T) {
 		InitialBackoff: 250 * time.Millisecond,
 		MaxBackoff:     2 * time.Second,
 	}, c.retryPolicy())
+}
+
+// The library's sanctioned starting point and this front door's flag
+// defaults are one policy by contract: an embedder starting from
+// migrate.DefaultOptions and an operator running the CLI with no flags get
+// identical budgets, size guard, and retry. Full-struct equality on each
+// policy field, so a drift on either side fails here.
+func TestMigrateDefaultsMatchLibraryDefaults(t *testing.T) {
+	c := parseMigrate(t)
+	got := c.options(nil)
+	want := migrate.DefaultOptions()
+	assert.Equal(t, want.MaxTableSizeBytes, got.MaxTableSizeBytes)
+	assert.Equal(t, want.Budget, got.Budget)
+	assert.Equal(t, want.Retry, got.Retry)
 }
 
 func TestRetryPolicyDefaults(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
@@ -34,7 +35,7 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	// a database connection. Run re-checks the gate — this early check is
 	// an ordering choice, not the safety boundary.
 	if v, refused := migrate.Gate(st); refused {
-		return c.emit(out, v)
+		return c.emit(out, cliSaferIdiom(st, v))
 	}
 
 	pool, err := dbconn.NewPool(ctx, c.Config())
@@ -43,18 +44,7 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	}
 	defer pool.Close()
 
-	v, runErr := migrate.Run(ctx, pool, st, migrate.Options{
-		Force:             c.Force,
-		MaxTableSizeBytes: int64(c.MaxTableSize),
-		Budget: executor.SequenceBudget{
-			Brief:      executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout},
-			Concurrent: executor.ConcurrentBudget{Overall: c.IndexBuildTimeout},
-			Validate:   executor.ValidateBudget{LockTimeout: c.LockTimeout, Overall: c.ValidateTimeout},
-		},
-		Retry:  c.retryPolicy(),
-		Logger: logger,
-		Audit:  c.audit(),
-	})
+	v, runErr := migrate.Run(ctx, pool, st, c.options(logger))
 	if runErr != nil {
 		// The failed verdict is the error's machine-readable twin on
 		// stdout, while the error itself still returns so the process
@@ -68,6 +58,38 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 		return runErr
 	}
 	return c.emit(out, v)
+}
+
+// options is the engine policy this command wires from its flags. With no
+// flags set it must equal [migrate.DefaultOptions] field for field — the
+// defaults test pins the two together so the CLI's flag defaults and the
+// library's sanctioned starting point cannot drift. The audit logger is
+// wired here, always on: the library discards a nil Audit, and a
+// deliberate safety override on this front door must be visible even
+// without --debug.
+func (c *MigrateCmd) options(logger *slog.Logger) migrate.Options {
+	return migrate.Options{
+		Force:             c.Force,
+		MaxTableSizeBytes: int64(c.MaxTableSize),
+		Budget: executor.SequenceBudget{
+			Brief:      executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout},
+			Concurrent: executor.ConcurrentBudget{Overall: c.IndexBuildTimeout},
+			Validate:   executor.ValidateBudget{LockTimeout: c.LockTimeout, Overall: c.ValidateTimeout},
+		},
+		Retry:  c.retryPolicy(),
+		Logger: logger,
+		Audit:  c.audit(),
+	}
+}
+
+// cliSaferIdiom attaches this front door's actionable spelling to a gate
+// refusal whose safer path is the declarative front door: the library
+// names the concept, each front door owns its own syntax.
+func cliSaferIdiom(st statement.Statement, v verdict.Verdict) verdict.Verdict {
+	if st.Kind() == statement.KindCreateTable {
+		v.SaferIdiom = "pg-sprite diff --desired schema.sql"
+	}
+	return v
 }
 
 func (c *MigrateCmd) retryPolicy() executor.RetryPolicy {

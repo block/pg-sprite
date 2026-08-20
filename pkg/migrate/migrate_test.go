@@ -49,11 +49,12 @@ func TestGate(t *testing.T) {
 			"suggesting the submitted statement back would loop a resubmitting automation")
 	})
 
-	t.Run("create table points at the declarative front-end", func(t *testing.T) {
+	t.Run("create table points at the declarative front door", func(t *testing.T) {
 		v, refused := Gate(parse(t, "CREATE TABLE t (id int)"))
 		require.True(t, refused)
 		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
-		assert.Equal(t, "pg-sprite diff --desired schema.sql", v.SaferIdiom)
+		assert.Empty(t, v.SaferIdiom,
+			"the library names the concept; each front door attaches its own actionable spelling")
 	})
 
 	t.Run("other kinds are unsupported", func(t *testing.T) {
@@ -62,6 +63,26 @@ func TestGate(t *testing.T) {
 		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
 		assert.Empty(t, v.SaferIdiom)
 	})
+}
+
+func TestRunRejectsUnrunnableOptions(t *testing.T) {
+	st, err := statement.ParseOne("ALTER TABLE billing.invoices ADD COLUMN age int")
+	require.NoError(t, err)
+
+	// Options validation happens before any database work, so no pool is
+	// needed: the zero value must be rejected by field name on every path,
+	// not only the paths that reach the size guard.
+	v, err := Run(t.Context(), nil, st, Options{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "MaxTableSizeBytes",
+		"the rejection must name the Options field, not an internal preflight concept")
+	assert.Equal(t, verdict.Verdict{}, v, "an error before a verdict carries a zero verdict")
+}
+
+func TestDefaultOptionsIsRunnable(t *testing.T) {
+	opts := DefaultOptions()
+	assert.NoError(t, opts.validate())
+	assert.Equal(t, executor.DefaultRetryPolicy(), opts.Retry)
 }
 
 func TestOptionsRetryDefaults(t *testing.T) {
