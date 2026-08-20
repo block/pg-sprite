@@ -52,8 +52,11 @@ strategies rather than the whole product:
 
 - **Planner** — parse the change (imperative `--alter` or declarative desired-state diff),
   introspect the live schema, and **classify** every operation as *native-safe*,
-  *needs-rewrite*, or *refuse*. The planner decides **what** must change. It has no idea
-  *how* any executor works.
+  *needs-rewrite*, or *refuse*. *Needs-rewrite* means PostgreSQL would rewrite the
+  **table** — a full-table copy under `ACCESS EXCLUSIVE` — so the change belongs to the
+  copy-and-swap executor (not that the SQL text needs rewording; safer-sequence
+  substitution is a native-safe outcome). The planner decides **what** must change. It has
+  no idea *how* any executor works.
 - **Router** — given the classified plan plus policy and cluster facts (reversibility
   required? app schema-version aware? logical replication available? table shape?), **choose
   the executor** for each change. The router decides **which strategy**, and is the single
