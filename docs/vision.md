@@ -109,15 +109,16 @@ and pg-sprite — treat a schema change as a *production operation*: their value
 happens to live traffic while the change runs — the locks held, the concurrent writes
 captured, the data verified, the cutover window, the recovery story after a crash.
 
-pg-sprite is an online executor, so judge it on execution grounds, against pgroll and
-pg-osc. They are peers, not competitors — three answers to the same problem under
-different design criteria: pgroll serves multiple schema versions simultaneously so
-applications can roll forward and back through a change; pg-osc reconstructs a single
-table via trigger-based copy-and-swap; pg-sprite routes classify-first to native idioms,
-captures concurrent writes from the log, gates cutover on a checksum, and stays invisible
-to applications. The convergence planners solve a different problem and meet pg-sprite
-only at its declarative front door — there a broad-model planner and a deep executor are
-potential complements, not alternatives.
+pg-sprite is an online executor. pgroll and pg-osc are peers, not competitors — three
+answers to the same problem, each built to different design criteria: pgroll serves
+multiple schema versions simultaneously so applications can roll forward and back through
+a change; pg-osc reconstructs a single table via trigger-based copy-and-swap; pg-sprite
+exists to satisfy the criteria laid out in
+[design-principles.md](design-principles.md) — safety over speed, classify-first routing
+to native idioms, log-based capture, a mandatory checksum gate before any destructive
+step, and application invisibility. The convergence planners solve a different problem
+and meet pg-sprite only at its declarative front door — there a broad-model planner and a
+deep executor are potential complements, not alternatives.
 
 pg-sprite exists because today the whole surface is covered only by assembling a
 toolchain, and each piece stops where the next is needed. Declarative diff-and-plan
