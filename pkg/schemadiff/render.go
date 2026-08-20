@@ -19,6 +19,22 @@ import (
 // truncated sequence name, a nullable column — must be resolved by hand.
 var ErrUnrenderableDefault = errors.New("sequence-backed default cannot be rendered as a desired schema")
 
+// ErrUnrenderablePartition is returned for a partitioned parent or a
+// partition. The model does not carry partition bounds or the
+// parent/partition topology, so a rendered file would silently lose the
+// PARTITION BY clause or the partition attachment — the renderer refuses
+// instead of emitting a wrong baseline.
+var ErrUnrenderablePartition = errors.New("partitioned tables cannot be rendered as a desired schema")
+
+// ErrUnrenderableForeignKey is returned when other tables reference this
+// one with foreign keys. A desired file cannot declare foreign keys, so
+// the single-table model carries no incoming foreign-key topology — a
+// rendered baseline would look complete while silently dropping the
+// table's relationships. The renderer refuses instead. Outgoing foreign
+// keys are refused separately by the desired-file grammar
+// (statement.ErrForeignKey).
+var ErrUnrenderableForeignKey = errors.New("tables referenced by foreign keys cannot be rendered as a desired schema")
+
 // Render renders the canonical model into a desired-state schema file: one
 // CREATE TABLE followed by the model's CREATE INDEX statements. The output
 // is proven admissible by parsing it through statement.ParseDesired before
@@ -28,6 +44,15 @@ var ErrUnrenderableDefault = errors.New("sequence-backed default cannot be rende
 // the table it came from yields no changes — the round-trip contract the
 // integration tests enforce.
 func Render(m Model) (string, error) {
+	if m.PartitionKey != "" {
+		return "", fmt.Errorf("render table %q: partitioned parent (PARTITION BY %s): %w", m.Table, m.PartitionKey, ErrUnrenderablePartition)
+	}
+	if m.IsPartition {
+		return "", fmt.Errorf("render table %q: partition of a partitioned parent: %w", m.Table, ErrUnrenderablePartition)
+	}
+	if len(m.ReferencedBy) != 0 {
+		return "", fmt.Errorf("render table %q: referenced by foreign keys (%s): %w", m.Table, strings.Join(m.ReferencedBy, ", "), ErrUnrenderableForeignKey)
+	}
 	defs := make([]string, 0, len(m.Columns)+len(m.Constraints))
 	for _, c := range m.Columns {
 		def, err := renderColumnDef(m.Table, c)

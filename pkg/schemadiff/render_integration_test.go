@@ -66,6 +66,35 @@ func TestRenderRoundTripsLiveTable(t *testing.T) {
 	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
 }
 
+// Quoted identifiers round-trip: a table whose name carries whitespace and
+// mixed case, columns that are mixed-case and a reserved word, and a
+// mixed-case constraint all force every identifier the renderer emits
+// through real quoting — a Sanitize call replaced with raw interpolation
+// would produce a file this test refuses to parse or materialize.
+func TestRenderRoundTripsQuotedIdentifiers(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	for _, ddl := range []string{
+		fmt.Sprintf(`CREATE TABLE %s."Order Items" (
+			"ID" bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+			"User ID" bigint NOT NULL,
+			"select" text,
+			CONSTRAINT "User Positive" CHECK ("User ID" > 0)
+		)`, schema),
+		fmt.Sprintf(`CREATE INDEX "Order Items_User_idx" ON %s."Order Items" ("User ID")`, schema),
+	} {
+		_, err := pool.Exec(t.Context(), ddl)
+		require.NoError(t, err)
+	}
+
+	live, desired, changes := roundTrip(t, pool, schema, "Order Items")
+	assert.Equal(t, live, desired, "rendered output must introspect back to the identical model")
+	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
+}
+
 // A serial table round-trips through the serial pseudo-type: the rendered
 // file recreates the owned sequence on the scratch schema and both sides
 // decompile the default identically.
@@ -111,6 +140,52 @@ func TestRenderRoundTripsQuotedIdentifiers(t *testing.T) {
 	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
 }
 
+// Partitioned parents and their partitions are introspectable (the
+// statement front door supports in-place changes on them) but refuse to
+// render: the model captures the partition key and attachment exactly so
+// the refusal — and the diff guard against a partitioning mismatch — fire
+// on real catalogs, never silently.
+func TestRenderRefusesLivePartitionedTables(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	for _, ddl := range []string{
+		fmt.Sprintf("CREATE TABLE %s.metrics (id bigint NOT NULL, day date NOT NULL) PARTITION BY RANGE (day)", schema),
+		fmt.Sprintf("CREATE TABLE %s.metrics_p1 PARTITION OF %s.metrics FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')", schema, schema),
+	} {
+		_, err := pool.Exec(t.Context(), ddl)
+		require.NoError(t, err)
+	}
+
+	parent, err := schemadiff.Introspect(t.Context(), pool, schema, "metrics")
+	require.NoError(t, err)
+	assert.Equal(t, "RANGE (day)", parent.PartitionKey)
+	_, err = schemadiff.Render(parent)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderablePartition)
+
+	child, err := schemadiff.Introspect(t.Context(), pool, schema, "metrics_p1")
+	require.NoError(t, err)
+	assert.True(t, child.IsPartition)
+	_, err = schemadiff.Render(child)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderablePartition)
+
+	// The diff guard closes the partition-blind hole end to end: a desired
+	// file declaring PARTITION BY against a plain live table must refuse,
+	// not diff to zero.
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.plain (id bigint NOT NULL, day date NOT NULL)", schema))
+	require.NoError(t, err)
+	ds, err := statement.ParseDesired("CREATE TABLE plain (id bigint NOT NULL, day date NOT NULL) PARTITION BY RANGE (day)")
+	require.NoError(t, err)
+	livePlain, err := schemadiff.Introspect(t.Context(), pool, schema, "plain")
+	require.NoError(t, err)
+	desiredPartitioned, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	require.NoError(t, err)
+	_, err = schemadiff.Diff(schema, livePlain, desiredPartitioned)
+	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+}
+
 // A live table with a foreign key cannot be rendered: the desired-file
 // grammar refuses foreign keys, and the renderer surfaces that gate's typed
 // error rather than emitting a file the front door would reject.
@@ -132,4 +207,13 @@ func TestRenderRefusesLiveForeignKey(t *testing.T) {
 	require.NoError(t, err)
 	_, err = schemadiff.Render(live)
 	require.ErrorIs(t, err, statement.ErrForeignKey)
+
+	// The referenced side refuses too: incoming foreign keys are not part
+	// of this table's own definition, so a rendered baseline of it would
+	// silently drop the relationship.
+	referenced, err := schemadiff.Introspect(t.Context(), pool, schema, "users")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"orders.orders_user_id_fkey"}, referenced.ReferencedBy)
+	_, err = schemadiff.Render(referenced)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)
 }

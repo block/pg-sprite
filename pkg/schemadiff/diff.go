@@ -99,6 +99,15 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	if live.Table != desired.Table {
 		return nil, fmt.Errorf("%w: %q vs %q", ErrDifferentTables, live.Table, desired.Table)
 	}
+	// Partitioning is table identity, not an alterable attribute: no ALTER
+	// can add, remove, or change a partition key or a partition attachment
+	// in place, so a mismatch fails closed instead of diffing to silence.
+	if live.PartitionKey != desired.PartitionKey {
+		return nil, fmt.Errorf("partition key %q vs %q: %w", live.PartitionKey, desired.PartitionKey, ErrUnsupportedChange)
+	}
+	if live.IsPartition != desired.IsPartition {
+		return nil, fmt.Errorf("partition attachment differs between live and desired: %w", ErrUnsupportedChange)
+	}
 	table := pgx.Identifier{schema, live.Table}.Sanitize()
 
 	liveCols := columnsByName(live.Columns)

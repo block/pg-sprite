@@ -45,6 +45,21 @@ func TestDiffRefusesDifferentTables(t *testing.T) {
 	require.ErrorIs(t, err, ErrDifferentTables)
 }
 
+// Partitioning is table identity: no ALTER can change a partition key or a
+// partition attachment in place, so a mismatch is a typed refusal — never a
+// silent zero diff.
+func TestDiffRefusesPartitioningMismatch(t *testing.T) {
+	partitioned := base()
+	partitioned.PartitionKey = "RANGE (id)"
+	_, err := Diff("public", base(), partitioned)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+
+	child := base()
+	child.IsPartition = true
+	_, err = Diff("public", child, base())
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+}
+
 func TestDiffAddColumn(t *testing.T) {
 	desired := base()
 	desired.Columns = append(desired.Columns, Column{

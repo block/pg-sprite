@@ -76,6 +76,19 @@ type Index struct {
 type Model struct {
 	// Table is the unqualified table name.
 	Table string
+	// PartitionKey is the server-decompiled partition key definition
+	// (pg_get_partkeydef), e.g. "RANGE (created_at)" — empty for a
+	// non-partitioned table.
+	PartitionKey string
+	// IsPartition reports that the table is itself a partition of a
+	// partitioned parent (pg_class.relispartition).
+	IsPartition bool
+	// ReferencedBy lists the incoming foreign keys — constraints on other
+	// tables that reference this one — as "table.constraint" strings, in
+	// that order. Incoming foreign keys are not part of this table's own
+	// definition and cannot be expressed in a desired file, so the model
+	// carries them only for the renderer to refuse on.
+	ReferencedBy []string
 	// Columns are the table's columns in attribute order.
 	Columns []Column
 	// Constraints are the table constraints, name-sorted.

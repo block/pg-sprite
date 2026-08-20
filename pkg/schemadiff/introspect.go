@@ -57,11 +57,15 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 
 	var oid uint32
 	var relkind string
+	var isPartition bool
+	var partitionKey string
 	err := tx.QueryRow(ctx, `
-		SELECT c.oid, c.relkind::text
+		SELECT c.oid, c.relkind::text, c.relispartition,
+		       COALESCE(pg_get_partkeydef(c.oid), '')
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2`, schema, table).Scan(&oid, &relkind)
+		WHERE n.nspname = $1 AND c.relname = $2`, schema, table).
+		Scan(&oid, &relkind, &isPartition, &partitionKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Model{}, fmt.Errorf("%s.%s: %w", schema, table, ErrTableNotFound)
 	}
@@ -72,7 +76,7 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 		return Model{}, fmt.Errorf("%s.%s has relkind %q: %w", schema, table, relkind, ErrNotTable)
 	}
 
-	m := Model{Table: table}
+	m := Model{Table: table, PartitionKey: partitionKey, IsPartition: isPartition}
 	if m.Columns, err = introspectColumns(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect columns of %s.%s: %w", schema, table, err)
 	}
@@ -81,6 +85,9 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 	}
 	if m.Indexes, err = introspectIndexes(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect indexes of %s.%s: %w", schema, table, err)
+	}
+	if m.ReferencedBy, err = introspectReferencedBy(ctx, tx, oid); err != nil {
+		return Model{}, fmt.Errorf("introspect incoming foreign keys of %s.%s: %w", schema, table, err)
 	}
 	return m, nil
 }
@@ -156,6 +163,37 @@ func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32) ([]Constr
 		return nil, fmt.Errorf("read constraints: %w", err)
 	}
 	return cons, nil
+}
+
+// introspectReferencedBy reads the incoming foreign keys: constraints on
+// other tables whose referenced relation is this table, as
+// "table.constraint" strings. A self-referential foreign key is excluded —
+// it is already carried as one of the table's own constraints. These are
+// not part of this table's definition; the model carries them only for the
+// renderer to refuse on.
+func introspectReferencedBy(ctx context.Context, tx pgx.Tx, oid uint32) ([]string, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT c.relname || '.' || con.conname
+		FROM pg_constraint con
+		JOIN pg_class c ON c.oid = con.conrelid
+		WHERE con.confrelid = $1 AND con.contype = 'f' AND con.conrelid <> $1
+		ORDER BY c.relname, con.conname`, oid)
+	if err != nil {
+		return nil, fmt.Errorf("query incoming foreign keys: %w", err)
+	}
+	defer rows.Close()
+	var refs []string
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("scan incoming foreign key: %w", err)
+		}
+		refs = append(refs, ref)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read incoming foreign keys: %w", err)
+	}
+	return refs, nil
 }
 
 // introspectIndexes reads the non-constraint indexes as server-decompiled

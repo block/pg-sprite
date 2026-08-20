@@ -96,6 +96,21 @@ func TestRenderRefusesUnrenderableSequenceDefaults(t *testing.T) {
 	}
 }
 
+// Partitioned parents and partitions refuse to render: the model carries no
+// partition bounds or topology, so a rendered file would be a silently
+// wrong baseline.
+func TestRenderRefusesPartitionedTables(t *testing.T) {
+	parent := base()
+	parent.PartitionKey = "RANGE (id)"
+	_, err := Render(parent)
+	require.ErrorIs(t, err, ErrUnrenderablePartition)
+
+	child := base()
+	child.IsPartition = true
+	_, err = Render(child)
+	require.ErrorIs(t, err, ErrUnrenderablePartition)
+}
+
 // The renderer proves its own output admissible through ParseDesired, so a
 // model carrying what a desired file refuses surfaces that gate's typed
 // error — a foreign key is the canonical case.
@@ -108,4 +123,15 @@ func TestRenderRefusesForeignKey(t *testing.T) {
 
 	_, err := Render(m)
 	require.ErrorIs(t, err, statement.ErrForeignKey)
+}
+
+// A table referenced by other tables' foreign keys refuses to render: the
+// single-table model cannot carry incoming foreign-key topology, so a
+// rendered baseline would silently drop the table's relationships.
+func TestRenderRefusesIncomingForeignKey(t *testing.T) {
+	m := base()
+	m.ReferencedBy = []string{"orders.orders_user_id_fkey"}
+
+	_, err := Render(m)
+	require.ErrorIs(t, err, ErrUnrenderableForeignKey)
 }
