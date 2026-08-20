@@ -137,7 +137,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 		}
 	}
 
-	facts, _, _, err := LiveFacts(ctx, pool, st)
+	facts, err := LiveFacts(ctx, pool, st)
 	if err != nil {
 		return verdict.Verdict{}, err
 	}
@@ -145,7 +145,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 	if err != nil {
 		return verdict.Verdict{}, err
 	}
-	classified, err := planner.Classify(canonical, facts)
+	classified, err := planner.Classify(canonical, facts.Classifier)
 	if err != nil {
 		return verdict.Verdict{}, err
 	}

@@ -40,7 +40,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	}
 	defer pool.Close()
 
-	facts, targetFacts, tableExists, err := migrate.LiveFacts(ctx, pool, st)
+	facts, err := migrate.LiveFacts(ctx, pool, st)
 	if err != nil {
 		return err
 	}
@@ -51,7 +51,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	classified, err := planner.Classify(canonical, facts)
+	classified, err := planner.Classify(canonical, facts.Classifier)
 	if err != nil {
 		return err
 	}
@@ -62,7 +62,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema = migrate.ResolvedSchema(st)
 	report.Table = st.Table()
-	report.TableExists = tableExists
+	report.TableExists = facts.TableExists
 	if report.ServerVersion, err = dbconn.ServerVersion(ctx, pool); err != nil {
 		return err
 	}
@@ -74,11 +74,11 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		}
 		report.Statements = append(report.Statements, ps)
 	}
-	if targetFacts.Partitioned() {
+	if facts.Target.Partitioned() {
 		refused := make([]bool, len(report.Statements))
 		for i := range report.Statements {
 			var cause preflight.PartitionRefusalCause
-			cause, err = preflight.RefusesPartitionedParent(targetFacts.ServerMajor(), report.Statements[i].ExecSQL)
+			cause, err = preflight.RefusesPartitionedParent(facts.Target.ServerMajor(), report.Statements[i].ExecSQL)
 			if err != nil {
 				return err
 			}
