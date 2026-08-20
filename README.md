@@ -124,6 +124,13 @@ change — every other command is read-only or fully offline.
 The offline commands have no connection flags at all, so they cannot be
 pointed at a database by accident.
 
+**If a multi-step change fails halfway, what state is my table in?** Every
+step before the failure has committed and is harmless to live traffic; the
+failing step rolled back; nothing after it ran — and the verdict names the
+exact boundary. Why safer sequences run without a wrapping transaction
+(PostgreSQL forbids it for the online forms) and what each documented
+partial state means is [docs/execution-model.md](docs/execution-model.md).
+
 ## Demo
 
 A runnable tour of the CLI against a local PostgreSQL (Docker required):
