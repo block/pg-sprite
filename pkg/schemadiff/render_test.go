@@ -39,17 +39,31 @@ CREATE INDEX events_name_idx ON events USING btree (name);
 }
 
 // A serial column renders back to its pseudo-type so the desired file
-// recreates the owned sequence on the scratch schema.
+// recreates the owned sequence on the scratch schema. All three
+// integer-family mappings are exercised so a typo in any one map entry
+// fails a test rather than shipping a wrong pseudo-type.
 func TestRenderSerialColumn(t *testing.T) {
-	m := base()
-	m.Columns[0] = Column{
-		Name: "id", Type: "bigint", NotNull: true,
-		Default: "nextval('events_id_seq'::regclass)", SequenceDefault: true,
+	tests := []struct {
+		colType string
+		want    string
+	}{
+		{"smallint", "smallserial"},
+		{"integer", "serial"},
+		{"bigint", "bigserial"},
 	}
+	for _, tt := range tests {
+		t.Run(tt.colType, func(t *testing.T) {
+			m := base()
+			m.Columns[0] = Column{
+				Name: "id", Type: tt.colType, NotNull: true,
+				Default: "nextval('events_id_seq'::regclass)", SequenceDefault: true,
+			}
 
-	out, err := Render(m)
-	require.NoError(t, err)
-	assert.Contains(t, out, `"id" bigserial NOT NULL`)
+			out, err := Render(m)
+			require.NoError(t, err)
+			assert.Contains(t, out, `"id" `+tt.want+` NOT NULL`)
+		})
+	}
 }
 
 // Sequence-backed defaults that are not the canonical serial form fail

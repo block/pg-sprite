@@ -83,6 +83,34 @@ func TestRenderRoundTripsSerialTable(t *testing.T) {
 	assert.Empty(t, changes)
 }
 
+// Quoted, mixed-case, whitespace, and reserved-word identifiers must
+// survive the round trip: every rendered name goes through
+// pgx.Identifier.Sanitize(), and this fixture is the one that would break
+// if a Sanitize call were dropped for raw interpolation — plain lowercase
+// fixtures render byte-identically either way.
+func TestRenderRoundTripsQuotedIdentifiers(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	for _, ddl := range []string{
+		fmt.Sprintf(`CREATE TABLE %s."Order Items" (
+			"Item ID" bigint PRIMARY KEY,
+			"select" text NOT NULL,
+			CONSTRAINT "Select Len" CHECK (length("select") > 0)
+		)`, schema),
+		fmt.Sprintf(`CREATE INDEX "Order Items select_idx" ON %s."Order Items" ("select")`, schema),
+	} {
+		_, err := pool.Exec(t.Context(), ddl)
+		require.NoError(t, err)
+	}
+
+	live, desired, changes := roundTrip(t, pool, schema, "Order Items")
+	assert.Equal(t, live, desired, "rendered output must introspect back to the identical model")
+	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
+}
+
 // A live table with a foreign key cannot be rendered: the desired-file
 // grammar refuses foreign keys, and the renderer surfaces that gate's typed
 // error rather than emitting a file the front door would reject.
