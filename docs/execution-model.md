@@ -3,8 +3,12 @@
 **If a multi-step schema change fails halfway, what state is your table in?**
 Every step before the failure has committed — permanently. The failing step
 rolled back. Nothing after it ran. pg-sprite tells you exactly where that line
-is, and every state it can leave behind is documented, harmless to live
-traffic, and a step *toward* the desired schema — not debris.
+is. Everything in the committed prefix is documented, harmless to live
+traffic, and a step *toward* the desired schema — not debris. A failed step
+can also leave state of *its own*: a concurrent index build that dies
+mid-build leaves an INVALID index that taxes every write until an operator
+drops it ([invalid-index-recovery.md](invalid-index-recovery.md)) — the
+verdict's `code` names that outcome when it happens.
 
 This page explains why the engine works this way and what the guarantees are.
 The machine-readable contracts live in
@@ -126,14 +130,20 @@ prose, which is free to change. Reading the three surfaces:
   a refusal — where nothing was ever attempted — exits 2. See
   [cli-output-examples.md](cli-output-examples.md).
 - **Library callers** get the same facts typed: `errors.As` to
-  `*executor.SequenceStepError` (`Step`, `Total`, `SQL`, and the underlying
+  `*executor.SequenceStepError` (`Step`, `Total`, `SQL`, `Kind` — the
+  execution class, the `(brief)` in the line below — and the underlying
   cause), with `executor.OutcomeCode` mapping any executor error to its
   stable code. The process error carries the same line for logs:
   `sequence step 3 of 4 (brief) failed; steps before it committed and their
   state remains: execution exceeded its lock budget (3s) after 3 bounded
   attempts`.
-- **An empty `executed_sql`** on a failed verdict means nothing committed —
-  the failure hit step 1, so there is no partial state at all.
+- **An empty `executed_sql`** on a failed verdict means no *earlier* step
+  committed — not that nothing was left behind: `code` names the outcome
+  and any state the failed step itself left (a concurrent index build that
+  fails at step 1 leaves an INVALID index with an empty committed prefix).
+  `failed_step` is the discriminator: `1` means a sequence stopped at its
+  first step; absent means no sequence ran at all — a single bounded
+  attempt failed, and a started bounded attempt rolls back.
 
 ## Why the prefix is safe to leave
 
@@ -150,17 +160,40 @@ Three mechanisms turn non-atomicity from a hazard into a contract:
    [suggest-report.md](suggest-report.md#caveats-caveats) names the same
    states for offline consumers:
 
-   | Sequence | A failed step leaves | Retry path |
-   | --- | --- | --- |
-   | `SET NOT NULL` (4 steps) | The NOT VALID CHECK scaffold | Resume at VALIDATE; a leftover scaffold is removed by running the DROP CONSTRAINT step alone |
-   | `ADD PRIMARY KEY` / `UNIQUE USING INDEX` (2 steps) | An INVALID index (`pg_index.indisvalid = false`) | Drop the invalid index, re-run the build — see [invalid-index-recovery.md](invalid-index-recovery.md); the engine detects and reports it but never drops it unprompted |
-   | `ADD CONSTRAINT ... NOT VALID` + `VALIDATE` | The NOT VALID constraint, enforcing for new writes | Re-run VALIDATE — it is safe to repeat |
+   | Sequence | A failed step leaves | Retry path | Safe to automate? |
+   | --- | --- | --- | --- |
+   | `SET NOT NULL` (4 steps) | The NOT VALID CHECK scaffold | Resume at the failed step; a leftover scaffold is removed by running the DROP CONSTRAINT step alone | Yes — a committed step refuses to double-apply (`duplicate_object`) |
+   | `ADD PRIMARY KEY` / `UNIQUE USING INDEX` (2 steps) | An INVALID index (`pg_index.indisvalid = false`) | Drop the invalid index, re-run the build — see [invalid-index-recovery.md](invalid-index-recovery.md) | **No — operator action**: recovery starts with a DROP the engine detects and reports but never issues unprompted |
+   | `ADD CONSTRAINT ... NOT VALID` + `VALIDATE` | The NOT VALID constraint, enforcing for new writes | Re-run VALIDATE — it is safe to repeat | Yes — VALIDATE is idempotent |
+
+   Nothing resumes automatically — deliberately. The engine never picks up
+   another run's leftovers on its own; the retry column is what a human or
+   an embedding orchestrator issues next. And since no verdict field names
+   the sequence, identify the row from the statement you submitted, not
+   from the verdict.
 
 3. **The prefix is progress, not debris.** Steps move monotonically toward
    the desired state, so a retry resumes from the boundary rather than
    starting over — and never double-applies work, because re-running a
    committed step fails with a distinct SQLSTATE the contract names
    (`duplicate_object`, `duplicate_table`).
+
+Finishing the step-3 failure from
+[How a failure is reported](#how-a-failure-is-reported) is the two steps the
+run never reached. The validated scaffold makes the catalog flip scan-free —
+PostgreSQL proves non-nullness from the constraint — so the safe finish is
+the submitted form itself, forced past the routing that would otherwise
+re-derive the full sequence, then the scaffold drop (metadata-only, no force
+needed):
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN email SET NOT NULL' --force public.users
+$ pg-sprite migrate --alter 'ALTER TABLE users DROP CONSTRAINT users_email_not_null'
+```
+
+Re-issuing the original statement *without* `--force` fails loudly at step 1
+with `duplicate_object` instead of silently double-applying: that SQLSTATE
+is the guard against repeating committed work, not a resume mechanism.
 
 The same semantics scale up one level: anything that executes more than one
 statement around the engine — an orchestrator converging a table onto its
