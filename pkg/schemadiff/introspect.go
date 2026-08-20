@@ -56,16 +56,16 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 	}
 
 	var oid uint32
-	var relkind string
+	var relkind, persistence string
 	var isPartition bool
 	var partitionKey string
 	err := tx.QueryRow(ctx, `
-		SELECT c.oid, c.relkind::text, c.relispartition,
+		SELECT c.oid, c.relkind::text, c.relpersistence::text, c.relispartition,
 		       COALESCE(pg_get_partkeydef(c.oid), '')
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = $1 AND c.relname = $2`, schema, table).
-		Scan(&oid, &relkind, &isPartition, &partitionKey)
+		Scan(&oid, &relkind, &persistence, &isPartition, &partitionKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Model{}, fmt.Errorf("%s.%s: %w", schema, table, ErrTableNotFound)
 	}
@@ -76,7 +76,7 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 		return Model{}, fmt.Errorf("%s.%s has relkind %q: %w", schema, table, relkind, ErrNotTable)
 	}
 
-	m := Model{Table: table, PartitionKey: partitionKey, IsPartition: isPartition}
+	m := Model{Table: table, PartitionKey: partitionKey, IsPartition: isPartition, Unlogged: persistence == "u"}
 	if m.Columns, err = introspectColumns(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect columns of %s.%s: %w", schema, table, err)
 	}
@@ -94,6 +94,12 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 
 // introspectColumns reads the canonical column list: server-formatted types
 // and server-decompiled default/generation expressions, in attribute order.
+// Two dependency facts ride along for each sequence-backed default: that
+// the default depends on a sequence at all (the pg_attrdef edge), and that
+// the sequence is owned by this exact column (the OWNED BY edge, deptype
+// 'a') — the discriminator between a serial column and a hand-written
+// nextval on a standalone or shared sequence. An explicit column collation
+// is read only when it differs from the type's default collation.
 func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT a.attname,
@@ -109,6 +115,29 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 		             AND dep.refclassid = 'pg_class'::regclass
 		           LIMIT 1
 		       ), false),
+		       COALESCE((
+		           SELECT true
+		           FROM pg_depend dep
+		           JOIN pg_class s ON s.oid = dep.refobjid AND s.relkind = 'S'
+		           JOIN pg_depend own ON own.classid = 'pg_class'::regclass
+		                             AND own.objid = s.oid
+		                             AND own.refclassid = 'pg_class'::regclass
+		                             AND own.refobjid = a.attrelid
+		                             AND own.refobjsubid = a.attnum
+		                             AND own.deptype = 'a'
+		           WHERE dep.classid = 'pg_attrdef'::regclass
+		             AND dep.objid = d.oid
+		             AND dep.refclassid = 'pg_class'::regclass
+		           LIMIT 1
+		       ), false),
+		       COALESCE((
+		           SELECT quote_ident(cn.nspname) || '.' || quote_ident(col.collname)
+		           FROM pg_collation col
+		           JOIN pg_namespace cn ON cn.oid = col.collnamespace
+		           JOIN pg_type t ON t.oid = a.atttypid
+		           WHERE col.oid = a.attcollation
+		             AND a.attcollation <> t.typcollation
+		       ), ''),
 		       a.attidentity::text,
 		       a.attgenerated::text
 		FROM pg_attribute a
@@ -123,7 +152,7 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 	for rows.Next() {
 		var c Column
 		var identity, generated string
-		if err := rows.Scan(&c.Name, &c.Type, &c.NotNull, &c.Default, &c.SequenceDefault, &identity, &generated); err != nil {
+		if err := rows.Scan(&c.Name, &c.Type, &c.NotNull, &c.Default, &c.SequenceDefault, &c.SequenceOwned, &c.Collation, &identity, &generated); err != nil {
 			return nil, fmt.Errorf("scan column: %w", err)
 		}
 		c.Identity = Identity(identity)
@@ -168,15 +197,19 @@ func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32) ([]Constr
 // introspectReferencedBy reads the incoming foreign keys: constraints on
 // other tables whose referenced relation is this table, as
 // "table.constraint" strings. A self-referential foreign key is excluded —
-// it is already carried as one of the table's own constraints. These are
-// not part of this table's definition; the model carries them only for the
-// renderer to refuse on.
+// it is already carried as one of the table's own constraints. Partition
+// clones are excluded too (conislocal, as in introspectConstraints): a
+// foreign key on a partitioned referencing table is mirrored onto every
+// partition, and those mirrors are the same relationship, not independent
+// ones. These are not part of this table's definition; the model carries
+// them only for the renderer to refuse on.
 func introspectReferencedBy(ctx context.Context, tx pgx.Tx, oid uint32) ([]string, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT c.relname || '.' || con.conname
 		FROM pg_constraint con
 		JOIN pg_class c ON c.oid = con.conrelid
 		WHERE con.confrelid = $1 AND con.contype = 'f' AND con.conrelid <> $1
+		      AND con.conislocal
 		ORDER BY c.relname, con.conname`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("query incoming foreign keys: %w", err)

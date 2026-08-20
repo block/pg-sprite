@@ -217,3 +217,165 @@ func TestRenderRefusesLiveForeignKey(t *testing.T) {
 	_, err = schemadiff.Render(referenced)
 	require.ErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)
 }
+
+// A foreign key on a partitioned referencing table is cloned onto every
+// partition in pg_constraint; ReferencedBy must carry the one real
+// relationship, not a row per partition clone.
+func TestIntrospectReferencedByCollapsesPartitionClones(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	for _, ddl := range []string{
+		fmt.Sprintf("CREATE TABLE %s.t (id bigint PRIMARY KEY)", schema),
+		fmt.Sprintf("CREATE TABLE %s.pt (id bigint, day date NOT NULL, t_id bigint REFERENCES %s.t(id)) PARTITION BY RANGE (day)", schema, schema),
+		fmt.Sprintf("CREATE TABLE %s.pt_1 PARTITION OF %s.pt FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')", schema, schema),
+		fmt.Sprintf("CREATE TABLE %s.pt_2 PARTITION OF %s.pt FOR VALUES FROM ('2026-02-01') TO ('2026-03-01')", schema, schema),
+	} {
+		_, err := pool.Exec(t.Context(), ddl)
+		require.NoError(t, err)
+	}
+
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"pt.pt_t_id_fkey"}, live.ReferencedBy)
+	_, err = schemadiff.Render(live)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)
+	assert.NotContains(t, err.Error(), "pt_1")
+}
+
+// A self-referential foreign key is the table's own constraint, not an
+// incoming reference — ReferencedBy excludes it whether the table is plain
+// or partitioned (where every partition carries a clone of the root
+// constraint). Rendering still refuses, but on the outgoing foreign key in
+// the table's own definition, not on a phantom incoming one.
+func TestIntrospectReferencedByExcludesSelfReference(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	for _, ddl := range []string{
+		fmt.Sprintf("CREATE TABLE %s.emp (id bigint PRIMARY KEY, parent_id bigint REFERENCES %s.emp(id))", schema, schema),
+		fmt.Sprintf(`CREATE TABLE %s.spt (
+			id bigint, day date NOT NULL, parent_id bigint, parent_day date,
+			PRIMARY KEY (id, day),
+			FOREIGN KEY (parent_id, parent_day) REFERENCES %s.spt (id, day)
+		) PARTITION BY RANGE (day)`, schema, schema),
+		fmt.Sprintf("CREATE TABLE %s.spt_1 PARTITION OF %s.spt FOR VALUES FROM ('2026-01-01') TO ('2026-02-01')", schema, schema),
+	} {
+		_, err := pool.Exec(t.Context(), ddl)
+		require.NoError(t, err)
+	}
+
+	emp, err := schemadiff.Introspect(t.Context(), pool, schema, "emp")
+	require.NoError(t, err)
+	assert.Empty(t, emp.ReferencedBy)
+	_, err = schemadiff.Render(emp)
+	require.ErrorIs(t, err, statement.ErrForeignKey)
+	require.NotErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)
+
+	spt, err := schemadiff.Introspect(t.Context(), pool, schema, "spt")
+	require.NoError(t, err)
+	assert.Empty(t, spt.ReferencedBy)
+}
+
+// Ownership, not naming, separates a serial column from a hand-written
+// nextval default. Two tables share one standalone sequence that happens to
+// carry the serial-style name of the first: rendering either as serial
+// would silently convert the shared sequence into a private one and break
+// the shared-ID invariant, so both refuse. A genuinely owned sequence still
+// renders.
+func TestRenderRefusesStandaloneSequenceWithSerialName(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	for _, ddl := range []string{
+		fmt.Sprintf("CREATE SEQUENCE %s.events_id_seq", schema),
+		fmt.Sprintf("CREATE TABLE %s.events (id bigint NOT NULL DEFAULT nextval('%s.events_id_seq'::regclass), name text)", schema, schema),
+		fmt.Sprintf("CREATE TABLE %s.orders (id bigint NOT NULL DEFAULT nextval('%s.events_id_seq'::regclass), name text)", schema, schema),
+		fmt.Sprintf("CREATE TABLE %s.owned (id bigserial NOT NULL, name text)", schema),
+	} {
+		_, err := pool.Exec(t.Context(), ddl)
+		require.NoError(t, err)
+	}
+
+	for _, table := range []string{"events", "orders"} {
+		live, err := schemadiff.Introspect(t.Context(), pool, schema, table)
+		require.NoError(t, err)
+		require.True(t, live.Columns[0].SequenceDefault)
+		assert.False(t, live.Columns[0].SequenceOwned, "a standalone sequence is not owned, whatever its name")
+		_, err = schemadiff.Render(live)
+		require.ErrorIs(t, err, schemadiff.ErrUnrenderableDefault, "table %s", table)
+	}
+
+	owned, err := schemadiff.Introspect(t.Context(), pool, schema, "owned")
+	require.NoError(t, err)
+	assert.True(t, owned.Columns[0].SequenceOwned)
+	rendered, err := schemadiff.Render(owned)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, `"id" bigserial NOT NULL`)
+}
+
+// An unlogged live table refuses to render, and a persistence mismatch
+// between live and desired is a typed diff refusal — never a plain-table
+// baseline or a silent zero diff.
+func TestRenderRefusesUnloggedLiveTable(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE UNLOGGED TABLE %s.buffer (id bigint NOT NULL, name text)", schema))
+	require.NoError(t, err)
+
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "buffer")
+	require.NoError(t, err)
+	assert.True(t, live.Unlogged)
+	_, err = schemadiff.Render(live)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderableUnlogged)
+
+	// The diff guard closes the persistence-blind hole end to end: a
+	// desired file declaring UNLOGGED against a plain live table must
+	// refuse, not diff to zero.
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.plainbuf (id bigint NOT NULL, name text)", schema))
+	require.NoError(t, err)
+	ds, err := statement.ParseDesired("CREATE UNLOGGED TABLE plainbuf (id bigint NOT NULL, name text)")
+	require.NoError(t, err)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	require.NoError(t, err)
+	assert.True(t, desired.Unlogged)
+	livePlain, err := schemadiff.Introspect(t.Context(), pool, schema, "plainbuf")
+	require.NoError(t, err)
+	_, err = schemadiff.Diff(schema, livePlain, desired)
+	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+}
+
+// A column with an explicit collation refuses to render, and a collation
+// delta between live and desired is a typed diff refusal — never a
+// baseline that silently drops the COLLATE clause or a silent zero diff.
+func TestRenderRefusesCollatedLiveColumn(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.words (id bigint NOT NULL, word text COLLATE "C")`, schema))
+	require.NoError(t, err)
+
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "words")
+	require.NoError(t, err)
+	assert.Equal(t, `pg_catalog."C"`, live.Columns[1].Collation)
+	_, err = schemadiff.Render(live)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderableCollation)
+
+	ds, err := statement.ParseDesired(`CREATE TABLE words (id bigint NOT NULL, word text)`)
+	require.NoError(t, err)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	require.NoError(t, err)
+	_, err = schemadiff.Diff(schema, live, desired)
+	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+}
