@@ -97,6 +97,30 @@ PG 14→18 — the fleet floor, not the newest release
 
 ## Where the existing ecosystem stops
 
+The tools in this space fall into two problem classes, and a fair comparison starts by
+naming which class a tool is in. **Convergence planners** —
+[pg-schema-diff](https://github.com/stripe/pg-schema-diff) and
+[pg-delta](https://github.com/supabase/pg-toolbelt/tree/main/packages/pg-delta) — treat a
+schema change as an *artifact*: an ordered DDL script that takes catalog state from A to
+B across a broad object model (tables, views, functions, enums, and more), executed as
+ordinary DDL when the operator chooses. **Online executors** —
+[pgroll](https://github.com/xataio/pgroll), [pg-osc](https://github.com/shayonj/pg-osc),
+and [pg-sprite](https://github.com/block/pg-sprite) — treat a schema change as a
+*production operation*: their value is what
+happens to live traffic while the change runs — the locks held, the concurrent writes
+captured, the data verified, the cutover window, the recovery story after a crash.
+
+pg-sprite is an online executor. pgroll and pg-osc are peers, not competitors — three
+answers to the same problem, each built to different design criteria: pgroll serves
+multiple schema versions simultaneously so applications can roll forward and back through
+a change; pg-osc reconstructs a single table via trigger-based copy-and-swap; pg-sprite
+exists to satisfy the criteria laid out in
+[design-principles.md](design-principles.md) — safety over speed, classify-first routing
+to native idioms, log-based capture, a mandatory checksum gate before any destructive
+step, and application invisibility. The convergence planners solve a different problem
+and meet pg-sprite only at its declarative front door — there a broad-model planner and a
+deep executor are potential complements, not alternatives.
+
 pg-sprite exists because today the whole surface is covered only by assembling a
 toolchain, and each piece stops where the next is needed. Declarative diff-and-plan
 tools generate and apply native DDL, but hand a genuine table rewrite to PostgreSQL

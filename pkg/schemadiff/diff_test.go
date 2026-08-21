@@ -45,6 +45,52 @@ func TestDiffRefusesDifferentTables(t *testing.T) {
 	require.ErrorIs(t, err, ErrDifferentTables)
 }
 
+// Partitioning is table identity: no ALTER can change a partition key or a
+// partition attachment in place, so a mismatch is a typed refusal — never a
+// silent zero diff.
+func TestDiffRefusesPartitioningMismatch(t *testing.T) {
+	partitioned := base()
+	partitioned.PartitionKey = "RANGE (id)"
+	_, err := Diff("public", base(), partitioned)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+
+	child := base()
+	child.IsPartition = true
+	_, err = Diff("public", child, base())
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+}
+
+// Persistence converges only by a full table rewrite (SET LOGGED / SET
+// UNLOGGED), which the engine does not derive — a mismatch is a typed
+// refusal, never a silent zero diff.
+func TestDiffRefusesPersistenceMismatch(t *testing.T) {
+	unlogged := base()
+	unlogged.Unlogged = true
+	_, err := Diff("public", unlogged, base())
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+
+	_, err = Diff("public", base(), unlogged)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+}
+
+// A collation delta on an existing column rewrites the column, and an
+// added column's COLLATE clause is not carried by the emitted ADD COLUMN —
+// both are typed refusals, never a silent zero diff or a silently dropped
+// clause.
+func TestDiffRefusesCollationChanges(t *testing.T) {
+	collated := base()
+	collated.Columns[1].Collation = `"C"`
+	_, err := Diff("public", base(), collated)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+
+	added := base()
+	added.Columns = append(added.Columns, Column{
+		Name: "note", Type: "text", Collation: `"C"`,
+	})
+	_, err = Diff("public", base(), added)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+}
+
 func TestDiffAddColumn(t *testing.T) {
 	desired := base()
 	desired.Columns = append(desired.Columns, Column{

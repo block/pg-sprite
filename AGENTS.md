@@ -135,6 +135,14 @@ is a smoke tour of the built binary, not a second test suite.
 - Never reference internal company details (cluster names, hostnames, org names) in code,
   comments, commits, or PRs — this is a public repo.
 
+## Capability statement
+
+[docs/limitations.md](docs/limitations.md) and the README's "What pg-sprite does not do yet"
+section are the public capability statement. Any PR that adds, removes, or re-scopes a
+capability — a planner route, a refusal, a verdict outcome, a declarative-model boundary —
+updates both in the same PR, and every release sweeps them against the shipped behavior
+before tagging.
+
 ## Logging and observability
 
 - **stdout is the product's output; diagnostics go to stderr.** Command results (verdicts,
