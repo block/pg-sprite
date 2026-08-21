@@ -58,7 +58,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 |---|---|---|---|
 | `sql` | string | always | The statement in the engine's **canonical rendering**: parsed and reprinted through the PostgreSQL deparser, whichever front door derived it. Never a verbatim echo of submitted text — the same change carries the same string through either door. Commented input is refused rather than silently stripped; optional noise words follow the grammar's canonical spelling. |
 | `kind` | string | diff source only | Classifies a diff-derived statement (see Kinds) so a consumer can gate whole classes of change. Absent for the alter source: a submitted statement may carry several operations and has no single kind. |
-| `destructive` | bool | always | Marks statements that discard live structure — a dropped column, constraint, or index. Derived from the classifier's decisions, so both sources report it identically by construction. Always emitted, never omitted: a safety flag a consumer gates on must be explicit even when false. |
+| `destructive` | bool | always | Marks statements that discard live structure — a dropped column, constraint, index, or `NOT NULL`. Derived from the classifier's decisions, so both sources report it identically by construction. Always emitted, never omitted: a safety flag a consumer gates on must be explicit even when false. |
 | `route` | string | always | The planner's aggregate route for the statement (see Routes). |
 | `backend` | string | except refusals | The assigned execution strategy (see Backends); absent for refusals. |
 | `disposition` | string | always | What execution would do with this statement now (see Dispositions). |

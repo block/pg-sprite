@@ -30,7 +30,7 @@ The invariant registry (invariant IDs referenced below) lives in
 | `pkg/statement`, `pkg/planner`, `pkg/schemadiff`, `pkg/router`, `pkg/plan`, `pkg/lint`, `pkg/suggest` — classify/diff/route/report | ❌ periphery¹ | `pkg/statement` (parse boundary), `pkg/schemadiff` (introspect/diff via scratch execute-and-introspect), `pkg/planner` (classifier), `pkg/router` (backend assignment + availability policy), `pkg/plan` (versioned dry-run plan report), `pkg/lint` (offline typed findings), and `pkg/suggest` (advisory rewrites with typed caveats) exist (Phases 2.1–2.5) | (CO-7 holds at the parse boundary) |
 | `pkg/verdict` — structured outcome contract, rendering, exit codes | ❌ periphery | exists (Phase 1) | — |
 | `pkg/diffplan` — desired schema → routed convergence plan, the declarative front door as a library (the CLI `diff` and embedding orchestrators share it) | ❌ periphery | exists | — |
-| `pkg/migrate` — one gated statement → resolve, classify, route, execute → one verdict; the imperative front door as a library (the CLI `migrate` and embedding orchestrators share it) | ❌ periphery² | exists | — |
+| `pkg/migrate` — one gated statement → resolve, classify, route, execute → one verdict; the imperative front door as a library (the CLI `migrate` and embedding orchestrators share it), plus the desired-state execution loop (`RunDesired`: derive the convergence plan, admit it as a whole, run each planned statement back through the same pipeline) | ❌ periphery² | exists | — |
 | `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`, `status`, `diff`, `fmt`, `lint`, and `suggest` exist | — |
 | `pkg/progress` — strategy-wide progress snapshots; the executors' observation seam (core imports it, so its locking discipline is core-critical); copy counters reserved for later | ✅ core | native progress exists | — |
 | orchestrator adapter | ❌ periphery | planned (Phase 11) | OC-* hold *at* the boundary |
@@ -46,7 +46,19 @@ The core executors re-verify their own preconditions and never trust that the pl
 pipeline — gate, resolve, preflight, execute — but every dangerous step it requests is enforced
 by the core packages it calls: the executors re-verify admission and run under their own bounded
 budgets, and preflight's proof types gate what may execute. A wrong sequencing decision in
-`pkg/migrate` yields a refusal or a bounded failed attempt, never an unbounded lock.
+`pkg/migrate` yields a refusal or a bounded failed attempt, never an unbounded lock. The
+desired-state loop inherits that argument for every *execution-time* property: it executes
+nothing itself — every planned statement goes back through `Run`, so each one is
+re-introspected, re-classified, re-routed, and re-preflighted at execution time, and a plan
+the loop wrongly admits still cannot make the core exceed a lock budget or skip a preflight.
+**One admission check has no core backstop: the destructive guard.** The core has no concept
+of destructiveness — `pkg/executor` and `pkg/preflight` never check it — so refusing a
+destructive desired-state plan rests entirely on `RunDesired`'s admission gate and on the
+classifier's `Destructive` derivation in `pkg/planner`, and its failure mode is data loss (a
+falsely-admitted `DROP COLUMN` commits), not a refusal or a bounded failed attempt. Those two
+sites are the exception to the periphery posture: treat `destructiveOp` and the desired-state
+admission gate with the core's review bar — spec-first, test-first, small diffs — even though
+their packages stay periphery for everything else they do.
 
 ## Rules inside the core
 

@@ -61,7 +61,7 @@ type Statement struct {
 	// has no single kind.
 	Kind schemadiff.ChangeKind `json:"kind,omitempty"`
 	// Destructive marks statements that discard live structure — a dropped
-	// column, constraint, or index. It is derived from the classifier's
+	// column, constraint, index, or NOT NULL. It is derived from the classifier's
 	// decisions, so both sources report it identically; it is always
 	// emitted, never omitted, because a safety flag a consumer gates on
 	// must be explicit even when false.
