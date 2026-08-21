@@ -44,6 +44,21 @@ type Column struct {
 	// the rolled-back scratch transaction, so no derived plan can
 	// reference it.
 	SequenceDefault bool
+	// SequenceOwned reports that the sequence behind the default is owned
+	// by this exact column (a pg_depend OWNED BY edge, deptype 'a') — what
+	// the serial shorthand produces. It is false for a hand-written
+	// nextval default on a standalone sequence or another table's
+	// sequence, however the sequence is named: sharing distinguishes it
+	// from ownership, not naming.
+	SequenceOwned bool
+	// Collation is the column's explicit collation as a schema-qualified,
+	// quote_ident-quoted name, empty when the column uses its type's
+	// default collation. The declarative model does not manage collations yet, so
+	// the model carries it only to refuse: dropping a COLLATE clause from
+	// a rendered baseline would silently change sort order and index
+	// semantics, and a collation delta cannot be converged without a
+	// table rewrite.
+	Collation string
 	// Identity is the identity kind, IdentityNone for plain columns.
 	Identity Identity
 	// Generated reports GENERATED ALWAYS AS (...) STORED.
@@ -76,6 +91,27 @@ type Index struct {
 type Model struct {
 	// Table is the unqualified table name.
 	Table string
+	// PartitionKey is the server-decompiled partition key definition
+	// (pg_get_partkeydef), e.g. "RANGE (created_at)" — empty for a
+	// non-partitioned table.
+	PartitionKey string
+	// IsPartition reports that the table is itself a partition of a
+	// partitioned parent (pg_class.relispartition).
+	IsPartition bool
+	// Unlogged reports that the table is unlogged
+	// (pg_class.relpersistence 'u'). The declarative model does not manage
+	// persistence yet — converging it (SET LOGGED / SET UNLOGGED) is a
+	// full table rewrite — so the model carries it only to refuse:
+	// rendering an unlogged table as a plain CREATE TABLE would silently
+	// change its crash-safety and replication behavior, and a persistence
+	// mismatch fails the diff closed instead of diffing to silence.
+	Unlogged bool
+	// ReferencedBy lists the incoming foreign keys — constraints on other
+	// tables that reference this one — as "table.constraint" strings, in
+	// that order. Incoming foreign keys are not part of this table's own
+	// definition and cannot be expressed in a desired file, so the model
+	// carries them only for the renderer to refuse on.
+	ReferencedBy []string
 	// Columns are the table's columns in attribute order.
 	Columns []Column
 	// Constraints are the table constraints, name-sorted.

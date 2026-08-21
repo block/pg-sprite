@@ -56,7 +56,7 @@ func TestRenderSerialColumn(t *testing.T) {
 			m := base()
 			m.Columns[0] = Column{
 				Name: "id", Type: tt.colType, NotNull: true,
-				Default: "nextval('events_id_seq'::regclass)", SequenceDefault: true,
+				Default: "nextval('events_id_seq'::regclass)", SequenceDefault: true, SequenceOwned: true,
 			}
 
 			out, err := Render(m)
@@ -77,13 +77,21 @@ func TestRenderRefusesUnrenderableSequenceDefaults(t *testing.T) {
 			Name: "id", Type: "bigint", NotNull: true,
 			Default: "nextval('global_id_seq'::regclass)", SequenceDefault: true,
 		}},
+		{"standalone sequence with the serial-style name", Column{
+			Name: "id", Type: "bigint", NotNull: true,
+			Default: "nextval('events_id_seq'::regclass)", SequenceDefault: true, SequenceOwned: false,
+		}},
+		{"owned sequence with a non-serial name", Column{
+			Name: "id", Type: "bigint", NotNull: true,
+			Default: "nextval('renamed_seq'::regclass)", SequenceDefault: true, SequenceOwned: true,
+		}},
 		{"nullable serial", Column{
 			Name: "id", Type: "bigint",
-			Default: "nextval('events_id_seq'::regclass)", SequenceDefault: true,
+			Default: "nextval('events_id_seq'::regclass)", SequenceDefault: true, SequenceOwned: true,
 		}},
 		{"non-integer type", Column{
 			Name: "id", Type: "numeric", NotNull: true,
-			Default: "nextval('events_id_seq'::regclass)", SequenceDefault: true,
+			Default: "nextval('events_id_seq'::regclass)", SequenceDefault: true, SequenceOwned: true,
 		}},
 	}
 	for _, tt := range tests {
@@ -94,6 +102,50 @@ func TestRenderRefusesUnrenderableSequenceDefaults(t *testing.T) {
 			require.ErrorIs(t, err, ErrUnrenderableDefault)
 		})
 	}
+}
+
+// Partitioned parents and partitions refuse to render: the model carries no
+// partition bounds or topology, so a rendered file would be a silently
+// wrong baseline.
+func TestRenderRefusesPartitionedTables(t *testing.T) {
+	parent := base()
+	parent.PartitionKey = "RANGE (id)"
+	_, err := Render(parent)
+	require.ErrorIs(t, err, ErrUnrenderablePartition)
+
+	child := base()
+	child.IsPartition = true
+	_, err = Render(child)
+	require.ErrorIs(t, err, ErrUnrenderablePartition)
+}
+
+// A zero-column table is legal PostgreSQL and renders as an empty body,
+// not an empty line between the parentheses.
+func TestRenderZeroColumnTable(t *testing.T) {
+	m := Model{Table: "nocols"}
+	out, err := Render(m)
+	require.NoError(t, err)
+	assert.Equal(t, "CREATE TABLE \"nocols\" ();\n", out)
+}
+
+// An unlogged table refuses to render: the model does not manage
+// persistence, so a plain CREATE TABLE baseline would silently change the
+// table's crash-safety and replication behavior.
+func TestRenderRefusesUnloggedTable(t *testing.T) {
+	m := base()
+	m.Unlogged = true
+	_, err := Render(m)
+	require.ErrorIs(t, err, ErrUnrenderableUnlogged)
+}
+
+// A column with an explicit collation refuses to render: the model does
+// not manage collations, so a baseline without the COLLATE clause would
+// silently change sort order and index semantics.
+func TestRenderRefusesCollatedColumn(t *testing.T) {
+	m := base()
+	m.Columns[1].Collation = `"C"`
+	_, err := Render(m)
+	require.ErrorIs(t, err, ErrUnrenderableCollation)
 }
 
 // The renderer proves its own output admissible through ParseDesired, so a
@@ -108,4 +160,15 @@ func TestRenderRefusesForeignKey(t *testing.T) {
 
 	_, err := Render(m)
 	require.ErrorIs(t, err, statement.ErrForeignKey)
+}
+
+// A table referenced by other tables' foreign keys refuses to render: the
+// single-table model cannot carry incoming foreign-key topology, so a
+// rendered baseline would silently drop the table's relationships.
+func TestRenderRefusesIncomingForeignKey(t *testing.T) {
+	m := base()
+	m.ReferencedBy = []string{"orders.orders_user_id_fkey"}
+
+	_, err := Render(m)
+	require.ErrorIs(t, err, ErrUnrenderableForeignKey)
 }

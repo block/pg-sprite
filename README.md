@@ -37,6 +37,28 @@ build plan live in [docs/](docs/) — start with
 [docs/README.md](docs/README.md); the vision — what pg-sprite is and is not —
 is [docs/vision.md](docs/vision.md).
 
+## What pg-sprite does not do yet
+
+So expectations are set before you point it at a database — the full list
+with per-item behavior is **[docs/limitations.md](docs/limitations.md)**;
+wherever an operation meets a boundary below, it fails closed with a typed
+refusal — never a silently wrong or incomplete result:
+
+- **Copy-and-swap** (genuine table rewrites) is not yet available — those
+  changes refuse rather than fall through to a blocking rewrite.
+- **Foreign keys** are out of the declarative model in either direction:
+  desired files cannot declare them, and export refuses both a table that
+  carries foreign keys and a table that other tables reference. FK DDL
+  still works through the statement front door (`NOT VALID` + `VALIDATE`).
+- **Partitioned tables** support in-place statement changes, but cannot be
+  expressed in or exported to desired files.
+- **Unlogged tables and explicit column collations** are outside the
+  declarative model: converging either is a table (or column) rewrite, so
+  export and diff refuse rather than plan one.
+- **Non-table objects** — views, standalone sequences, enums, domains,
+  extensions, functions, triggers — are outside the declarative model,
+  which covers one ordinary table plus its indexes per file.
+
 The codebase is partitioned into a small safety-critical core and a
 periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the
 rules that apply inside the core. Read it before changing anything under
