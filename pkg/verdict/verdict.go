@@ -78,7 +78,7 @@ const (
 	// this build does not implement (copy-and-swap).
 	ReasonBackendUnavailable Reason = "backend-unavailable"
 	// ReasonDestructiveChange: the desired-state plan discards live
-	// structure — a dropped column, constraint, or index — and
+	// structure — a dropped column, constraint, index, or NOT NULL — and
 	// desired-state execution runs no destructive statement without an
 	// explicit path for it. The imperative front door remains the way to
 	// run a reviewed destructive statement deliberately.
@@ -88,6 +88,25 @@ const (
 	// reviewer approved is not the plan that would execute; nothing runs.
 	ReasonPlanFingerprintMismatch Reason = "plan-fingerprint-mismatch"
 )
+
+// Reasons returns the closed set of non-zero Reason values. It is part of
+// the verdict contract: the tokens are what automation switches on, so the
+// set changes only deliberately, every token is pinned by test, and every
+// token has a row in docs/cli-output-examples.md's refusal-reason table.
+func Reasons() []Reason {
+	return []Reason{
+		ReasonUnsupportedStatement,
+		ReasonIndexStatement,
+		ReasonTableTooLarge,
+		ReasonInsufficientPrivileges,
+		ReasonUnsupportedPartitionedParent,
+		ReasonBudgetExceeded,
+		ReasonRewriteRequired,
+		ReasonBackendUnavailable,
+		ReasonDestructiveChange,
+		ReasonPlanFingerprintMismatch,
+	}
+}
 
 // Cause narrows ReasonBudgetExceeded to the budget that was exceeded, so
 // automation can branch on which limit fired without parsing prose.

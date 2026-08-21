@@ -47,10 +47,18 @@ pipeline — gate, resolve, preflight, execute — but every dangerous step it r
 by the core packages it calls: the executors re-verify admission and run under their own bounded
 budgets, and preflight's proof types gate what may execute. A wrong sequencing decision in
 `pkg/migrate` yields a refusal or a bounded failed attempt, never an unbounded lock. The
-desired-state loop inherits the argument by construction: it executes nothing itself — every
-planned statement goes back through `Run`, so each one is re-introspected, re-classified,
-re-routed, and re-preflighted at execution time, and a plan the loop wrongly admits still
-cannot make the core run anything the core would refuse statement-by-statement.
+desired-state loop inherits that argument for every *execution-time* property: it executes
+nothing itself — every planned statement goes back through `Run`, so each one is
+re-introspected, re-classified, re-routed, and re-preflighted at execution time, and a plan
+the loop wrongly admits still cannot make the core exceed a lock budget or skip a preflight.
+**One admission check has no core backstop: the destructive guard.** The core has no concept
+of destructiveness — `pkg/executor` and `pkg/preflight` never check it — so refusing a
+destructive desired-state plan rests entirely on `RunDesired`'s admission gate and on the
+classifier's `Destructive` derivation in `pkg/planner`, and its failure mode is data loss (a
+falsely-admitted `DROP COLUMN` commits), not a refusal or a bounded failed attempt. Those two
+sites are the exception to the periphery posture: treat `destructiveOp` and the desired-state
+admission gate with the core's review bar — spec-first, test-first, small diffs — even though
+their packages stay periphery for everything else they do.
 
 ## Rules inside the core
 

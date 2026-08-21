@@ -78,22 +78,35 @@ func TestJSONOmitsEmptyOptionalFields(t *testing.T) {
 // Reason and Cause values are the machine contract automation switches on:
 // flat kebab-case tokens, no spaces or colons — prose belongs in Detail.
 func TestReasonAndCauseTokensAreFlat(t *testing.T) {
-	for _, tok := range []string{
-		string(ReasonUnsupportedStatement),
-		string(ReasonIndexStatement),
-		string(ReasonTableTooLarge),
-		string(ReasonBudgetExceeded),
-		string(ReasonInsufficientPrivileges),
-		string(ReasonUnsupportedPartitionedParent),
-		string(ReasonRewriteRequired),
-		string(ReasonBackendUnavailable),
-		string(ReasonDestructiveChange),
-		string(ReasonPlanFingerprintMismatch),
-		string(CauseLockBudget),
-		string(CauseStatementBudget),
-	} {
+	toks := []string{string(CauseLockBudget), string(CauseStatementBudget)}
+	for _, r := range Reasons() {
+		toks = append(toks, string(r))
+	}
+	for _, tok := range toks {
 		assert.Regexp(t, `^[a-z0-9]+(-[a-z0-9]+)*$`, tok)
 	}
+}
+
+// The wire tokens themselves are the contract, not just their shape: a
+// renamed token ships a breaking change to every consumer switching on it,
+// so the exact strings are pinned here.
+func TestReasonsPinsWireTokens(t *testing.T) {
+	var got []string
+	for _, r := range Reasons() {
+		got = append(got, string(r))
+	}
+	assert.Equal(t, []string{
+		"unsupported-statement",
+		"index-statement",
+		"not-native-safe-table-too-large",
+		"insufficient-privileges",
+		"unsupported-partitioned-parent",
+		"not-native-safe-budget-exceeded",
+		"not-native-safe-rewrite-required",
+		"backend-unavailable",
+		"destructive-change",
+		"plan-fingerprint-mismatch",
+	}, got)
 }
 
 func TestStringExecuted(t *testing.T) {

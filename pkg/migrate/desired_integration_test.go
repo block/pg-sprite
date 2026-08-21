@@ -107,6 +107,31 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.True(t, exists, "the live column the desired schema lacks must survive")
 	})
 
+	t.Run("refuses a plan that drops NOT NULL and keeps the guarantee", func(t *testing.T) {
+		// Dropping NOT NULL discards the same guarantee as dropping the
+		// equivalent constraint: the destructive guard must stop the plan
+		// before anything runs, and the live guarantee must survive.
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(
+			"CREATE TABLE %s.t (id int PRIMARY KEY, v text NOT NULL)", schema))
+		require.NoError(t, err)
+
+		res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+			Schema:  schema,
+			Desired: parseDesired(t, "CREATE TABLE t (id int PRIMARY KEY, v text)"),
+		}, runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
+		assert.Empty(t, res.Verdicts, "the guard refuses before any statement runs")
+
+		var notNull bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT is_nullable = 'NO' FROM information_schema.columns
+			 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'v'`, schema).Scan(&notNull))
+		assert.True(t, notNull, "the NOT NULL the desired schema dropped must survive")
+	})
+
 	t.Run("refuses a pinned fingerprint mismatch and runs nothing", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))

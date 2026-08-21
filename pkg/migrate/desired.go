@@ -8,11 +8,18 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/diffplan"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
+
+// stoppedBeforeVerdict is the committed-prefix wording for a statement the
+// pipeline stopped on without reaching a verdict: unlike a failed verdict,
+// nothing about the statement was executed.
+const stoppedBeforeVerdict = "stopped before a verdict; nothing about it was executed"
 
 // DesiredRequest names the inputs to [RunDesired]. Zero-value fields are
 // invalid: the schema must be set, and the desired state must come from
@@ -51,7 +58,11 @@ type DesiredResult struct {
 	// Outcome is what happened overall: executed when every planned
 	// statement committed (or there was nothing to run), refused when the
 	// plan or one of its statements was refused and execution stopped,
-	// failed when a statement was attempted and failed.
+	// failed when execution stopped on an operational error. A failed
+	// result whose stopping statement has no verdict means the pipeline
+	// stopped before reaching one — nothing about that statement was
+	// executed; a failed verdict means the statement was attempted and
+	// failed. Detail says which.
 	Outcome verdict.Outcome `json:"outcome"`
 	// Reason is the typed refusal cause; empty unless Outcome is refused.
 	Reason verdict.Reason `json:"reason,omitempty"`
@@ -117,17 +128,25 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	for i, ps := range report.Statements {
 		st, err := statement.ParseOne(ps.SQL)
 		if err != nil {
+			// The planned SQL is engine-generated: a reparse failure is a
+			// breach of the engine's own contract, not a database problem.
 			result.Outcome = verdict.OutcomeFailed
-			result.Detail = committedPrefixDetail(i, len(report.Statements), "stopped before a verdict")
-			return result, fmt.Errorf("parse planned statement %d: %w", i+1, err)
+			result.Detail = committedPrefixDetail(i, len(report.Statements), stoppedBeforeVerdict)
+			return result, fmt.Errorf("%w: planned statement %d is engine-generated SQL its own parser rejects: %w",
+				executor.ErrInvariantViolation, i+1, err)
 		}
 		v, runErr := Run(ctx, pool, st, opts)
 		if runErr != nil {
 			result.Outcome = verdict.OutcomeFailed
+			// A zero verdict is Run's "stopped before reaching a verdict"
+			// shape: nothing about the statement was executed, so the
+			// detail must not call the statement failed.
+			what := stoppedBeforeVerdict
 			if v.Outcome != "" {
 				result.Verdicts = append(result.Verdicts, v)
+				what = "failed"
 			}
-			result.Detail = committedPrefixDetail(i, len(report.Statements), "failed")
+			result.Detail = committedPrefixDetail(i, len(report.Statements), what)
 			return result, fmt.Errorf("planned statement %d: %w", i+1, runErr)
 		}
 		result.Verdicts = append(result.Verdicts, v)
@@ -168,14 +187,24 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 		return refused, false
 	}
 	for i, ps := range report.Statements {
-		if ps.Destructive {
-			refused.Reason = verdict.ReasonDestructiveChange
-			refused.Detail = fmt.Sprintf(
-				"planned statement %d discards live structure (%s); desired-state execution runs no "+
-					"destructive statement — run it deliberately through the imperative front door",
-				i+1, ps.SQL)
-			return refused, false
+		if !ps.Destructive {
+			continue
 		}
+		refused.Reason = verdict.ReasonDestructiveChange
+		// The deliberate path differs by shape: the imperative front door
+		// runs an ALTER TABLE drop when the operator states it, but it
+		// refuses a plain DROP INDEX in favor of the concurrent idiom — so
+		// an index drop is pointed straight at that idiom instead of at a
+		// door that would bounce it.
+		deliberatePath := "run it deliberately through the imperative front door"
+		if ps.Kind == schemadiff.ChangeDropIndex {
+			deliberatePath = "drop it deliberately with DROP INDEX CONCURRENTLY, then rerun"
+		}
+		refused.Detail = fmt.Sprintf(
+			"planned statement %d discards live structure (%s); desired-state execution runs no "+
+				"destructive statement — %s",
+			i+1, ps.SQL, deliberatePath)
+		return refused, false
 	}
 	if report.Disposition != router.DispositionExecute {
 		refused.Reason, refused.Detail = planRefusal(report)
