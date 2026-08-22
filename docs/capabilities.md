@@ -1,0 +1,244 @@
+# Capabilities and support matrix
+
+One page answering the three questions users actually ask: **does pg-sprite support this
+change?**, **what is pg-sprite and why does it exist?**, and **what does pg-sprite
+deliberately not do?** Every operation and object type lands in exactly one of three
+tiers, and every planned tier-2 item corresponds to a real roadmap item — nothing is
+vaguely "future work".
+
+This page is the support matrix; the *mechanics* of each current refusal (what lock the
+refused form would take, what an operator who accepts a maintenance window can do) live in
+[limitations.md](limitations.md).
+
+## Contents
+
+- [What pg-sprite is — and why it exists](#what-pg-sprite-is--and-why-it-exists)
+- [The support model: three tiers](#the-support-model-three-tiers)
+- [The two front doors](#the-two-front-doors)
+- [Support matrix](#support-matrix)
+  - [Column changes](#column-changes)
+  - [Constraints](#constraints)
+  - [Indexes](#indexes)
+  - [Partitioned tables](#partitioned-tables)
+  - [The declarative model (desired files, diff, pull)](#the-declarative-model-desired-files-diff-pull)
+  - [Types and non-table objects](#types-and-non-table-objects)
+  - [Data and whole-table operations](#data-and-whole-table-operations)
+- [Peers share these limits — for different reasons](#peers-share-these-limits--for-different-reasons)
+- [Why typed refusal, not passthrough](#why-typed-refusal-not-passthrough)
+- [Deliberately operator-owned](#deliberately-operator-owned)
+
+## What pg-sprite is — and why it exists
+
+pg-sprite is an **online schema-change engine** for PostgreSQL: it takes one table-shape
+change, classifies it against the live database, and either executes it through the
+safest known online pattern — bounded `lock_timeout`/`statement_timeout` on every
+session — or refuses with a typed reason. The measure of the tool is not how many object
+types it models but whether a change it accepts can hurt a production workload. The full
+positioning is [vision.md](vision.md); how it differs from planners and imperative
+copy tools by *problem class* is [architecture.md](architecture.md).
+
+Two consequences follow, and they explain most of this page:
+
+1. **Tables and their indexes are the model, by design.** Online safety is a
+   readers-and-writers problem, and readers and writers touch tables. Objects with no
+   concurrent-access problem (extensions, functions, grants) are not in scope — not
+   because they are hard, but because there is nothing for an online engine to solve.
+2. **A refusal is a feature, not a gap.** `migrate` and its dry-run exit with code 0 only
+   when the change is executable through an online-safe path; a refusal exits 2 with a
+   typed reason. CI can gate on the exit code alone. That contract is only worth
+   something if pg-sprite never executes what it cannot vouch for — see
+   [Why typed refusal, not passthrough](#why-typed-refusal-not-passthrough).
+
+## The support model: three tiers
+
+| Tier | Meaning | What you see today |
+| --- | --- | --- |
+| **T1 — supported today** | The engine executes the change through an online-safe pattern | Execution (or the safer rewritten sequence), exit 0 |
+| **T2 — planned** | A known online pattern exists (or requires the copy-and-swap engine); building it is on the roadmap | A **typed refusal** naming the reason, exit 2 — never a silent fallback to a blocking form |
+| **T3 — out of scope by design** | No online-safety problem to solve, or solving it belongs to a different tool class | A typed refusal or a parse-level rejection, with the reason stating *why it is not planned* |
+
+The invariant: **every T2 row is a tracked roadmap item; T3 rows deliberately have
+none.** If a refusal message points at a "planned" capability, that plan exists —
+otherwise the refusal says out-of-scope and names the tool class that owns the job.
+
+## The two front doors
+
+Support differs by front door, so the matrix marks the exceptions:
+
+- **Imperative** (`migrate --alter`, `plan`, `lint`, `suggest`): takes one DDL statement,
+  classifies it, and executes the online form — rewriting a blocking statement into its
+  safer sequence where one exists. This door has the **broadest coverage**.
+- **Declarative** (`diff`, `pull`, desired files): compares a desired `CREATE TABLE`
+  file against the live table. This door depends on the canonical table *model*, which
+  is deliberately narrower: a table the model cannot fully describe gets a typed
+  refusal rather than a silently lossy description. Today that means tables that are
+  partitioned (or are partitions), own or are referenced by foreign keys, are unlogged,
+  carry explicit collations, or take defaults from sequences they do not own.
+
+An operation can therefore be T1 imperatively and T2 declaratively — foreign keys are
+the canonical example.
+
+## Support matrix
+
+Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today) ·
+❌ T3 (out of scope by design).
+
+### Column changes
+
+| Operation | Status | Behavior and why |
+| --- | --- | --- |
+| `ADD COLUMN` (no default, or constant default) | ✅ | Metadata-only / fast default (PG 11+); executes instantly under bounded locks |
+| `ADD COLUMN` with volatile default (`now()`, `gen_random_uuid()`, …) | 🟡 | Table rewrite; routes to copy-and-swap and is refused until that engine lands |
+| `ADD COLUMN ... GENERATED ... STORED` | 🟡 | Table rewrite; copy-and-swap route. The copy engine must **recompute, never copy,** generated columns on the shadow table |
+| `ADD COLUMN` with inline `UNIQUE`/`PRIMARY KEY`/`REFERENCES`/`CHECK` | 🟡 | The inline constraint does its index build or validation scan under the `ADD COLUMN`'s `ACCESS EXCLUSIVE` lock; refused with guidance to add the column first, then build the constraint online |
+| `DROP COLUMN` | ✅ | Metadata-only; flagged **destructive** in the plan report |
+| `ALTER COLUMN TYPE`, binary-coercible (proven against live column facts) | ✅ | Catalog relabel, e.g. `varchar(50)` → `varchar(100)`, `varchar` → `text` |
+| `ALTER COLUMN TYPE`, general (or with `USING`) | 🟡 | Table rewrite; copy-and-swap route, refused today |
+| `SET DEFAULT` / `DROP DEFAULT` / `DROP NOT NULL` | ✅ | Metadata-only |
+| `SET NOT NULL` | ✅ | Executed as the native four-step pattern: `ADD CONSTRAINT ... CHECK (col IS NOT NULL) NOT VALID` → online `VALIDATE` → `SET NOT NULL` (catalog flip, PG 12+) → drop the scaffold check |
+| `RENAME COLUMN` / `RENAME TABLE` | ✅ | Metadata-only for PostgreSQL but **app-breaking** across deployed instances; executed with a typed reason so lint/plan consumers can steer away |
+| `SET TABLESPACE` | 🟡 | Physical relocation is a rewrite; copy-and-swap route |
+
+### Constraints
+
+| Operation | Status | Behavior and why |
+| --- | --- | --- |
+| `ADD PRIMARY KEY` / `ADD UNIQUE` (plain key columns) | ✅ | Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX` |
+| `ADD CHECK` / `ADD FOREIGN KEY` (imperative) | ✅ | Rewritten to the online sequence: `ADD CONSTRAINT ... NOT VALID` (brief metadata lock) → `VALIDATE CONSTRAINT` (writes keep flowing during the scan) |
+| `ADD CONSTRAINT ... NOT VALID` / `... USING INDEX` / `VALIDATE CONSTRAINT` | ✅ | Already the online idiom; executed as-is |
+| `ADD FOREIGN KEY ... NOT VALID` on a **partitioned parent** | 🟡 | PostgreSQL supports this only from version 18; refused on 14–17 |
+| `EXCLUDE` constraints (and unrecognized constraint forms) | ❌ | No online pattern exists in PostgreSQL — the build scans under `ACCESS EXCLUSIVE` with no `NOT VALID`/`USING INDEX` equivalent. Refused; revisit only if PostgreSQL grows one |
+| `DROP CONSTRAINT` | ✅ | Metadata-only; flagged **destructive** |
+
+### Indexes
+
+| Operation | Status | Behavior and why |
+| --- | --- | --- |
+| `CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN | ✅ | Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification and typed invalid-index outcomes ([runbook](invalid-index-recovery.md)) |
+| `DROP INDEX` | ✅ | Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive** |
+| `REINDEX` | ✅ | Rewritten to `REINDEX ... CONCURRENTLY` |
+| Index build on a **partitioned parent** | 🟡 | PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned |
+| `ADD CONSTRAINT ... USING INDEX` on a partitioned parent | ❌ | PostgreSQL does not support adopting an index on a partitioned parent in any supported version; refused before execution |
+
+### Partitioned tables
+
+| Operation | Status | Behavior and why |
+| --- | --- | --- |
+| `CREATE TABLE ... PARTITION OF` | ✅ | Executed, with a typed warning: creating a partition takes a brief `ACCESS EXCLUSIVE` on the **parent** and queues behind long-running queries |
+| `ATTACH PARTITION` | ✅ | Executed; the safer idiom (pre-prove the bound with a validated `CHECK` so the attach skips its scan) is surfaced as guidance. A classify-first flow that constructs the proof itself is planned |
+| `DETACH PARTITION [CONCURRENTLY]` | ✅ | `CONCURRENTLY` is the idiom; the blocking form is rewritten to it |
+| Partitioned parents in the **declarative model** | 🟡 | Typed refusal: the model does not yet carry partition keys, and rendering a partitioned parent as a plain `CREATE TABLE` would be silently wrong |
+| Partitioned tables in **copy-and-swap** | 🟡 | Root-vs-leaf publication semantics and per-partition swap; sequenced after the copy engine core |
+
+### The declarative model (desired files, diff, pull)
+
+| Table shape | Status | Behavior and why |
+| --- | --- | --- |
+| Plain tables + their indexes | ✅ | `diff`, `pull`, and desired-file rendering round-trip the canonical model |
+| Tables that own **or are referenced by** foreign keys | 🟡 | Typed refusal on both sides — an incoming FK cannot be expressed in the table's own desired file, and a lossy description would be worse than none. Declarative FK support (composite keys as the primary case, two-phase `NOT VALID` → `VALIDATE` execution) is planned |
+| Unlogged tables | 🟡 | Typed refusal: persistence is not modeled, converging it (`SET LOGGED`) is a full rewrite, and rendering the table as plain `CREATE TABLE` would silently change crash-safety |
+| Explicit column collations | 🟡 | Typed refusal: dropping a `COLLATE` clause from a rendered baseline silently changes sort order and index semantics; a collation delta cannot converge without a rewrite |
+| Columns whose default uses a sequence the column does not own | 🟡 | Typed refusal: in a desired-state model that sequence exists only inside the scratch transaction, so no derived plan can reference it. Column-owned (`serial`-style) sequences are fine |
+| Greenfield `CREATE TABLE` apply (bootstrap an empty database from desired files) | ❌ | No online-safety problem — a new table has no readers or writers to protect. `diff --sql` emits the statement; applying it belongs to owner tooling or a convergence planner, not this engine |
+
+### Types and non-table objects
+
+| Object / operation | Status | Behavior and why |
+| --- | --- | --- |
+| Enum-typed columns on plain tables | 🟡 | Tolerance end to end (introspection already canonicalizes via `format_type`; desired-file admission and scratch-database mechanics are being verified) |
+| `ALTER TYPE ... ADD VALUE` | 🟡 | Metadata-only and online-safe (PG 14+ allows it in a transaction; the value is usable after commit) — planned as an owned operation. No peer online executor owns it |
+| Enum value rename / removal | 🟡 | PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite — routes to a typed refusal toward copy-and-swap |
+| Enum/domain type creation and drop | ❌ | Bootstrap/catalog work with no concurrent-access problem; owner tooling applies it in the same change that ships the code |
+| Views, materialized views | ❌ | `CREATE OR REPLACE VIEW` is transactional catalog work; no online-safety problem for an executor to own. (Materialized-view *refresh* is a data operation — also out) |
+| Triggers and PL/pgSQL function bodies | ❌ | Bootstrap/catalog objects with no online-safety problem; no peer online executor owns them either |
+| Extensions (`CREATE EXTENSION`) | ❌ | Same: catalog bootstrap, owner tooling |
+| Grants, roles, row-level-security policies | ❌ | Access control, not table shape; belongs to provisioning (see [engine-role.md](engine-role.md) for what the *engine's own* role needs) |
+| Standalone sequences, publications/subscriptions | ❌ | Not table shape; no online pattern to provide |
+
+### Data and whole-table operations
+
+| Operation | Status | Behavior and why |
+| --- | --- | --- |
+| Data backfills, `UPDATE`/`DELETE` batches, DML of any kind | ❌ | pg-sprite changes table *shape*, never table *contents*. Versioned-script runners and application jobs own data changes |
+| Column-transform expressions during a copy-and-swap rewrite | 🟡 | The one principled exception: when a rewrite is already copying every row, deriving a new column's value by expression is part of the shape change, not a data job. Planned as part of the copy engine |
+| Online table rebuild with no shape change (bloat reclamation) | 🟡 | A copy-and-swap with an identical target shape — the pg_repack use case with checksum-gated cutover and crash-resume. Planned once the copy engine lands |
+| Whole-schema convergence (apply a directory of desired files, dependency-ordered) | ❌ | Convergence planning across objects is a planner's job (pg-schema-diff, pgschema, pgdelta); pg-sprite stays the execution engine for the table-shape subset |
+| Versioned schema-change-file workflow (Flyway-style ordered scripts) | ❌ | Declarative-only by design; see [vision.md](vision.md) |
+| Expand/contract dual-schema versions (pgroll/reshape style) | ❌ | Rejected: application invisibility is a core invariant; see [vision.md](vision.md) |
+
+## Peers share these limits — for different reasons
+
+Every tool in this space draws a line around what it models. What differs is *why* the
+line sits where it does, and what happens when you cross it:
+
+- **Imperative online executors** (pg-osc, pg_repack; gh-ost and
+  [Spirit](https://github.com/block/spirit) in MySQL) never create enums, extensions, or
+  triggers because the question never arises: they execute exactly the `ALTER` handed to
+  them. The scope limit is implicit and undocumented — you discover it when raw SQL
+  errors out mid-change.
+- **[pgroll](https://github.com/xataio/pgroll)** models a JSON operation vocabulary, and
+  everything outside it goes through a **raw-SQL passthrough**: executed verbatim, with
+  none of pgroll's safety machinery applied. That is *passthrough, not support* — the
+  tool runs what it cannot analyze.
+- **Declarative planners** ([pg-schema-diff](https://github.com/stripe/pg-schema-diff),
+  [pgschema](https://github.com/pgschema/pgschema),
+  [pgdelta](https://github.com/pgdelta-dev/pgdelta)) model far more breadth — enums,
+  views, functions — because their product is a *DDL artifact*, not an execution. Breadth
+  is cheap when you don't own what happens under concurrent load.
+
+pg-sprite's position: model narrowly, execute what the model covers with provable online
+safety, and make every boundary a **typed refusal that states its tier** — planned (with
+a real plan) or out-of-scope (with the tool class that owns the job). The scope limit is
+explicit, documented on this page, and machine-checkable via exit codes.
+
+## Why typed refusal, not passthrough
+
+The obvious middle ground — refuse, then offer `--apply-anyway` — is deliberately not
+implemented. The trade was weighed, not overlooked:
+
+**What passthrough would buy.** One pipeline and one audit trail for every change; no
+side-channel psql sessions; lower adoption friction when users hit a boundary. pgroll
+demonstrates the demand is real.
+
+**Why it loses.** The exit-code contract — *0 means this ran through an online-safe
+path* — is the product. A passthrough mode means pg-sprite executed something it cannot
+vouch for, and every incident that follows lands on the tool's reputation, not the
+flag. It also breaks the ownership model that crash recovery depends on: the executor
+can reason about an interrupted change (see
+[invalid-index-recovery.md](invalid-index-recovery.md)) only because it knows exactly
+what it runs; arbitrary SQL has no resume semantics. And refusals are the forcing
+function that gets real capabilities built — a passthrough is where demand signals go to
+die.
+
+**What you get instead.** Every refusal names the classification, the reason, and —
+where one exists — the exact safer sequence or the statement an operator can run
+deliberately, outside the engine, in a maintenance window. The operator stays in
+control; the engine stays honest. `--force` never bypasses a policy refusal.
+
+A constrained variant is **planned**: an explicit, dedicated flag (distinct from
+`--force`) that executes an otherwise-refused change through the engine's own bounded
+`lock_timeout` sessions ("unsafe DDL under a bounded lock budget", which raw psql does
+not give you), with the refusal analysis still printed before execution and the verdict
+unmistakably marked as executed without an online-safety guarantee. The plain success
+contract stays reserved for online-safe paths, and refusals for unrecognized SQL are
+never eligible — only changes the engine understands but cannot run *safely*.
+
+## Deliberately operator-owned
+
+Two related jobs stay with humans on purpose:
+
+- **Invalid-index recovery.** A failed `CREATE INDEX CONCURRENTLY` leaves an invalid
+  index; an in-flight healthy build looks identical. The executor proves what it can and
+  **never drops an index itself** — PostgreSQL drops by name, not identity, so an
+  automatic drop could destroy another actor's build. The typed three-state ownership
+  model and what each state licenses is [invalid-index-recovery.md](invalid-index-recovery.md).
+- **Index maintenance (`REINDEX` automation, bloat-driven rebuild scheduling).** The
+  engine executes `REINDEX CONCURRENTLY` when asked (see matrix); *deciding* when an
+  index needs rebuilding is monitoring-and-operations territory. Automating it is
+  considered but on hold for the same ownership reasons as above.
+
+---
+
+**Keeping this page honest:** any change that adds, lifts, or re-tiers a refusal must
+update this matrix in the same PR, and each release's notes link here. A support
+question this page cannot answer is a bug in this page.
