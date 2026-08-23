@@ -1,0 +1,115 @@
+# Buzz corpus replay assessment — curated against the block/buzz commit pinned in
+# project.conf. Line ranges index into corpus/<migration>.sql at exactly that pin: bumping
+# the pin means re-curating this file (that coupling is deliberate — an assessment must
+# never silently apply to a corpus it was not written against).
+#
+# One row per replay step, in strict corpus order:
+#   <migration-prefix> <start>-<end> <expected>
+#
+# expected:
+#   execute          run through `pg-sprite migrate`; require exit 0 and outcome
+#                    executed-natively — pg-sprite itself mutates the database
+#   refuse:<reason>  run through `pg-sprite migrate`; require exit 2 and outcome
+#                    refused with exactly <reason> (a reason mismatch is a failure,
+#                    not a pass); then apply the same statement via psql to advance
+#   psql             out-of-scope content (data changes, PL/pgSQL functions and
+#                    triggers, dynamic DO blocks, session-scoped LOCK/SET LOCAL):
+#                    applied via psql in one transaction, never assessed
+0002 20-26 refuse:unsupported-statement
+0002 29-29 execute
+0003 12-12 execute
+0004 21-21 refuse:unsupported-partitioned-parent
+0005 25-25 execute
+0005 26-30 refuse:backend-unavailable
+0005 33-33 refuse:unsupported-partitioned-parent
+0006 15-50 refuse:unsupported-statement
+0006 53-54 execute
+0006 56-58 execute
+0006 59-61 execute
+0006 63-64 execute
+0006 72-87 refuse:unsupported-statement
+0006 94-118 refuse:unsupported-statement
+0006 120-121 execute
+0006 122-124 execute
+# Unnamed ADD FOREIGN KEY: the safer NOT VALID + VALIDATE sequence needs a
+# constraint name to reference; the same constraint with CONSTRAINT <name> executes.
+0006 128-130 refuse:not-native-safe-rewrite-required
+0007 12-12 psql
+0007 14-22 refuse:unsupported-statement
+0007 26-27 execute
+0007 33-140 psql
+0008 9-23 psql
+0009 11-135 psql
+0010 4-55 psql
+0011 7-162 psql
+0012 3-22 refuse:unsupported-statement
+0012 23-25 execute
+0012 26-26 execute
+0012 28-48 refuse:unsupported-statement
+0012 49-50 execute
+0012 51-52 execute
+0013 3-4 execute
+0014 11-34 psql
+0015 4-9 refuse:unsupported-statement
+0015 10-10 execute
+0015 12-26 refuse:unsupported-statement
+0015 27-27 execute
+0015 29-41 refuse:unsupported-statement
+0015 42-42 execute
+0015 44-49 refuse:unsupported-statement
+0015 50-50 execute
+0015 52-57 refuse:unsupported-statement
+0015 58-58 execute
+0015 60-65 refuse:unsupported-statement
+0015 66-66 execute
+0015 68-74 psql
+0016 3-3 execute
+0017 5-16 refuse:unsupported-statement
+0017 18-19 execute
+0017 20-21 execute
+0017 23-24 psql
+0018 5-15 refuse:unsupported-statement
+0018 16-17 execute
+0018 18-19 execute
+0018 21-38 psql
+0019 6-43 psql
+0020 4-12 refuse:unsupported-statement
+0021 44-74 psql
+0022 6-40 psql
+0023 22-43 psql
+0024 25-58 psql
+0025 18-31 refuse:unsupported-statement
+0025 33-33 execute
+0026 29-33 refuse:unsupported-statement
+0026 35-38 psql
+# CREATE INDEX CONCURRENTLY IF NOT EXISTS is refused by design: a name-only
+# no-op cannot prove the existing index is valid or even the requested one.
+0027 56-58 refuse:unsupported-statement
+0028 3-3 execute
+0029 10-10 psql
+0029 12-17 refuse:not-native-safe-rewrite-required
+0029 19-58 refuse:unsupported-statement
+0029 59-63 execute
+0029 64-66 execute
+0029 68-78 refuse:unsupported-statement
+0029 83-133 psql
+0029 135-151 refuse:unsupported-statement
+0029 159-166 refuse:unsupported-statement
+0029 174-223 psql
+0029 225-234 refuse:unsupported-statement
+0029 235-236 execute
+0029 238-249 refuse:unsupported-statement
+0029 250-251 execute
+0029 253-261 refuse:unsupported-statement
+0029 263-575 psql
+0030 5-5 psql
+0030 7-22 refuse:not-native-safe-rewrite-required
+0030 27-29 execute
+0030 31-31 execute
+0030 32-32 execute
+0030 33-34 execute
+0030 38-48 psql
+0031 3-3 psql
+0031 5-5 execute
+0031 7-10 psql
+0032 10-76 psql
