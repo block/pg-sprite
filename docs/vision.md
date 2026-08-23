@@ -17,6 +17,16 @@ checksum before any destructive step, a durable checkpoint so a mid-change crash
 instead of orphaning, and managed-platform failover (Aurora) treated as a modeled state
 rather than an unhandled surprise.
 
+**pg-sprite embraces the Unix design philosophy: do one thing, and do it perfectly.** The
+one thing is changing the *shape* of live PostgreSQL tables while applications keep
+reading and writing them. Everything inside that problem — classification, online idioms,
+rewrites, verification, crash-resume — belongs in this engine and is done to the safety
+bar below. Everything outside it — data changes, catalog bootstrap, GitOps orchestration,
+access control — is deliberately another tool's job, and the engine says so with a typed
+refusal that names the tool class ([capabilities.md](capabilities.md)). "One tool for all
+schema changes" and "do one thing" are the same claim read from two sides: depth across
+every table-shape change, never sprawl across object types.
+
 ## The five pillars
 
 ### 1. All schema changes, one engine
@@ -160,7 +170,9 @@ pg-sprite has succeeded when:
 
 ## What pg-sprite is not
 
-Scope honesty keeps the vision credible: pg-sprite is not the GitOps layer itself — it does
+This section is the do-one-thing philosophy applied — every "not" below is the same
+boundary drawn from a different angle. Scope honesty keeps the vision credible:
+pg-sprite is not the GitOps layer itself — it does
 not watch git, manage pull requests, or schedule fleets; it is the engine that layer
 (SchemaBot) drives. It is not an application-rollout coordinator (the multi-version schema
 window some expand/contract tools offer is a real capability we deliberately trade away
