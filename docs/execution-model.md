@@ -52,16 +52,25 @@ the sequencing across transaction boundaries *is* the safety mechanism.
 "Implicit or bounded" above is the mechanical detail behind the contract —
 autocommit-each-step has two shapes in the executor:
 
-- **Brief catalog steps and `VALIDATE CONSTRAINT`** each run as one short
-  *explicit* transaction: `BEGIN` → `SET LOCAL lock_timeout` /
-  `statement_timeout` → the statement → `COMMIT` (`pkg/executor`'s bounded
-  runner). The explicit `BEGIN` exists only because the budgets are applied
-  with `SET LOCAL`, which is scoped to that transaction — functionally it is
-  still one statement, one transaction, committed immediately, rolled back
-  atomically on failure.
-- **`CREATE INDEX CONCURRENTLY`** is true autocommit on a dedicated budgeted
-  session: it refuses to run inside any transaction block and internally
-  manages multiple transactions of its own.
+- **Brief catalog steps (step kind `brief`) and `VALIDATE CONSTRAINT` (step
+  kind `validate-constraint`)** each run as one short *explicit* transaction:
+  `BEGIN` → `SET LOCAL lock_timeout` / `statement_timeout` → the statement →
+  `COMMIT` (`pkg/executor`'s bounded runner). The explicit `BEGIN` exists
+  only because the budgets are applied with `SET LOCAL`, which is scoped to
+  that transaction — functionally it is still one statement, one
+  transaction, committed immediately, rolled back atomically on failure.
+- **`CREATE INDEX CONCURRENTLY` (step kind `concurrent-index-build`)** is
+  true autocommit on a dedicated budgeted session: it refuses to run inside
+  any transaction block and internally manages multiple transactions of its
+  own.
+
+Each step's class is the `kind` field of its step report in the JSON
+verdict — the field retry logic branches on. A failed `brief` step means
+something held a lock longer than the brief budget tolerates: retrying is
+reasonable. A failed `validate-constraint` step means the validation scan
+exceeded its own budget: retrying without raising it will fail the same
+way. A failed `concurrent-index-build` carries its own invalid-index
+verdict ([invalid-index-recovery.md](invalid-index-recovery.md)).
 
 ## The committed prefix
 

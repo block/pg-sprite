@@ -77,6 +77,12 @@ const (
 	StepValidateConstraint StepKind = "validate-constraint"
 )
 
+// StepKinds returns the closed set of StepKind values. It is part of the
+// documented contract: docs/execution-model.md names every kind.
+func StepKinds() []StepKind {
+	return []StepKind{StepBrief, StepConcurrentIndexBuild, StepValidateConstraint}
+}
+
 // ValidateBudget bounds one VALIDATE CONSTRAINT step. The validation scan
 // is long by design — it is the online half of the NOT VALID pattern — so
 // it gets its own overall bound instead of the brief statement budget,
