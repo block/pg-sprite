@@ -4,6 +4,16 @@
 
 die() { echo "$*" >&2; exit 1; }
 
+# The project name doubles as the directory, container suffix, and the
+# database/user/password inside the throwaway container, so it must be usable
+# in all of those. Identifier quoting keeps hyphens safe in SQL; this bounds
+# the rest (URLs, docker names, filenames) to one predictable charset.
+validate_project_name() {
+    case "$1" in
+        ''|*[!a-z0-9_-]*|[-_]*) die "project name must be lowercase letters, digits, hyphen, or underscore, starting with a letter or digit: $1" ;;
+    esac
+}
+
 # load_project <name>: source replay/<name>/project.conf and validate it.
 # Sets PROJECT and PROJECT_DIR, the conf variables (REPO, COMMIT,
 # MIGRATIONS_PATH, PG_IMAGE, PORT, BASELINE, FILES), and the derived
@@ -12,6 +22,7 @@ load_project() {
     local name="${1:-}"
     [ -n "$name" ] || die "usage: $(basename "$0") <project> ... — see replay/README.md"
     PROJECT="$(basename "$name")"
+    validate_project_name "$PROJECT"
     PROJECT_DIR="${REPLAY_DIR}/${PROJECT}"
     local conf="${PROJECT_DIR}/project.conf"
     [ -s "$conf" ] || die "no replay project at ${PROJECT_DIR} (missing project.conf) — see replay/README.md"

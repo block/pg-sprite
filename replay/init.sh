@@ -13,8 +13,11 @@ set -euo pipefail
 REPLAY_DIR="$(cd "$(dirname "$0")" && pwd)"
 . "${REPLAY_DIR}/common.sh"
 
+command -v python3 >/dev/null 2>&1 || die "python3 is required to parse GitHub API responses"
+
 [ $# -eq 4 ] || die "usage: $0 <project> <owner/repo|github-url> <commit-or-ref> <migrations-path>"
 project="$(basename "$1")"
+validate_project_name "$project"
 repo="$2"
 ref="$3"
 migrations_path="${4%/}"

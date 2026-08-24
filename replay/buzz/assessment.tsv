@@ -82,8 +82,9 @@
 0025 33-33 execute
 0026 29-33 refuse:unsupported-statement
 0026 35-38 psql
-# CREATE INDEX CONCURRENTLY IF NOT EXISTS is refused by design: a name-only
-# no-op cannot prove the existing index is valid or even the requested one.
+# CREATE INDEX IF NOT EXISTS is refused by design: the safer concurrent
+# rewrite cannot honor a name-only no-op that proves nothing about whether
+# the existing index is valid or even the requested one.
 0027 56-58 refuse:unsupported-statement
 0028 3-3 execute
 0029 10-10 psql

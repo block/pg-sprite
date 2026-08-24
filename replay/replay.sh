@@ -50,11 +50,13 @@ preview() {
 }
 
 # Either path ends at the pristine baseline: a fresh container applies it on
-# the way up; an existing one is dropped back to it.
+# the way up; an existing one is dropped back to it. A failed baseline must
+# stop the run — replaying against a partially-applied starting state would
+# produce a results table that looks legitimate but assesses the wrong world.
 if docker inspect "$CONTAINER" >/dev/null 2>&1; then
-    "${REPLAY_DIR}/harness.sh" "$PROJECT" reset
+    "${REPLAY_DIR}/harness.sh" "$PROJECT" reset || die "harness reset failed"
 else
-    "${REPLAY_DIR}/harness.sh" "$PROJECT" up
+    "${REPLAY_DIR}/harness.sh" "$PROJECT" up || die "harness up failed"
 fi
 
 rows=()
@@ -124,9 +126,12 @@ print(f"{outcome}:{reason}" if reason else outcome)
             rows+=("$migration|$range|$expected|$actual (exit $status)|FAIL|$label")
             failures=$((failures + 1))
         fi
-        # A refusal executed nothing; the corpus statement itself must still
-        # land for the remaining history to replay against true state.
-        if [ "$status" -ne 0 ]; then
+        # A refusal (exit 2) executed nothing, so the corpus statement itself
+        # must still land for the remaining history to replay against true
+        # state. Advance only on a true refusal — mirroring the execute
+        # branch, an exit-1 failed execution may have committed a prefix
+        # that must not be blindly re-applied.
+        if [ "$status" -eq 2 ]; then
             printf '%s\n' "$sql" | psql_apply \
                 || die "psql advance failed: $migration $range"
         fi

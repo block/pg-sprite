@@ -43,7 +43,9 @@ from exactly those:
 
 This resolves the ref to a commit, captures the corpus file list at that pin into
 `chuzz/project.conf`, gitignores `chuzz/corpus/`, and writes a skeleton
-`chuzz/assessment.tsv`. Then:
+`chuzz/assessment.tsv`. The project name doubles as the directory, container
+suffix, and container-local database identity, so it must be lowercase letters,
+digits, hyphen, or underscore, starting with a letter or digit. Then:
 
 ```sh
 make replay REPLAY_PROJECT=chuzz    # fetch + harness + replay, one shot

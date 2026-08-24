@@ -22,6 +22,7 @@ BASE_URL="https://raw.githubusercontent.com/${REPO_SLUG}/${COMMIT}/${MIGRATIONS_
 # deliberate pin-bump + re-curation of assessment.tsv can follow; never
 # mutates state itself.
 if [ "${1:-}" = "refresh" ]; then
+    command -v python3 >/dev/null 2>&1 || die "python3 is required to parse GitHub API responses"
     ref="${2:-HEAD}"
     api="https://api.github.com/repos/${REPO_SLUG}"
     sha="$(curl -fsSL "${api}/commits/${ref}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["sha"])')"

@@ -46,9 +46,12 @@ apply_baseline() {
 }
 
 recreate_database() {
-    docker exec "$CONTAINER" psql -q -U "$DB_NAME" -d postgres -v ON_ERROR_STOP=1 \
-        -c "DROP DATABASE IF EXISTS ${DB_NAME} WITH (FORCE)" \
-        -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_NAME}"
+    # The database name rides in a psql variable and is interpolated with
+    # :"db", psql's identifier quoting — never spliced into raw SQL text
+    # (hyphenated project names are ordinary and must survive this).
+    printf 'DROP DATABASE IF EXISTS :"db" WITH (FORCE);\nCREATE DATABASE :"db" OWNER :"db";\n' \
+        | docker exec -i "$CONTAINER" psql -q -U "$DB_NAME" -d postgres \
+            -v ON_ERROR_STOP=1 -v db="$DB_NAME"
 }
 
 cmd_up() {
@@ -72,7 +75,10 @@ cmd_up() {
 
 cmd_reset() {
     require_baseline
-    docker inspect "$CONTAINER" >/dev/null 2>&1 || die "container $CONTAINER not running — use up"
+    running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" \
+        || die "container $CONTAINER does not exist — use up"
+    [ "$running" = "true" ] \
+        || die "container $CONTAINER exists but is stopped — docker start $CONTAINER, or down then up"
     wait_ready
     recreate_database
     apply_baseline
