@@ -63,10 +63,24 @@ rows=()
 failures=0
 count_executed=0
 count_psql=0
-declare -a refuse_reasons=()
+count_no_osp=0
+count_by_design=0
+declare -a refuse_boundary_reasons=()
 
-while read -r migration range expected; do
+while read -r migration range expected class; do
     case "$migration" in ''|\#*) continue ;; esac
+
+    # The optional class field refines refusal rows only. Default (empty) is a
+    # capability boundary: pg-sprite is expected to handle this eventually.
+    case "$class" in
+    '') ;;
+    no-online-safety-problem|by-design)
+        case "$expected" in refuse:*) ;; *)
+            die "class '$class' only applies to refuse rows: $migration $range" ;;
+        esac
+        ;;
+    *) die "unknown refusal class '$class' in $MANIFEST: $migration $range" ;;
+    esac
 
     file=$(ls "${PROJECT_DIR}/corpus/${migration}_"*.sql 2>/dev/null) \
         || die "no corpus file for migration $migration"
@@ -121,7 +135,11 @@ print(f"{outcome}:{reason}" if reason else outcome)
         want_reason="${expected#refuse:}"
         if [ "$status" -eq 2 ] && [ "$actual" = "refused:${want_reason}" ]; then
             rows+=("$migration|$range|$expected|$actual|PASS|$label")
-            refuse_reasons+=("$want_reason")
+            case "$class" in
+            no-online-safety-problem) count_no_osp=$((count_no_osp + 1)) ;;
+            by-design) count_by_design=$((count_by_design + 1)) ;;
+            *) refuse_boundary_reasons+=("$want_reason") ;;
+            esac
         else
             rows+=("$migration|$range|$expected|$actual (exit $status)|FAIL|$label")
             failures=$((failures + 1))
@@ -153,14 +171,16 @@ done
 echo
 echo "== bucket summary"
 printf '%-52s %s\n' "executed natively by pg-sprite (T1)" "$count_executed"
-total_refused=${#refuse_reasons[@]}
-printf '%-52s %s\n' "typed refusal, advanced via psql (T2 boundary)" "$total_refused"
-if [ "$total_refused" -gt 0 ]; then
-    printf '%s\n' "${refuse_reasons[@]}" | sort | uniq -c | sort -rn \
+total_boundary=${#refuse_boundary_reasons[@]}
+printf '%-52s %s\n' "refusal: capability boundary (T2)" "$total_boundary"
+if [ "$total_boundary" -gt 0 ]; then
+    printf '%s\n' "${refuse_boundary_reasons[@]}" | sort | uniq -c | sort -rn \
         | while read -r n reason; do
             printf '  %-50s %s\n' "$reason" "$n"
         done
 fi
+printf '%-52s %s\n' "refusal: no online-safety problem (bootstrap DDL)" "$count_no_osp"
+printf '%-52s %s\n' "refusal: by design (safer form exists)" "$count_by_design"
 printf '%-52s %s\n' "out-of-scope content, psql only (T3)" "$count_psql"
 printf '%-52s %s\n' "mismatches" "$failures"
 

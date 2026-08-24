@@ -20,13 +20,20 @@ of a real service's schema-change workload lands in each support tier (see
 - **executed** — table-shape changes pg-sprite runs online today: the replay requires
   exit 0 and outcome `executed-natively`, and pg-sprite itself mutates the database —
   real execution, not dry-run.
-- **typed refusal** — everything `pg-sprite migrate` declines with a named reason:
-  planned capability (partitioned-parent indexes, rewrites pending copy-and-swap) but
-  also statements outside `migrate`'s intake, like `CREATE TABLE` — bootstrap DDL that
-  capabilities.md classes as having no online-safety problem, yet which the imperative
-  CLI still refuses as `unsupported-statement` rather than executing. The replay
-  requires exit 2 and *exactly* the expected reason (a reason mismatch is a failure,
-  not a pass), then applies the same statement via psql so the history keeps advancing.
+- **typed refusal** — everything `pg-sprite migrate` declines with a named reason.
+  The replay requires exit 2 and *exactly* the expected reason (a reason mismatch is
+  a failure, not a pass), then applies the same statement via psql so the history
+  keeps advancing. The manifest classifies each refusal so the summary separates
+  three very different situations:
+  - **capability boundary** (the default) — pg-sprite is expected to handle this
+    eventually: partitioned-parent indexes, multi-op rewrites and other
+    copy-and-swap territory.
+  - **no online-safety problem** — bootstrap DDL on objects nothing reads yet
+    (`CREATE TABLE`): correctly refused because there is no concurrent-access
+    problem for an online engine to solve.
+  - **by design** — refused deliberately and permanently because a safer form
+    exists (`CREATE INDEX IF NOT EXISTS`: the name-only no-op cannot prove an
+    existing index is valid; use plain `CREATE INDEX`).
 - **psql-only** — content out of scope by design (PL/pgSQL functions and triggers,
   data changes, dynamic `DO` blocks, extensions, session-scoped `LOCK`/`SET LOCAL`):
   applied via psql in one transaction, never assessed.
@@ -93,14 +100,18 @@ coexist. The container name defaults to `pgsprite-<project>-replay`.
 replay step, in strict corpus order:
 
 ```
-<migration-prefix> <start>-<end> <execute|refuse:<reason>|psql>
+<migration-prefix> <start>-<end> <execute|refuse:<reason>|psql> [class]
 ```
+
+The optional trailing `class` on refuse rows (`no-online-safety-problem` or
+`by-design`; empty means capability boundary) drives the refusal split in the
+bucket summary — see the classification above.
 
 Ranges are coupled to the pin in `project.conf` by design: an assessment must never
 silently apply to a corpus it was not written against, so bumping the pin means
 re-curating the manifest. The replay exits non-zero on any verdict mismatch and ends
-with a per-statement results table plus a bucket summary (executed / typed refusals
-by reason / psql-only / mismatches).
+with a per-statement results table plus a bucket summary (executed / refusals split
+by class, capability-boundary ones broken down by reason / psql-only / mismatches).
 
 ## Refreshing a corpus
 
