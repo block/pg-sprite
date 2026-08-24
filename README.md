@@ -35,12 +35,17 @@ same budgets. Changes without an available backend get a structured refusal (exi
 The design docs and the phased
 build plan live in [docs/](docs/) — start with
 [docs/README.md](docs/README.md); the vision — what pg-sprite is and is not —
-is [docs/vision.md](docs/vision.md).
+is [docs/vision.md](docs/vision.md); the canonical support matrix — is this
+change supported today, planned, or out of scope — is
+[docs/capabilities.md](docs/capabilities.md).
 
 ## What pg-sprite does not do yet
 
-So expectations are set before you point it at a database — the full list
-with per-item behavior is **[docs/limitations.md](docs/limitations.md)**;
+So expectations are set before you point it at a database — the complete
+support matrix (supported today / planned / out of scope, per operation and
+object type, with reasons) is **[docs/capabilities.md](docs/capabilities.md)**,
+and the mechanics of each current refusal are
+[docs/limitations.md](docs/limitations.md);
 wherever an operation meets a boundary below, it fails closed with a typed
 refusal — never a silently wrong or incomplete result:
 

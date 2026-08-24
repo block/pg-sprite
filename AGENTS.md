@@ -137,11 +137,13 @@ is a smoke tour of the built binary, not a second test suite.
 
 ## Capability statement
 
-[docs/limitations.md](docs/limitations.md) and the README's "What pg-sprite does not do yet"
-section are the public capability statement. Any PR that adds, removes, or re-scopes a
-capability — a planner route, a refusal, a verdict outcome, a declarative-model boundary —
-updates both in the same PR, and every release sweeps them against the shipped behavior
-before tagging.
+[docs/capabilities.md](docs/capabilities.md) is the canonical support matrix (every
+operation and object type, tiered supported / planned / out of scope, with reasons);
+[docs/limitations.md](docs/limitations.md) explains current refusal mechanics, and the
+README's "What pg-sprite does not do yet" section is the short-form pointer. Any PR that
+adds, removes, or re-scopes a capability — a planner route, a refusal, a verdict outcome,
+a declarative-model boundary — updates all three in the same PR, and every release sweeps
+them against the shipped behavior before tagging.
 
 ## Logging and observability
 
