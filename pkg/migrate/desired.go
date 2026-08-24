@@ -21,6 +21,14 @@ import (
 // nothing about the statement was executed.
 const stoppedBeforeVerdict = "stopped before a verdict; nothing about it was executed"
 
+// ErrForceNotSupported is returned by [RunDesired] when Options.Force is
+// set: the force acknowledgement applies to the imperative front door
+// only — desired-state execution never runs a submitted form blind. It is
+// a sentinel so an embedder can tell the unsupported option apart from an
+// operational failure with [errors.Is].
+var ErrForceNotSupported = errors.New(
+	"the force acknowledgement applies to the imperative front door only; desired-state execution never runs a submitted form blind")
+
 // DesiredRequest names the inputs to [RunDesired]. Zero-value fields are
 // invalid: the schema must be set, and the desired state must come from
 // [statement.ParseDesired] — the zero DesiredSchema is refused.
@@ -46,7 +54,9 @@ type DesiredRequest struct {
 // were never attempted. The committed prefix is read from the verdicts:
 // every executed verdict committed in full, and a failed verdict's own
 // ExecutedSQL discloses the committed steps inside the statement that
-// failed.
+// failed. Whether anything changed is read from the plan: an executed
+// outcome with empty Plan.Statements is the no-op signal — the live table
+// already matched the desired schema and nothing ran.
 type DesiredResult struct {
 	// Plan is the convergence plan derived at execution time; empty
 	// Plan.Statements means the live table already matched the desired
@@ -102,8 +112,7 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		return DesiredResult{}, err
 	}
 	if opts.Force != "" {
-		return DesiredResult{}, errors.New(
-			"the force acknowledgement applies to the imperative front door only; desired-state execution never runs a submitted form blind")
+		return DesiredResult{}, ErrForceNotSupported
 	}
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
 	if err != nil {
@@ -113,15 +122,20 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		"schema", report.Schema, "table", report.Table,
 		"statements", len(report.Statements), "fingerprint", report.Fingerprint)
 
-	if refused, ok := admitPlan(req, report); !ok {
-		return refused, nil
-	}
+	// An already-converged table resolves before admission: an empty plan
+	// carries no plan identity for a pinned fingerprint to verify (every
+	// empty plan hashes alike), and nothing runs either way — which is all
+	// a pin protects. Checking the pin first would refuse a legitimate
+	// re-run of an approved plan that already converged.
 	if len(report.Statements) == 0 {
 		return DesiredResult{
 			Plan:    report,
 			Outcome: verdict.OutcomeExecuted,
 			Detail:  "already converged: the live table matches the desired schema; nothing to run",
 		}, nil
+	}
+	if refused, ok := admitPlan(req, report); !ok {
+		return refused, nil
 	}
 
 	result := DesiredResult{Plan: report}
@@ -167,7 +181,9 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 // a unit. The checks run from the caller's contract outward: the pinned
 // fingerprint first (the caller's approval is void whatever else holds),
 // then the table's existence, then the destructive guard, then the routed
-// dispositions.
+// dispositions. An empty (already-converged) plan never reaches admission:
+// the caller resolves it first, because it carries no plan identity for
+// the pin to verify and nothing would run anyway.
 func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 	refused := DesiredResult{Plan: report, Outcome: verdict.OutcomeRefused}
 	if req.ExpectedFingerprint != "" && req.ExpectedFingerprint != report.Fingerprint {
@@ -204,6 +220,7 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 			"planned statement %d discards live structure (%s); desired-state execution runs no "+
 				"destructive statement — %s",
 			i+1, ps.SQL, deliberatePath)
+		refused.Detail += skippedRestDetail(len(report.Statements) - 1)
 		return refused, false
 	}
 	if report.Disposition != router.DispositionExecute {
@@ -211,6 +228,23 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 		return refused, false
 	}
 	return DesiredResult{}, true
+}
+
+// skippedRestDetail names what else a whole-plan destructive refusal
+// blocked, so the operator knows the size of what is stopped before
+// reading the plan: admission is all-or-nothing, and a desired file
+// usually carries several edits at once. Zero skipped statements say
+// nothing — there is nothing else in the plan to disclose.
+func skippedRestDetail(n int) string {
+	switch {
+	case n == 1:
+		return "; admission is all-or-nothing, so the plan's other statement, even if non-destructive, was not run"
+	case n > 1:
+		return fmt.Sprintf(
+			"; admission is all-or-nothing, so the plan's %d other statements, non-destructive ones included, were not run", n)
+	default:
+		return ""
+	}
 }
 
 // planRefusal maps the first non-executable planned statement to the typed
@@ -247,8 +281,14 @@ func planRefusal(report plan.Report) (verdict.Reason, string) {
 
 // committedPrefixDetail states how far convergence got when execution
 // stopped at statement i (0-based) of n: the statements before it are
-// committed and stay committed.
+// committed and stay committed. A stop on the first statement says plainly
+// that nothing committed before it — it does not claim the table is
+// untouched, because a failed statement's own committed steps are
+// disclosed by that statement's verdict, not here.
 func committedPrefixDetail(i, n int, what string) string {
+	if i == 0 {
+		return fmt.Sprintf("planned statement 1 of %d %s; nothing was committed before it", n, what)
+	}
 	return fmt.Sprintf("planned statement %d of %d %s; the %d preceding statements committed and remain in effect",
 		i+1, n, what, i)
 }

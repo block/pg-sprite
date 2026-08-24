@@ -28,6 +28,8 @@ func TestRunDesiredRejectsForce(t *testing.T) {
 	opts.Force = "public.t"
 	res, err := RunDesired(t.Context(), nil, DesiredRequest{}, opts)
 	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrForceNotSupported,
+		"the rejection is the typed sentinel an embedder can branch on")
 	assert.Contains(t, err.Error(), "imperative front door",
 		"the rejection points the caller at the front door where force applies")
 	assert.Equal(t, DesiredResult{}, res)
@@ -99,7 +101,42 @@ func TestAdmitPlan(t *testing.T) {
 		assert.Contains(t, res.Detail, "DROP COLUMN old")
 		assert.Contains(t, res.Detail, "imperative front door",
 			"an ALTER TABLE drop is pointed at the door that runs it deliberately")
+		assert.Contains(t, res.Detail, "the plan's other statement, even if non-destructive, was not run",
+			"a multi-statement refusal discloses that the rest of the plan was skipped too")
 		assert.Equal(t, report, res.Plan, "a refusal carries the plan it refused")
+	})
+
+	t.Run("counts the skipped statements when more than one is blocked", func(t *testing.T) {
+		report := executable()
+		report.Statements = append(report.Statements,
+			plan.Statement{
+				SQL:         "ALTER TABLE app.t DROP COLUMN old",
+				Destructive: true,
+				Disposition: router.DispositionExecute,
+			},
+			plan.Statement{
+				SQL:         "CREATE INDEX t_v_idx ON app.t (v)",
+				Disposition: router.DispositionExecute,
+			})
+		res, ok := admitPlan(DesiredRequest{}, report)
+		require.False(t, ok)
+		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
+		assert.Contains(t, res.Detail, "the plan's 2 other statements, non-destructive ones included, were not run",
+			"the disclosure counts every skipped statement, before and after the destructive one")
+	})
+
+	t.Run("a single-statement destructive refusal claims no skipped statements", func(t *testing.T) {
+		report := executable()
+		report.Statements = []plan.Statement{{
+			SQL:         "ALTER TABLE app.t DROP COLUMN old",
+			Destructive: true,
+			Disposition: router.DispositionExecute,
+		}}
+		res, ok := admitPlan(DesiredRequest{}, report)
+		require.False(t, ok)
+		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
+		assert.NotContains(t, res.Detail, "all-or-nothing",
+			"there is nothing else in the plan to disclose as skipped")
 	})
 
 	t.Run("points a destructive index drop at its concurrent idiom", func(t *testing.T) {
@@ -160,6 +197,6 @@ func TestCommittedPrefixDetail(t *testing.T) {
 		committedPrefixDetail(2, 5, "failed"))
 	assert.Equal(t,
 		"planned statement 1 of 2 stopped before a verdict; nothing about it was executed; "+
-			"the 0 preceding statements committed and remain in effect",
+			"nothing was committed before it",
 		committedPrefixDetail(0, 2, stoppedBeforeVerdict))
 }

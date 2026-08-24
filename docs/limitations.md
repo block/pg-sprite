@@ -26,3 +26,33 @@ with a typed refusal — never a silently wrong or incomplete result:
 | Non-table objects | Views, materialized views, standalone sequences, enums, domains, extensions, functions, and triggers are outside the model. A serial column's owned sequence is the one exception: it round-trips through the `serial` pseudo-types — and ownership is verified through the catalog (`pg_depend`), so a hand-written `nextval` default on a standalone sequence that merely carries the serial-style name refuses rather than exporting as `serial` and silently privatizing a shared sequence. A column may *use* an unmanaged type (an enum, a domain) — the type text round-trips — but the type's definition is not managed. |
 | Multiple tables per file | A desired file is single-table scoped: exactly one `CREATE TABLE` plus `CREATE INDEX` statements on it. Multi-table schemas are managed as one file per table. |
 | Changed index or constraint definition | A redefinition diffs to drop-and-recreate, the drop is destructive, and desired-state execution refuses any plan containing a destructive statement — the whole plan, including the harmless recreate. Run the drop deliberately first (`DROP INDEX CONCURRENTLY` directly against the database; `ALTER TABLE ... DROP CONSTRAINT` through the imperative front door), then rerun — the remaining plan converges the recreate. |
+
+## What desired-state execution converges today
+
+Desired-state execution (`migrate.RunDesired`, library-only today) feeds
+every planned statement back through the same gates as the imperative
+front door, so the outcome of an ordinary desired-file edit is the
+composition of the model boundaries above with those gates. At a glance:
+
+| Desired-file edit | Outcome today |
+| --- | --- |
+| Add a column | Converges. Runs as a bounded attempt of the submitted form, so the table-size guard applies (below). |
+| Widen a column type (`varchar(50)` → `varchar(255)`) | Converges — the same bounded attempt, under the same size guard. |
+| Add an index | Converges via `CREATE INDEX CONCURRENTLY`. Not size-guarded: long online work on a large table is the pattern's purpose. |
+| Add a constraint (`UNIQUE`, `CHECK`); `SET NOT NULL` | Converges via the safer online sequence; not size-guarded either. |
+| Relax a `NOT NULL` | Refused, whole plan: dropping `NOT NULL` discards the same guarantee its constraint form would, so it is destructive. Run it deliberately through the imperative front door — it executes natively there — then rerun. |
+| Change an index or constraint definition | Refused, whole plan — the drop-and-recreate row above. |
+| Narrow a column type (`varchar(255)` → `varchar(50)`) | Refused: the change routes to copy-and-swap, which is not yet available. |
+| A bounded-attempt edit on a table above the size threshold | Refused at that statement (`not-native-safe-table-too-large`): with the default 1 GiB threshold, adding a column to a larger table refuses until the threshold is raised. |
+
+A destructive refusal is all-or-nothing: one destructive statement refuses
+the whole plan, and the non-destructive statements beside it do not run —
+the refusal detail says how many were skipped.
+
+The size threshold is policy, not capability: `Options.MaxTableSizeBytes`
+(the CLI's `--max-table-size`) defaults to 1 GiB, and the guard covers only
+the blind bounded attempt of a submitted form — planner-proven online
+sequences are exempt. On a table you operate deliberately, raising the
+threshold is the sanctioned way to converge the bounded-attempt edits; the
+refusal means pg-sprite cannot prove the change is instant at that size,
+not that the change is unsafe.

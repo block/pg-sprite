@@ -172,6 +172,21 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
 		assert.Equal(t, reviewed.Fingerprint, res.Plan.Fingerprint,
 			"the executed plan is the reviewed plan")
+
+		// A retry of the same pinned request after convergence is a
+		// no-op, not a fingerprint mismatch: the empty plan resolves
+		// before the pin is checked, so an idempotent re-run of an
+		// approved plan stays safe to issue.
+		res, err = migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+			Schema:              schema,
+			Desired:             desired,
+			ExpectedFingerprint: reviewed.Fingerprint,
+		}, runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome,
+			"a pinned re-run of a converged table is a no-op, not a refusal")
+		assert.Empty(t, res.Plan.Statements, "the converged table plans no statements")
+		assert.Empty(t, res.Verdicts)
 	})
 
 	t.Run("stops at an execution-time refusal", func(t *testing.T) {
