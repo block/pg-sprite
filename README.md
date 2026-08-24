@@ -29,8 +29,9 @@ pg-sprite embraces the Unix design philosophy — **do one thing, and do it
 perfectly**: change the shape of live PostgreSQL tables while applications
 keep reading and writing them. Anything that is not that one thing — data
 backfills, catalog bootstrap, GitOps orchestration, access control — is
-deliberately another tool's job, and the engine says so with a typed refusal
-that names the tool class ([docs/capabilities.md](docs/capabilities.md)).
+deliberately another tool's job: the engine refuses it with a typed verdict,
+and [docs/capabilities.md](docs/capabilities.md) names the tool class that
+owns each job.
 
 **Status: Phases 1 and 2.1–2.5.** The parse boundary, declarative diff,
 classifier, router seam, versioned dry-run plan report, offline linter, and

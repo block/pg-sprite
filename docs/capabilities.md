@@ -59,14 +59,17 @@ Two consequences follow, and they explain most of this page:
 | --- | --- | --- |
 | **T1 — supported today** | The engine executes the change through an online-safe pattern | Execution (or the safer rewritten sequence), exit 0 |
 | **T2 — planned** | A known online pattern exists (or requires the copy-and-swap engine); building it is on the roadmap | A **typed refusal** naming the reason, exit 2 — never a silent fallback to a blocking form |
-| **T3 — out of scope by design** | No online-safety problem to solve, or solving it belongs to a different tool class | A typed refusal or a parse-level rejection, with the reason stating *why it is not planned* |
+| **T3 — out of scope by design** | No online-safety problem to solve, solving it belongs to a different tool class, or PostgreSQL offers no online mechanism to build on | A typed refusal or a parse-level rejection, with the reason stating *why it is not planned* |
 
 T3 rows carry one of three marks, because they mean different things — and only one of
 them is a limitation:
 
-- **⚪ no online-safety problem to solve** — the operation is already safe to run
-  directly: transactional catalog work, or bootstrap on an object nothing reads yet.
-  There is nothing for an *online* engine to add; run it through owner tooling or psql.
+- **⚪ no online-safety problem to solve** — the operation does no table scan and no
+  rewrite; at most it takes a brief catalog lock. There is nothing for an *online*
+  engine to add; run it through owner tooling or psql. Where that brief lock lands on a
+  **live** table (a trigger, a view swap, a greenfield foreign key), the row says so:
+  the statement queues behind long-running queries and blocks sessions behind it while
+  it waits, so run it under a `lock_timeout`.
 - **🔵 a different tool class owns it** — the job is real but belongs to another kind of
   tool (data-change runners, provisioning/IaC, convergence planners, expand/contract
   frameworks). The row's "Online-safety problem?" column names the class to look for.
@@ -81,7 +84,9 @@ instead.
 
 The invariant: **every T2 row is a tracked roadmap item; T3 rows deliberately have
 none.** If a refusal message points at a "planned" capability, that plan exists —
-otherwise the refusal says out-of-scope and names the tool class that owns the job.
+otherwise the change is out of scope by design, and this page — not the refusal text,
+which today is one undifferentiated unsupported-statement reason for everything outside
+the imperative front door — names the tool class that owns the job.
 
 ## The two front doors
 
@@ -101,6 +106,9 @@ An operation can therefore be T1 imperatively and T2 declaratively — foreign k
 the canonical example.
 
 ## Support matrix
+
+**51 operations: 17 supported today, 18 planned behind a typed refusal, 14 out of scope
+by design, and 2 with no online mechanism in PostgreSQL to build on.**
 
 Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today) ·
 ⚪ T3 (out of scope; **no online-safety problem** — run directly) ·
@@ -163,7 +171,7 @@ Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today
 | Unlogged tables | 🟡 | Yes | Typed refusal: persistence is not modeled, converging it (`SET LOGGED`) is a full rewrite, and rendering the table as plain `CREATE TABLE` would silently change crash-safety |
 | Explicit column collations | 🟡 | Yes | Typed refusal: dropping a `COLLATE` clause from a rendered baseline silently changes sort order and index semantics; a collation delta cannot converge without a rewrite |
 | Columns whose default uses a sequence the column does not own | 🟡 | Yes | Typed refusal: in a desired-state model that sequence exists only inside the scratch transaction, so no derived plan can reference it. Column-owned (`serial`-style) sequences are fine |
-| Greenfield `CREATE TABLE` apply (bootstrap an empty database from desired files) | ⚪ | No — owner tooling or a convergence planner | A new table has no readers or writers to protect. `diff --sql` emits the statement; applying it belongs to owner tooling or a convergence planner, not this engine |
+| Greenfield `CREATE TABLE` apply (the table does not exist yet — a fresh database or a new table in a live one) | ⚪ | No — owner tooling or a convergence planner | The new table has no readers or writers to protect, but a `REFERENCES` clause takes a brief `SHARE ROW EXCLUSIVE` on each **referenced** table and queues behind long-running queries — run it under a `lock_timeout`. `diff --sql` emits the statement; applying it belongs to owner tooling or a convergence planner, not this engine |
 
 ### Types and non-table objects
 
@@ -173,11 +181,14 @@ Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today
 | `ALTER TYPE ... ADD VALUE` | 🟡 | Yes | Metadata-only and online-safe (PG 14+ allows it in a transaction; the value is usable after commit) — planned as an owned operation. No peer online executor owns it |
 | Enum value rename / removal | 🟡 | Yes | PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite — routes to a typed refusal toward copy-and-swap |
 | Enum/domain type creation and drop | ⚪ | No — owner tooling (psql, shipped with the code change) | Bootstrap/catalog work with no concurrent-access problem; owner tooling applies it in the same change that ships the code |
-| Views, materialized views | ⚪ | No — owner tooling | `CREATE OR REPLACE VIEW` is transactional catalog work; no online-safety problem for an executor to own. (Materialized-view *refresh* is a data operation — also out) |
-| Triggers and PL/pgSQL function bodies | ⚪ | No — owner tooling | Bootstrap/catalog objects with no online-safety problem; no peer online executor owns them either |
+| Views, materialized views (create and replace) | ⚪ | No — owner tooling | Transactional catalog work, but `CREATE OR REPLACE VIEW` takes a brief `ACCESS EXCLUSIVE` on the view and queues behind in-flight readers — run it under a `lock_timeout` |
+| `REFRESH MATERIALIZED VIEW` | 🔵 | No — data jobs / owner tooling | A data operation, not catalog work: the plain form holds `ACCESS EXCLUSIVE` on the matview for the whole rebuild (`CONCURRENTLY` needs a unique index and trades the lock for churn). Scheduling refreshes belongs to data jobs |
+| PL/pgSQL function bodies (`CREATE OR REPLACE FUNCTION`) | ⚪ | No — owner tooling | Transactional catalog work that takes no lock on any relation; nothing for an online engine to add. No peer online executor owns it either |
+| Triggers (`CREATE TRIGGER`) | ⚪ | No — owner tooling | Catalog work — no scan, no rewrite — but it takes a brief `SHARE ROW EXCLUSIVE` on the table, queues behind long-running queries, and blocks writers while it waits — run it under a `lock_timeout` |
 | Extensions (`CREATE EXTENSION`) | ⚪ | No — owner tooling | Same: catalog bootstrap, owner tooling |
 | Grants, roles, row-level-security policies | 🔵 | No — provisioning / IaC | Access control, not table shape; belongs to provisioning (see [engine-role.md](engine-role.md) for what the *engine's own* role needs) |
-| Standalone sequences, publications/subscriptions | ⚪ | No — owner tooling / replication provisioning | Not table shape: sequence DDL is transactional catalog work, and publications/subscriptions are replication provisioning — owner tooling applies both |
+| Standalone sequences | ⚪ | No — owner tooling | Transactional catalog work on an object with no readers-and-writers problem |
+| Publications, subscriptions | 🔵 | No — replication provisioning / IaC | Replication provisioning, not table shape (`ALTER PUBLICATION ... ADD TABLE` also takes `SHARE UPDATE EXCLUSIVE` on the table) |
 
 ### Data and whole-table operations
 
@@ -211,9 +222,9 @@ line sits where it does, and what happens when you cross it:
   is cheap when you don't own what happens under concurrent load.
 
 pg-sprite's position: model narrowly, execute what the model covers with provable online
-safety, and make every boundary a **typed refusal that states its tier** — planned (with
-a real plan) or out-of-scope (with the tool class that owns the job). The scope limit is
-explicit, documented on this page, and machine-checkable via exit codes.
+safety, and make every boundary a **typed refusal**, with this page stating its tier —
+planned (with a real plan) or out of scope (with the tool class that owns the job). The
+scope limit is explicit, documented on this page, and machine-checkable via exit codes.
 
 ## Why typed refusal, not passthrough
 

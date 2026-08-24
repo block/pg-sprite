@@ -22,10 +22,10 @@ one thing is changing the *shape* of live PostgreSQL tables while applications k
 reading and writing them. Everything inside that problem — classification, online idioms,
 rewrites, verification, crash-resume — belongs in this engine and is done to the safety
 bar below. Everything outside it — data changes, catalog bootstrap, GitOps orchestration,
-access control — is deliberately another tool's job, and the engine says so with a typed
-refusal that names the tool class ([capabilities.md](capabilities.md)). "One tool for all
-schema changes" and "do one thing" are the same claim read from two sides: depth across
-every table-shape change, never sprawl across object types.
+access control — is deliberately another tool's job: the engine refuses it with a typed
+reason, and [capabilities.md](capabilities.md) names the tool class that owns each job.
+"One tool for all schema changes" and "do one thing" are the same claim read from two
+sides: depth across every table-shape change, never sprawl across object types.
 
 ## The five pillars
 
