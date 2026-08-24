@@ -232,3 +232,12 @@ desired state — must report the statements already committed, the one that
 failed, and the ones never attempted. That is the strongest guarantee
 available once PostgreSQL rules out atomicity for online DDL, and it is the
 contract embedders should expose rather than paper over.
+
+The engine implements that contract itself: `migrate.RunDesired` (in
+[`pkg/migrate`](../pkg/migrate/desired.go)) derives the convergence plan for
+a desired-state schema and executes each planned statement back through the
+same pipeline — fresh introspection, classification, and routing per
+statement — stopping at the first refusal or failure. Its result carries the
+plan, one verdict per attempted statement, and a detail naming exactly which
+planned statements committed and remain in effect: the committed prefix at
+the plan level, statements instead of steps.
