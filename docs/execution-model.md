@@ -52,16 +52,25 @@ the sequencing across transaction boundaries *is* the safety mechanism.
 "Implicit or bounded" above is the mechanical detail behind the contract —
 autocommit-each-step has two shapes in the executor:
 
-- **Brief catalog steps and `VALIDATE CONSTRAINT`** each run as one short
-  *explicit* transaction: `BEGIN` → `SET LOCAL lock_timeout` /
-  `statement_timeout` → the statement → `COMMIT` (`pkg/executor`'s bounded
-  runner). The explicit `BEGIN` exists only because the budgets are applied
-  with `SET LOCAL`, which is scoped to that transaction — functionally it is
-  still one statement, one transaction, committed immediately, rolled back
-  atomically on failure.
-- **`CREATE INDEX CONCURRENTLY`** is true autocommit on a dedicated budgeted
-  session: it refuses to run inside any transaction block and internally
-  manages multiple transactions of its own.
+- **Brief catalog steps (step kind `brief`) and `VALIDATE CONSTRAINT` (step
+  kind `validate-constraint`)** each run as one short *explicit* transaction:
+  `BEGIN` → `SET LOCAL lock_timeout` / `statement_timeout` → the statement →
+  `COMMIT` (`pkg/executor`'s bounded runner). The explicit `BEGIN` exists
+  only because the budgets are applied with `SET LOCAL`, which is scoped to
+  that transaction — functionally it is still one statement, one
+  transaction, committed immediately, rolled back atomically on failure.
+- **`CREATE INDEX CONCURRENTLY` (step kind `concurrent-index-build`)** is
+  true autocommit on a dedicated budgeted session: it refuses to run inside
+  any transaction block and internally manages multiple transactions of its
+  own.
+
+Each step's class is the `kind` field of its step report in the JSON
+verdict — the field retry logic branches on. A failed `brief` step means
+something held a lock longer than the brief budget tolerates: retrying is
+reasonable. A failed `validate-constraint` step means the validation scan
+exceeded its own budget: retrying without raising it will fail the same
+way. A failed `concurrent-index-build` carries its own invalid-index
+verdict ([invalid-index-recovery.md](invalid-index-recovery.md)).
 
 ## The committed prefix
 
@@ -70,7 +79,29 @@ shape: steps 1 through N−1 each committed, step N rolled back, steps N+1
 onward never attempted. The leading run of completed steps is the **committed
 prefix** — no holes, no in-limbo steps.
 
-The four-step `SET NOT NULL` sequence, failing at step 3:
+The running example is a single submitted statement:
+
+```sql
+ALTER TABLE users ALTER COLUMN email SET NOT NULL;
+```
+
+Run as-is, PostgreSQL takes `ACCESS EXCLUSIVE` and scans every row to prove no
+NULLs exist — blocking all reads and writes for the whole scan. The planner
+substitutes a four-step native sequence that moves the scan off the exclusive
+lock, exploiting the fact that PostgreSQL (12+) skips the `SET NOT NULL` scan
+when a validated `CHECK` constraint already proves the invariant:
+
+| # | Statement | What it does | Lock (duration) | Budget class |
+|---|---|---|---|---|
+| 1 | `ADD CONSTRAINT … CHECK (email IS NOT NULL) NOT VALID` | Installs the scaffold: enforced for new writes immediately; existing rows not yet checked | `ACCESS EXCLUSIVE` (brief — `NOT VALID` skips the scan) | brief |
+| 2 | `VALIDATE CONSTRAINT …` | Scans the table to prove existing rows satisfy the invariant — the long part | `SHARE UPDATE EXCLUSIVE` (long, but reads and writes continue) | validate (own overall bound) |
+| 3 | `ALTER COLUMN email SET NOT NULL` | The actual change — now a pure catalog flip, because the validated `CHECK` proves the invariant so no scan is needed | `ACCESS EXCLUSIVE` (brief) | brief |
+| 4 | `DROP CONSTRAINT …` (the scaffold) | Removes the now-redundant scaffold constraint | `ACCESS EXCLUSIVE` (brief) | brief |
+
+The exclusive locks are held only for instant catalog flips; the single
+full-table scan runs under a lock that blocks neither reads nor writes.
+
+The same sequence, failing at step 3:
 
 ```diagram
 step 1  ADD CONSTRAINT ... CHECK (col IS NOT NULL) NOT VALID  ── committed ─┐ committed
