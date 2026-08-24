@@ -10,8 +10,11 @@ import (
 )
 
 // ErrUnsupportedChange is returned when converging live onto desired would
-// need a change the engine does not derive (identity or generation changes
-// on an existing column). The caller surfaces it; nothing is guessed.
+// need a change the engine does not derive: identity, generation, or
+// collation changes on an existing column, a persistence (unlogged)
+// difference, or a partitioning difference (partition key or partition
+// attachment) — table identity that no ALTER converges. The caller
+// surfaces it; nothing is guessed.
 var ErrUnsupportedChange = errors.New("unsupported schema change")
 
 // ErrDifferentTables is returned when the two models describe different
@@ -99,6 +102,21 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	if live.Table != desired.Table {
 		return nil, fmt.Errorf("%w: %q vs %q", ErrDifferentTables, live.Table, desired.Table)
 	}
+	// Partitioning is table identity, not an alterable attribute: no ALTER
+	// can add, remove, or change a partition key or a partition attachment
+	// in place, so a mismatch fails closed instead of diffing to silence.
+	if live.PartitionKey != desired.PartitionKey {
+		return nil, fmt.Errorf("partition key %q vs %q: %w", live.PartitionKey, desired.PartitionKey, ErrUnsupportedChange)
+	}
+	if live.IsPartition != desired.IsPartition {
+		return nil, fmt.Errorf("partition attachment differs between live and desired: %w", ErrUnsupportedChange)
+	}
+	// Persistence is convergeable only by a full table rewrite (SET LOGGED
+	// / SET UNLOGGED), which the engine does not derive — a mismatch fails
+	// closed instead of diffing to silence.
+	if live.Unlogged != desired.Unlogged {
+		return nil, fmt.Errorf("table persistence (unlogged) differs between live and desired: %w", ErrUnsupportedChange)
+	}
 	table := pgx.Identifier{schema, live.Table}.Sanitize()
 
 	liveCols := columnsByName(live.Columns)
@@ -157,6 +175,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			if col.SequenceDefault {
 				return nil, fmt.Errorf("%w: column %q has a sequence-backed default (serial); the plan cannot create its sequence", ErrUnsupportedChange, col.Name)
 			}
+			// columnDef carries no COLLATE clause, so emitting the add
+			// would silently drop the collation — refuse instead.
+			if col.Collation != "" {
+				return nil, fmt.Errorf("%w: column %q has an explicit collation (%s); the plan cannot carry it", ErrUnsupportedChange, col.Name, col.Collation)
+			}
 			changes = append(changes, Change{
 				SQL:  "ALTER TABLE " + table + " ADD COLUMN " + columnDef(col),
 				Kind: ChangeAddColumn,
@@ -214,6 +237,12 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	}
 	if live.Generated != desired.Generated {
 		return nil, fmt.Errorf("%w: column %q generated change", ErrUnsupportedChange, live.Name)
+	}
+	// A collation change rewrites the column and rebuilds its indexes —
+	// the engine does not derive it, so a delta fails closed instead of
+	// diffing to silence.
+	if live.Collation != desired.Collation {
+		return nil, fmt.Errorf("%w: column %q collation change (%q vs %q)", ErrUnsupportedChange, live.Name, live.Collation, desired.Collation)
 	}
 	if desired.Generated && (live.Type != desired.Type || live.Default != desired.Default) {
 		return nil, fmt.Errorf("%w: column %q generation expression or type change", ErrUnsupportedChange, live.Name)
