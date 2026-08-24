@@ -178,7 +178,7 @@ type Decision struct {
 	// Operation is the operator-facing label (display only).
 	Operation string `json:"operation"`
 	// Destructive marks operations that discard live structure — a dropped
-	// column, constraint, or index. It is derived from the operation shape
+	// column, constraint, index, or NOT NULL. It is derived from the operation shape
 	// here, in the one place every front door shares, so a plan reports the
 	// same statement as destructive no matter how it was submitted. It is
 	// always emitted, never omitted: a safety flag a consumer gates on must
@@ -384,11 +384,16 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 // destructiveOp reports whether an operation shape discards live
 // structure. A drop is destructive regardless of how it routes: a dropped
 // column discards data, a dropped constraint discards a guarantee the
-// schema was providing, and a dropped index discards a structure that is
-// expensive to rebuild (and, for a unique index, the uniqueness guarantee).
+// schema was providing — and dropping NOT NULL discards exactly the same
+// guarantee its constraint form would, so it is marked identically — and a
+// dropped index discards a structure that is expensive to rebuild (and,
+// for a unique index, the uniqueness guarantee). Dropping a DEFAULT is
+// deliberately not destructive: a default guarantees nothing about
+// existing rows and is recreated by a metadata-only statement.
 func destructiveOp(kind statement.OpKind) bool {
 	switch kind {
-	case statement.OpDropColumn, statement.OpDropConstraint, statement.OpDropIndex:
+	case statement.OpDropColumn, statement.OpDropConstraint, statement.OpDropIndex,
+		statement.OpDropNotNull:
 		return true
 	default:
 		return false

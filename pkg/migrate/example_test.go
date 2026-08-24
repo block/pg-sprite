@@ -66,3 +66,54 @@ func Example_run() {
 		fmt.Println(v.Code, v.ExecutedSQL)
 	}
 }
+
+// Example_runDesired is the declarative execution flow: parse the
+// desired-state schema, connect, and converge the live table onto it — the
+// engine derives the plan and drives every planned statement through the
+// same pipeline Run uses. It is compile-checked but not executed —
+// RunDesired needs a live PostgreSQL database.
+func Example_runDesired() {
+	ctx := context.Background()
+
+	// One desired file describes one table: exactly one CREATE TABLE plus
+	// its indexes. Parse failures surface here, at the boundary where the
+	// embedder can render them.
+	desired, err := statement.ParseDesired(`CREATE TABLE users (id bigint PRIMARY KEY, email text);
+CREATE INDEX users_email_idx ON users (email);`)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+
+	pool, err := dbconn.NewPool(ctx, dbconn.Config{URL: "postgres://engine@localhost:5432/app"})
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	defer pool.Close()
+
+	// The result-and-error contract mirrors Run's three shapes: a refusal
+	// (at plan admission or on a mid-plan statement) returns the result
+	// with a nil error; an execution failure returns the failed result
+	// together with the operational error; an error with a zero result
+	// means nothing was planned or executed. Verdicts[i] is the verdict of
+	// Plan.Statements[i] — fewer verdicts than planned statements means
+	// execution stopped there.
+	res, err := migrate.RunDesired(ctx, pool, migrate.DesiredRequest{
+		Schema:  "public",
+		Desired: desired,
+		// ExpectedFingerprint pins a reviewed plan: leave it empty to run
+		// whatever plan the live table needs now.
+	}, migrate.DefaultOptions())
+	if err != nil {
+		log.Print(err)
+	}
+	switch res.Outcome {
+	case verdict.OutcomeExecuted:
+		fmt.Println(len(res.Plan.Statements), "statements converged")
+	case verdict.OutcomeRefused:
+		fmt.Println(res.Reason, res.Detail)
+	case verdict.OutcomeFailed:
+		fmt.Println(res.Detail)
+	}
+}

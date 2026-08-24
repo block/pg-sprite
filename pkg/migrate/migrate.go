@@ -4,12 +4,21 @@
 // embedding pg-sprite share this one pipeline, so a verdict means the same
 // thing no matter which caller produced it.
 //
+// [RunDesired] is the declarative execution loop on the same pipeline: one
+// parsed desired-state schema in, the convergence plan derived through
+// diffplan.Plan, and every planned statement executed back through [Run] —
+// per-statement verdicts, committed-prefix semantics, stop at the first
+// refusal or failure. Both entry points share [Options], the executors,
+// and the verdict contract; the desired loop adds only plan admission and
+// sequencing.
+//
 // Callers own the boundary concerns: parse the statement through
-// [statement.ParseOne] (a parse failure surfaces at the caller) and build
-// the connection through [dbconn.NewPool]. [Gate] is exported so a caller
-// can refuse an unsupported statement kind before dialing; [Run] re-checks
-// it, so a caller that skips the early gate still cannot execute a gated
-// kind.
+// [statement.ParseOne] (or the desired schema through
+// [statement.ParseDesired]; a parse failure surfaces at the caller) and
+// build the connection through [dbconn.NewPool]. [Gate] is exported so a
+// caller can refuse an unsupported statement kind before dialing; [Run]
+// re-checks it, so a caller that skips the early gate still cannot execute
+// a gated kind.
 //
 // [Run] takes the concrete [pgxpool.Pool] that [dbconn.NewPool] returns —
 // a deliberate concrete dependency, not an oversight: the execution paths

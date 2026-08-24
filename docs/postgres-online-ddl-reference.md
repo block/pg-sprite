@@ -408,9 +408,13 @@ an unclassified statement is never executed.
 |---|---|---|---|
 | warning — does not change the routing decision | per the routing decision | per the routing decision | unchanged by this code |
 
-The change discards live data or structure (`DROP COLUMN`, `DROP TABLE`,
-truncating conversions). Emitted alongside the routing decision as a warning so
-destructive intent is always visible in review.
+The change discards live data or structure: `DROP COLUMN`, `DROP TABLE`,
+truncating conversions, a dropped constraint or index, or `DROP NOT NULL`
+(which discards the same guarantee as dropping the equivalent constraint;
+`DROP DEFAULT` is deliberately not destructive — a default guarantees nothing
+about existing rows and is recreated by a metadata-only statement). Emitted
+alongside the routing decision as a warning so destructive intent is always
+visible in review.
 
 ### `rewrite-required`
 

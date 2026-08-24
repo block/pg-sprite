@@ -102,7 +102,11 @@ the planner's classifier:
   almost no parsing logic. This path lives at the `migrate` front door.
 - **Classified planning path (Phases 2.1–2.4).** Parse the statement and introspect the live schema to
   **predict the path up front** — native-safe, needs-rewrite, or refuse — without trial
-  execution. The planner drives `diff` and `migrate --dry-run`, and its classified route drives
+  execution. *Needs-rewrite* refers to a **table rewrite**: PostgreSQL would rebuild the
+  whole table (a full-table copy under `ACCESS EXCLUSIVE`), so executing the change online
+  is the future copy-and-swap executor's job — it does not mean the submitted SQL merely
+  needs rewording (that is the planner's safer-sequence substitution, which stays on the
+  native-safe path). The planner drives `diff` and `migrate --dry-run`, and its classified route drives
   `migrate`'s execution: a blocking submitted form is substituted with the planner's safer
   native sequence instead of incurring a wasted/aborted blind attempt.
 
