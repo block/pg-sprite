@@ -13,8 +13,9 @@
 # that does not produce exactly its expected outcome — including a refusal
 # with the wrong reason — is a failure, not a pass.
 #
-#   ./fetch.sh <project> && ./harness.sh <project> up   # once
-#   ./replay.sh <project>            # reset + full replay + summary tables
+#   make replay [REPLAY_PROJECT=<project>]   # fetch + harness + full replay
+#   ./replay.sh <project>                     # replay directly (starts or
+#                                             # resets the harness itself)
 set -uo pipefail
 
 REPLAY_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -48,7 +49,13 @@ preview() {
         | sed -E 's/^[[:space:]]+//; s/[[:space:]]+/ /g' | cut -c1-56
 }
 
-"${REPLAY_DIR}/harness.sh" "$PROJECT" reset
+# Either path ends at the pristine baseline: a fresh container applies it on
+# the way up; an existing one is dropped back to it.
+if docker inspect "$CONTAINER" >/dev/null 2>&1; then
+    "${REPLAY_DIR}/harness.sh" "$PROJECT" reset
+else
+    "${REPLAY_DIR}/harness.sh" "$PROJECT" up
+fi
 
 rows=()
 failures=0

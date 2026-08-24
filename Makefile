@@ -11,7 +11,10 @@ PG_DATABASE ?= pgsprite
 # Localhost-only test credentials, parameterized above — not a real secret.
 PG_DSN_LOCAL = postgres://$(PG_USER):$(PG_PASSWORD)@localhost:$(PG_PORT)/$(PG_DATABASE)?sslmode=disable# sadscan:disable np.postgres.1
 
-.PHONY: build test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check
+# Which corpus replay project to run (replay/<project>/project.conf).
+REPLAY_PROJECT ?= buzz
+
+.PHONY: build test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
 build:
 	$(GO) build -o bin/pg-sprite ./cmd/pg-sprite
@@ -88,3 +91,19 @@ demo-seed: db-up
 # --json fields and exit codes only. Needs jq.
 demo-check: build db-up demo-seed
 	CHECK=1 PGS="$(CURDIR)/bin/pg-sprite" PG_DSN="$(PG_DSN_LOCAL)" demo/tour.sh
+
+# Corpus replay (replay/README.md): replay a real project's schema-change
+# history through the built binary, asserting per statement that pg-sprite
+# executes it or refuses with exactly the expected typed reason. Fetches the
+# pinned corpus and starts (or resets) the project's own throwaway container
+# as needed; stop it with make replay-down.
+replay: build
+	replay/fetch.sh $(REPLAY_PROJECT)
+	PGS="$(CURDIR)/bin/pg-sprite" replay/replay.sh $(REPLAY_PROJECT)
+
+# Report corpus drift beyond the project's pin (read-only; see replay/README.md).
+replay-refresh:
+	replay/fetch.sh $(REPLAY_PROJECT) refresh
+
+replay-down:
+	replay/harness.sh $(REPLAY_PROJECT) down

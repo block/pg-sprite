@@ -9,11 +9,11 @@ of what production PostgreSQL schemas look like.
 The corpus files are buzz's SQLx migrations (their terminology, cited as-is);
 pg-sprite assesses only the schema-change content inside them. The baseline is corpus
 file `0001_initial_schema.sql`, and [assessment.tsv](assessment.tsv) curates the
-history after it. See [replay/README.md](../README.md) for usage — all commands take
-`buzz` as the project argument:
+history after it. See [replay/README.md](../README.md) for usage — buzz is the
+default project, so from the repository root:
 
 ```sh
-../fetch.sh buzz && ../harness.sh buzz up && ../replay.sh buzz
+make replay
 ```
 
 ## Boundary facts the curation surfaced

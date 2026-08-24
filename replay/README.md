@@ -46,11 +46,11 @@ This resolves the ref to a commit, captures the corpus file list at that pin int
 `chuzz/assessment.tsv`. Then:
 
 ```sh
-./fetch.sh chuzz            # download the pinned corpus into chuzz/corpus/
-./harness.sh chuzz up       # start postgres, apply the baseline via psql
+make replay REPLAY_PROJECT=chuzz    # fetch + harness + replay, one shot
 # curate chuzz/assessment.tsv — probe individual statements with:
 #   bin/pg-sprite migrate --url "$(./harness.sh chuzz dsn)" --json --alter '...'
-./replay.sh chuzz           # replay the full history, iterate until green
+# then rerun until green:
+make replay REPLAY_PROJECT=chuzz
 ```
 
 The first corpus file is assumed to be the baseline (bootstrap DDL applied directly
@@ -58,7 +58,17 @@ via psql — on an empty database it has no online-safety problem for pg-sprite 
 solve); adjust `BASELINE` in `project.conf` if your history starts differently, or
 set it empty to start from an empty database.
 
-## The scripts
+## Make targets and scripts
+
+From the repository root (`REPLAY_PROJECT` defaults to `buzz`):
+
+```sh
+make replay [REPLAY_PROJECT=<project>]           # build + fetch + harness + replay
+make replay-refresh [REPLAY_PROJECT=<project>]   # report corpus drift beyond the pin
+make replay-down [REPLAY_PROJECT=<project>]      # remove the project's container
+```
+
+The scripts underneath, for scaffolding and finer-grained control:
 
 ```sh
 ./init.sh <project> <repo> <ref> <path>   # scaffold a new project directory
@@ -69,7 +79,7 @@ set it empty to start from an empty database.
 ./harness.sh <project> psql ...           # psql inside the container
 ./harness.sh <project> reset              # back to the pristine baseline
 ./harness.sh <project> down               # remove the container and all state
-./replay.sh <project>                     # reset, replay, print the results tables
+./replay.sh <project>                     # replay (starts or resets the harness itself)
 ```
 
 Each project claims its own host port (`PORT` in `project.conf`), so harnesses can
