@@ -37,6 +37,7 @@ a verdict, not a plan report — and exit 2. The JSON report schema is
 [plan-report.md](plan-report.md).
 
 - [Codes used in these examples](#codes-used-in-these-examples)
+- [Refusal reasons](#refusal-reasons)
 - [Migrate](#migrate)
   - [Runs as written (`metadata-only`) — exit 0](#runs-as-written-metadata-only--exit-0)
   - [Safer-sequence substitution (`safer-idiom`) — exit 0](#safer-sequence-substitution-safer-idiom--exit-0)
@@ -67,6 +68,25 @@ is a one-line summary; the linked reference entry is authoritative.
 | [`table-not-found`](postgres-online-ddl-reference.md#table-not-found) | The target table does not exist, so classification fell back to zero facts; running without `--dry-run` would fail. The dry run exits 2 and the report carries `table_exists: false`. |
 | [`destructive`](postgres-online-ddl-reference.md#destructive) | The change discards live data or structure (`DROP COLUMN`, `DROP TABLE`, truncating conversions). A warning alongside the routing decision, not a refusal. |
 | [`blocking-idiom`](lint-report.md#codes-code) | Lint-only code: the submitted form blocks readers or writers and a safer native form exists; the finding's `suggestion` carries the safer SQL when the linter can construct it. |
+
+## Refusal reasons
+
+Every refusal verdict (`"outcome": "refused"`, exit 2) carries exactly one of
+these typed `reason` tokens — the value automation switches on; prose belongs
+in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
+
+| Reason | Meaning |
+|---|---|
+| `unsupported-statement` | No safe path is known for the statement — only `ALTER TABLE` and `CREATE INDEX` reach classification — or a desired-state plan needs a table that does not exist yet. |
+| `index-statement` | Index maintenance (`DROP INDEX`, `REINDEX`) has a native safe idiom (`CONCURRENTLY`) and is never attempted; the verdict's `safer_idiom` names it. |
+| `not-native-safe-table-too-large` | The size guard skipped the optimistic attempt: the table exceeds the configured bound and the change is not provably metadata-only. |
+| `insufficient-privileges` | The connected role lacks the access the change needs; `detail` names the exact missing GRANT (see [engine-role.md](engine-role.md)). |
+| `unsupported-partitioned-parent` | The routed plan builds an index on a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. |
+| `not-native-safe-budget-exceeded` | The optimistic attempt exceeded its lock or statement budget and was cancelled; the verdict's `cause` narrows which budget fired. |
+| `not-native-safe-rewrite-required` | The submitted form blocks and must run as a safer native sequence, but none could be constructed. |
+| `backend-unavailable` | The change routes to an execution strategy this build does not implement (copy-and-swap). |
+| `destructive-change` | The desired-state plan discards live structure — a dropped column, constraint, index, or `NOT NULL` — and desired-state execution runs no destructive statement; run the drop deliberately instead ([execution model](execution-model.md)). |
+| `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
 
 ## Migrate
 

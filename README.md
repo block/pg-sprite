@@ -25,6 +25,14 @@ change to the safest sequence that exists, and refuses with a structured
 verdict when it can't prove one (see
 [docs/postgres-online-ddl-reference.md](docs/postgres-online-ddl-reference.md)).
 
+pg-sprite embraces the Unix design philosophy — **do one thing, and do it
+perfectly**: change the shape of live PostgreSQL tables while applications
+keep reading and writing them. Anything that is not that one thing — data
+backfills, catalog bootstrap, GitOps orchestration, access control — is
+deliberately another tool's job: the engine refuses it with a typed verdict,
+and [docs/capabilities.md](docs/capabilities.md) names the tool class that
+owns each job.
+
 **Status: Phases 1 and 2.1–2.5.** The parse boundary, declarative diff,
 classifier, router seam, versioned dry-run plan report, offline linter, and
 advisory `suggest` command are implemented. `pg-sprite migrate --alter '…'` classifies and
@@ -98,6 +106,8 @@ machine-readable shape is in
 `migrate --dry-run` shows exactly what would run, as compiler-style
 diagnostics with a doc anchor per finding (exit 0 — the plan is executable).
 The demo above records the whole flow — dry run, real run, catalog proof;
+why the substituted sequence is safer — same end state, different locking
+— is worked through in [docs/safer-sequences.md](docs/safer-sequences.md);
 the machine-readable shape is in
 [docs/cli-output-examples.md](docs/cli-output-examples.md).
 

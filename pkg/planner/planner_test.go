@@ -47,16 +47,20 @@ func classifyOne(t *testing.T, sql string) planner.Decision {
 }
 
 // Destructive is a decision-level fact derived from the operation shape:
-// drops of columns, constraints, and indexes discard live structure, and
-// every front door that routes through the classifier inherits the same
-// marking — including DROP INDEX, whose drop discards the index's
-// guarantee (uniqueness, for a unique index) however it is submitted.
+// drops of columns, constraints, indexes, and NOT NULL discard live
+// structure or a guarantee, and every front door that routes through the
+// classifier inherits the same marking — including DROP INDEX, whose drop
+// discards the index's guarantee (uniqueness, for a unique index) however
+// it is submitted. DROP DEFAULT stays non-destructive: a default
+// guarantees nothing about existing rows and is recreated by a
+// metadata-only statement.
 func TestClassifyMarksDropsDestructive(t *testing.T) {
 	destructive := []string{
 		"ALTER TABLE t DROP COLUMN age",
 		"ALTER TABLE t DROP CONSTRAINT t_age_check",
 		"DROP INDEX t_v_idx",
 		"DROP INDEX CONCURRENTLY t_v_idx",
+		"ALTER TABLE t ALTER COLUMN age DROP NOT NULL",
 	}
 	for _, sql := range destructive {
 		assert.True(t, classifyOne(t, sql).Destructive, sql)
@@ -65,7 +69,6 @@ func TestClassifyMarksDropsDestructive(t *testing.T) {
 		"ALTER TABLE t ADD COLUMN age int",
 		"ALTER TABLE t ALTER COLUMN v50 TYPE varchar(100)",
 		"ALTER TABLE t ALTER COLUMN age DROP DEFAULT",
-		"ALTER TABLE t ALTER COLUMN age DROP NOT NULL",
 		"CREATE INDEX t_v_idx ON t (v50)",
 	}
 	for _, sql := range nonDestructive {

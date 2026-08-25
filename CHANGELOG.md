@@ -37,6 +37,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   carry a `guidance` field naming the typed manual path, drawn from the
   suggest report's Guidance vocabulary. The fingerprint definition is
   unchanged.
+- **`ALTER COLUMN ... DROP NOT NULL` now classifies as destructive** in plan
+  reports (`destructive: true`): dropping `NOT NULL` discards the same
+  guarantee as dropping the equivalent constraint. The full destructive set
+  is a dropped column, constraint, index, or `NOT NULL`; `DROP DEFAULT` is
+  deliberately not destructive — a default guarantees nothing about existing
+  rows and is recreated by a metadata-only statement. A consumer gating on
+  `.statements[].destructive` now sees `DROP NOT NULL` flagged, and
+  desired-state execution refuses it like any other drop.
 - **The suggest report is format version 2**: the Guidance vocabulary gains
   `name-constraint-then-validate`, emitted for an unnamed `ADD CHECK` /
   `ADD FOREIGN KEY`, and `unique-index-then-constraint`, covering an
@@ -102,6 +110,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- **Library-level desired-state execution: `migrate.RunDesired`** converges
+  one live table onto its parsed desired schema — derive the convergence
+  plan, admit it as a whole (table existence, destructive guard, routed
+  dispositions, optional `ExpectedFingerprint` pin), then run each planned
+  statement back through the same `migrate.Run` pipeline with fresh
+  introspection and classification, stopping at the first refusal or
+  failure. The result carries the plan, per-statement verdicts, and an
+  aggregate outcome with committed-prefix detail
+  ([docs/execution-model.md](docs/execution-model.md)). Two new refusal
+  reasons enter the vocabulary: `destructive-change` (the plan discards
+  live structure — a dropped column, constraint, index, or `NOT NULL`;
+  desired-state execution never runs it) and
+  `plan-fingerprint-mismatch` (the plan derived at execution time is not
+  the pinned reviewed plan). Library-only for now — the `migrate --desired`
+  CLI flag follows separately.
 - **A third verdict outcome, `failed`,** for execution failures (still exit
   1 — refusals remain exit 2). The verdict carries the executor's stable
   outcome code in `code`, and for a mid-sequence failure the 1-based
