@@ -59,4 +59,6 @@ the blind bounded attempt of a submitted form — planner-proven online
 sequences are exempt. On a table you operate deliberately, raising the
 threshold is the sanctioned way to converge the bounded-attempt edits; the
 refusal means pg-sprite cannot prove the change is instant at that size,
-not that the change is unsafe.
+not that the change is unsafe. Why the guard covers exactly that path —
+and why the wrong-guess cost scales with table size — is
+[optimistic-attempt.md](optimistic-attempt.md).

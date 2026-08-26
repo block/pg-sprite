@@ -36,6 +36,7 @@ Aurora-only. Why that combination is the product is [vision.md](vision.md); star
 | [cli-output-examples.md](cli-output-examples.md) | **CLI output examples** — one real, captured JSON output per shape the CLI produces: the plan report for every dry-run disposition (execute, safer-sequence substitution, rewrite-required, backend-unavailable, refusal, destructive), the execution verdict, exit codes, the linter, and diff. |
 | [safer-sequences.md](safer-sequences.md) | **Safer-sequence substitution** (the improve path) — how the planner replaces a native-but-blocking form with the ordered online sequence that reaches the same end state: a worked `ADD CONSTRAINT … UNIQUE` comparison (locking, failure modes, transactionality, cost), what the engine adds over running the idiom by hand, the substitutions made today, and the typed caveats. |
 | [execution-model.md](execution-model.md) | The **execution model** — why safer sequences run autocommit-each-step with no wrapping transaction (PostgreSQL forbids it for the online forms), the **committed prefix** a mid-sequence failure leaves, how the verdict reports the boundary, and the per-sequence partial-failure contracts with their retry paths. Read this to answer "if a multi-step change fails halfway, what state is my table in?" |
+| [optimistic-attempt.md](optimistic-attempt.md) | The **optimistic attempt and the table-size guard** — the full entry-to-exit map every statement walks (proven idiom, bounded attempt, rewrite refusal, forced override), which routes are size-checked and which are exempt (`Options.MaxTableSizeBytes`), why a bounded attempt is the right design on PostgreSQL specifically (no `ALGORITHM=INSTANT`, but transactional DDL), the wrong-guess timelines, and what peer tools do instead. |
 | [capabilities.md](capabilities.md) | The **canonical support matrix** — every operation and object type tiered as supported today / planned (typed refusal now) / out of scope by design, with reasons; how peers draw the same lines differently; why pg-sprite refuses instead of passing through. The one page for "does pg-sprite support X?". |
 | [limitations.md](limitations.md) | The **current limitations** — schema changes pg-sprite refuses today, why they are unsafe or unsupported, and where an operator must act outside the engine. |
 | [lint-report.md](lint-report.md) | The **lint report contract** — the versioned JSON shape `pg-sprite lint` emits for offline CI gating: finding fields (verbatim SQL, line/column), the codes table, severities and exit behavior, the offline-conservatism rules, and how the contract versions relative to the plan report. |
@@ -66,7 +67,9 @@ checksum correctness gate* before cutover, *dynamic time-based chunking*, and
    **Full classification** (parse-based, `pkg/planner`) *predicts* the path up front
    (`CREATE INDEX CONCURRENTLY`, `ADD ... NOT VALID` + `VALIDATE`, fast defaults,
    `ADD PK USING INDEX`, binary-coercible type change), powering dry-run, lint, and the
-   declarative diff.
+   declarative diff. The deep treatment of the bounded attempt — the full
+   entry-to-exit map, the size guard, and why the gamble is sane on PostgreSQL — is
+   [optimistic-attempt.md](optimistic-attempt.md).
 2. **Otherwise copy — refuse honestly until the copy engine lands.** Genuine table
    rewrites (`ALTER COLUMN TYPE` general, volatile-default `ADD COLUMN`, `STORED`
    generated column, repack) get a clear **refusal with the classification and reason** —
