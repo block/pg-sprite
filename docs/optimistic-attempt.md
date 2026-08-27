@@ -18,7 +18,7 @@ what a mid-sequence failure leaves behind is
   - [The walk, gate by gate](#the-walk-gate-by-gate)
   - [Exit inventory](#exit-inventory)
 - [The size guard knob](#the-size-guard-knob)
-- [Proof-based vs budget-based routes](#proof-based-vs-budget-based-routes)
+- [Exempt vs guarded execution shapes](#exempt-vs-guarded-execution-shapes)
   - [Who gets size-checked](#who-gets-size-checked)
   - [The budget mechanics](#the-budget-mechanics)
 - [Q&A](#qa)
@@ -34,16 +34,21 @@ what a mid-sequence failure leaves behind is
 
 pg-sprite executes a PostgreSQL schema change through an escalation ladder:
 
-1. **Proof:** the planner classifies the statement. Shapes it can *prove* are
-   metadata-only, or that it can substitute with a known online idiom (e.g.
-   `CREATE INDEX CONCURRENTLY`, [safer-sequences.md](safer-sequences.md)), run without
-   any size check — their online-safety comes from the proof, not from a bet.
-2. **Bounded attempt:** shapes the planner cannot prove are *attempted* under two
-   tight budgets — `lock_timeout` and `statement_timeout` — set with `SET LOCAL`
-   inside the attempt's transaction. If the change was really instant, it succeeds in
+1. **Proof:** the planner classifies the statement. Statements already submitted in
+   their safe online form (`CONCURRENTLY`, `NOT VALID`, `VALIDATE` — `online-idiom`)
+   and sequences the planner substitutes itself (e.g. `CREATE INDEX` →
+   `CREATE INDEX CONCURRENTLY`, [safer-sequences.md](safer-sequences.md)) run without
+   any size check — what executes is a planner-authored sequence or an already-online
+   form, never a blind statement.
+2. **Bounded attempt:** every other executing shape — *including those the classifier
+   labels `metadata-only`* — runs the submitted form once, blind, under two tight
+   budgets — `lock_timeout` and `statement_timeout` — set with `SET LOCAL` inside the
+   attempt's transaction. If the change was really instant, it succeeds in
    milliseconds. If it turns out to do real work (a table rewrite), the server cancels
    it, PostgreSQL's transactional DDL rolls it back cleanly, and a typed budget error
-   surfaces. Nothing executed, no debris.
+   surfaces. Nothing executed, no debris. The classification is a prediction, not an
+   assertion PostgreSQL honours — which is why even a `metadata-only` verdict earns a
+   budget, not an exemption.
 3. **The table-size guard** protects rung 2 only: above `Options.MaxTableSizeBytes`,
    the bounded attempt is refused *before any DDL runs* with a typed
    `*preflight.SizeError`, because on a big table even a losing gamble costs a full
@@ -115,20 +120,23 @@ narrates each gate; the [exit inventory](#exit-inventory) catalogs the endings.
    EXIT 1: success          ┌──────┼───────────┐           online rewrite
    (online build            │      │           │           succeeds
    completed) — or          ▼      ▼           ▼
-   typed executor       55P03   completes   57014
-   refusal (invalid-    lock    in budget   statement budget:
-   index leftovers,     budget      │       real work (rewrite);
-   cancelled, …)           │        │       cancelled + rolled
-                           ▼        ▼       back cleanly
-                    EXIT 3a:    EXIT 2:         │
-                    refusal     success —       ▼
-                    budget-     it really   EXIT 3b: refusal
-                    lock-       was         budget-statement-
-                    exceeded    metadata-   exceeded (terminal
-                    (contended  only        today; future: the
-                    table;      ("instant") routing signal into
-                    nothing                 the copy engine)
-                    executed)
+   typed refusal        55P03   completes   57014
+   (invalid-index       lock    in budget   statement budget:
+   leftovers), or       budget      │       real work (rewrite);
+   EXIT 7: step failed     │        │       cancelled + rolled
+   mid-sequence            ▼        ▼       back cleanly
+   (outcome: failed,   EXIT 3a:    EXIT 2:      │
+   committed prefix    refusal     success —    ▼
+   remains)            not-native- it really  EXIT 3b: refusal
+                       safe-       was meta-  not-native-safe-
+                       budget-     data-only  budget-exceeded,
+                       exceeded,   (instant)  cause: statement-
+                       cause:                 budget (terminal
+                       lock-budget            today; future: the
+                       (contended             routing signal into
+                       table;                 the copy engine)
+                       nothing
+                       executed)
 ```
 
 ### The walk, gate by gate
@@ -140,9 +148,18 @@ What happens to one statement, in order:
    the imperative `migrate` door takes the DDL as written; the declarative
    desired-state door derives statements by diffing and feeds each one through the
    same gates below. An orchestrator embedding the library (see
-   [schemabot-integration.md](schemabot-integration.md)) enters the same way. Nothing
-   below differs between the doors — except lane F, which the declarative door
-   rejects outright (`ErrForceNotSupported`).
+   [schemabot-integration.md](schemabot-integration.md)) enters the same way. The
+   doors differ before the fork, not after it. The declarative door rejects lane F
+   outright (`ErrForceNotSupported`), is library-only today (`RunDesired`; no CLI
+   verb — [limitations.md](limitations.md)), and runs a whole-plan admission gate
+   before any statement enters the walk: the plan is refused all-or-nothing when the
+   plan derived at execution time is not the pinned one (`plan-fingerprint-mismatch`),
+   the target table does not exist (`unsupported-statement`), any planned statement
+   discards live structure (`destructive-change`), or the plan as a whole does not
+   route to execute. Past admission, each derived statement walks the same gates
+   below — including the size guard, which is per-statement, never plan-level: a
+   multi-statement plan can be refused at statement 3 with statements 1 and 2
+   already committed (the committed prefix remains, Exit 7).
 2. **Parse gate.** The statement must parse (libpg_query) and be *exactly one*
    statement — the executor accepts only a parsed `statement.Statement`, so
    multi-statement smuggling is impossible by construction. Failure ends here; the
@@ -176,9 +193,12 @@ What happens to one statement, in order:
    - **Lane A → sequence executor.** Each brief step runs under budgets; the long
      build (the index build itself) runs under one overall deadline with
      `lock_timeout` disabled, because snapshot waits are healthy there
-     ([execution-model.md](execution-model.md)). Ends at Exit 1 — or a typed executor
-     refusal (invalid-index leftover, external cancellation —
-     [invalid-index-recovery.md](invalid-index-recovery.md)).
+     ([execution-model.md](execution-model.md)). Ends at Exit 1, at a typed refusal
+     (invalid-index leftover —
+     [invalid-index-recovery.md](invalid-index-recovery.md)) — or, when a step fails
+     mid-sequence, at Exit 7: an operational failure (`outcome: failed`), not a
+     refusal, whose committed prefix stays committed
+     ([execution-model.md](execution-model.md)).
    - **Lane B → bounded attempt.** `SET LOCAL lock_timeout` + `statement_timeout`,
      then run the submitted form once ([the budget mechanics](#the-budget-mechanics)).
      Three endings: it really was catalog-only and commits in milliseconds (Exit 2);
@@ -203,11 +223,30 @@ assertion separating "instant" from "copy"
 |---|---|---|---|
 | 1 | Online idiom / substituted sequence completed | Success verdict | Yes — online by proof |
 | 2 | Bounded attempt completed within budget | Success verdict | Yes — it was catalog-only |
-| 3a | Lock not granted within `lock_timeout` | `budget-lock-exceeded` (SQLSTATE `55P03`) | No — nothing executed |
-| 3b | Statement ran past `statement_timeout` | `budget-statement-exceeded` (SQLSTATE `57014`) | No — rolled back cleanly |
-| 4 | Table exceeds the size limit | `*preflight.SizeError` | No — refused before any DDL, no lock taken |
+| 3a | Lock not granted within `lock_timeout` | `reason: not-native-safe-budget-exceeded`, `cause: lock-budget` (SQLSTATE `55P03`; executor code `budget-lock-exceeded`) | No — nothing executed |
+| 3b | Statement ran past `statement_timeout` | `reason: not-native-safe-budget-exceeded`, `cause: statement-budget` (SQLSTATE `57014`; executor code `budget-statement-exceeded`) | No — rolled back cleanly |
+| 4 | Table exceeds the size limit | `reason: not-native-safe-table-too-large` (a typed `*preflight.SizeError` underneath) | No — refused before any DDL, no lock taken |
 | 5 | Shape routes to an unimplemented strategy, or is refused by a plan/partition/tier gate | Typed plan refusal | No |
 | 6 *(future)* | Copy-and-swap rewrite completes online | Success verdict (Phase 5) | Yes — shadow table + cutover |
+| 7 | Sequence stopped mid-flight (step failed, external cancellation) | `outcome: failed` + executor `code`, exit code 1 | **Partially** — the committed prefix remains ([execution-model.md](execution-model.md)) |
+
+Which field is the contract depends on the layer. `outcome` and `reason` (plus
+`cause`, which distinguishes 3a from 3b) are the verdict surface — the fields
+automation matches on. The executor `code` values (`budget-lock-exceeded`,
+`budget-statement-exceeded`, `execution-failed`, …) are the layer underneath and
+surface on `outcome: failed`. SQLSTATE is the PostgreSQL layer beneath both. A
+matcher written against the wrong layer never fires.
+
+Per refusal, the operational move an orchestrator makes
+([schemabot-integration.md](schemabot-integration.md)):
+
+| Refusal | What an orchestrator does |
+|---|---|
+| `not-native-safe-budget-exceeded`, `cause: lock-budget` | Transient — retry off-peak, same plan |
+| `not-native-safe-budget-exceeded`, `cause: statement-budget` | Terminal today; the future copy-and-swap on-ramp |
+| `not-native-safe-table-too-large` | Policy — an operator raises the threshold deliberately |
+| `insufficient-privileges` | Operator action — `detail` names the exact `GRANT` |
+| `destructive-change`, `plan-fingerprint-mismatch`, `backend-unavailable` | Human decision — never auto-retried |
 
 ## The size guard knob
 
@@ -216,6 +255,10 @@ The limit is policy, not capability — one number, set by the embedding caller:
 - **Knob:** `Options.MaxTableSizeBytes` (`pkg/migrate`); the CLI exposes it as
   `--max-table-size`.
 - **Default:** 1 GiB (`DefaultOptions`) — a default to tune, not a recommendation.
+  The consequence is worth meeting here rather than in production: at the default,
+  even adding a nullable column to a table over 1 GiB is refused until the operator
+  raises the threshold, because the add runs as a blind bounded attempt
+  ([limitations.md](limitations.md)).
 - **What it measures:** the table's full on-disk footprint — heap, indexes, and
   TOAST, across all partitions (`preflight.CheckTable`, `pkg/preflight`).
 - **Validation:** the value must be positive; a zero or negative value is rejected at
@@ -228,12 +271,13 @@ that the change is unsafe. On a table you operate deliberately, raising the limi
 the sanctioned way to converge a bounded-attempt change
 ([limitations.md](limitations.md)).
 
-## Proof-based vs budget-based routes
+## Exempt vs guarded execution shapes
 
 ### Who gets size-checked
 
-The size guard applies to exactly the executions whose safety is a bounded bet rather
-than a proof — `sizeGuardApplies` in `pkg/migrate`:
+The size guard applies to exactly the executions that run the submitted form as one
+blind statement under `ACCESS EXCLUSIVE` — however confidently the planner classified
+it (`sizeGuardApplies` in `pkg/migrate`):
 
 | Execution shape | Size-guarded? | Why |
 |---|---|---|
@@ -241,6 +285,43 @@ than a proof — `sizeGuardApplies` in `pkg/migrate`:
 | Substituted safer sequence (planner replaced the submitted form) | No — passes `preflight.NoSizeLimit` | Same: the sequence is the proof |
 | Blind bounded attempt of the submitted form | **Yes** | Safety comes from the budget, and the budget's worst case scales with table size |
 | **Forced** run (operator acknowledged override) | **Yes** | A forced run bypasses shape admission but not the size guard — it is still one blind bounded attempt |
+
+The axis is not proof-versus-bet — `metadata-only` is a proof-shaped word on a
+guarded route. The guard hedges against the classifier being *wrong*, not against the
+absence of a classification: a classification is a prediction from parse plus catalog
+introspection, and if the prediction misses (a version edge, an unexpected type, an
+extension-owned column), the statement rewrites the table under `ACCESS EXCLUSIVE` —
+exactly Case 3 of [the timelines](#timeline-the-four-bounded-attempt-scenarios). The
+exempt set is exempt because what executes can never produce Case 3, no matter how
+wrong the plan is: a planner-authored sequence or an already-online form never holds
+`ACCESS EXCLUSIVE` for the long work.
+
+Per planner `reason`, the same rule (a docs test in `pkg/migrate` pins this table
+against `sizeGuardApplies`):
+
+| planner `reason` | Size-guarded? |
+|---|---|
+| `metadata-only` | **Yes** — a blind bounded attempt of the submitted form |
+| `fast-default` | **Yes** — same |
+| `binary-coercible` | **Yes** — same |
+| `app-breaking-rename` | **Yes** — same (and a lint warning: the rename breaks running application code) |
+| `partition-parent-lock` | **Yes** — same |
+| `online-idiom` | No — the submitted form is already the safe native shape |
+| `safer-idiom` | No — the planner substituted its own sequence (without a constructible rewrite the statement does not execute at all: `rewrite-required`) |
+| `volatile-default` | n/a — routes to copy-and-swap, not executed today |
+| `generated-stored` | n/a — same |
+| `type-rewrite` | n/a — same |
+| `relocation` | n/a — same |
+| `unsupported-operation` | n/a — refused at plan time |
+
+To check your own DDL, ask the planner — the classification is in the dry-run
+verdict:
+
+```console
+$ pg-sprite migrate --dry-run --json --alter 'ALTER TABLE t ADD COLUMN c int' \
+    | jq -r '.statements[].decisions[].reason'
+metadata-only
+```
 
 `NoSizeLimit` is "a size limit no PostgreSQL relation can exceed" (`math.MaxInt64`);
 it and `SizeError` live in `pkg/preflight`.
@@ -261,26 +342,32 @@ weaken them:
 PostgreSQL errors are matched by SQLSTATE only, never message text. The outcomes have
 stable codes — `budget-lock-exceeded` and `budget-statement-exceeded` (`pkg/executor`)
 — and a budget error is **a refusal input, not an operational failure**: the caller
-turns it into a not-native-safe verdict. `DefaultOptions` budgets the brief attempt at
-3 s of lock wait and 30 s of statement runtime.
+turns it into a verdict with `reason: not-native-safe-budget-exceeded` and
+`cause: lock-budget` or `cause: statement-budget` — the fields automation matches on.
+`DefaultOptions` budgets the brief attempt at 3 s of lock wait and 30 s of statement
+runtime.
 
 ## Q&A
 
 ### Aren't all native-safe changes online-safe by design, without a limit?
 
-Only the *proven* ones. pg-sprite has two distinct sources of online-safety:
+Only the shapes whose *executed form* is already online. The size guard is keyed on
+what executes, not on how confident the classifier is:
 
-- **Proof-based routes** — the planner classified the statement as metadata-only, or
-  substituted a known online idiom. Their safety comes from the plan; table size is
-  irrelevant, so they pass `NoSizeLimit` and are never size-checked.
-- **Budget-based route** — the shape could not be proven, so the engine *attempts* it
-  under tight budgets and lets the server tell it whether the change was instant.
-  That safety is a bounded gamble, and the gamble's downside grows with table size.
+- **Exempt** — the statement's submitted form is already the safe native shape
+  (`online-idiom`), or the planner substituted its own known-safe sequence
+  (`safer-idiom`). What runs is online by construction, so table size is irrelevant
+  and these pass `NoSizeLimit`.
+- **Guarded** — every other executing shape, *including* `metadata-only`. However
+  confident the classification, the engine still runs the submitted DDL as one blind
+  statement under budgets; the classification is a prediction, not an assertion
+  PostgreSQL honours. The guard hedges against the classifier being wrong, and the
+  cost of being wrong grows with table size.
 
-So the terse version: **online-safety of proven routes comes from the plan; the size
-limit protects the one path whose safety comes from a bounded gamble instead of a
-proof.** Above the limit, the budget-based path is not even attempted — the typed
-`SizeError` is returned before any DDL runs.
+So the terse version: **exemption comes from what executes — an already-online
+submitted form or a substituted safe sequence — never from classification
+confidence. Everything else that executes is size-checked.** Above the limit the
+attempt is not even made — the typed `SizeError` is returned before any DDL runs.
 
 ### Why gamble at all? Do pg_osc and the other online tools do this?
 
@@ -406,15 +493,15 @@ t0
 
 (`AEL` = `ACCESS EXCLUSIVE` lock. A fifth outcome — the lock is never *granted*
 within `lock_timeout` because the table is contended — refuses with
-`budget-lock-exceeded` before any DDL effect, at the cost of briefly queueing other
-waiters behind the lock request.)
+`reason: not-native-safe-budget-exceeded` (`cause: lock-budget`) before any DDL
+effect, at the cost of briefly queueing other waiters behind the lock request.)
 
 ## What other tools do
 
 | Tool | Model | Cost of uncertainty |
 |---|---|---|
 | **pg-sprite** | Proof, then bounded attempt, then (planned) copy-and-swap | Cheap probe; wrong guess bounded by budget and size guard |
-| **pg_osc / pg_repack** (PostgreSQL) | Always copy-and-swap (shadow table + triggers/logical replay + cutover) | Maximum: full copy even for a metadata-only change |
+| **pg-osc** (PostgreSQL) | Always copy-and-swap (shadow table + triggers/logical replay + cutover) | Maximum: full copy even for a metadata-only change |
 | **pgroll** (PostgreSQL) | Expand/contract: versioned views over an evolving physical schema | No gamble, but the application must participate in the two-phase workflow |
 | **pt-osc / gh-ost** (MySQL) | Always copy-and-swap | Same maximum-cost answer; built for a world without transactional DDL |
 | **Spirit** (MySQL) | `ALGORITHM=INSTANT` first, fall back to copy | Not a gamble: MySQL refuses the instant assertion upfront, for free |
