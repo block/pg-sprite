@@ -1,6 +1,7 @@
 package executor_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 	"time"
@@ -16,12 +17,14 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
-// createFixture is one schema on a real server with an absence proof
-// minted for the named table — the inputs ExecuteCreate requires.
+// createFixture is one schema on a real server with an absence proof and
+// a creation-privilege proof minted for the named table — the inputs
+// ExecuteCreate requires.
 type createFixture struct {
 	pool   *pgxpool.Pool
 	schema string
 	at     preflight.AbsentTarget
+	cr     preflight.CreationRole
 }
 
 func newCreateFixture(t *testing.T, table string) createFixture {
@@ -33,7 +36,9 @@ func newCreateFixture(t *testing.T, table string) createFixture {
 
 	at, err := preflight.CheckTableAbsent(t.Context(), pool, schema, table)
 	require.NoError(t, err)
-	return createFixture{pool: pool, schema: schema, at: at}
+	cr, err := preflight.CheckCreatePrivileges(t.Context(), pool, schema)
+	require.NoError(t, err)
+	return createFixture{pool: pool, schema: schema, at: at, cr: cr}
 }
 
 func desired(t *testing.T, sql string) statement.DesiredSchema {
@@ -82,7 +87,7 @@ func TestExecuteCreateRunsTableAndIndexes(t *testing.T) {
 		CREATE UNIQUE INDEX t_id_name_idx ON t (id, name);
 	`)
 
-	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, ds, createBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 
 	assert.Equal(t, "r", relationKind(t, f.pool, f.schema, "t"))
@@ -107,7 +112,7 @@ func TestExecuteCreateOrdersTableBeforeIndexes(t *testing.T) {
 		CREATE TABLE t (id int, name text);
 	`)
 
-	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, ds, createBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 
 	require.Len(t, rep.Steps, 2)
@@ -124,7 +129,7 @@ func TestExecuteCreateReportsCollisionAsTyped(t *testing.T) {
 	require.NoError(t, err)
 
 	ds := desired(t, "CREATE TABLE t (id int)")
-	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, ds, createBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
 	require.Error(t, err)
 
 	var stepErr *executor.SequenceStepError
@@ -148,7 +153,7 @@ func TestExecuteCreateFailedStepKeepsCommittedPrefix(t *testing.T) {
 		CREATE INDEX t_missing_idx ON t (missing);
 	`)
 
-	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, ds, createBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
 	require.Error(t, err)
 
 	var stepErr *executor.SequenceStepError
@@ -194,7 +199,7 @@ func TestExecuteCreateRefusesDuplicateNamesAtAdmission(t *testing.T) {
 			f := newCreateFixture(t, "t")
 			ds := desired(t, tt.sql)
 
-			_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, ds, createBudget, executor.DefaultRetryPolicy())
+			_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
 			require.ErrorIs(t, err, executor.ErrDuplicateCreateName)
 			assert.Equal(t, executor.CodeDuplicateCreateName, executor.OutcomeCode(err))
 			assert.False(t, relationExists(t, f.pool, f.schema, "t"),
@@ -212,7 +217,7 @@ func TestExecuteCreateReportsTypeCollisionAsTyped(t *testing.T) {
 	require.NoError(t, err)
 
 	ds := desired(t, "CREATE TABLE t (id int)")
-	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, ds, createBudget, executor.DefaultRetryPolicy())
+	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrCreateCollision)
 	assert.Equal(t, executor.CodeCreateCollision, executor.OutcomeCode(err))
 }
@@ -257,7 +262,7 @@ func TestExecuteCreateAdmissionRefusals(t *testing.T) {
 			f := newCreateFixture(t, "t")
 			ds := desired(t, tt.sql)
 
-			_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, ds, createBudget, executor.DefaultRetryPolicy())
+			_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
 			require.ErrorIs(t, err, tt.wantErr)
 			assert.False(t, relationExists(t, f.pool, f.schema, "t"),
 				"admission covers the whole set before the first step executes")
@@ -272,7 +277,7 @@ func TestExecuteCreateRefusesPartitionOf(t *testing.T) {
 	require.NoError(t, err)
 
 	ds := desired(t, "CREATE TABLE t_part PARTITION OF parent FOR VALUES FROM (1) TO (10)")
-	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, ds, createBudget, executor.DefaultRetryPolicy())
+	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrPartitionOfUnsupported)
 	assert.Equal(t, executor.CodePartitionOfUnsupported, executor.OutcomeCode(err))
 }
@@ -283,7 +288,132 @@ func TestExecuteCreateRefusesProofTargetMismatch(t *testing.T) {
 	f := newCreateFixture(t, "other")
 	ds := desired(t, "CREATE TABLE t (id int)")
 
-	_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, ds, createBudget, executor.DefaultRetryPolicy())
+	_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 	assert.False(t, relationExists(t, f.pool, f.schema, "t"))
+}
+
+// Create steps run with search_path pinned to the proof's schema then
+// public — the same policy the introspection read path sets — so a
+// desired file's unqualified type reference resolves in the target
+// schema, and resolves there even when public holds a type of the same
+// name. Without the pin the steps would run under the session default and
+// the target schema's type would be invisible (SQLSTATE 42704).
+func TestExecuteCreateResolvesTypesInTargetSchema(t *testing.T) {
+	f := newCreateFixture(t, "t")
+
+	// The type lives in the target schema and, under a unique name, in
+	// public too — resolution must pick the target schema's copy.
+	typeName := f.schema + "_mood"
+	_, err := f.pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TYPE %s.%s AS ENUM ('happy', 'sad')", f.schema, typeName))
+	require.NoError(t, err)
+	_, err = f.pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TYPE public.%s AS ENUM ('decoy')", typeName))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := f.pool.Exec(context.WithoutCancel(t.Context()),
+			fmt.Sprintf("DROP TYPE IF EXISTS public.%s", typeName))
+		assert.NoError(t, err)
+	})
+
+	ds := desired(t, fmt.Sprintf("CREATE TABLE t (id int, m %s)", typeName))
+	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	require.NoError(t, err)
+
+	var udtSchema string
+	require.NoError(t, f.pool.QueryRow(t.Context(),
+		`SELECT udt_schema FROM information_schema.columns
+		  WHERE table_schema = $1 AND table_name = 't' AND column_name = 'm'`,
+		f.schema).Scan(&udtSchema))
+	assert.Equal(t, f.schema, udtSchema,
+		"the column's type must resolve in the proof's schema, not public")
+}
+
+// An explicit CREATE INDEX whose name is the first choice of an implicit
+// constraint index is a decidable conflict: admission refuses the whole
+// set before anything runs, rather than letting the server suffix its way
+// around one name or fail mid-run after the table committed.
+func TestExecuteCreateRefusesImplicitIndexNameCollision(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{
+			name: "explicit index named after the primary key's index",
+			sql: `CREATE TABLE t (id int PRIMARY KEY);
+			      CREATE INDEX t_pkey ON t (id);`,
+		},
+		{
+			name: "explicit index named after a unique constraint's index",
+			sql: `CREATE TABLE t (a int, b int, UNIQUE (a, b));
+			      CREATE INDEX t_a_b_key ON t (a);`,
+		},
+		{
+			name: "explicit index named after a named constraint",
+			sql: `CREATE TABLE t (id int, CONSTRAINT my_uni UNIQUE (id));
+			      CREATE INDEX my_uni ON t (id);`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newCreateFixture(t, "t")
+			ds := desired(t, tt.sql)
+
+			_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+			require.ErrorIs(t, err, executor.ErrDuplicateCreateName)
+			assert.Equal(t, executor.CodeDuplicateCreateName, executor.OutcomeCode(err))
+			assert.False(t, relationExists(t, f.pool, f.schema, "t"),
+				"admission covers the whole set before the first step executes")
+		})
+	}
+}
+
+// A zero CreationRole is forgeable by any package: only
+// CheckCreatePrivileges mints one with a schema, so the executor refuses
+// it as an invariant breach before anything runs.
+func TestExecuteCreateRefusesZeroCreationRole(t *testing.T) {
+	f := newCreateFixture(t, "t")
+	ds := desired(t, "CREATE TABLE t (id int)")
+
+	_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, preflight.CreationRole{}, ds, createBudget, executor.DefaultRetryPolicy())
+	require.ErrorIs(t, err, executor.ErrInvariantViolation)
+	assert.False(t, relationExists(t, f.pool, f.schema, "t"))
+}
+
+// A creation-privilege proof minted for one schema can never authorize a
+// run whose absence proof names another: the mismatch is an invariant
+// breach, not a refusal.
+func TestExecuteCreateRefusesCreationRoleSchemaMismatch(t *testing.T) {
+	f := newCreateFixture(t, "t")
+	otherSchema := testutil.NewSchema(t, f.pool)
+	otherCR, err := preflight.CheckCreatePrivileges(t.Context(), f.pool, otherSchema)
+	require.NoError(t, err)
+
+	ds := desired(t, "CREATE TABLE t (id int)")
+	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, otherCR, ds, createBudget, executor.DefaultRetryPolicy())
+	require.ErrorIs(t, err, executor.ErrInvariantViolation)
+	assert.False(t, relationExists(t, f.pool, f.schema, "t"))
+}
+
+// Unnamed CREATE INDEX steps claim no name — the server invents one,
+// suffixing around occupants — so two of them in one desired set are not
+// a duplicate-name conflict.
+func TestExecuteCreateAllowsMultipleUnnamedIndexes(t *testing.T) {
+	f := newCreateFixture(t, "t")
+	ds := desired(t, `
+		CREATE TABLE t (a int, b int);
+		CREATE INDEX ON t (a);
+		CREATE INDEX ON t (b);
+	`)
+
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	require.NoError(t, err)
+	require.Len(t, rep.Steps, 3)
+
+	var indexes int
+	require.NoError(t, f.pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_indexes WHERE schemaname = $1 AND tablename = 't'`,
+		f.schema).Scan(&indexes))
+	assert.Equal(t, 2, indexes, "both server-named indexes exist")
 }

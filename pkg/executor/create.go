@@ -79,31 +79,38 @@ const (
 // ExecuteCreate runs the desired schema's statements against the
 // verified-absent target: the CREATE TABLE first, then its indexes in
 // input order, each step a bounded transactional run under the brief
-// budgets, exactly like an optimistic attempt. The pool must come from
-// pkg/dbconn. Every desired statement is qualified into the proof's
-// schema, re-parsed, and admitted by shape and target before the first
-// step executes. On success every step committed and the report says what
-// each did. On failure the run stops at the failing step and returns a
-// typed *SequenceStepError; the committed prefix remains — a rerun's
-// absence check then refuses with preflight.ErrRelationExists, and the
-// caller re-diffs the live catalog to apply the remainder. retry bounds
-// lock_timeout retries on each step, exactly as in ExecuteNative.
-func ExecuteCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, ds statement.DesiredSchema, b Budget, retry RetryPolicy) (SequenceReport, error) {
-	return executeCreate(ctx, pool, at, ds, b, retry, nil)
+// budgets, exactly like an optimistic attempt, with its search_path
+// pinned to the proof's schema then public — the same policy the
+// introspection read path sets — so the desired file's unqualified
+// references resolve exactly as the diff resolved them. The pool must
+// come from pkg/dbconn and must be the session the proofs were minted on:
+// cr proves that session's role can create in the proof's schema, and
+// like the absence proof it is time-of-check — a grant revoked after
+// minting fails with the server's own error. Every desired statement is
+// qualified into the proof's schema, re-parsed, and admitted by shape and
+// target before the first step executes. On success every step committed
+// and the report says what each did. On failure the run stops at the
+// failing step and returns a typed *SequenceStepError; the committed
+// prefix remains — a rerun's absence check then refuses with
+// preflight.ErrRelationExists, and the caller re-diffs the live catalog
+// to apply the remainder. retry bounds lock_timeout retries on each step,
+// exactly as in ExecuteNative.
+func ExecuteCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, ds statement.DesiredSchema, b Budget, retry RetryPolicy) (SequenceReport, error) {
+	return executeCreate(ctx, pool, at, cr, ds, b, retry, nil)
 }
 
 // ExecuteCreateWithProgress runs the create path while updating tracker
 // with the current step. The caller may poll concurrently.
-func ExecuteCreateWithProgress(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, ds statement.DesiredSchema, b Budget, retry RetryPolicy, tracker *progress.Tracker) (rep SequenceReport, err error) {
+func ExecuteCreateWithProgress(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, ds statement.DesiredSchema, b Budget, retry RetryPolicy, tracker *progress.Tracker) (rep SequenceReport, err error) {
 	if tracker == nil {
 		return rep, fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
 	}
 	tracker.Start(len(ds.Statements()), progress.OperationAdmitting)
 	defer func() { tracker.Finish(err) }()
-	return executeCreate(ctx, pool, at, ds, b, retry, tracker)
+	return executeCreate(ctx, pool, at, cr, ds, b, retry, tracker)
 }
 
-func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, ds statement.DesiredSchema, b Budget, retry RetryPolicy, tracker *progress.Tracker) (SequenceReport, error) {
+func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, ds statement.DesiredSchema, b Budget, retry RetryPolicy, tracker *progress.Tracker) (SequenceReport, error) {
 	var rep SequenceReport
 	if err := b.validate(); err != nil {
 		return rep, err
@@ -113,10 +120,18 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 	}
 	// INV: ST-7 — the proofs are re-verified at the point of use. Zero
 	// values are forgeable by any package: only CheckTableAbsent mints an
-	// AbsentTarget with a table, and only ParseDesired mints a
-	// DesiredSchema with one.
+	// AbsentTarget with a table, only CheckCreatePrivileges mints a
+	// CreationRole with a schema, and only ParseDesired mints a
+	// DesiredSchema with a table.
 	if at.Schema() == "" || at.Table() == "" {
 		return rep, fmt.Errorf("%w: ST-7: absence proof carries no verified target", ErrInvariantViolation)
+	}
+	if cr.Schema() == "" {
+		return rep, fmt.Errorf("%w: ST-7: creation-privilege proof carries no verified schema", ErrInvariantViolation)
+	}
+	if cr.Schema() != at.Schema() {
+		return rep, fmt.Errorf("%w: ST-7: creation privileges were verified in %q but absence in %q",
+			ErrInvariantViolation, cr.Schema(), at.Schema())
 	}
 	if ds.Table() == "" {
 		return rep, fmt.Errorf("%w: ST-7: desired schema carries no admitted CREATE TABLE", ErrInvariantViolation)
@@ -136,7 +151,7 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 			start = tracker.Now()
 		}
 		err := executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
-			return executeNativeAttempt(ctx, pool, step, b)
+			return executeBoundedAttempt(ctx, pool, step, b, at.Schema())
 		}, sleepContext, func(attempt int) {
 			if tracker != nil {
 				tracker.SetAttempt(attempt)
@@ -158,10 +173,15 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 // schema, re-parses it, and admits it by shape and target. The CREATE
 // TABLE is ordered first regardless of its input position — an index
 // cannot be built before its table exists — and the indexes keep their
-// input order after it. Every step claims a name in the same pg_class
-// namespace, so a name claimed twice within the set — decidable here —
-// is refused before anything runs rather than failing mid-run after a
-// prefix committed. A step whose name the server invents (an unnamed
+// input order after it. Every step claims the names it will occupy in the
+// same pg_class namespace — the table plus the first-choice index names
+// of its index-backed constraints, or an explicit index name — so a name
+// claimed twice within the set — decidable here — is refused before
+// anything runs rather than failing mid-run after a prefix committed.
+// The claims are first choices: a set whose first choices collide is
+// refused even where the server would sidestep with a numeric suffix,
+// because a deterministic name the file states beats one the server
+// invents. A step whose name the server invents outright (an unnamed
 // index) claims nothing decidable and is exempt.
 func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]statement.Statement, error) {
 	desired := ds.Statements()
@@ -170,11 +190,11 @@ func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]
 	indexSteps := make([]statement.Statement, 0, len(desired))
 	claimed := make(map[string]struct{}, len(desired))
 	for i, raw := range desired {
-		st, name, err := admitCreateStep(at, raw.SQL())
+		st, names, err := admitCreateStep(at, raw.SQL())
 		if err != nil {
 			return nil, fmt.Errorf("desired statement %d of %d: %w", i+1, len(desired), err)
 		}
-		if name != "" {
+		for _, name := range names {
 			if _, taken := claimed[name]; taken {
 				return nil, fmt.Errorf("desired statement %d of %d: %w: %q", i+1, len(desired), ErrDuplicateCreateName, name)
 			}
@@ -197,65 +217,75 @@ func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]
 
 // admitCreateStep qualifies one desired statement into the proof's schema,
 // re-parses it by the real grammar, and admits it by shape and target. It
-// returns the pg_class name the step will claim — the table name, or the
-// index name, empty when the server invents one. CREATE TABLE clauses that
-// bind to a secondary relation or type — PARTITION OF, INHERITS, LIKE,
-// OF — are refused: statement.Qualify rewrites only the target, so the
-// secondary name would resolve via search_path to an existing object the
-// absence proof says nothing about.
-func admitCreateStep(at preflight.AbsentTarget, sql string) (statement.Statement, string, error) {
+// returns the pg_class names the step will claim — for a CREATE TABLE the
+// table name plus the first-choice index names of its index-backed
+// constraints, for a CREATE INDEX its explicit name, nothing when the
+// server invents one. CREATE TABLE clauses that bind to a secondary
+// relation or type — PARTITION OF, INHERITS, LIKE, OF — are refused:
+// statement.Qualify rewrites only the target, so the secondary name would
+// resolve via search_path to an existing object the absence proof says
+// nothing about.
+func admitCreateStep(at preflight.AbsentTarget, sql string) (statement.Statement, []string, error) {
 	qualified, err := statement.Qualify(sql, at.Schema())
 	if err != nil {
-		return statement.Statement{}, "", err
+		return statement.Statement{}, nil, err
 	}
 	st, err := statement.ParseOne(qualified)
 	if err != nil {
-		return statement.Statement{}, "", err
+		return statement.Statement{}, nil, err
 	}
 	ops, err := statement.ParseOps(qualified)
 	if err != nil {
-		return statement.Statement{}, "", err
+		return statement.Statement{}, nil, err
 	}
 	if len(ops) != 1 {
 		// ParseOne admitted a single statement, so a differing op count
 		// means the two parse boundaries disagree about the same SQL.
-		return statement.Statement{}, "", fmt.Errorf("%w: statement carries %d operations", ErrUnsupportedCreateStep, len(ops))
+		return statement.Statement{}, nil, fmt.Errorf("%w: statement carries %d operations", ErrUnsupportedCreateStep, len(ops))
 	}
 	op := ops[0]
-	var claims string
+	var claims []string
 	switch st.Kind() {
 	case statement.KindCreateTable:
 		if op.PartitionOf {
-			return statement.Statement{}, "", ErrPartitionOfUnsupported
+			return statement.Statement{}, nil, ErrPartitionOfUnsupported
 		}
 		if op.Inherits {
-			return statement.Statement{}, "", fmt.Errorf("%w: INHERITS binds to an existing parent the absence proof does not cover", ErrUnsupportedCreateStep)
+			return statement.Statement{}, nil, fmt.Errorf("%w: INHERITS binds to an existing parent the absence proof does not cover", ErrUnsupportedCreateStep)
 		}
 		if op.Like {
-			return statement.Statement{}, "", fmt.Errorf("%w: LIKE reads an existing source table the absence proof does not cover", ErrUnsupportedCreateStep)
+			return statement.Statement{}, nil, fmt.Errorf("%w: LIKE reads an existing source table the absence proof does not cover", ErrUnsupportedCreateStep)
 		}
 		if op.OfType {
-			return statement.Statement{}, "", fmt.Errorf("%w: OF binds to an existing composite type the absence proof does not cover", ErrUnsupportedCreateStep)
+			return statement.Statement{}, nil, fmt.Errorf("%w: OF binds to an existing composite type the absence proof does not cover", ErrUnsupportedCreateStep)
 		}
 		if op.IfNotExists {
-			return statement.Statement{}, "", ErrIfNotExistsUnsupported
+			return statement.Statement{}, nil, ErrIfNotExistsUnsupported
 		}
-		claims = st.Table()
+		implicit, err := statement.ImplicitIndexNames(qualified)
+		if err != nil {
+			// ParseOne already admitted this SQL as a CREATE TABLE, so a
+			// refusal here means the two parse boundaries disagree.
+			return statement.Statement{}, nil, fmt.Errorf("%w: %w", ErrUnsupportedCreateStep, err)
+		}
+		claims = append([]string{st.Table()}, implicit...)
 	case statement.KindCreateIndex:
 		if op.Concurrent {
-			return statement.Statement{}, "", fmt.Errorf("%w: a concurrent build is refused on a table born this run", ErrUnsupportedCreateStep)
+			return statement.Statement{}, nil, fmt.Errorf("%w: a concurrent build is refused on a table born this run", ErrUnsupportedCreateStep)
 		}
 		if op.IfNotExists {
-			return statement.Statement{}, "", ErrIfNotExistsUnsupported
+			return statement.Statement{}, nil, ErrIfNotExistsUnsupported
 		}
-		claims = op.Name
+		if op.Name != "" {
+			claims = []string{op.Name}
+		}
 	default:
-		return statement.Statement{}, "", fmt.Errorf("%w: kind %q", ErrUnsupportedCreateStep, st.Kind())
+		return statement.Statement{}, nil, fmt.Errorf("%w: kind %q", ErrUnsupportedCreateStep, st.Kind())
 	}
 	// INV: ST-7 — the executor runs exactly the statement that was
 	// admitted, and only against the target the absence proof verified.
 	if st.Table() == "" || st.Schema() != at.Schema() || st.Table() != at.Table() {
-		return statement.Statement{}, "", fmt.Errorf("%w: ST-7: statement targets %q but absence was verified for %q",
+		return statement.Statement{}, nil, fmt.Errorf("%w: ST-7: statement targets %q but absence was verified for %q",
 			ErrInvariantViolation, qualifiedName(st.Schema(), st.Table()), qualifiedName(at.Schema(), at.Table()))
 	}
 	return st, claims, nil

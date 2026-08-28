@@ -21,6 +21,7 @@ and [suggest-report.md](suggest-report.md#caveats-caveats).
 - [The committed prefix](#the-committed-prefix)
 - [How a failure is reported](#how-a-failure-is-reported)
 - [Why the prefix is safe to leave](#why-the-prefix-is-safe-to-leave)
+- [Outcome codes](#outcome-codes)
 
 ## Why there is no wrapping transaction
 
@@ -241,3 +242,37 @@ statement — stopping at the first refusal or failure. Its result carries the
 plan, one verdict per attempted statement, and a detail naming exactly which
 planned statements committed and remain in effect: the committed prefix at
 the plan level, statements instead of steps.
+
+## Outcome codes
+
+`executor.Codes()` enumerates the closed vocabulary below, and
+`executor.OutcomeCode` maps any executor error to its entry — the same code
+that reaches the JSON verdict's `code` field. Adapters render three facts
+per failure — the outcome code, the failing step's position
+(`SequenceStepError.Step` of `.Total`), and the failing step's SQL — and
+log the raw error, whose text interpolates server prose and is not a
+branching surface.
+
+| Code | Meaning |
+| --- | --- |
+| `budget-lock-exceeded` | The lock was not granted within `lock_timeout`; nothing executed |
+| `budget-statement-exceeded` | The statement ran past `statement_timeout` and was cancelled |
+| `cancelled-externally` | The statement was cancelled from outside the executor before its budget elapsed |
+| `invalid-index-own-leftover` | The failed build's own INVALID index remains; the [recovery runbook](invalid-index-recovery.md) applies |
+| `invalid-index-preexisting` | An INVALID index under the requested name predates this run |
+| `invalid-index-unproven` | An INVALID index may remain but the catalog state could not be proven |
+| `empty-sequence` | The sequence had no steps to run |
+| `unsupported-sequence-step` | A step is not a shape the sequence executor can run safely |
+| `unsupported-partitioned-parent` | Partitioned-parent admission refusal |
+| `not-concurrent-index-build` | The statement handed to the concurrent build executor is not a `CREATE INDEX CONCURRENTLY` |
+| `unnamed-index` | The concurrent build does not name its index, so its outcome could not be verified |
+| `unqualified-table` | The target table is not schema-qualified at the library boundary |
+| `if-not-exists-unsupported` | `CREATE ... IF NOT EXISTS` cannot prove what its no-op would mean |
+| `create-collision` | A name the create path needs is already taken on the server; re-diff the live catalog |
+| `duplicate-create-name` | The desired set claims the same relation name twice; refused at admission |
+| `partition-of-unsupported` | `CREATE TABLE PARTITION OF` locks the partitioned parent, which the absence proof does not cover |
+| `unsupported-create-step` | A desired statement is not a shape the create path can run |
+| `pool-too-small` | The pool cannot hold the build session and the verdict connection at once |
+| `table-not-found` | The statement's qualified table does not exist |
+| `invariant-violation` | A breach of the invariant registry; never a retry candidate |
+| `execution-failed` | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |

@@ -143,22 +143,46 @@ package. Landing this is one of:
 
 ### Routing the create path's refusals
 
-The planned greenfield `CREATE TABLE` path opens with `preflight.CheckTableAbsent`, and its
-proof has a rule the adapter must respect: an `AbsentTarget` is **minted inside the apply
-session and consumed there** — never serialized into `SchemaChange.Metadata`, carried across
-the plan/apply boundary, or reused across retries. Absence at plan time proves nothing about
-apply time; the executor re-verifies inside the session that runs the `CREATE`, the same way
-ST-7 re-verifies a `PreflightedTable`.
+The greenfield `CREATE TABLE` path is a fixed call order, all inside the apply session:
 
-Each refusal from the check maps to a different orchestrator action — route them, don't
-retry them uniformly:
+1. `statement.ParseDesired` — parse and validate the desired file (refuses `REFERENCES`,
+   `CONCURRENTLY`, qualified names).
+2. `preflight.CheckCreatePrivileges` — mint the `CreationRole` proof for the target schema.
+3. `preflight.CheckTableAbsent` — mint the `AbsentTarget` proof for the table name.
+4. `executor.ExecuteCreate` — consume both proofs and run the set.
+
+Both proofs share one rule the adapter must respect: they are **minted inside the apply
+session and consumed there** — never serialized into `SchemaChange.Metadata`, carried across
+the plan/apply boundary, or reused across retries. Absence or privilege at plan time proves
+nothing about apply time; the executor re-verifies inside the session that runs the
+`CREATE`, the same way ST-7 re-verifies a `PreflightedTable`.
+
+Each refusal from the preflight checks maps to a different orchestrator action — route
+them, don't retry them uniformly:
 
 | Refusal | What it means | Orchestrator action |
 | --- | --- | --- |
 | `ErrRelationExists` / `ErrTypeExists` (grouped by `preflight.IsNameOccupied`) | The name is already taken — this is not a create, it's a change to something that exists | Route to the diff/alter path, not to a failure state |
 | `ErrSchemaNotFound` | The qualified schema does not exist on the target | Operator action (create the schema or fix the desired file); retrying cannot succeed |
 | `ErrNoCreationSchema` | Unqualified name and the role's `search_path` yields no creation schema | Caller configuration: schema-qualify the name or fix the role's `search_path` |
-| Duplicate-name error from the `CREATE` itself | A concurrent writer won the race after a valid proof | Re-plan from scratch — the world changed; do not blindly retry the create |
+| `*preflight.PrivilegeError` (`Tier == TierCreateTable`) | The role lacks `CREATE` on the schema (or `USAGE` reaching it); the error carries the exact missing grant | Operator action: provision the named `GRANT`, then retry |
+
+`ExecuteCreate`'s own refusals and failures carry the same routing discipline
+([outcome codes](execution-model.md#outcome-codes)):
+
+| Outcome | What it means | Orchestrator action |
+| --- | --- | --- |
+| `ErrDuplicateCreateName` (`duplicate-create-name`) | The desired set claims one relation name twice — including a first-choice implicit constraint-index name; refused at admission, nothing ran | Fix the desired file; retrying unchanged cannot succeed |
+| `ErrPartitionOfUnsupported` (`partition-of-unsupported`) | `PARTITION OF` binds to a live parent the absence proof does not cover | Fix the desired file; out of the create path's scope |
+| `ErrUnsupportedCreateStep` (`unsupported-create-step`) | A desired statement is not a shape the create path can run | Fix the desired file |
+| `ErrCreateCollision` (`create-collision`) | A concurrent writer took a needed name after a valid proof | Re-diff the live catalog and re-plan — the world changed; never blindly retry the create |
+
+A failed create is not rolled back wholesale: each step committed in its own bounded
+transaction, so the steps before the failure remain
+([the committed prefix](execution-model.md#the-committed-prefix)). A rerun's absence check
+then refuses with `ErrRelationExists`, and the gate stays closed until the declarative
+front door re-diffs the live catalog and converges the remainder — the orchestrator never
+assumes the failed run left nothing behind.
 
 ## Execution-mode verdicts and direct execution
 

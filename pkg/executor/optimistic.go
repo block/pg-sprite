@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -218,6 +219,17 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 }
 
 func executeNativeAttempt(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget) error {
+	return executeBoundedAttempt(ctx, pool, st, b, "")
+}
+
+// executeBoundedAttempt is the shared transactional attempt behind the
+// optimistic and create paths. When searchPathSchema is set, the
+// transaction's search_path is pinned to that schema then public — the
+// same policy the introspection read path sets — so a statement's
+// unqualified references (a column's type, an expression's function)
+// resolve exactly as the diff resolved them, never via the session's
+// ambient search_path.
+func executeBoundedAttempt(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPathSchema string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin optimistic attempt: %w", err)
@@ -233,9 +245,12 @@ func executeNativeAttempt(ctx context.Context, pool *pgxpool.Pool, st statement.
 	// INV: LK-2 — budgets are applied inside this transaction regardless of
 	// the session defaults, so the attempt cannot outlive them even on a
 	// misconfigured pool. A bare integer is milliseconds to PostgreSQL;
-	// SET LOCAL cannot use bind parameters.
+	// SET LOCAL cannot use bind parameters, and identifiers are sanitized.
 	setBudgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(b.LockTimeout.Milliseconds(), 10) +
 		"; SET LOCAL statement_timeout = " + strconv.FormatInt(b.StatementTimeout.Milliseconds(), 10)
+	if searchPathSchema != "" {
+		setBudgets += "; SET LOCAL search_path = " + pgx.Identifier{searchPathSchema}.Sanitize() + ", public"
+	}
 	if _, err := tx.Exec(ctx, setBudgets); err != nil {
 		return fmt.Errorf("set attempt budgets: %w", err)
 	}

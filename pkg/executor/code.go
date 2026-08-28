@@ -85,6 +85,36 @@ const (
 	CodeExecutionFailed Code = "execution-failed"
 )
 
+// Codes returns the closed set of outcome codes. It is part of the report
+// contract: adapters enumerate it to know every outcome they must render,
+// and the docs test pins every code into the execution-model page so the
+// documented vocabulary cannot drift from this one.
+func Codes() []Code {
+	return []Code{
+		CodeBudgetLockExceeded,
+		CodeBudgetStatementExceeded,
+		CodeCancelledExternally,
+		CodeInvalidIndexOwnLeftover,
+		CodeInvalidIndexPreexisting,
+		CodeInvalidIndexUnproven,
+		CodeEmptySequence,
+		CodeUnsupportedSequenceStep,
+		CodeUnsupportedPartitionedParent,
+		CodeNotConcurrentIndexBuild,
+		CodeUnnamedIndex,
+		CodeUnqualifiedTable,
+		CodeIfNotExistsUnsupported,
+		CodeCreateCollision,
+		CodeDuplicateCreateName,
+		CodePartitionOfUnsupported,
+		CodeUnsupportedCreateStep,
+		CodePoolTooSmall,
+		CodeTableNotFound,
+		CodeInvariantViolation,
+		CodeExecutionFailed,
+	}
+}
+
 // OutcomeCode maps an error returned by this package to its stable code.
 // A nil error has no outcome code and maps to the empty Code. A
 // *SequenceStepError carries its failed step's own cause, so it maps to
