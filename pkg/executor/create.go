@@ -40,11 +40,18 @@ import (
 // cannot finish is never started.
 var (
 	// ErrCreateCollision is returned when a step fails because its target
-	// name is already taken — the absence proof is time-of-check, and a
-	// concurrent create won the race between the check and this run. The
-	// caller re-diffs the live catalog; nothing about the occupant's shape
-	// can be assumed.
-	ErrCreateCollision = errors.New("a relation already exists at a name the create path verified absent")
+	// name is already taken. For the table name that means a concurrent
+	// create won the race — the absence proof is time-of-check. Index
+	// names are never absence-checked, so a pre-existing occupant at an
+	// index name reports the same way. Either way the caller re-diffs the
+	// live catalog; nothing about the occupant's shape can be assumed.
+	ErrCreateCollision = errors.New("a name the create path needs is already taken")
+	// ErrDuplicateCreateName is returned when the desired set claims the
+	// same relation name twice — two indexes under one name, or an index
+	// named after the table. The conflict is decidable before anything
+	// runs, so admission refuses the whole set rather than letting a
+	// mid-run step fail after a prefix committed.
+	ErrDuplicateCreateName = errors.New("desired set claims the same relation name twice")
 	// ErrPartitionOfUnsupported is returned for CREATE TABLE ... PARTITION
 	// OF: attaching a partition takes a lock on the partitioned parent,
 	// an existing table the absence proof says nothing about.
@@ -57,10 +64,17 @@ var (
 	ErrUnsupportedCreateStep = errors.New("statement is not a shape the create path can run")
 )
 
-// sqlstateDuplicateTable is raised when a CREATE's target name is already
-// taken — for any relation kind, an index included. Postgres errors are
-// matched by SQLSTATE, never by message text.
-const sqlstateDuplicateTable = "42P07"
+// The SQLSTATEs a create step raises when its target name is already
+// taken. Postgres errors are matched by SQLSTATE, never by message text.
+const (
+	// sqlstateDuplicateTable: the occupant is a relation — any kind, an
+	// index included.
+	sqlstateDuplicateTable = "42P07"
+	// sqlstateDuplicateObject: the occupant is not a relation — a
+	// standalone type under the table's name raises it, because every
+	// table also mints a composite type of the same name.
+	sqlstateDuplicateObject = "42710"
+)
 
 // ExecuteCreate runs the desired schema's statements against the
 // verified-absent target: the CREATE TABLE first, then its indexes in
@@ -144,16 +158,27 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 // schema, re-parses it, and admits it by shape and target. The CREATE
 // TABLE is ordered first regardless of its input position — an index
 // cannot be built before its table exists — and the indexes keep their
-// input order after it.
+// input order after it. Every step claims a name in the same pg_class
+// namespace, so a name claimed twice within the set — decidable here —
+// is refused before anything runs rather than failing mid-run after a
+// prefix committed. A step whose name the server invents (an unnamed
+// index) claims nothing decidable and is exempt.
 func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]statement.Statement, error) {
 	desired := ds.Statements()
 	var createStep statement.Statement
 	var haveCreate bool
 	indexSteps := make([]statement.Statement, 0, len(desired))
+	claimed := make(map[string]struct{}, len(desired))
 	for i, raw := range desired {
-		st, err := admitCreateStep(at, raw.SQL())
+		st, name, err := admitCreateStep(at, raw.SQL())
 		if err != nil {
 			return nil, fmt.Errorf("desired statement %d of %d: %w", i+1, len(desired), err)
+		}
+		if name != "" {
+			if _, taken := claimed[name]; taken {
+				return nil, fmt.Errorf("desired statement %d of %d: %w: %q", i+1, len(desired), ErrDuplicateCreateName, name)
+			}
+			claimed[name] = struct{}{}
 		}
 		if st.Kind() == statement.KindCreateTable {
 			createStep = st
@@ -171,61 +196,82 @@ func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]
 }
 
 // admitCreateStep qualifies one desired statement into the proof's schema,
-// re-parses it by the real grammar, and admits it by shape and target.
-func admitCreateStep(at preflight.AbsentTarget, sql string) (statement.Statement, error) {
+// re-parses it by the real grammar, and admits it by shape and target. It
+// returns the pg_class name the step will claim — the table name, or the
+// index name, empty when the server invents one. CREATE TABLE clauses that
+// bind to a secondary relation or type — PARTITION OF, INHERITS, LIKE,
+// OF — are refused: statement.Qualify rewrites only the target, so the
+// secondary name would resolve via search_path to an existing object the
+// absence proof says nothing about.
+func admitCreateStep(at preflight.AbsentTarget, sql string) (statement.Statement, string, error) {
 	qualified, err := statement.Qualify(sql, at.Schema())
 	if err != nil {
-		return statement.Statement{}, err
+		return statement.Statement{}, "", err
 	}
 	st, err := statement.ParseOne(qualified)
 	if err != nil {
-		return statement.Statement{}, err
+		return statement.Statement{}, "", err
 	}
 	ops, err := statement.ParseOps(qualified)
 	if err != nil {
-		return statement.Statement{}, err
+		return statement.Statement{}, "", err
 	}
 	if len(ops) != 1 {
 		// ParseOne admitted a single statement, so a differing op count
 		// means the two parse boundaries disagree about the same SQL.
-		return statement.Statement{}, fmt.Errorf("%w: statement carries %d operations", ErrUnsupportedCreateStep, len(ops))
+		return statement.Statement{}, "", fmt.Errorf("%w: statement carries %d operations", ErrUnsupportedCreateStep, len(ops))
 	}
 	op := ops[0]
+	var claims string
 	switch st.Kind() {
 	case statement.KindCreateTable:
 		if op.PartitionOf {
-			return statement.Statement{}, ErrPartitionOfUnsupported
+			return statement.Statement{}, "", ErrPartitionOfUnsupported
+		}
+		if op.Inherits {
+			return statement.Statement{}, "", fmt.Errorf("%w: INHERITS binds to an existing parent the absence proof does not cover", ErrUnsupportedCreateStep)
+		}
+		if op.Like {
+			return statement.Statement{}, "", fmt.Errorf("%w: LIKE reads an existing source table the absence proof does not cover", ErrUnsupportedCreateStep)
+		}
+		if op.OfType {
+			return statement.Statement{}, "", fmt.Errorf("%w: OF binds to an existing composite type the absence proof does not cover", ErrUnsupportedCreateStep)
 		}
 		if op.IfNotExists {
-			return statement.Statement{}, ErrIfNotExistsUnsupported
+			return statement.Statement{}, "", ErrIfNotExistsUnsupported
 		}
+		claims = st.Table()
 	case statement.KindCreateIndex:
 		if op.Concurrent {
-			return statement.Statement{}, fmt.Errorf("%w: a concurrent build is refused on a table born this run", ErrUnsupportedCreateStep)
+			return statement.Statement{}, "", fmt.Errorf("%w: a concurrent build is refused on a table born this run", ErrUnsupportedCreateStep)
 		}
 		if op.IfNotExists {
-			return statement.Statement{}, ErrIfNotExistsUnsupported
+			return statement.Statement{}, "", ErrIfNotExistsUnsupported
 		}
+		claims = op.Name
 	default:
-		return statement.Statement{}, fmt.Errorf("%w: kind %q", ErrUnsupportedCreateStep, st.Kind())
+		return statement.Statement{}, "", fmt.Errorf("%w: kind %q", ErrUnsupportedCreateStep, st.Kind())
 	}
 	// INV: ST-7 — the executor runs exactly the statement that was
 	// admitted, and only against the target the absence proof verified.
 	if st.Table() == "" || st.Schema() != at.Schema() || st.Table() != at.Table() {
-		return statement.Statement{}, fmt.Errorf("%w: ST-7: statement targets %q but absence was verified for %q",
+		return statement.Statement{}, "", fmt.Errorf("%w: ST-7: statement targets %q but absence was verified for %q",
 			ErrInvariantViolation, qualifiedName(st.Schema(), st.Table()), qualifiedName(at.Schema(), at.Table()))
 	}
-	return st, nil
+	return st, claims, nil
 }
 
-// asCreateCollision maps SQLSTATE 42P07 — raised when a CREATE's target
-// name is taken, whether by a table or an index — to the typed collision
-// refusal. Every other error passes through unchanged. The server's error
-// names the occupied relation, so the wrap adds the classification, not
-// the identifier.
+// asCreateCollision maps the duplicate-name SQLSTATEs — 42P07 when a
+// relation holds the name, 42710 when a standalone type does — to the
+// typed collision refusal. Every other error passes through unchanged.
+// The server's error names the occupant, so the wrap adds the
+// classification, not the identifier.
 func asCreateCollision(err error) error {
 	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || pgErr.Code != sqlstateDuplicateTable {
+	if !errors.As(err, &pgErr) {
+		return err
+	}
+	if pgErr.Code != sqlstateDuplicateTable && pgErr.Code != sqlstateDuplicateObject {
 		return err
 	}
 	return fmt.Errorf("%w: %w", ErrCreateCollision, err)

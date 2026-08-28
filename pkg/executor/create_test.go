@@ -21,7 +21,10 @@ func TestExecuteCreateRejectsUnboundedBudget(t *testing.T) {
 
 	_, err = executor.ExecuteCreate(t.Context(), nil, preflight.AbsentTarget{}, ds,
 		executor.Budget{LockTimeout: 0, StatementTimeout: time.Second}, executor.DefaultRetryPolicy())
-	require.Error(t, err)
+	// The zero-value absence proof would also refuse (as an invariant
+	// violation); asserting on the budget wording proves the budget check
+	// fired first, since a valid proof needs a live database.
+	require.ErrorContains(t, err, "lock budget")
 }
 
 // A zero-value AbsentTarget is constructible by any package; only

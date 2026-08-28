@@ -81,20 +81,10 @@ func CheckCreatePrivileges(ctx context.Context, pool *pgxpool.Pool, schema strin
 	// provisioning statement; the proof is only minted when every fact
 	// holds.
 	if !canConnect {
-		return CreationRole{}, &PrivilegeError{
-			Tier:  TierConnect,
-			Check: fmt.Sprintf("has_database_privilege(%s, %s, 'CONNECT')", role, database),
-			Grant: fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s",
-				pgx.Identifier{database}.Sanitize(), pgx.Identifier{role}.Sanitize()),
-		}
+		return CreationRole{}, connectRefusal(role, database)
 	}
 	if !schemaUsage {
-		return CreationRole{}, &PrivilegeError{
-			Tier:  TierConnect,
-			Check: fmt.Sprintf("has_schema_privilege(%s, %s, 'USAGE')", role, *targetSchema),
-			Grant: fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s",
-				pgx.Identifier{*targetSchema}.Sanitize(), pgx.Identifier{role}.Sanitize()),
-		}
+		return CreationRole{}, schemaUsageRefusal(role, *targetSchema)
 	}
 	if !schemaCreate {
 		return CreationRole{}, &PrivilegeError{

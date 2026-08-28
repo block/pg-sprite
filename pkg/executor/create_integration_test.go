@@ -137,15 +137,15 @@ func TestExecuteCreateReportsCollisionAsTyped(t *testing.T) {
 
 // A failed step ends the run; the steps before it committed and remain,
 // and the report covers exactly that prefix so the caller can disclose
-// what already happened.
+// what already happened. An index on a column the table does not have
+// passes admission — admission checks shape and target, not column
+// existence — and fails only when the server executes it.
 func TestExecuteCreateFailedStepKeepsCommittedPrefix(t *testing.T) {
 	f := newCreateFixture(t, "t")
-	// Two indexes under one name: the second build fails with the
-	// duplicate-name SQLSTATE after the table and first index committed.
 	ds := desired(t, `
 		CREATE TABLE t (id int, name text);
-		CREATE INDEX dup_idx ON t (id);
-		CREATE INDEX dup_idx ON t (name);
+		CREATE INDEX t_id_idx ON t (id);
+		CREATE INDEX t_missing_idx ON t (missing);
 	`)
 
 	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, ds, createBudget, executor.DefaultRetryPolicy())
@@ -155,16 +155,66 @@ func TestExecuteCreateFailedStepKeepsCommittedPrefix(t *testing.T) {
 	require.ErrorAs(t, err, &stepErr)
 	assert.Equal(t, 3, stepErr.Step)
 	assert.Equal(t, 3, stepErr.Total)
-	assert.ErrorIs(t, err, executor.ErrCreateCollision)
+	// The server error is not a collision; it passes through untyped.
+	assert.NotErrorIs(t, err, executor.ErrCreateCollision)
+	assert.Equal(t, executor.CodeExecutionFailed, executor.OutcomeCode(err))
 
 	assert.True(t, relationExists(t, f.pool, f.schema, "t"))
-	assert.True(t, relationExists(t, f.pool, f.schema, "dup_idx"))
+	assert.True(t, relationExists(t, f.pool, f.schema, "t_id_idx"))
 	require.Len(t, rep.Steps, 2)
 
 	// The committed prefix is the rerun contract: the absence check now
 	// refuses, which is the declarative front door's signal to re-diff.
 	_, err = preflight.CheckTableAbsent(t.Context(), f.pool, f.schema, "t")
 	assert.ErrorIs(t, err, preflight.ErrRelationExists)
+}
+
+// A name claimed twice within the desired set is decidable at admission,
+// so the whole set refuses before the first step runs — never a mid-run
+// failure with a committed prefix.
+func TestExecuteCreateRefusesDuplicateNamesAtAdmission(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+	}{
+		{
+			name: "two indexes under one name",
+			sql: `CREATE TABLE t (id int, name text);
+				CREATE INDEX dup_idx ON t (id);
+				CREATE INDEX dup_idx ON t (name)`,
+		},
+		{
+			name: "index named after the table",
+			sql: `CREATE TABLE t (id int);
+				CREATE INDEX t ON t (id)`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newCreateFixture(t, "t")
+			ds := desired(t, tt.sql)
+
+			_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, ds, createBudget, executor.DefaultRetryPolicy())
+			require.ErrorIs(t, err, executor.ErrDuplicateCreateName)
+			assert.Equal(t, executor.CodeDuplicateCreateName, executor.OutcomeCode(err))
+			assert.False(t, relationExists(t, f.pool, f.schema, "t"),
+				"admission covers the whole set before the first step executes")
+		})
+	}
+}
+
+// A standalone type occupying the table's name raises a different SQLSTATE
+// than a relation would — every table also mints a composite type — and
+// still surfaces as the typed collision.
+func TestExecuteCreateReportsTypeCollisionAsTyped(t *testing.T) {
+	f := newCreateFixture(t, "t")
+	_, err := f.pool.Exec(t.Context(), fmt.Sprintf("CREATE TYPE %s.t AS ENUM ('a')", f.schema))
+	require.NoError(t, err)
+
+	ds := desired(t, "CREATE TABLE t (id int)")
+	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, ds, createBudget, executor.DefaultRetryPolicy())
+	require.ErrorIs(t, err, executor.ErrCreateCollision)
+	assert.Equal(t, executor.CodeCreateCollision, executor.OutcomeCode(err))
 }
 
 func TestExecuteCreateAdmissionRefusals(t *testing.T) {
@@ -182,6 +232,24 @@ func TestExecuteCreateAdmissionRefusals(t *testing.T) {
 			name:    "if not exists on an index",
 			sql:     "CREATE TABLE t (id int); CREATE INDEX IF NOT EXISTS t_idx ON t (id)",
 			wantErr: executor.ErrIfNotExistsUnsupported,
+		},
+		// INHERITS, LIKE, and OF bind to a secondary relation or type the
+		// qualification never touches: the name resolves via search_path
+		// to an existing object the absence proof says nothing about.
+		{
+			name:    "inherits from an existing parent",
+			sql:     "CREATE TABLE t (id int) INHERITS (parent)",
+			wantErr: executor.ErrUnsupportedCreateStep,
+		},
+		{
+			name:    "like an existing source table",
+			sql:     "CREATE TABLE t (LIKE src INCLUDING ALL)",
+			wantErr: executor.ErrUnsupportedCreateStep,
+		},
+		{
+			name:    "of an existing composite type",
+			sql:     "CREATE TABLE t OF ty",
+			wantErr: executor.ErrUnsupportedCreateStep,
 		},
 	}
 	for _, tt := range tests {

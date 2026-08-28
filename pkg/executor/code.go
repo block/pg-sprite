@@ -56,10 +56,14 @@ const (
 	// CodeIfNotExistsUnsupported: CREATE ... IF NOT EXISTS cannot prove
 	// what its no-op would mean.
 	CodeIfNotExistsUnsupported Code = "if-not-exists-unsupported"
-	// CodeCreateCollision: the create path's target name was taken
-	// between the absence check and execution; the caller re-diffs the
-	// live catalog rather than assuming the occupant's shape.
+	// CodeCreateCollision: a name the create path needs is already taken
+	// on the server; the caller re-diffs the live catalog rather than
+	// assuming the occupant's shape.
 	CodeCreateCollision Code = "create-collision"
+	// CodeDuplicateCreateName: the desired set claims the same relation
+	// name twice; the conflict is decidable at admission and refused
+	// before anything runs.
+	CodeDuplicateCreateName Code = "duplicate-create-name"
 	// CodePartitionOfUnsupported: CREATE TABLE PARTITION OF locks the
 	// partitioned parent, which the absence proof does not cover.
 	CodePartitionOfUnsupported Code = "partition-of-unsupported"
@@ -131,6 +135,8 @@ func sentinelCode(err error) Code {
 		return CodeIfNotExistsUnsupported
 	case errors.Is(err, ErrCreateCollision):
 		return CodeCreateCollision
+	case errors.Is(err, ErrDuplicateCreateName):
+		return CodeDuplicateCreateName
 	case errors.Is(err, ErrPartitionOfUnsupported):
 		return CodePartitionOfUnsupported
 	case errors.Is(err, ErrUnsupportedCreateStep):

@@ -53,6 +53,7 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{name: "unqualified table", err: executor.ErrUnqualifiedTable, want: executor.CodeUnqualifiedTable},
 		{name: "if not exists", err: executor.ErrIfNotExistsUnsupported, want: executor.CodeIfNotExistsUnsupported},
 		{name: "create collision", err: executor.ErrCreateCollision, want: executor.CodeCreateCollision},
+		{name: "duplicate create name", err: executor.ErrDuplicateCreateName, want: executor.CodeDuplicateCreateName},
 		{name: "partition of", err: executor.ErrPartitionOfUnsupported, want: executor.CodePartitionOfUnsupported},
 		{name: "unsupported create step", err: executor.ErrUnsupportedCreateStep, want: executor.CodeUnsupportedCreateStep},
 		{name: "pool too small", err: executor.ErrPoolTooSmall, want: executor.CodePoolTooSmall},
