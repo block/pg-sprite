@@ -61,6 +61,9 @@ the phased build plan should be traceable back to one of these.
   `max_replication_slots` / `max_wal_senders` headroom, and enough free disk for the shadow copy
   (copy-and-swap roughly **doubles** the table's storage). See
   [low-level-design's preconditions](low-level-design.md#configuration--privilege-preconditions).
+- **Safety primitives land reviewed and dormant.** A proof type and its check can merge with
+  no production caller: the primitive gets its own focused review and full test coverage, and
+  the feature that later consumes it arrives as a smaller, safer diff.
 - **Long migrations must be resumable.** A multi-hour/-day copy must survive process restarts:
   persist a durable checkpoint (`{copied-PK watermark, slot name, confirmed LSN}`) and resume
   with minimal lost work rather than restarting from zero — bounded by slot/WAL retention and,

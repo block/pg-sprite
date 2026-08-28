@@ -91,6 +91,7 @@ to obtain the type is through the function that validates it.
 | --- | --- | --- | --- |
 | `string` (user SQL) | `statement.ParseOne` / `statement.ParseOps`, then `planner.Classify` | `planner.Plan` / `planner.Decision` | CO-7 — classification consumes parsed operation descriptors |
 | table name | preflight | `PreflightedTable` (carries the proven facts: PK, no FKs/views, replica identity, headroom) | ST-6, RF-* |
+| table name (create target) | `preflight.CheckTableAbsent` | `AbsentTarget` (carries the resolved creation schema and the verified-free name; time-of-check — minted inside the apply session, never carried across a plan boundary, and re-verified at use the way ST-7 re-verifies `PreflightedTable`) | ST-6 for the create path |
 | shadow table | full checksum pass (planned) | `VerifiedShadow` — its constructor will be private to `pkg/checksum`; the planned `cutover.Swap` will accept **only** this type | CO-1 in the type system |
 | chunker low-watermark | all-checkers-clean pass (planned) | `CleanWatermark` — will be unobtainable in a pass that repaired anything | CO-2 |
 | — | planned table-lock acquisition | `TableLock` token, planned as a required parameter of every mutating operation | LK-1 |
