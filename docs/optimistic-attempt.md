@@ -154,9 +154,10 @@ What happens to one statement, in order:
    verb — [limitations.md](limitations.md)), and runs a whole-plan admission gate
    before any statement enters the walk: the plan is refused all-or-nothing when the
    plan derived at execution time is not the pinned one (`plan-fingerprint-mismatch`),
-   the target table does not exist (`unsupported-statement`), any planned statement
-   discards live structure (`destructive-change`), or the plan as a whole does not
-   route to execute. Past admission, each derived statement walks the same gates
+   any planned statement discards live structure (`destructive-change`), or the plan
+   as a whole does not route to execute. A plan whose table does not exist routes past
+   admission to the executor's greenfield create path — brief bounded steps, not the
+   per-statement walk below. Past admission, each derived statement walks the same gates
    below — including the size guard, which is per-statement, never plan-level: a
    multi-statement plan can be refused at statement 3 with statements 1 and 2
    already committed (the committed prefix remains, Exit 7).

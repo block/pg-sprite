@@ -46,7 +46,8 @@ var (
 // DesiredSchema is a validated desired-state schema file: exactly one
 // CREATE TABLE plus any number of CREATE INDEX statements on that table.
 // Statement SQL is canonical (parsed and deparsed through the PostgreSQL
-// grammar), in input order, one statement per entry.
+// grammar), one statement per entry, held in execution order: the CREATE
+// TABLE first, the indexes in input order after it.
 //
 // Only [ParseDesired] produces a non-zero value, so holding one is proof
 // the set-level admission rules held: a single unqualified CREATE TABLE,
@@ -59,9 +60,11 @@ type DesiredSchema struct {
 // Table returns the unqualified name of the single CREATE TABLE target.
 func (ds DesiredSchema) Table() string { return ds.table }
 
-// Statements returns the admitted statements in input order, the CREATE
-// TABLE among them. The slice is a copy: mutating it cannot invalidate the
-// admission proof the value carries.
+// Statements returns the admitted statements in execution order: the
+// CREATE TABLE first, the indexes in input order after it — an index
+// cannot be built before its table exists, and every consumer replays
+// this order verbatim. The slice is a copy: mutating it cannot invalidate
+// the admission proof the value carries.
 func (ds DesiredSchema) Statements() []Statement { return slices.Clone(ds.statements) }
 
 // ParseDesired parses a desired-state schema file and admits only what the
@@ -99,7 +102,28 @@ func ParseDesired(sql string) (DesiredSchema, error) {
 				ErrWrongIndexTarget, st.table, ds.table)
 		}
 	}
+	ds.statements = executionOrder(ds.statements)
 	return ds, nil
+}
+
+// executionOrder hoists the CREATE TABLE to the front, keeping the indexes
+// in input order after it. Ordering once at admission — rather than at each
+// replay site — means every consumer of the proof (the scratch-schema
+// introspection, the greenfield plan, the create path's steps) executes an
+// index-before-table file correctly by construction.
+func executionOrder(statements []Statement) []Statement {
+	ordered := make([]Statement, 0, len(statements))
+	for _, st := range statements {
+		if st.kind == KindCreateTable {
+			ordered = append(ordered, st)
+		}
+	}
+	for _, st := range statements {
+		if st.kind != KindCreateTable {
+			ordered = append(ordered, st)
+		}
+	}
+	return ordered
 }
 
 // admitDesiredStatement applies the per-statement admission rules and

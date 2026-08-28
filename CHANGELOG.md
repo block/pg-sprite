@@ -17,10 +17,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `verdict.Reasons()`); `PARTITION OF` and `IF NOT EXISTS` shapes refuse
   with `unsupported-statement` before anything runs. A caller that relied
   on the previous greenfield `unsupported-statement` refusal now sees the
-  create execute. Greenfield plan statements are additionally ordered
-  `CREATE TABLE` first (indexes keep their input order after it), so the
-  plan states execution order and a greenfield plan's fingerprint changes
-  when the desired file listed an index before its table.
+  create execute. Desired-file statements are additionally ordered for
+  execution at parse — the `CREATE TABLE` first, indexes keeping their
+  input order after it — everywhere the file replays: the greenfield plan,
+  the create path's steps, and the scratch-schema introspection that
+  derives a diff once the table exists. The plan states execution order, a
+  greenfield plan's fingerprint changes when the desired file listed an
+  index before its table, and an index-first file converges on rerun.
 - **`diff` now exits 2 when the derived plan contains a statement execution
   would refuse**, in all three output modes (default report, `--sql`,
   `--json`) — the same CI-gate contract as `migrate --dry-run`. Previously

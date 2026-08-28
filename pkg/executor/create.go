@@ -170,10 +170,10 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 }
 
 // admitCreateSteps qualifies every desired statement into the proof's
-// schema, re-parses it, and admits it by shape and target. The CREATE
-// TABLE is ordered first regardless of its input position — an index
-// cannot be built before its table exists — and the indexes keep their
-// input order after it. Every step claims the names it will occupy in the
+// schema, re-parses it, and admits it by shape and target. The statements
+// arrive in execution order — the CREATE TABLE first, the indexes in input
+// order after it, ordered once by statement.ParseDesired — and the steps
+// keep that order. Every step claims the names it will occupy in the
 // same pg_class namespace — the table plus the first-choice index names
 // of its index-backed constraints, or an explicit index name — so a name
 // claimed twice within the set — decidable here — is refused before
@@ -185,9 +185,13 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 // index) claims nothing decidable and is exempt.
 func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]statement.Statement, error) {
 	desired := ds.Statements()
-	var createStep statement.Statement
-	var haveCreate bool
-	indexSteps := make([]statement.Statement, 0, len(desired))
+	// INV: ST-7 — a DesiredSchema proof guarantees a CREATE TABLE ordered
+	// first; a set that does not lead with one means the proof was forged
+	// or mutated.
+	if len(desired) == 0 || desired[0].Kind() != statement.KindCreateTable {
+		return nil, fmt.Errorf("%w: ST-7: desired schema does not lead with a CREATE TABLE", ErrInvariantViolation)
+	}
+	steps := make([]statement.Statement, 0, len(desired))
 	claimed := make(map[string]struct{}, len(desired))
 	for i, raw := range desired {
 		st, names, err := admitCreateStep(at, raw.SQL())
@@ -200,19 +204,9 @@ func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]
 			}
 			claimed[name] = struct{}{}
 		}
-		if st.Kind() == statement.KindCreateTable {
-			createStep = st
-			haveCreate = true
-			continue
-		}
-		indexSteps = append(indexSteps, st)
+		steps = append(steps, st)
 	}
-	if !haveCreate {
-		// A DesiredSchema proof guarantees exactly one CREATE TABLE; a
-		// set without one here means the proof was forged or mutated.
-		return nil, fmt.Errorf("%w: ST-7: desired schema admitted without a CREATE TABLE", ErrInvariantViolation)
-	}
-	return append([]statement.Statement{createStep}, indexSteps...), nil
+	return steps, nil
 }
 
 // admitCreateStep qualifies one desired statement into the proof's schema,

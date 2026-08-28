@@ -108,6 +108,34 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Empty(t, res.Verdicts)
 	})
 
+	t.Run("creates from an index-first desired file and re-runs as a no-op", func(t *testing.T) {
+		// The index precedes its table in the file. Run 1 must still create
+		// table-first, and run 2 — where the desired file replays on the
+		// scratch schema — must converge rather than error on the index
+		// referencing a table that does not exist yet.
+		schema := testutil.NewSchema(t, pool)
+
+		req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t,
+			"CREATE INDEX t_v_idx ON t (v);\nCREATE TABLE t (id int PRIMARY KEY, v text);")}
+		res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+		require.Len(t, res.Verdicts, len(res.Plan.Statements))
+		var indexValid bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT i.indisvalid FROM pg_index i
+			 WHERE i.indexrelid = ($1 || '.t_v_idx')::regclass`, schema).Scan(&indexValid))
+		assert.True(t, indexValid, "the index build must have completed and validated")
+
+		// The convergence oracle: a second run derives an empty plan and
+		// runs nothing.
+		res, err = migrate.RunDesired(t.Context(), pool, req, runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+		assert.Empty(t, res.Plan.Statements, "the created table plans no statements")
+		assert.Empty(t, res.Verdicts)
+	})
+
 	t.Run("refuses a create when a standalone type occupies the name", func(t *testing.T) {
 		// A standalone type is not a table, so the plan is greenfield —
 		// but the create would collide with the type's own composite name.
