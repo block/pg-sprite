@@ -53,9 +53,19 @@ const (
 	// CodeUnqualifiedTable: the target table is not schema-qualified at
 	// the library boundary.
 	CodeUnqualifiedTable Code = "unqualified-table"
-	// CodeIfNotExistsUnsupported: CREATE INDEX CONCURRENTLY IF NOT EXISTS
-	// cannot prove what its no-op would mean.
+	// CodeIfNotExistsUnsupported: CREATE ... IF NOT EXISTS cannot prove
+	// what its no-op would mean.
 	CodeIfNotExistsUnsupported Code = "if-not-exists-unsupported"
+	// CodeCreateCollision: the create path's target name was taken
+	// between the absence check and execution; the caller re-diffs the
+	// live catalog rather than assuming the occupant's shape.
+	CodeCreateCollision Code = "create-collision"
+	// CodePartitionOfUnsupported: CREATE TABLE PARTITION OF locks the
+	// partitioned parent, which the absence proof does not cover.
+	CodePartitionOfUnsupported Code = "partition-of-unsupported"
+	// CodeUnsupportedCreateStep: a desired statement is not a shape the
+	// create path can run.
+	CodeUnsupportedCreateStep Code = "unsupported-create-step"
 	// CodePoolTooSmall: the pool cannot hold the build session and the
 	// verdict connection at once.
 	CodePoolTooSmall Code = "pool-too-small"
@@ -119,6 +129,12 @@ func sentinelCode(err error) Code {
 		return CodeUnqualifiedTable
 	case errors.Is(err, ErrIfNotExistsUnsupported):
 		return CodeIfNotExistsUnsupported
+	case errors.Is(err, ErrCreateCollision):
+		return CodeCreateCollision
+	case errors.Is(err, ErrPartitionOfUnsupported):
+		return CodePartitionOfUnsupported
+	case errors.Is(err, ErrUnsupportedCreateStep):
+		return CodeUnsupportedCreateStep
 	case errors.Is(err, ErrPoolTooSmall):
 		return CodePoolTooSmall
 	case errors.Is(err, ErrTableNotFound):

@@ -45,11 +45,12 @@ var (
 	// identical to the build session's — an unqualified name could resolve
 	// to a different table and turn the verdict into a false clean.
 	ErrUnqualifiedTable = errors.New("concurrent index build must schema-qualify its table")
-	// ErrIfNotExistsUnsupported is returned for CREATE INDEX CONCURRENTLY
-	// IF NOT EXISTS. The clause checks only the name: it succeeds as a
-	// no-op while an invalid or unrelated index owns that name, so the
-	// executor could report success over an index it cannot vouch for.
-	ErrIfNotExistsUnsupported = errors.New("CREATE INDEX CONCURRENTLY IF NOT EXISTS is not supported: a name-only no-op cannot prove the existing index is valid or even the requested one")
+	// ErrIfNotExistsUnsupported is returned for any CREATE ... IF NOT
+	// EXISTS. The clause checks only the name: it succeeds as a no-op
+	// while an unrelated relation — or, for a concurrent build, an
+	// invalid index — owns that name, so an executor could report
+	// success over a relation it cannot vouch for.
+	ErrIfNotExistsUnsupported = errors.New("IF NOT EXISTS is not supported: a name-only no-op cannot prove the existing relation is the requested one, or even valid")
 	// ErrPreexistingInvalidIndex is returned when an invalid index with the
 	// requested name already exists in the target schema — on any table.
 	// The executor cannot prove who owns that entry — an in-progress

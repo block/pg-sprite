@@ -67,8 +67,8 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
 - **Never trust callers.** Every dangerous operation re-verifies its preconditions, whoever the
   requester is (CLI, planner, orchestrator). The periphery may request; the core enforces.
 - **Domain types make illegal states unrepresentable.** Validating passages return proof types
-  with package-private constructors (today `preflight.PreflightedTable` and
-  `preflight.AbsentTarget`; later phases add
+  with package-private constructors (today `preflight.PreflightedTable`,
+  `preflight.AbsentTarget`, and `preflight.CreationRole`; later phases add
   `VerifiedShadow`, `CleanWatermark`, and `TableLock`); dangerous APIs accept only proof types —
   e.g. the planned cutover swap will accept only a `VerifiedShadow`.
 - **Put a limit on everything.** Every loop bounded, every queue bounded, every retry counted,

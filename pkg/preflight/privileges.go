@@ -40,6 +40,14 @@ const (
 	// TierCopyAndSwap covers shadow-object creation: membership usable
 	// with SET ROLE, so shadow objects are born with the correct owner.
 	TierCopyAndSwap
+	// TierCreateTable covers greenfield CREATE TABLE and sits off the
+	// ladder above: a table that does not exist yet has no owner to be a
+	// member of, so the create path proves CONNECT on the database plus
+	// USAGE and CREATE on the schema — deliberately not the ownership
+	// membership the ALTER tiers require. It is checked by
+	// CheckCreatePrivileges, never by CheckPrivileges, whose ladder walks
+	// facts about an existing table.
+	TierCreateTable
 )
 
 // String names the tier's capability for refusal messages.
@@ -53,6 +61,8 @@ func (t Tier) String() string {
 		return "index builds"
 	case TierCopyAndSwap:
 		return "copy-and-swap"
+	case TierCreateTable:
+		return "create a new table"
 	default:
 		return fmt.Sprintf("unknown tier %d", int(t))
 	}

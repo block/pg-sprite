@@ -256,6 +256,11 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpCreateTable},
 		},
 		{
+			name: "create table if not exists",
+			sql:  "CREATE TABLE IF NOT EXISTS t (id int)",
+			want: statement.Op{Kind: statement.OpCreateTable, IfNotExists: true},
+		},
+		{
 			name: "unrecognized statement",
 			sql:  "VACUUM FULL t",
 			want: statement.Op{Kind: statement.OpUnrecognized},

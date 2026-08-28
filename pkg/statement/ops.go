@@ -98,7 +98,8 @@ type Op struct {
 	Concurrent bool
 	// Unique is true for CREATE UNIQUE INDEX.
 	Unique bool
-	// IfNotExists is true for CREATE INDEX IF NOT EXISTS.
+	// IfNotExists is true for CREATE TABLE IF NOT EXISTS and
+	// CREATE INDEX IF NOT EXISTS.
 	IfNotExists bool
 	// GeneratedStored is true for ADD COLUMN ... GENERATED ... STORED.
 	GeneratedStored bool
@@ -245,6 +246,7 @@ func ParseOps(sql string) ([]Op, error) {
 		return []Op{{
 			Kind:        OpCreateTable,
 			PartitionOf: node.GetCreateStmt().GetPartbound() != nil,
+			IfNotExists: node.GetCreateStmt().GetIfNotExists(),
 		}}, nil
 	case node.GetIndexStmt() != nil:
 		idx := node.GetIndexStmt()

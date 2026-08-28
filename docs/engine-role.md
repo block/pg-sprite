@@ -55,6 +55,15 @@ same preflight: `wal_level = logical` (`rds.logical_replication = 1` on Aurora/R
 static parameter requiring a reboot), and free `max_replication_slots` /
 `max_wal_senders` headroom.
 
+### Off-ladder: greenfield `CREATE TABLE`
+
+Creating a new table sits outside the ladder: the table does not exist yet, so there is no
+owning role to be a member of — the table is born owned by the role that creates it. The
+create path's preflight (`CheckCreatePrivileges`) therefore proves exactly `CONNECT` on the
+database plus `USAGE` and `CREATE` on the target schema, deliberately not the Tier 1–3
+ownership membership. A missing grant is refused with the exact `GRANT` statement, whose
+grantee is the engine role itself.
+
 ## Provisioning
 
 For a target whose tables are owned by `app_owner` in schema `app`:
