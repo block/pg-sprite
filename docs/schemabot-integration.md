@@ -141,6 +141,25 @@ package. Landing this is one of:
   deferred-cutover recovery (Spirit implements it).
 - `engine.Drainer` — `Drain()` to flush in-flight background work on sequential resume.
 
+### Routing the create path's refusals
+
+The planned greenfield `CREATE TABLE` path opens with `preflight.CheckTableAbsent`, and its
+proof has a rule the adapter must respect: an `AbsentTarget` is **minted inside the apply
+session and consumed there** — never serialized into `SchemaChange.Metadata`, carried across
+the plan/apply boundary, or reused across retries. Absence at plan time proves nothing about
+apply time; the executor re-verifies inside the session that runs the `CREATE`, the same way
+ST-7 re-verifies a `PreflightedTable`.
+
+Each refusal from the check maps to a different orchestrator action — route them, don't
+retry them uniformly:
+
+| Refusal | What it means | Orchestrator action |
+| --- | --- | --- |
+| `ErrRelationExists` / `ErrTypeExists` (grouped by `preflight.IsNameOccupied`) | The name is already taken — this is not a create, it's a change to something that exists | Route to the diff/alter path, not to a failure state |
+| `ErrSchemaNotFound` | The qualified schema does not exist on the target | Operator action (create the schema or fix the desired file); retrying cannot succeed |
+| `ErrNoCreationSchema` | Unqualified name and the role's `search_path` yields no creation schema | Caller configuration: schema-qualify the name or fix the role's `search_path` |
+| Duplicate-name error from the `CREATE` itself | A concurrent writer won the race after a valid proof | Re-plan from scratch — the world changed; do not blindly retry the create |
+
 ## Execution-mode verdicts and direct execution
 
 SchemaBot records a per-statement **execution-mode verdict** on each planned `TableChange`:

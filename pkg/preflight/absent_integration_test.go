@@ -42,7 +42,10 @@ func TestCheckTableAbsentResolvesUnqualifiedName(t *testing.T) {
 }
 
 // Any relation kind occupies the name: a CREATE TABLE collides with a view
-// or sequence exactly as it does with a table.
+// or sequence exactly as it does with a table. taken_idx is a double
+// occupant — an index has no pg_type row, so a standalone type shares its
+// name — pinning that the relation wins the report: the relation is what
+// blocks a CREATE TABLE, and ErrTypeExists would name the wrong obstacle.
 func TestCheckTableAbsentRefusesOccupiedName(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -54,6 +57,7 @@ func TestCheckTableAbsentRefusesOccupiedName(t *testing.T) {
 		fmt.Sprintf("CREATE VIEW %s.taken_view AS SELECT 1", schema),
 		fmt.Sprintf("CREATE SEQUENCE %s.taken_seq", schema),
 		fmt.Sprintf("CREATE INDEX taken_idx ON %s.taken_table (id)", schema),
+		fmt.Sprintf("CREATE TYPE %s.taken_idx AS ENUM ('a')", schema),
 		fmt.Sprintf("CREATE MATERIALIZED VIEW %s.taken_mv AS SELECT 1", schema),
 		fmt.Sprintf("CREATE TABLE %s.taken_part (id int) PARTITION BY RANGE (id)", schema),
 		fmt.Sprintf("CREATE TYPE %s.taken_comp AS (x int)", schema),
@@ -67,6 +71,7 @@ func TestCheckTableAbsentRefusesOccupiedName(t *testing.T) {
 	} {
 		_, err := preflight.CheckTableAbsent(t.Context(), pool, schema, name)
 		assert.ErrorIs(t, err, preflight.ErrRelationExists, "occupied name %s", name)
+		assert.True(t, preflight.IsNameOccupied(err), "occupied name %s", name)
 	}
 }
 
@@ -91,6 +96,12 @@ func TestCheckTableAbsentRefusesOccupiedTypeName(t *testing.T) {
 	for _, name := range []string{"taken_enum", "taken_domain", "taken_rg"} {
 		_, err := preflight.CheckTableAbsent(t.Context(), pool, schema, name)
 		assert.ErrorIs(t, err, preflight.ErrTypeExists, "occupied type name %s", name)
+		assert.True(t, preflight.IsNameOccupied(err), "occupied type name %s", name)
+
+		// The refusal matches the server's behavior: the create really
+		// does collide with the type, so refusing was not a false block.
+		_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.%s (id int)", schema, name))
+		assert.Error(t, err, "CREATE TABLE %s should collide with the type", name)
 	}
 }
 
@@ -158,6 +169,8 @@ func TestCheckTableAbsentMissingSchema(t *testing.T) {
 
 	_, err = preflight.CheckTableAbsent(t.Context(), pool, "no_such_schema", "t")
 	assert.ErrorIs(t, err, preflight.ErrSchemaNotFound)
+	assert.False(t, preflight.IsNameOccupied(err),
+		"a missing schema is not an occupied name — the causes route differently")
 }
 
 // The catalog is matched on the exact name, so a mixed-case relation blocks
@@ -195,7 +208,46 @@ func TestCheckTableAbsentRefusesEmptySearchPath(t *testing.T) {
 
 	pool := connectAs(t, serverURL, role, password)
 	_, err = preflight.CheckTableAbsent(t.Context(), pool, "", "t")
-	require.Error(t, err)
+	assert.ErrorIs(t, err, preflight.ErrNoCreationSchema)
 	assert.NotErrorIs(t, err, preflight.ErrSchemaNotFound,
 		"an unresolvable search_path is not a missing schema — there is no schema name to report missing")
+}
+
+// CheckTable and CheckTableAbsent are not inverses for an unqualified name:
+// CheckTable resolves across the whole search_path while CheckTableAbsent
+// resolves current_schema() only. A table in a later search_path schema
+// makes both checks succeed for the same arguments — the documented reason
+// a caller deciding between create and alter must qualify the schema.
+func TestCheckTableAbsentIsNotComplementOfCheckTable(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+	first := testutil.NewSchema(t, admin)
+	second := testutil.NewSchema(t, admin)
+
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.only_here (id int)", second))
+	require.NoError(t, err)
+
+	const password = "absent-test-password"
+	role := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("GRANT USAGE ON SCHEMA %s, %s TO %s",
+		first, second, pgx.Identifier{role}.Sanitize()))
+	require.NoError(t, err)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("ALTER ROLE %s SET search_path = %s, %s",
+		pgx.Identifier{role}.Sanitize(), first, second))
+	require.NoError(t, err)
+	pool := connectAs(t, serverURL, role, password)
+
+	// CheckTable finds the table through the search_path...
+	pt, err := preflight.CheckTable(t.Context(), pool, "", "only_here", preflight.NoSizeLimit)
+	require.NoError(t, err)
+	assert.Equal(t, "only_here", pt.Table())
+
+	// ...while CheckTableAbsent proves the same name free, because an
+	// unqualified CREATE TABLE would land in the first schema, not the
+	// second. Both proofs are true at once.
+	at, err := preflight.CheckTableAbsent(t.Context(), pool, "", "only_here")
+	require.NoError(t, err)
+	assert.Equal(t, first, at.Schema())
 }

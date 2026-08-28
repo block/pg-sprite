@@ -121,6 +121,13 @@ func LookupTargetFacts(ctx context.Context, pool *pgxpool.Pool, schema, table st
 // exists, is an ordinary or partitioned table, and is at most limitBytes on
 // disk. Above the limit it returns a *SizeError; on success it returns the
 // PreflightedTable proof.
+//
+// The unqualified lookup is search_path-wide (to_regclass), so success does
+// not mean the name is occupied in the session's creation schema: a table
+// in a later search_path schema satisfies this check while CheckTableAbsent
+// — which resolves current_schema() only — still proves the creation schema
+// free for the same name. The two checks are inverses only when the caller
+// passes an explicit schema.
 func CheckTable(ctx context.Context, pool *pgxpool.Pool, schema, table string, limitBytes int64) (PreflightedTable, error) {
 	if limitBytes <= 0 {
 		return PreflightedTable{}, fmt.Errorf("size limit must be positive, got %d", limitBytes)
