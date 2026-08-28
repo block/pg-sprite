@@ -53,9 +53,23 @@ const (
 	// CodeUnqualifiedTable: the target table is not schema-qualified at
 	// the library boundary.
 	CodeUnqualifiedTable Code = "unqualified-table"
-	// CodeIfNotExistsUnsupported: CREATE INDEX CONCURRENTLY IF NOT EXISTS
-	// cannot prove what its no-op would mean.
+	// CodeIfNotExistsUnsupported: CREATE ... IF NOT EXISTS cannot prove
+	// what its no-op would mean.
 	CodeIfNotExistsUnsupported Code = "if-not-exists-unsupported"
+	// CodeCreateCollision: a name the create path needs is already taken
+	// on the server; the caller re-diffs the live catalog rather than
+	// assuming the occupant's shape.
+	CodeCreateCollision Code = "create-collision"
+	// CodeDuplicateCreateName: the desired set claims the same relation
+	// name twice; the conflict is decidable at admission and refused
+	// before anything runs.
+	CodeDuplicateCreateName Code = "duplicate-create-name"
+	// CodePartitionOfUnsupported: CREATE TABLE PARTITION OF locks the
+	// partitioned parent, which the absence proof does not cover.
+	CodePartitionOfUnsupported Code = "partition-of-unsupported"
+	// CodeUnsupportedCreateStep: a desired statement is not a shape the
+	// create path can run.
+	CodeUnsupportedCreateStep Code = "unsupported-create-step"
 	// CodePoolTooSmall: the pool cannot hold the build session and the
 	// verdict connection at once.
 	CodePoolTooSmall Code = "pool-too-small"
@@ -70,6 +84,36 @@ const (
 	// investigate, not a refusal to branch on.
 	CodeExecutionFailed Code = "execution-failed"
 )
+
+// Codes returns the closed set of outcome codes. It is part of the report
+// contract: adapters enumerate it to know every outcome they must render,
+// and the docs test pins every code into the execution-model page so the
+// documented vocabulary cannot drift from this one.
+func Codes() []Code {
+	return []Code{
+		CodeBudgetLockExceeded,
+		CodeBudgetStatementExceeded,
+		CodeCancelledExternally,
+		CodeInvalidIndexOwnLeftover,
+		CodeInvalidIndexPreexisting,
+		CodeInvalidIndexUnproven,
+		CodeEmptySequence,
+		CodeUnsupportedSequenceStep,
+		CodeUnsupportedPartitionedParent,
+		CodeNotConcurrentIndexBuild,
+		CodeUnnamedIndex,
+		CodeUnqualifiedTable,
+		CodeIfNotExistsUnsupported,
+		CodeCreateCollision,
+		CodeDuplicateCreateName,
+		CodePartitionOfUnsupported,
+		CodeUnsupportedCreateStep,
+		CodePoolTooSmall,
+		CodeTableNotFound,
+		CodeInvariantViolation,
+		CodeExecutionFailed,
+	}
+}
 
 // OutcomeCode maps an error returned by this package to its stable code.
 // A nil error has no outcome code and maps to the empty Code. A
@@ -119,6 +163,14 @@ func sentinelCode(err error) Code {
 		return CodeUnqualifiedTable
 	case errors.Is(err, ErrIfNotExistsUnsupported):
 		return CodeIfNotExistsUnsupported
+	case errors.Is(err, ErrCreateCollision):
+		return CodeCreateCollision
+	case errors.Is(err, ErrDuplicateCreateName):
+		return CodeDuplicateCreateName
+	case errors.Is(err, ErrPartitionOfUnsupported):
+		return CodePartitionOfUnsupported
+	case errors.Is(err, ErrUnsupportedCreateStep):
+		return CodeUnsupportedCreateStep
 	case errors.Is(err, ErrPoolTooSmall):
 		return CodePoolTooSmall
 	case errors.Is(err, ErrTableNotFound):

@@ -40,6 +40,14 @@ const (
 	// TierCopyAndSwap covers shadow-object creation: membership usable
 	// with SET ROLE, so shadow objects are born with the correct owner.
 	TierCopyAndSwap
+	// TierCreateTable covers greenfield CREATE TABLE and sits off the
+	// ladder above: a table that does not exist yet has no owner to be a
+	// member of, so the create path proves CONNECT on the database plus
+	// USAGE and CREATE on the schema — deliberately not the ownership
+	// membership the ALTER tiers require. It is checked by
+	// CheckCreatePrivileges, never by CheckPrivileges, whose ladder walks
+	// facts about an existing table.
+	TierCreateTable
 )
 
 // String names the tier's capability for refusal messages.
@@ -53,6 +61,8 @@ func (t Tier) String() string {
 		return "index builds"
 	case TierCopyAndSwap:
 		return "copy-and-swap"
+	case TierCreateTable:
+		return "create a new table"
 	default:
 		return fmt.Sprintf("unknown tier %d", int(t))
 	}
@@ -249,14 +259,31 @@ func unresolvedTargetCause(ctx context.Context, pool *pgxpool.Pool, schema, tabl
 		return fmt.Errorf("resolve schema %s: %w", schema, err)
 	}
 	if !usage {
-		return &PrivilegeError{
-			Tier:  TierConnect,
-			Check: fmt.Sprintf("has_schema_privilege(%s, %s, 'USAGE')", role, schema),
-			Grant: fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s",
-				pgx.Identifier{schema}.Sanitize(), pgx.Identifier{role}.Sanitize()),
-		}
+		return schemaUsageRefusal(role, schema)
 	}
 	return fmt.Errorf("%w: %s", ErrTableNotFound, qualifiedName(schema, table))
+}
+
+// connectRefusal is the typed refusal for a role that cannot connect to
+// the database, carrying the exact provisioning statement.
+func connectRefusal(role, database string) *PrivilegeError {
+	return &PrivilegeError{
+		Tier:  TierConnect,
+		Check: fmt.Sprintf("has_database_privilege(%s, %s, 'CONNECT')", role, database),
+		Grant: fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s",
+			pgx.Identifier{database}.Sanitize(), pgx.Identifier{role}.Sanitize()),
+	}
+}
+
+// schemaUsageRefusal is the typed refusal for a role without USAGE on the
+// schema, carrying the exact provisioning statement.
+func schemaUsageRefusal(role, schema string) *PrivilegeError {
+	return &PrivilegeError{
+		Tier:  TierConnect,
+		Check: fmt.Sprintf("has_schema_privilege(%s, %s, 'USAGE')", role, schema),
+		Grant: fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s",
+			pgx.Identifier{schema}.Sanitize(), pgx.Identifier{role}.Sanitize()),
+	}
 }
 
 // checkTierLadder walks the contract's tiers bottom-up to the requirement
@@ -270,20 +297,10 @@ func unresolvedTargetCause(ctx context.Context, pool *pgxpool.Pool, schema, tabl
 // mid-change server error.
 func checkTierLadder(ctx context.Context, pool *pgxpool.Pool, f accessFacts, tier Tier) error {
 	if !f.canConnect {
-		return &PrivilegeError{
-			Tier:  TierConnect,
-			Check: fmt.Sprintf("has_database_privilege(%s, %s, 'CONNECT')", f.role, f.database),
-			Grant: fmt.Sprintf("GRANT CONNECT ON DATABASE %s TO %s",
-				pgx.Identifier{f.database}.Sanitize(), pgx.Identifier{f.role}.Sanitize()),
-		}
+		return connectRefusal(f.role, f.database)
 	}
 	if !f.schemaUsage {
-		return &PrivilegeError{
-			Tier:  TierConnect,
-			Check: fmt.Sprintf("has_schema_privilege(%s, %s, 'USAGE')", f.role, f.schema),
-			Grant: fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s",
-				pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{f.role}.Sanitize()),
-		}
+		return schemaUsageRefusal(f.role, f.schema)
 	}
 	if tier < TierAlterInPlace {
 		return nil

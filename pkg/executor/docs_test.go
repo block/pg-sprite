@@ -25,3 +25,27 @@ func TestDocNamesEveryStepKind(t *testing.T) {
 			"docs/execution-model.md does not name step kind %q", k)
 	}
 }
+
+// Every outcome code automation can branch on must be named in the
+// execution model: a Code added to the vocabulary without the doc naming
+// it fails here.
+func TestDocNamesEveryOutcomeCode(t *testing.T) {
+	raw, err := os.ReadFile(executionModelDoc)
+	require.NoError(t, err)
+	doc := string(raw)
+	for _, c := range executor.Codes() {
+		assert.Contains(t, doc, fmt.Sprintf("`%s`", c),
+			"docs/execution-model.md does not name outcome code %q", c)
+	}
+}
+
+// The closed set has no duplicates: a code pasted twice would silently
+// shadow a missing entry.
+func TestCodesAreUnique(t *testing.T) {
+	seen := make(map[executor.Code]struct{})
+	for _, c := range executor.Codes() {
+		_, dup := seen[c]
+		assert.False(t, dup, "duplicate outcome code %q", c)
+		seen[c] = struct{}{}
+	}
+}

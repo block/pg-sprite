@@ -22,7 +22,7 @@ var proofTypeDocs = []string{
 // document: a new proof type added without updating all three lists fails
 // here. Extend the slice when a new proof type lands.
 func TestDocsListEveryProofType(t *testing.T) {
-	proofTypes := []string{"PreflightedTable", "AbsentTarget"}
+	proofTypes := []string{"PreflightedTable", "AbsentTarget", "CreationRole"}
 	for _, doc := range proofTypeDocs {
 		raw, err := os.ReadFile(doc)
 		require.NoError(t, err)

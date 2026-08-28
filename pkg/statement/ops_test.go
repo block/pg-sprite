@@ -256,6 +256,31 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpCreateTable},
 		},
 		{
+			name: "create table if not exists",
+			sql:  "CREATE TABLE IF NOT EXISTS t (id int)",
+			want: statement.Op{Kind: statement.OpCreateTable, IfNotExists: true},
+		},
+		{
+			name: "create table partition of",
+			sql:  "CREATE TABLE t PARTITION OF parent FOR VALUES FROM (1) TO (10)",
+			want: statement.Op{Kind: statement.OpCreateTable, PartitionOf: true},
+		},
+		{
+			name: "create table inherits",
+			sql:  "CREATE TABLE t (id int) INHERITS (parent)",
+			want: statement.Op{Kind: statement.OpCreateTable, Inherits: true},
+		},
+		{
+			name: "create table like",
+			sql:  "CREATE TABLE t (LIKE src INCLUDING ALL)",
+			want: statement.Op{Kind: statement.OpCreateTable, Like: true},
+		},
+		{
+			name: "create table of type",
+			sql:  "CREATE TABLE t OF ty",
+			want: statement.Op{Kind: statement.OpCreateTable, OfType: true},
+		},
+		{
 			name: "unrecognized statement",
 			sql:  "VACUUM FULL t",
 			want: statement.Op{Kind: statement.OpUnrecognized},

@@ -68,6 +68,9 @@ refusal — never a silently wrong or incomplete result:
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.
+- **Greenfield `CREATE TABLE` apply** is not user-reachable yet: the
+  executor create path exists as a library building block, but the
+  declarative front door does not route to it.
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
   which covers one ordinary table plus its indexes per file.

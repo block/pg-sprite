@@ -98,7 +98,8 @@ type Op struct {
 	Concurrent bool
 	// Unique is true for CREATE UNIQUE INDEX.
 	Unique bool
-	// IfNotExists is true for CREATE INDEX IF NOT EXISTS.
+	// IfNotExists is true for CREATE TABLE IF NOT EXISTS and
+	// CREATE INDEX IF NOT EXISTS.
 	IfNotExists bool
 	// GeneratedStored is true for ADD COLUMN ... GENERATED ... STORED.
 	GeneratedStored bool
@@ -111,6 +112,19 @@ type Op struct {
 	// PartitionOf is true for CREATE TABLE ... PARTITION OF, which locks
 	// the partitioned parent, not just the new relation.
 	PartitionOf bool
+	// Inherits is true for CREATE TABLE ... INHERITS, which locks each
+	// named parent — an existing relation, resolved via search_path when
+	// unqualified. Disjoint from PartitionOf: the grammar carries the
+	// partitioned parent in the same clause, but only PARTITION OF sets a
+	// partition bound.
+	Inherits bool
+	// Like is true for a CREATE TABLE with a LIKE clause, which reads an
+	// existing source table — resolved via search_path when unqualified.
+	Like bool
+	// OfType is true for CREATE TABLE ... OF type, which binds the table
+	// to an existing composite type — resolved via search_path when
+	// unqualified.
+	OfType bool
 	// Default is the DEFAULT shape for OpAddColumn.
 	Default DefaultKind
 	// NewType is the target type for OpAlterColumnType and the column type
@@ -185,6 +199,17 @@ func (o Op) Describe() string {
 	}
 }
 
+// hasLikeClause reports whether any table element is a LIKE clause, which
+// copies column definitions from an existing source table.
+func hasLikeClause(create *pganalyze.CreateStmt) bool {
+	for _, elt := range create.GetTableElts() {
+		if elt.GetTableLikeClause() != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // dropIndexNames renders the dropped index names for the operation label:
 // each object's qualified name, comma-separated when one statement drops
 // several. The name identifies which structure the plan discards, so a
@@ -242,9 +267,14 @@ func ParseOps(sql string) ([]Op, error) {
 		}
 		return ops, nil
 	case node.GetCreateStmt() != nil:
+		create := node.GetCreateStmt()
 		return []Op{{
 			Kind:        OpCreateTable,
-			PartitionOf: node.GetCreateStmt().GetPartbound() != nil,
+			PartitionOf: create.GetPartbound() != nil,
+			Inherits:    create.GetPartbound() == nil && len(create.GetInhRelations()) > 0,
+			Like:        hasLikeClause(create),
+			OfType:      create.GetOfTypename() != nil,
+			IfNotExists: create.GetIfNotExists(),
 		}}, nil
 	case node.GetIndexStmt() != nil:
 		idx := node.GetIndexStmt()
