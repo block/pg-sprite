@@ -115,8 +115,14 @@ the planner's classifier:
 > real work until cancelled, **blocking all reads and writes for the whole budget window**, so a
 > bounded attempt is not a free probe. Optimistic classification therefore bounds the attempt
 > with a tight `lock_timeout` **and** `statement_timeout`, and **skips the attempt entirely above
-> a table-size threshold** (`pg_class.relpages`), classifying the change as a rewrite — **refused
+> a table-size threshold** (`pg_total_relation_size`: heap, indexes, and TOAST, all
+> partitions), classifying the change as a rewrite — **refused
 > with the reason** until the in-house copy engine lands (see the build plan).
+
+The deep treatment of the bounded attempt — the full entry-to-exit map every statement
+walks, which routes are size-guarded and which are exempt, and why the bounded attempt
+is the right design on PostgreSQL specifically — is
+[optimistic-attempt.md](optimistic-attempt.md).
 
 ## Architecture at a glance
 
