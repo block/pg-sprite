@@ -106,6 +106,7 @@ func TestReasonsPinsWireTokens(t *testing.T) {
 		"backend-unavailable",
 		"destructive-change",
 		"plan-fingerprint-mismatch",
+		"create-collision",
 	}, got)
 }
 

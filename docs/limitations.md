@@ -41,6 +41,7 @@ composition of the model boundaries above with those gates. At a glance:
 
 | Desired-file edit | Outcome today |
 | --- | --- |
+| A desired file whose table does not exist yet | Converges — the greenfield create path verifies the name is free and the role holds `CREATE` on the schema, then runs the `CREATE TABLE` and the index builds as brief bounded steps. An occupied name (a relation or standalone type) is a typed `create-collision` refusal; `PARTITION OF` and `IF NOT EXISTS` are typed refusals before anything runs. |
 | Add a column | Converges. Runs as a bounded attempt of the submitted form, so the table-size guard applies (below). |
 | Widen a column type (`varchar(50)` → `varchar(255)`) | Converges — the same bounded attempt, under the same size guard. |
 | Add an index | Converges via `CREATE INDEX CONCURRENTLY`. Not size-guarded: long online work on a large table is the pattern's purpose. |

@@ -87,6 +87,12 @@ const (
 	// does not carry the fingerprint the caller pinned, so the plan a
 	// reviewer approved is not the plan that would execute; nothing runs.
 	ReasonPlanFingerprintMismatch Reason = "plan-fingerprint-mismatch"
+	// ReasonCreateCollision: the create plan's target name is already
+	// occupied — a relation or standalone type took it after the plan was
+	// derived — so the greenfield create cannot run; the caller re-derives
+	// the plan against the live catalog rather than assuming the
+	// occupant's shape.
+	ReasonCreateCollision Reason = "create-collision"
 )
 
 // Reasons returns the closed set of non-zero Reason values. It is part of
@@ -105,6 +111,7 @@ func Reasons() []Reason {
 		ReasonBackendUnavailable,
 		ReasonDestructiveChange,
 		ReasonPlanFingerprintMismatch,
+		ReasonCreateCollision,
 	}
 }
 

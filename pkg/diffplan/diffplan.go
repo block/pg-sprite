@@ -153,20 +153,31 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 }
 
 // qualifiedDesired renders the desired statements as the plan for a table
-// that does not exist yet, qualified onto the target schema.
+// that does not exist yet, qualified onto the target schema. The CREATE
+// TABLE is ordered first regardless of its input position — an index
+// cannot be built before its table exists — and the indexes keep their
+// input order after it, so the plan states the exact order the create
+// path executes and a plan statement's verdict is the verdict of the step
+// at the same position.
 func qualifiedDesired(ds statement.DesiredSchema, schema string) ([]schemadiff.Change, error) {
 	statements := ds.Statements()
 	changes := make([]schemadiff.Change, 0, len(statements))
+	var create *schemadiff.Change
 	for _, st := range statements {
 		qualified, err := statement.Qualify(st.SQL(), schema)
 		if err != nil {
 			return nil, fmt.Errorf("qualify desired statement: %w", err)
 		}
-		kind := schemadiff.ChangeCreateTable
 		if st.Kind() == statement.KindCreateIndex {
-			kind = schemadiff.ChangeCreateIndex
+			changes = append(changes, schemadiff.Change{SQL: qualified, Kind: schemadiff.ChangeCreateIndex})
+			continue
 		}
-		changes = append(changes, schemadiff.Change{SQL: qualified, Kind: kind})
+		create = &schemadiff.Change{SQL: qualified, Kind: schemadiff.ChangeCreateTable}
 	}
-	return changes, nil
+	if create == nil {
+		// A DesiredSchema proof guarantees exactly one CREATE TABLE; a set
+		// without one here means the proof was forged or mutated.
+		return nil, errors.New("desired schema carries no CREATE TABLE")
+	}
+	return append([]schemadiff.Change{*create}, changes...), nil
 }

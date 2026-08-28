@@ -76,15 +76,15 @@ func TestAdmitPlan(t *testing.T) {
 		assert.Equal(t, report, res.Plan, "a refusal carries the plan it refused")
 	})
 
-	t.Run("refuses a greenfield plan", func(t *testing.T) {
+	t.Run("admits a greenfield plan", func(t *testing.T) {
+		// A table that does not exist takes the create path after
+		// admission; admission itself only vets the plan's content — the
+		// pin, the destructive guard, and the routed dispositions.
 		report := executable()
 		exists := false
 		report.TableExists = &exists
-		res, ok := admitPlan(DesiredRequest{}, report)
-		require.False(t, ok)
-		assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
-		assert.Contains(t, res.Detail, "app.t")
-		assert.Equal(t, report, res.Plan, "a refusal carries the plan it refused")
+		_, ok := admitPlan(DesiredRequest{}, report)
+		assert.True(t, ok)
 	})
 
 	t.Run("refuses a destructive statement anywhere in the plan", func(t *testing.T) {
