@@ -67,6 +67,46 @@ func TestExecuteNativeCommitsInstantChange(t *testing.T) {
 	assert.Equal(t, "integer", columnType(t, pool, schema, "t", "age"), "the committed change must be visible")
 }
 
+// Alter attempts run with search_path pinned to the proof's schema then
+// public — the same policy the create path and the introspection read path
+// set — so an ALTER's unqualified type reference resolves in the target
+// schema, and resolves there even when public holds a type of the same
+// name. Without the pin the attempt would run under the session default:
+// the target schema's type would be invisible (SQLSTATE 42704) and a
+// same-named type in public would bind silently instead.
+func TestExecuteNativeResolvesTypesInTargetSchema(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+	pt := mustPreflight(t, pool, schema, "t")
+
+	// The type lives in the target schema and, under the same name, in
+	// public too — resolution must pick the target schema's copy.
+	typeName := schema + "_mood"
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TYPE %s.%s AS ENUM ('happy', 'sad')", schema, typeName))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TYPE public.%s AS ENUM ('decoy')", typeName))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := pool.Exec(context.WithoutCancel(t.Context()),
+			fmt.Sprintf("DROP TYPE IF EXISTS public.%s", typeName))
+		assert.NoError(t, err)
+	})
+
+	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN m %s", schema, typeName))
+	require.NoError(t, executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy()))
+
+	var udtSchema string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT udt_schema FROM information_schema.columns
+		  WHERE table_schema = $1 AND table_name = 't' AND column_name = 'm'`,
+		schema).Scan(&udtSchema))
+	assert.Equal(t, schema, udtSchema,
+		"the column's type must resolve in the proof's schema, not public")
+}
+
 func TestExecuteNativeCancelsWhenLockBlocked(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))

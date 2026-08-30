@@ -185,11 +185,11 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 // index) claims nothing decidable and is exempt.
 func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]statement.Statement, error) {
 	desired := ds.Statements()
-	// INV: ST-7 — a DesiredSchema proof guarantees a CREATE TABLE ordered
+	// INV: ST-8 — a DesiredSchema proof guarantees a CREATE TABLE ordered
 	// first; a set that does not lead with one means the proof was forged
 	// or mutated.
 	if len(desired) == 0 || desired[0].Kind() != statement.KindCreateTable {
-		return nil, fmt.Errorf("%w: ST-7: desired schema does not lead with a CREATE TABLE", ErrInvariantViolation)
+		return nil, fmt.Errorf("%w: ST-8: desired schema does not lead with a CREATE TABLE", ErrInvariantViolation)
 	}
 	steps := make([]statement.Statement, 0, len(desired))
 	claimed := make(map[string]struct{}, len(desired))

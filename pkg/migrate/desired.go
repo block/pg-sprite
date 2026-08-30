@@ -249,7 +249,10 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 	}
 	if execErr == nil {
 		result.Outcome = verdict.OutcomeExecuted
-		result.Detail = fmt.Sprintf("created: all %d planned statements committed", len(report.Statements))
+		// The count comes from the committed steps — the same source as
+		// the verdicts above — so the disclosure cannot claim more than
+		// the executor reported committing.
+		result.Detail = fmt.Sprintf("created: all %d planned statements committed", len(rep.Steps))
 		return result, nil
 	}
 	var stepErr *executor.SequenceStepError

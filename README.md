@@ -40,6 +40,10 @@ routes the statement, then executes the routed SQL — the planner's safer nativ
 default when the submitted form blocks (reported in the verdict's `executed_sql`), a bounded
 optimistic native attempt otherwise. A gated `--force` runs the submitted form as-is under the
 same budgets. Changes without an available backend get a structured refusal (exit code 2).
+Desired-state execution — converging a live table onto a `CREATE TABLE` file, including
+creating the table when it does not exist yet — is a Go API today: `migrate.RunDesired`
+in [`pkg/migrate`](pkg/migrate/desired.go); the CLI's `migrate` verb takes one imperative
+statement.
 The design docs and the phased
 build plan live in [docs/](docs/) — start with
 [docs/README.md](docs/README.md); the vision — what pg-sprite is and is not —

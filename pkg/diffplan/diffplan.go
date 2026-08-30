@@ -161,9 +161,9 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 func qualifiedDesired(ds statement.DesiredSchema, schema string) ([]schemadiff.Change, error) {
 	statements := ds.Statements()
 	if len(statements) == 0 || statements[0].Kind() != statement.KindCreateTable {
-		// A DesiredSchema proof guarantees a CREATE TABLE ordered first; a
-		// set that does not lead with one means the proof was forged or
-		// mutated.
+		// INV: ST-8 — a DesiredSchema proof guarantees a CREATE TABLE
+		// ordered first; a set that does not lead with one means the proof
+		// was forged or mutated.
 		return nil, errors.New("desired schema does not lead with a CREATE TABLE")
 	}
 	changes := make([]schemadiff.Change, 0, len(statements))

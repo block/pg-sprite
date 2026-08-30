@@ -24,6 +24,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   derives a diff once the table exists. The plan states execution order, a
   greenfield plan's fingerprint changes when the desired file listed an
   index before its table, and an index-first file converges on rerun.
+- **Alter attempts now run with `search_path` pinned to the target
+  schema** (then `public`) whenever the statement is schema-qualified —
+  the same resolution the create path and introspection use. A statement's
+  unqualified secondary names — a column's type, an expression's
+  function — resolve in the target schema, where previously they resolved
+  via the session's ambient `search_path` and could silently bind a
+  same-named object in `public`. A caller that relied on ambient
+  resolution for secondary names must qualify them.
 - **`diff` now exits 2 when the derived plan contains a statement execution
   would refuse**, in all three output modes (default report, `--sql`,
   `--json`) — the same CI-gate contract as `migrate --dry-run`. Previously

@@ -174,9 +174,13 @@ func (b Budget) validate() error {
 // grammar), and a target mismatch is refused before anything executes, so a
 // proof for one table cannot smuggle SQL against another. Each attempt is a
 // new transaction, so neither an aborted transaction nor its settings can
-// leak through the pool. On success the change is committed: it was
-// effectively instant. If the lock budget is exhausted across all bounded
-// attempts, a *BudgetError carrying the attempt count is returned.
+// leak through the pool. When the proof carries a schema, each attempt runs
+// with search_path pinned to that schema then public, so the statement's
+// unqualified secondary names resolve in the target schema — the same
+// resolution the create path and the introspection read path use. On
+// success the change is committed: it was effectively instant. If the lock
+// budget is exhausted across all bounded attempts, a *BudgetError carrying
+// the attempt count is returned.
 // Statement timeouts and all other failures return immediately: repeating
 // work that exceeded its execution budget is not a lock-acquisition
 // strategy.
@@ -209,17 +213,18 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		return fmt.Errorf("%w: ST-7: statement targets %q but preflight verified %q",
 			ErrInvariantViolation, qualifiedName(st.Schema(), st.Table()), qualifiedName(pt.Schema(), pt.Table()))
 	}
+	// The attempt runs with search_path pinned to the proof's schema (when
+	// the proof carries one — an unqualified lookup carries none and runs
+	// under the session default), so the statement's unqualified secondary
+	// names — a column's type, an expression's function — resolve in the
+	// target schema whether the run creates the table or alters it.
 	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
-		return executeNativeAttempt(ctx, pool, st, b)
+		return executeBoundedAttempt(ctx, pool, st, b, pt.Schema())
 	}, sleepContext, func(attempt int) {
 		if tracker != nil {
 			tracker.SetAttempt(attempt)
 		}
 	})
-}
-
-func executeNativeAttempt(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget) error {
-	return executeBoundedAttempt(ctx, pool, st, b, "")
 }
 
 // executeBoundedAttempt is the shared transactional attempt behind the
