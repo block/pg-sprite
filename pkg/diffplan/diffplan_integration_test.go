@@ -230,3 +230,39 @@ func TestPlanMissingTableEmitsFullDesiredSchema(t *testing.T) {
 		schemadiff.ChangeCreateIndex,
 	}, kinds)
 }
+
+// A greenfield plan must state execution order even when the desired file
+// lists an index before its table: the CREATE TABLE is planned first, so a
+// plan statement's verdict is the verdict of the create-path step at the
+// same position.
+func TestPlanMissingTableOrdersCreateTableFirst(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{
+		Schema: schema,
+		Desired: parseDesired(t,
+			"CREATE INDEX events_id_idx ON events (id);\nCREATE TABLE events (id bigint PRIMARY KEY);"),
+	})
+	require.NoError(t, err)
+
+	require.NotNil(t, report.TableExists)
+	assert.False(t, *report.TableExists)
+	var sqls []string
+	var kinds []schemadiff.ChangeKind
+	for _, ch := range report.Statements {
+		sqls = append(sqls, ch.SQL)
+		kinds = append(kinds, ch.Kind)
+	}
+	assert.Equal(t, []string{
+		fmt.Sprintf("CREATE TABLE %s.events (id bigint PRIMARY KEY)", schema),
+		fmt.Sprintf("CREATE INDEX events_id_idx ON %s.events USING btree (id)", schema),
+	}, sqls)
+	assert.Equal(t, []schemadiff.ChangeKind{
+		schemadiff.ChangeCreateTable,
+		schemadiff.ChangeCreateIndex,
+	}, kinds)
+}

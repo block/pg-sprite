@@ -24,6 +24,26 @@ create index events_name_idx on events (name);`)
 	assert.Equal(t, "CREATE INDEX events_name_idx ON events USING btree (name)", statements[1].SQL())
 }
 
+// A desired file may list an index before its table; Statements must
+// return execution order — the CREATE TABLE first — because every
+// consumer replays the slice verbatim and an index cannot be built
+// before its table exists.
+func TestParseDesiredOrdersTableFirst(t *testing.T) {
+	ds, err := ParseDesired(`create index events_name_idx on events (name);
+create table events (id bigint primary key, name varchar(50) not null);
+create index events_id_idx on events (id);`)
+	require.NoError(t, err)
+
+	statements := ds.Statements()
+	require.Len(t, statements, 3)
+	assert.Equal(t, KindCreateTable, statements[0].Kind())
+	assert.Equal(t, KindCreateIndex, statements[1].Kind())
+	assert.Equal(t, "CREATE INDEX events_name_idx ON events USING btree (name)", statements[1].SQL(),
+		"indexes keep their input order after the hoisted CREATE TABLE")
+	assert.Equal(t, KindCreateIndex, statements[2].Kind())
+	assert.Equal(t, "CREATE INDEX events_id_idx ON events USING btree (id)", statements[2].SQL())
+}
+
 // Statements returns a copy: mutating the returned slice must not change
 // what a later caller observes, so a validated DesiredSchema stays valid.
 func TestDesiredSchemaStatementsIsDefensiveCopy(t *testing.T) {

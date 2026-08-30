@@ -46,6 +46,8 @@ func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, desired statement.
 	if _, err := tx.Exec(ctx, setPath); err != nil {
 		return Model{}, fmt.Errorf("set scratch search_path: %w", err)
 	}
+	// Statements arrive in execution order — the CREATE TABLE first — so
+	// an index never replays before the table it targets exists.
 	for _, st := range desired.Statements() {
 		if _, err := tx.Exec(ctx, st.SQL()); err != nil {
 			return Model{}, fmt.Errorf("execute desired statement on scratch schema: %w", err)

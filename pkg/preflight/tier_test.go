@@ -71,6 +71,22 @@ func TestRequiredTier(t *testing.T) {
 			execSQL: []string{"ALTER TABLE s.t ALTER COLUMN c TYPE bigint"},
 			tier:    preflight.TierAlterInPlace,
 		},
+		// The greenfield create plan derives the off-ladder create tier —
+		// checked by CheckCreatePrivileges, never by the ladder walk —
+		// whether or not the plan also builds the new table's indexes.
+		{
+			name:    "create table derives the off-ladder create tier",
+			execSQL: []string{"CREATE TABLE s.t (id int)"},
+			tier:    preflight.TierCreateTable,
+		},
+		{
+			name: "create plan with index builds stays the create tier",
+			execSQL: []string{
+				"CREATE TABLE s.t (id int, c int)",
+				"CREATE INDEX t_c_idx ON s.t (c)",
+			},
+			tier: preflight.TierCreateTable,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -88,5 +104,17 @@ func TestRequiredTier(t *testing.T) {
 	t.Run("an unparseable step fails closed", func(t *testing.T) {
 		_, err := preflight.RequiredTier([]string{"not sql at all"})
 		require.Error(t, err)
+	})
+
+	t.Run("a set mixing create table with alter table fails closed", func(t *testing.T) {
+		// The off-ladder create tier proves creation access only; it
+		// cannot vouch for the ladder rungs an existing-table alter needs,
+		// and no front door produces such a set.
+		_, err := preflight.RequiredTier([]string{
+			"CREATE TABLE s.t (id int)",
+			"ALTER TABLE s.u ADD COLUMN c int",
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "mixes CREATE TABLE with ALTER TABLE")
 	})
 }

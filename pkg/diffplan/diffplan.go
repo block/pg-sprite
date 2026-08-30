@@ -153,18 +153,28 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 }
 
 // qualifiedDesired renders the desired statements as the plan for a table
-// that does not exist yet, qualified onto the target schema.
+// that does not exist yet, qualified onto the target schema. The statements
+// arrive in execution order — the CREATE TABLE first, the indexes in input
+// order after it, ordered once by statement.ParseDesired — so the plan
+// states the exact order the create path executes and a plan statement's
+// verdict is the verdict of the step at the same position.
 func qualifiedDesired(ds statement.DesiredSchema, schema string) ([]schemadiff.Change, error) {
 	statements := ds.Statements()
+	if len(statements) == 0 || statements[0].Kind() != statement.KindCreateTable {
+		// INV: ST-8 — a DesiredSchema proof guarantees a CREATE TABLE
+		// ordered first; a set that does not lead with one means the proof
+		// was forged or mutated.
+		return nil, errors.New("desired schema does not lead with a CREATE TABLE")
+	}
 	changes := make([]schemadiff.Change, 0, len(statements))
 	for _, st := range statements {
 		qualified, err := statement.Qualify(st.SQL(), schema)
 		if err != nil {
 			return nil, fmt.Errorf("qualify desired statement: %w", err)
 		}
-		kind := schemadiff.ChangeCreateTable
-		if st.Kind() == statement.KindCreateIndex {
-			kind = schemadiff.ChangeCreateIndex
+		kind := schemadiff.ChangeCreateIndex
+		if st.Kind() == statement.KindCreateTable {
+			kind = schemadiff.ChangeCreateTable
 		}
 		changes = append(changes, schemadiff.Change{SQL: qualified, Kind: kind})
 	}

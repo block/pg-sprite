@@ -143,13 +143,38 @@ package. Landing this is one of:
 
 ### Routing the create path's refusals
 
+A greenfield desired file — the table does not exist on the target — has no single routing
+class, and an adapter must not fold its outcomes into one arm. `migrate.RunDesired` resolves
+it to one of four things:
+
+| Outcome | Routing class |
+| --- | --- |
+| Executed | The table and its indexes exist; a rerun converges to an empty plan |
+| `create-collision` refusal | **Re-plan**: re-diff the live catalog — something now owns the name; never blindly retry |
+| `insufficient-privileges` refusal (`*preflight.PrivilegeError`, `Tier == TierCreateTable`) | **Operator provisioning action**: the role needs the exact `GRANT` the error carries — not a desired-file fix, and not retryable until granted |
+| Admission refusal (`unsupported-statement`) | **Author action**: the desired file states a shape the create path refuses; retrying unchanged cannot succeed |
+
+Only the last is an author error. An adapter that surfaces every greenfield refusal as
+"fix your desired file" gives operators the wrong instruction for the two middle rows. A
+create that failed mid-sequence follows the
+[committed-prefix contract](execution-model.md#the-committed-prefix) — the closing
+paragraph of this section says what that means for the gate: it stays closed until the
+live catalog is re-diffed; the failed run is never a no-op.
+
 The greenfield `CREATE TABLE` path is a fixed call order, all inside the apply session:
 
 1. `statement.ParseDesired` — parse and validate the desired file (refuses `REFERENCES`,
    `CONCURRENTLY`, qualified names).
-2. `preflight.CheckCreatePrivileges` — mint the `CreationRole` proof for the target schema.
-3. `preflight.CheckTableAbsent` — mint the `AbsentTarget` proof for the table name.
+2. `preflight.CheckTableAbsent` — mint the `AbsentTarget` proof for the table name.
+3. `preflight.CheckCreatePrivileges` — mint the `CreationRole` proof for the target schema.
 4. `executor.ExecuteCreate` — consume both proofs and run the set.
+
+`migrate.RunDesired` runs this sequence itself when the plan is greenfield — the adapter
+does not assemble it and must not mint either proof separately (a proof minted outside the
+executing session proves nothing about it). The order decides which refusal wins when both
+preflights would fail: absence is checked first, so an occupied name refuses as
+`create-collision` even when the role also lacks `CREATE` — the collision is the more
+actionable message (the change is not a create at all) and absence is the cheaper check.
 
 Both proofs share one rule the adapter must respect: they are **minted inside the apply
 session and consumed there** — never serialized into `SchemaChange.Metadata`, carried across
@@ -174,6 +199,7 @@ them, don't retry them uniformly:
 | --- | --- | --- |
 | `ErrDuplicateCreateName` (`duplicate-create-name`) | The desired set claims one relation name twice — including a first-choice implicit constraint-index name; refused at admission, nothing ran | Fix the desired file; retrying unchanged cannot succeed |
 | `ErrPartitionOfUnsupported` (`partition-of-unsupported`) | `PARTITION OF` binds to a live parent the absence proof does not cover | Fix the desired file; out of the create path's scope |
+| `ErrIfNotExistsUnsupported` (`if-not-exists-unsupported`) | `CREATE ... IF NOT EXISTS` succeeds as a name-only no-op over a relation it cannot vouch for — the opposite of the absence proof's fail-closed contract; refused at admission, nothing ran | Fix the desired file: state the plain `CREATE`; the absence check owns collision handling |
 | `ErrUnsupportedCreateStep` (`unsupported-create-step`) | A desired statement is not a shape the create path can run | Fix the desired file |
 | `ErrCreateCollision` (`create-collision`) | A concurrent writer took a needed name after a valid proof | Re-diff the live catalog and re-plan — the world changed; never blindly retry the create |
 

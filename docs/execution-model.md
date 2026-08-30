@@ -56,10 +56,15 @@ autocommit-each-step has two shapes in the executor:
 - **Brief catalog steps (step kind `brief`) and `VALIDATE CONSTRAINT` (step
   kind `validate-constraint`)** each run as one short *explicit* transaction:
   `BEGIN` → `SET LOCAL lock_timeout` / `statement_timeout` → the statement →
-  `COMMIT` (`pkg/executor`'s bounded runner). The explicit `BEGIN` exists
-  only because the budgets are applied with `SET LOCAL`, which is scoped to
-  that transaction — functionally it is still one statement, one
-  transaction, committed immediately, rolled back atomically on failure.
+  `COMMIT` (`pkg/executor`'s bounded runner). When the preflight proof
+  carries a schema, the same `SET LOCAL` pins `search_path` to that schema
+  then `public`, so the statement's unqualified secondary names — a
+  column's type, an expression's function — resolve in the target schema,
+  exactly as the introspection read path resolves them. The explicit
+  `BEGIN` exists only because the settings are applied with `SET LOCAL`,
+  which is scoped to that transaction — functionally it is still one
+  statement, one transaction, committed immediately, rolled back
+  atomically on failure.
 - **`CREATE INDEX CONCURRENTLY` (step kind `concurrent-index-build`)** is
   true autocommit on a dedicated budgeted session: it refuses to run inside
   any transaction block and internally manages multiple transactions of its

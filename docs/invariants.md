@@ -249,6 +249,20 @@ every desired statement's target against the absence proof the same way), `pkg/s
 (proof construction).
 *Source:* adversarial review of the optimistic front door.
 
+### ST-8 — A desired schema's statements carry execution order in the proof
+
+A `statement.DesiredSchema` orders its statements for execution at construction — the
+`CREATE TABLE` first, the indexes keeping their input order after it — so every replay of
+the file states the same order and the position mapping between a greenfield plan's
+statements and the create path's step verdicts holds by construction, not by each replay
+site re-deriving the rule. A set that does not lead with a `CREATE TABLE` means the proof
+was forged or mutated, and every consumer refuses it fail-closed rather than reordering.
+*Enforced:* `pkg/statement` (`ParseDesired` establishes the order), `pkg/diffplan`
+(`qualifiedDesired` asserts it when rendering the greenfield plan), `pkg/executor`
+(`admitCreateSteps` asserts it before anything runs); `pkg/schemadiff`'s scratch
+materialization relies on it to run the `CREATE TABLE` before its indexes.
+*Source:* adversarial review of the declarative front door.
+
 ## Refusals and preflight (RF)
 
 Each refusal is a preflight **error with a stated reason** — never a warning, never attempted.
@@ -346,4 +360,5 @@ about **how we write and review the code**.
 | ST-1, ST-2, ST-3, ST-4 | 8 | kill/resume, cross-version refuse, orphan-slot reap, failover reconcile |
 | ST-6 | 1 onward, complete by 8 | preflight matrix |
 | ST-7 | 1 | target-mismatch refusal + single-statement-by-construction tests |
+| ST-8 | 2 (declarative model) | parse-time ordering + forged-proof refusal tests at every replay site |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

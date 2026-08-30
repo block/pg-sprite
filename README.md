@@ -40,6 +40,10 @@ routes the statement, then executes the routed SQL — the planner's safer nativ
 default when the submitted form blocks (reported in the verdict's `executed_sql`), a bounded
 optimistic native attempt otherwise. A gated `--force` runs the submitted form as-is under the
 same budgets. Changes without an available backend get a structured refusal (exit code 2).
+Desired-state execution — converging a live table onto a `CREATE TABLE` file, including
+creating the table when it does not exist yet — is a Go API today: `migrate.RunDesired`
+in [`pkg/migrate`](pkg/migrate/desired.go); the CLI's `migrate` verb takes one imperative
+statement.
 The design docs and the phased
 build plan live in [docs/](docs/) — start with
 [docs/README.md](docs/README.md); the vision — what pg-sprite is and is not —
@@ -68,9 +72,10 @@ refusal — never a silently wrong or incomplete result:
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.
-- **Greenfield `CREATE TABLE` apply** is not user-reachable yet: the
-  executor create path exists as a library building block, but the
-  declarative front door does not route to it.
+- **Desired-state execution has no CLI verb yet** — `migrate.RunDesired`
+  (including the greenfield `CREATE TABLE` path for a table that does not
+  exist) is library-only; the CLI's `migrate` takes one imperative
+  statement.
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
   which covers one ordinary table plus its indexes per file.

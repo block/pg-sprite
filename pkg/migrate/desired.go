@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -88,13 +89,21 @@ type DesiredResult struct {
 // statement, so a statement that became unsafe after planning refuses
 // instead of running — stopping at the first refusal or failure.
 //
-// Plan-time admission is all-or-nothing: a plan that needs a table that
-// does not exist yet, contains a destructive statement, routes any
-// statement away from execution, or does not match the pinned fingerprint
-// is refused before anything runs. Execution-time semantics are
-// committed-prefix: once statements start running, an executed statement
-// stays committed even when a later one refuses or fails, and the result's
-// verdicts disclose exactly how far convergence got.
+// A table that does not exist yet takes the greenfield create path
+// instead: the plan is the desired schema itself, and after the same
+// whole-plan admission the executor's create path verifies the name is
+// free and the role can create in the schema, then runs the CREATE TABLE
+// and the index builds as brief bounded steps. An occupied name is a typed
+// [verdict.ReasonCreateCollision] refusal — the caller re-derives the plan
+// against the live catalog rather than assuming the occupant's shape.
+//
+// Plan-time admission is all-or-nothing: a plan that contains a
+// destructive statement, routes any statement away from execution, or
+// does not match the pinned fingerprint is refused before anything runs.
+// Execution-time semantics are committed-prefix: once statements start
+// running, an executed statement stays committed even when a later one
+// refuses or fails, and the result's verdicts disclose exactly how far
+// convergence got.
 //
 // The result-and-error contract mirrors [Run]'s three shapes. A refusal —
 // at plan admission or on a mid-plan statement — returns the result with a
@@ -137,6 +146,14 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	if refused, ok := admitPlan(req, report); !ok {
 		return refused, nil
 	}
+	if report.TableExists != nil && !*report.TableExists {
+		// The table does not exist: the plan is the desired schema itself
+		// and converging it means creating the table. The create path runs
+		// the whole plan through the executor's greenfield sequence — the
+		// per-statement Run pipeline below states facts about an existing
+		// table and its gate refuses CREATE TABLE outright.
+		return runCreate(ctx, pool, req, report, opts)
+	}
 
 	result := DesiredResult{Plan: report}
 	for i, ps := range report.Statements {
@@ -176,12 +193,133 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	return result, nil
 }
 
+// runCreate is the greenfield branch of desired-state execution: the plan's
+// table does not exist, so converging it means creating it. The absence and
+// creation-access proofs are minted here — in the session that executes, at
+// the point of use — and the executor's create path runs the CREATE TABLE
+// first and then the index builds, each as one brief bounded step.
+//
+// The result mirrors the convergence loop's shapes. An occupied target name
+// or a missing creation grant is a whole-plan refusal — nothing has
+// executed. Once steps start committing, semantics are committed-prefix: a
+// created table stays created when a later index build fails, the verdicts
+// disclose exactly how far the create got, and a rerun re-derives the plan
+// against the live catalog — which now sees the table — and converges the
+// remainder through the alter loop.
+func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, report plan.Report, opts Options) (DesiredResult, error) {
+	result := DesiredResult{Plan: report}
+	stopBefore := func(err error) (DesiredResult, error) {
+		result.Outcome = verdict.OutcomeFailed
+		result.Detail = committedPrefixDetail(0, len(report.Statements), stoppedBeforeVerdict)
+		return result, err
+	}
+	at, err := preflight.CheckTableAbsent(ctx, pool, req.Schema, report.Table)
+	if preflight.IsNameOccupied(err) {
+		result.Outcome = verdict.OutcomeRefused
+		result.Reason = verdict.ReasonCreateCollision
+		result.Detail = fmt.Sprintf(
+			"the plan creates %s.%s but the name is already occupied (%v); the live catalog changed "+
+				"since the plan was derived — re-derive the plan and review what it says now; nothing was executed",
+			report.Schema, report.Table, err)
+		return result, nil
+	}
+	if err != nil {
+		return stopBefore(fmt.Errorf("verify %s.%s is absent: %w", report.Schema, report.Table, err))
+	}
+	role, err := preflight.CheckCreatePrivileges(ctx, pool, req.Schema)
+	var privErr *preflight.PrivilegeError
+	if errors.As(err, &privErr) {
+		result.Outcome = verdict.OutcomeRefused
+		result.Reason = verdict.ReasonInsufficientPrivileges
+		result.Detail = privErr.Error() + "; nothing was executed"
+		return result, nil
+	}
+	if err != nil {
+		return stopBefore(fmt.Errorf("verify creation access in schema %s: %w", report.Schema, err))
+	}
+	opts.logger().Debug("create preflight passed",
+		"schema", at.Schema(), "table", at.Table(), "role", role.Role())
+
+	rep, execErr := executor.ExecuteCreate(ctx, pool, at, role, req.Desired, opts.Budget.Brief, opts.retry())
+	// The plan's statements and the executor's steps share one order — the
+	// CREATE TABLE first, then the indexes in input order — so the verdict
+	// at position i is the verdict of Plan.Statements[i].
+	for i := range rep.Steps {
+		result.Verdicts = append(result.Verdicts, createStepVerdict(report, i, opts))
+	}
+	if execErr == nil {
+		result.Outcome = verdict.OutcomeExecuted
+		// The count comes from the committed steps — the same source as
+		// the verdicts above — so the disclosure cannot claim more than
+		// the executor reported committing.
+		result.Detail = fmt.Sprintf("created: all %d planned statements committed", len(rep.Steps))
+		return result, nil
+	}
+	var stepErr *executor.SequenceStepError
+	if !errors.As(execErr, &stepErr) {
+		// No step error means nothing started: the executor refused the
+		// set at admission, from the statements' shapes alone.
+		if isCreateAdmissionRefusal(execErr) {
+			result.Outcome = verdict.OutcomeRefused
+			result.Reason = verdict.ReasonUnsupportedStatement
+			result.Detail = fmt.Sprintf("the create path refused the plan: %v; nothing was executed", execErr)
+			return result, nil
+		}
+		return stopBefore(fmt.Errorf("create %s.%s: %w", report.Schema, report.Table, execErr))
+	}
+	failed := verdict.Verdict{
+		Outcome:   verdict.OutcomeFailed,
+		Code:      string(executor.OutcomeCode(execErr)),
+		Statement: planStatementSQL(report, stepErr.Step-1),
+		Table:     report.Schema + "." + report.Table,
+		Detail:    "the step's bounded attempt failed and rolled back; Code names the outcome",
+	}
+	result.Verdicts = append(result.Verdicts, failed)
+	result.Outcome = verdict.OutcomeFailed
+	result.Detail = committedPrefixDetail(stepErr.Step-1, len(report.Statements), "failed")
+	return result, fmt.Errorf("planned statement %d: %w", stepErr.Step, execErr)
+}
+
+// createStepVerdict renders one committed create-path step as the executed
+// verdict of the plan statement at the same position.
+func createStepVerdict(report plan.Report, i int, opts Options) verdict.Verdict {
+	return verdict.Verdict{
+		Outcome:   verdict.OutcomeExecuted,
+		Statement: planStatementSQL(report, i),
+		Table:     report.Schema + "." + report.Table,
+		Detail: fmt.Sprintf("committed within budgets (lock %s, statement %s): the change was effectively instant",
+			opts.Budget.Brief.LockTimeout, opts.Budget.Brief.StatementTimeout),
+	}
+}
+
+// planStatementSQL returns the plan statement at i, empty when the position
+// is out of range — a defensive read: the executor's step count equals the
+// plan's statement count by construction, and a mismatch must not panic a
+// result renderer.
+func planStatementSQL(report plan.Report, i int) string {
+	if i < 0 || i >= len(report.Statements) {
+		return ""
+	}
+	return report.Statements[i].SQL
+}
+
+// isCreateAdmissionRefusal reports whether err is one of the create path's
+// static admission refusals: decided from the desired statements' shapes
+// before anything executes, so it maps to a refusal verdict, not an
+// operational error.
+func isCreateAdmissionRefusal(err error) bool {
+	return errors.Is(err, executor.ErrPartitionOfUnsupported) ||
+		errors.Is(err, executor.ErrIfNotExistsUnsupported) ||
+		errors.Is(err, executor.ErrUnsupportedCreateStep) ||
+		errors.Is(err, executor.ErrDuplicateCreateName)
+}
+
 // admitPlan is the all-or-nothing plan-time admission: it refuses the whole
 // plan — before anything runs — when the plan cannot converge the table as
 // a unit. The checks run from the caller's contract outward: the pinned
 // fingerprint first (the caller's approval is void whatever else holds),
-// then the table's existence, then the destructive guard, then the routed
-// dispositions. An empty (already-converged) plan never reaches admission:
+// then the destructive guard, then the routed dispositions. An empty
+// (already-converged) plan never reaches admission:
 // the caller resolves it first, because it carries no plan identity for
 // the pin to verify and nothing would run anyway.
 func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
@@ -192,14 +330,6 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 			"the plan derived at execution time (fingerprint %s) is not the pinned plan (fingerprint %s); "+
 				"the live table or the desired schema changed since the plan was reviewed — re-review the new plan",
 			report.Fingerprint, req.ExpectedFingerprint)
-		return refused, false
-	}
-	if report.TableExists != nil && !*report.TableExists {
-		refused.Reason = verdict.ReasonUnsupportedStatement
-		refused.Detail = fmt.Sprintf(
-			"table %s.%s does not exist; desired-state execution converges an existing table — "+
-				"create the table from the plan's SQL script first",
-			report.Schema, report.Table)
 		return refused, false
 	}
 	for i, ps := range report.Statements {
