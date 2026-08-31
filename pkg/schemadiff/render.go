@@ -26,6 +26,11 @@ var ErrUnrenderableDefault = errors.New("sequence-backed default cannot be rende
 // instead of emitting a wrong baseline.
 var ErrUnrenderablePartition = errors.New("partitioned tables cannot be rendered as a desired schema")
 
+// ErrUnrenderableInheritance is returned for either side of a classic
+// PostgreSQL inheritance relationship. The desired model cannot express
+// inheritance edges, so rendering would flatten a child or omit its children.
+var ErrUnrenderableInheritance = errors.New("table inheritance cannot be rendered as a desired schema")
+
 // ErrUnrenderableForeignKey is returned when other tables reference this
 // one with foreign keys. A desired file cannot declare foreign keys, so
 // the single-table model carries no incoming foreign-key topology — a
@@ -61,6 +66,12 @@ func Render(m Model) (string, error) {
 	}
 	if m.IsPartition {
 		return "", fmt.Errorf("render table %q: partition of a partitioned parent: %w", m.Table, ErrUnrenderablePartition)
+	}
+	if len(m.InheritsParents) != 0 {
+		return "", fmt.Errorf("render table %q: inherits from %s: %w", m.Table, strings.Join(m.InheritsParents, ", "), ErrUnrenderableInheritance)
+	}
+	if len(m.InheritanceChildren) != 0 {
+		return "", fmt.Errorf("render table %q: has inheritance children %s: %w", m.Table, strings.Join(m.InheritanceChildren, ", "), ErrUnrenderableInheritance)
 	}
 	if len(m.ReferencedBy) != 0 {
 		return "", fmt.Errorf("render table %q: referenced by foreign keys (%s): %w", m.Table, strings.Join(m.ReferencedBy, ", "), ErrUnrenderableForeignKey)

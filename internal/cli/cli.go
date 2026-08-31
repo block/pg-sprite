@@ -21,7 +21,7 @@ type CLI struct {
 	Version kong.VersionFlag `help:"Print version and exit."`
 
 	Migrate MigrateCmd `cmd:"" help:"Run a schema change safely."`
-	Pull    PullCmd    `cmd:"" help:"Export live tables as desired-state schema files."`
+	Pull    PullCmd    `cmd:"" help:"Export live tables to new desired-state schema files. Output is create-only: a second run into a populated directory fails per table; delete or move existing files to refresh them."`
 	Diff    DiffCmd    `cmd:"" help:"Diff a desired-state schema file against the live schema."`
 	Fmt     FmtCmd     `cmd:"" help:"Canonicalize a schema file."`
 	Lint    LintCmd    `cmd:"" help:"Lint DDL for unsafe patterns."`
@@ -128,7 +128,7 @@ type PullCmd struct {
 	DBFlags `embed:""`
 
 	Schema string `help:"Schema containing the tables to export." default:"public"`
-	Out    string `help:"Directory for the exported .sql files." short:"o" default:"schema" type:"path"`
+	Out    string `help:"Directory for create-only exported .sql files; delete or move existing files before refreshing." short:"o" default:"schema" type:"path"`
 }
 
 // Run implements the pull subcommand.

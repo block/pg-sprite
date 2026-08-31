@@ -77,6 +77,9 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 	}
 
 	m := Model{Table: table, PartitionKey: partitionKey, IsPartition: isPartition, Unlogged: persistence == "u"}
+	if m.InheritsParents, m.InheritanceChildren, err = introspectInheritance(ctx, tx, oid); err != nil {
+		return Model{}, fmt.Errorf("introspect inheritance of %s.%s: %w", schema, table, err)
+	}
 	if m.Columns, err = introspectColumns(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect columns of %s.%s: %w", schema, table, err)
 	}
@@ -90,6 +93,53 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 		return Model{}, fmt.Errorf("introspect incoming foreign keys of %s.%s: %w", schema, table, err)
 	}
 	return m, nil
+}
+
+// introspectInheritance reads classic PostgreSQL inheritance in both
+// directions. Declarative partitioning also uses pg_inherits, so only edges
+// whose child is not marked relispartition belong to classic inheritance.
+func introspectInheritance(ctx context.Context, tx pgx.Tx, oid uint32) ([]string, []string, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT direction, nspname || '.' || relname
+		FROM (
+			SELECT 0 AS direction, pn.nspname, p.relname
+			FROM pg_inherits i
+			JOIN pg_class child ON child.oid = i.inhrelid
+			JOIN pg_class p ON p.oid = i.inhparent
+			JOIN pg_namespace pn ON pn.oid = p.relnamespace
+			WHERE i.inhrelid = $1 AND NOT child.relispartition
+			UNION ALL
+			SELECT 1 AS direction, cn.nspname, child.relname
+			FROM pg_inherits i
+			JOIN pg_class child ON child.oid = i.inhrelid
+			JOIN pg_namespace cn ON cn.oid = child.relnamespace
+			WHERE i.inhparent = $1 AND NOT child.relispartition
+		) inheritance
+		ORDER BY direction, nspname, relname`, oid)
+	if err != nil {
+		return nil, nil, fmt.Errorf("query inheritance: %w", err)
+	}
+	defer rows.Close()
+	var parents, children []string
+	for rows.Next() {
+		var direction int
+		var relation string
+		if err := rows.Scan(&direction, &relation); err != nil {
+			return nil, nil, fmt.Errorf("scan inheritance: %w", err)
+		}
+		switch direction {
+		case 0:
+			parents = append(parents, relation)
+		case 1:
+			children = append(children, relation)
+		default:
+			return nil, nil, fmt.Errorf("unexpected inheritance direction %d", direction)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("read inheritance: %w", err)
+	}
+	return parents, children, nil
 }
 
 // introspectColumns reads the canonical column list: server-formatted types

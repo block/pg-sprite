@@ -125,7 +125,7 @@ Support differs by front door, so the matrix marks the exceptions:
   file against the live table. This door depends on the canonical table *model*, which
   is deliberately narrower: a table the model cannot fully describe gets a typed
   refusal rather than a silently lossy description. Today that means tables that are
-  partitioned (or are partitions), own or are referenced by foreign keys, are unlogged,
+  partitioned (or are partitions), participate in classic table inheritance, own or are referenced by foreign keys, are unlogged,
   carry explicit collations, or take defaults from sequences they do not own.
 
 An operation can therefore be T1 imperatively and T2 declaratively — foreign keys are
@@ -193,6 +193,7 @@ Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today
 | Table shape | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | Plain tables + their indexes | ✅ | native, as-is | Yes | `diff`, `pull`, and desired-file rendering round-trip the canonical model |
+| Classic table inheritance (`INHERITS`) | 🟡 | native, planned flow | Yes | Typed refusal for both parents and children: the model cannot express inheritance edges, and flattening inherited columns would produce a silently lossy baseline |
 | Tables that own **or are referenced by** foreign keys | 🟡 | native, planned flow | Yes | Typed refusal on both sides — an incoming FK cannot be expressed in the table's own desired file, and a lossy description would be worse than none. Declarative FK support (composite keys as the primary case, two-phase `NOT VALID` → `VALIDATE` execution) is planned |
 | Unlogged tables | 🟡 | native, planned flow | Yes | Typed refusal: persistence is not modeled, converging it (`SET LOGGED`) is a full rewrite, and rendering the table as plain `CREATE TABLE` would silently change crash-safety |
 | Explicit column collations | 🟡 | native, planned flow | Yes | Typed refusal: dropping a `COLLATE` clause from a rendered baseline silently changes sort order and index semantics; a collation delta cannot converge without a rewrite |

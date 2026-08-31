@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -43,12 +44,19 @@ func (c *PullCmd) run(ctx context.Context, out io.Writer) error {
 	}
 	defer pool.Close()
 
-	if err := os.MkdirAll(c.Out, 0o755); err != nil {
-		return fmt.Errorf("create output directory %s: %w", c.Out, err)
+	var schemaExists bool
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)`, c.Schema).Scan(&schemaExists); err != nil {
+		return fmt.Errorf("check schema %s: %w", c.Schema, err)
+	}
+	if !schemaExists {
+		return fmt.Errorf("schema %q does not exist", c.Schema)
 	}
 	tables, err := listTables(ctx, pool, c.Schema)
 	if err != nil {
 		return err
+	}
+	if err := os.MkdirAll(c.Out, 0o755); err != nil {
+		return fmt.Errorf("create output directory %s: %w", c.Out, err)
 	}
 	results := pullTables(ctx, pool, c.Schema, c.Out, tables, pullOneTable)
 	if err := writePullText(out, results); err != nil {
@@ -63,6 +71,12 @@ func listTables(ctx context.Context, pool *pgxpool.Pool, schema string) ([]strin
 		FROM pg_catalog.pg_class c
 		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')
+		  AND NOT c.relispartition
+		  AND NOT EXISTS (
+		      SELECT 1 FROM pg_catalog.pg_depend d
+		      WHERE d.classid = 'pg_class'::regclass
+		        AND d.objid = c.oid AND d.deptype = 'e'
+		  )
 		ORDER BY c.relname`, schema)
 	if err != nil {
 		return nil, fmt.Errorf("list tables in schema %s: %w", schema, err)
@@ -84,12 +98,26 @@ func listTables(ctx context.Context, pool *pgxpool.Pool, schema string) ([]strin
 
 func pullTables(ctx context.Context, pool *pgxpool.Pool, schema, outDir string, tables []string, pull tablePuller) []pullResult {
 	results := make([]pullResult, 0, len(tables))
+	seenPaths := make(map[string]string, len(tables))
 	for _, table := range tables {
+		if err := ctx.Err(); err != nil {
+			results = append(results, pullResult{table: table, status: pullStatusError, err: err})
+			break
+		}
 		path, err := tableOutputPath(outDir, table)
 		if err != nil {
 			results = append(results, pullResult{table: table, status: pullStatusError, err: err})
 			continue
 		}
+		pathKey := strings.ToLower(filepath.Base(path))
+		if other, ok := seenPaths[pathKey]; ok {
+			results = append(results, pullResult{
+				table: table, status: pullStatusError,
+				err: fmt.Errorf("output file name has a case collision with table %q", other),
+			})
+			continue
+		}
+		seenPaths[pathKey] = table
 		err = pull(ctx, pool, schema, table, path)
 		result := pullResult{table: table, path: path, status: pullStatusPulled}
 		if err != nil {
@@ -141,7 +169,8 @@ func pullRenderedFile(path, rendered string) error {
 		return errors.Join(fmt.Errorf("write %s: %w", path, err), closeErr, removeErr)
 	}
 	if err := file.Close(); err != nil {
-		return fmt.Errorf("close %s: %w", path, err)
+		removeErr := os.Remove(path)
+		return errors.Join(fmt.Errorf("close %s: %w", path, err), removeErr)
 	}
 	return nil
 }
@@ -149,15 +178,19 @@ func pullRenderedFile(path, rendered string) error {
 func writePullText(out io.Writer, results []pullResult) error {
 	counts := map[pullStatus]int{}
 	for _, result := range results {
-		counts[result.status]++
 		var err error
 		switch result.status {
 		case pullStatusPulled:
+			counts[result.status]++
 			_, err = fmt.Fprintf(out, "PULLED  %s -> %s\n", result.table, result.path)
 		case pullStatusRefused:
+			counts[result.status]++
 			_, err = fmt.Fprintf(out, "REFUSED %s: %v\n", result.table, result.err)
 		case pullStatusError:
+			counts[result.status]++
 			_, err = fmt.Fprintf(out, "ERROR   %s: %v\n", result.table, result.err)
+		default:
+			return fmt.Errorf("write pull report: unexpected pull status %q for table %q", result.status, result.table)
 		}
 		if err != nil {
 			return fmt.Errorf("write pull report: %w", err)

@@ -41,6 +41,37 @@ func TestPullTablesContinuesAfterFailures(t *testing.T) {
 	assert.ErrorIs(t, pullResultsError(results), ErrPullFailed)
 }
 
+func TestPullTablesReportsCaseFoldedPathCollision(t *testing.T) {
+	var called []string
+	pull := func(_ context.Context, _ *pgxpool.Pool, _, table, _ string) error {
+		called = append(called, table)
+		return nil
+	}
+
+	results := pullTables(t.Context(), nil, "public", t.TempDir(), []string{"Accounts", "accounts"}, pull)
+
+	assert.Equal(t, []string{"Accounts"}, called)
+	require.Len(t, results, 2)
+	assert.Equal(t, pullStatusPulled, results[0].status)
+	assert.Equal(t, pullStatusError, results[1].status)
+	assert.ErrorContains(t, results[1].err, `case collision with table "Accounts"`)
+}
+
+func TestPullTablesStopsAfterContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	pull := func(_ context.Context, _ *pgxpool.Pool, _, _, _ string) error {
+		cancel()
+		return nil
+	}
+
+	results := pullTables(ctx, nil, "public", t.TempDir(), []string{"first", "second", "third"}, pull)
+
+	require.Len(t, results, 2)
+	assert.Equal(t, pullStatusPulled, results[0].status)
+	assert.Equal(t, "second", results[1].table)
+	assert.ErrorIs(t, results[1].err, context.Canceled)
+}
+
 func TestPullResultsErrorReturnsRefusalWhenNoOperationalErrors(t *testing.T) {
 	results := []pullResult{{status: pullStatusPulled}, {status: pullStatusRefused}}
 	assert.ErrorIs(t, pullResultsError(results), verdict.ErrRefused)
@@ -63,6 +94,13 @@ func TestWritePullTextSummarizesOutcomes(t *testing.T) {
 		"REFUSED metrics: partitioned\n"+
 		"ERROR   events: exists\n"+
 		"Summary: 1 pulled, 1 refused, 1 errors\n", out.String())
+}
+
+func TestWritePullTextRejectsUnknownStatus(t *testing.T) {
+	var out strings.Builder
+	err := writePullText(&out, []pullResult{{table: "events", status: pullStatus("future")}})
+	require.ErrorContains(t, err, `unexpected pull status "future"`)
+	assert.Empty(t, out.String())
 }
 
 func TestPullOneTableDoesNotOverwriteExistingFile(t *testing.T) {

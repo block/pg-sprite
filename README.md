@@ -161,6 +161,7 @@ change — every other command is read-only or fully offline.
 | `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets |
 | `migrate --dry-run` | required | The same introspection as a real run — server version, target resolution, table facts — so the printed plan reflects the actual target; executes nothing |
 | `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
+| `pull` | required | Introspect each supported table in a schema and create one desired-state file per table; existing files are never overwritten |
 | `status` | required | Read-only view over `pg_stat_activity` for live pg-sprite sessions on the connected database |
 | `fmt` | none | Canonicalize a schema file — parser only |
 | `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone |

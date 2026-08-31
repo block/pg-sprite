@@ -157,6 +157,32 @@ func TestRenderRefusesLivePartitionedTables(t *testing.T) {
 	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
 }
 
+func TestRenderRefusesLiveClassicInheritanceOnBothSides(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.parent (id bigint NOT NULL)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.child (note text) INHERITS (%s.parent)", schema, schema))
+	require.NoError(t, err)
+
+	parent, err := schemadiff.Introspect(t.Context(), pool, schema, "parent")
+	require.NoError(t, err)
+	assert.Equal(t, []string{schema + ".child"}, parent.InheritanceChildren)
+	assert.Empty(t, parent.InheritsParents)
+	_, err = schemadiff.Render(parent)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderableInheritance)
+
+	child, err := schemadiff.Introspect(t.Context(), pool, schema, "child")
+	require.NoError(t, err)
+	assert.Equal(t, []string{schema + ".parent"}, child.InheritsParents)
+	assert.Empty(t, child.InheritanceChildren)
+	_, err = schemadiff.Render(child)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderableInheritance)
+}
+
 // A live table with a foreign key cannot be rendered: the desired-file
 // grammar refuses foreign keys, and the renderer surfaces that gate's typed
 // error rather than emitting a file the front door would reject.
