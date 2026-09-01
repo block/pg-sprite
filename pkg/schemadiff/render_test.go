@@ -119,6 +119,18 @@ func TestRenderRefusesPartitionedTables(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnrenderablePartition)
 }
 
+func TestRenderRefusesClassicInheritance(t *testing.T) {
+	child := base()
+	child.InheritsParents = []string{"public.parent"}
+	_, err := Render(child)
+	require.ErrorIs(t, err, ErrUnrenderableInheritance)
+
+	parent := base()
+	parent.InheritanceChildren = []string{"public.child"}
+	_, err = Render(parent)
+	require.ErrorIs(t, err, ErrUnrenderableInheritance)
+}
+
 // A zero-column table is legal PostgreSQL and renders as an empty body,
 // not an empty line between the parentheses.
 func TestRenderZeroColumnTable(t *testing.T) {

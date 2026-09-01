@@ -1,6 +1,6 @@
 // Package cli defines the pg-sprite command tree (Kong): migrate and
-// status (the optimistic front door), diff and fmt (the declarative front
-// door), and lint and suggest (the offline checker and advisor).
+// status (the optimistic front door), pull, diff, and fmt (the declarative
+// front door), and lint and suggest (the offline checker and advisor).
 package cli
 
 import (
@@ -21,6 +21,7 @@ type CLI struct {
 	Version kong.VersionFlag `help:"Print version and exit."`
 
 	Migrate MigrateCmd `cmd:"" help:"Run a schema change safely."`
+	Pull    PullCmd    `cmd:"" help:"Export live tables to new desired-state schema files. Output is create-only: a second run into a populated directory fails per table; delete or move existing files to refresh them."`
 	Diff    DiffCmd    `cmd:"" help:"Diff a desired-state schema file against the live schema."`
 	Fmt     FmtCmd     `cmd:"" help:"Canonicalize a schema file."`
 	Lint    LintCmd    `cmd:"" help:"Lint DDL for unsafe patterns."`
@@ -121,6 +122,17 @@ func (c *MigrateCmd) Validate() error {
 
 // Run implements the migrate subcommand.
 func (c *MigrateCmd) Run() error { return c.run(context.Background(), os.Stdout) }
+
+// PullCmd exports every table in one schema as a desired-state schema file.
+type PullCmd struct {
+	DBFlags `embed:""`
+
+	Schema string `help:"Schema containing the tables to export." default:"public"`
+	Out    string `help:"Directory for create-only exported .sql files; delete or move existing files before refreshing." short:"o" default:"schema" type:"path"`
+}
+
+// Run implements the pull subcommand.
+func (c *PullCmd) Run() error { return c.run(context.Background(), os.Stdout) }
 
 // DiffCmd derives statements from a desired-state schema (declarative
 // front-end): introspect the live table, materialize the desired state on a

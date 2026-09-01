@@ -98,6 +98,14 @@ type Model struct {
 	// IsPartition reports that the table is itself a partition of a
 	// partitioned parent (pg_class.relispartition).
 	IsPartition bool
+	// InheritsParents lists the classic-inheritance parents of this table.
+	// Declarative partitions use the same pg_inherits catalog but are
+	// excluded using pg_class.relispartition.
+	InheritsParents []string
+	// InheritanceChildren lists the classic-inheritance children of this
+	// table. The model carries both directions so rendering either side can
+	// fail closed rather than flattening inherited columns or losing edges.
+	InheritanceChildren []string
 	// Unlogged reports that the table is unlogged
 	// (pg_class.relpersistence 'u'). The declarative model does not manage
 	// persistence yet — converging it (SET LOGGED / SET UNLOGGED) is a
