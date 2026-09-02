@@ -383,7 +383,7 @@ idle and a plain rewrite is acceptable); it is an escape hatch, not a shortcut, 
 > executors are described in the architecture section and in
 > tool-pgroll.md. The per-primitive **Spirit (MySQL) →
 > PostgreSQL mapping** this executor is built on lives in
-> 12-mysql-vs-postgresql.md § primitive mapping.
+> [mysql-vs-postgresql.md § primitive mapping](mysql-vs-postgresql.md#copy-and-swap-executor-spirit-mysql--postgresql-primitive-mapping).
 
 ```
 +----------------------------------------------------------------------+

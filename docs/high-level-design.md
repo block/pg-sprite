@@ -285,8 +285,8 @@ Two things define this path and distinguish it from existing PostgreSQL tools:
   continuous re-verification loop while it waits.
 
 The mechanism (logical decoding, chunking, the transactional swap, checkpoint/resume) and the
-MySQL→PostgreSQL primitive mapping are in the low-level design and
-mysql-vs-postgresql.md.
+MySQL→PostgreSQL primitive mapping are in the [low-level design](low-level-design.md#copy-and-swap-executor-lifecycle) and
+[mysql-vs-postgresql.md](mysql-vs-postgresql.md#copy-and-swap-executor-spirit-mysql--postgresql-primitive-mapping).
 
 ## What it covers (and what it deliberately does not)
 

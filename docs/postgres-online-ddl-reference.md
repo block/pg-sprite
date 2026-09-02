@@ -14,10 +14,43 @@ These are exactly the two dimensions MySQL lets authors *assert* with `ALGORITHM
 pg-sprite's `diff` and `migrate --dry-run` are that missing declaration today: they classify
 and route the change. Routed execution lands with the Phase 3 executor.
 
-The rest of this document breaks down both dimensions per operation. 
+The rest of this document breaks down both dimensions per operation.
+
+## The three buckets: what MySQL's `ALGORITHM` states map to
+
+MySQL 8.0 asserts one of three work-done states per `ALTER`: `INSTANT` (metadata only),
+`INPLACE` (rebuilt in place — usually a full scan, sometimes a rebuild — while DML continues),
+and `COPY` (a full table copy). In practice MySQL tooling treats this as binary — INSTANT, or
+a copy — because INPLACE on a large table costs about what COPY does.
+
+PostgreSQL has the same three states; it just does not name them. Crossing the two axes
+above (lock × work done) gives exactly three buckets every DDL in this reference falls into:
+
+| Bucket | Work done | Lock | MySQL analog | Examples | pg-sprite route |
+| --- | --- | --- | --- | --- | --- |
+| **Catalog-only** | none — a catalog entry changes; no row is read or written | brief `ACCESS EXCLUSIVE` (milliseconds once acquired) | `ALGORITHM=INSTANT` | `ADD COLUMN` (nullable or constant default), `DROP COLUMN`, `SET/DROP DEFAULT`, `DROP NOT NULL`, renames, [binary-coercible type changes](binary-coercible-type-changes.md) | native, as written |
+| **Full scan, no rewrite** | every row is *read* (to validate or to build an index); the heap is not rewritten | native online forms hold `SHARE UPDATE EXCLUSIVE` for the scan; the as-written forms hold a blocking lock for the whole scan | `ALGORITHM=INPLACE` | `SET NOT NULL`, `ADD CONSTRAINT … CHECK/FOREIGN KEY`, `ADD CONSTRAINT … UNIQUE`, `CREATE INDEX` | native, **safer sequence** substituted (`NOT VALID` + `VALIDATE`, `CONCURRENTLY` + `USING INDEX`) |
+| **Full rewrite** | every row is *written* into a new heap; all indexes rebuilt | `ACCESS EXCLUSIVE` for the whole rewrite | `ALGORITHM=COPY` | `ALTER COLUMN TYPE` (non-coercible), `ADD COLUMN … DEFAULT <volatile>`, `ADD COLUMN … GENERATED … STORED`, `SET TABLESPACE`, `VACUUM FULL`/`CLUSTER` | **copy-and-swap** (typed refusal until the executor lands) |
+
+Two things fall out of this. For a coarse "does this cost scale with table size?" question,
+the last two buckets answer alike — only the first is free. For deciding *how* to run the
+change, the split between the second and third bucket is what matters: the second bucket
+nearly always has a native online form that keeps DML flowing (the lock, not the scan, was
+the problem — exclusion constraints are the notable exception); the third has none, and only
+a copy-and-swap avoids the long exclusive lock. The
+plan report's `decisions[].reason` vocabulary
+([plan-report.md](plan-report.md#planner-decision-reasons-decisionsreason)) is this table
+made machine-readable: `metadata-only` / `fast-default` / `binary-coercible` are the first
+bucket, `safer-idiom` the second, `type-rewrite` / `volatile-default` / `generated-stored` /
+`relocation` the third.
+
+The MySQL-side detail — how `ALGORITHM=` and `LOCK=` are asserted and how the two engines'
+lock models line up — is in
+[mysql-vs-postgresql.md](mysql-vs-postgresql.md#how-online-ddl-is-expressed).
 
 ## Table of contents
 
+- [The three buckets: what MySQL's `ALGORITHM` states map to](#the-three-buckets-what-mysqls-algorithm-states-map-to)
 - [Lock levels (weakest → strongest)](#lock-levels-weakest--strongest)
 - [Why DDL is dangerous: the lock queue](#why-ddl-is-dangerous-the-lock-queue)
 - [Column operations](#column-operations)
@@ -44,13 +77,13 @@ ACCESS SHARE  <  ROW SHARE  <  ROW EXCLUSIVE  <  SHARE UPDATE EXCLUSIVE
 ### Comparison with MySQL / InnoDB
 
 The PostgreSQL lock-mode → MySQL 8.0 (MDL + InnoDB) mapping, the `ALGORITHM=`/`LOCK=` contrast,
-and the brief-exclusive-lock parallel now live in the dedicated comparison doc:
-**12-mysql-vs-postgresql.md § Lock model comparison**.
+and the brief-exclusive-lock parallel live in the dedicated comparison doc:
+[mysql-vs-postgresql.md § Lock model comparison](mysql-vs-postgresql.md#lock-model-comparison).
 
 ## Why DDL is dangerous: the lock queue
 
 This is covered in the comparison reference:
-**12-mysql-vs-postgresql.md § Why DDL is dangerous: the lock queue**.
+[mysql-vs-postgresql.md § Why DDL is dangerous: the lock queue](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue).
 It explains the three-step lock-queue pile-up, why the DDL (not the long query) is the
 catalyst, how long the impact lasts, the mitigations the engine relies on, and why MySQL has
 the same dynamic via metadata locks. Read it first if any of that is unfamiliar.
@@ -313,7 +346,10 @@ the catalog instead of rewriting the table. Catalog-only; runs as written.
 
 The type change is binary-coercible (for example `varchar(50)` → `varchar(100)`,
 or `varchar` → `text`), so PostgreSQL relabels the column in place without a
-table rewrite. Runs as written.
+table rewrite. Runs as written. How PostgreSQL decides, which changes only
+*look* free (shortening `varchar`, changing `numeric` scale, `char(n)` → `text`),
+and the exact rules pg-sprite accepts are in
+[binary-coercible-type-changes.md](binary-coercible-type-changes.md).
 
 ### `safer-idiom`
 
