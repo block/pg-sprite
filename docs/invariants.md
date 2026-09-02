@@ -99,7 +99,7 @@ order-preserving apply within the batch, per-row retry on unique violation, or d
 pairs — and prove convergence under test. The checksum (CO-1) backstops, but the applier must
 converge without it. *Enforced:* applier batch semantics (design work, Phase 6). *Source:* Spirit
 `pkg/change/README.md` (the REPLACE rationale) — the PG translation in
-mysql-vs-postgresql
+[mysql-vs-postgresql](mysql-vs-postgresql.md#copy-and-swap-executor-spirit-mysql--postgresql-primitive-mapping)
 is incomplete without this.
 
 ### CO-7 — Every statement parses, or it is an error
@@ -138,7 +138,7 @@ mutual-exclusion gap called out in the validation review.
 The cutover swap is the only `ACCESS EXCLUSIVE` acquisition in the happy path, and **every**
 strong-lock acquisition (swap, catalog flips, trigger install in fallback mode) runs under
 `lock_timeout` + bounded retry/backoff so the engine never sits at the head of the lock queue
-(mysql-vs-postgresql § the lock queue).
+([mysql-vs-postgresql § the lock queue](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue)).
 **Exception policy required:** `CREATE INDEX CONCURRENTLY` and `REINDEX CONCURRENTLY` wait on
 other transactions via lock waits that a naive `lock_timeout` cancels — leaving an `INVALID`
 index — so they get their own wait policy (no per-lock timeout, one overall statement deadline)
@@ -148,7 +148,7 @@ executor's validate class deliberately keeps a bounded per-lock timeout — queu
 conflicting lock holder must not stall a sequence for the whole scan budget — while the scan
 itself runs under its own generous overall budget. *Enforced:* every DDL execution path in the
 native and copy-and-swap executors.
-*Source:* [design-principles](design-principles.md#correctness-and-safety), mysql-vs-postgresql;
+*Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
 ### LK-3 — Pending work is claimed exactly once, and Wait means finished
