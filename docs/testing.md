@@ -204,7 +204,7 @@ mirrors.
 
 ### How much of the suite runs on Ministack
 
-Deliberately almost none: one test, three subtests sharing one provisioned
+Deliberately almost none: one test whose subtests share one provisioned
 cluster ([ministack_integration_test.go](../internal/testutil/ministack_integration_test.go))
 — provisioning costs minutes, so the tier provisions once and orders the
 password rotation last. Each subtest pins one AWS seam:
@@ -221,7 +221,17 @@ password rotation last. Each subtest pins one AWS seam:
 - **password rotation** — RDS-managed password generation, rotation, and
   Secrets Manager resolution, plus what a rotation does to a running schema
   change (see below) and pg-sprite's contract that the resulting auth failure
-  is terminal, not retryable.
+  is terminal, not retryable;
+- **reader read-only boundary** — a real streaming-replication standby accepts
+  catalog preflight reads, refuses writes with SQLSTATE `25006`, and the
+  connection layer classifies that refusal as terminal;
+- **stop/start resilience** — stopping real cluster compute interrupts active
+  DDL with the terminal, fail-closed `execution-failed` outcome, then starting
+  it restores the writer and allows a fresh schema change;
+- **metadata failover** — `FailoverDBCluster` flips the API-visible writer and
+  reports `failing-over` while an established writer transaction remains
+  usable. Ministack does not yet promote the standby at the data plane, so the
+  test deliberately makes no such claim.
 
 ### What a password rotation does to a running schema change
 
@@ -291,7 +301,7 @@ stays unit-only so pushes remain fast.
 | Verify-full TLS against a live TLS-only server | [pkg/dbconn/tls_integration_test.go](../pkg/dbconn/tls_integration_test.go) |
 | Targeted blocker termination | [pkg/dbconn/dbconn_integration_test.go](../pkg/dbconn/dbconn_integration_test.go) |
 | Test harness self-checks | [internal/testutil](../internal/testutil/postgres_test.go) |
-| RDS control-plane provisioning → endpoint discovery → `dbconn` connect, error contract, password-rotation behavior (Ministack) | [internal/testutil/ministack_integration_test.go](../internal/testutil/ministack_integration_test.go) |
+| RDS control-plane provisioning → endpoint discovery → `dbconn` connect, reader read-only behavior, stop/start resilience, metadata failover, error contract, password rotation (Ministack) | [internal/testutil/ministack_integration_test.go](../internal/testutil/ministack_integration_test.go) |
 | Parse boundary, typed operations, and advisory rewrites | [pkg/statement](../pkg/statement/statement_test.go), [operation tests](../pkg/statement/ops_test.go) |
 | Native / copy-and-swap / refuse classification and safer SQL | [pkg/planner](../pkg/planner/planner_test.go) |
 | Backend routing and copy-and-swap unavailable disposition | [pkg/router](../pkg/router/router_test.go) |

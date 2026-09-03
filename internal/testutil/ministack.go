@@ -94,7 +94,7 @@ func ministackImage() string {
 	if img := os.Getenv("MINISTACK_IMAGE"); img != "" {
 		return img
 	}
-	return "ministackorg/ministack:1.4.15-full"
+	return "ministackorg/ministack:1.5.6-full"
 }
 
 // auroraEngineVersion returns a real aurora-postgresql engine version for
@@ -134,11 +134,15 @@ type AuroraCluster struct {
 	ClusterID string
 	// InstanceID is the DBInstanceIdentifier of the cluster's sole instance.
 	InstanceID string
+	// ReaderInstanceID is the cluster member backed by a real PostgreSQL
+	// hot standby when the harness enables Ministack's replication mode.
+	ReaderInstanceID string
 
 	// addr is the host:port the test connects to — the discovered cluster
 	// endpoint when reachable, otherwise the sibling container's
 	// host-published address (see ProvisionAuroraPostgres).
-	addr string
+	addr       string
+	readerAddr string
 	// password is the master password the cluster currently accepts.
 	// Rotate keeps it in sync with the control plane so URL never goes
 	// silently stale after a rotation.
@@ -155,6 +159,11 @@ func (c *AuroraCluster) URL() string {
 	return c.urlWithPassword(c.password)
 }
 
+// ReaderURL returns a connection URL for the cluster's read-only standby.
+func (c *AuroraCluster) ReaderURL() string {
+	return c.urlAt(c.readerAddr, c.password)
+}
+
 // urlWithPassword returns a connection URL using the given master
 // password. The password is RDS-generated — the harness does not choose
 // it — so it may contain URL-reserved characters; the URL is assembled
@@ -166,10 +175,14 @@ func (c *AuroraCluster) URL() string {
 // so the production TLS path is out of scope for this tier (it is
 // proven by pkg/dbconn's TLS integration tests).
 func (c *AuroraCluster) urlWithPassword(password string) string {
+	return c.urlAt(c.addr, password)
+}
+
+func (c *AuroraCluster) urlAt(addr, password string) string {
 	u := url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(fixtureUser, password),
-		Host:     c.addr,
+		Host:     addr,
 		Path:     "/" + fixtureDatabase,
 		RawQuery: "sslmode=disable",
 	}
@@ -238,6 +251,9 @@ func ProvisionAuroraPostgres(t *testing.T) *AuroraCluster {
 			},
 			WaitingFor: wait.ForHTTP("/_ministack/health").
 				WithPort(fmt.Sprintf("%d/tcp", ministackGatewayPort)),
+			Env: map[string]string{
+				"MINISTACK_RDS_PG_CLUSTER_REPLICATION": "1",
+			},
 		},
 	})
 	require.NoError(t, err, "start Ministack container")
@@ -309,6 +325,40 @@ func ProvisionAuroraPostgres(t *testing.T) *AuroraCluster {
 	}, auroraProvisionDeadline, auroraProvisionPoll,
 		"instance %s did not become %s within the provision deadline", instanceID, rdsStatusAvailable)
 
+	readerInstanceID := clusterID + "-reader"
+	_, err = clnt.CreateDBInstance(ctx, &rds.CreateDBInstanceInput{
+		DBInstanceIdentifier: aws.String(readerInstanceID),
+		DBClusterIdentifier:  aws.String(clusterID),
+		Engine:               aws.String("aurora-postgresql"),
+		DBInstanceClass:      aws.String("db.t3.medium"),
+	})
+	require.NoError(t, err, "create aurora-postgresql reader instance")
+	t.Cleanup(func() {
+		cleanupCtx := context.WithoutCancel(t.Context())
+		if _, err := clnt.DeleteDBInstance(cleanupCtx, &rds.DeleteDBInstanceInput{
+			DBInstanceIdentifier: aws.String(readerInstanceID),
+			SkipFinalSnapshot:    aws.Bool(true),
+		}); err != nil {
+			t.Logf("delete reader instance %s: %v", readerInstanceID, err)
+		}
+	})
+
+	var readerEndpoint string
+	var readerPort int32
+	require.Eventuallyf(t, func() bool {
+		out, err := clnt.DescribeDBInstances(ctx, &rds.DescribeDBInstancesInput{
+			DBInstanceIdentifier: aws.String(readerInstanceID),
+		})
+		if err != nil || len(out.DBInstances) == 0 ||
+			aws.ToString(out.DBInstances[0].DBInstanceStatus) != rdsStatusAvailable {
+			return false
+		}
+		readerEndpoint = aws.ToString(out.DBInstances[0].Endpoint.Address)
+		readerPort = aws.ToInt32(out.DBInstances[0].Endpoint.Port)
+		return readerEndpoint != "" && readerPort != 0
+	}, auroraProvisionDeadline, auroraProvisionPoll,
+		"reader instance %s did not become %s within the provision deadline", readerInstanceID, rdsStatusAvailable)
+
 	// Read the endpoint back from the control plane rather than trusting the
 	// request: the discovery flow is the behavior under test, and the
 	// address it returns is the address the test connects to. The one
@@ -331,14 +381,20 @@ func ProvisionAuroraPostgres(t *testing.T) *AuroraCluster {
 	if !tcpReachable(t, addr) {
 		addr = siblingHostAddr(t, ctr, clusterID)
 	}
+	readerAddr := net.JoinHostPort(readerEndpoint, strconv.Itoa(int(readerPort)))
+	if !tcpReachable(t, readerAddr) {
+		readerAddr = instanceHostAddr(t, ctr, readerInstanceID)
+	}
 
 	return &AuroraCluster{
-		Client:     clnt,
-		ClusterID:  clusterID,
-		InstanceID: instanceID,
-		addr:       addr,
-		password:   password,
-		secrets:    secrets,
+		Client:           clnt,
+		ClusterID:        clusterID,
+		InstanceID:       instanceID,
+		ReaderInstanceID: readerInstanceID,
+		addr:             addr,
+		readerAddr:       readerAddr,
+		password:         password,
+		secrets:          secrets,
 	}
 }
 
@@ -386,6 +442,30 @@ func siblingHostAddr(t *testing.T, ctr testcontainers.Container, clusterID strin
 	bindings := inspect.Container.NetworkSettings.Ports[dbPort]
 	require.NotEmptyf(t, bindings, "sibling container %s must publish %s on the host", name, siblingDBPort)
 
+	host, err := ctr.Host(ctx)
+	require.NoError(t, err, "resolve Docker host address")
+	return net.JoinHostPort(host, bindings[0].HostPort)
+}
+
+func instanceHostAddr(t *testing.T, ctr testcontainers.Container, instanceID string) string {
+	t.Helper()
+	ctx := t.Context()
+	docker, err := testcontainers.NewDockerClientWithOpts(ctx)
+	require.NoError(t, err, "create Docker client")
+	defer func() {
+		if err := docker.Close(); err != nil {
+			t.Logf("close Docker client: %v", err)
+		}
+	}()
+
+	scope := sha1.Sum([]byte(awsAccountID + ":" + awsRegion))
+	name := fmt.Sprintf("ministack-rds-%s-instance-%s", hex.EncodeToString(scope[:])[:12], instanceID)
+	inspect, err := docker.ContainerInspect(ctx, name, client.ContainerInspectOptions{})
+	require.NoErrorf(t, err, "inspect reader database container %s", name)
+	dbPort, err := network.ParsePort(siblingDBPort)
+	require.NoError(t, err, "parse reader database port")
+	bindings := inspect.Container.NetworkSettings.Ports[dbPort]
+	require.NotEmptyf(t, bindings, "reader container %s must publish %s on the host", name, siblingDBPort)
 	host, err := ctr.Host(ctx)
 	require.NoError(t, err, "resolve Docker host address")
 	return net.JoinHostPort(host, bindings[0].HostPort)
