@@ -41,8 +41,13 @@ a copy-and-swap avoids the long exclusive lock. The
 plan report's `decisions[].reason` vocabulary
 ([plan-report.md](plan-report.md#planner-decision-reasons-decisionsreason)) is this table
 made machine-readable: `metadata-only` / `fast-default` / `binary-coercible` are the first
-bucket, `safer-idiom` the second, `type-rewrite` / `volatile-default` / `generated-stored` /
-`relocation` the third.
+bucket; `safer-idiom` and `online-idiom` (the statement already arrived in its online form)
+the second; `type-rewrite` / `volatile-default` / `generated-stored` / `relocation` the third.
+The remaining reasons are first-bucket by cost but carry a warning the cost alone does not:
+`partition-parent-lock` (a new partition takes a brief `ACCESS EXCLUSIVE` on the parent, so
+the lock queue below applies to every query on the parent) and `app-breaking-rename` (the
+catalog change is instant; the running application code that still uses the old name is
+what breaks). `unsupported-operation` means the planner has no bucket to put the statement in.
 
 The MySQL-side detail — how `ALGORITHM=` and `LOCK=` are asserted and how the two engines'
 lock models line up — is in

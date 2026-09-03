@@ -13,8 +13,11 @@ MySQL-only — too many MySQL-isms to retrofit cleanly). The goal is a **decoupl
 executor** engine in which **copy-and-swap** is only one of several execution strategies. pg-sprite
 **derives design practices from several tools**: the copy-and-swap lifecycle and operator model
 from Spirit, the shadow-table approach from pg-osc/pg_repack, and the expand/contract executor
-from pgroll. See spirit-architecture-notes.md
-for how the Spirit original works and tool-pgroll.md for pgroll.
+from pgroll. See [Spirit's README](https://github.com/block/spirit) for how the original works
+(its per-primitive translation to PostgreSQL is in
+[mysql-vs-postgresql.md](mysql-vs-postgresql.md#copy-and-swap-executor-spirit-mysql--postgresql-primitive-mapping))
+and [high-level-design.md § execution patterns](high-level-design.md#the-execution-patterns-and-when-each-is-chosen)
+for where pgroll's expand/contract fits.
 
 ## Table of contents
 
@@ -176,7 +179,8 @@ pattern *per migration*:
 
 - **native** for the majority (the ➖/❌ rows in [postgres-online-ddl-reference](postgres-online-ddl-reference.md));
 - **log-based copy-and-swap** for transparent, heavy physical rewrites (`int→bigint`, repack)
-  where the change is invisible to the app — see tool-pgroll's comparison;
+  where the change is invisible to the app — see the pattern comparison in
+  [high-level-design.md](high-level-design.md#the-execution-patterns-and-when-each-is-chosen);
 - **expand/contract via pgroll** for prod-critical breaking changes where **instant
   reversibility** and **two live schema versions** matter more than transparency.
 
@@ -381,7 +385,8 @@ idle and a plain rewrite is acceptable); it is an escape hatch, not a shortcut, 
 > strategy for genuine table rewrites. Until it lands, those rewrites receive a **not
 > native-safe** refusal. The `native` and `expand/contract`
 > executors are described in the architecture section and in
-> tool-pgroll.md. The per-primitive **Spirit (MySQL) →
+> [high-level-design.md § execution patterns](high-level-design.md#the-execution-patterns-and-when-each-is-chosen).
+> The per-primitive **Spirit (MySQL) →
 > PostgreSQL mapping** this executor is built on lives in
 > [mysql-vs-postgresql.md § primitive mapping](mysql-vs-postgresql.md#copy-and-swap-executor-spirit-mysql--postgresql-primitive-mapping).
 
@@ -760,7 +765,7 @@ Target the highest-value rewrite cases first: general `ALTER COLUMN TYPE`, volat
 routes natively-safe operations to direct DDL. PK-required, no-FK-on-migrated-table for v1.
 
 Both the declarative and imperative front ends exist and share classify → route, matching the
-[README TL;DR](README.md#tldr-recommendation),
+[README § the decided shape](README.md#the-decided-shape),
 [high-level-design](high-level-design.md#two-front-ends-declarative-and-imperative), and
 build-plan Phase 2. Declarative performs introspection, diff, and ordering; the imperative
 `--alter` path uses the same classifier with the diff step skipped. Phase 3 makes their classified
