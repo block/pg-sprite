@@ -162,6 +162,31 @@ func RefuseUnsupportedPartitionedParent(report *Report, refused []bool) {
 	}
 }
 
+// RefuseUnsupportedCreateShape marks the create-path statements whose
+// connection-free admission checks refuse their shape.
+func RefuseUnsupportedCreateShape(report *Report, refused []error) {
+	any := false
+	for i := range report.Statements {
+		if i >= len(refused) || refused[i] == nil {
+			continue
+		}
+		any = true
+		report.Statements[i].Backend = ""
+		report.Statements[i].Disposition = router.DispositionRefuse
+		report.Statements[i].Reason = verdict.ReasonUnsupportedStatement
+		report.Statements[i].ExecSQL = nil
+		report.Statements[i].Execution = ""
+		for j := range report.Statements[i].Decisions {
+			report.Statements[i].Decisions[j].SaferSQL = nil
+			report.Statements[i].Decisions[j].SaferSQLExecution = ""
+		}
+	}
+	if any {
+		report.Disposition = router.DispositionRefuse
+		report.Reason = verdict.ReasonUnsupportedStatement
+	}
+}
+
 // NewReport returns an empty report for source with the contract version
 // stamped and Statements non-nil, so an empty plan serializes as [] rather
 // than null.

@@ -2,6 +2,7 @@ package plan_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -175,6 +176,27 @@ func TestRefuseUnsupportedPartitionedParentWithdrawsExecutionAdvice(t *testing.T
 	assert.Empty(t, r.Statements[0].Execution)
 	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQL)
 	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQLExecution)
+}
+
+func TestRefuseUnsupportedCreateShapeMarksPositions(t *testing.T) {
+	r := plan.Report{
+		Disposition: router.DispositionExecute,
+		Statements: []plan.Statement{
+			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE TABLE app.t (id int)"}, Execution: planner.ExecutionAutocommit},
+			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE INDEX i ON app.t (id)"}, Execution: planner.ExecutionAutocommit},
+		},
+	}
+	plan.RefuseUnsupportedCreateShape(&r, []error{errors.New("refused"), nil})
+
+	assert.Equal(t, router.DispositionRefuse, r.Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, r.Reason)
+	assert.Equal(t, router.DispositionRefuse, r.Statements[0].Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, r.Statements[0].Reason)
+	assert.Empty(t, r.Statements[0].Backend)
+	assert.Empty(t, r.Statements[0].ExecSQL)
+	assert.Equal(t, router.DispositionExecute, r.Statements[1].Disposition)
+	assert.Equal(t, router.BackendNative, r.Statements[1].Backend)
+	assert.NotEmpty(t, r.Statements[1].ExecSQL)
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact

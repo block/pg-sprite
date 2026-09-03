@@ -144,15 +144,16 @@ package. Landing this is one of:
 ### Routing the create path's refusals
 
 A greenfield desired file — the table does not exist on the target — has no single routing
-class, and an adapter must not fold its outcomes into one arm. `migrate.RunDesired` resolves
-it to one of four things:
+class, and an adapter must not fold its outcomes into one arm. The plan resolves
+shape-decidable author errors before the apply window, and `migrate.RunDesired` re-checks
+them when admitting execution. A greenfield run resolves to one of four things:
 
 | Outcome | Routing class |
 | --- | --- |
 | Executed | The table and its indexes exist; a rerun converges to an empty plan |
 | `create-collision` refusal | **Re-plan**: re-diff the live catalog — something now owns the name; never blindly retry |
 | `insufficient-privileges` refusal (`*preflight.PrivilegeError`, `Tier == TierCreateTable`) | **Operator provisioning action**: the role needs the exact `GRANT` the error carries — not a desired-file fix, and not retryable until granted |
-| Admission refusal (`unsupported-statement`) | **Author action**: the desired file states a shape the create path refuses; retrying unchanged cannot succeed |
+| Plan/admission refusal (`unsupported-statement`) | **Author action**: the desired file states a shape the create path refuses; retrying unchanged cannot succeed |
 
 Only the last is an author error. An adapter that surfaces every greenfield refusal as
 "fix your desired file" gives operators the wrong instruction for the two middle rows. A
@@ -197,10 +198,10 @@ them, don't retry them uniformly:
 
 | Outcome | What it means | Orchestrator action |
 | --- | --- | --- |
-| `ErrDuplicateCreateName` (`duplicate-create-name`) | The desired set claims one relation name twice — including a first-choice implicit constraint-index name; refused at admission, nothing ran | Fix the desired file; retrying unchanged cannot succeed |
-| `ErrPartitionOfUnsupported` (`partition-of-unsupported`) | `PARTITION OF` binds to a live parent the absence proof does not cover | Fix the desired file; out of the create path's scope |
-| `ErrIfNotExistsUnsupported` (`if-not-exists-unsupported`) | `CREATE ... IF NOT EXISTS` succeeds as a name-only no-op over a relation it cannot vouch for — the opposite of the absence proof's fail-closed contract; refused at admission, nothing ran | Fix the desired file: state the plain `CREATE`; the absence check owns collision handling |
-| `ErrUnsupportedCreateStep` (`unsupported-create-step`) | A desired statement is not a shape the create path can run | Fix the desired file |
+| `ErrDuplicateCreateName` (`duplicate-create-name`) | The desired set claims one relation name twice — including a first-choice implicit constraint-index name; refused in the plan and re-checked at apply, nothing ran | Fix the desired file; retrying unchanged cannot succeed |
+| `ErrPartitionOfUnsupported` (`partition-of-unsupported`) | `PARTITION OF` binds to a live parent the absence proof does not cover; refused in the plan and re-checked at apply | Fix the desired file; out of the create path's scope |
+| `ErrIfNotExistsUnsupported` (`if-not-exists-unsupported`) | `CREATE ... IF NOT EXISTS` succeeds as a name-only no-op over a relation it cannot vouch for — the opposite of the absence proof's fail-closed contract; refused in the plan and re-checked at apply, nothing ran | Fix the desired file: state the plain `CREATE`; the absence check owns collision handling |
+| `ErrUnsupportedCreateStep` (`unsupported-create-step`) | A desired statement is not a shape the create path can run; refused in the plan and re-checked at apply | Fix the desired file |
 | `ErrCreateCollision` (`create-collision`) | A concurrent writer took a needed name after a valid proof | Re-diff the live catalog and re-plan — the world changed; never blindly retry the create |
 
 A failed create is not rolled back wholesale: each step committed in its own bounded

@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -98,6 +99,13 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	report.TableExists = &tableExists
 	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
 		return plan.Report{}, err
+	}
+	if !tableExists {
+		refused, refusalErr := executor.CreateShapeRefusals(req.Schema, ds)
+		if refusalErr != nil {
+			return plan.Report{}, refusalErr
+		}
+		plan.RefuseUnsupportedCreateShape(&report, refused)
 	}
 	if tableExists {
 		targetFacts, checkErr := preflight.LookupTargetFacts(ctx, pool, req.Schema, ds.Table())

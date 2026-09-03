@@ -1,6 +1,7 @@
 package executor_test
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -10,6 +11,36 @@ import (
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
 )
+
+func TestCreateShapeRefusals(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want []error
+	}{
+		{name: "partition", sql: "CREATE TABLE t PARTITION OF parent FOR VALUES FROM (1) TO (2)", want: []error{executor.ErrPartitionOfUnsupported}},
+		{name: "if not exists", sql: "CREATE TABLE IF NOT EXISTS t (id int)", want: []error{executor.ErrIfNotExistsUnsupported}},
+		{name: "existing object clause", sql: "CREATE TABLE t (LIKE source)", want: []error{executor.ErrUnsupportedCreateStep}},
+		{name: "later duplicate", sql: "CREATE TABLE t (id int PRIMARY KEY); CREATE INDEX t_pkey ON t (id)", want: []error{nil, executor.ErrDuplicateCreateName}},
+		{name: "admitted", sql: "CREATE TABLE t (id int); CREATE INDEX t_id ON t (id)", want: []error{nil, nil}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ds, err := statement.ParseDesired(tc.sql)
+			require.NoError(t, err)
+			refusals, err := executor.CreateShapeRefusals("app", ds)
+			require.NoError(t, err)
+			require.Len(t, refusals, len(tc.want))
+			for i := range tc.want {
+				if tc.want[i] == nil {
+					require.NoError(t, refusals[i])
+					continue
+				}
+				require.True(t, errors.Is(refusals[i], tc.want[i]), "statement %d: %v", i+1, refusals[i])
+			}
+		})
+	}
+}
 
 // createBudget is generous for unit tests; admission refusals return
 // before any database access.

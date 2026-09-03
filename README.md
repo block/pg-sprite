@@ -61,6 +61,9 @@ and the mechanics of each current refusal are
 wherever an operation meets a boundary below, it fails closed with a typed
 refusal — never a silently wrong or incomplete result:
 
+Greenfield desired files refuse unsupported create shapes and duplicate
+claimed relation names during planning, then re-check those rules at apply.
+
 - **Copy-and-swap** (genuine table rewrites) is not yet available — those
   changes refuse rather than fall through to a blocking rewrite.
 - **Foreign keys** are out of the declarative model in either direction:
