@@ -46,7 +46,7 @@ licenses a consumer to intervene in the change itself.
 | Field | Type | Presence | Meaning |
 |---|---|---|---|
 | `operation` | string | once execution starts | The current operation's execution class (see Operations). |
-| `statement` | string | while a step is executing | The canonical, qualified SQL the executor is running for the current step. This is the executor's statement text, never a rendered or prettified form. |
+| `statement` | string | while a step is executing | The exact SQL string the executor executes for this step, after front-door qualification and canonicalization — not a display rendering. It is present only while the step is executing. On a terminal `failed` snapshot the typed `*SequenceStepError` returned to the in-process caller carries the SQL, while `step`, `operation`, and `attempt` remain so a poller can locate the step in the plan. |
 | `server_phase` | string | active concurrent build only | PostgreSQL's own phase string from `pg_stat_progress_create_index`, verbatim. |
 | `active` | bool | always | Whether an operation is executing now. `false` with `phase: "running"` means a concurrent build's progress row has left the server view. |
 | `attempt` | int | bounded retries only | The current attempt number when the executor is inside its bounded retry loop. |
@@ -103,7 +103,7 @@ A poll during step 2 of a 3-step sequence, mid concurrent index build:
   "step_elapsed_ns": 750000000,
   "detail": {
     "operation": "concurrent-index-build",
-    "statement": "CREATE INDEX CONCURRENTLY events_created_at_idx ON public.events (created_at)",
+    "statement": "CREATE INDEX CONCURRENTLY idx ON public.t (id)",
     "server_phase": "building index",
     "active": true,
     "attempt": 2,

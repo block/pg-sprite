@@ -176,15 +176,16 @@ func TestExecuteCreateWithProgressReportsQualifiedStepStatementsInOrder(t *testi
 			observed = append(observed, snapshot.Detail.Statement)
 		}
 		return len(observed) == 2
-	}, 5*time.Second, 10*time.Millisecond)
+	}, 5*time.Second, 10*time.Millisecond, "both active create steps must publish their statements in order")
 
 	execution := <-results
 	workers.Wait()
 	require.NoError(t, execution.err)
 	require.Len(t, execution.rep.Steps, 2)
-	assert.Equal(t, []string{execution.rep.Steps[0].SQL, execution.rep.Steps[1].SQL}, observed)
-	assert.Contains(t, observed[0], f.schema+".t")
-	assert.Contains(t, observed[1], f.schema+".t")
+	assert.Equal(t, []string{
+		fmt.Sprintf("CREATE TABLE %s.t (id int, name text)", f.schema),
+		fmt.Sprintf("CREATE INDEX t_name_idx ON %s.t USING btree (name)", f.schema),
+	}, observed)
 }
 
 // The absence proof is time-of-check: a create that takes the name after

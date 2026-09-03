@@ -40,7 +40,8 @@ const (
 // FormatVersion identifies the snapshot contract. A consumer must reject a
 // snapshot whose format_version it does not recognize rather than guess at
 // field semantics. Adding a phase or operation value is a contract change
-// and bumps this version, even when no field is added or renamed.
+// and bumps this version, even when no field is added or renamed. Adding an
+// optional field tagged omitempty does not bump this version.
 const FormatVersion = 1
 
 // Operation is the current operation's execution class.
