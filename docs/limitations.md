@@ -44,7 +44,7 @@ composition of the model boundaries above with those gates. At a glance:
 
 | Desired-file edit | Outcome today |
 | --- | --- |
-| A desired file whose table does not exist yet | Converges — the greenfield create path verifies the table name and every deterministic index/constraint-index name are free and the role holds `CREATE` on the schema, then runs the `CREATE TABLE` and index builds as brief bounded steps. An occupied claimed name is a typed `create-collision` refusal before anything runs; duplicate-name SQLSTATEs remain the race backstop. `PARTITION OF` and `IF NOT EXISTS` are also typed refusals before execution. |
+| A desired file whose table does not exist yet | Converges — the greenfield create path verifies the table name and every index name the desired file states (explicit `CREATE INDEX` names and first-choice constraint-index names; an unnamed `CREATE INDEX ON t (v)` claims nothing) are free and the role holds `CREATE` on the schema, then runs the `CREATE TABLE` and index builds as brief bounded steps. An occupied claimed name is a typed `create-collision` refusal before anything runs — drop or rename the occupant, or name the constraint's index explicitly; duplicate-name SQLSTATEs remain the race backstop. `PARTITION OF` and `IF NOT EXISTS` are also typed refusals before execution. |
 | Add a column | Converges. Runs as a bounded attempt of the submitted form, so the table-size guard applies (below). |
 | Widen a column type (`varchar(50)` → `varchar(255)`) | Converges — the same bounded attempt, under the same size guard. |
 | Add an index | Converges via `CREATE INDEX CONCURRENTLY`. Not size-guarded: long online work on a large table is the pattern's purpose. |

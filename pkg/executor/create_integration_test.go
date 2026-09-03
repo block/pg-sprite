@@ -2,6 +2,7 @@ package executor_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -155,6 +156,25 @@ func TestExecuteCreateRefusesOccupiedImplicitIndexNameBeforeExecution(t *testing
 	require.ErrorIs(t, err, executor.ErrCreateCollision)
 	assert.Empty(t, rep.Steps)
 	assert.False(t, relationExists(t, f.pool, f.schema, "t"), "the catalog preflight runs before every step")
+}
+
+// A claimed-name probe that cannot complete says nothing about whether the
+// names are free: it is the caller's operational failure, never a
+// collision, so the caller retries rather than being told a free name is
+// taken.
+func TestExecuteCreateProbeFailureIsNotACollision(t *testing.T) {
+	f := newCreateFixture(t, "t")
+	ds := desired(t, "CREATE TABLE t (id int PRIMARY KEY, v text)")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	rep, err := executor.ExecuteCreate(ctx, f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	require.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, executor.ErrCreateCollision)
+	var stepErr *executor.SequenceStepError
+	assert.False(t, errors.As(err, &stepErr), "nothing started, so there is no step to blame")
+	assert.Empty(t, rep.Steps)
+	assert.False(t, relationExists(t, f.pool, f.schema, "t"))
 }
 
 // A failed step ends the run; the steps before it committed and remain,

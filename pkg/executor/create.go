@@ -9,8 +9,11 @@
 // re-parsed by the real grammar, and admitted by shape and target before
 // anything executes.
 //
-// The executor proves every deterministic table, index, and constraint-index
-// name free before execution. The proof is time-of-check: nothing locks the
+// Before the first step the executor probes pg_class for every name the
+// desired file states — explicit index names and the first-choice names of
+// index-backed constraints — so an occupied name refuses the whole set
+// rather than failing after the table committed; the table name itself is
+// the caller's absence proof. The proof is time-of-check: nothing locks the
 // names, so a concurrent create can still take one before its step. That
 // loss surfaces through SQLSTATE 42P07 or 42710 as ErrCreateCollision — the
 // caller re-diffs rather than assuming what the collision left behind. A
@@ -41,10 +44,13 @@ import (
 // cannot finish is never started.
 var (
 	// ErrCreateCollision is returned when a claimed name is already taken.
-	// Admission checks the table's index and constraint-index names before
-	// execution; duplicate-name SQLSTATEs remain the time-of-check race
-	// backstop. The caller re-diffs the live catalog without assuming the
-	// occupant's shape.
+	// A catalog probe after admission checks the desired file's explicit
+	// index names and first-choice constraint-index names before the first
+	// step executes, refusing the whole set with no *SequenceStepError;
+	// duplicate-name SQLSTATEs remain the time-of-check race backstop and
+	// arrive wrapped in one. The remedy is on the desired file's side — drop
+	// or rename the occupant, or name the constraint's index explicitly —
+	// then re-diff; a re-plan alone reproduces the refusal.
 	ErrCreateCollision = errors.New("a name the create path needs is already taken")
 	// ErrDuplicateCreateName is returned when the desired set claims the
 	// same relation name twice — two indexes under one name, or an index
@@ -88,13 +94,18 @@ const (
 // like the absence proof it is time-of-check — a grant revoked after
 // minting fails with the server's own error. Every desired statement is
 // qualified into the proof's schema, re-parsed, and admitted by shape and
-// target before the first step executes. On success every step committed
-// and the report says what each did. On failure the run stops at the
-// failing step and returns a typed *SequenceStepError; the committed
-// prefix remains — a rerun's absence check then refuses with
-// preflight.ErrRelationExists, and the caller re-diffs the live catalog
-// to apply the remainder. retry bounds lock_timeout retries on each step,
-// exactly as in ExecuteNative.
+// target, and every index and constraint-index name the file states is
+// probed free in pg_class, before the first step executes. A refusal from
+// either check returns with an empty report and no *SequenceStepError:
+// an occupied name is ErrCreateCollision, an inadmissible shape one of the
+// admission sentinels, and a probe that could not complete (a cancelled
+// context, a lost connection) is that error, wrapped — not a collision.
+// On success every step committed and the report says what each did. On
+// failure the run stops at the failing step and returns a typed
+// *SequenceStepError; the committed prefix remains — a rerun's absence
+// check then refuses with preflight.ErrRelationExists, and the caller
+// re-diffs the live catalog to apply the remainder. retry bounds
+// lock_timeout retries on each step, exactly as in ExecuteNative.
 func ExecuteCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, ds statement.DesiredSchema, b Budget, retry RetryPolicy) (SequenceReport, error) {
 	return executeCreate(ctx, pool, at, cr, ds, b, retry, nil)
 }
@@ -149,8 +160,16 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 	// refuses the whole set instead of failing after the table committed.
 	// CheckTableAbsent already covers the table name and its composite type.
 	claimed = slices.DeleteFunc(claimed, func(name string) bool { return name == at.Table() })
-	if err := preflight.CheckNamesAbsent(ctx, pool, at.Schema(), claimed); err != nil {
-		return rep, fmt.Errorf("%w: the desired file claims a name the catalog already holds: %w", ErrCreateCollision, err)
+	err = preflight.CheckNamesAbsent(ctx, pool, at.Schema(), claimed)
+	if preflight.IsNameOccupied(err) {
+		return rep, fmt.Errorf("%w: the desired file claims a name the catalog already holds: %w",
+			ErrCreateCollision, err)
+	}
+	if err != nil {
+		// The probe itself failed — a cancelled context, a dropped
+		// connection — which says nothing about whether the names are
+		// free; it is an operational failure, not a collision.
+		return rep, fmt.Errorf("verify claimed names are absent in %s: %w", at.Schema(), err)
 	}
 	for i, step := range steps {
 		start := time.Now()
@@ -214,12 +233,13 @@ func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]
 		}
 		steps = append(steps, st)
 	}
-	ordered := make([]string, 0, len(claimed))
+	// Order does not matter: the catalog probe is set membership and picks
+	// the reported occupant itself.
+	names := make([]string, 0, len(claimed))
 	for name := range claimed {
-		ordered = append(ordered, name)
+		names = append(names, name)
 	}
-	slices.Sort(ordered)
-	return steps, ordered, nil
+	return steps, names, nil
 }
 
 // admitCreateStep qualifies one desired statement into the proof's schema,

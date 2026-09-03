@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -236,6 +237,37 @@ CREATE INDEX t_v_idx ON t (v);`
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
 		assert.Empty(t, res.Plan.Statements, "a clean greenfield create converges on its second run")
+	})
+
+	t.Run("a failed index build keeps the created table and discloses the prefix", func(t *testing.T) {
+		// An index on a column the table does not have passes admission
+		// (shape and target) and the claimed-name probe (the name is free),
+		// so the create path commits the CREATE TABLE and fails on the
+		// index step — committed-prefix semantics, disclosed by the
+		// verdicts: the executed create, then the failed build with the
+		// failing plan statement named.
+		schema := testutil.NewSchema(t, pool)
+		res, err := migrate.RunDesired(t.Context(), pool,
+			migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, `
+				CREATE TABLE t (id int PRIMARY KEY, v text);
+				CREATE INDEX t_missing_idx ON t (missing);`)}, runOptions())
+		require.Error(t, err, "a mid-plan execution failure returns the failed result with the error")
+		assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+		require.Len(t, res.Verdicts, 2, "the committed create and the failed index build")
+		assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
+		assert.Contains(t, res.Verdicts[0].Statement, "CREATE TABLE")
+		assert.Equal(t, verdict.OutcomeFailed, res.Verdicts[1].Outcome)
+		assert.Equal(t, string(executor.CodeExecutionFailed), res.Verdicts[1].Code)
+		assert.Contains(t, res.Verdicts[1].Statement, "t_missing_idx",
+			"the failed verdict names the plan statement that failed, not the one before it")
+		assert.Contains(t, res.Detail, "planned statement 2 of 2 failed",
+			"the disclosure counts the committed prefix")
+
+		var exists bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+			 WHERE table_schema = $1 AND table_name = 't')`, schema).Scan(&exists))
+		assert.True(t, exists, "the committed CREATE TABLE stays committed")
 	})
 
 	t.Run("refuses a destructive plan and drops nothing", func(t *testing.T) {

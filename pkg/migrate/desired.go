@@ -262,7 +262,9 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 		if errors.Is(execErr, executor.ErrCreateCollision) {
 			result.Outcome = verdict.OutcomeRefused
 			result.Reason = verdict.ReasonCreateCollision
-			result.Detail = fmt.Sprintf("the create path refused the plan because the catalog already holds a name it claims (%v); re-derive the plan and review what it says now; nothing was executed", execErr)
+			result.Detail = fmt.Sprintf("the create path refused the plan because the catalog already holds a name it claims (%v); "+
+				"re-derive the plan against the live catalog to see what holds the name, then drop or rename the occupant "+
+				"or name the constraint's index explicitly in the desired file; nothing was executed", execErr)
 			return result, nil
 		}
 		if isCreateAdmissionRefusal(execErr) {
