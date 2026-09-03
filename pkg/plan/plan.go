@@ -151,10 +151,7 @@ func RefuseUnsupportedPartitionedParent(report *Report, refused []bool) {
 		report.Statements[i].Reason = verdict.ReasonUnsupportedPartitionedParent
 		report.Statements[i].ExecSQL = nil
 		report.Statements[i].Execution = ""
-		for j := range report.Statements[i].Decisions {
-			report.Statements[i].Decisions[j].SaferSQL = nil
-			report.Statements[i].Decisions[j].SaferSQLExecution = ""
-		}
+		withdrawSaferAdvice(&report.Statements[i])
 	}
 	if any {
 		report.Disposition = router.DispositionRefuse
@@ -165,18 +162,38 @@ func RefuseUnsupportedPartitionedParent(report *Report, refused []bool) {
 // DiscloseGreenfieldExecution makes executable statements describe the plain,
 // bounded builds used for a table born in this run. There is no live traffic
 // to protect, so the create path does not substitute the planner's online
-// idioms.
+// idioms; each safer-idiom decision is reclassified metadata-only — the same
+// reason the planner gives the CREATE TABLE itself, because an index built
+// on an empty table nobody reads yet has no rows to scan and no readers to
+// lock out. Reclassifying keeps the statement in a state router.Route can
+// produce: an execute disposition never carries a safer-idiom decision
+// without its rewrite.
 func DiscloseGreenfieldExecution(report *Report) {
 	for i := range report.Statements {
-		if report.Statements[i].Disposition != router.DispositionExecute {
+		st := &report.Statements[i]
+		if st.Disposition != router.DispositionExecute {
 			continue
 		}
-		report.Statements[i].ExecSQL = []string{report.Statements[i].SQL}
-		report.Statements[i].Execution = planner.ExecutionAutocommit
-		for j := range report.Statements[i].Decisions {
-			report.Statements[i].Decisions[j].SaferSQL = nil
-			report.Statements[i].Decisions[j].SaferSQLExecution = ""
+		st.ExecSQL = []string{st.SQL}
+		st.Execution = planner.ExecutionAutocommit
+		withdrawSaferAdvice(st)
+		for j := range st.Decisions {
+			if st.Decisions[j].Reason == planner.ReasonSaferIdiom {
+				st.Decisions[j].Reason = planner.ReasonMetadataOnly
+			}
 		}
+	}
+}
+
+// withdrawSaferAdvice clears the planner's per-decision online rewrite from
+// a statement whose execution advice no longer applies — a refusal, or a
+// greenfield build that runs as written. Every mutator that withdraws
+// execution advice goes through here, so a decision field added later is
+// cleared in one place.
+func withdrawSaferAdvice(st *Statement) {
+	for j := range st.Decisions {
+		st.Decisions[j].SaferSQL = nil
+		st.Decisions[j].SaferSQLExecution = ""
 	}
 }
 

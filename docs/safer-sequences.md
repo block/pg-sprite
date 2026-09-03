@@ -103,7 +103,7 @@ the tool itself (see below):
 | `ADD UNIQUE` (direct) | 2 steps: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT … USING INDEX` (this page's example) |
 | `ADD PRIMARY KEY` (direct) | The same 2 steps — **on a column already `NOT NULL`**. On a nullable column, adopting the index must also set `NOT NULL`, and PostgreSQL validates that by scanning the heap under `ACCESS EXCLUSIVE` — the blocking work the substitution exists to avoid, and a scan the brief step budget cancels. Reach `NOT NULL` first via the 4-step sequence above, then add the primary key |
 | `ADD CHECK` / `ADD FOREIGN KEY` (direct) | 2 steps: `ADD CONSTRAINT … NOT VALID` → `VALIDATE CONSTRAINT` — the validation scan runs under a lock that lets reads and writes proceed |
-| `CREATE INDEX` (non-concurrent) | 1 statement: the same build with `CONCURRENTLY` |
+| `CREATE INDEX` (non-concurrent) | 1 statement: the same build with `CONCURRENTLY` — on a live table only; an index on a table that does not exist yet (`diff` greenfield) is `metadata-only` and runs as written |
 | `DETACH PARTITION` (non-concurrent) | 1 statement: `DETACH PARTITION … CONCURRENTLY` — shown by `--dry-run` and `suggest`, but **execution refuses this step today**: a cancelled concurrent detach leaves a detach-pending partition state the executor does not own recovering |
 
 Statements already in the safe form (`… USING INDEX`, `… NOT VALID`,

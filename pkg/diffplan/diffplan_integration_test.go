@@ -274,7 +274,9 @@ func assertGreenfieldIndexExecution(t *testing.T, got plan.Statement) {
 	require.Equal(t, []string{got.SQL}, got.ExecSQL)
 	assert.NotContains(t, got.ExecSQL[0], "CONCURRENTLY")
 	assert.Equal(t, planner.ExecutionAutocommit, got.Execution)
+	require.NotEmpty(t, got.Decisions)
 	for _, decision := range got.Decisions {
+		assert.Equal(t, planner.ReasonMetadataOnly, decision.Reason)
 		assert.Empty(t, decision.SaferSQL)
 		assert.Empty(t, decision.SaferSQLExecution)
 	}

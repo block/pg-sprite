@@ -179,38 +179,71 @@ func TestRefuseUnsupportedPartitionedParentWithdrawsExecutionAdvice(t *testing.T
 
 func TestDiscloseGreenfieldExecutionUsesPlainSQLForExecutableStatements(t *testing.T) {
 	concurrent := "CREATE INDEX CONCURRENTLY i ON s.t (c)"
+	saferIdiom := func() []planner.Decision {
+		return []planner.Decision{{
+			Route:             planner.RouteNative,
+			Reason:            planner.ReasonSaferIdiom,
+			SaferSQL:          []string{concurrent},
+			SaferSQLExecution: planner.ExecutionAutocommit,
+		}}
+	}
 	r := plan.Report{Statements: []plan.Statement{
 		{
 			SQL:         "CREATE INDEX i ON s.t USING btree (c)",
 			Disposition: router.DispositionExecute,
 			ExecSQL:     []string{concurrent},
 			Execution:   planner.ExecutionAutocommit,
-			Decisions: []planner.Decision{{
-				SaferSQL:          []string{concurrent},
-				SaferSQLExecution: planner.ExecutionAutocommit,
-			}},
+			Decisions:   saferIdiom(),
 		},
 		{
 			SQL:         "ALTER TABLE s.t SET UNLOGGED",
 			Disposition: router.DispositionRefuse,
 			ExecSQL:     []string{concurrent},
 			Execution:   planner.ExecutionAutocommit,
+			Decisions:   saferIdiom(),
+		},
+		{
+			SQL:         "ALTER TABLE s.t ADD COLUMN nickname text UNIQUE",
+			Disposition: router.DispositionRewriteRequired,
+			Decisions:   saferIdiom(),
+		},
+		{
+			SQL:         "ALTER TABLE s.t ALTER COLUMN c TYPE bigint",
+			Disposition: router.DispositionUnavailable,
+			Decisions:   saferIdiom(),
+		},
+		{
+			SQL:         "CREATE TABLE s.t (c int)",
+			Disposition: router.DispositionExecute,
+			ExecSQL:     []string{"CREATE TABLE s.t (c int)"},
+			Execution:   planner.ExecutionAutocommit,
 			Decisions: []planner.Decision{{
-				SaferSQL:          []string{concurrent},
-				SaferSQLExecution: planner.ExecutionAutocommit,
+				Route:  planner.RouteNative,
+				Reason: planner.ReasonMetadataOnly,
 			}},
 		},
 	}}
 
 	plan.DiscloseGreenfieldExecution(&r)
 
-	assert.Equal(t, []string{r.Statements[0].SQL}, r.Statements[0].ExecSQL)
-	assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
-	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQL)
-	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQLExecution)
+	executable := r.Statements[0]
+	assert.Equal(t, []string{executable.SQL}, executable.ExecSQL)
+	assert.Equal(t, planner.ExecutionAutocommit, executable.Execution)
+	assert.Equal(t, planner.ReasonMetadataOnly, executable.Decisions[0].Reason,
+		"a safer-idiom build on a table born in this run is reclassified metadata-only")
+	assert.Empty(t, executable.Decisions[0].SaferSQL)
+	assert.Empty(t, executable.Decisions[0].SaferSQLExecution)
+
+	for _, untouched := range r.Statements[1:4] {
+		assert.Equal(t, saferIdiom(), untouched.Decisions, untouched.Disposition)
+	}
 	assert.Equal(t, []string{concurrent}, r.Statements[1].ExecSQL)
-	assert.Equal(t, []string{concurrent}, r.Statements[1].Decisions[0].SaferSQL)
-	assert.Equal(t, planner.ExecutionAutocommit, r.Statements[1].Decisions[0].SaferSQLExecution)
+	assert.Equal(t, planner.ExecutionAutocommit, r.Statements[1].Execution)
+
+	createTable := r.Statements[4]
+	assert.Equal(t, []string{createTable.SQL}, createTable.ExecSQL)
+	assert.Equal(t, planner.ExecutionAutocommit, createTable.Execution)
+	assert.Equal(t, planner.ReasonMetadataOnly, createTable.Decisions[0].Reason)
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
