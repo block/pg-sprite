@@ -3,9 +3,11 @@ package executor_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,6 +16,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -118,6 +121,70 @@ func TestExecuteCreateOrdersTableBeforeIndexes(t *testing.T) {
 	require.Len(t, rep.Steps, 2)
 	assert.Contains(t, rep.Steps[0].SQL, "CREATE TABLE")
 	assert.Equal(t, "i", relationKind(t, f.pool, f.schema, "t_name_idx"))
+}
+
+func TestExecuteCreateWithProgressReportsQualifiedStepStatementsInOrder(t *testing.T) {
+	f := newCreateFixture(t, "t")
+	ds := desired(t, `
+		CREATE INDEX t_name_idx ON t (name);
+		CREATE TABLE t (id int, name text);
+	`)
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+
+	functionName := pgx.Identifier{f.schema, "delay_create_progress"}.Sanitize()
+	triggerName := pgx.Identifier{f.schema + "_delay_create_progress"}.Sanitize()
+	_, err = f.pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE FUNCTION %s() RETURNS event_trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF current_query() LIKE '%%%s%%' THEN
+				PERFORM pg_sleep(0.25);
+			END IF;
+		END
+		$$;
+		CREATE EVENT TRIGGER %s ON ddl_command_start EXECUTE FUNCTION %s()`,
+		functionName, f.schema, triggerName, functionName))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		_, cleanupErr := f.pool.Exec(ctx, fmt.Sprintf("DROP EVENT TRIGGER IF EXISTS %s", triggerName))
+		assert.NoError(t, cleanupErr)
+		_, cleanupErr = f.pool.Exec(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", functionName))
+		assert.NoError(t, cleanupErr)
+	})
+
+	type result struct {
+		rep executor.SequenceReport
+		err error
+	}
+	results := make(chan result, 1)
+	var workers sync.WaitGroup
+	workers.Go(func() {
+		rep, executeErr := executor.ExecuteCreateWithProgress(t.Context(), f.pool, f.at, f.cr, ds,
+			createBudget, executor.DefaultRetryPolicy(), tracker)
+		results <- result{rep: rep, err: executeErr}
+	})
+	t.Cleanup(workers.Wait)
+
+	var observed []string
+	require.Eventually(t, func() bool {
+		snapshot, progressErr := tracker.Progress(t.Context())
+		if progressErr != nil || snapshot.Detail.Statement == "" {
+			return false
+		}
+		if len(observed) == 0 || observed[len(observed)-1] != snapshot.Detail.Statement {
+			observed = append(observed, snapshot.Detail.Statement)
+		}
+		return len(observed) == 2
+	}, 5*time.Second, 10*time.Millisecond)
+
+	execution := <-results
+	workers.Wait()
+	require.NoError(t, execution.err)
+	require.Len(t, execution.rep.Steps, 2)
+	assert.Equal(t, []string{execution.rep.Steps[0].SQL, execution.rep.Steps[1].SQL}, observed)
+	assert.Contains(t, observed[0], f.schema+".t")
+	assert.Contains(t, observed[1], f.schema+".t")
 }
 
 // The absence proof is time-of-check: a create that takes the name after

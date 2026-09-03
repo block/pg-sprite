@@ -42,7 +42,7 @@ func runningTrackerWithBuild(t *testing.T, session fakeSession) *progress.Tracke
 	tracker, err := progress.NewTracker(&fakeClock{now: time.Unix(100, 0)})
 	require.NoError(t, err)
 	tracker.Start(1, progress.OperationConcurrentIndex)
-	tracker.StartStep(1, progress.OperationConcurrentIndex)
+	tracker.StartStep(1, progress.OperationConcurrentIndex, "CREATE INDEX CONCURRENTLY idx ON public.t (id)")
 	tracker.SetConcurrentBuild(session, 4242)
 	return tracker
 }
@@ -54,7 +54,7 @@ func TestTrackerReportsSequencePositionAndInjectedElapsed(t *testing.T) {
 
 	tracker.Start(3, progress.OperationBrief)
 	clock.now = clock.now.Add(2 * time.Second)
-	tracker.StartStep(2, progress.OperationValidate)
+	tracker.StartStep(2, progress.OperationValidate, "ALTER TABLE public.t VALIDATE CONSTRAINT c")
 	tracker.SetAttempt(2)
 	clock.now = clock.now.Add(750 * time.Millisecond)
 
@@ -77,7 +77,7 @@ func TestTrackerSequenceStepsAdvanceMonotonically(t *testing.T) {
 	tracker.Start(3, progress.OperationBrief)
 
 	for step := 1; step <= 3; step++ {
-		tracker.StartStep(step, progress.OperationBrief)
+		tracker.StartStep(step, progress.OperationBrief, "ALTER TABLE public.t ADD COLUMN c int")
 		snapshot, progressErr := tracker.Progress(t.Context())
 		require.NoError(t, progressErr)
 		assert.Equal(t, step, snapshot.Step)
@@ -124,7 +124,7 @@ func TestTerminalSnapshotFreezesElapsed(t *testing.T) {
 			tracker, err := progress.NewTracker(clock)
 			require.NoError(t, err)
 			tracker.Start(1, progress.OperationOptimistic)
-			tracker.StartStep(1, progress.OperationOptimistic)
+			tracker.StartStep(1, progress.OperationOptimistic, "ALTER TABLE public.t ADD COLUMN c int")
 			clock.now = clock.now.Add(3 * time.Second)
 			tracker.Finish(tc.outcome)
 
@@ -150,7 +150,7 @@ func TestStartResetsPriorRunState(t *testing.T) {
 	tracker, err := progress.NewTracker(clock)
 	require.NoError(t, err)
 	tracker.Start(3, progress.OperationBrief)
-	tracker.StartStep(2, progress.OperationValidate)
+	tracker.StartStep(2, progress.OperationValidate, "ALTER TABLE public.t VALIDATE CONSTRAINT c")
 	tracker.SetConcurrentBuild(fakeSession{query: func(context.Context, string, ...any) pgx.Row {
 		return fakeRow{scan: func(...any) error {
 			t.Fatal("a new run must not poll the prior run's session")
@@ -191,7 +191,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 	require.NoError(t, err)
 	tracker.Start(3, progress.OperationAdmitting)
 	clock.now = clock.now.Add(2 * time.Second)
-	tracker.StartStep(2, progress.OperationConcurrentIndex)
+	tracker.StartStep(2, progress.OperationConcurrentIndex, "CREATE INDEX CONCURRENTLY idx ON public.t (id)")
 	tracker.SetAttempt(2)
 	tracker.SetConcurrentBuild(session, 4242)
 	clock.now = clock.now.Add(750 * time.Millisecond)
@@ -209,6 +209,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 		"step_elapsed_ns": 750000000,
 		"detail": {
 			"operation": "concurrent-index-build",
+			"statement": "CREATE INDEX CONCURRENTLY idx ON public.t (id)",
 			"server_phase": "building index",
 			"active": true,
 			"attempt": 2,
@@ -224,6 +225,23 @@ func TestSnapshotJSONShape(t *testing.T) {
 			}
 		}
 	}`, string(raw))
+}
+
+func TestTrackerReportsCurrentStatementAndClearsItOnFinish(t *testing.T) {
+	tracker, err := progress.NewTracker(&fakeClock{now: time.Unix(100, 0)})
+	require.NoError(t, err)
+	tracker.Start(3, progress.OperationAdmitting)
+
+	const sql = "CREATE INDEX idx ON public.t (id)"
+	tracker.StartStep(2, progress.OperationBrief, sql)
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, sql, snapshot.Detail.Statement)
+
+	tracker.Finish(nil)
+	finished, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Empty(t, finished.Detail.Statement)
 }
 
 // Optional fields are omitted, not emitted as zero values — but the always-on
@@ -412,7 +430,7 @@ func TestStateMutatorsDoNotWaitForInFlightObservation(t *testing.T) {
 	mutated := make(chan struct{})
 	workers.Go(func() {
 		tracker.SetAttempt(2)
-		tracker.StartStep(1, progress.OperationConcurrentIndex)
+		tracker.StartStep(1, progress.OperationConcurrentIndex, "CREATE INDEX CONCURRENTLY idx ON public.t (id)")
 		close(mutated)
 	})
 	mutatorDeadline := time.After(5 * time.Second)

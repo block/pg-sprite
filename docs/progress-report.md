@@ -15,6 +15,9 @@ field shape: the closed vocabularies below (phases, operations) are pinned to it
 phase or operation value is a contract change and bumps `format_version`, even if no field
 is added or renamed.
 
+Additive optional fields do not bump `format_version`; consumers must ignore optional fields
+they do not recognize. The current version is **1**.
+
 The [plan report](plan-report.md), [lint report](lint-report.md), and
 [suggest report](suggest-report.md) are separate contracts with their own `format_version`;
 all version independently.
@@ -43,6 +46,7 @@ licenses a consumer to intervene in the change itself.
 | Field | Type | Presence | Meaning |
 |---|---|---|---|
 | `operation` | string | once execution starts | The current operation's execution class (see Operations). |
+| `statement` | string | while a step is executing | The canonical, qualified SQL the executor is running for the current step. This is the executor's statement text, never a rendered or prettified form. |
 | `server_phase` | string | active concurrent build only | PostgreSQL's own phase string from `pg_stat_progress_create_index`, verbatim. |
 | `active` | bool | always | Whether an operation is executing now. `false` with `phase: "running"` means a concurrent build's progress row has left the server view. |
 | `attempt` | int | bounded retries only | The current attempt number when the executor is inside its bounded retry loop. |
@@ -99,6 +103,7 @@ A poll during step 2 of a 3-step sequence, mid concurrent index build:
   "step_elapsed_ns": 750000000,
   "detail": {
     "operation": "concurrent-index-build",
+    "statement": "CREATE INDEX CONCURRENTLY events_created_at_idx ON public.events (created_at)",
     "server_phase": "building index",
     "active": true,
     "attempt": 2,
