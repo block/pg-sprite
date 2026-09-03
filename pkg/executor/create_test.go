@@ -1,10 +1,10 @@
 package executor_test
 
 import (
-	"errors"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/executor"
@@ -22,6 +22,13 @@ func TestCreateShapeRefusals(t *testing.T) {
 		{name: "if not exists", sql: "CREATE TABLE IF NOT EXISTS t (id int)", want: []error{executor.ErrIfNotExistsUnsupported}},
 		{name: "existing object clause", sql: "CREATE TABLE t (LIKE source)", want: []error{executor.ErrUnsupportedCreateStep}},
 		{name: "later duplicate", sql: "CREATE TABLE t (id int PRIMARY KEY); CREATE INDEX t_pkey ON t (id)", want: []error{nil, executor.ErrDuplicateCreateName}},
+		// A refused step still registers its claims: the collision with the
+		// refused table's name is reported on the later statement instead of
+		// admitting it.
+		{name: "duplicate of refused step", sql: "CREATE TABLE IF NOT EXISTS t (id int); CREATE INDEX t ON t (id)", want: []error{executor.ErrIfNotExistsUnsupported, executor.ErrDuplicateCreateName}},
+		// A step both refused by shape and colliding keeps the shape refusal
+		// as its cause.
+		{name: "refused shape wins over duplicate", sql: "CREATE TABLE t (id int PRIMARY KEY); CREATE INDEX IF NOT EXISTS t_pkey ON t (id)", want: []error{nil, executor.ErrIfNotExistsUnsupported}},
 		{name: "admitted", sql: "CREATE TABLE t (id int); CREATE INDEX t_id ON t (id)", want: []error{nil, nil}},
 	}
 	for _, tc := range tests {
@@ -33,10 +40,10 @@ func TestCreateShapeRefusals(t *testing.T) {
 			require.Len(t, refusals, len(tc.want))
 			for i := range tc.want {
 				if tc.want[i] == nil {
-					require.NoError(t, refusals[i])
+					assert.NoError(t, refusals[i])
 					continue
 				}
-				require.True(t, errors.Is(refusals[i], tc.want[i]), "statement %d: %v", i+1, refusals[i])
+				assert.ErrorIs(t, refusals[i], tc.want[i], "statement %d", i+1)
 			}
 		})
 	}

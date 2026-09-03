@@ -186,7 +186,7 @@ func TestRefuseUnsupportedCreateShapeMarksPositions(t *testing.T) {
 			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE INDEX i ON app.t (id)"}, Execution: planner.ExecutionAutocommit},
 		},
 	}
-	plan.RefuseUnsupportedCreateShape(&r, []error{errors.New("refused"), nil})
+	require.NoError(t, plan.RefuseUnsupportedCreateShape(&r, []error{errors.New("refused"), nil}))
 
 	assert.Equal(t, router.DispositionRefuse, r.Disposition)
 	assert.Equal(t, verdict.ReasonUnsupportedStatement, r.Reason)
@@ -197,6 +197,27 @@ func TestRefuseUnsupportedCreateShapeMarksPositions(t *testing.T) {
 	assert.Equal(t, router.DispositionExecute, r.Statements[1].Disposition)
 	assert.Equal(t, router.BackendNative, r.Statements[1].Backend)
 	assert.NotEmpty(t, r.Statements[1].ExecSQL)
+}
+
+// A refusal slice that does not line up with the planned statements means
+// the shape check and the plan disagree about what the plan contains; no
+// positional marking is safe, so the report is left as it was.
+func TestRefuseUnsupportedCreateShapeRejectsLengthMismatch(t *testing.T) {
+	r := plan.Report{
+		Disposition: router.DispositionExecute,
+		Statements: []plan.Statement{
+			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE TABLE app.t (id int)"}, Execution: planner.ExecutionAutocommit},
+			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE INDEX i ON app.t (id)"}, Execution: planner.ExecutionAutocommit},
+		},
+	}
+	err := plan.RefuseUnsupportedCreateShape(&r, []error{errors.New("refused")})
+
+	require.Error(t, err)
+	assert.Equal(t, router.DispositionExecute, r.Disposition)
+	for i := range r.Statements {
+		assert.Equal(t, router.DispositionExecute, r.Statements[i].Disposition, "statement %d", i+1)
+		assert.NotEmpty(t, r.Statements[i].ExecSQL, "statement %d", i+1)
+	}
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact

@@ -105,7 +105,9 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if refusalErr != nil {
 			return plan.Report{}, refusalErr
 		}
-		plan.RefuseUnsupportedCreateShape(&report, refused)
+		if err := plan.RefuseUnsupportedCreateShape(&report, refused); err != nil {
+			return plan.Report{}, err
+		}
 	}
 	if tableExists {
 		targetFacts, checkErr := preflight.LookupTargetFacts(ctx, pool, req.Schema, ds.Table())

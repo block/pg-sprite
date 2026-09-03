@@ -140,50 +140,54 @@ type Report struct {
 // RefuseUnsupportedPartitionedParent marks executable statements as refused
 // when partition-aware admission rejects their execution steps.
 func RefuseUnsupportedPartitionedParent(report *Report, refused []bool) {
-	any := false
-	for i := range report.Statements {
-		if i >= len(refused) || !refused[i] {
-			continue
-		}
-		any = true
-		report.Statements[i].Backend = ""
-		report.Statements[i].Disposition = router.DispositionRefuse
-		report.Statements[i].Reason = verdict.ReasonUnsupportedPartitionedParent
-		report.Statements[i].ExecSQL = nil
-		report.Statements[i].Execution = ""
-		for j := range report.Statements[i].Decisions {
-			report.Statements[i].Decisions[j].SaferSQL = nil
-			report.Statements[i].Decisions[j].SaferSQLExecution = ""
-		}
-	}
-	if any {
-		report.Disposition = router.DispositionRefuse
-		report.Reason = verdict.ReasonUnsupportedPartitionedParent
-	}
+	refuseStatements(report, verdict.ReasonUnsupportedPartitionedParent, func(i int) bool {
+		return i < len(refused) && refused[i]
+	})
 }
 
 // RefuseUnsupportedCreateShape marks the create-path statements whose
-// connection-free admission checks refuse their shape.
-func RefuseUnsupportedCreateShape(report *Report, refused []error) {
+// connection-free shape checks refuse them. refused is positional over
+// report.Statements — one entry per planned statement, nil where the
+// statement is admitted. The report carries no field for the cause; callers
+// that need the typed refusal keep the slice (executor.CreateShapeRefusals
+// is pure, so it can also be recomputed from the desired schema). A length
+// mismatch means the two sides no longer agree on what the plan contains,
+// so no positional marking is safe and the report is left untouched.
+func RefuseUnsupportedCreateShape(report *Report, refused []error) error {
+	if len(refused) != len(report.Statements) {
+		return fmt.Errorf("refuse create shapes: %d refusals for %d planned statements", len(refused), len(report.Statements))
+	}
+	refuseStatements(report, verdict.ReasonUnsupportedStatement, func(i int) bool {
+		return refused[i] != nil
+	})
+	return nil
+}
+
+// refuseStatements withdraws every piece of execution advice from each
+// statement the predicate selects and stamps the reason on it and, when any
+// statement was refused, on the report. Every refusal mutator goes through
+// here, so a field added later is withdrawn in one place.
+func refuseStatements(report *Report, reason verdict.Reason, refused func(i int) bool) {
 	any := false
 	for i := range report.Statements {
-		if i >= len(refused) || refused[i] == nil {
+		if !refused(i) {
 			continue
 		}
 		any = true
-		report.Statements[i].Backend = ""
-		report.Statements[i].Disposition = router.DispositionRefuse
-		report.Statements[i].Reason = verdict.ReasonUnsupportedStatement
-		report.Statements[i].ExecSQL = nil
-		report.Statements[i].Execution = ""
-		for j := range report.Statements[i].Decisions {
-			report.Statements[i].Decisions[j].SaferSQL = nil
-			report.Statements[i].Decisions[j].SaferSQLExecution = ""
+		st := &report.Statements[i]
+		st.Backend = ""
+		st.Disposition = router.DispositionRefuse
+		st.Reason = reason
+		st.ExecSQL = nil
+		st.Execution = ""
+		for j := range st.Decisions {
+			st.Decisions[j].SaferSQL = nil
+			st.Decisions[j].SaferSQLExecution = ""
 		}
 	}
 	if any {
 		report.Disposition = router.DispositionRefuse
-		report.Reason = verdict.ReasonUnsupportedStatement
+		report.Reason = reason
 	}
 }
 

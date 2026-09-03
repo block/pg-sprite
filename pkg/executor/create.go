@@ -224,9 +224,12 @@ type createStep struct {
 }
 
 // checkCreateSteps shape-checks every desired statement in order and marks
-// the second claimant of any name with ErrDuplicateCreateName. A returned
-// error means no positional result is safe — a parse failure or a violated
-// DesiredSchema invariant.
+// the second claimant of any name with ErrDuplicateCreateName. A step's
+// claims register whether or not its shape is refused, so a later statement
+// that collides with a refused one is reported as the collision it is rather
+// than admitted; a shape refusal already on the step is kept as its cause.
+// A returned error means no positional result is safe — a parse failure or
+// a violated DesiredSchema invariant.
 func checkCreateSteps(schema string, ds statement.DesiredSchema) ([]createStep, error) {
 	desired := ds.Statements()
 	// INV: ST-8 — a DesiredSchema proof guarantees a CREATE TABLE ordered
@@ -244,8 +247,10 @@ func checkCreateSteps(schema string, ds statement.DesiredSchema) ([]createStep, 
 		}
 		for _, name := range step.claims {
 			if _, taken := claimed[name]; taken {
-				step.refusal = fmt.Errorf("%w: %q", ErrDuplicateCreateName, name)
-				break
+				if step.refusal == nil {
+					step.refusal = fmt.Errorf("%w: %q", ErrDuplicateCreateName, name)
+				}
+				continue
 			}
 			claimed[name] = struct{}{}
 		}
@@ -278,7 +283,10 @@ func checkCreateStepShape(schema, table, sql string) (createStep, error) {
 		return createStep{}, err
 	}
 	// INV: ST-7 — the executor runs exactly the statement that was
-	// admitted, and only against the target the absence proof verified.
+	// admitted, and only against the desired schema's own table; on the
+	// execution path admitCreateSteps hands in the schema the absence proof
+	// verified, and executeCreate has already matched the proof's table to
+	// the desired schema's.
 	if st.Table() == "" || st.Schema() != schema || st.Table() != table {
 		return createStep{}, fmt.Errorf("%w: ST-7: statement targets %q but desired schema is for %q",
 			ErrInvariantViolation, qualifiedName(st.Schema(), st.Table()), qualifiedName(schema, table))
@@ -305,45 +313,62 @@ func checkCreateStepShape(schema, table, sql string) (createStep, error) {
 // checkCreateTableShape refuses the CREATE TABLE clauses that bind to a
 // secondary relation or type and returns the names the table will claim:
 // its own plus the first-choice index names of its index-backed constraints.
+// The claims are returned with the refusal so a later statement colliding
+// with a refused table is still reported.
 func checkCreateTableShape(qualified, table string, op statement.Op) ([]string, error) {
-	if op.PartitionOf {
-		return nil, ErrPartitionOfUnsupported
-	}
-	if op.Inherits {
-		return nil, fmt.Errorf("%w: INHERITS binds to an existing parent the absence proof does not cover", ErrUnsupportedCreateStep)
-	}
-	if op.Like {
-		return nil, fmt.Errorf("%w: LIKE reads an existing source table the absence proof does not cover", ErrUnsupportedCreateStep)
-	}
-	if op.OfType {
-		return nil, fmt.Errorf("%w: OF binds to an existing composite type the absence proof does not cover", ErrUnsupportedCreateStep)
-	}
-	if op.IfNotExists {
-		return nil, ErrIfNotExistsUnsupported
-	}
 	implicit, err := statement.ImplicitIndexNames(qualified)
 	if err != nil {
 		// ParseOne already admitted this SQL as a CREATE TABLE, so a
 		// refusal here means the two parse boundaries disagree.
 		return nil, fmt.Errorf("%w: %w", ErrUnsupportedCreateStep, err)
 	}
-	return append([]string{table}, implicit...), nil
+	return append([]string{table}, implicit...), createTableShapeRefusal(op)
+}
+
+// createTableShapeRefusal names the CREATE TABLE clause that keeps the
+// statement off the create path, nil when the shape is admitted.
+func createTableShapeRefusal(op statement.Op) error {
+	if op.PartitionOf {
+		return ErrPartitionOfUnsupported
+	}
+	if op.Inherits {
+		return fmt.Errorf("%w: INHERITS binds to an existing parent the absence proof does not cover", ErrUnsupportedCreateStep)
+	}
+	if op.Like {
+		return fmt.Errorf("%w: LIKE reads an existing source table the absence proof does not cover", ErrUnsupportedCreateStep)
+	}
+	if op.OfType {
+		return fmt.Errorf("%w: OF binds to an existing composite type the absence proof does not cover", ErrUnsupportedCreateStep)
+	}
+	if op.IfNotExists {
+		return ErrIfNotExistsUnsupported
+	}
+	return nil
 }
 
 // checkCreateIndexShape refuses index builds that cannot run against a
 // table born this run and returns the explicit index name as the step's
-// claim; an unnamed index claims nothing decidable.
+// claim; an unnamed index claims nothing decidable. The claim is returned
+// with the refusal so a later statement colliding with a refused index is
+// still reported.
 func checkCreateIndexShape(op statement.Op) ([]string, error) {
+	var claims []string
+	if op.Name != "" {
+		claims = []string{op.Name}
+	}
+	return claims, createIndexShapeRefusal(op)
+}
+
+// createIndexShapeRefusal names the CREATE INDEX clause that keeps the
+// statement off the create path, nil when the shape is admitted.
+func createIndexShapeRefusal(op statement.Op) error {
 	if op.Concurrent {
-		return nil, fmt.Errorf("%w: a concurrent build is refused on a table born this run", ErrUnsupportedCreateStep)
+		return fmt.Errorf("%w: a concurrent build is refused on a table born this run", ErrUnsupportedCreateStep)
 	}
 	if op.IfNotExists {
-		return nil, ErrIfNotExistsUnsupported
+		return ErrIfNotExistsUnsupported
 	}
-	if op.Name == "" {
-		return nil, nil
-	}
-	return []string{op.Name}, nil
+	return nil
 }
 
 // asCreateCollision maps the duplicate-name SQLSTATEs — 42P07 when a

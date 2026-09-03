@@ -61,9 +61,6 @@ and the mechanics of each current refusal are
 wherever an operation meets a boundary below, it fails closed with a typed
 refusal — never a silently wrong or incomplete result:
 
-Greenfield desired files refuse unsupported create shapes and duplicate
-claimed relation names during planning, then re-check those rules at apply.
-
 - **Copy-and-swap** (genuine table rewrites) is not yet available — those
   changes refuse rather than fall through to a blocking rewrite.
 - **Foreign keys** are out of the declarative model in either direction:
@@ -82,6 +79,10 @@ claimed relation names during planning, then re-check those rules at apply.
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
   which covers one ordinary table plus its indexes per file.
+- **Greenfield create shapes** the create path cannot run — `PARTITION OF`,
+  `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a relation name the desired
+  set claims twice — refuse at plan time, and the same rules re-check at
+  apply.
 
 The codebase is partitioned into a small safety-critical core and a
 periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the

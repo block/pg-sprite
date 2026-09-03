@@ -354,7 +354,7 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 		return refused, false
 	}
 	if report.Disposition != router.DispositionExecute {
-		refused.Reason, refused.Detail = planRefusal(report)
+		refused.Reason, refused.Detail = planRefusal(req, report)
 		return refused, false
 	}
 	return DesiredResult{}, true
@@ -379,8 +379,9 @@ func skippedRestDetail(n int) string {
 
 // planRefusal maps the first non-executable planned statement to the typed
 // refusal the aggregate result carries, mirroring how [Run] refuses the
-// same dispositions at execution time.
-func planRefusal(report plan.Report) (verdict.Reason, string) {
+// same dispositions at execution time. A greenfield statement the create
+// path refuses by shape carries the create path's own cause in the detail.
+func planRefusal(req DesiredRequest, report plan.Report) (verdict.Reason, string) {
 	for i, ps := range report.Statements {
 		detail := func(why string) string {
 			return fmt.Sprintf("planned statement %d (%s) %s; nothing was executed", i+1, ps.SQL, why)
@@ -397,6 +398,9 @@ func planRefusal(report plan.Report) (verdict.Reason, string) {
 			if reason == verdict.ReasonNone {
 				reason = verdict.ReasonUnsupportedStatement
 			}
+			if cause := createShapeCause(req, report, i); cause != nil {
+				return reason, detail(fmt.Sprintf("is refused by the create path: %v", cause))
+			}
 			return reason, detail("has no safe path")
 		default:
 			return verdict.ReasonUnsupportedStatement, detail("carries a disposition this build does not know")
@@ -407,6 +411,33 @@ func planRefusal(report plan.Report) (verdict.Reason, string) {
 	return verdict.ReasonUnsupportedStatement,
 		fmt.Sprintf("the plan's aggregate disposition is %q but no statement carries it; nothing was executed",
 			report.Disposition)
+}
+
+// createShapeCause returns the create path's typed refusal for planned
+// statement i of a greenfield plan, nil when the statement is not one the
+// create path refused by shape. The plan report carries no field for the
+// cause, and the shape check is pure over the desired schema the plan was
+// derived from, so it is recomputed here rather than stored. A desired
+// schema the planner just derived a plan from cannot fail the same check
+// it already passed; if it does, the statement is reported without a cause
+// rather than turning a refusal into an error.
+func createShapeCause(req DesiredRequest, report plan.Report, i int) error {
+	if report.TableExists == nil || *report.TableExists {
+		return nil
+	}
+	if report.Statements[i].Reason != verdict.ReasonUnsupportedStatement {
+		return nil
+	}
+	refused, err := executor.CreateShapeRefusals(req.Schema, req.Desired)
+	if err != nil {
+		return nil
+	}
+	if i >= len(refused) {
+		// The plan and the desired schema disagree on statement count;
+		// no positional cause is trustworthy.
+		return nil
+	}
+	return refused[i]
 }
 
 // committedPrefixDetail states how far convergence got when execution

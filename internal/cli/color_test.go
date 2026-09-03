@@ -133,8 +133,8 @@ func TestDiffTextColorWrapsLabelsOnly(t *testing.T) {
 	report.TableExists = &exists
 
 	var plain, colored strings.Builder
-	require.NoError(t, writeDiffText(&plain, palette{}, report))
-	require.NoError(t, writeDiffText(&colored, palette{enabled: true}, report))
+	require.NoError(t, writeDiffText(&plain, palette{}, report, nil))
+	require.NoError(t, writeDiffText(&colored, palette{enabled: true}, report, nil))
 
 	assert.Contains(t, colored.String(), ansiWarning)
 	assert.Contains(t, colored.String(), ansiBold)
