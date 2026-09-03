@@ -150,7 +150,7 @@ Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today
 | `ADD COLUMN ... GENERATED ... STORED` | 🟡 | copy-and-swap | Yes | Table rewrite; copy-and-swap route. The copy engine must **recompute, never copy,** generated columns on the shadow table |
 | `ADD COLUMN` with inline `UNIQUE`/`PRIMARY KEY`/`REFERENCES`/`CHECK` | 🟡 | native, planned flow | Yes | The inline constraint does its index build or validation scan under the `ADD COLUMN`'s `ACCESS EXCLUSIVE` lock; refused with guidance to add the column first, then build the constraint online |
 | `DROP COLUMN` | ✅ | native, as-is | Yes | Metadata-only; flagged **destructive** in the plan report |
-| `ALTER COLUMN TYPE`, binary-coercible (proven against live column facts) | ✅ | native, as-is | Yes | Catalog relabel, e.g. `varchar(50)` → `varchar(100)`, `varchar` → `text` |
+| `ALTER COLUMN TYPE`, binary-coercible (proven against live column facts) | ✅ | native, as-is | Yes | Catalog relabel, e.g. `varchar(50)` → `varchar(100)`, `varchar` → `text`; PostgreSQL itself refuses the change when a view, rule, or `STORED` generated column depends on the column — see [binary-coercible-type-changes.md](binary-coercible-type-changes.md#no-rewrite-is-not-no-cost) |
 | `ALTER COLUMN TYPE`, general (or with `USING`) | 🟡 | copy-and-swap | Yes | Table rewrite; copy-and-swap route, refused today |
 | `SET DEFAULT` / `DROP DEFAULT` / `DROP NOT NULL` | ✅ | native, as-is | Yes | Metadata-only |
 | `SET NOT NULL` | ✅ | native, safer sequence | Yes | Executed as the native four-step pattern: `ADD CONSTRAINT ... CHECK (col IS NOT NULL) NOT VALID` → online `VALIDATE` → `SET NOT NULL` (catalog flip, PG 12+) → drop the scaffold check |

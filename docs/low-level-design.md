@@ -544,7 +544,7 @@ covered. The unsupported rows are explicit non-goals for v1.
 
 Spirit publishes a short, deliberate list of things it **requires** of a table and things it
 **refuses to do** (see [its README](https://github.com/block/spirit#unsupported-features) and
-spirit-architecture-notes.md). These are not arbitrary —
+[the PostgreSQL primitive mapping](mysql-vs-postgresql.md#copy-and-swap-executor-spirit-mysql--postgresql-primitive-mapping)). These are not arbitrary —
 each maps to a property the copy/CDC/cutover machinery depends on. Below is the faithful
 translation of each constraint to PostgreSQL, **with the Postgres-specific reason**
 (not just "because Spirit does it"). The coverage matrix above states *what* is supported;

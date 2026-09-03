@@ -1,7 +1,7 @@
 # Design principles
 
 The canonical list of principles that govern the engine. They are distilled from Spirit's
-philosophy (see spirit-architecture-notes.md) and
+philosophy (see the [Spirit README](https://github.com/block/spirit)) and
 adapted for PostgreSQL. Everything in [low-level-design.md](low-level-design.md) and
 the phased build plan should be traceable back to one of these.
 
@@ -184,5 +184,5 @@ enforcement mechanics) live in [tcb-model](tcb-model.md); the repo-process versi
   checksum, lock behaviour).
 - **Each increment is independently useful.** The build is sequenced so that early phases
   (classify/print, then native-path execution) ship value on their own, and the highest-risk
-  components (CDC, cutover) are added last on a proven foundation (see
-  build-plan.md).
+  components (CDC, cutover) are added last on a proven foundation (see the
+  [current implementation status and next increment](low-level-design.md#next-step)).
