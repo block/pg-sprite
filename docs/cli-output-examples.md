@@ -1,11 +1,11 @@
 # CLI output examples
 
-Representative, real JSON outputs for every shape the CLI produces: the
-plan report for each dry-run disposition, the execution verdict, the
-linter, and diff. The human text rendering of the same reports is display
-only — see the animated demos in [demos/](demos/) for how it reads; the
-JSON is the machine contract. The text reports color their diagnostic
-labels when stdout is a terminal (`--color=auto|always|never`;
+Representative, real outputs for every shape the CLI produces: the plan
+report for each dry-run disposition, the execution verdict, the linter,
+pull, and diff. Where JSON is available, the human text rendering of the
+same reports is display only — see the animated demos in [demos/](demos/)
+for how it reads; the JSON is the machine contract. The text reports color
+their diagnostic labels when stdout is a terminal (`--color=auto|always|never`;
 [`NO_COLOR`](https://no-color.org) and `TERM=dumb` disable auto-detection);
 the JSON and `diff --sql` outputs are never colored. All were captured
 verbatim from a real session against the compose database (`make db-up`,
@@ -48,6 +48,8 @@ a verdict, not a plan report — and exit 2. The JSON report schema is
   - [Executable but destructive (`destructive`) — exit 0](#executable-but-destructive-destructive--exit-0)
 - [Lint](#lint)
   - [Blocking idioms flagged (`blocking-idiom`) — exit 0](#blocking-idioms-flagged-blocking-idiom--exit-0)
+- [Pull](#pull)
+  - [Export a desired-state file per table — exit 0](#export-a-desired-state-file-per-table--exit-0)
 - [Diff](#diff)
   - [Converge to the desired state (`metadata-only`) — exit 0](#converge-to-the-desired-state-metadata-only--exit-0)
 
@@ -412,6 +414,24 @@ $ pg-sprite lint /tmp/changes.sql --json
   "warnings": 2
 }
 ```
+
+## Pull
+
+`pull` exports every renderable table in a schema as a separate desired-state
+file. It currently emits a text-only per-table report rather than JSON. This
+output was captured from the compose database after loading `demo/seed.sql`:
+
+### Export a desired-state file per table — exit 0
+
+```console
+$ pg-sprite pull --schema public --out /tmp/pg-sprite-pull-example
+PULLED  orders -> /tmp/pg-sprite-pull-example/orders.sql
+PULLED  users -> /tmp/pg-sprite-pull-example/users.sql
+Summary: 2 pulled, 0 refused, 0 errors
+```
+
+See [pull.md](pull.md) for the refusal and exit-code contract and the
+zero-change `diff` verification loop.
 
 ## Diff
 

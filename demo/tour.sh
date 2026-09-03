@@ -2,7 +2,7 @@
 #
 # A runnable tour of the pg-sprite CLI: walk one statement through every
 # planner route and reason, print the declarative diff plans, run the
-# offline commands, and finish by executing real schema changes — including
+# offline commands, export and verify a declarative baseline, and finish by executing real schema changes — including
 # the safer-sequence substitutions — against the seeded demo tables. Run it
 # via `make demo`, which builds the binary, starts the compose database,
 # and reseeds demo/seed.sql first.
@@ -147,6 +147,38 @@ diff_plan() {
     fi
 }
 
+run_pull() {
+    heading "Existing database onboarding: export a baseline and prove zero diff"
+    local out_dir file_count desired out status
+    out_dir=$(mktemp -d "${TMPDIR:-/tmp}/pg-sprite-pull.XXXXXX")
+
+    step "pull --schema public --out $out_dir"
+    status=0
+    if [ "$CHECK" = 1 ]; then
+        "$PGS" pull --url "$PG_DSN" --schema public --out "$out_dir" >/dev/null || status=$?
+        assert_eq "pull exit" 0 "$status"
+        file_count=$(find "$out_dir" -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')
+        assert_eq "pulled file count" 2 "$file_count"
+    else
+        "$PGS" pull --url "$PG_DSN" --schema public --out "$out_dir" || echo "(exit $?)"
+    fi
+
+    for desired in "$out_dir"/*.sql; do
+        step "zero-diff proof: $desired"
+        status=0
+        if [ "$CHECK" = 1 ]; then
+            out=$("$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" --json) || status=$?
+            assert_eq "diff exit of [$desired]" 0 "$status"
+            assert_eq "diff format_version of [$desired]" 2 "$(jq -r '.format_version' <<<"$out")"
+            assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
+            assert_eq "zero diff of [$desired]" 0 "$(jq -r '.statements | length' <<<"$out")"
+        else
+            "$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" || echo "(exit $?)"
+        fi
+    done
+    rm -rf "$out_dir"
+}
+
 run_dryrun() {
     heading "Classification: one statement per route and reason (dry-run, no writes)"
     #       route          reason                 destructive disposition
@@ -234,11 +266,12 @@ run_exec() {
 case "$section" in
 dryrun)  run_dryrun ;;
 diff)    run_diff ;;
+pull)    run_pull ;;
 offline) run_offline ;;
 exec)    run_exec ;;
-all)     run_dryrun; run_diff; run_offline; run_exec ;;
+all)     run_dryrun; run_diff; run_pull; run_offline; run_exec ;;
 *)
-    echo "usage: tour.sh [dryrun|diff|offline|exec|all]" >&2
+    echo "usage: tour.sh [dryrun|diff|pull|offline|exec|all]" >&2
     exit 64
     ;;
 esac
