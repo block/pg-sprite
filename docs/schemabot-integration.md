@@ -169,6 +169,9 @@ The greenfield `CREATE TABLE` path is a fixed call order, all inside the apply s
 3. `preflight.CheckCreatePrivileges` — mint the `CreationRole` proof for the target schema.
 4. `executor.ExecuteCreate` — consume both proofs and run the set.
 
+The plan's `exec_sql` states the same plain `CREATE TABLE` and index builds that this path
+runs; it does not substitute `CONCURRENTLY` for an index on the table born in that run.
+
 `migrate.RunDesired` runs this sequence itself when the plan is greenfield — the adapter
 does not assemble it and must not mint either proof separately (a proof minted outside the
 executing session proves nothing about it). The order decides which refusal wins when both

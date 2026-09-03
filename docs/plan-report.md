@@ -199,6 +199,10 @@ separator (`0x1E`). Explanatory fields (`decisions`, `kind`, `destructive`) are 
 reworded reason does not change identity, but a rerouted, resequenced, or rewritten plan
 does. An empty plan has a defined identity (the digest of no input).
 
+For a table that does not exist yet, `exec_sql` is the plain canonical build that the
+greenfield create path runs. It never substitutes `CONCURRENTLY` for an index on a table
+born in that run, and the fingerprint therefore commits to the plain build.
+
 This is a **plan identity, not a schema fingerprint**. The engine's schema-state comparisons
 only ever compare server-decompiled output against server-decompiled output (see
 `pkg/statement`); the plan fingerprint never participates in them.

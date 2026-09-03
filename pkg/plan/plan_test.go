@@ -177,6 +177,42 @@ func TestRefuseUnsupportedPartitionedParentWithdrawsExecutionAdvice(t *testing.T
 	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQLExecution)
 }
 
+func TestDiscloseGreenfieldExecutionUsesPlainSQLForExecutableStatements(t *testing.T) {
+	concurrent := "CREATE INDEX CONCURRENTLY i ON s.t (c)"
+	r := plan.Report{Statements: []plan.Statement{
+		{
+			SQL:         "CREATE INDEX i ON s.t USING btree (c)",
+			Disposition: router.DispositionExecute,
+			ExecSQL:     []string{concurrent},
+			Execution:   planner.ExecutionAutocommit,
+			Decisions: []planner.Decision{{
+				SaferSQL:          []string{concurrent},
+				SaferSQLExecution: planner.ExecutionAutocommit,
+			}},
+		},
+		{
+			SQL:         "ALTER TABLE s.t SET UNLOGGED",
+			Disposition: router.DispositionRefuse,
+			ExecSQL:     []string{concurrent},
+			Execution:   planner.ExecutionAutocommit,
+			Decisions: []planner.Decision{{
+				SaferSQL:          []string{concurrent},
+				SaferSQLExecution: planner.ExecutionAutocommit,
+			}},
+		},
+	}}
+
+	plan.DiscloseGreenfieldExecution(&r)
+
+	assert.Equal(t, []string{r.Statements[0].SQL}, r.Statements[0].ExecSQL)
+	assert.Equal(t, planner.ExecutionAutocommit, r.Statements[0].Execution)
+	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQL)
+	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQLExecution)
+	assert.Equal(t, []string{concurrent}, r.Statements[1].ExecSQL)
+	assert.Equal(t, []string{concurrent}, r.Statements[1].Decisions[0].SaferSQL)
+	assert.Equal(t, planner.ExecutionAutocommit, r.Statements[1].Decisions[0].SaferSQLExecution)
+}
+
 // The JSON shape is the adapter-facing contract: exact keys, exact
 // omissions. A consumer pins format_version 2 against this test.
 func TestReportJSONShape(t *testing.T) {

@@ -99,7 +99,9 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
 		return plan.Report{}, err
 	}
-	if tableExists {
+	if !tableExists {
+		plan.DiscloseGreenfieldExecution(&report)
+	} else {
 		targetFacts, checkErr := preflight.LookupTargetFacts(ctx, pool, req.Schema, ds.Table())
 		if checkErr != nil {
 			return plan.Report{}, checkErr

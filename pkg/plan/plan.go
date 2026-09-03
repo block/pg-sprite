@@ -162,6 +162,24 @@ func RefuseUnsupportedPartitionedParent(report *Report, refused []bool) {
 	}
 }
 
+// DiscloseGreenfieldExecution makes executable statements describe the plain,
+// bounded builds used for a table born in this run. There is no live traffic
+// to protect, so the create path does not substitute the planner's online
+// idioms.
+func DiscloseGreenfieldExecution(report *Report) {
+	for i := range report.Statements {
+		if report.Statements[i].Disposition != router.DispositionExecute {
+			continue
+		}
+		report.Statements[i].ExecSQL = []string{report.Statements[i].SQL}
+		report.Statements[i].Execution = planner.ExecutionAutocommit
+		for j := range report.Statements[i].Decisions {
+			report.Statements[i].Decisions[j].SaferSQL = nil
+			report.Statements[i].Decisions[j].SaferSQLExecution = ""
+		}
+	}
+}
+
 // NewReport returns an empty report for source with the contract version
 // stamped and Statements non-nil, so an empty plan serializes as [] rather
 // than null.
