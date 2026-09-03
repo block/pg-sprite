@@ -257,8 +257,14 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 	}
 	var stepErr *executor.SequenceStepError
 	if !errors.As(execErr, &stepErr) {
-		// No step error means nothing started: the executor refused the
-		// set at admission, from the statements' shapes alone.
+		// No step error means nothing started: the executor refused the set
+		// during admission or its claimed-name catalog preflight.
+		if errors.Is(execErr, executor.ErrCreateCollision) {
+			result.Outcome = verdict.OutcomeRefused
+			result.Reason = verdict.ReasonCreateCollision
+			result.Detail = fmt.Sprintf("the create path refused the plan because the catalog already holds a name it claims (%v); re-derive the plan and review what it says now; nothing was executed", execErr)
+			return result, nil
+		}
 		if isCreateAdmissionRefusal(execErr) {
 			result.Outcome = verdict.OutcomeRefused
 			result.Reason = verdict.ReasonUnsupportedStatement

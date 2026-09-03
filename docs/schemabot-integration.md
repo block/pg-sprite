@@ -150,7 +150,7 @@ it to one of four things:
 | Outcome | Routing class |
 | --- | --- |
 | Executed | The table and its indexes exist; a rerun converges to an empty plan |
-| `create-collision` refusal | **Re-plan**: re-diff the live catalog — something now owns the name; never blindly retry |
+| `create-collision` refusal | **Re-plan**: re-diff the live catalog — the table name or a claimed index/constraint-index name is occupied; never blindly retry |
 | `insufficient-privileges` refusal (`*preflight.PrivilegeError`, `Tier == TierCreateTable`) | **Operator provisioning action**: the role needs the exact `GRANT` the error carries — not a desired-file fix, and not retryable until granted |
 | Admission refusal (`unsupported-statement`) | **Author action**: the desired file states a shape the create path refuses; retrying unchanged cannot succeed |
 
@@ -201,7 +201,12 @@ them, don't retry them uniformly:
 | `ErrPartitionOfUnsupported` (`partition-of-unsupported`) | `PARTITION OF` binds to a live parent the absence proof does not cover | Fix the desired file; out of the create path's scope |
 | `ErrIfNotExistsUnsupported` (`if-not-exists-unsupported`) | `CREATE ... IF NOT EXISTS` succeeds as a name-only no-op over a relation it cannot vouch for — the opposite of the absence proof's fail-closed contract; refused at admission, nothing ran | Fix the desired file: state the plain `CREATE`; the absence check owns collision handling |
 | `ErrUnsupportedCreateStep` (`unsupported-create-step`) | A desired statement is not a shape the create path can run | Fix the desired file |
-| `ErrCreateCollision` (`create-collision`) | A concurrent writer took a needed name after a valid proof | Re-diff the live catalog and re-plan — the world changed; never blindly retry the create |
+| `ErrCreateCollision` (`create-collision`) | A claimed index or constraint-index name was already occupied, or a concurrent writer took a needed name after the absence checks | Re-diff the live catalog and re-plan — the world changed; never blindly retry the create |
+
+Before the first step, `ExecuteCreate` checks all deterministic index and
+constraint-index names against `pg_class` in one schema-scoped catalog snapshot;
+`CheckTableAbsent` separately covers the table relation and composite type. The
+duplicate-name SQLSTATE mapping remains the race backstop after those checks.
 
 A failed create is not rolled back wholesale: each step committed in its own bounded
 transaction, so the steps before the failure remain

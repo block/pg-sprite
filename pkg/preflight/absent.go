@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -144,4 +146,34 @@ func CheckTableAbsent(ctx context.Context, pool *pgxpool.Pool, schema, table str
 			ErrTypeExists, qualifiedName(*targetSchema, table), *typtype)
 	}
 	return AbsentTarget{schema: *targetSchema, table: table}, nil
+}
+
+// CheckNamesAbsent verifies that no relation in schema occupies any of
+// names. It reads pg_class in one catalog snapshot and reports the first
+// occupied name in lexical order, regardless of input order. It does not
+// probe pg_type: this check protects index and constraint-index names,
+// which do not create types; [CheckTableAbsent] separately protects the
+// CREATE TABLE name and its composite type.
+func CheckNamesAbsent(ctx context.Context, pool *pgxpool.Pool, schema string, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	ordered := slices.Clone(names)
+	slices.Sort(ordered)
+	const q = `
+		SELECT c.relname, c.relkind::text
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = ANY($2)
+		ORDER BY c.relname
+		LIMIT 1`
+	var name, relkind string
+	err := pool.QueryRow(ctx, q, schema, ordered).Scan(&name, &relkind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check claimed names are absent in schema %q: %w", schema, err)
+	}
+	return fmt.Errorf("%w: %s has relkind %q", ErrRelationExists, qualifiedName(schema, name), relkind)
 }

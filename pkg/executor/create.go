@@ -9,13 +9,13 @@
 // re-parsed by the real grammar, and admitted by shape and target before
 // anything executes.
 //
-// The absence proof is time-of-check: nothing locks the name, so a
-// concurrent create can still take it between the check and a step here.
-// That loss surfaces as SQLSTATE 42P07 and is returned as the typed
-// ErrCreateCollision — the caller re-diffs the live catalog rather than
-// assuming what the collision left behind. A failed step ends the run
-// immediately; the steps before it committed (each in its own bounded
-// transaction) and remain, so a rerun's absence check refuses with
+// The executor proves every deterministic table, index, and constraint-index
+// name free before execution. The proof is time-of-check: nothing locks the
+// names, so a concurrent create can still take one before its step. That
+// loss surfaces through SQLSTATE 42P07 or 42710 as ErrCreateCollision — the
+// caller re-diffs rather than assuming what the collision left behind. A
+// failed step ends the run immediately; the steps before it committed
+// (each in its own bounded transaction) remain, so a rerun's absence check refuses with
 // ErrRelationExists and the declarative front door re-diffs and applies
 // the remainder.
 
@@ -25,6 +25,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -39,12 +40,11 @@ import (
 // desired statement before the first executes, so a creation this executor
 // cannot finish is never started.
 var (
-	// ErrCreateCollision is returned when a step fails because its target
-	// name is already taken. For the table name that means a concurrent
-	// create won the race — the absence proof is time-of-check. Index
-	// names are never absence-checked, so a pre-existing occupant at an
-	// index name reports the same way. Either way the caller re-diffs the
-	// live catalog; nothing about the occupant's shape can be assumed.
+	// ErrCreateCollision is returned when a claimed name is already taken.
+	// Admission checks the table's index and constraint-index names before
+	// execution; duplicate-name SQLSTATEs remain the time-of-check race
+	// backstop. The caller re-diffs the live catalog without assuming the
+	// occupant's shape.
 	ErrCreateCollision = errors.New("a name the create path needs is already taken")
 	// ErrDuplicateCreateName is returned when the desired set claims the
 	// same relation name twice — two indexes under one name, or an index
@@ -140,9 +140,17 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 		return rep, fmt.Errorf("%w: ST-7: desired schema targets %q but absence was verified for %q",
 			ErrInvariantViolation, ds.Table(), at.Table())
 	}
-	steps, err := admitCreateSteps(at, ds)
+	steps, claimed, err := admitCreateSteps(at, ds)
 	if err != nil {
 		return rep, err
+	}
+	// Every deterministic relation name the desired set will claim is
+	// proved free before the first step executes, so an occupied index name
+	// refuses the whole set instead of failing after the table committed.
+	// CheckTableAbsent already covers the table name and its composite type.
+	claimed = slices.DeleteFunc(claimed, func(name string) bool { return name == at.Table() })
+	if err := preflight.CheckNamesAbsent(ctx, pool, at.Schema(), claimed); err != nil {
+		return rep, fmt.Errorf("%w: the desired file claims a name the catalog already holds: %w", ErrCreateCollision, err)
 	}
 	for i, step := range steps {
 		start := time.Now()
@@ -183,30 +191,35 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 // because a deterministic name the file states beats one the server
 // invents. A step whose name the server invents outright (an unnamed
 // index) claims nothing decidable and is exempt.
-func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]statement.Statement, error) {
+func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]statement.Statement, []string, error) {
 	desired := ds.Statements()
 	// INV: ST-8 — a DesiredSchema proof guarantees a CREATE TABLE ordered
 	// first; a set that does not lead with one means the proof was forged
 	// or mutated.
 	if len(desired) == 0 || desired[0].Kind() != statement.KindCreateTable {
-		return nil, fmt.Errorf("%w: ST-8: desired schema does not lead with a CREATE TABLE", ErrInvariantViolation)
+		return nil, nil, fmt.Errorf("%w: ST-8: desired schema does not lead with a CREATE TABLE", ErrInvariantViolation)
 	}
 	steps := make([]statement.Statement, 0, len(desired))
 	claimed := make(map[string]struct{}, len(desired))
 	for i, raw := range desired {
 		st, names, err := admitCreateStep(at, raw.SQL())
 		if err != nil {
-			return nil, fmt.Errorf("desired statement %d of %d: %w", i+1, len(desired), err)
+			return nil, nil, fmt.Errorf("desired statement %d of %d: %w", i+1, len(desired), err)
 		}
 		for _, name := range names {
 			if _, taken := claimed[name]; taken {
-				return nil, fmt.Errorf("desired statement %d of %d: %w: %q", i+1, len(desired), ErrDuplicateCreateName, name)
+				return nil, nil, fmt.Errorf("desired statement %d of %d: %w: %q", i+1, len(desired), ErrDuplicateCreateName, name)
 			}
 			claimed[name] = struct{}{}
 		}
 		steps = append(steps, st)
 	}
-	return steps, nil
+	ordered := make([]string, 0, len(claimed))
+	for name := range claimed {
+		ordered = append(ordered, name)
+	}
+	slices.Sort(ordered)
+	return steps, ordered, nil
 }
 
 // admitCreateStep qualifies one desired statement into the proof's schema,

@@ -87,7 +87,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 | `backend-unavailable` | The change routes to an execution strategy this build does not implement (copy-and-swap). |
 | `destructive-change` | The desired-state plan discards live structure — a dropped column, constraint, index, or `NOT NULL` — and desired-state execution runs no destructive statement; run the drop deliberately instead ([execution model](execution-model.md)). |
 | `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
-| `create-collision` | The greenfield create plan's target name is already occupied — a relation or standalone type took it after the plan was derived. Nothing runs; re-derive the plan against the live catalog and review what it says now. |
+| `create-collision` | The greenfield create plan's table name or a claimed index/constraint-index name is occupied. Nothing runs; re-derive the plan against the live catalog and review what it says now. Catalog absence checks handle existing occupants; duplicate-name SQLSTATEs remain the race backstop. |
 
 ## Migrate
 

@@ -140,6 +140,23 @@ func TestExecuteCreateReportsCollisionAsTyped(t *testing.T) {
 	assert.Empty(t, rep.Steps)
 }
 
+// The first-choice name of an index-backed constraint is part of the
+// desired set's contract. An unrelated catalog occupant must refuse the
+// whole set rather than make PostgreSQL suffix the constraint name.
+func TestExecuteCreateRefusesOccupiedImplicitIndexNameBeforeExecution(t *testing.T) {
+	f := newCreateFixture(t, "t")
+	_, err := f.pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.other (v int)", f.schema))
+	require.NoError(t, err)
+	_, err = f.pool.Exec(t.Context(), fmt.Sprintf("CREATE INDEX t_pkey ON %s.other (v)", f.schema))
+	require.NoError(t, err)
+
+	ds := desired(t, "CREATE TABLE t (id int PRIMARY KEY, v text)")
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	require.ErrorIs(t, err, executor.ErrCreateCollision)
+	assert.Empty(t, rep.Steps)
+	assert.False(t, relationExists(t, f.pool, f.schema, "t"), "the catalog preflight runs before every step")
+}
+
 // A failed step ends the run; the steps before it committed and remain,
 // and the report covers exactly that prefix so the caller can disclose
 // what already happened. An index on a column the table does not have
