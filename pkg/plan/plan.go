@@ -164,9 +164,11 @@ func RefuseUnsupportedCreateShape(report *Report, refused []error) error {
 }
 
 // refuseStatements withdraws every piece of execution advice from each
-// statement the predicate selects and stamps the reason on it and, when any
-// statement was refused, on the report. Every refusal mutator goes through
-// here, so a field added later is withdrawn in one place.
+// statement the predicate selects and, when any statement was refused, stamps
+// the reason on the report. An already-refused statement or report keeps its
+// reason: the first refusal wins because an earlier mutator saw the more
+// specific cause. Every refusal mutator goes through here, so a field added
+// later is withdrawn in one place.
 func refuseStatements(report *Report, reason verdict.Reason, refused func(i int) bool) {
 	any := false
 	for i := range report.Statements {
@@ -175,9 +177,12 @@ func refuseStatements(report *Report, reason verdict.Reason, refused func(i int)
 		}
 		any = true
 		st := &report.Statements[i]
+		alreadyRefused := st.Disposition == router.DispositionRefuse
 		st.Backend = ""
 		st.Disposition = router.DispositionRefuse
-		st.Reason = reason
+		if !alreadyRefused {
+			st.Reason = reason
+		}
 		st.ExecSQL = nil
 		st.Execution = ""
 		for j := range st.Decisions {
@@ -186,8 +191,10 @@ func refuseStatements(report *Report, reason verdict.Reason, refused func(i int)
 		}
 	}
 	if any {
+		if report.Disposition != router.DispositionRefuse {
+			report.Reason = reason
+		}
 		report.Disposition = router.DispositionRefuse
-		report.Reason = reason
 	}
 }
 

@@ -127,6 +127,8 @@ treat the statement and report as refused.
 
 On the apply path, refusal checks have deterministic precedence: table size, then partition
 support, then privileges.
+On the greenfield create path, a decidable shape refusal takes precedence over the table-absence
+and privilege checks because it needs no connection.
 
 ### Backends (`backend`)
 

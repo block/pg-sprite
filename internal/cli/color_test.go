@@ -260,7 +260,7 @@ func TestMachineOutputsStayPlainUnderColorAlways(t *testing.T) {
 			return cmd.runSuggest(strings.NewReader("CREATE INDEX t_c_idx ON t (c)"), out)
 		}},
 		{"diff --json", func(out io.Writer) error { return writeJSON(out, diffReport) }},
-		{"diff --sql", func(out io.Writer) error { return writePlanText(out, diffReport) }},
+		{"diff --sql", func(out io.Writer) error { return writePlanText(out, diffReport, nil) }},
 		{"migrate --dry-run --json", func(out io.Writer) error { return writeJSON(out, dryRunReport) }},
 	}
 	for _, tc := range cases {

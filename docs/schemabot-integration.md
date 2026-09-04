@@ -155,6 +155,9 @@ them when admitting execution. A greenfield run resolves to one of four things:
 | `insufficient-privileges` refusal (`*preflight.PrivilegeError`, `Tier == TierCreateTable`) | **Operator provisioning action**: the role needs the exact `GRANT` the error carries — not a desired-file fix, and not retryable until granted |
 | Plan/admission refusal (`unsupported-statement`) | **Author action**: the desired file states a shape the create path refuses; retrying unchanged cannot succeed |
 
+Greenfield refusals have deterministic precedence: a decidable shape refusal comes before the
+table-absence and privilege checks because it needs no connection.
+
 Only the last is an author error. An adapter that surfaces every greenfield refusal as
 "fix your desired file" gives operators the wrong instruction for the two middle rows. A
 create that failed mid-sequence follows the

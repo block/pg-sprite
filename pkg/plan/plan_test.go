@@ -199,6 +199,28 @@ func TestRefuseUnsupportedCreateShapeMarksPositions(t *testing.T) {
 	assert.NotEmpty(t, r.Statements[1].ExecSQL)
 }
 
+func TestRefuseUnsupportedCreateShapePreservesExistingStatementReason(t *testing.T) {
+	r := plan.Report{
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedPartitionedParent,
+		Statements: []plan.Statement{{
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionRefuse,
+			Reason:      verdict.ReasonUnsupportedPartitionedParent,
+			ExecSQL:     []string{"CREATE TABLE app.t (id int)"},
+			Execution:   planner.ExecutionAutocommit,
+		}},
+	}
+	require.NoError(t, plan.RefuseUnsupportedCreateShape(&r, []error{errors.New("refused")}))
+
+	assert.Equal(t, router.DispositionRefuse, r.Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Statements[0].Reason)
+	assert.Empty(t, r.Statements[0].Backend)
+	assert.Empty(t, r.Statements[0].ExecSQL)
+	assert.Empty(t, r.Statements[0].Execution)
+}
+
 // A refusal slice that does not line up with the planned statements means
 // the shape check and the plan disagree about what the plan contains; no
 // positional marking is safe, so the report is left as it was.

@@ -432,7 +432,7 @@ func createShapeCause(req DesiredRequest, report plan.Report, i int) error {
 	if err != nil {
 		return nil
 	}
-	if i >= len(refused) {
+	if len(refused) != len(report.Statements) {
 		// The plan and the desired schema disagree on statement count;
 		// no positional cause is trustworthy.
 		return nil

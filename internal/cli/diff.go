@@ -48,14 +48,15 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		"schema", report.Schema, "table", report.Table, "changes", len(report.Statements),
 		"table_exists", report.TableExists != nil && *report.TableExists,
 		"disposition", string(report.Disposition))
+	causes := greenfieldRefusalCauses(c.Schema, ds, report)
 
 	switch {
 	case c.JSON:
 		err = writeJSON(out, report)
 	case c.SQL:
-		err = writePlanText(out, report)
+		err = writePlanText(out, report, causes)
 	default:
-		err = writeDiffText(out, c.palette(out), report, greenfieldRefusalCauses(c.Schema, ds, report))
+		err = writeDiffText(out, c.palette(out), report, causes)
 	}
 	if err != nil {
 		return err
@@ -117,7 +118,7 @@ func writeJSON(out io.Writer, report plan.Report) error {
 // plan (a CONCURRENTLY rewrite could not run inside a transaction block).
 // The header points at migrate as the executing front door: running this
 // script directly bypasses the gate that refuses blocking statements.
-func writePlanText(out io.Writer, report plan.Report) error {
+func writePlanText(out io.Writer, report plan.Report, refusalCauses []error) error {
 	if len(report.Statements) == 0 {
 		if _, err := fmt.Fprintln(out, "-- no changes: live table matches the desired schema"); err != nil {
 			return fmt.Errorf("write plan: %w", err)
@@ -136,8 +137,12 @@ func writePlanText(out io.Writer, report plan.Report) error {
 			return fmt.Errorf("write plan: %w", err)
 		}
 	}
-	for _, ps := range report.Statements {
-		if err := writeChangeText(out, ps); err != nil {
+	for i, ps := range report.Statements {
+		var cause error
+		if i < len(refusalCauses) {
+			cause = refusalCauses[i]
+		}
+		if err := writeChangeText(out, ps, cause); err != nil {
 			return err
 		}
 	}
@@ -148,12 +153,17 @@ func writePlanText(out io.Writer, report plan.Report) error {
 // refused statement is emitted as an SQL comment: the script is
 // copy-pasteable, and it must never carry a statement the engine refuses
 // where a reader could run it by accident.
-func writeChangeText(out io.Writer, ps plan.Statement) error {
+func writeChangeText(out io.Writer, ps plan.Statement, refusalCause error) error {
 	if _, err := fmt.Fprintf(out, "-- %s\n", annotate(ps)); err != nil {
 		return fmt.Errorf("write plan: %w", err)
 	}
 	if ps.Disposition == router.DispositionRefuse {
-		if _, err := fmt.Fprintf(out, "-- %s;\n", ps.SQL); err != nil {
+		if refusalCause != nil {
+			if _, err := fmt.Fprintf(out, "-- the create path refuses this statement: %v\n", refusalCause); err != nil {
+				return fmt.Errorf("write plan: %w", err)
+			}
+		}
+		if _, err := fmt.Fprintf(out, "-- %s;\n", strings.ReplaceAll(ps.SQL, "\n", "\n-- ")); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
 		return nil

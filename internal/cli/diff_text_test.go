@@ -172,7 +172,8 @@ func TestPlanTextCommentsOutRefusedStatement(t *testing.T) {
 	report.Disposition = router.DispositionRefuse
 	missing := false
 	report.TableExists = &missing
-	refusedSQL := `CREATE TABLE "public"."child" PARTITION OF "public"."parent" FOR VALUES IN (1)`
+	refusedSQL := `CREATE TABLE "public"."child" PARTITION OF "public"."parent" FOR VALUES IN ('a
+b')`
 	indexSQL := `CREATE INDEX "child_id_idx" ON "public"."child" ("id")`
 	report.Statements = append(report.Statements,
 		plan.Statement{
@@ -200,11 +201,14 @@ func TestPlanTextCommentsOutRefusedStatement(t *testing.T) {
 			}},
 		},
 	)
+	causes := []error{executor.ErrPartitionOfUnsupported, nil}
 
 	var out strings.Builder
-	require.NoError(t, writePlanText(&out, report))
+	require.NoError(t, writePlanText(&out, report, causes))
 	text := out.String()
-	assert.Contains(t, text, "-- native (metadata-only): refused — the engine will not run it\n-- "+refusedSQL+";\n")
+	assert.Contains(t, text, "-- native (metadata-only): refused — the engine will not run it\n"+
+		"-- the create path refuses this statement: "+executor.ErrPartitionOfUnsupported.Error()+"\n"+
+		"-- "+strings.ReplaceAll(refusedSQL, "\n", "\n-- ")+";\n")
 	assert.Contains(t, text, "-- native (metadata-only)\n"+indexSQL+";\n")
 	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
 		if strings.HasPrefix(line, "--") {
