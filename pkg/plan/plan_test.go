@@ -178,6 +178,7 @@ func TestRefuseUnsupportedPartitionedParentWithdrawsExecutionAdvice(t *testing.T
 }
 
 func TestDiscloseGreenfieldExecutionUsesPlainSQLForExecutableStatements(t *testing.T) {
+	tableExists := false
 	concurrent := "CREATE INDEX CONCURRENTLY i ON s.t (c)"
 	saferIdiom := func() []planner.Decision {
 		return []planner.Decision{{
@@ -187,7 +188,7 @@ func TestDiscloseGreenfieldExecutionUsesPlainSQLForExecutableStatements(t *testi
 			SaferSQLExecution: planner.ExecutionAutocommit,
 		}}
 	}
-	r := plan.Report{Statements: []plan.Statement{
+	r := plan.Report{TableExists: &tableExists, Statements: []plan.Statement{
 		{
 			SQL:         "CREATE INDEX i ON s.t USING btree (c)",
 			Disposition: router.DispositionExecute,
@@ -244,6 +245,42 @@ func TestDiscloseGreenfieldExecutionUsesPlainSQLForExecutableStatements(t *testi
 	assert.Equal(t, []string{createTable.SQL}, createTable.ExecSQL)
 	assert.Equal(t, planner.ExecutionAutocommit, createTable.Execution)
 	assert.Equal(t, planner.ReasonMetadataOnly, createTable.Decisions[0].Reason)
+}
+
+func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
+	trueValue := true
+	for _, tt := range []struct {
+		name        string
+		tableExists *bool
+	}{
+		{name: "table exists", tableExists: &trueValue},
+		{name: "table existence unknown"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := plan.Report{
+				TableExists: tt.tableExists,
+				Statements: []plan.Statement{{
+					SQL:         "CREATE INDEX i ON s.t (c)",
+					Disposition: router.DispositionExecute,
+					ExecSQL:     []string{"CREATE INDEX CONCURRENTLY i ON s.t (c)"},
+					Execution:   planner.ExecutionAutocommit,
+					Decisions: []planner.Decision{{
+						Reason:            planner.ReasonSaferIdiom,
+						SaferSQL:          []string{"CREATE INDEX CONCURRENTLY i ON s.t (c)"},
+						SaferSQLExecution: planner.ExecutionAutocommit,
+					}},
+				}},
+			}
+			before, err := json.Marshal(r)
+			require.NoError(t, err)
+
+			plan.DiscloseGreenfieldExecution(&r)
+
+			after, err := json.Marshal(r)
+			require.NoError(t, err)
+			assert.Equal(t, before, after)
+		})
+	}
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact

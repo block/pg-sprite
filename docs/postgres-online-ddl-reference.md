@@ -300,9 +300,12 @@ written on any table size, provided the lock can be acquired promptly
 
 Every executable build on a table that does not exist yet — the `diff`
 greenfield case — classifies here too, including index builds that would be
-[`safer-idiom`](#safer-idiom) on a live table: an index on an empty table
-nobody reads has no rows to scan and no readers to lock out, so the create
-path runs the statement as written.
+[`safer-idiom`](#safer-idiom) on a live table: each create step commits in its
+own transaction under the brief `lock_timeout` / `statement_timeout` budget,
+so `CREATE TABLE` is visible before its indexes build and a concurrent writer
+that already knows the name makes the step fail fast rather than block. The
+classification is `metadata-only` because the cost is bounded by that budget
+on a table born in the run, so the create path runs the statement as written.
 
 `ACCESS EXCLUSIVE` is the bucket's worst case, not its uniform cost — several
 forms take only `SHARE UPDATE EXCLUSIVE`, which does not block reads or

@@ -160,15 +160,23 @@ func RefuseUnsupportedPartitionedParent(report *Report, refused []bool) {
 }
 
 // DiscloseGreenfieldExecution makes executable statements describe the plain,
-// bounded builds used for a table born in this run. There is no live traffic
-// to protect, so the create path does not substitute the planner's online
-// idioms; each safer-idiom decision is reclassified metadata-only — the same
-// reason the planner gives the CREATE TABLE itself, because an index built
-// on an empty table nobody reads yet has no rows to scan and no readers to
-// lock out. Reclassifying keeps the statement in a state router.Route can
-// produce: an execute disposition never carries a safer-idiom decision
-// without its rewrite.
+// bounded builds used for a table born in this run. The report must describe
+// a table that does not exist yet; the function returns without mutation
+// unless the report establishes that precondition. Each create step commits in
+// its own transaction under the brief lock_timeout and statement_timeout
+// budget, so CREATE TABLE is visible before its indexes build and a concurrent
+// writer that already knows the name makes the step fail fast rather than
+// block. The build is classified metadata-only because its cost is bounded by
+// that budget on a table born in the run. Reclassifying keeps the statement in
+// a state router.Route can produce: an execute disposition never carries a
+// safer-idiom decision without its rewrite.
 func DiscloseGreenfieldExecution(report *Report) {
+	if report.TableExists == nil {
+		return
+	}
+	if *report.TableExists {
+		return
+	}
 	for i := range report.Statements {
 		st := &report.Statements[i]
 		if st.Disposition != router.DispositionExecute {

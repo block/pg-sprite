@@ -101,7 +101,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 
 | Value | Meaning |
 |---|---|
-| `metadata-only` | A brief ACCESS EXCLUSIVE catalog change, no scan and no rewrite. Also the classification of every executable build on a table that does not exist yet (a `diff` greenfield plan): an index on an empty table nobody reads has no rows to scan and no readers to lock out, so a `safer-idiom` decision is reclassified here and `exec_sql` is the statement as written. |
+| `metadata-only` | A brief ACCESS EXCLUSIVE catalog change, no scan and no rewrite. Also the classification of every executable build on a table that does not exist yet (a `diff` greenfield plan): each create step commits in its own transaction under the brief `lock_timeout` / `statement_timeout` budget, so `CREATE TABLE` is visible before its indexes build and a concurrent writer that already knows the name makes the step fail fast rather than block. The classification is `metadata-only` because the cost is bounded by that budget on a table born in the run; a `safer-idiom` decision is reclassified here and `exec_sql` is the statement as written. |
 | `online-idiom` | Already the safe native form (CONCURRENTLY, NOT VALID, VALIDATE, USING INDEX). |
 | `fast-default` | ADD COLUMN with a constant default — the catalog stores the default, no rewrite. |
 | `binary-coercible` | A type change PostgreSQL relabels without a rewrite (widen varchar, varchar to text, widen numeric precision). |
