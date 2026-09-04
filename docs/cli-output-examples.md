@@ -77,7 +77,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 
 | Reason | Meaning |
 |---|---|
-| `unsupported-statement` | No safe path is known for the statement — only `ALTER TABLE` and `CREATE INDEX` reach classification — or a greenfield create plan carries a shape the create path refuses (`PARTITION OF`, `IF NOT EXISTS`). |
+| `unsupported-statement` | No safe path is known for the statement — only `ALTER TABLE` and `CREATE INDEX` reach classification — or a greenfield create plan carries a shape the create path refuses (`PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a duplicate claimed relation name). These greenfield shapes refuse in the plan and are re-checked at apply. |
 | `index-statement` | Index maintenance (`DROP INDEX`, `REINDEX`) has a native safe idiom (`CONCURRENTLY`) and is never attempted; the verdict's `safer_idiom` names it. |
 | `not-native-safe-table-too-large` | The size guard skipped the optimistic attempt: the table exceeds the configured bound and the change is not provably metadata-only. |
 | `insufficient-privileges` | The connected role lacks the access the change needs; `detail` names the exact missing GRANT (see [engine-role.md](engine-role.md)). |

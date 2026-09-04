@@ -10,6 +10,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
@@ -47,14 +48,15 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		"schema", report.Schema, "table", report.Table, "changes", len(report.Statements),
 		"table_exists", report.TableExists != nil && *report.TableExists,
 		"disposition", string(report.Disposition))
+	causes := greenfieldRefusalCauses(c.Schema, ds, report)
 
 	switch {
 	case c.JSON:
 		err = writeJSON(out, report)
 	case c.SQL:
-		err = writePlanText(out, report)
+		err = writePlanText(out, report, causes)
 	default:
-		err = writeDiffText(out, c.palette(out), report)
+		err = writeDiffText(out, c.palette(out), report, causes)
 	}
 	if err != nil {
 		return err
@@ -66,6 +68,32 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		return verdict.ErrRefused
 	}
 	return nil
+}
+
+// greenfieldRefusalCauses returns the create path's typed refusal for each
+// statement of a refused greenfield plan, positional with
+// report.Statements and nil for statements the create path admitted; nil
+// for any other report. The plan report carries no field for the cause,
+// and the shape check is pure over the desired schema the plan was derived
+// from, so it is recomputed here rather than stored. The plan was just
+// derived from the same desired schema, so the check cannot fail or
+// disagree on statement count; if it does, the statements render without
+// a cause rather than turning a display detail into an error.
+func greenfieldRefusalCauses(schema string, ds statement.DesiredSchema, report plan.Report) []error {
+	if !tableMissing(report) {
+		return nil
+	}
+	if report.Disposition != router.DispositionRefuse {
+		return nil
+	}
+	causes, err := executor.CreateShapeRefusals(schema, ds)
+	if err != nil {
+		return nil
+	}
+	if len(causes) != len(report.Statements) {
+		return nil
+	}
+	return causes
 }
 
 // writeJSON emits the plan report as JSON.
@@ -90,7 +118,7 @@ func writeJSON(out io.Writer, report plan.Report) error {
 // plan (a CONCURRENTLY rewrite could not run inside a transaction block).
 // The header points at migrate as the executing front door: running this
 // script directly bypasses the gate that refuses blocking statements.
-func writePlanText(out io.Writer, report plan.Report) error {
+func writePlanText(out io.Writer, report plan.Report, refusalCauses []error) error {
 	if len(report.Statements) == 0 {
 		if _, err := fmt.Fprintln(out, "-- no changes: live table matches the desired schema"); err != nil {
 			return fmt.Errorf("write plan: %w", err)
@@ -109,18 +137,36 @@ func writePlanText(out io.Writer, report plan.Report) error {
 			return fmt.Errorf("write plan: %w", err)
 		}
 	}
-	for _, ps := range report.Statements {
-		if err := writeChangeText(out, ps); err != nil {
+	for i, ps := range report.Statements {
+		var cause error
+		if i < len(refusalCauses) {
+			cause = refusalCauses[i]
+		}
+		if err := writeChangeText(out, ps, cause); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// writeChangeText emits one annotated statement of the text plan.
-func writeChangeText(out io.Writer, ps plan.Statement) error {
+// writeChangeText emits one annotated statement of the text plan. A
+// refused statement is emitted as an SQL comment: the script is
+// copy-pasteable, and it must never carry a statement the engine refuses
+// where a reader could run it by accident.
+func writeChangeText(out io.Writer, ps plan.Statement, refusalCause error) error {
 	if _, err := fmt.Fprintf(out, "-- %s\n", annotate(ps)); err != nil {
 		return fmt.Errorf("write plan: %w", err)
+	}
+	if ps.Disposition == router.DispositionRefuse {
+		if refusalCause != nil {
+			if _, err := fmt.Fprintf(out, "-- the create path refuses this statement: %v\n", refusalCause); err != nil {
+				return fmt.Errorf("write plan: %w", err)
+			}
+		}
+		if _, err := fmt.Fprintf(out, "-- %s;\n", strings.ReplaceAll(ps.SQL, "\n", "\n-- ")); err != nil {
+			return fmt.Errorf("write plan: %w", err)
+		}
+		return nil
 	}
 	if len(ps.ExecSQL) > 0 && ps.ExecSQL[0] != ps.SQL {
 		if _, err := fmt.Fprintf(out, "-- safer form the engine would run (not equivalent; each step in its own transaction — see %s):\n",
@@ -162,6 +208,8 @@ func annotate(ps plan.Statement) string {
 		s += ": needs the " + string(ps.Backend) + " backend, which is not implemented yet"
 	case router.DispositionRewriteRequired:
 		s += ": blocks as submitted and no online rewrite was constructed — the engine will not run it"
+	case router.DispositionRefuse:
+		s += ": refused — the engine will not run it"
 	}
 	return s
 }

@@ -62,7 +62,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `route` | string | always | The planner's aggregate route for the statement (see Routes). |
 | `backend` | string | except refusals | The assigned execution strategy (see Backends); absent for refusals. |
 | `disposition` | string | always | What execution would do with this statement now (see Dispositions). |
-| `reason` | string | refusals only | Typed refusal cause for this statement: `unsupported-statement` for a planner-level refusal, `unsupported-partitioned-parent` when target facts refuse it. An unknown value must be treated as refused. |
+| `reason` | string | refusals only | Typed refusal cause for this statement: `unsupported-statement` for a planner-level refusal or, on a greenfield plan, a create shape the create path refuses (`PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, a duplicate claimed relation name); `unsupported-partitioned-parent` when target facts refuse it. An unknown value must be treated as refused. |
 | `decisions` | array | always | The planner's per-operation classifications (below). |
 | `exec_sql` | array | native route | The ordered SQL the native backend would run — the safer sequence when the planner constructed one, or the statement as written for a table that does not exist yet (the greenfield create path runs plain builds; see Fingerprint). Absent for non-native routes. |
 | `execution` | string | with `exec_sql` | The typed execution contract for `exec_sql` (see Execution contracts). A consumer that runs the statements itself branches on this — it is what says the steps must not be wrapped in a transaction block. Present exactly when `exec_sql` is. |
@@ -122,11 +122,13 @@ treat the statement and report as refused.
 
 | Value | Meaning |
 |---|---|
-| `unsupported-statement` | The planner knows no safe path for the statement (planner-level refusal). The same token the run path's refusal verdict carries, so a dry-run report and a run receipt for the same statement match on the typed field alone. |
+| `unsupported-statement` | The planner knows no safe path for the statement (planner-level refusal), or — on a greenfield plan, where the table does not exist — the create path refuses the statement's shape: `PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a relation name the desired set claims twice. The same token the run path's refusal verdict carries, so a dry-run report and a run receipt for the same statement match on the typed field alone. The report carries no per-statement cause; `migrate.RunDesired`'s refusal detail and the text diff name it. |
 | `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. |
 
 On the apply path, refusal checks have deterministic precedence: table size, then partition
 support, then privileges.
+On the greenfield create path, a decidable shape refusal takes precedence over the table-absence
+and privilege checks because it needs no connection.
 
 ### Backends (`backend`)
 

@@ -14,6 +14,7 @@ import (
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -198,7 +199,10 @@ CREATE INDEX t_v_idx ON t (v);`
 		require.NoError(t, err, "a create-path admission refusal is a result, not an error")
 		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
 		assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
-		assert.Contains(t, res.Detail, "PARTITION OF")
+		assert.Equal(t, router.DispositionRefuse, res.Plan.Disposition,
+			"the refusal is decided on the plan, before the create path is entered")
+		assert.Contains(t, res.Detail, "is refused by the create path: "+executor.ErrPartitionOfUnsupported.Error(),
+			"the detail carries the create path's typed cause, not the echoed SQL alone")
 		assert.Empty(t, res.Verdicts, "nothing was attempted")
 
 		var exists bool
@@ -206,6 +210,30 @@ CREATE INDEX t_v_idx ON t (v);`
 			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
 			 WHERE table_schema = $1 AND table_name = 't')`, schema).Scan(&exists))
 		assert.False(t, exists, "the refused plan must not create the partition")
+	})
+
+	t.Run("refuses a desired set that claims one name twice before anything runs", func(t *testing.T) {
+		// The plan SQL says nothing about why statement 2 is refused — the
+		// cause is the collision with the implicit primary-key index name,
+		// and the detail must name it.
+		schema := testutil.NewSchema(t, pool)
+
+		res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+			Schema:  schema,
+			Desired: parseDesired(t, "CREATE TABLE t (id int PRIMARY KEY); CREATE INDEX t_pkey ON t (id)"),
+		}, runOptions())
+		require.NoError(t, err, "a create-path admission refusal is a result, not an error")
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
+		assert.Contains(t, res.Detail, "planned statement 2 (")
+		assert.Contains(t, res.Detail, executor.ErrDuplicateCreateName.Error()+`: "t_pkey"`)
+		assert.Empty(t, res.Verdicts, "nothing was attempted")
+
+		var exists bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+			 WHERE table_schema = $1 AND table_name = 't')`, schema).Scan(&exists))
+		assert.False(t, exists, "the refused plan must not create the table")
 	})
 
 	t.Run("refuses an occupied constraint-index name and preserves convergence", func(t *testing.T) {

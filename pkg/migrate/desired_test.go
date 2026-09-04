@@ -9,6 +9,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -33,6 +34,21 @@ func TestRunDesiredRejectsForce(t *testing.T) {
 	assert.Contains(t, err.Error(), "imperative front door",
 		"the rejection points the caller at the front door where force applies")
 	assert.Equal(t, DesiredResult{}, res)
+}
+
+func TestCreateShapeCauseRejectsStatementCountMismatch(t *testing.T) {
+	ds, err := statement.ParseDesired("CREATE TABLE child PARTITION OF parent FOR VALUES IN (1)")
+	require.NoError(t, err)
+	missing := false
+	report := plan.Report{
+		TableExists: &missing,
+		Statements: []plan.Statement{
+			{Reason: verdict.ReasonUnsupportedStatement},
+			{Reason: verdict.ReasonNone},
+		},
+	}
+
+	assert.NoError(t, createShapeCause(DesiredRequest{Schema: "public", Desired: ds}, report, 0))
 }
 
 func TestAdmitPlan(t *testing.T) {

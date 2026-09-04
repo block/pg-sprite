@@ -2,6 +2,7 @@ package plan_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -175,6 +176,70 @@ func TestRefuseUnsupportedPartitionedParentWithdrawsExecutionAdvice(t *testing.T
 	assert.Empty(t, r.Statements[0].Execution)
 	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQL)
 	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQLExecution)
+}
+
+func TestRefuseUnsupportedCreateShapeMarksPositions(t *testing.T) {
+	r := plan.Report{
+		Disposition: router.DispositionExecute,
+		Statements: []plan.Statement{
+			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE TABLE app.t (id int)"}, Execution: planner.ExecutionAutocommit},
+			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE INDEX i ON app.t (id)"}, Execution: planner.ExecutionAutocommit},
+		},
+	}
+	require.NoError(t, plan.RefuseUnsupportedCreateShape(&r, []error{errors.New("refused"), nil}))
+
+	assert.Equal(t, router.DispositionRefuse, r.Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, r.Reason)
+	assert.Equal(t, router.DispositionRefuse, r.Statements[0].Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, r.Statements[0].Reason)
+	assert.Empty(t, r.Statements[0].Backend)
+	assert.Empty(t, r.Statements[0].ExecSQL)
+	assert.Equal(t, router.DispositionExecute, r.Statements[1].Disposition)
+	assert.Equal(t, router.BackendNative, r.Statements[1].Backend)
+	assert.NotEmpty(t, r.Statements[1].ExecSQL)
+}
+
+func TestRefuseUnsupportedCreateShapePreservesExistingStatementReason(t *testing.T) {
+	r := plan.Report{
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedPartitionedParent,
+		Statements: []plan.Statement{{
+			Backend:     router.BackendNative,
+			Disposition: router.DispositionRefuse,
+			Reason:      verdict.ReasonUnsupportedPartitionedParent,
+			ExecSQL:     []string{"CREATE TABLE app.t (id int)"},
+			Execution:   planner.ExecutionAutocommit,
+		}},
+	}
+	require.NoError(t, plan.RefuseUnsupportedCreateShape(&r, []error{errors.New("refused")}))
+
+	assert.Equal(t, router.DispositionRefuse, r.Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
+	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Statements[0].Reason)
+	assert.Empty(t, r.Statements[0].Backend)
+	assert.Empty(t, r.Statements[0].ExecSQL)
+	assert.Empty(t, r.Statements[0].Execution)
+}
+
+// A refusal slice that does not line up with the planned statements means
+// the shape check and the plan disagree about what the plan contains; no
+// positional marking is safe, so the report is left as it was.
+func TestRefuseUnsupportedCreateShapeRejectsLengthMismatch(t *testing.T) {
+	r := plan.Report{
+		Disposition: router.DispositionExecute,
+		Statements: []plan.Statement{
+			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE TABLE app.t (id int)"}, Execution: planner.ExecutionAutocommit},
+			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE INDEX i ON app.t (id)"}, Execution: planner.ExecutionAutocommit},
+		},
+	}
+	err := plan.RefuseUnsupportedCreateShape(&r, []error{errors.New("refused")})
+
+	require.Error(t, err)
+	assert.Equal(t, router.DispositionExecute, r.Disposition)
+	for i := range r.Statements {
+		assert.Equal(t, router.DispositionExecute, r.Statements[i].Disposition, "statement %d", i+1)
+		assert.NotEmpty(t, r.Statements[i].ExecSQL, "statement %d", i+1)
+	}
 }
 
 func TestDiscloseGreenfieldExecutionUsesPlainSQLForExecutableStatements(t *testing.T) {

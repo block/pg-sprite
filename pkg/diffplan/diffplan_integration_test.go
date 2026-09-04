@@ -2,6 +2,7 @@ package diffplan_test
 
 import (
 	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -230,6 +231,42 @@ func TestPlanMissingTableEmitsFullDesiredSchema(t *testing.T) {
 		schemadiff.ChangeCreateIndex,
 	}, kinds)
 	assertGreenfieldIndexExecution(t, report.Statements[1])
+}
+
+func TestPlanMissingTableRefusesCreateShapes(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.parent (id int) PARTITION BY RANGE (id)", schema))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		sql     string
+		refused []int
+	}{
+		{name: "partition of", sql: "CREATE TABLE child PARTITION OF parent FOR VALUES FROM (1) TO (2)", refused: []int{0}},
+		{name: "if not exists", sql: "CREATE TABLE IF NOT EXISTS t_if (id int)", refused: []int{0}},
+		{name: "duplicate implicit index", sql: "CREATE TABLE t_dup (id int PRIMARY KEY); CREATE INDEX t_dup_pkey ON t_dup (id)", refused: []int{1}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: parseDesired(t, tc.sql)})
+			require.NoError(t, err)
+			assert.Equal(t, router.DispositionRefuse, report.Disposition)
+			assert.Equal(t, verdict.ReasonUnsupportedStatement, report.Reason)
+			for i, st := range report.Statements {
+				want := router.DispositionExecute
+				if slices.Contains(tc.refused, i) {
+					want = router.DispositionRefuse
+					assert.Equal(t, verdict.ReasonUnsupportedStatement, st.Reason)
+				}
+				assert.Equal(t, want, st.Disposition, "statement %d", i+1)
+			}
+		})
+	}
 }
 
 // A greenfield plan must state execution order even when the desired file
