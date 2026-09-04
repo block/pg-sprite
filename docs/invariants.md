@@ -141,8 +141,10 @@ strong-lock acquisition (swap, catalog flips, trigger install in fallback mode) 
 ([mysql-vs-postgresql § the lock queue](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue)).
 **Exception policy required:** `CREATE INDEX CONCURRENTLY` and `REINDEX CONCURRENTLY` wait on
 other transactions via lock waits that a naive `lock_timeout` cancels — leaving an `INVALID`
-index — so they get their own wait policy (no per-lock timeout, one overall statement deadline)
-rather than the blanket timeout. `VALIDATE CONSTRAINT` is different in kind: its cancellation is
+index — so they get their own wait policy rather than the blanket timeout: no per-lock timeout,
+with either one overall server statement deadline or a caller-owned cancellable context as the
+statement's only bound. The executor refuses a non-cancellable context in caller-owned mode, so
+the statement remains bounded by construction. `VALIDATE CONSTRAINT` is different in kind: its cancellation is
 transactionally clean (the constraint simply stays `NOT VALID`; no debris), so the sequence
 executor's validate class deliberately keeps a bounded per-lock timeout — queueing behind a
 conflicting lock holder must not stall a sequence for the whole scan budget — while the scan

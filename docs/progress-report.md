@@ -16,7 +16,8 @@ phase or operation value is a contract change and bumps `format_version`, even i
 is added or renamed.
 
 Adding a field bumps `format_version` so a strict consumer can detect the new shape from the
-version. The current version is **2**: version 2 added `detail.statement`.
+version. The current version is **3**: version 2 added `detail.statement`; version 3 added
+`detail.current_locker_pid`, `work.lockers_total`, and `work.lockers_done`.
 
 The [plan report](plan-report.md), [lint report](lint-report.md), and
 [suggest report](suggest-report.md) are separate contracts with their own `format_version`;
@@ -50,6 +51,7 @@ licenses a consumer to intervene in the change itself.
 | `server_phase` | string | active concurrent build only | PostgreSQL's own phase string from `pg_stat_progress_create_index`, verbatim. |
 | `active` | bool | always | Whether an operation is executing now. `false` with `phase: "running"` means a concurrent build's progress row has left the server view. |
 | `attempt` | int | bounded retries only | The current attempt number when the executor is inside its bounded retry loop. |
+| `current_locker_pid` | int | while waiting on a locker | PostgreSQL backend PID currently blocking the concurrent build; omitted when none is published. |
 | `work` | object | server-observed work only | Present exactly when the server published a progress row; then **every** counter below is present, so a fresh build reports honest zeros rather than an empty object. |
 
 `statement` is the submitter's statement after qualification and canonicalization, so a
@@ -57,7 +59,8 @@ consumer rendering it into a shared surface must clamp and escape it.
 
 ### Work counters
 
-`blocks_done` / `blocks_total` and `tuples_done` / `tuples_total` come from
+`blocks_done` / `blocks_total`, `tuples_done` / `tuples_total`, and
+`lockers_done` / `lockers_total` come from
 `pg_stat_progress_create_index` during a concurrent index build. `rows_copied` /
 `rows_total` and `bytes_copied` / `bytes_total` are reserved for copy-and-swap and are `0`
 on every native operation — the engine never fabricates copy counters.
@@ -98,7 +101,7 @@ A poll during step 2 of a 3-step sequence, mid concurrent index build:
 
 ```json
 {
-  "format_version": 2,
+  "format_version": 3,
   "phase": "running",
   "step": 2,
   "total_steps": 3,
@@ -110,6 +113,7 @@ A poll during step 2 of a 3-step sequence, mid concurrent index build:
     "server_phase": "building index",
     "active": true,
     "attempt": 2,
+    "current_locker_pid": 31337,
     "work": {
       "rows_copied": 0,
       "rows_total": 0,
@@ -118,7 +122,9 @@ A poll during step 2 of a 3-step sequence, mid concurrent index build:
       "blocks_done": 11,
       "blocks_total": 40,
       "tuples_done": 7,
-      "tuples_total": 21
+      "tuples_total": 21,
+      "lockers_total": 3,
+      "lockers_done": 1
     }
   }
 }

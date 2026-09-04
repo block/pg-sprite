@@ -42,7 +42,7 @@ const (
 // field semantics. Adding a phase or operation value is a contract change
 // and bumps this version, even when no field is added or renamed. Adding a
 // field also bumps this version so strict consumers can detect the new shape.
-const FormatVersion = 2
+const FormatVersion = 3
 
 // Operation is the current operation's execution class.
 type Operation string
@@ -67,14 +67,16 @@ const (
 // guess at. Rows and bytes are reserved for copy-and-swap; native operations
 // do not fabricate them.
 type Work struct {
-	RowsCopied  uint64 `json:"rows_copied"`
-	RowsTotal   uint64 `json:"rows_total"`
-	BytesCopied uint64 `json:"bytes_copied"`
-	BytesTotal  uint64 `json:"bytes_total"`
-	BlocksDone  uint64 `json:"blocks_done"`
-	BlocksTotal uint64 `json:"blocks_total"`
-	TuplesDone  uint64 `json:"tuples_done"`
-	TuplesTotal uint64 `json:"tuples_total"`
+	RowsCopied   uint64 `json:"rows_copied"`
+	RowsTotal    uint64 `json:"rows_total"`
+	BytesCopied  uint64 `json:"bytes_copied"`
+	BytesTotal   uint64 `json:"bytes_total"`
+	BlocksDone   uint64 `json:"blocks_done"`
+	BlocksTotal  uint64 `json:"blocks_total"`
+	TuplesDone   uint64 `json:"tuples_done"`
+	TuplesTotal  uint64 `json:"tuples_total"`
+	LockersTotal uint64 `json:"lockers_total"`
+	LockersDone  uint64 `json:"lockers_done"`
 }
 
 // Detail describes the operation currently executing.
@@ -83,11 +85,12 @@ type Detail struct {
 	// Statement is the canonical, qualified SQL the executor is running for
 	// the current step, never a rendered or prettified form. Terminal snapshots
 	// retain it so observers can identify the statement that produced the outcome.
-	Statement   string `json:"statement,omitempty"`
-	ServerPhase string `json:"server_phase,omitempty"`
-	Active      bool   `json:"active"`
-	Attempt     int    `json:"attempt,omitempty"`
-	Work        *Work  `json:"work,omitempty"`
+	Statement        string `json:"statement,omitempty"`
+	ServerPhase      string `json:"server_phase,omitempty"`
+	Active           bool   `json:"active"`
+	Attempt          int    `json:"attempt,omitempty"`
+	Work             *Work  `json:"work,omitempty"`
+	CurrentLockerPID uint32 `json:"current_locker_pid,omitempty"`
 }
 
 // Snapshot is one immutable progress observation. For a terminal phase the
@@ -177,6 +180,15 @@ func (t *Tracker) SetConcurrentBuild(session dbconn.RowQuerier, pid uint32) {
 	t.session, t.buildPID = session, pid
 }
 
+// BuildPID returns the active concurrent build's backend PID. An
+// orchestrator passes this PID to pg_cancel_backend from a second connection
+// to stop the build. It returns zero when no build is active.
+func (t *Tracker) BuildPID() uint32 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.buildPID
+}
+
 // StopConcurrentBuild waits for an in-flight observation and releases the
 // reserved session back to the executor before its catalog verdict.
 func (t *Tracker) StopConcurrentBuild() {
@@ -238,7 +250,9 @@ func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
 	work := Work{
 		BlocksDone: p.BlocksDone, BlocksTotal: p.BlocksTotal,
 		TuplesDone: p.TuplesDone, TuplesTotal: p.TuplesTotal,
+		LockersTotal: p.LockersTotal, LockersDone: p.LockersDone,
 	}
 	s.Detail.Active, s.Detail.ServerPhase, s.Detail.Work = true, p.Phase, &work
+	s.Detail.CurrentLockerPID = p.CurrentLockerPID
 	return s, nil
 }

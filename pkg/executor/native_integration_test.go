@@ -85,6 +85,45 @@ func TestBuildIndexConcurrentlyBuildsValidIndex(t *testing.T) {
 	assert.True(t, valid, "the index must be valid")
 }
 
+func TestBuildIndexConcurrentlyCallerOwnedBuildsValidIndex(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.caller_owned_t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+	blocker, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	require.NoError(t, err)
+	var count int
+	require.NoError(t, blocker.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s.caller_owned_t", schema)).Scan(&count))
+
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	type result struct {
+		rep executor.IndexBuildReport
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		rep, buildErr := executor.BuildIndexConcurrentlyWithProgress(ctx, pool,
+			fmt.Sprintf("CREATE INDEX CONCURRENTLY caller_owned_idx ON %s.caller_owned_t (c)", schema),
+			executor.ConcurrentBudget{CallerOwned: true}, tracker)
+		done <- result{rep: rep, err: buildErr}
+	}()
+	require.Eventually(t, func() bool {
+		snapshot, progressErr := tracker.Progress(t.Context())
+		return progressErr == nil && snapshot.Detail.Work != nil && snapshot.Detail.Work.LockersTotal >= 1
+	}, 30*time.Second, 20*time.Millisecond, "the build must wait for the old snapshot")
+	require.NoError(t, blocker.Rollback(t.Context()))
+	buildResult := <-done
+	require.NoError(t, buildResult.err)
+	rep := buildResult.rep
+	assert.Equal(t, "caller_owned_idx", rep.Index)
+	assert.NotZero(t, rep.IndexOID)
+	exists, valid := indexState(t, pool, schema, "caller_owned_idx")
+	assert.True(t, exists)
+	assert.True(t, valid)
+}
+
 func TestBuildIndexConcurrentlyReportsServerProgressAndFinishes(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.progress_t AS
@@ -237,6 +276,83 @@ func TestBuildIndexConcurrentlyOperatorCancelIsNotBudgetExhaustion(t *testing.T)
 	case <-time.After(time.Minute):
 		t.Fatal("the cancelled build did not return")
 	}
+}
+
+func TestBuildIndexConcurrentlyCallerOwnedCancelViaTrackerPID(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.pid_t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+	blocker, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	require.NoError(t, err)
+	var count int
+	require.NoError(t, blocker.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s.pid_t", schema)).Scan(&count))
+	t.Cleanup(func() { require.NoError(t, blocker.Rollback(context.WithoutCancel(t.Context()))) })
+
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, buildErr := executor.BuildIndexConcurrentlyWithProgress(ctx, pool,
+			fmt.Sprintf("CREATE INDEX CONCURRENTLY pid_idx ON %s.pid_t (c)", schema),
+			executor.ConcurrentBudget{CallerOwned: true}, tracker)
+		done <- buildErr
+	}()
+
+	var pid uint32
+	require.Eventually(t, func() bool {
+		pid = tracker.BuildPID()
+		if pid == 0 {
+			return false
+		}
+		var active bool
+		err := pool.QueryRow(t.Context(), "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND state = 'active')", pid).Scan(&active)
+		return err == nil && active
+	}, 30*time.Second, 20*time.Millisecond, "the tracked build backend must become active")
+	var cancelled bool
+	require.NoError(t, pool.QueryRow(t.Context(), "SELECT pg_cancel_backend($1)", pid).Scan(&cancelled))
+	require.True(t, cancelled)
+
+	buildErr := <-done
+	require.ErrorIs(t, buildErr, executor.ErrCancelledExternally)
+	var budgetErr *executor.BudgetError
+	assert.False(t, errors.As(buildErr, &budgetErr))
+	var invalidErr *executor.InvalidIndexError
+	require.ErrorAs(t, buildErr, &invalidErr)
+	require.ErrorIs(t, invalidErr.Build, executor.ErrCancelledExternally)
+}
+
+func TestBuildIndexConcurrentlyReportsLockers(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.lockers_t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+	blocker, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
+	require.NoError(t, err)
+	var blockerPID uint32
+	require.NoError(t, blocker.QueryRow(t.Context(), "SELECT pg_backend_pid()").Scan(&blockerPID))
+	var count int
+	require.NoError(t, blocker.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s.lockers_t", schema)).Scan(&count))
+
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, buildErr := executor.BuildIndexConcurrentlyWithProgress(ctx, pool,
+			fmt.Sprintf("CREATE INDEX CONCURRENTLY lockers_idx ON %s.lockers_t (c)", schema),
+			executor.ConcurrentBudget{CallerOwned: true}, tracker)
+		done <- buildErr
+	}()
+
+	require.Eventually(t, func() bool {
+		snapshot, progressErr := tracker.Progress(t.Context())
+		return progressErr == nil && snapshot.Detail.Work != nil &&
+			snapshot.Detail.Work.LockersTotal >= 1 && snapshot.Detail.CurrentLockerPID == blockerPID
+	}, 30*time.Second, 20*time.Millisecond, "the server must publish the blocking snapshot PID")
+	require.NoError(t, blocker.Rollback(t.Context()))
+	require.NoError(t, <-done)
 }
 
 func TestBuildIndexConcurrentlyMissingTable(t *testing.T) {
