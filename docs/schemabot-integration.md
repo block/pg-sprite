@@ -144,15 +144,19 @@ package. Landing this is one of:
 ### Routing the create path's refusals
 
 A greenfield desired file — the table does not exist on the target — has no single routing
-class, and an adapter must not fold its outcomes into one arm. `migrate.RunDesired` resolves
-it to one of four things:
+class, and an adapter must not fold its outcomes into one arm. The plan resolves
+shape-decidable author errors before the apply window, and `migrate.RunDesired` re-checks
+them when admitting execution. A greenfield run resolves to one of four things:
 
 | Outcome | Routing class |
 | --- | --- |
 | Executed | The table and its indexes exist; a rerun converges to an empty plan |
-| `create-collision` refusal | **Re-plan**: re-diff the live catalog — something now owns the name; never blindly retry |
+| `create-collision` refusal | **Re-plan, then fix the occupant**: the table name or a claimed index, constraint-index, or sequence name is occupied. Re-diff the live catalog to see what holds it; re-planning alone reproduces the refusal — drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column. Never blindly retry |
 | `insufficient-privileges` refusal (`*preflight.PrivilegeError`, `Tier == TierCreateTable`) | **Operator provisioning action**: the role needs the exact `GRANT` the error carries — not a desired-file fix, and not retryable until granted |
-| Admission refusal (`unsupported-statement`) | **Author action**: the desired file states a shape the create path refuses; retrying unchanged cannot succeed |
+| Plan/admission refusal (`unsupported-statement`) | **Author action**: the desired file states a shape the create path refuses; retrying unchanged cannot succeed |
+
+Greenfield refusals have deterministic precedence: a decidable shape refusal comes before the
+table-absence and privilege checks because it needs no connection.
 
 Only the last is an author error. An adapter that surfaces every greenfield refusal as
 "fix your desired file" gives operators the wrong instruction for the two middle rows. A
@@ -167,14 +171,23 @@ The greenfield `CREATE TABLE` path is a fixed call order, all inside the apply s
    `CONCURRENTLY`, qualified names).
 2. `preflight.CheckTableAbsent` — mint the `AbsentTarget` proof for the table name.
 3. `preflight.CheckCreatePrivileges` — mint the `CreationRole` proof for the target schema.
-4. `executor.ExecuteCreate` — consume both proofs and run the set.
+4. `executor.ExecuteCreate` — consume both proofs, admit the set, probe `pg_class` for every
+   index, constraint-index, and sequence name the set claims, then run the set.
+
+For the shapes the create path admits, the plan's `exec_sql` is the statement as written —
+the plain `CREATE TABLE` and index builds this path runs, with each build's decision
+reclassified `metadata-only`; it never substitutes `CONCURRENTLY` for an index on the table
+born in that run.
 
 `migrate.RunDesired` runs this sequence itself when the plan is greenfield — the adapter
 does not assemble it and must not mint either proof separately (a proof minted outside the
-executing session proves nothing about it). The order decides which refusal wins when both
-preflights would fail: absence is checked first, so an occupied name refuses as
-`create-collision` even when the role also lacks `CREATE` — the collision is the more
-actionable message (the change is not a create at all) and absence is the cheaper check.
+executing session proves nothing about it). The order decides which refusal wins when more
+than one check would fail. The table name is checked first, so an occupied **table** name
+refuses as `create-collision` even when the role also lacks `CREATE` — the collision is the
+more actionable message (the change is not a create at all) and absence is the cheaper
+check. Claimed **index** names are probed last, inside `ExecuteCreate`: an occupied index
+name with a role lacking `CREATE` surfaces as `insufficient-privileges`, and the index
+collision appears only once the grant is in place.
 
 Both proofs share one rule the adapter must respect: they are **minted inside the apply
 session and consumed there** — never serialized into `SchemaChange.Metadata`, carried across
@@ -197,11 +210,23 @@ them, don't retry them uniformly:
 
 | Outcome | What it means | Orchestrator action |
 | --- | --- | --- |
-| `ErrDuplicateCreateName` (`duplicate-create-name`) | The desired set claims one relation name twice — including a first-choice implicit constraint-index name; refused at admission, nothing ran | Fix the desired file; retrying unchanged cannot succeed |
-| `ErrPartitionOfUnsupported` (`partition-of-unsupported`) | `PARTITION OF` binds to a live parent the absence proof does not cover | Fix the desired file; out of the create path's scope |
-| `ErrIfNotExistsUnsupported` (`if-not-exists-unsupported`) | `CREATE ... IF NOT EXISTS` succeeds as a name-only no-op over a relation it cannot vouch for — the opposite of the absence proof's fail-closed contract; refused at admission, nothing ran | Fix the desired file: state the plain `CREATE`; the absence check owns collision handling |
-| `ErrUnsupportedCreateStep` (`unsupported-create-step`) | A desired statement is not a shape the create path can run | Fix the desired file |
-| `ErrCreateCollision` (`create-collision`) | A concurrent writer took a needed name after a valid proof | Re-diff the live catalog and re-plan — the world changed; never blindly retry the create |
+| `ErrDuplicateCreateName` (`duplicate-create-name`) | The desired set claims one relation name twice — including a first-choice implicit constraint-index name; refused in the plan and re-checked at apply, nothing ran | Fix the desired file; retrying unchanged cannot succeed |
+| `ErrPartitionOfUnsupported` (`partition-of-unsupported`) | `PARTITION OF` binds to a live parent the absence proof does not cover; refused in the plan and re-checked at apply | Fix the desired file; out of the create path's scope |
+| `ErrIfNotExistsUnsupported` (`if-not-exists-unsupported`) | `CREATE ... IF NOT EXISTS` succeeds as a name-only no-op over a relation it cannot vouch for — the opposite of the absence proof's fail-closed contract; refused in the plan and re-checked at apply, nothing ran | Fix the desired file: state the plain `CREATE`; the absence check owns collision handling |
+| `ErrUnsupportedCreateStep` (`unsupported-create-step`) | A desired statement is not a shape the create path can run; refused in the plan and re-checked at apply | Fix the desired file |
+| `ErrCreateCollision` (`create-collision`) | A claimed index, constraint-index, or sequence name was already occupied, or a concurrent writer took a needed name after the absence checks | Re-diff the live catalog to see what holds the name, then drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column — re-planning alone reproduces the refusal; never blindly retry the create |
+
+Before the first step, `ExecuteCreate` probes `pg_class` in one schema-scoped catalog
+snapshot for every relation name the desired file states — explicit `CREATE INDEX` names
+and the first-choice names of implicit constraint indexes and column-owned sequences. Names
+the server invents rather than names the desired file states, such as an unnamed `CREATE
+INDEX ON t (v)`, are outside this coverage because the probe has nothing to check.
+`CheckTableAbsent` separately covers the table relation and composite type. Duplicate-name
+SQLSTATEs backstop races for explicit names. For server-chosen names, the probe narrows the
+race to the time-of-check window, but nothing catches a name taken inside it.
+
+A `create-collision` can identify a name the table needs — an index, constraint index, or
+sequence — rather than the table name itself.
 
 A failed create is not rolled back wholesale: each step committed in its own bounded
 transaction, so the steps before the failure remain

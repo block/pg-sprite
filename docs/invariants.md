@@ -259,7 +259,7 @@ site re-deriving the rule. A set that does not lead with a `CREATE TABLE` means 
 was forged or mutated, and every consumer refuses it fail-closed rather than reordering.
 *Enforced:* `pkg/statement` (`ParseDesired` establishes the order), `pkg/diffplan`
 (`qualifiedDesired` asserts it when rendering the greenfield plan), `pkg/executor`
-(`admitCreateSteps` asserts it before anything runs); `pkg/schemadiff`'s scratch
+(`checkCreateSteps` asserts it before anything is planned or run); `pkg/schemadiff`'s scratch
 materialization relies on it to run the `CREATE TABLE` before its indexes.
 *Source:* adversarial review of the declarative front door.
 

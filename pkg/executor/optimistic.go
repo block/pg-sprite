@@ -195,7 +195,7 @@ func ExecuteNativeWithProgress(ctx context.Context, pool *pgxpool.Pool, pt prefl
 		return fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
 	}
 	tracker.Start(1, progress.OperationOptimistic)
-	tracker.StartStep(1, progress.OperationOptimistic)
+	tracker.StartStep(1, progress.OperationOptimistic, st.SQL())
 	defer func() { tracker.Finish(err) }()
 	return executeNative(ctx, pool, pt, st, b, retry, tracker)
 }

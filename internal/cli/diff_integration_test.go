@@ -223,6 +223,43 @@ func TestDiffMissingTableEmitsFullDesiredSchema(t *testing.T) {
 	}, sqls)
 }
 
+// A greenfield desired file the create path refuses by shape exits with the
+// refusal code in every rendering, the JSON report carries the typed
+// refusal, and the text report names the create path's own cause — the
+// same explanation the executor would give — so the author can tell a
+// PARTITION OF refusal apart from any other unsupported shape.
+func TestDiffGreenfieldCreateShapeRefusal(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.parent (id int, region text) PARTITION BY LIST (region)", schema))
+	require.NoError(t, err)
+	desired := "CREATE TABLE child PARTITION OF parent FOR VALUES IN ('eu');"
+
+	cmd := newDiffCmd(t, url, schema, desired)
+	cmd.JSON = true
+	var out strings.Builder
+	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+	var report plan.Report
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
+	require.NotNil(t, report.TableExists)
+	assert.False(t, *report.TableExists)
+	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, router.DispositionRefuse, report.Statements[0].Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, report.Statements[0].Reason)
+	assert.Empty(t, report.Statements[0].ExecSQL)
+
+	text := newDiffCmd(t, url, schema, desired)
+	var textOut strings.Builder
+	require.ErrorIs(t, text.run(t.Context(), &textOut), verdict.ErrRefused)
+	assert.Contains(t, textOut.String(), "the create path refuses this statement: CREATE TABLE PARTITION OF")
+	assert.NotContains(t, textOut.String(), "the plan creates it")
+}
+
 func TestDiffTextPlanIsExecutableSQL(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
