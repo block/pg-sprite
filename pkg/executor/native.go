@@ -278,7 +278,7 @@ func BuildIndexConcurrentlyWithProgress(ctx context.Context, pool *pgxpool.Pool,
 		return rep, fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
 	}
 	tracker.Start(1, progress.OperationConcurrentIndex)
-	tracker.StartStep(1, progress.OperationConcurrentIndex)
+	tracker.StartStep(1, progress.OperationConcurrentIndex, sql)
 	defer func() { tracker.Finish(err) }()
 	return buildIndexConcurrently(ctx, pool, sql, b, tracker)
 }

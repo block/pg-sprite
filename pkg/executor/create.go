@@ -177,7 +177,7 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 	for i, step := range steps {
 		start := time.Now()
 		if tracker != nil {
-			tracker.StartStep(i+1, progress.OperationBrief)
+			tracker.StartStep(i+1, progress.OperationBrief, step.SQL())
 			start = tracker.Now()
 		}
 		err := executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {

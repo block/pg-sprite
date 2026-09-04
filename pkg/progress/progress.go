@@ -40,8 +40,9 @@ const (
 // FormatVersion identifies the snapshot contract. A consumer must reject a
 // snapshot whose format_version it does not recognize rather than guess at
 // field semantics. Adding a phase or operation value is a contract change
-// and bumps this version, even when no field is added or renamed.
-const FormatVersion = 1
+// and bumps this version, even when no field is added or renamed. Adding a
+// field also bumps this version so strict consumers can detect the new shape.
+const FormatVersion = 2
 
 // Operation is the current operation's execution class.
 type Operation string
@@ -78,11 +79,15 @@ type Work struct {
 
 // Detail describes the operation currently executing.
 type Detail struct {
-	Operation   Operation `json:"operation,omitempty"`
-	ServerPhase string    `json:"server_phase,omitempty"`
-	Active      bool      `json:"active"`
-	Attempt     int       `json:"attempt,omitempty"`
-	Work        *Work     `json:"work,omitempty"`
+	Operation Operation `json:"operation,omitempty"`
+	// Statement is the canonical, qualified SQL the executor is running for
+	// the current step, never a rendered or prettified form. Terminal snapshots
+	// retain it so observers can identify the statement that produced the outcome.
+	Statement   string `json:"statement,omitempty"`
+	ServerPhase string `json:"server_phase,omitempty"`
+	Active      bool   `json:"active"`
+	Attempt     int    `json:"attempt,omitempty"`
+	Work        *Work  `json:"work,omitempty"`
 }
 
 // Snapshot is one immutable progress observation. For a terminal phase the
@@ -145,13 +150,14 @@ func (t *Tracker) Start(total int, operation Operation) {
 	t.session, t.buildPID = nil, 0
 }
 
-// StartStep advances a sequence to a 1-based step and drops any build
-// session from a prior step, so a later step can never poll a stale build.
-func (t *Tracker) StartStep(step int, operation Operation) {
+// StartStep advances a sequence to a 1-based step, records the exact SQL the
+// executor will run, and drops any build session from a prior step, so a later
+// step can never poll a stale build.
+func (t *Tracker) StartStep(step int, operation Operation, statement string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.step, t.stepStart = step, t.clock.Now()
-	t.detail = Detail{Operation: operation, Active: true}
+	t.detail = Detail{Operation: operation, Statement: statement, Active: true}
 	t.session, t.buildPID = nil, 0
 }
 

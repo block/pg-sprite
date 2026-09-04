@@ -170,6 +170,11 @@ The greenfield `CREATE TABLE` path is a fixed call order, all inside the apply s
 4. `executor.ExecuteCreate` — consume both proofs, admit the set, probe `pg_class` for every
    index, constraint-index, and sequence name the set claims, then run the set.
 
+For the shapes the create path admits, the plan's `exec_sql` is the statement as written —
+the plain `CREATE TABLE` and index builds this path runs, with each build's decision
+reclassified `metadata-only`; it never substitutes `CONCURRENTLY` for an index on the table
+born in that run.
+
 `migrate.RunDesired` runs this sequence itself when the plan is greenfield — the adapter
 does not assemble it and must not mint either proof separately (a proof minted outside the
 executing session proves nothing about it). The order decides which refusal wins when more
