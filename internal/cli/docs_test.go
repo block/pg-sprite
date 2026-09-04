@@ -63,15 +63,16 @@ func alterReport(t *testing.T, sql, schema, table string, facts planner.Facts) p
 	return report
 }
 
-// The doc's example outputs are captured pipeline output, not prose:
+// The doc's --json example outputs are captured pipeline output, not prose:
 // rebuilding each one through the same classify-and-route pipeline must
-// reproduce the published JSON exactly (up to JSON equivalence). If this
+// reproduce the published JSON exactly (up to JSON equivalence). Examples
+// of text-only commands are prose and stay outside this check. If this
 // fails, regenerate the examples in docs/cli-output-examples.md.
 func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
-	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 9, "the doc publishes nine captured outputs")
+	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
+	require.Len(t, blocks, 9, "the doc publishes nine captured --json outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
