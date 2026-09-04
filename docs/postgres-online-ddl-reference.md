@@ -298,6 +298,15 @@ The operation is a brief catalog-only change: it takes at most a short
 written on any table size, provided the lock can be acquired promptly
 (pg-sprite runs every session under a bounded `lock_timeout`).
 
+Every executable build on a table that does not exist yet — the `diff`
+greenfield case — classifies here too, including index builds that would be
+[`safer-idiom`](#safer-idiom) on a live table: each create step commits in its
+own transaction under the brief `lock_timeout` / `statement_timeout` budget,
+so `CREATE TABLE` is visible before its indexes build and a concurrent writer
+that already knows the name makes the step fail fast rather than block. The
+classification is `metadata-only` because the cost is bounded by that budget
+on a table born in the run, so the create path runs the statement as written.
+
 `ACCESS EXCLUSIVE` is the bucket's worst case, not its uniform cost — several
 forms take only `SHARE UPDATE EXCLUSIVE`, which does not block reads or
 writes, only competing DDL and vacuum:
@@ -369,6 +378,11 @@ block. When no online sequence can be constructed (for example
 `ADD COLUMN ... UNIQUE`, `ATTACH PARTITION`, or `ADD CONSTRAINT ... NOT NULL`),
 the classification stays `safer-idiom` but the statement is refused with
 [`rewrite-required`](#rewrite-required) and exits 2.
+
+On a table that does not exist yet (the `diff` greenfield case) there is no
+live traffic to protect, so the build is reclassified
+[`metadata-only`](#metadata-only) and runs as written — the greenfield create
+path does not substitute `CONCURRENTLY`.
 
 ### `app-breaking-rename`
 

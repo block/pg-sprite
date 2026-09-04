@@ -64,7 +64,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `disposition` | string | always | What execution would do with this statement now (see Dispositions). |
 | `reason` | string | refusals only | Typed refusal cause for this statement: `unsupported-statement` for a planner-level refusal, `unsupported-partitioned-parent` when target facts refuse it. An unknown value must be treated as refused. |
 | `decisions` | array | always | The planner's per-operation classifications (below). |
-| `exec_sql` | array | native route | The ordered SQL the native backend would run — the safer sequence when the planner constructed one. Absent for non-native routes. |
+| `exec_sql` | array | native route | The ordered SQL the native backend would run — the safer sequence when the planner constructed one, or the statement as written for a table that does not exist yet (the greenfield create path runs plain builds; see Fingerprint). Absent for non-native routes. |
 | `execution` | string | with `exec_sql` | The typed execution contract for `exec_sql` (see Execution contracts). A consumer that runs the statements itself branches on this — it is what says the steps must not be wrapped in a transaction block. Present exactly when `exec_sql` is. |
 | `guidance` | string | `rewrite-required` only | The typed manual path for a rewrite-required refusal, drawn from the [suggest report's Guidance vocabulary](suggest-report.md#guidance-guidance). The engine will not run the statement; this names what to do instead (`split-statement`, `add-column-then-constraint`, …). Present exactly when `disposition` is `rewrite-required`. Explanatory: excluded from the fingerprint. |
 
@@ -101,11 +101,11 @@ consumer rendering either into a shared surface must clamp and escape them.
 
 | Value | Meaning |
 |---|---|
-| `metadata-only` | A brief ACCESS EXCLUSIVE catalog change, no scan and no rewrite. |
+| `metadata-only` | A brief ACCESS EXCLUSIVE catalog change, no scan and no rewrite. Also the classification of every executable build on a table that does not exist yet (a `diff` greenfield plan): each create step commits in its own transaction under the brief `lock_timeout` / `statement_timeout` budget, so `CREATE TABLE` is visible before its indexes build and a concurrent writer that already knows the name makes the step fail fast rather than block. The classification is `metadata-only` because the cost is bounded by that budget on a table born in the run; a `safer-idiom` decision is reclassified here and `exec_sql` is the statement as written. |
 | `online-idiom` | Already the safe native form (CONCURRENTLY, NOT VALID, VALIDATE, USING INDEX). |
 | `fast-default` | ADD COLUMN with a constant default — the catalog stores the default, no rewrite. |
 | `binary-coercible` | A type change PostgreSQL relabels without a rewrite (widen varchar, varchar to text, widen numeric precision). |
-| `safer-idiom` | Native, but the submitted form blocks; `safer_sql` carries the online rewrite when one can be constructed. |
+| `safer-idiom` | Native, but the submitted form blocks; `safer_sql` carries the online rewrite when one can be constructed. Never appears on an executable statement of a greenfield plan — see `metadata-only`. |
 | `app-breaking-rename` | A column or table rename — metadata-only for PostgreSQL, but running application code still referencing the old name breaks the instant it commits. For a column the safe sequence is expand/contract: add the new column, dual-write and backfill, switch reads, then drop the old column as its own reviewed change. For a table, coordinate the rename with the application deploy that adopts the new name. Index renames stay `metadata-only` — SQL never references an index by name. |
 | `volatile-default` | ADD COLUMN whose default the planner cannot prove constant — PostgreSQL rewrites the table. |
 | `generated-stored` | Adding a stored generated column computes every row — a full rewrite. |
@@ -198,6 +198,19 @@ field followed by a unit separator (`0x1F`) — and close each statement with a 
 separator (`0x1E`). Explanatory fields (`decisions`, `kind`, `destructive`) are excluded: a
 reworded reason does not change identity, but a rerouted, resequenced, or rewritten plan
 does. An empty plan has a defined identity (the digest of no input).
+
+For a table that does not exist yet, `exec_sql` is the plain canonical build that the
+greenfield create path runs. It never substitutes `CONCURRENTLY` for an index on a table
+born in that run, and the fingerprint therefore commits to the plain build.
+
+Upgrade caveat: earlier `format_version` 2 reports disclosed the planner's online rewrite
+(`CREATE INDEX CONCURRENTLY …`) as the greenfield `exec_sql` — a form the create path
+refuses and never ran. Correcting the disclosure changed the greenfield fingerprint's
+*value* without changing its *definition* (the serialization above is unchanged, so the
+version is not bumped): the fingerprint now commits to what actually runs. A consumer
+holding a greenfield fingerprint from an earlier report gets one
+`plan-fingerprint-mismatch` on its next apply; re-plan and pin the new value. Fingerprints
+for tables that already exist are unaffected.
 
 This is a **plan identity, not a schema fingerprint**. The engine's schema-state comparisons
 only ever compare server-decompiled output against server-decompiled output (see
