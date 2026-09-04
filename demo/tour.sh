@@ -158,6 +158,7 @@ run_pull() {
         "$PGS" pull --url "$PG_DSN" --schema public --out "$out_dir" >/dev/null || status=$?
         assert_eq "pull exit" 0 "$status"
         file_count=$(find "$out_dir" -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')
+        # One file per table in demo/seed.sql (orders, users).
         assert_eq "pulled file count" 2 "$file_count"
     else
         "$PGS" pull --url "$PG_DSN" --schema public --out "$out_dir" || echo "(exit $?)"
@@ -169,6 +170,7 @@ run_pull() {
         if [ "$CHECK" = 1 ]; then
             out=$("$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" --json) || status=$?
             assert_eq "diff exit of [$desired]" 0 "$status"
+            # Plan report contract version (plan.FormatVersion), same pin as diff_plan.
             assert_eq "diff format_version of [$desired]" 2 "$(jq -r '.format_version' <<<"$out")"
             assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
             assert_eq "zero diff of [$desired]" 0 "$(jq -r '.statements | length' <<<"$out")"

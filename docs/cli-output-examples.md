@@ -2,9 +2,10 @@
 
 Representative, real outputs for every shape the CLI produces: the plan
 report for each dry-run disposition, the execution verdict, the linter,
-pull, and diff. Where JSON is available, the human text rendering of the
-same reports is display only — see the animated demos in [demos/](demos/)
-for how it reads; the JSON is the machine contract. The text reports color
+pull, and diff. Every human text rendering is display only and unpinned —
+including `pull`'s, which has no JSON form yet — see the animated demos in
+[demos/](demos/) for how it reads; where JSON exists it is the machine
+contract. The text reports color
 their diagnostic labels when stdout is a terminal (`--color=auto|always|never`;
 [`NO_COLOR`](https://no-color.org) and `TERM=dumb` disable auto-detection);
 the JSON and `diff --sql` outputs are never colored. All were captured

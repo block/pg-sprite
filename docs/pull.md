@@ -39,28 +39,39 @@ output.
 
 ## Baseline export and zero-diff verification
 
-Start with an empty destination, export the live schema, and verify every file
+Start with a destination directory that does not exist yet (`pull` never
+overwrites an existing file), export the live schema, and verify every file
 against the same database before committing the baseline:
 
 ```sh
 export PGSPRITE_URL='postgres://user:password@localhost/database?sslmode=disable'
 
-rm -rf schema
 pg-sprite pull --schema public --out schema
 
+divergent=0
 for desired in schema/*.sql; do
   pg-sprite diff --schema public --desired "$desired" --json |
-    jq -e '.disposition == "execute" and (.statements | length == 0)' >/dev/null
+    jq -e '.disposition == "execute" and (.statements | length == 0)' >/dev/null ||
+    { echo "$desired does not round-trip"; divergent=1; }
 done
+test "$divergent" -eq 0
+```
 
+The check exits non-zero, and names each offending file, if any exported table
+produces a schema change plan — the result of the loop alone would only reflect
+the last file, so the loop records every divergence and the final `test` reports
+it. Commit the baseline only after the check exits 0:
+
+```sh
 git add schema
 git commit -m 'Add declarative schema baseline'
 ```
 
-The loop exits non-zero if any exported table produces a schema change plan.
-Run it against the same database and schema used by `pull`; each desired file
-is single-table scoped, while `--schema` tells `diff` where to find that live
-table.
+Run the check against the same database and schema used by `pull`; each desired
+file is single-table scoped, while `--schema` tells `diff` where to find that
+live table. The per-table `diff` reports are JSON; `pull` itself has no JSON
+output yet, so a CI consumer that wants a machine-readable per-table pull result
+runs this loop rather than parsing `pull`'s text report.
 
 This is the command-level form of `schemadiff.Render`'s round-trip guarantee:
 **introspect → render → parse → diff = zero changes**. `pull` calls
