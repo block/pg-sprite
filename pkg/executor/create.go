@@ -9,13 +9,17 @@
 // re-parsed by the real grammar, and admitted by shape and target before
 // anything executes.
 //
-// The absence proof is time-of-check: nothing locks the name, so a
-// concurrent create can still take it between the check and a step here.
-// That loss surfaces as SQLSTATE 42P07 and is returned as the typed
-// ErrCreateCollision — the caller re-diffs the live catalog rather than
-// assuming what the collision left behind. A failed step ends the run
-// immediately; the steps before it committed (each in its own bounded
-// transaction) and remain, so a rerun's absence check refuses with
+// Before the first step the executor probes pg_class for every name the
+// desired file states — explicit index names and the first-choice names of
+// index-backed constraints and column-owned sequences — so an occupied
+// name refuses the whole set rather than failing after the table committed;
+// the table name itself is the caller's absence proof. The proof is
+// time-of-check: nothing locks the names, so a concurrent create can still
+// take one before its step. Duplicate-name SQLSTATEs backstop races for
+// explicit names. For server-chosen names, the probe narrows the race to
+// the time-of-check window, but nothing catches a name taken inside it. A
+// failed step ends the run immediately; the steps before it committed
+// (each in its own bounded transaction) remain, so a rerun's absence check refuses with
 // ErrRelationExists and the declarative front door re-diffs and applies
 // the remainder.
 
@@ -25,6 +29,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -39,12 +44,16 @@ import (
 // desired statement before the first executes, so a creation this executor
 // cannot finish is never started.
 var (
-	// ErrCreateCollision is returned when a step fails because its target
-	// name is already taken. For the table name that means a concurrent
-	// create won the race — the absence proof is time-of-check. Index
-	// names are never absence-checked, so a pre-existing occupant at an
-	// index name reports the same way. Either way the caller re-diffs the
-	// live catalog; nothing about the occupant's shape can be assumed.
+	// ErrCreateCollision is returned when a claimed name is already taken.
+	// A catalog probe after admission checks the desired file's explicit
+	// index names and first-choice constraint-index and sequence names before
+	// the first step executes, refusing the whole set with no *SequenceStepError;
+	// duplicate-name SQLSTATEs backstop time-of-check races for explicit
+	// names and arrive wrapped in one. Server-chosen names have no such
+	// backstop. The remedy is on the desired file's side — drop or rename the
+	// occupant, name a constraint's index explicitly, or for a sequence use
+	// an explicitly named sequence or a non-serial column —
+	// then re-diff; a re-plan alone reproduces the refusal.
 	ErrCreateCollision = errors.New("a name the create path needs is already taken")
 	// ErrDuplicateCreateName is returned when the desired set claims the
 	// same relation name twice — two indexes under one name, or an index
@@ -88,13 +97,18 @@ const (
 // like the absence proof it is time-of-check — a grant revoked after
 // minting fails with the server's own error. Every desired statement is
 // qualified into the proof's schema, re-parsed, and admitted by shape and
-// target before the first step executes. On success every step committed
-// and the report says what each did. On failure the run stops at the
-// failing step and returns a typed *SequenceStepError; the committed
-// prefix remains — a rerun's absence check then refuses with
-// preflight.ErrRelationExists, and the caller re-diffs the live catalog
-// to apply the remainder. retry bounds lock_timeout retries on each step,
-// exactly as in ExecuteNative.
+// target, and every index and constraint-index name the file states is
+// probed free in pg_class, before the first step executes. A refusal from
+// either check returns with an empty report and no *SequenceStepError:
+// an occupied name is ErrCreateCollision, an inadmissible shape one of the
+// admission sentinels, and a probe that could not complete (a cancelled
+// context, a lost connection) is that error, wrapped — not a collision.
+// On success every step committed and the report says what each did. On
+// failure the run stops at the failing step and returns a typed
+// *SequenceStepError; the committed prefix remains — a rerun's absence
+// check then refuses with preflight.ErrRelationExists, and the caller
+// re-diffs the live catalog to apply the remainder. retry bounds
+// lock_timeout retries on each step, exactly as in ExecuteNative.
 func ExecuteCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, ds statement.DesiredSchema, b Budget, retry RetryPolicy) (SequenceReport, error) {
 	return executeCreate(ctx, pool, at, cr, ds, b, retry, nil)
 }
@@ -140,14 +154,30 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 		return rep, fmt.Errorf("%w: ST-7: desired schema targets %q but absence was verified for %q",
 			ErrInvariantViolation, ds.Table(), at.Table())
 	}
-	steps, err := admitCreateSteps(at, ds)
+	steps, claimed, err := admitCreateSteps(at, ds)
 	if err != nil {
 		return rep, err
+	}
+	// Every deterministic relation name the desired set will claim is
+	// proved free before the first step executes, so an occupied index name
+	// refuses the whole set instead of failing after the table committed.
+	// CheckTableAbsent already covers the table name and its composite type.
+	claimed = slices.DeleteFunc(claimed, func(name string) bool { return name == at.Table() })
+	err = preflight.CheckNamesAbsent(ctx, pool, at, claimed)
+	if preflight.IsNameOccupied(err) {
+		return rep, fmt.Errorf("%w: the desired file claims a name the catalog already holds: %w",
+			ErrCreateCollision, err)
+	}
+	if err != nil {
+		// The probe itself failed — a cancelled context, a dropped
+		// connection — which says nothing about whether the names are
+		// free; it is an operational failure, not a collision.
+		return rep, fmt.Errorf("verify claimed names are absent in %s: %w", at.Schema(), err)
 	}
 	for i, step := range steps {
 		start := time.Now()
 		if tracker != nil {
-			tracker.StartStep(i+1, progress.OperationBrief)
+			tracker.StartStep(i+1, progress.OperationBrief, step.SQL())
 			start = tracker.Now()
 		}
 		err := executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
@@ -174,28 +204,35 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 // arrive in execution order — the CREATE TABLE first, the indexes in input
 // order after it, ordered once by statement.ParseDesired — and the steps
 // keep that order. Every step claims the names it will occupy in the
-// same pg_class namespace — the table plus the first-choice index names
-// of its index-backed constraints, or an explicit index name — so a name
-// claimed twice within the set — decidable here — is refused before
+// same pg_class namespace — the table plus the first-choice relation names
+// of its constraints and column-owned sequences, or an explicit index name.
+// A name claimed twice within the set — decidable here — is refused before
 // anything runs rather than failing mid-run after a prefix committed.
 // The claims are first choices: a set whose first choices collide is
 // refused even where the server would sidestep with a numeric suffix,
 // because a deterministic name the file states beats one the server
 // invents. A step whose name the server invents outright (an unnamed
 // index) claims nothing decidable and is exempt.
-func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]statement.Statement, error) {
+// The admitted steps are returned with every name they claim, so the caller
+// can prove the set free in the catalog before the first step executes;
+// duplicates within the set are already refused here, so the names are
+// distinct. Order does not matter: the catalog probe is set membership and
+// picks the reported occupant itself.
+func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]statement.Statement, []string, error) {
 	checked, err := checkCreateSteps(at.Schema(), ds)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	steps := make([]statement.Statement, 0, len(checked))
+	names := make([]string, 0, len(checked))
 	for i, step := range checked {
 		if step.refusal != nil {
-			return nil, fmt.Errorf("desired statement %d of %d: %w", i+1, len(checked), step.refusal)
+			return nil, nil, fmt.Errorf("desired statement %d of %d: %w", i+1, len(checked), step.refusal)
 		}
 		steps = append(steps, step.statement)
+		names = append(names, step.claims...)
 	}
-	return steps, nil
+	return steps, names, nil
 }
 
 // CreateShapeRefusals checks the connection-free create-path rules in desired
@@ -262,8 +299,8 @@ func checkCreateSteps(schema string, ds statement.DesiredSchema) ([]createStep, 
 // checkCreateStepShape qualifies one desired statement into the target schema,
 // re-parses it by the real grammar, and checks it by shape and target. It
 // returns the pg_class names the step will claim — for a CREATE TABLE the
-// table name plus the first-choice index names of its index-backed
-// constraints, for a CREATE INDEX its explicit name, nothing when the
+// table name plus the first-choice relation names of its constraints and
+// column-owned sequences, for a CREATE INDEX its explicit name, nothing when the
 // server invents one. CREATE TABLE clauses that bind to a secondary
 // relation or type — PARTITION OF, INHERITS, LIKE, OF — are refused:
 // statement.Qualify rewrites only the target, so the secondary name would
@@ -312,11 +349,12 @@ func checkCreateStepShape(schema, table, sql string) (createStep, error) {
 
 // checkCreateTableShape refuses the CREATE TABLE clauses that bind to a
 // secondary relation or type and returns the names the table will claim:
-// its own plus the first-choice index names of its index-backed constraints.
+// its own plus the first-choice relation names of its constraints and
+// column-owned sequences.
 // The claims are returned with the refusal so a later statement colliding
 // with a refused table is still reported.
 func checkCreateTableShape(qualified, table string, op statement.Op) ([]string, error) {
-	implicit, err := statement.ImplicitIndexNames(qualified)
+	implicit, err := statement.ImplicitRelationNames(qualified)
 	if err != nil {
 		// ParseOne already admitted this SQL as a CREATE TABLE, so a
 		// refusal here means the two parse boundaries disagree.

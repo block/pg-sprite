@@ -3,6 +3,7 @@ package executor_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -223,7 +224,23 @@ func TestExecuteNativeWithProgressReportsRetriesAndFailure(t *testing.T) {
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
 	retry := executor.RetryPolicy{MaxAttempts: 2, InitialBackoff: 10 * time.Millisecond, MaxBackoff: 20 * time.Millisecond}
 	tight := executor.Budget{LockTimeout: 100 * time.Millisecond, StatementTimeout: time.Second}
-	err = executor.ExecuteNativeWithProgress(t.Context(), pool, pt, st, tight, retry, tracker)
+	done := make(chan error, 1)
+	var workers sync.WaitGroup
+	workers.Go(func() {
+		done <- executor.ExecuteNativeWithProgress(t.Context(), pool, pt, st, tight, retry, tracker)
+	})
+	t.Cleanup(workers.Wait)
+
+	var running progress.Snapshot
+	assert.Eventually(t, func() bool {
+		var progressErr error
+		running, progressErr = tracker.Progress(t.Context())
+		return progressErr == nil && running.Detail.Attempt > 0
+	}, time.Second, 5*time.Millisecond, "a blocked optimistic attempt must publish its active statement")
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema), running.Detail.Statement)
+
+	err = <-done
+	workers.Wait()
 
 	var budgetErr *executor.BudgetError
 	require.ErrorAs(t, err, &budgetErr)

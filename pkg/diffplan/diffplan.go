@@ -101,6 +101,8 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		return plan.Report{}, err
 	}
 	if !tableExists {
+		// Shape refusals are stamped first so the disclosure below only
+		// describes the statements that remain executable.
 		refused, refusalErr := executor.CreateShapeRefusals(req.Schema, ds)
 		if refusalErr != nil {
 			return plan.Report{}, refusalErr
@@ -108,8 +110,8 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if err := plan.RefuseUnsupportedCreateShape(&report, refused); err != nil {
 			return plan.Report{}, err
 		}
-	}
-	if tableExists {
+		plan.DiscloseGreenfieldExecution(&report)
+	} else {
 		targetFacts, checkErr := preflight.LookupTargetFacts(ctx, pool, req.Schema, ds.Table())
 		if checkErr != nil {
 			return plan.Report{}, checkErr

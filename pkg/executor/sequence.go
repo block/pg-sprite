@@ -294,7 +294,7 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 	for i, step := range admitted {
 		start := time.Now()
 		if tracker != nil {
-			tracker.StartStep(i+1, progressOperation(step.kind))
+			tracker.StartStep(i+1, progressOperation(step.kind), step.st.SQL())
 			start = tracker.Now()
 		}
 		var indexReport *IndexBuildReport

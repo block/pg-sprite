@@ -91,6 +91,11 @@ func TestParseDesiredRefusals(t *testing.T) {
 	}
 }
 
+func TestParseDesiredRefusesConcurrentIndexBeforePlanning(t *testing.T) {
+	_, err := ParseDesired("CREATE TABLE t (id int); CREATE INDEX CONCURRENTLY i ON t (id)")
+	require.ErrorIs(t, err, ErrConcurrentIndex)
+}
+
 func TestParseDesiredRefusesInvalidSQL(t *testing.T) {
 	_, err := ParseDesired("CREATE TABEL t (id int)")
 	require.Error(t, err)

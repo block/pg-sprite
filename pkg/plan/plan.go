@@ -185,16 +185,59 @@ func refuseStatements(report *Report, reason verdict.Reason, refused func(i int)
 		}
 		st.ExecSQL = nil
 		st.Execution = ""
-		for j := range st.Decisions {
-			st.Decisions[j].SaferSQL = nil
-			st.Decisions[j].SaferSQLExecution = ""
-		}
+		withdrawSaferAdvice(st)
 	}
 	if any {
 		if report.Disposition != router.DispositionRefuse {
 			report.Reason = reason
 		}
 		report.Disposition = router.DispositionRefuse
+	}
+}
+
+// DiscloseGreenfieldExecution makes executable statements describe the plain,
+// bounded builds used for a table born in this run. The report must describe
+// a table that does not exist yet; the function returns without mutation
+// unless the report establishes that precondition. Each create step commits in
+// its own transaction under the brief lock_timeout and statement_timeout
+// budget, so CREATE TABLE is visible before its indexes build and a concurrent
+// writer that already knows the name makes the step fail fast rather than
+// block. The build is classified metadata-only because its cost is bounded by
+// that budget on a table born in the run. Reclassifying keeps the statement in
+// a state router.Route can produce: an execute disposition never carries a
+// safer-idiom decision without its rewrite.
+func DiscloseGreenfieldExecution(report *Report) {
+	if report.TableExists == nil {
+		return
+	}
+	if *report.TableExists {
+		return
+	}
+	for i := range report.Statements {
+		st := &report.Statements[i]
+		if st.Disposition != router.DispositionExecute {
+			continue
+		}
+		st.ExecSQL = []string{st.SQL}
+		st.Execution = planner.ExecutionAutocommit
+		withdrawSaferAdvice(st)
+		for j := range st.Decisions {
+			if st.Decisions[j].Reason == planner.ReasonSaferIdiom {
+				st.Decisions[j].Reason = planner.ReasonMetadataOnly
+			}
+		}
+	}
+}
+
+// withdrawSaferAdvice clears the planner's per-decision online rewrite from
+// a statement whose execution advice no longer applies — a refusal, or a
+// greenfield build that runs as written. Every mutator that withdraws
+// execution advice goes through here, so a decision field added later is
+// cleared in one place.
+func withdrawSaferAdvice(st *Statement) {
+	for j := range st.Decisions {
+		st.Decisions[j].SaferSQL = nil
+		st.Decisions[j].SaferSQLExecution = ""
 	}
 }
 

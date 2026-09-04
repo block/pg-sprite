@@ -230,6 +230,7 @@ func TestPlanMissingTableEmitsFullDesiredSchema(t *testing.T) {
 		schemadiff.ChangeCreateTable,
 		schemadiff.ChangeCreateIndex,
 	}, kinds)
+	assertGreenfieldIndexExecution(t, report.Statements[1])
 }
 
 func TestPlanMissingTableRefusesCreateShapes(t *testing.T) {
@@ -302,4 +303,18 @@ func TestPlanMissingTableOrdersCreateTableFirst(t *testing.T) {
 		schemadiff.ChangeCreateTable,
 		schemadiff.ChangeCreateIndex,
 	}, kinds)
+	assertGreenfieldIndexExecution(t, report.Statements[1])
+}
+
+func assertGreenfieldIndexExecution(t *testing.T, got plan.Statement) {
+	t.Helper()
+	require.Equal(t, []string{got.SQL}, got.ExecSQL)
+	assert.NotContains(t, got.ExecSQL[0], "CONCURRENTLY")
+	assert.Equal(t, planner.ExecutionAutocommit, got.Execution)
+	require.NotEmpty(t, got.Decisions)
+	for _, decision := range got.Decisions {
+		assert.Equal(t, planner.ReasonMetadataOnly, decision.Reason)
+		assert.Empty(t, decision.SaferSQL)
+		assert.Empty(t, decision.SaferSQLExecution)
+	}
 }

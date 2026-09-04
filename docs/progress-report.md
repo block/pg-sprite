@@ -15,6 +15,9 @@ field shape: the closed vocabularies below (phases, operations) are pinned to it
 phase or operation value is a contract change and bumps `format_version`, even if no field
 is added or renamed.
 
+Adding a field bumps `format_version` so a strict consumer can detect the new shape from the
+version. The current version is **2**: version 2 added `detail.statement`.
+
 The [plan report](plan-report.md), [lint report](lint-report.md), and
 [suggest report](suggest-report.md) are separate contracts with their own `format_version`;
 all version independently.
@@ -43,10 +46,14 @@ licenses a consumer to intervene in the change itself.
 | Field | Type | Presence | Meaning |
 |---|---|---|---|
 | `operation` | string | once execution starts | The current operation's execution class (see Operations). |
+| `statement` | string | after a step starts | The exact SQL string the executor executes for this step, after front-door qualification and canonicalization — not a display rendering. It remains present on terminal snapshots so an observer can identify the statement that produced the outcome. |
 | `server_phase` | string | active concurrent build only | PostgreSQL's own phase string from `pg_stat_progress_create_index`, verbatim. |
 | `active` | bool | always | Whether an operation is executing now. `false` with `phase: "running"` means a concurrent build's progress row has left the server view. |
 | `attempt` | int | bounded retries only | The current attempt number when the executor is inside its bounded retry loop. |
 | `work` | object | server-observed work only | Present exactly when the server published a progress row; then **every** counter below is present, so a fresh build reports honest zeros rather than an empty object. |
+
+`statement` is the submitter's statement after qualification and canonicalization, so a
+consumer rendering it into a shared surface must clamp and escape it.
 
 ### Work counters
 
@@ -91,7 +98,7 @@ A poll during step 2 of a 3-step sequence, mid concurrent index build:
 
 ```json
 {
-  "format_version": 1,
+  "format_version": 2,
   "phase": "running",
   "step": 2,
   "total_steps": 3,
@@ -99,6 +106,7 @@ A poll during step 2 of a 3-step sequence, mid concurrent index build:
   "step_elapsed_ns": 750000000,
   "detail": {
     "operation": "concurrent-index-build",
+    "statement": "CREATE INDEX CONCURRENTLY idx ON public.t (id)",
     "server_phase": "building index",
     "active": true,
     "attempt": 2,
