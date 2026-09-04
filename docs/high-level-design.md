@@ -337,5 +337,7 @@ The choices that shape everything else (the full categorized list is in
   **[schemabot-integration.md](schemabot-integration.md)**.
 - The detailed interfaces, package layout, libraries, lifecycle internals, full coverage matrix,
   and later-phase decisions → **[low-level-design.md](low-level-design.md)**.
-- How Spirit (the inspiration) works → spirit-architecture-notes.md.
-- The phased plan to build it → build-plan.md.
+- How Spirit (the inspiration) works → the [Spirit README](https://github.com/block/spirit) and
+  [PostgreSQL primitive mapping](mysql-vs-postgresql.md#copy-and-swap-executor-spirit-mysql--postgresql-primitive-mapping).
+- Current implementation status and the next increment →
+  **[low-level-design.md](low-level-design.md#next-step)**.

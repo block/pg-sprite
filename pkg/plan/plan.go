@@ -140,25 +140,104 @@ type Report struct {
 // RefuseUnsupportedPartitionedParent marks executable statements as refused
 // when partition-aware admission rejects their execution steps.
 func RefuseUnsupportedPartitionedParent(report *Report, refused []bool) {
+	refuseStatements(report, verdict.ReasonUnsupportedPartitionedParent, func(i int) bool {
+		return i < len(refused) && refused[i]
+	})
+}
+
+// RefuseUnsupportedCreateShape marks the create-path statements whose
+// connection-free shape checks refuse them. refused is positional over
+// report.Statements — one entry per planned statement, nil where the
+// statement is admitted. The report carries no field for the cause; callers
+// that need the typed refusal keep the slice (executor.CreateShapeRefusals
+// is pure, so it can also be recomputed from the desired schema). A length
+// mismatch means the two sides no longer agree on what the plan contains,
+// so no positional marking is safe and the report is left untouched.
+func RefuseUnsupportedCreateShape(report *Report, refused []error) error {
+	if len(refused) != len(report.Statements) {
+		return fmt.Errorf("refuse create shapes: %d refusals for %d planned statements", len(refused), len(report.Statements))
+	}
+	refuseStatements(report, verdict.ReasonUnsupportedStatement, func(i int) bool {
+		return refused[i] != nil
+	})
+	return nil
+}
+
+// refuseStatements withdraws every piece of execution advice from each
+// statement the predicate selects and, when any statement was refused, stamps
+// the reason on the report. An already-refused statement or report keeps its
+// reason: the first refusal wins because an earlier mutator saw the more
+// specific cause. Every refusal mutator goes through here, so a field added
+// later is withdrawn in one place.
+func refuseStatements(report *Report, reason verdict.Reason, refused func(i int) bool) {
 	any := false
 	for i := range report.Statements {
-		if i >= len(refused) || !refused[i] {
+		if !refused(i) {
 			continue
 		}
 		any = true
-		report.Statements[i].Backend = ""
-		report.Statements[i].Disposition = router.DispositionRefuse
-		report.Statements[i].Reason = verdict.ReasonUnsupportedPartitionedParent
-		report.Statements[i].ExecSQL = nil
-		report.Statements[i].Execution = ""
-		for j := range report.Statements[i].Decisions {
-			report.Statements[i].Decisions[j].SaferSQL = nil
-			report.Statements[i].Decisions[j].SaferSQLExecution = ""
+		st := &report.Statements[i]
+		alreadyRefused := st.Disposition == router.DispositionRefuse
+		st.Backend = ""
+		st.Disposition = router.DispositionRefuse
+		if !alreadyRefused {
+			st.Reason = reason
 		}
+		st.ExecSQL = nil
+		st.Execution = ""
+		withdrawSaferAdvice(st)
 	}
 	if any {
+		if report.Disposition != router.DispositionRefuse {
+			report.Reason = reason
+		}
 		report.Disposition = router.DispositionRefuse
-		report.Reason = verdict.ReasonUnsupportedPartitionedParent
+	}
+}
+
+// DiscloseGreenfieldExecution makes executable statements describe the plain,
+// bounded builds used for a table born in this run. The report must describe
+// a table that does not exist yet; the function returns without mutation
+// unless the report establishes that precondition. Each create step commits in
+// its own transaction under the brief lock_timeout and statement_timeout
+// budget, so CREATE TABLE is visible before its indexes build and a concurrent
+// writer that already knows the name makes the step fail fast rather than
+// block. The build is classified metadata-only because its cost is bounded by
+// that budget on a table born in the run. Reclassifying keeps the statement in
+// a state router.Route can produce: an execute disposition never carries a
+// safer-idiom decision without its rewrite.
+func DiscloseGreenfieldExecution(report *Report) {
+	if report.TableExists == nil {
+		return
+	}
+	if *report.TableExists {
+		return
+	}
+	for i := range report.Statements {
+		st := &report.Statements[i]
+		if st.Disposition != router.DispositionExecute {
+			continue
+		}
+		st.ExecSQL = []string{st.SQL}
+		st.Execution = planner.ExecutionAutocommit
+		withdrawSaferAdvice(st)
+		for j := range st.Decisions {
+			if st.Decisions[j].Reason == planner.ReasonSaferIdiom {
+				st.Decisions[j].Reason = planner.ReasonMetadataOnly
+			}
+		}
+	}
+}
+
+// withdrawSaferAdvice clears the planner's per-decision online rewrite from
+// a statement whose execution advice no longer applies — a refusal, or a
+// greenfield build that runs as written. Every mutator that withdraws
+// execution advice goes through here, so a decision field added later is
+// cleared in one place.
+func withdrawSaferAdvice(st *Statement) {
+	for j := range st.Decisions {
+		st.Decisions[j].SaferSQL = nil
+		st.Decisions[j].SaferSQLExecution = ""
 	}
 }
 

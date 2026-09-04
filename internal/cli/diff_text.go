@@ -16,11 +16,23 @@ import (
 // framing differs from the dry-run report where the semantics differ: diff
 // never executes, so execution is routed through the migrate front door,
 // and a missing table is the greenfield case — the plan creates the table
-// from the full desired schema — not an error.
-func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
+// from the full desired schema — not an error, unless the create path
+// refuses a statement's shape, in which case the leading note says so
+// instead of promising a create the refusal beneath it withdraws. causes
+// is positional with report.Statements: the create path's typed refusal
+// for a greenfield statement it refused by shape, nil elsewhere. The plan
+// report has no field for it, so the caller recomputes it
+// (greenfieldRefusalCauses) and the renderer prints it as a trailing note
+// on the refused statement — the executor's explanation, which the typed
+// reason alone does not carry.
+func writeDiffText(out io.Writer, pal palette, report plan.Report, causes []error) error {
 	w := &stickyWriter{out: out, pal: pal}
 	if tableMissing(report) {
-		w.diag("note", "", fmt.Sprintf("the table %s.%s does not exist — the plan creates it from the full desired schema", report.Schema, report.Table))
+		if report.Disposition == router.DispositionExecute {
+			w.diag("note", "", fmt.Sprintf("the table %s.%s does not exist — the plan creates it from the full desired schema", report.Schema, report.Table))
+		} else {
+			w.diag("note", "", fmt.Sprintf("the table %s.%s does not exist — the plan is the full desired schema, and a statement in it is refused, so nothing would be created", report.Schema, report.Table))
+		}
 	}
 	if len(report.Statements) == 0 {
 		w.entry("plan:")
@@ -32,6 +44,9 @@ func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
 		s, r := writeStatementDiagnostics(w, i+1, ps, "pg-sprite migrate")
 		steps += s
 		refused += r
+		if i < len(causes) && causes[i] != nil {
+			w.diag("note", "", "the create path refuses this statement: "+causes[i].Error())
+		}
 	}
 	w.entry("plan:")
 	w.printf("  %s — %s, %s to run, %d refused\n", targetText(report),

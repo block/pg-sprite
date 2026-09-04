@@ -14,11 +14,11 @@ import (
 )
 
 // Two-oracle check (TM): for each representative CREATE TABLE, the names
-// ImplicitIndexNames predicts must be exactly the index names the real
+// ImplicitRelationNames predicts must be exactly the index and sequence names the real
 // server mints when it runs the same statement into an empty schema. The
 // prediction is the server's first choice, and an empty schema guarantees
 // the first choice is what the catalog records.
-func TestImplicitIndexNamesMatchServer(t *testing.T) {
+func TestImplicitRelationNamesMatchServer(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
@@ -37,11 +37,13 @@ func TestImplicitIndexNamesMatchServer(t *testing.T) {
 		{name: "long table name truncates the generated name", sql: fmt.Sprintf("CREATE TABLE %s (id int PRIMARY KEY)", longTable)},
 		{name: "btree exclusion constraint", sql: "CREATE TABLE t (c int, EXCLUDE USING btree (c WITH =))"},
 		{name: "exclusion constraint over an expression", sql: "CREATE TABLE t (c int, EXCLUDE USING btree ((c + 1) WITH =))"},
+		{name: "serial sequence", sql: "CREATE TABLE t (id serial PRIMARY KEY)"},
+		{name: "identity sequence", sql: "CREATE TABLE t (id bigint GENERATED ALWAYS AS IDENTITY)"},
 		{name: "no index-backed constraints", sql: "CREATE TABLE t (id int, note text)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			predicted, err := statement.ImplicitIndexNames(tt.sql)
+			predicted, err := statement.ImplicitRelationNames(tt.sql)
 			require.NoError(t, err)
 
 			schema := testutil.NewSchema(t, pool)
@@ -54,13 +56,11 @@ func TestImplicitIndexNamesMatchServer(t *testing.T) {
 			require.NoError(t, err)
 
 			rows, err := tx.Query(t.Context(),
-				`SELECT ic.relname
-				   FROM pg_index i
-				   JOIN pg_class c ON c.oid = i.indrelid
-				   JOIN pg_class ic ON ic.oid = i.indexrelid
+				`SELECT c.relname
+				   FROM pg_class c
 				   JOIN pg_namespace n ON n.oid = c.relnamespace
-				  WHERE n.nspname = $1
-				  ORDER BY ic.oid`, schema)
+				  WHERE n.nspname = $1 AND c.relkind IN ('i', 'S')
+				  ORDER BY c.oid`, schema)
 			require.NoError(t, err)
 			var actual []string
 			for rows.Next() {

@@ -79,6 +79,10 @@ refusal — never a silently wrong or incomplete result:
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
   which covers one ordinary table plus its indexes per file.
+- **Greenfield create shapes** the create path cannot run — `PARTITION OF`,
+  `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a relation name the desired
+  set claims twice — refuse at plan time, and the same rules re-check at
+  apply.
 
 The codebase is partitioned into a small safety-critical core and a
 periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the

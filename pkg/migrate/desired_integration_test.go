@@ -14,6 +14,7 @@ import (
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -198,7 +199,10 @@ CREATE INDEX t_v_idx ON t (v);`
 		require.NoError(t, err, "a create-path admission refusal is a result, not an error")
 		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
 		assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
-		assert.Contains(t, res.Detail, "PARTITION OF")
+		assert.Equal(t, router.DispositionRefuse, res.Plan.Disposition,
+			"the refusal is decided on the plan, before the create path is entered")
+		assert.Contains(t, res.Detail, "is refused by the create path: "+executor.ErrPartitionOfUnsupported.Error(),
+			"the detail carries the create path's typed cause, not the echoed SQL alone")
 		assert.Empty(t, res.Verdicts, "nothing was attempted")
 
 		var exists bool
@@ -208,26 +212,84 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.False(t, exists, "the refused plan must not create the partition")
 	})
 
-	t.Run("a failed index build keeps the created table and discloses the prefix", func(t *testing.T) {
-		// The desired index's name is already taken by an index on another
-		// table, so the create path commits the CREATE TABLE and stops on
-		// the index step — committed-prefix semantics, disclosed by the
-		// verdicts, with the collision's stable code on the failed one.
+	t.Run("refuses a desired set that claims one name twice before anything runs", func(t *testing.T) {
+		// The plan SQL says nothing about why statement 2 is refused — the
+		// cause is the collision with the implicit primary-key index name,
+		// and the detail must name it.
 		schema := testutil.NewSchema(t, pool)
-		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.other (v text)", schema))
+
+		res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+			Schema:  schema,
+			Desired: parseDesired(t, "CREATE TABLE t (id int PRIMARY KEY); CREATE INDEX t_pkey ON t (id)"),
+		}, runOptions())
+		require.NoError(t, err, "a create-path admission refusal is a result, not an error")
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
+		assert.Contains(t, res.Detail, "planned statement 2 (")
+		assert.Contains(t, res.Detail, executor.ErrDuplicateCreateName.Error()+`: "t_pkey"`)
+		assert.Empty(t, res.Verdicts, "nothing was attempted")
+
+		var exists bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+			 WHERE table_schema = $1 AND table_name = 't')`, schema).Scan(&exists))
+		assert.False(t, exists, "the refused plan must not create the table")
+	})
+
+	t.Run("refuses an occupied constraint-index name and preserves convergence", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.other (v int)", schema))
 		require.NoError(t, err)
-		_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE INDEX t_v_idx ON %s.other (v)", schema))
+		_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE INDEX t_pkey ON %s.other (v)", schema))
 		require.NoError(t, err)
 
 		res, err := migrate.RunDesired(t.Context(), pool,
 			migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, desiredSQL)}, runOptions())
+		require.NoError(t, err, "a catalog collision is a refusal, not an execution failure")
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonCreateCollision, res.Reason)
+		assert.Empty(t, res.Verdicts, "no create step ran")
+
+		var exists bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+			 WHERE table_schema = $1 AND table_name = 't')`, schema).Scan(&exists))
+		assert.False(t, exists, "the refused set must not create the table")
+
+		clean := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t,
+			"CREATE TABLE clean (id int PRIMARY KEY, v text)")}
+		res, err = migrate.RunDesired(t.Context(), pool, clean, runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+		res, err = migrate.RunDesired(t.Context(), pool, clean, runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+		assert.Empty(t, res.Plan.Statements, "a clean greenfield create converges on its second run")
+	})
+
+	t.Run("a failed index build keeps the created table and discloses the prefix", func(t *testing.T) {
+		// An index on a column the table does not have passes admission
+		// (shape and target) and the claimed-name probe (the name is free),
+		// so the create path commits the CREATE TABLE and fails on the
+		// index step — committed-prefix semantics, disclosed by the
+		// verdicts: the executed create, then the failed build with the
+		// failing plan statement named.
+		schema := testutil.NewSchema(t, pool)
+		res, err := migrate.RunDesired(t.Context(), pool,
+			migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, `
+				CREATE TABLE t (id int PRIMARY KEY, v text);
+				CREATE INDEX t_missing_idx ON t (missing);`)}, runOptions())
 		require.Error(t, err, "a mid-plan execution failure returns the failed result with the error")
 		assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
 		require.Len(t, res.Verdicts, 2, "the committed create and the failed index build")
 		assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
 		assert.Contains(t, res.Verdicts[0].Statement, "CREATE TABLE")
 		assert.Equal(t, verdict.OutcomeFailed, res.Verdicts[1].Outcome)
-		assert.Equal(t, string(executor.CodeCreateCollision), res.Verdicts[1].Code)
+		assert.Equal(t, string(executor.CodeExecutionFailed), res.Verdicts[1].Code)
+		assert.Contains(t, res.Verdicts[1].Statement, "t_missing_idx",
+			"the failed verdict names the plan statement that failed, not the one before it")
+		assert.Contains(t, res.Detail, "planned statement 2 of 2 failed",
+			"the disclosure counts the committed prefix")
 
 		var exists bool
 		require.NoError(t, pool.QueryRow(t.Context(),

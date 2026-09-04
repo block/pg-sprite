@@ -1,7 +1,8 @@
-// This file predicts the index names PostgreSQL invents for a CREATE
-// TABLE's index-backed constraints. The create path's admission gate
-// claims every relation name a desired set will occupy, and an implicit
-// constraint index occupies one just as an explicit CREATE INDEX does —
+// This file predicts the relation names PostgreSQL invents for a CREATE
+// TABLE's index-backed constraints and column-owned sequences. The create
+// path's admission gate claims every relation name a desired set will
+// occupy, and an implicit constraint index occupies one just as an
+// explicit CREATE INDEX does —
 // a set whose explicit index name collides with a constraint's index
 // would otherwise pass admission and fail mid-run after the table
 // committed. The prediction mirrors the server's first choice
@@ -24,24 +25,25 @@ import (
 )
 
 // ErrNotCreateTable is returned when the statement handed to
-// ImplicitIndexNames is not a single CREATE TABLE.
+// ImplicitRelationNames is not a single CREATE TABLE.
 var ErrNotCreateTable = errors.New("statement is not a CREATE TABLE")
 
 // nameDataLen is PostgreSQL's NAMEDATALEN - 1: the byte budget an
 // identifier is truncated to.
 const nameDataLen = 63
 
-// ImplicitIndexNames returns the first-choice index names PostgreSQL will
-// use for the index-backed constraints of one CREATE TABLE statement —
-// PRIMARY KEY, UNIQUE, and EXCLUDE, in their column-inline and
-// table-constraint forms. A named constraint's index takes the constraint
-// name verbatim; an unnamed one takes the server's generated name
+// ImplicitRelationNames returns the first-choice relation names PostgreSQL
+// will use for one CREATE TABLE statement: indexes for PRIMARY KEY, UNIQUE,
+// and EXCLUDE constraints, and sequences for serial and identity columns.
+// A named constraint's index takes the constraint name verbatim; an unnamed
+// one takes the server's generated name
 // (`<table>_pkey`, `<table>_<cols>_key`, `<table>_<cols>_excl`, truncated
-// to the identifier byte budget the way the server truncates). Names are
+// to the identifier byte budget the way the server truncates). A sequence
+// takes `<table>_<column>_seq` under the same truncation rules. Names are
 // returned in definition order and are not de-duplicated: two constraints
 // whose first choices coincide both appear, so a claim map sees the
 // conflict.
-func ImplicitIndexNames(sql string) ([]string, error) {
+func ImplicitRelationNames(sql string) ([]string, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
 		return nil, fmt.Errorf("parse statement: %w", err)
@@ -66,6 +68,9 @@ func ImplicitIndexNames(sql string) ([]string, error) {
 		if col == nil {
 			continue
 		}
+		if columnOwnsSequence(col) {
+			names = append(names, makeObjectName(table, col.GetColname(), "seq"))
+		}
 		for _, c := range col.GetConstraints() {
 			con := c.GetConstraint()
 			if con == nil {
@@ -77,6 +82,21 @@ func ImplicitIndexNames(sql string) ([]string, error) {
 		}
 	}
 	return names, nil
+}
+
+// columnOwnsSequence reports whether the column definition creates a
+// sequence whose name is chosen from the table and column names.
+func columnOwnsSequence(col *pganalyze.ColumnDef) bool {
+	typeName, _ := typeRef(col.GetTypeName())
+	if isSerialType(typeName) {
+		return true
+	}
+	for _, node := range col.GetConstraints() {
+		if node.GetConstraint().GetContype() == pganalyze.ConstrType_CONSTR_IDENTITY {
+			return true
+		}
+	}
+	return false
 }
 
 // constraintIndexName returns the index name a table-level constraint will

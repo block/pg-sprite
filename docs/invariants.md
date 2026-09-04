@@ -170,7 +170,7 @@ did or didn't commit. PostgreSQL's transactional DDL makes the swap itself atomi
 *client's knowledge* of the outcome is not. Retries of the cutover must be written against this
 ambiguity. *Enforced:* cutover retry loop. *Source:* Spirit's cutover
 (`information_schema` inspection on dropped connection,
-spirit-architecture-notes).
+[Spirit README](https://github.com/block/spirit#cut-over-and-cleanup)).
 
 ## State, checkpoint, and resume (ST)
 
@@ -259,7 +259,7 @@ site re-deriving the rule. A set that does not lead with a `CREATE TABLE` means 
 was forged or mutated, and every consumer refuses it fail-closed rather than reordering.
 *Enforced:* `pkg/statement` (`ParseDesired` establishes the order), `pkg/diffplan`
 (`qualifiedDesired` asserts it when rendering the greenfield plan), `pkg/executor`
-(`admitCreateSteps` asserts it before anything runs); `pkg/schemadiff`'s scratch
+(`checkCreateSteps` asserts it before anything is planned or run); `pkg/schemadiff`'s scratch
 materialization relies on it to run the `CREATE TABLE` before its indexes.
 *Source:* adversarial review of the declarative front door.
 

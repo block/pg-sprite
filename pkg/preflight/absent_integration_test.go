@@ -25,6 +25,33 @@ func TestCheckTableAbsentProvesFreeName(t *testing.T) {
 	assert.Equal(t, "brand_new", at.Table())
 }
 
+func TestCheckNamesAbsent(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	otherSchema := testutil.NewSchema(t, pool)
+	at, err := preflight.CheckTableAbsent(t.Context(), pool, schema, "new_table")
+	require.NoError(t, err)
+
+	require.NoError(t, preflight.CheckNamesAbsent(t.Context(), pool, at, nil))
+	require.NoError(t, preflight.CheckNamesAbsent(t.Context(), pool, at, []string{"free_name"}))
+	require.Error(t, preflight.CheckNamesAbsent(t.Context(), pool, preflight.AbsentTarget{}, []string{"free_name"}))
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.other (v int)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE INDEX t_pkey ON %s.other (v)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t_pkey (v int)", otherSchema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.other_schema_only (v int)", otherSchema))
+	require.NoError(t, err)
+
+	err = preflight.CheckNamesAbsent(t.Context(), pool, at, []string{"z_free", "t_pkey"})
+	assert.ErrorIs(t, err, preflight.ErrRelationExists)
+	assert.Contains(t, err.Error(), "t_pkey")
+	require.NoError(t, preflight.CheckNamesAbsent(t.Context(), pool, at, []string{"other_schema_only"}))
+}
+
 // An unqualified check resolves the schema an unqualified CREATE TABLE
 // would land in, so the proof names the exact creation target.
 func TestCheckTableAbsentResolvesUnqualifiedName(t *testing.T) {

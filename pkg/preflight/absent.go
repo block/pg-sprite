@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -144,4 +145,38 @@ func CheckTableAbsent(ctx context.Context, pool *pgxpool.Pool, schema, table str
 			ErrTypeExists, qualifiedName(*targetSchema, table), *typtype)
 	}
 	return AbsentTarget{schema: *targetSchema, table: table}, nil
+}
+
+// CheckNamesAbsent verifies that no relation in the proved target's schema
+// occupies any of names. It reads pg_class in one catalog snapshot and
+// reports the first occupied name in lexical order, regardless of input
+// order — the query's ORDER BY decides, so the caller need not sort. It does not probe
+// pg_type: this check protects index, constraint-index, and sequence names;
+// [CheckTableAbsent] separately protects the CREATE TABLE name and its
+// composite type. The [AbsentTarget] binds the check to the resolved,
+// existing schema where those names would land.
+func CheckNamesAbsent(ctx context.Context, pool *pgxpool.Pool, at AbsentTarget, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	schema := at.Schema()
+	if schema == "" || at.Table() == "" {
+		return fmt.Errorf("check claimed names: absence proof carries no verified target")
+	}
+	const q = `
+		SELECT c.relname, c.relkind::text
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = ANY($2)
+		ORDER BY c.relname
+		LIMIT 1`
+	var name, relkind string
+	err := pool.QueryRow(ctx, q, schema, names).Scan(&name, &relkind)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("check claimed names are absent in schema %q: %w", schema, err)
+	}
+	return fmt.Errorf("%w: %s has relkind %q", ErrRelationExists, qualifiedName(schema, name), relkind)
 }
