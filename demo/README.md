@@ -7,13 +7,14 @@ in check mode, the packaged-binary smoke test CI runs.
 make demo    # build + compose DB up + reseed + run the whole tour
 ```
 
-The tour walks four sections, each runnable on its own via
+The tour walks five sections, each runnable on its own via
 `demo/tour.sh <section>` (with `PGS` and `PG_DSN` set — see the Makefile):
 
 | Section   | What it shows                                                                                                       | Writes?             |
 | --------- | ------------------------------------------------------------------------------------------------------------------- | ------------------- |
 | `dryrun`  | One statement per planner route, reason, and disposition: metadata-only, fast-default, binary-coercible, the safer idioms, a rewrite-required suggestion, type-rewrite, volatile-default, app-breaking-rename, destructive, relocation, and a refusal | no                  |
 | `diff`    | The declarative front door: a routed convergence plan for an existing table and for a missing one                    | no                  |
+| `pull`    | Existing-database onboarding: export one desired file per demo table, then prove each produces a zero-change `diff` | no                  |
 | `offline` | `lint` (gates on error findings), `suggest` (advises), `fmt` (canonicalizes) — no database                           | no                  |
 | `exec`    | Real executions: a native add, the concurrent index substitution, the four-step `SET NOT NULL` sequence, and a structured refusal (exit code 2) for a rewrite whose backend is not yet available | yes (seeded tables) |
 
@@ -34,7 +35,9 @@ routes/reasons/destructive flags and `format_version`, verdict outcomes and
 reasons, the substituted `executed_sql` shape (step count plus a
 distinguishing fragment, so a regression that drops `CONCURRENTLY` or
 collapses the `SET NOT NULL` sequence turns the job red), statement counts —
-and on exit codes (`0` success, `2` refusal, `1` lint gate). It never
+and on exit codes (`0` success, `2` refusal, `1` lint gate). The `pull`
+step has no JSON mode, so check mode asserts only its exit code and exported
+file count, then uses each `diff --json` report to assert zero statements. It never
 asserts on human-facing prose, which is free to change. CI runs
 this as the `demo` job ("smoke test (built pg-sprite artifact)"): the
 built `bin/pg-sprite` exercised end-to-end against compose PostgreSQL.
