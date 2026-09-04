@@ -40,9 +40,9 @@ const (
 // FormatVersion identifies the snapshot contract. A consumer must reject a
 // snapshot whose format_version it does not recognize rather than guess at
 // field semantics. Adding a phase or operation value is a contract change
-// and bumps this version, even when no field is added or renamed. Adding an
-// optional field tagged omitempty does not bump this version.
-const FormatVersion = 1
+// and bumps this version, even when no field is added or renamed. Adding a
+// field also bumps this version so strict consumers can detect the new shape.
+const FormatVersion = 2
 
 // Operation is the current operation's execution class.
 type Operation string
@@ -81,7 +81,8 @@ type Work struct {
 type Detail struct {
 	Operation Operation `json:"operation,omitempty"`
 	// Statement is the canonical, qualified SQL the executor is running for
-	// the current step, never a rendered or prettified form.
+	// the current step, never a rendered or prettified form. Terminal snapshots
+	// retain it so observers can identify the statement that produced the outcome.
 	Statement   string `json:"statement,omitempty"`
 	ServerPhase string `json:"server_phase,omitempty"`
 	Active      bool   `json:"active"`
@@ -199,7 +200,6 @@ func (t *Tracker) Finish(err error) {
 	}
 	t.ended = now
 	t.detail.Active = false
-	t.detail.Statement = ""
 	t.session, t.buildPID = nil, 0
 }
 

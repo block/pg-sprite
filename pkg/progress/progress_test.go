@@ -110,6 +110,7 @@ func TestNewTrackerRequiresClock(t *testing.T) {
 // A terminal snapshot is terminal: elapsed values freeze at the instant
 // Finish recorded and do not grow with the clock, for both outcomes.
 func TestTerminalSnapshotFreezesElapsed(t *testing.T) {
+	const sql = "ALTER TABLE public.t ADD COLUMN c int"
 	cases := []struct {
 		name    string
 		outcome error
@@ -124,7 +125,7 @@ func TestTerminalSnapshotFreezesElapsed(t *testing.T) {
 			tracker, err := progress.NewTracker(clock)
 			require.NoError(t, err)
 			tracker.Start(1, progress.OperationOptimistic)
-			tracker.StartStep(1, progress.OperationOptimistic, "ALTER TABLE public.t ADD COLUMN c int")
+			tracker.StartStep(1, progress.OperationOptimistic, sql)
 			clock.now = clock.now.Add(3 * time.Second)
 			tracker.Finish(tc.outcome)
 
@@ -134,6 +135,7 @@ func TestTerminalSnapshotFreezesElapsed(t *testing.T) {
 			assert.Equal(t, tc.phase, snapshot.Phase)
 			assert.Equal(t, 3*time.Second, snapshot.Elapsed, "elapsed must freeze at Finish")
 			assert.Equal(t, 3*time.Second, snapshot.StepElapsed, "step elapsed must freeze at Finish")
+			assert.Equal(t, sql, snapshot.Detail.Statement, "terminal snapshot must retain its statement")
 
 			clock.now = clock.now.Add(time.Hour)
 			again, err := tracker.Progress(t.Context())
@@ -174,7 +176,7 @@ func TestStartResetsPriorRunState(t *testing.T) {
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
 // omissions, driven through a real poll so the test pins what a consumer
-// actually receives. A consumer pins format_version 1 against this test.
+// actually receives. A consumer pins format_version 2 against this test.
 func TestSnapshotJSONShape(t *testing.T) {
 	session := fakeSession{query: func(context.Context, string, ...any) pgx.Row {
 		return fakeRow{scan: func(dest ...any) error {
@@ -201,7 +203,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"phase": "running",
 		"step": 2,
 		"total_steps": 3,
@@ -227,7 +229,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 	}`, string(raw))
 }
 
-func TestTrackerReportsCurrentStatementAndClearsItOnFinish(t *testing.T) {
+func TestTrackerReportsCurrentStatementAndRetainsItOnFinish(t *testing.T) {
 	tracker, err := progress.NewTracker(&fakeClock{now: time.Unix(100, 0)})
 	require.NoError(t, err)
 	tracker.Start(3, progress.OperationAdmitting)
@@ -241,7 +243,7 @@ func TestTrackerReportsCurrentStatementAndClearsItOnFinish(t *testing.T) {
 	tracker.Finish(nil)
 	finished, err := tracker.Progress(t.Context())
 	require.NoError(t, err)
-	assert.Empty(t, finished.Detail.Statement)
+	assert.Equal(t, sql, finished.Detail.Statement)
 }
 
 // Optional fields are omitted, not emitted as zero values — but the always-on
@@ -257,7 +259,7 @@ func TestSnapshotJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"phase": "pending",
 		"elapsed_ns": 0,
 		"step_elapsed_ns": 0,
