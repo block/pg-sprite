@@ -147,19 +147,21 @@ func CheckTableAbsent(ctx context.Context, pool *pgxpool.Pool, schema, table str
 	return AbsentTarget{schema: *targetSchema, table: table}, nil
 }
 
-// CheckNamesAbsent verifies that no relation in schema occupies any of
-// names. It reads pg_class in one catalog snapshot and reports the first
-// occupied name in lexical order, regardless of input order — the query's
-// ORDER BY decides, so the caller need not sort. It does not probe
-// pg_type: this check protects index and constraint-index names, which do
-// not create types; [CheckTableAbsent] separately protects the CREATE
-// TABLE name and its composite type. schema must be the resolved,
-// non-empty schema the names would land in — the one an [AbsentTarget]
-// carries; a schema that does not exist holds no relations and reports
-// every name free.
-func CheckNamesAbsent(ctx context.Context, pool *pgxpool.Pool, schema string, names []string) error {
+// CheckNamesAbsent verifies that no relation in the proved target's schema
+// occupies any of names. It reads pg_class in one catalog snapshot and
+// reports the first occupied name in lexical order, regardless of input
+// order — the query's ORDER BY decides, so the caller need not sort. It does not probe
+// pg_type: this check protects index, constraint-index, and sequence names;
+// [CheckTableAbsent] separately protects the CREATE TABLE name and its
+// composite type. The [AbsentTarget] binds the check to the resolved,
+// existing schema where those names would land.
+func CheckNamesAbsent(ctx context.Context, pool *pgxpool.Pool, at AbsentTarget, names []string) error {
 	if len(names) == 0 {
 		return nil
+	}
+	schema := at.Schema()
+	if schema == "" || at.Table() == "" {
+		return fmt.Errorf("check claimed names: absence proof carries no verified target")
 	}
 	const q = `
 		SELECT c.relname, c.relkind::text

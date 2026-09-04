@@ -11,12 +11,13 @@
 //
 // Before the first step the executor probes pg_class for every name the
 // desired file states — explicit index names and the first-choice names of
-// index-backed constraints — so an occupied name refuses the whole set
-// rather than failing after the table committed; the table name itself is
-// the caller's absence proof. The proof is time-of-check: nothing locks the
-// names, so a concurrent create can still take one before its step. That
-// loss surfaces through SQLSTATE 42P07 or 42710 as ErrCreateCollision — the
-// caller re-diffs rather than assuming what the collision left behind. A
+// index-backed constraints and column-owned sequences — so an occupied
+// name refuses the whole set rather than failing after the table committed;
+// the table name itself is the caller's absence proof. The proof is
+// time-of-check: nothing locks the names, so a concurrent create can still
+// take one before its step. Duplicate-name SQLSTATEs backstop races for
+// explicit names. For server-chosen names, the probe narrows the race to
+// the time-of-check window, but nothing catches a name taken inside it. A
 // failed step ends the run immediately; the steps before it committed
 // (each in its own bounded transaction) remain, so a rerun's absence check refuses with
 // ErrRelationExists and the declarative front door re-diffs and applies
@@ -45,11 +46,13 @@ import (
 var (
 	// ErrCreateCollision is returned when a claimed name is already taken.
 	// A catalog probe after admission checks the desired file's explicit
-	// index names and first-choice constraint-index names before the first
-	// step executes, refusing the whole set with no *SequenceStepError;
-	// duplicate-name SQLSTATEs remain the time-of-check race backstop and
-	// arrive wrapped in one. The remedy is on the desired file's side — drop
-	// or rename the occupant, or name the constraint's index explicitly —
+	// index names and first-choice constraint-index and sequence names before
+	// the first step executes, refusing the whole set with no *SequenceStepError;
+	// duplicate-name SQLSTATEs backstop time-of-check races for explicit
+	// names and arrive wrapped in one. Server-chosen names have no such
+	// backstop. The remedy is on the desired file's side — drop or rename the
+	// occupant, name a constraint's index explicitly, or for a sequence use
+	// an explicitly named sequence or a non-serial column —
 	// then re-diff; a re-plan alone reproduces the refusal.
 	ErrCreateCollision = errors.New("a name the create path needs is already taken")
 	// ErrDuplicateCreateName is returned when the desired set claims the
@@ -160,7 +163,7 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 	// refuses the whole set instead of failing after the table committed.
 	// CheckTableAbsent already covers the table name and its composite type.
 	claimed = slices.DeleteFunc(claimed, func(name string) bool { return name == at.Table() })
-	err = preflight.CheckNamesAbsent(ctx, pool, at.Schema(), claimed)
+	err = preflight.CheckNamesAbsent(ctx, pool, at, claimed)
 	if preflight.IsNameOccupied(err) {
 		return rep, fmt.Errorf("%w: the desired file claims a name the catalog already holds: %w",
 			ErrCreateCollision, err)
@@ -201,9 +204,9 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 // arrive in execution order — the CREATE TABLE first, the indexes in input
 // order after it, ordered once by statement.ParseDesired — and the steps
 // keep that order. Every step claims the names it will occupy in the
-// same pg_class namespace — the table plus the first-choice index names
-// of its index-backed constraints, or an explicit index name — so a name
-// claimed twice within the set — decidable here — is refused before
+// same pg_class namespace — the table plus the first-choice relation names
+// of its constraints and column-owned sequences, or an explicit index name.
+// A name claimed twice within the set — decidable here — is refused before
 // anything runs rather than failing mid-run after a prefix committed.
 // The claims are first choices: a set whose first choices collide is
 // refused even where the server would sidestep with a numeric suffix,
@@ -245,8 +248,8 @@ func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]
 // admitCreateStep qualifies one desired statement into the proof's schema,
 // re-parses it by the real grammar, and admits it by shape and target. It
 // returns the pg_class names the step will claim — for a CREATE TABLE the
-// table name plus the first-choice index names of its index-backed
-// constraints, for a CREATE INDEX its explicit name, nothing when the
+// table name plus the first-choice relation names of its constraints and
+// column-owned sequences, for a CREATE INDEX its explicit name, nothing when the
 // server invents one. CREATE TABLE clauses that bind to a secondary
 // relation or type — PARTITION OF, INHERITS, LIKE, OF — are refused:
 // statement.Qualify rewrites only the target, so the secondary name would
@@ -289,7 +292,7 @@ func admitCreateStep(at preflight.AbsentTarget, sql string) (statement.Statement
 		if op.IfNotExists {
 			return statement.Statement{}, nil, ErrIfNotExistsUnsupported
 		}
-		implicit, err := statement.ImplicitIndexNames(qualified)
+		implicit, err := statement.ImplicitRelationNames(qualified)
 		if err != nil {
 			// ParseOne already admitted this SQL as a CREATE TABLE, so a
 			// refusal here means the two parse boundaries disagree.
