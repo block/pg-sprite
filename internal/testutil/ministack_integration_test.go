@@ -3,6 +3,7 @@
 package testutil_test
 
 import (
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -24,13 +25,44 @@ import (
 const (
 	controlPlaneDeadline = 2 * time.Minute
 	controlPlanePoll     = 250 * time.Millisecond
+	// clusterStatementTimeout bounds every statement the subtests run, except
+	// the deliberately long-running payload of the connection-loss subtest.
+	clusterStatementTimeout = time.Minute
+	// interruptedChangeDuration is how long the connection-loss payload runs
+	// if nothing interrupts it. That subtest's session statement_timeout is
+	// set above it so a slow cluster stop can never race the payload into a
+	// server-side query_canceled that looks like an interruption.
+	interruptedChangeDuration = 5 * time.Minute
+)
+
+// RDS API statuses the subtests observe. Ministack answers StopDBCluster
+// with the terminal "stopped" where real RDS reports the transitional
+// "stopping", so the stop assertion accepts both.
+const (
+	rdsStatusAvailable   = "available"
+	rdsStatusStopping    = "stopping"
+	rdsStatusStopped     = "stopped"
+	rdsStatusStarting    = "starting"
+	rdsStatusFailingOver = "failing-over"
+)
+
+// SQLSTATEs a PostgreSQL backend reports to its client when the server is
+// shut down underneath an in-flight statement. A fast shutdown lets each
+// backend send admin_shutdown before it exits; a crash reports
+// crash_shutdown; compute killed faster than either sends nothing at all.
+const (
+	codeAdminShutdown = "57P01"
+	codeCrashShutdown = "57P02"
 )
 
 // TestAuroraControlPlane proves the AWS-boundary seams against one shared
 // provisioned cluster: provisioning a cluster costs minutes, so the
 // subtests share it rather than provisioning separately. They run in
-// order, and PasswordRotation runs last because it changes the cluster's
-// master password.
+// order, and two orderings are load-bearing: ConnectionLossDuringSchemaChange
+// stops and restarts cluster compute and waits for every member to come
+// back, so MetadataFailoverKeepsWriterSession — which targets the reader
+// member — must run after it; PasswordRotation runs last because it
+// changes the cluster's master password.
 func TestAuroraControlPlane(t *testing.T) {
 	cluster := testutil.ProvisionAuroraPostgres(t)
 
@@ -38,21 +70,50 @@ func TestAuroraControlPlane(t *testing.T) {
 	t.Run("ErrorContract", func(t *testing.T) { errorContract(t, cluster) })
 	t.Run("ReaderIsReadOnly", func(t *testing.T) { readerIsReadOnly(t, cluster) })
 	t.Run("ConnectionLossDuringSchemaChange", func(t *testing.T) { connectionLossDuringSchemaChange(t, cluster) })
-	t.Run("FailoverDuringSchemaChange", func(t *testing.T) { failoverDuringSchemaChange(t, cluster) })
+	t.Run("MetadataFailoverKeepsWriterSession", func(t *testing.T) { metadataFailoverKeepsWriterSession(t, cluster) })
 	t.Run("PasswordRotation", func(t *testing.T) { passwordRotation(t, cluster) })
 }
 
-func newClusterPool(t *testing.T, url string) *pgxpool.Pool {
+func newClusterPool(t *testing.T, url string, statementTimeout time.Duration) *pgxpool.Pool {
 	t.Helper()
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{
 		URL:              url,
 		LockTimeout:      300 * time.Millisecond,
-		StatementTimeout: time.Minute,
+		StatementTimeout: statementTimeout,
 		ConnectTimeout:   2 * time.Second,
 	})
 	require.NoError(t, err, "connect to provisioned cluster via dbconn")
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// awaitInstanceStatus polls the control plane until the instance reports
+// status, failing the test at the control-plane deadline.
+func awaitInstanceStatus(t *testing.T, cluster *testutil.AuroraCluster, instanceID, status string) {
+	t.Helper()
+	require.Eventuallyf(t, func() bool {
+		out, err := cluster.Client.DescribeDBInstances(t.Context(), &rds.DescribeDBInstancesInput{
+			DBInstanceIdentifier: aws.String(instanceID),
+		})
+		return err == nil && len(out.DBInstances) == 1 && aws.ToString(out.DBInstances[0].DBInstanceStatus) == status
+	}, controlPlaneDeadline, controlPlanePoll, "instance %s did not report %s before the deadline", instanceID, status)
+}
+
+// assertInterruptedByShutdown pins the cause of a failed statement to the
+// server going away underneath it. A backend that gets to answer reports
+// admin_shutdown or crash_shutdown; compute killed faster than that
+// surfaces as a connection-level error carrying no server response. Any
+// other SQLSTATE — query_canceled from the session statement_timeout above
+// all — means the statement failed for a reason the stop did not cause.
+func assertInterruptedByShutdown(t *testing.T, err error) {
+	t.Helper()
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		t.Logf("statement interrupted without a server response: %v", err)
+		return
+	}
+	assert.Contains(t, []string{codeAdminShutdown, codeCrashShutdown}, pgErr.Code,
+		"a statement interrupted by a cluster stop must fail as a server shutdown, got SQLSTATE %s: %s", pgErr.Code, pgErr.Message)
 }
 
 // provisionAndConnect proves the AWS-boundary flow end to end: an
@@ -131,12 +192,12 @@ func errorContract(t *testing.T, cluster *testutil.AuroraCluster) {
 // PostgreSQL then refuses a write with read_only_sql_transaction, which the
 // connection layer correctly treats as terminal rather than transient.
 func readerIsReadOnly(t *testing.T, cluster *testutil.AuroraCluster) {
-	writer := newClusterPool(t, cluster.URL())
+	writer := newClusterPool(t, cluster.URL(), clusterStatementTimeout)
 	schema := testutil.NewSchema(t, writer)
 	_, err := writer.Exec(t.Context(), "CREATE TABLE "+schema+".reader_probe (id bigint PRIMARY KEY)")
 	require.NoError(t, err)
 
-	reader := newClusterPool(t, cluster.ReaderURL())
+	reader := newClusterPool(t, cluster.ReaderURL(), clusterStatementTimeout)
 	var inRecovery bool
 	require.NoError(t, reader.QueryRow(t.Context(), "SELECT pg_is_in_recovery()").Scan(&inRecovery))
 	assert.True(t, inRecovery, "reader instance must be a PostgreSQL hot standby")
@@ -160,10 +221,14 @@ func readerIsReadOnly(t *testing.T, cluster *testutil.AuroraCluster) {
 // executing. The optimistic executor has no connection-loss resume path: the
 // connection layer does not retry an ambiguously interrupted write, and the
 // executor's stable typed outcome is the fail-closed execution-failed fallback.
+// The subtest pins the cause as well as the outcome — the statement must
+// fail because the server went away, and the interrupted change must leave
+// nothing behind — because the outcome alone is what any failed DDL produces.
 func connectionLossDuringSchemaChange(t *testing.T, cluster *testutil.AuroraCluster) {
-	pool := newClusterPool(t, cluster.URL())
+	pool := newClusterPool(t, cluster.URL(), 2*interruptedChangeDuration)
 	schema := testutil.NewSchema(t, pool)
-	ddl := "CREATE TABLE " + schema + ".interrupted AS SELECT 1 AS id FROM pg_sleep(300)"
+	sleepSeconds := strconv.Itoa(int(interruptedChangeDuration.Seconds()))
+	ddl := "CREATE TABLE " + schema + ".interrupted AS SELECT 1 AS id FROM pg_sleep(" + sleepSeconds + ")"
 
 	result := make(chan error, 1)
 	go func() {
@@ -182,7 +247,8 @@ func connectionLossDuringSchemaChange(t *testing.T, cluster *testutil.AuroraClus
 		DBClusterIdentifier: aws.String(cluster.ClusterID),
 	})
 	require.NoError(t, err, "stop cluster during schema change")
-	assert.Equal(t, "stopped", aws.ToString(stopped.DBCluster.Status))
+	assert.Contains(t, []string{rdsStatusStopping, rdsStatusStopped}, aws.ToString(stopped.DBCluster.Status),
+		"StopDBCluster must report the stop in progress or complete")
 
 	var changeErr error
 	select {
@@ -191,6 +257,7 @@ func connectionLossDuringSchemaChange(t *testing.T, cluster *testutil.AuroraClus
 		require.FailNow(t, "schema change did not return after cluster stop")
 	}
 	require.Error(t, changeErr)
+	assertInterruptedByShutdown(t, changeErr)
 	assert.False(t, dbconn.Retryable(changeErr),
 		"an interrupted write with an ambiguous server outcome must not be retried")
 	assert.Equal(t, executor.CodeExecutionFailed, executor.OutcomeCode(changeErr),
@@ -200,27 +267,39 @@ func connectionLossDuringSchemaChange(t *testing.T, cluster *testutil.AuroraClus
 		DBClusterIdentifier: aws.String(cluster.ClusterID),
 	})
 	require.NoError(t, err, "restart cluster after connection loss")
-	assert.Equal(t, "starting", aws.ToString(started.DBCluster.Status))
+	assert.Equal(t, rdsStatusStarting, aws.ToString(started.DBCluster.Status))
 	require.Eventuallyf(t, func() bool {
 		out, err := cluster.Client.DescribeDBClusters(t.Context(), &rds.DescribeDBClustersInput{
 			DBClusterIdentifier: aws.String(cluster.ClusterID),
 		})
-		return err == nil && len(out.DBClusters) == 1 && aws.ToString(out.DBClusters[0].Status) == "available"
+		return err == nil && len(out.DBClusters) == 1 && aws.ToString(out.DBClusters[0].Status) == rdsStatusAvailable
 	}, controlPlaneDeadline, controlPlanePoll, "cluster did not become available after restart")
+	// The restart brings every member back, not just the writer: the
+	// following subtests target the reader member and must not inherit a
+	// half-restarted cluster.
+	awaitInstanceStatus(t, cluster, cluster.InstanceID, rdsStatusAvailable)
+	awaitInstanceStatus(t, cluster, cluster.ReaderInstanceID, rdsStatusAvailable)
 
 	pool.Reset()
 	require.Eventuallyf(t, func() bool {
 		_, err := pool.Exec(t.Context(), "CREATE TABLE "+schema+".after_restart (id bigint)")
 		return err == nil
 	}, controlPlaneDeadline, controlPlanePoll, "engine could not execute DDL after cluster restart")
+
+	// The interrupted change never committed: the shutdown aborted its
+	// transaction, so the relation it was creating does not exist.
+	var interruptedExists bool
+	require.NoError(t, pool.QueryRow(t.Context(), "SELECT to_regclass($1) IS NOT NULL", schema+".interrupted").Scan(&interruptedExists))
+	assert.False(t, interruptedExists, "an interrupted schema change must leave no relation behind")
 }
 
-// failoverDuringSchemaChange exercises only Ministack's current metadata
-// failover: member writer flags flip and the response is transitional, but
-// the standby is not promoted at the data plane yet. The established writer
-// transaction therefore remains the engine's usable connection.
-func failoverDuringSchemaChange(t *testing.T, cluster *testutil.AuroraCluster) {
-	pool := newClusterPool(t, cluster.URL())
+// metadataFailoverKeepsWriterSession exercises only Ministack's current
+// metadata failover: member writer flags flip and the response is
+// transitional, but the standby is not promoted at the data plane yet. The
+// established writer transaction therefore remains the engine's usable
+// connection — which is exactly what the subtest proves, and all it proves.
+func metadataFailoverKeepsWriterSession(t *testing.T, cluster *testutil.AuroraCluster) {
+	pool := newClusterPool(t, cluster.URL(), clusterStatementTimeout)
 	schema := testutil.NewSchema(t, pool)
 	tx, err := pool.Begin(t.Context())
 	require.NoError(t, err)
@@ -233,7 +312,7 @@ func failoverDuringSchemaChange(t *testing.T, cluster *testutil.AuroraCluster) {
 		TargetDBInstanceIdentifier: aws.String(cluster.ReaderInstanceID),
 	})
 	require.NoError(t, err, "fail over cluster metadata")
-	assert.Equal(t, "failing-over", aws.ToString(failedOver.DBCluster.Status))
+	assert.Equal(t, rdsStatusFailingOver, aws.ToString(failedOver.DBCluster.Status))
 
 	described, err := cluster.Client.DescribeDBClusters(t.Context(), &rds.DescribeDBClustersInput{
 		DBClusterIdentifier: aws.String(cluster.ClusterID),

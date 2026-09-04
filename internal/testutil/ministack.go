@@ -78,8 +78,8 @@ const (
 	fixtureUser     = "pgsprite"
 	fixtureDatabase = "pgsprite"
 	// awsAccountID and awsRegion identify the emulator's default account.
-	// Ministack scopes the sibling container's name by
-	// sha1(account:region), so these also feed siblingHostAddr.
+	// Ministack scopes each database container's name by
+	// sha1(account:region), so these also feed memberHostAddr.
 	awsAccountID = "000000000000"
 	awsRegion    = "us-east-1"
 )
@@ -379,11 +379,11 @@ func ProvisionAuroraPostgres(t *testing.T) *AuroraCluster {
 
 	addr := net.JoinHostPort(endpoint, strconv.Itoa(int(port)))
 	if !tcpReachable(t, addr) {
-		addr = siblingHostAddr(t, ctr, clusterID)
+		addr = memberHostAddr(t, ctr, memberKindCluster, clusterID)
 	}
 	readerAddr := net.JoinHostPort(readerEndpoint, strconv.Itoa(int(readerPort)))
 	if !tcpReachable(t, readerAddr) {
-		readerAddr = instanceHostAddr(t, ctr, readerInstanceID)
+		readerAddr = memberHostAddr(t, ctr, memberKindInstance, readerInstanceID)
 	}
 
 	return &AuroraCluster{
@@ -413,15 +413,24 @@ func tcpReachable(t *testing.T, addr string) bool {
 	return true
 }
 
-// siblingHostAddr resolves the host-published address of the sibling
-// database container backing the cluster. Ministack publishes the
-// sibling's PostgreSQL port on the Docker host, so a host that cannot
-// route to container IPs connects through that mapping. The container
-// name — "ministack-rds-<sha1(account:region)[:12]>-cluster-<cluster ID>"
-// — is an emulator implementation detail this fallback accepts coupling
-// to; it is exercised only on hosts where the discovered endpoint is
-// unreachable.
-func siblingHostAddr(t *testing.T, ctr testcontainers.Container, clusterID string) string {
+// memberKind is the segment of a Ministack database-container name that
+// says which identifier keys it: the cluster's shared writer container is
+// named after the cluster, a replicating reader after its instance.
+type memberKind string
+
+const (
+	memberKindCluster  memberKind = "cluster"
+	memberKindInstance memberKind = "instance"
+)
+
+// memberHostAddr resolves the host-published address of the database
+// container backing a cluster member. Ministack publishes each member's
+// PostgreSQL port on the Docker host, so a host that cannot route to
+// container IPs connects through that mapping. The container name —
+// "ministack-rds-<sha1(account:region)[:12]>-<kind>-<identifier>" — is an
+// emulator implementation detail this fallback accepts coupling to; it is
+// exercised only on hosts where the discovered endpoint is unreachable.
+func memberHostAddr(t *testing.T, ctr testcontainers.Container, kind memberKind, identifier string) string {
 	t.Helper()
 	ctx := t.Context()
 	docker, err := testcontainers.NewDockerClientWithOpts(ctx)
@@ -433,39 +442,15 @@ func siblingHostAddr(t *testing.T, ctr testcontainers.Container, clusterID strin
 	}()
 
 	scope := sha1.Sum([]byte(awsAccountID + ":" + awsRegion))
-	name := fmt.Sprintf("ministack-rds-%s-cluster-%s", hex.EncodeToString(scope[:])[:12], clusterID)
+	name := fmt.Sprintf("ministack-rds-%s-%s-%s", hex.EncodeToString(scope[:])[:12], kind, identifier)
 	inspect, err := docker.ContainerInspect(ctx, name, client.ContainerInspectOptions{})
-	require.NoErrorf(t, err, "inspect sibling database container %s", name)
+	require.NoErrorf(t, err, "inspect %s database container %s", kind, name)
 
 	dbPort, err := network.ParsePort(siblingDBPort)
-	require.NoError(t, err, "parse sibling database port")
+	require.NoError(t, err, "parse member database port")
 	bindings := inspect.Container.NetworkSettings.Ports[dbPort]
-	require.NotEmptyf(t, bindings, "sibling container %s must publish %s on the host", name, siblingDBPort)
+	require.NotEmptyf(t, bindings, "%s container %s must publish %s on the host", kind, name, siblingDBPort)
 
-	host, err := ctr.Host(ctx)
-	require.NoError(t, err, "resolve Docker host address")
-	return net.JoinHostPort(host, bindings[0].HostPort)
-}
-
-func instanceHostAddr(t *testing.T, ctr testcontainers.Container, instanceID string) string {
-	t.Helper()
-	ctx := t.Context()
-	docker, err := testcontainers.NewDockerClientWithOpts(ctx)
-	require.NoError(t, err, "create Docker client")
-	defer func() {
-		if err := docker.Close(); err != nil {
-			t.Logf("close Docker client: %v", err)
-		}
-	}()
-
-	scope := sha1.Sum([]byte(awsAccountID + ":" + awsRegion))
-	name := fmt.Sprintf("ministack-rds-%s-instance-%s", hex.EncodeToString(scope[:])[:12], instanceID)
-	inspect, err := docker.ContainerInspect(ctx, name, client.ContainerInspectOptions{})
-	require.NoErrorf(t, err, "inspect reader database container %s", name)
-	dbPort, err := network.ParsePort(siblingDBPort)
-	require.NoError(t, err, "parse reader database port")
-	bindings := inspect.Container.NetworkSettings.Ports[dbPort]
-	require.NotEmptyf(t, bindings, "reader container %s must publish %s on the host", name, siblingDBPort)
 	host, err := ctr.Host(ctx)
 	require.NoError(t, err, "resolve Docker host address")
 	return net.JoinHostPort(host, bindings[0].HostPort)

@@ -206,8 +206,16 @@ mirrors.
 
 Deliberately almost none: one test whose subtests share one provisioned
 cluster ([ministack_integration_test.go](../internal/testutil/ministack_integration_test.go))
-— provisioning costs minutes, so the tier provisions once and orders the
-password rotation last. Each subtest pins one AWS seam:
+— provisioning costs minutes, so the tier provisions once. The harness
+enables Ministack's cluster replication (`MINISTACK_RDS_PG_CLUSTER_REPLICATION`),
+which adds a second, reader member to the cluster: the reader and stop/start
+subtests need a real standby, and the price is a longer provisioning wait
+while the emulator brings both members to `available`. Two subtest
+orderings are load-bearing, and the test documents them where it fixes the
+order: stop/start restarts cluster compute and waits for every member to
+return before the metadata failover, which targets the reader member; the
+password rotation runs last because it changes the shared cluster's master
+password. Each subtest pins one AWS seam:
 
 - **provision & connect** — provision → instance `available` → endpoint
   discovery → `dbconn` connect → PG-major assertion → DDL smoke;
@@ -226,12 +234,18 @@ password rotation last. Each subtest pins one AWS seam:
   catalog preflight reads, refuses writes with SQLSTATE `25006`, and the
   connection layer classifies that refusal as terminal;
 - **stop/start resilience** — stopping real cluster compute interrupts active
-  DDL with the terminal, fail-closed `execution-failed` outcome, then starting
-  it restores the writer and allows a fresh schema change;
-- **metadata failover** — `FailoverDBCluster` flips the API-visible writer and
-  reports `failing-over` while an established writer transaction remains
-  usable. Ministack does not yet promote the standby at the data plane, so the
-  test deliberately makes no such claim.
+  DDL, and the test pins the *cause*, not just the failure: the backend's
+  `admin_shutdown` / `crash_shutdown` SQLSTATE or a connection-level error
+  carrying no server response — never `query_canceled` from the session's own
+  `statement_timeout`, which would pass a test that proved nothing about the
+  stop. The interruption is terminal for `dbconn.Retryable`, so the engine's
+  outcome is the fail-closed `execution-failed`. Starting compute again
+  restores every member, the interrupted DDL has left no trace in the
+  catalog, and a fresh schema change succeeds;
+- **metadata failover keeps the writer session** — `FailoverDBCluster` flips
+  the API-visible writer and reports `failing-over` while an established
+  writer transaction remains usable. Ministack does not yet promote the
+  standby at the data plane, so the test deliberately makes no such claim.
 
 ### What a password rotation does to a running schema change
 
