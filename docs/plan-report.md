@@ -111,7 +111,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `generated-stored` | Adding a stored generated column computes every row — a full rewrite. |
 | `type-rewrite` | A type conversion PostgreSQL cannot relabel — rewrite plus reindex. |
 | `relocation` | SET TABLESPACE moves the heap — a rewrite-scale copy. |
-| `partition-parent-lock` | Partition attach/detach in its lock-taking form. |
+| `partition-parent-lock` | Creating a partition (`CREATE TABLE … PARTITION OF`): a brief `ACCESS EXCLUSIVE` on the parent, no scan. |
 | `unsupported-operation` | The planner does not recognize the operation or knows no safe path for it. |
 
 ### Target-dependent refusal reasons (`reason`, `statements[].reason`)

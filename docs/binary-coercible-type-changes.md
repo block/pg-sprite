@@ -238,8 +238,8 @@ table.
 | # | Category | Why the bytes cannot be reused | Example |
 | --- | --- | --- | --- |
 | **A** | **Different on-disk representation** | The two types encode values differently (width, layout, or structure), so a function must produce every new datum. | `integer → bigint` (4 → 8 bytes); `real → double precision`; `integer → numeric`; `json → jsonb` (text → binary tree); `uuid → text` |
-| **B** | **Value-transforming conversion** | The types are "similar", but the cast function changes the bytes of at least some values — padding, masking, normalisation. | `char(10) → text` (`rtrim1()` strips the padding); `inet → cidr` (masks host bits); `char(10) → char(20)` (the padding is stored, so every datum grows) |
-| **C** | **A modifier stored inside the datum changes** | The typmod is not just a check — part of it is written into each value's header, so a different typmod means a different datum even when the numeric value is equal. | `numeric(10,2) → numeric(10,3)` (display scale lives in the datum — see [below](#numeric102--numeric103-the-value-survives-the-datum-does-not)); `timestamp(6) → timestamp(3)` (rounds fractional seconds); `interval` field/precision reduction |
+| **B** | **Value-transforming conversion** | The types are "similar", but the cast or coercion function changes the bytes of at least some values — padding, masking, normalisation, rounding. | `char(10) → text` (`rtrim1()` strips the padding); `inet → cidr` (masks host bits); `char(10) → char(20)` (the padding is stored, so every datum grows); `timestamp(6) → timestamp(3)` (rounds fractional seconds — `TemporalSimplify` only relabels when precision does not shrink); `interval` precision reduction (same, via `interval_support`) |
+| **C** | **A modifier stored inside the datum changes** | The typmod is not just a check — part of it is written into each value's header, so a different typmod means a different datum even when the value is equal. `numeric` is the one built-in type that does this. | `numeric(10,2) → numeric(10,3)` (display scale lives in the datum — see [below](#numeric102--numeric103-the-value-survives-the-datum-does-not)) |
 | **D** | **A tightening the type system cannot prove safe** | The new type or modifier could reject a value the old one accepted. PostgreSQL does not scan to see whether any row *would* be rejected; it rewrites, and fails if one is. | `varchar(100) → varchar(50)`; `text → varchar(255)`; `numeric(12,2) → numeric(10,2)`; `text → xml` (validation); `text → email` (domain with `CHECK` or `NOT NULL`); `varbit(16) → varbit(8)` |
 | **E** | **Session-dependent conversion** | The result depends on runtime state, so the bytes are only reusable under one specific setting. | `timestamp → timestamptz` under any session time zone other than a fixed +00:00 |
 | **F** | **Wrapped in a node the rewrite test does not recognise** | The conversion may be harmless, but it is expressed as a node type the test has no case for, so it falls through to "rewrite". | `varchar(50)[] → varchar(100)[]` (`ArrayCoerceExpr` — the scalar rule is not lifted to arrays); `integer → text` (`CoerceViaIO`); any `USING` clause containing a real function call, e.g. `USING lower(col)` or `USING col || ''` |
@@ -259,9 +259,9 @@ Common assumptions that turn out to be wrong in the safe direction:
   [No rewrite is not no cost](#no-rewrite-is-not-no-cost).
 - **Constraints referencing the column** (`CHECK`, `UNIQUE`, foreign keys). Same: re-created
   in the statement, not a heap rewrite.
-- **A stored generated column that references the altered column.** Its expression is
-  re-recorded as a dependency; the rewrite decision is made solely on the altered column's
-  own transform expression.
+- **An `interval` field-only reduction** (`DAY TO SECOND` → `HOUR TO SECOND`, for example).
+  The transform is a bare relabel with no heap rewrite, and existing values keep components
+  the new declared type excludes — a day component can survive in an `interval HOUR TO SECOND`.
 - **A collation change alone** (`ALTER COLUMN name TYPE text COLLATE "C"` on a `text`
   column). The transform is a bare relabel — no heap rewrite — but every index on the column
   is rebuilt because its sort order may differ.
@@ -363,6 +363,12 @@ statement rolls back; the time and lock are spent regardless).
 - **A view or rule referencing the column blocks the statement outright** —
   `cannot alter type of a column used by a view or rule` — whether or not the change would
   have been a relabel. The view has to be dropped and recreated around the change.
+- **A stored generated column whose expression references the altered column blocks the
+  statement the same way** — `cannot alter type of a column used by a generated column`
+  (`ERRCODE_FEATURE_NOT_SUPPORTED`), again regardless of whether the change would have been a
+  relabel. `RememberAllDependentForRebuilding` refuses rather than re-plans the generation
+  expression. The generated column has to be dropped before the change and re-added after
+  it — and re-adding a `STORED` generated column is itself a full rewrite.
 
 ## Checking before you run it
 
@@ -454,5 +460,5 @@ across the 14–18 range.
 | Typmod no-op rules | `varchar_support()` (`varchar.c`), `numeric_support()` (`numeric.c`), `varbit_support()` (`varbit.c`), `timestamp_support()` → `TemporalSimplify()` (`timestamp.c`, `datetime.c`), `interval_support()` (`timestamp.c`) |
 | Display scale stored in the `numeric` datum | `NumericShort` / `NumericLong` headers and `NUMERIC_DSCALE()` — `src/backend/utils/adt/numeric.c` |
 | Index storage reuse after a no-rewrite change | `ATPostAlterTypeParse()` → `TryReuseIndex()` → `CheckIndexCompatible()` — `tablecmds.c`, `indexcmds.c` |
-| View / rule dependency refusal | `RememberAllDependentForRebuilding()` — `tablecmds.c` |
+| View / rule and generated-column dependency refusals | `RememberAllDependentForRebuilding()` — `tablecmds.c` |
 | Cast methods | `CoercionMethod` enum — `src/include/catalog/pg_cast.h` |

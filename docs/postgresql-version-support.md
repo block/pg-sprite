@@ -107,6 +107,6 @@ What this *excludes* and why it's fine:
   exactly PG 14; the planned native and copy-and-swap executors would be unaffected, and PG 15+ removes the
   limitation entirely.
 
-See why-build-this-engine.md for why we reuse these tools as
-executors rather than replace them, and build-plan.md for how the
-version floor feeds the phased build.
+See [vision.md](vision.md) for why we reuse these tools as executors rather than replace
+them. The version floor feeds the later execution work summarized under the
+[current implementation status and next increment](low-level-design.md#next-step).

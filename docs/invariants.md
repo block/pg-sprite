@@ -170,7 +170,7 @@ did or didn't commit. PostgreSQL's transactional DDL makes the swap itself atomi
 *client's knowledge* of the outcome is not. Retries of the cutover must be written against this
 ambiguity. *Enforced:* cutover retry loop. *Source:* Spirit's cutover
 (`information_schema` inspection on dropped connection,
-spirit-architecture-notes).
+[Spirit README](https://github.com/block/spirit#cut-over-and-cleanup)).
 
 ## State, checkpoint, and resume (ST)
 

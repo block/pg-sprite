@@ -41,8 +41,21 @@ a copy-and-swap avoids the long exclusive lock. The
 plan report's `decisions[].reason` vocabulary
 ([plan-report.md](plan-report.md#planner-decision-reasons-decisionsreason)) is this table
 made machine-readable: `metadata-only` / `fast-default` / `binary-coercible` are the first
-bucket, `safer-idiom` the second, `type-rewrite` / `volatile-default` / `generated-stored` /
-`relocation` the third.
+bucket; `safer-idiom` is the second; `online-idiom` spans the first and second buckets —
+`NOT VALID`, `DROP INDEX CONCURRENTLY`, and `DETACH PARTITION CONCURRENTLY` read no rows,
+while `CREATE INDEX CONCURRENTLY` and `VALIDATE CONSTRAINT` read every row; `ADD CONSTRAINT …
+USING INDEX` is catalog-only when adopting an existing unique index as `UNIQUE`, but scans the
+full heap under `ACCESS EXCLUSIVE` when adopting it as a `PRIMARY KEY` on a nullable column
+because PostgreSQL validates `NOT NULL` — reach `NOT NULL` first as described in
+[safer sequences](safer-sequences.md#the-substitutions-the-planner-makes-today). See the per-operation table.
+`type-rewrite` / `volatile-default` / `generated-stored` / `relocation` are the third bucket.
+The remaining reasons are first-bucket by cost but carry a warning the cost alone does not:
+`partition-parent-lock` (a new partition takes a brief `ACCESS EXCLUSIVE` on the parent, so
+the lock queue below applies to every query on the parent) and `app-breaking-rename` (the
+catalog change is instant; the running application code that still uses the old name is
+what breaks). `unsupported-operation` means the planner does not recognize the operation or
+knows no safe path for it. The exclusion-constraint carve-out above is a known full-scan cost
+with no online path, not an operation with no cost bucket.
 
 The MySQL-side detail — how `ALGORITHM=` and `LOCK=` are asserted and how the two engines'
 lock models line up — is in
@@ -352,6 +365,12 @@ the catalog instead of rewriting the table. Catalog-only; runs as written.
 | Verdict | Lock | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
 | runs as written | brief `ACCESS EXCLUSIVE` | none — column relabeled in place | 0 |
+
+PostgreSQL refuses the statement outright when a view or rule, or a `STORED` generated
+column, depends on the altered column (`cannot alter type of a column used by a generated
+column`). The planner cannot see these dependencies because `Facts` carries only column
+types, so dry run still reports `binary-coercible`; see
+[No rewrite is not no cost](binary-coercible-type-changes.md#no-rewrite-is-not-no-cost).
 
 The type change is binary-coercible (for example `varchar(50)` → `varchar(100)`,
 or `varchar` → `text`), so PostgreSQL relabels the column in place without a
