@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -102,11 +103,61 @@ func TestRunSequenceWithProgressTracksStepsAndFinishes(t *testing.T) {
 	tracker, err := progress.NewTracker(progress.WallClock{})
 	require.NoError(t, err)
 
-	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0)", schema))
-	rep, err := executor.RunSequenceWithProgress(t.Context(), pool, pt, steps, runBudget,
-		executor.DefaultRetryPolicy(), tracker)
+	functionName := pgx.Identifier{schema, "delay_sequence_progress"}.Sanitize()
+	triggerName := pgx.Identifier{schema + "_delay_sequence_progress"}.Sanitize()
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE FUNCTION %s() RETURNS event_trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF current_query() LIKE '%%%s%%' THEN
+				PERFORM pg_sleep(0.25);
+			END IF;
+		END
+		$$;
+		CREATE EVENT TRIGGER %s ON ddl_command_start EXECUTE FUNCTION %s()`,
+		functionName, schema, triggerName, functionName))
 	require.NoError(t, err)
-	require.Len(t, rep.Steps, 2)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		_, cleanupErr := pool.Exec(ctx, fmt.Sprintf("DROP EVENT TRIGGER IF EXISTS %s", triggerName))
+		assert.NoError(t, cleanupErr)
+		_, cleanupErr = pool.Exec(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", functionName))
+		assert.NoError(t, cleanupErr)
+	})
+
+	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0)", schema))
+	type result struct {
+		rep executor.SequenceReport
+		err error
+	}
+	results := make(chan result, 1)
+	var workers sync.WaitGroup
+	workers.Go(func() {
+		rep, runErr := executor.RunSequenceWithProgress(t.Context(), pool, pt, steps, runBudget,
+			executor.DefaultRetryPolicy(), tracker)
+		results <- result{rep: rep, err: runErr}
+	})
+	t.Cleanup(workers.Wait)
+
+	var observed []string
+	assert.Eventually(t, func() bool {
+		snapshot, progressErr := tracker.Progress(t.Context())
+		if progressErr != nil || snapshot.Detail.Statement == "" {
+			return false
+		}
+		if len(observed) == 0 || observed[len(observed)-1] != snapshot.Detail.Statement {
+			observed = append(observed, snapshot.Detail.Statement)
+		}
+		return len(observed) == 2
+	}, 5*time.Second, 10*time.Millisecond, "both active sequence steps must publish their exact statements")
+	assert.Equal(t, []string{
+		fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0) NOT VALID", schema),
+		fmt.Sprintf(`ALTER TABLE %s VALIDATE CONSTRAINT "v_positive"`, pgx.Identifier{schema, "t"}.Sanitize()),
+	}, observed)
+
+	runResult := <-results
+	workers.Wait()
+	require.NoError(t, runResult.err)
+	require.Len(t, runResult.rep.Steps, 2)
 
 	snapshot, err := tracker.Progress(t.Context())
 	require.NoError(t, err)
