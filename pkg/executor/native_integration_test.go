@@ -92,13 +92,14 @@ func TestBuildIndexConcurrentlyReportsServerProgressAndFinishes(t *testing.T) {
 	require.NoError(t, err)
 	tracker, err := progress.NewTracker(progress.WallClock{})
 	require.NoError(t, err)
+	statementSQL := fmt.Sprintf("CREATE INDEX CONCURRENTLY progress_idx ON %s.progress_t (payload)", schema)
 
 	type result struct{ err error }
 	results := make(chan result, 1)
 	var workers sync.WaitGroup
 	workers.Go(func() {
 		_, buildErr := executor.BuildIndexConcurrentlyWithProgress(t.Context(), pool,
-			fmt.Sprintf("CREATE INDEX CONCURRENTLY progress_idx ON %s.progress_t (payload)", schema), buildBudget, tracker)
+			statementSQL, buildBudget, tracker)
 		results <- result{err: buildErr}
 	})
 	t.Cleanup(workers.Wait)
@@ -110,6 +111,7 @@ func TestBuildIndexConcurrentlyReportsServerProgressAndFinishes(t *testing.T) {
 		return progressErr == nil && observed.Detail.ServerPhase != ""
 	}, 30*time.Second, 10*time.Millisecond, "the active build must publish server progress")
 	require.NotNil(t, observed.Detail.Work)
+	assert.Equal(t, statementSQL, observed.Detail.Statement)
 	assert.LessOrEqual(t, observed.Detail.Work.BlocksDone, observed.Detail.Work.BlocksTotal)
 	assert.LessOrEqual(t, observed.Detail.Work.TuplesDone, observed.Detail.Work.TuplesTotal)
 
