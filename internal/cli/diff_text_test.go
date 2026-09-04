@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 )
 
 // The text rendering is this renderer's own unit test: the layout below is
@@ -106,6 +107,43 @@ func TestDiffTextGreenfieldLeadsWithNote(t *testing.T) {
 		"migrate refuses CREATE TABLE, so a greenfield plan must not point the reader at it")
 	assert.Contains(t, text, "sql:\n  re-run with --sql")
 	assert.NotContains(t, text, "error[table-not-found]")
+}
+
+// A greenfield index build renders as the metadata-only note the planner
+// already gives the CREATE TABLE — never as the safer-idiom warning that
+// would tell the reader a table nobody reads yet is about to be locked.
+func TestDiffTextGreenfieldIndexRendersMetadataOnly(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "public", "widgets", "16.10"
+	report.Disposition = router.DispositionExecute
+	missing := false
+	report.TableExists = &missing
+	sql := `CREATE INDEX "widgets_name_idx" ON "public"."widgets" USING btree ("name")`
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         sql,
+		Kind:        schemadiff.ChangeCreateIndex,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		Decisions: []planner.Decision{{
+			Operation: "create index",
+			Route:     planner.RouteNative,
+			Reason:    planner.ReasonMetadataOnly,
+		}},
+		ExecSQL:   []string{sql},
+		Execution: planner.ExecutionAutocommit,
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDiffText(&out, palette{}, report))
+	text := out.String()
+	assert.Contains(t, text, "statement 1:\n  "+sql+";\n")
+	assert.Contains(t, text, "note[metadata-only]:\n  create index — a brief catalog-only change")
+	assert.Contains(t, text, "note:\n  runs as written\n")
+	assert.Contains(t, text, "docs:\n  "+onlineDDLReferenceURL+"#metadata-only\n")
+	assert.NotContains(t, text, "warning[safer-idiom]")
+	assert.NotContains(t, text, "#safer-idiom")
+	assert.NotContains(t, text, "safer online sequence")
 }
 
 // A converged table renders a single plan entry — no statements, no
