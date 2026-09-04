@@ -176,7 +176,7 @@ func TestStartResetsPriorRunState(t *testing.T) {
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
 // omissions, driven through a real poll so the test pins what a consumer
-// actually receives. A consumer pins format_version 2 against this test.
+// actually receives. A consumer pins format_version 3 against this test.
 func TestSnapshotJSONShape(t *testing.T) {
 	session := fakeSession{query: func(context.Context, string, ...any) pgx.Row {
 		return fakeRow{scan: func(dest ...any) error {
@@ -185,6 +185,10 @@ func TestSnapshotJSONShape(t *testing.T) {
 			*(dest[2].(*uint64)) = 40 // blocks_total
 			*(dest[3].(*uint64)) = 7  // tuples_done
 			*(dest[4].(*uint64)) = 21 // tuples_total
+			*(dest[5].(*uint64)) = 3  // lockers_total
+			*(dest[6].(*uint64)) = 1  // lockers_done
+			pid := int32(31337)
+			*(dest[7].(**int32)) = &pid
 			return nil
 		}}
 	}}
@@ -203,7 +207,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 2,
+		"format_version": 3,
 		"phase": "running",
 		"step": 2,
 		"total_steps": 3,
@@ -215,6 +219,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 			"server_phase": "building index",
 			"active": true,
 			"attempt": 2,
+			"current_locker_pid": 31337,
 			"work": {
 				"rows_copied": 0,
 				"rows_total": 0,
@@ -223,7 +228,9 @@ func TestSnapshotJSONShape(t *testing.T) {
 				"blocks_done": 11,
 				"blocks_total": 40,
 				"tuples_done": 7,
-				"tuples_total": 21
+				"tuples_total": 21,
+				"lockers_total": 3,
+				"lockers_done": 1
 			}
 		}
 	}`, string(raw))
@@ -259,7 +266,7 @@ func TestSnapshotJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 2,
+		"format_version": 3,
 		"phase": "pending",
 		"elapsed_ns": 0,
 		"step_elapsed_ns": 0,
@@ -277,6 +284,10 @@ func TestProgressMergesServerIndexBuildWork(t *testing.T) {
 			*(dest[2].(*uint64)) = 40 // blocks_total
 			*(dest[3].(*uint64)) = 7  // tuples_done
 			*(dest[4].(*uint64)) = 21 // tuples_total
+			*(dest[5].(*uint64)) = 3  // lockers_total
+			*(dest[6].(*uint64)) = 1  // lockers_done
+			pid := int32(31337)
+			*(dest[7].(**int32)) = &pid
 			return nil
 		}}
 	}}
@@ -291,7 +302,27 @@ func TestProgressMergesServerIndexBuildWork(t *testing.T) {
 	assert.Equal(t, uint64(40), s.Detail.Work.BlocksTotal)
 	assert.Equal(t, uint64(7), s.Detail.Work.TuplesDone)
 	assert.Equal(t, uint64(21), s.Detail.Work.TuplesTotal)
+	assert.Equal(t, uint64(3), s.Detail.Work.LockersTotal)
+	assert.Equal(t, uint64(1), s.Detail.Work.LockersDone)
+	assert.Equal(t, uint32(31337), s.Detail.CurrentLockerPID)
 	assert.Zero(t, s.Detail.Work.RowsCopied, "native progress must not fabricate copy counters")
+}
+
+func TestBuildPIDLifecycle(t *testing.T) {
+	tracker, err := progress.NewTracker(&fakeClock{now: time.Unix(100, 0)})
+	require.NoError(t, err)
+	tracker.Start(1, progress.OperationConcurrentIndex)
+	tracker.SetConcurrentBuild(fakeSession{}, 4242)
+	assert.Equal(t, uint32(4242), tracker.BuildPID())
+
+	tracker.StopConcurrentBuild()
+	assert.Zero(t, tracker.BuildPID())
+	tracker.SetConcurrentBuild(fakeSession{}, 4242)
+	tracker.Finish(nil)
+	assert.Zero(t, tracker.BuildPID())
+	tracker.SetConcurrentBuild(fakeSession{}, 4242)
+	tracker.Start(1, progress.OperationConcurrentIndex)
+	assert.Zero(t, tracker.BuildPID())
 }
 
 // A build that has left the progress view is reported inactive, with no

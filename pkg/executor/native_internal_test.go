@@ -70,6 +70,13 @@ func TestAsConcurrentBudgetError(t *testing.T) {
 		assert.Equal(t, sqlstateQueryCanceled, pgErr.Code)
 	})
 
+	t.Run("57014 under a caller-owned deadline is an external cancellation", func(t *testing.T) {
+		err := asConcurrentBudgetError(cancelled, ConcurrentBudget{CallerOwned: true}, 2*time.Second)
+		require.ErrorIs(t, err, ErrCancelledExternally)
+		var budgetErr *BudgetError
+		assert.False(t, errors.As(err, &budgetErr))
+	})
+
 	t.Run("any other failure is neither", func(t *testing.T) {
 		err := asConcurrentBudgetError(&pgconn.PgError{Code: "42P07"}, budget, 2*time.Second)
 		assert.NotErrorIs(t, err, ErrCancelledExternally)

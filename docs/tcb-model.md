@@ -114,7 +114,8 @@ Performance. When a trade-off is hard, the higher priority wins. This is
 
 **Put a limit on everything (TIGER_STYLE).** Every loop bounded, every queue bounded, every
 retry counted, every wait deadlined. Existing instances include bounded native attempts, retry
-budgets, and `lock_timeout` / `statement_timeout` on every session. The future copy-and-swap
+budgets, bounded session timeouts, and caller-owned cancellable contexts where a server
+statement timeout is explicitly disabled. The future copy-and-swap
 path will also bound its change buffer, chunk target time, and slot-lag ceiling. The rule makes
 limits the *default*: an unbounded anything in a TCB package is a review-blocking defect. Where a
 loop is intentionally endless (the applier's consume loop), that must be stated and its exit

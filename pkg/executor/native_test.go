@@ -1,6 +1,7 @@
 package executor_test
 
 import (
+	"context"
 	"math"
 	"testing"
 	"time"
@@ -33,6 +34,20 @@ func TestBuildIndexConcurrentlyRejectsUnboundedBudget(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestBuildIndexConcurrentlyRejectsCallerOwnedOverallBudget(t *testing.T) {
+	_, err := executor.BuildIndexConcurrently(t.Context(), nil,
+		"CREATE INDEX CONCURRENTLY idx ON public.t (c)",
+		executor.ConcurrentBudget{Overall: time.Second, CallerOwned: true})
+	require.Error(t, err)
+}
+
+func TestBuildIndexConcurrentlyCallerOwnedNeedsCancellableContext(t *testing.T) {
+	_, err := executor.BuildIndexConcurrently(context.WithoutCancel(t.Context()), nil,
+		"CREATE INDEX CONCURRENTLY idx ON public.t (c)",
+		executor.ConcurrentBudget{CallerOwned: true})
+	require.ErrorIs(t, err, executor.ErrCallerOwnedNeedsCancellableContext)
 }
 
 func TestBuildIndexConcurrentlyAdmission(t *testing.T) {

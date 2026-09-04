@@ -88,6 +88,9 @@ var (
 	// connection, every failed build would resolve indeterminate. Like an
 	// unbounded budget, an unusable verdict is refused by construction.
 	ErrPoolTooSmall = errors.New("concurrent index build needs a pool of at least two connections: one for the build session, one reserved for the catalog verdict")
+	// ErrCallerOwnedNeedsCancellableContext is returned when caller-owned
+	// mode has no cancellation signal to bound the statement.
+	ErrCallerOwnedNeedsCancellableContext = errors.New("a caller-owned build needs a cancellable context: with statement_timeout disabled the context is the statement's only bound")
 	// ErrCancelledExternally is returned when the build's statement was
 	// cancelled (SQLSTATE 57014) before its overall budget elapsed: the
 	// executor's statement_timeout cannot have fired yet, so the
@@ -121,15 +124,21 @@ const verdictTimeout = 30 * time.Second
 // waits by implementation, so a session lock_timeout would cancel a healthy
 // build mid-wait — and that cancellation is exactly what creates the invalid
 // index this executor exists to prevent. The statement therefore runs with
-// lock_timeout disabled and one overall deadline. That is safe with respect
-// to the lock queue: the SHARE UPDATE EXCLUSIVE lock a concurrent build
-// waits for does not block normal reads or writes queued behind it.
+// lock_timeout disabled and one bound on the whole statement: a server
+// deadline, or in caller-owned mode the caller's cancellable context. That
+// is safe with respect to the lock queue: the SHARE UPDATE EXCLUSIVE lock a
+// concurrent build waits for does not block normal reads or writes queued
+// behind it.
 type ConcurrentBudget struct {
 	// Overall bounds the whole statement, waits included, via
 	// statement_timeout. It must be at least one millisecond (PostgreSQL's
 	// granularity); expect index builds on large tables to need a generous
 	// value.
 	Overall time.Duration
+	// CallerOwned makes the caller's cancellable context the statement's only
+	// bound: the session runs with statement_timeout disabled and Overall must
+	// be zero. The executor refuses a context that cannot be cancelled.
+	CallerOwned bool
 }
 
 // maxOverallBudget is PostgreSQL's ceiling for statement_timeout (the
@@ -140,6 +149,14 @@ const maxOverallBudget = time.Duration(math.MaxInt32) * time.Millisecond
 
 // validate rejects budgets that would leave the statement unbounded.
 func (b ConcurrentBudget) validate() error {
+	if b.CallerOwned {
+		// INV: LK-2 — the bound moves from the server timer to the caller's
+		// cancellable context, checked before a session is acquired.
+		if b.Overall != 0 {
+			return fmt.Errorf("caller-owned budget requires Overall to be zero, got %s", b.Overall)
+		}
+		return nil
+	}
 	// INV: LK-2 — the build is bounded by construction; below one
 	// millisecond the setting would round to zero, which disables
 	// statement_timeout entirely.
@@ -252,9 +269,12 @@ func (e *InvalidIndexError) Unwrap() []error {
 //   - a failed build that provably left nothing returns its failure alone
 //     — a retry can start immediately.
 //
-// Cancellation by the overall budget surfaces as a *BudgetError; a
+// Cancellation by the server-owned overall budget surfaces as a *BudgetError; a
 // cancellation arriving before the budget elapsed cannot be the budget's
 // own statement_timeout and surfaces as ErrCancelledExternally instead.
+// In caller-owned mode the cancellable context is the only bound and
+// statement_timeout is disabled; SQLSTATE 57014 always surfaces as
+// ErrCancelledExternally.
 // Caller cancellation is a race: the client returns while the cancel signal
 // travels to the server, so a build cancelled at the finish line may still
 // complete. The guarantee is about the catalog, not the race: after this
@@ -287,6 +307,11 @@ func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	var rep IndexBuildReport
 	if err := b.validate(); err != nil {
 		return rep, err
+	}
+	// INV: LK-2 — caller-owned mode is bounded by the caller's cancellation
+	// signal, so a context without one is refused before any session use.
+	if b.CallerOwned && ctx.Done() == nil {
+		return rep, ErrCallerOwnedNeedsCancellableContext
 	}
 	build, err := admitConcurrentIndexBuild(sql)
 	if err != nil {
@@ -693,12 +718,15 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 
 	// INV: LK-2 — the CONCURRENTLY exception policy: no per-lock timeout
 	// (a lock_timeout would cancel the statement's snapshot waits and leave
-	// the invalid index this executor exists to prevent); one overall
-	// statement deadline bounds every statement instead. A bare integer is
+	// the invalid index this executor exists to prevent); either one overall
+	// statement deadline or caller cancellation bounds the build instead. A bare integer is
 	// milliseconds to PostgreSQL; the settings are applied here regardless
 	// of the pool's defaults.
-	budgets := "SET lock_timeout = 0; SET statement_timeout = " +
-		strconv.FormatInt(b.Overall.Milliseconds(), 10)
+	statementTimeout := b.Overall.Milliseconds()
+	if b.CallerOwned {
+		statementTimeout = 0
+	}
+	budgets := "SET lock_timeout = 0; SET statement_timeout = " + strconv.FormatInt(statementTimeout, 10)
 	if _, err := conn.Exec(ctx, budgets); err != nil {
 		// The two SETs may have partially applied — PostgreSQL runs a
 		// simple-query batch statement by statement — so the session must
@@ -742,6 +770,10 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 func asConcurrentBudgetError(err error, b ConcurrentBudget, elapsed time.Duration) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == sqlstateQueryCanceled {
+		if b.CallerOwned {
+			return fmt.Errorf("%w (after %s, caller-owned deadline): %w",
+				ErrCancelledExternally, elapsed.Round(time.Millisecond), err)
+		}
 		if elapsed >= b.Overall {
 			return &BudgetError{Cause: CauseStatement, Budget: b.Overall}
 		}

@@ -68,7 +68,9 @@ autocommit-each-step has two shapes in the executor:
 - **`CREATE INDEX CONCURRENTLY` (step kind `concurrent-index-build`)** is
   true autocommit on a dedicated budgeted session: it refuses to run inside
   any transaction block and internally manages multiple transactions of its
-  own.
+  own. Its bound is either the session's overall `statement_timeout` or, in
+  explicit caller-owned mode, the caller's cancellable context while
+  `statement_timeout` is disabled.
 
 Each step's class is the `kind` field of its step report in the JSON
 verdict — the field retry logic branches on. A failed `brief` step means
