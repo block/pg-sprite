@@ -43,9 +43,12 @@ plan report's `decisions[].reason` vocabulary
 made machine-readable: `metadata-only` / `fast-default` / `binary-coercible` are the first
 bucket; `safer-idiom` is the second; `online-idiom` spans the first and second buckets —
 `NOT VALID`, `DROP INDEX CONCURRENTLY`, and `DETACH PARTITION CONCURRENTLY` read no rows,
-while `CREATE INDEX CONCURRENTLY` and `VALIDATE CONSTRAINT` read every row; see the
-per-operation table. `type-rewrite` / `volatile-default` / `generated-stored` / `relocation`
-are the third bucket.
+while `CREATE INDEX CONCURRENTLY` and `VALIDATE CONSTRAINT` read every row; `ADD CONSTRAINT …
+USING INDEX` is catalog-only when adopting an existing unique index as `UNIQUE`, but scans the
+full heap under `ACCESS EXCLUSIVE` when adopting it as a `PRIMARY KEY` on a nullable column
+because PostgreSQL validates `NOT NULL` — reach `NOT NULL` first as described in
+[safer sequences](safer-sequences.md#the-substitutions-the-planner-makes-today). See the per-operation table.
+`type-rewrite` / `volatile-default` / `generated-stored` / `relocation` are the third bucket.
 The remaining reasons are first-bucket by cost but carry a warning the cost alone does not:
 `partition-parent-lock` (a new partition takes a brief `ACCESS EXCLUSIVE` on the parent, so
 the lock queue below applies to every query on the parent) and `app-breaking-rename` (the

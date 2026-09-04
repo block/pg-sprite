@@ -238,7 +238,7 @@ table.
 | # | Category | Why the bytes cannot be reused | Example |
 | --- | --- | --- | --- |
 | **A** | **Different on-disk representation** | The two types encode values differently (width, layout, or structure), so a function must produce every new datum. | `integer → bigint` (4 → 8 bytes); `real → double precision`; `integer → numeric`; `json → jsonb` (text → binary tree); `uuid → text` |
-| **B** | **Value-transforming conversion** | The types are "similar", but the cast or coercion function changes the bytes of at least some values — padding, masking, normalisation, rounding. | `char(10) → text` (`rtrim1()` strips the padding); `inet → cidr` (masks host bits); `char(10) → char(20)` (the padding is stored, so every datum grows); `timestamp(6) → timestamp(3)` (rounds fractional seconds — `TemporalSimplify` only relabels when precision does not shrink); `interval` field/precision reduction (same, via `interval_support`) |
+| **B** | **Value-transforming conversion** | The types are "similar", but the cast or coercion function changes the bytes of at least some values — padding, masking, normalisation, rounding. | `char(10) → text` (`rtrim1()` strips the padding); `inet → cidr` (masks host bits); `char(10) → char(20)` (the padding is stored, so every datum grows); `timestamp(6) → timestamp(3)` (rounds fractional seconds — `TemporalSimplify` only relabels when precision does not shrink); `interval` precision reduction (same, via `interval_support`) |
 | **C** | **A modifier stored inside the datum changes** | The typmod is not just a check — part of it is written into each value's header, so a different typmod means a different datum even when the value is equal. `numeric` is the one built-in type that does this. | `numeric(10,2) → numeric(10,3)` (display scale lives in the datum — see [below](#numeric102--numeric103-the-value-survives-the-datum-does-not)) |
 | **D** | **A tightening the type system cannot prove safe** | The new type or modifier could reject a value the old one accepted. PostgreSQL does not scan to see whether any row *would* be rejected; it rewrites, and fails if one is. | `varchar(100) → varchar(50)`; `text → varchar(255)`; `numeric(12,2) → numeric(10,2)`; `text → xml` (validation); `text → email` (domain with `CHECK` or `NOT NULL`); `varbit(16) → varbit(8)` |
 | **E** | **Session-dependent conversion** | The result depends on runtime state, so the bytes are only reusable under one specific setting. | `timestamp → timestamptz` under any session time zone other than a fixed +00:00 |
@@ -259,6 +259,9 @@ Common assumptions that turn out to be wrong in the safe direction:
   [No rewrite is not no cost](#no-rewrite-is-not-no-cost).
 - **Constraints referencing the column** (`CHECK`, `UNIQUE`, foreign keys). Same: re-created
   in the statement, not a heap rewrite.
+- **An `interval` field-only reduction** (`DAY TO SECOND` → `HOUR TO SECOND`, for example).
+  The transform is a bare relabel with no heap rewrite, and existing values keep components
+  the new declared type excludes — a day component can survive in an `interval HOUR TO SECOND`.
 - **A collation change alone** (`ALTER COLUMN name TYPE text COLLATE "C"` on a `text`
   column). The transform is a bare relabel — no heap rewrite — but every index on the column
   is rebuilt because its sort order may differ.
