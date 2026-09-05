@@ -115,7 +115,12 @@ implementation time):
   SchemaBot's declarative roots are directories of many tables: the adapter loops `Plan` per
   table and merges into one `PlanResult`. One pool serves the whole fan-out (`Plan` does not
   close it), but each table costs one scratch transaction per plan, and cross-table ordering
-  is the adapter's responsibility.
+  is the adapter's responsibility. So is the set of tables: a live table with no desired file
+  is invisible to a per-table diff, and under a declarative model its only convergence is
+  `DROP TABLE` — which pg-sprite refuses at both front doors and never executes. The adapter
+  owning the whole schema enumerates the live tables itself and surfaces each undeclared one
+  as a blocked destructive verdict, so the divergence shows on the plan and the apply is
+  refused rather than the table lingering unreported.
 - **Store the whole `plan.Report`, not just its statements.** Engine-specific fields
   (`ServerVersion`, `Fingerprint`, `TableExists`, `Disposition`) ride in
   `SchemaChange.Metadata`. `plan.Fingerprint` is deterministic across front doors, so it is

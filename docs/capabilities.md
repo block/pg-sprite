@@ -134,7 +134,7 @@ the canonical example.
 
 ## Support matrix
 
-**51 operations: 17 supported today, 19 planned behind a typed refusal, 13 out of scope
+**52 operations: 17 supported today, 19 planned behind a typed refusal, 14 out of scope
 by design, and 2 with no online mechanism in PostgreSQL to build on.**
 
 Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today) ·
@@ -222,6 +222,7 @@ Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today
 
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
+| `DROP TABLE` | ⚪ | — | No — owner tooling, through a reviewed process | Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it — the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. An orchestrator that owns a whole schema is expected to surface such a table as a blocked destructive verdict and leave the drop to a reviewed process (see [schemabot-integration.md](schemabot-integration.md#the-proposed-schemabot-side-contract)); pg-sprite never plans or executes it |
 | Data backfills, `UPDATE`/`DELETE` batches, DML of any kind | 🔵 | — | No — data-change runners, application batch jobs | pg-sprite changes table *shape*, never table *contents*. Versioned-script runners and application jobs own data changes |
 | Column-transform expressions during a copy-and-swap rewrite | 🟡 | copy-and-swap | Yes | The one principled exception: when a rewrite is already copying every row, deriving a new column's value by expression is part of the shape change, not a data job. Planned as part of the copy engine |
 | Online table rebuild with no shape change (bloat reclamation) | 🟡 | copy-and-swap | Yes | A copy-and-swap with an identical target shape — the pg_repack use case with checksum-gated cutover and crash-resume. Planned once the copy engine lands |
