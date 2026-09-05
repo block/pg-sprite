@@ -36,13 +36,33 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 			want: executor.CodeInvalidIndexOwnLeftover,
 		},
 		{
-			name: "preexisting invalid index",
-			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Cleanup: executor.ErrPreexistingInvalidIndex},
-			want: executor.CodeInvalidIndexPreexisting,
+			name: "invalid index build in flight",
+			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", BuilderPID: 42, Cleanup: executor.ErrInvalidIndexBuildInFlight},
+			want: executor.CodeInvalidIndexBuildInFlight,
+		},
+		{
+			name: "abandoned invalid index",
+			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t", Cleanup: executor.ErrAbandonedInvalidIndex},
+			want: executor.CodeInvalidIndexAbandoned,
+		},
+		{
+			name: "invalid index on another table",
+			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "u", Cleanup: executor.ErrInvalidIndexOnOtherTable},
+			want: executor.CodeInvalidIndexOtherTable,
+		},
+		{
+			name: "invalid index with an unobservable builder",
+			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t", Cleanup: executor.ErrInvalidIndexBuilderUnobservable},
+			want: executor.CodeInvalidIndexBuilderUnobservable,
 		},
 		{
 			name: "unproven invalid index",
 			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Cleanup: executor.ErrTargetIdentityChanged},
+			want: executor.CodeInvalidIndexUnproven,
+		},
+		{
+			name: "abandonment unproven through to removal",
+			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Cleanup: executor.ErrAbandonmentUnproven},
 			want: executor.CodeInvalidIndexUnproven,
 		},
 		{name: "cancelled externally", err: executor.ErrCancelledExternally, want: executor.CodeCancelledExternally},

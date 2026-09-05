@@ -6,9 +6,10 @@ rolled back. Nothing after it ran. pg-sprite tells you exactly where that line
 is. Everything in the committed prefix is documented, harmless to live
 traffic, and a step *toward* the desired schema — not debris. A failed step
 can also leave state of *its own*: a concurrent index build that dies
-mid-build leaves an INVALID index that taxes every write until an operator
-drops it ([invalid-index-recovery.md](invalid-index-recovery.md)) — the
-verdict's `code` names that outcome when it happens.
+mid-build leaves an INVALID index that taxes every write until it is removed
+— by the executor's proven recovery when the entry is provably abandoned, by
+an operator otherwise ([invalid-index-recovery.md](invalid-index-recovery.md))
+— the verdict's `code` names that outcome when it happens.
 
 This page explains why the engine works this way and what the guarantees are.
 The machine-readable contracts live in
@@ -202,7 +203,7 @@ Three mechanisms turn non-atomicity from a hazard into a contract:
    | Sequence | A failed step leaves | Retry path | Safe to automate? |
    | --- | --- | --- | --- |
    | `SET NOT NULL` (4 steps) | The NOT VALID CHECK scaffold | Resume at the failed step; a leftover scaffold is removed by running the DROP CONSTRAINT step alone | Yes — a committed step refuses to double-apply (`duplicate_object`) |
-   | `ADD PRIMARY KEY` / `UNIQUE USING INDEX` (2 steps) | An INVALID index (`pg_index.indisvalid = false`) | Drop the invalid index, re-run the build — see [invalid-index-recovery.md](invalid-index-recovery.md) | **No — operator action**: recovery starts with a DROP the engine detects and reports but never issues unprompted |
+   | `ADD PRIMARY KEY` / `UNIQUE USING INDEX` (2 steps) | An INVALID index (`pg_index.indisvalid = false`) | `RebuildAbandonedIndex` removes the entry under proof and re-runs the build — see [invalid-index-recovery.md](invalid-index-recovery.md) | **Only as an explicit recovery call**: the sequence itself never drops; the recovery drops only what it has proven abandoned under the table lock, and refuses an in-flight or another table's entry |
    | `ADD CONSTRAINT ... NOT VALID` + `VALIDATE` | The NOT VALID constraint, enforcing for new writes | Re-run VALIDATE — it is safe to repeat | Yes — VALIDATE is idempotent |
 
    Nothing resumes automatically — deliberately. The engine never picks up
@@ -265,9 +266,12 @@ branching surface.
 | `budget-lock-exceeded` | The lock was not granted within `lock_timeout`; nothing executed |
 | `budget-statement-exceeded` | The statement ran past `statement_timeout` and was cancelled |
 | `cancelled-externally` | The statement was cancelled from outside the executor before its budget elapsed |
-| `invalid-index-own-leftover` | The failed build's own INVALID index remains; the [recovery runbook](invalid-index-recovery.md) applies |
-| `invalid-index-preexisting` | An INVALID index under the requested name predates this run |
-| `invalid-index-unproven` | An INVALID index may remain but the catalog state could not be proven |
+| `invalid-index-own-leftover` | The failed build's own INVALID index remains; `RebuildAbandonedIndex` removes it under proof ([recovery runbook](invalid-index-recovery.md)) |
+| `invalid-index-build-in-flight` | The INVALID index under the requested name is another backend's concurrent build still running; wait, never drop |
+| `invalid-index-abandoned` | An INVALID index under the requested name sits on the target table with no backend building it; `RebuildAbandonedIndex` removes it under proof |
+| `invalid-index-other-table` | An INVALID index under the requested name sits on a different table in the schema; this change never touches it |
+| `invalid-index-builder-unobservable` | An INVALID index under the requested name sits on the target table and this role cannot see whether a backend is building it; `RebuildAbandonedIndex` decides under the table lock |
+| `invalid-index-unproven` | An INVALID index may remain but the catalog state could not be proven, or a recovery could not carry its proof through to the removal |
 | `empty-sequence` | The sequence had no steps to run |
 | `unsupported-sequence-step` | A step is not a shape the sequence executor can run safely |
 | `unsupported-partitioned-parent` | Partitioned-parent admission refusal |
