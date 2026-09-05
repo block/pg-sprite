@@ -76,6 +76,10 @@ refusal — never a silently wrong or incomplete result:
   (including the greenfield `CREATE TABLE` path for a table that does not
   exist) is library-only; the CLI's `migrate` takes one imperative
   statement.
+- **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
+  build's leftover is reported with a typed state, and the proven removal
+  (`executor.RebuildAbandonedIndex`) is library-only; from the CLI the
+  [runbook](docs/invalid-index-recovery.md) applies.
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
   which covers one ordinary table plus its indexes per file.

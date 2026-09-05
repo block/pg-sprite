@@ -13,6 +13,7 @@ not escape hatches:
 | `ADD CONSTRAINT ... USING INDEX` on a partitioned parent | PostgreSQL does not support adopting an existing index on a partitioned parent in any supported version. pg-sprite refuses before execution. |
 | `ADD FOREIGN KEY ... NOT VALID` on a partitioned parent | PostgreSQL does not support this before version 18, so pg-sprite refuses it on versions 14–17. It is supported on version 18 and later. |
 | Copy-and-swap | The copy-and-swap backend is not yet available. Statements that require it route to `refuse`; pg-sprite never falls through to a blocking rewrite. |
+| A concurrent index build whose name is occupied by an invalid index | The build refuses before running and never drops the occupant: an invalid entry is either abandoned debris or someone's build still in progress, and a drop by name cannot tell them apart. The refusal is typed by proof (`invalid-index-abandoned`, `invalid-index-build-in-flight`, `invalid-index-other-table`, `invalid-index-builder-unobservable`). The proven removal — `executor.RebuildAbandonedIndex`, library-only today, no CLI verb — takes a bounded `SHARE UPDATE EXCLUSIVE` lock on the table (which any running concurrent index command holds), re-verifies the entry by OID, renames it to an identity-derived name and drops that; it refuses a visible in-flight build or another table's entry, and reports a lock budget rather than wait behind a build it cannot see. From the CLI, the [runbook](invalid-index-recovery.md) applies. |
 
 ## Declarative model boundaries
 

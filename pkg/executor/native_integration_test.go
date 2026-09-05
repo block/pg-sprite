@@ -399,24 +399,27 @@ func TestBuildIndexConcurrentlyFailedBuildReportsItsLeftover(t *testing.T) {
 	assert.True(t, valid)
 }
 
-func TestBuildIndexConcurrentlyFailsClosedOnPreexistingInvalidLeftover(t *testing.T) {
+func TestBuildIndexConcurrentlyFailsClosedOnAbandonedInvalidLeftover(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(
 		"CREATE TABLE %s.t (id int PRIMARY KEY, c int); INSERT INTO %s.t VALUES (1, 7), (2, 7)", schema, schema))
 	require.NoError(t, err)
 	leaveInvalidIndex(t, pool, schema, "t", "idx_left")
 
-	// A pre-existing invalid index cannot be proven this build's own
-	// debris, so the executor must refuse to touch it and name the
-	// explicit recovery — never build, never drop.
+	// A pre-existing invalid index on the target table with no backend
+	// building it is abandoned debris. The build itself never drops it —
+	// it refuses and names the recovery that does.
 	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema), buildBudget)
 
-	require.ErrorIs(t, err, executor.ErrPreexistingInvalidIndex)
+	require.ErrorIs(t, err, executor.ErrAbandonedInvalidIndex)
 	var invalidErr *executor.InvalidIndexError
 	require.ErrorAs(t, err, &invalidErr)
 	assert.Equal(t, schema, invalidErr.Schema)
 	assert.Equal(t, "idx_left", invalidErr.Index)
+	assert.Equal(t, "t", invalidErr.Table)
+	assert.Zero(t, invalidErr.BuilderPID, "no backend is building the leftover")
+	assert.True(t, invalidErr.Recoverable())
 	exists, valid := indexState(t, pool, schema, "idx_left")
 	assert.True(t, exists, "the pre-existing leftover must survive untouched")
 	assert.False(t, valid, "the pre-existing leftover must keep its invalid state")
@@ -451,14 +454,18 @@ func TestBuildIndexConcurrentlyNeverDropsUnrelatedTableLeftover(t *testing.T) {
 	require.NoError(t, err)
 	leaveInvalidIndex(t, pool, schema, "a", "idx_shared")
 
-	// The build on table b must refuse before touching anything: an
-	// invalid index under this name anywhere in the schema cannot be
-	// proven anyone's, and a's leftover must survive untouched for its own
-	// table's recovery.
+	// The build on table b must refuse before touching anything: the
+	// invalid index under this name belongs to table a, so it is neither
+	// this build's debris nor recoverable from here, and it must survive
+	// untouched for its own table's recovery.
 	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_shared ON %s.b (c)", schema), buildBudget)
 
-	require.ErrorIs(t, err, executor.ErrPreexistingInvalidIndex)
+	require.ErrorIs(t, err, executor.ErrInvalidIndexOnOtherTable)
+	var invalidErr *executor.InvalidIndexError
+	require.ErrorAs(t, err, &invalidErr)
+	assert.Equal(t, "a", invalidErr.Table, "the refusal must name the table that owns the leftover")
+	assert.False(t, invalidErr.Recoverable(), "another table's leftover is never this target's to recover")
 	exists, valid := indexState(t, pool, schema, "idx_shared")
 	assert.True(t, exists, "the other table's invalid index must survive")
 	assert.False(t, valid, "the other table's index must keep its invalid state for its own recovery")
@@ -708,15 +715,22 @@ func TestBuildIndexConcurrentlyProofsResistCatalogShadowing(t *testing.T) {
 	// unqualified catalog names. These impostors are empty or NULL:
 	// consulted, they would resolve no table, report no invalid index, and
 	// show no backend — turning every fail-closed proof into a false
-	// clean. The executor's proof queries must see the real catalogs
-	// through them.
+	// clean. The progress impostor and the current_setting impostor lie the
+	// other way — a hidden builder row and activity tracking off — which
+	// would turn a provable abandonment into an unobservable one. The
+	// executor's proof queries must see the real catalogs through all of
+	// them.
 	_, err = bootstrap.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.pg_class (oid oid, relname name, relnamespace oid);
 		CREATE TABLE %[1]s.pg_namespace (oid oid, nspname name);
 		CREATE TABLE %[1]s.pg_index (indexrelid oid, indisvalid boolean);
 		CREATE TABLE %[1]s.pg_stat_activity (pid int, state text);
+		CREATE TABLE %[1]s.pg_stat_progress_create_index (pid int, datname name, relid oid, index_relid oid);
+		INSERT INTO %[1]s.pg_stat_progress_create_index VALUES (1, current_database(), NULL, NULL);
 		CREATE FUNCTION %[1]s.to_regclass(text) RETURNS regclass
 			LANGUAGE sql IMMUTABLE AS 'SELECT NULL::regclass';
+		CREATE FUNCTION %[1]s.current_setting(text) RETURNS text
+			LANGUAGE sql IMMUTABLE AS $$SELECT 'off'::text$$;
 		CREATE TABLE %[1]s.t (id int PRIMARY KEY, c int);
 		INSERT INTO %[1]s.t VALUES (1, 7), (2, 7)`, schema))
 	require.NoError(t, err)
@@ -752,11 +766,27 @@ func TestBuildIndexConcurrentlyProofsResistCatalogShadowing(t *testing.T) {
 	require.False(t, valid, "the leftover must be invalid")
 
 	// The pre-build refusal: the impostor pg_index is empty and would miss
-	// the debris, letting a new build run over unprovable state.
+	// the debris, letting a new build run over unprovable state; the
+	// impostor progress view and current_setting would downgrade the
+	// verdict to unobservable. The real catalogs prove abandonment.
 	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_dup ON %s.t (c)", schema), buildBudget)
-	require.ErrorIs(t, err, executor.ErrPreexistingInvalidIndex,
+	require.ErrorIs(t, err, executor.ErrAbandonedInvalidIndex,
 		"the pre-build inspection must see the real catalog through the impostors")
+
+	// The recovery's own proofs run under the same search_path and must
+	// resist the same impostors: the quarantine re-verification, the sweep,
+	// and the rebuild's success verification.
+	require.NoError(t, pool.QueryRow(t.Context(),
+		fmt.Sprintf("DELETE FROM %s.t WHERE id = 2 RETURNING id", schema)).Scan(new(int)))
+	recovered, err := executor.RebuildAbandonedIndex(t.Context(), pool,
+		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_dup ON %s.t (c)", schema), buildBudget)
+	require.NoError(t, err, "the recovery must see the real catalog through the impostors")
+	require.Len(t, recovered.Dropped, 1)
+	assert.Equal(t, "idx_dup", recovered.Build.Index)
+	exists, valid = indexState(t, bootstrap, schema, "idx_dup")
+	assert.True(t, exists)
+	assert.True(t, valid)
 }
 
 func TestBuildIndexConcurrentlyTerminatedBackendReportsItsLeftover(t *testing.T) {

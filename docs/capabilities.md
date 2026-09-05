@@ -173,7 +173,7 @@ Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today
 
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| `CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN | ✅ | native, safer sequence | Yes | Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification and typed invalid-index outcomes ([runbook](invalid-index-recovery.md)) |
+| `CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN | ✅ | native, safer sequence | Yes | Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification, typed invalid-index outcomes, and a proven recovery for abandoned leftovers (`RebuildAbandonedIndex`, library-only; [runbook](invalid-index-recovery.md)) |
 | `DROP INDEX` | ✅ | native, safer sequence | Yes | Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive** |
 | `REINDEX` | ✅ | native, safer sequence | Yes | Rewritten to `REINDEX ... CONCURRENTLY` |
 | Index build on a **partitioned parent** | 🟡 | native, planned flow | Yes | PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned |
@@ -290,11 +290,15 @@ never eligible — only changes the engine understands but cannot run *safely*.
 
 Two related jobs stay with humans on purpose:
 
-- **Invalid-index recovery.** A failed `CREATE INDEX CONCURRENTLY` leaves an invalid
-  index; an in-flight healthy build looks identical. The executor proves what it can and
-  **never drops an index itself** — PostgreSQL drops by name, not identity, so an
-  automatic drop could destroy another actor's build. The typed three-state ownership
-  model and what each state licenses is [invalid-index-recovery.md](invalid-index-recovery.md).
+- **Deciding to recover an invalid index.** A failed `CREATE INDEX CONCURRENTLY` leaves
+  an invalid index; an in-flight healthy build looks identical. The build **never drops
+  an index itself** — PostgreSQL drops by name, not identity, so a drop on the way in
+  could destroy another actor's build. Recovery is a separate, explicit call
+  (`executor.RebuildAbandonedIndex`, library-only) that removes an entry only after
+  proving it abandoned under the table lock and by catalog identity, and refuses an
+  in-flight build or another table's entry. The typed ownership states, which of them the
+  recovery handles, and what the rest license a human to do is
+  [invalid-index-recovery.md](invalid-index-recovery.md).
 - **Index maintenance (`REINDEX` automation, bloat-driven rebuild scheduling).** The
   engine executes `REINDEX CONCURRENTLY` when asked (see matrix); *deciding* when an
   index needs rebuilding is monitoring-and-operations territory. Automating it is

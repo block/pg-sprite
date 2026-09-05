@@ -53,7 +53,7 @@ func TestAsConcurrentBudgetError(t *testing.T) {
 	cancelled := &pgconn.PgError{Code: sqlstateQueryCanceled}
 
 	t.Run("57014 at or past the budget is budget exhaustion", func(t *testing.T) {
-		err := asConcurrentBudgetError(cancelled, budget, time.Minute+time.Second)
+		err := asConcurrentBudgetError(cancelled, budget, time.Minute+time.Second, "concurrent index build")
 		var budgetErr *BudgetError
 		require.ErrorAs(t, err, &budgetErr)
 		assert.Equal(t, CauseStatement, budgetErr.Cause)
@@ -61,7 +61,7 @@ func TestAsConcurrentBudgetError(t *testing.T) {
 	})
 
 	t.Run("57014 before the budget is an external cancellation", func(t *testing.T) {
-		err := asConcurrentBudgetError(cancelled, budget, 2*time.Second)
+		err := asConcurrentBudgetError(cancelled, budget, 2*time.Second, "concurrent index build")
 		require.ErrorIs(t, err, ErrCancelledExternally)
 		var budgetErr *BudgetError
 		assert.False(t, errors.As(err, &budgetErr), "an external cancel must not read as budget exhaustion")
@@ -71,14 +71,14 @@ func TestAsConcurrentBudgetError(t *testing.T) {
 	})
 
 	t.Run("57014 under a caller-owned deadline is an external cancellation", func(t *testing.T) {
-		err := asConcurrentBudgetError(cancelled, ConcurrentBudget{CallerOwned: true}, 2*time.Second)
+		err := asConcurrentBudgetError(cancelled, ConcurrentBudget{CallerOwned: true}, 2*time.Second, "concurrent index build")
 		require.ErrorIs(t, err, ErrCancelledExternally)
 		var budgetErr *BudgetError
 		assert.False(t, errors.As(err, &budgetErr))
 	})
 
 	t.Run("any other failure is neither", func(t *testing.T) {
-		err := asConcurrentBudgetError(&pgconn.PgError{Code: "42P07"}, budget, 2*time.Second)
+		err := asConcurrentBudgetError(&pgconn.PgError{Code: "42P07"}, budget, 2*time.Second, "concurrent index build")
 		assert.NotErrorIs(t, err, ErrCancelledExternally)
 		var budgetErr *BudgetError
 		assert.False(t, errors.As(err, &budgetErr))
@@ -87,28 +87,100 @@ func TestAsConcurrentBudgetError(t *testing.T) {
 
 // TestInvalidIndexErrorAdviceMatchesProof is the renderer's own unit test:
 // the message may name a DROP INDEX CONCURRENTLY only in the one state
-// where the entry is proven this build's own leftover. Every other state
-// must not hand the operator a destructive statement — the index under
-// that name may be healthy or another actor's build in progress.
+// where the entry is proven this build's own leftover, and may point at
+// the automatic recovery only in the states that recovery accepts. Every
+// other state must not hand the operator a destructive statement — the
+// index under that name may be healthy or another actor's build in
+// progress.
 func TestInvalidIndexErrorAdviceMatchesProof(t *testing.T) {
 	tests := []struct {
-		name      string
-		cleanup   error
-		wantsDrop bool
+		name          string
+		cleanup       error
+		wantsDrop     bool
+		wantsRecovery bool
 	}{
-		{name: "proven own leftover names the drop", cleanup: ErrBuildLeftInvalidIndex, wantsDrop: true},
-		{name: "pre-existing invalid entry does not", cleanup: ErrPreexistingInvalidIndex, wantsDrop: false},
-		{name: "changed target identity does not", cleanup: ErrTargetIdentityChanged, wantsDrop: false},
-		{name: "an inspection failure does not", cleanup: errors.New("inspect index s.i: closed pool"), wantsDrop: false},
+		{name: "proven own leftover names the drop", cleanup: ErrBuildLeftInvalidIndex, wantsDrop: true, wantsRecovery: true},
+		{name: "abandoned entry names the recovery only", cleanup: ErrAbandonedInvalidIndex, wantsRecovery: true},
+		{name: "in-flight build does not", cleanup: ErrInvalidIndexBuildInFlight},
+		{name: "another table's entry does not", cleanup: ErrInvalidIndexOnOtherTable},
+		{name: "unobservable builder names the recovery only", cleanup: ErrInvalidIndexBuilderUnobservable, wantsRecovery: true},
+		{name: "changed target identity does not", cleanup: ErrTargetIdentityChanged},
+		{name: "unproven abandonment does not", cleanup: ErrAbandonmentUnproven},
+		{name: "an inspection failure does not", cleanup: errors.New("inspect index s.i: closed pool")},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			msg := (&InvalidIndexError{Schema: "s", Index: "i", Cleanup: tt.cleanup}).Error()
+			e := &InvalidIndexError{Schema: "s", Index: "i", Table: "t", BuilderPID: 7, Cleanup: tt.cleanup}
+			msg := e.Error()
 			if tt.wantsDrop {
 				assert.Contains(t, msg, `DROP INDEX CONCURRENTLY "s"."i"`)
 			} else {
 				assert.NotContains(t, msg, "DROP INDEX")
 			}
+			if tt.wantsRecovery {
+				assert.Contains(t, msg, "RebuildAbandonedIndex")
+			} else {
+				assert.NotContains(t, msg, "RebuildAbandonedIndex")
+			}
+			assert.Equal(t, tt.wantsRecovery, e.Recoverable(), "the advice and Recoverable must agree")
+		})
+	}
+}
+
+// TestClassifyInvalidIndexOrdersByProofStrength pins the classifier's
+// order: a visible builder outranks the table check, the table check
+// outranks visibility, and only a fully observable silence on the target
+// table is called abandoned.
+func TestClassifyInvalidIndexOrdersByProofStrength(t *testing.T) {
+	target := indexTarget{tableOID: 100, schema: "s"}
+	observable := builderFacts{tracking: true}
+	tests := []struct {
+		name     string
+		existing invalidIndex
+		want     error
+		wantPID  uint32
+	}{
+		{
+			name:     "visible builder on the target table is in flight",
+			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", builder: builderFacts{pid: 42, tracking: true}},
+			want:     ErrInvalidIndexBuildInFlight,
+			wantPID:  42,
+		},
+		{
+			name:     "visible builder on another table is still in flight",
+			existing: invalidIndex{oid: 1, tableOID: 200, table: "u", builder: builderFacts{pid: 42, hiddenRows: 3}},
+			want:     ErrInvalidIndexBuildInFlight,
+			wantPID:  42,
+		},
+		{
+			name:     "another table's entry is refused before visibility is consulted",
+			existing: invalidIndex{oid: 1, tableOID: 200, table: "u", builder: builderFacts{hiddenRows: 1}},
+			want:     ErrInvalidIndexOnOtherTable,
+		},
+		{
+			name:     "a hidden command makes the silence unobservable",
+			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", builder: builderFacts{hiddenRows: 1, tracking: true}},
+			want:     ErrInvalidIndexBuilderUnobservable,
+		},
+		{
+			name:     "activity tracking off makes the silence unobservable",
+			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", builder: builderFacts{tracking: false}},
+			want:     ErrInvalidIndexBuilderUnobservable,
+		},
+		{
+			name:     "observable silence on the target table is abandoned",
+			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", builder: observable},
+			want:     ErrAbandonedInvalidIndex,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := classifyInvalidIndex(tt.existing, target, "i")
+			require.ErrorIs(t, e, tt.want)
+			assert.Equal(t, "s", e.Schema)
+			assert.Equal(t, "i", e.Index)
+			assert.Equal(t, tt.existing.table, e.Table)
+			assert.Equal(t, tt.wantPID, e.BuilderPID)
 		})
 	}
 }

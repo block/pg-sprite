@@ -30,9 +30,23 @@ const (
 	// remains and is proven this run's leftover; the recovery runbook
 	// applies.
 	CodeInvalidIndexOwnLeftover Code = "invalid-index-own-leftover"
-	// CodeInvalidIndexPreexisting: an invalid index under the requested
-	// name predates this run; it may be another actor's build in progress.
-	CodeInvalidIndexPreexisting Code = "invalid-index-preexisting"
+	// CodeInvalidIndexBuildInFlight: the invalid index under the requested
+	// name is another backend's concurrent build still in progress; wait.
+	CodeInvalidIndexBuildInFlight Code = "invalid-index-build-in-flight"
+	// CodeInvalidIndexAbandoned: an abandoned invalid index under the
+	// requested name sits on the target table with no builder;
+	// RebuildAbandonedIndex recovers it.
+	CodeInvalidIndexAbandoned Code = "invalid-index-abandoned"
+	// CodeInvalidIndexOtherTable: an invalid index under the requested name
+	// sits on a different table in the target schema; this change refuses
+	// and does not remove it.
+	CodeInvalidIndexOtherTable Code = "invalid-index-other-table"
+	// CodeInvalidIndexBuilderUnobservable: an invalid index under the
+	// requested name sits on the target table and this role cannot observe
+	// whether a backend is building it; RebuildAbandonedIndex proves the
+	// state under the table lock, or a role with pg_read_all_stats can
+	// classify it.
+	CodeInvalidIndexBuilderUnobservable Code = "invalid-index-builder-unobservable"
 	// CodeInvalidIndexUnproven: an invalid index may remain but the
 	// catalog state could not be proven; an operator must inspect.
 	CodeInvalidIndexUnproven Code = "invalid-index-unproven"
@@ -95,7 +109,10 @@ func Codes() []Code {
 		CodeBudgetStatementExceeded,
 		CodeCancelledExternally,
 		CodeInvalidIndexOwnLeftover,
-		CodeInvalidIndexPreexisting,
+		CodeInvalidIndexBuildInFlight,
+		CodeInvalidIndexAbandoned,
+		CodeInvalidIndexOtherTable,
+		CodeInvalidIndexBuilderUnobservable,
 		CodeInvalidIndexUnproven,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
@@ -196,13 +213,20 @@ func (e *BudgetError) Code() Code {
 
 // Code returns the invalid-index outcome's stable code, derived from the
 // same cleanup state the error's rendering distinguishes: proven own
-// leftover, proven preexisting, or unproven.
+// leftover, another backend's build in flight, abandoned on the target
+// table, on another table, builder unobservable, or unproven.
 func (e *InvalidIndexError) Code() Code {
 	switch {
 	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):
 		return CodeInvalidIndexOwnLeftover
-	case errors.Is(e.Cleanup, ErrPreexistingInvalidIndex):
-		return CodeInvalidIndexPreexisting
+	case errors.Is(e.Cleanup, ErrInvalidIndexBuildInFlight):
+		return CodeInvalidIndexBuildInFlight
+	case errors.Is(e.Cleanup, ErrAbandonedInvalidIndex):
+		return CodeInvalidIndexAbandoned
+	case errors.Is(e.Cleanup, ErrInvalidIndexOnOtherTable):
+		return CodeInvalidIndexOtherTable
+	case errors.Is(e.Cleanup, ErrInvalidIndexBuilderUnobservable):
+		return CodeInvalidIndexBuilderUnobservable
 	default:
 		return CodeInvalidIndexUnproven
 	}
