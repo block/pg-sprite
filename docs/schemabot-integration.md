@@ -115,12 +115,29 @@ implementation time):
   SchemaBot's declarative roots are directories of many tables: the adapter loops `Plan` per
   table and merges into one `PlanResult`. One pool serves the whole fan-out (`Plan` does not
   close it), but each table costs one scratch transaction per plan, and cross-table ordering
-  is the adapter's responsibility. So is the set of tables: a live table with no desired file
-  is invisible to a per-table diff, and under a declarative model its only convergence is
-  `DROP TABLE` — which pg-sprite refuses at both front doors and never executes. The adapter
-  owning the whole schema enumerates the live tables itself and surfaces each undeclared one
-  as a blocked destructive verdict, so the divergence shows on the plan and the apply is
-  refused rather than the table lingering unreported.
+  is the adapter's responsibility.
+- **So is the set of tables.** A live table with no desired file is invisible to a per-table
+  diff, and under a declarative model its only convergence is `DROP TABLE` — which pg-sprite
+  refuses at both front doors and never executes. There is no `verdict.Verdict` to map: pg-sprite
+  never saw the table. The adapter enumerates the namespace's live tables itself (the catalog
+  query and its exclusions — partitions, `INHERITS` children, extension-owned tables — are
+  under [Deliberately operator-owned](capabilities.md#deliberately-operator-owned)) and
+  *synthesizes* an `engine.TableChange` per undeclared table: `ExecutionMode =
+  ExecutionModeBlocked`, `IsUnsafe` with a data-loss `UnsafeReason`, and a `ModeReason` that
+  names the table and the two remedies (restore or write its file; drop it through a reviewed
+  process). The row's `DDL` may carry the canonical `DROP TABLE <ns>.<table>` so the operator
+  sees what convergence would mean — the row is blocked, and pg-sprite neither emitted nor
+  will run that text. `verdict.ReasonDestructiveChange` is not reused for it: that reason is
+  scoped to a plan pg-sprite produced. The point of the synthesized row is the fail-closed
+  direction — the divergence shows on the plan and the apply is refused rather than the table
+  lingering unreported. This is a deliberate divergence from SchemaBot's MySQL path, which
+  plans the drop and, behind its unsafe acknowledgment, quarantines the table through
+  pending drops instead of blocking: PostgreSQL gets the block because pg-sprite offers no
+  whole-schema convergence and the drop is outside its statement set, so the orchestrator
+  holds the only view of the table set. A PostgreSQL quarantine (`ALTER TABLE … SET SCHEMA`)
+  would be the orchestrator's mechanism to add, not an engine gap. Onboarding follows from
+  the rule: an existing database is entirely undeclared tables, so the adapter declares them
+  first (`pull` — one desired file per table) or scopes which namespaces it owns.
 - **Store the whole `plan.Report`, not just its statements.** Engine-specific fields
   (`ServerVersion`, `Fingerprint`, `TableExists`, `Disposition`) ride in
   `SchemaChange.Metadata`. `plan.Fingerprint` is deterministic across front doors, so it is

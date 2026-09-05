@@ -134,11 +134,12 @@ the canonical example.
 
 ## Support matrix
 
-**52 operations: 17 supported today, 19 planned behind a typed refusal, 14 out of scope
+**53 operations: 17 supported today, 20 planned behind a typed refusal, 14 out of scope
 by design, and 2 with no online mechanism in PostgreSQL to build on.**
 
 Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today) ·
-⚪ T3 (out of scope; **no online-safety problem** — run directly) ·
+⚪ T3 (out of scope; **no online-safety problem** — run directly, or through whatever
+review the object warrants) ·
 🔵 T3 (out of scope; **a different tool class owns it**) ·
 ❌ T3 (out of scope; **no online mechanism exists** in PostgreSQL).
 
@@ -222,7 +223,7 @@ Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today
 
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| `DROP TABLE` | ⚪ | — | No — owner tooling, through a reviewed process | Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it — the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. An orchestrator that owns a whole schema is expected to surface such a table as a blocked destructive verdict and leave the drop to a reviewed process (see [schemabot-integration.md](schemabot-integration.md#the-proposed-schemabot-side-contract)); pg-sprite never plans or executes it |
+| `DROP TABLE` | ⚪ | — | No — owner tooling, through a reviewed process | Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it — the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. pg-sprite never plans or executes it; accounting for undeclared tables is the whole-schema owner's job, described under [Deliberately operator-owned](#deliberately-operator-owned) |
 | Data backfills, `UPDATE`/`DELETE` batches, DML of any kind | 🔵 | — | No — data-change runners, application batch jobs | pg-sprite changes table *shape*, never table *contents*. Versioned-script runners and application jobs own data changes |
 | Column-transform expressions during a copy-and-swap rewrite | 🟡 | copy-and-swap | Yes | The one principled exception: when a rewrite is already copying every row, deriving a new column's value by expression is part of the shape change, not a data job. Planned as part of the copy engine |
 | Online table rebuild with no shape change (bloat reclamation) | 🟡 | copy-and-swap | Yes | A copy-and-swap with an identical target shape — the pg_repack use case with checksum-gated cutover and crash-resume. Planned once the copy engine lands |
@@ -289,8 +290,46 @@ never eligible — only changes the engine understands but cannot run *safely*.
 
 ## Deliberately operator-owned
 
-Two related jobs stay with humans on purpose:
+Three related jobs stay with humans on purpose:
 
+- **Dropping a table nobody declares any more.** The declarative diff is single-table
+  scoped and whole-schema convergence is a planner's job (see the 🔵 row in the matrix), so
+  pg-sprite has no view of *which* tables a schema should contain — only of each table's
+  shape. Under a declarative model the only convergence for a live table with no desired
+  file is `DROP TABLE`, and pg-sprite never plans or executes one. Whoever owns the whole
+  schema — an orchestrator, or an operator running `diff` per file — therefore owns the
+  set of tables: decide how far the declared files are authoritative, enumerate the live
+  tables, and treat each undeclared one as a destructive divergence to resolve rather than
+  as up to date. Declare it (`pull` or `export` writes the desired file) or drop it through
+  a reviewed process; whether the owner blocks on it or quarantines it first (`ALTER TABLE …
+  SET SCHEMA` / `RENAME TO`) is the owner's policy, not pg-sprite's. A schema being
+  onboarded is entirely undeclared tables, so declare the existing tables first (`pull`
+  writes one desired file per table), or scope the owner's authority to the schemas it
+  manages. The enumeration is a catalog query the owner runs itself — the listing `pull`
+  baselines a schema from, with `INHERITS` children also excluded because export refuses
+  them anyway. The exclusions matter, because every false positive blocks a table nobody
+  touched:
+
+  ```sql
+  SELECT c.relname
+  FROM pg_catalog.pg_class c
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'app'
+    AND c.relkind IN ('r', 'p')                      -- ordinary and partitioned tables only
+    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i
+                    WHERE i.inhrelid = c.oid)         -- partitions and INHERITS children belong to their parent
+    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
+                    WHERE d.classid = 'pg_catalog.pg_class'::regclass
+                      AND d.objid = c.oid
+                      AND d.deptype = 'e')            -- extension-owned tables have no file to write
+  ORDER BY c.relname;
+  ```
+
+  Qualify the catalog with `pg_catalog.` so a user-first `search_path` cannot shadow it
+  into an empty — passing — result. Views, materialized views, foreign tables, and
+  sequences are outside the model and are not undeclared tables. The planner's scratch
+  objects live in a schema of their own (`pgsprite_scratch_<random>`) inside a transaction
+  that is always rolled back, so a listing scoped to the owner's schema never sees them.
 - **Invalid-index recovery.** A failed `CREATE INDEX CONCURRENTLY` leaves an invalid
   index; an in-flight healthy build looks identical. The executor proves what it can and
   **never drops an index itself** — PostgreSQL drops by name, not identity, so an
