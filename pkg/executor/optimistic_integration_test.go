@@ -31,11 +31,14 @@ func newPool(t *testing.T) (*pgxpool.Pool, string) {
 	return pool, testutil.NewSchema(t, pool)
 }
 
-func mustPreflight(t *testing.T, pool *pgxpool.Pool, schema, table string) preflight.PreflightedTable {
+// mustPreflight mints the two proofs every mutating executor entry point
+// requires: the preflight proof for the table (ST-6) and its change lock
+// (LK-1). The lock is released when the test ends.
+func mustPreflight(t *testing.T, pool *pgxpool.Pool, schema, table string) (preflight.PreflightedTable, *dbconn.TableLock) {
 	t.Helper()
 	pt, err := preflight.CheckTable(t.Context(), pool, schema, table, 1<<30)
 	require.NoError(t, err)
-	return pt
+	return pt, testutil.TableLock(t, pool, schema, table)
 }
 
 func mustParse(t *testing.T, sql string) statement.Statement {
@@ -60,10 +63,10 @@ func TestExecuteNativeCommitsInstantChange(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int NOT NULL DEFAULT 0", schema))
-	require.NoError(t, executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy()))
+	require.NoError(t, executor.ExecuteNative(t.Context(), pool, pt, lock, st, budget, executor.DefaultRetryPolicy()))
 
 	assert.Equal(t, "integer", columnType(t, pool, schema, "t", "age"), "the committed change must be visible")
 }
@@ -79,7 +82,7 @@ func TestExecuteNativeResolvesTypesInTargetSchema(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	// The type lives in the target schema and, under the same name, in
 	// public too — resolution must pick the target schema's copy.
@@ -97,7 +100,7 @@ func TestExecuteNativeResolvesTypesInTargetSchema(t *testing.T) {
 	})
 
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN m %s", schema, typeName))
-	require.NoError(t, executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy()))
+	require.NoError(t, executor.ExecuteNative(t.Context(), pool, pt, lock, st, budget, executor.DefaultRetryPolicy()))
 
 	var udtSchema string
 	require.NoError(t, pool.QueryRow(t.Context(),
@@ -112,7 +115,7 @@ func TestExecuteNativeCancelsWhenLockBlocked(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	// A second session holds ACCESS EXCLUSIVE for the whole test, so the
 	// attempt can never be granted its lock.
@@ -125,7 +128,7 @@ func TestExecuteNativeCancelsWhenLockBlocked(t *testing.T) {
 	require.NoError(t, err)
 
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
-	err = executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy())
+	err = executor.ExecuteNative(t.Context(), pool, pt, lock, st, budget, executor.DefaultRetryPolicy())
 
 	var budgetErr *executor.BudgetError
 	require.ErrorAs(t, err, &budgetErr)
@@ -144,12 +147,12 @@ func TestExecuteNativeCancelsRewriteAndLeavesTableUnchanged(t *testing.T) {
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(
 		"INSERT INTO %s.t SELECT g, repeat('x', 100) FROM generate_series(1, 300000) g", schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	// int -> bigint forces a full table rewrite under ACCESS EXCLUSIVE.
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
 	tight := executor.Budget{LockTimeout: budget.LockTimeout, StatementTimeout: 50 * time.Millisecond}
-	err = executor.ExecuteNative(t.Context(), pool, pt, st, tight, executor.DefaultRetryPolicy())
+	err = executor.ExecuteNative(t.Context(), pool, pt, lock, st, tight, executor.DefaultRetryPolicy())
 
 	var budgetErr *executor.BudgetError
 	require.ErrorAs(t, err, &budgetErr)
@@ -167,12 +170,12 @@ func TestExecuteNativeSurfacesOperationalErrors(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	// Dropping a column that does not exist is a plain SQL error, not a
 	// budget overrun.
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN nope", schema))
-	err = executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy())
+	err = executor.ExecuteNative(t.Context(), pool, pt, lock, st, budget, executor.DefaultRetryPolicy())
 	require.Error(t, err)
 	var budgetErr *executor.BudgetError
 	assert.NotErrorAs(t, err, &budgetErr)
@@ -182,12 +185,12 @@ func TestExecuteNativeWithProgressCommitsAndFinishes(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 	tracker, err := progress.NewTracker(progress.WallClock{})
 	require.NoError(t, err)
 
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int NOT NULL DEFAULT 0", schema))
-	require.NoError(t, executor.ExecuteNativeWithProgress(t.Context(), pool, pt, st, budget,
+	require.NoError(t, executor.ExecuteNativeWithProgress(t.Context(), pool, pt, lock, st, budget,
 		executor.DefaultRetryPolicy(), tracker))
 
 	assert.Equal(t, "integer", columnType(t, pool, schema, "t", "age"), "the committed change must be visible")
@@ -207,7 +210,7 @@ func TestExecuteNativeWithProgressReportsRetriesAndFailure(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 	tracker, err := progress.NewTracker(progress.WallClock{})
 	require.NoError(t, err)
 
@@ -227,7 +230,7 @@ func TestExecuteNativeWithProgressReportsRetriesAndFailure(t *testing.T) {
 	done := make(chan error, 1)
 	var workers sync.WaitGroup
 	workers.Go(func() {
-		done <- executor.ExecuteNativeWithProgress(t.Context(), pool, pt, st, tight, retry, tracker)
+		done <- executor.ExecuteNativeWithProgress(t.Context(), pool, pt, lock, st, tight, retry, tracker)
 	})
 	t.Cleanup(workers.Wait)
 
@@ -259,7 +262,7 @@ func TestExecuteNativeRejectsUnboundedBudgets(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int", schema))
 	unbounded := map[string]executor.Budget{
@@ -270,7 +273,7 @@ func TestExecuteNativeRejectsUnboundedBudgets(t *testing.T) {
 	}
 	for name, b := range unbounded {
 		t.Run(name, func(t *testing.T) {
-			require.Error(t, executor.ExecuteNative(t.Context(), pool, pt, st, b, executor.DefaultRetryPolicy()))
+			require.Error(t, executor.ExecuteNative(t.Context(), pool, pt, lock, st, b, executor.DefaultRetryPolicy()))
 		})
 	}
 
@@ -284,7 +287,7 @@ func TestExecuteNativeRejectsUnboundedBudgets(t *testing.T) {
 	})
 	_, err = blocker.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.t IN ACCESS EXCLUSIVE MODE", schema))
 	require.NoError(t, err)
-	err = executor.ExecuteNative(t.Context(), pool, pt, st, executor.Budget{LockTimeout: time.Millisecond, StatementTimeout: time.Second}, executor.DefaultRetryPolicy())
+	err = executor.ExecuteNative(t.Context(), pool, pt, lock, st, executor.Budget{LockTimeout: time.Millisecond, StatementTimeout: time.Second}, executor.DefaultRetryPolicy())
 	var budgetErr *executor.BudgetError
 	require.ErrorAs(t, err, &budgetErr)
 	assert.Equal(t, executor.CauseLock, budgetErr.Cause)
@@ -301,11 +304,11 @@ func TestExecuteNativeRefusesTargetMismatch(t *testing.T) {
 		_, err := pool.Exec(t.Context(), ddl)
 		require.NoError(t, err)
 	}
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	t.Run("statement targets a different table", func(t *testing.T) {
 		st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.victim ADD COLUMN a int", schema))
-		err := executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy())
+		err := executor.ExecuteNative(t.Context(), pool, pt, lock, st, budget, executor.DefaultRetryPolicy())
 		require.ErrorIs(t, err, executor.ErrInvariantViolation)
 
 		var n int
@@ -319,13 +322,13 @@ func TestExecuteNativeRefusesTargetMismatch(t *testing.T) {
 		// Fail-closed: the proof verified schema.t, the statement names a
 		// bare t that search_path could resolve elsewhere.
 		st := mustParse(t, "ALTER TABLE t ADD COLUMN a int")
-		err := executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy())
+		err := executor.ExecuteNative(t.Context(), pool, pt, lock, st, budget, executor.DefaultRetryPolicy())
 		require.ErrorIs(t, err, executor.ErrInvariantViolation)
 	})
 
 	t.Run("statement without a table target", func(t *testing.T) {
 		st := mustParse(t, "CREATE TABLE elsewhere (id int)")
-		err := executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy())
+		err := executor.ExecuteNative(t.Context(), pool, pt, lock, st, budget, executor.DefaultRetryPolicy())
 		require.ErrorIs(t, err, executor.ErrInvariantViolation)
 	})
 }

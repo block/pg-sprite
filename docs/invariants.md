@@ -115,21 +115,34 @@ requirement, rewritten for our parser); carried in the repo's [AGENTS.md](../AGE
 
 ## Locking and concurrency (LK)
 
-### LK-1 — At most one migration runs per table
+### LK-1 — At most one schema change runs per table
 
-Migrations serialize per table via a **session-scoped advisory lock** (`pg_advisory_lock` on a
-key derived from database + table — the analog of Spirit's `GET_LOCK` `MetadataLock`), with
-Spirit's hard-won connection rules carried over:
+Schema changes serialize per table via a **session-scoped advisory lock** (`pg_advisory_lock` on
+a key derived from database + schema + table — the analog of Spirit's `GET_LOCK` `MetadataLock`),
+with Spirit's hard-won connection rules carried over:
 
 - The lock is held on a **dedicated pool of exactly one connection**, exempt from client-side
   connection recycling (a recycled connection silently releases a session lock — a window in
-  which a second instance could start a concurrent migration on the same table).
-- A **keepalive** re-acquires on an interval strictly shorter than any server/idle timeout that
-  could kill the session; if the keepalive fails, the connection is torn down and re-established.
-- **Losing the lock is fail-closed:** if the lock cannot be confirmed held, the migration aborts
-  rather than continuing unprotected.
+  which a second instance could start a concurrent change on the same table). The exemption is
+  structural: the connection stays checked out for the lock's whole lifetime, and pgxpool
+  enforces lifetime and idle limits only at acquire time and on idle sweeps.
+- A **keepalive** re-confirms on an interval strictly shorter than any server/idle timeout that
+  could kill the session, and confirms against `pg_locks` rather than the client's memory of
+  having taken the lock.
+- **Losing the lock is fail-closed:** the context every mutating operation runs under is
+  cancelled the moment the lock stops being held, and an operation that asks for a guard after
+  that point is refused rather than run unprotected.
+- The lock is **exclusion only where the client keeps one server session**, which is not true
+  behind a transaction-mode pooler: the backend is returned at the end of the statement that took
+  the lock, so a second client connection reaching that backend re-enters the same lock while the
+  first still believes it holds it — mutual exclusion is gone with no error raised anywhere.
+  Acquisition therefore *proves* session affinity before returning a lock, by taking a probe lock
+  and forcing the connection onto a different backend, and refuses when the proof fails.
 
-*Planned enforcement:* `pkg/dbconn` lock type, verified before any write and monitored throughout.
+*Enforced:* `dbconn.AcquireTableLock` mints the `TableLock` proof (`pkg/dbconn/tablelock.go`,
+affinity proof in `pkg/dbconn/affinity.go`); it is a required parameter of every mutating executor
+entry point, re-verified there before any write (`pkg/executor/tablelock.go`); the front doors
+take it and turn contention into the `table-locked` refusal (`pkg/migrate/tablelock.go`).
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 

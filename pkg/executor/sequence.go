@@ -32,6 +32,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -228,19 +229,19 @@ type sequenceStep struct {
 // still individually bounded by the brief budgets. retry bounds
 // lock_timeout retries on each owner-gated step, exactly as in
 // ExecuteNative.
-func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy) (SequenceReport, error) {
-	return runSequence(ctx, pool, pt, steps, b, retry, nil)
+func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, lock *dbconn.TableLock, steps []string, b SequenceBudget, retry RetryPolicy) (SequenceReport, error) {
+	return runSequence(ctx, pool, pt, lock, steps, b, retry, nil)
 }
 
 // RunSequenceWithProgress runs a sequence while updating tracker with the
 // current step and its execution class. The caller may poll concurrently.
-func RunSequenceWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, tracker *progress.Tracker) (rep SequenceReport, err error) {
+func RunSequenceWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, lock *dbconn.TableLock, steps []string, b SequenceBudget, retry RetryPolicy, tracker *progress.Tracker) (rep SequenceReport, err error) {
 	if tracker == nil {
 		return rep, fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
 	}
 	tracker.Start(len(steps), progress.OperationAdmitting)
 	defer func() { tracker.Finish(err) }()
-	return runSequence(ctx, pool, pt, steps, b, retry, tracker)
+	return runSequence(ctx, pool, pt, lock, steps, b, retry, tracker)
 }
 
 // elapsedSince reports the time since start on the tracker's injected clock
@@ -254,7 +255,7 @@ func elapsedSince(tracker *progress.Tracker, start time.Time) time.Duration {
 	return time.Since(start)
 }
 
-func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, tracker *progress.Tracker) (SequenceReport, error) {
+func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, lock *dbconn.TableLock, steps []string, b SequenceBudget, retry RetryPolicy, tracker *progress.Tracker) (SequenceReport, error) {
 	var rep SequenceReport
 	if err := b.validate(); err != nil {
 		return rep, err
@@ -270,6 +271,11 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 	if err != nil {
 		return rep, err
 	}
+	ctx, cancel, err := guardTableLockFor(ctx, lock, pt.Schema(), pt.Table())
+	if err != nil {
+		return rep, err
+	}
+	defer cancel()
 	partitioned, serverMajor, err := sequenceTargetFacts(ctx, pool, pt.Schema(), pt.Table())
 	if err != nil {
 		return rep, err
@@ -300,19 +306,19 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 		var indexReport *IndexBuildReport
 		switch step.kind {
 		case StepConcurrentIndexBuild:
-			r, buildErr := buildIndexConcurrently(ctx, pool, step.st.SQL(), b.Concurrent, tracker)
+			r, buildErr := buildIndexConcurrently(ctx, pool, lock, step.st.SQL(), b.Concurrent, tracker)
 			err = buildErr
 			if buildErr == nil {
 				indexReport = &r
 			}
 		case StepValidateConstraint:
-			err = executeNative(ctx, pool, pt, step.st, Budget{
+			err = executeNative(ctx, pool, pt, lock, step.st, Budget{
 				LockTimeout:      b.Validate.LockTimeout,
 				StatementTimeout: b.Validate.Overall,
 			}, retry, tracker)
 			err = corroborateValidateCancel(err, b.Validate, elapsedSince(tracker, start))
 		case StepBrief:
-			err = executeNative(ctx, pool, pt, step.st, b.Brief, retry, tracker)
+			err = executeNative(ctx, pool, pt, lock, step.st, b.Brief, retry, tracker)
 		default:
 			// Admission produces only the three kinds above; an unknown
 			// kind here is a programming error and aborts fail-closed.

@@ -29,6 +29,7 @@ type createFixture struct {
 	schema string
 	at     preflight.AbsentTarget
 	cr     preflight.CreationRole
+	lock   *dbconn.TableLock
 }
 
 func newCreateFixture(t *testing.T, table string) createFixture {
@@ -42,7 +43,8 @@ func newCreateFixture(t *testing.T, table string) createFixture {
 	require.NoError(t, err)
 	cr, err := preflight.CheckCreatePrivileges(t.Context(), pool, schema)
 	require.NoError(t, err)
-	return createFixture{pool: pool, schema: schema, at: at, cr: cr}
+	return createFixture{pool: pool, schema: schema, at: at, cr: cr,
+		lock: testutil.TableLock(t, pool, schema, table)}
 }
 
 func desired(t *testing.T, sql string) statement.DesiredSchema {
@@ -91,7 +93,7 @@ func TestExecuteCreateRunsTableAndIndexes(t *testing.T) {
 		CREATE UNIQUE INDEX t_id_name_idx ON t (id, name);
 	`)
 
-	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 
 	assert.Equal(t, "r", relationKind(t, f.pool, f.schema, "t"))
@@ -116,7 +118,7 @@ func TestExecuteCreateOrdersTableBeforeIndexes(t *testing.T) {
 		CREATE TABLE t (id int, name text);
 	`)
 
-	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 
 	require.Len(t, rep.Steps, 2)
@@ -161,7 +163,7 @@ func TestExecuteCreateWithProgressReportsQualifiedStepStatementsInOrder(t *testi
 	results := make(chan result, 1)
 	var workers sync.WaitGroup
 	workers.Go(func() {
-		rep, executeErr := executor.ExecuteCreateWithProgress(t.Context(), f.pool, f.at, f.cr, ds,
+		rep, executeErr := executor.ExecuteCreateWithProgress(t.Context(), f.pool, f.at, f.cr, f.lock, ds,
 			createBudget, executor.DefaultRetryPolicy(), tracker)
 		results <- result{rep: rep, err: executeErr}
 	})
@@ -198,7 +200,7 @@ func TestExecuteCreateReportsCollisionAsTyped(t *testing.T) {
 	require.NoError(t, err)
 
 	ds := desired(t, "CREATE TABLE t (id int)")
-	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.Error(t, err)
 
 	var stepErr *executor.SequenceStepError
@@ -220,7 +222,7 @@ func TestExecuteCreateRefusesOccupiedImplicitIndexNameBeforeExecution(t *testing
 	require.NoError(t, err)
 
 	ds := desired(t, "CREATE TABLE t (id int PRIMARY KEY, v text)")
-	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrCreateCollision)
 	assert.Empty(t, rep.Steps)
 	assert.False(t, relationExists(t, f.pool, f.schema, "t"), "the catalog preflight runs before every step")
@@ -243,7 +245,7 @@ func TestExecuteCreateRefusesOccupiedImplicitSequenceNameBeforeExecution(t *test
 			_, err := f.pool.Exec(t.Context(), fmt.Sprintf("CREATE SEQUENCE %s.t_id_seq", f.schema))
 			require.NoError(t, err)
 
-			rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, desired(t, tt.sql), createBudget, executor.DefaultRetryPolicy())
+			rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, desired(t, tt.sql), createBudget, executor.DefaultRetryPolicy())
 			require.ErrorIs(t, err, executor.ErrCreateCollision)
 			assert.Empty(t, rep.Steps)
 			assert.False(t, relationExists(t, f.pool, f.schema, "t"), "the catalog preflight runs before every step")
@@ -261,7 +263,7 @@ func TestExecuteCreateProbeFailureIsNotACollision(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	rep, err := executor.ExecuteCreate(ctx, f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.ExecuteCreate(ctx, f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, context.Canceled)
 	assert.NotErrorIs(t, err, executor.ErrCreateCollision)
 	var stepErr *executor.SequenceStepError
@@ -283,7 +285,7 @@ func TestExecuteCreateFailedStepKeepsCommittedPrefix(t *testing.T) {
 		CREATE INDEX t_missing_idx ON t (missing);
 	`)
 
-	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.Error(t, err)
 
 	var stepErr *executor.SequenceStepError
@@ -329,7 +331,7 @@ func TestExecuteCreateRefusesDuplicateNamesAtAdmission(t *testing.T) {
 			f := newCreateFixture(t, "t")
 			ds := desired(t, tt.sql)
 
-			_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+			_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 			require.ErrorIs(t, err, executor.ErrDuplicateCreateName)
 			assert.Equal(t, executor.CodeDuplicateCreateName, executor.OutcomeCode(err))
 			assert.False(t, relationExists(t, f.pool, f.schema, "t"),
@@ -347,7 +349,7 @@ func TestExecuteCreateReportsTypeCollisionAsTyped(t *testing.T) {
 	require.NoError(t, err)
 
 	ds := desired(t, "CREATE TABLE t (id int)")
-	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrCreateCollision)
 	assert.Equal(t, executor.CodeCreateCollision, executor.OutcomeCode(err))
 }
@@ -392,7 +394,7 @@ func TestExecuteCreateAdmissionRefusals(t *testing.T) {
 			f := newCreateFixture(t, "t")
 			ds := desired(t, tt.sql)
 
-			_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+			_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 			require.ErrorIs(t, err, tt.wantErr)
 			assert.False(t, relationExists(t, f.pool, f.schema, "t"),
 				"admission covers the whole set before the first step executes")
@@ -407,7 +409,7 @@ func TestExecuteCreateRefusesPartitionOf(t *testing.T) {
 	require.NoError(t, err)
 
 	ds := desired(t, "CREATE TABLE t_part PARTITION OF parent FOR VALUES FROM (1) TO (10)")
-	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrPartitionOfUnsupported)
 	assert.Equal(t, executor.CodePartitionOfUnsupported, executor.OutcomeCode(err))
 }
@@ -418,7 +420,7 @@ func TestExecuteCreateRefusesProofTargetMismatch(t *testing.T) {
 	f := newCreateFixture(t, "other")
 	ds := desired(t, "CREATE TABLE t (id int)")
 
-	_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 	assert.False(t, relationExists(t, f.pool, f.schema, "t"))
 }
@@ -448,7 +450,7 @@ func TestExecuteCreateResolvesTypesInTargetSchema(t *testing.T) {
 	})
 
 	ds := desired(t, fmt.Sprintf("CREATE TABLE t (id int, m %s)", typeName))
-	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 
 	var udtSchema string
@@ -490,7 +492,7 @@ func TestExecuteCreateRefusesImplicitIndexNameCollision(t *testing.T) {
 			f := newCreateFixture(t, "t")
 			ds := desired(t, tt.sql)
 
-			_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+			_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 			require.ErrorIs(t, err, executor.ErrDuplicateCreateName)
 			assert.Equal(t, executor.CodeDuplicateCreateName, executor.OutcomeCode(err))
 			assert.False(t, relationExists(t, f.pool, f.schema, "t"),
@@ -506,7 +508,7 @@ func TestExecuteCreateRefusesZeroCreationRole(t *testing.T) {
 	f := newCreateFixture(t, "t")
 	ds := desired(t, "CREATE TABLE t (id int)")
 
-	_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, preflight.CreationRole{}, ds, createBudget, executor.DefaultRetryPolicy())
+	_, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, preflight.CreationRole{}, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 	assert.False(t, relationExists(t, f.pool, f.schema, "t"))
 }
@@ -521,7 +523,7 @@ func TestExecuteCreateRefusesCreationRoleSchemaMismatch(t *testing.T) {
 	require.NoError(t, err)
 
 	ds := desired(t, "CREATE TABLE t (id int)")
-	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, otherCR, ds, createBudget, executor.DefaultRetryPolicy())
+	_, err = executor.ExecuteCreate(t.Context(), f.pool, f.at, otherCR, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 	assert.False(t, relationExists(t, f.pool, f.schema, "t"))
 }
@@ -537,7 +539,7 @@ func TestExecuteCreateAllowsMultipleUnnamedIndexes(t *testing.T) {
 		CREATE INDEX ON t (b);
 	`)
 
-	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, f.lock, ds, createBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 	require.Len(t, rep.Steps, 3)
 

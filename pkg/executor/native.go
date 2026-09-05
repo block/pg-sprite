@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
 )
@@ -255,9 +256,9 @@ func (e *InvalidIndexError) Unwrap() []error {
 // (ErrPoolTooSmall), and both acquisitions are bounded by ctx. It never
 // drops an index: PostgreSQL drops by name, not identity, so no automatic drop can
 // prove it is destroying this build's own debris rather than another
-// actor's same-name index registered in the same window (the engine's
-// one-migration-per-table lease — planned invariant LK-1 — would close
-// that; once it exists this API should demand its proof). Every invalid
+// actor's same-name index registered in the same window. The table lock
+// this API demands (LK-1) excludes other pg-sprite instances, not every
+// actor, so it narrows that window without closing it. Every invalid
 // index is instead surfaced as a typed, fail-closed outcome carrying
 // state-specific operator guidance (see docs/invalid-index-recovery.md):
 //
@@ -287,23 +288,23 @@ func (e *InvalidIndexError) Unwrap() []error {
 // guard exists because a blocking attempt holds ACCESS EXCLUSIVE for its
 // whole budget, while a concurrent build takes only SHARE UPDATE EXCLUSIVE —
 // long builds on large tables are its purpose.
-func BuildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget) (IndexBuildReport, error) {
-	return buildIndexConcurrently(ctx, pool, sql, b, nil)
+func BuildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock, sql string, b ConcurrentBudget) (IndexBuildReport, error) {
+	return buildIndexConcurrently(ctx, pool, lock, sql, b, nil)
 }
 
 // BuildIndexConcurrentlyWithProgress runs a concurrent build while updating
 // tracker. The caller may poll tracker concurrently with this blocking call.
-func BuildIndexConcurrentlyWithProgress(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget, tracker *progress.Tracker) (rep IndexBuildReport, err error) {
+func BuildIndexConcurrentlyWithProgress(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock, sql string, b ConcurrentBudget, tracker *progress.Tracker) (rep IndexBuildReport, err error) {
 	if tracker == nil {
 		return rep, fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
 	}
 	tracker.Start(1, progress.OperationConcurrentIndex)
 	tracker.StartStep(1, progress.OperationConcurrentIndex, sql)
 	defer func() { tracker.Finish(err) }()
-	return buildIndexConcurrently(ctx, pool, sql, b, tracker)
+	return buildIndexConcurrently(ctx, pool, lock, sql, b, tracker)
 }
 
-func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget, tracker *progress.Tracker) (IndexBuildReport, error) {
+func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock, sql string, b ConcurrentBudget, tracker *progress.Tracker) (IndexBuildReport, error) {
 	var rep IndexBuildReport
 	if err := b.validate(); err != nil {
 		return rep, err
@@ -323,6 +324,16 @@ func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	if pool.Config().MaxConns < 2 {
 		return rep, ErrPoolTooSmall
 	}
+	// Everything decidable without the database has refused by now. A build
+	// is the longest-running write the engine issues, so the lock is
+	// confirmed here too rather than only where a sequence admitted its
+	// steps, and the guarded context is what stops the build if the lock
+	// goes while it runs.
+	ctx, cancel, err := guardTableLock(ctx, lock)
+	if err != nil {
+		return rep, err
+	}
+	defer cancel()
 
 	// One session carries resolution, the pre-build inspection, and the
 	// build itself, so the names the statement will resolve (search_path,

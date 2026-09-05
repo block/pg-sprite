@@ -35,6 +35,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -109,22 +110,22 @@ const (
 // check then refuses with preflight.ErrRelationExists, and the caller
 // re-diffs the live catalog to apply the remainder. retry bounds
 // lock_timeout retries on each step, exactly as in ExecuteNative.
-func ExecuteCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, ds statement.DesiredSchema, b Budget, retry RetryPolicy) (SequenceReport, error) {
-	return executeCreate(ctx, pool, at, cr, ds, b, retry, nil)
+func ExecuteCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, lock *dbconn.TableLock, ds statement.DesiredSchema, b Budget, retry RetryPolicy) (SequenceReport, error) {
+	return executeCreate(ctx, pool, at, cr, lock, ds, b, retry, nil)
 }
 
 // ExecuteCreateWithProgress runs the create path while updating tracker
 // with the current step. The caller may poll concurrently.
-func ExecuteCreateWithProgress(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, ds statement.DesiredSchema, b Budget, retry RetryPolicy, tracker *progress.Tracker) (rep SequenceReport, err error) {
+func ExecuteCreateWithProgress(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, lock *dbconn.TableLock, ds statement.DesiredSchema, b Budget, retry RetryPolicy, tracker *progress.Tracker) (rep SequenceReport, err error) {
 	if tracker == nil {
 		return rep, fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
 	}
 	tracker.Start(len(ds.Statements()), progress.OperationAdmitting)
 	defer func() { tracker.Finish(err) }()
-	return executeCreate(ctx, pool, at, cr, ds, b, retry, tracker)
+	return executeCreate(ctx, pool, at, cr, lock, ds, b, retry, tracker)
 }
 
-func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, ds statement.DesiredSchema, b Budget, retry RetryPolicy, tracker *progress.Tracker) (SequenceReport, error) {
+func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, cr preflight.CreationRole, lock *dbconn.TableLock, ds statement.DesiredSchema, b Budget, retry RetryPolicy, tracker *progress.Tracker) (SequenceReport, error) {
 	var rep SequenceReport
 	if err := b.validate(); err != nil {
 		return rep, err
@@ -158,6 +159,11 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 	if err != nil {
 		return rep, err
 	}
+	ctx, cancel, err := guardTableLockFor(ctx, lock, at.Schema(), at.Table())
+	if err != nil {
+		return rep, err
+	}
+	defer cancel()
 	// Every deterministic relation name the desired set will claim is
 	// proved free before the first step executes, so an occupied index name
 	// refuses the whole set instead of failing after the table committed.

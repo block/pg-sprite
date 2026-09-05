@@ -62,10 +62,11 @@ func leaveInvalidIndex(t *testing.T, pool *pgxpool.Pool, schema, table, index st
 
 func TestBuildIndexConcurrentlyBuildsValidIndex(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
 	require.NoError(t, err)
 
-	rep, err := executor.BuildIndexConcurrently(t.Context(), pool,
+	rep, err := executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_c ON %s.t (c)", schema), buildBudget)
 	require.NoError(t, err)
 
@@ -87,6 +88,7 @@ func TestBuildIndexConcurrentlyBuildsValidIndex(t *testing.T) {
 
 func TestBuildIndexConcurrentlyCallerOwnedBuildsValidIndex(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "caller_owned_t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.caller_owned_t (id int PRIMARY KEY, c int)", schema))
 	require.NoError(t, err)
 	blocker, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
@@ -104,7 +106,7 @@ func TestBuildIndexConcurrentlyCallerOwnedBuildsValidIndex(t *testing.T) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		rep, buildErr := executor.BuildIndexConcurrentlyWithProgress(ctx, pool,
+		rep, buildErr := executor.BuildIndexConcurrentlyWithProgress(ctx, pool, lock,
 			fmt.Sprintf("CREATE INDEX CONCURRENTLY caller_owned_idx ON %s.caller_owned_t (c)", schema),
 			executor.ConcurrentBudget{CallerOwned: true}, tracker)
 		done <- result{rep: rep, err: buildErr}
@@ -126,6 +128,7 @@ func TestBuildIndexConcurrentlyCallerOwnedBuildsValidIndex(t *testing.T) {
 
 func TestBuildIndexConcurrentlyReportsServerProgressAndFinishes(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "progress_t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.progress_t AS
 		SELECT n AS id, repeat(md5(n::text), 4) AS payload FROM generate_series(1, 1000000) n`, schema))
 	require.NoError(t, err)
@@ -137,7 +140,7 @@ func TestBuildIndexConcurrentlyReportsServerProgressAndFinishes(t *testing.T) {
 	results := make(chan result, 1)
 	var workers sync.WaitGroup
 	workers.Go(func() {
-		_, buildErr := executor.BuildIndexConcurrentlyWithProgress(t.Context(), pool,
+		_, buildErr := executor.BuildIndexConcurrentlyWithProgress(t.Context(), pool, lock,
 			statementSQL, buildBudget, tracker)
 		results <- result{err: buildErr}
 	})
@@ -171,6 +174,7 @@ func TestBuildIndexConcurrentlyReportsServerProgressAndFinishes(t *testing.T) {
 // wire-protocol error on the shared connection or a race-detector report.
 func TestBuildIndexConcurrentlyWithProgressFailingBuildUnderPolling(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "t")
 	// Duplicates guarantee the unique build fails after creating its
 	// catalog entry; the row count gives the poller a window to overlap
 	// the build and its failure verdict.
@@ -194,7 +198,7 @@ func TestBuildIndexConcurrentlyWithProgressFailingBuildUnderPolling(t *testing.T
 		}
 	})
 
-	_, buildErr := executor.BuildIndexConcurrentlyWithProgress(t.Context(), pool,
+	_, buildErr := executor.BuildIndexConcurrentlyWithProgress(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_dup ON %s.t (c)", schema), buildBudget, tracker)
 	close(stop)
 	pollers.Wait()
@@ -221,8 +225,9 @@ func TestBuildIndexConcurrentlyRefusesSingleConnectionPool(t *testing.T) {
 	schema := testutil.NewSchema(t, pool)
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
 	require.NoError(t, err)
+	lock := testutil.TableLock(t, pool, schema, "t")
 
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_c ON %s.t (c)", schema), buildBudget)
 
 	require.ErrorIs(t, err, executor.ErrPoolTooSmall)
@@ -237,6 +242,7 @@ func TestBuildIndexConcurrentlyRefusesSingleConnectionPool(t *testing.T) {
 // a heavier strategy when a human deliberately stopped the build.
 func TestBuildIndexConcurrentlyOperatorCancelIsNotBudgetExhaustion(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(
 		"CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
 	require.NoError(t, err)
@@ -254,7 +260,7 @@ func TestBuildIndexConcurrentlyOperatorCancelIsNotBudgetExhaustion(t *testing.T)
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := executor.BuildIndexConcurrently(t.Context(), pool,
+		_, err := executor.BuildIndexConcurrently(t.Context(), pool, lock,
 			fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_op ON %s.t (c)", schema), buildBudget)
 		done <- err
 	}()
@@ -280,6 +286,7 @@ func TestBuildIndexConcurrentlyOperatorCancelIsNotBudgetExhaustion(t *testing.T)
 
 func TestBuildIndexConcurrentlyCallerOwnedCancelViaTrackerPID(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "pid_t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.pid_t (id int PRIMARY KEY, c int)", schema))
 	require.NoError(t, err)
 	blocker, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
@@ -294,7 +301,7 @@ func TestBuildIndexConcurrentlyCallerOwnedCancelViaTrackerPID(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, buildErr := executor.BuildIndexConcurrentlyWithProgress(ctx, pool,
+		_, buildErr := executor.BuildIndexConcurrentlyWithProgress(ctx, pool, lock,
 			fmt.Sprintf("CREATE INDEX CONCURRENTLY pid_idx ON %s.pid_t (c)", schema),
 			executor.ConcurrentBudget{CallerOwned: true}, tracker)
 		done <- buildErr
@@ -325,6 +332,7 @@ func TestBuildIndexConcurrentlyCallerOwnedCancelViaTrackerPID(t *testing.T) {
 
 func TestBuildIndexConcurrentlyReportsLockers(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "lockers_t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.lockers_t (id int PRIMARY KEY, c int)", schema))
 	require.NoError(t, err)
 	blocker, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
@@ -340,7 +348,7 @@ func TestBuildIndexConcurrentlyReportsLockers(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		_, buildErr := executor.BuildIndexConcurrentlyWithProgress(ctx, pool,
+		_, buildErr := executor.BuildIndexConcurrentlyWithProgress(ctx, pool, lock,
 			fmt.Sprintf("CREATE INDEX CONCURRENTLY lockers_idx ON %s.lockers_t (c)", schema),
 			executor.ConcurrentBudget{CallerOwned: true}, tracker)
 		done <- buildErr
@@ -357,13 +365,15 @@ func TestBuildIndexConcurrentlyReportsLockers(t *testing.T) {
 
 func TestBuildIndexConcurrentlyMissingTable(t *testing.T) {
 	pool, schema := newPool(t)
-	_, err := executor.BuildIndexConcurrently(t.Context(), pool,
+	lock := testutil.TableLock(t, pool, schema, "missing_table")
+	_, err := executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx ON %s.missing_table (c)", schema), buildBudget)
 	require.ErrorIs(t, err, executor.ErrTableNotFound)
 }
 
 func TestBuildIndexConcurrentlyFailedBuildReportsItsLeftover(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(
 		"CREATE TABLE %s.t (id int PRIMARY KEY, c int); INSERT INTO %s.t VALUES (1, 7), (2, 7)", schema, schema))
 	require.NoError(t, err)
@@ -371,7 +381,7 @@ func TestBuildIndexConcurrentlyFailedBuildReportsItsLeftover(t *testing.T) {
 	// A unique build over duplicates fails after creating its catalog
 	// entry. The executor never drops — it must report the leftover as a
 	// typed outcome carrying both the build failure and the recovery need.
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_dup ON %s.t (c)", schema), buildBudget)
 
 	require.ErrorIs(t, err, executor.ErrBuildLeftInvalidIndex)
@@ -391,7 +401,7 @@ func TestBuildIndexConcurrentlyFailedBuildReportsItsLeftover(t *testing.T) {
 	require.NoError(t, err)
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("DELETE FROM %s.t WHERE id = 2", schema))
 	require.NoError(t, err)
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_dup ON %s.t (c)", schema), buildBudget)
 	require.NoError(t, err)
 	exists, valid = indexState(t, pool, schema, "idx_dup")
@@ -401,6 +411,7 @@ func TestBuildIndexConcurrentlyFailedBuildReportsItsLeftover(t *testing.T) {
 
 func TestBuildIndexConcurrentlyFailsClosedOnPreexistingInvalidLeftover(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(
 		"CREATE TABLE %s.t (id int PRIMARY KEY, c int); INSERT INTO %s.t VALUES (1, 7), (2, 7)", schema, schema))
 	require.NoError(t, err)
@@ -409,7 +420,7 @@ func TestBuildIndexConcurrentlyFailsClosedOnPreexistingInvalidLeftover(t *testin
 	// A pre-existing invalid index cannot be proven this build's own
 	// debris, so the executor must refuse to touch it and name the
 	// explicit recovery — never build, never drop.
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema), buildBudget)
 
 	require.ErrorIs(t, err, executor.ErrPreexistingInvalidIndex)
@@ -427,7 +438,7 @@ func TestBuildIndexConcurrentlyFailsClosedOnPreexistingInvalidLeftover(t *testin
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("DELETE FROM %s.t WHERE id = 2", schema))
 	require.NoError(t, err)
 
-	rep, err := executor.BuildIndexConcurrently(t.Context(), pool,
+	rep, err := executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema), buildBudget)
 	require.NoError(t, err)
 	assert.Equal(t, schema, rep.Schema)
@@ -442,6 +453,7 @@ func TestBuildIndexConcurrentlyFailsClosedOnPreexistingInvalidLeftover(t *testin
 
 func TestBuildIndexConcurrentlyNeverDropsUnrelatedTableLeftover(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "b")
 	// Two tables in the same schema; table a carries the invalid debris of
 	// a failed build under the exact name the new build on table b wants.
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(
@@ -455,7 +467,7 @@ func TestBuildIndexConcurrentlyNeverDropsUnrelatedTableLeftover(t *testing.T) {
 	// invalid index under this name anywhere in the schema cannot be
 	// proven anyone's, and a's leftover must survive untouched for its own
 	// table's recovery.
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_shared ON %s.b (c)", schema), buildBudget)
 
 	require.ErrorIs(t, err, executor.ErrPreexistingInvalidIndex)
@@ -466,6 +478,7 @@ func TestBuildIndexConcurrentlyNeverDropsUnrelatedTableLeftover(t *testing.T) {
 
 func TestBuildIndexConcurrentlyCallerCancellationReportsItsLeftover(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(
 		"CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
 	require.NoError(t, err)
@@ -486,7 +499,7 @@ func TestBuildIndexConcurrentlyCallerCancellationReportsItsLeftover(t *testing.T
 	defer cancelBuild()
 	done := make(chan error, 1)
 	go func() {
-		_, err := executor.BuildIndexConcurrently(buildCtx, pool,
+		_, err := executor.BuildIndexConcurrently(buildCtx, pool, lock,
 			fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_cancelled ON %s.t (c)", schema), buildBudget)
 		done <- err
 	}()
@@ -523,6 +536,7 @@ func TestBuildIndexConcurrentlyCallerCancellationReportsItsLeftover(t *testing.T
 
 func TestBuildIndexConcurrentlyCancellationBeforeCatalogEntryIsClean(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(
 		"CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
 	require.NoError(t, err)
@@ -542,7 +556,7 @@ func TestBuildIndexConcurrentlyCancellationBeforeCatalogEntryIsClean(t *testing.
 	defer cancelBuild()
 	done := make(chan error, 1)
 	go func() {
-		_, err := executor.BuildIndexConcurrently(buildCtx, pool,
+		_, err := executor.BuildIndexConcurrently(buildCtx, pool, lock,
 			fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_early ON %s.t (c)", schema), buildBudget)
 		done <- err
 	}()
@@ -576,11 +590,12 @@ func TestBuildIndexConcurrentlyCancellationBeforeCatalogEntryIsClean(t *testing.
 
 func TestBuildIndexConcurrentlyNeverDropsValidIndex(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(
 		"CREATE TABLE %s.t (id int PRIMARY KEY, c int); CREATE INDEX idx_c ON %s.t (c)", schema, schema))
 	require.NoError(t, err)
 
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_c ON %s.t (id)", schema), buildBudget)
 
 	// A genuine phase-1 collision over a valid index creates nothing, so
@@ -598,6 +613,7 @@ func TestBuildIndexConcurrentlyNeverDropsValidIndex(t *testing.T) {
 
 func TestBuildIndexConcurrentlyIfNotExistsIsRefused(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(
 		"CREATE TABLE %s.t (id int PRIMARY KEY, c int); CREATE INDEX idx_c ON %s.t (c)", schema, schema))
 	require.NoError(t, err)
@@ -605,7 +621,7 @@ func TestBuildIndexConcurrentlyIfNotExistsIsRefused(t *testing.T) {
 	// IF NOT EXISTS no-ops on the name alone: it would report success over
 	// an index the executor cannot prove valid, related, or intended. The
 	// refusal is an admission decision — nothing reaches the database.
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_c ON %s.t (c)", schema), buildBudget)
 	require.ErrorIs(t, err, executor.ErrIfNotExistsUnsupported)
 	exists, valid := indexState(t, pool, schema, "idx_c")
@@ -615,6 +631,7 @@ func TestBuildIndexConcurrentlyIfNotExistsIsRefused(t *testing.T) {
 
 func TestBuildIndexConcurrentlyOverallBudgetCancelsBlockedBuild(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
 	require.NoError(t, err)
 
@@ -630,7 +647,7 @@ func TestBuildIndexConcurrentlyOverallBudgetCancelsBlockedBuild(t *testing.T) {
 	require.NoError(t, err)
 
 	tight := executor.ConcurrentBudget{Overall: 300 * time.Millisecond}
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_blocked ON %s.t (c)", schema), tight)
 
 	var budgetErr *executor.BudgetError
@@ -641,6 +658,7 @@ func TestBuildIndexConcurrentlyOverallBudgetCancelsBlockedBuild(t *testing.T) {
 
 func TestBuildIndexConcurrentlyBudgetCancellationLeavesNoDebris(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
 	require.NoError(t, err)
 
@@ -650,7 +668,7 @@ func TestBuildIndexConcurrentlyBudgetCancellationLeavesNoDebris(t *testing.T) {
 	require.NoError(t, err)
 
 	tight := executor.ConcurrentBudget{Overall: 300 * time.Millisecond}
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_blocked ON %s.t (c)", schema), tight)
 	var budgetErr *executor.BudgetError
 	require.ErrorAs(t, err, &budgetErr)
@@ -665,13 +683,14 @@ func TestBuildIndexConcurrentlyBudgetCancellationLeavesNoDebris(t *testing.T) {
 	assert.False(t, exists, "a cancelled build must leave no index entry behind")
 
 	// The table must be immediately buildable again.
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_blocked ON %s.t (c)", schema), buildBudget)
 	require.NoError(t, err)
 }
 
 func TestBuildIndexConcurrentlyExpressionRaisedCollisionStillGetsVerdict(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "boom")
 	// An index-expression function that raises the name-collision SQLSTATE
 	// (42P07) mid-build: the failure fires after the catalog entry exists,
 	// so treating that SQLSTATE as "nothing was created" would skip the
@@ -683,7 +702,7 @@ func TestBuildIndexConcurrentlyExpressionRaisedCollisionStillGetsVerdict(t *test
 		$$ BEGIN RAISE USING ERRCODE = '42P07'; END $$`, schema, schema, schema))
 	require.NoError(t, err)
 
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_boom ON %s.t (%s.boom(c))", schema, schema), buildBudget)
 
 	require.ErrorIs(t, err, executor.ErrBuildLeftInvalidIndex)
@@ -730,10 +749,11 @@ func TestBuildIndexConcurrentlyProofsResistCatalogShadowing(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
+	lock := testutil.TableLock(t, pool, schema, "t")
 
 	// Target resolution: the impostor to_regclass resolves everything to
 	// NULL, so a shadowed resolution could never admit this build.
-	rep, err := executor.BuildIndexConcurrently(t.Context(), pool,
+	rep, err := executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_ok ON %s.t (id)", schema), buildBudget)
 	require.NoError(t, err, "target resolution must see the real catalog through the impostors")
 	assert.Equal(t, schema, rep.Schema)
@@ -743,7 +763,7 @@ func TestBuildIndexConcurrentlyProofsResistCatalogShadowing(t *testing.T) {
 	// The failure verdict: the impostor pg_class would resolve no table
 	// and yield an identity verdict; the impostor pg_stat_activity would
 	// hide the build backend. The real catalogs must name the leftover.
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_dup ON %s.t (c)", schema), buildBudget)
 	require.ErrorIs(t, err, executor.ErrBuildLeftInvalidIndex,
 		"the failure verdict must see the real catalog through the impostors")
@@ -753,7 +773,7 @@ func TestBuildIndexConcurrentlyProofsResistCatalogShadowing(t *testing.T) {
 
 	// The pre-build refusal: the impostor pg_index is empty and would miss
 	// the debris, letting a new build run over unprovable state.
-	_, err = executor.BuildIndexConcurrently(t.Context(), pool,
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, lock,
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_dup ON %s.t (c)", schema), buildBudget)
 	require.ErrorIs(t, err, executor.ErrPreexistingInvalidIndex,
 		"the pre-build inspection must see the real catalog through the impostors")
@@ -761,6 +781,7 @@ func TestBuildIndexConcurrentlyProofsResistCatalogShadowing(t *testing.T) {
 
 func TestBuildIndexConcurrentlyTerminatedBackendReportsItsLeftover(t *testing.T) {
 	pool, schema := newPool(t)
+	lock := testutil.TableLock(t, pool, schema, "t")
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(
 		"CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
 	require.NoError(t, err)
@@ -779,7 +800,7 @@ func TestBuildIndexConcurrentlyTerminatedBackendReportsItsLeftover(t *testing.T)
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := executor.BuildIndexConcurrently(t.Context(), pool,
+		_, err := executor.BuildIndexConcurrently(t.Context(), pool, lock,
 			fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_term ON %s.t (c)", schema), buildBudget)
 		done <- err
 	}()

@@ -18,21 +18,21 @@ import (
 // operational failure to retry.
 
 func TestExecuteNativeWithProgressRequiresTracker(t *testing.T) {
-	err := executor.ExecuteNativeWithProgress(t.Context(), nil, preflight.PreflightedTable{},
+	err := executor.ExecuteNativeWithProgress(t.Context(), nil, preflight.PreflightedTable{}, nil,
 		statement.Statement{}, executor.Budget{LockTimeout: time.Second, StatementTimeout: time.Second},
 		executor.DefaultRetryPolicy(), nil)
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 }
 
 func TestRunSequenceWithProgressRequiresTracker(t *testing.T) {
-	_, err := executor.RunSequenceWithProgress(t.Context(), nil, preflight.PreflightedTable{},
+	_, err := executor.RunSequenceWithProgress(t.Context(), nil, preflight.PreflightedTable{}, nil,
 		[]string{"ALTER TABLE s.t ADD COLUMN v int"},
 		executor.SequenceBudget{}, executor.DefaultRetryPolicy(), nil)
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 }
 
 func TestBuildIndexConcurrentlyWithProgressRequiresTracker(t *testing.T) {
-	_, err := executor.BuildIndexConcurrentlyWithProgress(t.Context(), nil,
+	_, err := executor.BuildIndexConcurrentlyWithProgress(t.Context(), nil, nil,
 		"CREATE INDEX CONCURRENTLY i ON s.t (c)", executor.ConcurrentBudget{Overall: time.Minute}, nil)
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 }

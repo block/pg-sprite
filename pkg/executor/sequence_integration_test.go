@@ -76,10 +76,10 @@ func TestRunSequenceValidatesCheckConstraintOnline(t *testing.T) {
 		"CREATE TABLE %s.t (id int PRIMARY KEY, v int); INSERT INTO %s.t SELECT g, g FROM generate_series(1, 100) g",
 		schema, schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0)", schema))
-	rep, err := executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.RunSequence(t.Context(), pool, pt, lock, steps, runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 
 	require.Len(t, rep.Steps, 2)
@@ -99,7 +99,7 @@ func TestRunSequenceWithProgressTracksStepsAndFinishes(t *testing.T) {
 		"CREATE TABLE %s.t (id int PRIMARY KEY, v int); INSERT INTO %s.t SELECT g, g FROM generate_series(1, 100) g",
 		schema, schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 	tracker, err := progress.NewTracker(progress.WallClock{})
 	require.NoError(t, err)
 
@@ -132,7 +132,7 @@ func TestRunSequenceWithProgressTracksStepsAndFinishes(t *testing.T) {
 	results := make(chan result, 1)
 	var workers sync.WaitGroup
 	workers.Go(func() {
-		rep, runErr := executor.RunSequenceWithProgress(t.Context(), pool, pt, steps, runBudget,
+		rep, runErr := executor.RunSequenceWithProgress(t.Context(), pool, pt, lock, steps, runBudget,
 			executor.DefaultRetryPolicy(), tracker)
 		results <- result{rep: rep, err: runErr}
 	})
@@ -178,14 +178,14 @@ func TestRunSequenceWithProgressReportsFailedStep(t *testing.T) {
 		"CREATE TABLE %s.t (id int PRIMARY KEY, v int); INSERT INTO %s.t VALUES (1, -1)",
 		schema, schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 	tracker, err := progress.NewTracker(progress.WallClock{})
 	require.NoError(t, err)
 
 	// The violating row makes step 1 (the NOT VALID add) succeed and step 2
 	// (the validation scan) fail.
 	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0)", schema))
-	_, err = executor.RunSequenceWithProgress(t.Context(), pool, pt, steps, runBudget,
+	_, err = executor.RunSequenceWithProgress(t.Context(), pool, pt, lock, steps, runBudget,
 		executor.DefaultRetryPolicy(), tracker)
 
 	var stepErr *executor.SequenceStepError
@@ -205,10 +205,10 @@ func TestRunSequenceSetNotNullLeavesNoScaffold(t *testing.T) {
 		"CREATE TABLE %s.t (id int PRIMARY KEY, v int); INSERT INTO %s.t SELECT g, g FROM generate_series(1, 100) g",
 		schema, schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN v SET NOT NULL", schema))
-	rep, err := executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.RunSequence(t.Context(), pool, pt, lock, steps, runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 	require.Len(t, rep.Steps, 4)
 
@@ -231,10 +231,10 @@ func TestRunSequenceAddsPrimaryKeyOverConcurrentBuild(t *testing.T) {
 		"CREATE TABLE %s.t (id int NOT NULL, v int); INSERT INTO %s.t SELECT g, g FROM generate_series(1, 100) g",
 		schema, schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD PRIMARY KEY (id)", schema))
-	rep, err := executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.RunSequence(t.Context(), pool, pt, lock, steps, runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 
 	require.Len(t, rep.Steps, 2)
@@ -257,18 +257,18 @@ func TestRunSequenceRunsSingleStepChanges(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	// A fast-default ADD COLUMN and a metadata-only change are one-step
 	// sequences: the executor covers them without a dedicated path.
-	rep, err := executor.RunSequence(t.Context(), pool, pt,
+	rep, err := executor.RunSequence(t.Context(), pool, pt, lock,
 		[]string{fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN age int NOT NULL DEFAULT 0", schema)}, runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 	require.Len(t, rep.Steps, 1)
 	assert.Equal(t, executor.StepBrief, rep.Steps[0].Kind)
 	assert.Equal(t, "integer", columnType(t, pool, schema, "t", "age"))
 
-	rep, err = executor.RunSequence(t.Context(), pool, pt,
+	rep, err = executor.RunSequence(t.Context(), pool, pt, lock,
 		[]string{fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN age DROP DEFAULT", schema)}, runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 	require.Len(t, rep.Steps, 1)
@@ -280,13 +280,13 @@ func TestRunSequenceStopsAtFailingStepAndReportsPartialState(t *testing.T) {
 		"CREATE TABLE %s.t (id int PRIMARY KEY, v int); INSERT INTO %s.t VALUES (1, -1)",
 		schema, schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	// The violating row makes step 1 (the NOT VALID add) succeed and step 2
 	// (the validation scan) fail: the documented partial state is the
 	// constraint left NOT VALID.
 	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0)", schema))
-	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
+	_, err = executor.RunSequence(t.Context(), pool, pt, lock, steps, runBudget, executor.DefaultRetryPolicy())
 
 	var stepErr *executor.SequenceStepError
 	require.ErrorAs(t, err, &stepErr)
@@ -306,7 +306,7 @@ func TestRunSequenceStopsAtFailingStepAndReportsPartialState(t *testing.T) {
 	// the typed error's own step number.
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("UPDATE %s.t SET v = 1 WHERE v <= 0", schema))
 	require.NoError(t, err)
-	rep, err := executor.RunSequence(t.Context(), pool, pt, steps[stepErr.Step-1:], runBudget, executor.DefaultRetryPolicy())
+	rep, err := executor.RunSequence(t.Context(), pool, pt, lock, steps[stepErr.Step-1:], runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err, "resuming from the failed step must complete the sequence")
 	require.Len(t, rep.Steps, 1)
 	assert.Equal(t, executor.StepValidateConstraint, rep.Steps[0].Kind)
@@ -318,7 +318,7 @@ func TestRunSequenceBudgetCancelsBlockedBriefStep(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v int)", schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	// A second session holds ACCESS EXCLUSIVE while the sequence runs, so
 	// the brief step can never be granted its lock and the lock budget
@@ -334,7 +334,7 @@ func TestRunSequenceBudgetCancelsBlockedBriefStep(t *testing.T) {
 	require.NoError(t, err)
 
 	steps := []string{fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN v", schema)}
-	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
+	_, err = executor.RunSequence(t.Context(), pool, pt, lock, steps, runBudget, executor.DefaultRetryPolicy())
 
 	var stepErr *executor.SequenceStepError
 	require.ErrorAs(t, err, &stepErr)
@@ -352,7 +352,7 @@ func TestRunSequenceBudgetCancelsBlockedBriefStep(t *testing.T) {
 	// TM-3: after the fault clears, the same sequence must proceed to
 	// completion.
 	require.NoError(t, blocker.Rollback(context.WithoutCancel(t.Context())))
-	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
+	_, err = executor.RunSequence(t.Context(), pool, pt, lock, steps, runBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err, "the sequence must complete once the lock holder is gone")
 	assert.False(t, columnExists(t, pool, schema, "t", "v"))
 }
@@ -383,7 +383,7 @@ func TestRunSequenceValidateRunsUnderValidateBudget(t *testing.T) {
 		"CREATE TABLE %s.t (id int PRIMARY KEY, v int); ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0) NOT VALID",
 		schema, schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	blocker, err := pool.Begin(t.Context())
 	require.NoError(t, err)
@@ -393,7 +393,7 @@ func TestRunSequenceValidateRunsUnderValidateBudget(t *testing.T) {
 	_, err = blocker.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.t IN ACCESS EXCLUSIVE MODE", schema))
 	require.NoError(t, err)
 
-	_, err = executor.RunSequence(t.Context(), pool, pt,
+	_, err = executor.RunSequence(t.Context(), pool, pt, lock,
 		[]string{fmt.Sprintf("ALTER TABLE %s.t VALIDATE CONSTRAINT v_positive", schema)}, runBudget, executor.DefaultRetryPolicy())
 
 	var stepErr *executor.SequenceStepError
@@ -418,7 +418,7 @@ func TestRunSequenceOperatorCancelOfValidateIsNotBudgetExhaustion(t *testing.T) 
 		"CREATE TABLE %s.t (id int PRIMARY KEY, v int); ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0) NOT VALID",
 		schema, schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	// An ACCESS EXCLUSIVE holder parks the validate in the lock queue,
 	// giving the cancel a window; the generous budgets guarantee neither
@@ -435,7 +435,7 @@ func TestRunSequenceOperatorCancelOfValidateIsNotBudgetExhaustion(t *testing.T) 
 	b.Validate = executor.ValidateBudget{LockTimeout: time.Minute, Overall: time.Minute}
 	done := make(chan error, 1)
 	go func() {
-		_, err := executor.RunSequence(t.Context(), pool, pt,
+		_, err := executor.RunSequence(t.Context(), pool, pt, lock,
 			[]string{fmt.Sprintf("ALTER TABLE %s.t VALIDATE CONSTRAINT v_positive", schema)}, b,
 			executor.DefaultRetryPolicy())
 		done <- err
@@ -474,7 +474,7 @@ func TestRunSequenceSurfacesFailedConcurrentBuildStep(t *testing.T) {
 		"CREATE TABLE %s.t (id int PRIMARY KEY, v int); INSERT INTO %s.t VALUES (1, 7), (2, 7)",
 		schema, schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	// The duplicate rows make the unique build fail after the brief step
 	// committed.
@@ -482,7 +482,7 @@ func TestRunSequenceSurfacesFailedConcurrentBuildStep(t *testing.T) {
 		fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0) NOT VALID", schema),
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY i_v ON %s.t (v)", schema),
 	}
-	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
+	_, err = executor.RunSequence(t.Context(), pool, pt, lock, steps, runBudget, executor.DefaultRetryPolicy())
 
 	var stepErr *executor.SequenceStepError
 	require.ErrorAs(t, err, &stepErr)
@@ -505,7 +505,7 @@ func TestRunSequenceRefusesSingleConnectionPoolBeforeAnyStep(t *testing.T) {
 	schema := testutil.NewSchema(t, pool)
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v int)", schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 
 	// The brief step comes before the build: if the pool guard fired only
 	// inside the delegated executor, the constraint would already be
@@ -514,7 +514,7 @@ func TestRunSequenceRefusesSingleConnectionPoolBeforeAnyStep(t *testing.T) {
 		fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0) NOT VALID", schema),
 		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY i_v ON %s.t (v)", schema),
 	}
-	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
+	_, err = executor.RunSequence(t.Context(), pool, pt, lock, steps, runBudget, executor.DefaultRetryPolicy())
 
 	require.ErrorIs(t, err, executor.ErrPoolTooSmall)
 	var stepErr *executor.SequenceStepError
@@ -529,12 +529,12 @@ func TestRunSequenceRefusesPartitionedParentBeforeAnyStep(t *testing.T) {
 		"CREATE TABLE %s.p (id int, v int) PARTITION BY RANGE (id); "+
 			"CREATE TABLE %s.p1 PARTITION OF %s.p FOR VALUES FROM (0) TO (100)", schema, schema, schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "p")
+	pt, lock := mustPreflight(t, pool, schema, "p")
 	steps := []string{
 		fmt.Sprintf("ALTER TABLE %s.p ADD CONSTRAINT v_positive CHECK (v > 0) NOT VALID", schema),
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY p_v_idx ON %s.p (v)", schema),
 	}
-	_, err = executor.RunSequence(t.Context(), pool, pt, steps, runBudget, executor.DefaultRetryPolicy())
+	_, err = executor.RunSequence(t.Context(), pool, pt, lock, steps, runBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrUnsupportedPartitionedParent)
 	exists, _ := constraintState(t, pool, schema, "p", "v_positive")
 	assert.False(t, exists, "partition refusal must precede every sequence step")
@@ -544,11 +544,11 @@ func TestRunSequenceReportsVanishedTargetAsTableNotFound(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int)", schema))
 	require.NoError(t, err)
-	pt := mustPreflight(t, pool, schema, "t")
+	pt, lock := mustPreflight(t, pool, schema, "t")
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("DROP TABLE %s.t", schema))
 	require.NoError(t, err)
 
-	_, err = executor.RunSequence(t.Context(), pool, pt,
+	_, err = executor.RunSequence(t.Context(), pool, pt, lock,
 		[]string{fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN v int", schema)},
 		runBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrTableNotFound)

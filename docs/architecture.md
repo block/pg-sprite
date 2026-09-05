@@ -180,7 +180,7 @@ different levels of commitment:
 | `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `diff` · `fmt` · `lint` · `suggest` · `status` | all six exist |
 | `internal/cli` | Command tree and flag handling (including `migrate --dry-run`) | all six exist |
 | `internal/testutil` | Test harness: containerized PostgreSQL, throwaway schemas | exists |
-| `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; advisory-lock mutual exclusion lands here | exists |
+| `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; per-table advisory-lock mutual exclusion (the `TableLock` proof, its keepalive, and the session-affinity proof that refuses a transaction-mode pooler) | exists |
 | `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parse boundary, typed per-operation descriptors, and advisory rewrites (never hand-parse SQL); migration-time shadow DDL + fingerprints are derived by `pkg/schemadiff` via scratch-DB execute-and-introspect | exists |
 | `pkg/preflight` | Precondition verification and refusals before any write: target facts + table-size guard, tiered privilege checks (a refusal carries the exact provisioning `GRANT`), partitioned-table support gates | exists |
 | `pkg/verdict` | Structured outcome contract (executed / refused / failed + reason, stable executor code, and safer idiom), rendering, exit codes | exists (Phase 1) |

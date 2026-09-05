@@ -7,6 +7,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
@@ -123,6 +124,19 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 	if opts.Force != "" {
 		return DesiredResult{}, ErrForceNotSupported
 	}
+	// INV: LK-1 — one lock covers the whole convergence, taken before the
+	// plan is derived and held past the last statement. Locking per
+	// statement instead would let another instance change the table between
+	// two steps of a plan derived against the shape it had before.
+	lock, refused, err := acquireTableLock(ctx, pool, req.Schema, req.Desired.Table(), opts)
+	if err != nil {
+		return DesiredResult{}, err
+	}
+	if refused {
+		return tableLockedResult(req), nil
+	}
+	defer releaseTableLock(ctx, lock, opts.logger())
+
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
 	if err != nil {
 		return DesiredResult{}, err
@@ -152,7 +166,7 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		// the whole plan through the executor's greenfield sequence — the
 		// per-statement Run pipeline below states facts about an existing
 		// table and its gate refuses CREATE TABLE outright.
-		return runCreate(ctx, pool, req, report, opts)
+		return runCreate(ctx, pool, req, report, lock, opts)
 	}
 
 	result := DesiredResult{Plan: report}
@@ -166,7 +180,7 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 			return result, fmt.Errorf("%w: planned statement %d is engine-generated SQL its own parser rejects: %w",
 				executor.ErrInvariantViolation, i+1, err)
 		}
-		v, runErr := Run(ctx, pool, st, opts)
+		v, runErr := run(ctx, pool, st, lock, opts, opts.logger())
 		if runErr != nil {
 			result.Outcome = verdict.OutcomeFailed
 			// A zero verdict is Run's "stopped before reaching a verdict"
@@ -206,7 +220,8 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 // disclose exactly how far the create got, and a rerun re-derives the plan
 // against the live catalog — which now sees the table — and converges the
 // remainder through the alter loop.
-func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, report plan.Report, opts Options) (DesiredResult, error) {
+func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, report plan.Report,
+	lock *dbconn.TableLock, opts Options) (DesiredResult, error) {
 	result := DesiredResult{Plan: report}
 	stopBefore := func(err error) (DesiredResult, error) {
 		result.Outcome = verdict.OutcomeFailed
@@ -240,7 +255,7 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 	opts.logger().Debug("create preflight passed",
 		"schema", at.Schema(), "table", at.Table(), "role", role.Role())
 
-	rep, execErr := executor.ExecuteCreate(ctx, pool, at, role, req.Desired, opts.Budget.Brief, opts.retry())
+	rep, execErr := executor.ExecuteCreate(ctx, pool, at, role, lock, req.Desired, opts.Budget.Brief, opts.retry())
 	// The plan's statements and the executor's steps share one order — the
 	// CREATE TABLE first, then the indexes in input order — so the verdict
 	// at position i is the verdict of Plan.Statements[i].

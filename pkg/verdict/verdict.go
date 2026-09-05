@@ -93,6 +93,10 @@ const (
 	// the plan against the live catalog rather than assuming the
 	// occupant's shape.
 	ReasonCreateCollision Reason = "create-collision"
+	// ReasonTableLocked: another pg-sprite instance holds the table's
+	// change lock, so this one did not start. Nothing was executed and the
+	// caller may retry once the other instance finishes.
+	ReasonTableLocked Reason = "table-locked"
 )
 
 // Reasons returns the closed set of non-zero Reason values. It is part of
@@ -112,6 +116,7 @@ func Reasons() []Reason {
 		ReasonDestructiveChange,
 		ReasonPlanFingerprintMismatch,
 		ReasonCreateCollision,
+		ReasonTableLocked,
 	}
 }
 

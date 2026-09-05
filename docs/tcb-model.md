@@ -95,7 +95,7 @@ to obtain the type is through the function that validates it.
 | creating role's access (create target) | `preflight.CheckCreatePrivileges` | `CreationRole` (carries the connected role and the resolved creation schema whose CONNECT / USAGE / CREATE grants were verified; time-of-check and session-scoped, like `AbsentTarget` — a revoked grant after minting fails with the server's own error) | ST-6 for the create path |
 | shadow table | full checksum pass (planned) | `VerifiedShadow` — its constructor will be private to `pkg/checksum`; the planned `cutover.Swap` will accept **only** this type | CO-1 in the type system |
 | chunker low-watermark | all-checkers-clean pass (planned) | `CleanWatermark` — will be unobtainable in a pass that repaired anything | CO-2 |
-| — | planned table-lock acquisition | `TableLock` token, planned as a required parameter of every mutating operation | LK-1 |
+| table name (change target) | `dbconn.AcquireTableLock` | `TableLock` (carries the held session-scoped advisory lock, the session it lives on, and the proof that the connection keeps one server session) — a required parameter of every mutating operation, re-verified against the catalog at use rather than trusted, because a proof minted earlier says nothing about now | LK-1 |
 | orchestrator proto/request | adapter validation at the edge | engine domain types; proto types never cross into the engine | OC-5, OC-6 |
 
 The intended compile-time effect of the future cutover API: **the cutover cannot be called with

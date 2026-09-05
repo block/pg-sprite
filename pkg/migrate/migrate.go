@@ -188,6 +188,28 @@ func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 		}
 	}
 
+	// INV: LK-1 — the lock is taken before the facts are read and held past
+	// the last step, so the whole decide-then-act sequence is atomic against
+	// other instances: a table another instance is already changing cannot
+	// have its facts read here, be classified against them, and then be
+	// changed on the strength of a picture that has since moved.
+	lock, refused, err := acquireTableLock(ctx, pool, st.Schema(), st.Table(), opts)
+	if err != nil {
+		return verdict.Verdict{}, err
+	}
+	if refused {
+		return tableLockedVerdict(st), nil
+	}
+	defer releaseTableLock(ctx, lock, logger)
+
+	return run(ctx, pool, st, lock, opts, logger)
+}
+
+// run is the pipeline under an acquired table lock: the shared body of the
+// imperative front door and of each statement in the desired-state loop,
+// which holds one lock across its whole convergence.
+func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, lock *dbconn.TableLock,
+	opts Options, logger *slog.Logger) (verdict.Verdict, error) {
 	facts, err := LiveFacts(ctx, pool, st)
 	if err != nil {
 		return verdict.Verdict{}, err
@@ -216,19 +238,19 @@ func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 			execSQL, substituted = []string{canonical}, false
 			auditForce(opts.audit(), st, rs)
 		}
-		return execute(ctx, pool, st, execSQL, rs.Plan, substituted, forced, opts, logger)
+		return execute(ctx, pool, st, lock, execSQL, rs.Plan, substituted, forced, opts, logger)
 	case router.DispositionRewriteRequired:
 		if opts.Force == "" {
 			return rewriteRequiredVerdict(st), nil
 		}
 		auditForce(opts.audit(), st, rs)
-		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, logger)
+		return execute(ctx, pool, st, lock, []string{canonical}, rs.Plan, false, true, opts, logger)
 	case router.DispositionUnavailable:
 		if opts.Force == "" {
 			return backendUnavailableVerdict(st, rs), nil
 		}
 		auditForce(opts.audit(), st, rs)
-		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, logger)
+		return execute(ctx, pool, st, lock, []string{canonical}, rs.Plan, false, true, opts, logger)
 	case router.DispositionRefuse:
 		// A planner refusal means no known safe path — there is nothing
 		// bounded to acknowledge, so the force acknowledgement does not
@@ -317,7 +339,7 @@ func auditForce(audit *slog.Logger, st statement.Statement, rs router.Statement)
 // connected role is checked at the tier the routed steps actually need
 // (engine-role contract), so a role that would die mid-change is refused
 // with the exact provisioning statement instead.
-func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
+func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, lock *dbconn.TableLock,
 	execSQL []string, plan planner.Plan, substituted, forced bool,
 	opts Options, logger *slog.Logger) (verdict.Verdict, error) {
 	limit := opts.MaxTableSizeBytes
@@ -369,9 +391,9 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	start := time.Now()
 	var rep executor.SequenceReport
 	if forced {
-		err = executor.ExecuteNative(ctx, pool, pt, st, opts.Budget.Brief, retry)
+		err = executor.ExecuteNative(ctx, pool, pt, lock, st, opts.Budget.Brief, retry)
 	} else {
-		rep, err = executor.RunSequence(ctx, pool, pt, execSQL, opts.Budget, retry)
+		rep, err = executor.RunSequence(ctx, pool, pt, lock, execSQL, opts.Budget, retry)
 	}
 	elapsed := time.Since(start)
 	if v, refused := execRefusal(st, err, substituted, forced, onlineIdiomPlan(plan)); refused {

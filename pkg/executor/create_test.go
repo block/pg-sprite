@@ -57,7 +57,7 @@ func TestExecuteCreateRejectsUnboundedBudget(t *testing.T) {
 	ds, err := statement.ParseDesired("CREATE TABLE t (id int)")
 	require.NoError(t, err)
 
-	_, err = executor.ExecuteCreate(t.Context(), nil, preflight.AbsentTarget{}, preflight.CreationRole{}, ds,
+	_, err = executor.ExecuteCreate(t.Context(), nil, preflight.AbsentTarget{}, preflight.CreationRole{}, nil, ds,
 		executor.Budget{LockTimeout: 0, StatementTimeout: time.Second}, executor.DefaultRetryPolicy())
 	// The zero-value absence proof would also refuse (as an invariant
 	// violation); asserting on the budget wording proves the budget check
@@ -72,7 +72,7 @@ func TestExecuteCreateRejectsZeroValueAbsenceProof(t *testing.T) {
 	ds, err := statement.ParseDesired("CREATE TABLE t (id int)")
 	require.NoError(t, err)
 
-	_, err = executor.ExecuteCreate(t.Context(), nil, preflight.AbsentTarget{}, preflight.CreationRole{}, ds,
+	_, err = executor.ExecuteCreate(t.Context(), nil, preflight.AbsentTarget{}, preflight.CreationRole{}, nil, ds,
 		createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 }
@@ -82,7 +82,7 @@ func TestExecuteCreateRejectsZeroValueAbsenceProof(t *testing.T) {
 // The refusal fires even though the absence proof is also zero-valued: the
 // absence check runs first and reports the same invariant class.
 func TestExecuteCreateRejectsZeroValueDesiredSchema(t *testing.T) {
-	_, err := executor.ExecuteCreate(t.Context(), nil, preflight.AbsentTarget{}, preflight.CreationRole{}, statement.DesiredSchema{},
+	_, err := executor.ExecuteCreate(t.Context(), nil, preflight.AbsentTarget{}, preflight.CreationRole{}, nil, statement.DesiredSchema{},
 		createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 }
@@ -91,7 +91,7 @@ func TestExecuteCreateWithProgressRequiresTracker(t *testing.T) {
 	ds, err := statement.ParseDesired("CREATE TABLE t (id int)")
 	require.NoError(t, err)
 
-	_, err = executor.ExecuteCreateWithProgress(t.Context(), nil, preflight.AbsentTarget{}, preflight.CreationRole{}, ds,
+	_, err = executor.ExecuteCreateWithProgress(t.Context(), nil, preflight.AbsentTarget{}, preflight.CreationRole{}, nil, ds,
 		createBudget, executor.DefaultRetryPolicy(), nil)
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 }

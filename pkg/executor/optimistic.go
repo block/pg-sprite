@@ -26,6 +26,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -184,23 +185,23 @@ func (b Budget) validate() error {
 // Statement timeouts and all other failures return immediately: repeating
 // work that exceeded its execution budget is not a lock-acquisition
 // strategy.
-func ExecuteNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy) error {
-	return executeNative(ctx, pool, pt, st, b, retry, nil)
+func ExecuteNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, lock *dbconn.TableLock, st statement.Statement, b Budget, retry RetryPolicy) error {
+	return executeNative(ctx, pool, pt, lock, st, b, retry, nil)
 }
 
 // ExecuteNativeWithProgress runs an optimistic native attempt while updating
 // tracker. The caller may poll tracker concurrently with this blocking call.
-func ExecuteNativeWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) (err error) {
+func ExecuteNativeWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, lock *dbconn.TableLock, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) (err error) {
 	if tracker == nil {
 		return fmt.Errorf("%w: progress tracker is required", ErrInvariantViolation)
 	}
 	tracker.Start(1, progress.OperationOptimistic)
 	tracker.StartStep(1, progress.OperationOptimistic, st.SQL())
 	defer func() { tracker.Finish(err) }()
-	return executeNative(ctx, pool, pt, st, b, retry, tracker)
+	return executeNative(ctx, pool, pt, lock, st, b, retry, tracker)
 }
 
-func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) error {
+func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, lock *dbconn.TableLock, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
@@ -213,6 +214,11 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		return fmt.Errorf("%w: ST-7: statement targets %q but preflight verified %q",
 			ErrInvariantViolation, qualifiedName(st.Schema(), st.Table()), qualifiedName(pt.Schema(), pt.Table()))
 	}
+	ctx, cancel, err := guardTableLockFor(ctx, lock, pt.Schema(), pt.Table())
+	if err != nil {
+		return err
+	}
+	defer cancel()
 	// The attempt runs with search_path pinned to the proof's schema (when
 	// the proof carries one — an unqualified lookup carries none and runs
 	// under the session default), so the statement's unqualified secondary

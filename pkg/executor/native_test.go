@@ -29,7 +29,7 @@ func TestBuildIndexConcurrentlyRejectsUnboundedBudget(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := executor.BuildIndexConcurrently(t.Context(), nil,
+			_, err := executor.BuildIndexConcurrently(t.Context(), nil, nil,
 				"CREATE INDEX CONCURRENTLY idx ON t (c)", executor.ConcurrentBudget{Overall: tt.overall})
 			require.Error(t, err)
 		})
@@ -37,14 +37,14 @@ func TestBuildIndexConcurrentlyRejectsUnboundedBudget(t *testing.T) {
 }
 
 func TestBuildIndexConcurrentlyRejectsCallerOwnedOverallBudget(t *testing.T) {
-	_, err := executor.BuildIndexConcurrently(t.Context(), nil,
+	_, err := executor.BuildIndexConcurrently(t.Context(), nil, nil,
 		"CREATE INDEX CONCURRENTLY idx ON public.t (c)",
 		executor.ConcurrentBudget{Overall: time.Second, CallerOwned: true})
 	require.Error(t, err)
 }
 
 func TestBuildIndexConcurrentlyCallerOwnedNeedsCancellableContext(t *testing.T) {
-	_, err := executor.BuildIndexConcurrently(context.WithoutCancel(t.Context()), nil,
+	_, err := executor.BuildIndexConcurrently(context.WithoutCancel(t.Context()), nil, nil,
 		"CREATE INDEX CONCURRENTLY idx ON public.t (c)",
 		executor.ConcurrentBudget{CallerOwned: true})
 	require.ErrorIs(t, err, executor.ErrCallerOwnedNeedsCancellableContext)
@@ -99,13 +99,13 @@ func TestBuildIndexConcurrentlyAdmission(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := executor.BuildIndexConcurrently(t.Context(), nil, tt.sql, concurrentBudget)
+			_, err := executor.BuildIndexConcurrently(t.Context(), nil, nil, tt.sql, concurrentBudget)
 			assert.ErrorIs(t, err, tt.want)
 		})
 	}
 }
 
 func TestBuildIndexConcurrentlyRejectsUnparsableSQL(t *testing.T) {
-	_, err := executor.BuildIndexConcurrently(t.Context(), nil, "CREATE INDEX CONCURRENTLY WHERE", concurrentBudget)
+	_, err := executor.BuildIndexConcurrently(t.Context(), nil, nil, "CREATE INDEX CONCURRENTLY WHERE", concurrentBudget)
 	require.Error(t, err)
 }

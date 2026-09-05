@@ -807,8 +807,10 @@ implemented. Phase 3 native execution is in progress: the `CREATE INDEX CONCURRE
 path exists in `pkg/executor` — session-scoped, outside any transaction, under the CONCURRENTLY
 wait policy (no per-lock timeout, one overall deadline), with invalid-index detection that
 fails closed into a typed, state-specific outcome (the executor never drops an index: a
-name-based drop cannot prove ownership until the LK-1 lease exists; the operator runbook is
-[invalid-index-recovery.md](invalid-index-recovery.md)). The CLI front door for the native
+name-based drop cannot prove ownership. The LK-1 table lock now exists and the build demands it,
+but it excludes other pg-sprite instances only — a same-name index registered by any other actor
+is still indistinguishable from this build's own debris, so the drop stays the operator's. The
+runbook is [invalid-index-recovery.md](invalid-index-recovery.md)). The CLI front door for the native
 path is wired: `migrate` routes an admitted statement through classify → route, resolves an
 unqualified table name once against the session's `search_path` and re-emits the qualified
 statement (the library-level `ErrUnqualifiedTable` refusal stays; the CLI moves the

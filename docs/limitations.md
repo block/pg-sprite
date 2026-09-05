@@ -13,6 +13,7 @@ not escape hatches:
 | `ADD CONSTRAINT ... USING INDEX` on a partitioned parent | PostgreSQL does not support adopting an existing index on a partitioned parent in any supported version. pg-sprite refuses before execution. |
 | `ADD FOREIGN KEY ... NOT VALID` on a partitioned parent | PostgreSQL does not support this before version 18, so pg-sprite refuses it on versions 14–17. It is supported on version 18 and later. |
 | Copy-and-swap | The copy-and-swap backend is not yet available. Statements that require it route to `refuse`; pg-sprite never falls through to a blocking rewrite. |
+| A connection through a transaction-mode pooler | pg-sprite serializes changes per table with a session-scoped advisory lock (LK-1), which is exclusion only while a client connection keeps one server session. Transaction pooling — PgBouncer or Supavisor in `transaction` mode, RDS Proxy without pinning — returns the backend at the end of every transaction, so two instances can hold what each believes is an exclusive lock and change one table at the same time. pg-sprite proves the connection keeps one session before taking the lock and refuses to run when the proof fails, rather than running with exclusion it does not have. Point it at the direct session endpoint, or run the pooler in `session` mode; a pooler is not itself the problem, transaction pooling is. |
 
 ## Declarative model boundaries
 
