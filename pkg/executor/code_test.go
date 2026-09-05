@@ -45,6 +45,7 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Cleanup: executor.ErrTargetIdentityChanged},
 			want: executor.CodeInvalidIndexUnproven,
 		},
+		{name: "cancelled by caller", err: executor.ErrCancelledByCaller, want: executor.CodeCancelledByCaller},
 		{name: "cancelled externally", err: executor.ErrCancelledExternally, want: executor.CodeCancelledExternally},
 		{name: "empty sequence", err: executor.ErrEmptySequence, want: executor.CodeEmptySequence},
 		{name: "unsupported sequence step", err: executor.ErrUnsupportedSequenceStep, want: executor.CodeUnsupportedSequenceStep},

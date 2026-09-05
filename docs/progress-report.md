@@ -95,6 +95,13 @@ server's progress view over the executor's reserved session; every other poll is
 memory. On a query error the returned snapshot still carries the last-known tracker state —
 `phase` is never empty — with the error returned alongside for the caller to classify.
 
+The tracker is also the operator's stop path for a running concurrent index build:
+`Tracker.CancelBuild` signals the build's backend over the same reserved session, and only
+while the build is active — the tracker never hands out the backend PID, so a caller cannot
+hold one past the build's return and cancel whatever the pool next runs on that backend. The
+build then reports `cancelled-externally`; a build the caller's own context ended reports
+`cancelled-by-caller`.
+
 ## Example
 
 A poll during step 2 of a 3-step sequence, mid concurrent index build:

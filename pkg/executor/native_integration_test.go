@@ -278,49 +278,87 @@ func TestBuildIndexConcurrentlyOperatorCancelIsNotBudgetExhaustion(t *testing.T)
 	}
 }
 
-func TestBuildIndexConcurrentlyCallerOwnedCancelViaTrackerPID(t *testing.T) {
-	pool, schema := newPool(t)
-	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.pid_t (id int PRIMARY KEY, c int)", schema))
+// blockedCallerOwnedBuild starts a caller-owned build on a fresh table
+// whose snapshot a repeatable-read transaction holds, so the build parks in
+// its wait phase until the blocker rolls back at cleanup. It returns once
+// the server has published the build's progress row — the statement is
+// provably running — with the build's cancel func, its tracker, and the
+// channel its outcome arrives on.
+func blockedCallerOwnedBuild(t *testing.T, pool *pgxpool.Pool, schema, table, index string) (context.CancelFunc, *progress.Tracker, <-chan error) {
+	t.Helper()
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.%s (id int PRIMARY KEY, c int)", schema, table))
 	require.NoError(t, err)
 	blocker, err := pool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	require.NoError(t, err)
 	var count int
-	require.NoError(t, blocker.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s.pid_t", schema)).Scan(&count))
+	require.NoError(t, blocker.QueryRow(t.Context(), fmt.Sprintf("SELECT count(*) FROM %s.%s", schema, table)).Scan(&count))
 	t.Cleanup(func() { require.NoError(t, blocker.Rollback(context.WithoutCancel(t.Context()))) })
 
 	tracker, err := progress.NewTracker(progress.WallClock{})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+	t.Cleanup(cancel)
 	done := make(chan error, 1)
 	go func() {
 		_, buildErr := executor.BuildIndexConcurrentlyWithProgress(ctx, pool,
-			fmt.Sprintf("CREATE INDEX CONCURRENTLY pid_idx ON %s.pid_t (c)", schema),
+			fmt.Sprintf("CREATE INDEX CONCURRENTLY %s ON %s.%s (c)", index, schema, table),
 			executor.ConcurrentBudget{CallerOwned: true}, tracker)
 		done <- buildErr
 	}()
-
-	var pid uint32
 	require.Eventually(t, func() bool {
-		pid = tracker.BuildPID()
-		if pid == 0 {
-			return false
-		}
-		var active bool
-		err := pool.QueryRow(t.Context(), "SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND state = 'active')", pid).Scan(&active)
-		return err == nil && active
-	}, 30*time.Second, 20*time.Millisecond, "the tracked build backend must become active")
-	var cancelled bool
-	require.NoError(t, pool.QueryRow(t.Context(), "SELECT pg_cancel_backend($1)", pid).Scan(&cancelled))
-	require.True(t, cancelled)
+		snapshot, progressErr := tracker.Progress(t.Context())
+		return progressErr == nil && snapshot.Detail.Work != nil
+	}, 30*time.Second, 20*time.Millisecond, "the server must publish the build's progress row")
+	return cancel, tracker, done
+}
+
+// A build stopped through the tracker is an operator's decision, not the
+// caller's and not the budget's: the caller's context is still live, so
+// the outcome is ErrCancelledExternally, carried inside the invalid-index
+// verdict the cancelled build leaves behind.
+func TestBuildIndexConcurrentlyCallerOwnedOperatorCancelViaTracker(t *testing.T) {
+	pool, schema := newPool(t)
+	_, tracker, done := blockedCallerOwnedBuild(t, pool, schema, "op_t", "op_idx")
+
+	require.NoError(t, tracker.CancelBuild(t.Context()))
 
 	buildErr := <-done
 	require.ErrorIs(t, buildErr, executor.ErrCancelledExternally)
+	assert.NotErrorIs(t, buildErr, executor.ErrCancelledByCaller)
 	var budgetErr *executor.BudgetError
 	assert.False(t, errors.As(buildErr, &budgetErr))
 	var invalidErr *executor.InvalidIndexError
 	require.ErrorAs(t, buildErr, &invalidErr)
 	require.ErrorIs(t, invalidErr.Build, executor.ErrCancelledExternally)
+	assert.Equal(t, executor.CodeInvalidIndexOwnLeftover, executor.OutcomeCode(buildErr))
+	require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrNoActiveBuild,
+		"once the build has returned the tracker must refuse to signal its backend again")
+}
+
+// The mode's own exit: the caller cancels the context that is the build's
+// only bound. That is the caller's cancellation — an orchestrator's lease
+// lapsing — and must not read as an operator's intervention
+// (ErrCancelledExternally) or as budget exhaustion, whichever of the
+// server's 57014 or the client's context error reached the executor first.
+func TestBuildIndexConcurrentlyCallerOwnedCallerCancel(t *testing.T) {
+	pool, schema := newPool(t)
+	cancel, _, done := blockedCallerOwnedBuild(t, pool, schema, "lease_t", "lease_idx")
+
+	cancel()
+
+	buildErr := <-done
+	require.ErrorIs(t, buildErr, executor.ErrCancelledByCaller)
+	assert.NotErrorIs(t, buildErr, executor.ErrCancelledExternally)
+	var budgetErr *executor.BudgetError
+	assert.False(t, errors.As(buildErr, &budgetErr))
+	var invalidErr *executor.InvalidIndexError
+	require.ErrorAs(t, buildErr, &invalidErr, "the cancelled build's leftover must be reported")
+	require.ErrorIs(t, invalidErr.Build, executor.ErrCancelledByCaller)
+	assert.Equal(t, executor.CodeInvalidIndexOwnLeftover, executor.OutcomeCode(buildErr))
+	assert.Equal(t, executor.CodeCancelledByCaller, executor.OutcomeCode(invalidErr.Build))
+	exists, valid := indexState(t, pool, schema, "lease_idx")
+	assert.True(t, exists, "the executor must not have dropped the leftover")
+	assert.False(t, valid, "the leftover must be invalid")
 }
 
 func TestBuildIndexConcurrentlyReportsLockers(t *testing.T) {
