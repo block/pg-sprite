@@ -308,21 +308,89 @@ func TestProgressMergesServerIndexBuildWork(t *testing.T) {
 	assert.Zero(t, s.Detail.Work.RowsCopied, "native progress must not fabricate copy counters")
 }
 
-func TestBuildPIDLifecycle(t *testing.T) {
+// cancelSession is a verdict session that answers pg_cancel_backend with
+// the supplied outcome and records the backend PID it was asked to signal.
+func cancelSession(t *testing.T, result bool, scanErr error, signalled *uint32) fakeSession {
+	t.Helper()
+	return fakeSession{query: func(_ context.Context, sql string, args ...any) pgx.Row {
+		assert.Contains(t, sql, "pg_cancel_backend")
+		require.Len(t, args, 1)
+		pid, ok := args[0].(uint32)
+		require.True(t, ok, "the backend PID must be passed as a bind parameter")
+		*signalled = pid
+		return fakeRow{scan: func(dest ...any) error {
+			if scanErr != nil {
+				return scanErr
+			}
+			*(dest[0].(*bool)) = result
+			return nil
+		}}
+	}}
+}
+
+// neverQueried is a session no build may reach: any query is a test failure.
+func neverQueried(t *testing.T) fakeSession {
+	t.Helper()
+	return fakeSession{query: func(context.Context, string, ...any) pgx.Row {
+		t.Fatal("no build is active, so the session must not be queried")
+		return nil
+	}}
+}
+
+func TestCancelBuildSignalsTheActiveBuild(t *testing.T) {
+	var signalled uint32
+	tracker := runningTrackerWithBuild(t, cancelSession(t, true, nil, &signalled))
+	require.NoError(t, tracker.CancelBuild(t.Context()))
+	assert.Equal(t, uint32(4242), signalled, "the cancel must target the build's own backend")
+}
+
+func TestCancelBuildReportsAStatementNotYetRunning(t *testing.T) {
+	var signalled uint32
+	t.Run("no active row for the backend", func(t *testing.T) {
+		tracker := runningTrackerWithBuild(t, cancelSession(t, false, pgx.ErrNoRows, &signalled))
+		require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrBuildNotRunning)
+	})
+	t.Run("backend gone before the signal", func(t *testing.T) {
+		tracker := runningTrackerWithBuild(t, cancelSession(t, false, nil, &signalled))
+		require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrBuildNotRunning)
+	})
+}
+
+func TestCancelBuildWrapsASessionFailure(t *testing.T) {
+	var signalled uint32
+	boom := errors.New("connection reset")
+	tracker := runningTrackerWithBuild(t, cancelSession(t, false, boom, &signalled))
+	err := tracker.CancelBuild(t.Context())
+	require.ErrorIs(t, err, boom)
+	assert.NotErrorIs(t, err, progress.ErrBuildNotRunning)
+	assert.NotErrorIs(t, err, progress.ErrNoActiveBuild)
+}
+
+// Every transition that ends a build's ownership of its backend also ends
+// the tracker's ability to signal it: after each one CancelBuild refuses
+// without touching the session, so a stale PID can never reach
+// pg_cancel_backend on a backend the pool may have handed to someone else.
+func TestCancelBuildRefusesOnceTheBuildIsNotActive(t *testing.T) {
 	tracker, err := progress.NewTracker(&fakeClock{now: time.Unix(100, 0)})
 	require.NoError(t, err)
-	tracker.Start(1, progress.OperationConcurrentIndex)
-	tracker.SetConcurrentBuild(fakeSession{}, 4242)
-	assert.Equal(t, uint32(4242), tracker.BuildPID())
+	require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrNoActiveBuild, "idle tracker")
 
-	tracker.StopConcurrentBuild()
-	assert.Zero(t, tracker.BuildPID())
-	tracker.SetConcurrentBuild(fakeSession{}, 4242)
-	tracker.Finish(nil)
-	assert.Zero(t, tracker.BuildPID())
-	tracker.SetConcurrentBuild(fakeSession{}, 4242)
 	tracker.Start(1, progress.OperationConcurrentIndex)
-	assert.Zero(t, tracker.BuildPID())
+	tracker.SetConcurrentBuild(neverQueried(t), 4242)
+	tracker.StopConcurrentBuild()
+	require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrNoActiveBuild, "after StopConcurrentBuild")
+
+	tracker.SetConcurrentBuild(neverQueried(t), 4242)
+	tracker.Finish(nil)
+	require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrNoActiveBuild, "after Finish")
+
+	tracker.SetConcurrentBuild(neverQueried(t), 4242)
+	tracker.Start(1, progress.OperationConcurrentIndex)
+	require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrNoActiveBuild, "after Start")
+
+	tracker.SetConcurrentBuild(neverQueried(t), 4242)
+	tracker.StartStep(2, progress.OperationConcurrentIndex, "CREATE INDEX CONCURRENTLY idx2 ON public.t (c)")
+	require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrNoActiveBuild, "after StartStep")
 }
 
 // A build that has left the progress view is reported inactive, with no

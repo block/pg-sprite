@@ -32,8 +32,8 @@ refused form would take, what an operator who accepts a maintenance window can d
 
 pg-sprite is an **online schema-change engine** for PostgreSQL: it takes one table-shape
 change, classifies it against the live database, and either executes it through the
-safest known online pattern — bounded server timeouts, or an explicit caller-owned
-cancellable context for concurrent index builds — or refuses with a typed reason. The measure of the tool is not how many object
+safest known online pattern under bounded sessions, or refuses with a typed reason. The
+measure of the tool is not how many object
 types it models but whether a change it accepts can hurt a production workload. The full
 positioning is [vision.md](vision.md); how it differs from planners and imperative
 copy tools by *problem class* is [architecture.md](architecture.md).
@@ -96,9 +96,10 @@ each matrix table answers *how* — the route the change takes (or will take) th
 engine:
 
 - **native, as-is** — the statement is already online-safe (metadata-only, or already
-  the online idiom); executed directly under bounded sessions. Concurrent index builds
-  may use a caller-owned cancellable context instead of `statement_timeout`; other native
-  work uses `lock_timeout`/`statement_timeout`.
+  the online idiom); executed directly under bounded sessions. The bound is
+  `lock_timeout`/`statement_timeout`, except that a concurrent index build may instead
+  be bounded by an explicit caller-owned cancellable context — the executor refuses a
+  context that cannot be cancelled, so the build stays bounded either way.
 - **native, safer sequence** — the blocking form is substituted with the equivalent
   online sequence before execution; the rewrites are catalogued in
   [safer-sequences.md](safer-sequences.md).

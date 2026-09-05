@@ -42,27 +42,42 @@ func TestClassifyBackendState(t *testing.T) {
 	}
 }
 
-// TestAsConcurrentBudgetError covers the 57014 disambiguation: SQLSTATE
-// 57014 is query_canceled generally, so only a cancellation arriving at or
-// after the overall budget can be the budget's own statement_timeout; an
-// earlier one is an external cancellation and must not read as budget
-// exhaustion — a consumer branching on *BudgetError escalates to a heavier
-// strategy, which is the wrong reaction to a deliberate operator cancel.
+// TestAsConcurrentBudgetError covers the cancellation partition. The
+// caller's own context ending is the caller's cancellation in either mode
+// and in either form it arrives; under a live context SQLSTATE 57014 is
+// query_canceled generally, so only a cancellation arriving at or after the
+// overall budget can be the budget's own statement_timeout — an earlier
+// one is an external cancellation and must not read as budget exhaustion,
+// because a consumer branching on *BudgetError escalates to a heavier
+// strategy, the wrong reaction to a deliberate operator cancel.
 func TestAsConcurrentBudgetError(t *testing.T) {
 	budget := ConcurrentBudget{Overall: time.Minute}
+	callerOwned := ConcurrentBudget{CallerOwned: true}
 	cancelled := &pgconn.PgError{Code: sqlstateQueryCanceled}
+	live := t.Context()
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	assertNotBudgetOrExternal := func(t *testing.T, err error) {
+		t.Helper()
+		var budgetErr *BudgetError
+		assert.False(t, errors.As(err, &budgetErr), "a cancellation that is not the budget's must not read as budget exhaustion")
+		assert.NotErrorIs(t, err, ErrCancelledExternally)
+	}
 
 	t.Run("57014 at or past the budget is budget exhaustion", func(t *testing.T) {
-		err := asConcurrentBudgetError(cancelled, budget, time.Minute+time.Second)
+		err := asConcurrentBudgetError(live, cancelled, budget, time.Minute+time.Second)
 		var budgetErr *BudgetError
 		require.ErrorAs(t, err, &budgetErr)
 		assert.Equal(t, CauseStatement, budgetErr.Cause)
 		assert.NotErrorIs(t, err, ErrCancelledExternally)
+		assert.NotErrorIs(t, err, ErrCancelledByCaller)
 	})
 
 	t.Run("57014 before the budget is an external cancellation", func(t *testing.T) {
-		err := asConcurrentBudgetError(cancelled, budget, 2*time.Second)
+		err := asConcurrentBudgetError(live, cancelled, budget, 2*time.Second)
 		require.ErrorIs(t, err, ErrCancelledExternally)
+		assert.NotErrorIs(t, err, ErrCancelledByCaller)
 		var budgetErr *BudgetError
 		assert.False(t, errors.As(err, &budgetErr), "an external cancel must not read as budget exhaustion")
 		var pgErr *pgconn.PgError
@@ -70,16 +85,45 @@ func TestAsConcurrentBudgetError(t *testing.T) {
 		assert.Equal(t, sqlstateQueryCanceled, pgErr.Code)
 	})
 
-	t.Run("57014 under a caller-owned deadline is an external cancellation", func(t *testing.T) {
-		err := asConcurrentBudgetError(cancelled, ConcurrentBudget{CallerOwned: true}, 2*time.Second)
+	t.Run("57014 under a live caller-owned context is an external cancellation", func(t *testing.T) {
+		err := asConcurrentBudgetError(live, cancelled, callerOwned, 2*time.Second)
 		require.ErrorIs(t, err, ErrCancelledExternally)
+		assert.NotErrorIs(t, err, ErrCancelledByCaller)
 		var budgetErr *BudgetError
 		assert.False(t, errors.As(err, &budgetErr))
 	})
 
+	t.Run("57014 under an ended caller-owned context is the caller's cancellation", func(t *testing.T) {
+		err := asConcurrentBudgetError(ended, cancelled, callerOwned, 2*time.Second)
+		require.ErrorIs(t, err, ErrCancelledByCaller)
+		assertNotBudgetOrExternal(t, err)
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, err, &pgErr, "the server error must stay reachable for SQLSTATE branching")
+	})
+
+	t.Run("57014 under an ended bounded context is the caller's cancellation", func(t *testing.T) {
+		err := asConcurrentBudgetError(ended, cancelled, budget, 2*time.Second)
+		require.ErrorIs(t, err, ErrCancelledByCaller)
+		assertNotBudgetOrExternal(t, err)
+	})
+
+	t.Run("the client's own context error under an ended context is the caller's cancellation", func(t *testing.T) {
+		err := asConcurrentBudgetError(ended, context.Canceled, callerOwned, 2*time.Second)
+		require.ErrorIs(t, err, ErrCancelledByCaller)
+		require.ErrorIs(t, err, context.Canceled, "the context error must stay reachable")
+		assertNotBudgetOrExternal(t, err)
+	})
+
+	t.Run("a non-cancellation failure under an ended context is an operational failure", func(t *testing.T) {
+		err := asConcurrentBudgetError(ended, &pgconn.PgError{Code: "42P07"}, callerOwned, 2*time.Second)
+		assert.NotErrorIs(t, err, ErrCancelledByCaller)
+		assertNotBudgetOrExternal(t, err)
+	})
+
 	t.Run("any other failure is neither", func(t *testing.T) {
-		err := asConcurrentBudgetError(&pgconn.PgError{Code: "42P07"}, budget, 2*time.Second)
+		err := asConcurrentBudgetError(live, &pgconn.PgError{Code: "42P07"}, budget, 2*time.Second)
 		assert.NotErrorIs(t, err, ErrCancelledExternally)
+		assert.NotErrorIs(t, err, ErrCancelledByCaller)
 		var budgetErr *BudgetError
 		assert.False(t, errors.As(err, &budgetErr))
 	})

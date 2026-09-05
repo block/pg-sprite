@@ -91,14 +91,33 @@ var (
 	// ErrCallerOwnedNeedsCancellableContext is returned when caller-owned
 	// mode has no cancellation signal to bound the statement.
 	ErrCallerOwnedNeedsCancellableContext = errors.New("a caller-owned build needs a cancellable context: with statement_timeout disabled the context is the statement's only bound")
+	// ErrCallerOwnedOverallBudget is returned when a caller-owned budget
+	// also carries a server deadline: the two bounds would contradict each
+	// other, so the combination is refused before any session is acquired.
+	ErrCallerOwnedOverallBudget = errors.New("a caller-owned build has no server deadline: Overall must be zero")
+	// ErrUnboundedBudget is returned when the overall budget would leave
+	// the statement without a working statement_timeout.
+	ErrUnboundedBudget = errors.New("the overall budget would leave the statement unbounded")
+	// ErrCancelledByCaller is returned when the build's statement was
+	// cancelled because the caller's own context ended — cancelled or past
+	// its deadline — while the statement ran. The cancellation reaches the
+	// executor in one of two forms, the server's SQLSTATE 57014 or the
+	// client's context error, and both are typed the same way: the cause is
+	// the caller, in either budget mode. An orchestrator reads it as its
+	// own lease lapsing, not as an operator's intervention
+	// (ErrCancelledExternally) and not as budget exhaustion (*BudgetError).
+	ErrCancelledByCaller = errors.New("the build was cancelled by its caller's context")
 	// ErrCancelledExternally is returned when the build's statement was
-	// cancelled (SQLSTATE 57014) before its overall budget elapsed: the
-	// executor's statement_timeout cannot have fired yet, so the
+	// cancelled (SQLSTATE 57014) while the caller's context was still live
+	// and, in bounded mode, before its overall budget elapsed: neither the
+	// caller nor the executor's statement_timeout can have done it, so the
 	// cancellation came from outside — an operator's pg_cancel_backend, an
-	// administrative tool. It is deliberately not a *BudgetError: a budget
-	// exhaustion invites escalation to a heavier strategy, while a
-	// deliberate cancel usually means the change should be left alone.
-	ErrCancelledExternally = errors.New("the build was cancelled from outside the executor before its budget elapsed")
+	// administrative tool. In caller-owned mode there is no server deadline,
+	// so every 57014 under a live context is external. It is deliberately
+	// not a *BudgetError: a budget exhaustion invites escalation to a
+	// heavier strategy, while a deliberate cancel usually means the change
+	// should be left alone.
+	ErrCancelledExternally = errors.New("the build was cancelled from outside the executor")
 )
 
 // sessionCleanupTimeout bounds the client-side session housekeeping around
@@ -153,7 +172,7 @@ func (b ConcurrentBudget) validate() error {
 		// INV: LK-2 — the bound moves from the server timer to the caller's
 		// cancellable context, checked before a session is acquired.
 		if b.Overall != 0 {
-			return fmt.Errorf("caller-owned budget requires Overall to be zero, got %s", b.Overall)
+			return fmt.Errorf("%w: got %s", ErrCallerOwnedOverallBudget, b.Overall)
 		}
 		return nil
 	}
@@ -161,10 +180,10 @@ func (b ConcurrentBudget) validate() error {
 	// millisecond the setting would round to zero, which disables
 	// statement_timeout entirely.
 	if b.Overall < time.Millisecond {
-		return fmt.Errorf("overall budget must be at least 1ms, got %s", b.Overall)
+		return fmt.Errorf("%w: overall budget must be at least 1ms, got %s", ErrUnboundedBudget, b.Overall)
 	}
 	if b.Overall > maxOverallBudget {
-		return fmt.Errorf("overall budget must be at most %s, got %s", maxOverallBudget, b.Overall)
+		return fmt.Errorf("%w: overall budget must be at most %s, got %s", ErrUnboundedBudget, maxOverallBudget, b.Overall)
 	}
 	return nil
 }
@@ -269,12 +288,14 @@ func (e *InvalidIndexError) Unwrap() []error {
 //   - a failed build that provably left nothing returns its failure alone
 //     — a retry can start immediately.
 //
-// Cancellation by the server-owned overall budget surfaces as a *BudgetError; a
-// cancellation arriving before the budget elapsed cannot be the budget's
-// own statement_timeout and surfaces as ErrCancelledExternally instead.
-// In caller-owned mode the cancellable context is the only bound and
-// statement_timeout is disabled; SQLSTATE 57014 always surfaces as
-// ErrCancelledExternally.
+// A cancelled build is typed by its cause. The caller's own context ending
+// surfaces as ErrCancelledByCaller in either mode. Under a live context,
+// cancellation by the server-owned overall budget surfaces as a
+// *BudgetError, and a cancellation arriving before the budget elapsed
+// cannot be the budget's own statement_timeout and surfaces as
+// ErrCancelledExternally instead. In caller-owned mode the cancellable
+// context is the only bound and statement_timeout is disabled, so a 57014
+// under a live context is always ErrCancelledExternally.
 // Caller cancellation is a race: the client returns while the cancel signal
 // travels to the server, so a build cancelled at the finish line may still
 // complete. The guarantee is about the catalog, not the race: after this
@@ -382,7 +403,7 @@ func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	if buildErr == nil {
 		return verifiedBuildReport(ctx, conn, build, target, elapsed)
 	}
-	buildErr = asConcurrentBudgetError(buildErr, b, elapsed)
+	buildErr = asConcurrentBudgetError(ctx, buildErr, b, elapsed)
 
 	// Every failure gets the catalog verdict — no error is exempt. Even a
 	// name-collision SQLSTATE cannot prove the statement created nothing:
@@ -758,20 +779,34 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 	return conn, release, nil
 }
 
-// asConcurrentBudgetError types the build failure. SQLSTATE 57014 is
-// query_canceled generally, not statement_timeout specifically — an
-// operator's pg_cancel_backend raises the same code — so the elapsed build
-// time corroborates: the budget's own statement_timeout cannot fire before
-// the budget elapses, so a 57014 arriving earlier is an external
-// cancellation (ErrCancelledExternally), not budget exhaustion. The
-// boundary is approximate by network latency — a cancel landing within
-// that sliver of the deadline reads as the budget — but the two truths
-// coincide there. Anything else is wrapped as an operational failure.
-func asConcurrentBudgetError(err error, b ConcurrentBudget, elapsed time.Duration) error {
+// asConcurrentBudgetError types the build failure into the three
+// cancellation causes a consumer branches on — the caller, the budget, or
+// a third party — or wraps anything else as an operational failure.
+//
+// The caller's context is the one exact signal: when it has ended, the
+// cancellation is the caller's own (ErrCancelledByCaller), whether it
+// reached the executor as the server's SQLSTATE 57014 or as the client's
+// context error — which of the two arrives first is a race the caller
+// cannot observe, so both are typed the same way. Only under a live
+// context does a 57014 need disambiguating: it is query_canceled
+// generally, not statement_timeout specifically — an operator's
+// pg_cancel_backend raises the same code — so the elapsed build time
+// corroborates: the budget's own statement_timeout cannot fire before the
+// budget elapses, so a 57014 arriving earlier is an external cancellation
+// (ErrCancelledExternally), not budget exhaustion. The boundary is
+// approximate by network latency — a cancel landing within that sliver of
+// the deadline reads as the budget — but the two truths coincide there.
+// In caller-owned mode there is no server deadline, so every 57014 under a
+// live context is external.
+func asConcurrentBudgetError(ctx context.Context, err error, b ConcurrentBudget, elapsed time.Duration) error {
+	if ctx.Err() != nil && isStatementCancellation(err) {
+		return fmt.Errorf("%w (after %s, %w): %w",
+			ErrCancelledByCaller, elapsed.Round(time.Millisecond), ctx.Err(), err)
+	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == sqlstateQueryCanceled {
 		if b.CallerOwned {
-			return fmt.Errorf("%w (after %s, caller-owned deadline): %w",
+			return fmt.Errorf("%w (after %s, caller-owned): %w",
 				ErrCancelledExternally, elapsed.Round(time.Millisecond), err)
 		}
 		if elapsed >= b.Overall {
@@ -781,4 +816,16 @@ func asConcurrentBudgetError(err error, b ConcurrentBudget, elapsed time.Duratio
 			ErrCancelledExternally, elapsed.Round(time.Millisecond), b.Overall, err)
 	}
 	return fmt.Errorf("concurrent index build: %w", err)
+}
+
+// isStatementCancellation reports whether err is a cancelled statement in
+// either of the forms a cancellation takes on the client: the server's
+// query_canceled, or the client's own context error when pgx gave up on
+// the statement before the server's response arrived.
+func isStatementCancellation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == sqlstateQueryCanceled
+	}
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

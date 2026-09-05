@@ -23,8 +23,11 @@ const (
 	// CodeBudgetStatementExceeded: the statement ran past
 	// statement_timeout and was cancelled; the change does real work.
 	CodeBudgetStatementExceeded Code = "budget-statement-exceeded"
+	// CodeCancelledByCaller: the build's statement was cancelled because
+	// the caller's own context ended while it ran.
+	CodeCancelledByCaller Code = "cancelled-by-caller"
 	// CodeCancelledExternally: the build's statement was cancelled from
-	// outside the executor before its budget elapsed.
+	// outside the executor — not by its caller, not by its budget.
 	CodeCancelledExternally Code = "cancelled-externally"
 	// CodeInvalidIndexOwnLeftover: the failed build's own invalid index
 	// remains and is proven this run's leftover; the recovery runbook
@@ -93,6 +96,7 @@ func Codes() []Code {
 	return []Code{
 		CodeBudgetLockExceeded,
 		CodeBudgetStatementExceeded,
+		CodeCancelledByCaller,
 		CodeCancelledExternally,
 		CodeInvalidIndexOwnLeftover,
 		CodeInvalidIndexPreexisting,
@@ -147,6 +151,8 @@ func sentinelCode(err error) Code {
 	switch {
 	case errors.Is(err, ErrInvariantViolation):
 		return CodeInvariantViolation
+	case errors.Is(err, ErrCancelledByCaller):
+		return CodeCancelledByCaller
 	case errors.Is(err, ErrCancelledExternally):
 		return CodeCancelledExternally
 	case errors.Is(err, ErrEmptySequence):
