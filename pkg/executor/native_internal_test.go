@@ -175,6 +175,7 @@ func TestInvalidIndexErrorAdviceMatchesProof(t *testing.T) {
 		{name: "abandoned entry names the recovery only", cleanup: ErrAbandonedInvalidIndex, wantsRecovery: true},
 		{name: "in-flight build does not", cleanup: ErrInvalidIndexBuildInFlight},
 		{name: "another table's entry does not", cleanup: ErrInvalidIndexOnOtherTable},
+		{name: "an entry the server will not drop concurrently does not", cleanup: ErrInvalidIndexNotDroppable},
 		{name: "unobservable builder names the recovery only", cleanup: ErrInvalidIndexBuilderUnobservable, wantsRecovery: true},
 		{name: "changed target identity does not", cleanup: ErrTargetIdentityChanged},
 		{name: "unproven abandonment does not", cleanup: ErrAbandonmentUnproven},
@@ -201,53 +202,73 @@ func TestInvalidIndexErrorAdviceMatchesProof(t *testing.T) {
 
 // TestClassifyInvalidIndexOrdersByProofStrength pins the classifier's
 // order: a visible builder outranks the table check, the table check
-// outranks visibility, and only a fully observable silence on the target
-// table is called abandoned.
+// outranks droppability, droppability outranks visibility, and only a
+// fully observable silence on a droppable entry on the target table is
+// the caller's silence verdict.
 func TestClassifyInvalidIndexOrdersByProofStrength(t *testing.T) {
 	target := indexTarget{tableOID: 100, schema: "s"}
 	observable := builderFacts{tracking: true}
 	tests := []struct {
 		name     string
 		existing invalidIndex
+		silence  error
 		want     error
 		wantPID  uint32
 	}{
 		{
 			name:     "visible builder on the target table is in flight",
-			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", builder: builderFacts{pid: 42, tracking: true}},
+			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", droppable: true, builder: builderFacts{pid: 42, tracking: true}},
+			silence:  ErrAbandonedInvalidIndex,
 			want:     ErrInvalidIndexBuildInFlight,
 			wantPID:  42,
 		},
 		{
 			name:     "visible builder on another table is still in flight",
-			existing: invalidIndex{oid: 1, tableOID: 200, table: "u", builder: builderFacts{pid: 42, hiddenRows: 3}},
+			existing: invalidIndex{oid: 1, tableOID: 200, table: "u", droppable: true, builder: builderFacts{pid: 42, hiddenRows: 3}},
+			silence:  ErrAbandonedInvalidIndex,
 			want:     ErrInvalidIndexBuildInFlight,
 			wantPID:  42,
 		},
 		{
-			name:     "another table's entry is refused before visibility is consulted",
-			existing: invalidIndex{oid: 1, tableOID: 200, table: "u", builder: builderFacts{hiddenRows: 1}},
+			name:     "another table's entry is refused before droppability is consulted",
+			existing: invalidIndex{oid: 1, tableOID: 200, table: "u", droppable: false, builder: builderFacts{hiddenRows: 1}},
+			silence:  ErrAbandonedInvalidIndex,
 			want:     ErrInvalidIndexOnOtherTable,
 		},
 		{
+			name:     "an entry the server will not drop concurrently is refused before visibility is consulted",
+			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", droppable: false, builder: builderFacts{hiddenRows: 1}},
+			silence:  ErrAbandonedInvalidIndex,
+			want:     ErrInvalidIndexNotDroppable,
+		},
+		{
 			name:     "a hidden command makes the silence unobservable",
-			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", builder: builderFacts{hiddenRows: 1, tracking: true}},
+			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", droppable: true, builder: builderFacts{hiddenRows: 1, tracking: true}},
+			silence:  ErrAbandonedInvalidIndex,
 			want:     ErrInvalidIndexBuilderUnobservable,
 		},
 		{
 			name:     "activity tracking off makes the silence unobservable",
-			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", builder: builderFacts{tracking: false}},
+			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", droppable: true, builder: builderFacts{tracking: false}},
+			silence:  ErrAbandonedInvalidIndex,
 			want:     ErrInvalidIndexBuilderUnobservable,
 		},
 		{
-			name:     "observable silence on the target table is abandoned",
-			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", builder: observable},
+			name:     "observable silence on the target table before a build is abandoned",
+			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", droppable: true, builder: observable},
+			silence:  ErrAbandonedInvalidIndex,
 			want:     ErrAbandonedInvalidIndex,
+		},
+		{
+			name:     "observable silence on the target table after this build's failure is its own leftover",
+			existing: invalidIndex{oid: 1, tableOID: 100, table: "t", droppable: true, builder: observable},
+			silence:  ErrBuildLeftInvalidIndex,
+			want:     ErrBuildLeftInvalidIndex,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			e := classifyInvalidIndex(tt.existing, target, "i")
+			e := classifyInvalidIndex(tt.existing, target, "i", tt.silence)
 			require.ErrorIs(t, e, tt.want)
 			assert.Equal(t, "s", e.Schema)
 			assert.Equal(t, "i", e.Index)
@@ -358,7 +379,8 @@ func TestFailedBuildVerdictFailsClosedOnChangedTargetIdentity(t *testing.T) {
 // race: the pinned table name resolves back to the pinned OID, but the
 // build's debris landed on a different table that briefly owned the name.
 // The schema-wide name inspection must still find it — an OID-pinned check
-// would go blind and report clean.
+// would go blind and report clean — and must report the entry where it is,
+// on the other table, without claiming it as this build's own leftover.
 func TestCatalogVerdictReportsDebrisOnAnotherTable(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -383,10 +405,12 @@ func TestCatalogVerdictReportsDebrisOnAnotherTable(t *testing.T) {
 
 	verdict := catalogVerdict(t.Context(), pool, build, pinned, buildErr)
 
-	require.ErrorIs(t, verdict, ErrBuildLeftInvalidIndex)
+	require.ErrorIs(t, verdict, ErrInvalidIndexOnOtherTable)
 	var invalidErr *InvalidIndexError
 	require.ErrorAs(t, verdict, &invalidErr)
+	assert.Equal(t, "u", invalidErr.Table, "the verdict names the table the debris actually sits on")
 	assert.ErrorIs(t, invalidErr.Build, buildErr)
+	assert.False(t, invalidErr.Recoverable(), "a foreign table's entry is not this change's to recover")
 }
 
 // TestCatalogVerdictFailsClosedWhenInspectionFails covers the verdict's own

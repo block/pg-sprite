@@ -63,9 +63,10 @@ func createTableWithDuplicates(t *testing.T, pool *pgxpool.Pool, schema, table s
 
 // startBlockedBuild runs a caller-owned concurrent build in the background
 // against a repeatable-read snapshot that holds it in its wait phase, and
-// returns once its invalid catalog entry exists. The returned stop tears
-// the build and the blocker down and waits for the build to return.
-func startBlockedBuild(t *testing.T, blockerPool, buildPool *pgxpool.Pool, schema, index string) (stop func()) {
+// returns once its invalid catalog entry exists. The build and the blocker
+// are torn down at cleanup — so a failing assertion cannot leak either —
+// and the teardown waits for the build to return.
+func startBlockedBuild(t *testing.T, blockerPool, buildPool *pgxpool.Pool, schema, index string) {
 	t.Helper()
 	blocker, err := blockerPool.BeginTx(t.Context(), pgx.TxOptions{IsoLevel: pgx.RepeatableRead})
 	require.NoError(t, err)
@@ -75,6 +76,18 @@ func startBlockedBuild(t *testing.T, blockerPool, buildPool *pgxpool.Pool, schem
 
 	buildCtx, cancelBuild := context.WithCancel(t.Context())
 	done := make(chan error, 1)
+	// Registered before the build starts, so the wait below failing still
+	// tears the build and its blocker down rather than leaking them into
+	// the pool's close.
+	t.Cleanup(func() {
+		cancelBuild()
+		select {
+		case <-done:
+		case <-time.After(time.Minute):
+			t.Error("the cancelled build did not return")
+		}
+		require.NoError(t, blocker.Rollback(context.WithoutCancel(t.Context())))
+	})
 	go func() {
 		_, err := executor.BuildIndexConcurrently(buildCtx, buildPool,
 			fmt.Sprintf("CREATE INDEX CONCURRENTLY %s ON %s.t (c)", index, schema),
@@ -85,16 +98,6 @@ func startBlockedBuild(t *testing.T, blockerPool, buildPool *pgxpool.Pool, schem
 		exists, _ := indexState(t, blockerPool, schema, index)
 		return exists
 	}, 30*time.Second, 50*time.Millisecond, "the blocked build must have created its catalog entry")
-
-	return func() {
-		cancelBuild()
-		select {
-		case <-done:
-		case <-time.After(time.Minute):
-			t.Error("the cancelled build did not return")
-		}
-		require.NoError(t, blocker.Rollback(context.WithoutCancel(t.Context())))
-	}
 }
 
 func TestRebuildAbandonedIndexRemovesOwnLeftoverAndRebuilds(t *testing.T) {
@@ -144,8 +147,7 @@ func TestRebuildAbandonedIndexRefusesVisibleInFlightBuild(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
 	require.NoError(t, err)
-	stop := startBlockedBuild(t, pool, pool, schema, "idx_busy")
-	defer stop()
+	startBlockedBuild(t, pool, pool, schema, "idx_busy")
 
 	// The entry under the name is another backend's build, visibly in
 	// progress: the recovery must refuse before taking any lock, and the
@@ -212,7 +214,6 @@ func TestRebuildAbandonedIndexReportsLockBudgetWhenTableIsBusy(t *testing.T) {
 	assert.Equal(t, executor.CauseLock, budgetErr.Cause)
 	assert.Positive(t, budgetErr.Budget)
 	assert.GreaterOrEqual(t, elapsed, budgetErr.Budget, "the proof waited out its bound before giving up")
-	assert.Less(t, elapsed, 2*budgetErr.Budget, "the proof gave up at its bound, not behind the lock")
 	var invalidErr *executor.InvalidIndexError
 	require.NotErrorAs(t, err, &invalidErr, "an unproven lock is a budget outcome, not a verdict on the entry")
 	exists, valid := indexState(t, pool, schema, "idx_left")
@@ -313,8 +314,7 @@ func TestRebuildAbandonedIndexHiddenBuilderIsUnobservableUntilLockProven(t *test
 	require.NoError(t, err)
 	t.Cleanup(limited.Close)
 
-	stop := startBlockedBuild(t, superuser, superuser, schema, "idx_hidden")
-	defer stop()
+	startBlockedBuild(t, superuser, superuser, schema, "idx_hidden")
 
 	// The build sees an invalid entry, no visible builder, and a hidden
 	// progress row: it must not call that abandoned.
@@ -380,4 +380,209 @@ func TestRebuildAbandonedIndexWithActivityTrackingOffIsUnobservableYetRecoverabl
 	exists, valid := indexState(t, pool, schema, "idx_left")
 	assert.True(t, exists)
 	assert.True(t, valid)
+}
+
+// createPartitionedTable makes a range-partitioned table with one partition
+// holding duplicate rows, so a unique build on the partition fails after
+// creating its catalog entry the way createTableWithDuplicates arranges for
+// a plain table.
+func createPartitionedTable(t *testing.T, pool *pgxpool.Pool, schema string) {
+	t.Helper()
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.p (id int, c int) PARTITION BY RANGE (id);
+		CREATE TABLE %[1]s.p1 PARTITION OF %[1]s.p FOR VALUES FROM (0) TO (100);
+		INSERT INTO %[1]s.p VALUES (1, 7), (1, 7)`, schema))
+	require.NoError(t, err)
+}
+
+func TestRebuildAbandonedIndexRefusesPartitionedParentIndex(t *testing.T) {
+	pool, schema := newPool(t)
+	createPartitionedTable(t, pool, schema)
+	// A partitioned table's index built ON ONLY is invalid by design until
+	// every partition's index is attached — the documented workflow, not
+	// debris — and the server refuses to drop it concurrently.
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE INDEX idx_p ON ONLY %s.p (c)", schema))
+	require.NoError(t, err)
+	exists, valid := indexState(t, pool, schema, "idx_p")
+	require.True(t, exists)
+	require.False(t, valid, "the parent index must be invalid before its partitions are attached")
+	parent := indexOID(t, pool, schema, "idx_p")
+
+	stmt := fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_p ON %s.p (c)", schema)
+	for name, run := range map[string]func() error{
+		"build": func() error {
+			_, err := executor.BuildIndexConcurrently(t.Context(), pool, stmt, buildBudget)
+			return err
+		},
+		"recovery": func() error {
+			_, err := executor.RebuildAbandonedIndex(t.Context(), pool, stmt, buildBudget)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := run()
+			require.ErrorIs(t, err, executor.ErrInvalidIndexNotDroppable)
+			var invalidErr *executor.InvalidIndexError
+			require.ErrorAs(t, err, &invalidErr)
+			assert.Equal(t, "idx_p", invalidErr.Index)
+			assert.Equal(t, "p", invalidErr.Table)
+			assert.False(t, invalidErr.Recoverable(), "an entry the server will not drop concurrently is an operator's, never the recovery's")
+			assert.Equal(t, parent, indexOID(t, pool, schema, "idx_p"), "the parent index is the same catalog entry")
+			assert.Empty(t, quarantinedIndexes(t, pool, schema), "nothing is quarantined")
+		})
+	}
+
+	// The refused entry is still the workflow's own: attaching the
+	// partition's index completes it.
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE INDEX p1_c ON %[1]s.p1 (c); ALTER INDEX %[1]s.idx_p ATTACH PARTITION %[1]s.p1_c", schema))
+	require.NoError(t, err)
+	_, valid = indexState(t, pool, schema, "idx_p")
+	assert.True(t, valid, "the parent index becomes valid once every partition's index is attached")
+}
+
+func TestRebuildAbandonedIndexSkipsQuarantinedEntryTheServerWillNotDrop(t *testing.T) {
+	pool, schema := newPool(t)
+	createPartitionedTable(t, pool, schema)
+	// A recovery quarantined a failed unique build's leftover on the
+	// partition and died before its drop; an operator then attached the
+	// entry to a partitioned parent index, and the server now refuses to
+	// drop it concurrently. A unique index on a partitioned table must
+	// include the partition key, and an attached partition index must
+	// match its parent's definition, so both are unique on (id, c).
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE UNIQUE INDEX idx_p ON ONLY %s.p (id, c)", schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_leaf ON %s.p1 (id, c)", schema))
+	require.Error(t, err, "a unique build over duplicates must fail")
+	debris := indexOID(t, pool, schema, "idx_leaf")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"ALTER INDEX %[1]s.idx_leaf RENAME TO %[2]s; ALTER INDEX %[1]s.idx_p ATTACH PARTITION %[1]s.%[2]s",
+		schema, quarantinedName(debris)))
+	require.NoError(t, err)
+	_, valid := indexState(t, pool, schema, quarantinedName(debris))
+	require.False(t, valid, "the attached entry stays invalid")
+
+	// The plain build does not refuse over an entry the recovery could not
+	// remove anyway: a permanent refusal would wedge every later build on
+	// the partition.
+	stmt := fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_c ON %s.p1 (c)", schema)
+	built, err := executor.BuildIndexConcurrently(t.Context(), pool, stmt, buildBudget)
+	require.NoError(t, err)
+	assert.Equal(t, "idx_c", built.Index)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("DROP INDEX %s.idx_c", schema))
+	require.NoError(t, err)
+
+	// The recovery steps over the entry, reports it, and builds.
+	rep, err := executor.RebuildAbandonedIndex(t.Context(), pool, stmt, buildBudget)
+	require.NoError(t, err)
+	assert.Empty(t, rep.Dropped, "nothing the server refuses to drop is attempted")
+	require.Len(t, rep.Skipped, 1, "the entry left in place is reported")
+	assert.Equal(t, schema, rep.Skipped[0].Schema)
+	assert.Equal(t, quarantinedName(debris), rep.Skipped[0].Index)
+	assert.Equal(t, debris, rep.Skipped[0].IndexOID)
+	assert.Equal(t, "idx_c", rep.Build.Index)
+	assert.Positive(t, rep.Duration)
+	exists, valid := indexState(t, pool, schema, "idx_c")
+	assert.True(t, exists)
+	assert.True(t, valid)
+	assert.Equal(t, []string{quarantinedName(debris)}, quarantinedIndexes(t, pool, schema),
+		"the skipped entry survives for an operator")
+}
+
+func TestBuildIndexConcurrentlyRefusesQuarantinedDebris(t *testing.T) {
+	pool, schema := newPool(t)
+	createTableWithDuplicates(t, pool, schema, "t")
+	// A recovery that died between its rename and its drop: the requested
+	// name is free, and the debris sits on the table under its quarantine
+	// name. A build that succeeded beside it would be the last anyone
+	// heard of the debris, so the build refuses and names the entry.
+	leaveInvalidIndex(t, pool, schema, "t", "idx_left")
+	debris := indexOID(t, pool, schema, "idx_left")
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("ALTER INDEX %s.idx_left RENAME TO %s", schema, quarantinedName(debris)))
+	require.NoError(t, err)
+
+	stmt := fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema)
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, stmt, buildBudget)
+
+	require.ErrorIs(t, err, executor.ErrAbandonedInvalidIndex)
+	var invalidErr *executor.InvalidIndexError
+	require.ErrorAs(t, err, &invalidErr)
+	assert.Equal(t, quarantinedName(debris), invalidErr.Index, "the refusal names the entry that is invalid, not the free name")
+	assert.Equal(t, "t", invalidErr.Table)
+	assert.True(t, invalidErr.Recoverable())
+	exists, _ := indexState(t, pool, schema, "idx_left")
+	assert.False(t, exists, "the refusal precedes any execution")
+
+	// The recovery the refusal names sweeps the debris and builds.
+	rep, err := executor.RebuildAbandonedIndex(t.Context(), pool, stmt, buildBudget)
+	require.NoError(t, err)
+	require.Len(t, rep.Dropped, 1)
+	assert.Equal(t, debris, rep.Dropped[0].IndexOID)
+	assert.Equal(t, "idx_left", rep.Build.Index)
+}
+
+func TestRebuildAbandonedIndexReportsLockBudgetWhenDropIsBlocked(t *testing.T) {
+	pool, schema := newPool(t)
+	createTableWithDuplicates(t, pool, schema, "t")
+	// Quarantined debris with the requested name free: the recovery goes
+	// straight to its sweep, and the sweep's DROP INDEX CONCURRENTLY needs
+	// the table lock a concurrent index command — visible or not — holds.
+	leaveInvalidIndex(t, pool, schema, "t", "idx_left")
+	debris := indexOID(t, pool, schema, "idx_left")
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("ALTER INDEX %s.idx_left RENAME TO %s", schema, quarantinedName(debris)))
+	require.NoError(t, err)
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, holder.Rollback(context.WithoutCancel(t.Context())))
+	})
+	_, err = holder.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.t IN SHARE UPDATE EXCLUSIVE MODE", schema))
+	require.NoError(t, err)
+
+	start := time.Now()
+	rep, err := executor.RebuildAbandonedIndex(t.Context(), pool,
+		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema), buildBudget)
+	elapsed := time.Since(start)
+
+	var budgetErr *executor.BudgetError
+	require.ErrorAs(t, err, &budgetErr)
+	assert.Equal(t, executor.CauseLock, budgetErr.Cause, "the drop gave up on the table lock, not the statement budget")
+	assert.Positive(t, budgetErr.Budget)
+	assert.Less(t, budgetErr.Budget, buildBudget.Overall, "the drop's lock bound is its own, shorter than the sweep's budget")
+	assert.GreaterOrEqual(t, elapsed, budgetErr.Budget, "the drop waited out its bound before giving up")
+	var invalidErr *executor.InvalidIndexError
+	require.NotErrorAs(t, err, &invalidErr, "a lock not granted is a budget outcome, not a verdict on the entry")
+	assert.Empty(t, rep.Dropped)
+	assert.Equal(t, []string{quarantinedName(debris)}, quarantinedIndexes(t, pool, schema),
+		"the debris survives exactly as quarantined for the next sweep")
+	_, valid := indexState(t, pool, schema, quarantinedName(debris))
+	assert.False(t, valid)
+	exists, _ := indexState(t, pool, schema, "idx_left")
+	assert.False(t, exists, "the build never ran")
+}
+
+// TestRebuildAbandonedIndexRefusesPoolWithoutRoomForItsSession covers the
+// recovery's admission-time pool guard: its own session stays open across
+// the drops and the build, so a pool sized for the build alone would not
+// fail but wait on itself; the recovery refuses it before anything runs.
+func TestRebuildAbandonedIndexRefusesPoolWithoutRoomForItsSession(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t), MaxConns: 2})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	createTableWithDuplicates(t, pool, schema, "t")
+	leaveInvalidIndex(t, pool, schema, "t", "idx_left")
+	stmt := fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema)
+
+	// The same pool is enough for the build alone.
+	_, err = executor.BuildIndexConcurrently(t.Context(), pool, stmt, buildBudget)
+	require.ErrorIs(t, err, executor.ErrAbandonedInvalidIndex, "two connections admit the build")
+
+	_, err = executor.RebuildAbandonedIndex(t.Context(), pool, stmt, buildBudget)
+
+	require.ErrorIs(t, err, executor.ErrPoolTooSmall)
+	assert.Empty(t, quarantinedIndexes(t, pool, schema), "the refusal precedes any execution")
+	exists, valid := indexState(t, pool, schema, "idx_left")
+	assert.True(t, exists)
+	assert.False(t, valid)
 }

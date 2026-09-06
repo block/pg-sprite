@@ -44,6 +44,12 @@ const (
 	// sits on a different table in the target schema; this change refuses
 	// and does not remove it.
 	CodeInvalidIndexOtherTable Code = "invalid-index-other-table"
+	// CodeInvalidIndexNotDroppable: the invalid index under the requested
+	// name sits on the target table but is a partitioned table's index, an
+	// index partition, or a constraint's index — not the debris of a
+	// failed concurrent build, and not removable by DROP INDEX
+	// CONCURRENTLY; this change leaves it in place for an operator.
+	CodeInvalidIndexNotDroppable Code = "invalid-index-not-droppable"
 	// CodeInvalidIndexBuilderUnobservable: an invalid index under the
 	// requested name sits on the target table and this role cannot observe
 	// whether a backend is building it; RebuildAbandonedIndex proves the
@@ -116,6 +122,7 @@ func Codes() []Code {
 		CodeInvalidIndexBuildInFlight,
 		CodeInvalidIndexAbandoned,
 		CodeInvalidIndexOtherTable,
+		CodeInvalidIndexNotDroppable,
 		CodeInvalidIndexBuilderUnobservable,
 		CodeInvalidIndexUnproven,
 		CodeEmptySequence,
@@ -220,7 +227,8 @@ func (e *BudgetError) Code() Code {
 // Code returns the invalid-index outcome's stable code, derived from the
 // same cleanup state the error's rendering distinguishes: proven own
 // leftover, another backend's build in flight, abandoned on the target
-// table, on another table, builder unobservable, or unproven.
+// table, on another table, not droppable, builder unobservable, or
+// unproven.
 func (e *InvalidIndexError) Code() Code {
 	switch {
 	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):
@@ -231,6 +239,8 @@ func (e *InvalidIndexError) Code() Code {
 		return CodeInvalidIndexAbandoned
 	case errors.Is(e.Cleanup, ErrInvalidIndexOnOtherTable):
 		return CodeInvalidIndexOtherTable
+	case errors.Is(e.Cleanup, ErrInvalidIndexNotDroppable):
+		return CodeInvalidIndexNotDroppable
 	case errors.Is(e.Cleanup, ErrInvalidIndexBuilderUnobservable):
 		return CodeInvalidIndexBuilderUnobservable
 	default:

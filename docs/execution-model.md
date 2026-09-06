@@ -276,6 +276,7 @@ branching surface.
 | `invalid-index-build-in-flight` | The INVALID index under the requested name is another backend's concurrent build still running; wait, never drop |
 | `invalid-index-abandoned` | An INVALID index under the requested name sits on the target table with no backend building it; `RebuildAbandonedIndex` removes it under proof |
 | `invalid-index-other-table` | An INVALID index under the requested name sits on a different table in the schema; this change never touches it |
+| `invalid-index-not-droppable` | The INVALID index under the requested name is one `DROP INDEX CONCURRENTLY` cannot remove — a partitioned table's index, an index partition, or a constraint's index — so it is not a failed concurrent build's debris; an operator resolves it |
 | `invalid-index-builder-unobservable` | An INVALID index under the requested name sits on the target table and this role cannot see whether a backend is building it; `RebuildAbandonedIndex` decides under the table lock |
 | `invalid-index-unproven` | An INVALID index may remain but the catalog state could not be proven, or a recovery could not carry its proof through to the removal |
 | `empty-sequence` | The sequence had no steps to run |
@@ -289,7 +290,7 @@ branching surface.
 | `duplicate-create-name` | The desired set claims the same relation name twice; refused at admission |
 | `partition-of-unsupported` | `CREATE TABLE PARTITION OF` locks the partitioned parent, which the absence proof does not cover |
 | `unsupported-create-step` | A desired statement is not a shape the create path can run |
-| `pool-too-small` | The pool cannot hold the build session and the verdict connection at once |
+| `pool-too-small` | The pool cannot hold every session the operation needs at once: a build's session and verdict connection, or a recovery's own session beside those |
 | `table-not-found` | The statement's qualified table does not exist |
 | `invariant-violation` | A breach of the invariant registry; never a retry candidate |
 | `execution-failed` | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |

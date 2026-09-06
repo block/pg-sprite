@@ -79,6 +79,18 @@ var (
 	// change's to remove — the recovery refuses it too, and that table's
 	// own change recovers it.
 	ErrInvalidIndexOnOtherTable = errors.New("an invalid index with this name exists on a different table in the target schema")
+	// ErrInvalidIndexNotDroppable is returned (inside an *InvalidIndexError)
+	// when the invalid index under the requested name sits on the target
+	// table but is not an index DROP INDEX CONCURRENTLY can remove: a
+	// partitioned table's index (invalid by design until every partition
+	// has an attached index, the documented CREATE INDEX ... ON ONLY
+	// workflow), an index partition attached to such a parent, or an index
+	// backing a constraint. None of these is the debris of a failed
+	// concurrent build whatever its validity flag says, and no recovery
+	// here can be proven through to a removal, so the build refuses and
+	// the recovery leaves the entry exactly as it found it — only an
+	// operator who knows what the index is can decide.
+	ErrInvalidIndexNotDroppable = errors.New("an invalid index with this name exists on the target table and is not a droppable index: it is a partitioned table's index, an index partition, or backs a constraint")
 	// ErrInvalidIndexBuilderUnobservable is returned (inside an
 	// *InvalidIndexError) when an invalid index under the requested name
 	// sits on the target table, no backend is visibly building it, and
@@ -122,11 +134,15 @@ var (
 	// errors.Is instead of matching message text.
 	ErrTableNotFound = errors.New("table not found")
 	// ErrPoolTooSmall is returned at admission when the pool cannot hold
-	// the build session and the verdict session at once. The verdict is a
-	// correctness dependency, not a nicety: without a reserved second
-	// connection, every failed build would resolve indeterminate. Like an
-	// unbounded budget, an unusable verdict is refused by construction.
-	ErrPoolTooSmall = errors.New("concurrent index build needs a pool of at least two connections: one for the build session, one reserved for the catalog verdict")
+	// every session the operation needs at once — for a build, the build
+	// session and the verdict session (buildMinConns); for a recovery, its
+	// own session on top of those (recoveryMinConns). The verdict is a
+	// correctness dependency, not a nicety: without a reserved connection,
+	// every failed build would resolve indeterminate, and a pool one
+	// connection short would not fail but wait on itself for as long as
+	// the caller's context allows. Like an unbounded budget, an unusable
+	// pool is refused by construction.
+	ErrPoolTooSmall = errors.New("the pool cannot hold every session the operation needs at once")
 	// ErrCallerOwnedNeedsCancellableContext is returned when caller-owned
 	// mode has no cancellation signal to bound the statement.
 	ErrCallerOwnedNeedsCancellableContext = errors.New("a caller-owned build needs a cancellable context: with statement_timeout disabled the context is the statement's only bound")
@@ -162,6 +178,14 @@ var (
 	// should be left alone.
 	ErrCancelledExternally = errors.New("the build was cancelled from outside the executor")
 )
+
+// buildMinConns is the pool size a concurrent build needs: the build
+// session and the verdict session reserved beside it.
+const buildMinConns = 2
+
+// recoveryMinConns is the pool size a recovery needs: its own session,
+// held across the drops and the build, plus the build's own two.
+const recoveryMinConns = buildMinConns + 1
 
 // sessionCleanupTimeout bounds the client-side session housekeeping around
 // a build: resetting the budget overrides and closing a session that must
@@ -287,7 +311,8 @@ type InvalidIndexError struct {
 // on the target table whose builder this role cannot observe — the
 // recovery's proof is a table lock, not the progress view, so it decides
 // what the view could not. A visibly in-flight build, another table's
-// debris, and an unproven state are not this actor's to recover.
+// debris, an index the server will not drop concurrently, and an unproven
+// state are not this actor's to recover.
 func (e *InvalidIndexError) Recoverable() bool {
 	switch {
 	case errors.Is(e.Cleanup, ErrBuildLeftInvalidIndex):
@@ -304,9 +329,10 @@ func (e *InvalidIndexError) Recoverable() bool {
 // Error implements the error interface. The advice is as state-specific as
 // the type: a removal is named only in the states where the recovery can
 // prove ownership before it drops — the same standard the executor holds
-// itself to. An in-flight build says wait; another table's debris and an
-// unproven state get investigation steps, never a statement to
-// copy-paste: the index under that name may be healthy.
+// itself to. An in-flight build says wait; another table's debris, an
+// index the server will not drop concurrently, and an unproven state get
+// investigation steps, never a statement to copy-paste: the index under
+// that name may be healthy, or may be exactly what it is meant to be.
 func (e *InvalidIndexError) Error() string {
 	name := fmt.Sprintf("%s.%s", e.Schema, e.Index)
 	switch {
@@ -321,6 +347,9 @@ func (e *InvalidIndexError) Error() string {
 			name, e.Table, e.Cleanup)
 	case errors.Is(e.Cleanup, ErrInvalidIndexOnOtherTable):
 		return fmt.Sprintf("index %s is invalid debris on a different table (%s), which this change will not remove; recover it from that table's own change or inspect it yourself, see docs/invalid-index-recovery.md: %v",
+			name, e.Table, e.Cleanup)
+	case errors.Is(e.Cleanup, ErrInvalidIndexNotDroppable):
+		return fmt.Sprintf("index %s is invalid on table %s but is not debris the server will remove concurrently (a partitioned table's index, an index partition, or a constraint's index); this change leaves it in place — inspect pg_class.relkind, pg_class.relispartition, and pg_constraint.conindid yourself, see docs/invalid-index-recovery.md: %v",
 			name, e.Table, e.Cleanup)
 	case errors.Is(e.Cleanup, ErrInvalidIndexBuilderUnobservable):
 		return fmt.Sprintf("index %s is invalid on table %s and this role cannot see whether another backend is still building it; recover with RebuildAbandonedIndex, which proves the state under the table lock, or inspect pg_stat_progress_create_index as a role with pg_read_all_stats, see docs/invalid-index-recovery.md: %v",
@@ -436,8 +465,9 @@ func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	// INV: LK-2 — the verdict is bounded by construction too: a pool that
 	// cannot hold the build session and the verdict session at once would
 	// make every failed build indeterminate.
-	if pool.Config().MaxConns < 2 {
-		return rep, ErrPoolTooSmall
+	if pool.Config().MaxConns < buildMinConns {
+		return rep, fmt.Errorf("concurrent index build needs %d connections (build session and reserved verdict session), pool holds %d: %w",
+			buildMinConns, pool.Config().MaxConns, ErrPoolTooSmall)
 	}
 
 	// One session carries resolution, the pre-build inspection, and the
@@ -476,7 +506,23 @@ func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 		return rep, err
 	}
 	if found {
-		return rep, classifyInvalidIndex(existing, target, build.index)
+		return rep, classifyInvalidIndex(existing, target, build.index, ErrAbandonedInvalidIndex)
+	}
+	// Quarantined debris on the target table refuses the build too, loudly:
+	// a recovery that renamed an entry and then died has freed the
+	// requested name, and a build that silently succeeded beside the
+	// leftover would be the last time anyone heard of it. The refusal is
+	// classified against the quarantine name — the entry that is invalid —
+	// and RebuildAbandonedIndex with this same statement sweeps it. Entries
+	// the server will not drop concurrently are not refused here: they are
+	// not this build's debris, the recovery reports them as skipped, and a
+	// permanent refusal would wedge every later build on the table.
+	debris, err := listDroppableQuarantinedIndexes(ctx, conn, target)
+	if err != nil {
+		return rep, err
+	}
+	if len(debris) != 0 {
+		return rep, classifyInvalidIndex(debris[0], target, quarantineName(debris[0].oid), ErrAbandonedInvalidIndex)
 	}
 
 	// The backend PID anchors the post-failure ownership proof: recovery
@@ -581,18 +627,27 @@ func failedBuildVerdict(ctx context.Context, q querier, build concurrentIndexBui
 //     replaced table means any debris lives on a relation this verdict
 //     never resolved, so the verdict is indeterminate, not clean;
 //   - whether an index with the build's name exists in the target schema
-//     and is invalid, and whether a backend is still building it. The name
-//     is checked schema-wide, not pinned to the table OID: a failed build's
-//     debris carries the requested name in the table's schema, and pinning
-//     to the OID would go blind if the table was swapped under the same
-//     name while the build ran. The builder check keeps the ownership
-//     claim honest: the build's own backend has provably stopped by now, so
-//     a live builder on the invalid entry is another actor whose build
-//     won the name before ours created anything — the entry is theirs, in
-//     flight, not our leftover. The claim is made only when this session
-//     could have seen such a builder: with another role's progress row
-//     hidden, or activity tracking off, the entry is reported without an
-//     owner.
+//     and is invalid, which table it sits on, whether the server could
+//     drop it concurrently, and whether a backend is still building it.
+//     The name is checked schema-wide, not pinned to the table OID: a
+//     failed build's debris carries the requested name in the table's
+//     schema, and pinning to the OID would go blind if the table was
+//     swapped under the same name while the build ran. The facts then
+//     go through the same classifier as the pre-build inspection, with
+//     one difference: an observable silence on the target table is this
+//     build's own leftover, not anonymous abandoned debris. The other
+//     verdicts keep the ownership claim honest. The build's own backend
+//     has provably stopped by now, so a live builder on the invalid entry
+//     is another actor whose build won the name before ours created
+//     anything — theirs, in flight. An entry on a different table is not
+//     provably ours either: our build may have created it on a table that
+//     briefly owned the resolved name, or another actor's failed build
+//     may have — the catalog cannot tell, and an ownership claim over a
+//     foreign table's index is exactly the claim the recovery refuses to
+//     act on, so the verdict reports the entry where it is and claims
+//     nothing. The ownership claim is made only when this session could
+//     have seen a builder: with another role's progress row hidden, or
+//     activity tracking off, the entry is reported without an owner.
 //
 // All facts are ordinary catalog scans inside one SELECT, so they share
 // the statement's MVCC snapshot; name-resolution helpers like to_regclass
@@ -609,30 +664,37 @@ func catalogVerdict(ctx context.Context, q querier, build concurrentIndexBuild, 
 	}
 	var (
 		currentOID *uint32
+		indexOID   *uint32
 		indexValid *bool
+		indexTable *uint32
+		tableName  *string
+		droppable  *bool
 		builderPID *int32
 		hiddenRows int64
 		tracking   bool
 	)
+	// The invalid-entry facts come from one LATERAL row so a missing entry
+	// is one NULL row, not five subqueries that could each miss.
 	err := q.QueryRow(ctx,
 		`SELECT (SELECT c.oid
 		           FROM pg_catalog.pg_class c
 		           JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		          WHERE n.nspname OPERATOR(pg_catalog.=) $1
 		            AND c.relname OPERATOR(pg_catalog.=) $2),
-		        (SELECT i.indisvalid
-		           FROM pg_catalog.pg_index i
-		           JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
-		           JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
-		          WHERE n.nspname OPERATOR(pg_catalog.=) $1
-		            AND c.relname OPERATOR(pg_catalog.=) $3),
-		        (SELECT `+builderPIDSubquery+`
-		           FROM pg_catalog.pg_class c
-		           JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
-		          WHERE n.nspname OPERATOR(pg_catalog.=) $1
-		            AND c.relname OPERATOR(pg_catalog.=) $3),
-		        `+builderVisibilityColumns,
-		target.schema, build.table, build.index).Scan(&currentOID, &indexValid, &builderPID, &hiddenRows, &tracking)
+		        idx.oid, idx.indisvalid, idx.indrelid, idx.table_name, idx.droppable, idx.builder_pid,
+		        `+builderVisibilityColumns+`
+		   FROM (SELECT 1) AS one
+		   LEFT JOIN LATERAL (
+		        SELECT c.oid, i.indisvalid, i.indrelid, t.relname AS table_name,
+		               `+droppableColumn+` AS droppable,
+		               `+builderPIDSubquery+` AS builder_pid
+		          FROM pg_catalog.pg_index i
+		          JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
+		          JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) i.indrelid
+		          JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		         WHERE n.nspname OPERATOR(pg_catalog.=) $1
+		           AND c.relname OPERATOR(pg_catalog.=) $3) AS idx ON true`,
+		target.schema, build.table, build.index).Scan(&currentOID, &indexOID, &indexValid, &indexTable, &tableName, &droppable, &builderPID, &hiddenRows, &tracking)
 	if err != nil {
 		return fail(fmt.Errorf("inspect index %s.%s: %w", target.schema, build.index, err))
 	}
@@ -644,17 +706,16 @@ func catalogVerdict(ctx context.Context, q querier, build concurrentIndexBuild, 
 	if indexValid == nil || *indexValid {
 		return buildErr
 	}
-	builder := newBuilderFacts(builderPID, hiddenRows, tracking)
-	owned := &InvalidIndexError{Schema: target.schema, Index: build.index, Table: build.table,
-		BuilderPID: builder.pid, Build: buildErr}
-	switch {
-	case builder.pid != 0:
-		owned.Cleanup = ErrInvalidIndexBuildInFlight
-	case !builder.observable():
-		owned.Cleanup = ErrInvalidIndexBuilderUnobservable
-	default:
-		owned.Cleanup = ErrBuildLeftInvalidIndex
+	if indexOID == nil || indexTable == nil || tableName == nil || droppable == nil {
+		// The entry's row was read, so every one of its columns is
+		// non-null by the catalog's own definition; a NULL is a catalog
+		// this verdict does not understand, and indeterminate fails closed.
+		return fail(fmt.Errorf("inspect index %s.%s: entry row carries NULL identity facts: %w", target.schema, build.index, ErrAbandonmentUnproven))
 	}
+	existing := invalidIndex{oid: *indexOID, tableOID: *indexTable, table: *tableName, droppable: *droppable,
+		builder: newBuilderFacts(builderPID, hiddenRows, tracking)}
+	owned := classifyInvalidIndex(existing, target, build.index, ErrBuildLeftInvalidIndex)
+	owned.Build = buildErr
 	return owned
 }
 
@@ -748,14 +809,32 @@ func resolveTarget(ctx context.Context, q querier, build concurrentIndexBuild) (
 }
 
 // invalidIndex is one catalog observation of an invalid index: its
-// identity (the OID a later proof re-checks), the table it sits on, and
-// what the snapshot says about a backend building it.
+// identity (the OID a later proof re-checks), the table it sits on,
+// whether the server could remove it concurrently, and what the snapshot
+// says about a backend building it.
 type invalidIndex struct {
 	oid      uint32
 	tableOID uint32
 	table    string
-	builder  builderFacts
+	// droppable reports whether DROP INDEX CONCURRENTLY can remove the
+	// entry (droppableColumn). An entry it cannot remove is not the debris
+	// of a failed concurrent build, whatever its validity flag says.
+	droppable bool
+	builder   builderFacts
 }
+
+// droppableColumn is the boolean that says whether DROP INDEX CONCURRENTLY
+// can remove the index whose pg_class row is aliased c. The server refuses
+// three shapes, and each is an index that is invalid for a reason other
+// than a failed concurrent build: a partitioned table's index (relkind I,
+// invalid by design until every partition's index is attached), an index
+// partition attached to such a parent (relispartition), and an index
+// backing a constraint — unique, primary key, exclusion, or referenced by a
+// foreign key — which pg_constraint.conindid names.
+const droppableColumn = `(c.relkind OPERATOR(pg_catalog.=) 'i'
+		            AND NOT c.relispartition
+		            AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k
+		                             WHERE k.conindid OPERATOR(pg_catalog.=) c.oid))`
 
 // builderFacts is what one catalog snapshot says about the backend building
 // an index, together with whether that answer can be trusted. A visible
@@ -807,6 +886,12 @@ const builderPIDSubquery = `(SELECT p.pid
 // view withholds from this session (a visible command always reports its
 // table, so a NULL there is a hidden command, not a command that has yet
 // to create its index), and whether this session records activity at all.
+// The hidden-row count is database-wide by necessity, not by choice: what
+// the view withholds is precisely the command's target, so a hidden row
+// cannot be attributed to any table, and any one of them may be building
+// the entry under inspection. An unrelated hidden build elsewhere in the
+// database therefore does turn an observable silence into an unobservable
+// one — the honest answer, since this session cannot tell them apart.
 const builderVisibilityColumns = `(SELECT pg_catalog.count(*)
 		           FROM pg_catalog.pg_stat_progress_create_index p
 		          WHERE p.datname OPERATOR(pg_catalog.=) pg_catalog.current_database()
@@ -837,13 +922,13 @@ func inspectInvalidIndex(ctx context.Context, q querier, schema, index string) (
 		tracking   bool
 	)
 	err := q.QueryRow(ctx,
-		`SELECT c.oid, i.indisvalid, i.indrelid, t.relname, `+builderPIDSubquery+`, `+builderVisibilityColumns+`
+		`SELECT c.oid, i.indisvalid, i.indrelid, t.relname, `+droppableColumn+`, `+builderPIDSubquery+`, `+builderVisibilityColumns+`
 		   FROM pg_catalog.pg_index i
 		   JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
 		   JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) i.indrelid
 		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		  WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`,
-		schema, index).Scan(&found.oid, &valid, &found.tableOID, &found.table, &builderPID, &hiddenRows, &tracking)
+		schema, index).Scan(&found.oid, &valid, &found.tableOID, &found.table, &found.droppable, &builderPID, &hiddenRows, &tracking)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return invalidIndex{}, false, nil
 	}
@@ -867,24 +952,31 @@ func pidValue(pid *int32) uint32 {
 	return uint32(*pid)
 }
 
-// classifyInvalidIndex turns an observed invalid index under the requested
-// name into the typed refusal the build and the recovery both act on. The
-// order is the order of proof strength: a visible builder is positive
-// evidence the entry is not abandoned whatever table it is on; without one,
-// the table decides whether the debris is this change's to recover; and on
-// the target table, the entry is called abandoned only when this session
-// could have seen a builder and saw none.
-func classifyInvalidIndex(existing invalidIndex, target indexTarget, index string) *InvalidIndexError {
+// classifyInvalidIndex turns an observed invalid index under the given
+// name into the typed refusal the build, the failure verdict, and the
+// recovery all act on. The order is the order of proof strength: a visible
+// builder is positive evidence the entry is not abandoned whatever table it
+// is on; without one, the table decides whether the debris is this change's
+// to recover; an entry the server will not drop concurrently is not the
+// debris of a failed concurrent build at all; and only then does
+// visibility decide — silence is the given verdict only when this session
+// could have seen a builder and saw none. The silence verdict is the one
+// fact the callers disagree on: before a build the entry is anonymous
+// abandoned debris (ErrAbandonedInvalidIndex); after this build's own
+// failure it is this build's leftover (ErrBuildLeftInvalidIndex).
+func classifyInvalidIndex(existing invalidIndex, target indexTarget, index string, silence error) *InvalidIndexError {
 	e := &InvalidIndexError{Schema: target.schema, Index: index, Table: existing.table, BuilderPID: existing.builder.pid}
 	switch {
 	case existing.builder.pid != 0:
 		e.Cleanup = ErrInvalidIndexBuildInFlight
 	case existing.tableOID != target.tableOID:
 		e.Cleanup = ErrInvalidIndexOnOtherTable
+	case !existing.droppable:
+		e.Cleanup = ErrInvalidIndexNotDroppable
 	case !existing.builder.observable():
 		e.Cleanup = ErrInvalidIndexBuilderUnobservable
 	default:
-		e.Cleanup = ErrAbandonedInvalidIndex
+		e.Cleanup = silence
 	}
 	return e
 }

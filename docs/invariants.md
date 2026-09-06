@@ -177,6 +177,34 @@ ambiguity. *Enforced:* cutover retry loop. *Source:* Spirit's cutover
 (`information_schema` inspection on dropped connection,
 [Spirit README](https://github.com/block/spirit#cut-over-and-cleanup)).
 
+### LK-5 — An index is dropped only by proven identity, under the lock that excludes its builder
+
+pg-sprite removes an invalid index only when it has **proved** the entry is abandoned debris,
+and a proof is a statement about an identity (`pg_class.oid`), never about a name: the same
+name can be occupied by a different entry between any two observations. The proof rests on
+`SHARE UPDATE EXCLUSIVE` on the index's table — the lock every concurrent index command
+(`CREATE`, `DROP`, `REINDEX … CONCURRENTLY`) holds for its whole life, so holding it proves no
+build of *any* index on the table is in flight, including one this role cannot observe.
+Under that lock, in the same transaction, the executor re-verifies the candidate by OID
+(still under the observed name, still invalid, still on the target table by OID and schema,
+still an index the server will drop concurrently, no visible builder) and renames it to a
+**quarantine name derived from its OID** — the only mutation the lock licenses. Any
+disagreement between the unlocked observation and the locked re-check fails closed
+(`ErrTargetIdentityChanged` when the table's identity moved, `ErrAbandonmentUnproven`
+otherwise) and mutates nothing. The subsequent `DROP INDEX CONCURRENTLY` — which cannot run
+inside the locking transaction — targets only quarantine names, re-verifies the same facts
+by OID immediately before it, and trusts the server's success only once the OID is gone.
+A valid index is never a candidate; an invalid index on a partitioned table, an index
+partition, or a constraint's index is never a candidate (the server will not drop it
+concurrently, so the rename would strand it). Every lock the recovery takes is bounded, and
+the proof's lock, every drop, and the requested build share **one** overall budget, so a
+recovery over k quarantined entries costs at most the budget, not (k+1) budgets.
+*Enforced:* `pkg/executor` recovery (`RebuildAbandonedIndex`): locked re-verification and
+rename, pre-/post-drop OID checks, droppability predicate, shared-budget accounting, with
+stale-observation tests that alter the catalog between observation and lock on a real
+database. *Source:* PostgreSQL's session-level `ShareUpdateExclusiveLock` on the heap for
+every `CONCURRENTLY` index command; [invalid-index-recovery](invalid-index-recovery.md).
+
 ## State, checkpoint, and resume (ST)
 
 ### ST-1 — The checkpoint is a single row, written atomically
@@ -361,6 +389,7 @@ about **how we write and review the code**.
 | CO-1, CO-2, CO-3 | 5 (gate), 8 (watermark/divergence policy) | inject-divergence, repair-invalidates-watermark |
 | CO-4, CO-5, CO-6 | 6 | one convergence test per race, incl. unique-value move |
 | LK-3 | 4–6 | cancellation/claim race test |
+| LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |
 | ST-1, ST-2, ST-3, ST-4 | 8 | kill/resume, cross-version refuse, orphan-slot reap, failover reconcile |
 | ST-6 | 1 onward, complete by 8 | preflight matrix |

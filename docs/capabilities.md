@@ -339,9 +339,12 @@ Three related jobs stay with humans on purpose:
   an index itself** — PostgreSQL drops by name, not identity, so a drop on the way in
   could destroy another actor's build. Recovery is a separate, explicit call
   (`executor.RebuildAbandonedIndex`, library-only) that removes an entry only after
-  proving it abandoned under the table lock and by catalog identity, and refuses an
-  in-flight build or another table's entry. The typed ownership states, which of them the
-  recovery handles, and what the rest license a human to do is
+  proving it abandoned under the table lock and by catalog identity
+  ([LK-5](invariants.md#lk-5--an-index-is-dropped-only-by-proven-identity-under-the-lock-that-excludes-its-builder)),
+  and refuses an in-flight build, another table's entry, or an entry the server will not
+  drop concurrently — a partitioned table's index, an index partition, or a constraint's
+  index is never debris and is never touched. The typed ownership states, which of them
+  the recovery handles, and what the rest license a human to do is
   [invalid-index-recovery.md](invalid-index-recovery.md).
 - **Index maintenance (`REINDEX` automation, bloat-driven rebuild scheduling).** The
   engine executes `REINDEX CONCURRENTLY` when asked (see matrix); *deciding* when an

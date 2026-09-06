@@ -56,6 +56,11 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 			want: executor.CodeInvalidIndexBuilderUnobservable,
 		},
 		{
+			name: "invalid index the server will not drop concurrently",
+			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t", Cleanup: executor.ErrInvalidIndexNotDroppable},
+			want: executor.CodeInvalidIndexNotDroppable,
+		},
+		{
 			name: "unproven invalid index",
 			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Cleanup: executor.ErrTargetIdentityChanged},
 			want: executor.CodeInvalidIndexUnproven,

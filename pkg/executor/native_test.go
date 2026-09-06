@@ -109,3 +109,37 @@ func TestBuildIndexConcurrentlyRejectsUnparsableSQL(t *testing.T) {
 	_, err := executor.BuildIndexConcurrently(t.Context(), nil, "CREATE INDEX CONCURRENTLY WHERE", concurrentBudget)
 	require.Error(t, err)
 }
+
+// TestRebuildAbandonedIndexAdmissionGuardsPrecedeSessionUse pins that the
+// recovery's admission refusals — the budget, the context, the statement —
+// are decided before a session is acquired: a nil pool is survivable only
+// when nothing touched it.
+func TestRebuildAbandonedIndexAdmissionGuardsPrecedeSessionUse(t *testing.T) {
+	const stmt = "CREATE INDEX CONCURRENTLY idx ON public.t (c)"
+	tests := []struct {
+		name          string
+		uncancellable bool
+		sql           string
+		budget        executor.ConcurrentBudget
+		want          error
+	}{
+		{name: "unbounded budget", sql: stmt, budget: executor.ConcurrentBudget{}},
+		{name: "caller-owned budget with an overall budget", sql: stmt, budget: executor.ConcurrentBudget{Overall: time.Second, CallerOwned: true}},
+		{name: "caller-owned budget without cancellation", uncancellable: true, sql: stmt, budget: executor.ConcurrentBudget{CallerOwned: true}, want: executor.ErrCallerOwnedNeedsCancellableContext},
+		{name: "not a concurrent build", sql: "CREATE INDEX idx ON public.t (c)", budget: concurrentBudget, want: executor.ErrNotConcurrentIndexBuild},
+		{name: "unqualified table", sql: "CREATE INDEX CONCURRENTLY idx ON t (c)", budget: concurrentBudget, want: executor.ErrUnqualifiedTable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			if tt.uncancellable {
+				ctx = context.WithoutCancel(ctx)
+			}
+			_, err := executor.RebuildAbandonedIndex(ctx, nil, tt.sql, tt.budget)
+			require.Error(t, err)
+			if tt.want != nil {
+				assert.ErrorIs(t, err, tt.want)
+			}
+		})
+	}
+}

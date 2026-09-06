@@ -28,16 +28,30 @@ proof strength, strongest first:
    entry's OID. The build is in flight; nothing here is debris.
 2. **It sits on a different table** — `pg_index.indrelid` is not the target table. It
    is not this change's to remove, whatever its state.
-3. **This role cannot see whether it is being built** — `pg_stat_progress_create_index`
+3. **The server will not drop it concurrently** — it is a partitioned table's index
+   (`relkind = 'I'`; invalid by design until every partition has an attached index), an
+   index partition (`relispartition`), or a constraint's index (`pg_constraint.conindid`).
+   None of these is debris a failed `CREATE INDEX CONCURRENTLY` can leave, and none can be
+   removed with `DROP INDEX CONCURRENTLY`, so the executor refuses rather than quarantine
+   an entry it could never drop.
+4. **This role cannot see whether it is being built** — `pg_stat_progress_create_index`
    hides the target of another role's command from a reader without
-   `pg_read_all_stats` (the row is there, its `index_relid` is `NULL`), and records
-   nothing at all when the builder runs with `track_activities` off. A silent progress
-   view is only evidence when nothing is hidden and tracking is on.
-4. **It is abandoned** — on the target table, no visible builder, nothing hidden,
-   tracking on. Nobody is building it; nobody ever will.
+   `pg_read_all_stats` (the row is there, its `index_relid` is `NULL`), and the view
+   records nothing at all when activity tracking is off. The executor reads its own
+   session's `track_activities` as the proxy for the server's: the setting is
+   per-session, so a builder that switched it off individually is not detectable — that
+   is one of the reasons the automatic recovery proves abandonment under a lock instead of
+   trusting the view. A silent progress view is only evidence when nothing is hidden and
+   tracking is on.
+5. **It is abandoned** — on the target table, droppable, no visible builder, nothing
+   hidden, tracking on. Nobody is building it; nobody ever will.
 
 After its own failed build, the executor proves its backend stopped and applies the same
-reading to whatever it finds under the build's name.
+reading to whatever it finds under the build's name. A build also refuses, with the same
+classification, when the target table carries **quarantined debris** — an entry a previous
+recovery renamed to `pgsprite_abandoned_<oid>` and then failed to drop — so debris the
+requested name no longer reveals is still reported, not silently built beside; the
+recovery with the same statement sweeps it.
 
 ## The states
 
@@ -47,6 +61,7 @@ reading to whatever it finds under the build's name.
 | Another backend's build in flight (`ErrInvalidIndexBuildInFlight`) | `invalid-index-build-in-flight` | No — refuses | **Wait.** The error names the backend PID |
 | Abandoned on the target table (`ErrAbandonedInvalidIndex`) | `invalid-index-abandoned` | **Yes** — `RebuildAbandonedIndex` | Call the recovery |
 | On a different table (`ErrInvalidIndexOnOtherTable`) | `invalid-index-other-table` | No — refuses | Recover it from that table's own change, or inspect it yourself |
+| Not droppable concurrently (`ErrInvalidIndexNotDroppable`) | `invalid-index-not-droppable` | No — refuses | Attach the missing partition indexes, or drop it with a plain `DROP INDEX` as a deliberate decision (below) |
 | Builder unobservable by this role (`ErrInvalidIndexBuilderUnobservable`) | `invalid-index-builder-unobservable` | **Yes** — `RebuildAbandonedIndex` proves it under the table lock | Call the recovery, or grant the role `pg_read_all_stats` and retry the build |
 | Unproven (anything else, incl. `ErrAbandonmentUnproven`, `ErrTargetIdentityChanged`) | `invalid-index-unproven` | No — fails closed | Investigate before touching anything (below) |
 
@@ -55,36 +70,57 @@ reading to whatever it finds under the build's name.
 ## The automatic recovery: `RebuildAbandonedIndex`
 
 `executor.RebuildAbandonedIndex` takes exactly the statement `BuildIndexConcurrently`
-takes, under the same budget and pool, and is the recovery the recoverable states name.
-It is safe because the removal is **proven, not named** — PostgreSQL drops by name, and a
-name alone can never prove which entry it will hit:
+takes, under the same budget, and is the recovery the recoverable states name. It needs a
+pool **one connection larger** than the build does (its inspection session stays open
+across the build's own two) and refuses a smaller one with `ErrPoolTooSmall` instead of
+waiting on the pool. It is safe because the removal is **proven, not named** — PostgreSQL
+drops by name, and a name alone can never prove which entry it will hit
+([LK-5](invariants.md#lk-5--an-index-is-dropped-only-by-proven-identity-under-the-lock-that-excludes-its-builder)):
 
 1. Under a bounded `SHARE UPDATE EXCLUSIVE` lock on the target table — the lock every
    concurrent index command (`CREATE`, `DROP`, `REINDEX ... CONCURRENTLY`) holds for its
    whole life, so holding it proves no build, drop, or reindex of any index on the table
    is in flight, *including one this role could not see* — the entry is re-verified by
-   OID (still under the requested name, still invalid, still on this table, no visible
-   builder) and renamed to `pgsprite_abandoned_<oid>`. The lock is bounded; if it is not
+   OID (still under the requested name, still invalid, still on this table — by OID and
+   by schema — still droppable, no visible builder) and renamed to
+   `pgsprite_abandoned_<oid>`. The lock wait is bounded (five seconds); if the lock is not
    granted within the bound, the recovery reports a `*BudgetError` (`CauseLock`) and
    touches nothing. That is what a hidden in-flight build looks like from here: it holds
-   the lock, so the proof cannot be taken, so nothing is dropped.
+   the lock, so the proof cannot be taken, so nothing is dropped. A table renamed, dropped,
+   or moved to another schema since the observation fails closed as
+   `ErrTargetIdentityChanged`.
 2. The rename commits, and every invalid index on the table whose name is *exactly* its
-   own quarantine name is dropped with `DROP INDEX CONCURRENTLY`, each verified by OID
-   before and after. The quarantine name can belong to nothing but the entry it was
-   derived from, so a drop by that name is a drop by identity. Because the sweep keys on
-   the name pattern, a recovery that dies between rename and drop leaves debris the next
-   recovery removes on its own; an operator's own index that merely starts with the
-   prefix is never matched.
+   own quarantine name is dropped with `DROP INDEX CONCURRENTLY`, each re-verified by OID
+   immediately before and after. The quarantine name can belong to nothing but the entry
+   it was derived from, so a drop by that name is a drop by identity. Because the sweep
+   keys on the name pattern, a recovery that dies between rename and drop leaves debris
+   the next recovery removes on its own; an operator's own index that merely starts with
+   the prefix is never matched. Each drop waits for its lock under the same five-second
+   bound — a drop cancelled mid-wait leaves the entry exactly as it was, so unlike the
+   build it can afford one — and a quarantined entry that has meanwhile become one the
+   server will not drop concurrently is **skipped**, reported, and left for an operator,
+   so one such entry never blocks every later recovery on the table.
 3. The requested build runs exactly as `BuildIndexConcurrently`.
 
-The recovery refuses, touching nothing, on a visible in-flight build or another table's
-entry, and fails closed with `ErrAbandonmentUnproven` if the entry changes between two
-verification points or a drop leaves it in place. It never removes a valid index: a valid
-index under the name is not debris, the recovery has nothing to remove, and the build
-fails on the name exactly as it would without the recovery.
+The proof's lock, every drop, and the build share **one** overall budget: what a drop
+spends is deducted from what the build gets, so a recovery over a table with several
+quarantined entries still finishes within the budget the caller gave it — or reports
+`*BudgetError` when what remains is too little to start the next statement. In caller-owned
+mode the caller's cancellation bounds the statements, as for the build; the lock waits keep
+their five-second bound in either mode.
 
-The `IndexRecoveryReport` it returns lists what it dropped (schema, quarantine name, OID,
-drop duration) and carries the verified build report.
+The recovery refuses, touching nothing, on a visible in-flight build (of the requested
+entry or of a quarantined one), another table's entry, or an entry the server will not
+drop concurrently, and fails closed with `ErrAbandonmentUnproven` if the entry changes
+between two verification points or a drop leaves it in place. It never removes a valid
+index: a valid index under the name is not debris, the recovery has nothing to remove, and
+the build fails on the name exactly as it would without the recovery; a quarantined entry
+that became valid (`REINDEX INDEX` in place) is likewise no longer a candidate.
+
+The `IndexRecoveryReport` it returns lists what it dropped (`Dropped`: schema, quarantine
+name, OID, drop duration), what it stepped over (`Skipped`: schema, quarantine name, OID),
+the whole recovery's `Duration` — so a caller that sized the budget as a lease window can
+see what was actually spent — and carries the verified build report.
 
 ## Recovering by hand
 
@@ -137,6 +173,24 @@ SELECT n.nspname, c.relname, i.indisvalid, t.relname AS table_name
  WHERE n.nspname = 'schema' AND c.relname = 'index';
 ```
 
+### The server will not drop it concurrently (`ErrInvalidIndexNotDroppable`)
+
+An invalid index under the requested name exists on the target table, but it is a
+partitioned table's index, an index partition, or a constraint's index. It is not a failed
+build's debris, and `DROP INDEX CONCURRENTLY` refuses all three, so the recovery refuses
+too — quarantining it would only strand it under a name nobody asked for. The common case
+is a partitioned index awaiting its partitions: attach them (`ALTER INDEX … ATTACH
+PARTITION`) and the entry becomes valid on its own. Removing one is a plain `DROP INDEX`
+under an `ACCESS EXCLUSIVE` lock — a deliberate human decision, never the executor's.
+
+```sql
+SELECT c.relkind, c.relispartition,
+       EXISTS (SELECT 1 FROM pg_constraint k WHERE k.conindid = c.oid) AS backs_constraint
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE n.nspname = 'schema' AND c.relname = 'index';
+```
+
 ### This role cannot see the builder (`ErrInvalidIndexBuilderUnobservable`)
 
 The entry is on the target table and no builder is *visible*, but the executor's role
@@ -146,9 +200,12 @@ Two ways forward:
 
 - `RebuildAbandonedIndex` does not need to see the builder: a hidden build holds the
   table lock, so the proof lock is either granted (nobody is building — the entry is
-  removed) or reported as a lock budget (somebody is — nothing is touched).
-- Grant the executor's role `pg_read_all_stats` and retry the build; the outcome becomes
-  in-flight or abandoned.
+  removed) or reported as a lock budget (somebody is — nothing is touched). This is the
+  way forward whenever the cause is `track_activities = off` — a server-wide setting on
+  some managed platforms — because no grant makes an untracked build visible.
+- When the cause is a hidden row, grant the executor's role `pg_read_all_stats` and retry
+  the build; the outcome becomes in-flight or abandoned. The grant does nothing for the
+  tracking-off case.
 
 ### The catalog state could not be proven (`invalid-index-unproven`)
 
@@ -166,7 +223,10 @@ any live session is building it. Only a confirmed invalid entry with no live bui
 candidate for `DROP INDEX CONCURRENTLY` — and if the target table was replaced, first
 establish which table the entry actually sits on (`indrelid`). An entry left under a
 `pgsprite_abandoned_<oid>` name is a quarantined entry whose drop did not complete; the
-next `RebuildAbandonedIndex` on that table sweeps it.
+next `RebuildAbandonedIndex` on that table sweeps it, and until then any plain build on
+the table refuses, naming the debris. A quarantined entry the recovery reports as
+`Skipped` is one the server will not drop concurrently (see the not-droppable state
+above); it stays until an operator decides.
 
 ## Why not just retry?
 
