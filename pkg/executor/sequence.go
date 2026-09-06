@@ -310,7 +310,7 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 				LockTimeout:      b.Validate.LockTimeout,
 				StatementTimeout: b.Validate.Overall,
 			}, retry, tracker)
-			err = corroborateValidateCancel(err, b.Validate, elapsedSince(tracker, start))
+			err = corroborateValidateCancel(ctx, err, b.Validate, elapsedSince(tracker, start))
 		case StepBrief:
 			err = executeNative(ctx, pool, pt, step.st, b.Brief, retry, tracker)
 		default:
@@ -371,28 +371,39 @@ func sequenceHasConcurrentBuild(steps []sequenceStep) bool {
 }
 
 // corroborateValidateCancel disambiguates a statement-cancellation verdict
-// on a validate step. SQLSTATE 57014 is query_canceled generally — an
-// operator's pg_cancel_backend raises the same code as statement_timeout —
-// and the brief mapping reads it as statement-budget exhaustion. That
-// conflation is tolerable inside a seconds-scale brief budget, but wrong
-// across the validate class's generous budget: a deliberate cancel hours
-// early would read as exhaustion, and exhaustion invites escalation to a
-// heavier strategy when the cancel means the change should be left alone.
-// As in the concurrent build executor, elapsed time corroborates: the
-// executor's own statement_timeout cannot fire before the budget elapses,
-// so an earlier cancellation came from outside. The original verdict is
-// folded into the message, not the chain — the whole point is that this
-// failure is not a *BudgetError.
-func corroborateValidateCancel(err error, b ValidateBudget, elapsed time.Duration) error {
+// on a validate step, with the same three-way typing as the concurrent
+// build executor. SQLSTATE 57014 is query_canceled generally — an
+// operator's pg_cancel_backend and the caller's own context raise the same
+// code as statement_timeout — and the brief mapping reads all of them as
+// statement-budget exhaustion. That conflation is tolerable inside a
+// seconds-scale brief budget, but wrong across the validate class's
+// generous budget: a deliberate cancel hours early would read as
+// exhaustion, and exhaustion invites escalation to a heavier strategy when
+// the cancel means the change should be left alone. Elapsed time
+// corroborates the budget: its statement_timeout cannot fire before the
+// budget elapses, so a cancellation at or past it is the budget's own.
+// Below the budget, an ended caller context makes the cancellation the
+// caller's (ErrCancelledByCaller) — whether the server's 57014 or the
+// client's own context error reached the executor first — and a live one
+// makes a 57014 external. The original verdict is folded into the
+// message, not the chain — the whole point is that neither failure is a
+// *BudgetError.
+func corroborateValidateCancel(ctx context.Context, err error, b ValidateBudget, elapsed time.Duration) error {
 	var budgetErr *BudgetError
-	if !errors.As(err, &budgetErr) || budgetErr.Cause != CauseStatement {
+	serverCancelled := errors.As(err, &budgetErr) && budgetErr.Cause == CauseStatement
+	if serverCancelled && elapsed >= b.Overall {
 		return err
 	}
-	if elapsed >= b.Overall {
-		return err
+	clientCancelled := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+	if ctxErr := ctx.Err(); ctxErr != nil && (serverCancelled || clientCancelled) {
+		return fmt.Errorf("%w (after %s of a %s budget, %w): %s",
+			ErrCancelledByCaller, elapsed.Round(time.Millisecond), b.Overall, ctxErr, err.Error())
 	}
-	return fmt.Errorf("%w (after %s of a %s budget): %s",
-		ErrCancelledExternally, elapsed.Round(time.Millisecond), b.Overall, err.Error())
+	if serverCancelled {
+		return fmt.Errorf("%w (after %s of a %s budget): %s",
+			ErrCancelledExternally, elapsed.Round(time.Millisecond), b.Overall, err.Error())
+	}
+	return err
 }
 
 // admitSequence re-parses and classifies every step and verifies each

@@ -5,9 +5,13 @@ package progress
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strconv"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 )
@@ -115,6 +119,15 @@ type Snapshot struct {
 // a database read; pollMu serializes observers, so the reserved session —
 // a single pgx connection that is not safe for concurrent use — only ever
 // carries one progress query at a time.
+//
+// StopConcurrentBuild is the one state change that takes pollMu, because it
+// is the fence between the build and the pool: the executor calls it before
+// the build's session can be released, so an observation or cancel signal
+// still in flight completes against a backend the build still owns. Start,
+// StartStep and Finish also clear the build fields, but as resets under mu
+// alone — by the time they run the build's step has already passed through
+// StopConcurrentBuild, and a reset that waited behind an observation would
+// make polling a gate on execution.
 type Tracker struct {
 	mu        sync.RWMutex
 	pollMu    sync.Mutex
@@ -180,17 +193,166 @@ func (t *Tracker) SetConcurrentBuild(session dbconn.RowQuerier, pid uint32) {
 	t.session, t.buildPID = session, pid
 }
 
-// BuildPID returns the active concurrent build's backend PID. An
-// orchestrator passes this PID to pg_cancel_backend from a second connection
-// to stop the build. It returns zero when no build is active.
-func (t *Tracker) BuildPID() uint32 {
+var (
+	// ErrNoActiveBuild is returned by CancelBuild when the tracker has no
+	// concurrent index build in flight.
+	ErrNoActiveBuild = errors.New("no concurrent index build is active")
+	// ErrBuildNotRunning is returned by CancelBuild when the tracker has a
+	// build but the server positively shows no statement running on its
+	// backend: the build statement has not reached the server yet, or the
+	// backend has already gone. PostgreSQL drops a cancel signal delivered
+	// to an idle backend, so signalling now would silently do nothing; the
+	// caller retries, or waits for the blocking executor call to return.
+	ErrBuildNotRunning = errors.New("the concurrent index build's statement is not running on the server")
+	// ErrBuildUnobservable is returned by CancelBuild when the server does
+	// not expose the build backend's state — activity tracking is off, or
+	// the backend is hidden from the tracker's role — so the tracker cannot
+	// tell a running build from an idle backend. A signal sent blind could
+	// be dropped on an idle backend while the caller reads nil as a cancel
+	// that reached the build, so none is sent. The build is still
+	// stoppable: an operator whose role can see the backend cancels it
+	// directly, or the caller ends the context the build runs under.
+	ErrBuildUnobservable = errors.New("the server does not expose the concurrent index build backend's state")
+)
+
+// cancelSignalTimeout bounds the cancel signal's round trip. The signal
+// runs on the executor's reserved verdict session, never under the
+// caller's own context: a caller deadline expiring mid-query would tear
+// down that session and leave the build's failure verdict indeterminate —
+// the outcome the reserved session exists to prevent.
+const cancelSignalTimeout = 5 * time.Second
+
+// cancelBuildSQL reads the build backend's state and signals it only when
+// the server reports it active, in one statement so the read and the
+// signal cannot straddle a state change the tracker then misreports.
+// Every catalog name is pg_catalog-qualified, operators included: a user
+// schema ahead of pg_catalog on search_path could otherwise substitute a
+// pg_cancel_backend that returns true and signals nothing.
+const cancelBuildSQL = `SELECT state,
+       CASE WHEN state OPERATOR(pg_catalog.=) 'active' THEN pg_catalog.pg_cancel_backend(pid) ELSE false END
+  FROM pg_catalog.pg_stat_activity
+ WHERE pid OPERATOR(pg_catalog.=) $1`
+
+// CancelBuild asks PostgreSQL to cancel the active concurrent build's
+// statement, from the tracker's reserved session. The tracker is the only
+// party that knows whether the build is still live, so the cancel is issued
+// here rather than by handing out the backend PID: it serializes against
+// StopConcurrentBuild, which the executor calls before the build's session
+// can return to the pool, so the PID it signals still belongs to the build
+// — never to an unrelated statement that reused the same pooled backend.
+// The signal is sent only to a backend the server reports active in the
+// same statement as the read, which rules out the common way a cancel is
+// lost — a signal landing on an idle backend — without making the signal
+// itself observable.
+//
+// A nil return means pg_cancel_backend accepted the signal for a backend
+// the same statement had just read as active. It does not mean the build
+// has stopped, and it cannot rule out the build finishing in the instant
+// between that read and the signal, in which case the signal lands on an
+// idle backend and is dropped: the server acts on a cancel at its next
+// interrupt check, and the build returns through the executor's normal
+// path — failed with its catalog verdict, or finished — either way on the
+// blocking executor call, not here. The caller's ctx gates whether the
+// signal is attempted; the signal itself runs bounded and detached from it,
+// because the session it rides on is the one the build's verdict needs
+// intact.
+//
+// The reserved session's role must be allowed to signal the build's
+// backend: the same role, or a member of pg_signal_backend. Otherwise
+// pg_cancel_backend raises an error rather than returning false, and that
+// error is returned wrapped; it is a permanent condition of the role, not
+// one a retry clears.
+func (t *Tracker) CancelBuild(ctx context.Context) error {
+	t.pollMu.Lock()
+	defer t.pollMu.Unlock()
 	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.buildPID
+	session, pid := t.session, t.buildPID
+	t.mu.RUnlock()
+	if pid == 0 || session == nil {
+		return ErrNoActiveBuild
+	}
+	if err := ctx.Err(); err != nil {
+		// A caller that has already given up sends nothing.
+		return fmt.Errorf("cancel concurrent index build backend %d: %w", pid, err)
+	}
+	signalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cancelSignalTimeout)
+	defer cancel()
+	var state *string
+	var cancelled bool
+	err := session.QueryRow(signalCtx, cancelBuildSQL, pid).Scan(&state, &cancelled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The backend is gone; a disconnected backend runs nothing.
+		return fmt.Errorf("cancel concurrent index build backend %d: %w", pid, ErrBuildNotRunning)
+	}
+	if err != nil {
+		return fmt.Errorf("cancel concurrent index build backend %d: %w", pid, err)
+	}
+	switch classifyBuildBackend(state) {
+	case buildBackendActive:
+		if !cancelled {
+			// The backend left between the activity read and the signal.
+			return fmt.Errorf("cancel concurrent index build backend %d: %w", pid, ErrBuildNotRunning)
+		}
+		return nil
+	case buildBackendIdle:
+		return fmt.Errorf("cancel concurrent index build backend %d: %w", pid, ErrBuildNotRunning)
+	default:
+		return fmt.Errorf("cancel concurrent index build backend %d reports state %s: %w",
+			pid, describeState(state), ErrBuildUnobservable)
+	}
 }
 
-// StopConcurrentBuild waits for an in-flight observation and releases the
-// reserved session back to the executor before its catalog verdict.
+// buildBackendVerdict is the classification of one pg_stat_activity state
+// observation for the purpose of signalling the build's backend.
+type buildBackendVerdict int
+
+const (
+	// buildBackendActive means the backend is executing a statement, so a
+	// cancel signal reaches it.
+	buildBackendActive buildBackendVerdict = iota
+	// buildBackendIdle means the backend positively runs nothing; a cancel
+	// signal would be dropped.
+	buildBackendIdle
+	// buildBackendUnobservable means the server does not expose the
+	// state: NULL for a backend hidden from this role, "disabled" when
+	// activity tracking is off, or a state outside the vocabulary.
+	buildBackendUnobservable
+)
+
+// classifyBuildBackend maps one observed pg_stat_activity state to its
+// cancel verdict. The cases are the documented pg_stat_activity.state
+// vocabulary (PostgreSQL 14–18). Only "active" is signalled — the build
+// statement is an ordinary query, never a fastpath function call — and
+// only the idle states count as positively not running; everything else
+// is unobservable rather than assumed either way.
+func classifyBuildBackend(state *string) buildBackendVerdict {
+	if state == nil {
+		return buildBackendUnobservable
+	}
+	switch *state {
+	case "active":
+		return buildBackendActive
+	case "idle", "idle in transaction", "idle in transaction (aborted)":
+		return buildBackendIdle
+	default:
+		return buildBackendUnobservable
+	}
+}
+
+// describeState renders an observed state for an error message.
+func describeState(state *string) string {
+	if state == nil {
+		return "NULL"
+	}
+	return strconv.Quote(*state)
+}
+
+// StopConcurrentBuild waits for an in-flight observation or cancel signal
+// and releases the reserved session back to the executor before its catalog
+// verdict. It is the fence that keeps CancelBuild's target honest: the
+// executor calls it before the build's own session can return to the pool,
+// so no signal that read the build's PID completes after that backend could
+// be running someone else's statement.
 func (t *Tracker) StopConcurrentBuild() {
 	t.pollMu.Lock()
 	defer t.pollMu.Unlock()

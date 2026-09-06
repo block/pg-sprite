@@ -308,21 +308,170 @@ func TestProgressMergesServerIndexBuildWork(t *testing.T) {
 	assert.Zero(t, s.Detail.Work.RowsCopied, "native progress must not fabricate copy counters")
 }
 
-func TestBuildPIDLifecycle(t *testing.T) {
+// backendObservation is what the server reports for the build's backend:
+// its pg_stat_activity state (nil for a hidden or untracked backend) and
+// whether the cancel signal was delivered.
+type backendObservation struct {
+	state     *string
+	cancelled bool
+}
+
+func observed(state string, cancelled bool) backendObservation {
+	return backendObservation{state: &state, cancelled: cancelled}
+}
+
+// cancelSession is a verdict session that answers the cancel query with the
+// supplied observation and records the backend PID it was asked to signal.
+func cancelSession(t *testing.T, obs backendObservation, scanErr error, signalled *uint32) fakeSession {
+	t.Helper()
+	return fakeSession{query: func(ctx context.Context, sql string, args ...any) pgx.Row {
+		assert.Contains(t, sql, "pg_catalog.pg_cancel_backend",
+			"the signal must resolve in pg_catalog, never through search_path")
+		require.Len(t, args, 1)
+		pid, ok := args[0].(uint32)
+		require.True(t, ok, "the backend PID must be passed as a bind parameter")
+		*signalled = pid
+		return fakeRow{scan: func(dest ...any) error {
+			if scanErr != nil {
+				return scanErr
+			}
+			*(dest[0].(**string)) = obs.state
+			*(dest[1].(*bool)) = obs.cancelled
+			return nil
+		}}
+	}}
+}
+
+// neverQueried is a session no build may reach: any query is a test failure.
+func neverQueried(t *testing.T) fakeSession {
+	t.Helper()
+	return fakeSession{query: func(context.Context, string, ...any) pgx.Row {
+		t.Fatal("no build is active, so the session must not be queried")
+		return nil
+	}}
+}
+
+func TestCancelBuildSignalsTheActiveBuild(t *testing.T) {
+	var signalled uint32
+	tracker := runningTrackerWithBuild(t, cancelSession(t, observed("active", true), nil, &signalled))
+	require.NoError(t, tracker.CancelBuild(t.Context()))
+	assert.Equal(t, uint32(4242), signalled, "the cancel must target the build's own backend")
+}
+
+// The signal rides on the executor's reserved verdict session, so it never
+// runs under the caller's own context: a caller deadline expiring mid-query
+// would tear down the session the build's failure verdict needs. The
+// caller's context still decides whether a signal is attempted at all.
+func TestCancelBuildRunsTheSignalDetachedFromTheCaller(t *testing.T) {
+	t.Run("the caller giving up mid-query does not end the signal's context", func(t *testing.T) {
+		callerCtx, cancel := context.WithCancel(t.Context())
+		var signalled uint32
+		session := cancelSession(t, observed("active", true), nil, &signalled)
+		inner := session.query
+		session.query = func(ctx context.Context, sql string, args ...any) pgx.Row {
+			cancel()
+			assert.NoError(t, ctx.Err(), "cancelling the caller's context must not cancel the signal's")
+			_, bounded := ctx.Deadline()
+			assert.True(t, bounded, "a detached signal must carry its own deadline")
+			return inner(ctx, sql, args...)
+		}
+		tracker := runningTrackerWithBuild(t, session)
+		require.NoError(t, tracker.CancelBuild(callerCtx))
+		assert.Equal(t, uint32(4242), signalled)
+	})
+	t.Run("a caller that already gave up sends nothing", func(t *testing.T) {
+		tracker := runningTrackerWithBuild(t, neverQueried(t))
+		ended, cancel := context.WithCancel(t.Context())
+		cancel()
+		err := tracker.CancelBuild(ended)
+		require.ErrorIs(t, err, context.Canceled)
+		assert.NotErrorIs(t, err, progress.ErrNoActiveBuild)
+	})
+}
+
+// Only a backend the server positively reports active is signalled; an
+// idle backend would drop the signal, so it is reported as not running
+// rather than as a delivered cancel.
+func TestCancelBuildReportsAStatementNotRunning(t *testing.T) {
+	var signalled uint32
+	t.Run("no row for the backend", func(t *testing.T) {
+		tracker := runningTrackerWithBuild(t, cancelSession(t, backendObservation{}, pgx.ErrNoRows, &signalled))
+		require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrBuildNotRunning)
+	})
+	t.Run("backend gone between the read and the signal", func(t *testing.T) {
+		tracker := runningTrackerWithBuild(t, cancelSession(t, observed("active", false), nil, &signalled))
+		require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrBuildNotRunning)
+	})
+	for _, idle := range []string{"idle", "idle in transaction", "idle in transaction (aborted)"} {
+		t.Run(idle, func(t *testing.T) {
+			// The session answers true, as a mutant that signalled an
+			// idle backend would see the server answer; the state must win.
+			tracker := runningTrackerWithBuild(t, cancelSession(t, observed(idle, true), nil, &signalled))
+			err := tracker.CancelBuild(t.Context())
+			require.ErrorIs(t, err, progress.ErrBuildNotRunning)
+			assert.NotErrorIs(t, err, progress.ErrBuildUnobservable)
+		})
+	}
+}
+
+// A state the server does not expose is neither running nor idle: the
+// tracker refuses rather than signal blind, and says so distinctly, because
+// "not running" would tell the operator to wait for a build that is in
+// fact running.
+func TestCancelBuildReportsAnUnobservableBackend(t *testing.T) {
+	var signalled uint32
+	cases := map[string]backendObservation{
+		"hidden backend (NULL state)":  {state: nil},
+		"activity tracking off":        observed("disabled", false),
+		"state outside the vocabulary": observed("fastpath function call", false),
+	}
+	for name, obs := range cases {
+		t.Run(name, func(t *testing.T) {
+			tracker := runningTrackerWithBuild(t, cancelSession(t, obs, nil, &signalled))
+			err := tracker.CancelBuild(t.Context())
+			require.ErrorIs(t, err, progress.ErrBuildUnobservable)
+			assert.NotErrorIs(t, err, progress.ErrBuildNotRunning)
+			assert.NotErrorIs(t, err, progress.ErrNoActiveBuild)
+		})
+	}
+}
+
+func TestCancelBuildWrapsASessionFailure(t *testing.T) {
+	var signalled uint32
+	boom := errors.New("connection reset")
+	tracker := runningTrackerWithBuild(t, cancelSession(t, backendObservation{}, boom, &signalled))
+	err := tracker.CancelBuild(t.Context())
+	require.ErrorIs(t, err, boom)
+	assert.NotErrorIs(t, err, progress.ErrBuildNotRunning)
+	assert.NotErrorIs(t, err, progress.ErrBuildUnobservable)
+	assert.NotErrorIs(t, err, progress.ErrNoActiveBuild)
+}
+
+// Every transition that ends a build's ownership of its backend also ends
+// the tracker's ability to signal it: after each one CancelBuild refuses
+// without touching the session, so a stale PID can never reach
+// pg_cancel_backend on a backend the pool may have handed to someone else.
+func TestCancelBuildRefusesOnceTheBuildIsNotActive(t *testing.T) {
 	tracker, err := progress.NewTracker(&fakeClock{now: time.Unix(100, 0)})
 	require.NoError(t, err)
-	tracker.Start(1, progress.OperationConcurrentIndex)
-	tracker.SetConcurrentBuild(fakeSession{}, 4242)
-	assert.Equal(t, uint32(4242), tracker.BuildPID())
+	require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrNoActiveBuild, "idle tracker")
 
-	tracker.StopConcurrentBuild()
-	assert.Zero(t, tracker.BuildPID())
-	tracker.SetConcurrentBuild(fakeSession{}, 4242)
-	tracker.Finish(nil)
-	assert.Zero(t, tracker.BuildPID())
-	tracker.SetConcurrentBuild(fakeSession{}, 4242)
 	tracker.Start(1, progress.OperationConcurrentIndex)
-	assert.Zero(t, tracker.BuildPID())
+	tracker.SetConcurrentBuild(neverQueried(t), 4242)
+	tracker.StopConcurrentBuild()
+	require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrNoActiveBuild, "after StopConcurrentBuild")
+
+	tracker.SetConcurrentBuild(neverQueried(t), 4242)
+	tracker.Finish(nil)
+	require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrNoActiveBuild, "after Finish")
+
+	tracker.SetConcurrentBuild(neverQueried(t), 4242)
+	tracker.Start(1, progress.OperationConcurrentIndex)
+	require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrNoActiveBuild, "after Start")
+
+	tracker.SetConcurrentBuild(neverQueried(t), 4242)
+	tracker.StartStep(2, progress.OperationConcurrentIndex, "CREATE INDEX CONCURRENTLY idx2 ON public.t (c)")
+	require.ErrorIs(t, tracker.CancelBuild(t.Context()), progress.ErrNoActiveBuild, "after StartStep")
 }
 
 // A build that has left the progress view is reported inactive, with no

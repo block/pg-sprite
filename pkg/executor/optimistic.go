@@ -79,6 +79,9 @@ type BudgetError struct {
 	// Attempts is the number of bounded transactions tried. It is greater
 	// than one when lock acquisition retries were exhausted.
 	Attempts int
+	// cause is the server's own error, kept reachable through Unwrap so
+	// triage can read the SQLSTATE and message the budget verdict stands on.
+	cause error
 }
 
 // Error implements the error interface.
@@ -88,6 +91,9 @@ func (e *BudgetError) Error() string {
 	}
 	return fmt.Sprintf("execution exceeded its %s (%s) and was cancelled", e.Cause, e.Budget)
 }
+
+// Unwrap exposes the server error behind the budget verdict.
+func (e *BudgetError) Unwrap() error { return e.cause }
 
 // RetryPolicy bounds retries after lock_timeout expires. Backoff doubles
 // after each failed attempt and is capped at MaxBackoff.
@@ -343,9 +349,9 @@ func asBudgetError(err error, b Budget) *BudgetError {
 	}
 	switch pgErr.Code {
 	case sqlstateLockNotAvailable:
-		return &BudgetError{Cause: CauseLock, Budget: b.LockTimeout}
+		return &BudgetError{Cause: CauseLock, Budget: b.LockTimeout, cause: err}
 	case sqlstateQueryCanceled:
-		return &BudgetError{Cause: CauseStatement, Budget: b.StatementTimeout}
+		return &BudgetError{Cause: CauseStatement, Budget: b.StatementTimeout, cause: err}
 	default:
 		return nil
 	}

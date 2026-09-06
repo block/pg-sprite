@@ -95,6 +95,27 @@ server's progress view over the executor's reserved session; every other poll is
 memory. On a query error the returned snapshot still carries the last-known tracker state —
 `phase` is never empty — with the error returned alongside for the caller to classify.
 
+The tracker is also the operator's stop path for a running concurrent index build:
+`Tracker.CancelBuild` signals the build's backend over the same reserved session, and only
+while the build is active — the tracker never hands out the backend PID, so a caller cannot
+hold one past the build's return and cancel whatever the pool next runs on that backend. The
+signal itself runs under its own short deadline, detached from the caller's context: a caller
+deadline expiring mid-signal must not tear down the session the build's failure verdict needs.
+A caller whose context has already ended sends nothing and gets its context error back.
+
+A nil return means the cancel request was *sent* to a backend the server, in the same
+statement, had just reported active — not that the build has stopped, and not a guarantee
+the build was still running when the signal arrived. The build's own return, with
+`cancelled-externally`, is the confirmation. The reserved session's role must be able to
+signal the build's backend (the same role, or a member of `pg_signal_backend`); otherwise
+`pg_cancel_backend` raises an error, which `CancelBuild` returns wrapped — a permanent
+condition of the role, not one a retry clears. `CancelBuild` refuses to signal blind:
+`ErrBuildNotRunning` when the server shows no statement running on the backend (the build has
+not reached the server yet, or has already finished), and `ErrBuildUnobservable` when the
+server cannot say — the backend is hidden from this role, or activity tracking is off — so an
+operator is never told to wait for a build that is in fact running. A build the caller's own
+context ended reports `cancelled-by-caller`.
+
 ## Example
 
 A poll during step 2 of a 3-step sequence, mid concurrent index build:

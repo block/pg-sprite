@@ -27,7 +27,9 @@ the reviewer's distillation.
   `pgx/v5`, `pglogrepl`, stdlib). `github.com/block/spirit` must never be imported as a
   module — ideas are ported with citations, not code.
 - Connections go through `pkg/dbconn` (bounded `lock_timeout` / `statement_timeout`) — flag
-  raw `pgx` pools in production code.
+  raw `pgx` pools in production code. The one sanctioned unbounded server statement is a
+  caller-owned concurrent index build; flag any prose that calls that path "bounded" without
+  naming its stop path (caller context, `Tracker.CancelBuild`, operator `pg_cancel_backend`).
 - SQL parsing goes through `wasilibs/go-pgquery` (Wasm `libpg_query`); flag
   `strings.Split(";")`, any hand-parsing, and imports of the cgo `pg_query_go` (documented
   escape hatch, not the default). A parse failure is an error surfaced to the caller.

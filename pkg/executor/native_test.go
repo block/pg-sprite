@@ -31,7 +31,7 @@ func TestBuildIndexConcurrentlyRejectsUnboundedBudget(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, err := executor.BuildIndexConcurrently(t.Context(), nil,
 				"CREATE INDEX CONCURRENTLY idx ON t (c)", executor.ConcurrentBudget{Overall: tt.overall})
-			require.Error(t, err)
+			require.ErrorIs(t, err, executor.ErrUnboundedBudget)
 		})
 	}
 }
@@ -40,7 +40,7 @@ func TestBuildIndexConcurrentlyRejectsCallerOwnedOverallBudget(t *testing.T) {
 	_, err := executor.BuildIndexConcurrently(t.Context(), nil,
 		"CREATE INDEX CONCURRENTLY idx ON public.t (c)",
 		executor.ConcurrentBudget{Overall: time.Second, CallerOwned: true})
-	require.Error(t, err)
+	require.ErrorIs(t, err, executor.ErrCallerOwnedOverallBudget)
 }
 
 func TestBuildIndexConcurrentlyCallerOwnedNeedsCancellableContext(t *testing.T) {

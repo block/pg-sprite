@@ -73,7 +73,9 @@ is a smoke tour of the built binary, not a second test suite.
   pg-sprite strings surface through orchestrators that ban "migration". Use "migration" only
   when citing external sources (Spirit's `pkg/migration`, peer tools, PostgreSQL docs).
 - Use `pkg/dbconn` for connections — never raw `pgx` pools in production code (tests excepted).
-  Every session runs under bounded `lock_timeout` / `statement_timeout`.
+  Every session runs under bounded `lock_timeout` / `statement_timeout`; the one exception is
+  a caller-owned concurrent index build, whose `statement_timeout` is off and whose stop path
+  is the caller's context, `Tracker.CancelBuild`, or an operator's `pg_cancel_backend`.
 - Never build SQL by interpolating raw identifiers: any user-supplied or introspected name in
   generated SQL goes through `pgx.Identifier{...}.Sanitize()` (or `quote_ident()` server-side).
 - Never string-manipulate connection strings/DSNs — parse (`pgx.ParseConfig`), modify fields,
