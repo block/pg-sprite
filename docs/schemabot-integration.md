@@ -247,6 +247,10 @@ INDEX ON t (v)`, are outside this coverage because the probe has nothing to chec
 SQLSTATEs backstop races for explicit names. For server-chosen names, the probe narrows the
 race to the time-of-check window, but nothing catches a name taken inside it.
 
+`preflight.LookupOwnedRelationNames` reads the constraint-index and column-sequence names
+the server actually chose for a table, so a caller can compare them against the names a
+create claimed; the create path does not yet run that comparison itself.
+
 A `create-collision` can identify a name the table needs — an index, constraint index, or
 sequence — rather than the table name itself.
 
