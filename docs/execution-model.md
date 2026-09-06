@@ -290,6 +290,25 @@ branching surface.
 | `invariant-violation` | A breach of the invariant registry; never a retry candidate |
 | `execution-failed` | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |
 
+### Create-shape causes
+
+`executor.CreateShapeCauses()` enumerates the closed vocabulary of reasons the create
+path refuses a desired statement by its shape; `executor.CreateShapeCauseOf(err)` reads
+the cause off a refusal. Like outcome codes, a cause is a stable identity for automation
+to branch on, never prose.
+
+| Cause | Meaning |
+| --- | --- |
+| `partition-of` | Attaching a partition locks a parent the absence proof does not cover |
+| `inherits` | `INHERITS` binds to an existing parent the absence proof does not cover |
+| `like` | `LIKE` reads an existing source table the absence proof does not cover |
+| `of-type` | `OF` binds to an existing composite type the absence proof does not cover |
+| `if-not-exists` | A name-only no-op cannot prove the existing relation has the requested shape or is valid |
+| `concurrently` | A table born this run needs no concurrent index build |
+| `duplicate-name` | The desired set claims the same relation name twice |
+| `multiple-operations` | The statement and operation parse boundaries disagree about the operation count |
+| `unsupported-kind` | The statement is not a create kind the create path can run |
+
 The three cancellation codes partition one server signal, SQLSTATE `57014`,
 in a fixed precedence. `budget-statement-exceeded` wins when the server's
 cancel arrives at or past the overall budget, even if the caller's own

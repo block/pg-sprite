@@ -50,7 +50,7 @@ var (
 	// while an unrelated relation — or, for a concurrent build, an
 	// invalid index — owns that name, so an executor could report
 	// success over a relation it cannot vouch for.
-	ErrIfNotExistsUnsupported = errors.New("IF NOT EXISTS is not supported: a name-only no-op cannot prove the existing relation is the requested one, or even valid")
+	ErrIfNotExistsUnsupported = errors.New(CreateShapeIfNotExists.Description())
 	// ErrPreexistingInvalidIndex is returned when an invalid index with the
 	// requested name already exists in the target schema — on any table.
 	// The executor cannot prove who owns that entry — an in-progress

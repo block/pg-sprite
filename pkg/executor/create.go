@@ -60,11 +60,11 @@ var (
 	// named after the table. The conflict is decidable before anything
 	// runs, so admission refuses the whole set rather than letting a
 	// mid-run step fail after a prefix committed.
-	ErrDuplicateCreateName = errors.New("desired set claims the same relation name twice")
+	ErrDuplicateCreateName = errors.New(CreateShapeDuplicateName.Description())
 	// ErrPartitionOfUnsupported is returned for CREATE TABLE ... PARTITION
 	// OF: attaching a partition takes a lock on the partitioned parent,
 	// an existing table the absence proof says nothing about.
-	ErrPartitionOfUnsupported = errors.New("CREATE TABLE PARTITION OF is not supported by the create path: attaching a partition locks the partitioned parent, which the absence proof does not cover")
+	ErrPartitionOfUnsupported = errors.New(CreateShapePartitionOf.Description())
 	// ErrUnsupportedCreateStep is returned when a desired statement is not
 	// a shape the create path can run: a plain CREATE TABLE or a plain
 	// CREATE INDEX on the new table. CONCURRENTLY is refused deliberately —
@@ -285,7 +285,7 @@ func checkCreateSteps(schema string, ds statement.DesiredSchema) ([]createStep, 
 		for _, name := range step.claims {
 			if _, taken := claimed[name]; taken {
 				if step.refusal == nil {
-					step.refusal = fmt.Errorf("%w: %q", ErrDuplicateCreateName, name)
+					step.refusal = &CreateShapeError{Cause: CreateShapeDuplicateName, Name: name}
 				}
 				continue
 			}
@@ -332,7 +332,7 @@ func checkCreateStepShape(schema, table, sql string) (createStep, error) {
 	if len(ops) != 1 {
 		// ParseOne admitted a single statement, so a differing op count
 		// means the two parse boundaries disagree about the same SQL.
-		step.refusal = fmt.Errorf("%w: statement carries %d operations", ErrUnsupportedCreateStep, len(ops))
+		step.refusal = &CreateShapeError{Cause: CreateShapeMultipleOperations}
 		return step, nil
 	}
 	op := ops[0]
@@ -342,7 +342,7 @@ func checkCreateStepShape(schema, table, sql string) (createStep, error) {
 	case statement.KindCreateIndex:
 		step.claims, step.refusal = checkCreateIndexShape(op)
 	default:
-		step.refusal = fmt.Errorf("%w: kind %q", ErrUnsupportedCreateStep, st.Kind())
+		step.refusal = &CreateShapeError{Cause: CreateShapeUnsupportedKind}
 	}
 	return step, nil
 }
@@ -367,19 +367,19 @@ func checkCreateTableShape(qualified, table string, op statement.Op) ([]string, 
 // statement off the create path, nil when the shape is admitted.
 func createTableShapeRefusal(op statement.Op) error {
 	if op.PartitionOf {
-		return ErrPartitionOfUnsupported
+		return &CreateShapeError{Cause: CreateShapePartitionOf}
 	}
 	if op.Inherits {
-		return fmt.Errorf("%w: INHERITS binds to an existing parent the absence proof does not cover", ErrUnsupportedCreateStep)
+		return &CreateShapeError{Cause: CreateShapeInherits}
 	}
 	if op.Like {
-		return fmt.Errorf("%w: LIKE reads an existing source table the absence proof does not cover", ErrUnsupportedCreateStep)
+		return &CreateShapeError{Cause: CreateShapeLike}
 	}
 	if op.OfType {
-		return fmt.Errorf("%w: OF binds to an existing composite type the absence proof does not cover", ErrUnsupportedCreateStep)
+		return &CreateShapeError{Cause: CreateShapeOfType}
 	}
 	if op.IfNotExists {
-		return ErrIfNotExistsUnsupported
+		return &CreateShapeError{Cause: CreateShapeIfNotExists}
 	}
 	return nil
 }
@@ -401,10 +401,10 @@ func checkCreateIndexShape(op statement.Op) ([]string, error) {
 // statement off the create path, nil when the shape is admitted.
 func createIndexShapeRefusal(op statement.Op) error {
 	if op.Concurrent {
-		return fmt.Errorf("%w: a concurrent build is refused on a table born this run", ErrUnsupportedCreateStep)
+		return &CreateShapeError{Cause: CreateShapeConcurrently}
 	}
 	if op.IfNotExists {
-		return ErrIfNotExistsUnsupported
+		return &CreateShapeError{Cause: CreateShapeIfNotExists}
 	}
 	return nil
 }
