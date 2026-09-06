@@ -103,9 +103,13 @@ var (
 	// its deadline — while the statement ran. The cancellation reaches the
 	// executor in one of two forms, the server's SQLSTATE 57014 or the
 	// client's context error, and both are typed the same way: the cause is
-	// the caller, in either budget mode. An orchestrator reads it as its
-	// own lease lapsing, not as an operator's intervention
-	// (ErrCancelledExternally) and not as budget exhaustion (*BudgetError).
+	// the caller, in either budget mode — with one precedence in bounded
+	// mode: a 57014 arriving once the overall budget has elapsed is the
+	// budget's statement_timeout firing and is typed *BudgetError even if
+	// the caller's context ended in the same instant, so the server's 57014
+	// is the caller's only below the budget. An orchestrator reads this
+	// error as its own lease lapsing, not as an operator's intervention
+	// (ErrCancelledExternally).
 	ErrCancelledByCaller = errors.New("the build was cancelled by its caller's context")
 	// ErrCancelledExternally is returned when the build's statement was
 	// cancelled (SQLSTATE 57014) while the caller's context was still live

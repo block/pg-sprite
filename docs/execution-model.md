@@ -269,8 +269,8 @@ branching surface.
 | --- | --- |
 | `budget-lock-exceeded` | The lock was not granted within `lock_timeout`; nothing executed |
 | `budget-statement-exceeded` | The statement ran past `statement_timeout` and was cancelled |
-| `cancelled-externally` | The statement was cancelled from outside the executor — not by its caller and not by its budget; an operator's `pg_cancel_backend` or `Tracker.CancelBuild` |
 | `cancelled-by-caller` | The caller's own context ended while the statement ran and the budget had not elapsed; in caller-owned mode this is the build's ordinary exit |
+| `cancelled-externally` | The statement was cancelled from outside the executor — not by its caller and not by its budget; an operator's `pg_cancel_backend` or `Tracker.CancelBuild` |
 | `invalid-index-own-leftover` | The failed build's own INVALID index remains; the [recovery runbook](invalid-index-recovery.md) applies |
 | `invalid-index-preexisting` | An INVALID index under the requested name predates this run |
 | `invalid-index-unproven` | An INVALID index may remain but the catalog state could not be proven |

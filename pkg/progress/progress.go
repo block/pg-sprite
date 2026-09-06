@@ -119,6 +119,15 @@ type Snapshot struct {
 // a database read; pollMu serializes observers, so the reserved session —
 // a single pgx connection that is not safe for concurrent use — only ever
 // carries one progress query at a time.
+//
+// StopConcurrentBuild is the one state change that takes pollMu, because it
+// is the fence between the build and the pool: the executor calls it before
+// the build's session can be released, so an observation or cancel signal
+// still in flight completes against a backend the build still owns. Start,
+// StartStep and Finish also clear the build fields, but as resets under mu
+// alone — by the time they run the build's step has already passed through
+// StopConcurrentBuild, and a reset that waited behind an observation would
+// make polling a gate on execution.
 type Tracker struct {
 	mu        sync.RWMutex
 	pollMu    sync.Mutex
@@ -199,10 +208,10 @@ var (
 	// not expose the build backend's state — activity tracking is off, or
 	// the backend is hidden from the tracker's role — so the tracker cannot
 	// tell a running build from an idle backend. A signal sent blind could
-	// be dropped on an idle backend and mistaken for a delivered cancel, so
-	// none is sent. The build is still stoppable: an operator whose role
-	// can see the backend cancels it directly, or the caller ends the
-	// context the build runs under.
+	// be dropped on an idle backend while the caller reads nil as a cancel
+	// that reached the build, so none is sent. The build is still
+	// stoppable: an operator whose role can see the backend cancels it
+	// directly, or the caller ends the context the build runs under.
 	ErrBuildUnobservable = errors.New("the server does not expose the concurrent index build backend's state")
 )
 
@@ -231,16 +240,28 @@ const cancelBuildSQL = `SELECT state,
 // StopConcurrentBuild, which the executor calls before the build's session
 // can return to the pool, so the PID it signals still belongs to the build
 // — never to an unrelated statement that reused the same pooled backend.
-// The signal is sent only to a backend the server reports active, so it
-// cannot be dropped on an idle backend and mistaken for a delivered cancel.
+// The signal is sent only to a backend the server reports active in the
+// same statement as the read, which rules out the common way a cancel is
+// lost — a signal landing on an idle backend — without making the signal
+// itself observable.
 //
-// A nil return means the signal was delivered, not that the build has
-// stopped: the server acts on a cancel at its next interrupt check, and
-// the build then returns through the executor's normal failure path with
-// its catalog verdict. The caller observes that outcome on the blocking
-// executor call, not here. The caller's ctx gates whether the signal is
-// attempted; the signal itself runs bounded and detached from it, because
-// the session it rides on is the one the build's verdict needs intact.
+// A nil return means pg_cancel_backend accepted the signal for a backend
+// the same statement had just read as active. It does not mean the build
+// has stopped, and it cannot rule out the build finishing in the instant
+// between that read and the signal, in which case the signal lands on an
+// idle backend and is dropped: the server acts on a cancel at its next
+// interrupt check, and the build returns through the executor's normal
+// path — failed with its catalog verdict, or finished — either way on the
+// blocking executor call, not here. The caller's ctx gates whether the
+// signal is attempted; the signal itself runs bounded and detached from it,
+// because the session it rides on is the one the build's verdict needs
+// intact.
+//
+// The reserved session's role must be allowed to signal the build's
+// backend: the same role, or a member of pg_signal_backend. Otherwise
+// pg_cancel_backend raises an error rather than returning false, and that
+// error is returned wrapped; it is a permanent condition of the role, not
+// one a retry clears.
 func (t *Tracker) CancelBuild(ctx context.Context) error {
 	t.pollMu.Lock()
 	defer t.pollMu.Unlock()
@@ -326,8 +347,12 @@ func describeState(state *string) string {
 	return strconv.Quote(*state)
 }
 
-// StopConcurrentBuild waits for an in-flight observation and releases the
-// reserved session back to the executor before its catalog verdict.
+// StopConcurrentBuild waits for an in-flight observation or cancel signal
+// and releases the reserved session back to the executor before its catalog
+// verdict. It is the fence that keeps CancelBuild's target honest: the
+// executor calls it before the build's own session can return to the pool,
+// so no signal that read the build's PID completes after that backend could
+// be running someone else's statement.
 func (t *Tracker) StopConcurrentBuild() {
 	t.pollMu.Lock()
 	defer t.pollMu.Unlock()

@@ -103,9 +103,13 @@ signal itself runs under its own short deadline, detached from the caller's cont
 deadline expiring mid-signal must not tear down the session the build's failure verdict needs.
 A caller whose context has already ended sends nothing and gets its context error back.
 
-A nil return means the cancel request was *delivered* to a backend the server positively
-reported active — not that the build has stopped. The build's own return, with
-`cancelled-externally`, is the confirmation. `CancelBuild` refuses to signal blind:
+A nil return means the cancel request was *sent* to a backend the server, in the same
+statement, had just reported active — not that the build has stopped, and not a guarantee
+the build was still running when the signal arrived. The build's own return, with
+`cancelled-externally`, is the confirmation. The reserved session's role must be able to
+signal the build's backend (the same role, or a member of `pg_signal_backend`); otherwise
+`pg_cancel_backend` raises an error, which `CancelBuild` returns wrapped — a permanent
+condition of the role, not one a retry clears. `CancelBuild` refuses to signal blind:
 `ErrBuildNotRunning` when the server shows no statement running on the backend (the build has
 not reached the server yet, or has already finished), and `ErrBuildUnobservable` when the
 server cannot say — the backend is hidden from this role, or activity tracking is off — so an
