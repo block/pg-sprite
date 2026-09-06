@@ -361,6 +361,73 @@ func TestBuildIndexConcurrentlyCallerOwnedCallerCancel(t *testing.T) {
 	assert.False(t, valid, "the leftover must be invalid")
 }
 
+// The operator's stop path resolves in pg_catalog like every proof. A user
+// schema ahead of pg_catalog on search_path offers an impostor activity
+// view that reports every backend active and an impostor pg_cancel_backend
+// that answers true and signals nothing: a shadowed cancel would report
+// success while the build ran on unbounded. The build must actually stop.
+func TestBuildIndexConcurrentlyCancelBuildResistsCatalogShadowing(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	bootstrap, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(bootstrap.Close)
+	schema := testutil.NewSchema(t, bootstrap)
+	_, err = bootstrap.Exec(t.Context(), fmt.Sprintf(`
+		CREATE VIEW %[1]s.pg_stat_activity AS
+			SELECT pid, 'active'::text AS state FROM pg_catalog.pg_stat_activity;
+		CREATE FUNCTION %[1]s.pg_cancel_backend(integer) RETURNS boolean
+			LANGUAGE sql AS 'SELECT true'`, schema))
+	require.NoError(t, err)
+
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{
+		URL: url,
+		BeforeConnect: func(_ context.Context, cc *pgx.ConnConfig) error {
+			cc.RuntimeParams["search_path"] = schema + ", pg_catalog"
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	_, tracker, done := blockedCallerOwnedBuild(t, pool, schema, "shadow_t", "shadow_idx")
+	require.NoError(t, tracker.CancelBuild(t.Context()))
+
+	select {
+	case buildErr := <-done:
+		require.ErrorIs(t, buildErr, executor.ErrCancelledExternally,
+			"the signal must reach the real backend through the impostors")
+	case <-time.After(30 * time.Second):
+		t.Fatal("the build did not stop: the cancel resolved through search_path and signalled nothing")
+	}
+}
+
+// CancelBuild signals only a backend the server positively reports active.
+// A backend that holds the build's PID but runs nothing — the statement
+// has not reached the server yet, or has already finished — would drop
+// the signal, so the tracker reports it not running rather than claiming a
+// delivered cancel.
+func TestCancelBuildRefusesAnIdleBackend(t *testing.T) {
+	pool, _ := newPool(t)
+	idle, err := pool.Acquire(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(idle.Release)
+	verdict, err := pool.Acquire(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(verdict.Release)
+
+	tracker, err := progress.NewTracker(progress.WallClock{})
+	require.NoError(t, err)
+	tracker.Start(1, progress.OperationConcurrentIndex)
+	tracker.SetConcurrentBuild(verdict, idle.Conn().PgConn().PID())
+
+	err = tracker.CancelBuild(t.Context())
+	require.ErrorIs(t, err, progress.ErrBuildNotRunning)
+	assert.NotErrorIs(t, err, progress.ErrBuildUnobservable)
+	var n int
+	require.NoError(t, idle.QueryRow(t.Context(), "SELECT 1").Scan(&n),
+		"the idle backend must not have been signalled")
+}
+
 func TestBuildIndexConcurrentlyReportsLockers(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.lockers_t (id int PRIMARY KEY, c int)", schema))

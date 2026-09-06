@@ -70,7 +70,12 @@ autocommit-each-step has two shapes in the executor:
   any transaction block and internally manages multiple transactions of its
   own. Its bound is either the session's overall `statement_timeout` or, in
   explicit caller-owned mode, the caller's cancellable context while
-  `statement_timeout` is disabled.
+  `statement_timeout` is disabled. In that mode the bound is the client
+  call, not the server statement: cancelling the context ends the call and
+  sends the server a cancel request, but a client that dies without
+  cancelling leaves the build running on the server with no timeout. The
+  stop path for a build the client no longer holds is `Tracker.CancelBuild`
+  while the call is live, or an operator's `pg_cancel_backend` afterwards.
 
 Each step's class is the `kind` field of its step report in the JSON
 verdict — the field retry logic branches on. A failed `brief` step means
@@ -265,7 +270,7 @@ branching surface.
 | `budget-lock-exceeded` | The lock was not granted within `lock_timeout`; nothing executed |
 | `budget-statement-exceeded` | The statement ran past `statement_timeout` and was cancelled |
 | `cancelled-externally` | The statement was cancelled from outside the executor — not by its caller and not by its budget; an operator's `pg_cancel_backend` or `Tracker.CancelBuild` |
-| `cancelled-by-caller` | The caller's own context ended while the statement ran; in caller-owned mode this is the build's ordinary exit |
+| `cancelled-by-caller` | The caller's own context ended while the statement ran and the budget had not elapsed; in caller-owned mode this is the build's ordinary exit |
 | `invalid-index-own-leftover` | The failed build's own INVALID index remains; the [recovery runbook](invalid-index-recovery.md) applies |
 | `invalid-index-preexisting` | An INVALID index under the requested name predates this run |
 | `invalid-index-unproven` | An INVALID index may remain but the catalog state could not be proven |
@@ -284,3 +289,13 @@ branching surface.
 | `table-not-found` | The statement's qualified table does not exist |
 | `invariant-violation` | A breach of the invariant registry; never a retry candidate |
 | `execution-failed` | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |
+
+The three cancellation codes partition one server signal, SQLSTATE `57014`,
+in a fixed precedence. `budget-statement-exceeded` wins when the server's
+cancel arrives at or past the overall budget, even if the caller's own
+context ended at the same instant: `statement_timeout` fired at the limit
+the caller sized, and reading it as the caller's cancellation would hide
+the exhaustion. Below the budget, an ended caller context makes the cancel
+`cancelled-by-caller` in whichever form it reached the executor — the
+server's `57014` or the client's own context error. A `57014` under a live
+caller context below the budget is `cancelled-externally`.

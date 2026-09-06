@@ -42,14 +42,15 @@ func TestClassifyBackendState(t *testing.T) {
 	}
 }
 
-// TestAsConcurrentBudgetError covers the cancellation partition. The
-// caller's own context ending is the caller's cancellation in either mode
-// and in either form it arrives; under a live context SQLSTATE 57014 is
-// query_canceled generally, so only a cancellation arriving at or after the
-// overall budget can be the budget's own statement_timeout — an earlier
-// one is an external cancellation and must not read as budget exhaustion,
-// because a consumer branching on *BudgetError escalates to a heavier
-// strategy, the wrong reaction to a deliberate operator cancel.
+// TestAsConcurrentBudgetError covers the cancellation partition, in
+// precedence order. A server 57014 at or past the overall budget is the
+// budget's own statement_timeout whatever the caller's context did. Below
+// that, the caller's own context ending is the caller's cancellation in
+// either mode and in either form it arrives. Under a live context SQLSTATE
+// 57014 is query_canceled generally, so an early one is an external
+// cancellation and must not read as budget exhaustion, because a consumer
+// branching on *BudgetError escalates to a heavier strategy, the wrong
+// reaction to a deliberate operator cancel.
 func TestAsConcurrentBudgetError(t *testing.T) {
 	budget := ConcurrentBudget{Overall: time.Minute}
 	callerOwned := ConcurrentBudget{CallerOwned: true}
@@ -72,6 +73,33 @@ func TestAsConcurrentBudgetError(t *testing.T) {
 		assert.Equal(t, CauseStatement, budgetErr.Cause)
 		assert.NotErrorIs(t, err, ErrCancelledExternally)
 		assert.NotErrorIs(t, err, ErrCancelledByCaller)
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, err, &pgErr, "the server error must stay reachable behind the budget verdict")
+		assert.Equal(t, sqlstateQueryCanceled, pgErr.Code)
+	})
+
+	// The budget's verdict outranks the caller's context: statement_timeout
+	// fired at the configured limit, so the strategy was too slow whether or
+	// not the caller also stopped waiting at the same instant. Reading it as
+	// the caller's cancellation would hide the exhaustion the caller sized.
+	t.Run("57014 at or past the budget under an ended context is still budget exhaustion", func(t *testing.T) {
+		err := asConcurrentBudgetError(ended, cancelled, budget, time.Minute+time.Second)
+		var budgetErr *BudgetError
+		require.ErrorAs(t, err, &budgetErr)
+		assert.Equal(t, CauseStatement, budgetErr.Cause)
+		assert.NotErrorIs(t, err, ErrCancelledByCaller)
+		assert.NotErrorIs(t, err, ErrCancelledExternally)
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, err, &pgErr)
+	})
+
+	// Only the server's own 57014 can be the budget's: pgx giving up on the
+	// statement client-side is the caller's cancellation at any elapsed.
+	t.Run("the client's own context error at or past the budget is the caller's cancellation", func(t *testing.T) {
+		err := asConcurrentBudgetError(ended, context.DeadlineExceeded, budget, time.Minute+time.Second)
+		require.ErrorIs(t, err, ErrCancelledByCaller)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		assertNotBudgetOrExternal(t, err)
 	})
 
 	t.Run("57014 before the budget is an external cancellation", func(t *testing.T) {

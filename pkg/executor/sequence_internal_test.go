@@ -5,7 +5,9 @@
 package executor
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -173,6 +175,66 @@ func TestAdmitSequenceSurfacesParseFailures(t *testing.T) {
 type skewedClock struct{ now time.Time }
 
 func (c *skewedClock) Now() time.Time { return c.now }
+
+// TestCorroborateValidateCancel covers the validate step's cancellation
+// partition, in precedence order: a statement-budget verdict at or past the
+// overall budget stands whatever the caller's context did; below it, an
+// ended caller context claims the cancellation in whichever form it
+// reached the executor; a live one makes the server's cancel external.
+// Neither reclassified failure may remain a *BudgetError — that type is
+// the consumer's escalation trigger.
+func TestCorroborateValidateCancel(t *testing.T) {
+	budget := ValidateBudget{LockTimeout: time.Second, Overall: time.Hour}
+	statementBudget := &BudgetError{Cause: CauseStatement, Budget: budget.Overall}
+	lockBudget := &BudgetError{Cause: CauseLock, Budget: budget.LockTimeout}
+	live := t.Context()
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	assertNotBudget := func(t *testing.T, err error) {
+		t.Helper()
+		var budgetErr *BudgetError
+		assert.False(t, errors.As(err, &budgetErr), "a reclassified cancel must not read as budget exhaustion")
+	}
+
+	t.Run("a statement verdict at or past the budget stands under a live context", func(t *testing.T) {
+		err := corroborateValidateCancel(live, statementBudget, budget, budget.Overall)
+		assert.Same(t, statementBudget, err)
+	})
+	t.Run("a statement verdict at or past the budget stands under an ended context", func(t *testing.T) {
+		err := corroborateValidateCancel(ended, statementBudget, budget, budget.Overall+time.Second)
+		assert.Same(t, statementBudget, err)
+	})
+	t.Run("an early statement verdict under an ended context is the caller's cancellation", func(t *testing.T) {
+		err := corroborateValidateCancel(ended, statementBudget, budget, time.Minute)
+		require.ErrorIs(t, err, ErrCancelledByCaller)
+		assert.NotErrorIs(t, err, ErrCancelledExternally)
+		assertNotBudget(t, err)
+	})
+	t.Run("the client's own context error under an ended context is the caller's cancellation", func(t *testing.T) {
+		err := corroborateValidateCancel(ended, fmt.Errorf("validate: %w", context.Canceled), budget, time.Minute)
+		require.ErrorIs(t, err, ErrCancelledByCaller)
+		assert.NotErrorIs(t, err, ErrCancelledExternally)
+		assertNotBudget(t, err)
+	})
+	t.Run("an early statement verdict under a live context is an external cancellation", func(t *testing.T) {
+		err := corroborateValidateCancel(live, statementBudget, budget, time.Minute)
+		require.ErrorIs(t, err, ErrCancelledExternally)
+		assert.NotErrorIs(t, err, ErrCancelledByCaller)
+		assertNotBudget(t, err)
+	})
+	t.Run("a lock verdict is not a cancellation in either context", func(t *testing.T) {
+		assert.Same(t, lockBudget, corroborateValidateCancel(live, lockBudget, budget, time.Minute))
+		assert.Same(t, lockBudget, corroborateValidateCancel(ended, lockBudget, budget, time.Minute))
+	})
+	t.Run("any other failure passes through", func(t *testing.T) {
+		boom := errors.New("connection reset")
+		assert.Same(t, boom, corroborateValidateCancel(ended, boom, budget, time.Minute))
+	})
+	t.Run("success passes through", func(t *testing.T) {
+		assert.NoError(t, corroborateValidateCancel(ended, nil, budget, time.Minute))
+	})
+}
 
 // Elapsed values fed to budget corroboration and step reports must come
 // from the same clock that produced the start instant: a tracker's injected

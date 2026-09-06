@@ -2,7 +2,11 @@ package executor_test
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
+	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -37,6 +41,49 @@ func TestDocNamesEveryOutcomeCode(t *testing.T) {
 		assert.Contains(t, doc, fmt.Sprintf("`%s`", c),
 			"docs/execution-model.md does not name outcome code %q", c)
 	}
+}
+
+// The closed set is complete: every Code constant declared in the package
+// is enumerated by Codes(). A constant added without its Codes() entry would
+// pass the doc test above (which walks Codes()) while adapters enumerating
+// Codes() never learned to render it.
+func TestCodesEnumerateEveryDeclaredCode(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "code.go", nil, parser.SkipObjectResolution)
+	require.NoError(t, err)
+
+	declared := make(map[executor.Code]struct{})
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || !isCodeType(vs.Type) {
+				continue
+			}
+			for _, v := range vs.Values {
+				lit, ok := v.(*ast.BasicLit)
+				require.True(t, ok && lit.Kind == token.STRING, "Code constants are string literals")
+				value, err := strconv.Unquote(lit.Value)
+				require.NoError(t, err)
+				declared[executor.Code(value)] = struct{}{}
+			}
+		}
+	}
+	require.NotEmpty(t, declared, "code.go declares the Code constants")
+
+	enumerated := make(map[executor.Code]struct{})
+	for _, c := range executor.Codes() {
+		enumerated[c] = struct{}{}
+	}
+	assert.Equal(t, declared, enumerated, "Codes() must enumerate exactly the declared Code constants")
+}
+
+func isCodeType(expr ast.Expr) bool {
+	ident, ok := expr.(*ast.Ident)
+	return ok && ident.Name == "Code"
 }
 
 // The closed set has no duplicates: a code pasted twice would silently

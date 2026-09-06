@@ -288,12 +288,13 @@ func (e *InvalidIndexError) Unwrap() []error {
 //   - a failed build that provably left nothing returns its failure alone
 //     — a retry can start immediately.
 //
-// A cancelled build is typed by its cause. The caller's own context ending
-// surfaces as ErrCancelledByCaller in either mode. Under a live context,
-// cancellation by the server-owned overall budget surfaces as a
-// *BudgetError, and a cancellation arriving before the budget elapsed
-// cannot be the budget's own statement_timeout and surfaces as
-// ErrCancelledExternally instead. In caller-owned mode the cancellable
+// A cancelled build is typed by its cause. A server cancellation at or
+// past the server-owned overall budget is that budget's own
+// statement_timeout and surfaces as a *BudgetError, whatever the caller's
+// context did meanwhile. Below the budget, the caller's own context ending
+// surfaces as ErrCancelledByCaller in either mode, and a cancellation
+// under a live context cannot be the budget's or the caller's and
+// surfaces as ErrCancelledExternally. In caller-owned mode the cancellable
 // context is the only bound and statement_timeout is disabled, so a 57014
 // under a live context is always ErrCancelledExternally.
 // Caller cancellation is a race: the client returns while the cancel signal
@@ -389,6 +390,11 @@ func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	pid := conn.Conn().PgConn().PID()
 	if tracker != nil {
 		tracker.SetConcurrentBuild(verdictConn, pid)
+		// The build's PID stays a cancel target only while this session
+		// owns the backend. The explicit call below retires it before the
+		// verdict so no poll can share the verdict session; the deferred
+		// call guarantees retirement on every exit, including a panic.
+		defer tracker.StopConcurrentBuild()
 	}
 
 	start := time.Now()
@@ -400,20 +406,22 @@ func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	if tracker != nil {
 		tracker.StopConcurrentBuild()
 	}
+
+	// Both verdicts run under their own bounded detached context: the
+	// build's context may have ended — that may be exactly why the build
+	// failed — and a build that succeeded at the finish line must not
+	// report as unproven because the caller cancelled a moment later.
+	verdictCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), verdictTimeout)
+	defer cancel()
 	if buildErr == nil {
-		return verifiedBuildReport(ctx, conn, build, target, elapsed)
+		return verifiedBuildReport(verdictCtx, conn, build, target, elapsed)
 	}
 	buildErr = asConcurrentBudgetError(ctx, buildErr, b, elapsed)
 
 	// Every failure gets the catalog verdict — no error is exempt. Even a
 	// name-collision SQLSTATE cannot prove the statement created nothing:
 	// index expressions and extension code run after the catalog entry
-	// commits and can raise any SQLSTATE, name collisions included. The
-	// verdict runs under its own bounded detached context, because the
-	// build's context may be cancelled — and that cancellation may be
-	// exactly why the build failed.
-	verdictCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), verdictTimeout)
-	defer cancel()
+	// commits and can raise any SQLSTATE, name collisions included.
 	return rep, failedBuildVerdict(verdictCtx, verdictConn, build, target, pid, buildErr)
 }
 
@@ -780,37 +788,43 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 }
 
 // asConcurrentBudgetError types the build failure into the three
-// cancellation causes a consumer branches on — the caller, the budget, or
+// cancellation causes a consumer branches on — the budget, the caller, or
 // a third party — or wraps anything else as an operational failure.
 //
-// The caller's context is the one exact signal: when it has ended, the
-// cancellation is the caller's own (ErrCancelledByCaller), whether it
-// reached the executor as the server's SQLSTATE 57014 or as the client's
+// The budget is checked first. SQLSTATE 57014 is query_canceled generally,
+// not statement_timeout specifically, but the budget's own
+// statement_timeout cannot fire before the budget elapses, so a 57014 at
+// or past the overall budget is budget exhaustion (*BudgetError) — even
+// when the caller's context has also ended, because an orchestrator's
+// deadline commonly sits just outside the budget it configured, and the
+// escalation signal a *BudgetError carries must not be lost to that
+// coincidence; the caller can always read its own ctx.Err(). The boundary
+// is approximate by network latency — a cancel landing within that sliver
+// of the deadline reads as the budget — but the two truths coincide there.
+//
+// Below the budget the caller's context is the exact signal: when it has
+// ended, the cancellation is the caller's own (ErrCancelledByCaller),
+// whether it reached the executor as the server's 57014 or as the client's
 // context error — which of the two arrives first is a race the caller
-// cannot observe, so both are typed the same way. Only under a live
-// context does a 57014 need disambiguating: it is query_canceled
-// generally, not statement_timeout specifically — an operator's
-// pg_cancel_backend raises the same code — so the elapsed build time
-// corroborates: the budget's own statement_timeout cannot fire before the
-// budget elapses, so a 57014 arriving earlier is an external cancellation
-// (ErrCancelledExternally), not budget exhaustion. The boundary is
-// approximate by network latency — a cancel landing within that sliver of
-// the deadline reads as the budget — but the two truths coincide there.
-// In caller-owned mode there is no server deadline, so every 57014 under a
-// live context is external.
+// cannot observe, so both are typed the same way. A 57014 under a live
+// context and before the budget is then neither the budget's nor the
+// caller's — an operator's pg_cancel_backend raises the same code — and
+// surfaces as ErrCancelledExternally. In caller-owned mode there is no
+// server deadline, so every 57014 under a live context is external.
 func asConcurrentBudgetError(ctx context.Context, err error, b ConcurrentBudget, elapsed time.Duration) error {
+	var pgErr *pgconn.PgError
+	serverCancelled := errors.As(err, &pgErr) && pgErr.Code == sqlstateQueryCanceled
+	if serverCancelled && !b.CallerOwned && elapsed >= b.Overall {
+		return &BudgetError{Cause: CauseStatement, Budget: b.Overall, cause: err}
+	}
 	if ctx.Err() != nil && isStatementCancellation(err) {
 		return fmt.Errorf("%w (after %s, %w): %w",
 			ErrCancelledByCaller, elapsed.Round(time.Millisecond), ctx.Err(), err)
 	}
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == sqlstateQueryCanceled {
+	if serverCancelled {
 		if b.CallerOwned {
 			return fmt.Errorf("%w (after %s, caller-owned): %w",
 				ErrCancelledExternally, elapsed.Round(time.Millisecond), err)
-		}
-		if elapsed >= b.Overall {
-			return &BudgetError{Cause: CauseStatement, Budget: b.Overall}
 		}
 		return fmt.Errorf("%w (after %s of a %s budget): %w",
 			ErrCancelledExternally, elapsed.Round(time.Millisecond), b.Overall, err)

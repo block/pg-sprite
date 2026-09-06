@@ -98,8 +98,11 @@ engine:
 - **native, as-is** — the statement is already online-safe (metadata-only, or already
   the online idiom); executed directly under bounded sessions. The bound is
   `lock_timeout`/`statement_timeout`, except that a concurrent index build may instead
-  be bounded by an explicit caller-owned cancellable context — the executor refuses a
-  context that cannot be cancelled, so the build stays bounded either way.
+  run under an explicit caller-owned cancellable context with `statement_timeout`
+  disabled. That bounds the client call, not the server statement: the executor refuses
+  a context that cannot be cancelled, but a client that dies without cancelling leaves
+  the build running server-side; `Tracker.CancelBuild` (or an operator's
+  `pg_cancel_backend`) is the stop path.
 - **native, safer sequence** — the blocking form is substituted with the equivalent
   online sequence before execution; the rewrites are catalogued in
   [safer-sequences.md](safer-sequences.md).

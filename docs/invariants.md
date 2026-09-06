@@ -143,8 +143,11 @@ strong-lock acquisition (swap, catalog flips, trigger install in fallback mode) 
 other transactions via lock waits that a naive `lock_timeout` cancels — leaving an `INVALID`
 index — so they get their own wait policy rather than the blanket timeout: no per-lock timeout,
 with either one overall server statement deadline or a caller-owned cancellable context as the
-statement's only bound. The executor refuses a non-cancellable context in caller-owned mode, so
-the statement remains bounded by construction. `VALIDATE CONSTRAINT` is different in kind: its cancellation is
+statement's only bound. In caller-owned mode the executor refuses a non-cancellable context, so
+the client call is bounded by construction; the server statement is not — it runs with
+`statement_timeout` off and stops only on a cancel request, so a client that dies without
+cancelling leaves it running until `Tracker.CancelBuild` or an operator's `pg_cancel_backend`
+stops it. `VALIDATE CONSTRAINT` is different in kind: its cancellation is
 transactionally clean (the constraint simply stays `NOT VALID`; no debris), so the sequence
 executor's validate class deliberately keeps a bounded per-lock timeout — queueing behind a
 conflicting lock holder must not stall a sequence for the whole scan budget — while the scan

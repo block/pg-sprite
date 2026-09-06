@@ -99,8 +99,18 @@ The tracker is also the operator's stop path for a running concurrent index buil
 `Tracker.CancelBuild` signals the build's backend over the same reserved session, and only
 while the build is active — the tracker never hands out the backend PID, so a caller cannot
 hold one past the build's return and cancel whatever the pool next runs on that backend. The
-build then reports `cancelled-externally`; a build the caller's own context ended reports
-`cancelled-by-caller`.
+signal itself runs under its own short deadline, detached from the caller's context: a caller
+deadline expiring mid-signal must not tear down the session the build's failure verdict needs.
+A caller whose context has already ended sends nothing and gets its context error back.
+
+A nil return means the cancel request was *delivered* to a backend the server positively
+reported active — not that the build has stopped. The build's own return, with
+`cancelled-externally`, is the confirmation. `CancelBuild` refuses to signal blind:
+`ErrBuildNotRunning` when the server shows no statement running on the backend (the build has
+not reached the server yet, or has already finished), and `ErrBuildUnobservable` when the
+server cannot say — the backend is hidden from this role, or activity tracking is off — so an
+operator is never told to wait for a build that is in fact running. A build the caller's own
+context ended reports `cancelled-by-caller`.
 
 ## Example
 
