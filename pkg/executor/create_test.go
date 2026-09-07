@@ -1,6 +1,9 @@
 package executor_test
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -49,6 +52,28 @@ func TestCreateShapeRefusals(t *testing.T) {
 	}
 }
 
+// The mismatch error is the operator's whole brief: the committed table,
+// the first-choice names it lacks, the names it owns instead, and the
+// remedy — and it unwraps to its sentinel, never to the pre-execution
+// collision, whose consumers assume nothing ran.
+func TestCreateNameMismatchErrorNamesTableAndNames(t *testing.T) {
+	err := &executor.CreateNameMismatchError{
+		Schema: "app", Table: "t",
+		Missing:   []string{"t_id_seq", "t_pkey"},
+		Unclaimed: []string{"t_id_seq1", "t_pkey1"},
+	}
+	assert.ErrorIs(t, err, executor.ErrCreateNameMismatch)
+	assert.NotErrorIs(t, err, executor.ErrCreateCollision)
+	assert.Equal(t, executor.CodeCreateNameMismatch, executor.OutcomeCode(err))
+	assert.Equal(t, `the CREATE TABLE committed but the table does not own a first-choice relation name the desired file claims: `+
+		`app.t claimed "t_id_seq", "t_pkey" and owns "t_id_seq1", "t_pkey1" instead; the table remains — `+
+		`free the first-choice name and rename the owned relation to it, or drop the table, then re-diff`,
+		err.Error())
+
+	none := &executor.CreateNameMismatchError{Schema: "app", Table: "t", Missing: []string{"t_pkey"}}
+	assert.Contains(t, none.Error(), `claimed "t_pkey" and owns nothing instead`)
+}
+
 // createBudget is generous for unit tests; admission refusals return
 // before any database access.
 var createBudget = executor.Budget{LockTimeout: time.Second, StatementTimeout: 2 * time.Second}
@@ -94,4 +119,31 @@ func TestExecuteCreateWithProgressRequiresTracker(t *testing.T) {
 	_, err = executor.ExecuteCreateWithProgress(t.Context(), nil, preflight.AbsentTarget{}, preflight.CreationRole{}, ds,
 		createBudget, executor.DefaultRetryPolicy(), nil)
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
+}
+
+// A read of the owned names that does not complete is its own outcome:
+// the code names the state the step left — a standing table whose names
+// are unproven — whatever kept the read from completing. The cause stays
+// in the chain for the operator, and the sentinel never claims a mismatch
+// it could not observe.
+func TestCreateNamesUnverifiedIsItsOwnCode(t *testing.T) {
+	causes := []struct {
+		name  string
+		cause error
+	}{
+		{name: "caller cancelled the bounded read", cause: executor.ErrCancelledByCaller},
+		{name: "raw context error the runner never classified", cause: context.Canceled},
+		{name: "table no longer at its name", cause: preflight.ErrTableNotFound},
+		{name: "opaque transport failure", cause: errors.New("connection reset")},
+	}
+	for _, tt := range causes {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &executor.SequenceStepError{Step: 1, Total: 2, Kind: executor.StepBrief,
+				Err: fmt.Errorf("%w: app.t: %w", executor.ErrCreateNamesUnverified, tt.cause)}
+			assert.ErrorIs(t, err, executor.ErrCreateNamesUnverified)
+			assert.ErrorIs(t, err, tt.cause, "the read's own failure stays in the chain")
+			assert.NotErrorIs(t, err, executor.ErrCreateNameMismatch)
+			assert.Equal(t, executor.CodeCreateNamesUnverified, executor.OutcomeCode(err))
+		})
+	}
 }

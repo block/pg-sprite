@@ -83,6 +83,20 @@ const (
 	// on the server; the caller re-diffs the live catalog rather than
 	// assuming the occupant's shape.
 	CodeCreateCollision Code = "create-collision"
+	// CodeCreateNameMismatch: the CREATE TABLE committed but the table does
+	// not own a first-choice constraint-index or sequence name the desired
+	// file claimed — an occupant took it inside the catalog probe's window
+	// and the server chose a suffixed name instead; the table remains for an
+	// operator to rename the relation or drop, then re-diff.
+	CodeCreateNameMismatch Code = "create-name-mismatch"
+	// CodeCreateNamesUnverified: the CREATE TABLE committed but the read of
+	// the relation names the table owns did not complete, so whether every
+	// first-choice claim was honoured is unknown; the table remains for an
+	// operator to compare its names against the desired file, then re-diff.
+	// The read's own failure is the cause in the error text, never the code:
+	// the code names the state the step left, and that state is a standing
+	// table whose names are unproven.
+	CodeCreateNamesUnverified Code = "create-names-unverified"
 	// CodeDuplicateCreateName: the desired set claims the same relation
 	// name twice; the conflict is decidable at admission and refused
 	// before anything runs.
@@ -133,6 +147,8 @@ func Codes() []Code {
 		CodeUnqualifiedTable,
 		CodeIfNotExistsUnsupported,
 		CodeCreateCollision,
+		CodeCreateNameMismatch,
+		CodeCreateNamesUnverified,
 		CodeDuplicateCreateName,
 		CodePartitionOfUnsupported,
 		CodeUnsupportedCreateStep,
@@ -167,6 +183,7 @@ func (c Code) Permanent() bool {
 		CodeUnqualifiedTable,
 		CodeIfNotExistsUnsupported,
 		CodeCreateCollision,
+		CodeCreateNameMismatch,
 		CodeDuplicateCreateName,
 		CodePartitionOfUnsupported,
 		CodeUnsupportedCreateStep,
@@ -205,11 +222,18 @@ func OutcomeCode(err error) Code {
 
 // sentinelCode maps the package's sentinel errors to their codes. The
 // invariant sentinel is checked first: an invariant breach is the
-// fail-closed outcome regardless of which path wrapped it.
+// fail-closed outcome regardless of which path wrapped it. The unverified
+// create sentinel is checked before the cause it wraps, because the code
+// names the state a step left, not the fault that kept it from being
+// proven.
 func sentinelCode(err error) Code {
 	switch {
 	case errors.Is(err, ErrInvariantViolation):
 		return CodeInvariantViolation
+	case errors.Is(err, ErrCreateNamesUnverified):
+		// The read's cause rides inside the wrap; the code names what the
+		// step left — a standing table whose names are unproven.
+		return CodeCreateNamesUnverified
 	case errors.Is(err, ErrCancelledByCaller):
 		return CodeCancelledByCaller
 	case errors.Is(err, ErrCancelledExternally):
@@ -230,6 +254,8 @@ func sentinelCode(err error) Code {
 		return CodeIfNotExistsUnsupported
 	case errors.Is(err, ErrCreateCollision):
 		return CodeCreateCollision
+	case errors.Is(err, ErrCreateNameMismatch):
+		return CodeCreateNameMismatch
 	case errors.Is(err, ErrDuplicateCreateName):
 		return CodeDuplicateCreateName
 	case errors.Is(err, ErrPartitionOfUnsupported):

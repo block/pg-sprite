@@ -58,10 +58,10 @@ func relationKind(t *testing.T, pool *pgxpool.Pool, schema, name string) string 
 	t.Helper()
 	var relkind *string
 	require.NoError(t, pool.QueryRow(t.Context(),
-		`SELECT c.relkind::text
-		   FROM pg_class c
-		   JOIN pg_namespace n ON n.oid = c.relnamespace
-		  WHERE n.nspname = $1 AND c.relname = $2`,
+		`SELECT (SELECT c.relkind::text
+		           FROM pg_class c
+		           JOIN pg_namespace n ON n.oid = c.relnamespace
+		          WHERE n.nspname = $1 AND c.relname = $2)`,
 		schema, name).Scan(&relkind))
 	if relkind == nil {
 		return ""
@@ -546,4 +546,249 @@ func TestExecuteCreateAllowsMultipleUnnamedIndexes(t *testing.T) {
 		`SELECT count(*) FROM pg_indexes WHERE schemaname = $1 AND tablename = 't'`,
 		f.schema).Scan(&indexes))
 	assert.Equal(t, 2, indexes, "both server-named indexes exist")
+}
+
+// A first-choice name taken after the probe but before the server picks
+// names is the one race the probe cannot see. The CREATE TABLE has
+// committed by then, so the outcome is a step-1 failure that names the
+// suffixed replacement and leaves the born table in place — never a
+// collision refusal, which would claim nothing ran, and never a drop of a
+// table the executor cannot prove nobody has started to use. The remedy
+// the code prescribes — free the first-choice name and rename the suffixed
+// relation onto it — must leave the table owning exactly what was claimed.
+// The proof is part of step 1: the steps after the CREATE TABLE never run
+// on a table whose names are in question.
+func TestExecuteCreateReportsNameTakenInsideProbeWindowAsMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		sql       string
+		total     int
+		setupSQL  string
+		occupant  string
+		missing   []string
+		unclaimed []string
+		// unbuilt is an index step after the CREATE TABLE that must not
+		// have run.
+		unbuilt string
+		// repairSQL is the operator's remedy: drop the occupant and rename
+		// the server's suffixed relation onto the first-choice name.
+		repairSQL []string
+		wantOwned preflight.OwnedRelationNames
+	}{
+		{
+			name: "constraint index",
+			sql: `
+				CREATE TABLE t (id int PRIMARY KEY, v text);
+				CREATE INDEX t_v_idx ON t (v);`,
+			total:     2,
+			setupSQL:  "CREATE TABLE %[1]s.other (v int)",
+			occupant:  "CREATE INDEX t_pkey ON %[1]s.other (v)",
+			missing:   []string{"t_pkey"},
+			unclaimed: []string{"t_pkey1"},
+			unbuilt:   "t_v_idx",
+			repairSQL: []string{
+				"DROP INDEX %[1]s.t_pkey",
+				"ALTER INDEX %[1]s.t_pkey1 RENAME TO t_pkey",
+			},
+			wantOwned: preflight.OwnedRelationNames{ConstraintIndexes: []string{"t_pkey"}, Sequences: []string{}},
+		},
+		{
+			name:      "column-owned sequence",
+			sql:       "CREATE TABLE t (id serial PRIMARY KEY)",
+			total:     1,
+			occupant:  "CREATE SEQUENCE %[1]s.t_id_seq",
+			missing:   []string{"t_id_seq"},
+			unclaimed: []string{"t_id_seq1"},
+			repairSQL: []string{
+				"DROP SEQUENCE %[1]s.t_id_seq",
+				"ALTER SEQUENCE %[1]s.t_id_seq1 RENAME TO t_id_seq",
+			},
+			wantOwned: preflight.OwnedRelationNames{ConstraintIndexes: []string{"t_pkey"}, Sequences: []string{"t_id_seq"}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newCreateFixture(t, "t")
+			if tt.setupSQL != "" {
+				_, err := f.pool.Exec(t.Context(), fmt.Sprintf(tt.setupSQL, f.schema))
+				require.NoError(t, err)
+			}
+			testutil.RunDuringDDL(t, f.pool, testutil.DDLCommandStart, "CREATE TABLE", f.schema, "t",
+				fmt.Sprintf(tt.occupant, f.schema))
+
+			rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, desired(t, tt.sql), createBudget, executor.DefaultRetryPolicy())
+			require.Error(t, err)
+
+			var stepErr *executor.SequenceStepError
+			require.ErrorAs(t, err, &stepErr)
+			assert.Equal(t, 1, stepErr.Step)
+			assert.Equal(t, tt.total, stepErr.Total)
+			assert.Equal(t, executor.StepBrief, stepErr.Kind)
+			assert.Contains(t, stepErr.SQL, "CREATE TABLE")
+			assert.ErrorIs(t, err, executor.ErrCreateNameMismatch)
+			assert.NotErrorIs(t, err, executor.ErrCreateCollision,
+				"a collision says nothing ran; here the CREATE TABLE committed")
+			assert.Equal(t, executor.CodeCreateNameMismatch, executor.OutcomeCode(err))
+
+			var mismatch *executor.CreateNameMismatchError
+			require.ErrorAs(t, err, &mismatch)
+			assert.Equal(t, f.schema, mismatch.Schema)
+			assert.Equal(t, "t", mismatch.Table)
+			assert.Equal(t, tt.missing, mismatch.Missing)
+			assert.Equal(t, tt.unclaimed, mismatch.Unclaimed)
+
+			assert.Empty(t, rep.Steps, "the failed step's own state is named by the code, not the committed prefix")
+			assert.Equal(t, "r", relationKind(t, f.pool, f.schema, "t"), "the born table is left in place")
+			for _, name := range tt.unclaimed {
+				assert.True(t, relationExists(t, f.pool, f.schema, name), "the server's suffixed replacement %s remains for the operator to rename", name)
+			}
+			if tt.unbuilt != "" {
+				assert.False(t, relationExists(t, f.pool, f.schema, tt.unbuilt), "the run stops at step 1; %s is never built on a table whose names are unproven", tt.unbuilt)
+			}
+
+			// The operator follows the code's remedy; the table then owns
+			// exactly the first-choice names the desired file claimed.
+			for _, repair := range tt.repairSQL {
+				_, err := f.pool.Exec(t.Context(), fmt.Sprintf(repair, f.schema))
+				require.NoError(t, err)
+			}
+			owned, err := preflight.LookupOwnedRelationNames(t.Context(), f.pool, f.schema, "t")
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantOwned, owned)
+		})
+	}
+}
+
+// A run whose first-choice names all land is unaffected by the
+// verification: the table owns exactly what the desired file claimed,
+// including the shapes whose server-chosen names depend on more than the
+// key columns — INCLUDE columns, repeated exclusion elements, and an
+// identity column's stated sequence name.
+func TestExecuteCreateVerifiesOwnedNamesWithoutFalsePositives(t *testing.T) {
+	tests := []struct {
+		name  string
+		sql   string
+		steps int
+		owned []string
+	}{
+		{
+			name: "serial primary key, unique column, and index",
+			sql: `
+				CREATE TABLE t (id serial PRIMARY KEY, v text UNIQUE);
+				CREATE INDEX t_v_idx ON t (v);`,
+			steps: 2,
+			owned: []string{"t_pkey", "t_v_key", "t_id_seq", "t_v_idx"},
+		},
+		{
+			name:  "unique with INCLUDE",
+			sql:   "CREATE TABLE t (id int, v text, UNIQUE (id) INCLUDE (v))",
+			steps: 1,
+			owned: []string{"t_id_v_key"},
+		},
+		{
+			name:  "exclusion constraint with a repeated element",
+			sql:   "CREATE TABLE t (a int, EXCLUDE USING btree (a WITH =, a WITH =))",
+			steps: 1,
+			owned: []string{"t_a_a1_excl"},
+		},
+		{
+			name:  "exclusion constraint over two expressions",
+			sql:   "CREATE TABLE t (a int, b int, EXCLUDE USING btree ((a + 1) WITH =, (b + 1) WITH =))",
+			steps: 1,
+			owned: []string{"t_expr_expr1_excl"},
+		},
+		{
+			name:  "identity column with a stated sequence name",
+			sql:   "CREATE TABLE t (id int GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME t_custom_seq) PRIMARY KEY)",
+			steps: 1,
+			owned: []string{"t_pkey", "t_custom_seq"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newCreateFixture(t, "t")
+
+			rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, desired(t, tt.sql), createBudget, executor.DefaultRetryPolicy())
+			require.NoError(t, err)
+			require.Len(t, rep.Steps, tt.steps)
+			for _, name := range tt.owned {
+				assert.True(t, relationExists(t, f.pool, f.schema, name), "%s exists under its first-choice name", name)
+			}
+		})
+	}
+}
+
+// A table that owns more than the desired file claimed is not a mismatch:
+// only a claim the table failed to honour is. Relations another actor
+// attaches inside the CREATE TABLE's own transaction — a sequence owned by
+// a column, a constraint added before the commit — are the table's to
+// keep, and the run passes.
+func TestExecuteCreateAcceptsOwnedNamesBeyondTheClaims(t *testing.T) {
+	f := newCreateFixture(t, "t")
+	testutil.RunDuringDDL(t, f.pool, testutil.DDLCommandEnd, "CREATE TABLE", f.schema, "t", fmt.Sprintf(`
+		CREATE SEQUENCE %[1]s.t_extra_seq OWNED BY %[1]s.t.id;
+		ALTER TABLE %[1]s.t ADD CONSTRAINT t_extra_key UNIQUE (v)`, f.schema))
+
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr,
+		desired(t, "CREATE TABLE t (id int PRIMARY KEY, v text)"), createBudget, executor.DefaultRetryPolicy())
+	require.NoError(t, err)
+	require.Len(t, rep.Steps, 1)
+
+	owned, err := preflight.LookupOwnedRelationNames(t.Context(), f.pool, f.schema, "t")
+	require.NoError(t, err)
+	assert.Equal(t, preflight.OwnedRelationNames{
+		ConstraintIndexes: []string{"t_extra_key", "t_pkey"},
+		Sequences:         []string{"t_extra_seq"},
+	}, owned, "the unclaimed relations the table gained stay owned by it")
+}
+
+// A CREATE TABLE that commits but whose table cannot then be read at its
+// name — here renamed from under the executor inside the statement's own
+// transaction — leaves the name set unproven. An unproven set is not a
+// passing one: the run fails at step 1 under its own code with the read's
+// cause in the chain, the index step after it never runs, and the table
+// (under whatever name it now bears) is left for the operator.
+func TestExecuteCreateReportsUnreadableOwnedNamesAsUnverified(t *testing.T) {
+	f := newCreateFixture(t, "t")
+	testutil.RunDuringDDL(t, f.pool, testutil.DDLCommandEnd, "CREATE TABLE", f.schema, "t",
+		fmt.Sprintf("ALTER TABLE %s.t RENAME TO t_moved", f.schema))
+
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, desired(t, `
+		CREATE TABLE t (id int PRIMARY KEY, v text);
+		CREATE INDEX t_v_idx ON t (v);`), createBudget, executor.DefaultRetryPolicy())
+	require.Error(t, err)
+
+	var stepErr *executor.SequenceStepError
+	require.ErrorAs(t, err, &stepErr)
+	assert.Equal(t, 1, stepErr.Step)
+	assert.Equal(t, 2, stepErr.Total)
+	assert.Equal(t, executor.StepBrief, stepErr.Kind)
+	assert.Contains(t, stepErr.SQL, "CREATE TABLE")
+	assert.ErrorIs(t, err, executor.ErrCreateNamesUnverified)
+	assert.ErrorIs(t, err, preflight.ErrTableNotFound, "the read's own failure is the cause")
+	assert.NotErrorIs(t, err, executor.ErrCreateNameMismatch, "nothing was compared, so nothing mismatched")
+	assert.Equal(t, executor.CodeCreateNamesUnverified, executor.OutcomeCode(err),
+		"the code names the state the step left, not the read's fault")
+
+	assert.Empty(t, rep.Steps, "the failed step's own state is named by the code, not the committed prefix")
+	assert.Equal(t, "", relationKind(t, f.pool, f.schema, "t"), "nothing stands at the claimed name")
+	assert.Equal(t, "r", relationKind(t, f.pool, f.schema, "t_moved"), "the committed table stands under the name it was moved to")
+	assert.False(t, relationExists(t, f.pool, f.schema, "t_v_idx"), "the run stops at step 1; the index is never built on an unproven table")
+}
+
+// A CREATE TABLE that claims no server-chosen name — no index-backed
+// constraint, no serial or identity column — has nothing to prove after
+// it commits, so no read runs and nothing the read could hit can fail the
+// run. Here the table is renamed inside its own transaction, which would
+// leave a read with nothing at the claimed name; the run still passes.
+func TestExecuteCreateSkipsTheOwnedNameReadWithoutClaims(t *testing.T) {
+	f := newCreateFixture(t, "t")
+	testutil.RunDuringDDL(t, f.pool, testutil.DDLCommandEnd, "CREATE TABLE", f.schema, "t",
+		fmt.Sprintf("ALTER TABLE %s.t RENAME TO t_moved", f.schema))
+
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr,
+		desired(t, "CREATE TABLE t (a int, v text)"), createBudget, executor.DefaultRetryPolicy())
+	require.NoError(t, err)
+	require.Len(t, rep.Steps, 1)
+	assert.Equal(t, "r", relationKind(t, f.pool, f.schema, "t_moved"))
 }
