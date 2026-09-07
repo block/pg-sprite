@@ -222,7 +222,15 @@ func RebuildAbandonedIndex(ctx context.Context, pool *pgxpool.Pool, sql string, 
 // closes the window between the caller's inspection and the lock grant.
 func quarantineAbandonedIndex(ctx context.Context, conn *pgxpool.Conn, target indexTarget, index string, existing invalidIndex) error {
 	fail := func(cleanup error) error {
-		return &InvalidIndexError{Schema: target.schema, Index: index, Table: existing.table, Cleanup: cleanup}
+		return &InvalidIndexError{Schema: target.schema, Index: index, Table: target.table, Cleanup: cleanup}
+	}
+	// The observation must be of the table the statement names. The entry's
+	// table OID already matched the resolution, but a rename between the
+	// resolution and the inspection keeps the OID and changes the name:
+	// the inspection then reports the table under a name the statement
+	// never gave, and locking that name would follow the rename silently.
+	if existing.table != target.table {
+		return fail(ErrTargetIdentityChanged)
 	}
 	tx, err := conn.Begin(ctx)
 	if err != nil {
@@ -243,10 +251,11 @@ func quarantineAbandonedIndex(ctx context.Context, conn *pgxpool.Conn, target in
 		return fmt.Errorf("set abandonment proof lock budget: %w", err)
 	}
 	// LOCK TABLE takes a name, not an identity: a table renamed or dropped
-	// since the resolution is no longer the table the statement names, and
-	// a table replaced under the same name is caught by the identity
-	// re-check below, once the lock on whatever now bears the name is held.
-	table := pgx.Identifier{target.schema, existing.table}
+	// since the inspection is no longer the table the statement names and
+	// fails here as undefined, and a table replaced under the same name is
+	// caught by the identity re-check below, once the lock on whatever now
+	// bears the name is held.
+	table := pgx.Identifier{target.schema, target.table}
 	if _, err := tx.Exec(ctx, "LOCK TABLE "+table.Sanitize()+" IN SHARE UPDATE EXCLUSIVE MODE"); err != nil {
 		var pgErr *pgconn.PgError
 		switch {
@@ -292,14 +301,14 @@ func quarantineAbandonedIndex(ctx context.Context, conn *pgxpool.Conn, target in
 	if err != nil {
 		return fail(fmt.Errorf("re-verify index %s.%s under lock: %w", target.schema, index, err))
 	}
-	if tableName == nil || *tableName != existing.table || tableSchema == nil || *tableSchema != target.schema {
+	if tableName == nil || *tableName != target.table || tableSchema == nil || *tableSchema != target.schema {
 		return fail(ErrTargetIdentityChanged)
 	}
 	if !facts.isAbandonmentCandidate(existing.oid, index, target) {
 		return fail(ErrAbandonmentUnproven)
 	}
 	if pid := pidValue(builderPID); pid != 0 {
-		return &InvalidIndexError{Schema: target.schema, Index: index, Table: existing.table, BuilderPID: pid, Cleanup: ErrInvalidIndexBuildInFlight}
+		return &InvalidIndexError{Schema: target.schema, Index: index, Table: target.table, BuilderPID: pid, Cleanup: ErrInvalidIndexBuildInFlight}
 	}
 
 	quarantined := quarantineName(existing.oid)
@@ -544,10 +553,14 @@ func dropQuarantinedIndex(ctx context.Context, pool *pgxpool.Pool, target indexT
 }
 
 // isBoundedOutcome reports whether a statement's failure is one of the
-// time-bound outcomes — a budget exhausted or an external cancellation —
-// that callers branch on directly and that must therefore not be wrapped
-// in a verdict about the entry.
+// time-bound outcomes — a budget exhausted, the caller's own cancellation,
+// or an external one — that callers branch on directly and that must
+// therefore not be wrapped in a verdict about the entry. A drop cancelled
+// mid-wait leaves the entry exactly as it was for the next sweep; wrapping
+// the cancellation would report that known state as unproven.
 func isBoundedOutcome(err error) bool {
 	var budgetErr *BudgetError
-	return errors.As(err, &budgetErr) || errors.Is(err, ErrCancelledExternally)
+	return errors.As(err, &budgetErr) ||
+		errors.Is(err, ErrCancelledByCaller) ||
+		errors.Is(err, ErrCancelledExternally)
 }

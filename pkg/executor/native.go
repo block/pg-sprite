@@ -764,12 +764,16 @@ func admitConcurrentIndexBuild(sql string) (concurrentIndexBuild, error) {
 }
 
 // indexTarget is the resolved identity the recovery paths key on: the
-// schema scopes the index-name inspections, and the table OID is the
-// identity the post-failure verdict re-proves — a table swapped under the
-// same name makes the verdict indeterminate rather than clean.
+// schema scopes the index-name inspections, the table OID is the identity
+// the post-failure verdict re-proves — a table swapped under the same name
+// makes the verdict indeterminate rather than clean — and the table name is
+// the one the statement gave, which the OID must still answer to whenever a
+// later observation is compared against the resolution: a rename keeps the
+// OID, and the statement no longer names the table.
 type indexTarget struct {
 	tableOID uint32
 	schema   string
+	table    string
 }
 
 // querier is the query surface the catalog helpers need; *pgxpool.Conn and
@@ -786,19 +790,19 @@ type querier interface {
 	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
-// resolveTarget resolves the statement's qualified table to its OID and
-// schema, proving it exists. Admission guarantees qualification, so the
+// resolveTarget resolves the statement's qualified table to its OID, schema
+// and name, proving it exists. Admission guarantees qualification, so the
 // resolution is session-independent — the same name yields the same table
 // on the build session and on the verdict's pool session alike.
 func resolveTarget(ctx context.Context, q querier, build concurrentIndexBuild) (indexTarget, error) {
 	ref := pgx.Identifier{build.tableSchema, build.table}
 	var target indexTarget
 	err := q.QueryRow(ctx,
-		`SELECT c.oid, n.nspname
+		`SELECT c.oid, n.nspname, c.relname
 		   FROM pg_catalog.pg_class c
 		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
 		  WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)`,
-		ref.Sanitize()).Scan(&target.tableOID, &target.schema)
+		ref.Sanitize()).Scan(&target.tableOID, &target.schema, &target.table)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return target, fmt.Errorf("resolve table %s: %w", ref.Sanitize(), ErrTableNotFound)
 	}
@@ -1171,11 +1175,13 @@ func asConcurrentBudgetError(ctx context.Context, err error, b ConcurrentBudget,
 // isStatementCancellation reports whether err is a cancelled statement in
 // either of the forms a cancellation takes on the client: the server's
 // query_canceled, or the client's own context error when pgx gave up on
-// the statement before the server's response arrived.
+// the statement before the server's response arrived. Each form is checked
+// on its own, so a server error of another kind in the same chain does not
+// hide the client's context error behind it.
 func isStatementCancellation(err error) bool {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return pgErr.Code == sqlstateQueryCanceled
+	if errors.As(err, &pgErr) && pgErr.Code == sqlstateQueryCanceled {
+		return true
 	}
 	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

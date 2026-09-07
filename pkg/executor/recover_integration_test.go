@@ -2,6 +2,7 @@ package executor_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -251,6 +252,41 @@ func TestRebuildAbandonedIndexSweepsQuarantinedDebris(t *testing.T) {
 	assert.True(t, valid)
 	assert.Equal(t, []string{"pgsprite_abandoned_1"}, quarantinedIndexes(t, pool, schema),
 		"the lookalike survives; only names derived from their own OID are swept")
+}
+
+func TestRebuildAbandonedIndexRefusesSweepWhileQuarantinedEntryIsBeingBuilt(t *testing.T) {
+	pool, schema := newPool(t)
+	createTableWithDuplicates(t, pool, schema, "t")
+	// The quarantine-named entry is another backend's build, visibly in
+	// flight: a concurrent build parked in its snapshot wait holds no lock
+	// on its own index, so the entry can be renamed under it, and the
+	// progress view keeps reporting the build against the entry's OID.
+	// (A REINDEX ... CONCURRENTLY of a quarantined entry is reported
+	// against the new entry it builds, not the old one; the old one is
+	// then guarded by the table lock the reindex holds, which the drop's
+	// lock budget surfaces.)
+	startBlockedBuild(t, pool, pool, schema, "idx_busy")
+	busy := indexOID(t, pool, schema, "idx_busy")
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("ALTER INDEX %s.idx_busy RENAME TO %s", schema, quarantinedName(busy)))
+	require.NoError(t, err)
+
+	// The requested name is free, so the recovery reaches its sweep; the
+	// sweep must refuse the entry someone is building rather than drop it
+	// from under them, and must build nothing.
+	rep, err := executor.RebuildAbandonedIndex(t.Context(), pool,
+		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_c ON %s.t (c)", schema), buildBudget)
+
+	require.ErrorIs(t, err, executor.ErrInvalidIndexBuildInFlight)
+	var invalidErr *executor.InvalidIndexError
+	require.ErrorAs(t, err, &invalidErr)
+	assert.Equal(t, quarantinedName(busy), invalidErr.Index, "the refusal names the quarantined entry under build")
+	assert.Equal(t, "t", invalidErr.Table)
+	assert.Positive(t, invalidErr.BuilderPID, "the refusal names the building backend")
+	assert.False(t, invalidErr.Recoverable())
+	assert.Empty(t, rep.Dropped, "nothing is dropped while the entry is being built")
+	assert.Equal(t, busy, indexOID(t, pool, schema, quarantinedName(busy)), "the entry under build survives")
+	exists, _ := indexState(t, pool, schema, "idx_c")
+	assert.False(t, exists, "the requested build does not start behind a refused sweep")
 }
 
 func TestRebuildAbandonedIndexNeverDropsValidIndex(t *testing.T) {
@@ -557,6 +593,60 @@ func TestRebuildAbandonedIndexReportsLockBudgetWhenDropIsBlocked(t *testing.T) {
 		"the debris survives exactly as quarantined for the next sweep")
 	_, valid := indexState(t, pool, schema, quarantinedName(debris))
 	assert.False(t, valid)
+	exists, _ := indexState(t, pool, schema, "idx_left")
+	assert.False(t, exists, "the build never ran")
+}
+
+// TestRebuildAbandonedIndexReportsItsCallerCancellingTheDrop covers the
+// most ordinary way a sweep ends under an orchestrator: the caller's lease
+// lapses while a drop waits on the table lock. The sweep must report the
+// caller's own cancellation as itself — not as a verdict on the entry,
+// which a cancelled drop leaves exactly as quarantined for the next sweep.
+func TestRebuildAbandonedIndexReportsItsCallerCancellingTheDrop(t *testing.T) {
+	pool, schema := newPool(t)
+	createTableWithDuplicates(t, pool, schema, "t")
+	leaveInvalidIndex(t, pool, schema, "t", "idx_left")
+	debris := indexOID(t, pool, schema, "idx_left")
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("ALTER INDEX %s.idx_left RENAME TO %s", schema, quarantinedName(debris)))
+	require.NoError(t, err)
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		require.NoError(t, holder.Rollback(context.WithoutCancel(t.Context())))
+	})
+	_, err = holder.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.t IN SHARE UPDATE EXCLUSIVE MODE", schema))
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	done := make(chan error, 1)
+	var rep executor.IndexRecoveryReport
+	go func() {
+		var sweepErr error
+		rep, sweepErr = executor.RebuildAbandonedIndex(ctx, pool,
+			fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema), buildBudget)
+		done <- sweepErr
+	}()
+	require.Eventually(t, func() bool {
+		var waiting int
+		err := pool.QueryRow(t.Context(), `
+			SELECT count(*) FROM pg_catalog.pg_stat_activity
+			 WHERE wait_event_type = 'Lock' AND query LIKE 'DROP INDEX CONCURRENTLY %'`).Scan(&waiting)
+		return err == nil && waiting == 1
+	}, 10*time.Second, 20*time.Millisecond, "the drop must be waiting on the held table lock")
+	cancel()
+
+	err = <-done
+	require.ErrorIs(t, err, executor.ErrCancelledByCaller)
+	assert.NotErrorIs(t, err, executor.ErrCancelledExternally)
+	var budgetErr *executor.BudgetError
+	assert.False(t, errors.As(err, &budgetErr), "the caller stopped the drop before its lock bound")
+	var invalidErr *executor.InvalidIndexError
+	require.NotErrorAs(t, err, &invalidErr, "the caller's own cancellation is not a verdict on the entry")
+	assert.Equal(t, executor.CodeCancelledByCaller, executor.OutcomeCode(err))
+	assert.Empty(t, rep.Dropped)
+	assert.Equal(t, []string{quarantinedName(debris)}, quarantinedIndexes(t, pool, schema),
+		"the debris survives exactly as quarantined for the next sweep")
 	exists, _ := indexState(t, pool, schema, "idx_left")
 	assert.False(t, exists, "the build never ran")
 }

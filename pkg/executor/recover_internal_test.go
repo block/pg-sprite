@@ -1,10 +1,13 @@
 package executor
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -101,6 +104,27 @@ func TestQuarantineAbandonedIndexFailsClosedOnStaleObservation(t *testing.T) {
 		assert.Equal(t, "idx_left", f.indexName(t), "the entry keeps its name")
 	})
 
+	t.Run("table renamed before the inspection", func(t *testing.T) {
+		// The rename lands between the resolution and the inspection: the
+		// entry's table OID still matches, and the inspection reports the
+		// table under its new name. The proof must not follow the rename
+		// onto a table the statement never names.
+		f := newStaleProofFixture(t)
+		f.exec(t, "ALTER TABLE %s.t RENAME TO t2", f.schema)
+		existing, found, err := inspectInvalidIndex(t.Context(), f.conn, f.schema, "idx_left")
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, "t2", existing.table, "the inspection sees the renamed table")
+
+		err = quarantineAbandonedIndex(t.Context(), f.conn, f.target, "idx_left", existing)
+
+		require.ErrorIs(t, err, ErrTargetIdentityChanged)
+		var invalidErr *InvalidIndexError
+		require.ErrorAs(t, err, &invalidErr)
+		assert.Equal(t, "t", invalidErr.Table, "the refusal names the table the statement gave")
+		assert.Equal(t, "idx_left", f.indexName(t), "the entry keeps its name")
+	})
+
 	t.Run("table moved to another schema", func(t *testing.T) {
 		f := newStaleProofFixture(t)
 		other := testutil.NewSchema(t, f.pool)
@@ -110,6 +134,22 @@ func TestQuarantineAbandonedIndexFailsClosedOnStaleObservation(t *testing.T) {
 
 		require.ErrorIs(t, err, ErrTargetIdentityChanged)
 		assert.Equal(t, "idx_left", f.indexName(t))
+	})
+
+	t.Run("table moved to another schema behind a same-named decoy", func(t *testing.T) {
+		// The lock resolves the name to the decoy, and the resolved OID
+		// still answers to the name "t" — in the other schema. Only the
+		// schema half of the identity check tells the two apart, and it
+		// must produce the identity verdict rather than let the rename
+		// fail on a name the index no longer has.
+		f := newStaleProofFixture(t)
+		other := testutil.NewSchema(t, f.pool)
+		f.exec(t, "ALTER TABLE %[1]s.t SET SCHEMA %[2]s; CREATE TABLE %[1]s.t (id int PRIMARY KEY, c int)", f.schema, other)
+
+		err := quarantineAbandonedIndex(t.Context(), f.conn, f.target, "idx_left", f.existing)
+
+		require.ErrorIs(t, err, ErrTargetIdentityChanged)
+		assert.Equal(t, "idx_left", f.indexName(t), "the moved table's entry keeps its name")
 	})
 
 	t.Run("index renamed", func(t *testing.T) {
@@ -263,4 +303,51 @@ func TestRemainingAfterSharesOneBudgetAcrossTheSweep(t *testing.T) {
 	left, err = owned.remainingAfter(time.Hour)
 	require.NoError(t, err)
 	assert.Equal(t, owned, left)
+}
+
+// TestIsBoundedOutcomeRoutesEveryCancellationCause drives each way a drop
+// can stop through the same chain dropQuarantinedIndex uses — the outcome
+// classifier, the bounded-outcome routing, the verdict wrap for anything
+// not bounded — and pins the code the sweep's caller reads. The three
+// cancellation causes and the budget are the caller's own signals: none
+// may come back wrapped as a verdict on the entry, because an entry whose
+// drop was cancelled mid-wait is unchanged, not unproven.
+func TestIsBoundedOutcomeRoutesEveryCancellationCause(t *testing.T) {
+	budget := ConcurrentBudget{Overall: time.Minute}
+	cancelled := &pgconn.PgError{Code: sqlstateQueryCanceled}
+	live := t.Context()
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+	wrap := func(cleanup error) error {
+		return &InvalidIndexError{Schema: "s", Index: "i", Table: "t", Cleanup: cleanup}
+	}
+
+	tests := []struct {
+		name        string
+		callerEnded bool
+		err         error
+		elapsed     time.Duration
+		bounded     bool
+		want        Code
+	}{
+		{name: "caller cancel, bare context error", callerEnded: true, err: context.Canceled, elapsed: time.Second, bounded: true, want: CodeCancelledByCaller},
+		{name: "caller cancel, server 57014 arrived", callerEnded: true, err: cancelled, elapsed: time.Second, bounded: true, want: CodeCancelledByCaller},
+		{name: "operator cancel under a live context", err: cancelled, elapsed: time.Second, bounded: true, want: CodeCancelledExternally},
+		{name: "budget exhausted", err: cancelled, elapsed: time.Minute, bounded: true, want: CodeBudgetStatementExceeded},
+		{name: "any other failure is a verdict on the entry", err: errors.New("server closed the connection"), elapsed: time.Second, bounded: false, want: CodeInvalidIndexUnproven},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := live
+			if tt.callerEnded {
+				ctx = ended
+			}
+			outcome := asConcurrentBudgetError(ctx, tt.err, budget, tt.elapsed, "drop quarantined index")
+			assert.Equal(t, tt.bounded, isBoundedOutcome(outcome))
+			if !isBoundedOutcome(outcome) {
+				outcome = wrap(outcome)
+			}
+			assert.Equal(t, tt.want, OutcomeCode(outcome))
+		})
+	}
 }

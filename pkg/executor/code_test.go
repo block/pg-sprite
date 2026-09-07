@@ -115,6 +115,54 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 	}
 }
 
+// TestCodePermanentClassifiesEveryCode pins each code's retry class, and
+// pins the case set to Codes() so a code added to the vocabulary has to be
+// classified here before it can land: an adapter that reads Permanent()
+// for a code nobody decided on would get the unclassified default.
+func TestCodePermanentClassifiesEveryCode(t *testing.T) {
+	want := map[executor.Code]bool{
+		executor.CodeBudgetLockExceeded:              false,
+		executor.CodeBudgetStatementExceeded:         false,
+		executor.CodeCancelledByCaller:               false,
+		executor.CodeCancelledExternally:             false,
+		executor.CodeInvalidIndexOwnLeftover:         false,
+		executor.CodeInvalidIndexBuildInFlight:       false,
+		executor.CodeInvalidIndexAbandoned:           false,
+		executor.CodeInvalidIndexOtherTable:          true,
+		executor.CodeInvalidIndexNotDroppable:        true,
+		executor.CodeInvalidIndexBuilderUnobservable: false,
+		executor.CodeInvalidIndexUnproven:            false,
+		executor.CodeEmptySequence:                   true,
+		executor.CodeUnsupportedSequenceStep:         true,
+		executor.CodeUnsupportedPartitionedParent:    true,
+		executor.CodeNotConcurrentIndexBuild:         true,
+		executor.CodeUnnamedIndex:                    true,
+		executor.CodeUnqualifiedTable:                true,
+		executor.CodeIfNotExistsUnsupported:          true,
+		executor.CodeCreateCollision:                 true,
+		executor.CodeDuplicateCreateName:             true,
+		executor.CodePartitionOfUnsupported:          true,
+		executor.CodeUnsupportedCreateStep:           true,
+		executor.CodePoolTooSmall:                    true,
+		executor.CodeTableNotFound:                   true,
+		executor.CodeInvariantViolation:              true,
+		executor.CodeExecutionFailed:                 false,
+	}
+
+	classified := make([]executor.Code, 0, len(want))
+	for c := range want {
+		classified = append(classified, c)
+	}
+	assert.ElementsMatch(t, executor.Codes(), classified, "every code in Codes() is classified here, and nothing else is")
+
+	for _, c := range executor.Codes() {
+		t.Run(string(c), func(t *testing.T) {
+			assert.Equal(t, want[c], c.Permanent())
+		})
+	}
+	assert.False(t, executor.Code("").Permanent(), "the empty code (no error) is not permanent")
+}
+
 func TestSequenceStepErrorCodeMatchesOutcomeCode(t *testing.T) {
 	stepErr := &executor.SequenceStepError{
 		Step: 1, Total: 2, Kind: executor.StepConcurrentIndexBuild, SQL: "CREATE INDEX CONCURRENTLY i ON s.t (c)",

@@ -18,6 +18,7 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/progress"
 )
 
 func TestClassifyBackendState(t *testing.T) {
@@ -155,6 +156,88 @@ func TestAsConcurrentBudgetError(t *testing.T) {
 		var budgetErr *BudgetError
 		assert.False(t, errors.As(err, &budgetErr))
 	})
+}
+
+// TestIsStatementCancellationReadsEachFormOnItsOwn pins that the two forms
+// a cancellation takes on the client are recognised independently: a
+// server error of another kind sharing the chain with the client's own
+// context error must not hide the context error, and a lone server error
+// that is not query_canceled is not a cancellation.
+func TestIsStatementCancellationReadsEachFormOnItsOwn(t *testing.T) {
+	queryCanceled := &pgconn.PgError{Code: sqlstateQueryCanceled}
+	adminShutdown := &pgconn.PgError{Code: "57P01"}
+	connectionFailure := &pgconn.PgError{Code: "08006"}
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "server query_canceled", err: queryCanceled, want: true},
+		{name: "wrapped server query_canceled", err: fmt.Errorf("exec: %w", queryCanceled), want: true},
+		{name: "client context cancelled", err: context.Canceled, want: true},
+		{name: "client deadline exceeded", err: context.DeadlineExceeded, want: true},
+		{name: "another server error ahead of the client's context error", err: fmt.Errorf("%w: %w", adminShutdown, context.Canceled), want: true},
+		{name: "the client's context error ahead of another server error", err: fmt.Errorf("%w: %w", context.Canceled, adminShutdown), want: true},
+		{name: "connection failure with the deadline", err: errors.Join(connectionFailure, context.DeadlineExceeded), want: true},
+		{name: "another server error alone", err: adminShutdown, want: false},
+		{name: "connection failure alone", err: connectionFailure, want: false},
+		{name: "an untyped error", err: errors.New("boom"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isStatementCancellation(tt.err))
+		})
+	}
+}
+
+// cancelOnSecondRead is a clock that ends a context the second time it is
+// read. The concurrent build reads its tracker's clock exactly twice — once
+// before the statement, once the instant it returns — so the second read is
+// the only point at which a caller can be made to cancel after a build has
+// succeeded on the server and before its verdict runs.
+type cancelOnSecondRead struct {
+	cancel context.CancelFunc
+	reads  int
+}
+
+func (c *cancelOnSecondRead) Now() time.Time {
+	c.reads++
+	if c.reads == 2 {
+		c.cancel()
+	}
+	return time.Now()
+}
+
+// TestBuildIndexConcurrentlyVerifiesASuccessfulBuildAfterTheCallerCancels
+// pins the success path's detached verdict: a build the server completed
+// is evidence the caller is owed, and the caller's context ending a moment
+// later must not turn it into an unproven outcome. The verdict runs on its
+// own bounded context, so the report is returned and the index is valid.
+func TestBuildIndexConcurrentlyVerifiesASuccessfulBuildAfterTheCallerCancels(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	t.Cleanup(cancel)
+	tracker, err := progress.NewTracker(&cancelOnSecondRead{cancel: cancel})
+	require.NoError(t, err)
+
+	rep, err := buildIndexConcurrently(ctx, pool, fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_c ON %s.t (c)", schema),
+		ConcurrentBudget{CallerOwned: true}, tracker)
+	require.Error(t, ctx.Err(), "the fixture must have ended the caller's context before the verdict")
+	require.NoError(t, err, "a build the server completed is reported, whatever the caller's context did after")
+	assert.Equal(t, "idx_c", rep.Index)
+	assert.NotZero(t, rep.IndexOID)
+
+	var valid bool
+	require.NoError(t, pool.QueryRow(context.WithoutCancel(t.Context()),
+		`SELECT i.indisvalid FROM pg_catalog.pg_index i WHERE i.indexrelid OPERATOR(pg_catalog.=) $1`, rep.IndexOID).Scan(&valid))
+	assert.True(t, valid)
 }
 
 // TestInvalidIndexErrorAdviceMatchesProof is the renderer's own unit test:
@@ -439,4 +522,76 @@ func TestCatalogVerdictFailsClosedWhenInspectionFails(t *testing.T) {
 	require.NotNil(t, invalidErr.Cleanup, "the inspection failure must be reported as the recovery cause")
 	assert.NotErrorIs(t, invalidErr.Cleanup, ErrTargetIdentityChanged, "an unreadable catalog is an inspection failure, not an identity verdict")
 	assert.NotErrorIs(t, invalidErr.Cleanup, ErrBuildLeftInvalidIndex, "an unreadable catalog cannot prove a leftover")
+}
+
+// TestDroppableColumnMatchesTheServer pins the droppability predicate to
+// the server's own answer, one index shape at a time: the predicate says
+// droppable exactly when DROP INDEX CONCURRENTLY succeeds, and every shape
+// it refuses is one the server refuses too, matched by SQLSTATE. The
+// constraint term is exercised on a plain table with an index that is
+// invalid in no other respect — a foreign key's referenced unique index,
+// which no constraint of its own table names — because a constraint's
+// index can never be a failed concurrent build's debris and so is not
+// reachable through the recovery's public path.
+func TestDroppableColumnMatchesTheServer(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (id int PRIMARY KEY, u int UNIQUE, c int, e int, EXCLUDE USING btree (e WITH =));
+		CREATE INDEX idx_plain ON %[1]s.t (c);
+		CREATE UNIQUE INDEX idx_referenced ON %[1]s.t (c);
+		CREATE TABLE %[1]s.r (id int PRIMARY KEY, t_c int REFERENCES %[1]s.t (c));
+		CREATE TABLE %[1]s.p (id int, c int) PARTITION BY RANGE (id);
+		CREATE TABLE %[1]s.p1 PARTITION OF %[1]s.p FOR VALUES FROM (0) TO (100);
+		CREATE INDEX idx_parent ON ONLY %[1]s.p (c);
+		CREATE INDEX idx_partition ON %[1]s.p1 (c);
+		ALTER INDEX %[1]s.idx_parent ATTACH PARTITION %[1]s.idx_partition`, schema))
+	require.NoError(t, err)
+
+	// The server refuses a partitioned table's index as unsupported, and
+	// refuses an index some other object depends on — a constraint's, a
+	// foreign key's referenced index, or a partition attached to a parent.
+	const (
+		sqlstateFeatureNotSupported        = "0A000"
+		sqlstateDependentObjectsStillExist = "2BP01"
+	)
+	tests := []struct {
+		name      string
+		index     string
+		droppable bool
+		// refusal is the SQLSTATE the server answers DROP INDEX
+		// CONCURRENTLY with when the predicate says not droppable.
+		refusal string
+	}{
+		{name: "plain index", index: "idx_plain", droppable: true},
+		{name: "primary key's index", index: "t_pkey", refusal: sqlstateDependentObjectsStillExist},
+		{name: "unique constraint's index", index: "t_u_key", refusal: sqlstateDependentObjectsStillExist},
+		{name: "exclusion constraint's index", index: "t_e_excl", refusal: sqlstateDependentObjectsStillExist},
+		{name: "unique index a foreign key references", index: "idx_referenced", refusal: sqlstateDependentObjectsStillExist},
+		{name: "partitioned table's index", index: "idx_parent", refusal: sqlstateFeatureNotSupported},
+		{name: "attached index partition", index: "idx_partition", refusal: sqlstateDependentObjectsStillExist},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var droppable bool
+			require.NoError(t, pool.QueryRow(t.Context(),
+				`SELECT `+droppableColumn+`
+				   FROM pg_catalog.pg_class c
+				   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+				  WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`,
+				schema, tt.index).Scan(&droppable))
+			assert.Equal(t, tt.droppable, droppable, "the predicate's verdict")
+
+			_, err := pool.Exec(t.Context(), fmt.Sprintf("DROP INDEX CONCURRENTLY %s.%s", schema, tt.index))
+			if tt.droppable {
+				require.NoError(t, err, "the server drops what the predicate calls droppable")
+				return
+			}
+			var pgErr *pgconn.PgError
+			require.ErrorAs(t, err, &pgErr, "the server refuses what the predicate calls not droppable")
+			assert.Equal(t, tt.refusal, pgErr.Code)
+		})
+	}
 }

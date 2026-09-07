@@ -143,6 +143,41 @@ func Codes() []Code {
 	}
 }
 
+// Permanent reports whether the outcome is decided by the statement, the
+// caller's configuration, or the standing catalog: retrying the same call
+// unchanged reproduces it, and no executor entry point changes it — an
+// author or operator has to act first. It is the floor an adapter's retry
+// policy stands on, not its ceiling: a code that is not permanent may still
+// be one a particular adapter declines to retry (a statement budget it
+// sized as a lease, for one), but a permanent code retried unchanged loops
+// for ever. The invalid-index family splits on exactly this line: an entry
+// RebuildAbandonedIndex can prove abandoned, a build to wait out, or a
+// proof to re-take is not permanent; an entry on another table or one the
+// server will not drop concurrently is. The empty code (no error) is not
+// permanent.
+func (c Code) Permanent() bool {
+	switch c {
+	case CodeInvalidIndexOtherTable,
+		CodeInvalidIndexNotDroppable,
+		CodeEmptySequence,
+		CodeUnsupportedSequenceStep,
+		CodeUnsupportedPartitionedParent,
+		CodeNotConcurrentIndexBuild,
+		CodeUnnamedIndex,
+		CodeUnqualifiedTable,
+		CodeIfNotExistsUnsupported,
+		CodeCreateCollision,
+		CodeDuplicateCreateName,
+		CodePartitionOfUnsupported,
+		CodeUnsupportedCreateStep,
+		CodePoolTooSmall,
+		CodeTableNotFound,
+		CodeInvariantViolation:
+		return true
+	}
+	return false
+}
+
 // OutcomeCode maps an error returned by this package to its stable code.
 // A nil error has no outcome code and maps to the empty Code. A
 // *SequenceStepError carries its failed step's own cause, so it maps to

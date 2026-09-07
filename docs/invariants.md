@@ -186,8 +186,9 @@ name can be occupied by a different entry between any two observations. The proo
 (`CREATE`, `DROP`, `REINDEX … CONCURRENTLY`) holds for its whole life, so holding it proves no
 build of *any* index on the table is in flight, including one this role cannot observe.
 Under that lock, in the same transaction, the executor re-verifies the candidate by OID
-(still under the observed name, still invalid, still on the target table by OID and schema,
-still an index the server will drop concurrently, no visible builder) and renames it to a
+(still under the observed name, still invalid, still on the target table by OID, schema and
+the table name the statement gave — a rename keeps the OID but the statement no longer names
+the table — still an index the server will drop concurrently, no visible builder) and renames it to a
 **quarantine name derived from its OID** — the only mutation the lock licenses. Any
 disagreement between the unlocked observation and the locked re-check fails closed
 (`ErrTargetIdentityChanged` when the table's identity moved, `ErrAbandonmentUnproven`

@@ -283,7 +283,11 @@ operational errors retries forever. Route them ([runbook](invalid-index-recovery
 server will not drop concurrently, left for an operator), and the recovery's whole
 `Duration` against the budget the adapter sized as its lease. An adapter that enumerates
 `executor.Codes()` exhaustively must map every row above; the set is the contract, and
-[execution-model](execution-model.md#outcome-codes) is its canonical list.
+[execution-model](execution-model.md#outcome-codes) is its canonical list. The rows are
+not one retry class: `invalid-index-other-table` and `invalid-index-not-droppable` are
+permanent — `Code.Permanent()` says so — while the rest wait on a recovery, a builder, or a
+re-taken proof. An adapter sorting these codes into "retry" and "refuse" groups starts from
+`Permanent()`, not from the family name.
 
 ## Execution-mode verdicts and direct execution
 
