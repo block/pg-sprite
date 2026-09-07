@@ -14,6 +14,7 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
@@ -251,6 +252,8 @@ func TestDiffGreenfieldCreateShapeRefusal(t *testing.T) {
 	require.Len(t, report.Statements, 1)
 	assert.Equal(t, router.DispositionRefuse, report.Statements[0].Disposition)
 	assert.Equal(t, verdict.ReasonUnsupportedStatement, report.Statements[0].Reason)
+	assert.Equal(t, executor.CreateShapePartitionOf, report.Statements[0].Cause,
+		"the JSON report names the create path's cause so a consumer renders it without recomputing the check")
 	assert.Empty(t, report.Statements[0].ExecSQL)
 
 	text := newDiffCmd(t, url, schema, desired)

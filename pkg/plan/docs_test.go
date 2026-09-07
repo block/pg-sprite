@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
@@ -118,6 +119,9 @@ func TestDocListsEveryVocabularyValue(t *testing.T) {
 	}
 	for _, g := range suggest.Guidances() {
 		values = append(values, string(g))
+	}
+	for _, c := range executor.CreateShapeCauses() {
+		values = append(values, string(c))
 	}
 	for _, v := range values {
 		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", v),

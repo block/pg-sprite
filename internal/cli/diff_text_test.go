@@ -44,7 +44,7 @@ func TestDiffTextSaferIdiomSubstitution(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDiffText(&out, palette{}, report, nil))
+	require.NoError(t, writeDiffText(&out, palette{}, report))
 	assert.Equal(t, `statement 1:
   ALTER TABLE "users" ADD CONSTRAINT "u" UNIQUE ("email");
 
@@ -98,7 +98,7 @@ func TestDiffTextGreenfieldLeadsWithNote(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDiffText(&out, palette{}, report, nil))
+	require.NoError(t, writeDiffText(&out, palette{}, report))
 	text := out.String()
 	assert.True(t, strings.HasPrefix(text, "note:\n  the table public.widgets does not exist — the plan creates it from the\n  full desired schema\n"),
 		"the greenfield note must lead the report: %s", text)
@@ -127,11 +127,11 @@ func TestDiffTextGreenfieldRefusedNoteAndCause(t *testing.T) {
 		Route:       planner.RouteNative,
 		Disposition: router.DispositionRefuse,
 		Reason:      verdict.ReasonUnsupportedStatement,
+		Cause:       executor.CreateShapePartitionOf,
 	})
-	causes := []error{executor.ErrPartitionOfUnsupported}
 
 	var out strings.Builder
-	require.NoError(t, writeDiffText(&out, palette{}, report, causes))
+	require.NoError(t, writeDiffText(&out, palette{}, report))
 	text := out.String()
 	assert.True(t, strings.HasPrefix(text, "note:\n  the table public.child does not exist — the plan is the full desired\n  schema, and a statement in it is refused, so nothing would be created\n"),
 		"the greenfield note must say the plan is refused: %s", text)
@@ -143,9 +143,9 @@ func TestDiffTextGreenfieldRefusedNoteAndCause(t *testing.T) {
 	assert.True(t, diffRefused(report))
 }
 
-// Without a cause list the refused greenfield statement renders its typed
-// refusal alone — the renderer never invents an explanation.
-func TestDiffTextGreenfieldRefusedWithoutCauses(t *testing.T) {
+// A refused greenfield statement that carries no create-shape cause renders
+// its typed refusal alone — the renderer never invents an explanation.
+func TestDiffTextGreenfieldRefusedWithoutCause(t *testing.T) {
 	report := plan.NewReport(plan.SourceDiff)
 	report.Schema, report.Table, report.ServerVersion = "public", "child", "16.10"
 	report.Disposition = router.DispositionRefuse
@@ -159,7 +159,7 @@ func TestDiffTextGreenfieldRefusedWithoutCauses(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDiffText(&out, palette{}, report, nil))
+	require.NoError(t, writeDiffText(&out, palette{}, report))
 	assert.NotContains(t, out.String(), "the create path refuses this statement")
 	assert.Contains(t, out.String(), "error[unsupported-statement]:\n  refused — ")
 }
@@ -182,6 +182,7 @@ b')`
 			Route:       planner.RouteNative,
 			Disposition: router.DispositionRefuse,
 			Reason:      verdict.ReasonUnsupportedStatement,
+			Cause:       executor.CreateShapePartitionOf,
 			Decisions: []planner.Decision{{
 				Operation: "create table",
 				Route:     planner.RouteNative,
@@ -202,13 +203,12 @@ b')`
 			}},
 		},
 	)
-	causes := []error{executor.ErrPartitionOfUnsupported, nil}
 
 	var out strings.Builder
-	require.NoError(t, writePlanText(&out, report, causes))
+	require.NoError(t, writePlanText(&out, report))
 	text := out.String()
 	assert.Contains(t, text, "-- native (metadata-only): refused — the engine will not run it\n"+
-		"-- the create path refuses this statement: "+executor.ErrPartitionOfUnsupported.Error()+"\n"+
+		"-- the create path refuses this statement: "+executor.CreateShapePartitionOf.Description()+"\n"+
 		"-- "+strings.ReplaceAll(refusedSQL, "\n", "\n-- ")+";\n")
 	assert.Contains(t, text, "-- native (metadata-only)\n"+indexSQL+";\n")
 	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
@@ -245,7 +245,7 @@ func TestDiffTextGreenfieldIndexRendersMetadataOnly(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDiffText(&out, palette{}, report, nil))
+	require.NoError(t, writeDiffText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "statement 1:\n  "+sql+";\n")
 	assert.Contains(t, text, "note[metadata-only]:\n  create index — a brief catalog-only change")
@@ -266,7 +266,7 @@ func TestDiffTextNoChanges(t *testing.T) {
 	report.TableExists = &exists
 
 	var out strings.Builder
-	require.NoError(t, writeDiffText(&out, palette{}, report, nil))
+	require.NoError(t, writeDiffText(&out, palette{}, report))
 	assert.Equal(t, `plan:
   public.users (PostgreSQL 16.10) — no changes; the live table matches the desired schema
 `, out.String())
@@ -294,7 +294,7 @@ func TestDiffTextRefusedStatementDropsApply(t *testing.T) {
 	})
 
 	var out strings.Builder
-	require.NoError(t, writeDiffText(&out, palette{}, report, nil))
+	require.NoError(t, writeDiffText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "error[backend-unavailable]:\n  refused — needs the copy-and-swap backend")
 	assert.Contains(t, text, "1 statement, 0 steps to run, 1 refused\n")

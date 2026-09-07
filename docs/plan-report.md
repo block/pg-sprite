@@ -13,12 +13,14 @@ the examples at the end of this page.
 Every report carries `format_version`. A consumer that does not recognize the version must
 **reject the report** — never guess at field semantics. The version covers more than the
 field shape: the closed vocabularies below (sources, routes, backends, dispositions,
-kinds, guidance) and the fingerprint serialization are all pinned to it. Adding a vocabulary value or
+kinds, guidance, causes) and the fingerprint serialization are all pinned to it. Adding a vocabulary value or
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **2**: version 2 added the statement-level `guidance` field on
-`rewrite-required` statements. The fingerprint definition is unchanged from version 1.
+The current version is **3**: version 3 added the statement-level `cause` field on
+greenfield statements the create path refuses by shape; version 2 added the statement-level
+`guidance` field on `rewrite-required` statements. The fingerprint definition is unchanged
+from version 1.
 
 The [lint report](lint-report.md) is a separate contract with its own `format_version`; the
 two version independently. Lint findings embed this contract's Reasons vocabulary — the lint
@@ -62,7 +64,8 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `route` | string | always | The planner's aggregate route for the statement (see Routes). |
 | `backend` | string | except refusals | The assigned execution strategy (see Backends); absent for refusals. |
 | `disposition` | string | always | What execution would do with this statement now (see Dispositions). |
-| `reason` | string | refusals only | Typed refusal cause for this statement: `unsupported-statement` for a planner-level refusal or, on a greenfield plan, a create shape the create path refuses (`PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, a duplicate claimed relation name); `unsupported-partitioned-parent` when target facts refuse it. An unknown value must be treated as refused. |
+| `reason` | string | refusals only | Typed refusal cause for this statement: `unsupported-statement` for a planner-level refusal or, on a greenfield plan, a create shape the create path refuses (`cause` names which); `unsupported-partitioned-parent` when target facts refuse it. An unknown value must be treated as refused. |
+| `cause` | string | greenfield create-shape refusals only | The create path's typed shape refusal (see Causes): why a table born in the run cannot carry this statement. Present exactly when the create path refused the statement — `disposition` is `refuse`, `reason` is `unsupported-statement`, and `table_exists` is false. Absent for every other refusal. Explanatory: excluded from the fingerprint. |
 | `decisions` | array | always | The planner's per-operation classifications (below). |
 | `exec_sql` | array | native route | The ordered SQL the native backend would run — the safer sequence when the planner constructed one, or the statement as written for a table that does not exist yet (the greenfield create path runs plain builds; see Fingerprint). Absent for non-native routes. |
 | `execution` | string | with `exec_sql` | The typed execution contract for `exec_sql` (see Execution contracts). A consumer that runs the statements itself branches on this — it is what says the steps must not be wrapped in a transaction block. Present exactly when `exec_sql` is. |
@@ -122,7 +125,7 @@ treat the statement and report as refused.
 
 | Value | Meaning |
 |---|---|
-| `unsupported-statement` | The planner knows no safe path for the statement (planner-level refusal), or — on a greenfield plan, where the table does not exist — the create path refuses the statement's shape: `PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a relation name the desired set claims twice. The same token the run path's refusal verdict carries, so a dry-run report and a run receipt for the same statement match on the typed field alone. The report carries no per-statement cause; `migrate.RunDesired`'s refusal detail and the text diff name it. |
+| `unsupported-statement` | The planner knows no safe path for the statement (planner-level refusal), or — on a greenfield plan, where the table does not exist — the create path refuses the statement's shape, in which case `cause` names which shape (see Causes). The same token the run path's refusal verdict carries, so a dry-run report and a run receipt for the same statement match on the typed field alone. |
 | `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. |
 
 On the apply path, refusal checks have deterministic precedence: table size, then partition
@@ -168,6 +171,27 @@ code's full manual path; this contract embeds it, so a new guidance code bumps t
 | `name-constraint-then-validate` | Name the constraint, add it NOT VALID, then VALIDATE it online. |
 | `unique-index-then-constraint` | Build the unique index with CREATE UNIQUE INDEX CONCURRENTLY, then attach it with ADD CONSTRAINT … USING INDEX. |
 
+### Causes (`cause`, greenfield create-shape refusals only)
+
+The create path's typed reason for refusing a statement by shape on a plan whose table does
+not exist. The vocabulary is owned by `pkg/executor` (`executor.CreateShapeCauses()`) and
+documented in full in the [execution model](execution-model.md#create-shape-causes); this
+contract embeds it, so a new cause bumps this `format_version` too. A renderer prints the
+cause's description instead of recomputing the shape check; `migrate.RunDesired`'s refusal
+detail and the text diff both read this field.
+
+| Value | Meaning |
+|---|---|
+| `partition-of` | `PARTITION OF` attaches to a parent the absence proof does not cover. |
+| `inherits` | `INHERITS` binds to an existing parent the absence proof does not cover. |
+| `like` | `LIKE` reads an existing source table the absence proof does not cover. |
+| `of-type` | `OF` binds to an existing composite type the absence proof does not cover. |
+| `if-not-exists` | A name-only no-op cannot prove the existing relation has the requested shape or is valid. |
+| `concurrently` | A concurrent index build is refused on a table born this run. |
+| `duplicate-name` | The desired set claims the same relation name twice. |
+| `multiple-operations` | The statement carries more than one operation. |
+| `unsupported-kind` | The statement is not a create kind the create path can run. |
+
 ### Kinds (`kind`, diff source only)
 
 | Value | Meaning |
@@ -197,9 +221,9 @@ time is the consumer's side of the contract.
 The serialization is exact and pinned by test: for each statement in plan order, hash the
 canonical `sql`, `route`, `backend`, and `disposition`, then each `exec_sql` entry — every
 field followed by a unit separator (`0x1F`) — and close each statement with a record
-separator (`0x1E`). Explanatory fields (`decisions`, `kind`, `destructive`) are excluded: a
-reworded reason does not change identity, but a rerouted, resequenced, or rewritten plan
-does. An empty plan has a defined identity (the digest of no input).
+separator (`0x1E`). Explanatory fields (`decisions`, `kind`, `destructive`, `reason`, `cause`,
+`guidance`) are excluded: a reworded reason does not change identity, but a rerouted,
+resequenced, or rewritten plan does. An empty plan has a defined identity (the digest of no input).
 
 For a table that does not exist yet, `exec_sql` is the plain canonical build that the
 greenfield create path runs. It never substitutes `CONCURRENTLY` for an index on a table
@@ -229,7 +253,7 @@ Both examples are generated by the real classify-and-route pipeline and pinned b
 
 ```json
 {
-  "format_version": 2,
+  "format_version": 3,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -272,7 +296,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 2,
+  "format_version": 3,
   "source": "diff",
   "schema": "app",
   "table": "orders",

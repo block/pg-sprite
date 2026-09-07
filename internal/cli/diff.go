@@ -10,7 +10,6 @@ import (
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
-	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
@@ -48,15 +47,14 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		"schema", report.Schema, "table", report.Table, "changes", len(report.Statements),
 		"table_exists", report.TableExists != nil && *report.TableExists,
 		"disposition", string(report.Disposition))
-	causes := greenfieldRefusalCauses(c.Schema, ds, report)
 
 	switch {
 	case c.JSON:
 		err = writeJSON(out, report)
 	case c.SQL:
-		err = writePlanText(out, report, causes)
+		err = writePlanText(out, report)
 	default:
-		err = writeDiffText(out, c.palette(out), report, causes)
+		err = writeDiffText(out, c.palette(out), report)
 	}
 	if err != nil {
 		return err
@@ -68,32 +66,6 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		return verdict.ErrRefused
 	}
 	return nil
-}
-
-// greenfieldRefusalCauses returns the create path's typed refusal for each
-// statement of a refused greenfield plan, positional with
-// report.Statements and nil for statements the create path admitted; nil
-// for any other report. The plan report carries no field for the cause,
-// and the shape check is pure over the desired schema the plan was derived
-// from, so it is recomputed here rather than stored. The plan was just
-// derived from the same desired schema, so the check cannot fail or
-// disagree on statement count; if it does, the statements render without
-// a cause rather than turning a display detail into an error.
-func greenfieldRefusalCauses(schema string, ds statement.DesiredSchema, report plan.Report) []error {
-	if !tableMissing(report) {
-		return nil
-	}
-	if report.Disposition != router.DispositionRefuse {
-		return nil
-	}
-	causes, err := executor.CreateShapeRefusals(schema, ds)
-	if err != nil {
-		return nil
-	}
-	if len(causes) != len(report.Statements) {
-		return nil
-	}
-	return causes
 }
 
 // writeJSON emits the plan report as JSON.
@@ -117,8 +89,10 @@ func writeJSON(out io.Writer, report plan.Report) error {
 // substituted into the script body, which stays the literal convergence
 // plan (a CONCURRENTLY rewrite could not run inside a transaction block).
 // The header points at migrate as the executing front door: running this
-// script directly bypasses the gate that refuses blocking statements.
-func writePlanText(out io.Writer, report plan.Report, refusalCauses []error) error {
+// script directly bypasses the gate that refuses blocking statements. A
+// greenfield statement the create path refuses by shape is annotated with
+// the plan's typed cause — the executor's own explanation.
+func writePlanText(out io.Writer, report plan.Report) error {
 	if len(report.Statements) == 0 {
 		if _, err := fmt.Fprintln(out, "-- no changes: live table matches the desired schema"); err != nil {
 			return fmt.Errorf("write plan: %w", err)
@@ -137,12 +111,8 @@ func writePlanText(out io.Writer, report plan.Report, refusalCauses []error) err
 			return fmt.Errorf("write plan: %w", err)
 		}
 	}
-	for i, ps := range report.Statements {
-		var cause error
-		if i < len(refusalCauses) {
-			cause = refusalCauses[i]
-		}
-		if err := writeChangeText(out, ps, cause); err != nil {
+	for _, ps := range report.Statements {
+		if err := writeChangeText(out, ps); err != nil {
 			return err
 		}
 	}
@@ -153,13 +123,13 @@ func writePlanText(out io.Writer, report plan.Report, refusalCauses []error) err
 // refused statement is emitted as an SQL comment: the script is
 // copy-pasteable, and it must never carry a statement the engine refuses
 // where a reader could run it by accident.
-func writeChangeText(out io.Writer, ps plan.Statement, refusalCause error) error {
+func writeChangeText(out io.Writer, ps plan.Statement) error {
 	if _, err := fmt.Fprintf(out, "-- %s\n", annotate(ps)); err != nil {
 		return fmt.Errorf("write plan: %w", err)
 	}
 	if ps.Disposition == router.DispositionRefuse {
-		if refusalCause != nil {
-			if _, err := fmt.Fprintf(out, "-- the create path refuses this statement: %v\n", refusalCause); err != nil {
+		if ps.Cause != "" {
+			if _, err := fmt.Fprintf(out, "-- the create path refuses this statement: %s\n", ps.Cause.Description()); err != nil {
 				return fmt.Errorf("write plan: %w", err)
 			}
 		}
