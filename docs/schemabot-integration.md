@@ -14,6 +14,7 @@ points here.
 - [Overview](#overview)
 - [Verb mapping (conceptual)](#verb-mapping-conceptual)
 - [The proposed SchemaBot-side contract](#the-proposed-schemabot-side-contract)
+- [Invalid-index outcomes of a concurrent index build](#invalid-index-outcomes-of-a-concurrent-index-build)
 - [Execution-mode verdicts and direct execution](#execution-mode-verdicts-and-direct-execution)
 - [Design constraints the integration imposes](#design-constraints-the-integration-imposes)
 
@@ -256,6 +257,37 @@ transaction, so the steps before the failure remain
 then refuses with `ErrRelationExists`, and the gate stays closed until the declarative
 front door re-diffs the live catalog and converges the remainder — the orchestrator never
 assumes the failed run left nothing behind.
+
+## Invalid-index outcomes of a concurrent index build
+
+`BuildIndexConcurrently` never drops an index. When an invalid index occupies the requested
+name — or the target table carries debris a previous recovery quarantined under
+`pgsprite_abandoned_<oid>` — the build refuses with a `*executor.InvalidIndexError` whose
+`Cleanup` sentinel and outcome code say how strong the proof of abandonment is, and
+`Recoverable()` says whether `executor.RebuildAbandonedIndex` (same statement, same budget,
+a pool one connection larger) will remove it. The refusal is deterministic: **retrying the
+build unchanged reproduces it**, so an adapter that classifies these codes as transient
+operational errors retries forever. Route them ([runbook](invalid-index-recovery.md)):
+
+| Outcome code | `Recoverable()` | Orchestrator action |
+| --- | --- | --- |
+| `invalid-index-own-leftover`, `invalid-index-abandoned`, `invalid-index-builder-unobservable` | yes | Run `RebuildAbandonedIndex` with the same statement (opt in explicitly — the build never does it for you); it removes the entry only after proving it abandoned under the table lock, or reports `*BudgetError` (`CauseLock`) and touches nothing when a build it cannot see holds the lock |
+| `invalid-index-build-in-flight` | no | Wait and retry later; the error names the backend PID |
+| `invalid-index-other-table` | no | Not this change's index; surface to an operator |
+| `invalid-index-not-droppable` | no | A partitioned table's index, an index partition, or a constraint's index — never debris; surface to an operator |
+| `invalid-index-unproven` | no | Fail closed; surface to an operator with the catalog queries from the runbook |
+
+`RebuildAbandonedIndex` itself refuses with the same codes when the proof does not hold
+(the table renamed or replaced, the entry changed, a builder visible), and its
+`IndexRecoveryReport` carries what it dropped, what it skipped (quarantined entries the
+server will not drop concurrently, left for an operator), and the recovery's whole
+`Duration` against the budget the adapter sized as its lease. An adapter that enumerates
+`executor.Codes()` exhaustively must map every row above; the set is the contract, and
+[execution-model](execution-model.md#outcome-codes) is its canonical list. The rows are
+not one retry class: `invalid-index-other-table` and `invalid-index-not-droppable` are
+permanent — `Code.Permanent()` says so — while the rest wait on a recovery, a builder, or a
+re-taken proof. An adapter sorting these codes into "retry" and "refuse" groups starts from
+`Permanent()`, not from the family name.
 
 ## Execution-mode verdicts and direct execution
 

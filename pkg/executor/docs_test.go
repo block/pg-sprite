@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -52,6 +53,31 @@ func TestDocNamesEveryCreateShapeCause(t *testing.T) {
 	for _, cause := range executor.CreateShapeCauses() {
 		assert.Contains(t, doc, fmt.Sprintf("`%s`", cause),
 			"docs/execution-model.md does not name create-shape cause %q", cause)
+	}
+}
+
+// The doc's Permanent column is Code.Permanent(): an adapter author reading
+// the table and one calling the method must reach the same retry class for
+// every code.
+func TestDocPermanentColumnMatchesCodePermanent(t *testing.T) {
+	raw, err := os.ReadFile(executionModelDoc)
+	require.NoError(t, err)
+	rows := make(map[executor.Code]string)
+	for line := range strings.SplitSeq(string(raw), "\n") {
+		for _, c := range executor.Codes() {
+			if strings.HasPrefix(line, fmt.Sprintf("| `%s` | ", c)) {
+				rows[c] = line
+			}
+		}
+	}
+	for _, c := range executor.Codes() {
+		row, ok := rows[c]
+		require.True(t, ok, "docs/execution-model.md has no outcome-code table row for %q", c)
+		want := "| no |"
+		if c.Permanent() {
+			want = "| yes |"
+		}
+		assert.Contains(t, row, want, "the Permanent column for %q disagrees with Code.Permanent()", c)
 	}
 }
 

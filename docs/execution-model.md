@@ -6,9 +6,10 @@ rolled back. Nothing after it ran. pg-sprite tells you exactly where that line
 is. Everything in the committed prefix is documented, harmless to live
 traffic, and a step *toward* the desired schema — not debris. A failed step
 can also leave state of *its own*: a concurrent index build that dies
-mid-build leaves an INVALID index that taxes every write until an operator
-drops it ([invalid-index-recovery.md](invalid-index-recovery.md)) — the
-verdict's `code` names that outcome when it happens.
+mid-build leaves an INVALID index that taxes every write until it is removed
+— by the executor's proven recovery when the entry is provably abandoned, by
+an operator otherwise ([invalid-index-recovery.md](invalid-index-recovery.md))
+— the verdict's `code` names that outcome when it happens.
 
 This page explains why the engine works this way and what the guarantees are.
 The machine-readable contracts live in
@@ -207,7 +208,7 @@ Three mechanisms turn non-atomicity from a hazard into a contract:
    | Sequence | A failed step leaves | Retry path | Safe to automate? |
    | --- | --- | --- | --- |
    | `SET NOT NULL` (4 steps) | The NOT VALID CHECK scaffold | Resume at the failed step; a leftover scaffold is removed by running the DROP CONSTRAINT step alone | Yes — a committed step refuses to double-apply (`duplicate_object`) |
-   | `ADD PRIMARY KEY` / `UNIQUE USING INDEX` (2 steps) | An INVALID index (`pg_index.indisvalid = false`) | Drop the invalid index, re-run the build — see [invalid-index-recovery.md](invalid-index-recovery.md) | **No — operator action**: recovery starts with a DROP the engine detects and reports but never issues unprompted |
+   | `ADD PRIMARY KEY` / `UNIQUE USING INDEX` (2 steps) | An INVALID index (`pg_index.indisvalid = false`) | `RebuildAbandonedIndex` removes the entry under proof and re-runs the build — see [invalid-index-recovery.md](invalid-index-recovery.md) | **Only as an explicit recovery call**: the sequence itself never drops; the recovery drops only what it has proven abandoned under the table lock, and refuses an in-flight or another table's entry |
    | `ADD CONSTRAINT ... NOT VALID` + `VALIDATE` | The NOT VALID constraint, enforcing for new writes | Re-run VALIDATE — it is safe to repeat | Yes — VALIDATE is idempotent |
 
    Nothing resumes automatically — deliberately. The engine never picks up
@@ -265,30 +266,46 @@ per failure — the outcome code, the failing step's position
 log the raw error, whose text interpolates server prose and is not a
 branching surface.
 
-| Code | Meaning |
-| --- | --- |
-| `budget-lock-exceeded` | The lock was not granted within `lock_timeout`; nothing executed |
-| `budget-statement-exceeded` | The statement ran past `statement_timeout` and was cancelled |
-| `cancelled-by-caller` | The caller's own context ended while the statement ran and the budget had not elapsed; in caller-owned mode this is the build's ordinary exit |
-| `cancelled-externally` | The statement was cancelled from outside the executor — not by its caller and not by its budget; an operator's `pg_cancel_backend` or `Tracker.CancelBuild` |
-| `invalid-index-own-leftover` | The failed build's own INVALID index remains; the [recovery runbook](invalid-index-recovery.md) applies |
-| `invalid-index-preexisting` | An INVALID index under the requested name predates this run |
-| `invalid-index-unproven` | An INVALID index may remain but the catalog state could not be proven |
-| `empty-sequence` | The sequence had no steps to run |
-| `unsupported-sequence-step` | A step is not a shape the sequence executor can run safely |
-| `unsupported-partitioned-parent` | Partitioned-parent admission refusal |
-| `not-concurrent-index-build` | The statement handed to the concurrent build executor is not a `CREATE INDEX CONCURRENTLY` |
-| `unnamed-index` | The concurrent build does not name its index, so its outcome could not be verified |
-| `unqualified-table` | The target table is not schema-qualified at the library boundary |
-| `if-not-exists-unsupported` | `CREATE ... IF NOT EXISTS` cannot prove what its no-op would mean |
-| `create-collision` | A name the create path needs is already taken on the server; re-diff the live catalog |
-| `duplicate-create-name` | The desired set claims the same relation name twice; refused at admission |
-| `partition-of-unsupported` | `CREATE TABLE PARTITION OF` locks the partitioned parent, which the absence proof does not cover |
-| `unsupported-create-step` | A desired statement is not a shape the create path can run |
-| `pool-too-small` | The pool cannot hold the build session and the verdict connection at once |
-| `table-not-found` | The statement's qualified table does not exist |
-| `invariant-violation` | A breach of the invariant registry; never a retry candidate |
-| `execution-failed` | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |
+The `Permanent` column is `Code.Permanent()`: the outcome is decided by the
+statement, the caller's configuration, or the standing catalog, so retrying
+the same call unchanged reproduces it and no executor entry point changes
+it — an author or operator has to act first. It is the floor an adapter's
+retry policy stands on, not its ceiling: an adapter may decline to retry a
+code that is not permanent (a statement budget it sized as a lease, for
+one), but a permanent code it keeps retrying loops for ever. The
+invalid-index family splits on this line — an entry `RebuildAbandonedIndex`
+can prove abandoned, a build to wait out, or a proof to re-take is not
+permanent; an entry on another table or one the server will not drop
+concurrently is.
+
+| Code | Permanent | Meaning |
+| --- | --- | --- |
+| `budget-lock-exceeded` | no | The lock was not granted within `lock_timeout`; nothing executed |
+| `budget-statement-exceeded` | no | The statement ran past `statement_timeout` and was cancelled |
+| `cancelled-by-caller` | no | The caller's own context ended while the statement ran and the budget had not elapsed; in caller-owned mode this is the build's ordinary exit |
+| `cancelled-externally` | no | The statement was cancelled from outside the executor — not by its caller and not by its budget; an operator's `pg_cancel_backend` or `Tracker.CancelBuild` |
+| `invalid-index-own-leftover` | no | The failed build's own INVALID index remains; `RebuildAbandonedIndex` removes it under proof ([recovery runbook](invalid-index-recovery.md)) |
+| `invalid-index-build-in-flight` | no | The INVALID index under the requested name is another backend's concurrent build still running; wait, never drop |
+| `invalid-index-abandoned` | no | An INVALID index under the requested name sits on the target table with no backend building it; `RebuildAbandonedIndex` removes it under proof |
+| `invalid-index-other-table` | yes | An INVALID index under the requested name sits on a different table in the schema; this change never touches it |
+| `invalid-index-not-droppable` | yes | The INVALID index under the requested name is one `DROP INDEX CONCURRENTLY` cannot remove — a partitioned table's index, an index partition, or a constraint's index — so it is not a failed concurrent build's debris; an operator resolves it |
+| `invalid-index-builder-unobservable` | no | An INVALID index under the requested name sits on the target table and this role cannot see whether a backend is building it; `RebuildAbandonedIndex` decides under the table lock |
+| `invalid-index-unproven` | no | An INVALID index may remain but the catalog state could not be proven, or a recovery could not carry its proof through to the removal |
+| `empty-sequence` | yes | The sequence had no steps to run |
+| `unsupported-sequence-step` | yes | A step is not a shape the sequence executor can run safely |
+| `unsupported-partitioned-parent` | yes | Partitioned-parent admission refusal |
+| `not-concurrent-index-build` | yes | The statement handed to the concurrent build executor is not a `CREATE INDEX CONCURRENTLY` |
+| `unnamed-index` | yes | The concurrent build does not name its index, so its outcome could not be verified |
+| `unqualified-table` | yes | The target table is not schema-qualified at the library boundary |
+| `if-not-exists-unsupported` | yes | `CREATE ... IF NOT EXISTS` cannot prove what its no-op would mean |
+| `create-collision` | yes | A name the create path needs is already taken on the server; re-diff the live catalog |
+| `duplicate-create-name` | yes | The desired set claims the same relation name twice; refused at admission |
+| `partition-of-unsupported` | yes | `CREATE TABLE PARTITION OF` locks the partitioned parent, which the absence proof does not cover |
+| `unsupported-create-step` | yes | A desired statement is not a shape the create path can run |
+| `pool-too-small` | yes | The pool cannot hold every session the operation needs at once: a build's session and verdict connection, or a recovery's own session beside those |
+| `table-not-found` | yes | The statement's qualified table does not exist |
+| `invariant-violation` | yes | A breach of the invariant registry; never a retry candidate |
+| `execution-failed` | no | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |
 
 ### Create-shape causes
 

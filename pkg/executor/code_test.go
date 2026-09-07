@@ -36,9 +36,29 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 			want: executor.CodeInvalidIndexOwnLeftover,
 		},
 		{
-			name: "preexisting invalid index",
-			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Cleanup: executor.ErrPreexistingInvalidIndex},
-			want: executor.CodeInvalidIndexPreexisting,
+			name: "invalid index build in flight",
+			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", BuilderPID: 42, Cleanup: executor.ErrInvalidIndexBuildInFlight},
+			want: executor.CodeInvalidIndexBuildInFlight,
+		},
+		{
+			name: "abandoned invalid index",
+			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t", Cleanup: executor.ErrAbandonedInvalidIndex},
+			want: executor.CodeInvalidIndexAbandoned,
+		},
+		{
+			name: "invalid index on another table",
+			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "u", Cleanup: executor.ErrInvalidIndexOnOtherTable},
+			want: executor.CodeInvalidIndexOtherTable,
+		},
+		{
+			name: "invalid index with an unobservable builder",
+			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t", Cleanup: executor.ErrInvalidIndexBuilderUnobservable},
+			want: executor.CodeInvalidIndexBuilderUnobservable,
+		},
+		{
+			name: "invalid index the server will not drop concurrently",
+			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Table: "t", Cleanup: executor.ErrInvalidIndexNotDroppable},
+			want: executor.CodeInvalidIndexNotDroppable,
 		},
 		{
 			name: "unproven invalid index",
@@ -46,6 +66,11 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 			want: executor.CodeInvalidIndexUnproven,
 		},
 		{name: "cancelled by caller", err: executor.ErrCancelledByCaller, want: executor.CodeCancelledByCaller},
+		{
+			name: "abandonment unproven through to removal",
+			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Cleanup: executor.ErrAbandonmentUnproven},
+			want: executor.CodeInvalidIndexUnproven,
+		},
 		{name: "cancelled externally", err: executor.ErrCancelledExternally, want: executor.CodeCancelledExternally},
 		{name: "empty sequence", err: executor.ErrEmptySequence, want: executor.CodeEmptySequence},
 		{name: "unsupported sequence step", err: executor.ErrUnsupportedSequenceStep, want: executor.CodeUnsupportedSequenceStep},
@@ -88,6 +113,54 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 			assert.Equal(t, tt.want, executor.OutcomeCode(tt.err))
 		})
 	}
+}
+
+// TestCodePermanentClassifiesEveryCode pins each code's retry class, and
+// pins the case set to Codes() so a code added to the vocabulary has to be
+// classified here before it can land: an adapter that reads Permanent()
+// for a code nobody decided on would get the unclassified default.
+func TestCodePermanentClassifiesEveryCode(t *testing.T) {
+	want := map[executor.Code]bool{
+		executor.CodeBudgetLockExceeded:              false,
+		executor.CodeBudgetStatementExceeded:         false,
+		executor.CodeCancelledByCaller:               false,
+		executor.CodeCancelledExternally:             false,
+		executor.CodeInvalidIndexOwnLeftover:         false,
+		executor.CodeInvalidIndexBuildInFlight:       false,
+		executor.CodeInvalidIndexAbandoned:           false,
+		executor.CodeInvalidIndexOtherTable:          true,
+		executor.CodeInvalidIndexNotDroppable:        true,
+		executor.CodeInvalidIndexBuilderUnobservable: false,
+		executor.CodeInvalidIndexUnproven:            false,
+		executor.CodeEmptySequence:                   true,
+		executor.CodeUnsupportedSequenceStep:         true,
+		executor.CodeUnsupportedPartitionedParent:    true,
+		executor.CodeNotConcurrentIndexBuild:         true,
+		executor.CodeUnnamedIndex:                    true,
+		executor.CodeUnqualifiedTable:                true,
+		executor.CodeIfNotExistsUnsupported:          true,
+		executor.CodeCreateCollision:                 true,
+		executor.CodeDuplicateCreateName:             true,
+		executor.CodePartitionOfUnsupported:          true,
+		executor.CodeUnsupportedCreateStep:           true,
+		executor.CodePoolTooSmall:                    true,
+		executor.CodeTableNotFound:                   true,
+		executor.CodeInvariantViolation:              true,
+		executor.CodeExecutionFailed:                 false,
+	}
+
+	classified := make([]executor.Code, 0, len(want))
+	for c := range want {
+		classified = append(classified, c)
+	}
+	assert.ElementsMatch(t, executor.Codes(), classified, "every code in Codes() is classified here, and nothing else is")
+
+	for _, c := range executor.Codes() {
+		t.Run(string(c), func(t *testing.T) {
+			assert.Equal(t, want[c], c.Permanent())
+		})
+	}
+	assert.False(t, executor.Code("").Permanent(), "the empty code (no error) is not permanent")
 }
 
 func TestSequenceStepErrorCodeMatchesOutcomeCode(t *testing.T) {
