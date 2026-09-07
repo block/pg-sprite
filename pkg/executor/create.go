@@ -16,12 +16,17 @@
 // the table name itself is the caller's absence proof. The proof is
 // time-of-check: nothing locks the names, so a concurrent create can still
 // take one before its step. Duplicate-name SQLSTATEs backstop races for
-// explicit names. For server-chosen names, the probe narrows the race to
-// the time-of-check window, but nothing catches a name taken inside it. A
-// failed step ends the run immediately; the steps before it committed
-// (each in its own bounded transaction) remain, so a rerun's absence check refuses with
-// ErrRelationExists and the declarative front door re-diffs and applies
-// the remainder.
+// explicit names. For server-chosen names PostgreSQL never raises one — it
+// appends a numeric suffix instead — so after the CREATE TABLE commits the
+// executor reads the relation names the table actually owns and compares
+// them against the first choices it claimed; a claimed name the table does
+// not own means an occupant took it inside the probe's window, and the run
+// stops there with the table left in place. A failed step ends the run
+// immediately; the steps before it committed (each in its own bounded
+// transaction) remain. This executor is never re-entered for that table:
+// a fresh absence proof refuses with preflight.ErrRelationExists, and the
+// declarative front door re-diffs the live catalog — which now holds the
+// table — and converges the remainder through its alter path.
 
 package executor
 
@@ -30,6 +35,8 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -71,7 +78,69 @@ var (
 	// the table is born this run with no traffic to protect, and a plain
 	// build cannot leave an INVALID index behind a failure.
 	ErrUnsupportedCreateStep = errors.New("statement is not a shape the create path can run")
+	// ErrCreateNameMismatch is returned when the CREATE TABLE committed but
+	// the table does not own a first-choice relation name the desired file
+	// claimed. PostgreSQL never raises a duplicate-name error for a
+	// constraint index or column-owned sequence whose first choice is taken
+	// — it appends a numeric suffix — so an occupant that took the name
+	// between the catalog probe and the step is visible only afterwards,
+	// in the names the table actually owns. The run stops at the CREATE
+	// TABLE with the table left in place: dropping a table this executor
+	// just created is a destructive action the create path never takes.
+	// The error arrives wrapped in a *SequenceStepError at step 1 as a
+	// *CreateNameMismatchError naming the claimed names the table lacks
+	// and the names it owns instead. The remedy is an operator's: free the
+	// first-choice name and rename the owned relation to it, or drop the
+	// table, then re-diff.
+	ErrCreateNameMismatch = errors.New("the CREATE TABLE committed but the table does not own a first-choice relation name the desired file claims")
+	// ErrCreateNamesUnverified is returned when the CREATE TABLE committed
+	// but the read of the relation names the table owns did not complete,
+	// so whether every first-choice claim was honoured is unknown. It wraps
+	// the read's own error as the cause — a cancelled context, a lost
+	// connection, a table no longer at its name — and arrives in a
+	// *SequenceStepError at step 1 under its own code, with the table left
+	// in place; an unproven name set is not a passing one, and the executor
+	// never drops a table it has just created.
+	ErrCreateNamesUnverified = errors.New("the CREATE TABLE committed but the relation names the table owns could not be read")
 )
+
+// CreateNameMismatchError reports the owned relation names that differ
+// from the create path's first-choice claims after the CREATE TABLE
+// committed. Missing lists the claimed constraint-index and sequence names
+// the table does not own; Unclaimed lists the names it owns that no claim
+// predicted — the server's suffixed replacements. Both are sorted.
+type CreateNameMismatchError struct {
+	Schema    string
+	Table     string
+	Missing   []string
+	Unclaimed []string
+}
+
+// Error names the committed table, the claimed names it lacks, and the
+// names it owns instead, so an operator can rename the relation to its
+// first choice once the occupant is gone or drop the table and re-diff.
+func (e *CreateNameMismatchError) Error() string {
+	return fmt.Sprintf("%s: %s claimed %s and owns %s instead; the table remains — "+
+		"free the first-choice name and rename the owned relation to it, or drop the table, then re-diff",
+		ErrCreateNameMismatch.Error(), qualifiedName(e.Schema, e.Table),
+		quotedList(e.Missing), quotedList(e.Unclaimed))
+}
+
+// Unwrap exposes the sentinel boundary for errors.Is callers.
+func (e *CreateNameMismatchError) Unwrap() error { return ErrCreateNameMismatch }
+
+// quotedList renders identifiers for an error message, or "nothing" for an
+// empty list so the sentence stays well-formed.
+func quotedList(names []string) string {
+	if len(names) == 0 {
+		return "nothing"
+	}
+	quoted := make([]string, len(names))
+	for i, name := range names {
+		quoted[i] = strconv.Quote(name)
+	}
+	return strings.Join(quoted, ", ")
+}
 
 // The SQLSTATEs a create step raises when its target name is already
 // taken. Postgres errors are matched by SQLSTATE, never by message text.
@@ -154,15 +223,28 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 		return rep, fmt.Errorf("%w: ST-7: desired schema targets %q but absence was verified for %q",
 			ErrInvariantViolation, ds.Table(), at.Table())
 	}
-	steps, claimed, err := admitCreateSteps(at, ds)
+	admitted, err := admitCreateSteps(at, ds)
 	if err != nil {
 		return rep, err
+	}
+	steps := make([]statement.Statement, 0, len(admitted))
+	claimed := make([]string, 0, len(admitted))
+	for _, step := range admitted {
+		steps = append(steps, step.statement)
+		claimed = append(claimed, step.claims...)
 	}
 	// Every deterministic relation name the desired set will claim is
 	// proved free before the first step executes, so an occupied index name
 	// refuses the whole set instead of failing after the table committed.
 	// CheckTableAbsent already covers the table name and its composite type.
 	claimed = slices.DeleteFunc(claimed, func(name string) bool { return name == at.Table() })
+	// The CREATE TABLE's own claims minus the table name are the
+	// first-choice constraint-index and sequence names the committed table
+	// must own; ST-8 puts that statement first. The clone keeps the
+	// admitted step's own claims intact — nothing else reads them after
+	// this point, so it is a guard on the step's value, not on a live
+	// alias.
+	ownedClaims := slices.DeleteFunc(slices.Clone(admitted[0].claims), func(name string) bool { return name == at.Table() })
 	err = preflight.CheckNamesAbsent(ctx, pool, at, claimed)
 	if preflight.IsNameOccupied(err) {
 		return rep, fmt.Errorf("%w: the desired file claims a name the catalog already holds: %w",
@@ -190,6 +272,16 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 		if err != nil {
 			return rep, &SequenceStepError{Step: i + 1, Total: len(steps), Kind: StepBrief, SQL: step.SQL(), Err: asCreateCollision(err)}
 		}
+		if i == 0 {
+			// The CREATE TABLE committed; proving it owns every first-choice
+			// name it claimed is part of the step. A mismatch or an
+			// unfinished proof fails the step with the table in place, and
+			// the report's committed prefix stays empty — the failed
+			// step's own state is what the error names.
+			if err := verifyOwnedNames(ctx, pool, at, ownedClaims); err != nil {
+				return rep, &SequenceStepError{Step: 1, Total: len(steps), Kind: StepBrief, SQL: step.SQL(), Err: err}
+			}
+		}
 		rep.Steps = append(rep.Steps, StepReport{
 			SQL:      step.SQL(),
 			Kind:     StepBrief,
@@ -213,26 +305,74 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 // because a deterministic name the file states beats one the server
 // invents. A step whose name the server invents outright (an unnamed
 // index) claims nothing decidable and is exempt.
-// The admitted steps are returned with every name they claim, so the caller
-// can prove the set free in the catalog before the first step executes;
-// duplicates within the set are already refused here, so the names are
-// distinct. Order does not matter: the catalog probe is set membership and
-// picks the reported occupant itself.
-func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]statement.Statement, []string, error) {
+// The admitted steps are returned with the names each claims, so the caller
+// can prove the set free in the catalog before the first step executes and
+// verify the CREATE TABLE's own claims after it commits; duplicates within
+// the set are already refused here, so the names are distinct.
+func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]createStep, error) {
 	checked, err := checkCreateSteps(at.Schema(), ds)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	steps := make([]statement.Statement, 0, len(checked))
-	names := make([]string, 0, len(checked))
 	for i, step := range checked {
 		if step.refusal != nil {
-			return nil, nil, fmt.Errorf("desired statement %d of %d: %w", i+1, len(checked), step.refusal)
+			return nil, fmt.Errorf("desired statement %d of %d: %w", i+1, len(checked), step.refusal)
 		}
-		steps = append(steps, step.statement)
-		names = append(names, step.claims...)
 	}
-	return steps, names, nil
+	return checked, nil
+}
+
+// verifyOwnedNames proves the committed table owns every first-choice
+// constraint-index and sequence name the CREATE TABLE claimed. A claimed
+// name the table does not own is the typed mismatch, naming the names it
+// owns unclaimed instead — the server's suffixed replacements. A lookup
+// that could not complete is returned wrapped: the table is committed
+// either way, and an unproven name set is not a passing one. A CREATE
+// TABLE that claimed no name has nothing to prove, so no read runs: a
+// failed read there could only ever fail a run it had nothing to say about.
+func verifyOwnedNames(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, claimed []string) error {
+	if len(claimed) == 0 {
+		return nil
+	}
+	owned, err := preflight.LookupOwnedRelationNames(ctx, pool, at.Schema(), at.Table())
+	if err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrCreateNamesUnverified, qualifiedName(at.Schema(), at.Table()), err)
+	}
+	missing, unclaimed := ownedNameMismatch(claimed, owned)
+	if len(missing) == 0 {
+		return nil
+	}
+	return &CreateNameMismatchError{Schema: at.Schema(), Table: at.Table(), Missing: missing, Unclaimed: unclaimed}
+}
+
+// ownedNameMismatch compares the claimed first-choice names against the
+// names the table owns: missing is every claimed name the table lacks,
+// unclaimed every owned name no claim predicted. Both are sorted. A table
+// owning more than it claimed alone is not a mismatch — only a claim the
+// table failed to honour is.
+func ownedNameMismatch(claimed []string, owned preflight.OwnedRelationNames) (missing, unclaimed []string) {
+	actual := make(map[string]struct{}, len(owned.ConstraintIndexes)+len(owned.Sequences))
+	for _, name := range owned.ConstraintIndexes {
+		actual[name] = struct{}{}
+	}
+	for _, name := range owned.Sequences {
+		actual[name] = struct{}{}
+	}
+	expected := make(map[string]struct{}, len(claimed))
+	for _, name := range claimed {
+		expected[name] = struct{}{}
+		if _, ok := actual[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	for name := range actual {
+		if _, ok := expected[name]; !ok {
+			unclaimed = append(unclaimed, name)
+		}
+	}
+	slices.Sort(missing)
+	slices.Sort(unclaimed)
+	return missing, unclaimed
 }
 
 // CreateShapeRefusals checks the connection-free create-path rules in desired
