@@ -280,12 +280,28 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 		Code:      string(executor.OutcomeCode(execErr)),
 		Statement: planStatementSQL(report, stepErr.Step-1),
 		Table:     report.Schema + "." + report.Table,
-		Detail:    "the step's bounded attempt failed and rolled back; Code names the outcome",
+		Detail:    createFailureDetail(execErr),
 	}
 	result.Verdicts = append(result.Verdicts, failed)
 	result.Outcome = verdict.OutcomeFailed
 	result.Detail = committedPrefixDetail(stepErr.Step-1, len(report.Statements), "failed")
 	return result, fmt.Errorf("planned statement %d: %w", stepErr.Step, execErr)
+}
+
+// createFailureDetail states what the failed create step left behind. A
+// bounded attempt that fails rolls back, so nothing remains — except when
+// the CREATE TABLE committed and its owned-name verification then failed
+// or could not complete: the table stands, and the detail says so rather
+// than claiming a rollback.
+func createFailureDetail(err error) string {
+	var mismatch *executor.CreateNameMismatchError
+	if errors.As(err, &mismatch) {
+		return fmt.Sprintf("the step's CREATE TABLE committed and was not rolled back: %v; Code names the outcome", mismatch)
+	}
+	if errors.Is(err, executor.ErrCreateNamesUnverified) {
+		return fmt.Sprintf("the step's CREATE TABLE committed and was not rolled back, and whether the table owns every claimed name is unproven: %v; Code names the outcome", err)
+	}
+	return "the step's bounded attempt failed and rolled back; Code names the outcome"
 }
 
 // createStepVerdict renders one committed create-path step as the executed

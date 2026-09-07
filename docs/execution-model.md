@@ -188,7 +188,11 @@ prose, which is free to change. Reading the three surfaces:
   fails at step 1 leaves an INVALID index with an empty committed prefix).
   `failed_step` is the discriminator: `1` means a sequence stopped at its
   first step; absent means no sequence ran at all — a single bounded
-  attempt failed, and a started bounded attempt rolls back.
+  attempt failed, and a started bounded attempt rolls back. A greenfield
+  create that fails at step 1 with `create-name-mismatch` is the other
+  case of a failed first step leaving state: its `CREATE TABLE` committed
+  and stays — the code names the outcome, and the executor never drops a
+  table it has just created.
 
 ## Why the prefix is safe to leave
 
@@ -299,6 +303,7 @@ concurrently is.
 | `unqualified-table` | yes | The target table is not schema-qualified at the library boundary |
 | `if-not-exists-unsupported` | yes | `CREATE ... IF NOT EXISTS` cannot prove what its no-op would mean |
 | `create-collision` | yes | A name the create path needs is already taken on the server; re-diff the live catalog |
+| `create-name-mismatch` | yes | The CREATE TABLE committed but the table does not own a first-choice constraint-index or sequence name the desired file claimed — an occupant took it inside the probe's window and the server chose a suffixed name; the table remains for an operator to rename the relation or drop, then re-diff |
 | `duplicate-create-name` | yes | The desired set claims the same relation name twice; refused at admission |
 | `partition-of-unsupported` | yes | `CREATE TABLE PARTITION OF` locks the partitioned parent, which the absence proof does not cover |
 | `unsupported-create-step` | yes | A desired statement is not a shape the create path can run |

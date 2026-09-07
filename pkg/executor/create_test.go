@@ -1,6 +1,9 @@
 package executor_test
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -49,6 +52,28 @@ func TestCreateShapeRefusals(t *testing.T) {
 	}
 }
 
+// The mismatch error is the operator's whole brief: the committed table,
+// the first-choice names it lacks, the names it owns instead, and the
+// remedy — and it unwraps to its sentinel, never to the pre-execution
+// collision, whose consumers assume nothing ran.
+func TestCreateNameMismatchErrorNamesTableAndNames(t *testing.T) {
+	err := &executor.CreateNameMismatchError{
+		Schema: "app", Table: "t",
+		Missing:   []string{"t_id_seq", "t_pkey"},
+		Unclaimed: []string{"t_id_seq1", "t_pkey1"},
+	}
+	assert.ErrorIs(t, err, executor.ErrCreateNameMismatch)
+	assert.NotErrorIs(t, err, executor.ErrCreateCollision)
+	assert.Equal(t, executor.CodeCreateNameMismatch, executor.OutcomeCode(err))
+	assert.Equal(t, `the CREATE TABLE committed but the table does not own a first-choice relation name the desired file claims: `+
+		`app.t claimed "t_id_seq", "t_pkey" and owns "t_id_seq1", "t_pkey1" instead; the table remains — `+
+		`free the first-choice name and rename the owned relation to it, or drop the table, then re-diff`,
+		err.Error())
+
+	none := &executor.CreateNameMismatchError{Schema: "app", Table: "t", Missing: []string{"t_pkey"}}
+	assert.Contains(t, none.Error(), `claimed "t_pkey" and owns nothing instead`)
+}
+
 // createBudget is generous for unit tests; admission refusals return
 // before any database access.
 var createBudget = executor.Budget{LockTimeout: time.Second, StatementTimeout: 2 * time.Second}
@@ -94,4 +119,23 @@ func TestExecuteCreateWithProgressRequiresTracker(t *testing.T) {
 	_, err = executor.ExecuteCreateWithProgress(t.Context(), nil, preflight.AbsentTarget{}, preflight.CreationRole{}, ds,
 		createBudget, executor.DefaultRetryPolicy(), nil)
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
+}
+
+// A read of the owned names that does not complete keeps the read's own
+// code when it has one, and is the untyped execution failure otherwise;
+// the sentinel marks that the CREATE TABLE stands unverified without
+// claiming a mismatch it could not observe.
+func TestCreateNamesUnverifiedKeepsTheReadsCode(t *testing.T) {
+	err := &executor.SequenceStepError{Step: 1, Total: 2, Kind: executor.StepBrief,
+		Err: fmt.Errorf("%w: app.t: %w", executor.ErrCreateNamesUnverified, executor.ErrCancelledByCaller)}
+	assert.ErrorIs(t, err, executor.ErrCreateNamesUnverified)
+	assert.NotErrorIs(t, err, executor.ErrCreateNameMismatch)
+	assert.Equal(t, executor.CodeCancelledByCaller, executor.OutcomeCode(err))
+
+	opaque := fmt.Errorf("%w: app.t: %w", executor.ErrCreateNamesUnverified, context.Canceled)
+	assert.ErrorIs(t, opaque, context.Canceled)
+	assert.Equal(t, executor.CodeExecutionFailed, executor.OutcomeCode(opaque),
+		"a raw context error the bounded runner never classified is the untyped failure")
+	assert.Equal(t, executor.CodeExecutionFailed,
+		executor.OutcomeCode(fmt.Errorf("%w: app.t: %w", executor.ErrCreateNamesUnverified, errors.New("connection reset"))))
 }

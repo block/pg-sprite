@@ -1,6 +1,7 @@
 package migrate_test
 
 import (
+	"context"
 	"fmt"
 	"net/url"
 	"testing"
@@ -296,6 +297,59 @@ CREATE INDEX t_v_idx ON t (v);`
 			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
 			 WHERE table_schema = $1 AND table_name = 't')`, schema).Scan(&exists))
 		assert.True(t, exists, "the committed CREATE TABLE stays committed")
+	})
+
+	t.Run("a first-choice name taken inside the probe window fails step 1 and leaves the table", func(t *testing.T) {
+		// The claimed-name probe passes because the name is free when it
+		// looks; an event trigger then takes it as the CREATE TABLE begins,
+		// so the server suffixes the constraint index. The CREATE TABLE has
+		// committed by the time the executor can see that, so the verdict
+		// is a failure at step 1 that says so — not a collision refusal
+		// claiming nothing ran — and the table stays for the operator.
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.other (v int)", schema))
+		require.NoError(t, err)
+		functionName := pgx.Identifier{schema, "take_name_during_create"}.Sanitize()
+		triggerName := pgx.Identifier{schema + "_take_name_during_create"}.Sanitize()
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE FUNCTION %s() RETURNS event_trigger LANGUAGE plpgsql AS $$
+			BEGIN
+				IF TG_TAG = 'CREATE TABLE' AND current_query() LIKE '%%%s.t %%' THEN
+					EXECUTE 'CREATE INDEX t_pkey ON %s.other (v)';
+				END IF;
+			END
+			$$;
+			CREATE EVENT TRIGGER %s ON ddl_command_start EXECUTE FUNCTION %s()`,
+			functionName, schema, schema, triggerName, functionName))
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			ctx := context.WithoutCancel(t.Context())
+			_, cleanupErr := pool.Exec(ctx, fmt.Sprintf("DROP EVENT TRIGGER IF EXISTS %s", triggerName))
+			assert.NoError(t, cleanupErr)
+			_, cleanupErr = pool.Exec(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", functionName))
+			assert.NoError(t, cleanupErr)
+		})
+
+		res, err := migrate.RunDesired(t.Context(), pool,
+			migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, desiredSQL)}, runOptions())
+		require.Error(t, err)
+		assert.ErrorIs(t, err, executor.ErrCreateNameMismatch)
+		assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+		require.Len(t, res.Verdicts, 1, "the failed create is the only verdict; nothing before it committed")
+		assert.Equal(t, verdict.OutcomeFailed, res.Verdicts[0].Outcome)
+		assert.Equal(t, string(executor.CodeCreateNameMismatch), res.Verdicts[0].Code)
+		assert.Contains(t, res.Verdicts[0].Statement, "CREATE TABLE")
+		assert.Contains(t, res.Verdicts[0].Detail, "committed and was not rolled back",
+			"the verdict must not describe the step as rolled back")
+		assert.Contains(t, res.Verdicts[0].Detail, `"t_pkey1"`, "the suffixed replacement is named for the operator")
+		assert.Contains(t, res.Detail, "planned statement 1 of",
+			"the disclosure places the failure at the first planned statement")
+
+		var exists bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+			 WHERE table_schema = $1 AND table_name = 't')`, schema).Scan(&exists))
+		assert.True(t, exists, "the executor never drops a table it has just created")
 	})
 
 	t.Run("refuses a destructive plan and drops nothing", func(t *testing.T) {

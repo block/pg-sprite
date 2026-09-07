@@ -79,6 +79,15 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{name: "unqualified table", err: executor.ErrUnqualifiedTable, want: executor.CodeUnqualifiedTable},
 		{name: "if not exists", err: executor.ErrIfNotExistsUnsupported, want: executor.CodeIfNotExistsUnsupported},
 		{name: "create collision", err: executor.ErrCreateCollision, want: executor.CodeCreateCollision},
+		{name: "create name mismatch", err: executor.ErrCreateNameMismatch, want: executor.CodeCreateNameMismatch},
+		{
+			name: "typed create name mismatch at step 1",
+			err: &executor.SequenceStepError{
+				Step: 1, Total: 2, Kind: executor.StepBrief, SQL: "CREATE TABLE s.t (id int PRIMARY KEY)",
+				Err: &executor.CreateNameMismatchError{Schema: "s", Table: "t", Missing: []string{"t_pkey"}, Unclaimed: []string{"t_pkey1"}},
+			},
+			want: executor.CodeCreateNameMismatch,
+		},
 		{name: "duplicate create name", err: executor.ErrDuplicateCreateName, want: executor.CodeDuplicateCreateName},
 		{name: "partition of", err: executor.ErrPartitionOfUnsupported, want: executor.CodePartitionOfUnsupported},
 		{name: "unsupported create step", err: executor.ErrUnsupportedCreateStep, want: executor.CodeUnsupportedCreateStep},
@@ -140,6 +149,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeUnqualifiedTable:                true,
 		executor.CodeIfNotExistsUnsupported:          true,
 		executor.CodeCreateCollision:                 true,
+		executor.CodeCreateNameMismatch:              true,
 		executor.CodeDuplicateCreateName:             true,
 		executor.CodePartitionOfUnsupported:          true,
 		executor.CodeUnsupportedCreateStep:           true,

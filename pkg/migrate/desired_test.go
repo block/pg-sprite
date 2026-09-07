@@ -1,11 +1,15 @@
 package migrate
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -215,4 +219,27 @@ func TestCommittedPrefixDetail(t *testing.T) {
 		"planned statement 1 of 2 stopped before a verdict; nothing about it was executed; "+
 			"nothing was committed before it",
 		committedPrefixDetail(0, 2, stoppedBeforeVerdict))
+}
+
+// The failed-create verdict's detail must state what the failed step left:
+// a rolled-back bounded attempt for most causes, but a standing table when
+// the CREATE TABLE committed and its owned-name verification then failed
+// or could not complete.
+func TestCreateFailureDetailNamesWhatTheStepLeft(t *testing.T) {
+	rolledBack := createFailureDetail(errors.New("lock_timeout"))
+	assert.Contains(t, rolledBack, "rolled back")
+	assert.NotContains(t, rolledBack, "committed")
+
+	mismatch := createFailureDetail(&executor.SequenceStepError{Step: 1, Total: 2, Err: &executor.CreateNameMismatchError{
+		Schema: "app", Table: "t", Missing: []string{"t_pkey"}, Unclaimed: []string{"t_pkey1"},
+	}})
+	assert.Contains(t, mismatch, "committed and was not rolled back")
+	assert.Contains(t, mismatch, `"t_pkey1"`)
+	assert.NotContains(t, mismatch, "the step's bounded attempt failed and rolled back")
+
+	unverified := createFailureDetail(&executor.SequenceStepError{Step: 1, Total: 2,
+		Err: fmt.Errorf("%w: app.t: %w", executor.ErrCreateNamesUnverified, context.Canceled)})
+	assert.Contains(t, unverified, "committed and was not rolled back")
+	assert.Contains(t, unverified, "unproven")
+	assert.NotContains(t, unverified, "the step's bounded attempt failed and rolled back")
 }

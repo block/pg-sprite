@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -546,4 +547,124 @@ func TestExecuteCreateAllowsMultipleUnnamedIndexes(t *testing.T) {
 		`SELECT count(*) FROM pg_indexes WHERE schemaname = $1 AND tablename = 't'`,
 		f.schema).Scan(&indexes))
 	assert.Equal(t, 2, indexes, "both server-named indexes exist")
+}
+
+// takeNameDuringCreateTable installs an event trigger that runs occupantSQL
+// when the CREATE TABLE for schema.t begins — after the claimed-name probe
+// has passed and before the server chooses the names the table will own.
+// It is the race the probe's time-of-check window admits, made
+// deterministic: the occupant takes a first-choice name, so the server
+// suffixes the table's own.
+func takeNameDuringCreateTable(t *testing.T, pool *pgxpool.Pool, schema, occupantSQL string) {
+	t.Helper()
+	functionName := pgx.Identifier{schema, "take_name_during_create"}.Sanitize()
+	triggerName := pgx.Identifier{schema + "_take_name_during_create"}.Sanitize()
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE FUNCTION %s() RETURNS event_trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			IF TG_TAG = 'CREATE TABLE' AND current_query() LIKE '%%%s.t %%' THEN
+				EXECUTE %s;
+			END IF;
+		END
+		$$;
+		CREATE EVENT TRIGGER %s ON ddl_command_start EXECUTE FUNCTION %s()`,
+		functionName, schema, quoteLiteral(occupantSQL), triggerName, functionName))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		_, cleanupErr := pool.Exec(ctx, fmt.Sprintf("DROP EVENT TRIGGER IF EXISTS %s", triggerName))
+		assert.NoError(t, cleanupErr)
+		_, cleanupErr = pool.Exec(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", functionName))
+		assert.NoError(t, cleanupErr)
+	})
+}
+
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// A first-choice name taken after the probe but before the server picks
+// names is the one race the probe cannot see. The CREATE TABLE has
+// committed by then, so the outcome is a step-1 failure that names the
+// suffixed replacement and leaves the born table in place — never a
+// collision refusal, which would claim nothing ran, and never a drop of a
+// table the executor cannot prove nobody has started to use.
+func TestExecuteCreateReportsNameTakenInsideProbeWindowAsMismatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		sql       string
+		setupSQL  string
+		occupant  string
+		missing   []string
+		unclaimed []string
+	}{
+		{
+			name:      "constraint index",
+			sql:       "CREATE TABLE t (id int PRIMARY KEY, v text)",
+			setupSQL:  "CREATE TABLE %[1]s.other (v int)",
+			occupant:  "CREATE INDEX t_pkey ON %[1]s.other (v)",
+			missing:   []string{"t_pkey"},
+			unclaimed: []string{"t_pkey1"},
+		},
+		{
+			name:      "column-owned sequence",
+			sql:       "CREATE TABLE t (id serial PRIMARY KEY)",
+			occupant:  "CREATE SEQUENCE %[1]s.t_id_seq",
+			missing:   []string{"t_id_seq"},
+			unclaimed: []string{"t_id_seq1"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newCreateFixture(t, "t")
+			if tt.setupSQL != "" {
+				_, err := f.pool.Exec(t.Context(), fmt.Sprintf(tt.setupSQL, f.schema))
+				require.NoError(t, err)
+			}
+			takeNameDuringCreateTable(t, f.pool, f.schema, fmt.Sprintf(tt.occupant, f.schema))
+
+			rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, desired(t, tt.sql), createBudget, executor.DefaultRetryPolicy())
+			require.Error(t, err)
+
+			var stepErr *executor.SequenceStepError
+			require.ErrorAs(t, err, &stepErr)
+			assert.Equal(t, 1, stepErr.Step)
+			assert.Equal(t, executor.StepBrief, stepErr.Kind)
+			assert.Contains(t, stepErr.SQL, "CREATE TABLE")
+			assert.ErrorIs(t, err, executor.ErrCreateNameMismatch)
+			assert.NotErrorIs(t, err, executor.ErrCreateCollision,
+				"a collision says nothing ran; here the CREATE TABLE committed")
+			assert.Equal(t, executor.CodeCreateNameMismatch, executor.OutcomeCode(err))
+
+			var mismatch *executor.CreateNameMismatchError
+			require.ErrorAs(t, err, &mismatch)
+			assert.Equal(t, f.schema, mismatch.Schema)
+			assert.Equal(t, "t", mismatch.Table)
+			assert.Equal(t, tt.missing, mismatch.Missing)
+			assert.Equal(t, tt.unclaimed, mismatch.Unclaimed)
+
+			assert.Empty(t, rep.Steps, "the failed step's own state is named by the code, not the committed prefix")
+			assert.Equal(t, "r", relationKind(t, f.pool, f.schema, "t"), "the born table is left in place")
+			for _, name := range tt.unclaimed {
+				assert.True(t, relationExists(t, f.pool, f.schema, name), "the server's suffixed replacement %s remains for the operator to rename", name)
+			}
+		})
+	}
+}
+
+// A run whose first-choice names all land is unaffected by the
+// verification: the table owns exactly what the desired file claimed.
+func TestExecuteCreateVerifiesOwnedNamesWithoutFalsePositives(t *testing.T) {
+	f := newCreateFixture(t, "t")
+	ds := desired(t, `
+		CREATE TABLE t (id serial PRIMARY KEY, v text UNIQUE);
+		CREATE INDEX t_v_idx ON t (v);
+	`)
+
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, ds, createBudget, executor.DefaultRetryPolicy())
+	require.NoError(t, err)
+	require.Len(t, rep.Steps, 2)
+	for _, name := range []string{"t_pkey", "t_v_key", "t_id_seq", "t_v_idx"} {
+		assert.True(t, relationExists(t, f.pool, f.schema, name))
+	}
 }

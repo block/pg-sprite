@@ -83,6 +83,12 @@ const (
 	// on the server; the caller re-diffs the live catalog rather than
 	// assuming the occupant's shape.
 	CodeCreateCollision Code = "create-collision"
+	// CodeCreateNameMismatch: the CREATE TABLE committed but the table does
+	// not own a first-choice constraint-index or sequence name the desired
+	// file claimed — an occupant took it inside the catalog probe's window
+	// and the server chose a suffixed name instead; the table remains for an
+	// operator to rename the relation or drop, then re-diff.
+	CodeCreateNameMismatch Code = "create-name-mismatch"
 	// CodeDuplicateCreateName: the desired set claims the same relation
 	// name twice; the conflict is decidable at admission and refused
 	// before anything runs.
@@ -133,6 +139,7 @@ func Codes() []Code {
 		CodeUnqualifiedTable,
 		CodeIfNotExistsUnsupported,
 		CodeCreateCollision,
+		CodeCreateNameMismatch,
 		CodeDuplicateCreateName,
 		CodePartitionOfUnsupported,
 		CodeUnsupportedCreateStep,
@@ -167,6 +174,7 @@ func (c Code) Permanent() bool {
 		CodeUnqualifiedTable,
 		CodeIfNotExistsUnsupported,
 		CodeCreateCollision,
+		CodeCreateNameMismatch,
 		CodeDuplicateCreateName,
 		CodePartitionOfUnsupported,
 		CodeUnsupportedCreateStep,
@@ -230,6 +238,8 @@ func sentinelCode(err error) Code {
 		return CodeIfNotExistsUnsupported
 	case errors.Is(err, ErrCreateCollision):
 		return CodeCreateCollision
+	case errors.Is(err, ErrCreateNameMismatch):
+		return CodeCreateNameMismatch
 	case errors.Is(err, ErrDuplicateCreateName):
 		return CodeDuplicateCreateName
 	case errors.Is(err, ErrPartitionOfUnsupported):
