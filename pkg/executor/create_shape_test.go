@@ -42,29 +42,75 @@ func TestCreateShapeRefusalCauses(t *testing.T) {
 	}
 }
 
+// The duplicate-name refusal names the colliding relation, so an operator
+// reading the CLI sees which name the desired set claimed twice.
+func TestCreateShapeRefusalNamesDuplicate(t *testing.T) {
+	ds, err := statement.ParseDesired("CREATE TABLE t (id int PRIMARY KEY); CREATE INDEX t_pkey ON t (id)")
+	require.NoError(t, err)
+	refusals, err := executor.CreateShapeRefusals("app", ds)
+	require.NoError(t, err)
+	require.Error(t, refusals[1])
+	assert.Equal(t, executor.CreateShapeDuplicateName.Description()+`: "t_pkey"`, refusals[1].Error())
+}
+
+// Every published cause maps to a sentinel, an outcome code, and its own
+// sentence. The table is checked against CreateShapeCauses() in both
+// directions, so a cause added to the vocabulary without a mapping — or a
+// Description or Unwrap arm left to fall through to the default — fails here
+// rather than surfacing as "unknown create-shape refusal" with the
+// execution-failed code at runtime.
 func TestCreateShapeErrorMappings(t *testing.T) {
-	tests := []struct {
-		cause    executor.CreateShapeCause
+	// keyword is the fragment that identifies the cause's own sentence, so
+	// two causes cannot silently swap prose.
+	tests := map[executor.CreateShapeCause]struct {
 		sentinel error
 		code     executor.Code
+		keyword  string
 	}{
-		{executor.CreateShapePartitionOf, executor.ErrPartitionOfUnsupported, executor.CodePartitionOfUnsupported},
-		{executor.CreateShapeInherits, executor.ErrUnsupportedCreateStep, executor.CodeUnsupportedCreateStep},
-		{executor.CreateShapeLike, executor.ErrUnsupportedCreateStep, executor.CodeUnsupportedCreateStep},
-		{executor.CreateShapeOfType, executor.ErrUnsupportedCreateStep, executor.CodeUnsupportedCreateStep},
-		{executor.CreateShapeIfNotExists, executor.ErrIfNotExistsUnsupported, executor.CodeIfNotExistsUnsupported},
-		{executor.CreateShapeConcurrently, executor.ErrUnsupportedCreateStep, executor.CodeUnsupportedCreateStep},
-		{executor.CreateShapeDuplicateName, executor.ErrDuplicateCreateName, executor.CodeDuplicateCreateName},
-		{executor.CreateShapeMultipleOperations, executor.ErrUnsupportedCreateStep, executor.CodeUnsupportedCreateStep},
-		{executor.CreateShapeUnsupportedKind, executor.ErrUnsupportedCreateStep, executor.CodeUnsupportedCreateStep},
+		executor.CreateShapePartitionOf:        {executor.ErrPartitionOfUnsupported, executor.CodePartitionOfUnsupported, "PARTITION OF"},
+		executor.CreateShapeInherits:           {executor.ErrUnsupportedCreateStep, executor.CodeUnsupportedCreateStep, "INHERITS"},
+		executor.CreateShapeLike:               {executor.ErrUnsupportedCreateStep, executor.CodeUnsupportedCreateStep, "LIKE"},
+		executor.CreateShapeOfType:             {executor.ErrUnsupportedCreateStep, executor.CodeUnsupportedCreateStep, "OF binds"},
+		executor.CreateShapeIfNotExists:        {executor.ErrIfNotExistsUnsupported, executor.CodeIfNotExistsUnsupported, "IF NOT EXISTS"},
+		executor.CreateShapeConcurrently:       {executor.ErrUnsupportedCreateStep, executor.CodeUnsupportedCreateStep, "concurrent build"},
+		executor.CreateShapeDuplicateName:      {executor.ErrDuplicateCreateName, executor.CodeDuplicateCreateName, "same relation name twice"},
+		executor.CreateShapeMultipleOperations: {executor.ErrUnsupportedCreateStep, executor.CodeUnsupportedCreateStep, "multiple operations"},
+		executor.CreateShapeUnsupportedKind:    {executor.ErrUnsupportedCreateStep, executor.CodeUnsupportedCreateStep, "statement kind"},
 	}
-	for _, tc := range tests {
-		t.Run(string(tc.cause), func(t *testing.T) {
-			err := &executor.CreateShapeError{Cause: tc.cause}
+	causes := executor.CreateShapeCauses()
+	require.Len(t, tests, len(causes), "every cause in CreateShapeCauses() needs a mapping row")
+
+	unknown := executor.CreateShapeCause("unknown").Description()
+	for _, cause := range causes {
+		t.Run(string(cause), func(t *testing.T) {
+			tc, mapped := tests[cause]
+			require.True(t, mapped, "cause %q has no mapping row", cause)
+
+			err := &executor.CreateShapeError{Cause: cause}
+			require.NotNil(t, err.Unwrap(), "Unwrap falls through to the default arm")
 			assert.ErrorIs(t, err, tc.sentinel)
 			assert.Equal(t, tc.code, executor.OutcomeCode(err))
+			assert.Equal(t, cause, executor.CreateShapeCauseOf(err))
+
+			description := cause.Description()
+			assert.NotEqual(t, unknown, description, "Description falls through to the default arm")
+			assert.Contains(t, description, tc.keyword)
+			assert.Equal(t, description, err.Error(), "a refusal without a name renders exactly its sentence")
 		})
 	}
+}
+
+// Only the duplicate-name refusal carries a relation name; the name is
+// rendered after the sentence, and other causes ignore a stray name.
+func TestCreateShapeErrorRendersName(t *testing.T) {
+	named := &executor.CreateShapeError{Cause: executor.CreateShapeDuplicateName, Name: "t_pkey"}
+	assert.Equal(t, executor.CreateShapeDuplicateName.Description()+`: "t_pkey"`, named.Error())
+
+	unnamed := &executor.CreateShapeError{Cause: executor.CreateShapeDuplicateName}
+	assert.Equal(t, executor.CreateShapeDuplicateName.Description(), unnamed.Error())
+
+	other := &executor.CreateShapeError{Cause: executor.CreateShapeLike, Name: "t_pkey"}
+	assert.Equal(t, executor.CreateShapeLike.Description(), other.Error())
 }
 
 func TestCreateShapeCauseOf(t *testing.T) {

@@ -338,29 +338,29 @@ func checkCreateStepShape(schema, table, sql string) (createStep, error) {
 	op := ops[0]
 	switch st.Kind() {
 	case statement.KindCreateTable:
-		step.claims, step.refusal = checkCreateTableShape(qualified, st.Table(), op)
+		// The table claims its own name plus the first-choice relation
+		// names of its constraints and column-owned sequences. ParseOne
+		// already admitted this SQL as a CREATE TABLE, so a failure to read
+		// those names means the two parse boundaries disagree: a parse
+		// failure like any other, not a shape, so no positional result is
+		// safe and the step carries no refusal.
+		implicit, err := statement.ImplicitRelationNames(qualified)
+		if err != nil {
+			return createStep{}, fmt.Errorf("implicit relation names: %w", err)
+		}
+		step.claims = append([]string{st.Table()}, implicit...)
+		step.refusal = createTableShapeRefusal(op)
 	case statement.KindCreateIndex:
-		step.claims, step.refusal = checkCreateIndexShape(op)
+		// An explicit index name is the step's claim; an unnamed index
+		// claims nothing decidable because the server invents the name.
+		if op.Name != "" {
+			step.claims = []string{op.Name}
+		}
+		step.refusal = createIndexShapeRefusal(op)
 	default:
 		step.refusal = &CreateShapeError{Cause: CreateShapeUnsupportedKind}
 	}
 	return step, nil
-}
-
-// checkCreateTableShape refuses the CREATE TABLE clauses that bind to a
-// secondary relation or type and returns the names the table will claim:
-// its own plus the first-choice relation names of its constraints and
-// column-owned sequences.
-// The claims are returned with the refusal so a later statement colliding
-// with a refused table is still reported.
-func checkCreateTableShape(qualified, table string, op statement.Op) ([]string, error) {
-	implicit, err := statement.ImplicitRelationNames(qualified)
-	if err != nil {
-		// ParseOne already admitted this SQL as a CREATE TABLE, so a
-		// refusal here means the two parse boundaries disagree.
-		return nil, fmt.Errorf("%w: %w", ErrUnsupportedCreateStep, err)
-	}
-	return append([]string{table}, implicit...), createTableShapeRefusal(op)
 }
 
 // createTableShapeRefusal names the CREATE TABLE clause that keeps the
@@ -382,19 +382,6 @@ func createTableShapeRefusal(op statement.Op) error {
 		return &CreateShapeError{Cause: CreateShapeIfNotExists}
 	}
 	return nil
-}
-
-// checkCreateIndexShape refuses index builds that cannot run against a
-// table born this run and returns the explicit index name as the step's
-// claim; an unnamed index claims nothing decidable. The claim is returned
-// with the refusal so a later statement colliding with a refused index is
-// still reported.
-func checkCreateIndexShape(op statement.Op) ([]string, error) {
-	var claims []string
-	if op.Name != "" {
-		claims = []string{op.Name}
-	}
-	return claims, createIndexShapeRefusal(op)
 }
 
 // createIndexShapeRefusal names the CREATE INDEX clause that keeps the

@@ -326,6 +326,11 @@ to branch on, never prose.
 | `multiple-operations` | The statement and operation parse boundaries disagree about the operation count |
 | `unsupported-kind` | The statement is not a create kind the create path can run |
 
+`concurrently`, `multiple-operations`, and `unsupported-kind` re-verify preconditions
+`statement.ParseDesired` already enforces — a desired file that passed admission cannot
+produce them. They are published so the vocabulary is closed, not because automation should
+expect them; a consumer seeing one has a desired schema that bypassed admission.
+
 The three cancellation codes partition one server signal, SQLSTATE `57014`,
 in a fixed precedence. `budget-statement-exceeded` wins when the server's
 cancel arrives at or past the overall budget, even if the caller's own
