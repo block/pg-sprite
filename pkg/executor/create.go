@@ -60,11 +60,11 @@ var (
 	// named after the table. The conflict is decidable before anything
 	// runs, so admission refuses the whole set rather than letting a
 	// mid-run step fail after a prefix committed.
-	ErrDuplicateCreateName = errors.New("desired set claims the same relation name twice")
+	ErrDuplicateCreateName = errors.New(CreateShapeDuplicateName.Description())
 	// ErrPartitionOfUnsupported is returned for CREATE TABLE ... PARTITION
 	// OF: attaching a partition takes a lock on the partitioned parent,
 	// an existing table the absence proof says nothing about.
-	ErrPartitionOfUnsupported = errors.New("CREATE TABLE PARTITION OF is not supported by the create path: attaching a partition locks the partitioned parent, which the absence proof does not cover")
+	ErrPartitionOfUnsupported = errors.New(CreateShapePartitionOf.Description())
 	// ErrUnsupportedCreateStep is returned when a desired statement is not
 	// a shape the create path can run: a plain CREATE TABLE or a plain
 	// CREATE INDEX on the new table. CONCURRENTLY is refused deliberately —
@@ -285,7 +285,7 @@ func checkCreateSteps(schema string, ds statement.DesiredSchema) ([]createStep, 
 		for _, name := range step.claims {
 			if _, taken := claimed[name]; taken {
 				if step.refusal == nil {
-					step.refusal = fmt.Errorf("%w: %q", ErrDuplicateCreateName, name)
+					step.refusal = &CreateShapeError{Cause: CreateShapeDuplicateName, Name: name}
 				}
 				continue
 			}
@@ -332,79 +332,66 @@ func checkCreateStepShape(schema, table, sql string) (createStep, error) {
 	if len(ops) != 1 {
 		// ParseOne admitted a single statement, so a differing op count
 		// means the two parse boundaries disagree about the same SQL.
-		step.refusal = fmt.Errorf("%w: statement carries %d operations", ErrUnsupportedCreateStep, len(ops))
+		step.refusal = &CreateShapeError{Cause: CreateShapeMultipleOperations}
 		return step, nil
 	}
 	op := ops[0]
 	switch st.Kind() {
 	case statement.KindCreateTable:
-		step.claims, step.refusal = checkCreateTableShape(qualified, st.Table(), op)
+		// The table claims its own name plus the first-choice relation
+		// names of its constraints and column-owned sequences. ParseOne
+		// already admitted this SQL as a CREATE TABLE, so a failure to read
+		// those names means the two parse boundaries disagree: a parse
+		// failure like any other, not a shape, so no positional result is
+		// safe and the step carries no refusal.
+		implicit, err := statement.ImplicitRelationNames(qualified)
+		if err != nil {
+			return createStep{}, fmt.Errorf("implicit relation names: %w", err)
+		}
+		step.claims = append([]string{st.Table()}, implicit...)
+		step.refusal = createTableShapeRefusal(op)
 	case statement.KindCreateIndex:
-		step.claims, step.refusal = checkCreateIndexShape(op)
+		// An explicit index name is the step's claim; an unnamed index
+		// claims nothing decidable because the server invents the name.
+		if op.Name != "" {
+			step.claims = []string{op.Name}
+		}
+		step.refusal = createIndexShapeRefusal(op)
 	default:
-		step.refusal = fmt.Errorf("%w: kind %q", ErrUnsupportedCreateStep, st.Kind())
+		step.refusal = &CreateShapeError{Cause: CreateShapeUnsupportedKind}
 	}
 	return step, nil
-}
-
-// checkCreateTableShape refuses the CREATE TABLE clauses that bind to a
-// secondary relation or type and returns the names the table will claim:
-// its own plus the first-choice relation names of its constraints and
-// column-owned sequences.
-// The claims are returned with the refusal so a later statement colliding
-// with a refused table is still reported.
-func checkCreateTableShape(qualified, table string, op statement.Op) ([]string, error) {
-	implicit, err := statement.ImplicitRelationNames(qualified)
-	if err != nil {
-		// ParseOne already admitted this SQL as a CREATE TABLE, so a
-		// refusal here means the two parse boundaries disagree.
-		return nil, fmt.Errorf("%w: %w", ErrUnsupportedCreateStep, err)
-	}
-	return append([]string{table}, implicit...), createTableShapeRefusal(op)
 }
 
 // createTableShapeRefusal names the CREATE TABLE clause that keeps the
 // statement off the create path, nil when the shape is admitted.
 func createTableShapeRefusal(op statement.Op) error {
 	if op.PartitionOf {
-		return ErrPartitionOfUnsupported
+		return &CreateShapeError{Cause: CreateShapePartitionOf}
 	}
 	if op.Inherits {
-		return fmt.Errorf("%w: INHERITS binds to an existing parent the absence proof does not cover", ErrUnsupportedCreateStep)
+		return &CreateShapeError{Cause: CreateShapeInherits}
 	}
 	if op.Like {
-		return fmt.Errorf("%w: LIKE reads an existing source table the absence proof does not cover", ErrUnsupportedCreateStep)
+		return &CreateShapeError{Cause: CreateShapeLike}
 	}
 	if op.OfType {
-		return fmt.Errorf("%w: OF binds to an existing composite type the absence proof does not cover", ErrUnsupportedCreateStep)
+		return &CreateShapeError{Cause: CreateShapeOfType}
 	}
 	if op.IfNotExists {
-		return ErrIfNotExistsUnsupported
+		return &CreateShapeError{Cause: CreateShapeIfNotExists}
 	}
 	return nil
-}
-
-// checkCreateIndexShape refuses index builds that cannot run against a
-// table born this run and returns the explicit index name as the step's
-// claim; an unnamed index claims nothing decidable. The claim is returned
-// with the refusal so a later statement colliding with a refused index is
-// still reported.
-func checkCreateIndexShape(op statement.Op) ([]string, error) {
-	var claims []string
-	if op.Name != "" {
-		claims = []string{op.Name}
-	}
-	return claims, createIndexShapeRefusal(op)
 }
 
 // createIndexShapeRefusal names the CREATE INDEX clause that keeps the
 // statement off the create path, nil when the shape is admitted.
 func createIndexShapeRefusal(op statement.Op) error {
 	if op.Concurrent {
-		return fmt.Errorf("%w: a concurrent build is refused on a table born this run", ErrUnsupportedCreateStep)
+		return &CreateShapeError{Cause: CreateShapeConcurrently}
 	}
 	if op.IfNotExists {
-		return ErrIfNotExistsUnsupported
+		return &CreateShapeError{Cause: CreateShapeIfNotExists}
 	}
 	return nil
 }

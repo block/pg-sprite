@@ -52,7 +52,7 @@ var (
 	// while an unrelated relation — or, for a concurrent build, an
 	// invalid index — owns that name, so an executor could report
 	// success over a relation it cannot vouch for.
-	ErrIfNotExistsUnsupported = errors.New("IF NOT EXISTS is not supported: a name-only no-op cannot prove the existing relation is the requested one, or even valid")
+	ErrIfNotExistsUnsupported = errors.New(CreateShapeIfNotExists.Description())
 	// ErrInvalidIndexBuildInFlight is returned (inside an *InvalidIndexError
 	// carrying the builder's PID) when the invalid index under the
 	// requested name is another backend's concurrent build still in

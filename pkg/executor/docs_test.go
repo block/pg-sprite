@@ -44,6 +44,18 @@ func TestDocNamesEveryOutcomeCode(t *testing.T) {
 	}
 }
 
+// Every create-shape cause automation can branch on must be named in the
+// execution model so the documented vocabulary cannot drift from the code.
+func TestDocNamesEveryCreateShapeCause(t *testing.T) {
+	raw, err := os.ReadFile(executionModelDoc)
+	require.NoError(t, err)
+	doc := string(raw)
+	for _, cause := range executor.CreateShapeCauses() {
+		assert.Contains(t, doc, fmt.Sprintf("`%s`", cause),
+			"docs/execution-model.md does not name create-shape cause %q", cause)
+	}
+}
+
 // The doc's Permanent column is Code.Permanent(): an adapter author reading
 // the table and one calling the method must reach the same retry class for
 // every code.
@@ -107,9 +119,50 @@ func TestCodesEnumerateEveryDeclaredCode(t *testing.T) {
 	assert.Equal(t, declared, enumerated, "Codes() must enumerate exactly the declared Code constants")
 }
 
+// The closed set is complete: every CreateShapeCause constant declared in
+// create_shape.go is enumerated by CreateShapeCauses().
+func TestCreateShapeCausesEnumerateEveryDeclaredCause(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "create_shape.go", nil, parser.SkipObjectResolution)
+	require.NoError(t, err)
+
+	declared := make(map[executor.CreateShapeCause]struct{})
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok || !isNamedType(vs.Type, "CreateShapeCause") {
+				continue
+			}
+			for _, value := range vs.Values {
+				lit, ok := value.(*ast.BasicLit)
+				require.True(t, ok && lit.Kind == token.STRING, "CreateShapeCause constants are string literals")
+				unquoted, err := strconv.Unquote(lit.Value)
+				require.NoError(t, err)
+				declared[executor.CreateShapeCause(unquoted)] = struct{}{}
+			}
+		}
+	}
+	require.NotEmpty(t, declared, "create_shape.go declares the CreateShapeCause constants")
+
+	enumerated := make(map[executor.CreateShapeCause]struct{})
+	for _, cause := range executor.CreateShapeCauses() {
+		enumerated[cause] = struct{}{}
+	}
+	assert.Equal(t, declared, enumerated,
+		"CreateShapeCauses() must enumerate exactly the declared CreateShapeCause constants")
+}
+
 func isCodeType(expr ast.Expr) bool {
+	return isNamedType(expr, "Code")
+}
+
+func isNamedType(expr ast.Expr, name string) bool {
 	ident, ok := expr.(*ast.Ident)
-	return ok && ident.Name == "Code"
+	return ok && ident.Name == name
 }
 
 // The closed set has no duplicates: a code pasted twice would silently
