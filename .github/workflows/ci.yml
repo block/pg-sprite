@@ -29,7 +29,7 @@ jobs:
         if: github.event_name == 'pull_request'
         id: filter
         continue-on-error: true
-        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3.0.3
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
         with:
           # 'every' makes a file count as code only when it satisfies all
           # three patterns (is anything AND not-md AND not-docs). The
@@ -76,7 +76,7 @@ jobs:
       # the action's default binary lags and cannot load a v2 config.
       - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: v2.12.2
+          version: v2.13.2
 
   build:
     needs: changes
