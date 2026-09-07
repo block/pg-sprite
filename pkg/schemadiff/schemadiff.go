@@ -82,12 +82,15 @@ type Index struct {
 	Name string
 	// Def is the canonical CREATE INDEX statement.
 	Def string
-	// Valid reports pg_index.indisvalid: false is the leftover of a
-	// concurrent build that did not finish. Such an entry carries the name
-	// and the definition but the planner never uses it, so it does not
-	// deliver the desired index. A desired-side index, materialized on the
-	// scratch schema, is always valid.
-	Valid bool
+	// Invalid reports pg_index.indisvalid = false: the entry carries the
+	// name and the definition but the planner never uses it, so it does not
+	// deliver the desired index. On a plain table it is a concurrent build
+	// that has not finished — abandoned, or still running. On a partitioned
+	// parent it means not every partition has a matching attached index;
+	// the server never builds a partitioned index concurrently. A
+	// desired-side index, materialized on the scratch schema, is never
+	// invalid, so the zero value is the delivered state.
+	Invalid bool
 }
 
 // Model is the canonical, comparison-ready description of one table. It

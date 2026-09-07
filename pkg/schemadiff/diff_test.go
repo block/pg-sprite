@@ -19,7 +19,7 @@ func base() Model {
 			{Name: "events_pkey", Def: "PRIMARY KEY (id)"},
 		},
 		Indexes: []Index{
-			{Name: "events_name_idx", Def: "CREATE INDEX events_name_idx ON events USING btree (name)", Valid: true},
+			{Name: "events_name_idx", Def: "CREATE INDEX events_name_idx ON events USING btree (name)"},
 		},
 	}
 }
@@ -268,13 +268,13 @@ func TestDiffIndexChangeDropsAndRecreatesQualified(t *testing.T) {
 	}, sqls(changes))
 }
 
-// A live index that matches the desired definition but is invalid is the
-// leftover of an unfinished concurrent build: it does not deliver the
-// desired index, so the diff emits the create — and only the create, never
-// a blocking DROP INDEX of an entry whose builder may still be running.
+// A live index that matches the desired definition but is invalid is an
+// unfinished concurrent build: it does not deliver the desired index, so
+// the diff emits the create — and only the create, never a blocking DROP
+// INDEX of an entry whose builder may still be running.
 func TestDiffInvalidIndexRebuildsWithoutDrop(t *testing.T) {
 	live := base()
-	live.Indexes[0].Valid = false
+	live.Indexes[0].Invalid = true
 	changes, err := Diff("public", live, base())
 	require.NoError(t, err)
 	require.Equal(t, []string{
@@ -282,6 +282,63 @@ func TestDiffInvalidIndexRebuildsWithoutDrop(t *testing.T) {
 	}, sqls(changes))
 	assert.Equal(t, ChangeCreateIndex, changes[0].Kind)
 	assert.False(t, changes[0].Destructive)
+}
+
+// An invalid live index that desired redefines is rebuilt to the new
+// definition by the create alone; the unfinished build under the old
+// definition is not dropped, for the same reason.
+func TestDiffInvalidIndexRedefinedCreatesWithoutDrop(t *testing.T) {
+	live := base()
+	live.Indexes[0].Invalid = true
+	desired := base()
+	desired.Indexes[0].Def = "CREATE UNIQUE INDEX events_name_idx ON events USING btree (name)"
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`CREATE UNIQUE INDEX events_name_idx ON public.events USING btree (name)`,
+	}, sqls(changes))
+	assert.Equal(t, ChangeCreateIndex, changes[0].Kind)
+	assert.False(t, changes[0].Destructive)
+}
+
+// An invalid live index that desired no longer names is left alone — the
+// leftover of a REINDEX ... CONCURRENTLY, or a build someone else is
+// running, is not the diff's to remove — while a valid index in the same
+// position is dropped as usual.
+func TestDiffInvalidIndexAbsentFromDesiredIsLeftAlone(t *testing.T) {
+	live := base()
+	live.Indexes = append(live.Indexes,
+		Index{Name: "events_name_idx_ccnew", Def: "CREATE INDEX events_name_idx_ccnew ON events USING btree (name)", Invalid: true},
+		Index{Name: "events_legacy_idx", Def: "CREATE INDEX events_legacy_idx ON events USING btree (id)"},
+	)
+	changes, err := Diff("public", live, base())
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`DROP INDEX "public"."events_legacy_idx"`,
+	}, sqls(changes))
+	assert.Equal(t, ChangeDropIndex, changes[0].Kind)
+}
+
+// On a partitioned parent an invalid index means unattached partition
+// indexes, not an unfinished build, so validity plays no part: a matching
+// entry is delivered and an entry desired no longer names is dropped.
+func TestDiffPartitionedParentComparesIndexesByDefinitionAlone(t *testing.T) {
+	live := base()
+	live.PartitionKey = "RANGE (id)"
+	live.Indexes[0].Invalid = true
+	desired := base()
+	desired.PartitionKey = "RANGE (id)"
+
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	assert.Empty(t, changes, "an invalid parent index with the desired definition is not rebuilt")
+
+	desired.Indexes = nil
+	changes, err = Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`DROP INDEX "public"."events_name_idx"`,
+	}, sqls(changes))
 }
 
 func TestDiffOrderingDropsBeforeAddsBeforeIndexes(t *testing.T) {

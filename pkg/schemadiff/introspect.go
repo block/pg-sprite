@@ -285,11 +285,12 @@ func introspectReferencedBy(ctx context.Context, tx pgx.Tx, oid uint32) ([]strin
 // pg_get_indexdef always schema-qualifies the ON clause, so the
 // qualification is stripped to keep the model schema-relative and
 // comparable between the live and scratch sides. indisvalid rides along so
-// the diff can tell a delivered index from the leftover of an unfinished
-// concurrent build.
+// the diff can tell a delivered index from an unfinished concurrent build;
+// indisready is deliberately not read — it turns true while a build is
+// still running, so it would report an in-flight index as delivered.
 func introspectIndexes(ctx context.Context, tx pgx.Tx, oid uint32) ([]Index, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT c.relname, pg_get_indexdef(i.indexrelid), i.indisvalid
+		SELECT c.relname, pg_get_indexdef(i.indexrelid), NOT i.indisvalid
 		FROM pg_index i
 		JOIN pg_class c ON c.oid = i.indexrelid
 		WHERE i.indrelid = $1
@@ -302,7 +303,7 @@ func introspectIndexes(ctx context.Context, tx pgx.Tx, oid uint32) ([]Index, err
 	var idxs []Index
 	for rows.Next() {
 		var ix Index
-		if err := rows.Scan(&ix.Name, &ix.Def, &ix.Valid); err != nil {
+		if err := rows.Scan(&ix.Name, &ix.Def, &ix.Invalid); err != nil {
 			return nil, fmt.Errorf("scan index: %w", err)
 		}
 		if ix.Def, err = statement.Qualify(ix.Def, ""); err != nil {
