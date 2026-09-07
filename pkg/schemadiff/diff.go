@@ -211,12 +211,12 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		}
 	}
 
-	// Indexes to create: new, or recreated after a definition change. The
-	// desired definition is server-decompiled and unqualified; only the
-	// schema qualification is injected.
+	// Indexes to create: new, recreated after a definition change, or
+	// rebuilt over an invalid leftover. The desired definition is
+	// server-decompiled and unqualified; only the schema qualification is
+	// injected.
 	for _, ix := range desired.Indexes {
-		had, ok := liveIdx[ix.Name]
-		if !ok || had.Def != ix.Def {
+		if indexNeedsCreate(liveIdx, ix) {
 			qualified, err := statement.Qualify(ix.Def, schema)
 			if err != nil {
 				return nil, fmt.Errorf("qualify index %s: %w", ix.Name, err)
@@ -338,4 +338,23 @@ func indexesByName(idxs []Index) map[string]Index {
 		m[ix.Name] = ix
 	}
 	return m
+}
+
+// indexNeedsCreate reports whether the desired index must be built: the
+// live table lacks it, the live definition differs, or the live entry is
+// invalid — the leftover of a concurrent build that did not finish. An
+// invalid entry with the desired definition is not dropped by the diff:
+// a plain DROP INDEX would block the table and cannot tell abandoned
+// debris from a build still in progress, so the create alone is emitted
+// and the concurrent build path, which proves ownership before removing
+// an occupant, deals with the leftover.
+func indexNeedsCreate(live map[string]Index, want Index) bool {
+	had, ok := live[want.Name]
+	if !ok {
+		return true
+	}
+	if had.Def != want.Def {
+		return true
+	}
+	return !had.Valid
 }

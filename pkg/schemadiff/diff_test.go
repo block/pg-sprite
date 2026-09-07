@@ -19,7 +19,7 @@ func base() Model {
 			{Name: "events_pkey", Def: "PRIMARY KEY (id)"},
 		},
 		Indexes: []Index{
-			{Name: "events_name_idx", Def: "CREATE INDEX events_name_idx ON events USING btree (name)"},
+			{Name: "events_name_idx", Def: "CREATE INDEX events_name_idx ON events USING btree (name)", Valid: true},
 		},
 	}
 }
@@ -266,6 +266,22 @@ func TestDiffIndexChangeDropsAndRecreatesQualified(t *testing.T) {
 		`DROP INDEX "public"."events_name_idx"`,
 		`CREATE UNIQUE INDEX events_name_idx ON public.events USING btree (name)`,
 	}, sqls(changes))
+}
+
+// A live index that matches the desired definition but is invalid is the
+// leftover of an unfinished concurrent build: it does not deliver the
+// desired index, so the diff emits the create — and only the create, never
+// a blocking DROP INDEX of an entry whose builder may still be running.
+func TestDiffInvalidIndexRebuildsWithoutDrop(t *testing.T) {
+	live := base()
+	live.Indexes[0].Valid = false
+	changes, err := Diff("public", live, base())
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`CREATE INDEX events_name_idx ON public.events USING btree (name)`,
+	}, sqls(changes))
+	assert.Equal(t, ChangeCreateIndex, changes[0].Kind)
+	assert.False(t, changes[0].Destructive)
 }
 
 func TestDiffOrderingDropsBeforeAddsBeforeIndexes(t *testing.T) {

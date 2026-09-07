@@ -50,6 +50,7 @@ composition of the model boundaries above with those gates. At a glance:
 | Add a column | Converges. Runs as a bounded attempt of the submitted form, so the table-size guard applies (below). |
 | Widen a column type (`varchar(50)` → `varchar(255)`) | Converges — the same bounded attempt, under the same size guard. |
 | Add an index | Converges via `CREATE INDEX CONCURRENTLY`. Not size-guarded: long online work on a large table is the pattern's purpose. |
+| Rebuild an index left invalid by an unfinished concurrent build | Plans as the same `create-index` change — the invalid entry, though it carries the desired name and definition, does not deliver the index, and the diff never emits a drop for it. Execution then meets the occupied name and refuses by proof (the invalid-index row above); remove the leftover per the [runbook](invalid-index-recovery.md), or, as a library caller, run the create through `executor.RebuildAbandonedIndex`, and rerun. |
 | Add a constraint (`UNIQUE`, `CHECK`); `SET NOT NULL` | Converges via the safer online sequence; not size-guarded either. |
 | Relax a `NOT NULL` | Refused, whole plan: dropping `NOT NULL` discards the same guarantee its constraint form would, so it is destructive. Run it deliberately through the imperative front door — it executes natively there — then rerun. |
 | Change an index or constraint definition | Refused, whole plan — the drop-and-recreate row above. |

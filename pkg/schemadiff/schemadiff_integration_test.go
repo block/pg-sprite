@@ -224,6 +224,66 @@ func TestDiffConverges(t *testing.T) {
 	assert.Empty(t, rediff, "after executing the plan the live table must match the desired state")
 }
 
+// The real debris of a failed concurrent build — a unique build over
+// duplicate rows fails after its catalog entry exists — introspects as an
+// invalid index, and the diff plans the rebuild as a create alone: a live
+// entry with the desired name and definition that never finished building
+// does not deliver the desired state, and the diff never drops it.
+func TestDiffRebuildsInvalidIndex(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	const desired = `
+CREATE TABLE events (
+  id bigint PRIMARY KEY,
+  name text NOT NULL
+);
+CREATE UNIQUE INDEX events_name_key ON events (name);
+`
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %[1]s.events (id bigint PRIMARY KEY, name text NOT NULL); INSERT INTO %[1]s.events VALUES (1, 'dup'), (2, 'dup')",
+		schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY events_name_key ON %s.events (name)", schema))
+	require.Error(t, err, "a unique build over duplicates must fail after creating its catalog entry")
+
+	ds, err := statement.ParseDesired(desired)
+	require.NoError(t, err)
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "events")
+	require.NoError(t, err)
+	want, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	require.NoError(t, err)
+
+	require.Len(t, live.Indexes, 1, "the failed build leaves its catalog entry")
+	assert.False(t, live.Indexes[0].Valid, "the leftover introspects as invalid")
+	require.Len(t, want.Indexes, 1)
+	assert.True(t, want.Indexes[0].Valid, "a scratch-materialized index is always valid")
+	assert.Equal(t, live.Indexes[0].Def, want.Indexes[0].Def, "only validity separates the two sides")
+
+	changes, err := schemadiff.Diff(schema, live, want)
+	require.NoError(t, err)
+	require.Len(t, changes, 1, "the invalid leftover plans as a rebuild, not a drop-and-recreate")
+	assert.Equal(t, schemadiff.ChangeCreateIndex, changes[0].Kind)
+	assert.False(t, changes[0].Destructive)
+	assert.Equal(t, fmt.Sprintf("CREATE UNIQUE INDEX events_name_key ON %s.events USING btree (name)", schema), changes[0].SQL)
+
+	// Once the leftover is gone and the index is built for real, the same
+	// desired state diffs to nothing.
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("DROP INDEX %s.events_name_key; DELETE FROM %s.events WHERE id = 2", schema, schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), changes[0].SQL)
+	require.NoError(t, err)
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "events")
+	require.NoError(t, err)
+	require.Len(t, after.Indexes, 1)
+	assert.True(t, after.Indexes[0].Valid)
+	rediff, err := schemadiff.Diff(schema, after, want)
+	require.NoError(t, err)
+	assert.Empty(t, rediff, "a valid index with the desired definition is delivered")
+}
+
 // Identity and generated columns round-trip through both introspection paths.
 func TestIntrospectIdentityAndGeneratedColumns(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})

@@ -198,7 +198,7 @@ review the object warrants) ·
 
 | Table shape | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| Plain tables + their indexes | ✅ | native, as-is | Yes | `diff`, `pull`, and desired-file rendering round-trip the canonical model |
+| Plain tables + their indexes | ✅ | native, as-is | Yes | `diff`, `pull`, and desired-file rendering round-trip the canonical model. The model carries each index's validity (`pg_index.indisvalid`): a live entry with the desired name and definition that never finished building does not deliver the desired index, so `diff` plans it as a `create-index` change — and never as a drop, since a plain `DROP INDEX` blocks the table and cannot tell abandoned debris from a build still in progress |
 | Classic table inheritance (`INHERITS`) | 🟡 | native, planned flow | Yes | Typed refusal for both parents and children: the model cannot express inheritance edges, and flattening inherited columns would produce a silently lossy baseline |
 | Tables that own **or are referenced by** foreign keys | 🟡 | native, planned flow | Yes | Typed refusal on both sides — an incoming FK cannot be expressed in the table's own desired file, and a lossy description would be worse than none. Declarative FK support (composite keys as the primary case, two-phase `NOT VALID` → `VALIDATE` execution) is planned |
 | Unlogged tables | 🟡 | native, planned flow | Yes | Typed refusal: persistence is not modeled, converging it (`SET LOGGED`) is a full rewrite, and rendering the table as plain `CREATE TABLE` would silently change crash-safety |
