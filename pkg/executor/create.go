@@ -23,9 +23,10 @@
 // not own means an occupant took it inside the probe's window, and the run
 // stops there with the table left in place. A failed step ends the run
 // immediately; the steps before it committed (each in its own bounded
-// transaction) remain, so a rerun's absence check refuses with
-// ErrRelationExists and the declarative front door re-diffs and applies
-// the remainder.
+// transaction) remain. This executor is never re-entered for that table:
+// a fresh absence proof refuses with preflight.ErrRelationExists, and the
+// declarative front door re-diffs the live catalog — which now holds the
+// table — and converges the remainder through its alter path.
 
 package executor
 
@@ -95,11 +96,11 @@ var (
 	// ErrCreateNamesUnverified is returned when the CREATE TABLE committed
 	// but the read of the relation names the table owns did not complete,
 	// so whether every first-choice claim was honoured is unknown. It wraps
-	// the read's own error — a typed cause keeps its code, anything else is
-	// the untyped execution failure — and arrives in
-	// a *SequenceStepError at step 1 with the table left in place; an
-	// unproven name set is not a passing one, and the executor never drops
-	// a table it has just created.
+	// the read's own error as the cause — a cancelled context, a lost
+	// connection, a table no longer at its name — and arrives in a
+	// *SequenceStepError at step 1 under its own code, with the table left
+	// in place; an unproven name set is not a passing one, and the executor
+	// never drops a table it has just created.
 	ErrCreateNamesUnverified = errors.New("the CREATE TABLE committed but the relation names the table owns could not be read")
 )
 
@@ -239,7 +240,10 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 	claimed = slices.DeleteFunc(claimed, func(name string) bool { return name == at.Table() })
 	// The CREATE TABLE's own claims minus the table name are the
 	// first-choice constraint-index and sequence names the committed table
-	// must own; ST-8 puts that statement first.
+	// must own; ST-8 puts that statement first. The clone keeps the
+	// admitted step's own claims intact — nothing else reads them after
+	// this point, so it is a guard on the step's value, not on a live
+	// alias.
 	ownedClaims := slices.DeleteFunc(slices.Clone(admitted[0].claims), func(name string) bool { return name == at.Table() })
 	err = preflight.CheckNamesAbsent(ctx, pool, at, claimed)
 	if preflight.IsNameOccupied(err) {
@@ -323,8 +327,13 @@ func admitCreateSteps(at preflight.AbsentTarget, ds statement.DesiredSchema) ([]
 // name the table does not own is the typed mismatch, naming the names it
 // owns unclaimed instead — the server's suffixed replacements. A lookup
 // that could not complete is returned wrapped: the table is committed
-// either way, and an unproven name set is not a passing one.
+// either way, and an unproven name set is not a passing one. A CREATE
+// TABLE that claimed no name has nothing to prove, so no read runs: a
+// failed read there could only ever fail a run it had nothing to say about.
 func verifyOwnedNames(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, claimed []string) error {
+	if len(claimed) == 0 {
+		return nil
+	}
 	owned, err := preflight.LookupOwnedRelationNames(ctx, pool, at.Schema(), at.Table())
 	if err != nil {
 		return fmt.Errorf("%w: %s: %w", ErrCreateNamesUnverified, qualifiedName(at.Schema(), at.Table()), err)

@@ -121,21 +121,29 @@ func TestExecuteCreateWithProgressRequiresTracker(t *testing.T) {
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 }
 
-// A read of the owned names that does not complete keeps the read's own
-// code when it has one, and is the untyped execution failure otherwise;
-// the sentinel marks that the CREATE TABLE stands unverified without
-// claiming a mismatch it could not observe.
-func TestCreateNamesUnverifiedKeepsTheReadsCode(t *testing.T) {
-	err := &executor.SequenceStepError{Step: 1, Total: 2, Kind: executor.StepBrief,
-		Err: fmt.Errorf("%w: app.t: %w", executor.ErrCreateNamesUnverified, executor.ErrCancelledByCaller)}
-	assert.ErrorIs(t, err, executor.ErrCreateNamesUnverified)
-	assert.NotErrorIs(t, err, executor.ErrCreateNameMismatch)
-	assert.Equal(t, executor.CodeCancelledByCaller, executor.OutcomeCode(err))
-
-	opaque := fmt.Errorf("%w: app.t: %w", executor.ErrCreateNamesUnverified, context.Canceled)
-	assert.ErrorIs(t, opaque, context.Canceled)
-	assert.Equal(t, executor.CodeExecutionFailed, executor.OutcomeCode(opaque),
-		"a raw context error the bounded runner never classified is the untyped failure")
-	assert.Equal(t, executor.CodeExecutionFailed,
-		executor.OutcomeCode(fmt.Errorf("%w: app.t: %w", executor.ErrCreateNamesUnverified, errors.New("connection reset"))))
+// A read of the owned names that does not complete is its own outcome:
+// the code names the state the step left — a standing table whose names
+// are unproven — whatever kept the read from completing. The cause stays
+// in the chain for the operator, and the sentinel never claims a mismatch
+// it could not observe.
+func TestCreateNamesUnverifiedIsItsOwnCode(t *testing.T) {
+	causes := []struct {
+		name  string
+		cause error
+	}{
+		{name: "caller cancelled the bounded read", cause: executor.ErrCancelledByCaller},
+		{name: "raw context error the runner never classified", cause: context.Canceled},
+		{name: "table no longer at its name", cause: preflight.ErrTableNotFound},
+		{name: "opaque transport failure", cause: errors.New("connection reset")},
+	}
+	for _, tt := range causes {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &executor.SequenceStepError{Step: 1, Total: 2, Kind: executor.StepBrief,
+				Err: fmt.Errorf("%w: app.t: %w", executor.ErrCreateNamesUnverified, tt.cause)}
+			assert.ErrorIs(t, err, executor.ErrCreateNamesUnverified)
+			assert.ErrorIs(t, err, tt.cause, "the read's own failure stays in the chain")
+			assert.NotErrorIs(t, err, executor.ErrCreateNameMismatch)
+			assert.Equal(t, executor.CodeCreateNamesUnverified, executor.OutcomeCode(err))
+		})
+	}
 }

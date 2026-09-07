@@ -275,12 +275,19 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 		}
 		return stopBefore(fmt.Errorf("create %s.%s: %w", report.Schema, report.Table, execErr))
 	}
+	// FailedStep is the machine-readable discriminator between a sequence
+	// that stopped at a step and a run that never started one: a create
+	// that fails at step 1 may have left its table standing, and the code
+	// says which. The committed prefix is not repeated on this verdict —
+	// each earlier step is its own executed verdict above.
 	failed := verdict.Verdict{
-		Outcome:   verdict.OutcomeFailed,
-		Code:      string(executor.OutcomeCode(execErr)),
-		Statement: planStatementSQL(report, stepErr.Step-1),
-		Table:     report.Schema + "." + report.Table,
-		Detail:    createFailureDetail(execErr),
+		Outcome:       verdict.OutcomeFailed,
+		Code:          string(executor.OutcomeCode(execErr)),
+		Statement:     planStatementSQL(report, stepErr.Step-1),
+		Table:         report.Schema + "." + report.Table,
+		FailedStep:    stepErr.Step,
+		FailedStepSQL: stepErr.SQL,
+		Detail:        createFailureDetail(execErr),
 	}
 	result.Verdicts = append(result.Verdicts, failed)
 	result.Outcome = verdict.OutcomeFailed

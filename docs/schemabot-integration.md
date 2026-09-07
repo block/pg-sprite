@@ -169,7 +169,7 @@ package. Landing this is one of:
 A greenfield desired file — the table does not exist on the target — has no single routing
 class, and an adapter must not fold its outcomes into one arm. The plan resolves
 shape-decidable author errors before the apply window, and `migrate.RunDesired` re-checks
-them when admitting execution. A greenfield run resolves to one of five things:
+them when admitting execution. A greenfield run resolves to one of six things:
 
 | Outcome | Routing class |
 | --- | --- |
@@ -177,14 +177,16 @@ them when admitting execution. A greenfield run resolves to one of five things:
 | `create-collision` refusal | **Re-plan, then fix the occupant**: the table name or a claimed index, constraint-index, or sequence name is occupied. Re-diff the live catalog to see what holds it; re-planning alone reproduces the refusal — drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column. Never blindly retry |
 | `insufficient-privileges` refusal (`*preflight.PrivilegeError`, `Tier == TierCreateTable`) | **Operator provisioning action**: the role needs the exact `GRANT` the error carries — not a desired-file fix, and not retryable until granted |
 | Plan/admission refusal (`unsupported-statement`) | **Author action**: the desired file states a shape the create path refuses; retrying unchanged cannot succeed |
-| `create-name-mismatch` failure (exit 1, `failed_step` 1) | **Operator action on a table that now exists**: the `CREATE TABLE` committed but a claimed first-choice constraint-index or sequence name went to an occupant inside the probe's window, so the server suffixed it. The executor leaves the table; an operator renames the owned relation to the claimed name (after freeing it) or drops the table, then re-diffs. Never retry the create — it now refuses as `create-collision` on the table name |
+| `create-name-mismatch` failure (exit 1, `failed_step` 1) | **Operator action on a table that now exists**: the `CREATE TABLE` committed but a claimed first-choice constraint-index or sequence name went to an occupant inside the probe's window, so the server suffixed it. The executor leaves the table; an operator frees the claimed name and renames the owned relation to it, or drops the table, then re-diffs. A rerun does not re-enter the create path: it diffs the live table, and converging the suffixed relation onto its claimed name is a constraint drop the planner refuses as `destructive-change` (a suffixed sequence is a sequence change the planner does not converge), so nothing runs until the operator acts |
+| `create-names-unverified` failure (exit 1, `failed_step` 1) | **Operator action on a table that now exists**: the `CREATE TABLE` committed but the read of the names the table owns did not complete, so the claims are unproven — not failed. An operator compares the table's constraint-index and sequence names against the desired file, renames or drops, then re-diffs; a rerun diffs the live table exactly as above |
 
 Greenfield refusals have deterministic precedence: a decidable shape refusal comes before the
 table-absence and privilege checks because it needs no connection.
 
-Only the last is an author error. An adapter that surfaces every greenfield refusal as
-"fix your desired file" gives operators the wrong instruction for the two middle rows. A
-create that failed mid-sequence follows the
+Only the plan/admission refusal is an author error. An adapter that surfaces every
+greenfield refusal as "fix your desired file" gives operators the wrong instruction for the
+collision and privilege rows, and the two failure rows are not refusals at all — a table now
+exists. A create that failed mid-sequence follows the
 [committed-prefix contract](execution-model.md#the-committed-prefix) — the closing
 paragraph of this section says what that means for the gate: it stays closed until the
 live catalog is re-diffed; the failed run is never a no-op.
@@ -239,8 +241,8 @@ them, don't retry them uniformly:
 | `ErrIfNotExistsUnsupported` (`if-not-exists-unsupported`) | `CREATE ... IF NOT EXISTS` succeeds as a name-only no-op over a relation it cannot vouch for — the opposite of the absence proof's fail-closed contract; refused in the plan and re-checked at apply, nothing ran | Fix the desired file: state the plain `CREATE`; the absence check owns collision handling |
 | `ErrUnsupportedCreateStep` (`unsupported-create-step`) | A desired statement is not a shape the create path can run; refused in the plan and re-checked at apply | Fix the desired file |
 | `ErrCreateCollision` (`create-collision`) | A claimed index, constraint-index, or sequence name was already occupied, or a concurrent writer took a needed name after the absence checks | Re-diff the live catalog to see what holds the name, then drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column — re-planning alone reproduces the refusal; never blindly retry the create |
-| `ErrCreateNameMismatch` (`create-name-mismatch`) | The `CREATE TABLE` committed, but a first-choice constraint-index or sequence name the desired file claimed went to an occupant inside the probe's window and the server chose a suffixed name; `*CreateNameMismatchError` lists the `Missing` claims and the `Unclaimed` names the table owns instead | **Refuse-and-leave — the table exists**: surface the mismatch to the author as a failed apply, never retry the create (the table name is now taken, so a rerun refuses as `create-collision` on the table itself). An operator frees the first-choice name and renames the owned relation to it, or drops the born table; then re-diff |
-| `ErrCreateNamesUnverified` (the wrapped read's code) | The `CREATE TABLE` committed but the read of the names the table owns did not complete, so the claims are unproven | **Refuse-and-leave — the table exists**: an operator compares the table's constraint-index and sequence names against the desired file by hand (`\d` shows them), renames or drops, then re-diffs; never retry the create |
+| `ErrCreateNameMismatch` (`create-name-mismatch`) | The `CREATE TABLE` committed, but a first-choice constraint-index or sequence name the desired file claimed went to an occupant inside the probe's window and the server chose a suffixed name; `*CreateNameMismatchError` lists the `Missing` claims and the `Unclaimed` names the table owns instead | **Refuse-and-leave — the table exists**: surface the mismatch to the author as a failed apply. A rerun re-diffs the live table rather than re-entering the create path, and converging the suffixed relation is a destructive drop the planner refuses — so nothing runs until an operator frees the first-choice name and renames the owned relation to it, or drops the born table; then re-diff |
+| `ErrCreateNamesUnverified` (`create-names-unverified`) | The `CREATE TABLE` committed but the read of the names the table owns did not complete, so the claims are unproven; the read's own failure — a cancelled context, a lost connection, a table no longer at its name — is the cause in the chain, never the code | **Refuse-and-leave — the table exists**: an operator compares the table's constraint-index and sequence names against the desired file by hand (`\d` shows them), renames or drops, then re-diffs; a rerun re-diffs the live table exactly as for a mismatch |
 
 Before the first step, `ExecuteCreate` probes `pg_class` in one schema-scoped catalog
 snapshot for every relation name the desired file states — explicit `CREATE INDEX` names
@@ -261,8 +263,9 @@ first-choice name the table does not own is a `*CreateNameMismatchError` (sentin
 `ErrCreateNameMismatch`, code `create-name-mismatch`) wrapped in a `SequenceStepError`
 at step 1, and the executor leaves the born table in place rather than dropping a relation
 it cannot prove nobody has started to use. A read of the owned names that does not complete
-is the same step-1 failure wrapped in `ErrCreateNamesUnverified`, carrying the read's own
-code when it has one and `execution-failed` otherwise — never a pass.
+is the same step-1 failure wrapped in `ErrCreateNamesUnverified` under its own code,
+`create-names-unverified`, with the read's own failure as the cause in the chain — never a
+pass, and never a mismatch it could not observe.
 
 A `create-collision` can identify a name the table needs — an index, constraint index, or
 sequence — rather than the table name itself.

@@ -80,6 +80,12 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{name: "if not exists", err: executor.ErrIfNotExistsUnsupported, want: executor.CodeIfNotExistsUnsupported},
 		{name: "create collision", err: executor.ErrCreateCollision, want: executor.CodeCreateCollision},
 		{name: "create name mismatch", err: executor.ErrCreateNameMismatch, want: executor.CodeCreateNameMismatch},
+		{name: "create names unverified", err: executor.ErrCreateNamesUnverified, want: executor.CodeCreateNamesUnverified},
+		{
+			name: "create names unverified outranks the read's own cause",
+			err:  fmt.Errorf("%w: app.t: %w", executor.ErrCreateNamesUnverified, executor.ErrCancelledByCaller),
+			want: executor.CodeCreateNamesUnverified,
+		},
 		{
 			name: "typed create name mismatch at step 1",
 			err: &executor.SequenceStepError{
@@ -150,6 +156,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeIfNotExistsUnsupported:          true,
 		executor.CodeCreateCollision:                 true,
 		executor.CodeCreateNameMismatch:              true,
+		executor.CodeCreateNamesUnverified:           false,
 		executor.CodeDuplicateCreateName:             true,
 		executor.CodePartitionOfUnsupported:          true,
 		executor.CodeUnsupportedCreateStep:           true,

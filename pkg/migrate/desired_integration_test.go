@@ -1,7 +1,6 @@
 package migrate_test
 
 import (
-	"context"
 	"fmt"
 	"net/url"
 	"testing"
@@ -305,33 +304,17 @@ CREATE INDEX t_v_idx ON t (v);`
 		// so the server suffixes the constraint index. The CREATE TABLE has
 		// committed by the time the executor can see that, so the verdict
 		// is a failure at step 1 that says so — not a collision refusal
-		// claiming nothing ran — and the table stays for the operator.
+		// claiming nothing ran — and the table stays for the operator. A
+		// rerun re-diffs the live table and refuses the constraint rename
+		// as destructive; the operator's rename converges it.
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.other (v int)", schema))
 		require.NoError(t, err)
-		functionName := pgx.Identifier{schema, "take_name_during_create"}.Sanitize()
-		triggerName := pgx.Identifier{schema + "_take_name_during_create"}.Sanitize()
-		_, err = pool.Exec(t.Context(), fmt.Sprintf(`
-			CREATE FUNCTION %s() RETURNS event_trigger LANGUAGE plpgsql AS $$
-			BEGIN
-				IF TG_TAG = 'CREATE TABLE' AND current_query() LIKE '%%%s.t %%' THEN
-					EXECUTE 'CREATE INDEX t_pkey ON %s.other (v)';
-				END IF;
-			END
-			$$;
-			CREATE EVENT TRIGGER %s ON ddl_command_start EXECUTE FUNCTION %s()`,
-			functionName, schema, schema, triggerName, functionName))
-		require.NoError(t, err)
-		t.Cleanup(func() {
-			ctx := context.WithoutCancel(t.Context())
-			_, cleanupErr := pool.Exec(ctx, fmt.Sprintf("DROP EVENT TRIGGER IF EXISTS %s", triggerName))
-			assert.NoError(t, cleanupErr)
-			_, cleanupErr = pool.Exec(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", functionName))
-			assert.NoError(t, cleanupErr)
-		})
+		testutil.RunDuringDDL(t, pool, testutil.DDLCommandStart, "CREATE TABLE", schema, "t",
+			fmt.Sprintf("CREATE INDEX t_pkey ON %s.other (v)", schema))
 
-		res, err := migrate.RunDesired(t.Context(), pool,
-			migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, desiredSQL)}, runOptions())
+		req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, desiredSQL)}
+		res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
 		require.Error(t, err)
 		assert.ErrorIs(t, err, executor.ErrCreateNameMismatch)
 		assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
@@ -339,6 +322,8 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Equal(t, verdict.OutcomeFailed, res.Verdicts[0].Outcome)
 		assert.Equal(t, string(executor.CodeCreateNameMismatch), res.Verdicts[0].Code)
 		assert.Contains(t, res.Verdicts[0].Statement, "CREATE TABLE")
+		assert.Equal(t, 1, res.Verdicts[0].FailedStep, "a sequence stopped at its first step, not a run that never started one")
+		assert.Contains(t, res.Verdicts[0].FailedStepSQL, "CREATE TABLE")
 		assert.Contains(t, res.Verdicts[0].Detail, "committed and was not rolled back",
 			"the verdict must not describe the step as rolled back")
 		assert.Contains(t, res.Verdicts[0].Detail, `"t_pkey1"`, "the suffixed replacement is named for the operator")
@@ -350,6 +335,70 @@ CREATE INDEX t_v_idx ON t (v);`
 			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
 			 WHERE table_schema = $1 AND table_name = 't')`, schema).Scan(&exists))
 		assert.True(t, exists, "the executor never drops a table it has just created")
+
+		// Retrying unchanged does not re-enter the create path: the live
+		// table diffs against the desired file, and converging the
+		// suffixed constraint onto its claimed name is a drop the planner
+		// refuses as destructive, so nothing runs.
+		res, err = migrate.RunDesired(t.Context(), pool, req, runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonDestructiveChange, res.Reason)
+		assert.Empty(t, res.Verdicts, "the destructive guard refuses before any statement runs")
+
+		// The operator follows the code's remedy — free the first-choice
+		// name and rename the suffixed relation onto it — and the front
+		// door converges the remainder, then re-runs as a no-op.
+		_, err = pool.Exec(t.Context(), fmt.Sprintf("DROP INDEX %s.t_pkey", schema))
+		require.NoError(t, err)
+		_, err = pool.Exec(t.Context(), fmt.Sprintf("ALTER INDEX %s.t_pkey1 RENAME TO t_pkey", schema))
+		require.NoError(t, err)
+
+		res, err = migrate.RunDesired(t.Context(), pool, req, runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+		require.Len(t, res.Plan.Statements, 1, "only the index the failed run never reached remains to converge")
+		assert.Contains(t, res.Plan.Statements[0].SQL, "t_v_idx")
+
+		res, err = migrate.RunDesired(t.Context(), pool, req, runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+		assert.Empty(t, res.Plan.Statements, "the repaired table plans no statements")
+		assert.Empty(t, res.Verdicts)
+	})
+
+	t.Run("a table that cannot be read at its name after the create fails step 1 as unverified", func(t *testing.T) {
+		// The CREATE TABLE commits, but an event trigger renamed the table
+		// inside that same transaction, so the read of the names it owns
+		// finds nothing at the claimed name. An unproven name set is not a
+		// passing one: the verdict fails at step 1 under its own code, with
+		// the read's cause in the chain, and the table stays where it was
+		// moved for the operator.
+		schema := testutil.NewSchema(t, pool)
+		testutil.RunDuringDDL(t, pool, testutil.DDLCommandEnd, "CREATE TABLE", schema, "t",
+			fmt.Sprintf("ALTER TABLE %s.t RENAME TO t_moved", schema))
+
+		res, err := migrate.RunDesired(t.Context(), pool,
+			migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, desiredSQL)}, runOptions())
+		require.Error(t, err)
+		assert.ErrorIs(t, err, executor.ErrCreateNamesUnverified)
+		assert.NotErrorIs(t, err, executor.ErrCreateNameMismatch, "nothing was compared, so nothing mismatched")
+		assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+		require.Len(t, res.Verdicts, 1, "the failed create is the only verdict; nothing before it committed")
+		assert.Equal(t, verdict.OutcomeFailed, res.Verdicts[0].Outcome)
+		assert.Equal(t, string(executor.CodeCreateNamesUnverified), res.Verdicts[0].Code)
+		assert.Equal(t, 1, res.Verdicts[0].FailedStep)
+		assert.Contains(t, res.Verdicts[0].FailedStepSQL, "CREATE TABLE")
+		assert.Contains(t, res.Verdicts[0].Detail, "committed and was not rolled back",
+			"the verdict must not describe the step as rolled back")
+		assert.Contains(t, res.Verdicts[0].Detail, "unproven",
+			"the verdict says the claims were not compared, not that they mismatched")
+
+		var moved bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+			 WHERE table_schema = $1 AND table_name = 't_moved')`, schema).Scan(&moved))
+		assert.True(t, moved, "the committed table stands under the name it was moved to")
 	})
 
 	t.Run("refuses a destructive plan and drops nothing", func(t *testing.T) {
