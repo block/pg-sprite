@@ -128,10 +128,16 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 
 	var changes []Change
 
+	// On a partitioned parent an invalid index means not every partition
+	// has a matching attached index, a state the one-table model does not
+	// describe, so the parent's entries are compared by name and definition
+	// alone. Only a plain table's invalid entry is an unfinished build.
+	partitioned := live.PartitionKey != ""
+
 	// Indexes to drop: gone from desired, or changed (dropped here,
 	// recreated in the create bucket below).
 	for _, ix := range live.Indexes {
-		if indexNeedsDrop(live, ix, desiredIdx) {
+		if indexNeedsDrop(partitioned, ix, desiredIdx) {
 			changes = append(changes, Change{
 				SQL:         "DROP INDEX " + pgx.Identifier{schema, ix.Name}.Sanitize(),
 				Kind:        ChangeDropIndex,
@@ -215,7 +221,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// server-decompiled and unqualified; only the schema qualification is
 	// injected.
 	for _, ix := range desired.Indexes {
-		if indexNeedsCreate(live, liveIdx, ix) {
+		if indexNeedsCreate(partitioned, liveIdx, ix) {
 			qualified, err := statement.Qualify(ix.Def, schema)
 			if err != nil {
 				return nil, fmt.Errorf("qualify index %s: %w", ix.Name, err)
@@ -342,8 +348,9 @@ func indexesByName(idxs []Index) map[string]Index {
 // indexNeedsCreate reports whether the desired index must be built: the
 // live table lacks it, the live definition differs, or the live entry with
 // the desired name and definition is an unfinished concurrent build and so
-// does not deliver the index.
-func indexNeedsCreate(live Model, liveIdx map[string]Index, want Index) bool {
+// does not deliver the index. partitioned says whether the live table is a
+// partitioned parent, whose invalid entries are not unfinished builds.
+func indexNeedsCreate(partitioned bool, liveIdx map[string]Index, want Index) bool {
 	had, ok := liveIdx[want.Name]
 	if !ok {
 		return true
@@ -351,7 +358,7 @@ func indexNeedsCreate(live Model, liveIdx map[string]Index, want Index) bool {
 	if had.Def != want.Def {
 		return true
 	}
-	return isUnfinishedBuild(live, had)
+	return isUnfinishedBuild(partitioned, had)
 }
 
 // indexNeedsDrop reports whether a live index must be dropped: desired no
@@ -359,9 +366,11 @@ func indexNeedsCreate(live Model, liveIdx map[string]Index, want Index) bool {
 // concurrent build is never dropped here, whatever desired says about its
 // name: DROP INDEX blocks the table and cannot tell abandoned debris from a
 // build still in progress. Its removal belongs to the concurrent build
-// path, which proves the occupant before touching it.
-func indexNeedsDrop(live Model, ix Index, desired map[string]Index) bool {
-	if isUnfinishedBuild(live, ix) {
+// path, which proves the occupant before touching it. partitioned says
+// whether the live table is a partitioned parent, whose invalid entries
+// are not unfinished builds.
+func indexNeedsDrop(partitioned bool, ix Index, desired map[string]Index) bool {
+	if isUnfinishedBuild(partitioned, ix) {
 		return false
 	}
 	want, ok := desired[ix.Name]
@@ -373,12 +382,10 @@ func indexNeedsDrop(live Model, ix Index, desired map[string]Index) bool {
 
 // isUnfinishedBuild reports whether a live index entry is a concurrent
 // build that has not finished — abandoned, or still running. That is what
-// an invalid entry means on a plain table. On a partitioned parent an
-// invalid index means not every partition has a matching attached index,
-// a state the one-table model does not describe, so the parent's entries
-// are compared by name and definition alone.
-func isUnfinishedBuild(live Model, ix Index) bool {
-	if live.PartitionKey != "" {
+// an invalid entry means on a plain table; a partitioned parent's invalid
+// entry means something else, and is never one.
+func isUnfinishedBuild(partitioned bool, ix Index) bool {
+	if partitioned {
 		return false
 	}
 	return ix.Invalid

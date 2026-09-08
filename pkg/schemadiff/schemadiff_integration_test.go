@@ -324,6 +324,70 @@ CREATE UNIQUE INDEX events_name_key ON events (name);
 	assert.Empty(t, rediff, "a valid index with the desired definition is delivered")
 }
 
+// Desired may name the leftover of a failed build with a different
+// definition — here a plain index where the abandoned build was unique.
+// The definition mismatch would plan a drop-and-recreate for a valid index;
+// for an unfinished build the diff still plans the create alone, and the
+// recovery proves the occupant abandoned by name and validity, not by
+// definition, so the redefined index converges through the same path.
+func TestDiffRebuildsRedefinedInvalidIndex(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+
+	const desired = `
+CREATE TABLE events (
+  id bigint PRIMARY KEY,
+  name text NOT NULL
+);
+CREATE INDEX events_name_key ON events (name);
+`
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %[1]s.events (id bigint PRIMARY KEY, name text NOT NULL); INSERT INTO %[1]s.events VALUES (1, 'dup'), (2, 'dup')",
+		schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY events_name_key ON %s.events (name)", schema))
+	require.Error(t, err, "a unique build over duplicates must fail after creating its catalog entry")
+
+	ds, err := statement.ParseDesired(desired)
+	require.NoError(t, err)
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "events")
+	require.NoError(t, err)
+	want, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	require.NoError(t, err)
+
+	require.Len(t, live.Indexes, 1, "the failed build leaves its catalog entry")
+	assert.True(t, live.Indexes[0].Invalid, "the leftover introspects as invalid")
+	require.Len(t, want.Indexes, 1)
+	require.NotEqual(t, live.Indexes[0].Def, want.Indexes[0].Def, "desired redefines the index under the leftover's name")
+
+	changes, err := schemadiff.Diff(schema, live, want)
+	require.NoError(t, err)
+	require.Len(t, changes, 1, "a redefined unfinished build plans as a create alone, never a drop")
+	assert.Equal(t, schemadiff.ChangeCreateIndex, changes[0].Kind)
+	assert.False(t, changes[0].Destructive)
+	assert.Equal(t, fmt.Sprintf("CREATE INDEX events_name_key ON %s.events USING btree (name)", schema), changes[0].SQL)
+
+	// The duplicate rows stay: they only ever conflicted with the abandoned
+	// unique build, not with the plain index desired now.
+	concurrent, err := statement.Concurrently(changes[0].SQL)
+	require.NoError(t, err)
+	rep, err := executor.RebuildAbandonedIndex(t.Context(), pool, concurrent, executor.ConcurrentBudget{CallerOwned: true})
+	require.NoError(t, err)
+	require.Len(t, rep.Dropped, 1, "the recovery removes exactly the abandoned entry")
+	assert.Equal(t, "events_name_key", rep.Build.Index)
+
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "events")
+	require.NoError(t, err)
+	require.Len(t, after.Indexes, 1, "the rebuilt index is the table's only index; no quarantined debris survives")
+	assert.False(t, after.Indexes[0].Invalid)
+	assert.Equal(t, want.Indexes[0].Def, after.Indexes[0].Def, "the rebuilt index carries the redefined definition")
+	rediff, err := schemadiff.Diff(schema, after, want)
+	require.NoError(t, err)
+	assert.Empty(t, rediff, "the redefined index is delivered")
+}
+
 // A healthy concurrent build still running introspects as invalid too —
 // indisready turns true once the build has scanned the table, indisvalid
 // only once every older snapshot is gone — and the diff must plan the same
