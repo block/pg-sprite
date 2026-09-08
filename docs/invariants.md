@@ -200,6 +200,12 @@ partition, or a constraint's index is never a candidate (the server will not dro
 concurrently, so the rename would strand it). Every lock the recovery takes is bounded, and
 the proof's lock, every drop, and the requested build share **one** overall budget, so a
 recovery over k quarantined entries costs at most the budget, not (k+1) budgets.
+The declarative diff leans on this proof without performing it: when desired names an index
+whose live entry is an unfinished build, `diff` plans the `create-index` alone and never a
+drop, knowing the create cannot run as-is against the occupied name. The plan completes only
+through this invariant's proven removal — `RebuildAbandonedIndex` — or through an operator
+following the runbook; a plain `CREATE INDEX` on the occupied name fails as a duplicate
+relation, and the concurrent build path refuses it by proof rather than drop by name.
 *Enforced:* `pkg/executor` recovery (`RebuildAbandonedIndex`): locked re-verification and
 rename, pre-/post-drop OID checks, droppability predicate, shared-budget accounting, with
 stale-observation tests that alter the catalog between observation and lock on a real
@@ -342,6 +348,21 @@ updated, the desired-state file reverted, a new plan — must not silently mark 
 clean it up. The started operation blocks until an operator verb (`cancel`, `cutover`) resolves
 it and the target is reconciled. Cleanup alone never declares success. *Source:* SchemaBot
 AGENTS.md ("started applies remain authoritative").
+
+The declarative diff makes one deliberate trade against this invariant. An invalid index on
+a plain table is an unfinished concurrent build — abandoned, or still running — and the diff
+never emits a `DROP INDEX` for it, whatever the desired file says about its name: a drop by
+name cannot tell the two apart, and dropping under a running build is the cleanup this
+invariant forbids. That keeps the cleanup half. It gives up the other half when the desired
+file no longer names the index at all: the observation is discarded and the plan is empty,
+so a desired state that removes an index the build never delivered reads as already
+converged. The trade is preferred to the alternatives — a name-based drop, or a fabricated
+change — because the plan stays executable and never destroys a build it cannot see; the
+leftover surfaces at the next `pull` (see [pull.md](pull.md)) and clears per the
+[invalid-index runbook](invalid-index-recovery.md). OC-1 reaches the same conclusion from
+the other side: the diff cannot confirm the entry is abandoned, so it must not round the
+uncertainty into a destructive change. *Enforced:* `pkg/schemadiff` never-drops-invalid
+tests against real debris on a real database.
 
 ### OC-3 — Control requests are durable operator intent
 
