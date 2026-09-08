@@ -29,11 +29,22 @@ compatibility comes from the existing transaction-scoped `pkg/schemadiff` scratc
 execute-and-introspect, not AST transformation. No durable scratch database or `CREATEDB` grant is
 required.
 
+The gated statement names the source table, so reaching the shadow needs exactly one edit at the
+parse boundary: `pkg/statement` retargets the statement's relation to the shadow's name and
+reprints it through the PostgreSQL deparser — the same single-field-and-deparse shape the
+safer-sequence rewrite uses to add `CONCURRENTLY`. No other node changes; the semantics of the
+DDL remain the server's. The executor re-verifies the retargeted statement before running it:
+re-parsed, it must equal the gated statement in every respect except the target relation, which
+must equal the shadow (the ST-7 check, with the shadow as the permitted target).
+
 **Why.** The real server remains the semantic authority while the only durable temporary object is
 the shadow needed by the operation itself.
 
 **Alternative considered → deferred.** A separately provisioned durable scratch database adds
-privilege and lifecycle requirements without strengthening the proof.
+privilege and lifecycle requirements without strengthening the proof. Executing the statement
+verbatim against a same-named shadow in an engine-owned schema reached through `search_path`
+avoids the retarget but cannot handle a schema-qualified statement and would move the swap from
+a rename to a `SET SCHEMA`; it was rejected for the two behaviours it would fork.
 
 **Where enforced.** `pkg/schemachange` shadow builder and `pkg/schemadiff`; ST-2, ST-6.
 
@@ -254,8 +265,11 @@ imports `pkg/schemachange`.
 
 ## Cutover transaction, step by step
 
-1. Begin a bounded transaction, set `lock_timeout`, and acquire `ACCESS EXCLUSIVE` on the source.
-2. Drain through the final WAL position and recheck the checksum/fidelity proofs (CO-1, ST-5).
+1. Begin a bounded transaction, set `lock_timeout`, and acquire `ACCESS EXCLUSIVE` on the source;
+   on `lock_timeout` roll back and retry with bounded backoff, never queue behind readers (LK-2).
+2. Drain captured changes through the final WAL position and re-verify the `VerifiedShadow` and
+   fidelity proofs already minted before the lock was taken — no checksum runs under the lock
+   (CO-1, ST-5).
 3. Rename source dependents to deterministic `_old` names, source to `_old`, and shadow to the
    source name; complete the D5 sequence and identity handoff.
 4. Recheck catalog identities and commit. A lost connection is resolved by catalog inspection,
