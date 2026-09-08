@@ -57,9 +57,13 @@ var ErrUnrenderableCollation = errors.New("columns with an explicit collation ca
 // is proven admissible by parsing it through statement.ParseDesired before
 // it is returned, so anything a desired file refuses (a foreign key, for
 // example) surfaces here as that gate's typed error. Materializing the
-// output with IntrospectDesired reproduces the model, so diffing it against
-// the table it came from yields no changes — the round-trip contract the
-// integration tests enforce.
+// output with IntrospectDesired reproduces the model's names and
+// definitions, so diffing it against the table it came from yields no
+// changes — the round-trip contract the integration tests enforce.
+// Validity is not rendered: an index the table carries invalid — an
+// unfinished concurrent build — renders as its definition and materializes
+// valid, so the round-trip diff of such a table is exactly the create-index
+// change that rebuilds it.
 func Render(m Model) (string, error) {
 	if m.PartitionKey != "" {
 		return "", fmt.Errorf("render table %q: partitioned parent (PARTITION BY %s): %w", m.Table, m.PartitionKey, ErrUnrenderablePartition)
