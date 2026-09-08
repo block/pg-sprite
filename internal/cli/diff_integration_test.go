@@ -259,7 +259,7 @@ func TestDiffGreenfieldCreateShapeRefusal(t *testing.T) {
 	text := newDiffCmd(t, url, schema, desired)
 	var textOut strings.Builder
 	require.ErrorIs(t, text.run(t.Context(), &textOut), verdict.ErrRefused)
-	assert.Contains(t, textOut.String(), "the create path refuses this statement: CREATE TABLE PARTITION OF")
+	assert.Contains(t, textOut.String(), "the create path refuses this statement: PARTITION OF")
 	assert.NotContains(t, textOut.String(), "the plan creates it")
 }
 

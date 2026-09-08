@@ -172,6 +172,7 @@ func TestRefuseUnsupportedPartitionedParentWithdrawsExecutionAdvice(t *testing.T
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
 	assert.Equal(t, planner.RouteNative, r.Statements[0].Route)
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Statements[0].Reason)
+	assert.Empty(t, r.Statements[0].Cause, "a target-facts refusal carries no create-shape cause")
 	assert.Empty(t, r.Statements[0].Backend)
 	assert.Empty(t, r.Statements[0].ExecSQL)
 	assert.Empty(t, r.Statements[0].Execution)
@@ -234,7 +235,8 @@ func TestRefuseUnsupportedCreateShapeRejectsRefusalWithoutCause(t *testing.T) {
 		&executor.CreateShapeError{Cause: executor.CreateShapePartitionOf}, errors.New("refused"),
 	})
 
-	require.Error(t, err)
+	require.ErrorIs(t, err, executor.ErrInvariantViolation,
+		"a refusal the cause vocabulary cannot name fails closed as an invariant violation")
 	assert.Equal(t, router.DispositionExecute, r.Disposition)
 	for i := range r.Statements {
 		assert.Equal(t, router.DispositionExecute, r.Statements[i].Disposition, "statement %d", i+1)
@@ -575,8 +577,10 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 	explained.Kind = schemadiff.ChangeAddColumn
 	explained.Decisions = []planner.Decision{{Operation: "ADD COLUMN c", Route: planner.RouteNative}}
 	explained.Guidance = suggest.GuidanceSplitStatement
+	explained.Reason = verdict.ReasonUnsupportedStatement
+	explained.Cause = executor.CreateShapePartitionOf
 	assert.Equal(t, base, plan.Fingerprint([]plan.Statement{explained, b}),
-		"decisions, kind, destructive, and guidance are explanatory: identity unchanged")
+		"decisions, kind, destructive, guidance, reason, and cause are explanatory: identity unchanged")
 
 	assert.NotEqual(t, base, plan.Fingerprint([]plan.Statement{b, a}),
 		"statement order is part of identity")

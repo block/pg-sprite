@@ -201,7 +201,7 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
 		assert.Equal(t, router.DispositionRefuse, res.Plan.Disposition,
 			"the refusal is decided on the plan, before the create path is entered")
-		assert.Contains(t, res.Detail, "is refused by the create path: "+executor.ErrPartitionOfUnsupported.Error(),
+		assert.Contains(t, res.Detail, "is refused by the create path: "+executor.CreateShapePartitionOf.Description(),
 			"the detail carries the create path's typed cause, not the echoed SQL alone")
 		assert.Empty(t, res.Verdicts, "nothing was attempted")
 

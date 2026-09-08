@@ -176,7 +176,7 @@ them when admitting execution. A greenfield run resolves to one of six things:
 | Executed | The table and its indexes exist; a rerun converges to an empty plan |
 | `create-collision` refusal | **Re-plan, then fix the occupant**: the table name or a claimed index, constraint-index, or sequence name is occupied. Re-diff the live catalog to see what holds it; re-planning alone reproduces the refusal — drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column. Never blindly retry |
 | `insufficient-privileges` refusal (`*preflight.PrivilegeError`, `Tier == TierCreateTable`) | **Operator provisioning action**: the role needs the exact `GRANT` the error carries — not a desired-file fix, and not retryable until granted |
-| Plan/admission refusal (`unsupported-statement`) | **Author action**: the desired file states a shape the create path refuses; retrying unchanged cannot succeed |
+| Plan/admission refusal (`unsupported-statement`) | **Author action**: the desired file states a shape the create path refuses; retrying unchanged cannot succeed. The [plan report](plan-report.md) (`format_version` 3) names the shape as the refused statement's typed `cause` — read that field rather than matching the executor's sentinels or the verdict's prose |
 | `create-name-mismatch` failure (exit 1, `failed_step` 1) | **Operator action on a table that now exists**: the `CREATE TABLE` committed but a claimed first-choice constraint-index or sequence name went to an occupant inside the probe's window, so the server suffixed it. The executor leaves the table; an operator frees the claimed name and renames the owned relation to it, or drops the table, then re-diffs. A rerun does not re-enter the create path: it diffs the live table, and converging the suffixed relation onto its claimed name is a constraint drop the planner refuses as `destructive-change` (a suffixed sequence is a sequence change the planner does not converge), so nothing runs until the operator acts |
 | `create-names-unverified` failure (exit 1, `failed_step` 1) | **Operator action on a table that now exists**: the `CREATE TABLE` committed but the read of the names the table owns did not complete, so the claims are unproven — not failed. An operator compares the table's constraint-index and sequence names against the desired file, renames or drops, then re-diffs; a rerun diffs the live table exactly as above |
 
@@ -232,7 +232,10 @@ them, don't retry them uniformly:
 | `*preflight.PrivilegeError` (`Tier == TierCreateTable`) | The role lacks `CREATE` on the schema (or `USAGE` reaching it); the error carries the exact missing grant | Operator action: provision the named `GRANT`, then retry |
 
 `ExecuteCreate`'s own refusals and failures carry the same routing discipline
-([outcome codes](execution-model.md#outcome-codes)):
+([outcome codes](execution-model.md#outcome-codes)). The four shape refusals are also decided
+in the plan, where the refused statement's `cause` names the shape
+([create-shape causes](execution-model.md#create-shape-causes)); the apply-time sentinel is
+the re-check, not the first notice:
 
 | Outcome | What it means | Orchestrator action |
 | --- | --- | --- |
@@ -329,10 +332,11 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   small-table direct ALTER blocks only writes, but the PostgreSQL native route holds
   `ACCESS EXCLUSIVE` and blocks reads too, so the policy's risk framing does not transfer.
 - **Recommended call sequence: dry-run, then apply.** The typed manual path for a
-  rewrite-required refusal (`guidance`), the plan `fingerprint`, and `table_exists` all live
-  on the [plan report](plan-report.md) — the dry run's output. The run verdict carries the
-  refusal reason as a typed field but its `detail` is display-only prose: an orchestrator
-  that wants the typed guidance must obtain the plan report first (dry-run for the
+  rewrite-required refusal (`guidance`), the create path's typed shape refusal
+  (`statements[].cause`, `format_version` 3), the plan `fingerprint`, and `table_exists` all
+  live on the [plan report](plan-report.md) — the dry run's output. The run verdict carries
+  the refusal reason as a typed field but its `detail` is display-only prose: an orchestrator
+  that wants the typed guidance or cause must obtain the plan report first (dry-run for the
   imperative front door, `diff --json` for the declarative one), then apply, and treat the
   verdict's `detail` as presentation until the verdict carries typed guidance too.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so

@@ -68,7 +68,7 @@ func CreateShapeCauses() []CreateShapeCause {
 func (c CreateShapeCause) Description() string {
 	switch c {
 	case CreateShapePartitionOf:
-		return "CREATE TABLE PARTITION OF is not supported by the create path: attaching a partition locks the partitioned parent, which the absence proof does not cover"
+		return "PARTITION OF attaches a partition to a parent the absence proof does not cover, locking that parent"
 	case CreateShapeInherits:
 		return "INHERITS binds to an existing parent the absence proof does not cover"
 	case CreateShapeLike:
@@ -76,7 +76,7 @@ func (c CreateShapeCause) Description() string {
 	case CreateShapeOfType:
 		return "OF binds to an existing composite type the absence proof does not cover"
 	case CreateShapeIfNotExists:
-		return "IF NOT EXISTS is not supported: a name-only no-op cannot prove the existing relation is the requested one, or even valid"
+		return "IF NOT EXISTS is a name-only no-op that cannot prove the existing relation is the requested one, or even valid"
 	case CreateShapeConcurrently:
 		return "a concurrent build is refused on a table born this run"
 	case CreateShapeDuplicateName:

@@ -79,11 +79,14 @@ type Statement struct {
 	// Cause is the create path's typed shape refusal for a statement of a
 	// greenfield plan (executor.CreateShapeCause): why a table born in the
 	// run cannot carry this statement. Present exactly when the create path
-	// refused the statement by shape — Disposition is refuse and Reason is
-	// unsupported-statement on a plan whose table does not exist. Absent for
-	// every other refusal. It is the executor's own explanation, so a
-	// renderer prints Description() instead of recomputing the check.
-	// Explanatory, so it is excluded from the fingerprint.
+	// refused the statement by shape — on a diff-source plan whose table
+	// does not exist, that is every statement with Disposition refuse and
+	// Reason unsupported-statement. Absent for every other refusal,
+	// including an alter-source refusal against an absent table. Stored
+	// rather than derived because a JSON consumer has no desired schema to
+	// recompute the shape check from; it is the executor's own explanation,
+	// so a renderer prints Description() instead. Explanatory, so it is
+	// excluded from the fingerprint.
 	Cause executor.CreateShapeCause `json:"cause,omitempty"`
 	// Decisions are the planner's per-operation classifications.
 	Decisions []planner.Decision `json:"decisions"`
@@ -176,7 +179,7 @@ func RefuseUnsupportedCreateShape(report *Report, refused []error) error {
 		}
 		causes[i] = executor.CreateShapeCauseOf(err)
 		if causes[i] == "" {
-			return fmt.Errorf("refuse create shapes: planned statement %d is refused without a create-shape cause: %w", i+1, err)
+			return fmt.Errorf("%w: refuse create shapes: planned statement %d is refused without a create-shape cause: %w", executor.ErrInvariantViolation, i+1, err)
 		}
 	}
 	refuseStatements(report, verdict.ReasonUnsupportedStatement, func(i int) (bool, executor.CreateShapeCause) {
