@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -163,6 +164,43 @@ func TestDocListsEveryVocabularyValue(t *testing.T) {
 	for _, v := range values {
 		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", v),
 			"docs/plan-report.md is missing a vocabulary row for %q", v)
+	}
+}
+
+// executionModelDoc owns the create-shape cause vocabulary this contract
+// embeds; the plan report's Causes table is a copy of its rows.
+const executionModelDoc = "../../docs/execution-model.md"
+
+// causeRowMeaning returns the Meaning cell of the vocabulary-table row for
+// one create-shape cause, with the sentence-ending period the plan report's
+// table style adds stripped so the two docs compare on wording alone.
+func causeRowMeaning(t *testing.T, doc, page string, cause executor.CreateShapeCause) string {
+	t.Helper()
+	prefix := fmt.Sprintf("| `%s` | ", cause)
+	for line := range strings.SplitSeq(doc, "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		meaning := strings.TrimSuffix(strings.TrimSpace(strings.TrimPrefix(line, prefix)), "|")
+		return strings.TrimSuffix(strings.TrimSpace(meaning), ".")
+	}
+	require.Failf(t, "missing vocabulary row", "%s has no Causes table row for %q", page, cause)
+	return ""
+}
+
+// The plan report copies the execution model's cause rows rather than
+// paraphrasing them: an integrator reading either page must learn the same
+// meaning for each value, so the two tables cannot diverge.
+func TestDocCauseRowsMatchExecutionModel(t *testing.T) {
+	planDoc := readDoc(t)
+	raw, err := os.ReadFile(executionModelDoc)
+	require.NoError(t, err)
+	modelDoc := string(raw)
+	for _, cause := range executor.CreateShapeCauses() {
+		assert.Equal(t,
+			causeRowMeaning(t, modelDoc, "docs/execution-model.md", cause),
+			causeRowMeaning(t, planDoc, "docs/plan-report.md", cause),
+			"docs/plan-report.md's row for %q drifted from docs/execution-model.md", cause)
 	}
 }
 
