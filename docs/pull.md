@@ -79,6 +79,18 @@ This is the command-level form of `schemadiff.Render`'s round-trip guarantee:
 its own output as a desired file, and integration tests materialize that output
 and prove that its diff from the source model is empty.
 
+The one table that does not round-trip to zero is one carrying an invalid index
+— a concurrent build that did not finish, or is still running. `pull` renders
+the index like any other (validity is not part of a desired file), and `diff`
+then plans exactly one `create-index` change for it: the entry carries the name
+and definition but does not deliver the index, so the plan is its rebuild. A
+freshly pulled baseline that re-diffs to a lone `create-index` is therefore the
+signal that the table carries an unfinished build — nothing else makes a just-
+exported file diff to a create. Query `pg_index.indisvalid` for the table's
+indexes to confirm which entry it is, then clear an abandoned entry per the
+[invalid-index runbook](invalid-index-recovery.md) — or wait for a build still
+running to finish — before recording the baseline as verified.
+
 ## Refused table shapes
 
 Export fails closed when the declarative model cannot represent a table
