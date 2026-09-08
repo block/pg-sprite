@@ -18,14 +18,12 @@ import (
 // and a missing table is the greenfield case — the plan creates the table
 // from the full desired schema — not an error, unless the create path
 // refuses a statement's shape, in which case the leading note says so
-// instead of promising a create the refusal beneath it withdraws. causes
-// is positional with report.Statements: the create path's typed refusal
-// for a greenfield statement it refused by shape, nil elsewhere. The plan
-// report has no field for it, so the caller recomputes it
-// (greenfieldRefusalCauses) and the renderer prints it as a trailing note
-// on the refused statement — the executor's explanation, which the typed
-// reason alone does not carry.
-func writeDiffText(out io.Writer, pal palette, report plan.Report, causes []error) error {
+// instead of promising a create the refusal beneath it withdraws. A
+// greenfield statement the create path refused by shape carries the typed
+// cause on the plan, and the renderer prints its description as a trailing
+// note on the refused statement — the executor's explanation, which the
+// typed reason alone does not carry.
+func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
 	w := &stickyWriter{out: out, pal: pal}
 	if tableMissing(report) {
 		if report.Disposition == router.DispositionExecute {
@@ -44,8 +42,8 @@ func writeDiffText(out io.Writer, pal palette, report plan.Report, causes []erro
 		s, r := writeStatementDiagnostics(w, i+1, ps, "pg-sprite migrate")
 		steps += s
 		refused += r
-		if i < len(causes) && causes[i] != nil {
-			w.diag("note", "", "the create path refuses this statement: "+causes[i].Error())
+		if ps.Cause != "" {
+			w.diag("note", "", "the create path refuses this statement: "+ps.Cause.Description())
 		}
 	}
 	w.entry("plan:")

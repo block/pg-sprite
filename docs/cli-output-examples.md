@@ -80,12 +80,12 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 
 | Reason | Meaning |
 |---|---|
-| `unsupported-statement` | No safe path is known for the statement — only `ALTER TABLE` and `CREATE INDEX` reach classification — or a greenfield create plan carries a shape the create path refuses (`PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a duplicate claimed relation name). These greenfield shapes refuse in the plan and are re-checked at apply. |
+| `unsupported-statement` | No safe path is known for the statement — only `ALTER TABLE` and `CREATE INDEX` reach classification — or a greenfield create plan carries a shape the create path refuses (`PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a duplicate claimed relation name; the [plan statement's `cause`](plan-report.md#causes-cause-greenfield-create-shape-refusals-only) names which — a create-shape vocabulary distinct from the verdict's budget `cause` below). These greenfield shapes refuse in the plan and are re-checked at apply. |
 | `index-statement` | Index maintenance (`DROP INDEX`, `REINDEX`) has a native safe idiom (`CONCURRENTLY`) and is never attempted; the verdict's `safer_idiom` names it. |
 | `not-native-safe-table-too-large` | The size guard skipped the optimistic attempt: the table exceeds the configured bound and the change is not provably metadata-only. |
 | `insufficient-privileges` | The connected role lacks the access the change needs; `detail` names the exact missing GRANT (see [engine-role.md](engine-role.md)). |
 | `unsupported-partitioned-parent` | The routed plan builds an index on a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. |
-| `not-native-safe-budget-exceeded` | The optimistic attempt exceeded its lock or statement budget and was cancelled; the verdict's `cause` narrows which budget fired. |
+| `not-native-safe-budget-exceeded` | The optimistic attempt exceeded its lock or statement budget and was cancelled; the verdict's `cause` narrows which budget fired (a budget vocabulary, unrelated to the plan statement's create-shape `cause`). |
 | `not-native-safe-rewrite-required` | The submitted form blocks and must run as a safer native sequence, but none could be constructed. |
 | `backend-unavailable` | The change routes to an execution strategy this build does not implement (copy-and-swap). |
 | `destructive-change` | The desired-state plan discards live structure — a dropped column, constraint, index, or `NOT NULL` — and desired-state execution runs no destructive statement; run the drop deliberately instead ([execution model](execution-model.md)). |
@@ -107,7 +107,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 2,
+  "format_version": 3,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -148,7 +148,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 2,
+  "format_version": 3,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -219,7 +219,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 2,
+  "format_version": 3,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -256,7 +256,7 @@ implemented yet.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 2,
+  "format_version": 3,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -293,7 +293,7 @@ The refusal cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 2,
+  "format_version": 3,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -330,7 +330,7 @@ the reviewer or orchestrator to gate on; `migrate` itself does not block it.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --json
 {
-  "format_version": 2,
+  "format_version": 3,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -457,7 +457,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 2,
+  "format_version": 3,
   "source": "diff",
   "schema": "public",
   "table": "users",

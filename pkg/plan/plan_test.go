@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
@@ -171,6 +172,7 @@ func TestRefuseUnsupportedPartitionedParentWithdrawsExecutionAdvice(t *testing.T
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
 	assert.Equal(t, planner.RouteNative, r.Statements[0].Route)
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Statements[0].Reason)
+	assert.Empty(t, r.Statements[0].Cause, "a target-facts refusal carries no create-shape cause")
 	assert.Empty(t, r.Statements[0].Backend)
 	assert.Empty(t, r.Statements[0].ExecSQL)
 	assert.Empty(t, r.Statements[0].Execution)
@@ -186,17 +188,61 @@ func TestRefuseUnsupportedCreateShapeMarksPositions(t *testing.T) {
 			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE INDEX i ON app.t (id)"}, Execution: planner.ExecutionAutocommit},
 		},
 	}
-	require.NoError(t, plan.RefuseUnsupportedCreateShape(&r, []error{errors.New("refused"), nil}))
+	require.NoError(t, plan.RefuseUnsupportedCreateShape(&r, []error{
+		&executor.CreateShapeError{Cause: executor.CreateShapePartitionOf}, nil,
+	}))
 
 	assert.Equal(t, router.DispositionRefuse, r.Disposition)
 	assert.Equal(t, verdict.ReasonUnsupportedStatement, r.Reason)
 	assert.Equal(t, router.DispositionRefuse, r.Statements[0].Disposition)
 	assert.Equal(t, verdict.ReasonUnsupportedStatement, r.Statements[0].Reason)
+	assert.Equal(t, executor.CreateShapePartitionOf, r.Statements[0].Cause)
 	assert.Empty(t, r.Statements[0].Backend)
 	assert.Empty(t, r.Statements[0].ExecSQL)
 	assert.Equal(t, router.DispositionExecute, r.Statements[1].Disposition)
 	assert.Equal(t, router.BackendNative, r.Statements[1].Backend)
+	assert.Empty(t, r.Statements[1].Cause)
 	assert.NotEmpty(t, r.Statements[1].ExecSQL)
+}
+
+// The cause is read through the wrappers the executor puts around a
+// shape refusal, so a *SequenceStepError naming the failed step still
+// stamps the typed cause.
+func TestRefuseUnsupportedCreateShapeReadsWrappedCause(t *testing.T) {
+	r := plan.Report{
+		Disposition: router.DispositionExecute,
+		Statements: []plan.Statement{
+			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE TABLE app.t (id int)"}, Execution: planner.ExecutionAutocommit},
+		},
+	}
+	wrapped := fmt.Errorf("desired statement 1 of 1: %w", &executor.CreateShapeError{Cause: executor.CreateShapeIfNotExists})
+	require.NoError(t, plan.RefuseUnsupportedCreateShape(&r, []error{wrapped}))
+
+	assert.Equal(t, executor.CreateShapeIfNotExists, r.Statements[0].Cause)
+}
+
+// A refusal the cause vocabulary does not name would leave the report with
+// a refusal it cannot explain; the mutator fails closed and marks nothing.
+func TestRefuseUnsupportedCreateShapeRejectsRefusalWithoutCause(t *testing.T) {
+	r := plan.Report{
+		Disposition: router.DispositionExecute,
+		Statements: []plan.Statement{
+			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE TABLE app.t (id int)"}, Execution: planner.ExecutionAutocommit},
+			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE INDEX i ON app.t (id)"}, Execution: planner.ExecutionAutocommit},
+		},
+	}
+	err := plan.RefuseUnsupportedCreateShape(&r, []error{
+		&executor.CreateShapeError{Cause: executor.CreateShapePartitionOf}, errors.New("refused"),
+	})
+
+	require.ErrorIs(t, err, executor.ErrInvariantViolation,
+		"a refusal the cause vocabulary cannot name fails closed as an invariant violation")
+	assert.Equal(t, router.DispositionExecute, r.Disposition)
+	for i := range r.Statements {
+		assert.Equal(t, router.DispositionExecute, r.Statements[i].Disposition, "statement %d", i+1)
+		assert.Empty(t, r.Statements[i].Cause, "statement %d", i+1)
+		assert.NotEmpty(t, r.Statements[i].ExecSQL, "statement %d", i+1)
+	}
 }
 
 func TestRefuseUnsupportedCreateShapePreservesExistingStatementReason(t *testing.T) {
@@ -211,11 +257,14 @@ func TestRefuseUnsupportedCreateShapePreservesExistingStatementReason(t *testing
 			Execution:   planner.ExecutionAutocommit,
 		}},
 	}
-	require.NoError(t, plan.RefuseUnsupportedCreateShape(&r, []error{errors.New("refused")}))
+	require.NoError(t, plan.RefuseUnsupportedCreateShape(&r, []error{
+		&executor.CreateShapeError{Cause: executor.CreateShapePartitionOf},
+	}))
 
 	assert.Equal(t, router.DispositionRefuse, r.Disposition)
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Statements[0].Reason)
+	assert.Empty(t, r.Statements[0].Cause, "the cause belongs to the reason it explains; the earlier refusal keeps both")
 	assert.Empty(t, r.Statements[0].Backend)
 	assert.Empty(t, r.Statements[0].ExecSQL)
 	assert.Empty(t, r.Statements[0].Execution)
@@ -232,7 +281,9 @@ func TestRefuseUnsupportedCreateShapeRejectsLengthMismatch(t *testing.T) {
 			{Backend: router.BackendNative, Disposition: router.DispositionExecute, ExecSQL: []string{"CREATE INDEX i ON app.t (id)"}, Execution: planner.ExecutionAutocommit},
 		},
 	}
-	err := plan.RefuseUnsupportedCreateShape(&r, []error{errors.New("refused")})
+	err := plan.RefuseUnsupportedCreateShape(&r, []error{
+		&executor.CreateShapeError{Cause: executor.CreateShapePartitionOf},
+	})
 
 	require.Error(t, err)
 	assert.Equal(t, router.DispositionExecute, r.Disposition)
@@ -349,7 +400,7 @@ func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 2 against this test.
+// omissions. A consumer pins format_version 3 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -405,7 +456,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 2,
+		"format_version": 3,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -463,12 +514,38 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 2,
+		"format_version": 3,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
 		"statements": []
 	}`, string(raw))
+}
+
+// The statement-level cause is emitted only when a greenfield create-shape
+// refusal set it; every other statement omits the key rather than
+// serializing an empty string.
+func TestStatementJSONCauseIsOptional(t *testing.T) {
+	refused := plan.Statement{
+		SQL:         "CREATE TABLE app.t PARTITION OF app.parent FOR VALUES IN (1)",
+		Route:       planner.RouteRefuse,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement,
+		Cause:       executor.CreateShapePartitionOf,
+	}
+	raw, err := json.Marshal(refused)
+	require.NoError(t, err)
+	assert.Contains(t, string(raw), `"cause":"partition-of"`)
+
+	plain := plan.Statement{
+		SQL:         "CREATE TABLE app.t (id int)",
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+	}
+	raw, err = json.Marshal(plain)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), `"cause"`)
 }
 
 // The fingerprint serialization is a pinned contract: a fixed statement
@@ -500,8 +577,10 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 	explained.Kind = schemadiff.ChangeAddColumn
 	explained.Decisions = []planner.Decision{{Operation: "ADD COLUMN c", Route: planner.RouteNative}}
 	explained.Guidance = suggest.GuidanceSplitStatement
+	explained.Reason = verdict.ReasonUnsupportedStatement
+	explained.Cause = executor.CreateShapePartitionOf
 	assert.Equal(t, base, plan.Fingerprint([]plan.Statement{explained, b}),
-		"decisions, kind, destructive, and guidance are explanatory: identity unchanged")
+		"decisions, kind, destructive, guidance, reason, and cause are explanatory: identity unchanged")
 
 	assert.NotEqual(t, base, plan.Fingerprint([]plan.Statement{b, a}),
 		"statement order is part of identity")
@@ -519,7 +598,7 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 }
 
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 2.
+// pinned to format_version 3.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }

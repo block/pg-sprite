@@ -47,6 +47,9 @@ func TestCreateShapeRefusals(t *testing.T) {
 					continue
 				}
 				assert.ErrorIs(t, refusals[i], tc.want[i], "statement %d", i+1)
+				// Every refusal names its cause: the plan report stamps it on
+				// the statement and fails closed on a refusal it cannot name.
+				assert.NotEmpty(t, executor.CreateShapeCauseOf(refusals[i]), "statement %d", i+1)
 			}
 		})
 	}
