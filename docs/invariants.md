@@ -20,7 +20,6 @@ several of these unrepresentable, and the in-TCB engineering rules live in
 ## Table of contents
 
 - [Correctness (CO)](#correctness-co)
-  - [CO-8 — A TOAST-omitted column is never overwritten](#co-8--a-toast-omitted-column-is-never-overwritten)
 - [Locking and concurrency (LK)](#locking-and-concurrency-lk)
 - [State, checkpoint, and resume (ST)](#state-checkpoint-and-resume-st)
 - [Refusals and preflight (RF)](#refusals-and-preflight-rf)
@@ -95,10 +94,14 @@ transiently-deleted row converges because its own event re-inserts it (the buffe
 guarantee, CO-5). PostgreSQL has no REPLACE: `INSERT … ON CONFLICT (pk) DO UPDATE` targets
 **one** conflict arbiter, so a batch that legally moves a unique value between rows (set
 `slot_id` NULL on row 1, then `'S'` on row 2, in one source transaction) can **error** on the
-secondary unique index instead of converging. The applier must define semantics for this —
-order-preserving apply within the batch, per-row retry on unique violation, or delete-then-insert
-pairs — and prove convergence under test. The checksum (CO-1) backstops, but the applier must
-converge without it. *Enforced:* applier batch semantics (design work, Phase 6). *Source:* Spirit
+secondary unique index instead of converging. The decided semantics
+([copy-and-swap D13](copy-and-swap-design.md#d13--recover-unique-secondary-key-moves-batch-wide))
+are key-targeted upserts, and on `23505` a savepoint rollback and batch-wide
+delete-all-then-insert-all; per-key delete-then-insert retry is rejected because a cyclic
+exchange collides in both orders. Convergence must still be proved under test. *Test obligation:*
+`seats(id int PRIMARY KEY, slot text UNIQUE)` holding `(1,'A'),(2,'B')`, flushed with the batch
+`{1→'B', 2→'A'}`, converges in one flush. The checksum (CO-1) backstops, but the applier must
+converge without it. *Enforced:* applier batch semantics (Phase 6). *Source:* Spirit
 `pkg/change/README.md` (the REPLACE rationale) — the PG translation in
 [mysql-vs-postgresql](mysql-vs-postgresql.md#copy-and-swap-executor-spirit-mysql--postgresql-primitive-mapping)
 is incomplete without this.
@@ -116,15 +119,17 @@ requirement, rewritten for our parser); carried in the repo's [AGENTS.md](../AGE
 
 ### CO-8 — A TOAST-omitted column is never overwritten
 
-An UPDATE decoded from pgoutput must change only columns present in its tuple. With PK-based
-`REPLICA IDENTITY DEFAULT`, pgoutput can omit an unchanged TOASTed value from the new tuple;
-absence means "leave the stored value unchanged", not NULL or an empty value. A full-row upsert
-that invents a value for that absent column would overwrite live shadow data and silently break
-convergence. *Enforced:* `pkg/applier` column-wise UPDATE construction from `ChangeEvent`'s
-per-column presence. *Source:*
-[copy-and-swap D6](copy-and-swap-design.md#d6--preserve-omitted-toast-values). *Test obligation:*
-a convergence test updates other columns while leaving a ≥8 KiB column untouched, using the load
-generator's TOAST-unchanged update profile.
+An UPDATE decoded from pgoutput must change only columns whose new-tuple field carries a value.
+Under either PK-based replica identity (`DEFAULT` or `FULL`), pgoutput sends an unchanged TOASTed
+value in the new tuple as the unchanged-TOAST marker (type byte `u`) — the column is present, the
+column count is the full count, and there is no value; the marker means "leave the stored value
+unchanged", not NULL or an empty value. A full-row upsert that invents a value for that column
+would overwrite live shadow data and silently break convergence. *Enforced:* `pkg/decode`
+per-column presence on `ChangeEvent`, `pkg/applier` column-wise UPDATE construction from it.
+*Source:* [copy-and-swap D6](copy-and-swap-design.md#d6--preserve-omitted-toast-values).
+*Test obligation:* a convergence test updates other columns while leaving a ≥8 KiB column
+untouched, using the load generator's TOAST-unchanged update profile, run under both
+`REPLICA IDENTITY DEFAULT` and `FULL`.
 
 ## Locking and concurrency (LK)
 
@@ -226,7 +231,7 @@ every `CONCURRENTLY` index command; [invalid-index-recovery](invalid-index-recov
 The checkpoint table keeps **one row per `(schema, table)`** (upsert on that key) so a crash can
 never leave a partial pair for one target — its record is either the old or the new one.
 Unbounded append-style checkpoint history is not used. *Planned enforcement (Phase 8):*
-`pkg/checkpoint` write path (`INSERT … ON CONFLICT (schema, table) DO UPDATE`, the REPLACE
+`pkg/checkpoint` write path (`INSERT … ON CONFLICT (schema_name, table_name) DO UPDATE`, the REPLACE
 analog). *Source:* Spirit `pkg/checkpoint` (single-row REPLACE on `id=1`), scoped per target by
 [copy-and-swap D3](copy-and-swap-design.md#d3--store-checkpoints-in-the-target-database).
 
@@ -289,7 +294,9 @@ never reach the database through the executor (pgx's simple protocol would happi
 it). *Enforced:* `pkg/executor` (`ExecuteNative`; `RunSequence` admission re-proves every step's
 target against the preflight proof before the first step executes; `ExecuteCreate` re-proves
 every desired statement's target against the absence proof the same way), `pkg/statement`
-(proof construction).
+(proof construction). *Planned enforcement:* the `pkg/schemachange` shadow builder re-proves the
+retargeted statement against the gated one with the shadow as the sole permitted target
+([copy-and-swap D1](copy-and-swap-design.md#d1--no-durable-scratch-database)).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof

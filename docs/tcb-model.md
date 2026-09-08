@@ -39,7 +39,7 @@ or a missed optimization, it is periphery.
 | Component | TCB? | Invariants it enforces |
 | --- | --- | --- |
 | checksum engine (incl. continuous checker, repair) | ✅ | CO-1, CO-2, CO-3 |
-| copier + applier write paths (chunk SQL, flush scheduling, change buffer) | ✅ | CO-4, CO-5, CO-6, LK-3 |
+| copier + applier write paths (chunk SQL, flush scheduling, change buffer, column-wise UPDATE) | ✅ | CO-4, CO-5, CO-6, CO-8, LK-3 |
 | decode position accounting (slot LSN, snapshot coordination) | ✅ | ST-4, CO-4 |
 | cutover (swap txn, final drain, fidelity gate, ambiguity resolution) | ✅ | LK-2, LK-4, ST-5 |
 | checkpoint store (write/read/validate) | ✅ | ST-1, ST-2 |
@@ -91,6 +91,7 @@ to obtain the type is through the function that validates it.
 | --- | --- | --- | --- |
 | `string` (user SQL) | `statement.ParseOne` / `statement.ParseOps`, then `planner.Classify` | `planner.Plan` / `planner.Decision` | CO-7 — classification consumes parsed operation descriptors |
 | table name | preflight | `PreflightedTable` (carries the proven facts: PK, no FKs/views, replica identity, headroom) | ST-6, RF-* |
+| table name (copy-and-swap target) | preflight (planned) | `CopySwapTarget` — the copy-and-swap route's proof: `PreflightedTable`'s facts plus the [v1 scope](copy-and-swap-design.md#v1-scope) checks (integer-family PK, PK-based replica identity, no OID-bound dependents, derived names within `NAMEDATALEN`, logical decoding and slot/disk headroom); the shadow builder will accept **only** this type | ST-6, RF-1..RF-3 for the copy-and-swap route |
 | table name (create target) | `preflight.CheckTableAbsent` | `AbsentTarget` (carries the resolved creation schema and the verified-free name; time-of-check — minted inside the apply session, never carried across a plan boundary, and re-verified at use the way ST-7 re-verifies `PreflightedTable`) | ST-6 for the create path |
 | creating role's access (create target) | `preflight.CheckCreatePrivileges` | `CreationRole` (carries the connected role and the resolved creation schema whose CONNECT / USAGE / CREATE grants were verified; time-of-check and session-scoped, like `AbsentTarget` — a revoked grant after minting fails with the server's own error) | ST-6 for the create path |
 | shadow table | full checksum pass (planned) | `VerifiedShadow` — its constructor will be private to `pkg/checksum`; the planned `cutover.Swap` will accept **only** this type | CO-1 in the type system |

@@ -31,7 +31,8 @@ the phased build plan should be traceable back to one of these.
   lifecycle, the gates, the refusals), not its directory structure — the code follows whatever
   is idiomatic for a Postgres + logical-decoding tool.
 - **Operator mental-model parity with Spirit.** Teams that already operate Spirit for MySQL carry its operator model. This engine deliberately mirrors Spirit's *operator surface* — the same lifecycle
-  stages, the same verbs (dry-run, defer-cutover, pause/resume, throttle, abort), the same
+  stages, the same verbs (dry-run, pause/resume, throttle, abort; deferred cutover is a later
+  mode), the same
   refusal semantics, and the same status/observability shape — so an operator carries **one
   mental model across both engines**. Runbooks, incident response, and intuition transfer; the
   PostgreSQL-specific machinery (logical slots, `CONCURRENTLY`, `NOT VALID`) is encoded by the
@@ -145,8 +146,8 @@ the phased build plan should be traceable back to one of these.
 - **Checksums must be deterministic across PostgreSQL quirks.** TOAST (including the
   unchanged-TOAST-on-UPDATE case), `STORED` generated columns, and non-deterministic
   collations must produce identical checksums on source and shadow, or the gate is meaningless.
-- **Be Aurora-aware, not Aurora-only.** Throttle on Aurora reader lag, replication-slot lag,
-  and WAL generation; use the RDS/Aurora CA bundle and the writer/reader split — while the
+- **Be Aurora-aware, not Aurora-only.** Throttle on chunk time and replication-slot lag (reader
+  lag is a deferred mode); use the RDS/Aurora CA bundle and the writer/reader split — while the
   core remains plain-PostgreSQL correct.
 
 ## Code and dependency maxims

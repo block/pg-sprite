@@ -18,11 +18,11 @@ The invariant registry (invariant IDs referenced below) lives in
 | Package | Core? | Status | Invariants enforced |
 | --- | --- | --- | --- |
 | `pkg/dbconn` — pool defaults, terminate-blockers, retries, RDS TLS; advisory table lock planned | ✅ core | exists; advisory table lock planned | LK-2 primitives; LK-1 planned |
-| `pkg/preflight` — precondition verifier, refusals | ✅ core | exists (Phase 1: table-size guard); grows through Phase 2 | ST-6, RF-1..RF-5 |
+| `pkg/preflight` — precondition verifier, refusals; the copy-and-swap route's `CopySwapTarget` proof is planned | ✅ core | exists (Phase 1: table-size guard); grows through Phase 2 | ST-6, RF-1..RF-5 |
 | `pkg/executor` — bounded optimistic attempt; native concurrent index build with invalid-index recovery; native sequence executor for the safer idioms | ✅ core | exists (Phase 1: attempt-under-budget; Phase 3.1: concurrent index build; Phase 3.2: sequence executor) | LK-2 (attempt bound + the CONCURRENTLY wait-policy exception) |
 | `pkg/checksum` — chunk verifier, continuous checker, repair | ✅ core | planned (Phase 5) | CO-1, CO-2, CO-3 |
 | `pkg/copier` — shadow-table chunked copy | ✅ core | planned (Phase 4) | CO-4, LK-3 |
-| `pkg/applier` — change apply, buffer, flush scheduling | ✅ core | planned (Phase 6) | CO-4, CO-5, CO-6, LK-3 |
+| `pkg/applier` — change apply, buffer, flush scheduling | ✅ core | planned (Phase 6) | CO-4, CO-5, CO-6, CO-8, LK-3 |
 | `pkg/decode` — logical decoding, LSN/position accounting | ✅ core | planned (Phase 6) | ST-4, CO-4 |
 | `pkg/checkpoint` — durable resume state | ✅ core | planned (Phase 8) | ST-1, ST-2 |
 | slot lifecycle (in `pkg/decode`) — create, reap, lag ceiling | ✅ core | planned (Phase 8) | ST-3 |
@@ -69,7 +69,7 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
 - **Domain types make illegal states unrepresentable.** Validating passages return proof types
   with package-private constructors (today `preflight.PreflightedTable`,
   `preflight.AbsentTarget`, and `preflight.CreationRole`; later phases add
-  `VerifiedShadow`, `CleanWatermark`, and `TableLock`); dangerous APIs accept only proof types —
+  `CopySwapTarget`, `VerifiedShadow`, `CleanWatermark`, and `TableLock`); dangerous APIs accept only proof types —
   e.g. the planned cutover swap will accept only a `VerifiedShadow`.
 - **Put a limit on everything.** Every loop bounded, every queue bounded, every retry counted,
   every wait deadlined. An unbounded anything in a core package is a review-blocking defect.

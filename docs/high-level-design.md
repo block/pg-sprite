@@ -301,8 +301,9 @@ a high level, v1 targets:
 - **Schema shape:** a single table that **has a primary key**, **no foreign keys or triggers on
   it**, **no PK change**, and **no lossy conversion** — intentionally close to Spirit's supported
   surface.
-- **Capture:** logical decoding where logical replication is enabled; a trigger-based fallback
-  otherwise (which inherits the overheads of pg_osc-style tools).
+- **Capture:** logical decoding; a cluster without logical replication receives a typed refusal
+  in v1, and trigger-based capture (which inherits the overheads of pg_osc-style tools) stays a
+  documented, deferred alternative.
 
 The full deployment/precondition/schema matrices, the per-constraint *reasons*, and the
 Postgres-specific preconditions (logical replication, slot/role privileges, unchanged-TOAST

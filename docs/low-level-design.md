@@ -113,7 +113,7 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
         │                            │
    ┌────┴────────────────────────────┴──── cross-cutting ──────────────────────┐
    │  pkg/dbconn   pgx pool · TLS/RDS CA · pg_terminate_backend · retries      │
-   │  pkg/throttler   Aurora reader lag · replication-slot lag · WAL gen       │ planned
+   │  pkg/throttler   chunk-time target · slot-lag ceiling (replica lag later) │ planned
    └────┬──────────────────────────────────────────────────────────────────────┘
         │
    ╭────▼─────────────────────────── PostgreSQL ───────────────────────────────╮
