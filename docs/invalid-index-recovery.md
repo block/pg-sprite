@@ -67,7 +67,7 @@ recovery with the same statement sweeps it.
 
 `(*InvalidIndexError).Recoverable()` is the programmatic form of the third column.
 
-## The automatic recovery: `RebuildAbandonedIndex`
+## The automatic recovery: `RebuildAbandonedIndex` and `DropAbandonedIndex`
 
 `executor.RebuildAbandonedIndex` takes exactly the statement `BuildIndexConcurrently`
 takes, under the same budget, and is the recovery the recoverable states name. It needs a
@@ -76,6 +76,11 @@ across the build's own two) and refuses a smaller one with `ErrPoolTooSmall` ins
 waiting on the pool. It is safe because the removal is **proven, not named** — PostgreSQL
 drops by name, and a name alone can never prove which entry it will hit
 ([LK-5](invariants.md#lk-5--an-index-is-dropped-only-by-proven-identity-under-the-lock-that-excludes-its-builder)):
+
+`executor.DropAbandonedIndex` takes the same statement and budget and performs the same
+proof, quarantine, and drop, but stops before the build. Its report therefore leaves
+`Build` zero and it needs two pool connections rather than three. This is useful when a
+caller is cleaning up a cancelled apply and must not resume the requested schema change.
 
 1. Under a bounded `SHARE UPDATE EXCLUSIVE` lock on the target table — the lock every
    concurrent index command (`CREATE`, `DROP`, `REINDEX ... CONCURRENTLY`) holds for its
