@@ -57,36 +57,103 @@ func Diff(ctx context.Context, pool *pgxpool.Pool, source, shadow RelationRef, o
 			return Report{}, fmt.Errorf("source %s.%s lacks shadow column %s", source.Schema, source.Table, c.Name)
 		}
 	}
+	key, err := primaryKeyColumn(ctx, pool, shadow)
+	if err != nil {
+		return Report{}, err
+	}
+	if !containsColumn(columns, key) {
+		return Report{}, fmt.Errorf("shadow %s.%s primary key %s cannot be ignored", shadow.Schema, shadow.Table, key)
+	}
 	var report Report
 	if err = pool.QueryRow(ctx, `SELECT (SELECT count(*) FROM `+qualified(source)+`), (SELECT count(*) FROM `+qualified(shadow)+`)`).Scan(&report.SourceCount, &report.ShadowCount); err != nil {
 		return Report{}, fmt.Errorf("count convergence relations: %w", err)
 	}
+	// The source side casts every column to the shadow's type so a widened
+	// or narrowed column compares by value, not by representation.
 	selectSource, selectShadow := make([]string, 0, len(columns)), make([]string, 0, len(columns))
 	for _, c := range columns {
 		id := pgx.Identifier{c.Name}.Sanitize()
 		selectSource = append(selectSource, id+`::`+c.Type)
 		selectShadow = append(selectShadow, id)
 	}
-	for _, direction := range []struct{ name, left, right string }{{"source-minus-shadow", strings.Join(selectSource, ","), strings.Join(selectShadow, ",")}, {"shadow-minus-source", strings.Join(selectShadow, ","), strings.Join(selectSource, ",")}} {
-		leftRel, rightRel := source, shadow
-		if direction.name == "shadow-minus-source" {
-			leftRel, rightRel = shadow, source
-		}
-		q := `SELECT id FROM (SELECT ` + direction.left + ` FROM ` + qualified(leftRel) + ` EXCEPT ALL SELECT ` + direction.right + ` FROM ` + qualified(rightRel) + `) d ORDER BY id LIMIT 20`
-		rows, e := pool.Query(ctx, q)
-		if e != nil {
-			return Report{}, fmt.Errorf("query %s difference: %w", direction.name, e)
-		}
-		keys, e := pgx.CollectRows(rows, pgx.RowTo[int64])
-		if e != nil {
-			return Report{}, fmt.Errorf("read %s difference: %w", direction.name, e)
+	sourceSide := relationSide{rel: source, columns: strings.Join(selectSource, ",")}
+	shadowSide := relationSide{rel: shadow, columns: strings.Join(selectShadow, ",")}
+	directions := []struct {
+		name        string
+		left, right relationSide
+	}{
+		{"source-minus-shadow", sourceSide, shadowSide},
+		{"shadow-minus-source", shadowSide, sourceSide},
+	}
+	for _, d := range directions {
+		keys, err := missingKeys(ctx, pool, d.left, d.right, key)
+		if err != nil {
+			return Report{}, fmt.Errorf("%s difference: %w", d.name, err)
 		}
 		if len(keys) > 0 {
-			report.Differences = append(report.Differences, DirectionDiff{Direction: direction.name, Keys: keys})
+			report.Differences = append(report.Differences, DirectionDiff{Direction: d.name, Keys: keys})
 		}
 	}
 	return report, nil
 }
+
+// relationSide is one operand of an EXCEPT: the relation and its projected,
+// already-cast column list.
+type relationSide struct {
+	rel     RelationRef
+	columns string
+}
+
+// missingKeys returns up to the first differenceLimit primary keys of rows
+// present in left but absent from right (EXCEPT ALL, so duplicate rows
+// count).
+func missingKeys(ctx context.Context, pool *pgxpool.Pool, left, right relationSide, key string) ([]int64, error) {
+	keyID := pgx.Identifier{key}.Sanitize()
+	q := `SELECT ` + keyID + ` FROM (SELECT ` + left.columns + ` FROM ` + qualified(left.rel) +
+		` EXCEPT ALL SELECT ` + right.columns + ` FROM ` + qualified(right.rel) +
+		`) d ORDER BY ` + keyID + ` LIMIT ` + fmt.Sprint(differenceLimit)
+	rows, err := pool.Query(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("query: %w", err)
+	}
+	keys, err := pgx.CollectRows(rows, pgx.RowTo[int64])
+	if err != nil {
+		return nil, fmt.Errorf("read: %w", err)
+	}
+	return keys, nil
+}
+
+// differenceLimit bounds how many differing keys one direction reports; a
+// diverged table is diagnosed from its first rows, not enumerated.
+const differenceLimit = 20
+
+func containsColumn(columns []compareColumn, name string) bool {
+	for _, c := range columns {
+		if c.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// primaryKeyColumn returns the shadow's single primary-key column, the key
+// the report names differing rows by. The copy path supports only
+// single-column integer keys, so a composite key is an error here too.
+func primaryKeyColumn(ctx context.Context, pool *pgxpool.Pool, r RelationRef) (string, error) {
+	rows, err := pool.Query(ctx, `SELECT a.attname FROM pg_index i JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY (i.indkey) WHERE i.indrelid = $1::regclass AND i.indisprimary ORDER BY a.attnum`, qualified(r))
+	if err != nil {
+		return "", fmt.Errorf("introspect %s.%s primary key: %w", r.Schema, r.Table, err)
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return "", fmt.Errorf("read %s.%s primary key: %w", r.Schema, r.Table, err)
+	}
+	if len(names) != 1 {
+		return "", fmt.Errorf("%s.%s must have a single-column primary key, found %d key columns", r.Schema, r.Table, len(names))
+	}
+	return names[0], nil
+}
+
 func qualified(r RelationRef) string { return pgx.Identifier{r.Schema, r.Table}.Sanitize() }
 func relationColumnNames(ctx context.Context, pool *pgxpool.Pool, r RelationRef) (map[string]bool, error) {
 	rows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2`, r.Schema, r.Table)

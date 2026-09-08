@@ -16,6 +16,6 @@ func TestNewChunk(t *testing.T) {
 }
 
 func TestWatermarkStates(t *testing.T) {
-	assert.Equal(t, Watermark{}, Watermark{})
+	assert.False(t, Watermark{}.Valid, "the zero watermark means nothing has been copied")
 	assert.Equal(t, Watermark{Value: 0, Valid: true}, NewWatermark(0))
 }

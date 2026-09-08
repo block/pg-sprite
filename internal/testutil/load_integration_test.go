@@ -16,6 +16,9 @@ func TestLoadGenerator(t *testing.T) {
 	t.Cleanup(pool.Close)
 	table := NewWorkloadTable(t, pool)
 	require.NoError(t, table.SeedRows(t.Context(), 200))
+	toastBytes, err := table.ToastBytes(t.Context())
+	require.NoError(t, err)
+	assert.Positive(t, toastBytes, "blob values must be stored out of line for the unchanged-TOAST update profile to mean anything")
 	generator := StartLoad(t, pool, table, LoadSpec{
 		Seed: 42, Workers: 4, RatePerSecond: 80,
 		Mix:            Mix{Insert: 1, Update: 1, Delete: 1, UniqueMove: 1},
