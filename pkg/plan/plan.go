@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"hash"
 
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -22,8 +23,9 @@ import (
 // FormatVersion identifies the report contract. A consumer must reject a
 // report whose version it does not understand instead of guessing at the
 // field semantics. Version 2 added the guidance field on rewrite-required
-// statements.
-const FormatVersion = 2
+// statements. Version 3 added the cause field on greenfield statements the
+// create path refuses by shape.
+const FormatVersion = 3
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -74,6 +76,18 @@ type Statement struct {
 	Disposition router.Disposition `json:"disposition"`
 	// Reason is the typed cause when target facts refuse this statement.
 	Reason verdict.Reason `json:"reason,omitempty"`
+	// Cause is the create path's typed shape refusal for a statement of a
+	// greenfield plan (executor.CreateShapeCause): why a table born in the
+	// run cannot carry this statement. Present exactly when the create path
+	// refused the statement by shape — on a diff-source plan whose table
+	// does not exist, that is every statement with Disposition refuse and
+	// Reason unsupported-statement. Absent for every other refusal,
+	// including an alter-source refusal against an absent table. Stored
+	// rather than derived because a JSON consumer has no desired schema to
+	// recompute the shape check from; it is the executor's own explanation,
+	// so a renderer prints Description() instead. Explanatory, so it is
+	// excluded from the fingerprint.
+	Cause executor.CreateShapeCause `json:"cause,omitempty"`
 	// Decisions are the planner's per-operation classifications.
 	Decisions []planner.Decision `json:"decisions"`
 	// ExecSQL is the ordered SQL the native backend would run — the safer
@@ -140,39 +154,53 @@ type Report struct {
 // RefuseUnsupportedPartitionedParent marks executable statements as refused
 // when partition-aware admission rejects their execution steps.
 func RefuseUnsupportedPartitionedParent(report *Report, refused []bool) {
-	refuseStatements(report, verdict.ReasonUnsupportedPartitionedParent, func(i int) bool {
-		return i < len(refused) && refused[i]
+	refuseStatements(report, verdict.ReasonUnsupportedPartitionedParent, func(i int) (bool, executor.CreateShapeCause) {
+		return i < len(refused) && refused[i], ""
 	})
 }
 
 // RefuseUnsupportedCreateShape marks the create-path statements whose
-// connection-free shape checks refuse them. refused is positional over
-// report.Statements — one entry per planned statement, nil where the
-// statement is admitted. The report carries no field for the cause; callers
-// that need the typed refusal keep the slice (executor.CreateShapeRefusals
-// is pure, so it can also be recomputed from the desired schema). A length
+// connection-free shape checks refuse them and stamps each one with the
+// executor's typed cause. refused is positional over report.Statements — one
+// entry per planned statement, nil where the statement is admitted. A length
 // mismatch means the two sides no longer agree on what the plan contains,
-// so no positional marking is safe and the report is left untouched.
+// so no positional marking is safe and the report is left untouched. A
+// refusal the cause vocabulary does not name is a contract violation: the
+// report would carry a refusal it cannot explain, so it fails closed before
+// any statement is marked.
 func RefuseUnsupportedCreateShape(report *Report, refused []error) error {
 	if len(refused) != len(report.Statements) {
 		return fmt.Errorf("refuse create shapes: %d refusals for %d planned statements", len(refused), len(report.Statements))
 	}
-	refuseStatements(report, verdict.ReasonUnsupportedStatement, func(i int) bool {
-		return refused[i] != nil
+	causes := make([]executor.CreateShapeCause, len(refused))
+	for i, err := range refused {
+		if err == nil {
+			continue
+		}
+		causes[i] = executor.CreateShapeCauseOf(err)
+		if causes[i] == "" {
+			return fmt.Errorf("%w: refuse create shapes: planned statement %d is refused without a create-shape cause: %w", executor.ErrInvariantViolation, i+1, err)
+		}
+	}
+	refuseStatements(report, verdict.ReasonUnsupportedStatement, func(i int) (bool, executor.CreateShapeCause) {
+		return refused[i] != nil, causes[i]
 	})
 	return nil
 }
 
 // refuseStatements withdraws every piece of execution advice from each
 // statement the predicate selects and, when any statement was refused, stamps
-// the reason on the report. An already-refused statement or report keeps its
-// reason: the first refusal wins because an earlier mutator saw the more
+// the reason on the report. The predicate also names the create path's cause
+// for the statement, empty when the refusal is not the create path's. An
+// already-refused statement or report keeps its reason, and with it its
+// cause: the first refusal wins because an earlier mutator saw the more
 // specific cause. Every refusal mutator goes through here, so a field added
 // later is withdrawn in one place.
-func refuseStatements(report *Report, reason verdict.Reason, refused func(i int) bool) {
+func refuseStatements(report *Report, reason verdict.Reason, refused func(i int) (bool, executor.CreateShapeCause)) {
 	any := false
 	for i := range report.Statements {
-		if !refused(i) {
+		selected, cause := refused(i)
+		if !selected {
 			continue
 		}
 		any = true
@@ -182,6 +210,7 @@ func refuseStatements(report *Report, reason verdict.Reason, refused func(i int)
 		st.Disposition = router.DispositionRefuse
 		if !alreadyRefused {
 			st.Reason = reason
+			st.Cause = cause
 		}
 		st.ExecSQL = nil
 		st.Execution = ""
@@ -323,8 +352,9 @@ func rewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 // Fingerprint computes the plan's stable identity: "sha256:" plus the hex
 // digest over what would execute — each statement's canonical SQL, route,
 // backend, disposition, and exec_sql, in plan order. Explanatory fields
-// (decisions, kind, destructive) are excluded, so a reworded reason does
-// not change identity but a rerouted or resequenced plan does. The exact
+// (decisions, kind, destructive, reason, cause, guidance) are excluded, so
+// a reworded reason does not change identity but a rerouted or resequenced
+// plan does. The exact
 // serialization is part of the contract (docs/plan-report.md) and changes
 // only with a format_version bump. This is a plan identity, not a schema
 // fingerprint: it never participates in schema-state comparison.

@@ -201,7 +201,7 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
 		assert.Equal(t, router.DispositionRefuse, res.Plan.Disposition,
 			"the refusal is decided on the plan, before the create path is entered")
-		assert.Contains(t, res.Detail, "is refused by the create path: "+executor.ErrPartitionOfUnsupported.Error(),
+		assert.Contains(t, res.Detail, "is refused by the create path: "+executor.CreateShapePartitionOf.Description(),
 			"the detail carries the create path's typed cause, not the echoed SQL alone")
 		assert.Empty(t, res.Verdicts, "nothing was attempted")
 
@@ -215,7 +215,7 @@ CREATE INDEX t_v_idx ON t (v);`
 	t.Run("refuses a desired set that claims one name twice before anything runs", func(t *testing.T) {
 		// The plan SQL says nothing about why statement 2 is refused — the
 		// cause is the collision with the implicit primary-key index name,
-		// and the detail must name it.
+		// and the detail carries the create path's typed cause for it.
 		schema := testutil.NewSchema(t, pool)
 
 		res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
@@ -226,7 +226,7 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
 		assert.Equal(t, verdict.ReasonUnsupportedStatement, res.Reason)
 		assert.Contains(t, res.Detail, "planned statement 2 (")
-		assert.Contains(t, res.Detail, executor.ErrDuplicateCreateName.Error()+`: "t_pkey"`)
+		assert.Contains(t, res.Detail, "is refused by the create path: "+executor.CreateShapeDuplicateName.Description())
 		assert.Empty(t, res.Verdicts, "nothing was attempted")
 
 		var exists bool

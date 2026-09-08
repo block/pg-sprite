@@ -11,6 +11,7 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
@@ -246,10 +247,11 @@ func TestPlanMissingTableRefusesCreateShapes(t *testing.T) {
 		name    string
 		sql     string
 		refused []int
+		cause   executor.CreateShapeCause
 	}{
-		{name: "partition of", sql: "CREATE TABLE child PARTITION OF parent FOR VALUES FROM (1) TO (2)", refused: []int{0}},
-		{name: "if not exists", sql: "CREATE TABLE IF NOT EXISTS t_if (id int)", refused: []int{0}},
-		{name: "duplicate implicit index", sql: "CREATE TABLE t_dup (id int PRIMARY KEY); CREATE INDEX t_dup_pkey ON t_dup (id)", refused: []int{1}},
+		{name: "partition of", sql: "CREATE TABLE child PARTITION OF parent FOR VALUES FROM (1) TO (2)", refused: []int{0}, cause: executor.CreateShapePartitionOf},
+		{name: "if not exists", sql: "CREATE TABLE IF NOT EXISTS t_if (id int)", refused: []int{0}, cause: executor.CreateShapeIfNotExists},
+		{name: "duplicate implicit index", sql: "CREATE TABLE t_dup (id int PRIMARY KEY); CREATE INDEX t_dup_pkey ON t_dup (id)", refused: []int{1}, cause: executor.CreateShapeDuplicateName},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -259,11 +261,14 @@ func TestPlanMissingTableRefusesCreateShapes(t *testing.T) {
 			assert.Equal(t, verdict.ReasonUnsupportedStatement, report.Reason)
 			for i, st := range report.Statements {
 				want := router.DispositionExecute
+				var wantCause executor.CreateShapeCause
 				if slices.Contains(tc.refused, i) {
 					want = router.DispositionRefuse
+					wantCause = tc.cause
 					assert.Equal(t, verdict.ReasonUnsupportedStatement, st.Reason)
 				}
 				assert.Equal(t, want, st.Disposition, "statement %d", i+1)
+				assert.Equal(t, wantCause, st.Cause, "statement %d carries the create path's cause exactly when it refused it", i+1)
 			}
 		})
 	}

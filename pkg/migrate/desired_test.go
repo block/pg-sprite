@@ -13,7 +13,6 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
-	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -40,19 +39,38 @@ func TestRunDesiredRejectsForce(t *testing.T) {
 	assert.Equal(t, DesiredResult{}, res)
 }
 
-func TestCreateShapeCauseRejectsStatementCountMismatch(t *testing.T) {
-	ds, err := statement.ParseDesired("CREATE TABLE child PARTITION OF parent FOR VALUES IN (1)")
-	require.NoError(t, err)
+// A greenfield create-shape refusal explains itself through the typed
+// cause the executor stamped on the statement; a refusal without one
+// falls back to the generic wording rather than inventing a cause.
+func TestPlanRefusalRendersCreateShapeCause(t *testing.T) {
 	missing := false
-	report := plan.Report{
+	refused := plan.Report{
 		TableExists: &missing,
+		Disposition: router.DispositionRefuse,
 		Statements: []plan.Statement{
-			{Reason: verdict.ReasonUnsupportedStatement},
-			{Reason: verdict.ReasonNone},
+			{
+				SQL:         "CREATE TABLE child PARTITION OF parent FOR VALUES IN (1)",
+				Disposition: router.DispositionRefuse,
+				Reason:      verdict.ReasonUnsupportedStatement,
+				Cause:       executor.CreateShapePartitionOf,
+			},
 		},
 	}
+	reason, detail := planRefusal(refused)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, reason)
+	assert.Contains(t, detail, "planned statement 1 (")
+	assert.Contains(t, detail, "is refused by the create path: "+executor.CreateShapePartitionOf.Description())
+	assert.Contains(t, detail, "nothing was executed")
 
-	assert.NoError(t, createShapeCause(DesiredRequest{Schema: "public", Desired: ds}, report, 0))
+	uncaused := refused
+	uncaused.Statements = []plan.Statement{
+		{SQL: "ALTER TABLE t NO SUCH THING", Disposition: router.DispositionRefuse},
+	}
+	reason, detail = planRefusal(uncaused)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, reason,
+		"a refused statement without a reason still reports the unsupported-statement reason")
+	assert.Contains(t, detail, "has no safe path")
+	assert.NotContains(t, detail, "create path")
 }
 
 func TestAdmitPlan(t *testing.T) {
