@@ -88,9 +88,13 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   updates never wait for a database read, but the verdict handoff *is* observer-gated:
   `StopConcurrentBuild` deliberately drains an in-flight poll before the executor reclaims
   the session, a wait bounded by the poller's context and the session's `statement_timeout`),
-  stdlib. The future decode path will add `pglogrepl`. Adding one requires a recorded decision (see the rubric in
+  stdlib. Adding one requires a recorded decision (see the rubric in
   [docs/tcb-model.md](docs/tcb-model.md) — copy small things, take pinned dependencies only
   for load-bearing expertise).
+  Recorded decision: `jackc/pglogrepl` (pinned) is admitted to the core for `pkg/decode` because
+  the streaming-replication protocol and `pgoutput` message decoding are load-bearing
+  wire-protocol expertise, under the same rubric as the parser; it is confined to `pkg/decode`
+  and is not added to `go.mod` until that package's implementation lands.
   Recorded decision: the AWS SDK (`aws-sdk-go-v2`) is a test-harness-only dependency, confined
   behind the `ministack` build tag in `internal/testutil` — it never appears in the core, in
   `cmd/pg-sprite`, or in any ordinary build; a plain `go build ./...` / `go test ./...` never

@@ -20,6 +20,7 @@ several of these unrepresentable, and the in-TCB engineering rules live in
 ## Table of contents
 
 - [Correctness (CO)](#correctness-co)
+  - [CO-8 — A TOAST-omitted column is never overwritten](#co-8--a-toast-omitted-column-is-never-overwritten)
 - [Locking and concurrency (LK)](#locking-and-concurrency-lk)
 - [State, checkpoint, and resume (ST)](#state-checkpoint-and-resume-st)
 - [Refusals and preflight (RF)](#refusals-and-preflight-rf)
@@ -112,6 +113,18 @@ the parser choice is an implementation decision of the understanding layer (see
 [low-level-design](low-level-design.md#how-the-planner-understands-ddl-decided)).
 *Enforced:* `pkg/statement` boundary. *Source:* SchemaBot AGENTS.md (TiDB-parser hard
 requirement, rewritten for our parser); carried in the repo's [AGENTS.md](../AGENTS.md).
+
+### CO-8 — A TOAST-omitted column is never overwritten
+
+An UPDATE decoded from pgoutput must change only columns present in its tuple. With PK-based
+`REPLICA IDENTITY DEFAULT`, pgoutput can omit an unchanged TOASTed value from the new tuple;
+absence means "leave the stored value unchanged", not NULL or an empty value. A full-row upsert
+that invents a value for that absent column would overwrite live shadow data and silently break
+convergence. *Enforced:* `pkg/applier` column-wise UPDATE construction from `ChangeEvent`'s
+per-column presence. *Source:*
+[copy-and-swap D6](copy-and-swap-design.md#d6--preserve-omitted-toast-values). *Test obligation:*
+a convergence test updates other columns while leaving a ≥8 KiB column untouched, using the load
+generator's TOAST-unchanged update profile.
 
 ## Locking and concurrency (LK)
 
@@ -210,11 +223,12 @@ every `CONCURRENTLY` index command; [invalid-index-recovery](invalid-index-recov
 
 ### ST-1 — The checkpoint is a single row, written atomically
 
-The checkpoint table keeps **one row** (upsert on a fixed key) so a crash can never leave *zero*
-checkpoints or a partial pair — there is always exactly one, and it is either the old or the new
-one. Unbounded append-style checkpoint history is not used. *Planned enforcement (Phase 8):*
-`pkg/checkpoint` write path (`INSERT … ON CONFLICT (id) DO UPDATE`, the REPLACE analog). *Source:* Spirit
-`pkg/checkpoint` (single-row REPLACE on `id=1`).
+The checkpoint table keeps **one row per `(schema, table)`** (upsert on that key) so a crash can
+never leave a partial pair for one target — its record is either the old or the new one.
+Unbounded append-style checkpoint history is not used. *Planned enforcement (Phase 8):*
+`pkg/checkpoint` write path (`INSERT … ON CONFLICT (schema, table) DO UPDATE`, the REPLACE
+analog). *Source:* Spirit `pkg/checkpoint` (single-row REPLACE on `id=1`), scoped per target by
+[copy-and-swap D3](copy-and-swap-design.md#d3--store-checkpoints-in-the-target-database).
 
 ### ST-2 — An incompatible checkpoint is distinguishable from a transient read error
 
@@ -257,17 +271,12 @@ risks-and-mitigations.
 
 Every knowable prerequisite is validated before the engine writes anything: logical-replication
 enablement and role, PK usability, `REPLICA IDENTITY`, slot/WAL-sender headroom, disk headroom
-(~2× the table), the [scratch database](low-level-design.md#plan-time-prerequisite-the-scratch-database)
-(pre-provisioned `pg_sprite_scratch`, or `CREATEDB` so preflight can self-provision it — a
-copy-and-swap prerequisite only; every capability shipped today uses a transaction-scoped
-scratch *schema* that needs neither), lock
-LK-1 acquired, and the RF-* refusals below. Failing hours into a copy on something knowable up
-front is a bug. **Sub-obligation — server-authoritative validation:** declarative desired-state
-SQL is already executed and introspected in a rolled-back, transaction-scoped scratch schema.
-The decided end state validates every execution path against the engine-owned scratch database
-before the first write to the target; the server is the semantic authority and client-side
-parsing is advisory. *Enforced today:* declarative diff. *Planned enforcement:* all execution
-paths in preflight. *Source:*
+(~2× the table), execute-and-introspect workspace, lock LK-1 acquired, and the RF-* refusals
+below. Failing hours into a copy on something knowable up front is a bug. Copy-and-swap needs no
+durable scratch database or `CREATEDB`: its gated DDL executes against the empty shadow and its
+checkpoint fingerprint uses the rolled-back, transaction-scoped `pkg/schemadiff` scratch schema.
+The server is the semantic authority and client-side parsing is advisory. *Enforced today:*
+declarative diff. *Planned enforcement:* all execution paths in preflight. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 
 ### ST-7 — The executor runs exactly the statement that was gated
@@ -388,7 +397,7 @@ about **how we write and review the code**.
 | LK-1 | 0–1 (before any executing mode ships) | two-instance mutual-exclusion + keepalive-loss test |
 | LK-2 | 3 (native), 7 (cutover) | lock-bounding + CIC-exception tests |
 | CO-1, CO-2, CO-3 | 5 (gate), 8 (watermark/divergence policy) | inject-divergence, repair-invalidates-watermark |
-| CO-4, CO-5, CO-6 | 6 | one convergence test per race, incl. unique-value move |
+| CO-4, CO-5, CO-6, CO-8 | 6 | one convergence test per race, incl. unique-value move and TOAST-unchanged update |
 | LK-3 | 4–6 | cancellation/claim race test |
 | LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |

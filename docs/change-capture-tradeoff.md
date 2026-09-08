@@ -87,11 +87,9 @@ failover), at the cost of source write overhead — and they do **not** buy you 
 
 ## Decision: primary + fallback, behind one interface
 
-When the copy-and-swap backend is built, it will define a **single change-capture abstraction**
-with two implementations selected per migration; no change-capture code exists yet:
-**logical decoding as the default** (the low-overhead differentiator) and **triggers as a
-first-class fallback** (the failover-safe, runs-anywhere path) — not a vestige. The planner picks
-based on cluster facts (is logical replication enabled? failover exposure? table write rate?), and
-the rest of the pipeline (chunked copy, **mandatory checksum**, copy-watermark checkpoint, atomic
-cutover) is **identical** regardless of which capture is chosen. See
+The copy-and-swap backend defines one change-capture abstraction. v1 implements **logical
+decoding** (the low-overhead differentiator); **triggers remain the first-class documented
+alternative** (the failover-safe, runs-anywhere path), but their implementation is deferred.
+Either implementation shares the rest of the pipeline: chunked copy, **mandatory checksum**,
+copy-watermark checkpoint, and atomic cutover. See
 [the change-capture decision in low-level-design](low-level-design.md#1-cdc-mechanism--logical-decoding-with-trigger-fallback).

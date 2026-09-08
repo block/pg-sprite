@@ -84,8 +84,9 @@ is a smoke tour of the built binary, not a second test suite.
   `libpg_query`; the cgo `pg_query_go` is the API-compatible escape hatch, not the default),
   with `pkg/statement` as the parse boundary. No `strings.Split(";")`, no hand-parsing; a parse failure is an
   error surfaced to the caller. Shadow-table DDL and checkpoint fingerprints are derived by
-  execute-and-introspect on the engine-owned scratch database, never by AST transformation
-  (see [docs/low-level-design.md](docs/low-level-design.md#how-the-planner-understands-ddl-decided)).
+  execute-and-introspect on the empty shadow and in the transaction-scoped scratch schema,
+  never by AST transformation (see
+  [docs/copy-and-swap-design.md](docs/copy-and-swap-design.md#d1--no-durable-scratch-database)).
 - Tests use testify (`require` for setup, `assert` for verification), `t.Context()` (in
   cleanups, which run after the context is cancelled, use
   `context.WithoutCancel(t.Context())`), and named polling deadlines — no bare `time.Sleep`
