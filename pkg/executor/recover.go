@@ -95,10 +95,11 @@ type IndexRecoveryReport struct {
 	// Build is the verified report of the requested index build. It is zero
 	// when returned by DropAbandonedIndex, which does not run a build.
 	Build IndexBuildReport `json:"build"`
-	// Duration is the wall-clock time of the whole recovery — proof and
-	// drops, plus the build when requested — so a caller that sized the
-	// budget as a lease can see what the recovery actually spent. It
-	// encodes as integer nanoseconds.
+	// Duration is the wall-clock time of the whole recovery call — proof
+	// and drops, plus the build when requested — so a caller that sized
+	// the budget as a lease can see what the recovery actually spent. It
+	// is set on every return, a refusal included, so a refusal that waited
+	// out a lock bound reports the wait. It encodes as integer nanoseconds.
 	Duration time.Duration `json:"duration_ns"`
 }
 
@@ -158,7 +159,10 @@ type IndexRecoveryReport struct {
 // Duration says what was actually spent.
 func RebuildAbandonedIndex(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget) (IndexRecoveryReport, error) {
 	start := time.Now()
-	rep, err := recoverAbandonedIndex(ctx, pool, sql, b, recoveryMinConns, func(rep *IndexRecoveryReport) error {
+	rep, err := recoverAbandonedIndex(ctx, pool, sql, b, recoveryPool{
+		minConns: recoveryMinConns,
+		sessions: "recovery session, build session, and reserved verdict session",
+	}, func(rep *IndexRecoveryReport) error {
 		var buildErr error
 		rep.Build, buildErr = buildIndexConcurrently(ctx, pool, sql, b, nil)
 		return buildErr
@@ -176,16 +180,28 @@ func RebuildAbandonedIndex(ctx context.Context, pool *pgxpool.Pool, sql string, 
 // zero.
 func DropAbandonedIndex(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget) (IndexRecoveryReport, error) {
 	start := time.Now()
-	rep, err := recoverAbandonedIndex(ctx, pool, sql, b, buildMinConns, nil)
+	rep, err := recoverAbandonedIndex(ctx, pool, sql, b, recoveryPool{
+		minConns: dropRecoveryMinConns,
+		sessions: "recovery session and drop session",
+	}, nil)
 	rep.Duration = time.Since(start)
 	return rep, err
+}
+
+// recoveryPool is what a recovery entry point needs of the pool at
+// admission: the connections it holds at its peak, and the sessions those
+// connections are, named in the refusal so an operator sizing the pool can
+// tell which operation asked and why.
+type recoveryPool struct {
+	minConns int32
+	sessions string
 }
 
 // recoverAbandonedIndex admits a concurrent build statement, proves and
 // quarantines an abandoned occupant of its name, and sweeps the target
 // table's identity-named quarantine debris. When after is non-nil, it runs
 // while the recovery session remains held.
-func recoverAbandonedIndex(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget, minConns int32, after func(*IndexRecoveryReport) error) (IndexRecoveryReport, error) {
+func recoverAbandonedIndex(ctx context.Context, pool *pgxpool.Pool, sql string, b ConcurrentBudget, need recoveryPool, after func(*IndexRecoveryReport) error) (IndexRecoveryReport, error) {
 	var rep IndexRecoveryReport
 	if err := b.validate(); err != nil {
 		return rep, err
@@ -203,9 +219,9 @@ func recoverAbandonedIndex(ctx context.Context, pool *pgxpool.Pool, sql string, 
 	// INV: LK-2 — the recovery session stays open while another session
 	// drops an entry, and a rebuild subsequently needs two sessions of its
 	// own. A smaller pool would wait on itself instead of failing.
-	if pool.Config().MaxConns < minConns {
-		return rep, fmt.Errorf("index recovery needs %d connections, pool holds %d: %w",
-			minConns, pool.Config().MaxConns, ErrPoolTooSmall)
+	if pool.Config().MaxConns < need.minConns {
+		return rep, fmt.Errorf("index recovery needs %d connections (%s), pool holds %d: %w",
+			need.minConns, need.sessions, pool.Config().MaxConns, ErrPoolTooSmall)
 	}
 
 	// The inspection and the proof run on a pool session under its

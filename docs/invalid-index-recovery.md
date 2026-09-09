@@ -125,8 +125,9 @@ that became valid (`REINDEX INDEX` in place) is likewise no longer a candidate.
 
 The `IndexRecoveryReport` it returns lists what it dropped (`Dropped`: schema, quarantine
 name, OID, drop duration), what it stepped over (`Skipped`: schema, quarantine name, OID),
-the whole recovery's `Duration` — so a caller that sized the budget as a lease window can
-see what was actually spent — and carries the verified build report.
+the whole recovery's `Duration` — set on a refusal as well as on success, so a caller that
+sized the budget as a lease window can see what was actually spent either way — and carries
+the verified build report.
 
 ## Recovering by hand
 

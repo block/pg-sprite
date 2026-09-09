@@ -179,6 +179,7 @@ func TestDropAbandonedIndexRefusesOtherTableLeftover(t *testing.T) {
 
 	require.ErrorIs(t, err, executor.ErrInvalidIndexOnOtherTable)
 	assert.Zero(t, rep.Build)
+	assert.Positive(t, rep.Duration, "a refusal reports what it spent")
 	exists, valid := indexState(t, pool, schema, "idx_shared")
 	assert.True(t, exists)
 	assert.False(t, valid)
@@ -250,13 +251,14 @@ func TestRebuildAbandonedIndexRefusesOtherTableLeftover(t *testing.T) {
 	require.NoError(t, err)
 	leaveInvalidIndex(t, pool, schema, "a", "idx_shared")
 
-	_, err = executor.RebuildAbandonedIndex(t.Context(), pool,
+	rep, err := executor.RebuildAbandonedIndex(t.Context(), pool,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_shared ON %s.b (c)", schema), buildBudget)
 
 	require.ErrorIs(t, err, executor.ErrInvalidIndexOnOtherTable)
 	var invalidErr *executor.InvalidIndexError
 	require.ErrorAs(t, err, &invalidErr)
 	assert.Equal(t, "a", invalidErr.Table)
+	assert.Positive(t, rep.Duration, "a refusal reports what it spent")
 	exists, valid := indexState(t, pool, schema, "idx_shared")
 	assert.True(t, exists, "another table's leftover must survive untouched")
 	assert.False(t, valid)
