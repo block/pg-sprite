@@ -45,7 +45,7 @@ func (c *PullCmd) run(ctx context.Context, out io.Writer) error {
 	defer pool.Close()
 
 	var schemaExists bool
-	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)`, c.Schema).Scan(&schemaExists); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname OPERATOR(pg_catalog.=) $1)`, c.Schema).Scan(&schemaExists); err != nil {
 		return fmt.Errorf("check schema %s: %w", c.Schema, err)
 	}
 	if !schemaExists {

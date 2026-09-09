@@ -313,11 +313,10 @@ Three related jobs stay with humans on purpose:
   is available to owners that need the same enumeration. It lists the tables a schema
   directory is expected to account for, not the files `pull` can write: partitions are
   represented through their parent's `PARTITION BY` and extension members belong to their
-  extension, so neither is listed, while a listed table whose shape export refuses — a
-  partitioned parent, either side of `INHERITS`, an unlogged table, a table other tables
-  reference — is still undeclared and still the owner's to resolve; `pull` reports each
-  refusal by table. The exclusions matter, because every false positive blocks a table
-  nobody touched:
+  extension, so neither is listed, while a listed table whose shape export refuses (the
+  declarative model's limits, under [The two front doors](#the-two-front-doors)) is still
+  undeclared and still the owner's to resolve; `pull` reports each refusal by table. The
+  exclusions matter, because every false positive blocks a table nobody touched:
 
   ```sql
   SELECT c.relname
@@ -336,9 +335,11 @@ Three related jobs stay with humans on purpose:
   ORDER BY c.relname;
   ```
 
-  Qualify the catalog with `pg_catalog.` so a user-first `search_path` cannot shadow it
-  into an empty — passing — result. Views, materialized views, foreign tables, and
-  sequences are outside the model and are not undeclared tables. The planner's scratch
+  Qualify every relation, operator, and type with `pg_catalog.`: under a user-first
+  `search_path`, an unqualified relation or `=` joins nothing and returns an empty —
+  passing — result, and an unqualified `regclass` cast stops matching the extension
+  dependency and lists extension members as undeclared. Views, materialized views, foreign
+  tables, and sequences are outside the model and are not undeclared tables. The planner's scratch
   objects live in a schema of their own (`pgsprite_scratch_<random>`) inside a transaction
   that is always rolled back, so a listing scoped to the owner's schema never sees them.
 - **Deciding to recover an invalid index.** A failed `CREATE INDEX CONCURRENTLY` leaves
