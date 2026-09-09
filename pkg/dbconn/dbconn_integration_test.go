@@ -1,7 +1,6 @@
 package dbconn_test
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -14,13 +13,15 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 )
 
-// A role whose search_path names pg_catalog after a user schema lets a table
-// in that schema shadow the catalog: `decoy.pg_class` would answer an
-// unqualified `pg_class` read. Every pooled session drops the explicit entry
-// so the catalog is searched implicitly first again, while the remaining
-// entries — and therefore the creation schema — stay exactly as configured.
-func TestPoolRemovesExplicitCatalogFromSearchPath(t *testing.T) {
-	url := testutil.StartPostgres(t)
+// A database whose search_path names pg_catalog after a user schema lets a
+// table in that schema shadow the catalog: `decoy.pg_class` would answer an
+// unqualified `pg_class` read. Every pooled session drops the shadowed entry
+// so the catalog is searched implicitly first again, while a path pg_catalog
+// leads is left alone and every other entry — and therefore the creation
+// schema — stays exactly as configured. The setting is database-scoped on a
+// throwaway database, so no other connection on the server sees it.
+func TestPoolRemovesShadowedCatalogFromSearchPath(t *testing.T) {
+	url := testutil.NewDatabase(t, testutil.StartPostgres(t))
 	setup, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
 	t.Cleanup(setup.Close)
@@ -28,16 +29,9 @@ func TestPoolRemovesExplicitCatalogFromSearchPath(t *testing.T) {
 		CREATE TABLE decoy.pg_class (oid oid, relname name, relnamespace oid);
 		INSERT INTO decoy.pg_class VALUES (1, 'bogus', 1)`)
 	require.NoError(t, err)
-	var role string
-	require.NoError(t, setup.QueryRow(t.Context(), "SELECT current_user").Scan(&role))
-	roleName := pgx.Identifier{role}.Sanitize()
-	t.Cleanup(func() {
-		ctx := context.WithoutCancel(t.Context())
-		_, err := setup.Exec(ctx, "ALTER ROLE "+roleName+" RESET search_path")
-		assert.NoError(t, err)
-		_, err = setup.Exec(ctx, "DROP SCHEMA decoy CASCADE")
-		assert.NoError(t, err)
-	})
+	var database string
+	require.NoError(t, setup.QueryRow(t.Context(), "SELECT current_database()").Scan(&database))
+	databaseName := pgx.Identifier{database}.Sanitize()
 
 	testCases := []struct {
 		name               string
@@ -46,13 +40,14 @@ func TestPoolRemovesExplicitCatalogFromSearchPath(t *testing.T) {
 		wantCreationSchema string
 	}{
 		{name: "catalog after user schema", searchPath: "decoy, pg_catalog", wantPath: "decoy", wantCreationSchema: "decoy"},
-		{name: "catalog before user schema", searchPath: "pg_catalog, decoy", wantPath: "decoy", wantCreationSchema: "decoy"},
+		{name: "catalog before user schema", searchPath: "pg_catalog, decoy", wantPath: "pg_catalog, decoy", wantCreationSchema: "pg_catalog"},
+		{name: "catalog only", searchPath: "pg_catalog", wantPath: "pg_catalog", wantCreationSchema: "pg_catalog"},
 		{name: "quoted catalog", searchPath: `decoy, "pg_catalog"`, wantPath: "decoy", wantCreationSchema: "decoy"},
 		{name: "default path untouched", searchPath: `"$user", public`, wantPath: `"$user", public`, wantCreationSchema: "public"},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := setup.Exec(t.Context(), "ALTER ROLE "+roleName+" SET search_path TO "+tc.searchPath)
+			_, err := setup.Exec(t.Context(), "ALTER DATABASE "+databaseName+" SET search_path TO "+tc.searchPath)
 			require.NoError(t, err)
 			pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 			require.NoError(t, err)
