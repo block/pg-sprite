@@ -204,22 +204,22 @@ understand.
 
 ## Shared refusal vocabulary
 
-A refusal `class` on the verdict JSON is a separate decision; `pkg/verdict` does not emit
-one today. When that field ships, its contract owns the vocabulary and the matrix uses the
-same words, so a consumer reading a row and a consumer reading a verdict reach the same
-route:
+A refusal `class` on the verdict JSON is a separate decision, recorded in
+[refusal-classes.md](refusal-classes.md); `pkg/verdict` does not emit one today. When that
+field ships, that contract owns the vocabulary and the matrix uses the same words, so a
+consumer reading a row and a consumer reading a verdict reach the same route:
 
 | Matrix row | Refusal `class` |
 | --- | --- |
 | T2 / `🟡` | `capability-boundary` |
-| T3 / `⚪` | `no-online-safety-problem` |
+| T3 / `⚪` | `no-online-safety-problem`, with `owner: direct-operator` |
 | T3 / `🔵` | `no-online-safety-problem`, with `owner` naming the tool class |
 | T3 / `❌` | `by-design` |
 
-T1 / `✅` has no capability refusal class. `environmental` has no matrix row because
-it describes the run site — privileges, contention, budgets, or other conditions —
-not whether pg-sprite supports an operation. The matrix and that contract must change
-together.
+T1 / `✅` has no capability refusal class. Two classes have no matrix row: `environmental`
+describes the run site — privileges, contention, budgets, or other conditions — not whether
+pg-sprite supports an operation, and `invariant-violation` reports a defect in pg-sprite,
+not a property of the operation. The matrix and that contract must change together.
 
 ## Alternatives considered
 

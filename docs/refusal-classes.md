@@ -14,17 +14,18 @@ the same kind of answer.
 
 ## The decided vocabulary
 
-The refusal verdict adds `class`, with exactly four values:
+The refusal verdict adds `class`, with exactly five values:
 
 | Class | Meaning | Consumer action |
 | --- | --- | --- |
 | `capability-boundary` | The engine cannot do this yet, or has no implemented safe route. This is a T2 capability. | Wait for the capability or escalate. |
-| `no-online-safety-problem` | There is nothing for an online schema-change engine to make safe; another tool class owns the work. | Hand the statement to the named owner. |
-| `by-design` | pg-sprite permanently refuses this form; the verdict names a safer idiom or deliberate path. | Use the safer idiom. |
-| `environmental` | The change is supportable, but not here, now, or as this role: a size policy, exhausted budget, privilege, stale plan, or catalog collision stopped it. | Retry, provision, re-plan, or escalate. |
+| `no-online-safety-problem` | There is nothing for an online schema-change engine to make safe; another tool class owns the work, or the operator runs it directly. | Hand the statement to the named owner. |
+| `by-design` | pg-sprite permanently refuses this form — because PostgreSQL offers no online mechanism in any supported version, or because a safer idiom exists; the verdict names the idiom or the deliberate path. This is [RF-5](invariants.md#refusals-and-preflight-rf) seen from the consumer's side. | Use the safer idiom, or run the blocking form outside pg-sprite in a maintenance window. |
+| `environmental` | The change is supportable, but not here, now, or as this role: a size policy, exhausted budget, privilege, server version, stale plan, or catalog collision stopped it. | Retry, provision, upgrade, re-plan, or escalate. |
+| `invariant-violation` | pg-sprite refused because its own input or state is incoherent — a report this build cannot have produced. This is a bug in pg-sprite, not a boundary of it; it is the refusal-verdict face of the fail-closed `ErrInvariantViolation` rule in [SAFETY.md](../SAFETY.md#rules-inside-the-core). | Report it with the verdict; do not retry, wait, or route elsewhere. |
 
-`environmental` has no capabilities-matrix tier. It describes the run site, not the
-operation. A supported operation can produce it without changing tier.
+`environmental` and `invariant-violation` have no capabilities-matrix tier. They describe the
+run, not the operation. A supported operation can produce either without changing tier.
 
 ```text
 ┌──────────────────────────┬──────────────────────────────┐
@@ -34,42 +35,87 @@ operation. A supported operation can produce it without changing tier.
 │ no-online-safety-problem │ hand to owner tool           │
 │ by-design                │ use safer idiom              │
 │ environmental            │ retry / provision / escalate │
+│ invariant-violation      │ report a pg-sprite bug       │
 └──────────────────────────┴──────────────────────────────┘
 ```
 
 ## The current reason-to-class map
 
-The closed reason set is `verdict.Reasons()`. The table below is the classification of every
-current emission site, including desired-state admission. A reason with several rows is
-deliberately not a class. One site covers several rows: the imperative front door refuses
-every statement kind it does not admit through a single catch-all in `pkg/migrate/verdicts.go`
-(`statement.KindOther`), which today cannot tell a backfill from a `GRANT`. Classifying that
-site means the parse boundary in `pkg/statement` distinguishes the kinds the rows below name,
-so that a `GRANT` is routed to provisioning and never to the data change runner.
+The closed reason set is `verdict.Reasons()`. The tables below classify every current
+emission, including desired-state admission. A reason with several rows is deliberately not a
+class.
+
+**The class is a property of the typed cause where one exists, and of the refusal site only
+where none does.** Three reasons carry a second, typed discriminator beneath them —
+`unsupported-partitioned-parent` carries a `preflight.PartitionRefusalCause`, and
+`unsupported-statement` carries an `executor.CreateShapeCause` on the create path or one of a
+closed set of admission sentinel errors on the imperative path — and in each case the values
+of that discriminator span more than one class. A single site can therefore emit several
+classes (`admissionRefusalVerdict` in `pkg/migrate/verdicts.go` mints refusals for three
+sentinels across two classes), so keying on the site would leave the class ambiguous and let a
+completeness test pass with the wrong answer. Where a reason has no such discriminator, the
+site is the key. The same rule applies when a broad reason gains a new cause or site: the
+author classifies it explicitly; nothing is ever derived from the reason string.
+
+One site still covers several rows: the imperative front door refuses every statement kind it
+does not admit through a single catch-all in `pkg/migrate/verdicts.go` (`statement.KindOther`),
+which today cannot tell a backfill from a `GRANT`. Classifying that site means the parse
+boundary in `pkg/statement` distinguishes the kinds the rows below name, so that a `GRANT` is
+routed to provisioning and never to the data change runner.
+
+### Reasons keyed on the site
 
 | Existing `reason` | Refusal site or shape | `class` | `owner`, when present |
 | --- | --- | --- | --- |
 | `unsupported-statement` | DML such as an `UPDATE` backfill | `no-online-safety-problem` | `data-change-runner` |
 | `unsupported-statement` | Grants, roles, row-level-security policies, publications, subscriptions | `no-online-safety-problem` | `provisioning` |
-| `unsupported-statement` | `DROP TABLE`, views, functions, triggers, extensions, standalone sequences, and other catalog work the matrix marks ⚪ | `no-online-safety-problem` | `owner-tooling` |
+| `unsupported-statement` | `DROP TABLE`, views, functions, triggers, extensions, standalone sequences, and other catalog work the matrix marks ⚪ | `no-online-safety-problem` | `direct-operator` |
 | `unsupported-statement` | Imperative `CREATE TABLE`; the detail already points to `diff` | `no-online-safety-problem` | `declarative-front-door` |
-| `unsupported-statement` | An admitted ALTER operation for which the planner has no route; an unnamed index; an unsupported sequence step; a greenfield create shape that needs a future modeled route | `capability-boundary` | — |
-| `unsupported-statement` | `CREATE INDEX IF NOT EXISTS`, or a duplicate claimed relation name in one desired set | `by-design` | — |
+| `unsupported-statement` | An admitted `ALTER TABLE` operation for which the planner has no route (`routeRefusalVerdict`) | `capability-boundary` | — |
+| `unsupported-statement` | Imperative admission sentinel `ErrUnsupportedSequenceStep` or `ErrUnnamedIndex`; create admission sentinel `ErrUnsupportedCreateStep` | `capability-boundary` | — |
+| `unsupported-statement` | Imperative or create admission sentinel `ErrIfNotExistsUnsupported`; create admission sentinel `ErrDuplicateCreateName` (the sentinel forms of the `if-not-exists` and `duplicate-name` causes below) | `by-design` | — |
+| `unsupported-statement` | Create admission sentinel `ErrPartitionOfUnsupported` (the sentinel form of the `partition-of` cause below) | `capability-boundary` | — |
+| `unsupported-statement` | `planRefusal` in `pkg/migrate/desired.go`: a statement whose disposition this build does not know, or a plan whose aggregate disposition no statement carries | `invariant-violation` | — |
 | `index-statement` | Plain `DROP INDEX` or `REINDEX`, for which the verdict names the concurrent form | `by-design` | — |
-| `index-statement` | An already-concurrent maintenance statement that pg-sprite need not wrap | `no-online-safety-problem` | `owner-tooling` |
+| `index-statement` | An already-concurrent maintenance statement that pg-sprite need not wrap | `no-online-safety-problem` | `direct-operator` |
 | `not-native-safe-table-too-large` | The size policy prevents a blind bounded attempt | `environmental` | — |
 | `insufficient-privileges` | The connected role lacks a required grant | `environmental` | — |
-| `unsupported-partitioned-parent` | The partition-aware online sequence is not implemented | `capability-boundary` | — |
 | `not-native-safe-budget-exceeded` | The lock or statement budget cancels an attempt | `environmental` | — |
 | `not-native-safe-rewrite-required` | The planner cannot construct the required safer sequence | `capability-boundary` | — |
 | `backend-unavailable` | The plan routes to an execution backend this build lacks | `capability-boundary` | — |
 | `destructive-change` | Desired-state execution will not infer permission to discard live structure | `by-design` | — |
 | `plan-fingerprint-mismatch` | The recomputed plan is not the reviewed plan | `environmental` | — |
-| `create-collision` | A target or claimed relation name is occupied at apply time | `environmental` | — |
+| `create-collision` | A target or claimed name is occupied at apply time by a relation or a standalone type | `environmental` | — |
 
-Both `unsupported-statement` and `index-statement` span multiple classes. Therefore **the
-class is assigned at each refusal site and is never derived from the reason**. The same rule
-applies when a broad reason gains a new site: the author must classify the site explicitly.
+### `unsupported-partitioned-parent`, keyed on `PartitionRefusalCause`
+
+The four causes span three classes. [RF-6](invariants.md#refusals-and-preflight-rf) already
+keeps the not-implemented case and the version-gated case apart in one sentence; this table
+agrees with it rather than collapsing them.
+
+| `PartitionRefusalCause` | What the refusal says | `class` | Why |
+| --- | --- | --- | --- |
+| `parent-concurrent-index-build` | The `CREATE INDEX ON ONLY` → per-partition `CONCURRENTLY` → `ATTACH PARTITION` flow is not yet implemented | `capability-boundary` | A planned engine capability; the matrix marks it 🟡. |
+| `parent-blocking-index-build` | pg-sprite will not substitute a blocking parent build for the missing partition-aware flow | `capability-boundary` | Same missing flow; the refusal of the blocking substitute is the policy half of the same gap. |
+| `parent-index-adoption` | PostgreSQL does not support adopting an existing index as a constraint on a partitioned parent in any supported version | `by-design` | No online mechanism exists; the matrix marks it ❌. Waiting for a pg-sprite release would wait for nothing. |
+| `parent-not-valid-foreign-key` | PostgreSQL before version 18 cannot add a `NOT VALID` foreign key on a partitioned table | `environmental` | The same statement, table, and pg-sprite build runs on a newer server; the action that unblocks it is a server upgrade, not an engine release. The matrix currently marks this row 🟡; under this contract it is T1 with a server-version precondition, and the sweep in rollout step 2 corrects the mark. |
+
+### `unsupported-statement` on the create path, keyed on `CreateShapeCause`
+
+The closed set is `executor.CreateShapeCauses()`. The cause travels with the plan statement
+and reaches the verdict through `planRefusal`.
+
+| `CreateShapeCause` | What the refusal says | `class` | Why |
+| --- | --- | --- | --- |
+| `partition-of` | Attaching a partition locks the partitioned parent, which the absence proof does not cover | `capability-boundary` | A proof the engine could mint but does not yet. |
+| `inherits` | Binding to an existing parent is outside the absence proof | `capability-boundary` | As above. |
+| `like` | Reading an existing source table is outside the absence proof | `capability-boundary` | As above. |
+| `of-type` | Binding to an existing composite type is outside the absence proof | `capability-boundary` | As above. |
+| `unsupported-kind` | The statement kind is outside the plain `CREATE TABLE` and `CREATE INDEX` shapes the create path runs | `capability-boundary` | A route that may be modeled later. |
+| `if-not-exists` | A name-only no-op cannot prove the existing relation has the requested shape or is valid | `by-design` | A permanent decision with a deliberate path: declare the shape and let `diff` converge it. |
+| `duplicate-name` | A desired set claims the same relation name twice | `by-design` | A permanent decision about input coherence; the fix is in the desired set. |
+| `concurrently` | A table born this run has no traffic to protect, and a plain build cannot leave an invalid index behind a failure | `by-design` | A permanent, reasoned decision that names the better idiom: the plain build. |
+| `multiple-operations` | The statement and operation parse boundaries disagree about the statement's operation count | `invariant-violation` | A defensive check against a state the build should not produce; nothing is missing and no environment is at fault. |
 
 ## Keep reason and class orthogonal
 
@@ -115,13 +161,16 @@ closed values are:
 | --- | --- |
 | `data-change-runner` | Data changes and backfills owned by the application's data change runner (the tool that runs its versioned SQL or ORM changes). |
 | `declarative-front-door` | Catalog bootstrap and convergence from a desired `CREATE TABLE`; `CREATE TABLE` keeps its pointer to `diff`. |
-| `owner-tooling` | Safe direct maintenance and catalog operations owned by the table or database operator's tooling. |
+| `direct-operator` | Nobody else's tool: the statement has no online-safety problem, so whoever operates the table runs it directly, through whatever review the object warrants. This is the matrix's ⚪ half of T3; the three owners above are its 🔵 half. |
 | `provisioning` | Access control and replication provisioning — grants, roles, row-level-security policies, publications, subscriptions — owned by infrastructure-as-code. |
 
 Prose in `detail` remains: it explains the concrete command or constraint to a human. Prose
 alone lost because machine routing is the purpose of this contract; parsing a sentence would
 recreate the problem that `class` solves. `owner` is absent outside
-`no-online-safety-problem` and required for every refusal in that class.
+`no-online-safety-problem` and required for every refusal in that class. `direct-operator` is
+a named value rather than an absent one so that the ⚪ and 🔵 halves stay legible apart in
+the JSON: a consumer that hands 🔵 refusals to another tool must not hand ⚪ refusals to
+nobody.
 
 ## Make an unclassified refusal unrepresentable
 
@@ -146,29 +195,51 @@ func NewRefusal(class RefusalClass, reason Reason, owner Owner) (Refusal, error)
 }
 ```
 
-A registry names every refusal site together with its reason, class, and optional owner. A
-completeness test derives the production refusal sites and fails if a site is absent, carries
-the zero class, or violates the owner rule. This is the same house pattern as the proof types
-in [the TCB model](tcb-model.md#make-illegal-states-unrepresentable) and the derived
-proof-type registry completeness harness in `internal/safety`: do not maintain a test-only
-shadow list that can drift from production.
+A registry names every refusal key — a typed cause where one exists, a site where none does —
+together with its reason, class, and optional owner. A completeness test derives the keys
+from production (`verdict.Reasons()`, `executor.CreateShapeCauses()`,
+`preflight.PartitionRefusalCauses()`, the admission sentinel sets, and a walk of the remaining
+refusal sites) and fails if a key is absent, carries the zero class, or violates the owner
+rule. Keying on causes is what gives the test correspondence rather than presence: a registry
+keyed on sites alone would go green with `admissionRefusalVerdict` classified
+`capability-boundary` while it minted a `by-design` refusal for every `CREATE ... IF NOT
+EXISTS`.
+
+The test also pins a sentinel set of keys it must find — at least one cause from each closed
+set and the `KindOther` catch-all — so that a change to how refusal verdicts are constructed
+cannot make the deriver find zero sites and pass vacuously on an empty set. This is the same
+house pattern as the proof types in
+[the TCB model](tcb-model.md#make-illegal-states-unrepresentable) and the derived proof-type
+registry completeness harness in `internal/safety`, whose `sentinelProofTypes` exists for the
+same reason: do not maintain a test-only shadow list that can drift from production, and do
+not let the derivation's own failure look like success.
+
+Until the field ships, the map in this document is itself pinned: the `docs_test.go` guards
+in `pkg/verdict`, `pkg/executor`, and `pkg/preflight` fail when a `Reason`,
+`CreateShapeCause`, or `PartitionRefusalCause` exists in the code without a row here, so a
+new discriminator value cannot land unclassified.
 
 ## Shared vocabulary with the capabilities matrix
 
-The [capabilities matrix](capabilities.md) tiers every operation and marks each row. Its
-tier and mark map to refusal class as follows, and a machine-readable form of the matrix,
-when one is decided, reuses these words rather than defining its own:
+The [capabilities matrix](capabilities.md) tiers every operation and marks each row, and the
+[capabilities contract](capabilities-contract.md) defines its machine-readable form. Tier
+and mark map to refusal class as follows; the contract's
+[shared refusal vocabulary](capabilities-contract.md#shared-refusal-vocabulary) reuses these
+words rather than defining its own:
 
 | Matrix tier or mark | Refusal class |
 | --- | --- |
 | T2 — planned | `capability-boundary` |
-| T3 ⚪ — no online-safety problem, or T3 🔵 — another tool class owns it | `no-online-safety-problem` |
+| T3 ⚪ — no online-safety problem (`owner: direct-operator`), or T3 🔵 — another tool class owns it (any other owner) | `no-online-safety-problem` |
 | T3 ❌ — no online mechanism / deliberately refused form | `by-design` |
 | T1 — supported today | No capability refusal; a run may still be `environmental` |
+| — | `invariant-violation` has no tier: it reports a defect in pg-sprite, not a property of the operation |
 
-The matrix and this contract define one vocabulary and must change together. The matrix
-describes the operation independent of a run; the verdict reports how one run met that
-contract.
+The matrix, its contract, and this document define one vocabulary and must change together.
+The matrix describes the operation independent of a run; the verdict reports how one run met
+that contract. Where a cause table above disagrees with a matrix mark today (the `NOT VALID`
+foreign key on a partitioned parent), the cause table is the decision and the matrix is
+corrected in the rollout sweep.
 
 ## Compatibility and rollout
 
@@ -180,15 +251,22 @@ are updated with the JSON surface.
 
 Sequence the work in three steps:
 
-1. Land this contract first.
+1. Land this contract first, with the docs guards that pin its cause tables to the code.
 2. Add engine classification, CLI surfaces, and the documentation sweep as one change. The
    capability-statement sync rule moves `capabilities.md`, `limitations.md`, the root README,
    and demo assertions together. In particular, that sweep updates `limitations.md`'s opening
    claim that all refusals mean an online-safety guarantee cannot be provided, and the root
    README's refusal and “What pg-sprite does not do yet” descriptions: some refusals instead
-   mean there is no online-safety problem here.
+   mean there is no online-safety problem here. It also corrects the matrix mark for the
+   `NOT VALID` foreign key on a partitioned parent. This is the step that adds the invariant
+   to [the RF registry](invariants.md#refusals-and-preflight-rf) — every refusal carries a
+   non-zero class, and `owner` is present exactly for `no-online-safety-problem` — because the
+   registry describes shipped behavior, and only then is there a constructor and a
+   completeness test enforcing it. This document establishes no invariant on its own; RF-5
+   and RF-6 are unchanged by it and are cited above because the map must agree with them.
 3. Make the replay corpus assert the engine-emitted class instead of curating its own
    classification.
 
 Non-goals are changing exit codes, changing any existing reason string, implementing a missing
-backend, or changing the capability tier of an operation.
+backend, or changing the capability tier of an operation (the one matrix-mark correction above
+is a fix to a mark that already disagrees with `limitations.md`, not a re-tiering).
