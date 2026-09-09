@@ -53,10 +53,10 @@ func (k Kind) String() string {
 	}
 }
 
-// Statement is one parsed SQL statement plus the facts the gate needs. It can
-// only be constructed by ParseOne, so holding one proves the SQL parsed as
-// exactly one statement through the PostgreSQL grammar — the proof the
-// executor requires before running anything (invariant ST-7).
+// Statement proves the SQL it carries parsed as exactly one statement through
+// the PostgreSQL grammar — the proof the executor requires before running
+// anything (invariant ST-7). It can only be constructed by ParseOne and
+// carries the facts the gate needs about that one statement.
 type Statement struct {
 	sql         string
 	kind        Kind
