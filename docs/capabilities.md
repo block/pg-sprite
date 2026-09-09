@@ -310,10 +310,14 @@ Three related jobs stay with humans on purpose:
   onboarded is entirely undeclared tables, so declare the existing tables first (`pull`
   writes one desired file per table), or scope the owner's authority to the schemas it
   manages. `schemadiff.ListManagedTables` implements the catalog query used by `pull` and
-  is available to owners that need the same enumeration. `INHERITS` children are included
-  because each has its own declaration; partitions are represented through their parent's
-  `PARTITION BY`. The exclusions matter, because every false positive blocks a table nobody
-  touched:
+  is available to owners that need the same enumeration. It lists the tables a schema
+  directory is expected to account for, not the files `pull` can write: partitions are
+  represented through their parent's `PARTITION BY` and extension members belong to their
+  extension, so neither is listed, while a listed table whose shape export refuses — a
+  partitioned parent, either side of `INHERITS`, an unlogged table, a table other tables
+  reference — is still undeclared and still the owner's to resolve; `pull` reports each
+  refusal by table. The exclusions matter, because every false positive blocks a table
+  nobody touched:
 
   ```sql
   SELECT c.relname

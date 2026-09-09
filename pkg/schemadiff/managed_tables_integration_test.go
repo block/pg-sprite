@@ -1,6 +1,7 @@
 package schemadiff
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -15,7 +16,7 @@ import (
 func TestListManagedTables(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 
 	t.Run("lists file-backed table kinds", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
@@ -51,8 +52,33 @@ func TestListManagedTables(t *testing.T) {
 	})
 }
 
-// The stock PostgreSQL integration image has no extension that owns tables.
-// Keep the catalog dependency exclusion explicit and protected from removal.
+// An extension's member tables are created and dropped with the extension,
+// so no desired file declares them. The stock integration image ships no
+// extension that creates a table, so the test makes one a member of the
+// extension every database carries — the catalog records the same
+// extension dependency an extension script would — and proves the listing
+// leaves it out while an unowned neighbour stays in.
 func TestListManagedTablesExcludesExtensionOwnedRelations(t *testing.T) {
-	assert.Contains(t, listManagedTablesSQL, "d.deptype OPERATOR(pg_catalog.=) 'e'")
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	qualified := pgx.Identifier{schema}.Sanitize()
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.owned_by_ext (id bigint);
+		CREATE TABLE %[1]s.unowned (id bigint);
+		ALTER EXTENSION plpgsql ADD TABLE %[1]s.owned_by_ext;`, qualified))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// The schema drop cannot cascade to an extension member; release the
+		// membership first so the throwaway schema's own cleanup succeeds.
+		_, err := pool.Exec(context.WithoutCancel(t.Context()),
+			fmt.Sprintf("ALTER EXTENSION plpgsql DROP TABLE %s.owned_by_ext", qualified))
+		require.NoError(t, err)
+	})
+
+	tables, err := ListManagedTables(t.Context(), pool, schema)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"unowned"}, tables)
 }
