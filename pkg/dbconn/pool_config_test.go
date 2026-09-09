@@ -28,6 +28,7 @@ func TestBuildPoolConfigDefaults(t *testing.T) {
 	assert.Positive(t, pc.MaxConnLifetime)
 	assert.Positive(t, pc.HealthCheckPeriod)
 	assert.Nil(t, pc.BeforeConnect)
+	assert.NotNil(t, pc.AfterConnect)
 	assert.Nil(t, pc.ConnConfig.Tracer)
 }
 

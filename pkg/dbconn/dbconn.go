@@ -80,7 +80,10 @@ type Config struct {
 }
 
 // NewPool builds a pgx pool from cfg, applies the session defaults, and
-// verifies connectivity with a ping before returning.
+// verifies connectivity with a ping before returning. Each physical
+// connection has any explicit pg_catalog entry removed from its search_path
+// (see unshadowCatalog), so catalog names always resolve to the catalog
+// while every other entry — and the creation schema — stays as configured.
 func NewPool(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	pc, err := buildPoolConfig(cfg)
 	if err != nil {
@@ -213,6 +216,7 @@ func buildPoolConfig(cfg Config) (*pgxpool.Config, error) {
 	if cfg.BeforeConnect != nil {
 		pc.BeforeConnect = cfg.BeforeConnect
 	}
+	pc.AfterConnect = unshadowCatalog
 	if cfg.Logger != nil {
 		pc.ConnConfig.Tracer = &tracelog.TraceLog{
 			Logger:   slogTraceLogger{logger: cfg.Logger},
