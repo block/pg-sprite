@@ -34,8 +34,10 @@ the reviewer's distillation.
 - SQL parsing goes through `wasilibs/go-pgquery` (Wasm `libpg_query`); flag
   `strings.Split(";")`, any hand-parsing, and imports of the cgo `pg_query_go` (documented
   escape hatch, not the default). A parse failure is an error surfaced to the caller.
-  Shadow-table DDL and checkpoint fingerprints come from execute-and-introspect on the scratch
-  database — flag AST surgery that constructs the shadow schema or fingerprints SQL text.
+  Shadow-table DDL is validated by executing the retargeted statement on the empty shadow and
+  checkpoint fingerprints come from the transaction-scoped scratch schema — execute-and-introspect;
+  the only permitted AST edit is the single relation retarget reprinted through the deparser.
+  Flag any other AST surgery that constructs the shadow schema, and any fingerprinting of SQL text.
 - Generated SQL quotes every user-supplied or introspected identifier
   (`pgx.Identifier{...}.Sanitize()` / `quote_ident()`) — flag raw interpolation of names into
   SQL. Connection strings are parsed and re-serialized (`pgx.ParseConfig`), never

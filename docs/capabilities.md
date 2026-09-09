@@ -210,7 +210,7 @@ review the object warrants) ·
 
 | Object / operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| Enum-typed columns on plain tables | 🟡 | native, planned flow | Yes | Tolerance end to end (introspection already canonicalizes via `format_type`; desired-file admission and scratch-database mechanics are being verified) |
+| Enum-typed columns on plain tables | 🟡 | native, planned flow | Yes | Tolerance end to end (introspection already canonicalizes via `format_type`; desired-file admission and transaction-scoped scratch-schema mechanics are being verified) |
 | `ALTER TYPE ... ADD VALUE` | 🟡 | native, planned flow | Yes | Metadata-only and online-safe (PG 14+ allows it in a transaction; the value is usable after commit) — planned as an owned operation. No peer online executor owns it |
 | Enum value rename / removal | 🟡 | copy-and-swap | Yes | PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite — routes to a typed refusal toward copy-and-swap |
 | Enum/domain type creation and drop | ⚪ | — | No — owner tooling (psql, shipped with the code change) | Bootstrap/catalog work with no concurrent-access problem; owner tooling applies it in the same change that ships the code |

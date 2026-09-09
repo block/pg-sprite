@@ -183,7 +183,7 @@ func refuseForeignKeys(create *pganalyze.CreateStmt) error {
 // empty schema strips an existing qualification instead. It supports exactly
 // one CREATE TABLE, CREATE INDEX, or ALTER TABLE statement. This touches
 // qualification only — no semantics are ever derived or transformed at the
-// AST level (that is the scratch database's job).
+// AST level (that is execute-and-introspect's job).
 func Qualify(sql, schema string) (string, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {

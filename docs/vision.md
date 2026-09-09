@@ -100,8 +100,8 @@ it — the honesty rule is that these claims are design-time until those tests l
 The design treats managed platforms (Aurora/RDS) as first-class targets rather than assuming
 an idealized self-hosted primary: replication-slot loss
 on failover is a modeled state transition with a checksum-repair path (ST-4), logical
-decoding is the default capture mode with triggers as a deliberate fallback
-([change-capture-tradeoff.md](change-capture-tradeoff.md)), and the CI matrix proves
+decoding is the v1 capture mode with a trigger-based implementation documented as the deferred
+alternative ([change-capture-tradeoff.md](change-capture-tradeoff.md)), and the CI matrix proves
 PG 14→18 — the fleet floor, not the newest release
 ([postgresql-version-support.md](postgresql-version-support.md)).
 

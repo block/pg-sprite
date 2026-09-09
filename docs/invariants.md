@@ -45,7 +45,8 @@ low-watermark advances past every chunk it sees feedback for, including repaired
 checksum pass where **any** chunk was repaired, the watermark is not a valid resume point until a
 later pass re-checks those chunks clean. The engine must persist an **empty** checksum watermark
 whenever the current pass has had repairs, forcing a resumed run to re-verify from the start of
-the checksum phase. The same rule applies to the continuous (deferred-cutover) checker: resuming
+the checksum phase. The same rule applies to the continuous checker (the pre-cutover re-check
+loop; a deferred-cutover mode, if ever built, would run the same checker longer): resuming
 from a stale watermark after a continuous-checker repair would let a re-run "pass" by verifying
 only trailing chunks — silently neutralizing a deliberate divergence abort.
 *Enforced:* checkpoint writer (watermark dropped unless **all** active checkers are clean).
@@ -71,21 +72,47 @@ inferred from whether a recopier happens to be wired up:
 
 The copier **never overwrites** (`ON CONFLICT (pk) DO NOTHING`); the applier **always
 overwrites** (`ON CONFLICT (pk) DO UPDATE` + explicit deletes); captured changes above the
-copier's watermark may be **discarded only for a monotonic integer PK**, and must be queued for
-composite/non-comparable PKs; a delete for a key inside an in-flight chunk must be re-applied
-after that chunk lands. Full statement and the races these resolve:
+copier's watermark are **discarded, judged per key**, which is sound only because v1 restricts
+the chunk key to one integer-family PK with a monotonic watermark
+([copy-and-swap D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key))
+— the precondition is the `CopySwapTarget` proof, whose preflight refuses composite and
+non-comparable PKs with `copy-and-swap-pk-unsupported` rather than queueing them. An UPDATE that
+moved the primary key (`ChangeEvent.OldKey` set) is two changes — a deletion of the old key and
+an image of the new — each judged against the watermark on its own, so the deletion below the
+watermark is applied even when the new key above it is discarded. A buffered change for **any**
+key inside an in-flight chunk — not only a delete — is never flushed while that chunk is in
+flight: of the two admissible disciplines (chunk copy and backlog flush mutually excluded per
+overlapping key range, or flush-now with a tombstone retained and re-applied after the chunk
+lands), v1 takes **mutual exclusion**, because D13's unique-key fallback reads the shadow row to
+complete unchanged-TOAST markers; the tombstone form is not available to the v1 applier
+([copy-and-swap D13](copy-and-swap-design.md#d13--recover-unique-secondary-key-moves-batch-wide)).
+Full statement and the races these resolve:
 [low-level-design § copy and apply ordering](low-level-design.md#copy-and-apply-ordering-the-core-correctness-subtlety).
-*Enforced:* copier/applier SQL shapes + flush scheduling. *Source:* this doc set (Spirit's
-model translated).
+*Enforced:* copier/applier SQL shapes + flush scheduling that defers any flush overlapping an
+in-flight chunk's key range (mutual exclusion, not tombstone retention). *Test obligation:* a
+marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
+and the row is then completed from the copied shadow row, never an absent-row abort; a
+key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark
+1000) asserts key 5 is deleted from the shadow. *Source:* this doc set (Spirit's model
+translated).
 
 ### CO-5 — The change buffer is disjoint and current at flush time
 
 At every flush, each PK appears **at most once** in the change buffer, holding the **latest** row
-image (or a delete marker) — dedup is what makes catch-up convergent rather than linear. After a
-mode transition (map ↔ FIFO-queue for non-memory-comparable PKs), **only the active store may
-hold entries**: the outgoing store is drained inline at the toggle, so no flush ever has to merge
-a stale store. *Enforced:* buffer data structure + the mode-toggle transition. *Source:* Spirit
-`pkg/change/subscription_buffered.go` (stated invariant).
+image (or a delete marker) — dedup is what makes catch-up convergent rather than linear. Dedup
+**merges, never replaces**: a newer UPDATE image overlays only the columns it carries onto the
+buffered image, so an unchanged-TOAST marker (CO-8) survives dedup only when no buffered image
+for that key ever held the column's value; a delete marker replaces the image outright, and an
+INSERT after a delete replaces the marker. An UPDATE that moved the primary key
+(`ChangeEvent.OldKey` set) enters the buffer as two entries — a delete marker for the old key and
+an image for the new key — and the image's marker, if any, stands for the value in the **old**
+key's shadow row (D13 completes it from there). The buffer is a single keyed map: v1 has one
+integer-family PK
+([copy-and-swap D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)),
+so Spirit's map ↔ FIFO-queue mode toggle for non-memory-comparable keys has no v1 counterpart
+and returns only if queue mode is ever built. *Enforced:* buffer data structure (merge on
+overlay). *Source:* Spirit `pkg/change/subscription_buffered.go` (stated invariant), narrowed to
+the v1 key shape; the merge rule is this doc set's addition for pgoutput's partial images.
 
 ### CO-6 — Unique-secondary-key moves must converge (PostgreSQL-specific gap)
 
@@ -94,10 +121,25 @@ transiently-deleted row converges because its own event re-inserts it (the buffe
 guarantee, CO-5). PostgreSQL has no REPLACE: `INSERT … ON CONFLICT (pk) DO UPDATE` targets
 **one** conflict arbiter, so a batch that legally moves a unique value between rows (set
 `slot_id` NULL on row 1, then `'S'` on row 2, in one source transaction) can **error** on the
-secondary unique index instead of converging. The applier must define semantics for this —
-order-preserving apply within the batch, per-row retry on unique violation, or delete-then-insert
-pairs — and prove convergence under test. The checksum (CO-1) backstops, but the applier must
-converge without it. *Enforced:* applier batch semantics (design work, Phase 6). *Source:* Spirit
+secondary unique index instead of converging. The decided semantics
+([copy-and-swap D13](copy-and-swap-design.md#d13--recover-unique-secondary-key-moves-batch-wide))
+are key-targeted upserts, and on `23505` a savepoint rollback and batch-wide
+delete-all-then-insert-all; per-key delete-then-insert retry is rejected because a cyclic
+exchange collides in both orders. The fallback inserts whole rows, so it must not invent a value
+for an unchanged-TOAST column (CO-8): before deleting, it completes any surviving image that
+still carries a marker from the current shadow row — the row for the key, or for
+`ChangeEvent.OldKey` when the UPDATE moved the primary key (`SELECT … FOR UPDATE`, same
+transaction) — and treats an absent shadow row for such an image as an invariant violation (fail
+closed) — CO-5's merge rule guarantees the marker only survives for values that live in a shadow
+row the batch did not create. Convergence must still be proved under test. *Test obligation:*
+`seats(id int PRIMARY KEY, slot text UNIQUE)` holding `(1,'A'),(2,'B')`, flushed with the batch
+`{1→'B', 2→'A'}`, converges in one flush; a second vector adds a column stored **out of line**
+(`SET STORAGE EXTERNAL`, proven by the test harness's `ToastBytes()` — a large value under the
+default `EXTENDED` storage may compress inline and never emit the marker) left untouched by both
+updates, asserts it survives the fallback byte-for-byte, and moves one row's primary key so the
+completion reads the old key's row rather than aborting. The checksum (CO-1)
+backstops, but the applier must converge without it. *Enforced:* applier batch semantics
+(Phase 6). *Source:* Spirit
 `pkg/change/README.md` (the REPLACE rationale) — the PG translation in
 [mysql-vs-postgresql](mysql-vs-postgresql.md#copy-and-swap-executor-spirit-mysql--postgresql-primitive-mapping)
 is incomplete without this.
@@ -112,6 +154,23 @@ the parser choice is an implementation decision of the understanding layer (see
 [low-level-design](low-level-design.md#how-the-planner-understands-ddl-decided)).
 *Enforced:* `pkg/statement` boundary. *Source:* SchemaBot AGENTS.md (TiDB-parser hard
 requirement, rewritten for our parser); carried in the repo's [AGENTS.md](../AGENTS.md).
+
+### CO-8 — A TOAST-omitted column is never overwritten
+
+An UPDATE decoded from pgoutput must change only columns whose new-tuple field carries a value.
+Under either replica identity v1 admits (`DEFAULT` or `FULL`, on a table with a usable primary
+key), pgoutput sends an unchanged TOASTed
+value in the new tuple as the unchanged-TOAST marker (type byte `u`) — the column is present, the
+column count is the full count, and there is no value; the marker means "leave the stored value
+unchanged", not NULL or an empty value. A full-row upsert that invents a value for that column
+would overwrite live shadow data and silently break convergence. *Enforced:* `pkg/decode`
+per-column presence on `ChangeEvent`, `pkg/applier` column-wise UPDATE construction from it.
+*Source:* [copy-and-swap D6](copy-and-swap-design.md#d6--preserve-omitted-toast-values).
+*Test obligation:* a convergence test updates other columns while leaving a column stored out of
+line untouched (`SET STORAGE EXTERNAL`, proven by the test harness's `ToastBytes()` — size alone
+is not the criterion, since a large value under `EXTENDED` storage may compress inline and never
+emit the marker), using the load generator's TOAST-unchanged update profile, run under both
+`REPLICA IDENTITY DEFAULT` and `FULL`.
 
 ## Locking and concurrency (LK)
 
@@ -136,7 +195,7 @@ mutual-exclusion gap called out in the validation review.
 ### LK-2 — Exactly one `ACCESS EXCLUSIVE` window, and every strong lock is bounded
 
 The cutover swap is the only `ACCESS EXCLUSIVE` acquisition in the happy path, and **every**
-strong-lock acquisition (swap, catalog flips, trigger install in fallback mode) runs under
+strong-lock acquisition (swap, catalog flips, trigger install if trigger capture is ever built) runs under
 `lock_timeout` + bounded retry/backoff so the engine never sits at the head of the lock queue
 ([mysql-vs-postgresql § the lock queue](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue)).
 **Exception policy required:** `CREATE INDEX CONCURRENTLY` and `REINDEX CONCURRENTLY` wait on
@@ -216,13 +275,14 @@ every `CONCURRENTLY` index command; [invalid-index-recovery](invalid-index-recov
 
 ## State, checkpoint, and resume (ST)
 
-### ST-1 — The checkpoint is a single row, written atomically
+### ST-1 — The checkpoint is one row per target, written atomically
 
-The checkpoint table keeps **one row** (upsert on a fixed key) so a crash can never leave *zero*
-checkpoints or a partial pair — there is always exactly one, and it is either the old or the new
-one. Unbounded append-style checkpoint history is not used. *Planned enforcement (Phase 8):*
-`pkg/checkpoint` write path (`INSERT … ON CONFLICT (id) DO UPDATE`, the REPLACE analog). *Source:* Spirit
-`pkg/checkpoint` (single-row REPLACE on `id=1`).
+The checkpoint table keeps **one row per `(schema, table)`** (upsert on that key) so a crash can
+never leave a partial pair for one target — its record is either the old or the new one.
+Unbounded append-style checkpoint history is not used. *Planned enforcement (Phase 8):*
+`pkg/checkpoint` write path (`INSERT … ON CONFLICT (schema_name, table_name) DO UPDATE`, the REPLACE
+analog). *Source:* Spirit `pkg/checkpoint` (single-row REPLACE on `id=1`), scoped per target by
+[copy-and-swap D3](copy-and-swap-design.md#d3--store-checkpoints-in-the-target-database).
 
 ### ST-2 — An incompatible checkpoint is distinguishable from a transient read error
 
@@ -255,7 +315,10 @@ disappearance rather than blindly continuing.
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum
 
 Before cutover the engine verifies the shadow carries the source's **owner, grants/ACLs, RLS
-policies, comments, storage parameters**, that **sequences are re-owned and advanced past the
+policies, comments, storage parameters, replica identity (`pg_class.relreplident`), and each
+constraint's validation state (`pg_constraint.convalidated`)** — none of which `LIKE … INCLUDING
+ALL` preserves ([copy-and-swap D2](copy-and-swap-design.md#d2--build-indexes-and-constraints-up-front)) —
+that **sequences are re-owned and advanced past the
 source's current values** (`setval`), and that indexes are valid (`pg_index.indisvalid`). Data
 equality (CO-1) plus metadata fidelity, or no swap. *Enforced:* cutover preconditions. *Source:*
 [low-level-design § operational caveats](low-level-design.md#operational-caveats),
@@ -265,17 +328,12 @@ risks-and-mitigations.
 
 Every knowable prerequisite is validated before the engine writes anything: logical-replication
 enablement and role, PK usability, `REPLICA IDENTITY`, slot/WAL-sender headroom, disk headroom
-(~2× the table), the [scratch database](low-level-design.md#plan-time-prerequisite-the-scratch-database)
-(pre-provisioned `pg_sprite_scratch`, or `CREATEDB` so preflight can self-provision it — a
-copy-and-swap prerequisite only; every capability shipped today uses a transaction-scoped
-scratch *schema* that needs neither), lock
-LK-1 acquired, and the RF-* refusals below. Failing hours into a copy on something knowable up
-front is a bug. **Sub-obligation — server-authoritative validation:** declarative desired-state
-SQL is already executed and introspected in a rolled-back, transaction-scoped scratch schema.
-The decided end state validates every execution path against the engine-owned scratch database
-before the first write to the target; the server is the semantic authority and client-side
-parsing is advisory. *Enforced today:* declarative diff. *Planned enforcement:* all execution
-paths in preflight. *Source:*
+(~2× the table), execute-and-introspect workspace, lock LK-1 acquired, and the RF-* refusals
+below. Failing hours into a copy on something knowable up front is a bug. Copy-and-swap needs no
+durable scratch database or `CREATEDB`: its gated DDL executes against the empty shadow and its
+checkpoint fingerprint uses the rolled-back, transaction-scoped `pkg/schemadiff` scratch schema.
+The server is the semantic authority and client-side parsing is advisory. *Enforced today:*
+declarative diff. *Planned enforcement:* all execution paths in preflight. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 
 ### ST-7 — The executor runs exactly the statement that was gated
@@ -288,7 +346,9 @@ never reach the database through the executor (pgx's simple protocol would happi
 it). *Enforced:* `pkg/executor` (`ExecuteNative`; `RunSequence` admission re-proves every step's
 target against the preflight proof before the first step executes; `ExecuteCreate` re-proves
 every desired statement's target against the absence proof the same way), `pkg/statement`
-(proof construction).
+(proof construction). *Planned enforcement:* the `pkg/schemachange` shadow builder re-proves the
+retargeted statement against the gated one with the shadow as the sole permitted target
+([copy-and-swap D1](copy-and-swap-design.md#d1--no-durable-scratch-database)).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
@@ -411,7 +471,7 @@ about **how we write and review the code**.
 | LK-1 | 0–1 (before any executing mode ships) | two-instance mutual-exclusion + keepalive-loss test |
 | LK-2 | 3 (native), 7 (cutover) | lock-bounding + CIC-exception tests |
 | CO-1, CO-2, CO-3 | 5 (gate), 8 (watermark/divergence policy) | inject-divergence, repair-invalidates-watermark |
-| CO-4, CO-5, CO-6 | 6 | one convergence test per race, incl. unique-value move |
+| CO-4, CO-5, CO-6, CO-8 | 6 | one convergence test per race, incl. unique-value move and TOAST-unchanged update |
 | LK-3 | 4–6 | cancellation/claim race test |
 | LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |
