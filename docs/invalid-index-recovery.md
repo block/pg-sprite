@@ -77,11 +77,6 @@ waiting on the pool. It is safe because the removal is **proven, not named** —
 drops by name, and a name alone can never prove which entry it will hit
 ([LK-5](invariants.md#lk-5--an-index-is-dropped-only-by-proven-identity-under-the-lock-that-excludes-its-builder)):
 
-`executor.DropAbandonedIndex` takes the same statement and budget and performs the same
-proof, quarantine, and drop, but stops before the build. Its report therefore leaves
-`Build` zero and it needs two pool connections rather than three. This is useful when a
-caller is cleaning up a cancelled apply and must not resume the requested schema change.
-
 1. Under a bounded `SHARE UPDATE EXCLUSIVE` lock on the target table — the lock every
    concurrent index command (`CREATE`, `DROP`, `REINDEX ... CONCURRENTLY`) holds for its
    whole life, so holding it proves no build, drop, or reindex of any index on the table
@@ -113,6 +108,12 @@ quarantined entries still finishes within the budget the caller gave it — or r
 `*BudgetError` when what remains is too little to start the next statement. In caller-owned
 mode the caller's cancellation bounds the statements, as for the build; the lock waits keep
 their five-second bound in either mode.
+
+`executor.DropAbandonedIndex` takes the same statement and budget and performs steps 1
+and 2 — the same proof, quarantine, and drops — but stops before step 3. Its report
+therefore leaves `Build` zero, and it needs two pool connections rather than three: its own
+session and one drop session. Use it when cleaning up after a cancelled apply that must not
+resume the requested schema change.
 
 The recovery refuses, touching nothing, on a visible in-flight build (of the requested
 entry or of a quarantined one), another table's entry, or an entry the server will not

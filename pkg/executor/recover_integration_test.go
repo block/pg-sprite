@@ -755,3 +755,33 @@ func TestRebuildAbandonedIndexRefusesPoolWithoutRoomForItsSession(t *testing.T) 
 	assert.True(t, exists)
 	assert.False(t, valid)
 }
+
+// TestDropAbandonedIndexRunsOnPoolSizedForTheBuild pins the drop-only
+// recovery's smaller pool minimum: with no build to run, its own session
+// plus one drop session is the whole peak, so a pool the rebuild refuses
+// admits the drop and the drop completes on it rather than waiting on
+// itself for a connection.
+func TestDropAbandonedIndexRunsOnPoolSizedForTheBuild(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t), MaxConns: 2})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	createTableWithDuplicates(t, pool, schema, "t")
+	leaveInvalidIndex(t, pool, schema, "t", "idx_left")
+	leftover := indexOID(t, pool, schema, "idx_left")
+	stmt := fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema)
+
+	_, err = executor.RebuildAbandonedIndex(t.Context(), pool, stmt, buildBudget)
+	require.ErrorIs(t, err, executor.ErrPoolTooSmall, "the same pool is too small for a rebuild")
+
+	rep, err := executor.DropAbandonedIndex(t.Context(), pool, stmt, buildBudget)
+	require.NoError(t, err)
+
+	require.Len(t, rep.Dropped, 1)
+	assert.Equal(t, leftover, rep.Dropped[0].IndexOID)
+	assert.Empty(t, rep.Skipped)
+	assert.Zero(t, rep.Build)
+	exists, _ := indexState(t, pool, schema, "idx_left")
+	assert.False(t, exists)
+	assert.Empty(t, quarantinedIndexes(t, pool, schema))
+}
