@@ -785,3 +785,30 @@ func TestDropAbandonedIndexRunsOnPoolSizedForTheBuild(t *testing.T) {
 	assert.False(t, exists)
 	assert.Empty(t, quarantinedIndexes(t, pool, schema))
 }
+
+// TestDropAbandonedIndexRefusesSingleConnectionPool pins the lower bound of
+// the drop-only recovery's pool minimum: the drop session runs while the
+// recovery session is held, so a pool of one connection would wait on
+// itself for the drop instead of failing. The recovery refuses it before
+// any session use, and the leftover stands untouched.
+func TestDropAbandonedIndexRefusesSingleConnectionPool(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t), MaxConns: 1})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	createTableWithDuplicates(t, pool, schema, "t")
+	leaveInvalidIndex(t, pool, schema, "t", "idx_left")
+	leftover := indexOID(t, pool, schema, "idx_left")
+	stmt := fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema)
+
+	rep, err := executor.DropAbandonedIndex(t.Context(), pool, stmt, buildBudget)
+
+	require.ErrorIs(t, err, executor.ErrPoolTooSmall)
+	assert.Empty(t, rep.Dropped)
+	assert.Empty(t, rep.Skipped)
+	assert.Equal(t, leftover, indexOID(t, pool, schema, "idx_left"), "the refusal precedes any execution")
+	exists, valid := indexState(t, pool, schema, "idx_left")
+	assert.True(t, exists)
+	assert.False(t, valid)
+	assert.Empty(t, quarantinedIndexes(t, pool, schema))
+}
