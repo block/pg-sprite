@@ -136,13 +136,17 @@ the phased build plan should be traceable back to one of these.
 - **Log-based CDC, not triggers — but cluster-dependently so.** The future copy-and-swap backend
   captures concurrent writes via
   **logical decoding** (a replication slot), which adds near-zero synchronous overhead to the
-  source — the key differentiator versus trigger-based tools like pg_osc. A trigger-based path is a
-  **first-class fallback** (it survives failover and runs anywhere), not a vestige; the default is
-  chosen per cluster, not absolutely — see the
+  source — the key differentiator versus trigger-based tools like pg_osc. v1 builds only the
+  logical-decoding path and refuses clusters without it
+  ([D15](copy-and-swap-design.md#d15--capture-changes-with-pgoutput)); a trigger-based
+  implementation (survives failover, runs anywhere) is the documented, deferred alternative behind
+  the same seam, not a vestige — see the
   [change-capture trade-off](change-capture-tradeoff.md). Note neither mechanism removes the
   mandatory checksum.
-- **Treat the replication slot as a managed, dangerous resource.** Temporary slot + a
-  name-prefixed reaper + a hard slot-lag ceiling; never leave an orphaned slot retaining WAL.
+- **Treat the replication slot as a managed, dangerous resource.** A durable, name-prefixed slot
+  that resume can reattach to ([D11](copy-and-swap-design.md#d11--bound-and-reap-logical-decoding-state)),
+  a startup reaper for orphans, and a hard slot-lag ceiling; never leave an orphaned slot
+  retaining WAL.
 - **Checksums must be deterministic across PostgreSQL quirks.** TOAST (including the
   unchanged-TOAST-on-UPDATE case), `STORED` generated columns, and non-deterministic
   collations must produce identical checksums on source and shadow, or the gate is meaningless.

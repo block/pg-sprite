@@ -40,7 +40,7 @@ or a missed optimization, it is periphery.
 | --- | --- | --- |
 | checksum engine (incl. continuous checker, repair) | ✅ | CO-1, CO-2, CO-3 |
 | copier + applier write paths (chunk SQL, flush scheduling, change buffer, column-wise UPDATE) | ✅ | CO-4, CO-5, CO-6, CO-8, LK-3 |
-| decode position accounting (slot LSN, snapshot coordination) | ✅ | ST-4, CO-4 |
+| decode position accounting (slot LSN, snapshot coordination) and per-column presence | ✅ | ST-4, CO-4, CO-8 |
 | cutover (swap txn, final drain, fidelity gate, ambiguity resolution) | ✅ | LK-2, LK-4, ST-5 |
 | checkpoint store (write/read/validate) | ✅ | ST-1, ST-2 |
 | slot lifecycle (create, reap, lag ceiling) | ✅ | ST-3 |

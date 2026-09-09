@@ -80,8 +80,8 @@ failover), at the cost of source write overhead — and they do **not** buy you 
 | Situation | Prefer |
 | --- | --- |
 | Hot, write-heavy table where trigger amplification is unacceptable; logical replication is enabled | **Logical decoding** |
-| Cluster where `rds.logical_replication` can't be enabled (no reboot window) or the role/connection constraints can't be met | **Triggers** |
-| Multi-day migration on a cluster with realistic failover/maintenance exposure | **Triggers** (failover-safe) — or logical decoding *with* a tested checksum-repair resume |
+| Cluster where `rds.logical_replication` can't be enabled (no reboot window) or the role/connection constraints can't be met | **Triggers** — not built in v1; preflight refuses with `copy-and-swap-logical-decoding-unavailable` until then |
+| Multi-day migration on a cluster with realistic failover/maintenance exposure | **Triggers** (failover-safe) once built — in v1, logical decoding *with* a tested checksum-repair resume |
 | Short migration on a quiet table | either; logical decoding has less footprint |
 | Sharded fleet running N migrations at once (slot/WAL pressure per cluster) | weigh per-cluster slot budget — see sharded-aurora-postgresql |
 

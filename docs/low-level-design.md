@@ -514,10 +514,13 @@ matrix is part of the "decisions, not options" philosophy.
 
 ### Operational caveats
 
-- **Unchanged-TOAST on UPDATE**: with default replica identity, an `UPDATE` that doesn't
-  touch a TOASTed column won't emit that column's value. The applier must handle this (carry
-  forward, or use `REPLICA IDENTITY FULL`) or the shadow can diverge — the checksum is the
-  backstop, but design for it explicitly.
+- **Unchanged-TOAST on UPDATE**: under either PK-based replica identity, an `UPDATE` that
+  doesn't touch a TOASTed column emits an unchanged-TOAST marker in place of that column's value.
+  The applier carries the stored value forward with a column-wise UPDATE
+  ([D6](copy-and-swap-design.md#d6--preserve-omitted-toast-values), CO-8); `REPLICA IDENTITY
+  FULL` is not a remedy — it enlarges only the old tuple and leaves the marker in place — and the
+  engine never changes the user's replica identity. The checksum is the backstop, not the
+  mechanism.
 - **No DDL during migration**: logical decoding does not stream DDL. Concurrent schema
   changes to the source mid-migration are unsupported and must be blocked.
 - **Multi-TB tables**: a multi-day copy means the slot retains WAL for the whole window →
@@ -534,8 +537,8 @@ matrix is part of the "decisions, not options" philosophy.
 
 ### What "Aurora-aware" actually means here
 
-Aurora-specific handling (throttle on Aurora reader replica lag and on replication **slot**
-lag, RDS CA bundle for TLS, `pg_terminate_backend` to bound the cutover lock, awareness of
+Aurora-specific handling (throttle on replication **slot** lag — reader replica-lag throttling is
+deferred, [D12](copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag); RDS CA bundle for TLS, `pg_terminate_backend` to bound the cutover lock, awareness of
 the writer/reader split) — **not** a claim that every Aurora edition/topology above is
 covered. The unsupported rows are explicit non-goals for v1.
 
@@ -586,7 +589,9 @@ The desired DDL executes in that transaction, so the role needs `CREATE` on the 
 These have **no MySQL counterpart** but are hard requirements for the logical-decoding path:
 
 - **`rds.logical_replication = 1`** (⇒ `wal_level = logical`); static, needs a reboot. Without
-  it the engine must fall back to trigger-based CDC.
+  it preflight refuses the copy-and-swap route (`copy-and-swap-logical-decoding-unavailable`);
+  trigger capture is the documented, deferred alternative
+  ([D15](copy-and-swap-design.md#d15--capture-changes-with-pgoutput)).
 - **`rds_replication` role** (Aurora grants no `SUPERUSER`) to create the slot and start
   replication.
 - **Replication-slot / `max_wal_senders` headroom**, and the slot must be on the **writer**
@@ -627,7 +632,7 @@ pkg/copier/           -> parallel chunked copy
 pkg/applier/          -> captured-change apply
 pkg/table/            -> PK-range chunkers and dynamic sizing
 pkg/checksum/         -> chunked verification and cutover gate
-pkg/throttler/        -> replica-lag / slot-lag throttle
+pkg/throttler/        -> chunk-time / slot-lag throttle (replica lag deferred, D12)
 Executor              -> Plan/Execute/Status/Abort backend interface
 ```
 

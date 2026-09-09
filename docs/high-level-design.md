@@ -324,8 +324,9 @@ The choices that shape everything else (the full categorized list is in
 - **Log-based capture, not triggers** (where possible) — near-zero source overhead, the key
   differentiator vs pg_osc. The trade is robustness: on Aurora a **writer failover can lose the
   logical slot mid-migration**, so the bulk copy resumes but the CDC catch-up may need a
-  checksum-repair reconciliation (not a full re-copy), and the trigger path is the failover-safe
-  fallback. The default is cluster-dependent — see the
+  checksum-repair reconciliation (not a full re-copy). A trigger-based path would be the
+  failover-safe alternative; it is documented but deferred in v1
+  ([D15](copy-and-swap-design.md#d15--capture-changes-with-pgoutput)) — see the
   [change-capture trade-off](change-capture-tradeoff.md) and
   [low-level-design's failover analysis](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 - **Operator mental-model parity with Spirit** — the same lifecycle and verbs, so

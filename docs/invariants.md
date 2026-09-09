@@ -45,7 +45,8 @@ low-watermark advances past every chunk it sees feedback for, including repaired
 checksum pass where **any** chunk was repaired, the watermark is not a valid resume point until a
 later pass re-checks those chunks clean. The engine must persist an **empty** checksum watermark
 whenever the current pass has had repairs, forcing a resumed run to re-verify from the start of
-the checksum phase. The same rule applies to the continuous (deferred-cutover) checker: resuming
+the checksum phase. The same rule applies to the continuous checker (the pre-cutover re-check
+loop; a deferred-cutover mode, if ever built, would run the same checker longer): resuming
 from a stale watermark after a continuous-checker repair would let a re-run "pass" by verifying
 only trailing chunks — silently neutralizing a deliberate divergence abort.
 *Enforced:* checkpoint writer (watermark dropped unless **all** active checkers are clean).
@@ -71,9 +72,12 @@ inferred from whether a recopier happens to be wired up:
 
 The copier **never overwrites** (`ON CONFLICT (pk) DO NOTHING`); the applier **always
 overwrites** (`ON CONFLICT (pk) DO UPDATE` + explicit deletes); captured changes above the
-copier's watermark may be **discarded only for a monotonic integer PK**, and must be queued for
-composite/non-comparable PKs; a delete for a key inside an in-flight chunk must be re-applied
-after that chunk lands. Full statement and the races these resolve:
+copier's watermark are **discarded**, which is sound only because v1 restricts the chunk key to
+one integer-family PK with a monotonic watermark
+([copy-and-swap D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key));
+composite and non-comparable PKs are refused in v1 rather than queued; a delete for a key inside
+an in-flight chunk must be re-applied after that chunk lands. Full statement and the races these
+resolve:
 [low-level-design § copy and apply ordering](low-level-design.md#copy-and-apply-ordering-the-core-correctness-subtlety).
 *Enforced:* copier/applier SQL shapes + flush scheduling. *Source:* this doc set (Spirit's
 model translated).
@@ -81,11 +85,17 @@ model translated).
 ### CO-5 — The change buffer is disjoint and current at flush time
 
 At every flush, each PK appears **at most once** in the change buffer, holding the **latest** row
-image (or a delete marker) — dedup is what makes catch-up convergent rather than linear. After a
-mode transition (map ↔ FIFO-queue for non-memory-comparable PKs), **only the active store may
-hold entries**: the outgoing store is drained inline at the toggle, so no flush ever has to merge
-a stale store. *Enforced:* buffer data structure + the mode-toggle transition. *Source:* Spirit
-`pkg/change/subscription_buffered.go` (stated invariant).
+image (or a delete marker) — dedup is what makes catch-up convergent rather than linear. Dedup
+**merges, never replaces**: a newer UPDATE image overlays only the columns it carries onto the
+buffered image, so an unchanged-TOAST marker (CO-8) survives dedup only when no buffered image
+for that key ever held the column's value; a delete marker replaces the image outright, and an
+INSERT after a delete replaces the marker. The buffer is a single keyed map: v1 has one
+integer-family PK
+([copy-and-swap D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)),
+so Spirit's map ↔ FIFO-queue mode toggle for non-memory-comparable keys has no v1 counterpart
+and returns only if queue mode is ever built. *Enforced:* buffer data structure (merge on
+overlay). *Source:* Spirit `pkg/change/subscription_buffered.go` (stated invariant), narrowed to
+the v1 key shape; the merge rule is this doc set's addition for pgoutput's partial images.
 
 ### CO-6 — Unique-secondary-key moves must converge (PostgreSQL-specific gap)
 
@@ -98,10 +108,17 @@ secondary unique index instead of converging. The decided semantics
 ([copy-and-swap D13](copy-and-swap-design.md#d13--recover-unique-secondary-key-moves-batch-wide))
 are key-targeted upserts, and on `23505` a savepoint rollback and batch-wide
 delete-all-then-insert-all; per-key delete-then-insert retry is rejected because a cyclic
-exchange collides in both orders. Convergence must still be proved under test. *Test obligation:*
+exchange collides in both orders. The fallback inserts whole rows, so it must not invent a value
+for an unchanged-TOAST column (CO-8): before deleting, it completes any surviving image that
+still carries a marker from the current shadow row (`SELECT … FOR UPDATE`, same transaction), and
+treats an absent shadow row for such an image as an invariant violation (fail closed) — CO-5's
+merge rule guarantees the marker only survives for rows that pre-existed on the source.
+Convergence must still be proved under test. *Test obligation:*
 `seats(id int PRIMARY KEY, slot text UNIQUE)` holding `(1,'A'),(2,'B')`, flushed with the batch
-`{1→'B', 2→'A'}`, converges in one flush. The checksum (CO-1) backstops, but the applier must
-converge without it. *Enforced:* applier batch semantics (Phase 6). *Source:* Spirit
+`{1→'B', 2→'A'}`, converges in one flush; a second vector adds a ≥8 KiB TOASTed column left
+untouched by both updates and asserts it survives the fallback byte-for-byte. The checksum (CO-1)
+backstops, but the applier must converge without it. *Enforced:* applier batch semantics
+(Phase 6). *Source:* Spirit
 `pkg/change/README.md` (the REPLACE rationale) — the PG translation in
 [mysql-vs-postgresql](mysql-vs-postgresql.md#copy-and-swap-executor-spirit-mysql--postgresql-primitive-mapping)
 is incomplete without this.
@@ -154,7 +171,7 @@ mutual-exclusion gap called out in the validation review.
 ### LK-2 — Exactly one `ACCESS EXCLUSIVE` window, and every strong lock is bounded
 
 The cutover swap is the only `ACCESS EXCLUSIVE` acquisition in the happy path, and **every**
-strong-lock acquisition (swap, catalog flips, trigger install in fallback mode) runs under
+strong-lock acquisition (swap, catalog flips, trigger install if trigger capture is ever built) runs under
 `lock_timeout` + bounded retry/backoff so the engine never sits at the head of the lock queue
 ([mysql-vs-postgresql § the lock queue](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue)).
 **Exception policy required:** `CREATE INDEX CONCURRENTLY` and `REINDEX CONCURRENTLY` wait on
@@ -232,7 +249,7 @@ every `CONCURRENTLY` index command; [invalid-index-recovery](invalid-index-recov
 
 ## State, checkpoint, and resume (ST)
 
-### ST-1 — The checkpoint is a single row, written atomically
+### ST-1 — The checkpoint is one row per target, written atomically
 
 The checkpoint table keeps **one row per `(schema, table)`** (upsert on that key) so a crash can
 never leave a partial pair for one target — its record is either the old or the new one.

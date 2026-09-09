@@ -23,7 +23,7 @@ The invariant registry (invariant IDs referenced below) lives in
 | `pkg/checksum` — chunk verifier, continuous checker, repair | ✅ core | planned (Phase 5) | CO-1, CO-2, CO-3 |
 | `pkg/copier` — shadow-table chunked copy | ✅ core | planned (Phase 4) | CO-4, LK-3 |
 | `pkg/applier` — change apply, buffer, flush scheduling | ✅ core | planned (Phase 6) | CO-4, CO-5, CO-6, CO-8, LK-3 |
-| `pkg/decode` — logical decoding, LSN/position accounting | ✅ core | planned (Phase 6) | ST-4, CO-4 |
+| `pkg/decode` — logical decoding, LSN/position accounting, per-column presence | ✅ core | planned (Phase 6) | ST-4, CO-4, CO-8 |
 | `pkg/checkpoint` — durable resume state | ✅ core | planned (Phase 8) | ST-1, ST-2 |
 | slot lifecycle (in `pkg/decode`) — create, reap, lag ceiling | ✅ core | planned (Phase 8) | ST-3 |
 | `pkg/schemachange` — orchestrator, **cutover swap + fidelity gate** | ✅ core | planned (Phase 7) | LK-2, LK-4, ST-5 |

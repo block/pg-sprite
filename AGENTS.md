@@ -85,7 +85,8 @@ is a smoke tour of the built binary, not a second test suite.
   with `pkg/statement` as the parse boundary. No `strings.Split(";")`, no hand-parsing; a parse failure is an
   error surfaced to the caller. Shadow-table DDL and checkpoint fingerprints are derived by
   execute-and-introspect on the empty shadow and in the transaction-scoped scratch schema,
-  never by AST transformation (see
+  never by AST transformation; the one AST edit permitted is retargeting a single statement's
+  one relation name (`pkg/statement` `Qualify`), which changes no semantics (see
   [docs/copy-and-swap-design.md](docs/copy-and-swap-design.md#d1--no-durable-scratch-database)).
 - Tests use testify (`require` for setup, `assert` for verification), `t.Context()` (in
   cleanups, which run after the context is cancelled, use

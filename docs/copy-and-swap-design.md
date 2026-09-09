@@ -164,7 +164,8 @@ therefore carries the user's names — `ON CONFLICT ON CONSTRAINT u_slot` keeps 
 later change of the same table derives the same names — and only the old table's dependents wear
 the suffix. A shared `serial`/`nextval` sequence is not a dependent of the old table and keeps its
 name (D5). Preflight returns `copy-and-swap-name-length` if any derived identifier — an `_old`
-name, or a shadow-side `LIKE` name — would exceed PostgreSQL's 63-byte `NAMEDATALEN` limit.
+name, or a shadow-side `LIKE` name — would exceed PostgreSQL's 63-byte identifier limit
+(`NAMEDATALEN - 1`).
 
 **Why.** Stable names make catalog inspection and resume deterministic; restoring user names keeps
 the swap invisible to code that names constraints; refusing truncation prevents collisions.
@@ -230,24 +231,40 @@ observation and policy.
 
 ### D13 — Recover unique-secondary-key moves batch-wide
 
-**Decision.** A buffered flush applies the CO-5 buffer — one latest image or deletion per primary
+**Decision.** A buffered flush applies the CO-5 buffer — one merged image or deletion per primary
 key, with no statement order to preserve — in one transaction as key-targeted upserts and
-deletes. Flush boundaries fall on source commit boundaries, so a batch never holds half of a
-source transaction. On SQLSTATE `23505` the applier rolls back to the flush's savepoint and reapplies the
-whole batch as delete-all-then-insert-all: it deletes every key in the batch, then inserts every
-surviving image. CO-6's test obligation stays open until this converges under test; its fixed
-vector is `seats(id int PRIMARY KEY, slot text UNIQUE)` holding `(1,'A'),(2,'B')` with the
-batch `{1→'B', 2→'A'}`.
+column-wise updates (D6) plus deletes. Flush boundaries fall on source commit boundaries, so a
+batch never holds half of a source transaction. On SQLSTATE `23505` the applier rolls back to the
+flush's savepoint and reapplies the whole batch as delete-all-then-insert-all: it deletes every
+key in the batch, then inserts every surviving image. CO-6's test obligation stays open until
+this converges under test; its fixed vector is `seats(id int PRIMARY KEY, slot text UNIQUE)`
+holding `(1,'A'),(2,'B')` with the batch `{1→'B', 2→'A'}`.
+
+The fallback inserts whole rows, so it needs complete images where the primary path needs only
+present columns. Two rules supply them. First, the CO-5 buffer merges rather than replaces: a
+newer UPDATE image overlays only its present columns onto the buffered image for that key, so an
+unchanged-TOAST marker (`u`, D6) survives dedup only when no buffered image for the key ever
+carried that column's value — that is, the row already existed on the source before the batch.
+Second, before the fallback deletes anything it completes every surviving image that still
+carries a marker by reading those columns from the current shadow row (`SELECT … FOR UPDATE` on
+the affected keys, in the same transaction, after the savepoint rollback); by CO-8 the shadow's
+stored value is exactly the value the marker stands for. A marker-bearing image whose shadow row
+is absent is a protocol error, not a case to handle: the row pre-exists on the source, so its key
+is either above the copier watermark (discarded under CO-4 before buffering) or inside an
+in-flight chunk (whose flush CO-4 already defers until the chunk lands). The applier aborts the
+change fail closed if it observes one.
 
 **Why.** PostgreSQL's targeted `ON CONFLICT` cannot by itself move one unique secondary value
 between rows, and neither can per-key retry: for the cyclic exchange above, a delete-then-insert
 pair collides in both orders, so a per-pair loop reaches no fixed point. Deleting every key in the
 batch first leaves no row that can collide with the inserts, so the batch-wide form converges in
-one pass.
+one pass — provided every inserted image is complete, which the two rules above guarantee
+without inventing a value for an omitted column.
 
 **Alternative considered → rejected.** Per-key delete-then-insert retry cannot converge on a
 cyclic exchange. Ignoring secondary conflicts would leave convergence to the checksum rather
-than the applier.
+than the applier. Restricting the fallback to batches whose images are already complete would
+leave a cyclic exchange that touches a TOASTed row with no converging path at all.
 
 **Where enforced.** `pkg/applier`; CO-5, CO-6.
 
@@ -285,7 +302,7 @@ decoding but adds write-path availability and amplification costs.
 | `pkg/preflight` | Produces `CopySwapTarget`, the copy-and-swap route's proof (the table facts `PreflightedTable` carries plus the v1 shape, replica identity, dependent-object, name-length, decoding, and headroom checks above); owns Tier-3 refusals. | ST-6, RF-1..RF-3 |
 | `pkg/copier` | Produces `Chunk` and `Watermark`. | CO-4, LK-3 |
 | `pkg/checksum` | Produces `VerifiedShadow` and `CleanWatermark`; their constructors are private to this package. | CO-1, CO-2, CO-3 |
-| `pkg/decode` | Produces `ChangeEvent`, including per-column presence. | ST-3, ST-4, CO-4 |
+| `pkg/decode` | Produces `ChangeEvent`, including per-column presence. | ST-3, ST-4, CO-4, CO-8 |
 | `pkg/applier` | Applies presence-aware events from the per-key buffer. | CO-4, CO-5, CO-6, CO-8, LK-3 |
 | `pkg/checkpoint` | Produces `Checkpoint`. | ST-1, ST-2 |
 | `pkg/schemachange` | Orchestrator, shadow builder, and cutover. | LK-2, LK-4, ST-5 |

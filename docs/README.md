@@ -81,10 +81,11 @@ checksum correctness gate* before cutover, *dynamic time-based chunking*, and
    resumable copy-and-swap** lifts those refusals. PostgreSQL does far more changes as
    native instant operations than MySQL, so refusing the rewrite cases still leaves the
    tool useful for the majority of changes from day one.
-3. **Change capture is log-based by default.** A change-capture abstraction with
-   **logical decoding** as the primary implementation and a **trigger-based** fallback for
-   environments that cannot enable `rds.logical_replication` or can't accept slot loss on
-   failover. The default is cluster-dependent, not absolute — see
+3. **Change capture is log-based.** v1 captures changes with **logical decoding** (pgoutput)
+   only; clusters that cannot enable `rds.logical_replication` receive a typed refusal. A
+   **trigger-based** implementation behind the same change-capture seam remains the documented
+   alternative for those clusters and for slot loss on failover, but is deferred — see
+   [copy-and-swap D15](copy-and-swap-design.md#d15--capture-changes-with-pgoutput) and
    [change-capture-tradeoff.md](change-capture-tradeoff.md).
 4. **Two front doors, one pipeline.** *Declarative* (`diff`/`fmt`) takes a desired
    `CREATE TABLE` and derives the change by diffing against the live schema; *imperative*

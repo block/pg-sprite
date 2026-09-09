@@ -51,7 +51,10 @@ requires — nothing higher.
 
 Copy-and-swap uses the empty shadow plus the transaction-scoped `pkg/schemadiff` scratch schema
 for execute-and-introspect; it does not add a higher privilege tier or require `CREATEDB`. See
-[the D1 decision](copy-and-swap-design.md#d1--no-durable-scratch-database).
+[the D1 decision](copy-and-swap-design.md#d1--no-durable-scratch-database). The scratch schema
+does need `CREATE` **on the database** (`CREATE SCHEMA` is a database-level privilege) — a
+requirement of every declarative plan, not only copy-and-swap, that the tier table does not yet
+carry and preflight's privilege probe does not yet check; both are open follow-ups.
 
 Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are checked in the
 same preflight: `wal_level = logical` (`rds.logical_replication = 1` on Aurora/RDS, a
