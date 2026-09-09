@@ -13,8 +13,8 @@ when the executor ships.
 
 | Classification | v1 surface |
 | --- | --- |
-| Supported in v1 | Rewrite-requiring `ALTER COLUMN … TYPE`, initially `integer` → `bigint` identity primary keys, `text` → `varchar(n)`, and `numeric` precision/scale widening; volatile-default `ADD COLUMN`; and `STORED` generated-column addition. The table has one `smallint`, `integer`, or `bigint` primary-key column; PK-based `REPLICA IDENTITY DEFAULT` or `FULL`; no incoming or outgoing foreign keys, triggers, partitioning/inheritance, or rules; no dependent views or materialized views; no explicit membership in a publication other than the engine's own; and every derived dependent-object name fits in PostgreSQL's `NAMEDATALEN` limit. Foreign keys, triggers, dependent views, and publication membership are the OID-bound dependents a rename swap strands (RF-2): they would follow the retained `_old` table, not the live one. |
-| Typed refusal (planned) | Unsupported key (`copy-and-swap-pk-unsupported`); unsuitable replica identity (`copy-and-swap-replica-identity`); foreign keys (`copy-and-swap-foreign-keys`); triggers or rules (`copy-and-swap-triggers`); partitioned or inherited tables (`copy-and-swap-partitioned`); dependent views or materialized views (`copy-and-swap-dependent-views`); publication membership (`copy-and-swap-publication-member`); derived names longer than 63 bytes (`copy-and-swap-name-length`); unavailable logical decoding (`copy-and-swap-logical-decoding-unavailable`); insufficient replication-slot or WAL-sender capacity (`copy-and-swap-slot-headroom`); insufficient disk (`copy-and-swap-disk-headroom`); or insufficient grants (`copy-and-swap-grants`). Every refusal names its reason. |
+| Supported in v1 | Rewrite-requiring `ALTER COLUMN … TYPE`, initially `integer` → `bigint` identity primary keys, `text` → `varchar(n)`, and `numeric` precision/scale widening; volatile-default `ADD COLUMN`; and `STORED` generated-column addition. The table has one `smallint`, `integer`, or `bigint` primary-key column (a usable primary key) and a replica identity of `DEFAULT` or `FULL`; no incoming or outgoing foreign keys, triggers, partitioning/inheritance, or rules; no dependent views or materialized views; no explicit membership in a publication other than the engine's own; and every derived dependent-object name fits in PostgreSQL's 63-byte identifier limit (`NAMEDATALEN - 1`). Foreign keys, triggers, dependent views, and publication membership are the OID-bound dependents a rename swap strands (RF-2): they would follow the retained `_old` table, not the live one. |
+| Typed refusal (planned) | Unsupported key (`copy-and-swap-pk-unsupported`); unsuitable replica identity (`copy-and-swap-replica-identity`); foreign keys (`copy-and-swap-foreign-keys`); triggers or rules (`copy-and-swap-triggers`); partitioned or inherited tables (`copy-and-swap-partitioned`); dependent views or materialized views (`copy-and-swap-dependent-views`); publication membership (`copy-and-swap-publication-member`); derived names longer than 63 bytes (`copy-and-swap-name-length`); unavailable logical decoding (`copy-and-swap-logical-decoding-unavailable`); insufficient replication-slot or WAL-sender capacity (`copy-and-swap-slot-headroom`); a same-named slot already owned by another database (`copy-and-swap-slot-collision`); insufficient disk (`copy-and-swap-disk-headroom`); or insufficient grants (`copy-and-swap-grants`). Every refusal names its reason. |
 | Out of scope | All other table shapes and operations, including primary-key changes, receive a typed refusal rather than an unsafe approximation. |
 
 ## Decisions
@@ -55,9 +55,16 @@ retarget re-verification, with the shadow as the sole permitted target).
 settings (`SET STORAGE`), and the comments on columns, constraints, and indexes when the shadow
 is created; identity is the D5 exception. It does not carry the table's owner, ACLs,
 row-level-security setting and policies, storage parameters (`reloptions` such as
-`fillfactor` and autovacuum settings), or the table comment; the shadow builder replicates those
-explicitly, and the ST-5 fidelity checklist refuses to swap until they match. Bulk copy pays
-index maintenance as rows arrive.
+`fillfactor` and autovacuum settings), the table comment, or the replica identity
+(`pg_class.relreplident`); the shadow builder replicates those explicitly — for replica
+identity, `ALTER TABLE … REPLICA IDENTITY` on the shadow, so a source on `FULL` swaps in on
+`FULL` (D6) — and the ST-5 fidelity checklist refuses to swap until they match. `INCLUDING ALL`
+also copies a `CHECK … NOT VALID` constraint as a **validated** one, and the copier's insert
+would then reject rows the source legally holds; for every source constraint with
+`pg_constraint.convalidated = false` the shadow builder drops the copied constraint and re-adds
+it `NOT VALID` on the still-empty shadow, so the shadow carries the source's actual semantics
+and the swap never silently validates a constraint the user left unvalidated (ST-5 compares
+`convalidated`). Bulk copy pays index maintenance as rows arrive.
 
 **Why.** The shadow has its complete enforced shape throughout copy and reaches the fidelity gate
 without a second long build phase.
@@ -83,7 +90,10 @@ consistency boundary and unbounded history.
 ### D4 — Restrict the chunk key to one integer-family primary key
 
 **Decision.** v1 accepts one `smallint`, `integer`, or `bigint` primary-key column. It uses
-monotonic PK-range chunks and may discard captured events above the copier watermark under CO-4.
+monotonic PK-range chunks and may discard captured changes above the copier watermark under
+CO-4, judged **per key**: an UPDATE that moved the primary key (`ChangeEvent.OldKey` set) is a
+deletion of the old key and an image of the new one, each judged against the watermark on its
+own, so the deletion below the watermark is applied even when the new key above it is discarded.
 Composite, `uuid`, and text keys return `copy-and-swap-pk-unsupported`.
 
 **Why.** A totally ordered, compact key makes chunk boundaries, resume watermarks, and the
@@ -104,13 +114,17 @@ table's. Identity metadata is excluded from the shadow. The shadow instead recei
 `ACCESS EXCLUSIVE`, cutover renames the source identity sequence to its `_old` name (D8), drops
 that default, recreates identity with
 `ALTER TABLE … ALTER COLUMN … ADD GENERATED ALWAYS|BY DEFAULT AS IDENTITY` using the source
-sequence's options, and copies the source sequence's exact position with
-`setval('<new-identity-sequence>', last_value, is_called)`, both values read from the source
-sequence in the same transaction. A never-advanced source (`is_called = false`) therefore leaves
-the new sequence at the same not-yet-issued start value rather than skipping it, and no sequence
-value is ever spliced into SQL text. Discovery uses `pg_get_serial_sequence` and verifies the
-corresponding `pg_depend` ownership edge. The old identity sequence is dropped with the old
-table.
+sequence's options, renames the server-named new identity sequence to the name the source's
+held (freed by its `_old` rename, so a user-renamed identity sequence keeps its name), and
+copies the source sequence's exact position with
+`setval('<new-identity-sequence>', last_value, is_called)`, both values read in the same
+transaction from the sequence relation itself (`SELECT last_value, is_called FROM <sequence>`)
+— not from `pg_sequences.last_value` or `pg_sequence_last_value()`, which report NULL for a
+never-advanced sequence and would turn the strict `setval` into a silent no-op. A never-advanced
+source (`is_called = false`) therefore leaves the new sequence at the same not-yet-issued start
+value rather than skipping it, and no sequence value is ever spliced into SQL text. Discovery
+uses `pg_get_serial_sequence` and verifies the corresponding `pg_depend` ownership edge. The old
+identity sequence is dropped with the old table.
 
 **Why.** Copy never advances an unrelated sequence, and the post-swap table preserves generation
 kind, sequence name, and the source's exact issued-value state.
@@ -122,9 +136,11 @@ independent sequence too early and obscures the state handoff.
 
 ### D6 — Preserve omitted TOAST values
 
-**Decision.** v1 requires PK-based `REPLICA IDENTITY DEFAULT` or `FULL` and never changes the
-user's replica identity. UPDATE apply is column-wise: only fields that carry a value in the
-pgoutput new tuple are assigned, so an unchanged TOASTed field remains untouched.
+**Decision.** v1 requires a table with a usable primary key whose replica identity is `DEFAULT`
+or `FULL`, and never changes the user's replica identity: the shadow is set to the source's
+(D2) and ST-5 refuses to swap if they differ. UPDATE apply is column-wise: only fields that
+carry a value in the pgoutput new tuple are assigned, so an unchanged TOASTed field remains
+untouched.
 
 **Why.** Regardless of replica identity, pgoutput sends an unchanged out-of-line value in the new
 tuple as an unchanged-TOAST marker (column type byte `u`) rather than its bytes: the column is
@@ -156,16 +172,21 @@ cases and test surfaces.
 **Decision.** Shadow and retained-source names are `_pgsprite_<8-hex-hash-of-schema.table>_new`
 and `_pgsprite_<8-hex-hash-of-schema.table>_old`. `LIKE` derives the shadow's index names — and
 so the names of the primary-key, unique, and exclusion constraints those indexes back — from the
-shadow's name, so cutover restores them: every index and identity sequence on the old table is
-renamed to `_pgsprite_<hash>_old_<name>`, and the shadow's corresponding dependent is then renamed
-to the name the source dependent held (`ALTER INDEX … RENAME` renames a constraint together with
-its index; `CHECK` constraints keep their names under `LIKE` and need no rename). The post-swap catalog
-therefore carries the user's names — `ON CONFLICT ON CONSTRAINT u_slot` keeps working and a
-later change of the same table derives the same names — and only the old table's dependents wear
-the suffix. A shared `serial`/`nextval` sequence is not a dependent of the old table and keeps its
-name (D5). Preflight returns `copy-and-swap-name-length` if any derived identifier — an `_old`
-name, or a shadow-side `LIKE` name — would exceed PostgreSQL's 63-byte identifier limit
-(`NAMEDATALEN - 1`).
+shadow's name, so cutover restores them: every index, extended-statistics object, and identity
+sequence on the old table is renamed to `_pgsprite_<hash>_old_<name>`, and the shadow's
+corresponding dependent is then renamed to the name the source dependent held
+(`ALTER INDEX … RENAME` renames a constraint together with its index; `CHECK` constraints keep
+their names under `LIKE` and need no rename). `LIKE` keeps none of the source's index,
+unique-constraint, or statistics names, so "corresponding" is established by **definition**, not
+by name: indexed columns or expressions, access method, operator classes, uniqueness, and
+predicate for an index; the column set and kinds for a statistics object. Two source indexes
+with identical definitions are interchangeable, so an arbitrary pairing between them restores an
+equivalent catalog. The post-swap catalog therefore carries the user's names —
+`ON CONFLICT ON CONSTRAINT u_slot` keeps working and a later change of the same table derives
+the same names — and only the old table's dependents wear the suffix. A shared `serial`/`nextval`
+sequence is not a dependent of the old table and keeps its name (D5). Preflight returns
+`copy-and-swap-name-length` if any derived identifier — an `_old` name, or a shadow-side `LIKE`
+name — would exceed PostgreSQL's 63-byte identifier limit (`NAMEDATALEN - 1`).
 
 **Why.** Stable names make catalog inspection and resume deterministic; restoring user names keeps
 the swap invisible to code that names constraints; refusing truncation prevents collisions.
@@ -203,14 +224,23 @@ later mode.
 
 ### D11 — Bound and reap logical-decoding state
 
-**Decision.** Slot and single-table publication are both named `pgsprite_<8hex>`. Preflight checks
-free `max_replication_slots` and `max_wal_senders` capacity. Slot lag has a hard byte ceiling,
-default 1 GiB; crossing it aborts fail closed. At startup a reaper drops orphan `pgsprite_*`
-slots whose checkpoint row is absent or terminal. Slot inspection treats
+**Decision.** Slot and single-table publication are both named `pgsprite_<8hex>`, where the hash
+covers `database.schema.table`: a replication slot is cluster-wide while the checkpoint table
+(D3) is per-database, so two databases holding a same-named table must not derive the same slot
+name. If a slot of the derived name already exists for another database — a hash collision —
+preflight refuses (`copy-and-swap-slot-collision`) rather than sharing or dropping it. The
+checkpoint row is written and committed **before** the slot is created, so a slot with no row is
+an orphan and never a slot mid-creation. Preflight checks free `max_replication_slots` and
+`max_wal_senders` capacity. Slot lag has a hard byte ceiling, default 1 GiB; crossing it aborts
+fail closed. At startup a reaper drops orphan `pgsprite_*` slots that belong to the current
+database (`pg_replication_slots.database = current_database()`), are inactive
+(`active_pid IS NULL`), and whose checkpoint row is absent or terminal; slots of other databases
+are never inspected, let alone dropped. Slot inspection treats
 `pg_replication_slots.wal_status = 'lost'` as lost state.
 
 **Why.** A slot is durable cluster state that can retain unbounded WAL unless ownership and a
-hard limit are explicit.
+hard limit are explicit — and because it is cluster state, ownership must be established per
+database, or a reaper in one database would push another's in-flight change into ST-4 slot loss.
 
 **Alternative considered → deferred.** Best-effort cleanup alone cannot cover process death.
 
@@ -244,13 +274,17 @@ The fallback inserts whole rows, so it needs complete images where the primary p
 present columns. Two rules supply them. First, the CO-5 buffer merges rather than replaces: a
 newer UPDATE image overlays only its present columns onto the buffered image for that key, so an
 unchanged-TOAST marker (`u`, D6) survives dedup only when no buffered image for the key ever
-carried that column's value — that is, the row already existed on the source before the batch.
-Second, before the fallback deletes anything it completes every surviving image that still
-carries a marker by reading those columns from the current shadow row (`SELECT … FOR UPDATE` on
-the affected keys, in the same transaction, after the savepoint rollback); by CO-8 the shadow's
-stored value is exactly the value the marker stands for. That read presumes the shadow row is
-present, which holds only under one of the two chunk-overlap disciplines CO-4 admits: a key
-inside an in-flight chunk may have its flush **deferred** until the chunk lands, or may be
+carried that column's value — that is, the value lives in a shadow row the batch did not
+create: the row for the key itself, or, when the UPDATE moved the primary key
+(`ChangeEvent.OldKey` set), the row for the old key, since a key-moving UPDATE emits a
+marker-bearing image under a key the shadow has never held. Second, before the fallback deletes
+anything it completes every surviving image that still carries a marker by reading those columns
+from the current shadow row — the row for `Key`, or for `OldKey` when the image carries one
+(`SELECT … FOR UPDATE` on the affected keys, in the same transaction, after the savepoint
+rollback; the old key's row is still present because completion runs before any delete); by
+CO-8 the shadow's stored value is exactly the value the marker stands for. That read presumes
+the shadow row is present, which holds only under one of the two chunk-overlap disciplines CO-4
+admits: a key inside an in-flight chunk may have its flush **deferred** until the chunk lands, or may be
 flushed now with a tombstone retained and re-applied afterwards
 ([low-level-design](low-level-design.md#copy-and-apply-ordering-the-core-correctness-subtlety)).
 Under tombstone retention a marker-bearing UPDATE for such a key would flush while the copier
@@ -258,10 +292,13 @@ has not yet written the row, and the fallback would find no shadow row on a perm
 interleaving. D13 therefore fixes the applier's choice: a flush that touches any key inside an
 in-flight chunk is deferred until that chunk lands (chunk copy and backlog flush mutually
 excluded per overlapping key range); the tombstone-retention form is not available to the v1
-applier. With that discipline, a marker-bearing image whose shadow row is absent is a protocol
-error, not a case to handle: the row pre-exists on the source, so its key is either above the
-copier watermark (discarded under CO-4 before buffering) or inside an in-flight chunk (whose
-flush is deferred). The applier aborts the change fail closed if it observes one.
+applier. With that discipline, a marker-bearing image whose shadow row — for `Key`, or for
+`OldKey` when set — is absent is a protocol error, not a case to handle: the row pre-exists on
+the source under that key, so the key is either above the copier watermark (discarded under CO-4
+before buffering) or inside an in-flight chunk (whose flush is deferred). The applier aborts the
+change fail closed if it observes one. CO-6's second test vector therefore moves the primary key
+of a row whose out-of-line column is untouched, and asserts the fallback completes it from the
+old key's row rather than aborting.
 
 **Why.** PostgreSQL's targeted `ON CONFLICT` cannot by itself move one unique secondary value
 between rows, and neither can per-key retry: for the cyclic exchange above, a delete-then-insert
@@ -311,7 +348,7 @@ decoding but adds write-path availability and amplification costs.
 | `pkg/preflight` | Produces `CopySwapTarget`, the copy-and-swap route's proof (the table facts `PreflightedTable` carries plus the v1 shape, replica identity, dependent-object, name-length, decoding, and headroom checks above); owns Tier-3 refusals. | ST-6, RF-1..RF-3 |
 | `pkg/copier` | Produces `Chunk` and `Watermark`. | CO-4, LK-3 |
 | `pkg/checksum` | Produces `VerifiedShadow` and `CleanWatermark`; their constructors are private to this package. | CO-1, CO-2, CO-3 |
-| `pkg/decode` | Produces `ChangeEvent`, including per-column presence. | ST-3, ST-4, CO-4, CO-8 |
+| `pkg/decode` | Produces `ChangeEvent`, including per-column presence and `OldKey` for an UPDATE that moved the primary key. | ST-3, ST-4, CO-4, CO-8 |
 | `pkg/applier` | Applies presence-aware events from the per-key buffer. | CO-4, CO-5, CO-6, CO-8, LK-3 |
 | `pkg/checkpoint` | Produces `Checkpoint`. | ST-1, ST-2 |
 | `pkg/schemachange` | Orchestrator, shadow builder, and cutover. | LK-2, LK-4, ST-5 |
@@ -326,12 +363,14 @@ imports `pkg/schemachange`.
 2. Drain captured changes through the final WAL position and re-verify the `VerifiedShadow` and
    fidelity proofs already minted before the lock was taken — no checksum runs under the lock
    (CO-1, ST-5).
-3. Rename the source's indexes and identity sequence to their deterministic `_old` names, the
-   source to `_old`, and the shadow to the source name; then rename the shadow's indexes to the
-   names the source's indexes held, restoring the constraint names with them (D8).
+3. Rename the source's indexes, extended-statistics objects, and identity sequence to their
+   deterministic `_old` names, the source to `_old`, and the shadow to the source name; then
+   rename the shadow's indexes and statistics objects — paired with the source's by definition —
+   to the names the source's held, restoring the constraint names with them (D8).
 4. Complete the D5 sequence handoff: re-own a shared `serial`/`nextval` sequence to the live
    table; for identity, drop the shadow's `nextval` default, add identity with the source
-   sequence's options, and `setval` the new sequence to the source's `(last_value, is_called)`.
+   sequence's options, rename the new sequence to the name the source's identity sequence held,
+   and `setval` it to the source's `(last_value, is_called)` read from the sequence relation.
 5. Recheck catalog identities — live name, dependent names, sequence ownership — and commit. A
    lost connection is resolved by catalog inspection, never assumption (LK-4).
 6. In separate bounded statements, remove the slot/publication and, unless `--keep-old` was set,

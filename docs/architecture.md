@@ -194,8 +194,7 @@ different levels of commitment:
 | `pkg/router` | Route classified statements to native / copy-and-swap / refuse dispositions; copy-and-swap reports unavailable until that backend lands | exists (Phase 2.4) |
 | `pkg/executor` | Bounded optimistic native attempt, the concurrent index build, and the autocommit safer-sequence runner, with stable outcome codes; the full `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) arrives with the copy-and-swap backend | native execution exists |
 | `pkg/progress` | Strategy-wide, pollable progress snapshots: native phase/elapsed time, sequence position, retry attempt, and server-reported concurrent-index work; optional copy counters are reserved for copy-and-swap | native progress exists |
-| `pkg/table` | PK-range chunker over one integer-family primary key, dynamic time-based sizing; composite keys deferred | Phase 4 |
-| `pkg/copier` | Parallel chunked copy into the shadow table (never overwrites) | Phase 4 |
+| `pkg/copier` | PK-range chunker over one integer-family primary key with dynamic time-based sizing (produces `Chunk` and `Watermark`; composite keys refused in v1), and the parallel chunked copy into the shadow table (never overwrites) — there is no separate chunker package | contracts exist; copy loop Phase 4 |
 | `pkg/checksum` | The mandatory correctness gate; continuous checker; repair primitive | Phase 5 |
 | `pkg/decode` | Logical-decoding change capture, LSN accounting, slot lifecycle | Phase 6, 8 |
 | `pkg/applier` | Change apply onto the shadow (always wins), buffer/dedup, flush scheduling | Phase 6 |

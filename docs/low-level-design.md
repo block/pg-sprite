@@ -450,8 +450,11 @@ The invariants that resolve them (Spirit's model, translated):
   analog), keyed by PK and deduplicated to the latest image per key before each flush.
 - **The watermark orders the two**: captured changes for PK ranges the copier has already passed
   are applied; changes *above* the copier's watermark can be discarded for a monotonic integer PK
-  (the copier will read the current row anyway — the high-watermark optimization). Composite and
-  non-memory-comparable PKs need a queue mode and are refused in v1.
+  (the copier will read the current row anyway — the high-watermark optimization). The judgement
+  is per key: an UPDATE that moved the primary key (`ChangeEvent.OldKey` set) is a deletion of
+  the old key plus an image of the new key, so a deletion below the watermark is applied even
+  when the new key above it is discarded. Composite and non-memory-comparable PKs need a queue
+  mode and are refused in v1.
 - **Deletes must not be lost to an in-flight chunk**: a delete for a key inside a chunk that is
   currently being copied must be re-applied *after* that chunk lands (tombstone retention until
   the covering chunk completes), or chunk copy and backlog flush must be mutually excluded per
@@ -516,7 +519,7 @@ matrix is part of the "decisions, not options" philosophy.
 
 ### Operational caveats
 
-- **Unchanged-TOAST on UPDATE**: under either PK-based replica identity, an `UPDATE` that
+- **Unchanged-TOAST on UPDATE**: under either admitted replica identity (`DEFAULT` or `FULL`), an `UPDATE` that
   doesn't touch a TOASTed column emits an unchanged-TOAST marker in place of that column's value.
   The applier carries the stored value forward with a column-wise UPDATE
   ([D6](copy-and-swap-design.md#d6--preserve-omitted-toast-values), CO-8); `REPLICA IDENTITY
@@ -529,8 +532,10 @@ matrix is part of the "decisions, not options" philosophy.
   disk/lag risk (see risks below).
 - **Multi-statement / multi-table atomic changes**: out of v1 scope.
 - **Shadow-table fidelity beyond columns**: the shadow must explicitly replicate the source's
-  **owner, GRANTs/ACLs, row-level-security policies, comments, and storage parameters** — none
-  of which comes along by creating a table with the right columns. Miss the grants and
+  **owner, GRANTs/ACLs, row-level-security policies, comments, storage parameters, replica
+  identity, and each constraint's `NOT VALID` state** — none of which comes along by creating a
+  table with the right columns, and `LIKE … INCLUDING ALL` silently validates a `NOT VALID`
+  constraint ([D2](copy-and-swap-design.md#d2--build-indexes-and-constraints-up-front)). Miss the grants and
   application roles **lose access at the instant of cutover**. The cutover refuses to swap until
   this fidelity checklist passes; OID-bound dependents (views, publications) are refused up
   front in v1 (see the schema-shape matrix above). The shadow's column definition itself comes
@@ -630,9 +635,8 @@ pkg/verdict/          -> typed outcomes
 Planned:
 pkg/migration/        -> orchestrator + runner + cutover
 pkg/decode/           -> logical-decoding client
-pkg/copier/           -> parallel chunked copy
+pkg/copier/           -> PK-range chunker, dynamic sizing, parallel chunked copy
 pkg/applier/          -> captured-change apply
-pkg/table/            -> PK-range chunkers and dynamic sizing
 pkg/checksum/         -> chunked verification and cutover gate
 pkg/throttler/        -> chunk-time / slot-lag throttle (replica lag deferred, D12)
 Executor              -> Plan/Execute/Status/Abort backend interface

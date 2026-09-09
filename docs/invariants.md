@@ -72,15 +72,29 @@ inferred from whether a recopier happens to be wired up:
 
 The copier **never overwrites** (`ON CONFLICT (pk) DO NOTHING`); the applier **always
 overwrites** (`ON CONFLICT (pk) DO UPDATE` + explicit deletes); captured changes above the
-copier's watermark are **discarded**, which is sound only because v1 restricts the chunk key to
-one integer-family PK with a monotonic watermark
-([copy-and-swap D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key));
-composite and non-comparable PKs are refused in v1 rather than queued; a delete for a key inside
-an in-flight chunk must be re-applied after that chunk lands. Full statement and the races these
-resolve:
+copier's watermark are **discarded, judged per key**, which is sound only because v1 restricts
+the chunk key to one integer-family PK with a monotonic watermark
+([copy-and-swap D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key))
+— the precondition is the `CopySwapTarget` proof, whose preflight refuses composite and
+non-comparable PKs with `copy-and-swap-pk-unsupported` rather than queueing them. An UPDATE that
+moved the primary key (`ChangeEvent.OldKey` set) is two changes — a deletion of the old key and
+an image of the new — each judged against the watermark on its own, so the deletion below the
+watermark is applied even when the new key above it is discarded. A buffered change for **any**
+key inside an in-flight chunk — not only a delete — is never flushed while that chunk is in
+flight: of the two admissible disciplines (chunk copy and backlog flush mutually excluded per
+overlapping key range, or flush-now with a tombstone retained and re-applied after the chunk
+lands), v1 takes **mutual exclusion**, because D13's unique-key fallback reads the shadow row to
+complete unchanged-TOAST markers; the tombstone form is not available to the v1 applier
+([copy-and-swap D13](copy-and-swap-design.md#d13--recover-unique-secondary-key-moves-batch-wide)).
+Full statement and the races these resolve:
 [low-level-design § copy and apply ordering](low-level-design.md#copy-and-apply-ordering-the-core-correctness-subtlety).
-*Enforced:* copier/applier SQL shapes + flush scheduling. *Source:* this doc set (Spirit's
-model translated).
+*Enforced:* copier/applier SQL shapes + flush scheduling that defers any flush overlapping an
+in-flight chunk's key range (mutual exclusion, not tombstone retention). *Test obligation:* a
+marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
+and the row is then completed from the copied shadow row, never an absent-row abort; a
+key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark
+1000) asserts key 5 is deleted from the shadow. *Source:* this doc set (Spirit's model
+translated).
 
 ### CO-5 — The change buffer is disjoint and current at flush time
 
@@ -89,7 +103,10 @@ image (or a delete marker) — dedup is what makes catch-up convergent rather th
 **merges, never replaces**: a newer UPDATE image overlays only the columns it carries onto the
 buffered image, so an unchanged-TOAST marker (CO-8) survives dedup only when no buffered image
 for that key ever held the column's value; a delete marker replaces the image outright, and an
-INSERT after a delete replaces the marker. The buffer is a single keyed map: v1 has one
+INSERT after a delete replaces the marker. An UPDATE that moved the primary key
+(`ChangeEvent.OldKey` set) enters the buffer as two entries — a delete marker for the old key and
+an image for the new key — and the image's marker, if any, stands for the value in the **old**
+key's shadow row (D13 completes it from there). The buffer is a single keyed map: v1 has one
 integer-family PK
 ([copy-and-swap D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)),
 so Spirit's map ↔ FIFO-queue mode toggle for non-memory-comparable keys has no v1 counterpart
@@ -110,13 +127,17 @@ are key-targeted upserts, and on `23505` a savepoint rollback and batch-wide
 delete-all-then-insert-all; per-key delete-then-insert retry is rejected because a cyclic
 exchange collides in both orders. The fallback inserts whole rows, so it must not invent a value
 for an unchanged-TOAST column (CO-8): before deleting, it completes any surviving image that
-still carries a marker from the current shadow row (`SELECT … FOR UPDATE`, same transaction), and
-treats an absent shadow row for such an image as an invariant violation (fail closed) — CO-5's
-merge rule guarantees the marker only survives for rows that pre-existed on the source.
-Convergence must still be proved under test. *Test obligation:*
+still carries a marker from the current shadow row — the row for the key, or for
+`ChangeEvent.OldKey` when the UPDATE moved the primary key (`SELECT … FOR UPDATE`, same
+transaction) — and treats an absent shadow row for such an image as an invariant violation (fail
+closed) — CO-5's merge rule guarantees the marker only survives for values that live in a shadow
+row the batch did not create. Convergence must still be proved under test. *Test obligation:*
 `seats(id int PRIMARY KEY, slot text UNIQUE)` holding `(1,'A'),(2,'B')`, flushed with the batch
-`{1→'B', 2→'A'}`, converges in one flush; a second vector adds a ≥8 KiB TOASTed column left
-untouched by both updates and asserts it survives the fallback byte-for-byte. The checksum (CO-1)
+`{1→'B', 2→'A'}`, converges in one flush; a second vector adds a column stored **out of line**
+(`SET STORAGE EXTERNAL`, proven by the test harness's `ToastBytes()` — a large value under the
+default `EXTENDED` storage may compress inline and never emit the marker) left untouched by both
+updates, asserts it survives the fallback byte-for-byte, and moves one row's primary key so the
+completion reads the old key's row rather than aborting. The checksum (CO-1)
 backstops, but the applier must converge without it. *Enforced:* applier batch semantics
 (Phase 6). *Source:* Spirit
 `pkg/change/README.md` (the REPLACE rationale) — the PG translation in
@@ -137,15 +158,18 @@ requirement, rewritten for our parser); carried in the repo's [AGENTS.md](../AGE
 ### CO-8 — A TOAST-omitted column is never overwritten
 
 An UPDATE decoded from pgoutput must change only columns whose new-tuple field carries a value.
-Under either PK-based replica identity (`DEFAULT` or `FULL`), pgoutput sends an unchanged TOASTed
+Under either replica identity v1 admits (`DEFAULT` or `FULL`, on a table with a usable primary
+key), pgoutput sends an unchanged TOASTed
 value in the new tuple as the unchanged-TOAST marker (type byte `u`) — the column is present, the
 column count is the full count, and there is no value; the marker means "leave the stored value
 unchanged", not NULL or an empty value. A full-row upsert that invents a value for that column
 would overwrite live shadow data and silently break convergence. *Enforced:* `pkg/decode`
 per-column presence on `ChangeEvent`, `pkg/applier` column-wise UPDATE construction from it.
 *Source:* [copy-and-swap D6](copy-and-swap-design.md#d6--preserve-omitted-toast-values).
-*Test obligation:* a convergence test updates other columns while leaving a ≥8 KiB column
-untouched, using the load generator's TOAST-unchanged update profile, run under both
+*Test obligation:* a convergence test updates other columns while leaving a column stored out of
+line untouched (`SET STORAGE EXTERNAL`, proven by the test harness's `ToastBytes()` — size alone
+is not the criterion, since a large value under `EXTENDED` storage may compress inline and never
+emit the marker), using the load generator's TOAST-unchanged update profile, run under both
 `REPLICA IDENTITY DEFAULT` and `FULL`.
 
 ## Locking and concurrency (LK)
@@ -291,7 +315,10 @@ disappearance rather than blindly continuing.
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum
 
 Before cutover the engine verifies the shadow carries the source's **owner, grants/ACLs, RLS
-policies, comments, storage parameters**, that **sequences are re-owned and advanced past the
+policies, comments, storage parameters, replica identity (`pg_class.relreplident`), and each
+constraint's validation state (`pg_constraint.convalidated`)** — none of which `LIKE … INCLUDING
+ALL` preserves ([copy-and-swap D2](copy-and-swap-design.md#d2--build-indexes-and-constraints-up-front)) —
+that **sequences are re-owned and advanced past the
 source's current values** (`setval`), and that indexes are valid (`pg_index.indisvalid`). Data
 equality (CO-1) plus metadata fidelity, or no swap. *Enforced:* cutover preconditions. *Source:*
 [low-level-design § operational caveats](low-level-design.md#operational-caveats),
