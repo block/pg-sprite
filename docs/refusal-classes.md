@@ -41,11 +41,17 @@ operation. A supported operation can produce it without changing tier.
 
 The closed reason set is `verdict.Reasons()`. The table below is the classification of every
 current emission site, including desired-state admission. A reason with several rows is
-deliberately not a class.
+deliberately not a class. One site covers several rows: the imperative front door refuses
+every statement kind it does not admit through a single catch-all in `pkg/migrate/verdicts.go`
+(`statement.KindOther`), which today cannot tell a backfill from a `GRANT`. Classifying that
+site means the parse boundary in `pkg/statement` distinguishes the kinds the rows below name,
+so that a `GRANT` is routed to provisioning and never to the data change runner.
 
 | Existing `reason` | Refusal site or shape | `class` | `owner`, when present |
 | --- | --- | --- | --- |
-| `unsupported-statement` | DML such as an `UPDATE` backfill, or another non-DDL owner operation | `no-online-safety-problem` | `data-change-runner` |
+| `unsupported-statement` | DML such as an `UPDATE` backfill | `no-online-safety-problem` | `data-change-runner` |
+| `unsupported-statement` | Grants, roles, row-level-security policies, publications, subscriptions | `no-online-safety-problem` | `provisioning` |
+| `unsupported-statement` | `DROP TABLE`, views, functions, triggers, extensions, standalone sequences, and other catalog work the matrix marks ⚪ | `no-online-safety-problem` | `owner-tooling` |
 | `unsupported-statement` | Imperative `CREATE TABLE`; the detail already points to `diff` | `no-online-safety-problem` | `declarative-front-door` |
 | `unsupported-statement` | An admitted ALTER operation for which the planner has no route; an unnamed index; an unsupported sequence step; a greenfield create shape that needs a future modeled route | `capability-boundary` | — |
 | `unsupported-statement` | `CREATE INDEX IF NOT EXISTS`, or a duplicate claimed relation name in one desired set | `by-design` | — |
@@ -96,7 +102,7 @@ For example, an `UPDATE` backfill changes only by additive fields:
   "class": "no-online-safety-problem",
   "owner": "data-change-runner",
   "statement": "UPDATE accounts SET normalized_name = lower(name)",
-  "detail": "data backfills belong to the application's data change runner; pg-sprite changes table shape"
+  "detail": "only ALTER TABLE and CREATE INDEX statements are supported by the imperative front door"
 }
 ```
 
@@ -110,6 +116,7 @@ closed values are:
 | `data-change-runner` | Data changes and backfills owned by the application's data change runner (the tool that runs its versioned SQL or ORM changes). |
 | `declarative-front-door` | Catalog bootstrap and convergence from a desired `CREATE TABLE`; `CREATE TABLE` keeps its pointer to `diff`. |
 | `owner-tooling` | Safe direct maintenance and catalog operations owned by the table or database operator's tooling. |
+| `provisioning` | Access control and replication provisioning — grants, roles, row-level-security policies, publications, subscriptions — owned by infrastructure-as-code. |
 
 Prose in `detail` remains: it explains the concrete command or constraint to a human. Prose
 alone lost because machine routing is the purpose of this contract; parsing a sentence would
@@ -148,8 +155,9 @@ shadow list that can drift from production.
 
 ## Shared vocabulary with the capabilities matrix
 
-The sibling [capabilities contract](capabilities-contract.md) defines the machine-readable
-matrix. Its tier and mark map to refusal class as follows:
+The [capabilities matrix](capabilities.md) tiers every operation and marks each row. Its
+tier and mark map to refusal class as follows, and a machine-readable form of the matrix,
+when one is decided, reuses these words rather than defining its own:
 
 | Matrix tier or mark | Refusal class |
 | --- | --- |
@@ -158,8 +166,9 @@ matrix. Its tier and mark map to refusal class as follows:
 | T3 ❌ — no online mechanism / deliberately refused form | `by-design` |
 | T1 — supported today | No capability refusal; a run may still be `environmental` |
 
-These two documents define one vocabulary and must change together. The matrix describes the
-operation independent of a run; the verdict reports how one run met that contract.
+The matrix and this contract define one vocabulary and must change together. The matrix
+describes the operation independent of a run; the verdict reports how one run met that
+contract.
 
 ## Compatibility and rollout
 
