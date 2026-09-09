@@ -121,7 +121,7 @@ implementation time):
   diff, and under a declarative model its only convergence is `DROP TABLE` — which pg-sprite
   refuses at both front doors and never executes. There is no `verdict.Verdict` to map: pg-sprite
   never saw the table. The adapter enumerates the namespace's live tables itself (the catalog
-  query and its exclusions — partitions, `INHERITS` children, extension-owned tables — are
+  query and its exclusions — partitions and extension-owned tables — are
   under [Deliberately operator-owned](capabilities.md#deliberately-operator-owned)) and
   *synthesizes* an `engine.TableChange` per undeclared table: `ExecutionMode =
   ExecutionModeBlocked`, `IsUnsafe` with a data-loss `UnsafeReason`, and a `ModeReason` that
