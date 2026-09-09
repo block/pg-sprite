@@ -15,9 +15,10 @@ the reviewer's distillation.
   state the blast radius (data corruption, lost writes, wrong-table swap, stranded slot).
 - Core packages: every loop, queue, retry, and wait must be bounded. An unbounded anything in
   a core package is a review-blocking defect.
-- Dangerous APIs accept proof types (`statement.Classified`, `PreflightedTable`,
-  `AbsentTarget`, `CreationRole`, `PrivilegedRole`, `CopySwapTarget`, `VerifiedShadow`, `CleanWatermark`, `TableLock`) with package-private
-  constructors — never a
+- Dangerous APIs accept proof types (`statement.Statement`, `statement.DesiredSchema`,
+  `preflight.PreflightedTable`, `preflight.AbsentTarget`, `preflight.CreationRole`,
+  `preflight.PrivilegedRole`, `preflight.CopySwapTarget`, `checksum.VerifiedShadow`,
+  `checksum.CleanWatermark`, `dbconn.TableLock`) with package-private constructors — never a
   raw string or bool that a caller could fabricate. Core code re-verifies its own
   preconditions; it never trusts that the planner or CLI checked.
 - Invariant enforcement points carry a `// INV: <id>` comment matching

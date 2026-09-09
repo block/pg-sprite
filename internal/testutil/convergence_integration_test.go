@@ -56,6 +56,29 @@ func TestConvergenceOracle(t *testing.T) {
 	assert.Equal(t, []DirectionDiff{{Direction: "source-minus-shadow", Keys: lowest}, {Direction: "shadow-minus-source", Keys: lowest}}, report.Differences)
 	assert.Equal(t, report.SourceCount, report.ShadowCount, "row values differ but counts do not")
 
+	// A count skew is reported through the differing keys alone: a row only
+	// the shadow holds is a shadow-minus-source key, a row only the source
+	// lost is another, and no row appears in the opposite direction.
+	_, err = pool.Exec(t.Context(), `UPDATE `+qualified(shadow)+` SET label=`+pgx.Identifier{"s"}.Sanitize()+`.label FROM `+qualified(source)+` s WHERE `+qualified(shadow)+`.id=s.id`)
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), `INSERT INTO `+qualified(shadow)+` (id, uniq, amount, label, blob) VALUES (31, '31', 0.31, 'shadow-only', NULL)`)
+	require.NoError(t, err)
+	report, err = Diff(t.Context(), pool, source, shadow, ConvergeOptions{IgnoreColumns: []string{"updated_at"}})
+	require.NoError(t, err)
+	assert.False(t, report.Converged())
+	assert.Equal(t, []DirectionDiff{{Direction: "shadow-minus-source", Keys: []int64{31}}}, report.Differences)
+	assert.Equal(t, int64(30), report.SourceCount)
+	assert.Equal(t, int64(31), report.ShadowCount)
+
+	_, err = pool.Exec(t.Context(), `DELETE FROM `+qualified(source)+` WHERE id=3`)
+	require.NoError(t, err)
+	report, err = Diff(t.Context(), pool, source, shadow, ConvergeOptions{IgnoreColumns: []string{"updated_at"}})
+	require.NoError(t, err)
+	assert.False(t, report.Converged())
+	assert.Equal(t, []DirectionDiff{{Direction: "shadow-minus-source", Keys: []int64{3, 31}}}, report.Differences)
+	assert.Equal(t, int64(29), report.SourceCount)
+	assert.Equal(t, int64(31), report.ShadowCount)
+
 	// Ignoring the primary key is refused: the report names rows by it.
 	_, err = Diff(t.Context(), pool, source, shadow, ConvergeOptions{IgnoreColumns: []string{"id"}})
 	assert.EqualError(t, err, "shadow "+shadow.Schema+".shadow primary key id cannot be ignored")

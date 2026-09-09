@@ -6,6 +6,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -52,12 +53,19 @@ func isProofType(spec *ast.TypeSpec, doc *ast.CommentGroup) bool {
 	return strings.HasPrefix(doc.Text(), spec.Name.Name+" proves ")
 }
 
-// proofTypes walks every non-test Go file under root and returns the
-// qualified proof types it defines, sorted.
-func proofTypes(t *testing.T, root string) []string {
+// inventory is what the walk learns about the code under one root: the
+// proof types it defines and, per package name, every exported top-level
+// type and function — the identifiers prose may legitimately name.
+type inventory struct {
+	proofTypes []string
+	declared   map[string]map[string]bool
+}
+
+// inventoryOf walks every non-test Go file under root.
+func inventoryOf(t *testing.T, root string) inventory {
 	t.Helper()
 	fset := token.NewFileSet()
-	var found []string
+	inv := inventory{declared: map[string]map[string]bool{}}
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -69,27 +77,44 @@ func proofTypes(t *testing.T, root string) []string {
 		if err != nil {
 			return err
 		}
-		for _, decl := range file.Decls {
-			gen, ok := decl.(*ast.GenDecl)
-			if !ok || gen.Tok != token.TYPE {
-				continue
-			}
-			for _, spec := range gen.Specs {
-				ts := spec.(*ast.TypeSpec)
-				doc := ts.Doc
-				if doc == nil {
-					doc = gen.Doc
-				}
-				if isProofType(ts, doc) {
-					found = append(found, file.Name.Name+"."+ts.Name.Name)
-				}
-			}
-		}
+		inv.record(file)
 		return nil
 	})
 	require.NoError(t, err)
-	sort.Strings(found)
-	return found
+	sort.Strings(inv.proofTypes)
+	return inv
+}
+
+func (inv *inventory) record(file *ast.File) {
+	pkg := file.Name.Name
+	if inv.declared[pkg] == nil {
+		inv.declared[pkg] = map[string]bool{}
+	}
+	for _, decl := range file.Decls {
+		switch decl := decl.(type) {
+		case *ast.FuncDecl:
+			if decl.Recv == nil && decl.Name.IsExported() {
+				inv.declared[pkg][decl.Name.Name] = true
+			}
+		case *ast.GenDecl:
+			if decl.Tok != token.TYPE {
+				continue
+			}
+			for _, spec := range decl.Specs {
+				ts := spec.(*ast.TypeSpec)
+				if ts.Name.IsExported() {
+					inv.declared[pkg][ts.Name.Name] = true
+				}
+				doc := ts.Doc
+				if doc == nil {
+					doc = decl.Doc
+				}
+				if isProofType(ts, doc) {
+					inv.proofTypes = append(inv.proofTypes, pkg+"."+ts.Name.Name)
+				}
+			}
+		}
+	}
 }
 
 // namesProofType reports whether prose names the type in code font, either
@@ -99,17 +124,40 @@ func namesProofType(raw, name string) bool {
 	return strings.Contains(raw, "`"+name+"`") || strings.Contains(raw, "."+name+"`")
 }
 
-// Every proof type defined under pkg/ must be named in every registry: a
-// proof type added, renamed, or dropped without updating all three lists
-// fails here, and no list has to be maintained by hand in a test.
+// qualifiedMention matches a code-font `pkg.Name` where pkg is a Go package
+// name and Name an exported identifier; `pkg.file.go` and `Type.Method` do
+// not match.
+var qualifiedMention = regexp.MustCompile("`([a-z][a-z0-9]*)\\.([A-Z][A-Za-z0-9_]*)`")
+
+// staleMentions returns every qualified mention in prose whose package the
+// inventory knows but which names nothing that package exports. Mentions
+// of packages outside the inventory (stdlib, pgx) are not its concern.
+func (inv inventory) staleMentions(prose string) []string {
+	var stale []string
+	for _, m := range qualifiedMention.FindAllStringSubmatch(prose, -1) {
+		pkg, name := m[1], m[2]
+		exported, known := inv.declared[pkg]
+		if known && !exported[name] {
+			stale = append(stale, pkg+"."+name)
+		}
+	}
+	return stale
+}
+
+// Every proof type defined under pkg/ must be named in every registry, so a
+// proof type added or renamed without updating all three lists fails here.
+// The reverse holds for qualified names: a registry may not name a
+// `pkg.Name` that the package does not export, so a proof type dropped or
+// renamed in the code while a registry still lists it fails here too.
+// Neither list is maintained by hand in a test.
 func TestRegistriesNameEveryProofType(t *testing.T) {
-	derived := proofTypes(t, "../../pkg")
-	bare := make([]string, 0, len(derived))
-	for _, qualified := range derived {
+	inv := inventoryOf(t, "../../pkg")
+	bare := make([]string, 0, len(inv.proofTypes))
+	for _, qualified := range inv.proofTypes {
 		bare = append(bare, qualified[strings.LastIndex(qualified, ".")+1:])
 	}
 	for _, sentinel := range sentinelProofTypes {
-		require.Contains(t, bare, sentinel, "the proof-type walker no longer recognises %s; derived set: %v", sentinel, derived)
+		require.Contains(t, bare, sentinel, "the proof-type walker no longer recognises %s; derived set: %v", sentinel, inv.proofTypes)
 	}
 	for _, registry := range proofTypeRegistries {
 		raw, err := os.ReadFile(registry)
@@ -117,5 +165,16 @@ func TestRegistriesNameEveryProofType(t *testing.T) {
 		for _, name := range bare {
 			assert.True(t, namesProofType(string(raw), name), "%s does not name the proof type %s", registry, name)
 		}
+		assert.Empty(t, inv.staleMentions(string(raw)), "%s names identifiers its package does not export", registry)
 	}
+}
+
+// The reverse direction must see through the shapes prose actually uses: a
+// real qualified type resolves, a qualified name the package no longer
+// exports is stale, and mentions of foreign packages, file names, and
+// Type.Method pairs are neither.
+func TestStaleMentions(t *testing.T) {
+	inv := inventoryOf(t, "../../pkg")
+	prose := "`statement.Statement`, `statement.Classified`, `time.Sleep`, `runner.go`, `Tracker.CancelBuild`"
+	assert.Equal(t, []string{"statement.Classified"}, inv.staleMentions(prose))
 }
