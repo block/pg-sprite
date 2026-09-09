@@ -45,13 +45,13 @@ func (c *PullCmd) run(ctx context.Context, out io.Writer) error {
 	defer pool.Close()
 
 	var schemaExists bool
-	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)`, c.Schema).Scan(&schemaExists); err != nil {
+	if err := pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname OPERATOR(pg_catalog.=) $1)`, c.Schema).Scan(&schemaExists); err != nil {
 		return fmt.Errorf("check schema %s: %w", c.Schema, err)
 	}
 	if !schemaExists {
 		return fmt.Errorf("schema %q does not exist", c.Schema)
 	}
-	tables, err := listTables(ctx, pool, c.Schema)
+	tables, err := schemadiff.ListManagedTables(ctx, pool, c.Schema)
 	if err != nil {
 		return err
 	}
@@ -63,37 +63,6 @@ func (c *PullCmd) run(ctx context.Context, out io.Writer) error {
 		return err
 	}
 	return pullResultsError(results)
-}
-
-func listTables(ctx context.Context, pool *pgxpool.Pool, schema string) ([]string, error) {
-	rows, err := pool.Query(ctx, `
-		SELECT c.relname
-		FROM pg_catalog.pg_class c
-		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relkind IN ('r', 'p')
-		  AND NOT c.relispartition
-		  AND NOT EXISTS (
-		      SELECT 1 FROM pg_catalog.pg_depend d
-		      WHERE d.classid = 'pg_class'::regclass
-		        AND d.objid = c.oid AND d.deptype = 'e'
-		  )
-		ORDER BY c.relname`, schema)
-	if err != nil {
-		return nil, fmt.Errorf("list tables in schema %s: %w", schema, err)
-	}
-	defer rows.Close()
-	var tables []string
-	for rows.Next() {
-		var table string
-		if err := rows.Scan(&table); err != nil {
-			return nil, fmt.Errorf("scan table in schema %s: %w", schema, err)
-		}
-		tables = append(tables, table)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("read tables in schema %s: %w", schema, err)
-	}
-	return tables, nil
 }
 
 func pullTables(ctx context.Context, pool *pgxpool.Pool, schema, outDir string, tables []string, pull tablePuller) []pullResult {
