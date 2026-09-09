@@ -127,6 +127,82 @@ func TestRebuildAbandonedIndexRemovesOwnLeftoverAndRebuilds(t *testing.T) {
 	assert.Empty(t, quarantinedIndexes(t, pool, schema), "no quarantined debris survives a completed recovery")
 }
 
+func TestDropAbandonedIndexRemovesOwnLeftoverWithoutRebuilding(t *testing.T) {
+	pool, schema := newPool(t)
+	createTableWithDuplicates(t, pool, schema, "t")
+	leaveInvalidIndex(t, pool, schema, "t", "idx_left")
+	leftover := indexOID(t, pool, schema, "idx_left")
+
+	rep, err := executor.DropAbandonedIndex(t.Context(), pool,
+		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema), buildBudget)
+	require.NoError(t, err)
+
+	require.Len(t, rep.Dropped, 1)
+	assert.Equal(t, executor.DroppedIndex{
+		Schema: schema, Index: quarantinedName(leftover), IndexOID: leftover, Duration: rep.Dropped[0].Duration,
+	}, rep.Dropped[0])
+	assert.Positive(t, rep.Dropped[0].Duration)
+	assert.Empty(t, rep.Skipped)
+	assert.Zero(t, rep.Build)
+	assert.Positive(t, rep.Duration)
+	exists, _ := indexState(t, pool, schema, "idx_left")
+	assert.False(t, exists, "the requested index is not rebuilt")
+	assert.Empty(t, quarantinedIndexes(t, pool, schema))
+}
+
+func TestDropAbandonedIndexRefusesVisibleInFlightBuild(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+	startBlockedBuild(t, pool, pool, schema, "idx_busy")
+
+	rep, err := executor.DropAbandonedIndex(t.Context(), pool,
+		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_busy ON %s.t (c)", schema), buildBudget)
+
+	require.ErrorIs(t, err, executor.ErrInvalidIndexBuildInFlight)
+	assert.Zero(t, rep.Build)
+	exists, valid := indexState(t, pool, schema, "idx_busy")
+	assert.True(t, exists)
+	assert.False(t, valid)
+	assert.Empty(t, quarantinedIndexes(t, pool, schema))
+}
+
+func TestDropAbandonedIndexRefusesOtherTableLeftover(t *testing.T) {
+	pool, schema := newPool(t)
+	createTableWithDuplicates(t, pool, schema, "a")
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.b (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+	leaveInvalidIndex(t, pool, schema, "a", "idx_shared")
+
+	rep, err := executor.DropAbandonedIndex(t.Context(), pool,
+		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_shared ON %s.b (c)", schema), buildBudget)
+
+	require.ErrorIs(t, err, executor.ErrInvalidIndexOnOtherTable)
+	assert.Zero(t, rep.Build)
+	assert.Positive(t, rep.Duration, "a refusal reports what it spent")
+	exists, valid := indexState(t, pool, schema, "idx_shared")
+	assert.True(t, exists)
+	assert.False(t, valid)
+	assert.Empty(t, quarantinedIndexes(t, pool, schema))
+}
+
+func TestDropAbandonedIndexWithoutDebrisDoesNotBuild(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+
+	rep, err := executor.DropAbandonedIndex(t.Context(), pool,
+		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_c ON %s.t (c)", schema), buildBudget)
+	require.NoError(t, err)
+
+	assert.Empty(t, rep.Dropped)
+	assert.Empty(t, rep.Skipped)
+	assert.Zero(t, rep.Build)
+	assert.Positive(t, rep.Duration)
+	exists, _ := indexState(t, pool, schema, "idx_c")
+	assert.False(t, exists)
+}
+
 func TestRebuildAbandonedIndexWithoutDebrisIsJustTheBuild(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
@@ -175,13 +251,14 @@ func TestRebuildAbandonedIndexRefusesOtherTableLeftover(t *testing.T) {
 	require.NoError(t, err)
 	leaveInvalidIndex(t, pool, schema, "a", "idx_shared")
 
-	_, err = executor.RebuildAbandonedIndex(t.Context(), pool,
+	rep, err := executor.RebuildAbandonedIndex(t.Context(), pool,
 		fmt.Sprintf("CREATE INDEX CONCURRENTLY idx_shared ON %s.b (c)", schema), buildBudget)
 
 	require.ErrorIs(t, err, executor.ErrInvalidIndexOnOtherTable)
 	var invalidErr *executor.InvalidIndexError
 	require.ErrorAs(t, err, &invalidErr)
 	assert.Equal(t, "a", invalidErr.Table)
+	assert.Positive(t, rep.Duration, "a refusal reports what it spent")
 	exists, valid := indexState(t, pool, schema, "idx_shared")
 	assert.True(t, exists, "another table's leftover must survive untouched")
 	assert.False(t, valid)
@@ -454,6 +531,10 @@ func TestRebuildAbandonedIndexRefusesPartitionedParentIndex(t *testing.T) {
 			_, err := executor.RebuildAbandonedIndex(t.Context(), pool, stmt, buildBudget)
 			return err
 		},
+		"drop": func() error {
+			_, err := executor.DropAbandonedIndex(t.Context(), pool, stmt, buildBudget)
+			return err
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := run()
@@ -675,4 +756,61 @@ func TestRebuildAbandonedIndexRefusesPoolWithoutRoomForItsSession(t *testing.T) 
 	exists, valid := indexState(t, pool, schema, "idx_left")
 	assert.True(t, exists)
 	assert.False(t, valid)
+}
+
+// TestDropAbandonedIndexRunsOnPoolSizedForTheBuild pins the drop-only
+// recovery's smaller pool minimum: with no build to run, its own session
+// plus one drop session is the whole peak, so a pool the rebuild refuses
+// admits the drop and the drop completes on it rather than waiting on
+// itself for a connection.
+func TestDropAbandonedIndexRunsOnPoolSizedForTheBuild(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t), MaxConns: 2})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	createTableWithDuplicates(t, pool, schema, "t")
+	leaveInvalidIndex(t, pool, schema, "t", "idx_left")
+	leftover := indexOID(t, pool, schema, "idx_left")
+	stmt := fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema)
+
+	_, err = executor.RebuildAbandonedIndex(t.Context(), pool, stmt, buildBudget)
+	require.ErrorIs(t, err, executor.ErrPoolTooSmall, "the same pool is too small for a rebuild")
+
+	rep, err := executor.DropAbandonedIndex(t.Context(), pool, stmt, buildBudget)
+	require.NoError(t, err)
+
+	require.Len(t, rep.Dropped, 1)
+	assert.Equal(t, leftover, rep.Dropped[0].IndexOID)
+	assert.Empty(t, rep.Skipped)
+	assert.Zero(t, rep.Build)
+	exists, _ := indexState(t, pool, schema, "idx_left")
+	assert.False(t, exists)
+	assert.Empty(t, quarantinedIndexes(t, pool, schema))
+}
+
+// TestDropAbandonedIndexRefusesSingleConnectionPool pins the lower bound of
+// the drop-only recovery's pool minimum: the drop session runs while the
+// recovery session is held, so a pool of one connection would wait on
+// itself for the drop instead of failing. The recovery refuses it before
+// any session use, and the leftover stands untouched.
+func TestDropAbandonedIndexRefusesSingleConnectionPool(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t), MaxConns: 1})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	createTableWithDuplicates(t, pool, schema, "t")
+	leaveInvalidIndex(t, pool, schema, "t", "idx_left")
+	leftover := indexOID(t, pool, schema, "idx_left")
+	stmt := fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema)
+
+	rep, err := executor.DropAbandonedIndex(t.Context(), pool, stmt, buildBudget)
+
+	require.ErrorIs(t, err, executor.ErrPoolTooSmall)
+	assert.Empty(t, rep.Dropped)
+	assert.Empty(t, rep.Skipped)
+	assert.Equal(t, leftover, indexOID(t, pool, schema, "idx_left"), "the refusal precedes any execution")
+	exists, valid := indexState(t, pool, schema, "idx_left")
+	assert.True(t, exists)
+	assert.False(t, valid)
+	assert.Empty(t, quarantinedIndexes(t, pool, schema))
 }

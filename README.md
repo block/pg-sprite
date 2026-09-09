@@ -78,7 +78,8 @@ refusal — never a silently wrong or incomplete result:
   statement.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
   build's leftover is reported with a typed state, and the proven removal
-  (`executor.RebuildAbandonedIndex`) is library-only; from the CLI the
+  (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
+  the caller must not rebuild) is library-only; from the CLI the
   [runbook](docs/invalid-index-recovery.md) applies.
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
