@@ -32,5 +32,8 @@ func (t CopySwapTarget) PKColumn() string { return t.pkColumn }
 // PKType returns the primary-key type.
 func (t CopySwapTarget) PKType() PKType { return t.pkType }
 
-// OwnerRole returns the table owner role.
+// OwnerRole returns the catalog-resolved owner of the target table: the role
+// the shadow builder runs SET ROLE to so that the shadow table and its
+// dependents are created owner-correct, and whose SET-usable membership the
+// Tier 3 privilege check proved for the connected role.
 func (t CopySwapTarget) OwnerRole() string { return t.ownerRole }

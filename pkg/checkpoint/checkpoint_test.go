@@ -12,3 +12,10 @@ func TestPhaseString(t *testing.T) {
 		assert.Equal(t, want, phase.String())
 	}
 }
+
+func TestPhaseTerminal(t *testing.T) {
+	terminal := map[Phase]bool{PhaseCopying: false, PhaseCatchingUp: false, PhaseVerifying: false, PhaseCutover: false, PhaseDone: true, PhaseFailed: true, Phase(0): false}
+	for phase, want := range terminal {
+		assert.Equal(t, want, phase.Terminal(), "phase %s", phase)
+	}
+}

@@ -96,36 +96,71 @@ type LoadSpec struct {
 	ToastRewriteFraction float64
 }
 
-// Summary reports committed operations and inserted and deleted IDs.
+// total returns the summed mutation weight.
+func (m Mix) total() int { return m.Insert + m.Update + m.Delete + m.UniqueMove }
+
+// validate rejects a spec that would start a generator writing nothing or
+// picking mutations from an empty mix; a convergence test running against
+// such a generator would pass trivially.
+func (s LoadSpec) validate() error {
+	if s.Workers < 1 {
+		return fmt.Errorf("load spec: workers must be at least 1, got %d", s.Workers)
+	}
+	if s.RatePerSecond < 1 {
+		return fmt.Errorf("load spec: rate per second must be at least 1, got %d", s.RatePerSecond)
+	}
+	if s.Mix.Insert < 0 || s.Mix.Update < 0 || s.Mix.Delete < 0 || s.Mix.UniqueMove < 0 {
+		return fmt.Errorf("load spec: mix weights must not be negative, got %+v", s.Mix)
+	}
+	if s.Mix.total() < 1 {
+		return fmt.Errorf("load spec: mix must have positive total weight, got %+v", s.Mix)
+	}
+	if s.HotRowFraction < 0 || s.HotRowFraction > 1 {
+		return fmt.Errorf("load spec: hot row fraction must be within [0, 1], got %v", s.HotRowFraction)
+	}
+	if s.ToastRewriteFraction < 0 || s.ToastRewriteFraction > 1 {
+		return fmt.Errorf("load spec: toast rewrite fraction must be within [0, 1], got %v", s.ToastRewriteFraction)
+	}
+	return nil
+}
+
+// Summary reports committed operations, inserted and deleted IDs, and the
+// number of mutations that aborted on an expected race (a unique-key
+// collision, a serialization failure, a deadlock, or a vanished row) and
+// were dropped rather than retried. A run whose Races dwarf its committed
+// counts wrote far less than its spec suggests.
 type Summary struct {
 	Inserts     int
 	Updates     int
 	Deletes     int
 	UniqueMoves int
+	Races       int
 	InsertedIDs []int64
 	DeletedIDs  []int64
 }
 
 // LoadGenerator owns running workload workers.
 type LoadGenerator struct {
-	cancel  context.CancelFunc
-	done    chan struct{}
-	mu      sync.Mutex
-	summary Summary
-	err     error
-	stop    sync.Once
+	cancel      context.CancelFunc
+	done        chan struct{}
+	stopTimeout time.Duration
+	mu          sync.Mutex
+	summary     Summary
+	err         error
+	stop        sync.Once
 }
 
-// StartLoad starts bounded, cancellable workload workers.
+// stopTimeout bounds how long Stop waits for workers after cancelling them.
+const stopTimeout = 5 * time.Second
+
+// StartLoad starts bounded, cancellable workload workers. An invalid spec
+// fails the test immediately rather than starting a generator that writes
+// nothing.
 func StartLoad(t *testing.T, pool *pgxpool.Pool, table WorkloadTable, spec LoadSpec) *LoadGenerator {
 	t.Helper()
+	require.NoError(t, spec.validate())
 	ctx, cancel := context.WithCancel(t.Context())
-	g := &LoadGenerator{cancel: cancel, done: make(chan struct{})}
-	if spec.Workers < 1 || spec.RatePerSecond < 1 {
-		g.err = fmt.Errorf("workers and rate must be positive")
-		close(g.done)
-		return g
-	}
+	g := &LoadGenerator{cancel: cancel, done: make(chan struct{}), stopTimeout: stopTimeout}
 	var wg sync.WaitGroup
 	for worker := range spec.Workers {
 		wg.Go(func() { g.run(ctx, pool, table, spec, worker) })
@@ -149,21 +184,22 @@ func (g *LoadGenerator) run(ctx context.Context, pool *pgxpool.Pool, table Workl
 			mutationCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 			err := g.mutate(mutationCtx, pool, table, spec, rng)
 			cancel()
-			if err != nil && !expectedRace(err) {
-				g.fail(err)
-				g.cancel()
-				return
+			if err == nil {
+				continue
 			}
+			if expectedRace(err) {
+				g.race()
+				continue
+			}
+			g.fail(err)
+			g.cancel()
+			return
 		}
 	}
 }
 
 func (g *LoadGenerator) mutate(ctx context.Context, pool *pgxpool.Pool, table WorkloadTable, spec LoadSpec, rng *rand.Rand) error {
-	total := spec.Mix.Insert + spec.Mix.Update + spec.Mix.Delete + spec.Mix.UniqueMove
-	if total <= 0 {
-		return fmt.Errorf("mutation mix must have positive weight")
-	}
-	pick := rng.IntN(total)
+	pick := rng.IntN(spec.Mix.total())
 	switch {
 	case pick < spec.Mix.Insert:
 		return g.insert(ctx, pool, table, rng)
@@ -271,6 +307,11 @@ func expectedRace(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && (pgErr.Code == "23505" || pgErr.Code == "40001" || pgErr.Code == "40P01")
 }
+func (g *LoadGenerator) race() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.summary.Races++
+}
 func (g *LoadGenerator) fail(err error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -279,17 +320,21 @@ func (g *LoadGenerator) fail(err error) {
 	}
 }
 
-// Stop promptly cancels workers and waits at most five seconds for completion.
+// Stop promptly cancels workers and waits a bounded time for completion. It
+// always returns the summary accumulated so far; when workers do not stop in
+// time the error joins the deadline with any worker error already recorded,
+// so a wedged worker's cause is not lost behind the timeout.
 func (g *LoadGenerator) Stop() (Summary, error) {
 	g.stop.Do(g.cancel)
-	deadline := time.NewTimer(5 * time.Second)
+	deadline := time.NewTimer(g.stopTimeout)
 	defer deadline.Stop()
+	var stopErr error
 	select {
 	case <-g.done:
 	case <-deadline.C:
-		return Summary{}, fmt.Errorf("stop load generator: deadline exceeded")
+		stopErr = fmt.Errorf("stop load generator: workers still running after %s", g.stopTimeout)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return g.summary, g.err
+	return g.summary, errors.Join(g.err, stopErr)
 }

@@ -85,8 +85,10 @@ corpus is shared across phases and **never shrinks to make a phase land**.
 `internal/testutil` provides a fixed workload table with identity and unique keys,
 numeric and TOAST-able values, and timestamps. Its seeded load generator runs inserts,
 updates, deletes, and transactional unique-key swaps while a copy is active. The
-convergence oracle implements TM-5 with a typed symmetric difference and row-count
-comparison, and can ignore columns that a test deliberately excludes.
+convergence oracle implements TM-5 with a typed symmetric difference computed in a
+single read-only `REPEATABLE READ` snapshot, so both directions and both row counts
+describe the same instant. It can ignore columns that a test deliberately excludes,
+except the primary key, which every comparison projects so rows stay distinct.
 
 Every declarative-diff test proves, against two real databases: the derived
 plan applies cleanly; re-introspect + re-diff yields **empty**; a second
