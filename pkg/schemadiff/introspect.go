@@ -47,7 +47,12 @@ func Introspect(ctx context.Context, db *pgxpool.Pool, schema, table string) (Mo
 // introspectInTx introspects schema.table inside an open transaction. It
 // sets the transaction-local search_path so decompiled definitions print
 // unqualified, resolves the relation by explicit qualification (never via
-// search_path), and reads columns, constraints, and indexes.
+// search_path), and reads columns, constraints, and indexes. Its catalog
+// queries can name pg_class and = unqualified because the search_path they
+// run under is the one set here, which does not list pg_catalog and so
+// searches it first; a query that runs under the caller's session
+// search_path (ListManagedTables) has no such guarantee and qualifies
+// everything.
 func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model, error) {
 	// search_path cannot use bind parameters; identifiers are sanitized.
 	setPath := "SET LOCAL search_path = " + pgx.Identifier{schema}.Sanitize() + ", public"
