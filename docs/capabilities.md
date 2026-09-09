@@ -309,23 +309,26 @@ Three related jobs stay with humans on purpose:
   SET SCHEMA` / `RENAME TO`) is the owner's policy, not pg-sprite's. A schema being
   onboarded is entirely undeclared tables, so declare the existing tables first (`pull`
   writes one desired file per table), or scope the owner's authority to the schemas it
-  manages. The enumeration is a catalog query the owner runs itself — the listing `pull`
-  baselines a schema from, with `INHERITS` children also excluded because export refuses
-  them anyway. The exclusions matter, because every false positive blocks a table nobody
+  manages. `schemadiff.ListManagedTables` implements the catalog query used by `pull` and
+  is available to owners that need the same enumeration. `INHERITS` children are included
+  because each has its own declaration; partitions are represented through their parent's
+  `PARTITION BY`. The exclusions matter, because every false positive blocks a table nobody
   touched:
 
   ```sql
   SELECT c.relname
   FROM pg_catalog.pg_class c
-  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname = 'app'
-    AND c.relkind IN ('r', 'p')                      -- ordinary and partitioned tables only
-    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i
-                    WHERE i.inhrelid = c.oid)         -- partitions and INHERITS children belong to their parent
+  JOIN pg_catalog.pg_namespace n
+    ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+  WHERE n.nspname OPERATOR(pg_catalog.=) 'app'
+    AND (c.relkind OPERATOR(pg_catalog.=) 'r'
+         OR c.relkind OPERATOR(pg_catalog.=) 'p')    -- ordinary and partitioned tables only
+    AND NOT c.relispartition                         -- partitions belong to their parent
     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
-                    WHERE d.classid = 'pg_catalog.pg_class'::regclass
-                      AND d.objid = c.oid
-                      AND d.deptype = 'e')            -- extension-owned tables have no file to write
+                    WHERE d.classid OPERATOR(pg_catalog.=)
+                            'pg_catalog.pg_class'::pg_catalog.regclass
+                      AND d.objid OPERATOR(pg_catalog.=) c.oid
+                      AND d.deptype OPERATOR(pg_catalog.=) 'e') -- extension-owned tables have no file to write
   ORDER BY c.relname;
   ```
 
