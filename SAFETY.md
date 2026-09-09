@@ -17,16 +17,16 @@ The invariant registry (invariant IDs referenced below) lives in
 
 | Package | Core? | Status | Invariants enforced |
 | --- | --- | --- | --- |
-| `pkg/dbconn` — pool defaults, terminate-blockers, retries, RDS TLS; advisory table lock planned | ✅ core | exists; advisory table lock planned | LK-2 primitives; LK-1 planned |
-| `pkg/preflight` — precondition verifier, refusals; the copy-and-swap route's `CopySwapTarget` proof is planned | ✅ core | exists (Phase 1: table-size guard); grows through Phase 2 | ST-6, RF-1..RF-5 |
+| `pkg/dbconn` — pool defaults, terminate-blockers, retries, RDS TLS; advisory table lock planned | ✅ core | exists; table-lock proof declaration exists; lock acquisition planned | LK-2 primitives; LK-1 planned |
+| `pkg/preflight` — precondition verifier, refusals | ✅ core | exists; copy-and-swap target proof declaration exists | ST-6, RF-1..RF-5 |
 | `pkg/executor` — bounded optimistic attempt; native concurrent index build with invalid-index recovery; native sequence executor for the safer idioms | ✅ core | exists (Phase 1: attempt-under-budget; Phase 3.1: concurrent index build; Phase 3.2: sequence executor) | LK-2 (attempt bound + the CONCURRENTLY wait-policy exception) |
-| `pkg/checksum` — chunk verifier, continuous checker, repair | ✅ core | planned (Phase 5) | CO-1, CO-2, CO-3 |
-| `pkg/copier` — shadow-table chunked copy | ✅ core | planned (Phase 4) | CO-4, LK-3 |
-| `pkg/applier` — change apply, buffer, flush scheduling | ✅ core | planned (Phase 6) | CO-4, CO-5, CO-6, CO-8, LK-3 |
-| `pkg/decode` — logical decoding, LSN/position accounting, per-column presence | ✅ core | planned (Phase 6) | ST-4, CO-4, CO-8 |
-| `pkg/checkpoint` — durable resume state | ✅ core | planned (Phase 8) | ST-1, ST-2 |
+| `pkg/checksum` — chunk verifier, continuous checker, repair | ✅ core | types and proof-type declarations exist; verifier planned | CO-1, CO-2, CO-3 |
+| `pkg/copier` — shadow-table chunked copy | ✅ core | contract types exist; copier planned | CO-4, LK-3 |
+| `pkg/applier` — change apply, buffer, flush scheduling | ✅ core | package contract exists; applier planned | CO-4, CO-5, CO-6, CO-8, LK-3 |
+| `pkg/decode` — logical decoding, LSN/position accounting, per-column presence | ✅ core | contract types exist; decoder planned | ST-4, CO-4, CO-8 |
+| `pkg/checkpoint` — durable resume state | ✅ core | checkpoint contract exists; persistence planned | ST-1, ST-2 |
 | slot lifecycle (in `pkg/decode`) — create, reap, lag ceiling | ✅ core | planned (Phase 8) | ST-3 |
-| `pkg/schemachange` — orchestrator, **cutover swap + fidelity gate** | ✅ core | planned (Phase 7) | LK-2, LK-4, ST-5 |
+| `pkg/schemachange` — orchestrator, **cutover swap + fidelity gate** | ✅ core | package contract exists; orchestrator planned | LK-2, LK-4, ST-5 |
 | `pkg/statement`, `pkg/planner`, `pkg/schemadiff`, `pkg/router`, `pkg/plan`, `pkg/lint`, `pkg/suggest` — classify/diff/route/report | ❌ periphery¹ | `pkg/statement` (parse boundary), `pkg/schemadiff` (introspect/diff via scratch execute-and-introspect), `pkg/planner` (classifier), `pkg/router` (backend assignment + availability policy), `pkg/plan` (versioned dry-run plan report), `pkg/lint` (offline typed findings), and `pkg/suggest` (advisory rewrites with typed caveats) exist (Phases 2.1–2.5) | (CO-7 holds at the parse boundary) |
 | `pkg/verdict` — structured outcome contract, rendering, exit codes | ❌ periphery | exists (Phase 1) | — |
 | `pkg/diffplan` — desired schema → routed convergence plan, the declarative front door as a library (the CLI `diff` and embedding orchestrators share it) | ❌ periphery | exists | — |
@@ -67,9 +67,10 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
 - **Never trust callers.** Every dangerous operation re-verifies its preconditions, whoever the
   requester is (CLI, planner, orchestrator). The periphery may request; the core enforces.
 - **Domain types make illegal states unrepresentable.** Validating passages return proof types
-  with package-private constructors (today `preflight.PreflightedTable`,
-  `preflight.AbsentTarget`, and `preflight.CreationRole`; later phases add
-  `CopySwapTarget`, `VerifiedShadow`, `CleanWatermark`, and `TableLock`); dangerous APIs accept only proof types —
+  with package-private constructors (`statement.Statement`, `statement.DesiredSchema`,
+  `preflight.PreflightedTable`, `preflight.AbsentTarget`, `preflight.CreationRole`,
+  `preflight.PrivilegedRole`, `preflight.CopySwapTarget`, `dbconn.TableLock`,
+  `checksum.VerifiedShadow`, and `checksum.CleanWatermark`); dangerous APIs accept only proof types —
   e.g. the planned cutover swap will accept only a `VerifiedShadow`.
 - **Put a limit on everything.** Every loop bounded, every queue bounded, every retry counted,
   every wait deadlined. An unbounded anything in a core package is a review-blocking defect.

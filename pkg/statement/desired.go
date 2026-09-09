@@ -43,15 +43,14 @@ var (
 	ErrWrongIndexTarget = errors.New("index must target the desired table")
 )
 
-// DesiredSchema is a validated desired-state schema file: exactly one
-// CREATE TABLE plus any number of CREATE INDEX statements on that table.
+// DesiredSchema proves a desired-state schema file passed the set-level
+// admission rules: exactly one unqualified CREATE TABLE plus any number of
+// CREATE INDEX statements on that table, none of them CONCURRENTLY. Only
+// [ParseDesired] produces a non-zero value.
+//
 // Statement SQL is canonical (parsed and deparsed through the PostgreSQL
 // grammar), one statement per entry, held in execution order: the CREATE
 // TABLE first, the indexes in input order after it.
-//
-// Only [ParseDesired] produces a non-zero value, so holding one is proof
-// the set-level admission rules held: a single unqualified CREATE TABLE,
-// every index on that table, none of them CONCURRENTLY.
 type DesiredSchema struct {
 	table      string
 	statements []Statement
