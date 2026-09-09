@@ -179,7 +179,7 @@ enforcement mechanics) live in [tcb-model](tcb-model.md); the repo-process versi
 - **Minimize state; derive rather than store.** If a value can be recomputed from the database
   or the checkpoint, don't persist it; small state is what makes an incident reasoned about by
   hand. The checkpoint carries the minimum resumable set and nothing else
-  ([invariants ST-1](invariants.md#st-1--the-checkpoint-is-a-single-row-written-atomically)).
+  ([invariants ST-1](invariants.md#st-1--the-checkpoint-is-one-row-per-target-written-atomically)).
 
 ## Process and delivery
 

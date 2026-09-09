@@ -455,7 +455,9 @@ The invariants that resolve them (Spirit's model, translated):
 - **Deletes must not be lost to an in-flight chunk**: a delete for a key inside a chunk that is
   currently being copied must be re-applied *after* that chunk lands (tombstone retention until
   the covering chunk completes), or chunk copy and backlog flush must be mutually excluded per
-  overlapping key range.
+  overlapping key range. v1 takes the mutual-exclusion form for every buffered change, not only
+  deletes, because the unique-key fallback reads the shadow row to complete unchanged-TOAST
+  markers ([copy-and-swap D13](copy-and-swap-design.md#d13--recover-unique-secondary-key-moves-batch-wide)).
 
 The **mandatory checksum remains the backstop, not the mechanism** — it catches a protocol bug
 before cutover, but the protocol must converge without it. The precise rule set (flush scheduling,

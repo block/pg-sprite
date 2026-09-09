@@ -248,11 +248,20 @@ carried that column's value — that is, the row already existed on the source b
 Second, before the fallback deletes anything it completes every surviving image that still
 carries a marker by reading those columns from the current shadow row (`SELECT … FOR UPDATE` on
 the affected keys, in the same transaction, after the savepoint rollback); by CO-8 the shadow's
-stored value is exactly the value the marker stands for. A marker-bearing image whose shadow row
-is absent is a protocol error, not a case to handle: the row pre-exists on the source, so its key
-is either above the copier watermark (discarded under CO-4 before buffering) or inside an
-in-flight chunk (whose flush CO-4 already defers until the chunk lands). The applier aborts the
-change fail closed if it observes one.
+stored value is exactly the value the marker stands for. That read presumes the shadow row is
+present, which holds only under one of the two chunk-overlap disciplines CO-4 admits: a key
+inside an in-flight chunk may have its flush **deferred** until the chunk lands, or may be
+flushed now with a tombstone retained and re-applied afterwards
+([low-level-design](low-level-design.md#copy-and-apply-ordering-the-core-correctness-subtlety)).
+Under tombstone retention a marker-bearing UPDATE for such a key would flush while the copier
+has not yet written the row, and the fallback would find no shadow row on a permitted
+interleaving. D13 therefore fixes the applier's choice: a flush that touches any key inside an
+in-flight chunk is deferred until that chunk lands (chunk copy and backlog flush mutually
+excluded per overlapping key range); the tombstone-retention form is not available to the v1
+applier. With that discipline, a marker-bearing image whose shadow row is absent is a protocol
+error, not a case to handle: the row pre-exists on the source, so its key is either above the
+copier watermark (discarded under CO-4 before buffering) or inside an in-flight chunk (whose
+flush is deferred). The applier aborts the change fail closed if it observes one.
 
 **Why.** PostgreSQL's targeted `ON CONFLICT` cannot by itself move one unique secondary value
 between rows, and neither can per-key retry: for the cyclic exchange above, a delete-then-insert
