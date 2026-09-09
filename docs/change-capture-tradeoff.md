@@ -36,7 +36,7 @@ default must point here**, because the right default is cluster-dependent, not a
 | **Prerequisites** | `rds.logical_replication=1` (**reboot**), `rds_replication` role, a replication-protocol connection (no RDS Proxy), `REPLICA IDENTITY` | none — ordinary `TRIGGER` privilege; works on any cluster, no reboot, no params |
 | **Survives Aurora failover?** | ⚠️ **no, not guaranteed** — the slot lives on the writer and Aurora doesn't sync it; failover can lose it (see slot loss on failover) | ✅ **yes** — the trigger + queue/shadow are ordinary data, replicated by Aurora storage |
 | **WAL / disk-retention risk** | ❌ an abandoned/slow slot pins WAL and can fill the volume | ✅ none (queue-table bloat is a normal, vacuumable concern) |
-| **Capture completeness** | ⚠️ wrinkles: unchanged-TOAST omitted unless `REPLICA IDENTITY FULL`; generated cols arrive NULL; DDL not decoded (must lock out concurrent DDL) | ✅ trigger sees the **full new row** synchronously — no TOAST/generated-col gaps |
+| **Capture completeness** | ⚠️ wrinkles: an unchanged TOASTed column arrives as an unchanged-TOAST marker, not its value, under every replica identity (`FULL` enlarges only the old tuple) — the applier must skip it column-wise ([D6](copy-and-swap-design.md#d6--preserve-omitted-toast-values), CO-8); generated cols arrive NULL; DDL not decoded (must lock out concurrent DDL) | ✅ trigger sees the **full new row** synchronously — no TOAST/generated-col gaps |
 | **Snapshot ↔ position coordination** | ❌ must seed the copy from the slot's exported snapshot and replay strictly from that LSN | ✅ sidestepped — trigger captures from creation; copy + capture reconcile |
 | **Throughput of catch-up** | commit-ordered, effectively serial (mitigated by PG14 streaming / PG16 parallel apply — see [postgresql-version-support](postgresql-version-support.md#the-version-we-pivot-on)) | bounded by trigger/queue apply; also serial-ish, but no slot/LSN machinery |
 | **Pause / resume of capture** | ✅ easy — just stop/start consuming the slot | ⚠️ harder — triggers fire regardless; a queue-table design can defer apply, direct-to-shadow cannot |
@@ -80,18 +80,16 @@ failover), at the cost of source write overhead — and they do **not** buy you 
 | Situation | Prefer |
 | --- | --- |
 | Hot, write-heavy table where trigger amplification is unacceptable; logical replication is enabled | **Logical decoding** |
-| Cluster where `rds.logical_replication` can't be enabled (no reboot window) or the role/connection constraints can't be met | **Triggers** |
-| Multi-day migration on a cluster with realistic failover/maintenance exposure | **Triggers** (failover-safe) — or logical decoding *with* a tested checksum-repair resume |
+| Cluster where `rds.logical_replication` can't be enabled (no reboot window) or the role/connection constraints can't be met | **Triggers** — not built in v1; preflight refuses with `copy-and-swap-logical-decoding-unavailable` until then |
+| Multi-day migration on a cluster with realistic failover/maintenance exposure | **Triggers** (failover-safe) once built — in v1, logical decoding *with* a tested checksum-repair resume |
 | Short migration on a quiet table | either; logical decoding has less footprint |
 | Sharded fleet running N migrations at once (slot/WAL pressure per cluster) | weigh per-cluster slot budget — see sharded-aurora-postgresql |
 
 ## Decision: primary + fallback, behind one interface
 
-When the copy-and-swap backend is built, it will define a **single change-capture abstraction**
-with two implementations selected per migration; no change-capture code exists yet:
-**logical decoding as the default** (the low-overhead differentiator) and **triggers as a
-first-class fallback** (the failover-safe, runs-anywhere path) — not a vestige. The planner picks
-based on cluster facts (is logical replication enabled? failover exposure? table write rate?), and
-the rest of the pipeline (chunked copy, **mandatory checksum**, copy-watermark checkpoint, atomic
-cutover) is **identical** regardless of which capture is chosen. See
+The copy-and-swap backend defines one change-capture abstraction. v1 implements **logical
+decoding** (the low-overhead differentiator); **triggers remain the first-class documented
+alternative** (the failover-safe, runs-anywhere path), but their implementation is deferred.
+Either implementation shares the rest of the pipeline: chunked copy, **mandatory checksum**,
+copy-watermark checkpoint, and atomic cutover. See
 [the change-capture decision in low-level-design](low-level-design.md#1-cdc-mechanism--logical-decoding-with-trigger-fallback).

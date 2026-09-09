@@ -113,7 +113,7 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
         │                            │
    ┌────┴────────────────────────────┴──── cross-cutting ──────────────────────┐
    │  pkg/dbconn   pgx pool · TLS/RDS CA · pg_terminate_backend · retries      │
-   │  pkg/throttler   Aurora reader lag · replication-slot lag · WAL gen       │ planned
+   │  pkg/throttler   chunk-time target · slot-lag ceiling (replica lag later) │ planned
    └────┬──────────────────────────────────────────────────────────────────────┘
         │
    ╭────▼─────────────────────────── PostgreSQL ───────────────────────────────╮
@@ -160,11 +160,10 @@ that serves it best:
 - **Declarative desired-state input** uses **execute-and-introspect** today: execute the desired
   DDL in a transaction-scoped scratch schema, introspect the canonical model from PostgreSQL's
   catalogs, and always roll back. This supplies semantic validation without AST transformation.
-- **Migration-time shadow-table DDL and checkpoint fingerprints** will also use
-  execute-and-introspect, but in an engine-owned
-  [scratch database](#plan-time-prerequisite-the-scratch-database), because those artifacts must
-  outlive a transaction. Broader scratch-backed refusal checks (RF-1..5), including surfacing
-  server SQLSTATEs, are planned with that execution path.
+- **Copy-and-swap shadow DDL and checkpoint fingerprints** also use execute-and-introspect. The
+  gated DDL executes against the empty shadow, while its after-schema fingerprint reuses the
+  transaction-scoped scratch schema. No durable scratch database is involved; the complete
+  decision is [D1](copy-and-swap-design.md#d1--no-durable-scratch-database).
 
 Classification still *predicts* lock/rewrite behaviour — an empty scratch table reveals nothing
 about a 2 TB rewrite — so execute-and-introspect complements the classifier, never replaces it.
@@ -420,9 +419,9 @@ idle and a plain rewrite is acceptable); it is an escape hatch, not a shortcut, 
                                         +-------------------------------------+
 ```
 
-Key correctness gate (same as Spirit): the **checksum must pass before cutover**. With
-`--defer-cutover`, a continuous checksum loop runs while waiting on a sentinel, exactly like
-Spirit's deferred-cutover mode.
+Key correctness gate (same as Spirit): the **checksum must pass before cutover**. v1 proceeds to
+cutover when the gate passes; deferred cutover is out of scope (see
+[D10](copy-and-swap-design.md#d10--cut-over-as-soon-as-the-gate-passes)).
 
 ## Copy and apply ordering (the core correctness subtlety)
 
@@ -451,17 +450,22 @@ The invariants that resolve them (Spirit's model, translated):
   analog), keyed by PK and deduplicated to the latest image per key before each flush.
 - **The watermark orders the two**: captured changes for PK ranges the copier has already passed
   are applied; changes *above* the copier's watermark can be discarded for a monotonic integer PK
-  (the copier will read the current row anyway — the high-watermark optimization) and must be
-  queued for composite / non-memory-comparable PKs.
+  (the copier will read the current row anyway — the high-watermark optimization). The judgement
+  is per key: an UPDATE that moved the primary key (`ChangeEvent.OldKey` set) is a deletion of
+  the old key plus an image of the new key, so a deletion below the watermark is applied even
+  when the new key above it is discarded. Composite and non-memory-comparable PKs need a queue
+  mode and are refused in v1.
 - **Deletes must not be lost to an in-flight chunk**: a delete for a key inside a chunk that is
   currently being copied must be re-applied *after* that chunk lands (tombstone retention until
   the covering chunk completes), or chunk copy and backlog flush must be mutually excluded per
-  overlapping key range.
+  overlapping key range. v1 takes the mutual-exclusion form for every buffered change, not only
+  deletes, because the unique-key fallback reads the shadow row to complete unchanged-TOAST
+  markers ([copy-and-swap D13](copy-and-swap-design.md#d13--recover-unique-secondary-key-moves-batch-wide)).
 
 The **mandatory checksum remains the backstop, not the mechanism** — it catches a protocol bug
-before cutover, but the protocol must converge without it. The precise rule set (flush scheduling
-vs chunk boundaries, tombstone lifetime, the composite-PK queue) is a Phase 6 deliverable with a
-dedicated convergence test per race above. The trigger fallback has its own analog of this race —
+before cutover, but the protocol must converge without it. The precise rule set (flush scheduling,
+chunk boundaries, and tombstone lifetime) is an executor deliverable with a dedicated convergence
+test per race above. Trigger capture has its own analog of this race —
 see risks-and-mitigations § trigger-specific risks; this
 section is the logical-decoding counterpart.
 
@@ -491,8 +495,8 @@ matrix is part of the "decisions, not options" philosophy.
 
 | Precondition | Required for | If absent |
 | --- | --- | --- |
-| `rds.logical_replication = 1` (static → reboot) ⇒ `wal_level = logical` | logical-decoding CDC path | Fall back to **trigger-based** CDC |
-| `rds_replication` role granted (Aurora gives no `SUPERUSER`) | creating slot / starting replication | Use trigger fallback, or request the grant |
+| `rds.logical_replication = 1` (static → reboot) ⇒ `wal_level = logical` | logical-decoding CDC path | Typed refusal in v1; trigger capture is deferred |
+| `rds_replication` role granted (Aurora gives no `SUPERUSER`) | creating slot / starting replication | Request the grant; trigger capture is deferred |
 | Owning-role membership + schema `CREATE` (the tiered [engine-role contract](engine-role.md)) | all owner-gated DDL: in-place `ALTER`, index builds, shadow table / triggers / swap | Preflight refuses, naming the missing `GRANT` |
 | `max_replication_slots` / `max_wal_senders` headroom | concurrent migrations | Serialize migrations |
 | `REPLICA IDENTITY` = PK (default) or `FULL` | correct UPDATE/DELETE capture; unchanged-TOAST columns | v1 requires a PK, so default identity suffices |
@@ -502,7 +506,7 @@ matrix is part of the "decisions, not options" philosophy.
 | Schema feature | v1 | Notes |
 | --- | --- | --- |
 | Single-column integer/`bigint`/`identity` PK | ✅ Fast path | Best watermark + chunking |
-| Composite or `uuid`/`text` PK | ✅ Slower path | Composite chunker; weaker watermark optimization |
+| Composite or `uuid`/`text` PK | ❌ v1 | Queue-mode apply is deferred |
 | **No** primary key / no unique-not-null key | ❌ | Required, same constraint as Spirit |
 | Foreign keys **referencing** the table | ❌ v1 | FKs must be re-pointed at cutover — defer to v2 |
 | Triggers on the table | ❌ v1 | Must be recreated on the shadow with correct ordering |
@@ -515,28 +519,33 @@ matrix is part of the "decisions, not options" philosophy.
 
 ### Operational caveats
 
-- **Unchanged-TOAST on UPDATE**: with default replica identity, an `UPDATE` that doesn't
-  touch a TOASTed column won't emit that column's value. The applier must handle this (carry
-  forward, or use `REPLICA IDENTITY FULL`) or the shadow can diverge — the checksum is the
-  backstop, but design for it explicitly.
+- **Unchanged-TOAST on UPDATE**: under either admitted replica identity (`DEFAULT` or `FULL`), an `UPDATE` that
+  doesn't touch a TOASTed column emits an unchanged-TOAST marker in place of that column's value.
+  The applier carries the stored value forward with a column-wise UPDATE
+  ([D6](copy-and-swap-design.md#d6--preserve-omitted-toast-values), CO-8); `REPLICA IDENTITY
+  FULL` is not a remedy — it enlarges only the old tuple and leaves the marker in place — and the
+  engine never changes the user's replica identity. The checksum is the backstop, not the
+  mechanism.
 - **No DDL during migration**: logical decoding does not stream DDL. Concurrent schema
   changes to the source mid-migration are unsupported and must be blocked.
 - **Multi-TB tables**: a multi-day copy means the slot retains WAL for the whole window →
   disk/lag risk (see risks below).
 - **Multi-statement / multi-table atomic changes**: out of v1 scope.
 - **Shadow-table fidelity beyond columns**: the shadow must explicitly replicate the source's
-  **owner, GRANTs/ACLs, row-level-security policies, comments, and storage parameters** — none
-  of which comes along by creating a table with the right columns. Miss the grants and
+  **owner, GRANTs/ACLs, row-level-security policies, comments, storage parameters, replica
+  identity, and each constraint's `NOT VALID` state** — none of which comes along by creating a
+  table with the right columns, and `LIKE … INCLUDING ALL` silently validates a `NOT VALID`
+  constraint ([D2](copy-and-swap-design.md#d2--build-indexes-and-constraints-up-front)). Miss the grants and
   application roles **lose access at the instant of cutover**. The cutover refuses to swap until
   this fidelity checklist passes; OID-bound dependents (views, publications) are refused up
   front in v1 (see the schema-shape matrix above). The shadow's column definition itself comes
-  from [execute-and-introspect](#how-the-planner-understands-ddl-decided) on the scratch
-  database, not from AST transformation of the user's `ALTER`.
+  from [execute-and-introspect](#how-the-planner-understands-ddl-decided) against the empty
+  shadow, not from AST transformation of the user's `ALTER`.
 
 ### What "Aurora-aware" actually means here
 
-Aurora-specific handling (throttle on Aurora reader replica lag and on replication **slot**
-lag, RDS CA bundle for TLS, `pg_terminate_backend` to bound the cutover lock, awareness of
+Aurora-specific handling (throttle on replication **slot** lag — reader replica-lag throttling is
+deferred, [D12](copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag); RDS CA bundle for TLS, `pg_terminate_backend` to bound the cutover lock, awareness of
 the writer/reader split) — **not** a claim that every Aurora edition/topology above is
 covered. The unsupported rows are explicit non-goals for v1.
 
@@ -555,7 +564,7 @@ this section states *why* and pins the analog to the underlying primitive.
 | Spirit (MySQL) requirement | PostgreSQL analog (v1) | Postgres-specific reason |
 | --- | --- | --- |
 | Table **must have a PRIMARY KEY** | Require a PK, or a `NOT NULL` `UNIQUE` key usable as one | Chunking needs a deterministic, range-scannable key to slice `WHERE pk BETWEEN …`; the applier needs a stable conflict target for `INSERT … ON CONFLICT (pk) DO UPDATE`; resume needs a watermark. No PK ⇒ would need `REPLICA IDENTITY FULL`, full-row matching on apply/delete, and a synthetic `ctid`-based chunker (unstable across `VACUUM`/rewrite) — unsafe for v1. |
-| PK should ideally be a single memory-comparable integer | `bigint`/`identity`/`serial` single-column PK is the fast path; composite / `uuid` / `text` PK is the slower path | The high-watermark optimization (discard captured changes above the copier's position) and the optimistic chunker rely on a monotonic, cheaply-comparable key. `uuid`/`text`/collated keys force the composite/queue path, exactly as in Spirit. |
+| PK should ideally be a single memory-comparable integer | Require a single-column `smallint`/`integer`/`bigint` PK in v1 | The high-watermark optimization (discard captured changes above the copier's position) and the optimistic chunker rely on a monotonic, cheaply-comparable key. Composite, `uuid`, and text keys require the deferred queue path. |
 | `binlog_row_image=FULL` (full before/after image) | `REPLICA IDENTITY` = PK (default) is enough for v1; `FULL` only if no PK | PG only logs the replica-identity columns for `UPDATE`/`DELETE` by default; that is sufficient when a PK exists. The **unchanged-TOAST** wrinkle (a TOASTed column not in the update isn't streamed) is the PG-specific gotcha the applier must handle. |
 
 ### Unsupported / refused operations (mirror Spirit's blocklist)
@@ -568,43 +577,28 @@ this section states *why* and pins the analog to the underlying primitive.
 | **Lossy conversions** (shorten `VARCHAR` below longest value, add `NOT NULL` w/o default, add `UNIQUE` on non-unique data) | Refuse; require the data be fixed first | These can fail or truncate *during the copy or the constraint validation*, after work is spent. PG surfaces them as `VALIDATE CONSTRAINT` / cast failures; better to reject up front. |
 | Read-replica `<10s` lag fidelity | Not a goal | Like Spirit, the engine prioritizes copy throughput; it observes reader/slot lag only to throttle and protect DR, not to guarantee replica freshness. |
 
-### Plan-time prerequisite: the scratch database
+### Plan-time prerequisite: execute-and-introspect workspace
 
-**This prerequisite belongs to the copy-and-swap path (shadow-DDL derivation and checkpoint
-fingerprints, later phases). Nothing shipped today requires it — declarative diffing uses
-the transaction-scoped scratch schema described below, which needs no `CREATEDB` and no
-pre-provisioning.**
+Copy-and-swap requires no durable scratch database and no `CREATEDB` grant. Under the table
+owner's role, the executor creates the real empty shadow in the source schema and applies the
+gated `ALTER TABLE` there. PostgreSQL therefore supplies semantic validation and the resulting
+catalog shape without transforming the user's DDL. See the authoritative
+[D1 decision](copy-and-swap-design.md#d1--no-durable-scratch-database).
 
-[Execute-and-introspect](#how-the-planner-understands-ddl-decided) (semantic validation,
-shadow-DDL derivation, checkpoint fingerprints) needs a scratch database **on the target
-cluster** — server version and extension parity hold by construction, and the storage cost is
-schema-only (no data ever lands in scratch). Preflight (ST-6) verifies one of two acceptable
-states and refuses with a stated reason otherwise:
-
-1. **`pg_sprite_scratch` is pre-provisioned** (engine-role-owned), or
-2. the engine role holds **`CREATEDB`**, so preflight can self-provision it.
-
-The scratch database is engine-owned and disposable: preflight may reset it (drop/recreate
-contents) at any time. Restricted environments that won't grant `CREATEDB` pre-provision
-instead.
-
-**Plan-time diffing uses a lighter mechanism.** `pkg/schemadiff` materializes the desired
-state inside a single always-rolled-back transaction in the *target* database, in a
-randomly named transaction-scoped schema (`pgsprite_scratch_<random>`). This keeps the
-same-server semantic-truth property (same version, extensions, and defaults as the live
-table) while requiring no `CREATEDB`, no pre-provisioning, and leaving zero footprint —
-appropriate because diffing never writes the live table (it is not read-only: the desired
-DDL executes in that rolled-back transaction, so the role needs `CREATE` on the target
-database). The durable `pg_sprite_scratch`
-database above is required only by the migration path proper (shadow-DDL derivation and
-checkpoint fingerprints), where objects must outlive a transaction.
+`pkg/schemadiff` computes the after-schema checkpoint fingerprint by materializing desired state
+inside a single always-rolled-back transaction in the target database, in a randomly named
+transaction-scoped schema (`pgsprite_scratch_<random>`). This is the existing declarative-diff
+mechanism: it preserves server-version, extension, and default parity and leaves no footprint.
+The desired DDL executes in that transaction, so the role needs `CREATE` on the target database.
 
 ### Postgres-only preconditions Spirit has no analog for
 
 These have **no MySQL counterpart** but are hard requirements for the logical-decoding path:
 
 - **`rds.logical_replication = 1`** (⇒ `wal_level = logical`); static, needs a reboot. Without
-  it the engine must fall back to trigger-based CDC.
+  it preflight refuses the copy-and-swap route (`copy-and-swap-logical-decoding-unavailable`);
+  trigger capture is the documented, deferred alternative
+  ([D15](copy-and-swap-design.md#d15--capture-changes-with-pgoutput)).
 - **`rds_replication` role** (Aurora grants no `SUPERUSER`) to create the slot and start
   replication.
 - **Replication-slot / `max_wal_senders` headroom**, and the slot must be on the **writer**
@@ -641,11 +635,10 @@ pkg/verdict/          -> typed outcomes
 Planned:
 pkg/migration/        -> orchestrator + runner + cutover
 pkg/decode/           -> logical-decoding client
-pkg/copier/           -> parallel chunked copy
+pkg/copier/           -> PK-range chunker, dynamic sizing, parallel chunked copy
 pkg/applier/          -> captured-change apply
-pkg/table/            -> PK-range chunkers and dynamic sizing
 pkg/checksum/         -> chunked verification and cutover gate
-pkg/throttler/        -> replica-lag / slot-lag throttle
+pkg/throttler/        -> chunk-time / slot-lag throttle (replica lag deferred, D12)
 Executor              -> Plan/Execute/Status/Abort backend interface
 ```
 
@@ -716,9 +709,9 @@ of preference:
    planned mandatory checksum gate will also serve as a repair primitive.
 2. **Restart from scratch.** New slot + new snapshot + full re-copy. Always correct, but throws
    away all progress; acceptable only for small tables.
-3. **Don't use logical decoding here.** For clusters where failover risk during a multi-day
-   migration is unacceptable, route to the **trigger fallback** (decision #1): the trigger +
-   queue table are ordinary data that survive failover, so the migration simply resumes.
+3. **Don't use logical decoding here.** Trigger capture is the documented future alternative for
+   clusters where failover risk during a long-running schema change is unacceptable; it is not
+   built in v1.
 
 Design implications the rest of the system must honour:
 - **Model slot loss as a first-class state transition** in checkpoint/resume (build-plan
@@ -734,10 +727,14 @@ Design implications the rest of the system must honour:
 ## Decisions for later execution phases
 
 The parser (`wasilibs/go-pgquery`), declarative diff engine (in-house `pkg/schemadiff`), and
-execute-and-introspect mechanism are decided and implemented. The topics below either define the
-future copy-and-swap backend or retain execution-policy details to settle when that backend lands.
+execute-and-introspect mechanism are decided and implemented. The copy-and-swap decisions are
+recorded in [copy-and-swap-design.md](copy-and-swap-design.md); later topics remain here for
+context.
 
 ### 1. CDC mechanism — logical decoding with trigger fallback
+
+**Decided for v1:** logical decoding through pgoutput is the implemented path; trigger capture is
+deferred. See [D15](copy-and-swap-design.md#d15--capture-changes-with-pgoutput).
 
 - **Logical decoding** (recommended primary): faithful Spirit port, **no synchronous write
   overhead** on the source; this is what makes the tool better than pg_osc. Costs: needs
@@ -752,17 +749,19 @@ future copy-and-swap backend or retain execution-policy details to settle when t
   robustness escape hatch for clusters that can't enable logical replication or can't accept
   [slot loss on failover](#failover-during-migration-what-survives-and-what-doesnt) during a
   multi-day migration — not a strictly-safer option.
-- **Decision:** the future `decode.Source` seam uses **logical decoding as primary and
-  trigger-based capture as fallback** — and treats the
-  fallback as a first-class robustness path on Aurora, not a vestige. The full comparison
+- **Decision:** v1 uses **logical decoding**. Trigger-based capture remains the documented,
+  first-class future robustness alternative, not a v1 implementation. The full comparison
   (overhead, failover survival, and why neither lets us drop the checksum) is in
   [change-capture-tradeoff.md](change-capture-tradeoff.md).
 
 ### 2. Scope of v1
 
-Target the highest-value rewrite cases first: general `ALTER COLUMN TYPE`, volatile-default
-`ADD COLUMN`, `STORED` generated column, and full-table repack — plus the **classifier** that
-routes natively-safe operations to direct DDL. PK-required, no-FK-on-migrated-table for v1.
+**Decided:** the exact operation and table-shape boundary, including typed refusal reasons, is in
+[the v1 scope table](copy-and-swap-design.md#v1-scope).
+
+The initial targets are rewrite-requiring `ALTER COLUMN TYPE`, volatile-default `ADD COLUMN`, and
+`STORED` generated-column addition. The classifier continues to route natively safe operations
+to direct DDL.
 
 Both the declarative and imperative front ends exist and share classify → route, matching the
 [README § the decided shape](README.md#the-decided-shape),

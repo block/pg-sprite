@@ -29,6 +29,7 @@ Aurora-only. Why that combination is the product is [vision.md](vision.md); star
 | [mysql-vs-postgresql.md](mysql-vs-postgresql.md) | The **MySQL ↔ PostgreSQL comparison reference** — how each engine expresses online DDL (`ALGORITHM=`/`LOCK=` vs per-operation idioms), the lock-mode → MDL mapping, **why DDL is dangerous** (the lock-queue pile-up, the same failure mode in both engines, and its mitigations), and the per-primitive [Spirit](https://github.com/block/spirit) (MySQL) → PostgreSQL translation the copy-and-swap executor is built on. |
 | [high-level-design.md](high-level-design.md) | The **high-level design** — the conceptual overview: the problem, the planner → router → executor philosophy, the execution patterns and when each is chosen, and coverage at a glance. No package/interface detail. Start here for the architecture. |
 | [low-level-design.md](low-level-design.md) | The **low-level design** — the detailed engineering design: package layout, the `Executor` interface, library choices, copy-and-swap lifecycle internals, the full coverage matrix, table requirements, and the decisions remaining for later execution phases. Read this when designing the interfaces and packages. |
+| [copy-and-swap-design.md](copy-and-swap-design.md) | The decided **copy-and-swap v1 design** — supported table shapes, shadow and checkpoint construction, copy/apply/checksum rules, slot lifecycle, cutover, and the package/proof-type map. |
 | [design-principles.md](design-principles.md) | The canonical **design principles** that govern the engine — safety over speed, decisions-not-options, classify-first, mandatory checksum gate, log-based CDC, and the PostgreSQL/Aurora-specific rules everything else traces back to. |
 | [postgresql-version-support.md](postgresql-version-support.md) | The **PostgreSQL version matrix** — which PG majors pgroll, pg_osc, and pg_repack support, which majors Aurora still ships, the minimum PG version each native idiom needs, and the resulting decision to **pivot on PostgreSQL 14+** (validated 14 → 18). |
 | [change-capture-tradeoff.md](change-capture-tradeoff.md) | The canonical **triggers vs logical-decoding** trade-off for copy-and-swap — overhead, failover survival, WAL risk, and whether either lets us drop the checksum/checkpoint (answer: keep the checksum; triggers simplify but don't remove the checkpoint). Any doc proposing logical decoding as the default points here. |
@@ -81,10 +82,11 @@ checksum correctness gate* before cutover, *dynamic time-based chunking*, and
    resumable copy-and-swap** lifts those refusals. PostgreSQL does far more changes as
    native instant operations than MySQL, so refusing the rewrite cases still leaves the
    tool useful for the majority of changes from day one.
-3. **Change capture is log-based by default.** A change-capture abstraction with
-   **logical decoding** as the primary implementation and a **trigger-based** fallback for
-   environments that cannot enable `rds.logical_replication` or can't accept slot loss on
-   failover. The default is cluster-dependent, not absolute — see
+3. **Change capture is log-based.** v1 captures changes with **logical decoding** (pgoutput)
+   only; clusters that cannot enable `rds.logical_replication` receive a typed refusal. A
+   **trigger-based** implementation behind the same change-capture seam remains the documented
+   alternative for those clusters and for slot loss on failover, but is deferred — see
+   [copy-and-swap D15](copy-and-swap-design.md#d15--capture-changes-with-pgoutput) and
    [change-capture-tradeoff.md](change-capture-tradeoff.md).
 4. **Two front doors, one pipeline.** *Declarative* (`diff`/`fmt`) takes a desired
    `CREATE TABLE` and derives the change by diffing against the live schema; *imperative*
