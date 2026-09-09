@@ -48,7 +48,13 @@ requires — nothing higher.
 | 1 | In-place `ALTER TABLE` (the instant and fast native paths) | Inheritable **membership in the owning role** — sufficient on its own | `pg_has_role(current_user, <owner>, 'USAGE')` |
 | 2 | Index builds: `CREATE INDEX [CONCURRENTLY]`, and the `ALTER TABLE` shapes that build one — `ADD CONSTRAINT UNIQUE` / `PRIMARY KEY` / `EXCLUDE` without `USING INDEX`, or `ADD COLUMN` with an inline `UNIQUE` / `PRIMARY KEY` | Tier 1 + **`CREATE` on the target schema** — table ownership alone is refused with `permission denied for schema` | `has_schema_privilege(..., 'CREATE')` |
 | 3 | Copy-and-swap | Tier 2 + membership usable with `SET ROLE` (for owner-correct shadow objects); for logical-decoding CDC: `rds_replication` membership (Aurora/RDS) or the `REPLICATION` attribute (self-managed) | `pg_has_role(..., 'SET')` (16+; on 14–15 the Tier 1 `USAGE` check already proves `SET ROLE` access — membership options arrive in 16); `pg_has_role(current_user, 'rds_replication', 'MEMBER')` |
-| 4 | Planner scratch database (execute-and-introspect) | A pre-provisioned `pg_sprite_scratch` owned by the engine role, **or** `CREATEDB` | *Not yet implemented* — a missing scratch database surfaces at scratch creation, not in the preflight |
+
+Copy-and-swap uses the empty shadow plus the transaction-scoped `pkg/schemadiff` scratch schema
+for execute-and-introspect; it does not add a higher privilege tier or require `CREATEDB`. See
+[the D1 decision](copy-and-swap-design.md#d1--no-durable-scratch-database). The scratch schema
+does need `CREATE` **on the database** (`CREATE SCHEMA` is a database-level privilege) — a
+requirement of every declarative plan, not only copy-and-swap, that the tier table does not yet
+carry and preflight's privilege probe does not yet check; both are open follow-ups.
 
 Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are checked in the
 same preflight: `wal_level = logical` (`rds.logical_replication = 1` on Aurora/RDS, a

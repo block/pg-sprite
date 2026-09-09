@@ -22,8 +22,8 @@ The invariant registry (invariant IDs referenced below) lives in
 | `pkg/executor` — bounded optimistic attempt; native concurrent index build with invalid-index recovery; native sequence executor for the safer idioms | ✅ core | exists (Phase 1: attempt-under-budget; Phase 3.1: concurrent index build; Phase 3.2: sequence executor) | LK-2 (attempt bound + the CONCURRENTLY wait-policy exception) |
 | `pkg/checksum` — chunk verifier, continuous checker, repair | ✅ core | types and proof-type declarations exist; verifier planned | CO-1, CO-2, CO-3 |
 | `pkg/copier` — shadow-table chunked copy | ✅ core | contract types exist; copier planned | CO-4, LK-3 |
-| `pkg/applier` — change apply, buffer, flush scheduling | ✅ core | package contract exists; applier planned | CO-4, CO-5, CO-6, LK-3 |
-| `pkg/decode` — logical decoding, LSN/position accounting | ✅ core | contract types exist; decoder planned | ST-4, CO-4 |
+| `pkg/applier` — change apply, buffer, flush scheduling | ✅ core | package contract exists; applier planned | CO-4, CO-5, CO-6, CO-8, LK-3 |
+| `pkg/decode` — logical decoding, LSN/position accounting, per-column presence | ✅ core | contract types exist; decoder planned | ST-4, CO-4, CO-8 |
 | `pkg/checkpoint` — durable resume state | ✅ core | checkpoint contract exists; persistence planned | ST-1, ST-2 |
 | slot lifecycle (in `pkg/decode`) — create, reap, lag ceiling | ✅ core | planned (Phase 8) | ST-3 |
 | `pkg/schemachange` — orchestrator, **cutover swap + fidelity gate** | ✅ core | package contract exists; orchestrator planned | LK-2, LK-4, ST-5 |
@@ -89,9 +89,13 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   updates never wait for a database read, but the verdict handoff *is* observer-gated:
   `StopConcurrentBuild` deliberately drains an in-flight poll before the executor reclaims
   the session, a wait bounded by the poller's context and the session's `statement_timeout`),
-  stdlib. The future decode path will add `pglogrepl`. Adding one requires a recorded decision (see the rubric in
+  stdlib. Adding one requires a recorded decision (see the rubric in
   [docs/tcb-model.md](docs/tcb-model.md) — copy small things, take pinned dependencies only
   for load-bearing expertise).
+  Recorded decision: `jackc/pglogrepl` (pinned) is admitted to the core for `pkg/decode` because
+  the streaming-replication protocol and `pgoutput` message decoding are load-bearing
+  wire-protocol expertise, under the same rubric as the parser; it is confined to `pkg/decode`
+  and is not added to `go.mod` until that package's implementation lands.
   Recorded decision: the AWS SDK (`aws-sdk-go-v2`) is a test-harness-only dependency, confined
   behind the `ministack` build tag in `internal/testutil` — it never appears in the core, in
   `cmd/pg-sprite`, or in any ordinary build; a plain `go build ./...` / `go test ./...` never

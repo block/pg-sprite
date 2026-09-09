@@ -181,7 +181,7 @@ different levels of commitment:
 | `internal/cli` | Command tree and flag handling (including `migrate --dry-run`) | all six exist |
 | `internal/testutil` | Test harness: containerized PostgreSQL, throwaway schemas | exists |
 | `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; advisory-lock mutual exclusion lands here | exists |
-| `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parse boundary, typed per-operation descriptors, and advisory rewrites (never hand-parse SQL); migration-time shadow DDL + fingerprints are derived by `pkg/schemadiff` via scratch-DB execute-and-introspect | exists |
+| `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parse boundary, typed per-operation descriptors, and advisory rewrites (never hand-parse SQL); shadow DDL is validated by executing the retargeted statement on the empty shadow, and fingerprints come from `pkg/schemadiff`'s transaction-scoped scratch schema — execute-and-introspect, never AST surgery | exists |
 | `pkg/preflight` | Precondition verification and refusals before any write: target facts + table-size guard, tiered privilege checks (a refusal carries the exact provisioning `GRANT`), partitioned-table support gates | exists |
 | `pkg/verdict` | Structured outcome contract (executed / refused / failed + reason, stable executor code, and safer idiom), rendering, exit codes | exists (Phase 1) |
 | `pkg/schemadiff` | Execute-and-introspect desired state, introspect the live catalog, and produce an ordered declarative diff | exists |
@@ -194,14 +194,13 @@ different levels of commitment:
 | `pkg/router` | Route classified statements to native / copy-and-swap / refuse dispositions; copy-and-swap reports unavailable until that backend lands | exists (Phase 2.4) |
 | `pkg/executor` | Bounded optimistic native attempt, the concurrent index build, and the autocommit safer-sequence runner, with stable outcome codes; the full `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) arrives with the copy-and-swap backend | native execution exists |
 | `pkg/progress` | Strategy-wide, pollable progress snapshots: native phase/elapsed time, sequence position, retry attempt, and server-reported concurrent-index work; optional copy counters are reserved for copy-and-swap | native progress exists |
-| `pkg/table` | PK-range chunkers (single-column fast path, composite), dynamic time-based sizing | Phase 4 |
-| `pkg/copier` | Parallel chunked copy into the shadow table (never overwrites) | Phase 4 |
+| `pkg/copier` | PK-range chunker over one integer-family primary key with dynamic time-based sizing (produces `Chunk` and `Watermark`; composite keys refused in v1), and the parallel chunked copy into the shadow table (never overwrites) — there is no separate chunker package | contracts exist; copy loop Phase 4 |
 | `pkg/checksum` | The mandatory correctness gate; continuous checker; repair primitive | Phase 5 |
 | `pkg/decode` | Logical-decoding change capture, LSN accounting, slot lifecycle | Phase 6, 8 |
 | `pkg/applier` | Change apply onto the shadow (always wins), buffer/dedup, flush scheduling | Phase 6 |
 | `pkg/schemachange` | Orchestrator: lifecycle, cutover swap + fidelity gate, checkpoint/resume | Phase 7–8 |
-| `pkg/checkpoint` | Durable single-row resume state | Phase 8 |
-| `pkg/throttler` | Aurora reader-lag / slot-lag / WAL throttling | Phase 8 |
+| `pkg/checkpoint` | Durable resume state: one row per `(schema, table)` in the target database | Phase 8 |
+| `pkg/throttler` | Chunk-time targeting and the hard slot-lag ceiling; replica-lag throttling deferred | Phase 8 |
 
 ## The copy-and-swap lifecycle
 
