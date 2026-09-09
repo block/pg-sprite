@@ -35,13 +35,26 @@ linters:
             - "**/pkg/preflight/**"
             - "**/pkg/executor/**"
             - "**/pkg/progress/**"
+            - "**/pkg/checksum/**"
+            - "**/pkg/copier/**"
+            - "**/pkg/applier/**"
+            - "**/pkg/decode/**"
+            - "**/pkg/checkpoint/**"
+            - "**/pkg/schemachange/**"
             - "!$test"
           allow:
             - $gostd
             - github.com/jackc/pgx/v5
             - github.com/block/pg-sprite/pkg/dbconn
             - github.com/block/pg-sprite/pkg/preflight
+            - github.com/block/pg-sprite/pkg/executor
             - github.com/block/pg-sprite/pkg/progress
+            - github.com/block/pg-sprite/pkg/checksum
+            - github.com/block/pg-sprite/pkg/copier
+            - github.com/block/pg-sprite/pkg/applier
+            - github.com/block/pg-sprite/pkg/decode
+            - github.com/block/pg-sprite/pkg/checkpoint
+            - github.com/block/pg-sprite/pkg/schemachange
             - github.com/block/pg-sprite/pkg/statement
     sloglint:
       static-msg: true
