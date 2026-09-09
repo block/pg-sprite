@@ -177,5 +177,5 @@ equivalent is given alongside.
 | Force-kill via `performance_schema` | `pg_terminate_backend()` + `lock_timeout`/`statement_timeout` to bound the cutover wait |
 | TiDB SQL parser (`pkg/statement`) | [`wasilibs/go-pgquery`](https://github.com/wasilibs/go-pgquery) (libpg_query compiled to Wasm — the real PostgreSQL grammar, no cgo) for parsing `ALTER` / `CREATE TABLE` |
 | Aurora MySQL throttling (active threads, replica lag) | Replication **slot lag** (`pg_replication_slots`), WAL generation rate, replica lag (`pg_stat_replication`; *Aurora:* `aurora_replica_status()`, CloudWatch) |
-| `AUTO_INCREMENT` optimistic chunker | `bigint`/`identity`/`serial` PK range chunker; composite-PK chunker otherwise |
+| `AUTO_INCREMENT` optimistic chunker | `smallint`/`integer`/`bigint` PK range chunker; composite and non-integer keys are refused in v1 (`copy-and-swap-pk-unsupported`, [D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)) |
 | TLS / RDS CA auto-detection | same idea, the RDS/Aurora CA bundle for `pgx` when the target is a managed service |

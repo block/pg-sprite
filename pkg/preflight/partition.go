@@ -26,6 +26,18 @@ const (
 	PartitionCauseNotValidForeignKey PartitionRefusalCause = "parent-not-valid-foreign-key"
 )
 
+// PartitionRefusalCauses returns the closed set of partitioned-parent
+// refusal causes, so documentation and consumers can enumerate them instead
+// of maintaining their own list.
+func PartitionRefusalCauses() []PartitionRefusalCause {
+	return []PartitionRefusalCause{
+		PartitionCauseConcurrentIndexBuild,
+		PartitionCauseBlockingIndexBuild,
+		PartitionCauseIndexAdoption,
+		PartitionCauseNotValidForeignKey,
+	}
+}
+
 // UnsupportedPartitionedParentError reports that an execution plan contains
 // a step pg-sprite cannot safely run on a partitioned parent. Its rendered
 // message is a fixed English sentence with no interpolated identifiers or

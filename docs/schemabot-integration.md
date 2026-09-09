@@ -56,7 +56,7 @@ this mapping clean — the orchestrator's engine verbs line up almost one-to-one
 | apply | **Router + Executor**: run native changes **asynchronously**; return a refusal verdict for non-native-safe changes until later-phase executors land |
 | progress | per-table rows-copied / total / percent / ETA / checksum state |
 | stop / start | checkpoint and resume (slot + copy + applier state) |
-| cutover (+ deferred cutover) | the deferred, operator-gated atomic swap |
+| cutover | the gated atomic swap, taken as soon as the gates pass; an operator-gated deferred cutover is not in v1 ([D10](copy-and-swap-design.md#d10--cut-over-as-soon-as-the-gate-passes)) |
 | volume | chunk-time / parallelism / throttle level (1–11) |
 | cancel | abort and **guarantee logical-slot + shadow-table cleanup** |
 | revert | only if the chosen executor supports it (Spirit declines this; see the [reversibility principle](design-principles.md#correctness-and-safety)) |
@@ -121,7 +121,7 @@ implementation time):
   diff, and under a declarative model its only convergence is `DROP TABLE` — which pg-sprite
   refuses at both front doors and never executes. There is no `verdict.Verdict` to map: pg-sprite
   never saw the table. The adapter enumerates the namespace's live tables itself (the catalog
-  query and its exclusions — partitions, `INHERITS` children, extension-owned tables — are
+  query and its exclusions — partitions and extension-owned tables — are
   under [Deliberately operator-owned](capabilities.md#deliberately-operator-owned)) and
   *synthesizes* an `engine.TableChange` per undeclared table: `ExecutionMode =
   ExecutionModeBlocked`, `IsUnsafe` with a data-loss `UnsafeReason`, and a `ModeReason` that
@@ -379,7 +379,8 @@ they are registered as the `OC-*` invariants in
 
 - **Keep PostgreSQL-only machinery inside the adapter.** When the copy-and-swap backend and
   adapter exist, logical-decoding slot create/cleanup, `REPLICA IDENTITY`, logical-replication
-  preflight, and the trigger fallback will all live behind `Apply`/`Stop`/`Cancel` so the
+  preflight, and any later trigger-capture implementation will all live behind
+  `Apply`/`Stop`/`Cancel` so the
   engine-neutral orchestration layer stays untouched
   (OC-6).
 - **Shared types stay engine-agnostic** — engine-specific data rides in generic

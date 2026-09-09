@@ -55,7 +55,7 @@ lifecycle. *Binds:* Phase 3 (native executor) onward. *Source:* pgroll
 
 Generated SQL whose exact shape carries a safety property (chunk
 continuation predicates, `ON CONFLICT` arbiters, timeout preludes,
-fallback-mode trigger bodies) is **frozen by exact-string test AND proven
+trigger bodies if trigger capture is ever built) is **frozen by exact-string test AND proven
 behaviorally against a real database** — never just one of the two.
 *Binds:* Phase 3 onward. *Source:* pgroll trigger/backfill template tests;
 pg-delta's snapshot + roundtrip pairing.
@@ -166,8 +166,8 @@ roles** (`NewRole`), so the role behind an external `PG_DSN` needs
 `CREATEROLE` — a step up from "a database you can create schemas in".
 The compose database and per-test containers connect as superuser, so
 this only matters when pointing `PG_DSN` at a shared server; tests whose
-requirements go further (replication attributes) skip themselves when the
-server refuses.
+requirements go further (replication attributes, extension ownership) skip
+themselves when the server refuses.
 
 ## Aurora-shaped environments: three tiers, each proving what it can
 
