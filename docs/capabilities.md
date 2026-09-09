@@ -178,7 +178,7 @@ review the object warrants) ·
 
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| `CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN | ✅ | native, safer sequence | Yes | Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification, typed invalid-index outcomes, and a proven recovery for abandoned leftovers (`RebuildAbandonedIndex`, library-only; [runbook](invalid-index-recovery.md)) |
+| `CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN | ✅ | native, safer sequence | Yes | Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification, typed invalid-index outcomes, and a proven recovery for abandoned leftovers (`RebuildAbandonedIndex`, or `DropAbandonedIndex` to remove the leftover without rebuilding; both library-only; [runbook](invalid-index-recovery.md)) |
 | `DROP INDEX` | ✅ | native, safer sequence | Yes | Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive** |
 | `REINDEX` | ✅ | native, safer sequence | Yes | Rewritten to `REINDEX ... CONCURRENTLY` |
 | Index build on a **partitioned parent** | 🟡 | native, planned flow | Yes | PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned |
@@ -345,7 +345,8 @@ Three related jobs stay with humans on purpose:
   an invalid index; an in-flight healthy build looks identical. The build **never drops
   an index itself** — PostgreSQL drops by name, not identity, so a drop on the way in
   could destroy another actor's build. Recovery is a separate, explicit call
-  (`executor.RebuildAbandonedIndex`, library-only) that removes an entry only after
+  (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when the caller must
+  not rebuild; both library-only) that removes an entry only after
   proving it abandoned under the table lock and by catalog identity
   ([LK-5](invariants.md#lk-5--an-index-is-dropped-only-by-proven-identity-under-the-lock-that-excludes-its-builder)),
   and refuses an in-flight build, another table's entry, or an entry the server will not
