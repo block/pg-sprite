@@ -178,7 +178,7 @@ review the object warrants) ·
 
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| `CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN | ✅ | native, safer sequence | Yes | Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification, typed invalid-index outcomes, and a proven recovery for abandoned leftovers (`RebuildAbandonedIndex`, library-only; [runbook](invalid-index-recovery.md)) |
+| `CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN | ✅ | native, safer sequence | Yes | Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification, typed invalid-index outcomes, and a proven recovery for abandoned leftovers (`RebuildAbandonedIndex`, or `DropAbandonedIndex` to remove the leftover without rebuilding; both library-only; [runbook](invalid-index-recovery.md)) |
 | `DROP INDEX` | ✅ | native, safer sequence | Yes | Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive** |
 | `REINDEX` | ✅ | native, safer sequence | Yes | Rewritten to `REINDEX ... CONCURRENTLY` |
 | Index build on a **partitioned parent** | 🟡 | native, planned flow | Yes | PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned |
@@ -309,36 +309,45 @@ Three related jobs stay with humans on purpose:
   SET SCHEMA` / `RENAME TO`) is the owner's policy, not pg-sprite's. A schema being
   onboarded is entirely undeclared tables, so declare the existing tables first (`pull`
   writes one desired file per table), or scope the owner's authority to the schemas it
-  manages. The enumeration is a catalog query the owner runs itself — the listing `pull`
-  baselines a schema from, with `INHERITS` children also excluded because export refuses
-  them anyway. The exclusions matter, because every false positive blocks a table nobody
-  touched:
+  manages. `schemadiff.ListManagedTables` implements the catalog query used by `pull` and
+  is available to owners that need the same enumeration. It lists the tables a schema
+  directory is expected to account for, not the files `pull` can write: partitions are
+  represented through their parent's `PARTITION BY` and extension members belong to their
+  extension, so neither is listed, while a listed table whose shape export refuses (the
+  declarative model's limits, under [The two front doors](#the-two-front-doors)) is still
+  undeclared and still the owner's to resolve; `pull` reports each refusal by table. The
+  exclusions matter, because every false positive blocks a table nobody touched:
 
   ```sql
   SELECT c.relname
   FROM pg_catalog.pg_class c
-  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-  WHERE n.nspname = 'app'
-    AND c.relkind IN ('r', 'p')                      -- ordinary and partitioned tables only
-    AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i
-                    WHERE i.inhrelid = c.oid)         -- partitions and INHERITS children belong to their parent
+  JOIN pg_catalog.pg_namespace n
+    ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+  WHERE n.nspname OPERATOR(pg_catalog.=) 'app'
+    AND (c.relkind OPERATOR(pg_catalog.=) 'r'
+         OR c.relkind OPERATOR(pg_catalog.=) 'p')    -- ordinary and partitioned tables only
+    AND NOT c.relispartition                         -- partitions belong to their parent
     AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend d
-                    WHERE d.classid = 'pg_catalog.pg_class'::regclass
-                      AND d.objid = c.oid
-                      AND d.deptype = 'e')            -- extension-owned tables have no file to write
+                    WHERE d.classid OPERATOR(pg_catalog.=)
+                            'pg_catalog.pg_class'::pg_catalog.regclass
+                      AND d.objid OPERATOR(pg_catalog.=) c.oid
+                      AND d.deptype OPERATOR(pg_catalog.=) 'e') -- extension-owned tables have no file to write
   ORDER BY c.relname;
   ```
 
-  Qualify the catalog with `pg_catalog.` so a user-first `search_path` cannot shadow it
-  into an empty — passing — result. Views, materialized views, foreign tables, and
-  sequences are outside the model and are not undeclared tables. The planner's scratch
+  Qualify every relation, operator, and type with `pg_catalog.`: under a user-first
+  `search_path`, an unqualified relation or `=` joins nothing and returns an empty —
+  passing — result, and an unqualified `regclass` cast stops matching the extension
+  dependency and lists extension members as undeclared. Views, materialized views, foreign
+  tables, and sequences are outside the model and are not undeclared tables. The planner's scratch
   objects live in a schema of their own (`pgsprite_scratch_<random>`) inside a transaction
   that is always rolled back, so a listing scoped to the owner's schema never sees them.
 - **Deciding to recover an invalid index.** A failed `CREATE INDEX CONCURRENTLY` leaves
   an invalid index; an in-flight healthy build looks identical. The build **never drops
   an index itself** — PostgreSQL drops by name, not identity, so a drop on the way in
   could destroy another actor's build. Recovery is a separate, explicit call
-  (`executor.RebuildAbandonedIndex`, library-only) that removes an entry only after
+  (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when the caller must
+  not rebuild; both library-only) that removes an entry only after
   proving it abandoned under the table lock and by catalog identity
   ([LK-5](invariants.md#lk-5--an-index-is-dropped-only-by-proven-identity-under-the-lock-that-excludes-its-builder)),
   and refuses an in-flight build, another table's entry, or an entry the server will not

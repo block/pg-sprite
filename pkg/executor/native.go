@@ -135,13 +135,16 @@ var (
 	ErrTableNotFound = errors.New("table not found")
 	// ErrPoolTooSmall is returned at admission when the pool cannot hold
 	// every session the operation needs at once — for a build, the build
-	// session and the verdict session (buildMinConns); for a recovery, its
-	// own session on top of those (recoveryMinConns). The verdict is a
-	// correctness dependency, not a nicety: without a reserved connection,
-	// every failed build would resolve indeterminate, and a pool one
-	// connection short would not fail but wait on itself for as long as
-	// the caller's context allows. Like an unbounded budget, an unusable
-	// pool is refused by construction.
+	// session and the verdict session (buildMinConns); for a rebuild
+	// recovery, its own session on top of those (recoveryMinConns); for a
+	// drop-only recovery, its own session and one drop session
+	// (dropRecoveryMinConns). The message names the sessions the refused
+	// operation holds at its peak. The verdict is a correctness
+	// dependency, not a nicety: without a reserved connection, every
+	// failed build would resolve indeterminate, and a pool one connection
+	// short would not fail but wait on itself for as long as the caller's
+	// context allows. Like an unbounded budget, an unusable pool is
+	// refused by construction.
 	ErrPoolTooSmall = errors.New("the pool cannot hold every session the operation needs at once")
 	// ErrCallerOwnedNeedsCancellableContext is returned when caller-owned
 	// mode has no cancellation signal to bound the statement.
@@ -183,9 +186,15 @@ var (
 // session and the verdict session reserved beside it.
 const buildMinConns = 2
 
-// recoveryMinConns is the pool size a recovery needs: its own session,
-// held across the drops and the build, plus the build's own two.
+// recoveryMinConns is the pool size a rebuild recovery needs: its own
+// session, held across the drops and the build, plus the build's own two.
 const recoveryMinConns = buildMinConns + 1
+
+// dropRecoveryMinConns is the pool size a drop-only recovery needs: its own
+// session, held across the drops, and the drop session beside it. It is
+// its own constant because it counts different sessions from buildMinConns
+// and only happens to equal it.
+const dropRecoveryMinConns = 2
 
 // sessionCleanupTimeout bounds the client-side session housekeeping around
 // a build: resetting the budget overrides and closing a session that must
