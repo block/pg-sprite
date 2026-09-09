@@ -31,7 +31,7 @@ func (v VerifiedShadow) VerifiedAt() time.Time { return v.verifiedAt }
 
 // CleanWatermark proves every chunk through its watermark was clean on a fresh
 // read and that the pass repaired nothing. Its zero value is forgeable;
-// consumers must reject it when Watermark().Valid is false.
+// consumers must reject it when Watermark().Valid() is false.
 type CleanWatermark struct{ watermark copier.Watermark }
 
 // Watermark returns the clean copied-through watermark.
