@@ -68,7 +68,8 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   requester is (CLI, planner, orchestrator). The periphery may request; the core enforces.
 - **Domain types make illegal states unrepresentable.** Validating passages return proof types
   with package-private constructors (`preflight.PreflightedTable`,
-  `preflight.AbsentTarget`, `preflight.CreationRole`, `preflight.CopySwapTarget`,
+  `preflight.AbsentTarget`, `preflight.CreationRole`, `preflight.PrivilegedRole`,
+  `preflight.CopySwapTarget`,
   `dbconn.TableLock`, `checksum.VerifiedShadow`, and `checksum.CleanWatermark`); dangerous APIs accept only proof types —
   e.g. the planned cutover swap will accept only a `VerifiedShadow`.
 - **Put a limit on everything.** Every loop bounded, every queue bounded, every retry counted,

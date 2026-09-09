@@ -15,17 +15,20 @@ func TestConvergenceOracle(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	sourceTable := NewWorkloadTable(t, pool)
-	require.NoError(t, sourceTable.SeedRows(t.Context(), 20))
+	require.NoError(t, sourceTable.SeedRows(t.Context(), 30))
 	source := RelationRef{Schema: sourceTable.Schema, Table: sourceTable.Table}
 	shadow := RelationRef{Schema: source.Schema, Table: "shadow"}
 	_, err = pool.Exec(t.Context(), `CREATE TABLE `+qualified(shadow)+` (LIKE `+qualified(source)+` INCLUDING ALL)`)
 	require.NoError(t, err)
-	_, err = pool.Exec(t.Context(), `ALTER TABLE `+qualified(shadow)+` ALTER COLUMN amount TYPE numeric(14,4)`)
+	// amount widens within the numeric category; uniq moves to another
+	// category entirely, which EXCEPT cannot match without the oracle's
+	// source-side cast.
+	_, err = pool.Exec(t.Context(), `ALTER TABLE `+qualified(shadow)+` ALTER COLUMN amount TYPE numeric(14,4), ALTER COLUMN uniq TYPE text`)
 	require.NoError(t, err)
-	_, err = pool.Exec(t.Context(), `INSERT INTO `+qualified(shadow)+` SELECT * FROM `+qualified(source))
+	_, err = pool.Exec(t.Context(), `INSERT INTO `+qualified(shadow)+` SELECT id, uniq::text, amount, label, blob, updated_at FROM `+qualified(source))
 	require.NoError(t, err)
 
-	AssertConverged(t, t.Context(), pool, source, shadow, ConvergeOptions{})
+	AssertConverged(t, pool, source, shadow, ConvergeOptions{})
 	report, err := Diff(t.Context(), pool, source, shadow, ConvergeOptions{})
 	require.NoError(t, err)
 	assert.True(t, report.Converged())
@@ -42,4 +45,18 @@ func TestConvergenceOracle(t *testing.T) {
 	report, err = Diff(t.Context(), pool, source, shadow, ConvergeOptions{IgnoreColumns: []string{"updated_at"}})
 	require.NoError(t, err)
 	assert.True(t, report.Converged())
+
+	// A wide divergence is reported by its twenty lowest keys, not
+	// enumerated: 25 differing rows yield exactly ids 1..20 per direction.
+	_, err = pool.Exec(t.Context(), `UPDATE `+qualified(shadow)+` SET label='wide' WHERE id<=25`)
+	require.NoError(t, err)
+	report, err = Diff(t.Context(), pool, source, shadow, ConvergeOptions{IgnoreColumns: []string{"updated_at"}})
+	require.NoError(t, err)
+	lowest := []int64{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20}
+	assert.Equal(t, []DirectionDiff{{Direction: "source-minus-shadow", Keys: lowest}, {Direction: "shadow-minus-source", Keys: lowest}}, report.Differences)
+	assert.Equal(t, report.SourceCount, report.ShadowCount, "row values differ but counts do not")
+
+	// Ignoring the primary key is refused: the report names rows by it.
+	_, err = Diff(t.Context(), pool, source, shadow, ConvergeOptions{IgnoreColumns: []string{"id"}})
+	assert.EqualError(t, err, "shadow "+shadow.Schema+".shadow primary key id cannot be ignored")
 }

@@ -33,6 +33,8 @@ func TestLoadGenerator(t *testing.T) {
 	assert.Positive(t, summary.Updates)
 	assert.Positive(t, summary.Deletes)
 	assert.Positive(t, summary.UniqueMoves)
+	committed := summary.Inserts + summary.Updates + summary.Deletes + summary.UniqueMoves
+	assert.Less(t, summary.Races, committed, "a run should commit far more than it aborts on expected races")
 	var count, distinct int
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT count(*),count(DISTINCT uniq) FROM `+table.Qualified()).Scan(&count, &distinct))
 	assert.Equal(t, 200+summary.Inserts-summary.Deletes, count)

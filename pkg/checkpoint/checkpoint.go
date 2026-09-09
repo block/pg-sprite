@@ -8,7 +8,10 @@ import (
 	"github.com/block/pg-sprite/pkg/decode"
 )
 
-// Phase identifies the durable schema-change phase.
+// Phase identifies the durable schema-change phase. Values are opaque
+// labels: the happy path visits them in declaration order, but PhaseFailed
+// is reachable from any phase, so callers never compare phases for order —
+// they switch on the value or ask Terminal.
 type Phase uint8
 
 const (
@@ -25,6 +28,10 @@ const (
 	// PhaseFailed is unsuccessful and terminal.
 	PhaseFailed
 )
+
+// Terminal reports whether the phase is an end state that resume must not
+// re-enter.
+func (p Phase) Terminal() bool { return p == PhaseDone || p == PhaseFailed }
 
 // String returns the stable phase name.
 func (p Phase) String() string {
