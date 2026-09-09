@@ -144,10 +144,15 @@ below):
 
 The generator replaces only content between paired markers such as
 `<!-- capabilities:begin column_changes -->` and
-`<!-- capabilities:end column_changes -->`. Everything outside those markers — the
-introduction, tier explanation, peer comparison, refusal rationale, and operator
-recipes — remains hand-written. Generated output is deterministic: source order is
-display order, formatting has no timestamps, and a second generation is a no-op.
+`<!-- capabilities:end column_changes -->`. One more pair,
+`<!-- capabilities:begin summary -->` and `<!-- capabilities:end summary -->`, wraps the
+headline sentence above the tables that counts operations per tier: those counts are
+derived from the rows, so the generator writes them, and a row added to the YAML cannot
+leave the sentence one behind. The status legend below it stays hand-written; the mark set
+is a closed enum and the legend explains it rather than counting it. Everything outside the
+markers — the introduction, tier explanation, legend, peer comparison, refusal rationale,
+and operator recipes — remains hand-written. Generated output is deterministic: source
+order is display order, formatting has no timestamps, and a second generation is a no-op.
 
 The generator lands with the YAML file, not later. A Make target runs its `go run`
 entry point. CI runs that target and then fails unless `git diff --exit-code` is empty.
@@ -199,8 +204,10 @@ understand.
 
 ## Shared refusal vocabulary
 
-The sibling [refusal-classes.md](refusal-classes.md) defines the verdict JSON `class`
-field and owns that vocabulary. The matrix and that field use the same words:
+A refusal `class` on the verdict JSON is a separate decision; `pkg/verdict` does not emit
+one today. When that field ships, its contract owns the vocabulary and the matrix uses the
+same words, so a consumer reading a row and a consumer reading a verdict reach the same
+route:
 
 | Matrix row | Refusal `class` |
 | --- | --- |
@@ -211,7 +218,8 @@ field and owns that vocabulary. The matrix and that field use the same words:
 
 T1 / `✅` has no capability refusal class. `environmental` has no matrix row because
 it describes the run site — privileges, contention, budgets, or other conditions —
-not whether pg-sprite supports an operation. The two documents must change together.
+not whether pg-sprite supports an operation. The matrix and that contract must change
+together.
 
 ## Alternatives considered
 
