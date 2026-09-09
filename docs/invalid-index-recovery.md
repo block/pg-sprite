@@ -67,7 +67,7 @@ recovery with the same statement sweeps it.
 
 `(*InvalidIndexError).Recoverable()` is the programmatic form of the third column.
 
-## The automatic recovery: `RebuildAbandonedIndex`
+## The automatic recovery: `RebuildAbandonedIndex` and `DropAbandonedIndex`
 
 `executor.RebuildAbandonedIndex` takes exactly the statement `BuildIndexConcurrently`
 takes, under the same budget, and is the recovery the recoverable states name. It needs a
@@ -109,6 +109,12 @@ quarantined entries still finishes within the budget the caller gave it — or r
 mode the caller's cancellation bounds the statements, as for the build; the lock waits keep
 their five-second bound in either mode.
 
+`executor.DropAbandonedIndex` takes the same statement and budget and performs steps 1
+and 2 — the same proof, quarantine, and drops — but stops before step 3. Its report
+therefore leaves `Build` zero, and it needs two pool connections rather than three: its own
+session and one drop session. Use it when cleaning up after a cancelled apply that must not
+resume the requested schema change.
+
 The recovery refuses, touching nothing, on a visible in-flight build (of the requested
 entry or of a quarantined one), another table's entry, or an entry the server will not
 drop concurrently, and fails closed with `ErrAbandonmentUnproven` if the entry changes
@@ -119,8 +125,9 @@ that became valid (`REINDEX INDEX` in place) is likewise no longer a candidate.
 
 The `IndexRecoveryReport` it returns lists what it dropped (`Dropped`: schema, quarantine
 name, OID, drop duration), what it stepped over (`Skipped`: schema, quarantine name, OID),
-the whole recovery's `Duration` — so a caller that sized the budget as a lease window can
-see what was actually spent — and carries the verified build report.
+the whole recovery's `Duration` — set on a refusal as well as on success, so a caller that
+sized the budget as a lease window can see what was actually spent either way — and carries
+the verified build report.
 
 ## Recovering by hand
 

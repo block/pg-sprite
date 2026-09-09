@@ -293,14 +293,14 @@ operational errors retries forever. Route them ([runbook](invalid-index-recovery
 
 | Outcome code | `Recoverable()` | Orchestrator action |
 | --- | --- | --- |
-| `invalid-index-own-leftover`, `invalid-index-abandoned`, `invalid-index-builder-unobservable` | yes | Run `RebuildAbandonedIndex` with the same statement (opt in explicitly — the build never does it for you); it removes the entry only after proving it abandoned under the table lock, or reports `*BudgetError` (`CauseLock`) and touches nothing when a build it cannot see holds the lock |
+| `invalid-index-own-leftover`, `invalid-index-abandoned`, `invalid-index-builder-unobservable` | yes | Run `RebuildAbandonedIndex` with the same statement (opt in explicitly — the build never does it for you); it removes the entry only after proving it abandoned under the table lock, or reports `*BudgetError` (`CauseLock`) and touches nothing when a build it cannot see holds the lock. When the apply was cancelled and must not resume — the leftover is to be removed, not rebuilt — run `DropAbandonedIndex` instead: the same statement, budget, and proof, stopping after the drop, on a pool of two connections rather than three |
 | `invalid-index-build-in-flight` | no | Wait and retry later; the error names the backend PID |
 | `invalid-index-other-table` | no | Not this change's index; surface to an operator |
 | `invalid-index-not-droppable` | no | A partitioned table's index, an index partition, or a constraint's index — never debris; surface to an operator |
 | `invalid-index-unproven` | no | Fail closed; surface to an operator with the catalog queries from the runbook |
 
-`RebuildAbandonedIndex` itself refuses with the same codes when the proof does not hold
-(the table renamed or replaced, the entry changed, a builder visible), and its
+`RebuildAbandonedIndex` and `DropAbandonedIndex` refuse with the same codes when the proof does not hold
+(the table renamed or replaced, the entry changed, a builder visible), and their
 `IndexRecoveryReport` carries what it dropped, what it skipped (quarantined entries the
 server will not drop concurrently, left for an operator), and the recovery's whole
 `Duration` against the budget the adapter sized as its lease. An adapter that enumerates

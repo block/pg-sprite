@@ -238,11 +238,13 @@ recovery over k quarantined entries costs at most the budget, not (k+1) budgets.
 The declarative diff leans on this proof without performing it: when desired names an index
 whose live entry is an unfinished build, `diff` plans the `create-index` alone and never a
 drop, knowing the create cannot run as-is against the occupied name. The plan completes only
-through this invariant's proven removal — `RebuildAbandonedIndex` — or through an operator
+through this invariant's proven removal — `RebuildAbandonedIndex`, or `DropAbandonedIndex`
+when the name must be cleared without completing the plan — or through an operator
 following the runbook; a plain `CREATE INDEX` on the occupied name fails as a duplicate
 relation, and the concurrent build path refuses it by proof rather than drop by name.
-*Enforced:* `pkg/executor` recovery (`RebuildAbandonedIndex`): locked re-verification and
-rename, pre-/post-drop OID checks, droppability predicate, shared-budget accounting, with
+*Enforced:* `pkg/executor` recovery (`recoverAbandonedIndex`, shared by both entry points
+`RebuildAbandonedIndex` and `DropAbandonedIndex`): locked re-verification and rename,
+pre-/post-drop OID checks, droppability predicate, shared-budget accounting, with
 stale-observation tests that alter the catalog between observation and lock on a real
 database. *Source:* PostgreSQL's session-level `ShareUpdateExclusiveLock` on the heap for
 every `CONCURRENTLY` index command; [invalid-index-recovery](invalid-index-recovery.md).
