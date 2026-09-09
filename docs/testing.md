@@ -53,7 +53,7 @@ lifecycle. *Binds:* Phase 3 (native executor) onward. *Source:* pgroll
 
 Generated SQL whose exact shape carries a safety property (chunk
 continuation predicates, `ON CONFLICT` arbiters, timeout preludes,
-fallback-mode trigger bodies) is **frozen by exact-string test AND proven
+trigger bodies if trigger capture is ever built) is **frozen by exact-string test AND proven
 behaviorally against a real database** — never just one of the two.
 *Binds:* Phase 3 onward. *Source:* pgroll trigger/backfill template tests;
 pg-delta's snapshot + roundtrip pairing.
