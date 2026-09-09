@@ -80,6 +80,14 @@ corpus is shared across phases and **never shrinks to make a phase land**.
 
 ### TM-5 — Convergence is the diff oracle
 
+#### Test harness
+
+`internal/testutil` provides a fixed workload table with identity and unique keys,
+numeric and TOAST-able values, and timestamps. Its seeded load generator runs inserts,
+updates, deletes, and transactional unique-key swaps while a copy is active. The
+convergence oracle implements TM-5 with a typed symmetric difference and row-count
+comparison, and can ignore columns that a test deliberately excludes.
+
 Every declarative-diff test proves, against two real databases: the derived
 plan applies cleanly; re-introspect + re-diff yields **empty**; a second
 derivation emits nothing (idempotency). Comparison is **semantic catalog
