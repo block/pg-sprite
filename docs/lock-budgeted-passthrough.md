@@ -73,6 +73,12 @@ it is acquired.
         └──────┬──────┘       └────────────────────┘
                │ yes
                ▼
+┌─────────────────────────────────┐  mismatch  ┌────────────────────┐
+│ resolve the locked table        │───────────▶│ usage error, no run│
+│ (index → pg_index.indrelid)     │            └────────────────────┘
+└──────────────┬──────────────────┘
+               │ matches flag value
+               ▼
 ┌─────────────────────────────────┐
 │ engine-owned bounded session    │
 │ lock_timeout + statement_timeout│
@@ -90,7 +96,7 @@ it is acquired.
 | --- | --- |
 | 1 | `--accept-blocking` is a dedicated flag. `--force` continues not to bypass policy refusals. |
 | 2 | Both the imperative `migrate` and declarative `diff` planning paths perform normal classification. The refusal's reason, class, cause, detail, and safer idiom remain visible before any eligible execution. |
-| 3 | Every executed statement uses an engine-owned session with a non-zero `lock_timeout` and non-zero `statement_timeout`; no caller-owned or unbounded session is eligible. |
+| 3 | Every executed statement uses an engine-owned session with a non-zero `lock_timeout` and a non-zero `statement_timeout` the operator supplied explicitly on that invocation; no caller-owned, defaulted, or unbounded session is eligible. |
 | 4 | Success is `executed-without-online-safety` in text and JSON and exits 3. `executed-natively` and exit 0 remain exclusive to online-safe paths. |
 | 5 | Interruption makes no resume promise. The verdict and documentation describe the state PostgreSQL left rather than manufacturing a checkpoint. |
 | 6 | Eligibility is selected from a closed registry keyed by typed class, reason, and cause or refusal site. No renderer text or SQL substring participates in the decision. |
@@ -120,10 +126,26 @@ pg-sprite migrate \
   --statement-timeout 10m
 ```
 
-The acknowledgement is checked after target resolution and before execution. A mismatch is a
-usage error and nothing runs. The value prevents a copied command from silently accepting a
-different relation's lock. Statements without one resolved target relation are ineligible in
-v1.
+The value names the table whose lock the operator accepts, because that is the relation the
+blocking form makes unavailable: a plain `DROP INDEX` takes `ACCESS EXCLUSIVE` on the index's
+table, and a parent index build locks the parent. The partitioned-parent statements and
+`REINDEX TABLE` name that table themselves. `DROP INDEX` and `REINDEX INDEX` name only the
+index, and the imperative front door's parse-only target resolution knows no table for those
+kinds, so the acknowledgement needs one catalog lookup the current flow does not make: resolve
+the index name against `search_path`, then read its owning table from `pg_index.indrelid`.
+
+That lookup runs after the refusal is produced and found eligible and only when the flag is
+present, so the statement-kind gate stays parse-only and a refusal is produced exactly where it
+is produced today. The sequence is: gate refuses, registry says eligible, flag present, dial,
+resolve the accepted table, compare it with the flag's value, then execute. A mismatch or an
+index that no longer exists is a usage error and nothing runs. The value prevents a copied
+command from silently accepting a different relation's lock.
+
+Eligibility itself never depends on that lookup. The registry keys row 1 on the refusal site,
+and the site distinguishes the single-relation forms — one `DROP INDEX`, `REINDEX INDEX`,
+`REINDEX TABLE` — from the forms that name several relations or none: `DROP INDEX a, b`,
+`REINDEX SCHEMA`, `REINDEX DATABASE`, and `REINDEX SYSTEM`. Those multi-relation forms are
+ineligible in v1 because one flag value cannot acknowledge several tables' locks.
 
 Execution is exposed only by the imperative `migrate` front door. Declarative `diff` still
 classifies and reports eligibility, but it cannot accept the flag or execute this path. A
@@ -151,7 +173,7 @@ The v1 set is:
 
 | Class | Typed refusal shape | v1 | Rationale |
 | --- | --- | --- | --- |
-| `by-design` | `index-statement` at the plain `DROP INDEX` or `REINDEX` site, with the concurrent safer idiom | eligible | This is the core maintenance-window case: the submitted form is understood, the safer idiom is known, and bounding `ACCESS EXCLUSIVE` acquisition prevents lock-queue pile-up. |
+| `by-design` | `index-statement` at the plain single-relation `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` site, with the concurrent safer idiom | eligible | This is the core maintenance-window case: the submitted form is understood, the safer idiom is known, one table's lock is being accepted, and bounding `ACCESS EXCLUSIVE` acquisition prevents lock-queue pile-up. The multi-relation sites (`DROP INDEX a, b`, `REINDEX SCHEMA`, `DATABASE`, `SYSTEM`) stay ineligible. |
 | `capability-boundary` | `unsupported-partitioned-parent` with cause `parent-blocking-index-build` | eligible | The missing partition-aware flow does not make the plain PostgreSQL statement unknown. Its principal pre-execution hazard is acquiring the parent lock, which `lock_timeout` bounds. |
 | `capability-boundary` | `not-native-safe-rewrite-required` | ineligible | A rewrite holds its strong lock for the full rewrite. Bounding acquisition alone does not bound the outage, and v1 must not imply otherwise. |
 | `capability-boundary` | `backend-unavailable` and all other missing routes or backends | ineligible | A missing execution backend is not permission to substitute an unrelated blocking implementation. |
@@ -187,6 +209,15 @@ CLI default may pre-populate budgets for safe paths, but accepting blocking exec
 requires the operator to state `--statement-timeout` explicitly on that invocation. This is
 the maximum server-side execution time the operator is accepting after lock acquisition.
 
+Explicit is a stronger requirement than non-zero, and the flag's current shape cannot express
+it: `--statement-timeout` is a shared connection flag with a non-zero default, so the command
+receives the same duration whether the operator typed it or not. The implementation must
+therefore read whether the flag was supplied from the parsed command line — the argument
+parser records that per flag — rather than inspecting the duration's value, and it must not
+change the shared flag's type or default for every other command to get there. Downgrading the
+requirement to "non-zero" because that is what the value alone can show is not an acceptable
+implementation shortcut.
+
 The required bound wins over an unbounded default with an optional override. An unbounded
 statement can protect lock acquisition yet take a table out of service indefinitely after
 acquiring the lock. That trades the exact fleet hazard this feature should constrain for
@@ -211,7 +242,7 @@ executed without online safety (accepted blocking refusal)
   table:     app.orders
   statement: DROP INDEX app.orders_created_at_idx
   refusal:   by-design / index-statement
-  safer:     DROP INDEX CONCURRENTLY app.orders_created_at_idx
+  safer:     DROP INDEX CONCURRENTLY
   budgets:   lock 3s, statement 10m
 ```
 
@@ -224,22 +255,24 @@ JSON preserves the accepted refusal rather than clearing it on success:
   "class": "by-design",
   "statement": "DROP INDEX app.orders_created_at_idx",
   "table": "app.orders",
-  "safer_idiom": "DROP INDEX CONCURRENTLY app.orders_created_at_idx",
+  "safer_idiom": "DROP INDEX CONCURRENTLY",
   "blocking_passthrough": true,
   "lock_timeout": "3s",
   "statement_timeout": "10m"
 }
 ```
 
-`reason`, `class`, and any typed `cause` are the original refusal identity. `detail` remains
-human explanation, not an automation key. `blocking_passthrough` is an explicit audit field
+`reason`, `class`, and any typed `cause` are the original refusal identity, and `safer_idiom`
+keeps its existing contract of naming the idiom rather than rewriting the statement. `detail`
+remains human explanation, not an automation key. `blocking_passthrough` is an explicit audit field
 even though the outcome also distinguishes the path. Existing consumers that ignore additive
 fields remain able to read the object; consumers must recognize the new outcome before
 treating it as success.
 
 The dry-run plan report adds `blocking_passthrough_eligible` to every refused statement. It is
-`true` only when the typed registry entry is eligible and the front door can resolve the
-required target; it does not depend on whether the execution flag was supplied. The report
+`true` exactly when the typed registry entry for the refusal's class, reason, and cause or site
+is eligible; it depends neither on whether the execution flag was supplied nor on the catalog
+lookup that resolves the accepted table, which runs only on the execution path. The report
 retains disposition `refuse`, reason, class, cause, and guidance. Eligibility is permission to
 request a later execution path, not a reclassification as online-safe.
 
@@ -337,26 +370,52 @@ this design lands.
 Sequence implementation as follows:
 
 1. Add a typed eligibility registry at the gate, keyed by refusal class, reason, and typed
-   cause or refusal site. Its completeness tests make new values ineligible by default and
-   prove that render text is never consulted.
+   cause or refusal site. The `index-statement` site distinguishes the single-relation forms
+   from `DROP INDEX a, b` and `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM`, so the registry can
+   admit the former and refuse the latter without a database. Its completeness tests make new
+   values ineligible by default and prove that render text is never consulted.
 2. Add the executor path through engine-owned bounded sessions, requiring explicit non-zero
    `statement_timeout` and non-zero `lock_timeout`. At this step add lock-budget invariants to
    [the invariant registry](invariants.md): every passthrough statement runs in an
    engine-owned session under both bounds; lock-budget exhaustion executes nothing; and no
    ineligible, unclassified, environmental, or invariant-violation refusal reaches execution.
    Also add an RF invariant that refusal analysis and identity survive accepted execution.
-   This design establishes no invariant on its own; the registry describes shipped behavior
-   only, matching the sequencing rule in [refusal-classes.md](refusal-classes.md).
+   The same step amends two existing entries whose unqualified wording this behavior makes
+   false. [RF-5](invariants.md#refusals-and-preflight-rf) names `--force` as *the* route for
+   running a risky statement as-submitted; its amended text reads "running as-submitted
+   requires a loud, typed, audited acknowledgement: `--force` on the routes it governs, or
+   `--accept-blocking` for an eligible policy refusal".
+   [RF-6](invariants.md#refusals-and-preflight-rf) says pg-sprite does not substitute a
+   blocking parent build for the missing partition-aware flow; its amended text adds "on its
+   own initiative — an operator may accept that build only through `--accept-blocking`, under
+   engine-owned lock and statement budgets, with the
+   refusal identity retained". This design establishes no invariant on its own and amends none
+   until the behavior ships; the registry describes shipped behavior only, matching the
+   sequencing rule in [refusal-classes.md](refusal-classes.md), whose own rollout record
+   checked RF-5 and RF-6 and recorded them unchanged.
 3. Add `executed-without-online-safety`, retained reason/class/cause, budget fields, exit code
    3, and dry-run eligibility to the verdict and plan-report contracts. Update
    [cli-output-examples.md](cli-output-examples.md) with generated examples and pin the JSON
    and text renderers.
 4. Add `--accept-blocking` to imperative `migrate`, reject its combination with `--force`,
    emit the pre-execution audit record, and add demo assertions for eligibility, success,
-   lock-budget refusal, statement-budget failure, and exit codes.
-5. Re-tier only the newly shipped path in [capabilities.md](capabilities.md), then update
-   [limitations.md](limitations.md) and the root README in the same capability-statement
-   change. The underlying operation tier does not change in this design-only change.
+   lock-budget refusal, statement-budget failure, mismatched acknowledgement, and exit codes.
+   This step adds the two pieces of plumbing the acknowledgement needs: the statement boundary
+   exposes the index or table an index-maintenance statement names, and the front door resolves
+   an index to its owning table through `pg_index.indrelid` after the eligibility check. It also
+   detects an explicitly supplied `--statement-timeout` from the parsed command line, as the
+   budgets section requires.
+5. Re-tier only the newly shipped path by editing its rows in
+   `pkg/capabilities/capabilities.yaml` and regenerating [capabilities.md](capabilities.md)
+   with `make gen-capabilities` — the page is a rendered artifact and a hand edit fails its
+   generation test. In the same capability-statement change update
+   [limitations.md](limitations.md), the root README, and two rows of
+   [refusal-classes.md](refusal-classes.md) that state the opposite of this behavior today:
+   the `by-design` row's "run the blocking form outside pg-sprite in a maintenance window",
+   and the `parent-blocking-index-build` row's "pg-sprite will not substitute a blocking
+   parent build". The docs guard for that table checks only that a row exists per cause, not
+   what the row says, so nothing fails when those rows go stale. The underlying operation tier
+   does not change in this design-only change.
 
 ## Non-goals
 
