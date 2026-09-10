@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -137,4 +139,25 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 		assert.JSONEq(t, blocks[i][1], string(marshaled),
 			"docs/cli-output-examples.md example %d drifted from pipeline output", i+1)
 	}
+}
+
+// The capabilities example is the one --json block the doc truncates with
+// `| head`, so it is not a complete JSON document and the check above cannot
+// see it. It is still captured output: the published lines must be exactly
+// what the command prints first, byte for byte, for a "dev" build.
+func TestCLIOutputExamplesCapabilitiesHeadMatchesCommand(t *testing.T) {
+	raw, err := os.ReadFile(cliOutputExamplesDoc)
+	require.NoError(t, err)
+	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite capabilities --json \\| head\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
+	require.Len(t, blocks, 1, "the doc publishes one truncated capabilities --json output")
+	published := strings.Split(strings.TrimSuffix(blocks[0][1], "\n"), "\n")
+
+	cmd := CapabilitiesCmd{JSON: true, version: "dev"}
+	var out bytes.Buffer
+	require.NoError(t, cmd.run(&out))
+	printed := strings.Split(out.String(), "\n")
+	require.Greater(t, len(printed), len(published))
+
+	assert.Equal(t, printed[:len(published)], published,
+		"docs/cli-output-examples.md capabilities example drifted from command output")
 }

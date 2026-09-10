@@ -2,7 +2,7 @@
 
 Representative, real outputs for every shape the CLI produces: the plan
 report for each dry-run disposition, the execution verdict, the linter,
-pull, and diff. Every human text rendering is display only and unpinned —
+pull, diff, and the offline capabilities matrix. Every human text rendering is display only and unpinned —
 including `pull`'s, which has no JSON form yet — see the animated demos in
 [demos/](demos/) for how it reads; where JSON exists it is the machine
 contract. The text reports color
@@ -37,22 +37,6 @@ dry run. Statement kinds `migrate` does not support (`DROP INDEX`,
 a verdict, not a plan report — and exit 2. The JSON report schema is
 [plan-report.md](plan-report.md).
 
-The offline capabilities command exposes the embedded support matrix and
-the same release-stamped version reported by `pg-sprite --version`:
-
-```console
-$ pg-sprite capabilities --json | head
-{
-  "version": "dev",
-  "capabilities": [
-    {
-      "id": "add-column-no-default-or-constant-default",
-      "area": "column_changes",
-      "operation": "`ADD COLUMN` (no default, or constant default)",
-      "tier": "t1",
-      "status_mark": "✅",
-```
-
 - [Codes used in these examples](#codes-used-in-these-examples)
 - [Refusal reasons](#refusal-reasons)
 - [Migrate](#migrate)
@@ -69,6 +53,8 @@ $ pg-sprite capabilities --json | head
   - [Export a desired-state file per table — exit 0](#export-a-desired-state-file-per-table--exit-0)
 - [Diff](#diff)
   - [Converge to the desired state (`metadata-only`) — exit 0](#converge-to-the-desired-state-metadata-only--exit-0)
+- [Capabilities](#capabilities)
+  - [Embedded support matrix with the binary version — exit 0](#embedded-support-matrix-with-the-binary-version--exit-0)
 
 ## Codes used in these examples
 
@@ -504,4 +490,29 @@ $ pg-sprite diff --desired /tmp/users.sql --json
     }
   ]
 }
+```
+
+## Capabilities
+
+`capabilities` needs no database: it prints the embedded support matrix
+that generates [capabilities.md](capabilities.md), stamped with the same
+release version `pg-sprite --version` reports, so a consumer can pin a
+build and query the matrix with `jq` (recipes in
+[capabilities-contract.md](capabilities-contract.md#cli-json-and-query-recipes)).
+The text form is a display-only table; the JSON is the contract. The
+output is long, so this example shows its opening lines:
+
+### Embedded support matrix with the binary version — exit 0
+
+```console
+$ pg-sprite capabilities --json | head
+{
+  "version": "dev",
+  "capabilities": [
+    {
+      "id": "add-column-no-default-or-constant-default",
+      "area": "column_changes",
+      "operation": "`ADD COLUMN` (no default, or constant default)",
+      "tier": "t1",
+      "status_mark": "✅",
 ```

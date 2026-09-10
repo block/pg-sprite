@@ -240,9 +240,10 @@ run_offline() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" capabilities --json) || status=$?
         assert_eq "capabilities exit" 0 "$status"
-        if [ -z "$(jq -r '.version' <<<"$out")" ]; then
-            fail "capabilities version: expected a non-empty value"
-        fi
+        # The JSON version is the release stamp --version prints. Comparing
+        # the two also catches a renamed or omitted key, which jq -r renders
+        # as the literal string "null" rather than as empty output.
+        assert_eq "capabilities version" "$("$PGS" --version)" "$(jq -r '.version' <<<"$out")"
         if [ "$(jq -r '.capabilities | length' <<<"$out")" -le 40 ]; then
             fail "capabilities: expected more than 40 rows"
         fi

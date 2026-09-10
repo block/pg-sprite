@@ -1,7 +1,10 @@
 package capabilities
 
 import (
+	"encoding/json"
 	"os"
+	"regexp"
+	"slices"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -68,6 +71,30 @@ func TestCheckedInMarkdownIsGenerated(t *testing.T) {
 	output, err := RenderDocument(input, rows)
 	require.NoError(t, err)
 	assert.Equal(t, input, output)
+}
+
+// The contract doc promises that one named row marshals to the JSON object
+// it prints. Consumers copy that object's field values into jq filters, so
+// the example must be the row's actual encoding, not a paraphrase of it.
+func TestContractDocExampleRowMatchesRegistry(t *testing.T) {
+	raw, err := os.ReadFile("../../docs/capabilities-contract.md")
+	require.NoError(t, err)
+	blocks := regexp.MustCompile("(?s)```json\n(\\{\n  \"id\": \"[^\"]+\",.*?)```").FindAllStringSubmatch(string(raw), -1)
+	require.Len(t, blocks, 1, "the contract doc prints one example row object")
+
+	var example struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(blocks[0][1]), &example))
+
+	rows, err := Rows()
+	require.NoError(t, err)
+	index := slices.IndexFunc(rows, func(row Row) bool { return row.ID == example.ID })
+	require.GreaterOrEqual(t, index, 0, "example row %q is not in the registry", example.ID)
+	marshaled, err := json.Marshal(rows[index])
+	require.NoError(t, err)
+	assert.JSONEq(t, string(marshaled), blocks[0][1],
+		"docs/capabilities-contract.md example row drifted from capabilities.yaml")
 }
 
 func TestRenderDocumentRejectsBadMarkers(t *testing.T) {

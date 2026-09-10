@@ -133,7 +133,7 @@ below):
   "owning_tool_class": "data jobs / owner tooling",
   "front_doors": {
     "migrate": "refused",
-    "diff": "not_applicable"
+    "diff": "refused"
   },
   "refusal_reason": "unsupported-statement",
   "reason_notes": "A data operation, not catalog work: the plain form holds `ACCESS EXCLUSIVE` on the matview for the whole rebuild (`CONCURRENTLY` needs a unique index and trades the lock for churn). Scheduling refreshes belongs to data jobs"
