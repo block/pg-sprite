@@ -19,12 +19,19 @@ REPLAY_PROJECT ?= buzz
 gen-capabilities:
 	$(GO) run ./internal/cmd/gen-capabilities
 
-# Regenerate the capabilities page and leave any stale output visible for review.
-check-capabilities: gen-capabilities
-	@if ! git diff --exit-code -- docs/capabilities.md; then \
+# Regenerate the capabilities page and fail if regeneration changed it. Only the
+# generator's own edits count, so an uncommitted edit to the hand-written prose
+# outside the marker regions does not trip the gate; the stale generated output
+# is left in place, with the diff printed, for review.
+check-capabilities:
+	@before=$$(mktemp); cp docs/capabilities.md "$$before"; \
+	$(GO) run ./internal/cmd/gen-capabilities || { rm -f "$$before"; exit 1; }; \
+	if ! diff -u --label docs/capabilities.md --label regenerated "$$before" docs/capabilities.md; then \
+		rm -f "$$before"; \
 		echo "docs/capabilities.md disagrees with pkg/capabilities/capabilities.yaml; run make gen-capabilities and commit the result" >&2; \
 		exit 1; \
-	fi
+	fi; \
+	rm -f "$$before"
 
 build:
 	$(GO) build -o bin/pg-sprite ./cmd/pg-sprite

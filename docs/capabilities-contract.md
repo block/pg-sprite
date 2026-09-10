@@ -74,7 +74,7 @@ path on T3 rows.
             │ go:embed                   │ regenerate                  │ committed
             ▼                            ▼                             ▼
 ┌───────────────────────┐     ┌─────────────────────────────────────────────────────┐
-│ pkg/capabilities      │     │ CI gate: regenerate, then require an empty git diff │
+│ pkg/capabilities      │     │ CI gate: regenerate, then require a no-op rewrite   │
 └───────────┬───────────┘     └─────────────────────────────────────────────────────┘
             │
             ▼
@@ -155,11 +155,13 @@ and operator recipes — remains hand-written. Generated output is deterministic
 order is display order, formatting has no timestamps, and a second generation is a no-op.
 
 The generator lands with the YAML file, not later. `make check-capabilities` runs its
-`go run` entry point and fails unless the generated page has an empty git diff. The
-unconditional capabilities job in `.github/workflows/ci.yml` applies that gate to code
-and docs-only changes, and `.github/workflows/release.yml` repeats it for the tagged tree
-before the test sweep. The test validates semantics; regenerate-and-diff proves the
-checked-in human page is the rendering of the validated data.
+`go run` entry point and fails unless regeneration leaves the page byte-identical; only
+the generator's own edits count, so an uncommitted edit to the hand-written prose does
+not trip it. The unconditional unit job in `.github/workflows/ci.yml` runs that target
+beside the unit tests on code and docs-only changes alike, and
+`.github/workflows/release.yml` repeats it for the tagged tree before the test sweep. The
+test validates semantics; regenerate-and-diff proves the checked-in human page is the
+rendering of the validated data.
 
 The capability-statement rule still applies beyond the generated matrix. A behavior
 change updates the YAML, [limitations.md](limitations.md), and the README's short
