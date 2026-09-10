@@ -11,9 +11,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// affinityProbeTimeout bounds the whole proof. It issues a handful of
-// trivial statements, so anything near this bound has already failed.
-const affinityProbeTimeout = 15 * time.Second
+// affinityProbeFloor is the least time the proof is given. It issues a
+// handful of trivial statements, so anything near this has already failed.
+const affinityProbeFloor = 15 * time.Second
+
+// affinityProbeBound is how long the proof gets on a pool whose dials are
+// budgeted at connectTimeout. The floor applies to a server reachable in
+// the ordinary time; an operator who budgeted longer to reach the server
+// budgeted it for a reason, and the proof runs against that same server, so
+// the larger of the two wins rather than this package quietly cutting the
+// budget down.
+func affinityProbeBound(connectTimeout time.Duration) time.Duration {
+	return max(affinityProbeFloor, connectTimeout)
+}
 
 // ProveSessionAffinity proves on conn the property every session-scoped
 // advisory lock rests on: that this connection keeps one server session, so
@@ -38,6 +48,9 @@ const affinityProbeTimeout = 15 * time.Second
 // false positive to trade off, because each reading is a fact about the
 // connection in hand rather than a guess about what sits behind it.
 //
+// bound caps the whole proof; a non-positive bound leaves it on the
+// caller's context alone.
+//
 // It is one-sided in the other direction: an idle transaction-mode pooler
 // with spare backends can answer every reading the healthy way, so a clean
 // proof is evidence and not certainty. It is a guard against the
@@ -54,9 +67,12 @@ const affinityProbeTimeout = 15 * time.Second
 // lock is the instrument here rather than the subject: it is the one piece
 // of session state whose loss a client can observe directly, which makes it
 // the way to prove the session is stable enough to carry the timeouts.
-func ProveSessionAffinity(ctx context.Context, conn *pgxpool.Conn, pinner *pgxpool.Pool) error {
-	ctx, cancel := context.WithTimeout(ctx, affinityProbeTimeout)
-	defer cancel()
+func ProveSessionAffinity(ctx context.Context, conn *pgxpool.Conn, pinner *pgxpool.Pool, bound time.Duration) error {
+	if bound > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, bound)
+		defer cancel()
+	}
 
 	key, err := probeKey()
 	if err != nil {

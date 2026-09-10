@@ -44,7 +44,8 @@ type Config struct {
 	// StatementTimeout is applied as the session statement_timeout on every
 	// connection. Zero means DefaultStatementTimeout.
 	StatementTimeout time.Duration
-	// ConnectTimeout bounds each dial attempt. Zero means
+	// ConnectTimeout bounds each dial attempt, and is also the floor for
+	// how long NewPool's session affinity proof may take. Zero means
 	// DefaultConnectTimeout.
 	ConnectTimeout time.Duration
 	// CACertPath, when set, enables verify-full TLS using the given CA bundle
@@ -85,6 +86,12 @@ type Config struct {
 // from its search_path (see unshadowCatalog), so a schema listed ahead of
 // an explicit pg_catalog no longer shadows the catalog while every other
 // entry stays as configured.
+//
+// It proves session affinity before returning, which needs a second
+// connection to the same server for the length of the proof. The server —
+// or the pooler in front of it — must have one connection to spare beyond
+// this pool's own, or NewPool fails rather than opening a pool whose bounds
+// were never proven to hold.
 func NewPool(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	pc, err := buildPoolConfig(cfg)
 	if err != nil {
@@ -138,7 +145,7 @@ func proveSessionAffinity(ctx context.Context, pool *pgxpool.Pool, pc *pgxpool.C
 	}
 	defer conn.Release()
 
-	if err := ProveSessionAffinity(ctx, conn, pinner); err != nil {
+	if err := ProveSessionAffinity(ctx, conn, pinner, affinityProbeBound(pc.ConnConfig.ConnectTimeout)); err != nil {
 		if errors.Is(err, ErrNoSessionAffinity) {
 			return fmt.Errorf("%w; %s", err, sessionEndpointRemedy)
 		}
