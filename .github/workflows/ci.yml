@@ -16,8 +16,10 @@ concurrency:
 
 jobs:
   # Detect whether the change touches anything other than *.md / docs/**.
-  # PRs that touch only docs skip the heavy jobs below; pushes to main
-  # always run. Fails open: if detection fails, treat as a code change.
+  # PRs that touch only docs skip every job gated on `code == 'true'`
+  # below — lint, build, the Docker test matrix and demo — while the unit
+  # job runs regardless (see its comment); pushes to main always run
+  # everything. Fails open: if detection fails, treat as a code change.
   changes:
     runs-on: ubuntu-latest
     permissions:
@@ -60,6 +62,27 @@ jobs:
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
           echo "event=$EVENT_NAME code=$code"
+
+  # Unit tests (SKIP_INTEGRATION=1, no Docker) run on every PR and push,
+  # deliberately outside the docs-only skip: the guards that pin prose to
+  # code — internal/safety/proof_types_test.go for the proof-type
+  # registries, the docs_test.go files for the verdict/plan/suggest report
+  # examples and CLI output examples — are unit tests, and a docs-only PR
+  # is exactly the change they exist to catch. Gating them on the code filter
+  # would switch the guards off precisely when prose changes. The job is
+  # cheap enough that running it redundantly alongside the matrix on code
+  # PRs costs less than maintaining a list of which packages are guards.
+  unit:
+    name: unit tests (no Docker; docs guards)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - run: make test-unit
 
   lint:
     needs: changes
@@ -189,10 +212,11 @@ jobs:
 
   # Single required status for branch protection ("all-green" is the
   # context to require). Succeeds when nothing failed — including
-  # docs-only PRs where the heavy jobs were skipped.
+  # docs-only PRs, where the code-gated jobs were skipped but the unit
+  # job (and its docs guards) still had to pass.
   all-green:
     if: always()
-    needs: [changes, lint, build, test, demo]
+    needs: [changes, unit, lint, build, test, demo]
     runs-on: ubuntu-latest
     steps:
       - name: Check job results

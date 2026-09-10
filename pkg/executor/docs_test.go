@@ -19,6 +19,10 @@ import (
 // executionModelDoc is the human-facing contract page this test keeps honest.
 const executionModelDoc = "../../docs/execution-model.md"
 
+// refusalClassesDoc is the routing contract that classifies every
+// create-shape cause; a cause without a row there cannot be routed.
+const refusalClassesDoc = "../../docs/refusal-classes.md"
+
 // Every step kind automation can branch on must be named in the execution
 // model: a StepKind added to the code without the doc naming it fails here.
 func TestDocNamesEveryStepKind(t *testing.T) {
@@ -53,6 +57,19 @@ func TestDocNamesEveryCreateShapeCause(t *testing.T) {
 	for _, cause := range executor.CreateShapeCauses() {
 		assert.Contains(t, doc, fmt.Sprintf("`%s`", cause),
 			"docs/execution-model.md does not name create-shape cause %q", cause)
+	}
+}
+
+// Every create-shape cause must be classified: a cause added to the code
+// without a row in the refusal-class map fails here, so a new cause cannot
+// land without a routing decision.
+func TestRefusalClassesDocListsEveryCreateShapeCause(t *testing.T) {
+	raw, err := os.ReadFile(refusalClassesDoc)
+	require.NoError(t, err)
+	doc := string(raw)
+	for _, cause := range executor.CreateShapeCauses() {
+		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", cause),
+			"docs/refusal-classes.md has no class row for create-shape cause %q", cause)
 	}
 }
 
