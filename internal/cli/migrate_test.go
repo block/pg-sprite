@@ -16,7 +16,7 @@ import (
 // exercise the same flag-to-field path production does.
 func parseMigrate(t *testing.T, args ...string) *MigrateCmd {
 	t.Helper()
-	c := New()
+	c := New("test")
 	k, err := kong.New(c, kong.Vars{"version": "test"})
 	require.NoError(t, err)
 	_, err = k.Parse(append([]string{
@@ -32,7 +32,7 @@ func parseMigrate(t *testing.T, args ...string) *MigrateCmd {
 // acknowledgement is a contradiction the grammar rejects up front rather
 // than silently ignoring the override.
 func TestForceRejectedWithDryRun(t *testing.T) {
-	c := New()
+	c := New("test")
 	k, err := kong.New(c, kong.Vars{"version": "test"})
 	require.NoError(t, err)
 	_, err = k.Parse([]string{

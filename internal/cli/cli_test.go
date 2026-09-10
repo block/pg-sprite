@@ -33,11 +33,11 @@ func clearFlagEnv(t *testing.T) {
 }
 
 func TestGrammarIsValid(t *testing.T) {
-	newKong(t, cli.New())
+	newKong(t, cli.New("test"))
 }
 
 func TestMigrateFlagsWireIntoDBConfig(t *testing.T) {
-	c := cli.New()
+	c := cli.New("test")
 	k := newKong(t, c)
 	_, err := k.Parse([]string{
 		"migrate",
@@ -55,7 +55,7 @@ func TestMigrateFlagsWireIntoDBConfig(t *testing.T) {
 }
 
 func TestURLIsRequiredForDatabaseCommands(t *testing.T) {
-	c := cli.New()
+	c := cli.New("test")
 	k := newKong(t, c)
 	_, err := k.Parse([]string{"migrate", "--alter", "ALTER TABLE t ADD COLUMN c int"})
 	require.Error(t, err)
@@ -63,7 +63,7 @@ func TestURLIsRequiredForDatabaseCommands(t *testing.T) {
 }
 
 func TestFmtIsOffline(t *testing.T) {
-	c := cli.New()
+	c := cli.New("test")
 	k := newKong(t, c)
 	_, err := k.Parse([]string{"fmt"})
 	require.NoError(t, err, "fmt must not require database flags")
