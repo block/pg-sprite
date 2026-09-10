@@ -307,8 +307,18 @@ func blockedCallerOwnedBuild(t *testing.T, pool *pgxpool.Pool, schema, table, in
 	}()
 	require.Eventually(t, func() bool {
 		snapshot, progressErr := tracker.Progress(t.Context())
-		return progressErr == nil && snapshot.Detail.Work != nil
-	}, 30*time.Second, 20*time.Millisecond, "the server must publish the build's progress row")
+		if progressErr != nil || snapshot.Detail.Work == nil {
+			return false
+		}
+		// The server publishes the progress row while the build is still
+		// initializing, before its catalog entry commits. A cancellation
+		// that lands in that window leaves nothing behind, and the leftover
+		// is what these tests are about — so the entry, not the row, is
+		// what says the build has reached the state under test.
+		exists, _ := indexState(t, pool, schema, index)
+		return exists
+	}, 30*time.Second, 20*time.Millisecond,
+		"the server must publish the build's progress row and commit its catalog entry")
 	return cancel, tracker, done
 }
 
@@ -928,7 +938,7 @@ func TestBuildIndexConcurrentlyTerminatedBackendReportsItsLeftover(t *testing.T)
 	assert.True(t, exists, "the leftover must survive for the operator's explicit recovery")
 	assert.False(t, valid, "the leftover must be invalid")
 
-	// The dead session's RESET cannot succeed, so it must have been
+	// The dead session's bounds cannot be put back, so it must have been
 	// discarded — not released: no session in the pool may still carry the
 	// build's lock_timeout = 0 override.
 	for _, conn := range pool.AcquireAllIdle(t.Context()) {

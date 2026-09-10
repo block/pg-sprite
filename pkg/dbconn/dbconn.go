@@ -44,7 +44,9 @@ type Config struct {
 	// StatementTimeout is applied as the session statement_timeout on every
 	// connection. Zero means DefaultStatementTimeout.
 	StatementTimeout time.Duration
-	// ConnectTimeout bounds each dial attempt. Zero means
+	// ConnectTimeout bounds each dial attempt. The session affinity proof
+	// runs against the same server and opens a connection of its own, so its
+	// budget is this plus the proof's own floor. Zero means
 	// DefaultConnectTimeout.
 	ConnectTimeout time.Duration
 	// CACertPath, when set, enables verify-full TLS using the given CA bundle
@@ -85,6 +87,12 @@ type Config struct {
 // from its search_path (see unshadowCatalog), so a schema listed ahead of
 // an explicit pg_catalog no longer shadows the catalog while every other
 // entry stays as configured.
+//
+// It proves session affinity before returning, which needs a second
+// connection to the same server for the length of the proof. The server —
+// or the pooler in front of it — must have one connection to spare beyond
+// this pool's own, or NewPool fails rather than opening a pool whose bounds
+// were never proven to hold.
 func NewPool(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 	pc, err := buildPoolConfig(cfg)
 	if err != nil {
@@ -98,7 +106,67 @@ func NewPool(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 		pool.Close()
 		return nil, fmt.Errorf("ping after connect: %w", err)
 	}
+	if err := verifySessionSettings(ctx, pool, sessionBounds(resolveTimeouts(cfg))); err != nil {
+		pool.Close()
+		return nil, err
+	}
+	// Reading the bounds back is not enough on its own. A transaction-mode
+	// pooler that happens to hand this pool the same backend twice reports
+	// the bounds this pool just set, so the read-back can answer healthily
+	// on a connection whose next statement lands on a backend that never
+	// saw them. The proof forces the rebind instead of waiting for load to
+	// produce it.
+	if err := proveSessionAffinity(ctx, pool, pc); err != nil {
+		pool.Close()
+		return nil, err
+	}
 	return pool, nil
+}
+
+// proveSessionAffinity runs the affinity proof on one of the pool's own
+// connections. The second connection the proof needs comes from a throwaway
+// pool of its own rather than from the caller's: the proof would otherwise
+// need two of the caller's connections, which a pool sized at one does not
+// have — and a check that quietly skips itself on a small pool is not a
+// check. The throwaway pool lives only for the proof.
+func proveSessionAffinity(ctx context.Context, pool *pgxpool.Pool, pc *pgxpool.Config) error {
+	pinnerCfg := pc.Copy()
+	pinnerCfg.MaxConns = 1
+	pinnerCfg.MinConns = 0
+	pinnerCfg.ConnConfig.RuntimeParams["application_name"] = "pg-sprite (session probe)"
+	pinner, err := pgxpool.NewWithConfig(ctx, pinnerCfg)
+	if err != nil {
+		return fmt.Errorf("open a second connection to prove session affinity: %w", err)
+	}
+	defer pinner.Close()
+
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire a connection to prove session affinity: %w", err)
+	}
+	defer conn.Release()
+
+	if err := ProveSessionAffinity(ctx, conn, pinner, affinityProbeBound(pc.ConnConfig.ConnectTimeout)); err != nil {
+		if errors.Is(err, ErrNoSessionAffinity) {
+			return fmt.Errorf("%w; %s", err, sessionEndpointRemedy)
+		}
+		return err
+	}
+	return nil
+}
+
+// resolveTimeouts applies the package defaults to an unset timeout. The pool
+// sends these as startup parameters and NewPool verifies the session kept
+// them, so both paths must resolve them the same way.
+func resolveTimeouts(cfg Config) (lock, statement time.Duration) {
+	lock, statement = cfg.LockTimeout, cfg.StatementTimeout
+	if lock == 0 {
+		lock = DefaultLockTimeout
+	}
+	if statement == 0 {
+		statement = DefaultStatementTimeout
+	}
+	return lock, statement
 }
 
 // ServerVersion reads the connected server's server_version setting.
@@ -169,19 +237,27 @@ func buildPoolConfig(cfg Config) (*pgxpool.Config, error) {
 		return nil, fmt.Errorf("parse connection config: %w", err)
 	}
 
-	lockTimeout := cfg.LockTimeout
-	if lockTimeout == 0 {
-		lockTimeout = DefaultLockTimeout
-	}
-	stmtTimeout := cfg.StatementTimeout
-	if stmtTimeout == 0 {
-		stmtTimeout = DefaultStatementTimeout
-	}
+	lockTimeout, stmtTimeout := resolveTimeouts(cfg)
 	rp := pc.ConnConfig.RuntimeParams
 	// A bare integer is interpreted by PostgreSQL as milliseconds.
 	rp["lock_timeout"] = strconv.FormatInt(lockTimeout.Milliseconds(), 10)
 	rp["statement_timeout"] = strconv.FormatInt(stmtTimeout.Milliseconds(), 10)
 	rp["application_name"] = "pg-sprite"
+	// The same two bounds are also applied as statements on every new
+	// connection. A startup parameter is the earliest a bound can take
+	// effect, but it is the pooler's to forward: PgBouncer drops any
+	// parameter in its ignore_startup_parameters list, in session mode as
+	// well as transaction mode, so an operator connecting through a
+	// session-mode endpoint would otherwise silently run unbounded. A SET
+	// is an ordinary statement that no pooler strips, and in session mode
+	// it persists for the connection's life.
+	//
+	// The bounds are applied before the search_path repair so that the
+	// repair's own statements run under them too.
+	pc.AfterConnect = chainAfterConnect(
+		applySessionBounds(lockTimeout, stmtTimeout),
+		unshadowCatalog,
+	)
 
 	connectTimeout := cfg.ConnectTimeout
 	if connectTimeout == 0 {
@@ -217,7 +293,6 @@ func buildPoolConfig(cfg Config) (*pgxpool.Config, error) {
 	if cfg.BeforeConnect != nil {
 		pc.BeforeConnect = cfg.BeforeConnect
 	}
-	pc.AfterConnect = unshadowCatalog
 	if cfg.Logger != nil {
 		pc.ConnConfig.Tracer = &tracelog.TraceLog{
 			Logger:   slogTraceLogger{logger: cfg.Logger},

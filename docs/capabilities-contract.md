@@ -133,7 +133,7 @@ below):
   "owning_tool_class": "data jobs / owner tooling",
   "front_doors": {
     "migrate": "refused",
-    "diff": "not_applicable"
+    "diff": "refused"
   },
   "refusal_reason": "unsupported-statement",
   "reason_notes": "A data operation, not catalog work: the plain form holds `ACCESS EXCLUSIVE` on the matview for the whole rebuild (`CONCURRENTLY` needs a unique index and trades the lock for churn). Scheduling refreshes belongs to data jobs"
@@ -271,7 +271,7 @@ Implementation order is, with each step marked as it ships:
 1. add the typed package, `pkg/capabilities/capabilities.yaml`, validator, generator,
    and markers together, making the repository single-source on day one; *(done)*
 2. add `pg-sprite capabilities`, including `--json` and the embedded binary version;
-   *(pending)*
+   *(done)*
 3. add the regenerate-and-diff CI gate to the normal pipeline; and *(done)*
 4. add documentation and `jq` recipes for consumers. *(pending)*
 

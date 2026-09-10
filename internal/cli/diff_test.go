@@ -19,7 +19,7 @@ import (
 func TestDiffRejectsSQLWithJSON(t *testing.T) {
 	desired := filepath.Join(t.TempDir(), "schema.sql")
 	require.NoError(t, os.WriteFile(desired, []byte("CREATE TABLE t (id bigint PRIMARY KEY)"), 0o600))
-	c := New()
+	c := New("test")
 	k, err := kong.New(c, kong.Vars{"version": "test"})
 	require.NoError(t, err)
 	_, err = k.Parse([]string{

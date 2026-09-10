@@ -255,8 +255,10 @@ The work landed in three steps:
    and `owner` is present exactly for `no-online-safety-problem` — because the registry
    describes shipped behavior, and the constructor and completeness test enforce it. RF-5 and
    RF-6 are unchanged and are cited above because the map must agree with them. *(done)*
-3. Make the replay corpus assert the engine-emitted class instead of curating its own
-   classification. *(pending)*
+3. Make the replay corpus assert the engine-emitted class — and, where RF-7 requires one, the
+   owner — instead of curating its own classification. Only the three operation-scoped
+   classes are pinnable; `environmental` and `invariant-violation` describe the run and are a
+   mismatch by definition. *(done)*
 
 Non-goals are changing exit codes, changing any existing reason string, implementing a missing
 backend, or changing the capability tier of an operation (the one matrix-mark correction above
