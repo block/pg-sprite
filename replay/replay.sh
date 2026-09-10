@@ -4,14 +4,14 @@
 #
 # Resets the harness database to the project baseline, then walks
 # replay/<project>/assessment.tsv in order. Every assessed step (execute /
-# refuse:<reason>) runs through `pg-sprite migrate --json` against the live
+# refuse:<reason>:<class>) runs through `pg-sprite migrate --json` against the live
 # database — real execution, not dry-run. Refused steps are then applied via
 # psql so state keeps advancing; psql steps (out-of-scope content) are
 # applied via psql in one transaction and never assessed.
 #
 # The run fails (non-zero exit) on any verdict mismatch: an assessed step
 # that does not produce exactly its expected outcome — including a refusal
-# with the wrong reason — is a failure, not a pass.
+# with the wrong reason or class — is a failure, not a pass.
 #
 #   make replay [REPLAY_PROJECT=<project>]   # fetch + harness + full replay
 #   ./replay.sh <project>                     # replay directly (starts or
@@ -63,23 +63,29 @@ rows=()
 failures=0
 count_executed=0
 count_psql=0
-count_no_osp=0
+count_capability_boundary=0
+count_no_online_safety_problem=0
 count_by_design=0
-declare -a refuse_boundary_reasons=()
+count_environmental=0
+count_invariant_violation=0
+declare -a capability_boundary_reasons=()
 
-while read -r migration range expected class; do
+while read -r migration range expected extra; do
     case "$migration" in ''|\#*) continue ;; esac
 
-    # The optional class field refines refusal rows only. Default (empty) is a
-    # capability boundary: pg-sprite is expected to handle this eventually.
-    case "$class" in
-    '') ;;
-    no-online-safety-problem|by-design)
-        case "$expected" in refuse:*) ;; *)
-            die "class '$class' only applies to refuse rows: $migration $range" ;;
+    [ -z "$extra" ] || die "unexpected fourth column in $MANIFEST: $migration $range"
+
+    case "$expected" in
+    refuse:*:*)
+        expectation="${expected#refuse:}"
+        want_reason="${expectation%:*}"
+        want_class="${expectation##*:}"
+        case "$want_class" in
+        capability-boundary|no-online-safety-problem|by-design|environmental|invariant-violation) ;;
+        *) die "unknown pinned refusal class '$want_class' in $MANIFEST: $migration $range" ;;
         esac
         ;;
-    *) die "unknown refusal class '$class' in $MANIFEST: $migration $range" ;;
+    refuse:*) die "refusal expectation must pin a class in $MANIFEST: $migration $range" ;;
     esac
 
     file=$(ls "${PROJECT_DIR}/corpus/${migration}_"*.sql 2>/dev/null) \
@@ -102,17 +108,20 @@ while read -r migration range expected class; do
 
     out="$("$PGS" migrate --url "$DSN" --json --alter "$sql" 2>/dev/null)"
     status=$?
-    actual="$(printf '%s' "$out" | python3 -c '
+    verdict_fields="$(printf '%s' "$out" | python3 -c '
 import json, sys
 try:
     v = json.load(sys.stdin)
 except Exception:
-    print("unparseable")
+    print("unparseable\t\t\t")
     raise SystemExit
-outcome = v.get("outcome", "unknown")
-reason = v.get("reason", "")
-print(f"{outcome}:{reason}" if reason else outcome)
+print("\t".join(str(v.get(k, "")) for k in ("outcome", "reason", "class", "owner")))
 ')"
+    IFS=$'\t' read -r outcome reason actual_class owner <<<"$verdict_fields"
+    actual="$outcome"
+    [ -n "$reason" ] && actual="${actual}:${reason}"
+    [ -n "$actual_class" ] && actual="${actual}:${actual_class}"
+    [ -n "$owner" ] && actual="${actual} owner:${owner}"
 
     case "$expected" in
     execute)
@@ -132,14 +141,21 @@ print(f"{outcome}:{reason}" if reason else outcome)
         fi
         ;;
     refuse:*)
-        want_reason="${expected#refuse:}"
-        if [ "$status" -eq 2 ] && [ "$actual" = "refused:${want_reason}" ]; then
-            rows+=("$migration|$range|$expected|$actual|PASS|$label")
-            case "$class" in
-            no-online-safety-problem) count_no_osp=$((count_no_osp + 1)) ;;
+        if [ "$status" -eq 2 ]; then
+            case "$actual_class" in
+            capability-boundary)
+                count_capability_boundary=$((count_capability_boundary + 1))
+                capability_boundary_reasons+=("$reason")
+                ;;
+            no-online-safety-problem) count_no_online_safety_problem=$((count_no_online_safety_problem + 1)) ;;
             by-design) count_by_design=$((count_by_design + 1)) ;;
-            *) refuse_boundary_reasons+=("$want_reason") ;;
+            environmental) count_environmental=$((count_environmental + 1)) ;;
+            invariant-violation) count_invariant_violation=$((count_invariant_violation + 1)) ;;
             esac
+        fi
+        if [ "$status" -eq 2 ] && [ "$outcome" = "refused" ] \
+            && [ "$reason" = "$want_reason" ] && [ "$actual_class" = "$want_class" ]; then
+            rows+=("$migration|$range|$expected|$actual|PASS|$label")
         else
             rows+=("$migration|$range|$expected|$actual (exit $status)|FAIL|$label")
             failures=$((failures + 1))
@@ -171,16 +187,17 @@ done
 echo
 echo "== bucket summary"
 printf '%-52s %s\n' "executed natively by pg-sprite (T1)" "$count_executed"
-total_boundary=${#refuse_boundary_reasons[@]}
-printf '%-52s %s\n' "refusal: capability boundary (T2)" "$total_boundary"
-if [ "$total_boundary" -gt 0 ]; then
-    printf '%s\n' "${refuse_boundary_reasons[@]}" | sort | uniq -c | sort -rn \
+printf '%-52s %s\n' "refusal: capability boundary (T2)" "$count_capability_boundary"
+if [ "$count_capability_boundary" -gt 0 ]; then
+    printf '%s\n' "${capability_boundary_reasons[@]}" | sort | uniq -c | sort -rn \
         | while read -r n reason; do
             printf '  %-50s %s\n' "$reason" "$n"
         done
 fi
-printf '%-52s %s\n' "refusal: no online-safety problem (bootstrap DDL)" "$count_no_osp"
+printf '%-52s %s\n' "refusal: no online-safety problem" "$count_no_online_safety_problem"
 printf '%-52s %s\n' "refusal: by design (safer form exists)" "$count_by_design"
+printf '%-52s %s\n' "refusal: environmental" "$count_environmental"
+printf '%-52s %s\n' "refusal: INVARIANT VIOLATION (REPORT PG-SPRITE DEFECT)" "$count_invariant_violation"
 printf '%-52s %s\n' "out-of-scope content, psql only (T3)" "$count_psql"
 printf '%-52s %s\n' "mismatches" "$failures"
 

@@ -256,7 +256,7 @@ The work landed in three steps:
    describes shipped behavior, and the constructor and completeness test enforce it. RF-5 and
    RF-6 are unchanged and are cited above because the map must agree with them. *(done)*
 3. Make the replay corpus assert the engine-emitted class instead of curating its own
-   classification. *(pending)*
+   classification. *(done)*
 
 Non-goals are changing exit codes, changing any existing reason string, implementing a missing
 backend, or changing the capability tier of an operation (the one matrix-mark correction above
