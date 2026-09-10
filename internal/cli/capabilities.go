@@ -31,8 +31,16 @@ func (c *CapabilitiesCmd) run(out io.Writer) error {
 	return writeCapabilitiesText(out, c.palette(out), rows)
 }
 
+// capabilitiesRowFormat lays out one text row. Every padded column holds
+// only single-width runes, so rune-counted padding lines up with the
+// terminal's cells; the status mark is a double-width glyph, so it is the
+// unpadded last column rather than a padded one that would shift everything
+// after it by a cell.
+const capabilitiesRowFormat = "%-13s %-29s %-4s %-14s %-14s %-9s %s\n"
+
 func writeCapabilitiesText(out io.Writer, pal palette, rows []capabilities.Row) error {
-	if _, err := fmt.Fprintf(out, "%s\n", pal.bold(fmt.Sprintf("%-13s %-29s %-5s %-14s %-14s %-9s", "AREA", "OPERATION", "TIER", "BACKEND", "FRONT DOORS", "OWNER"))); err != nil {
+	header := fmt.Sprintf(capabilitiesRowFormat, "AREA", "OPERATION", "TIER", "BACKEND", "FRONT DOORS", "OWNER", "STATUS")
+	if _, err := fmt.Fprint(out, pal.bold(strings.TrimSuffix(header, "\n"))+"\n"); err != nil {
 		return fmt.Errorf("write capabilities: %w", err)
 	}
 	for _, row := range rows {
@@ -41,10 +49,9 @@ func writeCapabilitiesText(out io.Writer, pal palette, rows []capabilities.Row) 
 		if owner == "" {
 			owner = "—"
 		}
-		tierMark := fmt.Sprintf("%s/%s", row.Tier, row.StatusMark)
-		if _, err := fmt.Fprintf(out, "%-13s %-29s %-5s %-14s %-14s %-9s\n",
-			clip(string(row.Area), 13), clip(row.Operation, 29), tierMark,
-			clip(string(row.EnginePath), 14), frontDoors, clip(owner, 9)); err != nil {
+		if _, err := fmt.Fprintf(out, capabilitiesRowFormat,
+			clip(string(row.Area), 13), clip(row.Operation, 29), row.Tier,
+			clip(string(row.EnginePath), 14), frontDoors, clip(owner, 9), row.StatusMark); err != nil {
 			return fmt.Errorf("write capabilities: %w", err)
 		}
 	}
@@ -63,9 +70,12 @@ func doorLabel(status capabilities.FrontDoorStatus) string {
 	return string(status)
 }
 
+// clip truncates value to width runes, spending the last rune on an
+// ellipsis. The guard and the slice measure the same string, so the slice
+// bound is always within range.
 func clip(value string, width int) string {
 	if utf8.RuneCountInString(value) <= width {
 		return value
 	}
-	return string([]rune(strings.TrimSpace(value))[:width-1]) + "…"
+	return string([]rune(value)[:width-1]) + "…"
 }

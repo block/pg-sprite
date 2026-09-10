@@ -170,8 +170,6 @@ func TestCheckedInMarkdownIsGenerated(t *testing.T) {
 	assert.Equal(t, input, output)
 }
 
-// A pipe inside a cell is escaped so GFM keeps it in that cell; every
-// other column stays in place and the escaped source renders as the pipe.
 // The contract doc promises that one named row marshals to the JSON object
 // it prints. Consumers copy that object's field values into jq filters, so
 // the example must be the row's actual encoding, not a paraphrase of it.
@@ -196,6 +194,8 @@ func TestContractDocExampleRowMatchesRegistry(t *testing.T) {
 		"docs/capabilities-contract.md example row drifted from capabilities.yaml")
 }
 
+// A pipe inside a cell is escaped so GFM keeps it in that cell; every
+// other column stays in place and the escaped source renders as the pipe.
 func TestRenderDocumentEscapesPipesInCells(t *testing.T) {
 	row := validRow()
 	row.Operation = "`a | b`"

@@ -261,15 +261,14 @@ artifact. The generated `docs/capabilities.md` remains the human-facing home.
 This decision does not build sortable HTML tables or a documentation site. It also
 does not change any capability, tier, refusal, or runtime behavior.
 
-Implementation order is:
-
-**Status:** steps 1–2 are complete; steps 3–4 remain planned.
+Implementation order is, with each step marked as it ships:
 
 1. add the typed package, `pkg/capabilities/capabilities.yaml`, validator, generator,
-   and markers together, making the repository single-source on day one;
+   and markers together, making the repository single-source on day one; *(done)*
 2. add `pg-sprite capabilities`, including `--json` and the embedded binary version;
-3. add the regenerate-and-diff CI gate to the normal pipeline; and
-4. add documentation and `jq` recipes for consumers.
+   *(done)*
+3. add the regenerate-and-diff CI gate to the normal pipeline; and *(pending)*
+4. add documentation and `jq` recipes for consumers. *(pending)*
 
 The generator is part of the first step rather than a cleanup step: there is never an
 intermediate state in which two hand-maintained matrices are authoritative.

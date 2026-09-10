@@ -517,4 +517,5 @@ $ pg-sprite capabilities --json | head
       "operation": "`ADD COLUMN` (no default, or constant default)",
       "tier": "t1",
       "status_mark": "✅",
+      "engine_path": "native_as_is",
 ```

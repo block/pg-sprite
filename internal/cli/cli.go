@@ -31,15 +31,12 @@ type CLI struct {
 	Status       StatusCmd       `cmd:"" help:"Report the status of a running schema change."`
 }
 
-// New returns a command tree for kong.Parse. The optional version keeps
-// tests and embedding callers source-compatible while the binary supplies
-// the same release-stamped value used by --version.
-func New(version ...string) *CLI {
-	binaryVersion := "dev"
-	if len(version) > 0 {
-		binaryVersion = version[0]
-	}
-	return &CLI{Capabilities: CapabilitiesCmd{version: binaryVersion}}
+// New returns a command tree for kong.Parse. The version is the same
+// release-stamped value the binary prints for --version; requiring it here
+// means a caller cannot build the tree and leave the capabilities output
+// reporting a default.
+func New(version string) *CLI {
+	return &CLI{Capabilities: CapabilitiesCmd{version: version}}
 }
 
 // DBFlags are the connection flags shared by every command that talks to the
