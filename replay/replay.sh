@@ -178,10 +178,22 @@ done <"$MANIFEST"
 
 echo
 echo "== per-statement results"
-printf '%-5s %-9s %-38s %-42s %-5s %s\n' MIG LINES EXPECTED ACTUAL RES STATEMENT
+# EXPECTED and ACTUAL carry reason and class segments of unbounded length, so
+# size those columns from the rows being printed instead of a fixed width
+# that a long refusal would overflow and misalign.
+expected_width=8
+actual_width=6
+for row in "${rows[@]}"; do
+    IFS='|' read -r _ _ e a _ _ <<<"$row"
+    [ "${#e}" -gt "$expected_width" ] && expected_width=${#e}
+    [ "${#a}" -gt "$actual_width" ] && actual_width=${#a}
+done
+printf '%-5s %-9s %-*s %-*s %-5s %s\n' MIG LINES \
+    "$expected_width" EXPECTED "$actual_width" ACTUAL RES STATEMENT
 for row in "${rows[@]}"; do
     IFS='|' read -r m r e a res l <<<"$row"
-    printf '%-5s %-9s %-38s %-42s %-5s %s\n' "$m" "$r" "$e" "$a" "$res" "$l"
+    printf '%-5s %-9s %-*s %-*s %-5s %s\n' "$m" "$r" \
+        "$expected_width" "$e" "$actual_width" "$a" "$res" "$l"
 done
 
 echo
