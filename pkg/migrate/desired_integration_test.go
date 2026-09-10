@@ -1,6 +1,7 @@
 package migrate_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"testing"
@@ -523,6 +524,14 @@ CREATE INDEX t_v_idx ON t (v);`
 		require.NotEmpty(t, res.Verdicts)
 		last := res.Verdicts[len(res.Verdicts)-1]
 		assert.Equal(t, verdict.OutcomeRefused, last.Outcome)
+		assert.Equal(t, verdict.ClassEnvironmental, res.Class,
+			"the aggregate carries the refusing statement's class")
+		assert.Equal(t, last.Class, res.Class)
+		assert.Equal(t, last.Owner, res.Owner)
+		js, err := json.Marshal(res)
+		require.NoError(t, err)
+		assert.Contains(t, string(js), `"class":"environmental"`,
+			"a consumer routing on the aggregate's class must see it on the wire")
 		assert.Less(t, len(res.Verdicts), len(res.Plan.Statements),
 			"the statements after the refusal were never attempted")
 

@@ -127,6 +127,7 @@ func TestDiffTextGreenfieldRefusedNoteAndCause(t *testing.T) {
 		Route:       planner.RouteNative,
 		Disposition: router.DispositionRefuse,
 		Reason:      verdict.ReasonUnsupportedStatement,
+		Class:       verdict.ClassCapabilityBoundary,
 		Cause:       executor.CreateShapePartitionOf,
 	})
 
@@ -137,6 +138,8 @@ func TestDiffTextGreenfieldRefusedNoteAndCause(t *testing.T) {
 		"the greenfield note must say the plan is refused: %s", text)
 	assert.NotContains(t, text, "the plan creates it")
 	assert.Contains(t, text, "error[unsupported-statement]:\n  refused — ")
+	assert.Contains(t, text, "note:\n  refusal class: capability-boundary\n",
+		"the diff text renderer names the class the JSON report carries")
 	assert.Contains(t, text, "note:\n  the create path refuses this statement: PARTITION OF attaches a\n  partition to a parent the absence proof does not cover, locking that\n  parent\n")
 	assert.Contains(t, text, "1 statement, 0 steps to run, 1 refused\n")
 	assert.NotContains(t, text, "apply:")

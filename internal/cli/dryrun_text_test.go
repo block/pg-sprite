@@ -183,6 +183,7 @@ func TestDryRunTextRefusalAndDestructive(t *testing.T) {
 		Route:       planner.RouteNative,
 		Disposition: router.DispositionRefuse,
 		Reason:      verdict.ReasonUnsupportedPartitionedParent,
+		Class:       verdict.ClassCapabilityBoundary,
 		Decisions: []planner.Decision{{
 			Operation:   "drop column",
 			Destructive: true,
@@ -195,6 +196,9 @@ func TestDryRunTextRefusalAndDestructive(t *testing.T) {
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "error[unsupported-partitioned-parent]:\n  refused — the target is a partitioned table")
+	assert.Contains(t, text, "note:\n  refusal class: capability-boundary\n",
+		"the text renderer names the routing class the JSON report carries")
+	assert.NotContains(t, text, "; owner:", "a capability-boundary refusal has no owner to name")
 	assert.Contains(t, text, "warning[destructive]:\n  this change discards live data or structure")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#unsupported-partitioned-parent\n")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#destructive\n")
@@ -271,6 +275,7 @@ func TestDryRunTextPlannerRefusalNamesOperation(t *testing.T) {
 		Route:       planner.RouteRefuse,
 		Disposition: router.DispositionRefuse,
 		Reason:      verdict.ReasonUnsupportedStatement,
+		Class:       verdict.ClassCapabilityBoundary,
 		Decisions: []planner.Decision{{
 			Operation: "unrecognized operation",
 			Route:     planner.RouteRefuse,
@@ -282,8 +287,38 @@ func TestDryRunTextPlannerRefusalNamesOperation(t *testing.T) {
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "error[unsupported-statement]:\n  refused — the planner knows no safe path for unrecognized operation")
+	assert.Contains(t, text, "note:\n  refusal class: capability-boundary\n")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#unsupported-statement\n")
 	assert.NotContains(t, text, "error[refuse]")
+}
+
+// A refusal that names an owner renders class and owner on one note, so
+// the human reading the text sees who the work is handed to; a statement
+// the report leaves unclassified renders no class note at all rather than
+// a blank one.
+func TestDryRunTextRefusalClassAndOwner(t *testing.T) {
+	statement := func(class verdict.Class, owner verdict.Owner) plan.Report {
+		report := plan.NewReport(plan.SourceAlter)
+		report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+		report.Disposition = router.DispositionRefuse
+		report.Statements = append(report.Statements, plan.Statement{
+			SQL:         `GRANT SELECT ON "users" TO reporting`,
+			Route:       planner.RouteRefuse,
+			Disposition: router.DispositionRefuse,
+			Reason:      verdict.ReasonUnsupportedStatement,
+			Class:       class,
+			Owner:       owner,
+		})
+		return report
+	}
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, statement(verdict.ClassNoOnlineSafetyProblem, verdict.OwnerProvisioning)))
+	assert.Contains(t, out.String(), "note:\n  refusal class: no-online-safety-problem; owner: provisioning\n")
+
+	out.Reset()
+	require.NoError(t, writeDryRunText(&out, palette{}, statement("", "")))
+	assert.NotContains(t, out.String(), "refusal class")
 }
 
 // A missing target table renders its own error diagnostic, keeps the

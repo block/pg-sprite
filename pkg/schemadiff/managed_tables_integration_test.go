@@ -1,7 +1,6 @@
 package schemadiff
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"testing"
@@ -121,15 +120,9 @@ func TestListManagedTablesResistsCatalogShadowing(t *testing.T) {
 	require.NoError(t, err)
 	addToExtensionOrSkip(t, bootstrap, "app.owned_by_ext")
 
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{
-		URL: url,
-		BeforeConnect: func(_ context.Context, cc *pgx.ConnConfig) error {
-			cc.RuntimeParams["search_path"] = "shadow, pg_catalog"
-			return nil
-		},
-	})
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
+	// A raw pool: dbconn.NewPool removes a shadowed pg_catalog from the
+	// search_path on connect, which would disarm this test.
+	pool := testutil.NewCatalogShadowingPool(t, url, "shadow")
 
 	tables, err := ListManagedTables(t.Context(), pool, "app")
 	require.NoError(t, err, "the enumeration must see the real catalog through the impostors")

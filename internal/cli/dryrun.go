@@ -75,16 +75,16 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		report.Statements = append(report.Statements, ps)
 	}
 	if facts.Target.Partitioned() {
-		refused := make([]bool, len(report.Statements))
+		causes := make([]preflight.PartitionRefusalCause, len(report.Statements))
 		for i := range report.Statements {
-			var cause preflight.PartitionRefusalCause
-			cause, err = preflight.RefusesPartitionedParent(facts.Target.ServerMajor(), report.Statements[i].ExecSQL)
+			causes[i], err = preflight.RefusesPartitionedParent(facts.Target.ServerMajor(), report.Statements[i].ExecSQL)
 			if err != nil {
 				return err
 			}
-			refused[i] = cause != ""
 		}
-		plan.RefuseUnsupportedPartitionedParent(&report, refused)
+		if err = plan.RefuseUnsupportedPartitionedParent(&report, causes); err != nil {
+			return err
+		}
 	}
 	report.Fingerprint = plan.Fingerprint(report.Statements)
 
