@@ -56,21 +56,49 @@ func TestPlanRefusalRendersCreateShapeCause(t *testing.T) {
 			},
 		},
 	}
-	reason, detail := planRefusal(refused)
-	assert.Equal(t, verdict.ReasonUnsupportedStatement, reason)
+	r, detail := planRefusal(refused)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, r.Reason())
+	assert.Equal(t, verdict.ClassCapabilityBoundary, r.Class(), "the create-shape cause classifies the refusal")
 	assert.Contains(t, detail, "planned statement 1 (")
 	assert.Contains(t, detail, "is refused by the create path: "+executor.CreateShapePartitionOf.Description())
 	assert.Contains(t, detail, "nothing was executed")
 
-	uncaused := refused
-	uncaused.Statements = []plan.Statement{
-		{SQL: "ALTER TABLE t NO SUCH THING", Disposition: router.DispositionRefuse},
-	}
-	reason, detail = planRefusal(uncaused)
-	assert.Equal(t, verdict.ReasonUnsupportedStatement, reason,
-		"a refused statement without a reason still reports the unsupported-statement reason")
+	byDesign := refused
+	byDesign.Statements = []plan.Statement{{
+		SQL: "CREATE INDEX IF NOT EXISTS i ON t (c)", Disposition: router.DispositionRefuse,
+		Reason: verdict.ReasonUnsupportedStatement, Cause: executor.CreateShapeIfNotExists,
+	}}
+	r, _ = planRefusal(byDesign)
+	assert.Equal(t, verdict.ClassByDesign, r.Class(), "the same reason, a different cause, a different class")
+
+	routed := refused
+	routed.Statements = []plan.Statement{{
+		SQL: "ALTER TABLE t ALTER COLUMN c TYPE text", Disposition: router.DispositionRefuse,
+		Reason: verdict.ReasonUnsupportedStatement, Class: verdict.ClassCapabilityBoundary,
+	}}
+	r, detail = planRefusal(routed)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, r.Reason())
+	assert.Equal(t, verdict.ClassCapabilityBoundary, r.Class(), "a routed refusal's class travels with the plan statement")
 	assert.Contains(t, detail, "has no safe path")
 	assert.NotContains(t, detail, "create path")
+
+	unclassified := refused
+	unclassified.Statements = []plan.Statement{
+		{SQL: "ALTER TABLE t NO SUCH THING", Disposition: router.DispositionRefuse},
+	}
+	r, detail = planRefusal(unclassified)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, r.Reason(),
+		"a refused statement without a reason still reports the unsupported-statement reason")
+	assert.Equal(t, verdict.ClassInvariantViolation, r.Class(),
+		"a refused plan statement carrying no class is a report this build cannot have produced")
+	assert.Contains(t, detail, "carries no refusal class")
+
+	incoherent := plan.Report{Disposition: router.DispositionRefuse, Statements: []plan.Statement{
+		{SQL: "ALTER TABLE t ADD COLUMN c int", Disposition: router.DispositionExecute},
+	}}
+	r, detail = planRefusal(incoherent)
+	assert.Equal(t, verdict.ClassInvariantViolation, r.Class())
+	assert.Contains(t, detail, "no statement carries it")
 }
 
 func TestAdmitPlan(t *testing.T) {
@@ -200,12 +228,18 @@ func TestAdmitPlan(t *testing.T) {
 		cases := []struct {
 			disposition router.Disposition
 			stReason    verdict.Reason
+			stClass     verdict.Class
 			want        verdict.Reason
+			wantClass   verdict.Class
 		}{
-			{router.DispositionRewriteRequired, verdict.ReasonNone, verdict.ReasonRewriteRequired},
-			{router.DispositionUnavailable, verdict.ReasonNone, verdict.ReasonBackendUnavailable},
-			{router.DispositionRefuse, verdict.ReasonUnsupportedPartitionedParent, verdict.ReasonUnsupportedPartitionedParent},
-			{router.DispositionRefuse, verdict.ReasonNone, verdict.ReasonUnsupportedStatement},
+			{router.DispositionRewriteRequired, verdict.ReasonNone, "", verdict.ReasonRewriteRequired, verdict.ClassCapabilityBoundary},
+			{router.DispositionUnavailable, verdict.ReasonNone, "", verdict.ReasonBackendUnavailable, verdict.ClassCapabilityBoundary},
+			// A classified plan statement's reason and class travel to the result.
+			{router.DispositionRefuse, verdict.ReasonUnsupportedPartitionedParent, verdict.ClassEnvironmental, verdict.ReasonUnsupportedPartitionedParent, verdict.ClassEnvironmental},
+			// A refused statement with a reason but no class keeps its reason;
+			// the class reports the unclassified refusal as the build's defect.
+			{router.DispositionRefuse, verdict.ReasonUnsupportedPartitionedParent, "", verdict.ReasonUnsupportedPartitionedParent, verdict.ClassInvariantViolation},
+			{router.DispositionRefuse, verdict.ReasonNone, "", verdict.ReasonUnsupportedStatement, verdict.ClassInvariantViolation},
 		}
 		for _, tc := range cases {
 			report := executable()
@@ -214,10 +248,13 @@ func TestAdmitPlan(t *testing.T) {
 				SQL:         "ALTER TABLE app.t ALTER COLUMN v TYPE bigint",
 				Disposition: tc.disposition,
 				Reason:      tc.stReason,
+				Class:       tc.stClass,
 			})
 			res, ok := admitPlan(DesiredRequest{}, report)
 			require.False(t, ok, "disposition %s", tc.disposition)
 			assert.Equal(t, tc.want, res.Reason, "disposition %s", tc.disposition)
+			assert.Equal(t, tc.wantClass, res.Class, "disposition %s / %s", tc.disposition, tc.stReason)
+			assert.Empty(t, res.Owner)
 			assert.Contains(t, res.Detail, "statement 2", "the detail names the non-executable statement")
 			assert.Contains(t, res.Detail, "nothing was executed")
 			assert.Equal(t, report, res.Plan, "a refusal carries the plan it refused")

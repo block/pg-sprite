@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -40,10 +41,9 @@ func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, desired statement.
 		return Model{}, fmt.Errorf("create scratch schema: %w", err)
 	}
 	// Unqualified desired statements must land on the scratch schema, while
-	// extension types installed in public stay resolvable. search_path
-	// cannot use bind parameters; the identifier is sanitized.
-	setPath := "SET LOCAL search_path = " + pgx.Identifier{scratch}.Sanitize() + ", public"
-	if _, err := tx.Exec(ctx, setPath); err != nil {
+	// extension types installed in public stay resolvable. The path is
+	// built by dbconn so it upholds CO-9 like the session's.
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(scratch, "public")); err != nil {
 		return Model{}, fmt.Errorf("set scratch search_path: %w", err)
 	}
 	// Statements arrive in execution order — the CREATE TABLE first — so

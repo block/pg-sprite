@@ -109,7 +109,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 3,
+  "format_version": 4,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -150,7 +150,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 3,
+  "format_version": 4,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -221,7 +221,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 3,
+  "format_version": 4,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -258,7 +258,7 @@ implemented yet.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 3,
+  "format_version": 4,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -295,7 +295,7 @@ The refusal cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 3,
+  "format_version": 4,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -303,6 +303,7 @@ $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)
   "table_exists": true,
   "disposition": "refuse",
   "reason": "unsupported-partitioned-parent",
+  "class": "capability-boundary",
   "fingerprint": "sha256:e0cebea56d6c5577722d17be16442b06303a817af0c009913d746fd3d1c379e0",
   "statements": [
     {
@@ -311,6 +312,7 @@ $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)
       "route": "native",
       "disposition": "refuse",
       "reason": "unsupported-partitioned-parent",
+      "class": "capability-boundary",
       "decisions": [
         {
           "operation": "CREATE INDEX events_created_idx",
@@ -332,7 +334,7 @@ the reviewer or orchestrator to gate on; `migrate` itself does not block it.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --json
 {
-  "format_version": 3,
+  "format_version": 4,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -459,7 +461,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 3,
+  "format_version": 4,
   "source": "diff",
   "schema": "public",
   "table": "users",

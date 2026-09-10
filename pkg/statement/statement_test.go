@@ -1,6 +1,9 @@
 package statement
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -126,7 +129,7 @@ func TestParseOneKinds(t *testing.T) {
 		{
 			name: "drop table is not a drop-index",
 			sql:  "DROP TABLE users",
-			want: Statement{kind: KindOther},
+			want: Statement{kind: KindCatalogWork},
 		},
 		{
 			name: "create table",
@@ -136,6 +139,86 @@ func TestParseOneKinds(t *testing.T) {
 		{
 			name: "dml",
 			sql:  "UPDATE users SET age = 1",
+			want: Statement{kind: KindDataChange},
+		},
+		{
+			name: "grant is provisioning, unlike create role catalog syntax",
+			sql:  "GRANT SELECT ON users TO app",
+			want: Statement{kind: KindProvisioning},
+		},
+		{
+			name: "insert is data change, unlike create table as",
+			sql:  "INSERT INTO users VALUES (1)",
+			want: Statement{kind: KindDataChange},
+		},
+		{
+			name: "create table as is neither a plain create table nor a data change",
+			sql:  "CREATE TABLE users_copy AS SELECT * FROM users",
+			want: Statement{kind: KindOther},
+		},
+		{
+			name: "delete is data change",
+			sql:  "DELETE FROM users WHERE id = 1",
+			want: Statement{kind: KindDataChange},
+		},
+		{
+			name: "merge is data change",
+			sql:  "MERGE INTO users u USING staged s ON u.id = s.id WHEN MATCHED THEN UPDATE SET age = s.age",
+			want: Statement{kind: KindDataChange},
+		},
+		{
+			name: "create role is provisioning",
+			sql:  "CREATE ROLE app LOGIN",
+			want: Statement{kind: KindProvisioning},
+		},
+		{
+			name: "row-level-security policy is provisioning",
+			sql:  "CREATE POLICY p ON users USING (owner = current_user)",
+			want: Statement{kind: KindProvisioning},
+		},
+		{
+			name: "publication is provisioning",
+			sql:  "CREATE PUBLICATION pub FOR TABLE users",
+			want: Statement{kind: KindProvisioning},
+		},
+		{
+			name: "create view is catalog work",
+			sql:  "CREATE VIEW v AS SELECT id FROM users",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create function is catalog work",
+			sql:  "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create trigger is catalog work",
+			sql:  "CREATE TRIGGER trg BEFORE INSERT ON users FOR EACH ROW EXECUTE FUNCTION f()",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create extension is catalog work",
+			sql:  "CREATE EXTENSION pg_stat_statements",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "standalone sequence is catalog work",
+			sql:  "CREATE SEQUENCE users_id_seq",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "comment is catalog work",
+			sql:  "COMMENT ON TABLE users IS 'people'",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "drop view is catalog work, unlike drop index",
+			sql:  "DROP VIEW v",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "vacuum is unnamed grammar and stays other",
+			sql:  "VACUUM users",
 			want: Statement{kind: KindOther},
 		},
 	}
@@ -242,4 +325,68 @@ func TestBuildsIndex(t *testing.T) {
 			assert.Equal(t, tt.want, st.BuildsIndex())
 		})
 	}
+}
+
+// The closed set is complete: Kinds() enumerates exactly the Kind constants
+// the iota block in statement.go declares, and every named kind has its own
+// String(). A length check pinned to the last constant would keep passing
+// after a kind is appended past it and left out of the walk.
+func TestKindsIsClosedAndNamed(t *testing.T) {
+	kinds := Kinds()
+	require.Equal(t, KindOther, kinds[0], "the catch-all leads the walk")
+
+	declared := declaredKinds(t)
+	enumerated := make(map[Kind]struct{}, len(kinds))
+	names := map[string]bool{}
+	for _, k := range kinds {
+		_, dup := enumerated[k]
+		assert.False(t, dup, "duplicate kind %d", k)
+		enumerated[k] = struct{}{}
+		assert.NotEmpty(t, k.String())
+		assert.False(t, names[k.String()], "duplicate kind name %q", k.String())
+		names[k.String()] = true
+		if k != KindOther {
+			assert.NotEqual(t, KindOther.String(), k.String(),
+				"kind %d falls through to the catch-all name", k)
+		}
+	}
+	assert.Equal(t, declared, enumerated,
+		"Kinds() must enumerate exactly the Kind constants statement.go declares")
+}
+
+// declaredKinds parses statement.go and returns the value of every constant
+// in the iota block that KindOther opens.
+func declaredKinds(t *testing.T) map[Kind]struct{} {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "statement.go", nil, parser.SkipObjectResolution)
+	require.NoError(t, err)
+
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST || len(gen.Specs) == 0 {
+			continue
+		}
+		first, ok := gen.Specs[0].(*ast.ValueSpec)
+		if !ok || len(first.Names) != 1 || first.Names[0].Name != "KindOther" {
+			continue
+		}
+		declared := make(map[Kind]struct{}, len(gen.Specs))
+		for i, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			require.True(t, ok)
+			require.Len(t, vs.Names, 1, "one Kind per line in the iota block")
+			if i == 0 {
+				require.Len(t, vs.Values, 1, "KindOther opens the iota block")
+				ident, ok := vs.Values[0].(*ast.Ident)
+				require.True(t, ok && ident.Name == "iota", "KindOther is the iota anchor")
+			} else {
+				require.Empty(t, vs.Values, "%s takes its value from iota", vs.Names[0].Name)
+			}
+			declared[Kind(i)] = struct{}{}
+		}
+		return declared
+	}
+	t.Fatal("statement.go declares no const block opened by KindOther")
+	return nil
 }

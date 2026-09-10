@@ -18,6 +18,7 @@ import (
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/suggest"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // planReportDoc is the human-facing contract page these tests keep honest.
@@ -160,6 +161,12 @@ func TestDocListsEveryVocabularyValue(t *testing.T) {
 	}
 	for _, c := range executor.CreateShapeCauses() {
 		values = append(values, string(c))
+	}
+	for _, c := range verdict.Classes() {
+		values = append(values, string(c))
+	}
+	for _, o := range verdict.Owners() {
+		values = append(values, string(o))
 	}
 	for _, v := range values {
 		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", v),

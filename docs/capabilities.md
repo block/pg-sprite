@@ -142,7 +142,7 @@ the canonical example.
 > `make gen-capabilities`; do not edit the generated regions below by hand.
 
 <!-- capabilities:begin summary -->
-**53 operations: 17 supported today, 20 planned behind a typed refusal, 14 out of scope
+**53 operations: 18 supported today, 19 planned behind a typed refusal, 14 out of scope
 by design, and 2 with no online mechanism in PostgreSQL to build on.**
 <!-- capabilities:end summary -->
 
@@ -178,7 +178,7 @@ review the object warrants) ·
 | `ADD PRIMARY KEY` / `ADD UNIQUE` (plain key columns) | ✅ | native, safer sequence | Yes | Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX` |
 | `ADD CHECK` / `ADD FOREIGN KEY` (imperative) | ✅ | native, safer sequence | Yes | Rewritten to the online sequence: `ADD CONSTRAINT ... NOT VALID` (brief metadata lock) → `VALIDATE CONSTRAINT` (writes keep flowing during the scan) |
 | `ADD CONSTRAINT ... NOT VALID` / `... USING INDEX` / `VALIDATE CONSTRAINT` | ✅ | native, as-is | Yes | Already the online idiom; executed as-is |
-| `ADD FOREIGN KEY ... NOT VALID` on a **partitioned parent** | 🟡 | native, planned flow | Yes | PostgreSQL supports this only from version 18; refused on 14–17 |
+| `ADD FOREIGN KEY ... NOT VALID` on a **partitioned parent** | ✅ | native, safer sequence | Yes — server version 18 or later | Supported on version 18 and later; refused on 14–17 with an environmental class |
 | `EXCLUDE` constraints (and unrecognized constraint forms) | ❌ | — | Yes — unsolvable today | No online pattern exists in PostgreSQL — the build scans under `ACCESS EXCLUSIVE` with no `NOT VALID`/`USING INDEX` equivalent. Refused; revisit only if PostgreSQL grows one |
 | `DROP CONSTRAINT` | ✅ | native, as-is | Yes | Metadata-only; flagged **destructive** |
 <!-- capabilities:end constraints -->

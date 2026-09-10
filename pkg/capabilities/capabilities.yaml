@@ -161,15 +161,15 @@ rows:
   - id: add-foreign-key-not-valid-on-a-partitioned-parent
     area: "constraints"
     operation: "`ADD FOREIGN KEY ... NOT VALID` on a **partitioned parent**"
-    tier: "t2"
-    status_mark: "🟡"
-    engine_path: "native_planned_flow"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
     online_safety_problem: true
+    online_safety_detail: "server version 18 or later"
     front_doors:
-      migrate: refused
-      diff: refused
-    refusal_reason: unsupported-statement
-    reason_notes: "PostgreSQL supports this only from version 18; refused on 14–17"
+      migrate: supported
+      diff: supported
+    reason_notes: "Supported on version 18 and later; refused on 14–17 with an environmental class"
   - id: exclude-constraints-and-unrecognized-constraint-forms
     area: "constraints"
     operation: "`EXCLUDE` constraints (and unrecognized constraint forms)"
@@ -237,7 +237,7 @@ rows:
     front_doors:
       migrate: refused
       diff: refused
-    refusal_reason: unsupported-statement
+    refusal_reason: unsupported-partitioned-parent
     reason_notes: "PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned"
   - id: add-constraint-using-index-on-a-partitioned-parent
     area: "indexes"
@@ -250,7 +250,7 @@ rows:
     front_doors:
       migrate: refused
       diff: refused
-    refusal_reason: unsupported-statement
+    refusal_reason: unsupported-partitioned-parent
     reason_notes: "PostgreSQL does not support adopting an index on a partitioned parent in any supported version; refused before execution"
   - id: create-table-partition-of
     area: "partitioned_tables"
