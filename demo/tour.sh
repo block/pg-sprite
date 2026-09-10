@@ -240,6 +240,22 @@ run_offline() {
     heading "Offline commands (no database)"
     local out status
 
+    step "capabilities"
+    status=0
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" capabilities --json) || status=$?
+        assert_eq "capabilities exit" 0 "$status"
+        # The JSON version is the release stamp --version prints. Comparing
+        # the two also catches a renamed or omitted key, which jq -r renders
+        # as the literal string "null" rather than as empty output.
+        assert_eq "capabilities version" "$("$PGS" --version)" "$(jq -r '.version' <<<"$out")"
+        if [ "$(jq -r '.capabilities | length' <<<"$out")" -le 40 ]; then
+            fail "capabilities: expected more than 40 rows"
+        fi
+    else
+        "$PGS" capabilities
+    fi
+
     # lint gates: risky.sql carries exactly one error-severity finding (the
     # refused operation), so the exit code and count are knowable — a vague
     # "something failed" check would also pass on a missing binary.
