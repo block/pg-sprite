@@ -13,6 +13,18 @@ import (
 
 const testURL = "postgres://user@localhost:5432/app"
 
+// The proof runs against the same server the pool dials, and opens a second
+// connection lazily inside its own bound, so a budget that only matched the
+// dial could be spent before the proof's first statement. A longer dial
+// budget widens the proof rather than capping it or replacing its floor.
+func TestAffinityProbeBoundReservesTheProofsOwnTimeAboveTheDial(t *testing.T) {
+	assert.Equal(t, affinityProbeFloor+DefaultConnectTimeout, affinityProbeBound(DefaultConnectTimeout))
+	assert.Equal(t, affinityProbeFloor+time.Minute, affinityProbeBound(time.Minute),
+		"a dial budgeted above the floor is added to it, not compared against it")
+	assert.Equal(t, affinityProbeFloor, affinityProbeBound(0),
+		"an unbudgeted dial leaves the proof on its floor")
+}
+
 func TestBuildPoolConfigDefaults(t *testing.T) {
 	pc, err := buildPoolConfig(Config{URL: testURL})
 	require.NoError(t, err)

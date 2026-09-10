@@ -15,7 +15,7 @@ import (
 var version = "dev"
 
 func main() {
-	k := kong.Parse(cli.New(),
+	k := kong.Parse(cli.New(version),
 		kong.Name("pg-sprite"),
 		kong.Description("An online schema-change engine for PostgreSQL."),
 		kong.UsageOnError(),
