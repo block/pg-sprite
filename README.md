@@ -167,7 +167,7 @@ go install github.com/block/pg-sprite/cmd/pg-sprite@latest
 Half the CLI works offline on DDL text alone; the other half connects to a
 live database (`--url` / `PGSPRITE_URL`, always under bounded `lock_timeout`
 and `statement_timeout`; a `search_path` that lists `pg_catalog` after a user
-schema has that entry removed so the schema can never shadow the catalog, and
+schema has that entry removed so the schema no longer shadows the catalog, and
 every other entry is left as configured). Only `migrate` without `--dry-run`
 ever commits a change — every other command is read-only or fully offline.
 

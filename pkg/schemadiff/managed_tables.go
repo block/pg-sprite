@@ -40,8 +40,8 @@ const listManagedTablesSQL = `
 // reports the refusal by table.
 //
 // Every catalog relation, operator, and type in the query is pg_catalog
-// qualified, so a search_path that lists a user schema ahead of pg_catalog
-// cannot change the answer: an unqualified relation or operator would join
+// qualified (CO-9), so a search_path that lists a user schema ahead of
+// pg_catalog cannot change the answer: an unqualified relation or operator would join
 // nothing and list no tables, while an unqualified regclass cast would stop
 // matching the extension dependency and list extension members as
 // undeclared. Both are silent wrong answers, and each blocks or waves

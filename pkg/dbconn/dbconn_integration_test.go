@@ -18,8 +18,11 @@ import (
 // unqualified `pg_class` read. Every pooled session drops the shadowed entry
 // so the catalog is searched implicitly first again, while a path pg_catalog
 // leads is left alone and every other entry — and therefore the creation
-// schema — stays exactly as configured. The setting is database-scoped on a
-// throwaway database, so no other connection on the server sees it.
+// schema — stays exactly as configured. The decoy schema also shadows
+// set_config itself with a function that changes nothing, so the rewrite
+// only lands if the hook qualifies the call it makes under the shadowed
+// path. The setting is database-scoped on a throwaway database, so no other
+// connection on the server sees it.
 func TestPoolRemovesShadowedCatalogFromSearchPath(t *testing.T) {
 	url := testutil.NewDatabase(t, testutil.StartPostgres(t))
 	setup, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -27,16 +30,20 @@ func TestPoolRemovesShadowedCatalogFromSearchPath(t *testing.T) {
 	t.Cleanup(setup.Close)
 	_, err = setup.Exec(t.Context(), `CREATE SCHEMA decoy;
 		CREATE TABLE decoy.pg_class (oid oid, relname name, relnamespace oid);
-		INSERT INTO decoy.pg_class VALUES (1, 'bogus', 1)`)
+		INSERT INTO decoy.pg_class VALUES (1, 'bogus', 1);
+		CREATE FUNCTION decoy.set_config(text, text, boolean) RETURNS text
+			LANGUAGE sql AS $$ SELECT 'decoy'::text $$`)
 	require.NoError(t, err)
 	var database string
 	require.NoError(t, setup.QueryRow(t.Context(), "SELECT current_database()").Scan(&database))
 	databaseName := pgx.Identifier{database}.Sanitize()
 
 	testCases := []struct {
-		name               string
-		searchPath         string
-		wantPath           string
+		name       string
+		searchPath string
+		wantPath   string
+		// wantCreationSchema is what current_schema() reports; empty means
+		// NULL, the state in which an unqualified CREATE has nowhere to land.
 		wantCreationSchema string
 	}{
 		{name: "catalog after user schema", searchPath: "decoy, pg_catalog", wantPath: "decoy", wantCreationSchema: "decoy"},
@@ -44,6 +51,7 @@ func TestPoolRemovesShadowedCatalogFromSearchPath(t *testing.T) {
 		{name: "catalog only", searchPath: "pg_catalog", wantPath: "pg_catalog", wantCreationSchema: "pg_catalog"},
 		{name: "quoted catalog", searchPath: `decoy, "pg_catalog"`, wantPath: "decoy", wantCreationSchema: "decoy"},
 		{name: "default path untouched", searchPath: `"$user", public`, wantPath: `"$user", public`, wantCreationSchema: "public"},
+		{name: "only a missing schema ahead leaves no creation schema", searchPath: "no_such_schema, pg_catalog", wantPath: "no_such_schema", wantCreationSchema: ""},
 	}
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -53,11 +61,17 @@ func TestPoolRemovesShadowedCatalogFromSearchPath(t *testing.T) {
 			require.NoError(t, err)
 			t.Cleanup(pool.Close)
 
-			var gotPath, creationSchema string
+			var gotPath string
 			require.NoError(t, pool.QueryRow(t.Context(), "SHOW search_path").Scan(&gotPath))
 			assert.Equal(t, tc.wantPath, gotPath)
+			var creationSchema *string
 			require.NoError(t, pool.QueryRow(t.Context(), "SELECT current_schema()").Scan(&creationSchema))
-			assert.Equal(t, tc.wantCreationSchema, creationSchema)
+			if tc.wantCreationSchema == "" {
+				assert.Nil(t, creationSchema, "current_schema() must be NULL")
+			} else {
+				require.NotNil(t, creationSchema)
+				assert.Equal(t, tc.wantCreationSchema, *creationSchema)
+			}
 
 			// The decoy holds one row; the real catalog holds far more.
 			var catalogRows int

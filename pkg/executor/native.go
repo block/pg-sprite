@@ -789,7 +789,7 @@ type indexTarget struct {
 // *pgxpool.Pool both satisfy it.
 //
 // Every proof query these helpers run names its relations, functions, and
-// operators with an explicit pg_catalog qualification: search_path may
+// operators with an explicit pg_catalog qualification (CO-9): search_path may
 // legitimately list a user schema before pg_catalog, and a user relation
 // named pg_index — or a user operator named = — would silently shadow the
 // catalog and turn a fail-closed proof into a false clean. Only the

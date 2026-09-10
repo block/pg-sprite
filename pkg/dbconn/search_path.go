@@ -29,7 +29,20 @@ const catalogSchema = "pg_catalog"
 // included. The creation schema (current_schema()) changes only when every
 // entry ahead of a removed pg_catalog names a schema that does not exist:
 // it was pg_catalog, where unqualified CREATE is refused anyway, and
-// becomes the next existing entry.
+// becomes the next existing entry after the removed one, or NULL when there
+// is none — an unqualified CREATE then fails with "no schema has been
+// selected", which pg-sprite's preflight reports as ErrNoCreationSchema.
+//
+// Only an explicit pg_catalog entry is rewritten. The implicit pg_temp
+// search that precedes it is untouched: pg-sprite creates no temporary
+// objects, so nothing it runs can populate a pg_temp schema that would
+// shadow the catalog for its own session. The write is a runtime set_config
+// on the server connection, so under a transaction-pooling proxy the
+// rewritten path may outlive the client that triggered it; the value it
+// leaves behind is the stricter one.
+//
+// INV: CO-9 — this hook upholds the invariant for every session-path read;
+// LocalSearchPath upholds it for every transaction-local path.
 func unshadowCatalog(ctx context.Context, conn *pgx.Conn) error {
 	var path string
 	if err := conn.QueryRow(ctx, "SHOW search_path").Scan(&path); err != nil {
@@ -43,6 +56,24 @@ func unshadowCatalog(ctx context.Context, conn *pgx.Conn) error {
 		return fmt.Errorf("remove shadowed %s from search_path: %w", catalogSchema, err)
 	}
 	return nil
+}
+
+// LocalSearchPath returns the SET LOCAL statement that scopes the current
+// transaction's search_path to schemas, in order. SET cannot take bind
+// parameters, so each schema is quoted as an identifier, and the path then
+// receives the same rewrite as every pooled session's: a pg_catalog entry
+// that another schema precedes is dropped. A transaction-local path replaces
+// the session path for the transaction, so it must uphold the same
+// guarantee (INV: CO-9); every transaction-local search_path pg-sprite sets
+// is built here, and TestLocalSearchPathIsTheOnlySearchPathWriter keeps it
+// that way.
+func LocalSearchPath(schemas ...string) string {
+	quoted := make([]string, len(schemas))
+	for i, schema := range schemas {
+		quoted[i] = pgx.Identifier{schema}.Sanitize()
+	}
+	path, _ := withoutShadowedCatalog(strings.Join(quoted, ", "))
+	return "SET LOCAL search_path = " + path
 }
 
 // withoutShadowedCatalog returns path with every pg_catalog entry that a
@@ -107,6 +138,11 @@ func splitSearchPath(path string) []string {
 }
 
 // namesCatalog reports whether one search_path entry resolves to pg_catalog.
+// A quoted entry is unquoted the general way — the surrounding quotes drop
+// and "" becomes " — even though pg_catalog itself contains no quote, so
+// the comparison stays correct if the target ever changes. The length guard
+// keeps a lone quote, which the server never emits, from being unquoted as
+// an empty name.
 func namesCatalog(entry string) bool {
 	if strings.HasPrefix(entry, `"`) && strings.HasSuffix(entry, `"`) && len(entry) >= 2 {
 		unquoted := strings.ReplaceAll(entry[1:len(entry)-1], `""`, `"`)
