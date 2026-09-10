@@ -283,6 +283,23 @@ to distinguish accepted blocking execution from the product's online-safe succes
 A distinct code is intentionally non-zero: generic CI fails closed, while a caller that
 deliberately permits this path can allow 3 explicitly.
 
+The full ladder once this ships, with the question each code answers:
+
+| Exit | Meaning | Did the statement run? | Online-safe? |
+|------|---------|------------------------|--------------|
+| 0 | Executed through an online-safe path, or a dry run found every statement executable | yes (dry run: no) | yes |
+| 1 | Failure: a PostgreSQL error or statement-budget cancellation after execution started (attempted, rolled back), or an operational or usage error before it, including a mismatched or unresolvable acknowledgement (nothing ran) | attempted or no | not applicable |
+| 2 | Refused: ineligible, no acknowledgement supplied, or the lock budget was exhausted | no | not applicable |
+| 3 | Committed through the accepted blocking passthrough | yes | no |
+
+Exit 3 is the only code where the statement committed and the engine does not vouch for online
+safety, so a consumer can read it without JSON. The exit code is produced the way exit 2 is
+today: `migrate` returns a typed sentinel after printing the verdict, and the entry point maps
+that sentinel to the code. Exit 3 needs a second sentinel and constant beside
+`ExitCodeRefused` in `pkg/verdict`, because the verdict is a success that must still leave a
+non-zero process status; `kong`'s default error path would otherwise print it as an
+operational failure and exit 1.
+
 ## Failure and interruption semantics
 
 Failure before the statement starts, including an exhausted lock budget, remains a typed
@@ -394,9 +411,17 @@ Sequence implementation as follows:
    sequencing rule in [refusal-classes.md](refusal-classes.md), whose own rollout record
    checked RF-5 and RF-6 and recorded them unchanged.
 3. Add `executed-without-online-safety`, retained reason/class/cause, budget fields, exit code
-   3, and dry-run eligibility to the verdict and plan-report contracts. Update
-   [cli-output-examples.md](cli-output-examples.md) with generated examples and pin the JSON
-   and text renderers.
+   3, and dry-run eligibility to the verdict and plan-report contracts. Exit 3 lands as a
+   constant and sentinel in `pkg/verdict` beside `ExitCodeRefused` and `ErrRefused`, mapped
+   in the entry point the same way. Update [cli-output-examples.md](cli-output-examples.md)
+   with generated examples — a new `executed-without-online-safety — exit 3` section and the
+   exit-code contract paragraph at its head — and pin the JSON and text renderers. The
+   exit-code contract is stated in three more places that today describe a three-code ladder
+   and must gain exit 3 in the same change: the exit-codes bullet in
+   [execution-model.md](execution-model.md), the dry-run exit-code paragraph in
+   [postgres-online-ddl-reference.md](postgres-online-ddl-reference.md#dry-run-diagnostic-codes),
+   and the root README's exit-code gate paragraph, which must say that a gate treating every
+   non-zero status as failure stays fail-closed for this path.
 4. Add `--accept-blocking` to imperative `migrate`, reject its combination with `--force`,
    emit the pre-execution audit record, and add demo assertions for eligibility, success,
    lock-budget refusal, statement-budget failure, mismatched acknowledgement, and exit codes.
