@@ -362,9 +362,14 @@ fault-injection tests.
 A survey of the CI setups of pgroll, Reshape, pg-osc, pg_repack,
 pg-schema-diff, pg-delta, migra, Atlas, SchemaHero, and Bytebase found no
 peer testing physical replicas, poolers as live intermediaries, failover, or
-cloud-managed PostgreSQL — those remain environment-gate territory (see
-above). The patterns worth carrying, tied to the phase whose implementation
-makes them meaningful:
+cloud-managed PostgreSQL. The pooler is now covered here: a pooled
+connection string is what a hosted platform hands an operator by default, so
+`StartPostgresBehindPgBouncer` runs a real PgBouncer in both pool modes as
+part of the default suite
+([sessionstate_integration_test.go](../pkg/dbconn/sessionstate_integration_test.go)).
+Replicas, failover, and cloud-managed PostgreSQL remain environment-gate
+territory (see above). The patterns worth carrying, tied to the phase whose
+implementation makes them meaningful:
 
 | Pattern (peer precedent) | Where it lands here |
 | --- | --- |
