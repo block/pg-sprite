@@ -44,8 +44,9 @@ type Config struct {
 	// StatementTimeout is applied as the session statement_timeout on every
 	// connection. Zero means DefaultStatementTimeout.
 	StatementTimeout time.Duration
-	// ConnectTimeout bounds each dial attempt, and is also the floor for
-	// how long NewPool's session affinity proof may take. Zero means
+	// ConnectTimeout bounds each dial attempt. The session affinity proof
+	// runs against the same server and opens a connection of its own, so its
+	// budget is this plus the proof's own floor. Zero means
 	// DefaultConnectTimeout.
 	ConnectTimeout time.Duration
 	// CACertPath, when set, enables verify-full TLS using the given CA bundle

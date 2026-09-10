@@ -608,11 +608,14 @@ func TestDroppableColumnMatchesTheServer(t *testing.T) {
 func TestBudgetedSessionRestoresBoundsTheStartupPacketNeverCarried(t *testing.T) {
 	cfg, err := pgxpool.ParseConfig(testutil.StartPostgres(t))
 	require.NoError(t, err)
-	// The pooler dropped them, so they are absent from the startup packet
-	// and applied as statements — the arrangement this package's pool uses
-	// against a session-mode pooler.
-	delete(cfg.ConnConfig.RuntimeParams, "lock_timeout")
-	delete(cfg.ConnConfig.RuntimeParams, "statement_timeout")
+	// Absent from the startup packet and applied as statements below — the
+	// arrangement this package's pool uses against a session-mode pooler
+	// that drops them. Asserted rather than arranged: pgx seeds neither, so
+	// deleting them would prove nothing, and a change that started seeding
+	// them has to fail here rather than quietly leave the test testing the
+	// packet it meant to strip.
+	require.NotContains(t, cfg.ConnConfig.RuntimeParams, "lock_timeout")
+	require.NotContains(t, cfg.ConnConfig.RuntimeParams, "statement_timeout")
 	cfg.MaxConns = 1
 	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
 		_, err := conn.Exec(ctx, "SET lock_timeout = 3000; SET statement_timeout = 30000")

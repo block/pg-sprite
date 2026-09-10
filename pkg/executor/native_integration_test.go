@@ -938,7 +938,7 @@ func TestBuildIndexConcurrentlyTerminatedBackendReportsItsLeftover(t *testing.T)
 	assert.True(t, exists, "the leftover must survive for the operator's explicit recovery")
 	assert.False(t, valid, "the leftover must be invalid")
 
-	// The dead session's RESET cannot succeed, so it must have been
+	// The dead session's bounds cannot be put back, so it must have been
 	// discarded — not released: no session in the pool may still carry the
 	// build's lock_timeout = 0 override.
 	for _, conn := range pool.AcquireAllIdle(t.Context()) {

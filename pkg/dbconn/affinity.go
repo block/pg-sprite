@@ -11,18 +11,24 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// affinityProbeFloor is the least time the proof is given. It issues a
-// handful of trivial statements, so anything near this has already failed.
+// affinityProbeFloor is the least time the proof's own statements are given.
+// They are a handful of trivial round trips, so anything near this has
+// already failed.
 const affinityProbeFloor = 15 * time.Second
 
-// affinityProbeBound is how long the proof gets on a pool whose dials are
-// budgeted at connectTimeout. The floor applies to a server reachable in
-// the ordinary time; an operator who budgeted longer to reach the server
-// budgeted it for a reason, and the proof runs against that same server, so
-// the larger of the two wins rather than this package quietly cutting the
-// budget down.
+// affinityProbeBound is how long the whole proof gets on a pool whose dials
+// are budgeted at connectTimeout. The second connection the proof needs is
+// opened lazily inside this bound, so its dial spends the dial budget before
+// the proof's first statement runs. The two are added rather than maxed: an
+// operator who budgeted a long dial because the server genuinely takes that
+// long to reach would otherwise watch the proof spend its whole budget
+// dialing and report a deadline instead of the affinity verdict it exists to
+// give.
 func affinityProbeBound(connectTimeout time.Duration) time.Duration {
-	return max(affinityProbeFloor, connectTimeout)
+	if connectTimeout <= 0 {
+		return affinityProbeFloor
+	}
+	return affinityProbeFloor + connectTimeout
 }
 
 // ProveSessionAffinity proves on conn the property every session-scoped
