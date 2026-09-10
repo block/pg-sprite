@@ -1,0 +1,637 @@
+rows:
+  - id: add-column-no-default-or-constant-default
+    area: "column_changes"
+    operation: "`ADD COLUMN` (no default, or constant default)"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Metadata-only / fast default (PG 11+); executes instantly under bounded locks"
+  - id: add-column-with-volatile-default-now-gen-random-uuid
+    area: "column_changes"
+    operation: "`ADD COLUMN` with volatile default (`now()`, `gen_random_uuid()`, …)"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "copy_and_swap"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: backend-unavailable
+    reason_notes: "Table rewrite; routes to copy-and-swap and is refused until that engine lands"
+  - id: add-column-generated-stored
+    area: "column_changes"
+    operation: "`ADD COLUMN ... GENERATED ... STORED`"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "copy_and_swap"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: backend-unavailable
+    reason_notes: "Table rewrite; copy-and-swap route. The copy engine must **recompute, never copy,** generated columns on the shadow table"
+  - id: add-column-with-inline-unique-primary-key-references-check
+    area: "column_changes"
+    operation: "`ADD COLUMN` with inline `UNIQUE`/`PRIMARY KEY`/`REFERENCES`/`CHECK`"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "The inline constraint does its index build or validation scan under the `ADD COLUMN`'s `ACCESS EXCLUSIVE` lock; refused with guidance to add the column first, then build the constraint online"
+  - id: drop-column
+    area: "column_changes"
+    operation: "`DROP COLUMN`"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Metadata-only; flagged **destructive** in the plan report"
+  - id: alter-column-type-binary-coercible-proven-against-live-column-facts
+    area: "column_changes"
+    operation: "`ALTER COLUMN TYPE`, binary-coercible (proven against live column facts)"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Catalog relabel, e.g. `varchar(50)` → `varchar(100)`, `varchar` → `text`; PostgreSQL itself refuses the change when a view, rule, or `STORED` generated column depends on the column — see [binary-coercible-type-changes.md](binary-coercible-type-changes.md#no-rewrite-is-not-no-cost)"
+  - id: alter-column-type-general-or-with-using
+    area: "column_changes"
+    operation: "`ALTER COLUMN TYPE`, general (or with `USING`)"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "copy_and_swap"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: backend-unavailable
+    reason_notes: "Table rewrite; copy-and-swap route, refused today"
+  - id: set-default-drop-default-drop-not-null
+    area: "column_changes"
+    operation: "`SET DEFAULT` / `DROP DEFAULT` / `DROP NOT NULL`"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Metadata-only"
+  - id: set-not-null
+    area: "column_changes"
+    operation: "`SET NOT NULL`"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Executed as the native four-step pattern: `ADD CONSTRAINT ... CHECK (col IS NOT NULL) NOT VALID` → online `VALIDATE` → `SET NOT NULL` (catalog flip, PG 12+) → drop the scaffold check"
+  - id: rename-column-rename-table
+    area: "column_changes"
+    operation: "`RENAME COLUMN` / `RENAME TABLE`"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Metadata-only for PostgreSQL but **app-breaking** across deployed instances; executed with a typed reason so lint/plan consumers can steer away"
+  - id: set-tablespace
+    area: "column_changes"
+    operation: "`SET TABLESPACE`"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "copy_and_swap"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: backend-unavailable
+    reason_notes: "Physical relocation is a rewrite; copy-and-swap route"
+  - id: add-primary-key-add-unique-plain-key-columns
+    area: "constraints"
+    operation: "`ADD PRIMARY KEY` / `ADD UNIQUE` (plain key columns)"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`"
+  - id: add-check-add-foreign-key-imperative
+    area: "constraints"
+    operation: "`ADD CHECK` / `ADD FOREIGN KEY` (imperative)"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Rewritten to the online sequence: `ADD CONSTRAINT ... NOT VALID` (brief metadata lock) → `VALIDATE CONSTRAINT` (writes keep flowing during the scan)"
+  - id: add-constraint-not-valid-using-index-validate-constraint
+    area: "constraints"
+    operation: "`ADD CONSTRAINT ... NOT VALID` / `... USING INDEX` / `VALIDATE CONSTRAINT`"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Already the online idiom; executed as-is"
+  - id: add-foreign-key-not-valid-on-a-partitioned-parent
+    area: "constraints"
+    operation: "`ADD FOREIGN KEY ... NOT VALID` on a **partitioned parent**"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    online_safety_problem: true
+    online_safety_detail: "server version 18 or later"
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Supported on version 18 and later; refused on 14–17 with an environmental class"
+  - id: exclude-constraints-and-unrecognized-constraint-forms
+    area: "constraints"
+    operation: "`EXCLUDE` constraints (and unrecognized constraint forms)"
+    tier: "t3"
+    status_mark: "❌"
+    engine_path: "none"
+    online_safety_problem: true
+    online_safety_detail: "unsolvable today"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "No online pattern exists in PostgreSQL — the build scans under `ACCESS EXCLUSIVE` with no `NOT VALID`/`USING INDEX` equivalent. Refused; revisit only if PostgreSQL grows one"
+  - id: drop-constraint
+    area: "constraints"
+    operation: "`DROP CONSTRAINT`"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Metadata-only; flagged **destructive**"
+  - id: create-unique-index-on-a-plain-table-including-partial-expression-covering-include-gin-gist-brin
+    area: "indexes"
+    operation: "`CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification, typed invalid-index outcomes, and a proven recovery for abandoned leftovers (`RebuildAbandonedIndex`, or `DropAbandonedIndex` to remove the leftover without rebuilding; both library-only; [runbook](invalid-index-recovery.md))"
+  - id: drop-index
+    area: "indexes"
+    operation: "`DROP INDEX`"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**"
+  - id: reindex
+    area: "indexes"
+    operation: "`REINDEX`"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Rewritten to `REINDEX ... CONCURRENTLY`"
+  - id: index-build-on-a-partitioned-parent
+    area: "indexes"
+    operation: "Index build on a **partitioned parent**"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-partitioned-parent
+    reason_notes: "PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned"
+  - id: add-constraint-using-index-on-a-partitioned-parent
+    area: "indexes"
+    operation: "`ADD CONSTRAINT ... USING INDEX` on a partitioned parent"
+    tier: "t3"
+    status_mark: "❌"
+    engine_path: "none"
+    online_safety_problem: true
+    online_safety_detail: "unsolvable today"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-partitioned-parent
+    reason_notes: "PostgreSQL does not support adopting an index on a partitioned parent in any supported version; refused before execution"
+  - id: create-table-partition-of
+    area: "partitioned_tables"
+    operation: "`CREATE TABLE ... PARTITION OF`"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Typed refusal at both doors: the imperative door does not take `CREATE TABLE`, and the declarative create path refuses the form at plan time and re-checks it at apply — attaching a partition takes a brief `ACCESS EXCLUSIVE` on the **parent**, which the greenfield absence proof does not cover. The partition-aware flow is planned"
+  - id: attach-partition
+    area: "partitioned_tables"
+    operation: "`ATTACH PARTITION`"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Executed; the safer idiom (pre-prove the bound with a validated `CHECK` so the attach skips its scan) is surfaced as guidance. A classify-first flow that constructs the proof itself is planned"
+  - id: detach-partition-concurrently
+    area: "partitioned_tables"
+    operation: "`DETACH PARTITION [CONCURRENTLY]`"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "`CONCURRENTLY` is the idiom; the blocking form is rewritten to it"
+  - id: partitioned-parents-in-the-declarative-model
+    area: "partitioned_tables"
+    operation: "Partitioned parents in the **declarative model**"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Typed refusal: the model does not yet carry partition keys, and rendering a partitioned parent as a plain `CREATE TABLE` would be silently wrong"
+  - id: partitioned-tables-in-copy-and-swap
+    area: "partitioned_tables"
+    operation: "Partitioned tables in **copy-and-swap**"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "copy_and_swap"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: backend-unavailable
+    reason_notes: "Root-vs-leaf publication semantics and per-partition swap; sequenced after the copy engine core"
+  - id: plain-tables-their-indexes
+    area: "declarative_model"
+    operation: "Plain tables + their indexes"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "`diff`, `pull`, and desired-file rendering round-trip the canonical model. The model carries each index's validity (`pg_index.indisvalid`): on a plain table an invalid entry is a concurrent build that did not finish — abandoned, or still running — so a live entry with the desired name and definition does not deliver the desired index, and `diff` plans it as a `create-index` change. `diff` never emits a drop for an invalid entry, whatever the desired file says about its name: a plain `DROP INDEX` blocks the table and cannot tell abandoned debris from a build still in progress. A `pull`ed baseline of such a table therefore re-diffs to that one rebuild rather than to zero. On a partitioned parent an invalid index means unattached partition indexes, not an unfinished build, so validity plays no part in the parent's comparison"
+  - id: classic-table-inheritance-inherits
+    area: "declarative_model"
+    operation: "Classic table inheritance (`INHERITS`)"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Typed refusal for both parents and children: the model cannot express inheritance edges, and flattening inherited columns would produce a silently lossy baseline"
+  - id: tables-that-own-or-are-referenced-by-foreign-keys
+    area: "declarative_model"
+    operation: "Tables that own **or are referenced by** foreign keys"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Typed refusal on both sides — an incoming FK cannot be expressed in the table's own desired file, and a lossy description would be worse than none. Declarative FK support (composite keys as the primary case, two-phase `NOT VALID` → `VALIDATE` execution) is planned"
+  - id: unlogged-tables
+    area: "declarative_model"
+    operation: "Unlogged tables"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Typed refusal: persistence is not modeled, converging it (`SET LOGGED`) is a full rewrite, and rendering the table as plain `CREATE TABLE` would silently change crash-safety"
+  - id: explicit-column-collations
+    area: "declarative_model"
+    operation: "Explicit column collations"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Typed refusal: dropping a `COLLATE` clause from a rendered baseline silently changes sort order and index semantics; a collation delta cannot converge without a rewrite"
+  - id: columns-whose-default-uses-a-sequence-the-column-does-not-own
+    area: "declarative_model"
+    operation: "Columns whose default uses a sequence the column does not own"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Typed refusal: in a desired-state model that sequence exists only inside the scratch transaction, so no derived plan can reference it. Column-owned (`serial`-style) sequences are fine"
+  - id: greenfield-create-table-apply-the-table-does-not-exist-yet-a-fresh-database-or-a-new-table-in-a-live-one
+    area: "declarative_model"
+    operation: "Greenfield `CREATE TABLE` apply (the table does not exist yet — a fresh database or a new table in a live one)"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    online_safety_problem: true
+    online_safety_detail: "a `REFERENCES` clause would take a brief `SHARE ROW EXCLUSIVE` on each **referenced** live table, but desired files refuse foreign keys today, so no live table is locked"
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "Desired-state execution creates the table: `CheckTableAbsent` verifies the table relation and composite-type name are free, the executor verifies every relation name the desired file states (explicit index names and first-choice constraint-index and column-sequence names) is free in the schema, and `CheckCreatePrivileges` verifies the role can create there. It then runs the `CREATE TABLE` and index builds as brief bounded steps under the engine's budgets. An occupied claimed name is a typed `create-collision` refusal before execution — drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff (a read of the owned names that does not complete is the same step-1 failure as `create-names-unverified`, never a pass). `PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, and in-set duplicate names refuse at plan time and are re-checked at apply, while `REFERENCES` and `CONCURRENTLY` are refused upstream at desired-file parse and re-checked at admission as defense in depth"
+  - id: enum-typed-columns-on-plain-tables
+    area: "types_and_non_table_objects"
+    operation: "Enum-typed columns on plain tables"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Tolerance end to end (introspection already canonicalizes via `format_type`; desired-file admission and transaction-scoped scratch-schema mechanics are being verified)"
+  - id: alter-type-add-value
+    area: "types_and_non_table_objects"
+    operation: "`ALTER TYPE ... ADD VALUE`"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Metadata-only and online-safe (PG 14+ allows it in a transaction; the value is usable after commit) — planned as an owned operation. No peer online executor owns it"
+  - id: enum-value-rename-removal
+    area: "types_and_non_table_objects"
+    operation: "Enum value rename / removal"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "copy_and_swap"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: backend-unavailable
+    reason_notes: "PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite — routes to a typed refusal toward copy-and-swap"
+  - id: enum-domain-type-creation-and-drop
+    area: "types_and_non_table_objects"
+    operation: "Enum/domain type creation and drop"
+    tier: "t3"
+    status_mark: "⚪"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "owner tooling (psql, shipped with the code change)"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Bootstrap/catalog work with no concurrent-access problem; owner tooling applies it in the same change that ships the code"
+  - id: views-materialized-views-create-and-replace
+    area: "types_and_non_table_objects"
+    operation: "Views, materialized views (create and replace)"
+    tier: "t3"
+    status_mark: "⚪"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "owner tooling"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Transactional catalog work, but `CREATE OR REPLACE VIEW` takes a brief `ACCESS EXCLUSIVE` on the view and queues behind in-flight readers — run it under a `lock_timeout`"
+  - id: refresh-materialized-view
+    area: "types_and_non_table_objects"
+    operation: "`REFRESH MATERIALIZED VIEW`"
+    tier: "t3"
+    status_mark: "🔵"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "data jobs / owner tooling"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "A data operation, not catalog work: the plain form holds `ACCESS EXCLUSIVE` on the matview for the whole rebuild (`CONCURRENTLY` needs a unique index and trades the lock for churn). Scheduling refreshes belongs to data jobs"
+  - id: pl-pgsql-function-bodies-create-or-replace-function
+    area: "types_and_non_table_objects"
+    operation: "PL/pgSQL function bodies (`CREATE OR REPLACE FUNCTION`)"
+    tier: "t3"
+    status_mark: "⚪"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "owner tooling"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Transactional catalog work that takes no lock on any relation; nothing for an online engine to add. No peer online executor owns it either"
+  - id: triggers-create-trigger
+    area: "types_and_non_table_objects"
+    operation: "Triggers (`CREATE TRIGGER`)"
+    tier: "t3"
+    status_mark: "⚪"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "owner tooling"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Catalog work — no scan, no rewrite — but it takes a brief `SHARE ROW EXCLUSIVE` on the table, queues behind long-running queries, and blocks writers while it waits — run it under a `lock_timeout`"
+  - id: extensions-create-extension
+    area: "types_and_non_table_objects"
+    operation: "Extensions (`CREATE EXTENSION`)"
+    tier: "t3"
+    status_mark: "⚪"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "owner tooling"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Same: catalog bootstrap, owner tooling"
+  - id: grants-roles-row-level-security-policies
+    area: "types_and_non_table_objects"
+    operation: "Grants, roles, row-level-security policies"
+    tier: "t3"
+    status_mark: "🔵"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "provisioning / IaC"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Access control, not table shape; belongs to provisioning (see [engine-role.md](engine-role.md) for what the *engine's own* role needs)"
+  - id: standalone-sequences
+    area: "types_and_non_table_objects"
+    operation: "Standalone sequences"
+    tier: "t3"
+    status_mark: "⚪"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "owner tooling"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Transactional catalog work on an object with no readers-and-writers problem"
+  - id: publications-subscriptions
+    area: "types_and_non_table_objects"
+    operation: "Publications, subscriptions"
+    tier: "t3"
+    status_mark: "🔵"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "replication provisioning / IaC"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Replication provisioning, not table shape (`ALTER PUBLICATION ... ADD TABLE` also takes `SHARE UPDATE EXCLUSIVE` on the table)"
+  - id: drop-table
+    area: "data_and_whole_table_operations"
+    operation: "`DROP TABLE`"
+    tier: "t3"
+    status_mark: "⚪"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "owner tooling, through a reviewed process"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it — the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. pg-sprite never plans or executes it; accounting for undeclared tables is the whole-schema owner's job, described under [Deliberately operator-owned](#deliberately-operator-owned)"
+  - id: data-backfills-update-delete-batches-dml-of-any-kind
+    area: "data_and_whole_table_operations"
+    operation: "Data backfills, `UPDATE`/`DELETE` batches, DML of any kind"
+    tier: "t3"
+    status_mark: "🔵"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "data-change runners, application batch jobs"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "pg-sprite changes table *shape*, never table *contents*. Versioned-script runners and application jobs own data changes"
+  - id: column-transform-expressions-during-a-copy-and-swap-rewrite
+    area: "data_and_whole_table_operations"
+    operation: "Column-transform expressions during a copy-and-swap rewrite"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "copy_and_swap"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: backend-unavailable
+    reason_notes: "The one principled exception: when a rewrite is already copying every row, deriving a new column's value by expression is part of the shape change, not a data job. Planned as part of the copy engine"
+  - id: online-table-rebuild-with-no-shape-change-bloat-reclamation
+    area: "data_and_whole_table_operations"
+    operation: "Online table rebuild with no shape change (bloat reclamation)"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "copy_and_swap"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: backend-unavailable
+    reason_notes: "A copy-and-swap with an identical target shape — the pg_repack use case with checksum-gated cutover and crash-resume. Planned once the copy engine lands"
+  - id: whole-schema-convergence-apply-a-directory-of-desired-files-dependency-ordered
+    area: "data_and_whole_table_operations"
+    operation: "Whole-schema convergence (apply a directory of desired files, dependency-ordered)"
+    tier: "t3"
+    status_mark: "🔵"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "convergence planners (pg-schema-diff, pgschema, pgdelta)"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Convergence planning across objects is a planner's job; pg-sprite stays the execution engine for the table-shape subset"
+  - id: versioned-schema-change-file-workflow-flyway-style-ordered-scripts
+    area: "data_and_whole_table_operations"
+    operation: "Versioned schema-change-file workflow (Flyway-style ordered scripts)"
+    tier: "t3"
+    status_mark: "🔵"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "versioned-script runners (Flyway-style)"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Declarative-only by design; see [vision.md](vision.md)"
+  - id: expand-contract-dual-schema-versions-pgroll-reshape-style
+    area: "data_and_whole_table_operations"
+    operation: "Expand/contract dual-schema versions (pgroll/reshape style)"
+    tier: "t3"
+    status_mark: "🔵"
+    engine_path: "none"
+    online_safety_problem: false
+    owning_tool_class: "pgroll/reshape own this model"
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Rejected: application invisibility is a core invariant; see [vision.md](vision.md)"

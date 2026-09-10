@@ -263,6 +263,8 @@ does not change any capability, tier, refusal, or runtime behavior.
 
 Implementation order is:
 
+**Status:** step 1 is complete; steps 2–4 remain planned.
+
 1. add the typed package, `pkg/capabilities/capabilities.yaml`, validator, generator,
    and markers together, making the repository single-source on day one;
 2. add `pg-sprite capabilities`, including `--json` and the embedded binary version;
