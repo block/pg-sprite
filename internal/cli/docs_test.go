@@ -95,13 +95,13 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 
 	partitioned := alterReport(t, "CREATE INDEX events_created_idx ON events (created)",
 		"public", "events", eventsFacts())
-	refused := make([]bool, len(partitioned.Statements))
+	causes := make([]preflight.PartitionRefusalCause, len(partitioned.Statements))
 	for i := range partitioned.Statements {
 		cause, err := preflight.RefusesPartitionedParent(16, partitioned.Statements[i].ExecSQL)
 		require.NoError(t, err)
-		refused[i] = cause != ""
+		causes[i] = cause
 	}
-	plan.RefuseUnsupportedPartitionedParent(&partitioned, refused)
+	require.NoError(t, plan.RefuseUnsupportedPartitionedParent(&partitioned, causes))
 	partitioned.Fingerprint = plan.Fingerprint(partitioned.Statements)
 
 	destructive := alterReport(t, "ALTER TABLE users DROP COLUMN email",

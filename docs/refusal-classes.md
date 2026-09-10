@@ -5,16 +5,16 @@ kind of boundary it reached.** `reason` continues to identify the immediate caus
 answers the next question: wait for engine capability, hand the work to its owner, use the
 named safer idiom, or change the run environment.
 
-Today every refused statement has an `outcome`, a typed `reason`, explanatory `detail`, and,
+Every refused statement has an `outcome`, a typed `reason`, a typed `class`, explanatory `detail`, and,
 where one exists, a `safer_idiom`. Exit code 2 means nothing ran. That is enough to explain a
-single refusal, but not enough to route it: `unsupported-statement` currently covers a data
+single refusal, but not enough to route it: `unsupported-statement` alone covers a data
 backfill, an imperative `CREATE TABLE`, a permanently unsafe `CREATE INDEX IF NOT EXISTS`,
 and an admitted `ALTER TABLE` operation for which the planner has no route. Those are not
 the same kind of answer.
 
 ## The decided vocabulary
 
-The refusal verdict adds `class`, with exactly five values:
+The refusal verdict carries `class`, with exactly five values:
 
 | Class | Meaning | Consumer action |
 | --- | --- | --- |
@@ -98,7 +98,7 @@ agrees with it rather than collapsing them.
 | `parent-concurrent-index-build` | The `CREATE INDEX ON ONLY` → per-partition `CONCURRENTLY` → `ATTACH PARTITION` flow is not yet implemented | `capability-boundary` | A planned engine capability; the matrix marks it 🟡. |
 | `parent-blocking-index-build` | pg-sprite will not substitute a blocking parent build for the missing partition-aware flow | `capability-boundary` | Same missing flow; the refusal of the blocking substitute is the policy half of the same gap. |
 | `parent-index-adoption` | PostgreSQL does not support adopting an existing index as a constraint on a partitioned parent in any supported version | `by-design` | No online mechanism exists; the matrix marks it ❌. Waiting for a pg-sprite release would wait for nothing. |
-| `parent-not-valid-foreign-key` | PostgreSQL before version 18 cannot add a `NOT VALID` foreign key on a partitioned table | `environmental` | The same statement, table, and pg-sprite build runs on a newer server; the action that unblocks it is a server upgrade, not an engine release. The matrix currently marks this row 🟡; under this contract it is T1 with a server-version precondition, and the sweep in rollout step 2 corrects the mark. |
+| `parent-not-valid-foreign-key` | PostgreSQL before version 18 cannot add a `NOT VALID` foreign key on a partitioned table | `environmental` | The same statement, table, and pg-sprite build runs on a newer server; the action that unblocks it is a server upgrade, not an engine release. The matrix marks this row ✅ with a server-version precondition. |
 
 ### `unsupported-statement` on the create path, keyed on `CreateShapeCause`
 
@@ -178,29 +178,23 @@ The implementation follows the repository's proof-type idiom: unexported fields 
 validating constructor make a valid refusal the only value downstream renderers can receive.
 Refusal constructors take a non-zero class (and require a valid owner exactly for
 `no-online-safety-problem`) rather than constructing a `Verdict` and filling fields later.
-In outline, not as the final API:
-
-```go
-type RefusalClass string
-
-type Refusal struct {
-	class  RefusalClass
-	reason Reason
-	owner  Owner
-}
-
-func NewRefusal(class RefusalClass, reason Reason, owner Owner) (Refusal, error) {
-	// Reject zero/unknown class and invalid class-owner combinations.
-	return Refusal{class: class, reason: reason, owner: owner}, nil
-}
-```
+`pkg/verdict` implements it as the `Refusal` proof type: `NewRefusal(class, reason, owner)`
+rejects the zero or an unknown class, an unknown reason, and an owner outside
+`no-online-safety-problem`; the per-class constructors (`CapabilityBoundary`,
+`NoOnlineSafetyProblem`, `ByDesign`, `Environmental`, `InvariantViolation`) are total for
+valid inputs; and `Verdict.WithRefusal` is the only way a verdict acquires its
+`outcome: refused`, `reason`, `class`, and `owner` together.
 
 A registry names every refusal key — a typed cause where one exists, a site where none does —
 together with its reason, class, and optional owner. A completeness test derives the keys
 from production (`verdict.Reasons()`, `executor.CreateShapeCauses()`,
 `preflight.PartitionRefusalCauses()`, the admission sentinel sets, and a walk of the remaining
 refusal sites) and fails if a key is absent, carries the zero class, or violates the owner
-rule. Keying on causes is what gives the test correspondence rather than presence: a registry
+rule. The registry has two halves: `pkg/plan/refusal.go` classifies the keys that travel with
+a planned statement (`CreateShapeRefusal`, `PartitionRefusal`, `RouteRefusal`), and
+`pkg/migrate/refusal_registry.go` classifies statement kinds at the gate, the admission
+sentinel sets, and the imperative sites; `TestRefusalRegistryIsComplete` in `pkg/migrate`
+covers both halves. Keying on causes is what gives the test correspondence rather than presence: a registry
 keyed on sites alone would go green with `admissionRefusalVerdict` classified
 `capability-boundary` while it minted a `by-design` refusal for every `CREATE ... IF NOT
 EXISTS`.
@@ -214,7 +208,7 @@ registry completeness harness in `internal/safety`, whose `sentinelProofTypes` e
 same reason: do not maintain a test-only shadow list that can drift from production, and do
 not let the derivation's own failure look like success.
 
-Until the field ships, the map in this document is itself pinned: the `docs_test.go` guards
+The map in this document is pinned: the `docs_test.go` guards
 in `pkg/verdict`, `pkg/executor`, and `pkg/preflight` fail when a `Reason`,
 `CreateShapeCause`, or `PartitionRefusalCause` exists in the code without a row here, so a
 new discriminator value cannot land unclassified.
@@ -237,35 +231,32 @@ words rather than defining its own:
 
 The matrix, its contract, and this document define one vocabulary and must change together.
 The matrix describes the operation independent of a run; the verdict reports how one run met
-that contract. Where a cause table above disagrees with a matrix mark today (the `NOT VALID`
-foreign key on a partitioned parent), the cause table is the decision and the matrix is
-corrected in the rollout sweep.
+that contract. The cause tables above are the decision; the matrix mark for the `NOT VALID` foreign key
+on a partitioned parent was corrected to agree with them.
 
 ## Compatibility and rollout
 
 This is an additive JSON change. Consumers that ignore unknown fields are unaffected;
 consumers that understand `class` stop maintaining their own reason buckets. Text renderers
 show the class and, when present, owner. Exit code 2 retains its meaning, and every existing
-reason string remains byte-for-byte unchanged. When the field ships, `demo/tour.sh` assertions
-are updated with the JSON surface.
+reason string remains byte-for-byte unchanged. `demo/tour.sh` asserts the class on the JSON
+surface alongside the reason and cause.
 
-Sequence the work in three steps:
+The work landed in three steps:
 
-1. Land this contract first, with the docs guards that pin its cause tables to the code.
-2. Add engine classification, CLI surfaces, and the documentation sweep as one change. The
-   capability-statement sync rule moves `capabilities.md`, `limitations.md`, the root README,
-   and demo assertions together. In particular, that sweep updates `limitations.md`'s opening
-   claim that all refusals mean an online-safety guarantee cannot be provided, and the root
-   README's refusal and “What pg-sprite does not do yet” descriptions: some refusals instead
-   mean there is no online-safety problem here. It also corrects the matrix mark for the
-   `NOT VALID` foreign key on a partitioned parent. This is the step that adds the invariant
-   to [the RF registry](invariants.md#refusals-and-preflight-rf) — every refusal carries a
-   non-zero class, and `owner` is present exactly for `no-online-safety-problem` — because the
-   registry describes shipped behavior, and only then is there a constructor and a
-   completeness test enforcing it. This document establishes no invariant on its own; RF-5
-   and RF-6 are unchanged by it and are cited above because the map must agree with them.
+1. This contract, with the docs guards that pin its cause tables to the code. *(done)*
+2. Engine classification, CLI surfaces, and the documentation sweep as one change. The
+   capability-statement sync rule moved `capabilities.md`, `limitations.md`, the root README,
+   and demo assertions together: `limitations.md` no longer claims every refusal means an
+   online-safety guarantee cannot be provided, the root README says some refusals mean there
+   is no online-safety problem here, and the matrix mark for the `NOT VALID` foreign key on a
+   partitioned parent was corrected. This step added
+   [RF-7](invariants.md#refusals-and-preflight-rf) — every refusal carries a non-zero class,
+   and `owner` is present exactly for `no-online-safety-problem` — because the registry
+   describes shipped behavior, and the constructor and completeness test enforce it. RF-5 and
+   RF-6 are unchanged and are cited above because the map must agree with them. *(done)*
 3. Make the replay corpus assert the engine-emitted class instead of curating its own
-   classification.
+   classification. *(pending)*
 
 Non-goals are changing exit codes, changing any existing reason string, implementing a missing
 backend, or changing the capability tier of an operation (the one matrix-mark correction above
