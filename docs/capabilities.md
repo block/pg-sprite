@@ -138,8 +138,13 @@ the canonical example.
 
 ## Support matrix
 
+> **Editing the matrix:** edit `../pkg/capabilities/capabilities.yaml`, then run
+> `make gen-capabilities`; do not edit the generated regions below by hand.
+
+<!-- capabilities:begin summary -->
 **53 operations: 17 supported today, 20 planned behind a typed refusal, 14 out of scope
 by design, and 2 with no online mechanism in PostgreSQL to build on.**
+<!-- capabilities:end summary -->
 
 Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today) ·
 ⚪ T3 (out of scope; **no online-safety problem** — run directly, or through whatever
@@ -149,6 +154,7 @@ review the object warrants) ·
 
 ### Column changes
 
+<!-- capabilities:begin column_changes -->
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | `ADD COLUMN` (no default, or constant default) | ✅ | native, as-is | Yes | Metadata-only / fast default (PG 11+); executes instantly under bounded locks |
@@ -162,9 +168,11 @@ review the object warrants) ·
 | `SET NOT NULL` | ✅ | native, safer sequence | Yes | Executed as the native four-step pattern: `ADD CONSTRAINT ... CHECK (col IS NOT NULL) NOT VALID` → online `VALIDATE` → `SET NOT NULL` (catalog flip, PG 12+) → drop the scaffold check |
 | `RENAME COLUMN` / `RENAME TABLE` | ✅ | native, as-is | Yes | Metadata-only for PostgreSQL but **app-breaking** across deployed instances; executed with a typed reason so lint/plan consumers can steer away |
 | `SET TABLESPACE` | 🟡 | copy-and-swap | Yes | Physical relocation is a rewrite; copy-and-swap route |
+<!-- capabilities:end column_changes -->
 
 ### Constraints
 
+<!-- capabilities:begin constraints -->
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | `ADD PRIMARY KEY` / `ADD UNIQUE` (plain key columns) | ✅ | native, safer sequence | Yes | Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX` |
@@ -173,9 +181,11 @@ review the object warrants) ·
 | `ADD FOREIGN KEY ... NOT VALID` on a **partitioned parent** | 🟡 | native, planned flow | Yes | PostgreSQL supports this only from version 18; refused on 14–17 |
 | `EXCLUDE` constraints (and unrecognized constraint forms) | ❌ | — | Yes — unsolvable today | No online pattern exists in PostgreSQL — the build scans under `ACCESS EXCLUSIVE` with no `NOT VALID`/`USING INDEX` equivalent. Refused; revisit only if PostgreSQL grows one |
 | `DROP CONSTRAINT` | ✅ | native, as-is | Yes | Metadata-only; flagged **destructive** |
+<!-- capabilities:end constraints -->
 
 ### Indexes
 
+<!-- capabilities:begin indexes -->
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | `CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN | ✅ | native, safer sequence | Yes | Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification, typed invalid-index outcomes, and a proven recovery for abandoned leftovers (`RebuildAbandonedIndex`, or `DropAbandonedIndex` to remove the leftover without rebuilding; both library-only; [runbook](invalid-index-recovery.md)) |
@@ -183,9 +193,11 @@ review the object warrants) ·
 | `REINDEX` | ✅ | native, safer sequence | Yes | Rewritten to `REINDEX ... CONCURRENTLY` |
 | Index build on a **partitioned parent** | 🟡 | native, planned flow | Yes | PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned |
 | `ADD CONSTRAINT ... USING INDEX` on a partitioned parent | ❌ | — | Yes — unsolvable today | PostgreSQL does not support adopting an index on a partitioned parent in any supported version; refused before execution |
+<!-- capabilities:end indexes -->
 
 ### Partitioned tables
 
+<!-- capabilities:begin partitioned_tables -->
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | `CREATE TABLE ... PARTITION OF` | 🟡 | native, planned flow | Yes | Typed refusal at both doors: the imperative door does not take `CREATE TABLE`, and the declarative create path refuses the form at plan time and re-checks it at apply — attaching a partition takes a brief `ACCESS EXCLUSIVE` on the **parent**, which the greenfield absence proof does not cover. The partition-aware flow is planned |
@@ -193,9 +205,11 @@ review the object warrants) ·
 | `DETACH PARTITION [CONCURRENTLY]` | ✅ | native, safer sequence | Yes | `CONCURRENTLY` is the idiom; the blocking form is rewritten to it |
 | Partitioned parents in the **declarative model** | 🟡 | native, planned flow | Yes | Typed refusal: the model does not yet carry partition keys, and rendering a partitioned parent as a plain `CREATE TABLE` would be silently wrong |
 | Partitioned tables in **copy-and-swap** | 🟡 | copy-and-swap | Yes | Root-vs-leaf publication semantics and per-partition swap; sequenced after the copy engine core |
+<!-- capabilities:end partitioned_tables -->
 
 ### The declarative model (desired files, diff, pull)
 
+<!-- capabilities:begin declarative_model -->
 | Table shape | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | Plain tables + their indexes | ✅ | native, as-is | Yes | `diff`, `pull`, and desired-file rendering round-trip the canonical model. The model carries each index's validity (`pg_index.indisvalid`): on a plain table an invalid entry is a concurrent build that did not finish — abandoned, or still running — so a live entry with the desired name and definition does not deliver the desired index, and `diff` plans it as a `create-index` change. `diff` never emits a drop for an invalid entry, whatever the desired file says about its name: a plain `DROP INDEX` blocks the table and cannot tell abandoned debris from a build still in progress. A `pull`ed baseline of such a table therefore re-diffs to that one rebuild rather than to zero. On a partitioned parent an invalid index means unattached partition indexes, not an unfinished build, so validity plays no part in the parent's comparison |
@@ -205,9 +219,11 @@ review the object warrants) ·
 | Explicit column collations | 🟡 | native, planned flow | Yes | Typed refusal: dropping a `COLLATE` clause from a rendered baseline silently changes sort order and index semantics; a collation delta cannot converge without a rewrite |
 | Columns whose default uses a sequence the column does not own | 🟡 | native, planned flow | Yes | Typed refusal: in a desired-state model that sequence exists only inside the scratch transaction, so no derived plan can reference it. Column-owned (`serial`-style) sequences are fine |
 | Greenfield `CREATE TABLE` apply (the table does not exist yet — a fresh database or a new table in a live one) | ✅ | native, as-is | Yes — a `REFERENCES` clause would take a brief `SHARE ROW EXCLUSIVE` on each **referenced** live table, but desired files refuse foreign keys today, so no live table is locked | Desired-state execution creates the table: `CheckTableAbsent` verifies the table relation and composite-type name are free, the executor verifies every relation name the desired file states (explicit index names and first-choice constraint-index and column-sequence names) is free in the schema, and `CheckCreatePrivileges` verifies the role can create there. It then runs the `CREATE TABLE` and index builds as brief bounded steps under the engine's budgets. An occupied claimed name is a typed `create-collision` refusal before execution — drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff (a read of the owned names that does not complete is the same step-1 failure as `create-names-unverified`, never a pass). `PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, and in-set duplicate names refuse at plan time and are re-checked at apply, while `REFERENCES` and `CONCURRENTLY` are refused upstream at desired-file parse and re-checked at admission as defense in depth |
+<!-- capabilities:end declarative_model -->
 
 ### Types and non-table objects
 
+<!-- capabilities:begin types_and_non_table_objects -->
 | Object / operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | Enum-typed columns on plain tables | 🟡 | native, planned flow | Yes | Tolerance end to end (introspection already canonicalizes via `format_type`; desired-file admission and transaction-scoped scratch-schema mechanics are being verified) |
@@ -222,9 +238,11 @@ review the object warrants) ·
 | Grants, roles, row-level-security policies | 🔵 | — | No — provisioning / IaC | Access control, not table shape; belongs to provisioning (see [engine-role.md](engine-role.md) for what the *engine's own* role needs) |
 | Standalone sequences | ⚪ | — | No — owner tooling | Transactional catalog work on an object with no readers-and-writers problem |
 | Publications, subscriptions | 🔵 | — | No — replication provisioning / IaC | Replication provisioning, not table shape (`ALTER PUBLICATION ... ADD TABLE` also takes `SHARE UPDATE EXCLUSIVE` on the table) |
+<!-- capabilities:end types_and_non_table_objects -->
 
 ### Data and whole-table operations
 
+<!-- capabilities:begin data_and_whole_table_operations -->
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | `DROP TABLE` | ⚪ | — | No — owner tooling, through a reviewed process | Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it — the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. pg-sprite never plans or executes it; accounting for undeclared tables is the whole-schema owner's job, described under [Deliberately operator-owned](#deliberately-operator-owned) |
@@ -234,6 +252,7 @@ review the object warrants) ·
 | Whole-schema convergence (apply a directory of desired files, dependency-ordered) | 🔵 | — | No — convergence planners (pg-schema-diff, pgschema, pgdelta) | Convergence planning across objects is a planner's job; pg-sprite stays the execution engine for the table-shape subset |
 | Versioned schema-change-file workflow (Flyway-style ordered scripts) | 🔵 | — | No — versioned-script runners (Flyway-style) | Declarative-only by design; see [vision.md](vision.md) |
 | Expand/contract dual-schema versions (pgroll/reshape style) | 🔵 | — | No — pgroll/reshape own this model | Rejected: application invisibility is a core invariant; see [vision.md](vision.md) |
+<!-- capabilities:end data_and_whole_table_operations -->
 
 ## Peers share these limits — for different reasons
 

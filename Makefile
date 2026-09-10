@@ -14,7 +14,10 @@ PG_DSN_LOCAL = postgres://$(PG_USER):$(PG_PASSWORD)@localhost:$(PG_PORT)/$(PG_DA
 # Which corpus replay project to run (replay/<project>/project.conf).
 REPLAY_PROJECT ?= buzz
 
-.PHONY: build test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+.PHONY: build gen-capabilities test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+
+gen-capabilities:
+	$(GO) run ./internal/cmd/gen-capabilities
 
 build:
 	$(GO) build -o bin/pg-sprite ./cmd/pg-sprite
