@@ -147,6 +147,7 @@ func writeRefusal(w *stickyWriter, ps plan.Statement) []string {
 			reason = verdict.ReasonUnsupportedStatement
 		}
 		w.diag("error", string(reason), "refused — "+refuseText(ps, reason))
+		writeRefusalClass(w, ps)
 		return []string{string(reason)}
 	}
 	// An unrecognized disposition is outside this build's contract: refuse
@@ -154,6 +155,22 @@ func writeRefusal(w *stickyWriter, ps plan.Statement) []string {
 	// a code this build does not know has no anchor to link.
 	w.diag("error", "unknown-disposition", fmt.Sprintf("refused — unrecognized disposition %q; treat the statement as not executable", ps.Disposition))
 	return nil
+}
+
+// writeRefusalClass emits the refusal's typed class and owner as a note, so
+// a human reading the text renderer sees the same routing the JSON report
+// carries: whether to wait for a capability, hand the statement to its owner,
+// use a safer idiom, fix the environment, or report a bug. A statement the
+// plan report leaves unclassified emits nothing rather than a blank class.
+func writeRefusalClass(w *stickyWriter, ps plan.Statement) {
+	if ps.Class == "" {
+		return
+	}
+	msg := "refusal class: " + string(ps.Class)
+	if ps.Owner != "" {
+		msg += "; owner: " + string(ps.Owner)
+	}
+	w.diag("note", "", msg)
 }
 
 // decisionSeverity maps one operation's classification to its diagnostic

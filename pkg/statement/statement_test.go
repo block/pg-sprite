@@ -1,6 +1,9 @@
 package statement
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -324,17 +327,66 @@ func TestBuildsIndex(t *testing.T) {
 	}
 }
 
+// The closed set is complete: Kinds() enumerates exactly the Kind constants
+// the iota block in statement.go declares, and every named kind has its own
+// String(). A length check pinned to the last constant would keep passing
+// after a kind is appended past it and left out of the walk.
 func TestKindsIsClosedAndNamed(t *testing.T) {
 	kinds := Kinds()
 	require.Equal(t, KindOther, kinds[0], "the catch-all leads the walk")
-	seen := map[Kind]bool{}
+
+	declared := declaredKinds(t)
+	enumerated := make(map[Kind]struct{}, len(kinds))
 	names := map[string]bool{}
 	for _, k := range kinds {
-		assert.False(t, seen[k], "duplicate kind %d", k)
-		seen[k] = true
+		_, dup := enumerated[k]
+		assert.False(t, dup, "duplicate kind %d", k)
+		enumerated[k] = struct{}{}
 		assert.NotEmpty(t, k.String())
 		assert.False(t, names[k.String()], "duplicate kind name %q", k.String())
 		names[k.String()] = true
+		if k != KindOther {
+			assert.NotEqual(t, KindOther.String(), k.String(),
+				"kind %d falls through to the catch-all name", k)
+		}
 	}
-	assert.Len(t, kinds, int(KindCatalogWork)+1, "Kinds() must list every declared kind")
+	assert.Equal(t, declared, enumerated,
+		"Kinds() must enumerate exactly the Kind constants statement.go declares")
+}
+
+// declaredKinds parses statement.go and returns the value of every constant
+// in the iota block that KindOther opens.
+func declaredKinds(t *testing.T) map[Kind]struct{} {
+	t.Helper()
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "statement.go", nil, parser.SkipObjectResolution)
+	require.NoError(t, err)
+
+	for _, decl := range file.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST || len(gen.Specs) == 0 {
+			continue
+		}
+		first, ok := gen.Specs[0].(*ast.ValueSpec)
+		if !ok || len(first.Names) != 1 || first.Names[0].Name != "KindOther" {
+			continue
+		}
+		declared := make(map[Kind]struct{}, len(gen.Specs))
+		for i, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			require.True(t, ok)
+			require.Len(t, vs.Names, 1, "one Kind per line in the iota block")
+			if i == 0 {
+				require.Len(t, vs.Values, 1, "KindOther opens the iota block")
+				ident, ok := vs.Values[0].(*ast.Ident)
+				require.True(t, ok && ident.Name == "iota", "KindOther is the iota anchor")
+			} else {
+				require.Empty(t, vs.Values, "%s takes its value from iota", vs.Names[0].Name)
+			}
+			declared[Kind(i)] = struct{}{}
+		}
+		return declared
+	}
+	t.Fatal("statement.go declares no const block opened by KindOther")
+	return nil
 }

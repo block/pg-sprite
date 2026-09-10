@@ -13,14 +13,15 @@ the examples at the end of this page.
 Every report carries `format_version`. A consumer that does not recognize the version must
 **reject the report** — never guess at field semantics. The version covers more than the
 field shape: the closed vocabularies below (sources, routes, backends, dispositions,
-kinds, guidance, causes) and the fingerprint serialization are all pinned to it. Adding a vocabulary value or
+kinds, guidance, causes, classes, owners) and the fingerprint serialization are all pinned to it. Adding a vocabulary value or
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **3**: version 3 added the statement-level `cause` field on
-greenfield statements the create path refuses by shape; version 2 added the statement-level
-`guidance` field on `rewrite-required` statements. The fingerprint definition is unchanged
-from version 1.
+The current version is **4**: version 4 added the `class` and `owner` fields on the report
+and on refused statements, each drawn from a closed vocabulary (see Classes and Owners);
+version 3 added the statement-level `cause` field on greenfield statements the create path
+refuses by shape; version 2 added the statement-level `guidance` field on `rewrite-required`
+statements. The fingerprint definition is unchanged from version 1.
 
 The [lint report](lint-report.md) is a separate contract with its own `format_version`; the
 two version independently. Lint findings embed this contract's Reasons vocabulary — the lint
@@ -51,6 +52,8 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `table_exists` | bool | when introspected | Whether the live table was found. Set by both sources that introspect the target (diff, and the alter dry run); absent means the plan has no single table target to introspect. For diff, `false` means the plan is the full desired schema; for an alter dry run, `false` means the plan was classified from zero facts, executing it would fail, and the dry run exits with the refusal code. |
 | `disposition` | string | always | Aggregate disposition across all statements (see Dispositions). |
 | `reason` | string | target-dependent refusal only | Aggregate typed refusal cause when target facts override an otherwise executable route. |
+| `class` | string | target-dependent refusal only | Aggregate refusal class (see Classes): how a consumer routes the refusal. Present exactly when `reason` is; a planner-level refusal carries its class on the refused statement instead. |
+| `owner` | string | `no-online-safety-problem` refusals only | Who owns the aggregate work pg-sprite has no online-safety reason to run (see Owners). Present exactly when `class` is `no-online-safety-problem`. |
 | `fingerprint` | string | always | The plan's stable identity (see Fingerprint). |
 | `statements` | array | always | The ordered plan; `[]` (never `null`) means nothing to do. |
 
@@ -66,6 +69,8 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `disposition` | string | always | What execution would do with this statement now (see Dispositions). |
 | `reason` | string | refusals only | Typed refusal cause for this statement: `unsupported-statement` for a planner-level refusal or, on a greenfield plan, a create shape the create path refuses (`cause` names which); `unsupported-partitioned-parent` when target facts refuse it. An unknown value must be treated as refused. |
 | `cause` | string | greenfield create-shape refusals only | The create path's typed shape refusal (see Causes): why a table born in the run cannot carry this statement. Present exactly when the create path refused the statement — on a `diff`-source report with `table_exists: false`, that is every statement whose `disposition` is `refuse` and `reason` is `unsupported-statement`. Absent for every other refusal, including an `alter`-source refusal against a table that does not exist. Explanatory: excluded from the fingerprint. |
+| `class` | string | refusals only | This statement's refusal class (see Classes): how a consumer routes it — wait for a capability, hand to an owner, use a safer idiom, fix the environment, or report a bug. Present exactly when `disposition` is `refuse`. Explanatory: excluded from the fingerprint. |
+| `owner` | string | `no-online-safety-problem` refusals only | Who owns the work (see Owners). Present exactly when `class` is `no-online-safety-problem`. Explanatory: excluded from the fingerprint. |
 | `decisions` | array | always | The planner's per-operation classifications (below). |
 | `exec_sql` | array | native route | The ordered SQL the native backend would run — the safer sequence when the planner constructed one, or the statement as written for a table that does not exist yet (the greenfield create path runs plain builds; see Fingerprint). Absent for non-native routes. |
 | `execution` | string | with `exec_sql` | The typed execution contract for `exec_sql` (see Execution contracts). A consumer that runs the statements itself branches on this — it is what says the steps must not be wrapped in a transaction block. Present exactly when `exec_sql` is. |
@@ -198,6 +203,32 @@ admission cannot produce them. They are published so the vocabulary is closed, n
 consumer should branch on them; one appearing in a report means the desired schema bypassed
 admission.
 
+### Classes (`class`, `statements[].class`)
+
+This vocabulary is owned by `pkg/verdict` and closed: a new class is a contract change that
+bumps `format_version`. [docs/refusal-classes.md](refusal-classes.md) is the authoritative
+statement of each class and its consumer action; this table is a copy of its rows.
+
+| Value | Meaning |
+|---|---|
+| `capability-boundary` | The engine cannot do this yet, or has no implemented safe route. Wait for the capability or escalate. |
+| `no-online-safety-problem` | There is nothing for an online schema-change engine to make safe; another tool class owns the work, or the operator runs it directly. Hand the statement to the named `owner`. |
+| `by-design` | pg-sprite permanently refuses this form — PostgreSQL offers no online mechanism in any supported version, or a safer idiom exists and the verdict names it. Use the safer idiom, or run the blocking form outside pg-sprite in a maintenance window. |
+| `environmental` | The change is supportable, but not here, now, or as this role: a size policy, exhausted budget, privilege, server version, stale plan, or catalog collision stopped it. Retry, provision, upgrade, re-plan, or escalate. |
+| `invariant-violation` | pg-sprite refused because its own input or state is incoherent — a report this build cannot have produced. Report it with the verdict; do not retry, wait, or route elsewhere. |
+
+### Owners (`owner`, `statements[].owner`)
+
+This vocabulary is owned by `pkg/verdict` and closed: a new owner is a contract change that
+bumps `format_version`. Present exactly when `class` is `no-online-safety-problem`.
+
+| Value | Meaning |
+|---|---|
+| `data-change-runner` | Data changes and backfills owned by the application's data change runner (the tool that runs its versioned SQL or ORM changes). |
+| `declarative-front-door` | Catalog bootstrap and convergence from a desired `CREATE TABLE`; `CREATE TABLE` keeps its pointer to `diff`. |
+| `direct-operator` | Nobody else's tool: the statement has no online-safety problem, so whoever operates the table runs it directly, through whatever review the object warrants. |
+| `provisioning` | Access control and replication provisioning — grants, roles, row-level-security policies, publications, subscriptions — owned by infrastructure-as-code. |
+
 ### Kinds (`kind`, diff source only)
 
 | Value | Meaning |
@@ -259,7 +290,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 3,
+  "format_version": 4,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -302,7 +333,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 3,
+  "format_version": 4,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -369,7 +400,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 3,
+  "format_version": 4,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

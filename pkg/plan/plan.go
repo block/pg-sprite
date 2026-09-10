@@ -25,8 +25,9 @@ import (
 // report whose version it does not understand instead of guessing at the
 // field semantics. Version 2 added the guidance field on rewrite-required
 // statements. Version 3 added the cause field on greenfield statements the
-// create path refuses by shape.
-const FormatVersion = 3
+// create path refuses by shape. Version 4 added the class and owner fields on
+// the report and on refused statements, and closed their vocabularies.
+const FormatVersion = 4
 
 // Source identifies which front door derived the plan.
 type Source string
