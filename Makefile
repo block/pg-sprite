@@ -54,19 +54,24 @@ lint:
 	golangci-lint run
 
 # Regenerate the marked regions of docs/capabilities.md from the embedded
-# matrix (pkg/capabilities/capabilities.yaml); CI fails if they drift.
+# matrix (pkg/capabilities/capabilities.yaml); CI fails if they drift. The
+# gate below runs the same command, so the two cannot drift apart.
+GEN_CAPABILITIES = $(GO) run ./internal/cmd/gen-capabilities
+
 gen-capabilities:
-	$(GO) run ./internal/cmd/gen-capabilities
+	$(GEN_CAPABILITIES)
 
 # Regenerate the capabilities page and fail if regeneration changed it. Only the
 # generator's own edits count, so an uncommitted edit to the hand-written prose
-# outside the marker regions does not trip the gate; the stale generated output
-# is left in place, with the diff printed, for review.
+# outside the marker regions does not trip the gate. The target is a pure
+# check: on failure it prints the diff and puts the committed page back, so a
+# rerun fails the same way and `make gen-capabilities` is the only command
+# that writes the page.
 check-capabilities:
 	@before=$$(mktemp); cp docs/capabilities.md "$$before"; \
-	$(GO) run ./internal/cmd/gen-capabilities || { rm -f "$$before"; exit 1; }; \
+	$(GEN_CAPABILITIES) || { rm -f "$$before"; exit 1; }; \
 	if ! diff -u --label docs/capabilities.md --label regenerated "$$before" docs/capabilities.md; then \
-		rm -f "$$before"; \
+		cp "$$before" docs/capabilities.md; rm -f "$$before"; \
 		echo "docs/capabilities.md disagrees with pkg/capabilities/capabilities.yaml; run make gen-capabilities and commit the result" >&2; \
 		exit 1; \
 	fi; \

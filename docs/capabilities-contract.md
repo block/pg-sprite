@@ -157,11 +157,12 @@ order is display order, formatting has no timestamps, and a second generation is
 The generator lands with the YAML file, not later. `make check-capabilities` runs its
 `go run` entry point and fails unless regeneration leaves the page byte-identical; only
 the generator's own edits count, so an uncommitted edit to the hand-written prose does
-not trip it. The unconditional unit job in `.github/workflows/ci.yml` runs that target
-beside the unit tests on code and docs-only changes alike, and
-`.github/workflows/release.yml` repeats it for the tagged tree before the test sweep. The
-test validates semantics; regenerate-and-diff proves the checked-in human page is the
-rendering of the validated data.
+not trip it, and a failing run restores the committed page so the check has no side
+effect and `make gen-capabilities` is the one command that writes it. The unconditional
+unit job in `.github/workflows/ci.yml` runs that target beside the unit tests on code and
+docs-only changes alike, and `.github/workflows/release.yml` repeats it for the tagged
+tree before the test sweep. The test validates semantics; regenerate-and-diff proves the
+checked-in human page is the rendering of the validated data.
 
 The capability-statement rule still applies beyond the generated matrix. A behavior
 change updates the YAML, [limitations.md](limitations.md), and the README's short
@@ -265,15 +266,14 @@ artifact. The generated `docs/capabilities.md` remains the human-facing home.
 This decision does not build sortable HTML tables or a documentation site. It also
 does not change any capability, tier, refusal, or runtime behavior.
 
-Implementation order is:
-
-**Status:** steps 1 and 3 are complete; steps 2 and 4 remain planned.
+Implementation order is, with each step marked as it ships:
 
 1. add the typed package, `pkg/capabilities/capabilities.yaml`, validator, generator,
-   and markers together, making the repository single-source on day one;
+   and markers together, making the repository single-source on day one; *(done)*
 2. add `pg-sprite capabilities`, including `--json` and the embedded binary version;
-3. add the regenerate-and-diff CI gate to the normal pipeline; and
-4. add documentation and `jq` recipes for consumers.
+   *(pending)*
+3. add the regenerate-and-diff CI gate to the normal pipeline; and *(done)*
+4. add documentation and `jq` recipes for consumers. *(pending)*
 
 The generator is part of the first step rather than a cleanup step: there is never an
 intermediate state in which two hand-maintained matrices are authoritative.
