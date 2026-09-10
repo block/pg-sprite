@@ -16,6 +16,9 @@ default project, so from the repository root:
 make replay
 ```
 
+Each refusal row pins the class emitted by pg-sprite; the engine's classification is
+authoritative. See the [refusal class contract](../../docs/refusal-classes.md).
+
 ## Boundary facts the curation surfaced
 
 Curating the manifest against real verdicts (not predictions) established two
