@@ -166,6 +166,8 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 	v := verdict.Verdict{
 		Outcome:       verdict.OutcomeFailed,
 		Reason:        verdict.ReasonIndexStatement,
+		Class:         verdict.ClassNoOnlineSafetyProblem,
+		Owner:         verdict.OwnerDirectOperator,
 		Cause:         verdict.CauseLockBudget,
 		Code:          "lock-budget-exceeded",
 		FailedStep:    2,

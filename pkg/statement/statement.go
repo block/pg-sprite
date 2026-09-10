@@ -33,7 +33,27 @@ const (
 	KindDropIndex
 	KindReindex
 	KindCreateTable
+	KindDataChange
+	KindProvisioning
+	KindCatalogWork
 )
+
+// Kinds returns the closed set of statement kinds, KindOther first. The
+// front door's refusal classification registry walks it to prove every kind
+// it does not admit is classified.
+func Kinds() []Kind {
+	return []Kind{
+		KindOther,
+		KindAlterTable,
+		KindCreateIndex,
+		KindDropIndex,
+		KindReindex,
+		KindCreateTable,
+		KindDataChange,
+		KindProvisioning,
+		KindCatalogWork,
+	}
+}
 
 // String returns the human-readable name of the kind.
 func (k Kind) String() string {
@@ -48,6 +68,12 @@ func (k Kind) String() string {
 		return "REINDEX"
 	case KindCreateTable:
 		return "CREATE TABLE"
+	case KindDataChange:
+		return "data change"
+	case KindProvisioning:
+		return "provisioning"
+	case KindCatalogWork:
+		return "catalog work"
 	default:
 		return "other"
 	}
@@ -131,6 +157,13 @@ func ParseOne(sql string) (Statement, error) {
 	st := Statement{sql: sql}
 	node := tree.GetStmts()[0].GetStmt()
 	switch {
+	case node.GetInsertStmt() != nil, node.GetUpdateStmt() != nil, node.GetDeleteStmt() != nil, node.GetMergeStmt() != nil:
+		st.kind = KindDataChange
+	case node.GetGrantStmt() != nil, node.GetGrantRoleStmt() != nil, node.GetCreateRoleStmt() != nil,
+		node.GetAlterRoleStmt() != nil, node.GetCreatePolicyStmt() != nil, node.GetAlterPolicyStmt() != nil,
+		node.GetCreatePublicationStmt() != nil, node.GetAlterPublicationStmt() != nil,
+		node.GetCreateSubscriptionStmt() != nil, node.GetAlterSubscriptionStmt() != nil:
+		st.kind = KindProvisioning
 	case node.GetAlterTableStmt() != nil:
 		alter := node.GetAlterTableStmt()
 		// ALTER INDEX (and ALTER VIEW etc.) also parse as AlterTableStmt;
@@ -185,10 +218,19 @@ func ParseOne(sql string) (Statement, error) {
 		if node.GetDropStmt().GetRemoveType() == pganalyze.ObjectType_OBJECT_INDEX {
 			st.kind = KindDropIndex
 			st.concurrent = node.GetDropStmt().GetConcurrent()
+		} else {
+			st.kind = KindCatalogWork
 		}
 	case node.GetReindexStmt() != nil:
 		st.kind = KindReindex
 		st.concurrent = reindexConcurrently(node.GetReindexStmt())
+	default:
+		// Parsed statements that are recognized catalog operations are direct
+		// operator work. Truly unknown grammar nodes retain KindOther.
+		if node.GetViewStmt() != nil || node.GetCreateFunctionStmt() != nil || node.GetCreateTrigStmt() != nil ||
+			node.GetCreateExtensionStmt() != nil || node.GetCreateSeqStmt() != nil || node.GetCommentStmt() != nil {
+			st.kind = KindCatalogWork
+		}
 	}
 	return st, nil
 }

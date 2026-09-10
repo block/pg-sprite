@@ -16,22 +16,9 @@ REPLAY_PROJECT ?= buzz
 
 .PHONY: build gen-capabilities check-capabilities test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
-gen-capabilities:
-	$(GO) run ./internal/cmd/gen-capabilities
-
-# Regenerate the capabilities page and fail if regeneration changed it. Only the
-# generator's own edits count, so an uncommitted edit to the hand-written prose
-# outside the marker regions does not trip the gate; the stale generated output
-# is left in place, with the diff printed, for review.
-check-capabilities:
-	@before=$$(mktemp); cp docs/capabilities.md "$$before"; \
-	$(GO) run ./internal/cmd/gen-capabilities || { rm -f "$$before"; exit 1; }; \
-	if ! diff -u --label docs/capabilities.md --label regenerated "$$before" docs/capabilities.md; then \
-		rm -f "$$before"; \
-		echo "docs/capabilities.md disagrees with pkg/capabilities/capabilities.yaml; run make gen-capabilities and commit the result" >&2; \
-		exit 1; \
-	fi; \
-	rm -f "$$before"
+# The first target is make's default goal: keep build here so a bare
+# `make` builds the binary rather than rewriting a checked-in document.
+.DEFAULT_GOAL := build
 
 build:
 	$(GO) build -o bin/pg-sprite ./cmd/pg-sprite
@@ -65,6 +52,25 @@ test-aws-boundary:
 
 lint:
 	golangci-lint run
+
+# Regenerate the marked regions of docs/capabilities.md from the embedded
+# matrix (pkg/capabilities/capabilities.yaml); CI fails if they drift.
+gen-capabilities:
+	$(GO) run ./internal/cmd/gen-capabilities
+
+# Regenerate the capabilities page and fail if regeneration changed it. Only the
+# generator's own edits count, so an uncommitted edit to the hand-written prose
+# outside the marker regions does not trip the gate; the stale generated output
+# is left in place, with the diff printed, for review.
+check-capabilities:
+	@before=$$(mktemp); cp docs/capabilities.md "$$before"; \
+	$(GO) run ./internal/cmd/gen-capabilities || { rm -f "$$before"; exit 1; }; \
+	if ! diff -u --label docs/capabilities.md --label regenerated "$$before" docs/capabilities.md; then \
+		rm -f "$$before"; \
+		echo "docs/capabilities.md disagrees with pkg/capabilities/capabilities.yaml; run make gen-capabilities and commit the result" >&2; \
+		exit 1; \
+	fi; \
+	rm -f "$$before"
 
 # Configure git hooks (relative path so worktrees work too).
 setup:

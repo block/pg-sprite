@@ -30,7 +30,8 @@ perfectly**: change the shape of live PostgreSQL tables while applications
 keep reading and writing them. Anything that is not that one thing — data
 backfills, catalog bootstrap, GitOps orchestration, access control — is
 deliberately another tool's job: the engine refuses it with a typed verdict,
-and [docs/capabilities.md](docs/capabilities.md) names the tool class that
+and every refusal carries a routing class (and an owner when there is no online-safety
+problem for the engine to solve); [docs/capabilities.md](docs/capabilities.md) names the tool class that
 owns each job.
 
 **Status: Phases 1 and 2.1–2.5.** The parse boundary, declarative diff,
@@ -166,8 +167,10 @@ go install github.com/block/pg-sprite/cmd/pg-sprite@latest
 
 Half the CLI works offline on DDL text alone; the other half connects to a
 live database (`--url` / `PGSPRITE_URL`, always under bounded `lock_timeout`
-and `statement_timeout`). Only `migrate` without `--dry-run` ever commits a
-change — every other command is read-only or fully offline.
+and `statement_timeout`; a `search_path` that lists `pg_catalog` after a user
+schema has that entry removed so the schema no longer shadows the catalog, and
+every other entry is left as configured). Only `migrate` without `--dry-run`
+ever commits a change — every other command is read-only or fully offline.
 
 | Command | Live database | What the connection is used for |
 |---|---|---|

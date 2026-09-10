@@ -4,8 +4,10 @@ package capabilities
 import (
 	"bytes"
 	_ "embed"
+	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -104,15 +106,6 @@ var idPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 // Validate checks closed vocabularies and cross-field invariants.
 func Validate(rows []Row) error {
-	areas := set(AreaColumnChanges, AreaConstraints, AreaIndexes, AreaPartitionedTables, AreaDeclarativeModel, AreaTypesAndNonTableObjects, AreaDataAndWholeTableOperations)
-	tiers := set(TierOne, TierTwo, TierThree)
-	marks := set(StatusSupported, StatusPlanned, StatusNoSafetyProblem, StatusOtherTool, StatusNoOnlineMechanism)
-	paths := set(PathNativeAsIs, PathNativeSaferSequence, PathNativePlannedFlow, PathCopyAndSwap, PathNone)
-	doors := set(DoorSupported, DoorRefused, DoorNotApplicable)
-	reasons := map[verdict.Reason]bool{}
-	for _, reason := range verdict.Reasons() {
-		reasons[reason] = true
-	}
 	ids := map[string]bool{}
 	for i, row := range rows {
 		prefix := fmt.Sprintf("row %d", i+1)
@@ -123,11 +116,12 @@ func Validate(rows []Row) error {
 			return fmt.Errorf("%s: duplicate id %q", prefix, row.ID)
 		}
 		ids[row.ID] = true
-		if !areas[row.Area] || !tiers[row.Tier] || !marks[row.StatusMark] || !paths[row.EnginePath] || !doors[row.FrontDoors.Migrate] || !doors[row.FrontDoors.Diff] {
-			return fmt.Errorf("%s: unknown enum value", prefix)
+		prefix = fmt.Sprintf("row %d (%s)", i+1, row.ID)
+		if err := validateEnums(row); err != nil {
+			return fmt.Errorf("%s: %w", prefix, err)
 		}
-		if row.Operation == "" || row.ReasonNotes == "" {
-			return fmt.Errorf("%s: operation and reason_notes are required", prefix)
+		if err := validateText(row); err != nil {
+			return fmt.Errorf("%s: %w", prefix, err)
 		}
 		expected := map[StatusMark]Tier{StatusSupported: TierOne, StatusPlanned: TierTwo, StatusNoSafetyProblem: TierThree, StatusOtherTool: TierThree, StatusNoOnlineMechanism: TierThree}[row.StatusMark]
 		if row.Tier != expected {
@@ -149,19 +143,74 @@ func Validate(rows []Row) error {
 		if refused != (row.RefusalReason != "") {
 			return fmt.Errorf("%s: refusal_reason must be present iff a front door is refused", prefix)
 		}
-		if row.RefusalReason != "" && !reasons[row.RefusalReason] {
-			return fmt.Errorf("%s: unknown refusal_reason %q", prefix, row.RefusalReason)
+		if row.RefusalReason != "" && !slices.Contains(verdict.Reasons(), row.RefusalReason) {
+			return fmt.Errorf("%s: refusal_reason %q is not a verdict.Reason", prefix, row.RefusalReason)
 		}
 	}
 	return nil
 }
 
-func set[T comparable](values ...T) map[T]bool {
-	out := make(map[T]bool, len(values))
-	for _, v := range values {
-		out[v] = true
+// validateEnums checks every closed-vocabulary field of one row and names
+// the first field and value that fall outside their vocabulary.
+func validateEnums(row Row) error {
+	if err := checkEnum("area", row.Area, AreaColumnChanges, AreaConstraints, AreaIndexes, AreaPartitionedTables, AreaDeclarativeModel, AreaTypesAndNonTableObjects, AreaDataAndWholeTableOperations); err != nil {
+		return err
 	}
-	return out
+	if err := checkEnum("tier", row.Tier, TierOne, TierTwo, TierThree); err != nil {
+		return err
+	}
+	if err := checkEnum("status_mark", row.StatusMark, StatusSupported, StatusPlanned, StatusNoSafetyProblem, StatusOtherTool, StatusNoOnlineMechanism); err != nil {
+		return err
+	}
+	if err := checkEnum("engine_path", row.EnginePath, PathNativeAsIs, PathNativeSaferSequence, PathNativePlannedFlow, PathCopyAndSwap, PathNone); err != nil {
+		return err
+	}
+	if err := checkEnum("front_doors.migrate", row.FrontDoors.Migrate, DoorSupported, DoorRefused, DoorNotApplicable); err != nil {
+		return err
+	}
+	return checkEnum("front_doors.diff", row.FrontDoors.Diff, DoorSupported, DoorRefused, DoorNotApplicable)
+}
+
+func checkEnum[T ~string](field string, value T, allowed ...T) error {
+	if slices.Contains(allowed, value) {
+		return nil
+	}
+	return fmt.Errorf("%s %q is not one of %v", field, string(value), allowed)
+}
+
+// validateText checks the free-text cells: the required ones are present,
+// and none carries a newline. Every cell is interpolated into one line of a
+// pipe-delimited Markdown table, and a newline would end the row early and
+// hide every row after it while the generator still reports success.
+func validateText(row Row) error {
+	if row.Operation == "" {
+		return errors.New("operation is required")
+	}
+	if row.ReasonNotes == "" {
+		return errors.New("reason_notes is required")
+	}
+	for field, value := range textCells(row) {
+		if strings.ContainsAny(value, "\r\n") {
+			return fmt.Errorf("%s must be a single line (a table row cannot span lines)", field)
+		}
+	}
+	return nil
+}
+
+// textCells names every free-text field that lands in a rendered table cell.
+func textCells(row Row) map[string]string {
+	return map[string]string{
+		"operation":            row.Operation,
+		"online_safety_detail": row.OnlineSafetyDetail,
+		"owning_tool_class":    row.OwningToolClass,
+		"reason_notes":         row.ReasonNotes,
+	}
+}
+
+// cell escapes a free-text value for one Markdown table cell: an unescaped
+// pipe would split the cell and shift every column after it.
+func cell(value string) string {
+	return strings.ReplaceAll(value, "|", "\\|")
 }
 
 // RenderDocument replaces every marked generated region in a capabilities document.
@@ -194,7 +243,7 @@ func RenderDocument(input []byte, rows []Row) ([]byte, error) {
 			} else if r.OnlineSafetyDetail != "" {
 				answer += " — " + r.OnlineSafetyDetail
 			}
-			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", r.Operation, r.StatusMark, pathLabels[r.EnginePath], answer, r.ReasonNotes)
+			fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", cell(r.Operation), r.StatusMark, pathLabels[r.EnginePath], cell(answer), cell(r.ReasonNotes))
 		}
 		out, err = replaceRegion(out, string(area), strings.TrimSuffix(b.String(), "\n"))
 		if err != nil {
@@ -204,15 +253,37 @@ func RenderDocument(input []byte, rows []Row) ([]byte, error) {
 	return out, nil
 }
 
+// replaceRegion replaces the bytes between one region's begin and end
+// markers. The document must carry exactly one of each, begin first; any
+// other arrangement is refused before either slice so a malformed document
+// is never truncated.
 func replaceRegion(doc []byte, name, content string) ([]byte, error) {
 	begin := []byte("<!-- capabilities:begin " + name + " -->")
 	end := []byte("<!-- capabilities:end " + name + " -->")
-	bi := bytes.Index(doc, begin)
-	ei := bytes.Index(doc, end)
-	if bi < 0 || ei < 0 || ei < bi || bytes.Contains(doc[bi+len(begin):], begin) || bytes.Contains(doc[ei+len(end):], end) {
-		return nil, fmt.Errorf("missing, unbalanced, or duplicate capability markers for %s", name)
+	bi, err := markerIndex(doc, begin)
+	if err != nil {
+		return nil, err
+	}
+	ei, err := markerIndex(doc, end)
+	if err != nil {
+		return nil, err
+	}
+	if ei < bi {
+		return nil, fmt.Errorf("capability marker %q appears before %q", end, begin)
 	}
 	start := bi + len(begin)
 	replacement := []byte("\n" + content + "\n")
 	return append(append(append([]byte(nil), doc[:start]...), replacement...), doc[ei:]...), nil
+}
+
+// markerIndex locates one marker that must appear exactly once.
+func markerIndex(doc, marker []byte) (int, error) {
+	switch bytes.Count(doc, marker) {
+	case 0:
+		return 0, fmt.Errorf("capability marker %q is missing", marker)
+	case 1:
+		return bytes.Index(doc, marker), nil
+	default:
+		return 0, fmt.Errorf("capability marker %q appears more than once", marker)
+	}
 }

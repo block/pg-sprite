@@ -95,6 +95,28 @@ func NewDatabase(t *testing.T, serverURL string) string {
 	return u.String()
 }
 
+// NewCatalogShadowingPool returns a pool whose every session has schema
+// ahead of pg_catalog on search_path, so impostor relations, views,
+// functions, and operators created in schema answer unqualified catalog
+// names. It is a raw pgx pool on purpose: pools from pkg/dbconn remove a
+// shadowed pg_catalog entry on connect, which would make the impostors
+// unreachable, and the tests that use this pool prove that the queries
+// themselves stay pg_catalog-qualified for a pool the library caller built.
+// It carries none of pkg/dbconn's session defaults.
+func NewCatalogShadowingPool(t *testing.T, serverURL, schema string) *pgxpool.Pool {
+	t.Helper()
+	pc, err := pgxpool.ParseConfig(serverURL)
+	require.NoError(t, err, "parse server URL")
+	pc.ConnConfig.RuntimeParams["search_path"] = schema + ", pg_catalog"
+	pool, err := pgxpool.NewWithConfig(t.Context(), pc)
+	require.NoError(t, err, "connect with a shadowing search_path")
+	t.Cleanup(pool.Close)
+	var path string
+	require.NoError(t, pool.QueryRow(t.Context(), "SHOW search_path").Scan(&path))
+	require.Equal(t, schema+", pg_catalog", path, "the shadowing search_path must survive connect")
+	return pool
+}
+
 // NewSchema creates a unique throwaway schema on pool, sets it up for
 // cleanup, and returns its name. Tests qualify their objects with it so
 // parallel tests on one container never collide.
