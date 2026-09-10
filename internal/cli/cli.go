@@ -1,6 +1,7 @@
 // Package cli defines the pg-sprite command tree (Kong): migrate and
 // status (the optimistic front door), pull, diff, and fmt (the declarative
-// front door), and lint and suggest (the offline checker and advisor).
+// front door), lint and suggest (the offline checker and advisor), and
+// capabilities (the embedded support matrix).
 package cli
 
 import (
@@ -20,17 +21,26 @@ import (
 type CLI struct {
 	Version kong.VersionFlag `help:"Print version and exit."`
 
-	Migrate MigrateCmd `cmd:"" help:"Run a schema change safely."`
-	Pull    PullCmd    `cmd:"" help:"Export live tables to new desired-state schema files. Output is create-only: a second run into a populated directory fails per table; delete or move existing files to refresh them."`
-	Diff    DiffCmd    `cmd:"" help:"Diff a desired-state schema file against the live schema."`
-	Fmt     FmtCmd     `cmd:"" help:"Canonicalize a schema file."`
-	Lint    LintCmd    `cmd:"" help:"Lint DDL for unsafe patterns."`
-	Suggest SuggestCmd `cmd:"" help:"Recommend safer native forms for risky DDL."`
-	Status  StatusCmd  `cmd:"" help:"Report the status of a running schema change."`
+	Migrate      MigrateCmd      `cmd:"" help:"Run a schema change safely."`
+	Pull         PullCmd         `cmd:"" help:"Export live tables to new desired-state schema files. Output is create-only: a second run into a populated directory fails per table; delete or move existing files to refresh them."`
+	Diff         DiffCmd         `cmd:"" help:"Diff a desired-state schema file against the live schema."`
+	Fmt          FmtCmd          `cmd:"" help:"Canonicalize a schema file."`
+	Lint         LintCmd         `cmd:"" help:"Lint DDL for unsafe patterns."`
+	Suggest      SuggestCmd      `cmd:"" help:"Recommend safer native forms for risky DDL."`
+	Capabilities CapabilitiesCmd `cmd:"" help:"Print the embedded support matrix."`
+	Status       StatusCmd       `cmd:"" help:"Report the status of a running schema change."`
 }
 
-// New returns an empty command tree for kong.Parse.
-func New() *CLI { return &CLI{} }
+// New returns a command tree for kong.Parse. The optional version keeps
+// tests and embedding callers source-compatible while the binary supplies
+// the same release-stamped value used by --version.
+func New(version ...string) *CLI {
+	binaryVersion := "dev"
+	if len(version) > 0 {
+		binaryVersion = version[0]
+	}
+	return &CLI{Capabilities: CapabilitiesCmd{version: binaryVersion}}
+}
 
 // DBFlags are the connection flags shared by every command that talks to the
 // database, so every entry point carries the same bounded session defaults.
@@ -193,6 +203,20 @@ type SuggestCmd struct {
 
 // Run implements the suggest subcommand.
 func (c *SuggestCmd) Run() error { return c.runSuggest(os.Stdin, os.Stdout) }
+
+// CapabilitiesCmd prints the embedded support matrix without connecting to
+// a database.
+type CapabilitiesCmd struct {
+	OutputFlags `embed:""`
+
+	JSON    bool `help:"Emit the support matrix as JSON."`
+	version string
+}
+
+// Run implements the capabilities subcommand.
+func (c *CapabilitiesCmd) Run() error { return c.run(os.Stdout) }
+
+func (c *CapabilitiesCmd) binaryVersion() string { return c.version }
 
 // StatusCmd reports schema-change progress.
 type StatusCmd struct {

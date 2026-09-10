@@ -37,6 +37,22 @@ dry run. Statement kinds `migrate` does not support (`DROP INDEX`,
 a verdict, not a plan report — and exit 2. The JSON report schema is
 [plan-report.md](plan-report.md).
 
+The offline capabilities command exposes the embedded support matrix and
+the same release-stamped version reported by `pg-sprite --version`:
+
+```console
+$ pg-sprite capabilities --json | head
+{
+  "version": "dev",
+  "capabilities": [
+    {
+      "id": "add-column-no-default-or-constant-default",
+      "area": "column_changes",
+      "operation": "`ADD COLUMN` (no default, or constant default)",
+      "tier": "t1",
+      "status_mark": "✅",
+```
+
 - [Codes used in these examples](#codes-used-in-these-examples)
 - [Refusal reasons](#refusal-reasons)
 - [Migrate](#migrate)
