@@ -142,7 +142,7 @@ the canonical example.
 > `make gen-capabilities`; do not edit the generated regions below by hand.
 
 <!-- capabilities:begin summary -->
-**53 operations: 17 supported today, 20 planned behind a typed refusal, 14 out of scope
+**53 operations: 18 supported today, 19 planned behind a typed refusal, 14 out of scope
 by design, and 2 with no online mechanism in PostgreSQL to build on.**
 <!-- capabilities:end summary -->
 

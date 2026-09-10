@@ -2,10 +2,13 @@ package capabilities
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 func validRow() Row {
@@ -16,6 +19,32 @@ func TestEmbeddedCapabilitiesValidate(t *testing.T) {
 	rows, err := Rows()
 	require.NoError(t, err)
 	assert.Len(t, rows, 53)
+}
+
+// The engine refuses a partitioned parent with its own target-fact reason
+// (partitionedParentVerdict in pkg/migrate, one row per PartitionRefusalCause
+// family), so the rows for those shapes must publish that token, not the
+// planner-level unsupported-statement: a consumer filtering on the reason
+// the engine emits would otherwise find no rows.
+func TestPartitionedParentRowsCarryTheEngineReason(t *testing.T) {
+	rows, err := Rows()
+	require.NoError(t, err)
+	var got []string
+	for _, r := range rows {
+		if r.RefusalReason == verdict.ReasonUnsupportedPartitionedParent {
+			got = append(got, r.ID)
+		}
+	}
+	assert.ElementsMatch(t, []string{
+		"index-build-on-a-partitioned-parent",
+		"add-constraint-using-index-on-a-partitioned-parent",
+	}, got)
+	for _, r := range rows {
+		if strings.Contains(r.Operation, "partitioned parent") && r.RefusalReason != "" {
+			assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.RefusalReason,
+				"row %s names a partitioned parent but publishes %q", r.ID, r.RefusalReason)
+		}
+	}
 }
 
 func TestLoadRejectsInvalidYAML(t *testing.T) {
@@ -60,6 +89,74 @@ func TestValidateRules(t *testing.T) {
 	}
 }
 
+// An enum error names the row, the field, and the offending value, so a
+// typo in a 53-row file is found without diffing the vocabulary by hand.
+func TestValidateNamesTheFieldAndValue(t *testing.T) {
+	tests := map[string]struct {
+		mutate func(*Row)
+		want   string
+	}{
+		"area":         {func(r *Row) { r.Area = "colum_changes" }, `area "colum_changes" is not one of`},
+		"engine path":  {func(r *Row) { r.EnginePath = "native" }, `engine_path "native" is not one of`},
+		"diff door":    {func(r *Row) { r.FrontDoors.Diff = "refuse" }, `front_doors.diff "refuse" is not one of`},
+		"migrate door": {func(r *Row) { r.FrontDoors.Migrate = "ok" }, `front_doors.migrate "ok" is not one of`},
+		"refusal reason": {func(r *Row) {
+			r.FrontDoors.Diff = DoorRefused
+			r.RefusalReason = "unsupported-partition"
+		}, `refusal_reason "unsupported-partition" is not a verdict.Reason`},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			row := validRow()
+			tt.mutate(&row)
+			err := Validate([]Row{row})
+			require.Error(t, err)
+			assert.ErrorContains(t, err, "row 1 (example): ")
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+// A free-text cell that spans lines would end its table row early and
+// silently drop every row after it, so the loader refuses it.
+func TestValidateRejectsMultilineCells(t *testing.T) {
+	for field, mutate := range map[string]func(*Row){
+		"operation":            func(r *Row) { r.Operation = "one\ntwo" },
+		"reason_notes":         func(r *Row) { r.ReasonNotes = "one\ntwo" },
+		"online_safety_detail": func(r *Row) { r.OnlineSafetyDetail = "one\r\ntwo" },
+		"owning_tool_class": func(r *Row) {
+			r.OnlineSafetyProblem = false
+			r.OwningToolClass = "one\ntwo"
+		},
+	} {
+		t.Run(field, func(t *testing.T) {
+			row := validRow()
+			mutate(&row)
+			assert.ErrorContains(t, Validate([]Row{row}), field+" must be a single line")
+		})
+	}
+}
+
+// A YAML block scalar is the realistic way a newline reaches a cell.
+func TestLoadRejectsBlockScalarCell(t *testing.T) {
+	_, err := Load([]byte(`rows:
+  - id: example
+    area: column_changes
+    operation: example
+    tier: t1
+    status_mark: "✅"
+    engine_path: native_as_is
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: |
+      first line
+      second line
+`))
+	assert.ErrorContains(t, err, "reason_notes must be a single line")
+}
+
 func TestCheckedInMarkdownIsGenerated(t *testing.T) {
 	rows, err := Rows()
 	require.NoError(t, err)
@@ -70,11 +167,54 @@ func TestCheckedInMarkdownIsGenerated(t *testing.T) {
 	assert.Equal(t, input, output)
 }
 
+// A pipe inside a cell is escaped so GFM keeps it in that cell; every
+// other column stays in place and the escaped source renders as the pipe.
+func TestRenderDocumentEscapesPipesInCells(t *testing.T) {
+	row := validRow()
+	row.Operation = "`a | b`"
+	row.OnlineSafetyDetail = "either|or"
+	row.ReasonNotes = "left | right"
+	var doc strings.Builder
+	doc.WriteString("<!-- capabilities:begin summary -->\n<!-- capabilities:end summary -->\n")
+	for _, area := range []Area{AreaColumnChanges, AreaConstraints, AreaIndexes, AreaPartitionedTables, AreaDeclarativeModel, AreaTypesAndNonTableObjects, AreaDataAndWholeTableOperations} {
+		doc.WriteString("<!-- capabilities:begin " + string(area) + " -->\n<!-- capabilities:end " + string(area) + " -->\n")
+	}
+	out, err := RenderDocument([]byte(doc.String()), []Row{row})
+	require.NoError(t, err)
+	want := "| `a \\| b` | ✅ | native, as-is | Yes — either\\|or | left \\| right |\n"
+	assert.Contains(t, string(out), want)
+	for line := range strings.SplitSeq(string(out), "\n") {
+		if strings.HasPrefix(line, "| `a") {
+			assert.Equal(t, 5, markdownCellCount(line), "the row must still have five cells: %s", line)
+		}
+	}
+}
+
+// markdownCellCount counts the cells a Markdown table renderer would see:
+// unescaped pipes split cells, escaped ones (\|) are literal text.
+func markdownCellCount(line string) int {
+	unescaped := strings.ReplaceAll(line, "\\|", "")
+	return strings.Count(unescaped, "|") - 1
+}
+
+// Each malformed marker arrangement is refused with an error that names the
+// marker and the problem, and nothing is written for any of them.
 func TestRenderDocumentRejectsBadMarkers(t *testing.T) {
 	rows, err := Rows()
 	require.NoError(t, err)
-	for _, doc := range []string{"", "<!-- capabilities:begin summary -->"} {
-		_, err := RenderDocument([]byte(doc), rows)
-		assert.Error(t, err)
+	const begin, end = "<!-- capabilities:begin summary -->", "<!-- capabilities:end summary -->"
+	tests := map[string]struct{ doc, want string }{
+		"empty":            {"", `begin summary -->" is missing`},
+		"missing end":      {begin, `end summary -->" is missing`},
+		"end before begin": {end + "\n" + begin, `end summary -->" appears before`},
+		"duplicate begin":  {begin + "\n" + begin + "\n" + end, `begin summary -->" appears more than once`},
+		"duplicate end":    {begin + "\n" + end + "\n" + end, `end summary -->" appears more than once`},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			out, err := RenderDocument([]byte(tt.doc), rows)
+			assert.Nil(t, out)
+			assert.ErrorContains(t, err, tt.want)
+		})
 	}
 }

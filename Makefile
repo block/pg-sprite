@@ -16,8 +16,9 @@ REPLAY_PROJECT ?= buzz
 
 .PHONY: build gen-capabilities test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
-gen-capabilities:
-	$(GO) run ./internal/cmd/gen-capabilities
+# The first target is make's default goal: keep build here so a bare
+# `make` builds the binary rather than rewriting a checked-in document.
+.DEFAULT_GOAL := build
 
 build:
 	$(GO) build -o bin/pg-sprite ./cmd/pg-sprite
@@ -51,6 +52,11 @@ test-aws-boundary:
 
 lint:
 	golangci-lint run
+
+# Regenerate the marked regions of docs/capabilities.md from the embedded
+# matrix (pkg/capabilities/capabilities.yaml); CI fails if they drift.
+gen-capabilities:
+	$(GO) run ./internal/cmd/gen-capabilities
 
 # Configure git hooks (relative path so worktrees work too).
 setup:
