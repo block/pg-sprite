@@ -96,9 +96,10 @@ func describeTimeout(ms int64) string {
 // that does not forward startup parameters.
 func applySessionBounds(lock, statement time.Duration) func(context.Context, *pgx.Conn) error {
 	return func(ctx context.Context, conn *pgx.Conn) error {
-		// One statement per Exec: the extended protocol rejects a query
-		// string carrying several commands, and the pool's exec mode is a
-		// caller option.
+		// One statement per Exec, so a failure names the bound that was
+		// not applied rather than the pair. A zero-argument Exec goes out
+		// on the simple protocol, which would carry both in one string;
+		// the split is for the error, not for the protocol.
 		//
 		// SET takes no placeholder, so the value is interpolated — it is a
 		// duration resolved by this package, never caller-supplied text.

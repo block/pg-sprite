@@ -41,7 +41,7 @@ func TestPoolCarriesItsSessionTimeouts(t *testing.T) {
 // hands the same backend out again and reports them present — so the
 // refusal rests on the affinity proof, which forces the rebind.
 func TestNewPoolRefusesAConnectionThatDiscardsSessionTimeouts(t *testing.T) {
-	pooledURL, _ := testutil.StartPostgresBehindPgBouncer(t, testutil.TransactionPooling)
+	pooledURL := testutil.StartPostgresBehindPgBouncer(t, testutil.TransactionPooling)
 
 	_, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: pooledURL})
 
@@ -57,7 +57,7 @@ func TestNewPoolRefusesAConnectionThatDiscardsSessionTimeouts(t *testing.T) {
 // — this is what lets pg-sprite run against a hosted platform whose
 // session-mode endpoint is the same host on a different port.
 func TestNewPoolAcceptsSessionPooling(t *testing.T) {
-	pooledURL, _ := testutil.StartPostgresBehindPgBouncer(t, testutil.SessionPooling)
+	pooledURL := testutil.StartPostgresBehindPgBouncer(t, testutil.SessionPooling)
 
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: pooledURL, LockTimeout: 2 * time.Second})
 	require.NoError(t, err)

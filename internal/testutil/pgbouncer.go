@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
@@ -33,13 +34,12 @@ const pgBouncerImage = "edoburu/pgbouncer:v1.25.2-p0"
 const pgBouncerPort = "6432"
 
 // StartPostgresBehindPgBouncer starts a PostgreSQL server with a PgBouncer
-// in front of it in the given pool mode, and returns both connection URLs:
-// the pooled one a hosted platform would hand an operator, and the direct
-// one that reaches the server itself.
+// in front of it in the given pool mode and returns the pooled connection
+// URL — the one a hosted platform would hand an operator.
 //
 // It always starts its own containers: the pooling mode is the fixture, so
 // an external PG_DSN cannot substitute for it.
-func StartPostgresBehindPgBouncer(t *testing.T, mode PoolMode) (pooledURL, directURL string) {
+func StartPostgresBehindPgBouncer(t *testing.T, mode PoolMode) (pooledURL string) {
 	t.Helper()
 	if os.Getenv("SKIP_INTEGRATION") != "" {
 		t.Skip("SKIP_INTEGRATION set; skipping test that needs a database")
@@ -55,7 +55,10 @@ func StartPostgresBehindPgBouncer(t *testing.T, mode PoolMode) (pooledURL, direc
 	net, err := tcnetwork.New(ctx)
 	require.NoError(t, err, "create the pooler test network")
 	t.Cleanup(func() {
-		if err := net.Remove(ctx); err != nil {
+		// t.Context is cancelled by cleanup time; strip the cancellation, or
+		// the removal always fails and each run leaks a bridge network until
+		// the address pool is exhausted.
+		if err := net.Remove(context.WithoutCancel(t.Context())); err != nil {
 			t.Logf("remove the pooler test network: %v", err)
 		}
 	})
@@ -123,8 +126,7 @@ func StartPostgresBehindPgBouncer(t *testing.T, mode PoolMode) (pooledURL, direc
 		}
 	})
 
-	return containerURL(t, pooler, pgBouncerPort, user, password, database),
-		containerURL(t, server, "5432", user, password, database)
+	return containerURL(t, pooler, pgBouncerPort, user, password, database)
 }
 
 // containerURL builds a connection URL for a container's mapped port.
