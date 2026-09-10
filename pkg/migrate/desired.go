@@ -77,9 +77,26 @@ type DesiredResult struct {
 	Outcome verdict.Outcome `json:"outcome"`
 	// Reason is the typed refusal cause; empty unless Outcome is refused.
 	Reason verdict.Reason `json:"reason,omitempty"`
+	// Class identifies how a consumer routes a refusal; empty unless
+	// Outcome is refused.
+	Class verdict.Class `json:"class,omitempty"`
+	// Owner identifies who owns work with no online-safety problem; present
+	// exactly when Class is no-online-safety-problem.
+	Owner verdict.Owner `json:"owner,omitempty"`
 	// Detail is the human explanation: why refused, what committed, or
 	// that there was nothing to do.
 	Detail string `json:"detail,omitempty"`
+}
+
+// refused returns r as a refused result carrying the classified refusal and
+// its explanation. It is the one path from a refusal onto DesiredResult, so
+// a site cannot set a reason without a class.
+func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult {
+	// INV: RF-7 — class and owner come from the proof, never from the site.
+	r.Outcome = verdict.OutcomeRefused
+	r.Reason, r.Class, r.Owner = ref.Reason(), ref.Class(), ref.Owner()
+	r.Detail = detail
+	return r
 }
 
 // RunDesired converges one live table onto its desired-state schema:
@@ -215,13 +232,10 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 	}
 	at, err := preflight.CheckTableAbsent(ctx, pool, req.Schema, report.Table)
 	if preflight.IsNameOccupied(err) {
-		result.Outcome = verdict.OutcomeRefused
-		result.Reason = verdict.ReasonCreateCollision
-		result.Detail = fmt.Sprintf(
+		return result.refused(createCollisionRefusal(), fmt.Sprintf(
 			"the plan creates %s.%s but the name is already occupied (%v); the live catalog changed "+
 				"since the plan was derived — re-derive the plan and review what it says now; nothing was executed",
-			report.Schema, report.Table, err)
-		return result, nil
+			report.Schema, report.Table, err)), nil
 	}
 	if err != nil {
 		return stopBefore(fmt.Errorf("verify %s.%s is absent: %w", report.Schema, report.Table, err))
@@ -229,10 +243,7 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 	role, err := preflight.CheckCreatePrivileges(ctx, pool, req.Schema)
 	var privErr *preflight.PrivilegeError
 	if errors.As(err, &privErr) {
-		result.Outcome = verdict.OutcomeRefused
-		result.Reason = verdict.ReasonInsufficientPrivileges
-		result.Detail = privErr.Error() + "; nothing was executed"
-		return result, nil
+		return result.refused(insufficientPrivilegesRefusal(), privErr.Error()+"; nothing was executed"), nil
 	}
 	if err != nil {
 		return stopBefore(fmt.Errorf("verify creation access in schema %s: %w", report.Schema, err))
@@ -260,18 +271,13 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 		// No step error means nothing started: the executor refused the set
 		// during admission or its claimed-name catalog preflight.
 		if errors.Is(execErr, executor.ErrCreateCollision) {
-			result.Outcome = verdict.OutcomeRefused
-			result.Reason = verdict.ReasonCreateCollision
-			result.Detail = fmt.Sprintf("the create path refused the plan because the catalog already holds a name it claims (%v); "+
-				"re-derive the plan against the live catalog to see what holds the name, then drop or rename the occupant, "+
-				"name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column; nothing was executed", execErr)
-			return result, nil
+			return result.refused(createCollisionRefusal(),
+				fmt.Sprintf("the create path refused the plan because the catalog already holds a name it claims (%v); "+
+					"re-derive the plan against the live catalog to see what holds the name, then drop or rename the occupant, "+
+					"name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column; nothing was executed", execErr)), nil
 		}
-		if isCreateAdmissionRefusal(execErr) {
-			result.Outcome = verdict.OutcomeRefused
-			result.Reason = verdict.ReasonUnsupportedStatement
-			result.Detail = fmt.Sprintf("the create path refused the plan: %v; nothing was executed", execErr)
-			return result, nil
+		if r, ok := createAdmissionRefusal(execErr); ok {
+			return result.refused(r, fmt.Sprintf("the create path refused the plan: %v; nothing was executed", execErr)), nil
 		}
 		return stopBefore(fmt.Errorf("create %s.%s: %w", report.Schema, report.Table, execErr))
 	}
@@ -334,17 +340,6 @@ func planStatementSQL(report plan.Report, i int) string {
 	return report.Statements[i].SQL
 }
 
-// isCreateAdmissionRefusal reports whether err is one of the create path's
-// static admission refusals: decided from the desired statements' shapes
-// before anything executes, so it maps to a refusal verdict, not an
-// operational error.
-func isCreateAdmissionRefusal(err error) bool {
-	return errors.Is(err, executor.ErrPartitionOfUnsupported) ||
-		errors.Is(err, executor.ErrIfNotExistsUnsupported) ||
-		errors.Is(err, executor.ErrUnsupportedCreateStep) ||
-		errors.Is(err, executor.ErrDuplicateCreateName)
-}
-
 // admitPlan is the all-or-nothing plan-time admission: it refuses the whole
 // plan — before anything runs — when the plan cannot converge the table as
 // a unit. The checks run from the caller's contract outward: the pinned
@@ -354,20 +349,17 @@ func isCreateAdmissionRefusal(err error) bool {
 // the caller resolves it first, because it carries no plan identity for
 // the pin to verify and nothing would run anyway.
 func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
-	refused := DesiredResult{Plan: report, Outcome: verdict.OutcomeRefused}
+	refused := DesiredResult{Plan: report}
 	if req.ExpectedFingerprint != "" && req.ExpectedFingerprint != report.Fingerprint {
-		refused.Reason = verdict.ReasonPlanFingerprintMismatch
-		refused.Detail = fmt.Sprintf(
+		return refused.refused(fingerprintMismatchRefusal(), fmt.Sprintf(
 			"the plan derived at execution time (fingerprint %s) is not the pinned plan (fingerprint %s); "+
 				"the live table or the desired schema changed since the plan was reviewed — re-review the new plan",
-			report.Fingerprint, req.ExpectedFingerprint)
-		return refused, false
+			report.Fingerprint, req.ExpectedFingerprint)), false
 	}
 	for i, ps := range report.Statements {
 		if !ps.Destructive {
 			continue
 		}
-		refused.Reason = verdict.ReasonDestructiveChange
 		// The deliberate path differs by shape: the imperative front door
 		// runs an ALTER TABLE drop when the operator states it, but it
 		// refuses a plain DROP INDEX in favor of the concurrent idiom — so
@@ -377,16 +369,16 @@ func admitPlan(req DesiredRequest, report plan.Report) (DesiredResult, bool) {
 		if ps.Kind == schemadiff.ChangeDropIndex {
 			deliberatePath = "drop it deliberately with DROP INDEX CONCURRENTLY, then rerun"
 		}
-		refused.Detail = fmt.Sprintf(
+		detail := fmt.Sprintf(
 			"planned statement %d discards live structure (%s); desired-state execution runs no "+
 				"destructive statement — %s",
 			i+1, ps.SQL, deliberatePath)
-		refused.Detail += skippedRestDetail(len(report.Statements) - 1)
-		return refused, false
+		detail += skippedRestDetail(len(report.Statements) - 1)
+		return refused.refused(destructiveChangeRefusal(), detail), false
 	}
 	if report.Disposition != router.DispositionExecute {
-		refused.Reason, refused.Detail = planRefusal(report)
-		return refused, false
+		r, detail := planRefusal(report)
+		return refused.refused(r, detail), false
 	}
 	return DesiredResult{}, true
 }
@@ -413,7 +405,7 @@ func skippedRestDetail(n int) string {
 // same dispositions at execution time. A greenfield statement the create
 // path refuses by shape carries the create path's own cause in the detail,
 // read from the plan's typed field rather than recomputed.
-func planRefusal(report plan.Report) (verdict.Reason, string) {
+func planRefusal(report plan.Report) (verdict.Refusal, string) {
 	for i, ps := range report.Statements {
 		detail := func(why string) string {
 			return fmt.Sprintf("planned statement %d (%s) %s; nothing was executed", i+1, ps.SQL, why)
@@ -422,25 +414,37 @@ func planRefusal(report plan.Report) (verdict.Reason, string) {
 		case router.DispositionExecute:
 			continue
 		case router.DispositionRewriteRequired:
-			return verdict.ReasonRewriteRequired, detail("blocks and has no safer native sequence")
+			return rewriteRequiredRefusal(), detail("blocks and has no safer native sequence")
 		case router.DispositionUnavailable:
-			return verdict.ReasonBackendUnavailable, detail("routes to an execution strategy this build does not implement")
+			return backendUnavailableRefusal(), detail("routes to an execution strategy this build does not implement")
 		case router.DispositionRefuse:
-			reason := ps.Reason
-			if reason == verdict.ReasonNone {
-				reason = verdict.ReasonUnsupportedStatement
-			}
+			// The plan-side registry classified the statement when it was
+			// refused; the class travels with the statement. A refused
+			// statement the plan could not classify is a report this build
+			// cannot have produced.
 			if ps.Cause != "" {
-				return reason, detail("is refused by the create path: " + ps.Cause.Description())
+				if r, ok := plan.CreateShapeRefusal(ps.Cause); ok {
+					return r, detail("is refused by the create path: " + ps.Cause.Description())
+				}
+				return planIncoherentRefusal(), detail(fmt.Sprintf("is refused by the create path with a cause this build does not classify (%q)", ps.Cause))
 			}
-			return reason, detail("has no safe path")
+			r, err := verdict.NewRefusal(ps.Class, ps.Reason, ps.Owner)
+			if err == nil {
+				return r, detail("has no safe path")
+			}
+			// Keep the statement's own reason where it has one; the class
+			// says the build produced a refusal it did not classify.
+			if unclassified, err := verdict.NewRefusal(verdict.ClassInvariantViolation, ps.Reason, ""); err == nil {
+				return unclassified, detail("is refused but carries no refusal class")
+			}
+			return planIncoherentRefusal(), detail("is refused but carries no refusal class")
 		default:
-			return verdict.ReasonUnsupportedStatement, detail("carries a disposition this build does not know")
+			return planIncoherentRefusal(), detail("carries a disposition this build does not know")
 		}
 	}
 	// The aggregate disposition is non-executable but every statement is:
 	// a report this build cannot have produced. Refuse rather than guess.
-	return verdict.ReasonUnsupportedStatement,
+	return planIncoherentRefusal(),
 		fmt.Sprintf("the plan's aggregate disposition is %q but no statement carries it; nothing was executed",
 			report.Disposition)
 }

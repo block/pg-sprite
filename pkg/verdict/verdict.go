@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -115,6 +116,163 @@ func Reasons() []Reason {
 	}
 }
 
+// Class identifies the routing category of a refusal.
+type Class string
+
+const (
+	// ClassCapabilityBoundary means the engine has no implemented safe route.
+	ClassCapabilityBoundary Class = "capability-boundary"
+	// ClassNoOnlineSafetyProblem means another owner should run the work.
+	ClassNoOnlineSafetyProblem Class = "no-online-safety-problem"
+	// ClassByDesign means pg-sprite permanently refuses the form.
+	ClassByDesign Class = "by-design"
+	// ClassEnvironmental means the current run environment blocked the work.
+	ClassEnvironmental Class = "environmental"
+	// ClassInvariantViolation reports incoherent engine state.
+	ClassInvariantViolation Class = "invariant-violation"
+)
+
+// Classes returns the closed set of refusal classes.
+func Classes() []Class {
+	return []Class{ClassCapabilityBoundary, ClassNoOnlineSafetyProblem, ClassByDesign, ClassEnvironmental, ClassInvariantViolation}
+}
+
+// ParseClass validates a refusal class token.
+func ParseClass(value string) (Class, error) {
+	for _, class := range Classes() {
+		if value == string(class) {
+			return class, nil
+		}
+	}
+	return "", fmt.Errorf("unknown refusal class %q", value)
+}
+
+// Owner identifies who owns work that has no online-safety problem.
+type Owner string
+
+const (
+	// OwnerDataChangeRunner owns DML and backfills.
+	OwnerDataChangeRunner Owner = "data-change-runner"
+	// OwnerDeclarativeFrontDoor owns desired catalog convergence.
+	OwnerDeclarativeFrontDoor Owner = "declarative-front-door"
+	// OwnerDirectOperator means the operator runs the work directly.
+	OwnerDirectOperator Owner = "direct-operator"
+	// OwnerProvisioning owns access-control and replication provisioning.
+	OwnerProvisioning Owner = "provisioning"
+)
+
+// Owners returns the closed set of refusal owners.
+func Owners() []Owner {
+	return []Owner{OwnerDataChangeRunner, OwnerDeclarativeFrontDoor, OwnerDirectOperator, OwnerProvisioning}
+}
+
+// ParseOwner validates a refusal owner token.
+func ParseOwner(value string) (Owner, error) {
+	for _, owner := range Owners() {
+		if value == string(owner) {
+			return owner, nil
+		}
+	}
+	return "", fmt.Errorf("unknown refusal owner %q", value)
+}
+
+// Refusal is proof that a class, reason, and owner form a valid refusal:
+// the fields are unexported and the only constructor validates them, so a
+// refusal that reaches a renderer through WithRefusal has been classified.
+// The classification registries in pkg/plan and pkg/migrate mint these; a
+// refusal site never names a class on its own.
+type Refusal struct {
+	class  Class
+	reason Reason
+	owner  Owner
+}
+
+// NewRefusal validates and constructs a refusal proof. It rejects a reason
+// outside Reasons(), a class outside Classes(), an owner outside Owners(),
+// and an owner that is absent when the class is no-online-safety-problem or
+// present when it is not.
+func NewRefusal(class Class, reason Reason, owner Owner) (Refusal, error) {
+	if reason == ReasonNone || !slices.Contains(Reasons(), reason) {
+		return Refusal{}, fmt.Errorf("unknown refusal reason %q", reason)
+	}
+	if _, err := ParseClass(string(class)); err != nil {
+		return Refusal{}, err
+	}
+	if owner != "" {
+		if _, err := ParseOwner(string(owner)); err != nil {
+			return Refusal{}, err
+		}
+	}
+	// INV: RF-7 — owner is present exactly when the class is
+	// no-online-safety-problem.
+	if class == ClassNoOnlineSafetyProblem && owner == "" {
+		return Refusal{}, fmt.Errorf("refusal class %s requires an owner", class)
+	}
+	if class != ClassNoOnlineSafetyProblem && owner != "" {
+		return Refusal{}, fmt.Errorf("refusal class %s carries no owner, got %q", class, owner)
+	}
+	return Refusal{class: class, reason: reason, owner: owner}, nil
+}
+
+// The per-class constructors are what the classification registries use:
+// each fixes its class, and only NoOnlineSafetyProblem takes an owner, so
+// the owner rule holds by construction and a registry entry has no error
+// path. The registries' completeness tests pin that every entry's reason is
+// in Reasons().
+
+// CapabilityBoundary classifies a refusal of work the engine may learn to do.
+func CapabilityBoundary(reason Reason) Refusal {
+	return Refusal{class: ClassCapabilityBoundary, reason: reason}
+}
+
+// NoOnlineSafetyProblem classifies a refusal of work that is safe to run
+// elsewhere and names who runs it.
+func NoOnlineSafetyProblem(reason Reason, owner Owner) Refusal {
+	return Refusal{class: ClassNoOnlineSafetyProblem, reason: reason, owner: owner}
+}
+
+// ByDesign classifies a refusal of a form pg-sprite will never run.
+func ByDesign(reason Reason) Refusal {
+	return Refusal{class: ClassByDesign, reason: reason}
+}
+
+// Environmental classifies a refusal the run environment caused.
+func Environmental(reason Reason) Refusal {
+	return Refusal{class: ClassEnvironmental, reason: reason}
+}
+
+// InvariantViolation classifies a refusal of a state this build should not
+// have produced.
+func InvariantViolation(reason Reason) Refusal {
+	return Refusal{class: ClassInvariantViolation, reason: reason}
+}
+
+// Class returns the refusal's validated class.
+func (r Refusal) Class() Class { return r.class }
+
+// Reason returns the refusal's validated reason.
+func (r Refusal) Reason() Reason { return r.reason }
+
+// Owner returns the refusal's validated owner; empty unless the class is
+// no-online-safety-problem.
+func (r Refusal) Owner() Owner { return r.owner }
+
+// IsZero reports whether r was never constructed through NewRefusal.
+func (r Refusal) IsZero() bool { return r == Refusal{} }
+
+// WithRefusal returns v as a refused verdict carrying r's reason, class,
+// and owner. It is the one path from a classified refusal onto the verdict
+// contract, so a site that forgets to classify has no Reason to set.
+func (v Verdict) WithRefusal(r Refusal) Verdict {
+	// INV: RF-7 — the verdict's class and owner come from the proof, never
+	// from the site.
+	v.Outcome = OutcomeRefused
+	v.Reason = r.reason
+	v.Class = r.class
+	v.Owner = r.owner
+	return v
+}
+
 // Cause narrows ReasonBudgetExceeded to the budget that was exceeded, so
 // automation can branch on which limit fired without parsing prose.
 type Cause string
@@ -137,6 +295,10 @@ type Verdict struct {
 	Outcome Outcome `json:"outcome"`
 	// Reason is the typed refusal cause; empty when executed.
 	Reason Reason `json:"reason,omitempty"`
+	// Class identifies how a consumer routes a refusal.
+	Class Class `json:"class,omitempty"`
+	// Owner identifies who owns work with no online-safety problem.
+	Owner Owner `json:"owner,omitempty"`
 	// Cause narrows a budget refusal to the budget that fired; empty
 	// otherwise.
 	Cause Cause `json:"cause,omitempty"`
@@ -205,6 +367,12 @@ func (v Verdict) String() string {
 	}
 	if v.Table != "" {
 		fmt.Fprintf(&b, "\n  table:     %s", v.Table)
+	}
+	if v.Outcome == OutcomeRefused {
+		fmt.Fprintf(&b, "\n  class:     %s", v.Class)
+		if v.Owner != "" {
+			fmt.Fprintf(&b, "\n  owner:     %s", v.Owner)
+		}
 	}
 	fmt.Fprintf(&b, "\n  statement: %s", v.Statement)
 	if v.Attempts > 0 {

@@ -8,6 +8,75 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestNewRefusalEnforcesRF7(t *testing.T) {
+	r, err := NewRefusal(ClassNoOnlineSafetyProblem, ReasonUnsupportedStatement, OwnerDataChangeRunner)
+	require.NoError(t, err)
+	assert.Equal(t, ClassNoOnlineSafetyProblem, r.Class())
+	assert.Equal(t, ReasonUnsupportedStatement, r.Reason())
+	assert.Equal(t, OwnerDataChangeRunner, r.Owner())
+	assert.False(t, r.IsZero())
+	assert.True(t, Refusal{}.IsZero())
+	for _, tc := range []struct {
+		name   string
+		class  Class
+		reason Reason
+		owner  Owner
+	}{
+		{"unknown reason", ClassCapabilityBoundary, "unknown", ""},
+		{"zero reason", ClassCapabilityBoundary, ReasonNone, ""},
+		{"unknown class", "unknown", ReasonUnsupportedStatement, ""},
+		{"zero class", "", ReasonUnsupportedStatement, ""},
+		{"unknown owner", ClassNoOnlineSafetyProblem, ReasonUnsupportedStatement, "nobody"},
+		{"missing owner", ClassNoOnlineSafetyProblem, ReasonUnsupportedStatement, ""},
+		{"unexpected owner", ClassByDesign, ReasonUnsupportedStatement, OwnerDirectOperator},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewRefusal(tc.class, tc.reason, tc.owner)
+			assert.Error(t, err)
+		})
+	}
+}
+
+// The per-class constructors agree with NewRefusal: what they build, it
+// accepts; and each one's class is the one its name says.
+func TestClassConstructorsAgreeWithNewRefusal(t *testing.T) {
+	for _, r := range []Refusal{
+		CapabilityBoundary(ReasonRewriteRequired),
+		NoOnlineSafetyProblem(ReasonUnsupportedStatement, OwnerProvisioning),
+		ByDesign(ReasonDestructiveChange),
+		Environmental(ReasonTableTooLarge),
+		InvariantViolation(ReasonUnsupportedStatement),
+	} {
+		got, err := NewRefusal(r.Class(), r.Reason(), r.Owner())
+		require.NoError(t, err, r.Class())
+		assert.Equal(t, r, got)
+	}
+	assert.Equal(t, ClassCapabilityBoundary, CapabilityBoundary(ReasonRewriteRequired).Class())
+	assert.Equal(t, ClassNoOnlineSafetyProblem, NoOnlineSafetyProblem(ReasonUnsupportedStatement, OwnerProvisioning).Class())
+	assert.Equal(t, ClassByDesign, ByDesign(ReasonDestructiveChange).Class())
+	assert.Equal(t, ClassEnvironmental, Environmental(ReasonTableTooLarge).Class())
+	assert.Equal(t, ClassInvariantViolation, InvariantViolation(ReasonUnsupportedStatement).Class())
+}
+
+func TestWithRefusalStampsOutcomeReasonClassOwner(t *testing.T) {
+	v := Verdict{Statement: "GRANT SELECT ON t TO r", Detail: "x"}.
+		WithRefusal(NoOnlineSafetyProblem(ReasonUnsupportedStatement, OwnerProvisioning))
+	assert.Equal(t, OutcomeRefused, v.Outcome)
+	assert.Equal(t, ReasonUnsupportedStatement, v.Reason)
+	assert.Equal(t, ClassNoOnlineSafetyProblem, v.Class)
+	assert.Equal(t, OwnerProvisioning, v.Owner)
+	assert.Equal(t, "GRANT SELECT ON t TO r", v.Statement)
+	assert.Equal(t, "x", v.Detail)
+
+	// A refusal with no owner leaves the field empty, so it is omitted from JSON.
+	v = Verdict{}.WithRefusal(ByDesign(ReasonIndexStatement))
+	assert.Empty(t, v.Owner)
+	js, err := v.JSON()
+	require.NoError(t, err)
+	assert.Contains(t, js, `"class": "by-design"`)
+	assert.NotContains(t, js, `"owner"`)
+}
+
 func TestJSONRoundTrip(t *testing.T) {
 	v := Verdict{
 		Outcome:    OutcomeRefused,

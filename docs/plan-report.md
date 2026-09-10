@@ -377,6 +377,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
   "table_exists": false,
   "disposition": "refuse",
   "reason": "unsupported-statement",
+  "class": "by-design",
   "fingerprint": "sha256:342c51305b0be702f1fdcb879a7e43f81748639011b8e6782538dea1c5a2e8e6",
   "statements": [
     {
@@ -386,6 +387,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
       "route": "native",
       "disposition": "refuse",
       "reason": "unsupported-statement",
+      "class": "by-design",
       "cause": "if-not-exists",
       "decisions": [
         {

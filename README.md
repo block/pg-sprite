@@ -30,7 +30,8 @@ perfectly**: change the shape of live PostgreSQL tables while applications
 keep reading and writing them. Anything that is not that one thing — data
 backfills, catalog bootstrap, GitOps orchestration, access control — is
 deliberately another tool's job: the engine refuses it with a typed verdict,
-and [docs/capabilities.md](docs/capabilities.md) names the tool class that
+and every refusal carries a routing class (and an owner when there is no online-safety
+problem for the engine to solve); [docs/capabilities.md](docs/capabilities.md) names the tool class that
 owns each job.
 
 **Status: Phases 1 and 2.1–2.5.** The parse boundary, declarative diff,

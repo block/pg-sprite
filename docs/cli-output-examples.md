@@ -301,6 +301,7 @@ $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)
   "table_exists": true,
   "disposition": "refuse",
   "reason": "unsupported-partitioned-parent",
+  "class": "capability-boundary",
   "fingerprint": "sha256:e0cebea56d6c5577722d17be16442b06303a817af0c009913d746fd3d1c379e0",
   "statements": [
     {
@@ -309,6 +310,7 @@ $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)
       "route": "native",
       "disposition": "refuse",
       "reason": "unsupported-partitioned-parent",
+      "class": "capability-boundary",
       "decisions": [
         {
           "operation": "CREATE INDEX events_created_idx",

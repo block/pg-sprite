@@ -17,6 +17,12 @@ import (
 func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 	var b strings.Builder
 	b.WriteString(outcomeHeadline(pal, v))
+	if v.Outcome == verdict.OutcomeRefused {
+		fmt.Fprintf(&b, "\n  %s     %s", pal.bold("class:"), v.Class)
+		if v.Owner != "" {
+			fmt.Fprintf(&b, "\n  %s     %s", pal.bold("owner:"), v.Owner)
+		}
+	}
 	if v.Table != "" {
 		fmt.Fprintf(&b, "\n  %s     %s", pal.bold("table:"), v.Table)
 	}

@@ -126,7 +126,7 @@ func TestParseOneKinds(t *testing.T) {
 		{
 			name: "drop table is not a drop-index",
 			sql:  "DROP TABLE users",
-			want: Statement{kind: KindOther},
+			want: Statement{kind: KindCatalogWork},
 		},
 		{
 			name: "create table",
@@ -136,6 +136,86 @@ func TestParseOneKinds(t *testing.T) {
 		{
 			name: "dml",
 			sql:  "UPDATE users SET age = 1",
+			want: Statement{kind: KindDataChange},
+		},
+		{
+			name: "grant is provisioning, unlike create role catalog syntax",
+			sql:  "GRANT SELECT ON users TO app",
+			want: Statement{kind: KindProvisioning},
+		},
+		{
+			name: "insert is data change, unlike create table as",
+			sql:  "INSERT INTO users VALUES (1)",
+			want: Statement{kind: KindDataChange},
+		},
+		{
+			name: "create table as is neither a plain create table nor a data change",
+			sql:  "CREATE TABLE users_copy AS SELECT * FROM users",
+			want: Statement{kind: KindOther},
+		},
+		{
+			name: "delete is data change",
+			sql:  "DELETE FROM users WHERE id = 1",
+			want: Statement{kind: KindDataChange},
+		},
+		{
+			name: "merge is data change",
+			sql:  "MERGE INTO users u USING staged s ON u.id = s.id WHEN MATCHED THEN UPDATE SET age = s.age",
+			want: Statement{kind: KindDataChange},
+		},
+		{
+			name: "create role is provisioning",
+			sql:  "CREATE ROLE app LOGIN",
+			want: Statement{kind: KindProvisioning},
+		},
+		{
+			name: "row-level-security policy is provisioning",
+			sql:  "CREATE POLICY p ON users USING (owner = current_user)",
+			want: Statement{kind: KindProvisioning},
+		},
+		{
+			name: "publication is provisioning",
+			sql:  "CREATE PUBLICATION pub FOR TABLE users",
+			want: Statement{kind: KindProvisioning},
+		},
+		{
+			name: "create view is catalog work",
+			sql:  "CREATE VIEW v AS SELECT id FROM users",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create function is catalog work",
+			sql:  "CREATE FUNCTION f() RETURNS int LANGUAGE sql AS 'SELECT 1'",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create trigger is catalog work",
+			sql:  "CREATE TRIGGER trg BEFORE INSERT ON users FOR EACH ROW EXECUTE FUNCTION f()",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "create extension is catalog work",
+			sql:  "CREATE EXTENSION pg_stat_statements",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "standalone sequence is catalog work",
+			sql:  "CREATE SEQUENCE users_id_seq",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "comment is catalog work",
+			sql:  "COMMENT ON TABLE users IS 'people'",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "drop view is catalog work, unlike drop index",
+			sql:  "DROP VIEW v",
+			want: Statement{kind: KindCatalogWork},
+		},
+		{
+			name: "vacuum is unnamed grammar and stays other",
+			sql:  "VACUUM users",
 			want: Statement{kind: KindOther},
 		},
 	}
@@ -242,4 +322,19 @@ func TestBuildsIndex(t *testing.T) {
 			assert.Equal(t, tt.want, st.BuildsIndex())
 		})
 	}
+}
+
+func TestKindsIsClosedAndNamed(t *testing.T) {
+	kinds := Kinds()
+	require.Equal(t, KindOther, kinds[0], "the catch-all leads the walk")
+	seen := map[Kind]bool{}
+	names := map[string]bool{}
+	for _, k := range kinds {
+		assert.False(t, seen[k], "duplicate kind %d", k)
+		seen[k] = true
+		assert.NotEmpty(t, k.String())
+		assert.False(t, names[k.String()], "duplicate kind name %q", k.String())
+		names[k.String()] = true
+	}
+	assert.Len(t, kinds, int(KindCatalogWork)+1, "Kinds() must list every declared kind")
 }

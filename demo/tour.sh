@@ -155,7 +155,11 @@ diff_plan() {
 # (plan.Statement.Cause, executor.CreateShapeCauses()) so a consumer can
 # render or branch on it without recomputing the shape check.
 diff_refused() {
-    local desired="$1" cause="$2" out status=0
+    local desired="$1" cause="$2" out status=0 class=capability-boundary
+    case "$cause" in
+    if-not-exists|duplicate-name|concurrently) class=by-design ;;
+    multiple-operations) class=invariant-violation ;;
+    esac
     step "diff --desired $desired (expect refusal)"
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
@@ -163,6 +167,7 @@ diff_refused() {
         assert_eq "diff format_version of [$desired]" 3 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "diff disposition of [$desired]" refuse "$(jq -r '.disposition' <<<"$out")"
         assert_eq "diff reason of [$desired]" unsupported-statement "$(jq -r '.statements[0].reason' <<<"$out")"
+        assert_eq "diff class of [$desired]" "$class" "$(jq -r '.statements[0].class' <<<"$out")"
         assert_eq "diff cause of [$desired]" "$cause" "$(jq -r '.statements[0].cause' <<<"$out")"
     else
         "$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public \

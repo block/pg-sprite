@@ -13,6 +13,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -76,6 +77,10 @@ type Statement struct {
 	Disposition router.Disposition `json:"disposition"`
 	// Reason is the typed cause when target facts refuse this statement.
 	Reason verdict.Reason `json:"reason,omitempty"`
+	// Class identifies how a consumer routes a refused statement.
+	Class verdict.Class `json:"class,omitempty"`
+	// Owner identifies who owns work with no online-safety problem.
+	Owner verdict.Owner `json:"owner,omitempty"`
 	// Cause is the create path's typed shape refusal for a statement of a
 	// greenfield plan (executor.CreateShapeCause): why a table born in the
 	// run cannot carry this statement. Present exactly when the create path
@@ -141,6 +146,10 @@ type Report struct {
 	// Reason is the typed refusal cause when target facts make an otherwise
 	// executable routed plan unsafe.
 	Reason verdict.Reason `json:"reason,omitempty"`
+	// Class identifies how a consumer routes an aggregate refusal.
+	Class verdict.Class `json:"class,omitempty"`
+	// Owner identifies who owns aggregate work with no online-safety problem.
+	Owner verdict.Owner `json:"owner,omitempty"`
 	// Fingerprint is the plan's stable identity (see Fingerprint). An
 	// approver pins it when the plan is reviewed; an executor recomputes it
 	// at apply time and refuses on mismatch — that is how "the plan a
@@ -151,12 +160,33 @@ type Report struct {
 	Statements []Statement `json:"statements"`
 }
 
-// RefuseUnsupportedPartitionedParent marks executable statements as refused
-// when partition-aware admission rejects their execution steps.
-func RefuseUnsupportedPartitionedParent(report *Report, refused []bool) {
-	refuseStatements(report, verdict.ReasonUnsupportedPartitionedParent, func(i int) (bool, executor.CreateShapeCause) {
-		return i < len(refused) && refused[i], ""
+// RefuseUnsupportedPartitionedParent marks statements as refused when
+// partition-aware admission rejects their execution steps. causes is
+// positional over report.Statements — one entry per planned statement, empty
+// where the statement is admitted — because the class of the refusal is a
+// property of the cause (docs/refusal-classes.md), not of the reason. A
+// length mismatch, or a cause the classification registry does not name,
+// is a contract violation: the report would carry a refusal it cannot
+// explain, so it fails closed before any statement is marked.
+func RefuseUnsupportedPartitionedParent(report *Report, causes []preflight.PartitionRefusalCause) error {
+	if len(causes) != len(report.Statements) {
+		return fmt.Errorf("refuse partitioned parent: %d causes for %d planned statements", len(causes), len(report.Statements))
+	}
+	refusals := make([]verdict.Refusal, len(causes))
+	for i, cause := range causes {
+		if cause == "" {
+			continue
+		}
+		r, ok := PartitionRefusal(cause)
+		if !ok {
+			return fmt.Errorf("%w: refuse partitioned parent: planned statement %d carries unclassified cause %q", executor.ErrInvariantViolation, i+1, cause)
+		}
+		refusals[i] = r
+	}
+	refuseStatements(report, func(i int) (verdict.Refusal, executor.CreateShapeCause) {
+		return refusals[i], ""
 	})
+	return nil
 }
 
 // RefuseUnsupportedCreateShape marks the create-path statements whose
@@ -173,6 +203,7 @@ func RefuseUnsupportedCreateShape(report *Report, refused []error) error {
 		return fmt.Errorf("refuse create shapes: %d refusals for %d planned statements", len(refused), len(report.Statements))
 	}
 	causes := make([]executor.CreateShapeCause, len(refused))
+	refusals := make([]verdict.Refusal, len(refused))
 	for i, err := range refused {
 		if err == nil {
 			continue
@@ -181,46 +212,49 @@ func RefuseUnsupportedCreateShape(report *Report, refused []error) error {
 		if causes[i] == "" {
 			return fmt.Errorf("%w: refuse create shapes: planned statement %d is refused without a create-shape cause: %w", executor.ErrInvariantViolation, i+1, err)
 		}
+		r, ok := CreateShapeRefusal(causes[i])
+		if !ok {
+			return fmt.Errorf("%w: refuse create shapes: planned statement %d carries unclassified cause %q", executor.ErrInvariantViolation, i+1, causes[i])
+		}
+		refusals[i] = r
 	}
-	refuseStatements(report, verdict.ReasonUnsupportedStatement, func(i int) (bool, executor.CreateShapeCause) {
-		return refused[i] != nil, causes[i]
+	refuseStatements(report, func(i int) (verdict.Refusal, executor.CreateShapeCause) {
+		return refusals[i], causes[i]
 	})
 	return nil
 }
 
 // refuseStatements withdraws every piece of execution advice from each
-// statement the predicate selects and, when any statement was refused, stamps
-// the reason on the report. The predicate also names the create path's cause
+// statement the selector classifies and, when any statement was refused,
+// stamps the first refusal on the report. The selector returns the zero
+// Refusal for a statement it leaves alone, and names the create path's cause
 // for the statement, empty when the refusal is not the create path's. An
-// already-refused statement or report keeps its reason, and with it its
-// cause: the first refusal wins because an earlier mutator saw the more
-// specific cause. Every refusal mutator goes through here, so a field added
-// later is withdrawn in one place.
-func refuseStatements(report *Report, reason verdict.Reason, refused func(i int) (bool, executor.CreateShapeCause)) {
-	any := false
+// already-refused statement or report keeps its reason, class, and cause:
+// the first refusal wins because an earlier mutator saw the more specific
+// cause. Every refusal mutator goes through here, so a field added later is
+// withdrawn in one place.
+func refuseStatements(report *Report, refused func(i int) (verdict.Refusal, executor.CreateShapeCause)) {
 	for i := range report.Statements {
-		selected, cause := refused(i)
-		if !selected {
+		r, cause := refused(i)
+		if r.IsZero() {
 			continue
 		}
-		any = true
 		st := &report.Statements[i]
 		alreadyRefused := st.Disposition == router.DispositionRefuse
 		st.Backend = ""
 		st.Disposition = router.DispositionRefuse
 		if !alreadyRefused {
-			st.Reason = reason
+			// INV: RF-7 — the statement's class comes from the proof.
+			st.Reason, st.Class, st.Owner = r.Reason(), r.Class(), r.Owner()
 			st.Cause = cause
+		}
+		if report.Disposition != router.DispositionRefuse {
+			report.Reason, report.Class, report.Owner = r.Reason(), r.Class(), r.Owner()
+			report.Disposition = router.DispositionRefuse
 		}
 		st.ExecSQL = nil
 		st.Execution = ""
 		withdrawSaferAdvice(st)
-	}
-	if any {
-		if report.Disposition != router.DispositionRefuse {
-			report.Reason = reason
-		}
-		report.Disposition = router.DispositionRefuse
 	}
 }
 
@@ -306,7 +340,8 @@ func FromRouted(rs router.Statement) (Statement, error) {
 		// own; stamp the same typed reason the run path's refusal verdict
 		// reports, so a dry-run report and a run receipt for the same
 		// statement match on the typed field alone.
-		st.Reason = verdict.ReasonUnsupportedStatement
+		r := RouteRefusal()
+		st.Reason, st.Class, st.Owner = r.Reason(), r.Class(), r.Owner()
 	}
 	for _, d := range rs.Decisions {
 		if d.Destructive {

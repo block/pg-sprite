@@ -117,15 +117,17 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 			return plan.Report{}, checkErr
 		}
 		if targetFacts.Partitioned() {
-			refused := make([]bool, len(report.Statements))
+			causes := make([]preflight.PartitionRefusalCause, len(report.Statements))
 			for i := range report.Statements {
 				cause, causeErr := preflight.RefusesPartitionedParent(targetFacts.ServerMajor(), report.Statements[i].ExecSQL)
 				if causeErr != nil {
 					return plan.Report{}, causeErr
 				}
-				refused[i] = cause != ""
+				causes[i] = cause
 			}
-			plan.RefuseUnsupportedPartitionedParent(&report, refused)
+			if err := plan.RefuseUnsupportedPartitionedParent(&report, causes); err != nil {
+				return plan.Report{}, err
+			}
 		}
 	}
 	report.Fingerprint = plan.Fingerprint(report.Statements)

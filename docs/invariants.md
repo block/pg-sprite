@@ -389,6 +389,13 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   does not substitute a blocking parent build for the missing partition-aware online flow.
   *Enforced:* preflight and sequence-executor admission. *Source:* PostgreSQL relation-kind and
   version capabilities.
+- **RF-7** — Every refusal carries exactly one non-zero class from the closed refusal-class
+  vocabulary, and carries an owner exactly when its class is `no-online-safety-problem`.
+  *Enforced:* `verdict.NewRefusal` and the per-class constructors are the only way to build a
+  `verdict.Refusal`; `Verdict.WithRefusal` is the only way a verdict acquires its refusal
+  fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`)
+  is checked for completeness against the production closed sets by
+  `TestRefusalRegistryIsComplete`. *Source:* [refusal classes](refusal-classes.md).
 
 ## Orchestration / control-plane (OC)
 

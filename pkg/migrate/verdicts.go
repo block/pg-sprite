@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
@@ -20,21 +21,20 @@ import (
 // statements are never executed. Gate needs no database, so a caller can
 // refuse before dialing; [Run] re-checks it regardless.
 func Gate(st statement.Statement) (verdict.Verdict, bool) {
-	v := verdict.Verdict{Outcome: verdict.OutcomeRefused, Statement: st.SQL()}
-	switch st.Kind() {
-	case statement.KindAlterTable, statement.KindCreateIndex:
+	r, refused := gateRefusal(st.Kind(), st.Concurrent())
+	if !refused {
 		return verdict.Verdict{}, false
+	}
+	v := verdict.Verdict{Statement: st.SQL()}.WithRefusal(r)
+	switch st.Kind() {
 	case statement.KindDropIndex, statement.KindReindex:
-		v.Reason = verdict.ReasonIndexStatement
 		v.Detail, v.SaferIdiom = indexAdvice(st)
 	case statement.KindCreateTable:
-		v.Reason = verdict.ReasonUnsupportedStatement
 		// The library names the concept; each front door attaches its own
 		// actionable spelling (the CLI points at its diff command).
 		v.Detail = "migrate changes an existing table; to converge a table onto a desired-state CREATE TABLE, " +
 			"use the declarative front door — diff the desired schema against the live database"
-	case statement.KindOther:
-		v.Reason = verdict.ReasonUnsupportedStatement
+	default:
 		v.Detail = "only ALTER TABLE and CREATE INDEX statements are supported by the imperative front door"
 	}
 	return v, true
@@ -65,27 +65,28 @@ func indexAdvice(st statement.Statement) (detail, saferIdiom string) {
 // the submitted form and the role could not run it.
 func privilegeVerdict(st statement.Statement, privErr *preflight.PrivilegeError, forced bool) verdict.Verdict {
 	return verdict.Verdict{
-		Outcome:   verdict.OutcomeRefused,
-		Reason:    verdict.ReasonInsufficientPrivileges,
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Forced:    forced,
 		Detail:    privErr.Error(),
-	}
+	}.WithRefusal(insufficientPrivilegesRefusal())
 }
 
 // partitionedParentVerdict refuses unsupported execution steps on a
 // partitioned parent before the sequence executor runs anything.
 func partitionedParentVerdict(st statement.Statement, partitionErr *preflight.UnsupportedPartitionedParentError,
-	forced bool) verdict.Verdict {
+	forced bool) (verdict.Verdict, error) {
+	r, ok := partitionRefusal(partitionErr.Cause)
+	if !ok {
+		return verdict.Verdict{}, fmt.Errorf("%w: partitioned-parent refusal carries unclassified cause %q",
+			executor.ErrInvariantViolation, partitionErr.Cause)
+	}
 	return verdict.Verdict{
-		Outcome:   verdict.OutcomeRefused,
-		Reason:    verdict.ReasonUnsupportedPartitionedParent,
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Forced:    forced,
 		Detail:    partitionErr.Error(),
-	}
+	}.WithRefusal(r), nil
 }
 
 // rewriteRequiredVerdict is the refusal for a statement whose submitted
@@ -94,27 +95,23 @@ func partitionedParentVerdict(st statement.Statement, partitionErr *preflight.Un
 // build. Running the submitted form would falsify the plan's own reason.
 func rewriteRequiredVerdict(st statement.Statement) verdict.Verdict {
 	return verdict.Verdict{
-		Outcome:   verdict.OutcomeRefused,
-		Reason:    verdict.ReasonRewriteRequired,
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Detail: "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not " +
 			"construct one for this statement; submit each operation as its own single-operation statement " +
 			"so the engine can build its safer form (a dry-run classification shows each operation's route)",
-	}
+	}.WithRefusal(rewriteRequiredRefusal())
 }
 
 // backendUnavailableVerdict is the refusal for a change that routes to an
 // execution strategy this build does not implement.
 func backendUnavailableVerdict(st statement.Statement, rs router.Statement) verdict.Verdict {
 	return verdict.Verdict{
-		Outcome:   verdict.OutcomeRefused,
-		Reason:    verdict.ReasonBackendUnavailable,
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Detail: fmt.Sprintf("the change requires the %s strategy, which this build does not implement yet: "+
 			"PostgreSQL would rewrite the table under ACCESS EXCLUSIVE for the whole operation", rs.Backend),
-	}
+	}.WithRefusal(backendUnavailableRefusal())
 }
 
 // routeRefusalVerdict is the refusal for a statement the planner refused:
@@ -122,12 +119,10 @@ func backendUnavailableVerdict(st statement.Statement, rs router.Statement) verd
 // part of the statement the engine does not know a safe path for.
 func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Verdict {
 	v := verdict.Verdict{
-		Outcome:   verdict.OutcomeRefused,
-		Reason:    verdict.ReasonUnsupportedStatement,
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Detail:    "the planner knows no safe path for this statement",
-	}
+	}.WithRefusal(plan.RouteRefusal())
 	for _, d := range rs.Decisions {
 		if d.Route == planner.RouteRefuse {
 			v.Detail = fmt.Sprintf("the planner knows no safe path for %s", d.Operation)
@@ -143,8 +138,6 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 // submitted form and the guard said no.
 func sizeGuardVerdict(st statement.Statement, sizeErr *preflight.SizeError, forced bool) verdict.Verdict {
 	return verdict.Verdict{
-		Outcome:   verdict.OutcomeRefused,
-		Reason:    verdict.ReasonTableTooLarge,
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Forced:    forced,
@@ -153,7 +146,7 @@ func sizeGuardVerdict(st statement.Statement, sizeErr *preflight.SizeError, forc
 			"size; if it requires a rewrite, a cancelled attempt is not a free probe — it would hold "+
 			"ACCESS EXCLUSIVE doing rewrite work for the whole budget",
 			sizeErr.TotalBytes, sizeErr.LimitBytes),
-	}
+	}.WithRefusal(tableTooLargeRefusal())
 }
 
 // admissionRefusalVerdict is the refusal for a statement the gate admits but
@@ -161,15 +154,13 @@ func sizeGuardVerdict(st statement.Statement, sizeErr *preflight.SizeError, forc
 // unnamed index build, IF NOT EXISTS on a concurrent build, or a substituted
 // step shape the sequence executor does not drive yet (DETACH PARTITION
 // CONCURRENTLY). The typed error carries the explanation.
-func admissionRefusalVerdict(st statement.Statement, err error, forced bool) verdict.Verdict {
+func admissionRefusalVerdict(st statement.Statement, err error, r verdict.Refusal, forced bool) verdict.Verdict {
 	return verdict.Verdict{
-		Outcome:   verdict.OutcomeRefused,
-		Reason:    verdict.ReasonUnsupportedStatement,
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Forced:    forced,
 		Detail:    fmt.Sprintf("the engine cannot run this statement safely: %v; nothing was executed", err),
-	}
+	}.WithRefusal(r)
 }
 
 // budgetVerdict is the refusal for an attempt that exceeded its lock or
@@ -180,12 +171,10 @@ func admissionRefusalVerdict(st statement.Statement, err error, forced bool) ver
 // doing rewrite work. A refused forced attempt still records the override.
 func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError, forced, online bool) verdict.Verdict {
 	v := verdict.Verdict{
-		Outcome:   verdict.OutcomeRefused,
-		Reason:    verdict.ReasonBudgetExceeded,
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Forced:    forced,
-	}
+	}.WithRefusal(budgetExceededRefusal())
 	switch budgetErr.Cause {
 	case executor.CauseLock:
 		v.Cause = verdict.CauseLockBudget
@@ -264,8 +253,8 @@ func execRefusal(st statement.Statement, err error,
 	if err == nil {
 		return verdict.Verdict{}, false
 	}
-	if isAdmissionRefusal(err) {
-		return admissionRefusalVerdict(st, err, forced), true
+	if r, ok := admissionRefusal(err); ok {
+		return admissionRefusalVerdict(st, err, r, forced), true
 	}
 	var invalidErr *executor.InvalidIndexError
 	if errors.As(err, &invalidErr) {
@@ -280,21 +269,6 @@ func execRefusal(st statement.Statement, err error,
 		return budgetVerdict(st, budgetErr, forced, online), true
 	}
 	return verdict.Verdict{}, false
-}
-
-// isAdmissionRefusal reports whether err is one of the executor's static
-// admission refusals: decided from the statement's shape before anything
-// executes, so it maps to a refusal verdict, not an operational error. A
-// *SequenceStepError wrapper means execution started, which is never an
-// admission refusal.
-func isAdmissionRefusal(err error) bool {
-	var stepErr *executor.SequenceStepError
-	if errors.As(err, &stepErr) {
-		return false
-	}
-	return errors.Is(err, executor.ErrUnsupportedSequenceStep) ||
-		errors.Is(err, executor.ErrUnnamedIndex) ||
-		errors.Is(err, executor.ErrIfNotExistsUnsupported)
 }
 
 // onlineIdiomPlan reports whether the plan proved every operation an online
