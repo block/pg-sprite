@@ -22,10 +22,10 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/progress"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -256,11 +256,12 @@ func executeBoundedAttempt(ctx context.Context, pool *pgxpool.Pool, st statement
 	// INV: LK-2 — budgets are applied inside this transaction regardless of
 	// the session defaults, so the attempt cannot outlive them even on a
 	// misconfigured pool. A bare integer is milliseconds to PostgreSQL;
-	// SET LOCAL cannot use bind parameters, and identifiers are sanitized.
+	// SET LOCAL cannot use bind parameters. The transaction-local
+	// search_path is built by dbconn so it upholds CO-9 like the session's.
 	setBudgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(b.LockTimeout.Milliseconds(), 10) +
 		"; SET LOCAL statement_timeout = " + strconv.FormatInt(b.StatementTimeout.Milliseconds(), 10)
 	if searchPathSchema != "" {
-		setBudgets += "; SET LOCAL search_path = " + pgx.Identifier{searchPathSchema}.Sanitize() + ", public"
+		setBudgets += "; " + dbconn.LocalSearchPath(searchPathSchema, "public")
 	}
 	if _, err := tx.Exec(ctx, setBudgets); err != nil {
 		return fmt.Errorf("set attempt budgets: %w", err)
