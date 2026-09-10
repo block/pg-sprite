@@ -1,7 +1,8 @@
 # Current limitations
 
-pg-sprite refuses a schema change when it cannot provide its online-safety
-guarantees. This page explains the *mechanics* of each current refusal; the
+pg-sprite refuses a schema change at capability, ownership, design, environment, or
+internal-invariant boundaries. Some refusals mean there is no online-safety problem for
+the engine to solve and name the owner that should handle the work. This page explains the *mechanics* of each current refusal; the
 complete support matrix — every operation and object type, tiered as
 supported / planned / out of scope, with reasons — is
 [capabilities.md](capabilities.md). These are current capability boundaries,

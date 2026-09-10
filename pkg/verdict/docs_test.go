@@ -46,3 +46,21 @@ func TestRefusalClassesDocListsEveryRefusalReason(t *testing.T) {
 			"docs/refusal-classes.md has neither a class row nor a cause table for refusal reason %q", r)
 	}
 }
+
+// Every class and owner the contract closes over must be documented: a
+// Class or Owner constant added without a row in the refusal-classes
+// vocabulary tables fails here, so a new value cannot land without a stated
+// meaning and consumer action.
+func TestRefusalClassesDocListsEveryClassAndOwner(t *testing.T) {
+	raw, err := os.ReadFile(refusalClassesDoc)
+	require.NoError(t, err)
+	doc := string(raw)
+	for _, c := range Classes() {
+		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", string(c)),
+			"docs/refusal-classes.md is missing a vocabulary row for class %q", c)
+	}
+	for _, o := range Owners() {
+		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", string(o)),
+			"docs/refusal-classes.md is missing a vocabulary row for owner %q", o)
+	}
+}

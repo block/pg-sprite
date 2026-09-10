@@ -339,7 +339,7 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	if err := preflight.CheckPartitionSupport(pt, serverMajor, execSQL); err != nil {
 		var partitionErr *preflight.UnsupportedPartitionedParentError
 		if errors.As(err, &partitionErr) {
-			return partitionedParentVerdict(st, partitionErr, forced), nil
+			return partitionedParentVerdict(st, partitionErr, forced)
 		}
 		return verdict.Verdict{}, err
 	}

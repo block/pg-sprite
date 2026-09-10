@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/suggest"
@@ -166,18 +167,51 @@ func TestRefuseUnsupportedPartitionedParentWithdrawsExecutionAdvice(t *testing.T
 			ExecSQL: []string{"CREATE INDEX CONCURRENTLY i ON t (c)"}, Execution: planner.ExecutionAutocommit,
 		}},
 	}
-	plan.RefuseUnsupportedPartitionedParent(&r, []bool{true})
+	require.NoError(t, plan.RefuseUnsupportedPartitionedParent(&r, []preflight.PartitionRefusalCause{preflight.PartitionCauseConcurrentIndexBuild}))
 
 	assert.Equal(t, router.DispositionRefuse, r.Disposition)
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Reason)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, r.Class)
 	assert.Equal(t, planner.RouteNative, r.Statements[0].Route)
 	assert.Equal(t, verdict.ReasonUnsupportedPartitionedParent, r.Statements[0].Reason)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, r.Statements[0].Class)
+	assert.Empty(t, r.Statements[0].Owner)
 	assert.Empty(t, r.Statements[0].Cause, "a target-facts refusal carries no create-shape cause")
 	assert.Empty(t, r.Statements[0].Backend)
 	assert.Empty(t, r.Statements[0].ExecSQL)
 	assert.Empty(t, r.Statements[0].Execution)
 	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQL)
 	assert.Empty(t, r.Statements[0].Decisions[0].SaferSQLExecution)
+}
+
+// The partition refusal's class is a property of the cause: an index-adoption
+// refusal is by-design, a pre-18 NOT VALID foreign key is environmental. A
+// registry keyed on the reason alone could not tell them apart.
+func TestRefuseUnsupportedPartitionedParentClassFollowsCause(t *testing.T) {
+	for cause, want := range map[preflight.PartitionRefusalCause]verdict.Class{
+		preflight.PartitionCauseBlockingIndexBuild: verdict.ClassCapabilityBoundary,
+		preflight.PartitionCauseIndexAdoption:      verdict.ClassByDesign,
+		preflight.PartitionCauseNotValidForeignKey: verdict.ClassEnvironmental,
+	} {
+		r := plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{
+			{Disposition: router.DispositionExecute},
+			{Disposition: router.DispositionExecute},
+		}}
+		require.NoError(t, plan.RefuseUnsupportedPartitionedParent(&r, []preflight.PartitionRefusalCause{"", cause}))
+		assert.Equal(t, router.DispositionExecute, r.Statements[0].Disposition, cause)
+		assert.Empty(t, r.Statements[0].Class, cause)
+		assert.Equal(t, want, r.Statements[1].Class, cause)
+		assert.Equal(t, want, r.Class, "the report carries the first refusal's class")
+	}
+}
+
+func TestRefuseUnsupportedPartitionedParentFailsClosed(t *testing.T) {
+	r := plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{{Disposition: router.DispositionExecute}}}
+	require.Error(t, plan.RefuseUnsupportedPartitionedParent(&r, nil), "positional length mismatch")
+	err := plan.RefuseUnsupportedPartitionedParent(&r, []preflight.PartitionRefusalCause{"parent-unknown-shape"})
+	require.ErrorIs(t, err, executor.ErrInvariantViolation)
+	assert.Equal(t, router.DispositionExecute, r.Statements[0].Disposition, "nothing is marked when the refusal cannot be classified")
+	assert.Empty(t, r.Reason)
 }
 
 func TestRefuseUnsupportedCreateShapeMarksPositions(t *testing.T) {
@@ -400,7 +434,7 @@ func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 3 against this test.
+// omissions. A consumer pins format_version 4 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -456,7 +490,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 3,
+		"format_version": 4,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -514,7 +548,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 3,
+		"format_version": 4,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -598,7 +632,7 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 }
 
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 3.
+// pinned to format_version 4.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }
