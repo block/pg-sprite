@@ -103,9 +103,10 @@ demo-check: build db-up demo-seed
 
 # Corpus replay (replay/README.md): replay a real project's schema-change
 # history through the built binary, asserting per statement that pg-sprite
-# executes it or refuses with exactly the expected typed reason and class. Fetches the
-# pinned corpus and starts (or resets) the project's own throwaway container
-# as needed; stop it with make replay-down.
+# executes it or refuses with exactly the expected typed reason, class, and
+# owner. Fetches the pinned corpus and starts (or resets) the project's own
+# throwaway container as needed; stop it with make replay-down. Operator-run,
+# not a CI gate.
 replay: build
 	replay/fetch.sh $(REPLAY_PROJECT)
 	PGS="$(CURDIR)/bin/pg-sprite" replay/replay.sh $(REPLAY_PROJECT)

@@ -4,14 +4,14 @@
 #
 # Resets the harness database to the project baseline, then walks
 # replay/<project>/assessment.tsv in order. Every assessed step (execute /
-# refuse:<reason>:<class>) runs through `pg-sprite migrate --json` against the live
-# database — real execution, not dry-run. Refused steps are then applied via
-# psql so state keeps advancing; psql steps (out-of-scope content) are
-# applied via psql in one transaction and never assessed.
+# refuse:<reason>:<class>[:<owner>]) runs through `pg-sprite migrate --json`
+# against the live database — real execution, not dry-run. Refused steps are
+# then applied via psql so state keeps advancing; psql steps (out-of-scope
+# content) are applied via psql in one transaction and never assessed.
 #
 # The run fails (non-zero exit) on any verdict mismatch: an assessed step
 # that does not produce exactly its expected outcome — including a refusal
-# with the wrong reason or class — is a failure, not a pass.
+# with the wrong reason, class, or owner — is a failure, not a pass.
 #
 #   make replay [REPLAY_PROJECT=<project>]   # fetch + harness + full replay
 #   ./replay.sh <project>                     # replay directly (starts or
@@ -49,6 +49,84 @@ preview() {
         | sed -E 's/^[[:space:]]+//; s/[[:space:]]+/ /g' | cut -c1-56
 }
 
+# Refuse expectations are refuse:<reason>:<class>[:<owner>], parsed from the
+# right: class and owner are closed, disjoint vocabularies, so the last
+# token is an owner exactly when it names one, and the token before the
+# class is the reason (which may itself contain colons).
+is_owner() {
+    case "$1" in
+    data-change-runner|declarative-front-door|direct-operator|provisioning) return 0 ;;
+    esac
+    return 1
+}
+
+# A manifest pins verdicts the corpus itself determines. Two classes describe
+# the run rather than the operation (docs/refusal-classes.md) and so are never
+# a legitimate expectation: invariant-violation reports a pg-sprite defect,
+# and environmental depends on the run's budgets, privileges, and server —
+# a row pinning either would go green over a failure the corpus does not
+# control.
+parse_refuse_expectation() {
+    local expectation="${1#refuse:}" where="$2"
+    want_owner=""
+    if is_owner "${expectation##*:}"; then
+        want_owner="${expectation##*:}"
+        expectation="${expectation%:*}"
+    fi
+    case "$expectation" in
+    *:*) ;;
+    *) die "refusal expectation must pin a class (refuse:<reason>:<class>) in $where" ;;
+    esac
+    want_reason="${expectation%:*}"
+    want_class="${expectation##*:}"
+    case "$want_class" in
+    capability-boundary|by-design)
+        [ -z "$want_owner" ] \
+            || die "class $want_class carries no owner (RF-7) in $where" ;;
+    no-online-safety-problem)
+        [ -n "$want_owner" ] \
+            || die "class $want_class must name its owner" \
+                "(refuse:<reason>:<class>:<owner>, RF-7) in $where" ;;
+    environmental|invariant-violation)
+        die "class $want_class describes the run, not the operation, and is never" \
+            "an expected verdict (docs/refusal-classes.md) in $where" ;;
+    *) die "unknown pinned refusal class '$want_class' in $where" ;;
+    esac
+}
+
+# parse_row validates one manifest row and, for a refuse row, sets
+# want_reason / want_class / want_owner. Called once over the whole manifest
+# before the harness is touched — a malformed pin must fail before anything
+# runs, not on the row it sits on — and again per row during the walk.
+parse_row() {
+    local migration="$1" range="$2" expected="$3" extra="$4"
+    local where="$MANIFEST: $migration $range"
+    want_reason=""; want_class=""; want_owner=""
+
+    # The class rides inside the refuse expectation; a refuse row with a bare
+    # trailing token is the shape of a manifest written before that move, so
+    # name the move rather than the symptom.
+    if [ -n "$extra" ]; then
+        case "$expected" in
+        refuse:*)
+            die "unexpected fourth column '$extra' in $where — the class belongs" \
+                "inside the expectation: refuse:<reason>:<class>[:<owner>]" ;;
+        *) die "unexpected fourth column '$extra' in $where" ;;
+        esac
+    fi
+
+    case "$expected" in
+    execute|psql) ;;
+    refuse:*) parse_refuse_expectation "$expected" "$where" ;;
+    *) die "unknown expectation '$expected' in $where" ;;
+    esac
+}
+
+while read -r migration range expected extra; do
+    case "$migration" in ''|\#*) continue ;; esac
+    parse_row "$migration" "$range" "$expected" "$extra"
+done <"$MANIFEST"
+
 # Either path ends at the pristine baseline: a fresh container applies it on
 # the way up; an existing one is dropped back to it. A failed baseline must
 # stop the run — replaying against a partially-applied starting state would
@@ -72,21 +150,7 @@ declare -a capability_boundary_reasons=()
 
 while read -r migration range expected extra; do
     case "$migration" in ''|\#*) continue ;; esac
-
-    [ -z "$extra" ] || die "unexpected fourth column in $MANIFEST: $migration $range"
-
-    case "$expected" in
-    refuse:*:*)
-        expectation="${expected#refuse:}"
-        want_reason="${expectation%:*}"
-        want_class="${expectation##*:}"
-        case "$want_class" in
-        capability-boundary|no-online-safety-problem|by-design|environmental|invariant-violation) ;;
-        *) die "unknown pinned refusal class '$want_class' in $MANIFEST: $migration $range" ;;
-        esac
-        ;;
-    refuse:*) die "refusal expectation must pin a class in $MANIFEST: $migration $range" ;;
-    esac
+    parse_row "$migration" "$range" "$expected" "$extra"
 
     file=$(ls "${PROJECT_DIR}/corpus/${migration}_"*.sql 2>/dev/null) \
         || die "no corpus file for migration $migration"
@@ -141,6 +205,10 @@ print("\t".join(str(v.get(k, "")) for k in ("outcome", "reason", "class", "owner
         fi
         ;;
     refuse:*)
+        # Buckets count the engine's verdict, not the pin — the class it
+        # emitted is the finding about the workload. A mismatched row is
+        # still counted under what the engine said; the summary header says
+        # so whenever failures is non-zero.
         if [ "$status" -eq 2 ]; then
             case "$actual_class" in
             capability-boundary)
@@ -153,8 +221,12 @@ print("\t".join(str(v.get(k, "")) for k in ("outcome", "reason", "class", "owner
             invariant-violation) count_invariant_violation=$((count_invariant_violation + 1)) ;;
             esac
         fi
+        # Owner is asserted on every row: RF-7 makes it present exactly when
+        # the class is no-online-safety-problem, so the pin (or its absence)
+        # is well-defined without a separate column.
         if [ "$status" -eq 2 ] && [ "$outcome" = "refused" ] \
-            && [ "$reason" = "$want_reason" ] && [ "$actual_class" = "$want_class" ]; then
+            && [ "$reason" = "$want_reason" ] && [ "$actual_class" = "$want_class" ] \
+            && [ "$owner" = "$want_owner" ]; then
             rows+=("$migration|$range|$expected|$actual|PASS|$label")
         else
             rows+=("$migration|$range|$expected|$actual (exit $status)|FAIL|$label")
@@ -197,21 +269,45 @@ for row in "${rows[@]}"; do
 done
 
 echo
-echo "== bucket summary"
-printf '%-52s %s\n' "executed natively by pg-sprite (T1)" "$count_executed"
-printf '%-52s %s\n' "refusal: capability boundary (T2)" "$count_capability_boundary"
+# The buckets tally engine verdicts, so they are a finding about the workload
+# only when every verdict matched its pin; otherwise say what they are.
+if [ "$failures" -eq 0 ]; then
+    echo "== bucket summary"
+else
+    echo "== bucket summary (engine verdicts as emitted; $failures row(s) mismatched" \
+        "their pin — see FAIL rows above)"
+fi
+# Labels are a fixed set but of uneven length; size the column from them so
+# the loudest label cannot push its own count out of line.
+summary_labels=(
+    "executed natively by pg-sprite (T1)"
+    "refusal: capability boundary (T2)"
+    "refusal: no online-safety problem"
+    "refusal: by design (safer form exists)"
+    "refusal: environmental"
+    "refusal: INVARIANT VIOLATION (REPORT PG-SPRITE DEFECT)"
+    "out-of-scope content, psql only (T3)"
+    "mismatches"
+)
+label_width=0
+for l in "${summary_labels[@]}"; do
+    [ "${#l}" -gt "$label_width" ] && label_width=${#l}
+done
+summary_line() { printf '%-*s %s\n' "$label_width" "$1" "$2"; }
+summary_line "${summary_labels[0]}" "$count_executed"
+summary_line "${summary_labels[1]}" "$count_capability_boundary"
 if [ "$count_capability_boundary" -gt 0 ]; then
     printf '%s\n' "${capability_boundary_reasons[@]}" | sort | uniq -c | sort -rn \
         | while read -r n reason; do
-            printf '  %-50s %s\n' "$reason" "$n"
+            printf '  %-*s %s\n' "$((label_width - 2))" "$reason" "$n"
         done
 fi
-printf '%-52s %s\n' "refusal: no online-safety problem" "$count_no_online_safety_problem"
-printf '%-52s %s\n' "refusal: by design (safer form exists)" "$count_by_design"
-printf '%-52s %s\n' "refusal: environmental" "$count_environmental"
-printf '%-52s %s\n' "refusal: INVARIANT VIOLATION (REPORT PG-SPRITE DEFECT)" "$count_invariant_violation"
-printf '%-52s %s\n' "out-of-scope content, psql only (T3)" "$count_psql"
-printf '%-52s %s\n' "mismatches" "$failures"
+summary_line "${summary_labels[2]}" "$count_no_online_safety_problem"
+summary_line "${summary_labels[3]}" "$count_by_design"
+summary_line "${summary_labels[4]}" "$count_environmental"
+summary_line "${summary_labels[5]}" "$count_invariant_violation"
+summary_line "${summary_labels[6]}" "$count_psql"
+summary_line "${summary_labels[7]}" "$failures"
 
 [ "$failures" -eq 0 ] || exit 1
 echo
