@@ -154,10 +154,12 @@ markers — the introduction, tier explanation, legend, peer comparison, refusal
 and operator recipes — remains hand-written. Generated output is deterministic: source
 order is display order, formatting has no timestamps, and a second generation is a no-op.
 
-The generator lands with the YAML file, not later. A Make target runs its `go run`
-entry point. CI runs that target and then fails unless `git diff --exit-code` is empty.
-The test validates semantics; regenerate-and-diff proves the checked-in human page is
-the rendering of the validated data.
+The generator lands with the YAML file, not later. `make check-capabilities` runs its
+`go run` entry point and fails unless the generated page has an empty git diff. The
+unconditional capabilities job in `.github/workflows/ci.yml` applies that gate to code
+and docs-only changes, and `.github/workflows/release.yml` repeats it for the tagged tree
+before the test sweep. The test validates semantics; regenerate-and-diff proves the
+checked-in human page is the rendering of the validated data.
 
 The capability-statement rule still applies beyond the generated matrix. A behavior
 change updates the YAML, [limitations.md](limitations.md), and the README's short
@@ -263,7 +265,7 @@ does not change any capability, tier, refusal, or runtime behavior.
 
 Implementation order is:
 
-**Status:** step 1 is complete; steps 2–4 remain planned.
+**Status:** steps 1 and 3 are complete; steps 2 and 4 remain planned.
 
 1. add the typed package, `pkg/capabilities/capabilities.yaml`, validator, generator,
    and markers together, making the repository single-source on day one;

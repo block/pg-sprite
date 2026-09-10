@@ -14,10 +14,17 @@ PG_DSN_LOCAL = postgres://$(PG_USER):$(PG_PASSWORD)@localhost:$(PG_PORT)/$(PG_DA
 # Which corpus replay project to run (replay/<project>/project.conf).
 REPLAY_PROJECT ?= buzz
 
-.PHONY: build gen-capabilities test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+.PHONY: build gen-capabilities check-capabilities test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
 gen-capabilities:
 	$(GO) run ./internal/cmd/gen-capabilities
+
+# Regenerate the capabilities page and leave any stale output visible for review.
+check-capabilities: gen-capabilities
+	@if ! git diff --exit-code -- docs/capabilities.md; then \
+		echo "docs/capabilities.md disagrees with pkg/capabilities/capabilities.yaml; run make gen-capabilities and commit the result" >&2; \
+		exit 1; \
+	fi
 
 build:
 	$(GO) build -o bin/pg-sprite ./cmd/pg-sprite
