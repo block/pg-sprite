@@ -199,10 +199,17 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		}
 		result.Verdicts = append(result.Verdicts, v)
 		if v.Outcome == verdict.OutcomeRefused {
-			result.Outcome = verdict.OutcomeRefused
-			result.Reason = v.Reason
-			result.Detail = committedPrefixDetail(i, len(report.Statements), "was refused at execution time")
-			return result, nil
+			// INV: RF-7 — the aggregate carries the statement verdict's
+			// classified refusal; a refused verdict Run produced without
+			// a valid class is a breach of the engine's own contract.
+			ref, err := v.Refusal()
+			if err != nil {
+				result.Outcome = verdict.OutcomeFailed
+				result.Detail = committedPrefixDetail(i, len(report.Statements), "was refused at execution time")
+				return result, fmt.Errorf("%w: planned statement %d refused without a classified refusal: %w",
+					executor.ErrInvariantViolation, i+1, err)
+			}
+			return result.refused(ref, committedPrefixDetail(i, len(report.Statements), "was refused at execution time")), nil
 		}
 	}
 	result.Outcome = verdict.OutcomeExecuted

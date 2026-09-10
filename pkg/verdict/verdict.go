@@ -273,6 +273,18 @@ func (v Verdict) WithRefusal(r Refusal) Verdict {
 	return v
 }
 
+// Refusal reconstructs the classified refusal a refused verdict carries, so
+// a caller that aggregates verdicts into its own result propagates the
+// class and owner through the same one path instead of copying fields. It
+// fails on a verdict that is not refused, or whose reason, class, and owner
+// do not validate together — a verdict this build cannot have produced.
+func (v Verdict) Refusal() (Refusal, error) {
+	if v.Outcome != OutcomeRefused {
+		return Refusal{}, fmt.Errorf("verdict outcome is %q, not %q", v.Outcome, OutcomeRefused)
+	}
+	return NewRefusal(v.Class, v.Reason, v.Owner)
+}
+
 // Cause narrows ReasonBudgetExceeded to the budget that was exceeded, so
 // automation can branch on which limit fired without parsing prose.
 type Cause string

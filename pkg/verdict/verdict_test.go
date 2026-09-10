@@ -77,6 +77,22 @@ func TestWithRefusalStampsOutcomeReasonClassOwner(t *testing.T) {
 	assert.NotContains(t, js, `"owner"`)
 }
 
+func TestRefusalRoundTripsThroughVerdict(t *testing.T) {
+	want := NoOnlineSafetyProblem(ReasonUnsupportedStatement, OwnerProvisioning)
+	got, err := Verdict{Statement: "GRANT SELECT ON t TO r"}.WithRefusal(want).Refusal()
+	require.NoError(t, err)
+	assert.Equal(t, want, got)
+
+	_, err = Verdict{Outcome: OutcomeExecuted}.Refusal()
+	require.Error(t, err, "an executed verdict carries no refusal")
+
+	_, err = Verdict{Outcome: OutcomeRefused, Reason: ReasonTableTooLarge}.Refusal()
+	require.Error(t, err, "a refused verdict without a class is not a classified refusal")
+
+	_, err = Verdict{Outcome: OutcomeRefused, Reason: ReasonTableTooLarge, Class: ClassEnvironmental, Owner: OwnerProvisioning}.Refusal()
+	require.Error(t, err, "an owner outside no-online-safety-problem violates RF-7")
+}
+
 func TestJSONRoundTrip(t *testing.T) {
 	v := Verdict{
 		Outcome:    OutcomeRefused,
