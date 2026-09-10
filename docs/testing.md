@@ -28,7 +28,10 @@ Concretely:
   real PostgreSQL, across every supported major in CI.
 - **The matrix is a gate, not advisory.** The `all-green` sentinel job
   requires the full version matrix; docs-only changes are the only path
-  that skips it.
+  that skips it, and even they must pass the unit job — the guards that
+  pin prose to code (`internal/safety/proof_types_test.go` for the
+  proof-type registries, the `docs_test.go` files for report and CLI
+  output examples) run on every PR regardless of what it touches.
 - **Coverage never regresses.** Deleting or skipping a test to get green is
   forbidden (same rule as the hooks: no `--no-verify`, no `nolint`). A
   numeric coverage ratchet on `pkg/` packages is not yet wired into CI, so
