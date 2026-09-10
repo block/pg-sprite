@@ -1093,6 +1093,16 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 		return nil, nil, fmt.Errorf("acquire session: %w", err)
 	}
 
+	// The bounds in force are read before they are overridden so the release
+	// can put them back as they were. Nothing has been changed yet, so a
+	// session whose read fails is still exactly as the pool prepared it and
+	// goes back unharmed.
+	priorLock, priorStatement, err := sessionBudgets(ctx, conn)
+	if err != nil {
+		conn.Release()
+		return nil, nil, err
+	}
+
 	// INV: LK-2 — the CONCURRENTLY exception policy: no per-lock timeout
 	// (a lock_timeout would cancel the statement's snapshot waits and leave
 	// the invalid index this executor exists to prevent); either one overall
@@ -1123,7 +1133,16 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 		// socket must not hang the executor.
 		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sessionCleanupTimeout)
 		defer cancel()
-		if _, err := conn.Exec(cleanupCtx, "RESET lock_timeout; RESET statement_timeout"); err == nil {
+		// The bounds are put back by value rather than with RESET. RESET
+		// restores what the startup packet carried, which is not where the
+		// bounds necessarily came from: a pooler that drops those parameters
+		// leaves the pool to apply them as statements instead, and a RESET
+		// there would hand back a session with both bounds at zero — the
+		// unbounded state LK-2 exists to prevent, on a connection the pool
+		// then reuses.
+		restore := "SET lock_timeout = " + strconv.FormatInt(priorLock, 10) +
+			"; SET statement_timeout = " + strconv.FormatInt(priorStatement, 10)
+		if _, err := conn.Exec(cleanupCtx, restore); err == nil {
 			conn.Release()
 			return
 		}
@@ -1133,6 +1152,23 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 		_ = conn.Hijack().Close(cleanupCtx)
 	}
 	return conn, release, nil
+}
+
+// sessionBudgets reads the execution bounds in force on conn, in the
+// milliseconds a bare integer SET writes.
+//
+// pg_settings reports both in milliseconds, where current_setting renders
+// them as text under PostgreSQL's unit rules — "3s" for 3000 and "500ms"
+// for 500 — which a caller that means to write the value straight back
+// would have to parse.
+func sessionBudgets(ctx context.Context, conn *pgxpool.Conn) (lockMS, statementMS int64, err error) {
+	const query = `SELECT
+		(SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name = 'lock_timeout'),
+		(SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name = 'statement_timeout')`
+	if err := conn.QueryRow(ctx, query).Scan(&lockMS, &statementMS); err != nil {
+		return 0, 0, fmt.Errorf("read session budgets: %w", err)
+	}
+	return lockMS, statementMS, nil
 }
 
 // asConcurrentBudgetError types a CONCURRENTLY statement's failure into

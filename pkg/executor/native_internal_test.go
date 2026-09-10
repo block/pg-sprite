@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -594,4 +596,52 @@ func TestDroppableColumnMatchesTheServer(t *testing.T) {
 			assert.Equal(t, tt.refusal, pgErr.Code)
 		})
 	}
+}
+
+// A pooler that drops lock_timeout and statement_timeout from the startup
+// packet leaves the pool to apply them as statements on each new session
+// instead. RESET restores what the startup packet carried, so on such an
+// endpoint it restores nothing and the session goes back to the pool with
+// both bounds at zero. The release must therefore put the bounds back by
+// value: a reused session without them is the unbounded state LK-2 exists
+// to prevent.
+func TestBudgetedSessionRestoresBoundsTheStartupPacketNeverCarried(t *testing.T) {
+	cfg, err := pgxpool.ParseConfig(testutil.StartPostgres(t))
+	require.NoError(t, err)
+	// The pooler dropped them, so they are absent from the startup packet
+	// and applied as statements — the arrangement this package's pool uses
+	// against a session-mode pooler.
+	delete(cfg.ConnConfig.RuntimeParams, "lock_timeout")
+	delete(cfg.ConnConfig.RuntimeParams, "statement_timeout")
+	cfg.MaxConns = 1
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SET lock_timeout = 3000; SET statement_timeout = 30000")
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	conn, release, err := acquireBudgetedSession(t.Context(), pool, ConcurrentBudget{Overall: time.Minute})
+	require.NoError(t, err)
+	var buildPID, duringLock int64
+	require.NoError(t, conn.QueryRow(t.Context(),
+		`SELECT pg_backend_pid(), (SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name = 'lock_timeout')`).
+		Scan(&buildPID, &duringLock))
+	require.Zero(t, duringLock, "the build itself runs with lock_timeout disabled")
+	release()
+
+	reused, err := pool.Acquire(t.Context())
+	require.NoError(t, err)
+	defer reused.Release()
+	var reusedPID, lockMS, statementMS int64
+	require.NoError(t, reused.QueryRow(t.Context(), `SELECT
+		pg_backend_pid(),
+		(SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name = 'lock_timeout'),
+		(SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name = 'statement_timeout')`).
+		Scan(&reusedPID, &lockMS, &statementMS))
+	require.Equal(t, buildPID, reusedPID,
+		"the released session must be the one reused, or this proves nothing about it")
+	assert.Equal(t, int64(3000), lockMS, "a reused session must not be left without a lock bound")
+	assert.Equal(t, int64(30000), statementMS, "a reused session must not be left without a statement bound")
 }
