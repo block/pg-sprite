@@ -172,6 +172,28 @@ is not the criterion, since a large value under `EXTENDED` storage may compress 
 emit the marker), using the load generator's TOAST-unchanged update profile, run under both
 `REPLICA IDENTITY DEFAULT` and `FULL`.
 
+### CO-9 — Decision reads resolve to the real catalog
+
+Every catalog read that feeds a decision — a preflight proof, a progress or cancel probe, the
+managed-table listing, introspection — must resolve `pg_class`, `pg_index`, `pg_cancel_backend`,
+`=`, and every other catalog name to `pg_catalog`, whatever `search_path` the role or database
+is configured with. PostgreSQL searches `pg_catalog` implicitly first unless the path names it
+explicitly, in which case a user schema listed ahead of it shadows the catalog: a decoy
+`app.pg_index` turns a fail-closed proof into a false clean, and a decoy `pg_cancel_backend`
+returns true and signals nothing. Two layers uphold the invariant. At the connection layer,
+every pooled session drops a `pg_catalog` entry that another schema precedes (`pkg/dbconn`
+`unshadowCatalog`), and every transaction-local path is built by `dbconn.LocalSearchPath`, which
+applies the same rewrite. At the query layer, reads that run under a path pg-sprite did not set
+— the session's own — qualify every relation, function, operator, and type with `pg_catalog`.
+The connection-layer guarantee is per session: it rewrites an explicit `pg_catalog` entry only,
+not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary objects), and a
+proxy that hands the server connection to another client keeps the rewritten, stricter path.
+*Enforced:* `pkg/dbconn` (session hook, `LocalSearchPath`, and the test that keeps it the only
+`search_path` writer under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
+`pkg/progress`, `pkg/schemadiff`. *Test obligation:* a shadowing `search_path` (`<schema>,
+pg_catalog` with decoy catalog relations and functions in the schema) yields the same answer as
+the default path, per read site and per pooled session.
+
 ## Locking and concurrency (LK)
 
 ### LK-1 — At most one migration runs per table
@@ -479,6 +501,7 @@ about **how we write and review the code**.
 | LK-2 | 3 (native), 7 (cutover) | lock-bounding + CIC-exception tests |
 | CO-1, CO-2, CO-3 | 5 (gate), 8 (watermark/divergence policy) | inject-divergence, repair-invalidates-watermark |
 | CO-4, CO-5, CO-6, CO-8 | 6 | one convergence test per race, incl. unique-value move and TOAST-unchanged update |
+| CO-9 | 3 onward | shadowing-search_path tests per read site and per pooled session |
 | LK-3 | 4–6 | cancellation/claim race test |
 | LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |

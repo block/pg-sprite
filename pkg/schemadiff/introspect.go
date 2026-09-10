@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -49,14 +50,12 @@ func Introspect(ctx context.Context, db *pgxpool.Pool, schema, table string) (Mo
 // unqualified, resolves the relation by explicit qualification (never via
 // search_path), and reads columns, constraints, and indexes. Its catalog
 // queries can name pg_class and = unqualified because the search_path they
-// run under is the one set here, which does not list pg_catalog and so
-// searches it first; a query that runs under the caller's session
-// search_path (ListManagedTables) has no such guarantee and qualifies
-// everything.
+// run under is the one set here, which dbconn builds so pg_catalog is never
+// listed behind another schema and is searched first (CO-9); a query that
+// runs under the caller's session search_path (ListManagedTables) qualifies
+// everything instead.
 func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model, error) {
-	// search_path cannot use bind parameters; identifiers are sanitized.
-	setPath := "SET LOCAL search_path = " + pgx.Identifier{schema}.Sanitize() + ", public"
-	if _, err := tx.Exec(ctx, setPath); err != nil {
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(schema, "public")); err != nil {
 		return Model{}, fmt.Errorf("set introspection search_path: %w", err)
 	}
 

@@ -225,9 +225,9 @@ const cancelSignalTimeout = 5 * time.Second
 // cancelBuildSQL reads the build backend's state and signals it only when
 // the server reports it active, in one statement so the read and the
 // signal cannot straddle a state change the tracker then misreports.
-// Every catalog name is pg_catalog-qualified, operators included: a user
-// schema ahead of pg_catalog on search_path could otherwise substitute a
-// pg_cancel_backend that returns true and signals nothing.
+// Every catalog name is pg_catalog-qualified, operators included (CO-9):
+// a user schema ahead of pg_catalog on search_path could otherwise
+// substitute a pg_cancel_backend that returns true and signals nothing.
 const cancelBuildSQL = `SELECT state,
        CASE WHEN state OPERATOR(pg_catalog.=) 'active' THEN pg_catalog.pg_cancel_backend(pid) ELSE false END
   FROM pg_catalog.pg_stat_activity

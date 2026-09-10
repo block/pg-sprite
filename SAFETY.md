@@ -17,9 +17,9 @@ The invariant registry (invariant IDs referenced below) lives in
 
 | Package | Core? | Status | Invariants enforced |
 | --- | --- | --- | --- |
-| `pkg/dbconn` — pool defaults, terminate-blockers, retries, RDS TLS; advisory table lock planned | ✅ core | exists; table-lock proof declaration exists; lock acquisition planned | LK-2 primitives; LK-1 planned |
+| `pkg/dbconn` — pool defaults, terminate-blockers, retries, RDS TLS; advisory table lock planned | ✅ core | exists; table-lock proof declaration exists; lock acquisition planned | LK-2 primitives; CO-9 (session hook and `LocalSearchPath`); LK-1 planned |
 | `pkg/preflight` — precondition verifier, refusals | ✅ core | exists; copy-and-swap target proof declaration exists | ST-6, RF-1..RF-5 |
-| `pkg/executor` — bounded optimistic attempt; native concurrent index build with invalid-index recovery; native sequence executor for the safer idioms | ✅ core | exists (Phase 1: attempt-under-budget; Phase 3.1: concurrent index build; Phase 3.2: sequence executor) | LK-2 (attempt bound + the CONCURRENTLY wait-policy exception) |
+| `pkg/executor` — bounded optimistic attempt; native concurrent index build with invalid-index recovery; native sequence executor for the safer idioms | ✅ core | exists (Phase 1: attempt-under-budget; Phase 3.1: concurrent index build; Phase 3.2: sequence executor) | LK-2 (attempt bound + the CONCURRENTLY wait-policy exception), CO-9 (qualified proof reads) |
 | `pkg/checksum` — chunk verifier, continuous checker, repair | ✅ core | types and proof-type declarations exist; verifier planned | CO-1, CO-2, CO-3 |
 | `pkg/copier` — shadow-table chunked copy | ✅ core | contract types exist; copier planned | CO-4, LK-3 |
 | `pkg/applier` — change apply, buffer, flush scheduling | ✅ core | package contract exists; applier planned | CO-4, CO-5, CO-6, CO-8, LK-3 |

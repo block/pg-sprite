@@ -379,15 +379,7 @@ func TestBuildIndexConcurrentlyCancelBuildResistsCatalogShadowing(t *testing.T) 
 			LANGUAGE sql AS 'SELECT true'`, schema))
 	require.NoError(t, err)
 
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{
-		URL: url,
-		BeforeConnect: func(_ context.Context, cc *pgx.ConnConfig) error {
-			cc.RuntimeParams["search_path"] = schema + ", pg_catalog"
-			return nil
-		},
-	})
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
+	pool := testutil.NewCatalogShadowingPool(t, url, schema)
 
 	_, tracker, done := blockedCallerOwnedBuild(t, pool, schema, "shadow_t", "shadow_idx")
 	require.NoError(t, tracker.CancelBuild(t.Context()))
@@ -840,15 +832,7 @@ func TestBuildIndexConcurrentlyProofsResistCatalogShadowing(t *testing.T) {
 		INSERT INTO %[1]s.t VALUES (1, 7), (2, 7)`, schema))
 	require.NoError(t, err)
 
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{
-		URL: url,
-		BeforeConnect: func(_ context.Context, cc *pgx.ConnConfig) error {
-			cc.RuntimeParams["search_path"] = schema + ", pg_catalog"
-			return nil
-		},
-	})
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
+	pool := testutil.NewCatalogShadowingPool(t, url, schema)
 
 	// Target resolution: the impostor to_regclass resolves everything to
 	// NULL, so a shadowed resolution could never admit this build.
