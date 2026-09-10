@@ -243,7 +243,13 @@ func buildPoolConfig(cfg Config) (*pgxpool.Config, error) {
 	// session-mode endpoint would otherwise silently run unbounded. A SET
 	// is an ordinary statement that no pooler strips, and in session mode
 	// it persists for the connection's life.
-	pc.AfterConnect = applySessionBounds(lockTimeout, stmtTimeout)
+	//
+	// The bounds are applied before the search_path repair so that the
+	// repair's own statements run under them too.
+	pc.AfterConnect = chainAfterConnect(
+		applySessionBounds(lockTimeout, stmtTimeout),
+		unshadowCatalog,
+	)
 
 	connectTimeout := cfg.ConnectTimeout
 	if connectTimeout == 0 {
@@ -279,7 +285,6 @@ func buildPoolConfig(cfg Config) (*pgxpool.Config, error) {
 	if cfg.BeforeConnect != nil {
 		pc.BeforeConnect = cfg.BeforeConnect
 	}
-	pc.AfterConnect = unshadowCatalog
 	if cfg.Logger != nil {
 		pc.ConnConfig.Tracer = &tracelog.TraceLog{
 			Logger:   slogTraceLogger{logger: cfg.Logger},
