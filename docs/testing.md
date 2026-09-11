@@ -37,6 +37,21 @@ Concretely:
   numeric coverage ratchet on `pkg/` packages is not yet wired into CI, so
   this clause remains enforced in review.
 
+## Supabase compatibility
+
+The required Supabase CI job runs the database suites and
+[`integration/supabase`](../integration/supabase) against pinned, disposable
+Supabase services. The [Supabase guide](supabase.md#what-works-today) maps each
+compatibility claim to its tests.
+
+When a new DDL route affects Supabase tables, extend this suite in the same PR.
+Verify the resulting schema and data, access policies and grants, and the app's
+API or Realtime behavior where relevant. Refusals must assert a typed reason and
+unchanged durable state; execution failures must assert any committed leftovers.
+When copy-and-swap becomes available, replace the corresponding refusal
+expectation with successful execution and preservation checks—do not simply
+remove it. Keep the guide's support claims aligned with that evidence.
+
 ## Test-methodology invariants (TM)
 
 How tests are *built*, mined from the peer suites (pgroll, pg_repack,

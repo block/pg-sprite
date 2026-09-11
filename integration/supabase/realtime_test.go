@@ -114,21 +114,7 @@ func TestRealtimeDuringNativeChanges(t *testing.T) {
 	execSQL(t, pool, "ALTER PUBLICATION supabase_realtime ADD TABLE "+table)
 	var oid uint32
 	require.NoError(t, pool.QueryRow(t.Context(), "SELECT $1::regclass::oid", table).Scan(&oid))
-	// Fixture recreation changes table identities cached by Realtime. Reset only
-	// before subscribing; never restart a service or reconnect during the changes.
-	setupCtx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
-	defer cancel()
-	require.NoError(t, compose(setupCtx, "up", "-d", "--no-deps", "--force-recreate", "realtime"))
-	jwt := token(t, 1)
-	require.EventuallyWithT(t, func(c *assert.CollectT) {
-		// The image's temporary seed process also serves HTTP; wait for the marker
-		// created by the final server command before accepting health responses.
-		if !assert.NoError(c, compose(setupCtx, "exec", "-T", "realtime", "test", "-f", "/tmp/pgsprite-server-ready")) {
-			return
-		}
-		_, err := get(setupCtx, "http://localhost:55442/api/tenants/localhost/health", jwt)
-		assert.NoError(c, err)
-	}, 30*time.Second, 200*time.Millisecond)
+	startRealtime(t)
 	first, second := subscribe(t, 1), subscribe(t, 2)
 	execSQL(t, pool, "INSERT INTO "+table+" VALUES (0,'00000000-0000-0000-0000-000000000001','before'),(1000,'00000000-0000-0000-0000-000000000002','before')")
 	for _, s := range []*subscription{first, second} {
@@ -208,4 +194,23 @@ func TestRealtimeDuringNativeChanges(t *testing.T) {
 	assert.Equal(t, 1, count)
 	require.NoError(t, pool.QueryRow(t.Context(), "SELECT indisvalid FROM pg_index WHERE indexrelid='public.pgsprite_realtime_probe_body'::regclass").Scan(&valid))
 	assert.True(t, valid)
+}
+
+func startRealtime(t *testing.T) {
+	t.Helper()
+	// Fixture recreation changes table identities cached by Realtime. Reset only
+	// before subscribing; never restart a service or reconnect during the changes.
+	setupCtx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
+	defer cancel()
+	require.NoError(t, compose(setupCtx, "up", "-d", "--no-deps", "--force-recreate", "realtime"))
+	jwt := token(t, 1)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		// The image's temporary seed process also serves HTTP; wait for the marker
+		// created by the final server command before accepting health responses.
+		if !assert.NoError(c, compose(setupCtx, "exec", "-T", "realtime", "test", "-f", "/tmp/pgsprite-server-ready")) {
+			return
+		}
+		_, err := get(setupCtx, "http://localhost:55442/api/tenants/localhost/health", jwt)
+		assert.NoError(c, err)
+	}, 30*time.Second, 200*time.Millisecond)
 }

@@ -178,7 +178,14 @@ hosted-project or complete Supabase stack test.
 | Add an index to that table | Executed as `CREATE INDEX CONCURRENTLY`; RLS remained intact | [RLS preservation](../pkg/migrate/rls_integration_test.go) |
 | Diff desired SQL containing `DEFAULT auth.uid()` | Applied successfully; follow-up diff empty | [Desired schema](../integration/supabase/schema_test.go) |
 | Diff a column using `extensions.citext` | Applied with a schema-qualified type; follow-up diff empty | [Desired schema](../integration/supabase/schema_test.go) |
-| Rewrite a text column to integer | Refused with `backend-unavailable` | [Refusals](../integration/supabase/schema_test.go) |
+| Defaults, nullability, widening `varchar`, and converting `varchar` to `text` | Executed without replacing the table; policies, grants, publication membership, data, and tenant API access preserved | [Native DDL matrix](../integration/supabase/ddl_matrix_test.go) |
+| Check and unique constraints, column rename and removal | Catalog changes verified; tenant API access and existing protections preserved | [Native DDL matrix](../integration/supabase/ddl_matrix_test.go) |
+| Foreign key from an app table to `auth.users` | Statement workflow added and validated the constraint; orphan writes rejected | [Auth foreign key](../integration/supabase/failure_test.go) |
+| Integer widening, text-to-integer, `varchar` shrinking, numeric scale changes, and volatile defaults | Both statement and desired-schema workflows refused with `backend-unavailable`; full schema/data snapshots unchanged, including a safe addition in the same plan | [Copy-and-swap refusals](../integration/supabase/ddl_matrix_test.go) |
+| Stored generated column or explicit `USING` expression | Statement workflow refused with `backend-unavailable`; schema and data unchanged | [Additional refusals](../integration/supabase/failure_test.go) |
+| Desired plan containing a column removal | Refused with `destructive-change`; no safe prefix applied | [Whole-plan admission](../integration/supabase/failure_test.go) |
+| Lock contention, null rows during `SET NOT NULL`, and duplicate rows during a unique index build | Typed outcomes and durable database state verified; tenant API access preserved | [Failure paths](../integration/supabase/failure_test.go) |
+| API and Realtime after each copy-and-swap refusal | Tenant reads and new INSERT events still worked on the original sockets | [Service continuity](../integration/supabase/continuity_test.go) |
 | Enable RLS through the schema-change entry point | Refused with `unsupported-statement` | [Refusals](../integration/supabase/schema_test.go) |
 | Supavisor session endpoint | Column addition and concurrent index succeeded; session timeouts verified | [Execution](../integration/supabase/services_test.go), [timeouts](../pkg/dbconn/supabase_integration_test.go) |
 | Supavisor transaction endpoint | Refused with `ErrNoSessionAffinity`, even with named prepared statements disabled | [Pooler boundary](../pkg/dbconn/supabase_integration_test.go) |
@@ -194,6 +201,12 @@ visibility before and after native changes, in addition to checking the
 stored policy definitions. Here, each tenant is a separate customer whose rows
 must stay private. An owner-only SELECT is insufficient evidence of RLS because
 owners normally bypass it.
+
+A refusal and an execution failure have different consequences. A refused rewrite
+leaves the tested table unchanged. Failed constraint validation can leave a
+`NOT VALID` check constraint, and a failed concurrent unique index build can leave
+an invalid index. The failure tests verify those leftovers and the reported
+outcome; they do not assume every unsuccessful change rolls back completely.
 
 ## What to keep in mind
 
@@ -231,8 +244,9 @@ before we expand the support claim:
    while access policies and Realtime subscriptions still work. Make clear which
    objects the files describe and which remain managed separately
 3. **Cover more app workflows.** Exercise deletes and reconnects in Realtime,
-   column changes beyond additions, and tables linked to `auth.users`. Make the
-   limits of desired schema files and access-policy handling clear in each case
+   Realtime payloads after column renames and removals, and real signup/login
+   flows. Make the limits of desired schema files and access-policy handling
+   clear in each case
 4. **Validate table rewrites when the engine supports them.** Copy-and-swap must
    preserve data and the surrounding policies, grants, and replication setup.
    A successful copy alone is not enough to claim Supabase compatibility
@@ -271,9 +285,7 @@ SUPABASE_TRANSACTION_URL='postgres://postgres.pgsprite:pgsprite_test_only@127.0.
 docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services --profile realtime down -v
 ```
 
-Expect `PASS` for `TestAPIAndPooler`, `TestRealtimeDuringNativeChanges`,
-`TestDesiredSupabaseObjects`, and `TestSupabaseRefusalsLeaveSchemaUnchanged`,
-followed by `ok` for each package. Without `SUPABASE_SERVICES_TEST=1`, the
+Expect `PASS` for every test and subtest, followed by `ok` for each package. Without `SUPABASE_SERVICES_TEST=1`, the
 service tests skip. The fixed localhost addresses prevent accidentally pointing
 these destructive fixtures at a hosted project.
 
@@ -296,6 +308,12 @@ every committed INSERT/UPDATE event and the new column in subsequent payloads,
 plus the table's PostgreSQL identifier (OID), RLS flag, publication membership,
 and index validity. A publication defines which tables PostgreSQL exposes to
 replication; Realtime uses it to receive these row changes.
+
+The DDL matrix checks PostgreSQL catalogs and actual tenant API responses.
+Rewrite refusal tests snapshot columns, data, constraints, indexes, policies,
+grants, and publication membership before both entry points run. The continuity
+test then inserts rows after each refusal and requires delivery to the original
+Realtime subscriptions, with tenant isolation intact.
 
 Each run recreates its disposable table and restarts only the fixture's Realtime
 service **before** opening subscriptions. Realtime [caches publication table
