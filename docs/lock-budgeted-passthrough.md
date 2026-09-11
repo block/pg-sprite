@@ -392,7 +392,9 @@ Sequence implementation as follows:
    refusal identity retained". This design establishes no invariant on its own and amends none
    until the behavior ships; the registry describes shipped behavior only, matching the
    sequencing rule in [refusal-classes.md](refusal-classes.md), whose own rollout record
-   checked RF-5 and RF-6 and recorded them unchanged.
+   checked RF-5 and RF-6 and recorded them unchanged. *(done: the executor-owned AB-1 and AB-2
+   invariants ship here; the front-door invariants, refusal-identity invariant, and RF-5/RF-6
+   amendments move to step 4 with the flag.)*
 3. Add `executed-without-online-safety`, retained reason/class/cause, budget fields, exit code
    3, and dry-run eligibility to the verdict and plan-report contracts. Update
    [cli-output-examples.md](cli-output-examples.md) with generated examples and pin the JSON

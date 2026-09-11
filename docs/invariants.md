@@ -21,6 +21,7 @@ several of these unrepresentable, and the in-TCB engineering rules live in
 
 - [Correctness (CO)](#correctness-co)
 - [Locking and concurrency (LK)](#locking-and-concurrency-lk)
+- [Accepted blocking execution (AB)](#accepted-blocking-execution-ab)
 - [State, checkpoint, and resume (ST)](#state-checkpoint-and-resume-st)
 - [Refusals and preflight (RF)](#refusals-and-preflight-rf)
 - [Orchestration / control-plane (OC)](#orchestration--control-plane-oc)
@@ -295,6 +296,24 @@ stale-observation tests that alter the catalog between observation and lock on a
 database. *Source:* PostgreSQL's session-level `ShareUpdateExclusiveLock` on the heap for
 every `CONCURRENTLY` index command; [invalid-index-recovery](invalid-index-recovery.md).
 
+## Accepted blocking execution (AB)
+
+### AB-1 — Every accepted blocking statement runs under both engine-owned bounds
+
+Every accepted blocking statement runs in one engine-owned session and transaction with an
+explicit, non-zero `lock_timeout` and `statement_timeout`. Transaction-local settings override
+ambient defaults, and an absent, sub-millisecond, or server-unrepresentable bound is refused
+before a session is acquired. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`). *Source:*
+[lock-budgeted passthrough](lock-budgeted-passthrough.md#engine-owned-session-and-budgets).
+
+### AB-2 — Lock-budget exhaustion executes nothing
+
+An accepted blocking statement that cannot acquire its lock within `lock_timeout` is not
+retried: PostgreSQL aborts that transaction before the DDL executes, and the executor returns
+the typed lock-budget outcome. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`, SQLSTATE
+`55P03`). *Source:*
+[lock-budgeted passthrough](lock-budgeted-passthrough.md#failure-and-interruption-semantics).
+
 ## State, checkpoint, and resume (ST)
 
 ### ST-1 — The checkpoint is one row per target, written atomically
@@ -504,6 +523,7 @@ about **how we write and review the code**.
 | CO-9 | 3 onward | shadowing-search_path tests per read site and per pooled session |
 | LK-3 | 4–6 | cancellation/claim race test |
 | LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |
+| AB-1, AB-2 | accepted-blocking rollout step 2 | exact session bounds + lock exhaustion leaves catalog unchanged |
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |
 | ST-1, ST-2, ST-3, ST-4 | 8 | kill/resume, cross-version refuse, orphan-slot reap, failover reconcile |
 | ST-6 | 1 onward, complete by 8 | preflight matrix |

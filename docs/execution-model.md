@@ -286,6 +286,9 @@ concurrently is.
 | --- | --- | --- |
 | `budget-lock-exceeded` | no | The lock was not granted within `lock_timeout`; nothing executed |
 | `budget-statement-exceeded` | no | The statement ran past `statement_timeout` and was cancelled |
+| `blocking-outcome-unknown` | no | The accepted blocking transaction reached an ambiguous client boundary; inspect the catalog before retrying |
+| `invalid-blocking-budget` | yes | An accepted blocking bound is disabled or cannot be represented by PostgreSQL |
+| `unsupported-accepted-blocking` | yes | The statement is outside the accepted blocking executor's narrow index-maintenance set |
 | `cancelled-by-caller` | no | The caller's own context ended while the statement ran and the budget had not elapsed; in caller-owned mode this is the build's ordinary exit |
 | `cancelled-externally` | no | The statement was cancelled from outside the executor — not by its caller and not by its budget; an operator's `pg_cancel_backend` or `Tracker.CancelBuild` |
 | `invalid-index-own-leftover` | no | The failed build's own INVALID index remains; `RebuildAbandonedIndex` removes it under proof ([recovery runbook](invalid-index-recovery.md)) |
