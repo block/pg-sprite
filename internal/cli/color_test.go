@@ -185,6 +185,9 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 	}
 	rv := reflect.ValueOf(v)
 	for i := range rv.NumField() {
+		if rv.Type().Field(i).PkgPath != "" {
+			continue
+		}
 		require.False(t, rv.Field(i).IsZero(),
 			"Verdict field %s is zero in the all-fields fixture; set it so the renderer parity lock covers it",
 			rv.Type().Field(i).Name)

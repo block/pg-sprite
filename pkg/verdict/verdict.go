@@ -309,16 +309,18 @@ func (r Refusal) WithSite(site RefusalSite) Refusal {
 func (r Refusal) IsZero() bool { return r == Refusal{} }
 
 // WithRefusal returns v as a refused verdict carrying r's reason, class,
-// and owner. It is the one path from a classified refusal onto the verdict
-// contract, so a site that forgets to classify has no Reason to set.
+// owner, cause, and full in-process proof. It is the one path from a
+// classified refusal onto the verdict contract, so a site that forgets to
+// classify has no Reason to set.
 func (v Verdict) WithRefusal(r Refusal) Verdict {
-	// INV: RF-7 — the verdict's class and owner come from the proof, never
-	// from the site.
+	// INV: RF-7, RF-8 — the verdict's refusal fields and in-process proof
+	// come from the proof, never from the site.
 	v.Outcome = OutcomeRefused
 	v.Reason = r.reason
 	v.Class = r.class
 	v.Owner = r.owner
 	v.Cause = r.cause
+	v.proof = r
 	return v
 }
 
@@ -340,8 +342,11 @@ func (v Verdict) WithAcceptedBlocking(r Refusal, lockTimeout, statementTimeout t
 	if statementTimeout <= 0 {
 		return Verdict{}, fmt.Errorf("%w: statement timeout must be positive", ErrInvalidAcceptedBlocking)
 	}
+	// INV: RF-8 — the accepted refusal keeps its full in-process proof so a
+	// consumer that re-derives eligibility reads the same identity the gate did.
 	v.Outcome = OutcomeExecutedWithoutOnlineSafety
 	v.Reason, v.Class, v.Owner, v.Cause = r.reason, r.class, r.owner, r.cause
+	v.proof = r
 	v.BlockingPassthrough = true
 	v.LockTimeout = formatDuration(lockTimeout)
 	v.StatementTimeout = formatDuration(statementTimeout)
@@ -363,24 +368,72 @@ func formatDuration(d time.Duration) string {
 // class and owner through the same one path instead of copying fields. It
 // fails on a verdict that is not refused, or whose reason, class, and owner
 // do not validate together — a verdict this build cannot have produced.
+// An in-process verdict returns its full proof, re-validated the same way
+// and checked against the exported refusal fields, so a proof that never
+// passed the constructors, or fields rewritten after WithRefusal, cannot
+// reach an eligibility decision. A verdict decoded from JSON reconstructs
+// class, reason, owner, and cause, but cannot recover its refusal site;
+// site-keyed eligibility therefore fails closed after JSON decoding, while
+// cause-keyed eligibility is decidable from the JSON fields.
 func (v Verdict) Refusal() (Refusal, error) {
 	if v.Outcome != OutcomeRefused && v.Outcome != OutcomeExecutedWithoutOnlineSafety {
 		return Refusal{}, fmt.Errorf("verdict outcome %q carries no refusal", v.Outcome)
+	}
+	// INV: RF-8 — preserve the full in-process proof; decoded verdicts can
+	// reconstruct only the refusal fields represented in JSON.
+	if !v.proof.IsZero() {
+		return v.provenRefusal()
 	}
 	r, err := NewRefusal(v.Class, v.Reason, v.Owner)
 	if err != nil {
 		return Refusal{}, err
 	}
-	return r.WithCause(v.Cause), nil
+	if v.Cause != CauseNone {
+		r = r.WithCause(v.Cause)
+	}
+	return r, nil
 }
 
-// Cause narrows ReasonBudgetExceeded to the budget that was exceeded, so
-// automation can branch on which limit fired without parsing prose.
+// provenRefusal returns the in-process proof once it validates under RF-7
+// and agrees with the verdict's exported refusal fields. Both checks are
+// needed: the per-class constructors do not validate their reason, and the
+// exported fields are what a consumer reads while the proof is what an
+// eligibility decision consumes.
+func (v Verdict) provenRefusal() (Refusal, error) {
+	// INV: RF-7, RF-8 — a proof reaches a consumer only when it is a valid
+	// classified refusal and the verdict still describes it.
+	if _, err := NewRefusal(v.proof.class, v.proof.reason, v.proof.owner); err != nil {
+		return Refusal{}, fmt.Errorf("verdict refusal proof: %w", err)
+	}
+	if v.refusalFieldsDivergeFromProof() {
+		return Refusal{}, fmt.Errorf(
+			"verdict refusal fields class=%q reason=%q owner=%q cause=%q diverge from proof class=%q reason=%q owner=%q cause=%q",
+			v.Class, v.Reason, v.Owner, v.Cause,
+			v.proof.class, v.proof.reason, v.proof.owner, v.proof.cause)
+	}
+	return v.proof, nil
+}
+
+// refusalFieldsDivergeFromProof reports whether any exported refusal field
+// no longer matches the proof WithRefusal stamped it from.
+func (v Verdict) refusalFieldsDivergeFromProof() bool {
+	return v.Class != v.proof.class ||
+		v.Reason != v.proof.reason ||
+		v.Owner != v.proof.owner ||
+		v.Cause != v.proof.cause
+}
+
+// Cause narrows a refusal reason to the typed discriminator automation
+// branches on without parsing prose: which budget fired under
+// ReasonBudgetExceeded, or which parent shape was refused under
+// ReasonUnsupportedPartitionedParent. The accepted-blocking registry keys
+// on it, so a cause is part of the refusal identity, not a rendering detail.
 type Cause string
 
-// The budget causes a refusal can carry.
+// The causes a refusal can carry, grouped by the reason they narrow.
 const (
-	// CauseNone is the zero cause for verdicts that are not budget refusals.
+	// CauseNone is the zero cause for verdicts whose reason has no narrower
+	// discriminator.
 	CauseNone Cause = ""
 	// CauseLockBudget: the lock was not granted within lock_timeout; nothing
 	// was executed.
@@ -403,6 +456,13 @@ const (
 
 // Verdict is the structured outcome of one migrate invocation.
 type Verdict struct {
+	// proof is the full in-process refusal WithRefusal stamped the exported
+	// fields from. It is deliberately outside the JSON contract: the refusal
+	// site it carries is not a wire field, so it does not survive decoding,
+	// and a decoded verdict never compares equal to the in-process verdict it
+	// was encoded from. Refusal() is the only reader.
+	proof Refusal
+
 	// Outcome is what happened.
 	Outcome Outcome `json:"outcome"`
 	// Reason is the typed refusal cause; empty when executed.
@@ -411,8 +471,9 @@ type Verdict struct {
 	Class Class `json:"class,omitempty"`
 	// Owner identifies who owns work with no online-safety problem.
 	Owner Owner `json:"owner,omitempty"`
-	// Cause narrows a budget refusal to the budget that fired; empty
-	// otherwise.
+	// Cause narrows the refusal reason to its typed discriminator: the
+	// budget that fired, or the partitioned-parent shape refused. Empty
+	// when the reason has none. Preserved on an accepted-blocking verdict.
 	Cause Cause `json:"cause,omitempty"`
 	// Code is the executor's stable outcome code (executor.OutcomeCode)
 	// carried by a failed verdict — flat kebab-case, part of the executor's

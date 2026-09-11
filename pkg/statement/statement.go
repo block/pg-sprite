@@ -108,6 +108,25 @@ const (
 	IndexTargetOther
 )
 
+// IndexTargets returns the closed set of index-maintenance target shapes.
+func IndexTargets() []IndexTarget {
+	return []IndexTarget{IndexTargetSingleRelation, IndexTargetOther}
+}
+
+// String returns the stable name of an index target shape.
+func (t IndexTarget) String() string {
+	switch t {
+	case IndexTargetNone:
+		return "none"
+	case IndexTargetSingleRelation:
+		return "single-relation"
+	case IndexTargetOther:
+		return "other"
+	default:
+		return fmt.Sprintf("IndexTarget(%d)", t)
+	}
+}
+
 // SQL returns the original statement text as submitted.
 func (s Statement) SQL() string { return s.sql }
 

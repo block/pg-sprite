@@ -102,6 +102,17 @@ it is acquired.
 | 6 | Eligibility is selected from a closed registry keyed by typed class, reason, and cause or refusal site. No renderer text or SQL substring participates in the decision. |
 | 7 | A dry-run reports the original refusal and a per-statement `blocking_passthrough_eligible` boolean, but executes nothing even when the flag is present. |
 
+The full typed refusal proof is available while its verdict remains in process, and
+`Refusal()` returns it only when it validates as a classified refusal and still matches the
+verdict's exported fields. JSON carries class, reason, owner, and cause, but not the internal
+refusal site. Calling `Refusal()` on a decoded verdict therefore reconstructs the JSON fields
+but cannot restore the site: the site-keyed row (single-relation `index-statement`) fails
+closed after decoding, while the cause-keyed row (`unsupported-partitioned-parent` with
+`parent-blocking-index-build`) is decidable from the wire fields. Decoding is not the
+fail-closed boundary; the front door is. Eligibility is consumed only from the proof of the
+verdict the same `migrate` or `diff` invocation produced, never from a verdict read back
+from JSON.
+
 “Prints before execution” is an ordering requirement for human output and an information
 requirement for JSON. Human mode prints the refusal analysis, then a separate acceptance line,
 then starts the session. JSON remains one final machine-readable object; its executed verdict
@@ -240,8 +251,8 @@ while the contract is that the engine cannot vouch for online safety. Text begin
 ```text
 executed without online safety (accepted blocking refusal)
   table:     app.orders
-  statement: DROP INDEX app.orders_created_at_idx
   refusal:   by-design / index-statement
+  statement: DROP INDEX app.orders_created_at_idx
   safer:     DROP INDEX CONCURRENTLY
   budgets:   lock 3s, statement 10m
 ```
