@@ -172,22 +172,24 @@ An additional local services test uses PostgREST 14.17, Supavisor 2.9.12
 and Auth 2.196.0. The Realtime test adds Realtime 2.134.10. It is not a
 hosted-project or complete Supabase stack test.
 
-| Experiment | Result |
-| --- | --- |
-| Add a nullable column to an RLS-protected table | Executed natively; existing policy and RLS remained intact |
-| Add an index to that table | Executed as `CREATE INDEX CONCURRENTLY`; RLS remained intact |
-| Diff desired SQL containing `DEFAULT auth.uid()` | Planned successfully |
-| Diff a column using `extensions.citext` | Planned successfully with a schema-qualified type |
-| Rewrite a text column to integer | Refused with `backend-unavailable` |
-| Enable RLS through the schema-change entry point | Refused with `unsupported-statement` |
-| Supavisor session endpoint | Column addition and concurrent index succeeded; session timeouts verified |
-| Supavisor transaction endpoint | Connection refused; named prepared statements conflict, and disabling them reaches `ErrNoSessionAffinity` |
-| PostgREST after direct/session schema changes | New columns became available through automatic schema-cache reload |
-| Signed JWTs before and after schema changes | Each tenant saw only its own row; unrelated tenant saw none |
-| Realtime during column addition and concurrent index build | Both sockets stayed connected; all expected INSERT/UPDATE events arrived with tenant isolation and new-column payloads |
+| Experiment | Result | Test |
+| --- | --- | --- |
+| Add a nullable column to an RLS-protected table | Executed natively; existing policy and RLS remained intact | [RLS preservation](../pkg/migrate/rls_integration_test.go) |
+| Add an index to that table | Executed as `CREATE INDEX CONCURRENTLY`; RLS remained intact | [RLS preservation](../pkg/migrate/rls_integration_test.go) |
+| Diff desired SQL containing `DEFAULT auth.uid()` | Applied successfully; follow-up diff empty | [Desired schema](../integration/supabase/schema_test.go) |
+| Diff a column using `extensions.citext` | Applied with a schema-qualified type; follow-up diff empty | [Desired schema](../integration/supabase/schema_test.go) |
+| Rewrite a text column to integer | Refused with `backend-unavailable` | [Refusals](../integration/supabase/schema_test.go) |
+| Enable RLS through the schema-change entry point | Refused with `unsupported-statement` | [Refusals](../integration/supabase/schema_test.go) |
+| Supavisor session endpoint | Column addition and concurrent index succeeded; session timeouts verified | [Execution](../integration/supabase/services_test.go), [timeouts](../pkg/dbconn/supabase_integration_test.go) |
+| Supavisor transaction endpoint | Refused with `ErrNoSessionAffinity`, even with named prepared statements disabled | [Pooler boundary](../pkg/dbconn/supabase_integration_test.go) |
+| PostgREST after direct/session schema changes | New columns became available through automatic schema-cache reload | [API and tenants](../integration/supabase/services_test.go) |
+| Signed JWTs before and after schema changes | Each tenant saw only its own row; unrelated tenant saw none | [API and tenants](../integration/supabase/services_test.go) |
+| Realtime during column addition and concurrent index build | Both sockets stayed connected; all expected INSERT/UPDATE events arrived with tenant isolation and new-column payloads | [Realtime](../integration/supabase/realtime_test.go) |
 
-The `schemadiff`, `diffplan`, and `migrate` integration suites also passed
-against this image. `TestNativeChangesPreserveRowSecurity` verifies tenant
+The required **Supabase compatibility** CI job runs every test linked above,
+plus the `schemadiff`, `diffplan`, and `migrate` integration suites against this
+image, on code PRs and pushes to `main`. Docs-only PRs keep the usual lighter
+checks. See the [workflow](../.github/workflows/ci.yml). `TestNativeChangesPreserveRowSecurity` verifies tenant
 visibility before and after native changes, in addition to checking the
 stored policy definitions. Here, each tenant is a separate customer whose rows
 must stay private. An owner-only SELECT is insufficient evidence of RLS because
@@ -269,7 +271,8 @@ SUPABASE_TRANSACTION_URL='postgres://postgres.pgsprite:pgsprite_test_only@127.0.
 docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services --profile realtime down -v
 ```
 
-Expect `PASS` for `TestAPIAndPooler` and `TestRealtimeDuringNativeChanges`,
+Expect `PASS` for `TestAPIAndPooler`, `TestRealtimeDuringNativeChanges`,
+`TestDesiredSupabaseObjects`, and `TestSupabaseRefusalsLeaveSchemaUnchanged`,
 followed by `ok` for each package. Without `SUPABASE_SERVICES_TEST=1`, the
 service tests skip. The fixed localhost addresses prevent accidentally pointing
 these destructive fixtures at a hosted project.

@@ -157,6 +157,43 @@ jobs:
       - name: Test against the long-lived database
         run: make test-db
 
+  # Supabase uses its own PostgreSQL image, roles, pooler and API services.
+  # Keep this required: ordinary PostgreSQL tests cannot cover those boundaries.
+  supabase:
+    name: Supabase compatibility
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - name: Start disposable Supabase services
+        run: docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services --profile realtime up --wait --wait-timeout 120 -d
+      - name: Run database suites against Supabase PostgreSQL
+        run: go test -race -count=1 -timeout=10m ./pkg/schemadiff ./pkg/diffplan ./pkg/migrate
+        env:
+          PG_DSN: postgres://postgres:pgsprite_test_only@127.0.0.1:55438/postgres?sslmode=disable
+      - name: Verify Supabase schema and service boundaries
+        run: go test -race -count=1 -timeout=5m -v ./integration/supabase
+        env:
+          SUPABASE_SERVICES_TEST: "1"
+      - name: Verify pooler session bounds
+        run: go test -race -count=1 -timeout=2m ./pkg/dbconn -run TestSupavisorSessionBoundary
+        env:
+          SUPABASE_SESSION_URL: postgres://postgres.pgsprite:pgsprite_test_only@127.0.0.1:55440/postgres?sslmode=disable
+          SUPABASE_TRANSACTION_URL: postgres://postgres.pgsprite:pgsprite_test_only@127.0.0.1:55441/postgres?sslmode=disable
+      - name: Show service logs on failure
+        if: failure()
+        run: docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services --profile realtime logs --no-color --tail 100
+      - name: Remove disposable services
+        if: always()
+        run: docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services --profile realtime down -v
+
   # Artifact smoke test: the demo tour in check mode drives the built
   # bin/pg-sprite through every planner route, the declarative diff, the
   # offline commands, and real executions against the compose database,
@@ -216,7 +253,7 @@ jobs:
   # job (and its docs guards) still had to pass.
   all-green:
     if: always()
-    needs: [changes, unit, lint, build, test, demo]
+    needs: [changes, unit, lint, build, test, demo, supabase]
     runs-on: ubuntu-latest
     steps:
       - name: Check job results
