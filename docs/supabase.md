@@ -223,10 +223,15 @@ before we expand the support claim:
 
 1. **Validate hosted projects.** Run the same checks on a disposable Supabase
    project, including certificate verification, network access, and hosted roles
-2. **Cover more app workflows.** Exercise deletes and reconnects in Realtime,
+2. **Validate declarative schema workflows.** Export an existing Supabase schema,
+   edit the desired SQL files, preview the diff, and apply supported changes.
+   Verify that the live schema matches the files and a second diff is empty,
+   while access policies and Realtime subscriptions still work. Make clear which
+   objects the files describe and which remain managed separately
+3. **Cover more app workflows.** Exercise deletes and reconnects in Realtime,
    column changes beyond additions, and tables linked to `auth.users`. Make the
    limits of desired schema files and access-policy handling clear in each case
-3. **Validate table rewrites when the engine supports them.** Copy-and-swap must
+4. **Validate table rewrites when the engine supports them.** Copy-and-swap must
    preserve data and the surrounding policies, grants, and replication setup.
    A successful copy alone is not enough to claim Supabase compatibility
 
