@@ -109,7 +109,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 4,
+  "format_version": 5,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -150,7 +150,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 4,
+  "format_version": 5,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -208,6 +208,34 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UN
 }
 ```
 
+An operator-accepted blocking refusal has a distinct marked outcome and exit
+3; exit 0 remains exclusive to online-safe execution. Nothing produces this
+outcome until `--accept-blocking` lands in a later change:
+
+```text
+executed without online safety (accepted blocking refusal)
+  table:     public.users
+  refusal:   by-design / index-statement
+  statement: DROP INDEX public.users_email_idx
+  safer:     DROP INDEX CONCURRENTLY
+  budgets:   lock 3s, statement 10m
+```
+
+```console
+$ pg-sprite migrate --alter 'DROP INDEX public.users_email_idx' --accept-blocking public.users --lock-timeout 3s --statement-timeout 10m --json
+{
+  "outcome": "executed-without-online-safety",
+  "reason": "index-statement",
+  "class": "by-design",
+  "statement": "DROP INDEX public.users_email_idx",
+  "table": "public.users",
+  "safer_idiom": "DROP INDEX CONCURRENTLY",
+  "blocking_passthrough": true,
+  "lock_timeout": "3s",
+  "statement_timeout": "10m"
+}
+```
+
 ### Refused: no online rewrite exists (`rewrite-required`) — exit 2
 
 The column and its constraint arrive in one statement, so no online
@@ -221,7 +249,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 4,
+  "format_version": 5,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -258,7 +286,7 @@ implemented yet.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 4,
+  "format_version": 5,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -295,7 +323,7 @@ The refusal cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 4,
+  "format_version": 5,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -313,6 +341,7 @@ $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)
       "disposition": "refuse",
       "reason": "unsupported-partitioned-parent",
       "class": "capability-boundary",
+      "blocking_passthrough_eligible": false,
       "decisions": [
         {
           "operation": "CREATE INDEX events_created_idx",
@@ -334,7 +363,7 @@ the reviewer or orchestrator to gate on; `migrate` itself does not block it.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --json
 {
-  "format_version": 4,
+  "format_version": 5,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -461,7 +490,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 4,
+  "format_version": 5,
   "source": "diff",
   "schema": "public",
   "table": "users",

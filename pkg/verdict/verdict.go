@@ -13,16 +13,28 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
 
-// ExitCodeRefused is the process exit code for a refusal verdict — distinct
-// from 1, which means an operational error (could not connect, bad flag, SQL
-// error). Automation branches on the difference.
-const ExitCodeRefused = 2
+const (
+	// ExitCodeRefused is the process exit code for refusal. Exit 0 remains
+	// exclusive to online-safe success and exit 1 to operational failure.
+	ExitCodeRefused = 2
+	// ExitCodeAcceptedBlocking marks committed execution without an online-
+	// safety guarantee; it cannot be confused with online-safe exit 0.
+	ExitCodeAcceptedBlocking = 3
+)
 
 // ErrRefused is the sentinel the CLI returns after printing a refusal
 // verdict, so the entry point can map it to ExitCodeRefused.
 var ErrRefused = errors.New("refused")
+
+// ErrAcceptedBlocking is returned after an accepted-blocking verdict is
+// printed so the entry point can map it to ExitCodeAcceptedBlocking.
+var ErrAcceptedBlocking = errors.New("executed without online safety")
+
+// ErrInvalidAcceptedBlocking reports an incomplete accepted-blocking verdict.
+var ErrInvalidAcceptedBlocking = errors.New("invalid accepted-blocking verdict")
 
 // Outcome is what happened to the submitted change.
 type Outcome string
@@ -32,6 +44,9 @@ const (
 	// OutcomeExecuted means the change ran and committed natively within
 	// its budgets.
 	OutcomeExecuted Outcome = "executed-natively"
+	// OutcomeExecutedWithoutOnlineSafety means the operator accepted a typed
+	// blocking refusal and the statement committed under explicit budgets.
+	OutcomeExecutedWithoutOnlineSafety Outcome = "executed-without-online-safety"
 	// OutcomeRefused means the change was not executed; Reason says why.
 	OutcomeRefused Outcome = "refused"
 	// OutcomeFailed means execution was attempted and failed: an
@@ -303,7 +318,44 @@ func (v Verdict) WithRefusal(r Refusal) Verdict {
 	v.Reason = r.reason
 	v.Class = r.class
 	v.Owner = r.owner
+	v.Cause = r.cause
 	return v
+}
+
+// WithAcceptedBlocking returns an executed verdict that retains the accepted
+// refusal identity and explicit non-zero execution budgets.
+func (v Verdict) WithAcceptedBlocking(r Refusal, lockTimeout, statementTimeout time.Duration) (Verdict, error) {
+	if r.IsZero() {
+		return Verdict{}, fmt.Errorf("%w: refusal identity is required", ErrInvalidAcceptedBlocking)
+	}
+	if _, err := NewRefusal(r.class, r.reason, r.owner); err != nil {
+		return Verdict{}, fmt.Errorf("%w: %w", ErrInvalidAcceptedBlocking, err)
+	}
+	if !AcceptedBlockingEligible(r) {
+		return Verdict{}, fmt.Errorf("%w: refusal is not eligible", ErrInvalidAcceptedBlocking)
+	}
+	if lockTimeout <= 0 {
+		return Verdict{}, fmt.Errorf("%w: lock timeout must be positive", ErrInvalidAcceptedBlocking)
+	}
+	if statementTimeout <= 0 {
+		return Verdict{}, fmt.Errorf("%w: statement timeout must be positive", ErrInvalidAcceptedBlocking)
+	}
+	v.Outcome = OutcomeExecutedWithoutOnlineSafety
+	v.Reason, v.Class, v.Owner, v.Cause = r.reason, r.class, r.owner, r.cause
+	v.BlockingPassthrough = true
+	v.LockTimeout = formatDuration(lockTimeout)
+	v.StatementTimeout = formatDuration(statementTimeout)
+	return v, nil
+}
+
+func formatDuration(d time.Duration) string {
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", d/time.Hour)
+	}
+	if d%time.Minute == 0 {
+		return fmt.Sprintf("%dm", d/time.Minute)
+	}
+	return d.String()
 }
 
 // Refusal reconstructs the classified refusal a refused verdict carries, so
@@ -312,10 +364,14 @@ func (v Verdict) WithRefusal(r Refusal) Verdict {
 // fails on a verdict that is not refused, or whose reason, class, and owner
 // do not validate together — a verdict this build cannot have produced.
 func (v Verdict) Refusal() (Refusal, error) {
-	if v.Outcome != OutcomeRefused {
-		return Refusal{}, fmt.Errorf("verdict outcome is %q, not %q", v.Outcome, OutcomeRefused)
+	if v.Outcome != OutcomeRefused && v.Outcome != OutcomeExecutedWithoutOnlineSafety {
+		return Refusal{}, fmt.Errorf("verdict outcome %q carries no refusal", v.Outcome)
 	}
-	return NewRefusal(v.Class, v.Reason, v.Owner)
+	r, err := NewRefusal(v.Class, v.Reason, v.Owner)
+	if err != nil {
+		return Refusal{}, err
+	}
+	return r.WithCause(v.Cause), nil
 }
 
 // Cause narrows ReasonBudgetExceeded to the budget that was exceeded, so
@@ -397,6 +453,12 @@ type Verdict struct {
 	// strategy refusal. It is the machine-readable audit record of the
 	// override.
 	Forced bool `json:"forced,omitempty"`
+	// BlockingPassthrough marks execution of an operator-accepted refusal.
+	BlockingPassthrough bool `json:"blocking_passthrough,omitempty"`
+	// LockTimeout is the explicit lock-acquisition budget.
+	LockTimeout string `json:"lock_timeout,omitempty"`
+	// StatementTimeout is the explicit statement execution budget.
+	StatementTimeout string `json:"statement_timeout,omitempty"`
 }
 
 // JSON renders the verdict as a single JSON object.
@@ -414,6 +476,8 @@ func (v Verdict) String() string {
 	switch v.Outcome {
 	case OutcomeExecuted:
 		b.WriteString("executed natively")
+	case OutcomeExecutedWithoutOnlineSafety:
+		b.WriteString("executed without online safety (accepted blocking refusal)")
 	case OutcomeRefused:
 		fmt.Fprintf(&b, "refused (%s)", v.Reason)
 	case OutcomeFailed:
@@ -424,7 +488,10 @@ func (v Verdict) String() string {
 	if v.Table != "" {
 		fmt.Fprintf(&b, "\n  table:     %s", v.Table)
 	}
-	if v.Outcome == OutcomeRefused {
+	switch v.Outcome {
+	case OutcomeExecutedWithoutOnlineSafety:
+		fmt.Fprintf(&b, "\n  refusal:   %s / %s", v.Class, v.Reason)
+	case OutcomeRefused:
 		fmt.Fprintf(&b, "\n  class:     %s", v.Class)
 		if v.Owner != "" {
 			fmt.Fprintf(&b, "\n  owner:     %s", v.Owner)
@@ -439,6 +506,9 @@ func (v Verdict) String() string {
 	}
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  safer:     %s", v.SaferIdiom)
+	}
+	if v.Outcome == OutcomeExecutedWithoutOnlineSafety {
+		fmt.Fprintf(&b, "\n  budgets:   lock %s, statement %s", v.LockTimeout, v.StatementTimeout)
 	}
 	if v.Forced {
 		b.WriteString("\n  forced:    the submitted form ran as-is (force acknowledged)")

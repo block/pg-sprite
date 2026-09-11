@@ -114,7 +114,7 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 			// and owner rule.
 			_, err := verdict.NewRefusal(k.refusal.Class(), k.refusal.Reason(), k.refusal.Owner())
 			require.NoError(t, err)
-			_, decided := acceptedBlockingDecision(k.refusal)
+			_, decided := verdict.AcceptedBlockingDecision(k.refusal)
 			require.True(t, decided, "eligibility registry has no explicit decision for class=%q reason=%q cause=%q site=%q",
 				k.refusal.Class(), k.refusal.Reason(), k.refusal.Cause(), k.refusal.Site())
 			classified[k.refusal.Reason()] = true
@@ -186,10 +186,10 @@ func TestAcceptedBlockingEligibleRowsArePinned(t *testing.T) {
 	parent, ok := partitionRefusal(preflight.PartitionCauseBlockingIndexBuild)
 	require.True(t, ok)
 
-	assert.True(t, AcceptedBlockingEligible(index))
-	assert.True(t, AcceptedBlockingEligible(parent))
-	assert.False(t, AcceptedBlockingEligible(rewriteRequiredRefusal()))
-	assert.False(t, AcceptedBlockingEligible(backendUnavailableRefusal()))
+	assert.True(t, verdict.AcceptedBlockingEligible(index))
+	assert.True(t, verdict.AcceptedBlockingEligible(parent))
+	assert.False(t, verdict.AcceptedBlockingEligible(rewriteRequiredRefusal()))
+	assert.False(t, verdict.AcceptedBlockingEligible(backendUnavailableRefusal()))
 }
 
 func TestIndexStatementAcceptedBlockingEligibility(t *testing.T) {
@@ -212,7 +212,7 @@ func TestIndexStatementAcceptedBlockingEligibility(t *testing.T) {
 			require.NoError(t, err)
 			r, ok := gateRefusal(st.Kind(), st.Concurrent(), st.IndexTarget())
 			require.True(t, ok)
-			assert.Equal(t, tc.want, AcceptedBlockingEligible(r))
+			assert.Equal(t, tc.want, verdict.AcceptedBlockingEligible(r))
 		})
 	}
 }
@@ -221,10 +221,10 @@ func TestAcceptedBlockingEligibilityIgnoresRenderedText(t *testing.T) {
 	r, ok := gateRefusal(statement.KindDropIndex, false, statement.IndexTargetSingleRelation)
 	require.True(t, ok)
 	v := verdict.Verdict{Detail: "first explanation", SaferIdiom: "first rendering"}.WithRefusal(r)
-	before := AcceptedBlockingEligible(r)
+	before := verdict.AcceptedBlockingEligible(r)
 	v.Detail = "completely different"
 	v.SaferIdiom = "different rendering"
-	after := AcceptedBlockingEligible(r)
+	after := verdict.AcceptedBlockingEligible(r)
 
 	assert.Equal(t, "completely different", v.Detail)
 	assert.Equal(t, "different rendering", v.SaferIdiom)
