@@ -36,16 +36,25 @@ The marker-delimited regions of this page are generated from
 `pg-sprite capabilities` for a compact table, or use `pg-sprite capabilities --json` for
 automation. Both forms read the embedded YAML data only and do not connect to PostgreSQL.
 The [machine-readable capabilities contract](capabilities-contract.md) defines the JSON
-schema and versioning rules.
+schema and versioning rules. Array order is source order and stable for display, but select
+rows by `id` or by field, never by array position.
 
 ```sh
+# Is this one operation supported today? Look a row up by its id.
+pg-sprite capabilities --json | jq '.capabilities[] | select(.id == "add-column-no-default-or-constant-default")'
+
 # All T2 rows.
 pg-sprite capabilities --json | jq '.capabilities[] | select(.tier == "t2")'
 
-# Everything the declarative door refuses.
+# What is waiting on the copy engine, across tiers.
+pg-sprite capabilities --json | jq '.capabilities[] | select(.engine_path == "copy_and_swap")'
+
+# Everything the declarative door refuses. Both doors carry the same disposition on
+# every row today; the map exists so they can diverge, so query the door you use.
 pg-sprite capabilities --json | jq '.capabilities[] | select(.front_doors.diff == "refused")'
 
-# Rows owned by another tool class.
+# Rows another tool class owns: the ⚪ and 🔵 rows. The ❌ rows name no owner, because
+# PostgreSQL offers no online mechanism for them, so this is not the full out-of-scope set.
 pg-sprite capabilities --json | jq '.capabilities[] | select(.owning_tool_class != null)'
 ```
 

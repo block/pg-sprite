@@ -173,9 +173,10 @@ select by fields or `id`, not array position. The command reads only embedded da
 does not connect to PostgreSQL.
 
 The contract must support the `jq` recipes in the operator guide's
-[Query the matrix](capabilities.md#query-the-matrix) section: selecting rows by tier,
-by a front door's disposition, and by owning tool class. That section is the one copy of
-the recipes; this contract only fixes the field names they select on.
+[Query the matrix](capabilities.md#query-the-matrix) section: looking a row up by `id`,
+and selecting rows by tier, by engine path, by a front door's disposition, and by owning
+tool class. That section is the one copy of the recipes; this contract only fixes the
+field names they select on.
 
 Human output may render a compact table, but JSON field names and enum values are the
 automation contract. Stable JSON means deterministic content and closed vocabulary;
@@ -253,7 +254,8 @@ artifact. The generated `docs/capabilities.md` remains the human-facing home.
 This decision does not build sortable HTML tables or a documentation site. It also
 does not change any capability, tier, refusal, or runtime behavior.
 
-Implementation order is, with each step marked as it ships:
+Implementation proceeds in these steps, each marked as it ships. Only the first step is a
+prerequisite for the others; the rest land independently:
 
 1. add the typed package, `pkg/capabilities/capabilities.yaml`, validator, generator,
    and markers together, making the repository single-source on day one; *(done)*
