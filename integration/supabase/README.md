@@ -66,7 +66,8 @@ CI execution.
 **Flag image updates during Supabase work.** The
 [agent guideline](../../AGENTS.md#supabase-image-maintenance) asks agents changing
 or reviewing the fixture, tests, or compatibility guide to check upstream
-releases. Report current and candidate versions, release-note links, and any
+releases. Explicitly flag major-version drift and propose a separate update PR.
+Report current and candidate versions, release-note links, and any
 changes to roles, initialization, pooling, or replication. If the check cannot
 be completed, say so rather than treating the pins as current.
 

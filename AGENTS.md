@@ -57,11 +57,13 @@ make lint        # golangci-lint
 
 When changing or reviewing the Supabase fixture, tests, or compatibility guide,
 check upstream releases for the images pinned in `compose/supabase.yml`. Flag
-available stable updates with the current and candidate versions, release-note
+available stable updates, explicitly calling out major-version drift, with the
+current and candidate versions, release-note
 links, and relevant changes to roles, initialization, pooling, or replication.
 If release information is unavailable, say the check is incomplete; do not infer
-that the pins are current. Keep unrelated image upgrades in a separate follow-up
-and follow the repo's PR-creation rules below. For an upgrade, preserve version
+that the pins are current. Propose a separate update PR with the compatibility
+risks and validation needed, rather than silently upgrading during unrelated work.
+Follow the repo's PR-creation rules below. For an upgrade, preserve version
 and digest pins, review the pooler source/version attribution, run the required
 Supabase CI job, and update the guide's tested versions and limits together.
 See [fixture maintenance](integration/supabase/README.md#maintaining-the-fixture).
