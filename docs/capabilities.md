@@ -12,6 +12,7 @@ refused form would take, what an operator who accepts a maintenance window can d
 
 ## Contents
 
+- [Query the matrix](#query-the-matrix)
 - [What pg-sprite is — and why it exists](#what-pg-sprite-is--and-why-it-exists)
 - [The support model: three tiers](#the-support-model-three-tiers)
   - [The engine path](#the-engine-path)
@@ -27,6 +28,25 @@ refused form would take, what an operator who accepts a maintenance window can d
 - [Peers share these limits — for different reasons](#peers-share-these-limits--for-different-reasons)
 - [Why typed refusal, not passthrough](#why-typed-refusal-not-passthrough)
 - [Deliberately operator-owned](#deliberately-operator-owned)
+
+## Query the matrix
+
+This page is generated from the matrix embedded in the pg-sprite binary. Run
+`pg-sprite capabilities` for a compact table, or use `pg-sprite capabilities --json`
+for automation. Both forms read embedded data only and do not connect to PostgreSQL.
+The [machine-readable capabilities contract](capabilities-contract.md) defines the JSON
+schema and versioning rules.
+
+```sh
+# All T2 rows.
+pg-sprite capabilities --json | jq '.capabilities[] | select(.tier == "t2")'
+
+# Everything the declarative door refuses.
+pg-sprite capabilities --json | jq '.capabilities[] | select(.front_doors.diff == "refused")'
+
+# Rows owned by another tool class.
+pg-sprite capabilities --json | jq '.capabilities[] | select(.owning_tool_class != null)'
+```
 
 ## What pg-sprite is — and why it exists
 

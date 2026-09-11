@@ -268,7 +268,7 @@ Implementation order is, with each step marked as it ships:
 2. add `pg-sprite capabilities`, including `--json` and the embedded binary version;
    *(done)*
 3. add the regenerate-and-diff CI gate to the normal pipeline; and *(pending)*
-4. add documentation and `jq` recipes for consumers. *(pending)*
+4. add documentation and `jq` recipes for consumers. *(done)*
 
 The generator is part of the first step rather than a cleanup step: there is never an
 intermediate state in which two hand-maintained matrices are authoritative.
