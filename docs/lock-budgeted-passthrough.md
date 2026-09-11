@@ -102,6 +102,17 @@ it is acquired.
 | 6 | Eligibility is selected from a closed registry keyed by typed class, reason, and cause or refusal site. No renderer text or SQL substring participates in the decision. |
 | 7 | A dry-run reports the original refusal and a per-statement `blocking_passthrough_eligible` boolean, but executes nothing even when the flag is present. |
 
+The full typed refusal proof is available while its verdict remains in process, and
+`Refusal()` returns it only when it validates as a classified refusal and still matches the
+verdict's exported fields. JSON carries class, reason, owner, and cause, but not the internal
+refusal site. Calling `Refusal()` on a decoded verdict therefore reconstructs the JSON fields
+but cannot restore the site: the site-keyed row (single-relation `index-statement`) fails
+closed after decoding, while the cause-keyed row (`unsupported-partitioned-parent` with
+`parent-blocking-index-build`) is decidable from the wire fields. Decoding is not the
+fail-closed boundary; the front door is. Eligibility is consumed only from the proof of the
+verdict the same `migrate` or `diff` invocation produced, never from a verdict read back
+from JSON.
+
 “Prints before execution” is an ordering requirement for human output and an information
 requirement for JSON. Human mode prints the refusal analysis, then a separate acceptance line,
 then starts the session. JSON remains one final machine-readable object; its executed verdict
@@ -173,7 +184,7 @@ The v1 set is:
 
 | Class | Typed refusal shape | v1 | Rationale |
 | --- | --- | --- | --- |
-| `by-design` | `index-statement` at the plain single-relation `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` site, with the concurrent safer idiom | eligible | This is the core maintenance-window case: the submitted form is understood, the safer idiom is known, one table's lock is being accepted, and bounding `ACCESS EXCLUSIVE` acquisition prevents lock-queue pile-up. The multi-relation sites (`DROP INDEX a, b`, `REINDEX SCHEMA`, `DATABASE`, `SYSTEM`) stay ineligible. |
+| `by-design` | `index-statement` at the plain single-relation `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` site, with the concurrent safer idiom | eligible | This is the core maintenance-window case: the submitted form is understood, the safer idiom is known, one table's lock is being accepted, and bounding `ACCESS EXCLUSIVE` acquisition prevents lock-queue pile-up. The multi-relation sites (`DROP INDEX a, b`, `REINDEX SCHEMA`, `DATABASE`, `SYSTEM`) stay ineligible. `REINDEX` on a partitioned table or index is eligible by shape but cannot run inside the engine-owned transaction; the executor reports it as `unsupported-accepted-blocking` (see [Engine-owned session and budgets](#engine-owned-session-and-budgets)). |
 | `capability-boundary` | `unsupported-partitioned-parent` with cause `parent-blocking-index-build` | eligible | The missing partition-aware flow does not make the plain PostgreSQL statement unknown. Its principal pre-execution hazard is acquiring the parent lock, which `lock_timeout` bounds. |
 | `capability-boundary` | `not-native-safe-rewrite-required` | ineligible | A rewrite holds its strong lock for the full rewrite. Bounding acquisition alone does not bound the outage, and v1 must not imply otherwise. |
 | `capability-boundary` | `backend-unavailable` and all other missing routes or backends | ineligible | A missing execution backend is not permission to substitute an unrelated blocking implementation. |
@@ -197,11 +208,25 @@ copy-and-swap is not a reason to add passthrough eligibility; it removes the ref
 
 ## Engine-owned session and budgets
 
-An eligible statement runs as one statement in one engine-owned session and transaction,
-using the same bounded runner and retry policy as other brief native execution. The runner
-sets `lock_timeout` and `statement_timeout` in the transaction before the statement. It does
-not hand SQL to a shell, inherit an unbounded caller session, or use the caller-owned
-concurrent-index exception.
+An eligible statement runs as one statement in one engine-owned session and transaction, in
+exactly one attempt. The runner sets `lock_timeout` and `statement_timeout` in the transaction
+before the statement. It does not hand SQL to a shell, inherit an unbounded caller session, or
+use the caller-owned concurrent-index exception.
+
+The single attempt is deliberate and differs from brief native execution, which retries a
+lock-budget miss up to three times. The operator accepted one bounded `ACCESS EXCLUSIVE`
+acquisition; a second attempt would re-queue behind the same holder, stack another
+`lock_timeout` of blocked readers and writers behind the engine's request, and turn the stated
+budget into a multiple of itself. An exhausted lock budget is therefore the final typed outcome
+([AB-2](invariants.md#ab-2--lock-budget-exhaustion-executes-nothing)); the operator decides
+whether to run the command again.
+
+The engine-owned transaction is also the path's boundary. `REINDEX TABLE` and `REINDEX INDEX`
+on a partitioned relation are single-relation by shape, but PostgreSQL reindexes each partition
+in its own transaction and refuses to start inside a transaction block (SQLSTATE `25001`)
+before touching any partition. The executor reports that server refusal as
+`unsupported-accepted-blocking`, a permanent outcome, rather than as an execution failure an
+adapter might retry.
 
 Both bounds are required and non-zero. `--accept-blocking` rejects an omitted, zero, or
 disabled `statement_timeout`; it does not silently inherit an unbounded value. The ordinary
@@ -240,8 +265,8 @@ while the contract is that the engine cannot vouch for online safety. Text begin
 ```text
 executed without online safety (accepted blocking refusal)
   table:     app.orders
-  statement: DROP INDEX app.orders_created_at_idx
   refusal:   by-design / index-statement
+  statement: DROP INDEX app.orders_created_at_idx
   safer:     DROP INDEX CONCURRENTLY
   budgets:   lock 3s, statement 10m
 ```
@@ -390,7 +415,7 @@ Sequence implementation as follows:
    cause or refusal site. The `index-statement` site distinguishes the single-relation forms
    from `DROP INDEX a, b` and `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM`, so the registry can
    admit the former and refuse the latter without a database. Its completeness tests make new
-   values ineligible by default and prove that render text is never consulted.
+   values ineligible by default and prove that render text is never consulted. *(done)*
 2. Add the executor path through engine-owned bounded sessions, requiring explicit non-zero
    `statement_timeout` and non-zero `lock_timeout`. At this step add lock-budget invariants to
    [the invariant registry](invariants.md): every passthrough statement runs in an
@@ -409,7 +434,9 @@ Sequence implementation as follows:
    refusal identity retained". This design establishes no invariant on its own and amends none
    until the behavior ships; the registry describes shipped behavior only, matching the
    sequencing rule in [refusal-classes.md](refusal-classes.md), whose own rollout record
-   checked RF-5 and RF-6 and recorded them unchanged.
+   checked RF-5 and RF-6 and recorded them unchanged. *(done: the executor-owned AB-1 and AB-2
+   invariants ship here; the front-door invariants, refusal-identity invariant, and RF-5/RF-6
+   amendments move to step 4 with the flag.)*
 3. Add `executed-without-online-safety`, retained reason/class/cause, budget fields, exit code
    3, and dry-run eligibility to the verdict and plan-report contracts. Exit 3 lands as a
    constant and sentinel in `pkg/verdict` beside `ExitCodeRefused` and `ErrRefused`, mapped

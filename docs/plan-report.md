@@ -17,7 +17,8 @@ kinds, guidance, causes, classes, owners) and the fingerprint serialization are 
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **4**: version 4 added the `class` and `owner` fields on the report
+The current version is **5**: version 5 added `blocking_passthrough_eligible` to every refused
+statement; version 4 added the `class` and `owner` fields on the report
 and on refused statements, each drawn from a closed vocabulary (see Classes and Owners);
 version 3 added the statement-level `cause` field on greenfield statements the create path
 refuses by shape; version 2 added the statement-level `guidance` field on `rewrite-required`
@@ -71,6 +72,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `cause` | string | greenfield create-shape refusals only | The create path's typed shape refusal (see Causes): why a table born in the run cannot carry this statement. Present exactly when the create path refused the statement — on a `diff`-source report with `table_exists: false`, that is every statement whose `disposition` is `refuse` and `reason` is `unsupported-statement`. Absent for every other refusal, including an `alter`-source refusal against a table that does not exist. Explanatory: excluded from the fingerprint. |
 | `class` | string | refusals only | This statement's refusal class (see Classes): how a consumer routes it — wait for a capability, hand to an owner, use a safer idiom, fix the environment, or report a bug. Present exactly when `disposition` is `refuse`. Explanatory: excluded from the fingerprint. |
 | `owner` | string | `no-online-safety-problem` refusals only | Who owns the work (see Owners). Present exactly when `class` is `no-online-safety-problem`. Explanatory: excluded from the fingerprint. |
+| `blocking_passthrough_eligible` | bool | refusals only | Whether this typed refusal is in the closed accepted-blocking registry. Independent of flags and catalog lookups; explanatory and excluded from the fingerprint. |
 | `decisions` | array | always | The planner's per-operation classifications (below). |
 | `exec_sql` | array | native route | The ordered SQL the native backend would run — the safer sequence when the planner constructed one, or the statement as written for a table that does not exist yet (the greenfield create path runs plain builds; see Fingerprint). Absent for non-native routes. |
 | `execution` | string | with `exec_sql` | The typed execution contract for `exec_sql` (see Execution contracts). A consumer that runs the statements itself branches on this — it is what says the steps must not be wrapped in a transaction block. Present exactly when `exec_sql` is. |
@@ -290,7 +292,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 4,
+  "format_version": 5,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -333,7 +335,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 4,
+  "format_version": 5,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -400,7 +402,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 4,
+  "format_version": 5,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",
@@ -419,6 +421,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
       "disposition": "refuse",
       "reason": "unsupported-statement",
       "class": "by-design",
+      "blocking_passthrough_eligible": false,
       "cause": "if-not-exists",
       "decisions": [
         {
