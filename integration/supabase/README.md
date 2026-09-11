@@ -55,10 +55,13 @@ assertions. Keep the guide aligned as those checks expand.
 CI runs each service test once. Investigate intermittent failures and fix their
 root cause rather than adding retries or routine repetitions.
 
-For a timing failure, inspect the assertion and service logs attached to the CI
-job. Check final-server readiness and subscription readiness before changing a
-wait. Do not increase deadlines to hide a flake. Reproduce it and verify the fix
-with repeated runs using the existing `scripts/test-flaky.sh` helper.
+Follow the repository's [test conventions](../../AGENTS.md#build-and-test):
+investigate failures, find the root cause, and never increase timeouts to fix a
+flake. For Supabase timing failures, inspect the assertion and service logs,
+including final-server and subscription readiness. After fixing the cause, use
+[`scripts/test-flaky.sh`](../../scripts/test-flaky.sh) to prove the fix holds
+before declaring it resolved. This targeted verification is separate from normal
+CI execution.
 
 **Monthly image review (manual maintainer task):**
 
