@@ -52,11 +52,8 @@ assertions. Keep the guide aligned as those checks expand.
 
 ## Maintaining the fixture
 
-CI repeats `TestRealtimeDuringNativeChanges` three times in addition to the full
-suite. Each repetition recreates the table and starts fresh subscriptions, so it
-also exercises readiness after fixture recreation. No service restarts occur
-during a schema change. A failed repetition fails the job; it is not a retry that
-can turn a failure green.
+CI runs each service test once. Investigate intermittent failures and fix their
+root cause rather than adding retries or routine repetitions.
 
 For a timing failure, inspect the assertion and service logs attached to the CI
 job. Check final-server readiness and subscription readiness before changing a
@@ -70,7 +67,7 @@ with repeated runs using the existing `scripts/test-flaky.sh` helper.
    pooling, and replication before selecting updates
 2. Open an update PR with the new pins. For Supavisor, compare `pooler.exs` with
    its upstream source and update its source link and validated version together
-3. Run the required Supabase CI job, including the repeated Realtime check.
+3. Run the required Supabase CI job.
    Investigate failures before accepting new versions
 4. Update the tested versions and any changed limits in `docs/supabase.md` in
    the same PR. Record why an update is deferred in the update PR when applicable
