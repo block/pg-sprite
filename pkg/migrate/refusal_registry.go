@@ -205,48 +205,6 @@ func partitionRefusal(cause preflight.PartitionRefusalCause) (verdict.Refusal, b
 	return plan.PartitionRefusal(cause)
 }
 
-// AcceptedBlockingEligible reports whether a typed refusal is in the closed
-// accepted-blocking registry. Unknown combinations fail closed.
-func AcceptedBlockingEligible(r verdict.Refusal) bool {
-	eligible, decided := acceptedBlockingDecision(r)
-	return decided && eligible
-}
-
-// acceptedBlockingDecision is total over the registered reason and
-// cause/site vocabulary. The bool pair is eligibility and whether the key
-// has an explicit decision; completeness tests reject undecided additions.
-func acceptedBlockingDecision(r verdict.Refusal) (bool, bool) {
-	switch r.Reason() {
-	case verdict.ReasonIndexStatement:
-		switch r.Site() {
-		case verdict.RefusalSiteIndexSingleRelation:
-			return r.Class() == verdict.ClassByDesign, true
-		case verdict.RefusalSiteIndexOther, "":
-			return false, true
-		default:
-			return false, false
-		}
-	case verdict.ReasonUnsupportedPartitionedParent:
-		switch r.Cause() {
-		case verdict.CauseParentBlockingIndexBuild:
-			return r.Class() == verdict.ClassCapabilityBoundary, true
-		case verdict.CauseParentConcurrentIndexBuild, verdict.CauseParentIndexAdoption,
-			verdict.CauseParentNotValidForeignKey:
-			return false, true
-		default:
-			return false, false
-		}
-	case verdict.ReasonUnsupportedStatement, verdict.ReasonTableTooLarge,
-		verdict.ReasonInsufficientPrivileges, verdict.ReasonBudgetExceeded,
-		verdict.ReasonRewriteRequired, verdict.ReasonBackendUnavailable,
-		verdict.ReasonDestructiveChange, verdict.ReasonPlanFingerprintMismatch,
-		verdict.ReasonCreateCollision:
-		return false, true
-	default:
-		return false, false
-	}
-}
-
 // isInSentinelSet reports whether err matches any sentinel in set.
 func isInSentinelSet(err error, set []error) bool {
 	for _, sentinel := range set {

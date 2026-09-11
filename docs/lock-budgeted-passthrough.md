@@ -265,8 +265,8 @@ while the contract is that the engine cannot vouch for online safety. Text begin
 ```text
 executed without online safety (accepted blocking refusal)
   table:     app.orders
-  statement: DROP INDEX app.orders_created_at_idx
   refusal:   by-design / index-statement
+  statement: DROP INDEX app.orders_created_at_idx
   safer:     DROP INDEX CONCURRENTLY
   budgets:   lock 3s, statement 10m
 ```

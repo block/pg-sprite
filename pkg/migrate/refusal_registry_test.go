@@ -115,7 +115,7 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 			// and owner rule.
 			_, err := verdict.NewRefusal(k.refusal.Class(), k.refusal.Reason(), k.refusal.Owner())
 			require.NoError(t, err)
-			_, decided := acceptedBlockingDecision(k.refusal)
+			_, decided := verdict.AcceptedBlockingDecision(k.refusal)
 			require.True(t, decided, "eligibility registry has no explicit decision for class=%q reason=%q cause=%q site=%q",
 				k.refusal.Class(), k.refusal.Reason(), k.refusal.Cause(), k.refusal.Site())
 			classified[k.refusal.Reason()] = true
@@ -195,7 +195,7 @@ func TestAcceptedBlockingEligibleRowsArePinned(t *testing.T) {
 
 	var eligible []string
 	for _, k := range keys {
-		if AcceptedBlockingEligible(k.refusal) {
+		if verdict.AcceptedBlockingEligible(k.refusal) {
 			eligible = append(eligible, k.key)
 		}
 	}
@@ -208,10 +208,10 @@ func TestAcceptedBlockingEligibleRowsArePinned(t *testing.T) {
 	for _, cause := range preflight.PartitionRefusalCauses() {
 		r, ok := partitionRefusal(cause)
 		require.True(t, ok, cause)
-		assert.Equal(t, cause == preflight.PartitionCauseBlockingIndexBuild, AcceptedBlockingEligible(r), cause)
+		assert.Equal(t, cause == preflight.PartitionCauseBlockingIndexBuild, verdict.AcceptedBlockingEligible(r), cause)
 	}
-	assert.False(t, AcceptedBlockingEligible(rewriteRequiredRefusal()))
-	assert.False(t, AcceptedBlockingEligible(backendUnavailableRefusal()))
+	assert.False(t, verdict.AcceptedBlockingEligible(rewriteRequiredRefusal()))
+	assert.False(t, verdict.AcceptedBlockingEligible(backendUnavailableRefusal()))
 }
 
 // The registry's default arms are fail-closed, not merely undecided: a
@@ -231,10 +231,10 @@ func TestAcceptedBlockingUnknownKeysFailClosed(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			eligible, decided := acceptedBlockingDecision(tc.refusal)
+			eligible, decided := verdict.AcceptedBlockingDecision(tc.refusal)
 			assert.False(t, eligible)
 			assert.False(t, decided)
-			assert.False(t, AcceptedBlockingEligible(tc.refusal))
+			assert.False(t, verdict.AcceptedBlockingEligible(tc.refusal))
 		})
 	}
 }
@@ -256,7 +256,7 @@ func TestAcceptedBlockingRowsRequireTheirClass(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			eligible, decided := acceptedBlockingDecision(tc.refusal)
+			eligible, decided := verdict.AcceptedBlockingDecision(tc.refusal)
 			assert.False(t, eligible)
 			assert.True(t, decided)
 		})
@@ -283,7 +283,7 @@ func TestIndexStatementAcceptedBlockingEligibility(t *testing.T) {
 			require.NoError(t, err)
 			r, ok := gateRefusal(st.Kind(), st.Concurrent(), st.IndexTarget())
 			require.True(t, ok)
-			assert.Equal(t, tc.want, AcceptedBlockingEligible(r))
+			assert.Equal(t, tc.want, verdict.AcceptedBlockingEligible(r))
 		})
 	}
 }
@@ -304,7 +304,7 @@ func TestGateVerdictAcceptedBlockingEligibility(t *testing.T) {
 			require.True(t, refused)
 			r, err := v.Refusal()
 			require.NoError(t, err)
-			assert.Equal(t, tc.want, AcceptedBlockingEligible(r))
+			assert.Equal(t, tc.want, verdict.AcceptedBlockingEligible(r))
 
 			if tc.want {
 				encoded, err := json.Marshal(v)
@@ -313,7 +313,7 @@ func TestGateVerdictAcceptedBlockingEligibility(t *testing.T) {
 				require.NoError(t, json.Unmarshal(encoded, &decoded))
 				decodedRefusal, err := decoded.Refusal()
 				require.NoError(t, err)
-				assert.False(t, AcceptedBlockingEligible(decodedRefusal))
+				assert.False(t, verdict.AcceptedBlockingEligible(decodedRefusal))
 			}
 		})
 	}
@@ -328,8 +328,8 @@ func TestAcceptedBlockingEligibilityIgnoresRenderedText(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, first, second)
-	assert.Equal(t, AcceptedBlockingEligible(first), AcceptedBlockingEligible(second))
-	assert.True(t, AcceptedBlockingEligible(first))
+	assert.Equal(t, verdict.AcceptedBlockingEligible(first), verdict.AcceptedBlockingEligible(second))
+	assert.True(t, verdict.AcceptedBlockingEligible(first))
 }
 
 // Membership and classification are one walk: an error outside the sentinel
