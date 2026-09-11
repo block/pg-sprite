@@ -98,6 +98,11 @@ is a smoke tour of the built binary, not a second test suite.
   from fragments or positional case fields; substituting a safely quoted fixture name is
   fine. Prefer separate named tests for distinct DDL operations over one large matrix.
   Share fixture setup and verification helpers, while keeping the SQL under test visible.
+  Treat DDL tests as executable capability documentation: name the operation and expected
+  outcome, and briefly explain why it succeeds, is refused, or fails. Explain non-obvious
+  expected values and any durable leftovers. A passing refusal test proves safe rejection,
+  not support for executing the change. Use copy-and-swap for the engine path; reserve
+  table rewrite for PostgreSQL's physical operation.
 - Errors: wrap with context and identifiers (`fmt.Errorf("create slot %s: %w", name, err)`);
   never log-and-continue; no silent branch cases; no `nolint`; no `--no-verify`.
 

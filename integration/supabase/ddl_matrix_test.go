@@ -106,7 +106,8 @@ func seedDDLTable(t *testing.T, pool *pgxpool.Pool, name string) string {
 
 type nativeDDLCase struct{ name, setup, ddl, proof, want string }
 
-func TestNativeConstantDefault(t *testing.T) {
+// Adding a constant default fills existing rows without replacing the table.
+func TestAddColumnWithConstantDefaultSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name:  "constant_default",
 		ddl:   "ALTER TABLE %s ADD COLUMN enabled boolean NOT NULL DEFAULT true",
@@ -115,7 +116,8 @@ func TestNativeConstantDefault(t *testing.T) {
 	})
 }
 
-func TestNativeSetDefault(t *testing.T) {
+// Setting a default updates the stored expression while preserving existing rows.
+func TestSetColumnDefaultSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name: "set_default",
 		ddl:  "ALTER TABLE %s ALTER COLUMN note SET DEFAULT 'draft'",
@@ -129,7 +131,8 @@ func TestNativeSetDefault(t *testing.T) {
 	})
 }
 
-func TestNativeDropDefault(t *testing.T) {
+// Dropping a default removes the expression while preserving existing rows.
+func TestDropColumnDefaultSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name:  "drop_default",
 		setup: "ALTER TABLE %s ALTER COLUMN note SET DEFAULT 'draft'",
@@ -144,7 +147,8 @@ func TestNativeDropDefault(t *testing.T) {
 	})
 }
 
-func TestNativeDropNotNull(t *testing.T) {
+// Relaxing nullability removes NOT NULL without changing existing data.
+func TestDropNotNullSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name: "drop_not_null",
 		ddl:  "ALTER TABLE %s ALTER COLUMN body DROP NOT NULL",
@@ -156,7 +160,8 @@ func TestNativeDropNotNull(t *testing.T) {
 	})
 }
 
-func TestNativeSetNotNull(t *testing.T) {
+// Existing non-null data passes validation and the column becomes NOT NULL.
+func TestSetNotNullOnValidDataSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name: "set_not_null",
 		ddl:  "ALTER TABLE %s ALTER COLUMN note SET NOT NULL",
@@ -168,7 +173,8 @@ func TestNativeSetNotNull(t *testing.T) {
 	})
 }
 
-func TestNativeVarcharWiden(t *testing.T) {
+// Widening varchar preserves the table and its data; typmod includes four header bytes.
+func TestWidenVarcharSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name: "varchar_widen",
 		ddl:  "ALTER TABLE %s ALTER COLUMN label TYPE varchar(32)",
@@ -180,7 +186,8 @@ func TestNativeVarcharWiden(t *testing.T) {
 	})
 }
 
-func TestNativeVarcharToText(t *testing.T) {
+// Converting varchar to text changes the type without replacing the table.
+func TestVarcharToTextSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name: "varchar_to_text",
 		ddl:  "ALTER TABLE %s ALTER COLUMN label TYPE text",
@@ -192,7 +199,8 @@ func TestNativeVarcharToText(t *testing.T) {
 	})
 }
 
-func TestNativeCheckConstraint(t *testing.T) {
+// A check constraint is added and validated against the existing rows.
+func TestAddCheckConstraintSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name: "check_constraint",
 		ddl:  "ALTER TABLE %s ADD CONSTRAINT positive CHECK (amount>0)",
@@ -204,7 +212,8 @@ func TestNativeCheckConstraint(t *testing.T) {
 	})
 }
 
-func TestNativeCheckNotValid(t *testing.T) {
+// NOT VALID adds the check without marking existing rows as validated.
+func TestAddNotValidCheckSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name: "check_not_valid",
 		ddl:  "ALTER TABLE %s ADD CONSTRAINT positive CHECK (amount>0) NOT VALID",
@@ -216,7 +225,8 @@ func TestNativeCheckNotValid(t *testing.T) {
 	})
 }
 
-func TestNativeValidateCheck(t *testing.T) {
+// Validating an existing check marks it valid after checking the rows.
+func TestValidateExistingCheckSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name:  "validate_check",
 		setup: "ALTER TABLE %s ADD CONSTRAINT positive CHECK (amount>0) NOT VALID",
@@ -229,7 +239,8 @@ func TestNativeValidateCheck(t *testing.T) {
 	})
 }
 
-func TestNativeUniqueConstraint(t *testing.T) {
+// Distinct existing values allow a valid unique constraint to be installed.
+func TestAddUniqueConstraintSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name: "unique_constraint",
 		ddl:  "ALTER TABLE %s ADD CONSTRAINT unique_body UNIQUE (body)",
@@ -241,7 +252,8 @@ func TestNativeUniqueConstraint(t *testing.T) {
 	})
 }
 
-func TestNativeRenameColumn(t *testing.T) {
+// Renaming an application column preserves the table and tenant access.
+func TestRenameColumnSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name: "rename_column",
 		ddl:  "ALTER TABLE %s RENAME COLUMN label TO caption",
@@ -254,7 +266,8 @@ func TestNativeRenameColumn(t *testing.T) {
 	})
 }
 
-func TestNativeDropColumn(t *testing.T) {
+// The explicit DROP COLUMN statement removes the column; this is not desired-plan consent.
+func TestDropColumnStatementSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
 		name: "drop_column",
 		ddl:  "ALTER TABLE %s DROP COLUMN note",
@@ -287,15 +300,16 @@ func runNativeDDL(t *testing.T, tc nativeDDLCase) {
 	verifyAPITenants(t, "pgsprite_native_"+tc.name, map[int][]int{1: {1}, 2: {2}, 3: {}})
 }
 
-type rewriteCase struct {
+// The safe_prefix addition proves whole-plan refusal: even a supported change
+// must remain unapplied when another change requires unavailable copy-and-swap.
+type copySwapCase struct {
 	ddl     string
 	desired string
 }
 
-// Each refused statement and desired schema includes a harmless addition.
-// Neither entry point may commit that addition before refusing the rewrite.
-func TestCopySwapRefusesIntegerWidth(t *testing.T) {
-	runServiceRefusal(t, rewriteCase{
+// Integer widening needs copy-and-swap, so both entry points must refuse before applying any DDL.
+func TestIntegerWideningRequiresUnavailableCopySwap(t *testing.T) {
+	runServiceRefusal(t, copySwapCase{
 		ddl: `ALTER TABLE %s
 			ADD COLUMN safe_prefix text,
 			ALTER COLUMN id TYPE bigint`,
@@ -311,8 +325,9 @@ func TestCopySwapRefusesIntegerWidth(t *testing.T) {
 	})
 }
 
-func TestCopySwapRefusesTextToInteger(t *testing.T) {
-	runServiceRefusal(t, rewriteCase{
+// Converting text to integer needs copy-and-swap, even when all fixture values can be cast.
+func TestTextToIntegerRequiresUnavailableCopySwap(t *testing.T) {
+	runServiceRefusal(t, copySwapCase{
 		ddl: `ALTER TABLE %s
 			ADD COLUMN safe_prefix text,
 			ALTER COLUMN body TYPE integer USING body::integer`,
@@ -328,8 +343,9 @@ func TestCopySwapRefusesTextToInteger(t *testing.T) {
 	})
 }
 
-func TestCopySwapRefusesVarcharShrink(t *testing.T) {
-	runServiceRefusal(t, rewriteCase{
+// Narrowing varchar is refused through the unavailable copy-and-swap path.
+func TestVarcharShrinkRequiresUnavailableCopySwap(t *testing.T) {
+	runServiceRefusal(t, copySwapCase{
 		ddl: `ALTER TABLE %s
 			ADD COLUMN safe_prefix text,
 			ALTER COLUMN label TYPE varchar(4)`,
@@ -345,8 +361,9 @@ func TestCopySwapRefusesVarcharShrink(t *testing.T) {
 	})
 }
 
-func TestCopySwapRefusesNumericScale(t *testing.T) {
-	runServiceRefusal(t, rewriteCase{
+// Changing numeric scale is refused through the unavailable copy-and-swap path.
+func TestNumericScaleChangeRequiresUnavailableCopySwap(t *testing.T) {
+	runServiceRefusal(t, copySwapCase{
 		ddl: `ALTER TABLE %s
 			ADD COLUMN safe_prefix text,
 			ALTER COLUMN amount TYPE numeric(8, 1)`,
@@ -362,8 +379,9 @@ func TestCopySwapRefusesNumericScale(t *testing.T) {
 	})
 }
 
-func TestCopySwapRefusesVolatileUUID(t *testing.T) {
-	runServiceRefusal(t, rewriteCase{
+// A volatile UUID default needs copy-and-swap rather than a metadata-only column addition.
+func TestVolatileUUIDDefaultRequiresUnavailableCopySwap(t *testing.T) {
+	runServiceRefusal(t, copySwapCase{
 		ddl: `ALTER TABLE %s
 			ADD COLUMN safe_prefix text,
 			ADD COLUMN nonce uuid DEFAULT gen_random_uuid()`,
@@ -380,8 +398,9 @@ func TestCopySwapRefusesVolatileUUID(t *testing.T) {
 	})
 }
 
-func TestCopySwapRefusesVolatileTimestamp(t *testing.T) {
-	runServiceRefusal(t, rewriteCase{
+// A volatile timestamp default needs copy-and-swap rather than a metadata-only column addition.
+func TestVolatileTimestampDefaultRequiresUnavailableCopySwap(t *testing.T) {
+	runServiceRefusal(t, copySwapCase{
 		ddl: `ALTER TABLE %s
 			ADD COLUMN safe_prefix text,
 			ADD COLUMN stamp timestamptz DEFAULT clock_timestamp()`,
@@ -398,7 +417,7 @@ func TestCopySwapRefusesVolatileTimestamp(t *testing.T) {
 	})
 }
 
-func refuseRewrite(t *testing.T, pool *pgxpool.Pool, table, name string, tc rewriteCase) {
+func refuseCopySwap(t *testing.T, pool *pgxpool.Pool, table, name string, tc copySwapCase) {
 	t.Helper()
 	before := snapshot(t, pool, table)
 	st, err := statement.ParseOne(fmt.Sprintf(tc.ddl, table))

@@ -17,11 +17,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// Stored generated values require unavailable copy-and-swap; refusal leaves the table unchanged.
 func TestRefuseStoredGeneratedColumn(t *testing.T) {
 	runAdditionalRefusal(t, "pgsprite_extra_stored_generated", `ALTER TABLE %s
 		ADD COLUMN doubled int GENERATED ALWAYS AS (id * 2) STORED`)
 }
 
+// An explicit USING expression is refused through the unavailable copy-and-swap path.
 func TestRefuseUsingExpression(t *testing.T) {
 	runAdditionalRefusal(t, "pgsprite_extra_using_expression", `ALTER TABLE %s
 		ALTER COLUMN body TYPE text USING upper(body)`)
@@ -41,6 +43,7 @@ func runAdditionalRefusal(t *testing.T, name, ddl string) {
 	assert.Equal(t, before, snapshot(t, pool, table))
 }
 
+// Without destructive-change consent, removing a column refuses the whole desired plan.
 func TestDesiredDestructivePlanDoesNotApplySafePrefix(t *testing.T) {
 	pool := fixture(t)
 	name := "pgsprite_destructive_plan"
@@ -63,6 +66,7 @@ func TestDesiredDestructivePlanDoesNotApplySafePrefix(t *testing.T) {
 	assert.Equal(t, before, snapshot(t, pool, table))
 }
 
+// A conflicting lock exhausts the brief lock budget without applying the column addition.
 func TestSupabaseLockBudget(t *testing.T) {
 	pool := fixture(t)
 	table := seedDDLTable(t, pool, "pgsprite_lock_budget")
@@ -95,6 +99,7 @@ func TestSupabaseLockBudget(t *testing.T) {
 	verifyAPITenants(t, "pgsprite_lock_budget", map[int][]int{1: {1}, 2: {2}, 3: {}})
 }
 
+// Null rows fail validation after the NOT VALID scaffold commits; the column stays nullable.
 func TestSupabaseNotNullValidationFailure(t *testing.T) {
 	pool := fixture(t)
 	table := seedDDLTable(t, pool, "pgsprite_bad_not_null")
@@ -125,6 +130,7 @@ func TestSupabaseNotNullValidationFailure(t *testing.T) {
 	verifyAPITenants(t, "pgsprite_bad_not_null", map[int][]int{1: {1}, 2: {2}, 3: {}})
 }
 
+// Duplicate values fail the concurrent unique build and leave a reported invalid index.
 func TestSupabaseUniqueIndexFailure(t *testing.T) {
 	pool := fixture(t)
 	table := seedDDLTable(t, pool, "pgsprite_duplicate_index")
@@ -148,6 +154,7 @@ func TestSupabaseUniqueIndexFailure(t *testing.T) {
 	verifyAPITenants(t, "pgsprite_duplicate_index", map[int][]int{1: {1}, 2: {2}, 3: {}})
 }
 
+// The statement workflow validates an auth.users reference and rejects an orphan write.
 func TestForeignKeyToSupabaseAuth(t *testing.T) {
 	pool := fixture(t)
 	execSQL(t, pool, "INSERT INTO auth.users(id) VALUES ('00000000-0000-0000-0000-000000000001'),('00000000-0000-0000-0000-000000000002')")

@@ -42,7 +42,8 @@ Concretely:
 The required Supabase CI job runs the database suites and
 [`integration/supabase`](../integration/supabase) against pinned, disposable
 Supabase services. The [Supabase guide](supabase.md#what-works-today) maps each
-compatibility claim to its tests.
+compatibility claim to its tests. The [test reader guide](../integration/supabase/README.md)
+explains the cases, shared assertions, and what a passing result establishes.
 
 When a new DDL route affects Supabase tables, extend this suite in the same PR.
 Verify the resulting schema and data, access policies and grants, and the app's
