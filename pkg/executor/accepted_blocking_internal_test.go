@@ -50,6 +50,7 @@ func TestAcceptedBlockingStatementErrorMapsSQLSTATE(t *testing.T) {
 	}{
 		{name: "lock", code: sqlstateLockNotAvailable, want: CodeBudgetLockExceeded},
 		{name: "statement", code: sqlstateQueryCanceled, want: CodeBudgetStatementExceeded},
+		{name: "cannot run in transaction block", code: sqlstateActiveSQLTransaction, want: CodeUnsupportedAcceptedBlocking},
 		{name: "other postgres", code: "23505", want: CodeExecutionFailed},
 	}
 	for _, tt := range tests {
@@ -59,9 +60,20 @@ func TestAcceptedBlockingStatementErrorMapsSQLSTATE(t *testing.T) {
 		})
 	}
 
+	// A statement the server will not run inside a transaction block fails
+	// the same way on every attempt, so its outcome must be permanent and
+	// must keep the server's SQLSTATE for the operator.
+	serverErr := &pgconn.PgError{Code: sqlstateActiveSQLTransaction, Message: "REINDEX TABLE cannot run inside a transaction block"}
+	err := acceptedBlockingStatementError(t.Context(), serverErr, b)
+	require.ErrorIs(t, err, ErrUnsupportedAcceptedBlocking)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, sqlstateActiveSQLTransaction, pgErr.Code)
+	assert.True(t, OutcomeCode(err).Permanent())
+
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
-	err := acceptedBlockingStatementError(ctx, errors.New("connection lost"), b)
+	err = acceptedBlockingStatementError(ctx, errors.New("connection lost"), b)
 	var unknown *BlockingOutcomeUnknownError
 	require.ErrorAs(t, err, &unknown)
 	assert.Equal(t, CodeBlockingOutcomeUnknown, OutcomeCode(err))

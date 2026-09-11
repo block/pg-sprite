@@ -52,6 +52,38 @@ func TestExecuteAcceptedBlockingLockBudgetExecutesNothing(t *testing.T) {
 	assert.True(t, valid)
 }
 
+// REINDEX on a partitioned relation is admitted by shape but PostgreSQL
+// refuses to run it inside a transaction block, which is the only way this
+// executor runs anything. The failure is reported as a permanent outcome
+// outside the path, not as a retryable execution failure, and nothing is
+// changed: the parent and its partitions keep their indexes.
+func TestExecuteAcceptedBlockingRefusesReindexOnPartitionedRelation(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.parent (id int) PARTITION BY RANGE (id);
+		CREATE TABLE %[1]s.leaf PARTITION OF %[1]s.parent FOR VALUES FROM (0) TO (10);
+		CREATE INDEX parent_i ON %[1]s.parent (id)`, schema))
+	require.NoError(t, err)
+	b := executor.BlockingBudget{LockTimeout: time.Second, StatementTimeout: 10 * time.Second}
+
+	for _, sql := range []string{
+		fmt.Sprintf("REINDEX TABLE %s.parent", schema),
+		fmt.Sprintf("REINDEX INDEX %s.parent_i", schema),
+	} {
+		t.Run(sql, func(t *testing.T) {
+			_, err := executor.ExecuteAcceptedBlocking(t.Context(), pool, sql, b)
+			require.ErrorIs(t, err, executor.ErrUnsupportedAcceptedBlocking)
+			var pgErr *pgconn.PgError
+			require.ErrorAs(t, err, &pgErr)
+			assert.Equal(t, "25001", pgErr.Code)
+			assert.True(t, executor.OutcomeCode(err).Permanent())
+		})
+	}
+	exists, valid := indexState(t, pool, schema, "parent_i")
+	assert.True(t, exists)
+	assert.True(t, valid)
+}
+
 func TestExecuteAcceptedBlockingAppliesBothBoundsOnExecutingSession(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`

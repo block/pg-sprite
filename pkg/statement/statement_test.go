@@ -354,9 +354,46 @@ func TestKindsIsClosedAndNamed(t *testing.T) {
 		"Kinds() must enumerate exactly the Kind constants statement.go declares")
 }
 
+// IndexTargets() is the closed set the eligibility registry walks, so it
+// must name every declared target shape except IndexTargetNone, which
+// marks statements outside index maintenance rather than a shape of one.
+// Each named shape has its own String() rather than the numeric fallback.
+func TestIndexTargetsIsClosedAndNamed(t *testing.T) {
+	targets := IndexTargets()
+	assert.NotContains(t, targets, IndexTargetNone, "the non-shape is not a target the registry decides")
+
+	declared := declaredIotaValues(t, "IndexTargetNone")
+	delete(declared, int(IndexTargetNone))
+	enumerated := make(map[int]struct{}, len(targets))
+	names := map[string]bool{}
+	for _, target := range targets {
+		_, dup := enumerated[int(target)]
+		assert.False(t, dup, "duplicate index target %d", target)
+		enumerated[int(target)] = struct{}{}
+		assert.NotContains(t, target.String(), "IndexTarget(", "target %d falls through to the numeric name", target)
+		assert.False(t, names[target.String()], "duplicate index target name %q", target.String())
+		names[target.String()] = true
+	}
+	assert.Equal(t, declared, enumerated,
+		"IndexTargets() must enumerate exactly the IndexTarget constants statement.go declares after IndexTargetNone")
+	assert.Equal(t, "none", IndexTargetNone.String())
+}
+
 // declaredKinds parses statement.go and returns the value of every constant
 // in the iota block that KindOther opens.
 func declaredKinds(t *testing.T) map[Kind]struct{} {
+	t.Helper()
+	values := declaredIotaValues(t, "KindOther")
+	declared := make(map[Kind]struct{}, len(values))
+	for v := range values {
+		declared[Kind(v)] = struct{}{}
+	}
+	return declared
+}
+
+// declaredIotaValues parses statement.go and returns the value of every
+// constant in the iota block that the named anchor constant opens.
+func declaredIotaValues(t *testing.T, anchor string) map[int]struct{} {
 	t.Helper()
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "statement.go", nil, parser.SkipObjectResolution)
@@ -368,25 +405,25 @@ func declaredKinds(t *testing.T) map[Kind]struct{} {
 			continue
 		}
 		first, ok := gen.Specs[0].(*ast.ValueSpec)
-		if !ok || len(first.Names) != 1 || first.Names[0].Name != "KindOther" {
+		if !ok || len(first.Names) != 1 || first.Names[0].Name != anchor {
 			continue
 		}
-		declared := make(map[Kind]struct{}, len(gen.Specs))
+		declared := make(map[int]struct{}, len(gen.Specs))
 		for i, spec := range gen.Specs {
 			vs, ok := spec.(*ast.ValueSpec)
 			require.True(t, ok)
-			require.Len(t, vs.Names, 1, "one Kind per line in the iota block")
+			require.Len(t, vs.Names, 1, "one constant per line in the %s iota block", anchor)
 			if i == 0 {
-				require.Len(t, vs.Values, 1, "KindOther opens the iota block")
+				require.Len(t, vs.Values, 1, "%s opens the iota block", anchor)
 				ident, ok := vs.Values[0].(*ast.Ident)
-				require.True(t, ok && ident.Name == "iota", "KindOther is the iota anchor")
+				require.True(t, ok && ident.Name == "iota", "%s is the iota anchor", anchor)
 			} else {
 				require.Empty(t, vs.Values, "%s takes its value from iota", vs.Names[0].Name)
 			}
-			declared[Kind(i)] = struct{}{}
+			declared[i] = struct{}{}
 		}
 		return declared
 	}
-	t.Fatal("statement.go declares no const block opened by KindOther")
+	t.Fatalf("statement.go declares no const block opened by %s", anchor)
 	return nil
 }

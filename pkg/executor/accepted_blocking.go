@@ -19,9 +19,18 @@ var (
 	// disabled or cannot be represented by PostgreSQL.
 	ErrInvalidBlockingBudget = errors.New("invalid accepted-blocking budget")
 	// ErrUnsupportedAcceptedBlocking means the statement is not one of the
-	// single-relation blocking index forms this executor admits.
+	// single-relation blocking index forms this executor admits, or the
+	// server will not run it inside the engine-owned transaction. Retrying
+	// the same statement reproduces it; the outcome is permanent.
 	ErrUnsupportedAcceptedBlocking = errors.New("statement is not an accepted blocking index statement")
 )
+
+// sqlstateActiveSQLTransaction is raised when a statement that must own its
+// transaction is submitted inside a transaction block. In the admitted set
+// only REINDEX on a partitioned table or index does this: PostgreSQL
+// reindexes each partition in its own transaction and refuses before
+// touching any of them.
+const sqlstateActiveSQLTransaction = "25001"
 
 // BlockingBudget bounds one operator-accepted blocking statement.
 type BlockingBudget struct {
@@ -140,6 +149,13 @@ func acceptedBlockingStatementError(ctx context.Context, err error, b BlockingBu
 			return &BudgetError{Cause: CauseLock, Budget: b.LockTimeout, Attempts: 1, cause: err}
 		case sqlstateQueryCanceled:
 			return &BudgetError{Cause: CauseStatement, Budget: b.StatementTimeout, Attempts: 1, cause: err}
+		case sqlstateActiveSQLTransaction:
+			// The server refused the statement before it executed, and it
+			// will refuse it every time: the engine-owned transaction is the
+			// only way this executor runs anything. Report the statement as
+			// outside the path rather than as a retryable execution failure.
+			return fmt.Errorf("%w: the server will not run it inside the engine-owned transaction: %w",
+				ErrUnsupportedAcceptedBlocking, err)
 		default:
 			return &BlockingExecutionError{Err: err}
 		}
