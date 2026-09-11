@@ -60,6 +60,8 @@ services:
       METRICS_JWT_SECRET: pgsprite-local-test-jwt-secret-not-for-production
       REGION: local
       ERL_AFLAGS: -proto_dist inet_tcp
+      # Keep the fixture within the runner's file-descriptor limit.
+      RLIMIT_NOFILE: "10000"
       POOLER_TENANT_ID: pgsprite
       POOLER_DEFAULT_POOL_SIZE: "3"
       POOLER_MAX_CLIENT_CONN: "30"
