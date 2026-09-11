@@ -1,0 +1,121 @@
+# Disposable compatibility target. Optional services profile adds PostgREST/Supavisor.
+services:
+  postgres:
+    image: supabase/postgres:17.6.1.136@sha256:f371b5f3f2ac0a05703f33d6e6134515fb2498cab708fb948a0aeb7481467c00
+    ports:
+      - "127.0.0.1:${PG_PORT:-55438}:5432"
+    environment:
+      POSTGRES_PASSWORD: pgsprite_test_only
+      POSTGRES_DB: postgres
+    volumes:
+      - ./supabase/init.sql:/docker-entrypoint-initdb.d/init-scripts/99-pgsprite.sql:ro
+    command: [postgres, -c, config_file=/etc/postgresql/postgresql.conf]
+    healthcheck:
+      # The initialization server accepts Unix sockets before setup finishes.
+      # Dependents need the final TCP listener, not that temporary server.
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, postgres, -d, postgres]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+  rest:
+    image: postgrest/postgrest:v14.17@sha256:c9dc201e555f5d8e37e7f39cdd4df0229774996e213bfd7de8d10ac609030f2c
+    profiles: [services]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:55439:3000"
+    environment:
+      PGRST_DB_URI: postgres://authenticator:pgsprite_test_only@postgres:5432/postgres
+      PGRST_DB_SCHEMAS: public
+      PGRST_DB_ANON_ROLE: anon
+      PGRST_JWT_SECRET: pgsprite-local-test-jwt-secret-not-for-production
+  pooler:
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:4000/api/health]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    image: supabase/supavisor:2.9.12@sha256:464b93a60ba8c96bc06dad7f241562d6613b2a994922307717b05f432ae415c2
+    profiles: [services]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:55440:5432"
+      - "127.0.0.1:55441:6543"
+    volumes:
+      - ./supabase/pooler.exs:/etc/pooler/pooler.exs:ro
+    environment:
+      PORT: "4000"
+      POSTGRES_PORT: "5432"
+      POSTGRES_HOST: postgres
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD: pgsprite_test_only
+      DATABASE_URL: ecto://supabase_admin:pgsprite_test_only@postgres:5432/_supabase
+      CLUSTER_POSTGRES: "true"
+      SECRET_KEY_BASE: pgsprite-local-test-secret-key-base-with-at-least-sixty-four-characters
+      VAULT_ENC_KEY: pgsprite-test-vault-key-32-chars
+      API_JWT_SECRET: pgsprite-local-test-jwt-secret-not-for-production
+      METRICS_JWT_SECRET: pgsprite-local-test-jwt-secret-not-for-production
+      REGION: local
+      ERL_AFLAGS: -proto_dist inet_tcp
+      # Keep the fixture within the runner's file-descriptor limit.
+      RLIMIT_NOFILE: "10000"
+      POOLER_TENANT_ID: pgsprite
+      POOLER_DEFAULT_POOL_SIZE: "3"
+      POOLER_MAX_CLIENT_CONN: "30"
+      POOLER_POOL_MODE: transaction
+      DB_POOL_SIZE: "3"
+    command:
+      - /bin/sh
+      - -c
+      - '/app/bin/migrate && /app/bin/supavisor eval "$$(cat /etc/pooler/pooler.exs)" && /app/bin/server'
+  auth:
+    image: supabase/gotrue:v2.196.0@sha256:c0c25187a6b835e65a6f6e6c6b39d090e832d40e6de5186f2c038e0411944232
+    profiles: [services]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GOTRUE_API_HOST: 0.0.0.0
+      GOTRUE_API_PORT: "9999"
+      API_EXTERNAL_URL: http://localhost:9999
+      GOTRUE_DB_DRIVER: postgres
+      GOTRUE_DB_DATABASE_URL: postgres://supabase_auth_admin:pgsprite_test_only@postgres:5432/postgres
+      GOTRUE_SITE_URL: http://localhost:3000
+      GOTRUE_JWT_SECRET: pgsprite-local-test-jwt-secret-not-for-production
+      GOTRUE_JWT_AUD: authenticated
+      GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
+      GOTRUE_DISABLE_SIGNUP: "true"
+  realtime:
+    image: supabase/realtime:v2.134.10@sha256:cbcc6a7986fc28b6dcffa798b077d5fb9c69cd25500371ab49147a86d7edbb03
+    profiles: [realtime]
+    # The image briefly starts an HTTP server while seeding. Mark only the final
+    # server phase so the test cannot subscribe to that temporary process.
+    command: [sh, -c, 'touch /tmp/pgsprite-server-ready; exec /app/bin/server']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:55442:4000"
+    environment:
+      PORT: "4000"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: supabase_admin
+      DB_PASSWORD: pgsprite_test_only
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: SET search_path TO _realtime
+      DB_ENC_KEY: supabaserealtime
+      API_JWT_SECRET: pgsprite-local-test-jwt-secret-not-for-production
+      SECRET_KEY_BASE: pgsprite-local-test-secret-key-base-with-at-least-sixty-four-characters
+      METRICS_JWT_SECRET: pgsprite-local-test-jwt-secret-not-for-production
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SELF_HOST_TENANT_NAME: localhost
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+      DISABLE_HEALTHCHECK_LOGGING: "true"

@@ -53,6 +53,21 @@ make lint        # golangci-lint
   major (default 16), CI runs the matrix 14 → 18. Core logic is validated against a real
   database — no mocked-DB tests for core logic.
 
+## Supabase image maintenance
+
+When changing or reviewing the Supabase fixture, tests, or compatibility guide,
+check upstream releases for the images pinned in `compose/supabase.yml`. Flag
+available stable updates, explicitly calling out major-version drift, with the
+current and candidate versions, release-note
+links, and relevant changes to roles, initialization, pooling, or replication.
+If release information is unavailable, say the check is incomplete; do not infer
+that the pins are current. Propose a separate update PR with the compatibility
+risks and validation needed, rather than silently upgrading during unrelated work.
+Follow the repo's PR-creation rules below. For an upgrade, preserve version
+and digest pins, review the pooler source/version attribution, run the required
+Supabase CI job, and update the guide's tested versions and limits together.
+See [fixture maintenance](integration/supabase/README.md#maintaining-the-fixture).
+
 ## Demo tour
 
 [demo/](demo/) is a runnable product tour and CI's artifact smoke test (`make demo`
@@ -92,6 +107,17 @@ is a smoke tour of the built binary, not a second test suite.
   cleanups, which run after the context is cancelled, use
   `context.WithoutCancel(t.Context())`), and named polling deadlines — no bare `time.Sleep`
   readiness waits.
+- **Test SQL must be readable by humans.** Show the complete DDL statement and desired
+  schema in the test that exercises them. Use multiline raw strings for table definitions
+  and longer SQL, with one column or clause per line. Do not make readers reconstruct SQL
+  from fragments or positional case fields; substituting a safely quoted fixture name is
+  fine. Prefer separate named tests for distinct DDL operations over one large matrix.
+  Share fixture setup and verification helpers, while keeping the SQL under test visible.
+  Treat DDL tests as executable capability documentation: name the operation and expected
+  outcome, and briefly explain why it succeeds, is refused, or fails. Explain non-obvious
+  expected values and any durable leftovers. A passing refusal test proves safe rejection,
+  not support for executing the change. Use copy-and-swap for the engine path; reserve
+  table rewrite for PostgreSQL's physical operation.
 - Errors: wrap with context and identifiers (`fmt.Errorf("create slot %s: %w", name, err)`);
   never log-and-continue; no silent branch cases; no `nolint`; no `--no-verify`.
 
