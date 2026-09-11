@@ -92,7 +92,7 @@ func pullTables(ctx context.Context, pool *pgxpool.Pool, schema, outDir string, 
 		if err != nil {
 			result.status = pullStatusError
 			result.err = err
-			var refusal *renderRefusal
+			var refusal *schemadiff.RenderRefusal
 			if errors.As(err, &refusal) {
 				result.status = pullStatusRefused
 			}
@@ -110,11 +110,10 @@ func tableOutputPath(outDir, table string) (string, error) {
 	return filepath.Join(outDir, name), nil
 }
 
-type renderRefusal struct{ err error }
-
-func (e *renderRefusal) Error() string { return e.err.Error() }
-func (e *renderRefusal) Unwrap() error { return e.err }
-
+// pullOneTable exports one table. A *schemadiff.RenderRefusal passes through
+// unwrapped so the caller can report the table as REFUSED; any other error
+// — an introspection failure, a renderer that produced an inadmissible file,
+// a file-system failure — is the table's ERROR.
 func pullOneTable(ctx context.Context, pool *pgxpool.Pool, schema, table, path string) error {
 	model, err := schemadiff.Introspect(ctx, pool, schema, table)
 	if err != nil {
@@ -122,7 +121,7 @@ func pullOneTable(ctx context.Context, pool *pgxpool.Pool, schema, table, path s
 	}
 	rendered, err := schemadiff.Render(model)
 	if err != nil {
-		return &renderRefusal{err: err}
+		return err
 	}
 	return pullRenderedFile(path, rendered)
 }

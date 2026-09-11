@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -22,7 +23,9 @@ func TestPullTablesContinuesAfterFailures(t *testing.T) {
 		called = append(called, table)
 		switch table {
 		case "bad_render":
-			return &renderRefusal{err: errors.New("unsupported table")}
+			return &schemadiff.RenderRefusal{Table: table, Causes: []schemadiff.RenderCause{
+				{Err: schemadiff.ErrUnrenderableUnlogged, Detail: "unlogged table"},
+			}}
 		case "bad_read":
 			return wantErr
 		default:

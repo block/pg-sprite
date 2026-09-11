@@ -3,6 +3,7 @@ package schemadiff
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -35,10 +36,63 @@ var ErrUnrenderableInheritance = errors.New("table inheritance cannot be rendere
 // one with foreign keys. A desired file cannot declare foreign keys, so
 // the single-table model carries no incoming foreign-key topology — a
 // rendered baseline would look complete while silently dropping the
-// table's relationships. The renderer refuses instead. Outgoing foreign
-// keys are refused separately by the desired-file grammar
-// (statement.ErrForeignKey).
+// table's relationships. The renderer refuses instead. The table's own
+// foreign keys are refused under the desired-file grammar's sentinel
+// (statement.ErrForeignKey), named by constraint.
 var ErrUnrenderableForeignKey = errors.New("tables referenced by foreign keys cannot be rendered as a desired schema")
+
+// RenderRefusal is the error Render returns when the model carries anything
+// a desired schema file cannot express. It gathers every cause rather than
+// stopping at the first, so a caller that has to explain why a live table
+// cannot be declared can name all of them, and it unwraps to each cause's
+// sentinel so errors.Is keeps matching for a caller that branches on one.
+type RenderRefusal struct {
+	// Table is the unqualified table name.
+	Table string
+	// Causes lists what the desired schema cannot express, table-level
+	// properties first and then each column's, in attribute order. It is
+	// never empty.
+	Causes []RenderCause
+}
+
+// RenderCause is one property of the model a desired schema file cannot
+// express.
+type RenderCause struct {
+	// Err is the sentinel that names the property: ErrUnrenderablePartition,
+	// ErrUnrenderableInheritance, statement.ErrForeignKey for the table's
+	// own foreign keys, ErrUnrenderableForeignKey for the foreign keys that
+	// reference it, ErrUnrenderableUnlogged, ErrUnrenderableCollation, or
+	// ErrUnrenderableDefault.
+	Err error
+	// Objects are the catalog names the property is about: the table's own
+	// foreign key constraints, "table.constraint" for the foreign keys that
+	// reference it, the relations on the other side of an inheritance edge,
+	// the column carrying a collation or a sequence-backed default. It is
+	// empty for a property of the table as a whole.
+	Objects []string
+	// Detail is the phrase Error prints for the cause, carrying what the
+	// names alone do not: the partition key, the collation, the default.
+	Detail string
+}
+
+// Error joins every cause: a table refused for one reason reads as a single
+// clause, and a table refused for several names them all.
+func (e *RenderRefusal) Error() string {
+	parts := make([]string, len(e.Causes))
+	for i, cause := range e.Causes {
+		parts[i] = cause.Detail + ": " + cause.Err.Error()
+	}
+	return fmt.Sprintf("render table %q: %s", e.Table, strings.Join(parts, "; "))
+}
+
+// Unwrap exposes every cause's sentinel to errors.Is.
+func (e *RenderRefusal) Unwrap() []error {
+	errs := make([]error, len(e.Causes))
+	for i, cause := range e.Causes {
+		errs[i] = cause.Err
+	}
+	return errs
+}
 
 // ErrUnrenderableUnlogged is returned for an unlogged table. The
 // declarative model does not manage persistence, so a rendered plain
@@ -53,35 +107,22 @@ var ErrUnrenderableUnlogged = errors.New("unlogged tables cannot be rendered as 
 var ErrUnrenderableCollation = errors.New("columns with an explicit collation cannot be rendered as a desired schema")
 
 // Render renders the canonical model into a desired-state schema file: one
-// CREATE TABLE followed by the model's CREATE INDEX statements. The output
-// is proven admissible by parsing it through statement.ParseDesired before
-// it is returned, so anything a desired file refuses (a foreign key, for
-// example) surfaces here as that gate's typed error. Materializing the
-// output with IntrospectDesired reproduces the model's names and
-// definitions, so diffing it against the table it came from yields no
-// changes — the round-trip contract the integration tests enforce.
-// Validity is not rendered: an index the table carries invalid — an
-// unfinished concurrent build — renders as its definition and materializes
-// valid, so the round-trip diff of such a table is exactly the create-index
-// change that rebuilds it.
+// CREATE TABLE followed by the model's CREATE INDEX statements. A model
+// carrying anything a desired file cannot express is refused with a
+// *RenderRefusal that names every such property, so one call gives the
+// whole answer. The output is proven admissible by parsing it through
+// statement.ParseDesired before it is returned, so a property the refusals
+// do not model but the desired-file grammar refuses still cannot become a
+// baseline. Materializing the output with IntrospectDesired reproduces the
+// model's names and definitions, so diffing it against the table it came
+// from yields no changes — the round-trip contract the integration tests
+// enforce. Validity is not rendered: an index the table carries invalid —
+// an unfinished concurrent build — renders as its definition and
+// materializes valid, so the round-trip diff of such a table is exactly the
+// create-index change that rebuilds it.
 func Render(m Model) (string, error) {
-	if m.PartitionKey != "" {
-		return "", fmt.Errorf("render table %q: partitioned parent (PARTITION BY %s): %w", m.Table, m.PartitionKey, ErrUnrenderablePartition)
-	}
-	if m.IsPartition {
-		return "", fmt.Errorf("render table %q: partition of a partitioned parent: %w", m.Table, ErrUnrenderablePartition)
-	}
-	if len(m.InheritsParents) != 0 {
-		return "", fmt.Errorf("render table %q: inherits from %s: %w", m.Table, strings.Join(m.InheritsParents, ", "), ErrUnrenderableInheritance)
-	}
-	if len(m.InheritanceChildren) != 0 {
-		return "", fmt.Errorf("render table %q: has inheritance children %s: %w", m.Table, strings.Join(m.InheritanceChildren, ", "), ErrUnrenderableInheritance)
-	}
-	if len(m.ReferencedBy) != 0 {
-		return "", fmt.Errorf("render table %q: referenced by foreign keys (%s): %w", m.Table, strings.Join(m.ReferencedBy, ", "), ErrUnrenderableForeignKey)
-	}
-	if m.Unlogged {
-		return "", fmt.Errorf("render table %q: %w", m.Table, ErrUnrenderableUnlogged)
+	if causes := renderRefusals(m); len(causes) != 0 {
+		return "", &RenderRefusal{Table: m.Table, Causes: causes}
 	}
 	defs := make([]string, 0, len(m.Columns)+len(m.Constraints))
 	for _, c := range m.Columns {
@@ -113,16 +154,107 @@ func Render(m Model) (string, error) {
 	return out, nil
 }
 
+// renderRefusals collects every property of the model a desired schema file
+// cannot express: the table's own first, then each column's in attribute
+// order. An empty result means the model renders.
+func renderRefusals(m Model) []RenderCause {
+	var causes []RenderCause
+	if m.PartitionKey != "" {
+		causes = append(causes, RenderCause{
+			Err:    ErrUnrenderablePartition,
+			Detail: fmt.Sprintf("partitioned parent (PARTITION BY %s)", m.PartitionKey),
+		})
+	}
+	if m.IsPartition {
+		causes = append(causes, RenderCause{
+			Err:    ErrUnrenderablePartition,
+			Detail: "partition of a partitioned parent",
+		})
+	}
+	if len(m.InheritsParents) != 0 {
+		causes = append(causes, RenderCause{
+			Err:     ErrUnrenderableInheritance,
+			Objects: slices.Clone(m.InheritsParents),
+			Detail:  "inherits from " + strings.Join(m.InheritsParents, ", "),
+		})
+	}
+	if len(m.InheritanceChildren) != 0 {
+		causes = append(causes, RenderCause{
+			Err:     ErrUnrenderableInheritance,
+			Objects: slices.Clone(m.InheritanceChildren),
+			Detail:  "has inheritance children " + strings.Join(m.InheritanceChildren, ", "),
+		})
+	}
+	if own := foreignKeyNames(m.Constraints); len(own) != 0 {
+		causes = append(causes, RenderCause{
+			Err:     statement.ErrForeignKey,
+			Objects: own,
+			Detail:  "foreign key constraint(s) " + strings.Join(own, ", "),
+		})
+	}
+	if len(m.ReferencedBy) != 0 {
+		causes = append(causes, RenderCause{
+			Err:     ErrUnrenderableForeignKey,
+			Objects: slices.Clone(m.ReferencedBy),
+			Detail:  fmt.Sprintf("referenced by foreign keys (%s)", strings.Join(m.ReferencedBy, ", ")),
+		})
+	}
+	if m.Unlogged {
+		causes = append(causes, RenderCause{
+			Err:    ErrUnrenderableUnlogged,
+			Detail: "unlogged table",
+		})
+	}
+	for _, c := range m.Columns {
+		causes = append(causes, columnRefusals(m.Table, c)...)
+	}
+	return causes
+}
+
+// columnRefusals collects what a desired file cannot express about one
+// column: an explicit collation, which the model carries only to keep a
+// baseline from silently dropping it, and a sequence-backed default that
+// is not the serial shorthand, because the sequence it references cannot
+// exist on the scratch schema.
+func columnRefusals(table string, c Column) []RenderCause {
+	var causes []RenderCause
+	if c.Collation != "" {
+		causes = append(causes, RenderCause{
+			Err:     ErrUnrenderableCollation,
+			Objects: []string{c.Name},
+			Detail:  fmt.Sprintf("column %q collation %s", c.Name, c.Collation),
+		})
+	}
+	if c.SequenceDefault {
+		if _, ok := serialType(table, c); !ok {
+			causes = append(causes, RenderCause{
+				Err:     ErrUnrenderableDefault,
+				Objects: []string{c.Name},
+				Detail:  fmt.Sprintf("column %q default %q", c.Name, c.Default),
+			})
+		}
+	}
+	return causes
+}
+
+// foreignKeyNames returns the names of the FOREIGN KEY constraints among
+// cons, in the model's (name-sorted) order.
+func foreignKeyNames(cons []Constraint) []string {
+	var names []string
+	for _, con := range cons {
+		if con.ForeignKey {
+			names = append(names, con.Name)
+		}
+	}
+	return names
+}
+
 // renderColumnDef renders one column for CREATE TABLE. A serial column is
 // rendered back to its pseudo-type so the desired file recreates the owned
-// sequence on the scratch schema; every other sequence-backed default is
-// refused because the sequence it references cannot exist there. An
-// explicit column collation is refused: the model carries it only to keep
-// the baseline from silently dropping it.
+// sequence on the scratch schema. Any other sequence-backed default was
+// refused by renderRefusals before this runs; the check here keeps the
+// renderer fail-closed should the two ever disagree.
 func renderColumnDef(table string, c Column) (string, error) {
-	if c.Collation != "" {
-		return "", fmt.Errorf("column %q collation %s: %w", c.Name, c.Collation, ErrUnrenderableCollation)
-	}
 	if c.SequenceDefault {
 		st, ok := serialType(table, c)
 		if !ok {

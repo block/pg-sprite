@@ -226,7 +226,7 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 // model identical across supported majors.
 func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32) ([]Constraint, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT conname, pg_get_constraintdef(oid)
+		SELECT conname, pg_get_constraintdef(oid), contype = 'f'
 		FROM pg_constraint
 		WHERE conrelid = $1 AND contype IN ('p','u','c','f','x') AND conislocal
 		ORDER BY conname`, oid)
@@ -237,7 +237,7 @@ func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32) ([]Constr
 	var cons []Constraint
 	for rows.Next() {
 		var c Constraint
-		if err := rows.Scan(&c.Name, &c.Def); err != nil {
+		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey); err != nil {
 			return nil, fmt.Errorf("scan constraint: %w", err)
 		}
 		cons = append(cons, c)

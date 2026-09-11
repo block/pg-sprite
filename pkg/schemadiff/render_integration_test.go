@@ -184,8 +184,10 @@ func TestRenderRefusesLiveClassicInheritanceOnBothSides(t *testing.T) {
 }
 
 // A live table with a foreign key cannot be rendered: the desired-file
-// grammar refuses foreign keys, and the renderer surfaces that gate's typed
-// error rather than emitting a file the front door would reject.
+// grammar has no way to declare one, and the renderer refuses by
+// constraint name under that gate's sentinel rather than emitting a file
+// the front door would reject. Introspection marks exactly the FOREIGN KEY
+// constraints, so the refusal names them and nothing else.
 func TestRenderRefusesLiveForeignKey(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -194,7 +196,11 @@ func TestRenderRefusesLiveForeignKey(t *testing.T) {
 
 	for _, ddl := range []string{
 		fmt.Sprintf("CREATE TABLE %s.users (id bigint PRIMARY KEY)", schema),
-		fmt.Sprintf("CREATE TABLE %s.orders (id bigint PRIMARY KEY, user_id bigint REFERENCES %s.users)", schema, schema),
+		fmt.Sprintf(`CREATE TABLE %s.orders (
+			id bigint PRIMARY KEY,
+			user_id bigint REFERENCES %s.users,
+			qty integer CONSTRAINT orders_qty_check CHECK (qty > 0)
+		)`, schema, schema),
 	} {
 		_, err := pool.Exec(t.Context(), ddl)
 		require.NoError(t, err)
@@ -202,8 +208,20 @@ func TestRenderRefusesLiveForeignKey(t *testing.T) {
 
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "orders")
 	require.NoError(t, err)
+	foreignKeys := map[string]bool{}
+	for _, con := range live.Constraints {
+		foreignKeys[con.Name] = con.ForeignKey
+	}
+	assert.Equal(t, map[string]bool{
+		"orders_pkey": false, "orders_qty_check": false, "orders_user_id_fkey": true,
+	}, foreignKeys)
+
 	_, err = schemadiff.Render(live)
 	require.ErrorIs(t, err, statement.ErrForeignKey)
+	var refusal *schemadiff.RenderRefusal
+	require.ErrorAs(t, err, &refusal)
+	require.Len(t, refusal.Causes, 1)
+	assert.Equal(t, []string{"orders_user_id_fkey"}, refusal.Causes[0].Objects)
 
 	// The referenced side refuses too: incoming foreign keys are not part
 	// of this table's own definition, so a rendered baseline of it would
@@ -213,6 +231,9 @@ func TestRenderRefusesLiveForeignKey(t *testing.T) {
 	assert.Equal(t, []string{"orders.orders_user_id_fkey"}, referenced.ReferencedBy)
 	_, err = schemadiff.Render(referenced)
 	require.ErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)
+	require.ErrorAs(t, err, &refusal)
+	require.Len(t, refusal.Causes, 1)
+	assert.Equal(t, []string{"orders.orders_user_id_fkey"}, refusal.Causes[0].Objects)
 }
 
 // A foreign key on a partitioned referencing table is cloned onto every

@@ -102,6 +102,12 @@ without losing meaning. Current refusals include:
 - unlogged tables and columns with explicit collations; and
 - sequence-backed defaults that cannot be rendered as an owned `serial` form.
 
+A table that meets several of these is refused once, with every cause named
+(`render table "orders": foreign key constraint(s) orders_user_id_fkey: …;
+unlogged table: …`), so one `pull` tells you everything that has to change
+before the table can be declared. Library callers get the same list as a
+`*schemadiff.RenderRefusal`, one typed cause per limit.
+
 Extension-owned tables are excluded from enumeration. Comments, storage
 parameters, and non-table objects are outside the declarative model and are not
 exported; manage them separately. See the complete

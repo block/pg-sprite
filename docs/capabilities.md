@@ -364,8 +364,13 @@ Three related jobs stay with humans on purpose:
   represented through their parent's `PARTITION BY` and extension members belong to their
   extension, so neither is listed, while a listed table whose shape export refuses (the
   declarative model's limits, under [The two front doors](#the-two-front-doors)) is still
-  undeclared and still the owner's to resolve; `pull` reports each refusal by table. The
-  exclusions matter, because every false positive blocks a table nobody touched:
+  undeclared and still the owner's to resolve; `pull` reports each refusal by table. An
+  owner that has to tell its users *why* a listed table cannot be declared runs
+  `schemadiff.Introspect` and `schemadiff.Render` on it and reads the
+  `*schemadiff.RenderRefusal` — every cause the table carries, each under its typed
+  sentinel with the catalog objects it is about (the foreign-key constraints by name, for
+  instance) — instead of writing its own catalog query for each limit. The exclusions
+  matter, because every false positive blocks a table nobody touched:
 
   ```sql
   SELECT c.relname

@@ -1,6 +1,7 @@
 package schemadiff
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -160,10 +161,31 @@ func TestRenderRefusesCollatedColumn(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnrenderableCollation)
 }
 
-// The renderer proves its own output admissible through ParseDesired, so a
-// model carrying what a desired file refuses surfaces that gate's typed
-// error — a foreign key is the canonical case.
+// The table's own foreign keys are refused by constraint name under the
+// desired-file grammar's sentinel. The cause is driven by the catalog's
+// constraint type, not by the definition text, so a flagged constraint
+// whose definition does not spell REFERENCES is still named.
 func TestRenderRefusesForeignKey(t *testing.T) {
+	m := base()
+	m.Constraints = append(m.Constraints,
+		Constraint{Name: "events_org_fk", Def: "FOREIGN KEY (org_id) REFERENCES orgs(id)", ForeignKey: true},
+		Constraint{Name: "events_user_fk", Def: "CHECK (user_id > 0)", ForeignKey: true},
+	)
+
+	_, err := Render(m)
+	require.ErrorIs(t, err, statement.ErrForeignKey)
+	var refusal *RenderRefusal
+	require.ErrorAs(t, err, &refusal)
+	require.Len(t, refusal.Causes, 1)
+	assert.Equal(t, []string{"events_org_fk", "events_user_fk"}, refusal.Causes[0].Objects)
+	assert.Equal(t, `render table "events": foreign key constraint(s) events_org_fk, events_user_fk: `+
+		statement.ErrForeignKey.Error(), err.Error())
+}
+
+// The renderer proves its own output admissible through ParseDesired, so a
+// REFERENCES clause the model does not flag still cannot become a
+// baseline — it surfaces the parse gate's typed error, not a refusal.
+func TestRenderParseGateCatchesUnflaggedForeignKey(t *testing.T) {
 	m := base()
 	m.Constraints = append(m.Constraints, Constraint{
 		Name: "events_user_fk",
@@ -172,6 +194,8 @@ func TestRenderRefusesForeignKey(t *testing.T) {
 
 	_, err := Render(m)
 	require.ErrorIs(t, err, statement.ErrForeignKey)
+	var refusal *RenderRefusal
+	assert.False(t, errors.As(err, &refusal))
 }
 
 // A table referenced by other tables' foreign keys refuses to render: the
@@ -183,4 +207,73 @@ func TestRenderRefusesIncomingForeignKey(t *testing.T) {
 
 	_, err := Render(m)
 	require.ErrorIs(t, err, ErrUnrenderableForeignKey)
+	var refusal *RenderRefusal
+	require.ErrorAs(t, err, &refusal)
+	require.Len(t, refusal.Causes, 1)
+	assert.Equal(t, []string{"orders.orders_user_id_fkey"}, refusal.Causes[0].Objects)
+	assert.Equal(t, `render table "events": referenced by foreign keys (orders.orders_user_id_fkey): `+
+		ErrUnrenderableForeignKey.Error(), err.Error())
+}
+
+// A table refused for several reasons names every one of them in one
+// refusal — table-level causes first, then each column's in attribute
+// order — and the refusal matches every cause's sentinel, so a caller
+// explaining why the table cannot be declared needs one call, and a caller
+// branching on one sentinel keeps working.
+func TestRenderRefusalCollectsEveryCause(t *testing.T) {
+	m := base()
+	m.Unlogged = true
+	m.InheritanceChildren = []string{"public.events_child"}
+	m.ReferencedBy = []string{"orders.orders_event_fk"}
+	m.Constraints = append(m.Constraints, Constraint{
+		Name: "events_user_fk", Def: "FOREIGN KEY (user_id) REFERENCES users(id)", ForeignKey: true,
+	})
+	m.Columns[1].Collation = `"C"`
+	m.Columns = append(m.Columns, Column{
+		Name: "seq", Type: "bigint", NotNull: true,
+		Default: "nextval('shared_seq'::regclass)", SequenceDefault: true,
+	})
+
+	_, err := Render(m)
+
+	var refusal *RenderRefusal
+	require.ErrorAs(t, err, &refusal)
+	assert.Equal(t, "events", refusal.Table)
+	wantErrs := []error{
+		ErrUnrenderableInheritance, statement.ErrForeignKey, ErrUnrenderableForeignKey,
+		ErrUnrenderableUnlogged, ErrUnrenderableCollation, ErrUnrenderableDefault,
+	}
+	require.Len(t, refusal.Causes, len(wantErrs))
+	for i, want := range wantErrs {
+		assert.ErrorIs(t, refusal.Causes[i].Err, want, "cause %d", i)
+		assert.ErrorIs(t, err, want)
+	}
+	assert.Equal(t, []string{"public.events_child"}, refusal.Causes[0].Objects)
+	assert.Equal(t, []string{"events_user_fk"}, refusal.Causes[1].Objects)
+	assert.Equal(t, []string{"orders.orders_event_fk"}, refusal.Causes[2].Objects)
+	assert.Empty(t, refusal.Causes[3].Objects)
+	assert.Equal(t, []string{"name"}, refusal.Causes[4].Objects)
+	assert.Equal(t, []string{"seq"}, refusal.Causes[5].Objects)
+	assert.NotErrorIs(t, err, ErrUnrenderablePartition)
+	assert.Equal(t, `render table "events": `+
+		`has inheritance children public.events_child: `+ErrUnrenderableInheritance.Error()+`; `+
+		`foreign key constraint(s) events_user_fk: `+statement.ErrForeignKey.Error()+`; `+
+		`referenced by foreign keys (orders.orders_event_fk): `+ErrUnrenderableForeignKey.Error()+`; `+
+		`unlogged table: `+ErrUnrenderableUnlogged.Error()+`; `+
+		`column "name" collation "C": `+ErrUnrenderableCollation.Error()+`; `+
+		`column "seq" default "nextval('shared_seq'::regclass)": `+ErrUnrenderableDefault.Error(),
+		err.Error())
+}
+
+// The refusal's Objects are the refusal's own: mutating them afterwards
+// does not reach back into the model it was built from.
+func TestRenderRefusalClonesObjects(t *testing.T) {
+	m := base()
+	m.ReferencedBy = []string{"orders.orders_event_fk"}
+
+	_, err := Render(m)
+	var refusal *RenderRefusal
+	require.ErrorAs(t, err, &refusal)
+	refusal.Causes[0].Objects[0] = "changed"
+	assert.Equal(t, []string{"orders.orders_event_fk"}, m.ReferencedBy)
 }

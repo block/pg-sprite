@@ -72,6 +72,12 @@ type Constraint struct {
 	Name string
 	// Def is the canonical definition text.
 	Def string
+	// ForeignKey reports a FOREIGN KEY constraint (pg_constraint.contype
+	// 'f'). A desired file cannot declare one, so the renderer refuses the
+	// table by constraint name rather than leaving the parse gate to find
+	// the REFERENCES clause in the rendered text. The diff compares
+	// constraints by definition alone, so the flag never changes a plan.
+	ForeignKey bool
 }
 
 // Index is one non-constraint index: its name plus the server-decompiled
