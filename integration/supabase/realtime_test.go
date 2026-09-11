@@ -116,7 +116,9 @@ func TestRealtimeDuringNativeChanges(t *testing.T) {
 	require.NoError(t, pool.QueryRow(t.Context(), "SELECT $1::regclass::oid", table).Scan(&oid))
 	startRealtime(t)
 	first, second := subscribe(t, 1), subscribe(t, 2)
-	execSQL(t, pool, "INSERT INTO "+table+" VALUES (0,'00000000-0000-0000-0000-000000000001','before'),(1000,'00000000-0000-0000-0000-000000000002','before')")
+	execSQL(t, pool, "INSERT INTO "+table+` VALUES
+		(0,'00000000-0000-0000-0000-000000000001','before'),
+		(1000,'00000000-0000-0000-0000-000000000002','before')`)
 	for _, s := range []*subscription{first, second} {
 		s.receiveUntil(t, func(_ realtimeMessage) bool { return len(s.records) == 1 })
 	}
@@ -168,7 +170,9 @@ func TestRealtimeDuringNativeChanges(t *testing.T) {
 		require.NoError(t, err)
 	default:
 	}
-	execSQL(t, pool, "INSERT INTO "+table+" VALUES (999,'00000000-0000-0000-0000-000000000001','after','new column'),(1999,'00000000-0000-0000-0000-000000000002','after','new column')")
+	execSQL(t, pool, "INSERT INTO "+table+` VALUES
+		(999,'00000000-0000-0000-0000-000000000001','after','new column'),
+		(1999,'00000000-0000-0000-0000-000000000002','after','new column')`)
 	written := int(committed.Load())
 	for _, s := range []*subscription{first, second} {
 		s.receiveUntil(t, func(_ realtimeMessage) bool { return len(s.records) == written*2+2 })
@@ -190,9 +194,14 @@ func TestRealtimeDuringNativeChanges(t *testing.T) {
 	require.NoError(t, pool.QueryRow(t.Context(), "SELECT oid,relrowsecurity FROM pg_class WHERE oid=$1::regclass", table).Scan(&currentOID, &enabled))
 	assert.Equal(t, oid, currentOID)
 	assert.True(t, enabled)
-	require.NoError(t, pool.QueryRow(t.Context(), "SELECT count(*) FROM pg_publication_tables WHERE pubname='supabase_realtime' AND tablename='pgsprite_realtime_probe'").Scan(&count))
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT count(*)
+		FROM pg_publication_tables
+		WHERE pubname='supabase_realtime'
+		AND tablename='pgsprite_realtime_probe'`).Scan(&count))
 	assert.Equal(t, 1, count)
-	require.NoError(t, pool.QueryRow(t.Context(), "SELECT indisvalid FROM pg_index WHERE indexrelid='public.pgsprite_realtime_probe_body'::regclass").Scan(&valid))
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT indisvalid
+		FROM pg_index
+		WHERE indexrelid='public.pgsprite_realtime_probe_body'::regclass`).Scan(&valid))
 	assert.True(t, valid)
 }
 

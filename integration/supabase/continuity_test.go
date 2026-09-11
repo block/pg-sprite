@@ -34,7 +34,8 @@ func verifyAPITenants(t *testing.T, name string, expected map[int][]int) {
 	}
 }
 
-func TestServicesAfterCopySwapRefusals(t *testing.T) {
+func runServiceRefusal(t *testing.T, tc rewriteCase) {
+	t.Helper()
 	pool := fixture(t)
 	name := "pgsprite_realtime_probe"
 	table := seedDDLTable(t, pool, name)
@@ -48,19 +49,15 @@ func TestServicesAfterCopySwapRefusals(t *testing.T) {
 		key := fmt.Sprintf("UPDATE:%d", s.tenant)
 		s.receiveUntil(t, func(_ realtimeMessage) bool { _, ok := s.records[key]; return ok })
 	}
-	for i, tc := range rewriteCases() {
-		t.Run(tc.name, func(t *testing.T) {
-			refuseRewrite(t, pool, table, name, tc)
-			for _, s := range subscribers {
-				id := 10 + i + (s.tenant-1)*1000
-				_, err := pool.Exec(t.Context(), "INSERT INTO "+table+" VALUES ($1,$2,'123','one',12.50,'ready')", id, tenantID(s.tenant))
-				require.NoError(t, err)
-				key := fmt.Sprintf("INSERT:%d", id)
-				s.receiveUntil(t, func(_ realtimeMessage) bool { _, ok := s.records[key]; return ok })
-				assert.Equal(t, "123", s.records[key].Payload.Data.Record.Body)
-				expected[s.tenant] = append(expected[s.tenant], id)
-			}
-			verifyAPITenants(t, name, expected)
-		})
+	refuseRewrite(t, pool, table, name, tc)
+	for _, s := range subscribers {
+		id := 10 + (s.tenant-1)*1000
+		_, err := pool.Exec(t.Context(), "INSERT INTO "+table+" VALUES ($1,$2,'123','one',12.50,'ready')", id, tenantID(s.tenant))
+		require.NoError(t, err)
+		key := fmt.Sprintf("INSERT:%d", id)
+		s.receiveUntil(t, func(_ realtimeMessage) bool { _, ok := s.records[key]; return ok })
+		assert.Equal(t, "123", s.records[key].Payload.Data.Record.Body)
+		expected[s.tenant] = append(expected[s.tenant], id)
 	}
+	verifyAPITenants(t, name, expected)
 }

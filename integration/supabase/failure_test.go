@@ -3,6 +3,7 @@ package supabase_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -16,24 +17,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAdditionalRewriteRefusals(t *testing.T) {
+func TestRefuseStoredGeneratedColumn(t *testing.T) {
+	runAdditionalRefusal(t, "pgsprite_extra_stored_generated", `ALTER TABLE %s
+		ADD COLUMN doubled int GENERATED ALWAYS AS (id * 2) STORED`)
+}
+
+func TestRefuseUsingExpression(t *testing.T) {
+	runAdditionalRefusal(t, "pgsprite_extra_using_expression", `ALTER TABLE %s
+		ALTER COLUMN body TYPE text USING upper(body)`)
+}
+
+func runAdditionalRefusal(t *testing.T, name, ddl string) {
+	t.Helper()
 	pool := fixture(t)
-	for _, tc := range []struct{ name, ddl string }{
-		{"stored_generated", "ADD COLUMN doubled int GENERATED ALWAYS AS (id*2) STORED"},
-		{"using_expression", "ALTER COLUMN body TYPE text USING upper(body)"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			table := seedDDLTable(t, pool, "pgsprite_extra_"+tc.name)
-			before := snapshot(t, pool, table)
-			st, err := statement.ParseOne("ALTER TABLE " + table + " " + tc.ddl)
-			require.NoError(t, err)
-			v, err := migrate.Run(t.Context(), pool, st, migrate.DefaultOptions())
-			require.NoError(t, err)
-			assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
-			assert.Equal(t, verdict.ReasonBackendUnavailable, v.Reason)
-			assert.Equal(t, before, snapshot(t, pool, table))
-		})
-	}
+	table := seedDDLTable(t, pool, name)
+	before := snapshot(t, pool, table)
+	st, err := statement.ParseOne(fmt.Sprintf(ddl, table))
+	require.NoError(t, err)
+	v, err := migrate.Run(t.Context(), pool, st, migrate.DefaultOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonBackendUnavailable, v.Reason)
+	assert.Equal(t, before, snapshot(t, pool, table))
 }
 
 func TestDesiredDestructivePlanDoesNotApplySafePrefix(t *testing.T) {
@@ -41,7 +46,14 @@ func TestDesiredDestructivePlanDoesNotApplySafePrefix(t *testing.T) {
 	name := "pgsprite_destructive_plan"
 	table := seedDDLTable(t, pool, name)
 	before := snapshot(t, pool, table)
-	ds, err := statement.ParseDesired("CREATE TABLE " + name + " (id int PRIMARY KEY,owner_id uuid NOT NULL,body text NOT NULL,label varchar(8),amount numeric(8,2),safe_prefix text)")
+	ds, err := statement.ParseDesired("CREATE TABLE " + name + ` (
+		id int PRIMARY KEY,
+		owner_id uuid NOT NULL,
+		body text NOT NULL,
+		label varchar(8),
+		amount numeric(8,2),
+		safe_prefix text
+	)`)
 	require.NoError(t, err)
 	result, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{Schema: "public", Desired: ds}, migrate.DefaultOptions())
 	require.NoError(t, err)
@@ -101,7 +113,11 @@ func TestSupabaseNotNullValidationFailure(t *testing.T) {
 	var nulls, scaffolds int
 	require.NoError(t, pool.QueryRow(t.Context(), "SELECT attnotnull FROM pg_attribute WHERE attrelid=$1::regclass AND attname='note'", table).Scan(&notNull))
 	require.NoError(t, pool.QueryRow(t.Context(), "SELECT count(*) FROM "+table+" WHERE note IS NULL").Scan(&nulls))
-	require.NoError(t, pool.QueryRow(t.Context(), "SELECT count(*) FROM pg_constraint WHERE conrelid=$1::regclass AND contype='c' AND NOT convalidated", table).Scan(&scaffolds))
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT count(*)
+		FROM pg_constraint
+		WHERE conrelid = $1::regclass
+		AND contype='c'
+		AND NOT convalidated`, table).Scan(&scaffolds))
 	assert.False(t, notNull)
 	assert.Equal(t, 1, nulls)
 	assert.Equal(t, 1, scaffolds)
@@ -122,7 +138,9 @@ func TestSupabaseUniqueIndexFailure(t *testing.T) {
 	assert.Equal(t, string(executor.CodeInvalidIndexOwnLeftover), v.Code)
 	var valid bool
 	var count int
-	require.NoError(t, pool.QueryRow(t.Context(), "SELECT indisvalid FROM pg_index WHERE indexrelid='public.pgsprite_duplicate_body'::regclass").Scan(&valid))
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT indisvalid
+		FROM pg_index
+		WHERE indexrelid='public.pgsprite_duplicate_body'::regclass`).Scan(&valid))
 	require.NoError(t, pool.QueryRow(t.Context(), "SELECT count(*) FROM "+table+" WHERE body='duplicate'").Scan(&count))
 	assert.False(t, valid)
 	assert.Equal(t, 2, count)
@@ -145,7 +163,10 @@ func TestForeignKeyToSupabaseAuth(t *testing.T) {
 	require.Len(t, v.ExecutedSQL, 2)
 	var valid bool
 	var target string
-	require.NoError(t, pool.QueryRow(t.Context(), "SELECT convalidated,confrelid::regclass::text FROM pg_constraint WHERE conrelid=$1::regclass AND conname='owner_fk'", table).Scan(&valid, &target))
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT convalidated, confrelid::regclass::text
+		FROM pg_constraint
+		WHERE conrelid = $1::regclass
+		AND conname='owner_fk'`, table).Scan(&valid, &target))
 	assert.True(t, valid)
 	assert.Equal(t, "auth.users", target)
 	assert.Equal(t, before, protections(t, pool, table))

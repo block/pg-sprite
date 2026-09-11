@@ -58,7 +58,11 @@ func newTable(t *testing.T, pool *pgxpool.Pool, name string) string {
 	t.Helper()
 	table := pgx.Identifier{"public", name}.Sanitize()
 	execSQL(t, pool, "DROP TABLE IF EXISTS "+table)
-	execSQL(t, pool, "CREATE TABLE "+table+" (id int PRIMARY KEY, owner_id uuid NOT NULL, body text NOT NULL)")
+	execSQL(t, pool, "CREATE TABLE "+table+` (
+		id int PRIMARY KEY,
+		owner_id uuid NOT NULL,
+		body text NOT NULL
+	)`)
 	t.Cleanup(func() {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 5*time.Second)
 		defer cancel()
@@ -66,7 +70,10 @@ func newTable(t *testing.T, pool *pgxpool.Pool, name string) string {
 		assert.NoError(t, err)
 	})
 	execSQL(t, pool, "ALTER TABLE "+table+" ENABLE ROW LEVEL SECURITY")
-	execSQL(t, pool, "CREATE POLICY own_rows ON "+table+" TO authenticated USING (owner_id=auth.uid()) WITH CHECK (owner_id=auth.uid())")
+	execSQL(t, pool, "CREATE POLICY own_rows ON "+table+`
+		TO authenticated
+		USING (owner_id = auth.uid())
+		WITH CHECK (owner_id = auth.uid())`)
 	execSQL(t, pool, "GRANT SELECT ON "+table+" TO authenticated")
 	return table
 }
@@ -140,7 +147,9 @@ func compose(ctx context.Context, args ...string) error {
 func TestAPIAndPooler(t *testing.T) {
 	pool := fixture(t)
 	table := newTable(t, pool, "pgsprite_service_probe")
-	execSQL(t, pool, "INSERT INTO "+table+" VALUES (1,'00000000-0000-0000-0000-000000000001','first'),(2,'00000000-0000-0000-0000-000000000002','second')")
+	execSQL(t, pool, "INSERT INTO "+table+` VALUES
+		(1,'00000000-0000-0000-0000-000000000001','first'),
+		(2,'00000000-0000-0000-0000-000000000002','second')`)
 	execSQL(t, pool, "NOTIFY pgrst, 'reload schema'")
 	verify := func(extra string) {
 		t.Helper()
