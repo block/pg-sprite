@@ -74,7 +74,7 @@ path on T3 rows.
             │ go:embed                   │ regenerate                  │ committed
             ▼                            ▼                             ▼
 ┌───────────────────────┐     ┌─────────────────────────────────────────────────────┐
-│ pkg/capabilities      │     │ CI gate: regenerate, then require an empty git diff │
+│ pkg/capabilities      │     │ CI gate: regenerate, then require a no-op rewrite   │
 └───────────┬───────────┘     └─────────────────────────────────────────────────────┘
             │
             ▼
@@ -154,10 +154,16 @@ markers — the introduction, tier explanation, legend, peer comparison, refusal
 and operator recipes — remains hand-written. Generated output is deterministic: source
 order is display order, formatting has no timestamps, and a second generation is a no-op.
 
-The generator lands with the YAML file, not later. A Make target runs its `go run`
-entry point. CI runs that target and then fails unless `git diff --exit-code` is empty.
-The test validates semantics; regenerate-and-diff proves the checked-in human page is
-the rendering of the validated data.
+The generator lands with the YAML file, not later. `make check-capabilities` runs its
+`go run` entry point and fails unless regeneration leaves the page byte-identical; only
+the generator's own edits count, so an uncommitted edit to the hand-written prose does
+not trip it, and a failing run — a generator error or a diff — restores the page as it was
+before the run, so the check has no side effect and `make gen-capabilities` is the one
+command that writes it. The unconditional
+unit job in `.github/workflows/ci.yml` runs that target beside the unit tests on code and
+docs-only changes alike, and `.github/workflows/release.yml` repeats it for the tagged
+tree before the test sweep. The test validates semantics; regenerate-and-diff proves the
+checked-in human page is the rendering of the validated data.
 
 The capability-statement rule still applies beyond the generated matrix. A behavior
 change updates the YAML, [limitations.md](limitations.md), and the README's short
@@ -172,18 +178,11 @@ Array order is source order and therefore stable for display, but consumers shou
 select by fields or `id`, not array position. The command reads only embedded data and
 does not connect to PostgreSQL.
 
-The contract must support these queries:
-
-```sh
-# All T2 rows.
-pg-sprite capabilities --json | jq '.capabilities[] | select(.tier == "t2")'
-
-# Everything the declarative door refuses.
-pg-sprite capabilities --json | jq '.capabilities[] | select(.front_doors.diff == "refused")'
-
-# Rows owned by another tool class.
-pg-sprite capabilities --json | jq '.capabilities[] | select(.owning_tool_class != null)'
-```
+The contract must support the `jq` recipes in the operator guide's
+[Query the matrix](capabilities.md#query-the-matrix) section: looking a row up by `id`,
+and selecting rows by tier, by engine path, by a front door's disposition, and by owning
+tool class. That section is the one copy of the recipes; this contract only fixes the
+field names they select on.
 
 Human output may render a compact table, but JSON field names and enum values are the
 automation contract. Stable JSON means deterministic content and closed vocabulary;
@@ -261,14 +260,15 @@ artifact. The generated `docs/capabilities.md` remains the human-facing home.
 This decision does not build sortable HTML tables or a documentation site. It also
 does not change any capability, tier, refusal, or runtime behavior.
 
-Implementation order is, with each step marked as it ships:
+Implementation proceeds in these steps, each marked as it ships. Only the first step is a
+prerequisite for the others; the rest land independently:
 
 1. add the typed package, `pkg/capabilities/capabilities.yaml`, validator, generator,
    and markers together, making the repository single-source on day one; *(done)*
 2. add `pg-sprite capabilities`, including `--json` and the embedded binary version;
    *(done)*
-3. add the regenerate-and-diff CI gate to the normal pipeline; and *(pending)*
-4. add documentation and `jq` recipes for consumers. *(pending)*
+3. add the regenerate-and-diff CI gate to the normal pipeline; and *(done)*
+4. add documentation and `jq` recipes for consumers. *(done)*
 
 The generator is part of the first step rather than a cleanup step: there is never an
 intermediate state in which two hand-maintained matrices are authoritative.

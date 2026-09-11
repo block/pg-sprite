@@ -205,6 +205,45 @@ func TestRefuseUnsupportedPartitionedParentClassFollowsCause(t *testing.T) {
 	}
 }
 
+func TestRefusedStatementsReportAcceptedBlockingEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		cause preflight.PartitionRefusalCause
+		want  bool
+	}{
+		{"blocking parent index", preflight.PartitionCauseBlockingIndexBuild, true},
+		{"concurrent parent index", preflight.PartitionCauseConcurrentIndexBuild, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := plan.NewReport(plan.SourceAlter)
+			r.Statements = []plan.Statement{{Disposition: router.DispositionExecute}}
+			require.NoError(t, plan.RefuseUnsupportedPartitionedParent(&r, []preflight.PartitionRefusalCause{tc.cause}))
+			require.NotNil(t, r.Statements[0].BlockingPassthroughEligible)
+			assert.Equal(t, tc.want, *r.Statements[0].BlockingPassthroughEligible)
+			raw, err := json.Marshal(r.Statements[0])
+			require.NoError(t, err)
+			assert.Contains(t, string(raw), fmt.Sprintf(`"blocking_passthrough_eligible":%t`, tc.want))
+		})
+	}
+
+	raw, err := json.Marshal(plan.Statement{Disposition: router.DispositionExecute})
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "blocking_passthrough_eligible")
+}
+
+// The refusal proof carries the preflight cause under the verdict package's
+// own typed vocabulary. The two constant sets spell the same wire tokens, and
+// this pins that correspondence for every cause preflight registers: a cause
+// added on one side without the other is a registry hole, not a silent
+// no-cause refusal.
+func TestPartitionRefusalCarriesItsCause(t *testing.T) {
+	for _, cause := range preflight.PartitionRefusalCauses() {
+		r, ok := plan.PartitionRefusal(cause)
+		require.True(t, ok, cause)
+		assert.Equal(t, string(cause), string(r.Cause()), cause)
+	}
+}
+
 func TestRefuseUnsupportedPartitionedParentFailsClosed(t *testing.T) {
 	r := plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{{Disposition: router.DispositionExecute}}}
 	require.Error(t, plan.RefuseUnsupportedPartitionedParent(&r, nil), "positional length mismatch")
@@ -434,7 +473,7 @@ func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 4 against this test.
+// omissions. A consumer pins format_version 5 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -490,7 +529,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 4,
+		"format_version": 5,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -548,7 +587,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 4,
+		"format_version": 5,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -632,7 +671,7 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 }
 
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 4.
+// pinned to format_version 5.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }

@@ -17,14 +17,17 @@ import (
 func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 	var b strings.Builder
 	b.WriteString(outcomeHeadline(pal, v))
-	if v.Outcome == verdict.OutcomeRefused {
+	if v.Table != "" {
+		fmt.Fprintf(&b, "\n  %s     %s", pal.bold("table:"), v.Table)
+	}
+	switch v.Outcome {
+	case verdict.OutcomeExecutedWithoutOnlineSafety:
+		fmt.Fprintf(&b, "\n  %s   %s / %s", pal.bold("refusal:"), v.Class, v.Reason)
+	case verdict.OutcomeRefused:
 		fmt.Fprintf(&b, "\n  %s     %s", pal.bold("class:"), v.Class)
 		if v.Owner != "" {
 			fmt.Fprintf(&b, "\n  %s     %s", pal.bold("owner:"), v.Owner)
 		}
-	}
-	if v.Table != "" {
-		fmt.Fprintf(&b, "\n  %s     %s", pal.bold("table:"), v.Table)
 	}
 	fmt.Fprintf(&b, "\n  %s %s", pal.bold("statement:"), v.Statement)
 	if v.Attempts > 0 {
@@ -35,6 +38,9 @@ func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 	}
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  %s     %s", pal.bold("safer:"), v.SaferIdiom)
+	}
+	if v.Outcome == verdict.OutcomeExecutedWithoutOnlineSafety {
+		fmt.Fprintf(&b, "\n  %s   lock %s, statement %s", pal.bold("budgets:"), v.LockTimeout, v.StatementTimeout)
 	}
 	if v.Forced {
 		fmt.Fprintf(&b, "\n  %s    the submitted form ran as-is (force acknowledged)", pal.bold("forced:"))
@@ -66,6 +72,8 @@ func outcomeHeadline(pal palette, v verdict.Verdict) string {
 	switch v.Outcome {
 	case verdict.OutcomeExecuted:
 		return pal.severity("help", "executed natively")
+	case verdict.OutcomeExecutedWithoutOnlineSafety:
+		return pal.severity("warning", "executed without online safety (accepted blocking refusal)")
 	case verdict.OutcomeRefused:
 		return pal.severity("error", fmt.Sprintf("refused (%s)", v.Reason))
 	case verdict.OutcomeFailed:

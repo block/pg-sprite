@@ -51,6 +51,8 @@ build plan live in [docs/](docs/) — start with
 is [docs/vision.md](docs/vision.md); the canonical support matrix — is this
 change supported today, planned, or out of scope — is
 [docs/capabilities.md](docs/capabilities.md).
+The same embedded matrix is queryable for automation with
+`pg-sprite capabilities --json`.
 
 ## What pg-sprite does not do yet
 
@@ -179,6 +181,7 @@ ever commits a change — every other command is read-only or fully offline.
 | `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
 | [`pull`](docs/pull.md) | required | Introspect each supported table in a schema and create one desired-state file per table; existing files are never overwritten, and a zero-change `diff` verifies the baseline |
 | `status` | required | Read-only view over `pg_stat_activity` for live pg-sprite sessions on the connected database |
+| `capabilities` | none | Print the embedded support matrix as a compact table, or as the versioned automation contract with `--json` |
 | `fmt` | none | Canonicalize a schema file — parser only |
 | `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone |
 | `suggest` | none | Map risky DDL to the safer native form the engine would run, with typed caveats; advisory, always exits 0 |

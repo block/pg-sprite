@@ -23,6 +23,12 @@ const (
 	// CodeBudgetStatementExceeded: the statement ran past
 	// statement_timeout and was cancelled; the change does real work.
 	CodeBudgetStatementExceeded Code = "budget-statement-exceeded"
+	// CodeBlockingOutcomeUnknown requires catalog inspection before retry.
+	CodeBlockingOutcomeUnknown Code = "blocking-outcome-unknown"
+	// CodeInvalidBlockingBudget identifies an unrepresentable or disabled bound.
+	CodeInvalidBlockingBudget Code = "invalid-blocking-budget"
+	// CodeUnsupportedAcceptedBlocking identifies a statement outside this narrow path.
+	CodeUnsupportedAcceptedBlocking Code = "unsupported-accepted-blocking"
 	// CodeCancelledByCaller: the build's statement was cancelled because
 	// the caller's own context ended while it ran.
 	CodeCancelledByCaller Code = "cancelled-by-caller"
@@ -130,6 +136,9 @@ func Codes() []Code {
 	return []Code{
 		CodeBudgetLockExceeded,
 		CodeBudgetStatementExceeded,
+		CodeBlockingOutcomeUnknown,
+		CodeInvalidBlockingBudget,
+		CodeUnsupportedAcceptedBlocking,
 		CodeCancelledByCaller,
 		CodeCancelledExternally,
 		CodeInvalidIndexOwnLeftover,
@@ -175,6 +184,8 @@ func (c Code) Permanent() bool {
 	switch c {
 	case CodeInvalidIndexOtherTable,
 		CodeInvalidIndexNotDroppable,
+		CodeInvalidBlockingBudget,
+		CodeUnsupportedAcceptedBlocking,
 		CodeEmptySequence,
 		CodeUnsupportedSequenceStep,
 		CodeUnsupportedPartitionedParent,
@@ -217,6 +228,10 @@ func OutcomeCode(err error) Code {
 	if errors.As(err, &budgetErr) {
 		return budgetErr.Code()
 	}
+	var unknownErr *BlockingOutcomeUnknownError
+	if errors.As(err, &unknownErr) {
+		return CodeBlockingOutcomeUnknown
+	}
 	return sentinelCode(err)
 }
 
@@ -234,6 +249,10 @@ func sentinelCode(err error) Code {
 		// The read's cause rides inside the wrap; the code names what the
 		// step left — a standing table whose names are unproven.
 		return CodeCreateNamesUnverified
+	case errors.Is(err, ErrInvalidBlockingBudget):
+		return CodeInvalidBlockingBudget
+	case errors.Is(err, ErrUnsupportedAcceptedBlocking):
+		return CodeUnsupportedAcceptedBlocking
 	case errors.Is(err, ErrCancelledByCaller):
 		return CodeCancelledByCaller
 	case errors.Is(err, ErrCancelledExternally):

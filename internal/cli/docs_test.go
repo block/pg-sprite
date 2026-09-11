@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,7 +75,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 9, "the doc publishes nine captured --json outputs")
+	require.Len(t, blocks, 10, "the doc publishes ten captured --json outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
@@ -90,6 +91,14 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 			`ALTER TABLE "public"."users" ADD CONSTRAINT "users_email_key" UNIQUE USING INDEX "users_email_key"`,
 		},
 	}
+	acceptedBlocking, err := (verdict.Verdict{
+		Statement:  "DROP INDEX public.users_email_idx",
+		Table:      "public.users",
+		SaferIdiom: "DROP INDEX CONCURRENTLY",
+	}).WithAcceptedBlocking(
+		verdict.ByDesign(verdict.ReasonIndexStatement).WithSite(verdict.RefusalSiteIndexSingleRelation),
+		3*time.Second, 10*time.Minute)
+	require.NoError(t, err)
 	rewriteRequired := alterReport(t, "ALTER TABLE users ADD COLUMN nickname text UNIQUE",
 		"public", "users", usersFacts())
 	backendUnavailable := alterReport(t, "ALTER TABLE users ALTER COLUMN id TYPE text",
@@ -131,7 +140,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	}
 	diff.Fingerprint = plan.Fingerprint(diff.Statements)
 
-	want := []any{metadataOnly, saferIdiom, executed, rewriteRequired,
+	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, rewriteRequired,
 		backendUnavailable, partitioned, destructive, lintReport, diff}
 	for i, w := range want {
 		marshaled, err := json.Marshal(w)
