@@ -302,11 +302,41 @@ retains disposition `refuse`, reason, class, cause, and guidance. Eligibility is
 request a later execution path, not a reclassification as online-safe.
 
 Exit code 3 means the statement committed through this marked path. Exit code 0 remains
-online-safe success, 1 remains execution failure, and 2 remains refusal with nothing run.
+online-safe success, 1 remains execution failure, and 2 remains refusal with nothing committed.
 Choosing exit 0 plus a marked outcome lost because shell CI would have to parse JSON or prose
 to distinguish accepted blocking execution from the product's online-safe success contract.
 A distinct code is intentionally non-zero: generic CI fails closed, while a caller that
 deliberately permits this path can allow 3 explicitly.
+
+The full ladder once this ships is the binary's process contract, with the question each code
+answers. Refusals from every command — `migrate`, `diff`, a dry run, and `pull` — share exit
+2, so a CI author gates on the status without caring which subcommand produced it; exit 3 is
+produced by `migrate` alone, because no other command executes DDL.
+
+| Exit | Meaning | Anything committed? | Online-safe? |
+|------|---------|---------------------|--------------|
+| 0 | Executed through an online-safe path, or a dry run found every statement executable | yes (dry run: nothing runs) | yes |
+| 1 | Failure: a PostgreSQL error after execution started (attempted, rolled back), or an operational or usage error before it, including a mismatched or unresolvable acknowledgement (nothing ran). On this path only, a statement-budget cancellation is also a failure | no; a sequence that stopped mid-flight keeps its committed prefix in `executed_sql` | not applicable |
+| 2 | Refused: ineligible, no acknowledgement supplied, the lock budget was exhausted, or any other command's typed refusal | no | not applicable |
+| 3 | Committed through the accepted blocking passthrough | yes | no |
+
+The third column asks what committed, not what ran: the optimistic attempt's statement-budget
+cancellation is a refusal whose statement ran and was rolled back, and exit 2 must stay true
+of it. The passthrough treats the same cancellation differently because the reason for the
+refusal is gone. On the optimistic attempt a budget overrun is a routing input — the change
+needs a different strategy, so the engine refuses and says which — but the operator on this
+path has already accepted the blocking strategy and there is no further route to offer, so a
+statement that started and was cancelled is a failed attempt, exit 1, as the failure section
+below states. Every other path keeps its cancellation at exit 2; the rules in
+[optimistic-attempt.md](optimistic-attempt.md) are unchanged.
+
+Exit 3 is the only code where the statement committed and the engine does not vouch for online
+safety, so a consumer can read it without JSON. The exit code is produced the way exit 2 is
+today: `migrate` returns a typed sentinel after printing the verdict, and the entry point maps
+that sentinel to the code. Exit 3 needs a second sentinel and constant beside
+`ExitCodeRefused` in `pkg/verdict`, because the verdict is a success that must still leave a
+non-zero process status; `kong`'s default error path would otherwise print it as an
+operational failure and exit 1.
 
 ## Failure and interruption semantics
 
@@ -421,17 +451,50 @@ Sequence implementation as follows:
    invariants ship here; the front-door invariants, refusal-identity invariant, and RF-5/RF-6
    amendments move to step 4 with the flag.)*
 3. Add `executed-without-online-safety`, retained reason/class/cause, budget fields, exit code
-   3, and dry-run eligibility to the verdict and plan-report contracts. Update
-   [cli-output-examples.md](cli-output-examples.md) with generated examples and pin the JSON
-   and text renderers.
+   3, and dry-run eligibility to the verdict and plan-report contracts. On this path a
+   statement-budget cancellation produces a `failed` verdict with the executor's
+   `budget-statement-exceeded` code rather than the optimistic attempt's budget refusal, so
+   the passthrough's verdict builder must not reuse that refusal for the statement cause.
+   Exit 3 lands as a constant and sentinel in `pkg/verdict` beside `ExitCodeRefused` and
+   `ErrRefused`, mapped in the entry point the same way. Update
+   [cli-output-examples.md](cli-output-examples.md) with generated examples — a new
+   `executed-without-online-safety — exit 3` section and the exit-code contract paragraph at
+   its head — and pin the JSON and text renderers. The exit-code contract is stated in five
+   more places that today describe a two- or three-code ladder and must gain exit 3 in the
+   same change: the exit-codes bullet in [execution-model.md](execution-model.md), the
+   dry-run exit-code paragraph in
+   [postgres-online-ddl-reference.md](postgres-online-ddl-reference.md#dry-run-diagnostic-codes),
+   the failure-versus-refusal sentence in [low-level-design.md](low-level-design.md) that
+   tells embedders the codes distinguish nothing-committed from partial state and must add
+   the committed-and-not-vouched-for case, the hand-written prose of
+   [capabilities.md](capabilities.md) — the "a refusal is a feature" contract bullet that
+   states a two-code ladder, and the T2 row's "exit 2" cell, which after this ships is exit
+   3 under an explicit acknowledgement; both sit above the generated markers, so
+   `make gen-capabilities` in step 5 does not touch them and they are edited by hand here —
+   and the root README's exit-code gate paragraph, which must say that a gate treating every
+   non-zero status as failure stays fail-closed for this path. The same change tightens the
+   exit-2 glosses in [execution-model.md](execution-model.md) and
+   [refusal-classes.md](refusal-classes.md) from "nothing ran" to "nothing committed", which
+   is the claim that holds for a statement-budget refusal. Two surfaces state a ladder and are
+   deliberately left alone. [pull.md](pull.md) has its own three-code ladder: `pull` never
+   executes DDL, so exit 3 cannot occur there. `replay/replay.sh` hard-codes exit 0 and 2 in
+   its per-statement branches: it invokes `migrate` without `--accept-blocking`, so it cannot
+   produce a 3, and an unexpected 3 falls through every branch to `FAIL` and skips the
+   `psql` re-apply, which is the safe direction for a statement that already committed.
+   *(done in part: the outcome, the retained identity and budget fields, the exit-3 constant
+   and sentinel, plan-report eligibility, and the `cli-output-examples.md` example shipped;
+   the exit-code contract paragraph at that page's head, the five surface edits, and the
+   exit-2 gloss tightening move to step 4 with the flag, because no command can produce exit 3
+   until `--accept-blocking` exists.)*
 4. Add `--accept-blocking` to imperative `migrate`, reject its combination with `--force`,
    emit the pre-execution audit record, and add demo assertions for eligibility, success,
    lock-budget refusal, statement-budget failure, mismatched acknowledgement, and exit codes.
-   This step adds the two pieces of plumbing the acknowledgement needs: the statement boundary
-   exposes the index or table an index-maintenance statement names, and the front door resolves
-   an index to its owning table through `pg_index.indrelid` after the eligibility check. It also
-   detects an explicitly supplied `--statement-timeout` from the parsed command line, as the
-   budgets section requires.
+   The demo README's own exit-code enumeration, which today lists 0, 1, and 2, gains exit 3
+   beside those assertions. This step adds the two pieces of plumbing the acknowledgement
+   needs: the statement boundary exposes the index or table an index-maintenance statement
+   names, and the front door resolves an index to its owning table through
+   `pg_index.indrelid` after the eligibility check. It also detects an explicitly supplied
+   `--statement-timeout` from the parsed command line, as the budgets section requires.
 5. Re-tier only the newly shipped path by editing its rows in
    `pkg/capabilities/capabilities.yaml` and regenerating [capabilities.md](capabilities.md)
    with `make gen-capabilities` — the page is a rendered artifact and a hand edit fails its
