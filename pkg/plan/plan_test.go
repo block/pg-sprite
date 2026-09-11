@@ -205,6 +205,19 @@ func TestRefuseUnsupportedPartitionedParentClassFollowsCause(t *testing.T) {
 	}
 }
 
+// The refusal proof carries the preflight cause under the verdict package's
+// own typed vocabulary. The two constant sets spell the same wire tokens, and
+// this pins that correspondence for every cause preflight registers: a cause
+// added on one side without the other is a registry hole, not a silent
+// no-cause refusal.
+func TestPartitionRefusalCarriesItsCause(t *testing.T) {
+	for _, cause := range preflight.PartitionRefusalCauses() {
+		r, ok := plan.PartitionRefusal(cause)
+		require.True(t, ok, cause)
+		assert.Equal(t, string(cause), string(r.Cause()), cause)
+	}
+}
+
 func TestRefuseUnsupportedPartitionedParentFailsClosed(t *testing.T) {
 	r := plan.Report{Disposition: router.DispositionExecute, Statements: []plan.Statement{{Disposition: router.DispositionExecute}}}
 	require.Error(t, plan.RefuseUnsupportedPartitionedParent(&r, nil), "positional length mismatch")

@@ -78,10 +78,21 @@ func TestWithRefusalStampsOutcomeReasonClassOwner(t *testing.T) {
 }
 
 func TestRefusalRoundTripsThroughVerdict(t *testing.T) {
-	want := NoOnlineSafetyProblem(ReasonUnsupportedStatement, OwnerProvisioning)
+	want := ByDesign(ReasonIndexStatement).
+		WithCause(CauseStatementBudget).
+		WithSite(RefusalSiteIndexSingleRelation)
 	got, err := Verdict{Statement: "GRANT SELECT ON t TO r"}.WithRefusal(want).Refusal()
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
+
+	encoded, err := json.Marshal(Verdict{}.WithRefusal(want))
+	require.NoError(t, err)
+	var decoded Verdict
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	got, err = decoded.Refusal()
+	require.NoError(t, err)
+	assert.Equal(t, CauseStatementBudget, got.Cause())
+	assert.Equal(t, RefusalSite(""), got.Site())
 
 	_, err = Verdict{Outcome: OutcomeExecuted}.Refusal()
 	require.Error(t, err, "an executed verdict carries no refusal")
@@ -91,6 +102,56 @@ func TestRefusalRoundTripsThroughVerdict(t *testing.T) {
 
 	_, err = Verdict{Outcome: OutcomeRefused, Reason: ReasonTableTooLarge, Class: ClassEnvironmental, Owner: OwnerProvisioning}.Refusal()
 	require.Error(t, err, "an owner outside no-online-safety-problem violates RF-7")
+}
+
+// The in-process fast path validates the proof the same way the decoded
+// path validates the JSON fields: a non-zero proof that never passed the
+// constructors is rejected rather than returned as-is.
+func TestRefusalRejectsUnvalidatedProof(t *testing.T) {
+	tests := []struct {
+		name  string
+		proof Refusal
+	}{
+		{"site on the zero refusal", Refusal{}.WithSite(RefusalSiteIndexSingleRelation)},
+		{"cause on the zero refusal", Refusal{}.WithCause(CauseLockBudget)},
+		{"reason outside Reasons()", ByDesign("brand-new-reason")},
+		{"owner on a class that carries none", Refusal{class: ClassByDesign, reason: ReasonIndexStatement, owner: OwnerDirectOperator}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.False(t, tc.proof.IsZero(), "the fixture must take the in-process path")
+			_, err := Verdict{}.WithRefusal(tc.proof).Refusal()
+			assert.Error(t, err)
+		})
+	}
+}
+
+// The exported refusal fields are what a consumer reads; the proof is what
+// an eligibility decision consumes. A verdict whose fields were rewritten
+// after WithRefusal describes a different refusal than it proves, and
+// Refusal() refuses to hand out either.
+func TestRefusalRejectsFieldsDivergingFromProof(t *testing.T) {
+	proof := CapabilityBoundary(ReasonUnsupportedPartitionedParent).WithCause(CauseParentBlockingIndexBuild)
+	tests := []struct {
+		name   string
+		mutate func(*Verdict)
+	}{
+		{"class", func(v *Verdict) { v.Class = ClassByDesign }},
+		{"reason", func(v *Verdict) { v.Reason = ReasonIndexStatement }},
+		{"owner", func(v *Verdict) { v.Owner = OwnerDirectOperator }},
+		{"cause", func(v *Verdict) { v.Cause = CauseParentConcurrentIndexBuild }},
+		{"cause cleared", func(v *Verdict) { v.Cause = CauseNone }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v := Verdict{}.WithRefusal(proof)
+			_, err := v.Refusal()
+			require.NoError(t, err, "the unmodified verdict agrees with its proof")
+			tc.mutate(&v)
+			_, err = v.Refusal()
+			assert.ErrorContains(t, err, "diverge from proof")
+		})
+	}
 }
 
 func TestJSONRoundTrip(t *testing.T) {
@@ -163,7 +224,11 @@ func TestJSONOmitsEmptyOptionalFields(t *testing.T) {
 // Reason and Cause values are the machine contract automation switches on:
 // flat kebab-case tokens, no spaces or colons — prose belongs in Detail.
 func TestReasonAndCauseTokensAreFlat(t *testing.T) {
-	toks := []string{string(CauseLockBudget), string(CauseStatementBudget)}
+	toks := []string{
+		string(CauseLockBudget), string(CauseStatementBudget),
+		string(CauseParentBlockingIndexBuild), string(CauseParentConcurrentIndexBuild),
+		string(CauseParentIndexAdoption), string(CauseParentNotValidForeignKey),
+	}
 	for _, r := range Reasons() {
 		toks = append(toks, string(r))
 	}

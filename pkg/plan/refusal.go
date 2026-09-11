@@ -44,21 +44,30 @@ func CreateShapeRefusal(cause executor.CreateShapeCause) (verdict.Refusal, bool)
 // PartitionRefusal classifies a partitioned-parent refusal by its cause. The
 // closed key set is preflight.PartitionRefusalCauses(); ok is false outside
 // it. The four causes span three classes, which is why the plan carries the
-// cause rather than a bare refused flag.
+// cause rather than a bare refused flag. The refusal keeps its typed cause,
+// so every consumer of the proof — both front doors and the accepted-blocking
+// eligibility registry — reads one narrowing instead of re-deriving it from
+// the preflight error.
 func PartitionRefusal(cause preflight.PartitionRefusalCause) (verdict.Refusal, bool) {
 	switch cause {
-	case preflight.PartitionCauseConcurrentIndexBuild, preflight.PartitionCauseBlockingIndexBuild:
-		// The partition-aware concurrent index flow is a planned capability;
-		// refusing the blocking substitute is the policy half of the same gap.
-		return verdict.CapabilityBoundary(verdict.ReasonUnsupportedPartitionedParent), true
+	case preflight.PartitionCauseConcurrentIndexBuild:
+		// The partition-aware concurrent index flow is a planned capability.
+		return verdict.CapabilityBoundary(verdict.ReasonUnsupportedPartitionedParent).
+			WithCause(verdict.CauseParentConcurrentIndexBuild), true
+	case preflight.PartitionCauseBlockingIndexBuild:
+		// Refusing the blocking substitute is the policy half of the same gap.
+		return verdict.CapabilityBoundary(verdict.ReasonUnsupportedPartitionedParent).
+			WithCause(verdict.CauseParentBlockingIndexBuild), true
 	case preflight.PartitionCauseIndexAdoption:
 		// No supported PostgreSQL version adopts an index as a constraint on
 		// a partitioned parent; waiting for an engine release waits for nothing.
-		return verdict.ByDesign(verdict.ReasonUnsupportedPartitionedParent), true
+		return verdict.ByDesign(verdict.ReasonUnsupportedPartitionedParent).
+			WithCause(verdict.CauseParentIndexAdoption), true
 	case preflight.PartitionCauseNotValidForeignKey:
 		// The same statement runs on a newer server; the unblocking action is
 		// a server upgrade, not an engine release.
-		return verdict.Environmental(verdict.ReasonUnsupportedPartitionedParent), true
+		return verdict.Environmental(verdict.ReasonUnsupportedPartitionedParent).
+			WithCause(verdict.CauseParentNotValidForeignKey), true
 	default:
 		return verdict.Refusal{}, false
 	}
