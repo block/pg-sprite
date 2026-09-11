@@ -16,16 +16,17 @@ See [engine-role.md](engine-role.md) for the operation-specific grants.
 Use TLS certificate verification for a hosted database. Set `PGSPRITE_URL`
 through your credential tooling, and use `--ca-cert` with the server's CA
 certificate when needed. Do not copy passwords into committed scripts.
-Direct hosted connections may require IPv6. Session and transaction poolers
-are distinct connection paths; the local validation below does not certify
-Supavisor compatibility.
+Direct hosted connections may require IPv6. The tested Supavisor session endpoint also works. Do not use transaction
+pooling: pg-sprite needs a stable backend session for its execution limits.
+Disabling prepared statements does not make transaction pooling safe.
 
 ## What was tested
 
 A disposable local `supabase/postgres:17.6.1.136` database (PostgreSQL 17.6)
 was exercised as its non-superuser `postgres` role. This is the actual
 Supabase database image, not an ordinary PostgreSQL image with renamed roles.
-It is not a hosted-project or full Supabase service-stack test.
+An additional local services test uses PostgREST 14.17, Supavisor 2.9.12
+and Auth 2.196.0. It is not a hosted-project or complete Supabase stack test.
 
 | Experiment | Result |
 | --- | --- |
@@ -35,6 +36,10 @@ It is not a hosted-project or full Supabase service-stack test.
 | Diff a column using `extensions.citext` | Planned successfully with a schema-qualified type |
 | Rewrite a text column to integer | Refused with `backend-unavailable` |
 | Enable RLS through the schema-change entry point | Refused with `unsupported-statement` |
+| Supavisor session endpoint | Column addition and concurrent index succeeded; session timeouts verified |
+| Supavisor transaction endpoint | Connection refused; named prepared statements conflict, and disabling them reaches `ErrNoSessionAffinity` |
+| PostgREST after direct/session DDL | New columns became available through automatic schema-cache reload |
+| Signed JWTs before and after DDL | Each tenant saw only its own row; unrelated tenant saw none |
 
 The `schemadiff`, `diffplan`, and `migrate` integration suites also passed
 against this image. `TestNativeChangesPreserveRowSecurity` verifies tenant
@@ -54,14 +59,14 @@ owners normally bypass it.
   see [capabilities.md](capabilities.md)
 - Restrict experiments to application-owned tables. Do not reconcile
   Supabase-managed schemas as if they were application declarations
-- Verify PostgREST schema-cache visibility and Realtime behavior in the
-  target deployment before relying on a change. The database-only experiment
-  does not exercise either service
+- Verify Realtime behavior separately; these experiments do not start
+  Realtime. PostgREST cache refresh was exercised with the image's DDL event
+  triggers; a deployment without those triggers needs its own reload workflow
 
-Hosted role configuration, TLS, Supavisor session/transaction pooling, Auth,
-PostgREST and Realtime remain separate validation targets. The local result
-supports native PostgreSQL compatibility, not an unrestricted Supabase
-support claim.
+Hosted role configuration, TLS and Realtime remain unverified. The Auth
+service runs its schema initialization; JWTs are signed by the test fixture,
+so this does not test signup or login. These local results are not an
+unrestricted Supabase support claim.
 
 ## Repeat the database checks
 
@@ -78,3 +83,34 @@ docker compose -p pgsprite-supabase -f compose/supabase.yml down -v
 Success prints `ok` for each package. Failures retain the normal Go test
 assertion output. This suite uses disposable schemas and roles on the test
 server; never point it at a project containing real application data.
+
+## Repeat the API and pooler checks
+
+Build the CLI and start the optional services profile. Use the default ports
+for this script. All credentials and JWT signing keys belong only to this
+localhost fixture.
+
+```sh
+make build
+docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services up --wait -d
+python3 scripts/test-supabase.py
+SUPABASE_SESSION_URL='postgres://postgres.pgsprite:pgsprite_test_only@127.0.0.1:55440/postgres?sslmode=disable' \
+SUPABASE_TRANSACTION_URL='postgres://postgres.pgsprite:pgsprite_test_only@127.0.0.1:55441/postgres?sslmode=disable' \
+  go test -race -count=1 ./pkg/dbconn -run TestSupavisorSessionBoundary
+docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services down -v
+```
+
+The script reports:
+
+```text
+PASS: direct/session changes, concurrent index, JWT tenant isolation, automatic API cache refresh, transaction-pool refusal
+```
+
+The Go test additionally requires the typed `ErrNoSessionAffinity` error;
+an unrelated connection failure cannot satisfy it. It checks the session
+endpoint's actual lock and statement timeout values.
+
+Auth must initialize its schema before the JWT test: the database image's
+bootstrap `auth.uid()` reads a legacy setting, while the Auth service updates
+it to read PostgREST's JSON claims. The fixture runs the real Auth service
+instead of replacing that function with a test implementation.
