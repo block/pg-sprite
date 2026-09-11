@@ -26,8 +26,9 @@ import (
 // field semantics. Version 2 added the guidance field on rewrite-required
 // statements. Version 3 added the cause field on greenfield statements the
 // create path refuses by shape. Version 4 added the class and owner fields on
-// the report and on refused statements, and closed their vocabularies.
-const FormatVersion = 4
+// the report and on refused statements, and closed their vocabularies. Version
+// 5 added blocking_passthrough_eligible to refused statements.
+const FormatVersion = 5
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -82,6 +83,9 @@ type Statement struct {
 	Class verdict.Class `json:"class,omitempty"`
 	// Owner identifies who owns work with no online-safety problem.
 	Owner verdict.Owner `json:"owner,omitempty"`
+	// BlockingPassthroughEligible reports whether an operator may request the
+	// bounded blocking path for this refusal. Present exactly on refusals.
+	BlockingPassthroughEligible *bool `json:"blocking_passthrough_eligible,omitempty"`
 	// Cause is the create path's typed shape refusal for a statement of a
 	// greenfield plan (executor.CreateShapeCause): why a table born in the
 	// run cannot carry this statement. Present exactly when the create path
@@ -248,6 +252,7 @@ func refuseStatements(report *Report, refused func(i int) (verdict.Refusal, exec
 			// INV: RF-7 — the statement's class comes from the proof.
 			st.Reason, st.Class, st.Owner = r.Reason(), r.Class(), r.Owner()
 			st.Cause = cause
+			st.BlockingPassthroughEligible = new(verdict.AcceptedBlockingEligible(r))
 		}
 		if report.Disposition != router.DispositionRefuse {
 			report.Reason, report.Class, report.Owner = r.Reason(), r.Class(), r.Owner()
@@ -343,6 +348,7 @@ func FromRouted(rs router.Statement) (Statement, error) {
 		// statement match on the typed field alone.
 		r := RouteRefusal()
 		st.Reason, st.Class, st.Owner = r.Reason(), r.Class(), r.Owner()
+		st.BlockingPassthroughEligible = new(verdict.AcceptedBlockingEligible(r))
 	}
 	for _, d := range rs.Decisions {
 		if d.Destructive {
