@@ -63,17 +63,22 @@ including final-server and subscription readiness. After fixing the cause, use
 before declaring it resolved. This targeted verification is separate from normal
 CI execution.
 
-**Monthly image review (manual maintainer task):**
+**Flag image updates during Supabase work.** The
+[agent guideline](../../AGENTS.md#supabase-image-maintenance) asks agents changing
+or reviewing the fixture, tests, or compatibility guide to check upstream
+releases. Report current and candidate versions, release-note links, and any
+changes to roles, initialization, pooling, or replication. If the check cannot
+be completed, say so rather than treating the pins as current.
 
-1. Check upstream releases for the images in `compose/supabase.yml`. Keep both
-   version tags and immutable digests; review changes to roles, initialization,
-   pooling, and replication before selecting updates
-2. Open an update PR with the new pins. For Supavisor, compare `pooler.exs` with
-   its upstream source and update its source link and validated version together
-3. Run the required Supabase CI job.
-   Investigate failures before accepting new versions
+Handle unrelated upgrades in a separate follow-up. When making an upgrade:
+
+1. Keep both version tags and immutable digests in `compose/supabase.yml`
+2. For Supavisor, compare `pooler.exs` with its upstream source and update its
+   source link and validated version together
+3. Run the required Supabase CI job and investigate failures before accepting
+   new versions
 4. Update the tested versions and any changed limits in `docs/supabase.md` in
-   the same PR. Record why an update is deferred in the update PR when applicable
+   the same PR
 
-The image review is a maintainer procedure, not an automated update bot. Fresh CI
+This check is triggered by agent work, not a scheduled update bot. Fresh CI
 runners pull the pinned images on each run, which also exposes unavailable pins.
