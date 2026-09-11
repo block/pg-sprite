@@ -102,6 +102,17 @@ it is acquired.
 | 6 | Eligibility is selected from a closed registry keyed by typed class, reason, and cause or refusal site. No renderer text or SQL substring participates in the decision. |
 | 7 | A dry-run reports the original refusal and a per-statement `blocking_passthrough_eligible` boolean, but executes nothing even when the flag is present. |
 
+The full typed refusal proof is available while its verdict remains in process, and
+`Refusal()` returns it only when it validates as a classified refusal and still matches the
+verdict's exported fields. JSON carries class, reason, owner, and cause, but not the internal
+refusal site. Calling `Refusal()` on a decoded verdict therefore reconstructs the JSON fields
+but cannot restore the site: the site-keyed row (single-relation `index-statement`) fails
+closed after decoding, while the cause-keyed row (`unsupported-partitioned-parent` with
+`parent-blocking-index-build`) is decidable from the wire fields. Decoding is not the
+fail-closed boundary; the front door is. Eligibility is consumed only from the proof of the
+verdict the same `migrate` or `diff` invocation produced, never from a verdict read back
+from JSON.
+
 “Prints before execution” is an ordering requirement for human output and an information
 requirement for JSON. Human mode prints the refusal analysis, then a separate acceptance line,
 then starts the session. JSON remains one final machine-readable object; its executed verdict
@@ -173,7 +184,7 @@ The v1 set is:
 
 | Class | Typed refusal shape | v1 | Rationale |
 | --- | --- | --- | --- |
-| `by-design` | `index-statement` at the plain single-relation `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` site, with the concurrent safer idiom | eligible | This is the core maintenance-window case: the submitted form is understood, the safer idiom is known, one table's lock is being accepted, and bounding `ACCESS EXCLUSIVE` acquisition prevents lock-queue pile-up. The multi-relation sites (`DROP INDEX a, b`, `REINDEX SCHEMA`, `DATABASE`, `SYSTEM`) stay ineligible. |
+| `by-design` | `index-statement` at the plain single-relation `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` site, with the concurrent safer idiom | eligible | This is the core maintenance-window case: the submitted form is understood, the safer idiom is known, one table's lock is being accepted, and bounding `ACCESS EXCLUSIVE` acquisition prevents lock-queue pile-up. The multi-relation sites (`DROP INDEX a, b`, `REINDEX SCHEMA`, `DATABASE`, `SYSTEM`) stay ineligible. `REINDEX` on a partitioned table or index is eligible by shape but cannot run inside the engine-owned transaction; the executor reports it as `unsupported-accepted-blocking` (see [Engine-owned session and budgets](#engine-owned-session-and-budgets)). |
 | `capability-boundary` | `unsupported-partitioned-parent` with cause `parent-blocking-index-build` | eligible | The missing partition-aware flow does not make the plain PostgreSQL statement unknown. Its principal pre-execution hazard is acquiring the parent lock, which `lock_timeout` bounds. |
 | `capability-boundary` | `not-native-safe-rewrite-required` | ineligible | A rewrite holds its strong lock for the full rewrite. Bounding acquisition alone does not bound the outage, and v1 must not imply otherwise. |
 | `capability-boundary` | `backend-unavailable` and all other missing routes or backends | ineligible | A missing execution backend is not permission to substitute an unrelated blocking implementation. |
@@ -197,11 +208,25 @@ copy-and-swap is not a reason to add passthrough eligibility; it removes the ref
 
 ## Engine-owned session and budgets
 
-An eligible statement runs as one statement in one engine-owned session and transaction,
-using the same bounded runner and retry policy as other brief native execution. The runner
-sets `lock_timeout` and `statement_timeout` in the transaction before the statement. It does
-not hand SQL to a shell, inherit an unbounded caller session, or use the caller-owned
-concurrent-index exception.
+An eligible statement runs as one statement in one engine-owned session and transaction, in
+exactly one attempt. The runner sets `lock_timeout` and `statement_timeout` in the transaction
+before the statement. It does not hand SQL to a shell, inherit an unbounded caller session, or
+use the caller-owned concurrent-index exception.
+
+The single attempt is deliberate and differs from brief native execution, which retries a
+lock-budget miss up to three times. The operator accepted one bounded `ACCESS EXCLUSIVE`
+acquisition; a second attempt would re-queue behind the same holder, stack another
+`lock_timeout` of blocked readers and writers behind the engine's request, and turn the stated
+budget into a multiple of itself. An exhausted lock budget is therefore the final typed outcome
+([AB-2](invariants.md#ab-2--lock-budget-exhaustion-executes-nothing)); the operator decides
+whether to run the command again.
+
+The engine-owned transaction is also the path's boundary. `REINDEX TABLE` and `REINDEX INDEX`
+on a partitioned relation are single-relation by shape, but PostgreSQL reindexes each partition
+in its own transaction and refuses to start inside a transaction block (SQLSTATE `25001`)
+before touching any partition. The executor reports that server refusal as
+`unsupported-accepted-blocking`, a permanent outcome, rather than as an execution failure an
+adapter might retry.
 
 Both bounds are required and non-zero. `--accept-blocking` rejects an omitted, zero, or
 disabled `statement_timeout`; it does not silently inherit an unbounded value. The ordinary
@@ -240,8 +265,8 @@ while the contract is that the engine cannot vouch for online safety. Text begin
 ```text
 executed without online safety (accepted blocking refusal)
   table:     app.orders
-  statement: DROP INDEX app.orders_created_at_idx
   refusal:   by-design / index-statement
+  statement: DROP INDEX app.orders_created_at_idx
   safer:     DROP INDEX CONCURRENTLY
   budgets:   lock 3s, statement 10m
 ```
@@ -277,11 +302,41 @@ retains disposition `refuse`, reason, class, cause, and guidance. Eligibility is
 request a later execution path, not a reclassification as online-safe.
 
 Exit code 3 means the statement committed through this marked path. Exit code 0 remains
-online-safe success, 1 remains execution failure, and 2 remains refusal with nothing run.
+online-safe success, 1 remains execution failure, and 2 remains refusal with nothing committed.
 Choosing exit 0 plus a marked outcome lost because shell CI would have to parse JSON or prose
 to distinguish accepted blocking execution from the product's online-safe success contract.
 A distinct code is intentionally non-zero: generic CI fails closed, while a caller that
 deliberately permits this path can allow 3 explicitly.
+
+The full ladder once this ships is the binary's process contract, with the question each code
+answers. Refusals from every command — `migrate`, `diff`, a dry run, and `pull` — share exit
+2, so a CI author gates on the status without caring which subcommand produced it; exit 3 is
+produced by `migrate` alone, because no other command executes DDL.
+
+| Exit | Meaning | Anything committed? | Online-safe? |
+|------|---------|---------------------|--------------|
+| 0 | Executed through an online-safe path, or a dry run found every statement executable | yes (dry run: nothing runs) | yes |
+| 1 | Failure: a PostgreSQL error after execution started (attempted, rolled back), or an operational or usage error before it, including a mismatched or unresolvable acknowledgement (nothing ran). On this path only, a statement-budget cancellation is also a failure | no; a sequence that stopped mid-flight keeps its committed prefix in `executed_sql` | not applicable |
+| 2 | Refused: ineligible, no acknowledgement supplied, the lock budget was exhausted, or any other command's typed refusal | no | not applicable |
+| 3 | Committed through the accepted blocking passthrough | yes | no |
+
+The third column asks what committed, not what ran: the optimistic attempt's statement-budget
+cancellation is a refusal whose statement ran and was rolled back, and exit 2 must stay true
+of it. The passthrough treats the same cancellation differently because the reason for the
+refusal is gone. On the optimistic attempt a budget overrun is a routing input — the change
+needs a different strategy, so the engine refuses and says which — but the operator on this
+path has already accepted the blocking strategy and there is no further route to offer, so a
+statement that started and was cancelled is a failed attempt, exit 1, as the failure section
+below states. Every other path keeps its cancellation at exit 2; the rules in
+[optimistic-attempt.md](optimistic-attempt.md) are unchanged.
+
+Exit 3 is the only code where the statement committed and the engine does not vouch for online
+safety, so a consumer can read it without JSON. The exit code is produced the way exit 2 is
+today: `migrate` returns a typed sentinel after printing the verdict, and the entry point maps
+that sentinel to the code. Exit 3 needs a second sentinel and constant beside
+`ExitCodeRefused` in `pkg/verdict`, because the verdict is a success that must still leave a
+non-zero process status; `kong`'s default error path would otherwise print it as an
+operational failure and exit 1.
 
 ## Failure and interruption semantics
 
@@ -373,7 +428,7 @@ Sequence implementation as follows:
    cause or refusal site. The `index-statement` site distinguishes the single-relation forms
    from `DROP INDEX a, b` and `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM`, so the registry can
    admit the former and refuse the latter without a database. Its completeness tests make new
-   values ineligible by default and prove that render text is never consulted.
+   values ineligible by default and prove that render text is never consulted. *(done)*
 2. Add the executor path through engine-owned bounded sessions, requiring explicit non-zero
    `statement_timeout` and non-zero `lock_timeout`. At this step add lock-budget invariants to
    [the invariant registry](invariants.md): every passthrough statement runs in an
@@ -392,19 +447,54 @@ Sequence implementation as follows:
    refusal identity retained". This design establishes no invariant on its own and amends none
    until the behavior ships; the registry describes shipped behavior only, matching the
    sequencing rule in [refusal-classes.md](refusal-classes.md), whose own rollout record
-   checked RF-5 and RF-6 and recorded them unchanged.
+   checked RF-5 and RF-6 and recorded them unchanged. *(done: the executor-owned AB-1 and AB-2
+   invariants ship here; the front-door invariants, refusal-identity invariant, and RF-5/RF-6
+   amendments move to step 4 with the flag.)*
 3. Add `executed-without-online-safety`, retained reason/class/cause, budget fields, exit code
-   3, and dry-run eligibility to the verdict and plan-report contracts. Update
-   [cli-output-examples.md](cli-output-examples.md) with generated examples and pin the JSON
-   and text renderers.
+   3, and dry-run eligibility to the verdict and plan-report contracts. On this path a
+   statement-budget cancellation produces a `failed` verdict with the executor's
+   `budget-statement-exceeded` code rather than the optimistic attempt's budget refusal, so
+   the passthrough's verdict builder must not reuse that refusal for the statement cause.
+   Exit 3 lands as a constant and sentinel in `pkg/verdict` beside `ExitCodeRefused` and
+   `ErrRefused`, mapped in the entry point the same way. Update
+   [cli-output-examples.md](cli-output-examples.md) with generated examples — a new
+   `executed-without-online-safety — exit 3` section and the exit-code contract paragraph at
+   its head — and pin the JSON and text renderers. The exit-code contract is stated in five
+   more places that today describe a two- or three-code ladder and must gain exit 3 in the
+   same change: the exit-codes bullet in [execution-model.md](execution-model.md), the
+   dry-run exit-code paragraph in
+   [postgres-online-ddl-reference.md](postgres-online-ddl-reference.md#dry-run-diagnostic-codes),
+   the failure-versus-refusal sentence in [low-level-design.md](low-level-design.md) that
+   tells embedders the codes distinguish nothing-committed from partial state and must add
+   the committed-and-not-vouched-for case, the hand-written prose of
+   [capabilities.md](capabilities.md) — the "a refusal is a feature" contract bullet that
+   states a two-code ladder, and the T2 row's "exit 2" cell, which after this ships is exit
+   3 under an explicit acknowledgement; both sit above the generated markers, so
+   `make gen-capabilities` in step 5 does not touch them and they are edited by hand here —
+   and the root README's exit-code gate paragraph, which must say that a gate treating every
+   non-zero status as failure stays fail-closed for this path. The same change tightens the
+   exit-2 glosses in [execution-model.md](execution-model.md) and
+   [refusal-classes.md](refusal-classes.md) from "nothing ran" to "nothing committed", which
+   is the claim that holds for a statement-budget refusal. Two surfaces state a ladder and are
+   deliberately left alone. [pull.md](pull.md) has its own three-code ladder: `pull` never
+   executes DDL, so exit 3 cannot occur there. `replay/replay.sh` hard-codes exit 0 and 2 in
+   its per-statement branches: it invokes `migrate` without `--accept-blocking`, so it cannot
+   produce a 3, and an unexpected 3 falls through every branch to `FAIL` and skips the
+   `psql` re-apply, which is the safe direction for a statement that already committed.
+   *(done in part: the outcome, the retained identity and budget fields, the exit-3 constant
+   and sentinel, plan-report eligibility, and the `cli-output-examples.md` example shipped;
+   the exit-code contract paragraph at that page's head, the five surface edits, and the
+   exit-2 gloss tightening move to step 4 with the flag, because no command can produce exit 3
+   until `--accept-blocking` exists.)*
 4. Add `--accept-blocking` to imperative `migrate`, reject its combination with `--force`,
    emit the pre-execution audit record, and add demo assertions for eligibility, success,
    lock-budget refusal, statement-budget failure, mismatched acknowledgement, and exit codes.
-   This step adds the two pieces of plumbing the acknowledgement needs: the statement boundary
-   exposes the index or table an index-maintenance statement names, and the front door resolves
-   an index to its owning table through `pg_index.indrelid` after the eligibility check. It also
-   detects an explicitly supplied `--statement-timeout` from the parsed command line, as the
-   budgets section requires.
+   The demo README's own exit-code enumeration, which today lists 0, 1, and 2, gains exit 3
+   beside those assertions. This step adds the two pieces of plumbing the acknowledgement
+   needs: the statement boundary exposes the index or table an index-maintenance statement
+   names, and the front door resolves an index to its owning table through
+   `pg_index.indrelid` after the eligibility check. It also detects an explicitly supplied
+   `--statement-timeout` from the parsed command line, as the budgets section requires.
 5. Re-tier only the newly shipped path by editing its rows in
    `pkg/capabilities/capabilities.yaml` and regenerating [capabilities.md](capabilities.md)
    with `make gen-capabilities` — the page is a rendered artifact and a hand edit fails its

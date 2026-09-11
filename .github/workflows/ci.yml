@@ -72,6 +72,12 @@ jobs:
   # would switch the guards off precisely when prose changes. The job is
   # cheap enough that running it redundantly alongside the matrix on code
   # PRs costs less than maintaining a list of which packages are guards.
+  #
+  # The capabilities gate rides along for the same reason. The semantic
+  # assertion — the checked-in capabilities page is the rendering of the
+  # YAML — is already a unit test; the make target adds the generator's
+  # own `go run` entry point, which release.yml runs against the tagged
+  # tree, so a broken target fails a PR here rather than a release.
   unit:
     name: unit tests (no Docker; docs guards)
     runs-on: ubuntu-latest
@@ -82,6 +88,9 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
+      # The gate is one `go run` and a diff; it goes first so a broken
+      # generator is reported even when an unrelated unit test fails.
+      - run: make check-capabilities
       - run: make test-unit
 
   lint:
@@ -254,7 +263,7 @@ jobs:
   # Single required status for branch protection ("all-green" is the
   # context to require). Succeeds when nothing failed — including
   # docs-only PRs, where the code-gated jobs were skipped but the unit
-  # job (and its docs guards) still had to pass.
+  # job (its docs guards and the capabilities gate) still had to pass.
   all-green:
     if: always()
     needs: [changes, unit, lint, build, test, demo, supabase]

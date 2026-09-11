@@ -102,7 +102,7 @@ func siteRefusals() []siteRefusal {
 // (ALTER TABLE, CREATE INDEX). concurrent distinguishes the already-safe
 // maintenance forms — which pg-sprite need not wrap — from the plain forms
 // it refuses in favor of their concurrent idiom.
-func gateRefusal(kind statement.Kind, concurrent bool) (verdict.Refusal, bool) {
+func gateRefusal(kind statement.Kind, concurrent bool, target statement.IndexTarget) (verdict.Refusal, bool) {
 	switch kind {
 	case statement.KindAlterTable, statement.KindCreateIndex:
 		return verdict.Refusal{}, false
@@ -110,7 +110,11 @@ func gateRefusal(kind statement.Kind, concurrent bool) (verdict.Refusal, bool) {
 		if concurrent {
 			return verdict.NoOnlineSafetyProblem(verdict.ReasonIndexStatement, verdict.OwnerDirectOperator), true
 		}
-		return verdict.ByDesign(verdict.ReasonIndexStatement), true
+		site := verdict.RefusalSiteIndexOther
+		if target == statement.IndexTargetSingleRelation {
+			site = verdict.RefusalSiteIndexSingleRelation
+		}
+		return verdict.ByDesign(verdict.ReasonIndexStatement).WithSite(site), true
 	case statement.KindCreateTable:
 		return verdict.NoOnlineSafetyProblem(verdict.ReasonUnsupportedStatement, verdict.OwnerDeclarativeFrontDoor), true
 	case statement.KindDataChange:

@@ -27,5 +27,8 @@ func main() {
 	if errors.Is(err, verdict.ErrRefused) {
 		os.Exit(verdict.ExitCodeRefused)
 	}
+	if errors.Is(err, verdict.ErrAcceptedBlocking) {
+		os.Exit(verdict.ExitCodeAcceptedBlocking)
+	}
 	k.FatalIfErrorf(err)
 }

@@ -66,6 +66,9 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 			want: executor.CodeInvalidIndexUnproven,
 		},
 		{name: "cancelled by caller", err: executor.ErrCancelledByCaller, want: executor.CodeCancelledByCaller},
+		{name: "blocking outcome unknown", err: &executor.BlockingOutcomeUnknownError{Err: errors.New("lost")}, want: executor.CodeBlockingOutcomeUnknown},
+		{name: "invalid blocking budget", err: executor.ErrInvalidBlockingBudget, want: executor.CodeInvalidBlockingBudget},
+		{name: "unsupported accepted blocking", err: executor.ErrUnsupportedAcceptedBlocking, want: executor.CodeUnsupportedAcceptedBlocking},
 		{
 			name: "abandonment unproven through to removal",
 			err:  &executor.InvalidIndexError{Schema: "s", Index: "i", Cleanup: executor.ErrAbandonmentUnproven},
@@ -138,6 +141,9 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 	want := map[executor.Code]bool{
 		executor.CodeBudgetLockExceeded:              false,
 		executor.CodeBudgetStatementExceeded:         false,
+		executor.CodeBlockingOutcomeUnknown:          false,
+		executor.CodeInvalidBlockingBudget:           true,
+		executor.CodeUnsupportedAcceptedBlocking:     true,
 		executor.CodeCancelledByCaller:               false,
 		executor.CodeCancelledExternally:             false,
 		executor.CodeInvalidIndexOwnLeftover:         false,

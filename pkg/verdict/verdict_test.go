@@ -2,7 +2,9 @@ package verdict
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,6 +37,77 @@ func TestNewRefusalEnforcesRF7(t *testing.T) {
 			assert.Error(t, err)
 		})
 	}
+}
+
+func TestAcceptedBlockingVerdictContract(t *testing.T) {
+	r := ByDesign(ReasonIndexStatement).WithSite(RefusalSiteIndexSingleRelation)
+	v, err := (Verdict{
+		Statement:  "DROP INDEX app.orders_created_at_idx",
+		Table:      "app.orders",
+		SaferIdiom: "DROP INDEX CONCURRENTLY",
+	}).WithAcceptedBlocking(r, 3*time.Second, 10*time.Minute)
+	require.NoError(t, err)
+
+	assert.Equal(t, OutcomeExecutedWithoutOnlineSafety, v.Outcome)
+	gotRefusal, err := v.Refusal()
+	require.NoError(t, err)
+	assert.Equal(t, r.Class(), gotRefusal.Class())
+	assert.Equal(t, r.Reason(), gotRefusal.Reason())
+	js, err := v.JSON()
+	require.NoError(t, err)
+	assert.Equal(t, `{
+  "outcome": "executed-without-online-safety",
+  "reason": "index-statement",
+  "class": "by-design",
+  "statement": "DROP INDEX app.orders_created_at_idx",
+  "table": "app.orders",
+  "safer_idiom": "DROP INDEX CONCURRENTLY",
+  "blocking_passthrough": true,
+  "lock_timeout": "3s",
+  "statement_timeout": "10m"
+}`, js)
+	assert.Equal(t, `executed without online safety (accepted blocking refusal)
+  table:     app.orders
+  refusal:   by-design / index-statement
+  statement: DROP INDEX app.orders_created_at_idx
+  safer:     DROP INDEX CONCURRENTLY
+  budgets:   lock 3s, statement 10m`, v.String())
+}
+
+func TestAcceptedBlockingVerdictRejectsIllegalStates(t *testing.T) {
+	r := ByDesign(ReasonIndexStatement).WithSite(RefusalSiteIndexSingleRelation)
+	for _, tc := range []struct {
+		name      string
+		refusal   Refusal
+		lock      time.Duration
+		statement time.Duration
+	}{
+		{"missing refusal", Refusal{}, time.Second, time.Second},
+		{"ineligible refusal", CapabilityBoundary(ReasonRewriteRequired), time.Second, time.Second},
+		{"zero lock budget", r, 0, time.Second},
+		{"negative lock budget", r, -time.Second, time.Second},
+		{"zero statement budget", r, time.Second, 0},
+		{"negative statement budget", r, time.Second, -time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := (Verdict{}).WithAcceptedBlocking(tc.refusal, tc.lock, tc.statement)
+			assert.ErrorIs(t, err, ErrInvalidAcceptedBlocking)
+		})
+	}
+}
+
+func TestExistingVerdictJSONIsUnchanged(t *testing.T) {
+	js, err := (Verdict{Statement: "DROP INDEX app.i", SaferIdiom: "DROP INDEX CONCURRENTLY"}).
+		WithRefusal(ByDesign(ReasonIndexStatement)).JSON()
+	require.NoError(t, err)
+	assert.Equal(t, `{
+  "outcome": "refused",
+  "reason": "index-statement",
+  "class": "by-design",
+  "statement": "DROP INDEX app.i",
+  "safer_idiom": "DROP INDEX CONCURRENTLY"
+}`, js)
+	assert.False(t, errors.Is(ErrRefused, ErrAcceptedBlocking))
 }
 
 // The per-class constructors agree with NewRefusal: what they build, it
@@ -77,11 +150,43 @@ func TestWithRefusalStampsOutcomeReasonClassOwner(t *testing.T) {
 	assert.NotContains(t, js, `"owner"`)
 }
 
+// A refusal's typed cause is part of its identity, so stamping the refusal
+// onto a verdict carries the cause into the JSON; a refusal without a cause
+// emits no cause key.
+func TestWithRefusalCarriesTypedCause(t *testing.T) {
+	withCause := Verdict{}.WithRefusal(
+		CapabilityBoundary(ReasonUnsupportedPartitionedParent).WithCause(CauseParentBlockingIndexBuild))
+	assert.Equal(t, CauseParentBlockingIndexBuild, withCause.Cause)
+	js, err := withCause.JSON()
+	require.NoError(t, err)
+	assert.Contains(t, js, `"cause": "parent-blocking-index-build"`)
+
+	js, err = Verdict{}.WithRefusal(ByDesign(ReasonIndexStatement)).JSON()
+	require.NoError(t, err)
+	assert.NotContains(t, js, `"cause"`)
+}
+
 func TestRefusalRoundTripsThroughVerdict(t *testing.T) {
-	want := NoOnlineSafetyProblem(ReasonUnsupportedStatement, OwnerProvisioning)
+	want := ByDesign(ReasonIndexStatement).
+		WithCause(CauseStatementBudget).
+		WithSite(RefusalSiteIndexSingleRelation)
 	got, err := Verdict{Statement: "GRANT SELECT ON t TO r"}.WithRefusal(want).Refusal()
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
+
+	caused := CapabilityBoundary(ReasonUnsupportedPartitionedParent).WithCause(CauseParentBlockingIndexBuild)
+	got, err = Verdict{}.WithRefusal(caused).Refusal()
+	require.NoError(t, err)
+	assert.Equal(t, CauseParentBlockingIndexBuild, got.Cause(), "the cause survives the round trip")
+
+	encoded, err := json.Marshal(Verdict{}.WithRefusal(want))
+	require.NoError(t, err)
+	var decoded Verdict
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	got, err = decoded.Refusal()
+	require.NoError(t, err)
+	assert.Equal(t, CauseStatementBudget, got.Cause())
+	assert.Equal(t, RefusalSite(""), got.Site())
 
 	_, err = Verdict{Outcome: OutcomeExecuted}.Refusal()
 	require.Error(t, err, "an executed verdict carries no refusal")
@@ -91,6 +196,56 @@ func TestRefusalRoundTripsThroughVerdict(t *testing.T) {
 
 	_, err = Verdict{Outcome: OutcomeRefused, Reason: ReasonTableTooLarge, Class: ClassEnvironmental, Owner: OwnerProvisioning}.Refusal()
 	require.Error(t, err, "an owner outside no-online-safety-problem violates RF-7")
+}
+
+// The in-process fast path validates the proof the same way the decoded
+// path validates the JSON fields: a non-zero proof that never passed the
+// constructors is rejected rather than returned as-is.
+func TestRefusalRejectsUnvalidatedProof(t *testing.T) {
+	tests := []struct {
+		name  string
+		proof Refusal
+	}{
+		{"site on the zero refusal", Refusal{}.WithSite(RefusalSiteIndexSingleRelation)},
+		{"cause on the zero refusal", Refusal{}.WithCause(CauseLockBudget)},
+		{"reason outside Reasons()", ByDesign("brand-new-reason")},
+		{"owner on a class that carries none", Refusal{class: ClassByDesign, reason: ReasonIndexStatement, owner: OwnerDirectOperator}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			require.False(t, tc.proof.IsZero(), "the fixture must take the in-process path")
+			_, err := Verdict{}.WithRefusal(tc.proof).Refusal()
+			assert.Error(t, err)
+		})
+	}
+}
+
+// The exported refusal fields are what a consumer reads; the proof is what
+// an eligibility decision consumes. A verdict whose fields were rewritten
+// after WithRefusal describes a different refusal than it proves, and
+// Refusal() refuses to hand out either.
+func TestRefusalRejectsFieldsDivergingFromProof(t *testing.T) {
+	proof := CapabilityBoundary(ReasonUnsupportedPartitionedParent).WithCause(CauseParentBlockingIndexBuild)
+	tests := []struct {
+		name   string
+		mutate func(*Verdict)
+	}{
+		{"class", func(v *Verdict) { v.Class = ClassByDesign }},
+		{"reason", func(v *Verdict) { v.Reason = ReasonIndexStatement }},
+		{"owner", func(v *Verdict) { v.Owner = OwnerDirectOperator }},
+		{"cause", func(v *Verdict) { v.Cause = CauseParentConcurrentIndexBuild }},
+		{"cause cleared", func(v *Verdict) { v.Cause = CauseNone }},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			v := Verdict{}.WithRefusal(proof)
+			_, err := v.Refusal()
+			require.NoError(t, err, "the unmodified verdict agrees with its proof")
+			tc.mutate(&v)
+			_, err = v.Refusal()
+			assert.ErrorContains(t, err, "diverge from proof")
+		})
+	}
 }
 
 func TestJSONRoundTrip(t *testing.T) {
@@ -163,7 +318,11 @@ func TestJSONOmitsEmptyOptionalFields(t *testing.T) {
 // Reason and Cause values are the machine contract automation switches on:
 // flat kebab-case tokens, no spaces or colons — prose belongs in Detail.
 func TestReasonAndCauseTokensAreFlat(t *testing.T) {
-	toks := []string{string(CauseLockBudget), string(CauseStatementBudget)}
+	toks := []string{
+		string(CauseLockBudget), string(CauseStatementBudget),
+		string(CauseParentBlockingIndexBuild), string(CauseParentConcurrentIndexBuild),
+		string(CauseParentIndexAdoption), string(CauseParentNotValidForeignKey),
+	}
 	for _, r := range Reasons() {
 		toks = append(toks, string(r))
 	}
