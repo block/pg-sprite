@@ -12,6 +12,7 @@ refused form would take, what an operator who accepts a maintenance window can d
 
 ## Contents
 
+- [Query the matrix](#query-the-matrix)
 - [What pg-sprite is — and why it exists](#what-pg-sprite-is--and-why-it-exists)
 - [The support model: three tiers](#the-support-model-three-tiers)
   - [The engine path](#the-engine-path)
@@ -27,6 +28,35 @@ refused form would take, what an operator who accepts a maintenance window can d
 - [Peers share these limits — for different reasons](#peers-share-these-limits--for-different-reasons)
 - [Why typed refusal, not passthrough](#why-typed-refusal-not-passthrough)
 - [Deliberately operator-owned](#deliberately-operator-owned)
+
+## Query the matrix
+
+The marker-delimited regions of this page are generated from
+`pkg/capabilities/capabilities.yaml`; the surrounding guidance is hand-written. Run
+`pg-sprite capabilities` for a compact table, or use `pg-sprite capabilities --json` for
+automation. Both forms read the embedded YAML data only and do not connect to PostgreSQL.
+The [machine-readable capabilities contract](capabilities-contract.md) defines the JSON
+schema and versioning rules. Array order is source order and stable for display, but select
+rows by `id` or by field, never by array position.
+
+```sh
+# Is this one operation supported today? Look a row up by its id.
+pg-sprite capabilities --json | jq '.capabilities[] | select(.id == "add-column-no-default-or-constant-default")'
+
+# All T2 rows.
+pg-sprite capabilities --json | jq '.capabilities[] | select(.tier == "t2")'
+
+# What is waiting on the copy engine, across tiers.
+pg-sprite capabilities --json | jq '.capabilities[] | select(.engine_path == "copy_and_swap")'
+
+# Everything the declarative door refuses. Both doors carry the same disposition on
+# every row today; the map exists so they can diverge, so query the door you use.
+pg-sprite capabilities --json | jq '.capabilities[] | select(.front_doors.diff == "refused")'
+
+# Rows another tool class owns: the ⚪ and 🔵 rows. The ❌ rows name no owner, because
+# PostgreSQL offers no online mechanism for them, so this is not the full out-of-scope set.
+pg-sprite capabilities --json | jq '.capabilities[] | select(.owning_tool_class != null)'
+```
 
 ## What pg-sprite is — and why it exists
 
