@@ -31,9 +31,10 @@ refused form would take, what an operator who accepts a maintenance window can d
 
 ## Query the matrix
 
-This page is generated from the matrix embedded in the pg-sprite binary. Run
-`pg-sprite capabilities` for a compact table, or use `pg-sprite capabilities --json`
-for automation. Both forms read embedded data only and do not connect to PostgreSQL.
+The marker-delimited regions of this page are generated from
+`pkg/capabilities/capabilities.yaml`; the surrounding guidance is hand-written. Run
+`pg-sprite capabilities` for a compact table, or use `pg-sprite capabilities --json` for
+automation. Both forms read the embedded YAML data only and do not connect to PostgreSQL.
 The [machine-readable capabilities contract](capabilities-contract.md) defines the JSON
 schema and versioning rules.
 

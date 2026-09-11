@@ -172,18 +172,10 @@ Array order is source order and therefore stable for display, but consumers shou
 select by fields or `id`, not array position. The command reads only embedded data and
 does not connect to PostgreSQL.
 
-The contract must support these queries:
-
-```sh
-# All T2 rows.
-pg-sprite capabilities --json | jq '.capabilities[] | select(.tier == "t2")'
-
-# Everything the declarative door refuses.
-pg-sprite capabilities --json | jq '.capabilities[] | select(.front_doors.diff == "refused")'
-
-# Rows owned by another tool class.
-pg-sprite capabilities --json | jq '.capabilities[] | select(.owning_tool_class != null)'
-```
+The contract must support the `jq` recipes in the operator guide's
+[Query the matrix](capabilities.md#query-the-matrix) section: selecting rows by tier,
+by a front door's disposition, and by owning tool class. That section is the one copy of
+the recipes; this contract only fixes the field names they select on.
 
 Human output may render a compact table, but JSON field names and enum values are the
 automation contract. Stable JSON means deterministic content and closed vocabulary;
