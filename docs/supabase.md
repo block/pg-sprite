@@ -40,7 +40,7 @@ and Auth 2.196.0. The Realtime test adds Realtime 2.134.10. It is not a hosted-p
 | Supavisor transaction endpoint | Connection refused; named prepared statements conflict, and disabling them reaches `ErrNoSessionAffinity` |
 | PostgREST after direct/session DDL | New columns became available through automatic schema-cache reload |
 | Signed JWTs before and after DDL | Each tenant saw only its own row; unrelated tenant saw none |
-| Realtime during column addition and concurrent index build | Both sockets stayed connected; all 244 expected INSERT/UPDATE events arrived with tenant isolation and new-column payloads |
+| Realtime during column addition and concurrent index build | Both sockets stayed connected; all expected INSERT/UPDATE events arrived with tenant isolation and new-column payloads |
 
 The `schemadiff`, `diffplan`, and `migrate` integration suites also passed
 against this image. `TestNativeChangesPreserveRowSecurity` verifies tenant
@@ -87,64 +87,48 @@ Success prints `ok` for each package. Failures retain the normal Go test
 assertion output. This suite uses disposable schemas and roles on the test
 server; never point it at a project containing real application data.
 
-## Repeat the API and pooler checks
+## Repeat the service checks
 
-Build the CLI and start the optional services profile. Use the default ports
-for this script. All credentials and JWT signing keys belong only to this
-localhost fixture.
+The opt-in Go tests use the real local services and pg-sprite's public library
+entry point. They need Go and Docker; no separately built CLI, Python, or Node.
+Use the default fixture ports and run one experiment at a time.
 
 ```sh
-make build
-docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services up --wait -d
-python3 scripts/test-supabase.py
+docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services --profile realtime up --wait -d
+SUPABASE_SERVICES_TEST=1 go test -race -count=1 -v ./integration/supabase
 SUPABASE_SESSION_URL='postgres://postgres.pgsprite:pgsprite_test_only@127.0.0.1:55440/postgres?sslmode=disable' \
 SUPABASE_TRANSACTION_URL='postgres://postgres.pgsprite:pgsprite_test_only@127.0.0.1:55441/postgres?sslmode=disable' \
   go test -race -count=1 ./pkg/dbconn -run TestSupavisorSessionBoundary
-docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services down -v
+docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services --profile realtime down -v
 ```
 
-The script reports:
+Expect `PASS` for `TestAPIAndPooler` and `TestRealtimeDuringNativeChanges`,
+followed by `ok` for each package. Without `SUPABASE_SERVICES_TEST=1`, the
+service tests skip. The fixed localhost addresses prevent accidentally pointing
+these destructive fixtures at a hosted project.
 
-```text
-PASS: direct/session changes, concurrent index, JWT tenant isolation, automatic API cache refresh, transaction-pool refusal
-```
-
-The Go test additionally requires the typed `ErrNoSessionAffinity` error;
-an unrelated connection failure cannot satisfy it. It checks the session
-endpoint's actual lock and statement timeout values.
+`TestAPIAndPooler` verifies tenant visibility, automatic PostgREST schema-cache
+refresh, and native changes through direct and session connections. It requires
+the typed `ErrNoSessionAffinity` error for transaction pooling; an unrelated
+connection failure cannot satisfy it. `TestSupavisorSessionBoundary` additionally
+checks the session endpoint's actual lock and statement timeout values.
 
 Auth must initialize its schema before the JWT test: the database image's
 bootstrap `auth.uid()` reads a legacy setting, while the Auth service updates
 it to read PostgREST's JSON claims. The fixture runs the real Auth service
 instead of replacing that function with a test implementation.
 
-## Repeat the Realtime checks
-
-Use Node 22 or newer, the built CLI, and both optional profiles. Run one
-experiment at a time against this fixture:
-
-```sh
-make build
-docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services --profile realtime up --wait -d
-node scripts/test-supabase-realtime.mjs
-docker compose -p pgsprite-supabase -f compose/supabase.yml --profile services --profile realtime down -v
-```
-
-Expected output:
-
-```text
-PASS: same two sockets, 244 expected INSERT/UPDATE events, concurrent writes, new-column payload, tenant isolation, table identity and publication preserved
-```
-
-The script creates an RLS-protected table with 100,000 seed rows and opens
-subscriptions for two tenants. It checks baseline delivery, then adds a column
-and builds an index through the Supavisor session endpoint while writes continue.
-It verifies each expected event and the new column in subsequent payloads, plus
-the table OID, RLS flag, publication membership, and index validity.
+`TestRealtimeDuringNativeChanges` creates an RLS-protected table with 100,000
+seed rows and opens subscriptions for two tenants. It checks baseline delivery,
+then adds a column and builds an index through the session endpoint while writes
+continue. The writer stays active until both changes finish. The test verifies
+every committed INSERT/UPDATE event and the new column in subsequent payloads,
+plus the table OID, RLS flag, publication membership, and index validity.
 
 Each run recreates its disposable table and restarts only the fixture's Realtime
 service **before** opening subscriptions. Realtime [caches publication table
-identities](https://github.com/supabase/realtime/blob/v2.134.10/lib/extensions/postgres_cdc_rls/subscription_manager.ex); recreating a table between runs otherwise leaves stale subscription
-state until its periodic refresh. There are no service restarts or socket
-reconnections during the schema changes. This checks delivery of the expected
-events, not an exactly-once guarantee.
+identities](https://github.com/supabase/realtime/blob/v2.134.10/lib/extensions/postgres_cdc_rls/subscription_manager.ex);
+recreating a table between runs otherwise leaves stale subscription state until
+its periodic refresh. Readiness excludes the temporary HTTP server used during
+seeding. There are no service restarts or socket reconnections during the schema
+changes. This checks delivery of the expected events, not an exactly-once guarantee.
