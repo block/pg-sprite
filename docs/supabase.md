@@ -8,7 +8,7 @@ Supabase's access policies, Data API, and Realtime subscriptions. Hosted project
 are the next validation step. Changes that need a replacement table are refused
 today because copy-and-swap is not implemented yet.
 
-Start with [a database connection](#choose-a-connection). The [test results](#what-works-today)
+Start with [your first change](#make-your-first-change). The [test results](#what-works-today)
 and [roadmap](#where-we-go-next) show how far the current coverage goes.
 
 ## The Supabase features involved
@@ -28,7 +28,24 @@ See Supabase's guides to [database connections](https://supabase.com/docs/guides
 [row-level security](https://supabase.com/docs/guides/database/postgres/row-level-security),
 and the [Data API](https://supabase.com/docs/guides/api) for more detail.
 
-## Choose a connection
+## Make your first change
+
+This walkthrough adds a nullable `title` column to an existing `public.documents`
+table. Substitute your own app table and column. Start on a development project;
+the compatibility results below come from local Supabase services.
+
+### Install pg-sprite
+
+With Go installed:
+
+```sh
+go install github.com/block/pg-sprite/cmd/pg-sprite@latest
+```
+
+This installs the `pg-sprite` binary in Go's bin directory. Add that directory
+to your `PATH` if your shell cannot find it. See [installation options](../README.md#install).
+
+### Connect to your project
 
 In your Supabase dashboard, open **Connect** and choose **Direct connection**
 or **Session pooler**. pg-sprite needs that PostgreSQL connection URL; the API
@@ -37,39 +54,114 @@ Connect as a role that owns the application table. Supabase's `postgres` role
 worked for the tested changes without superuser access.
 See [engine-role.md](engine-role.md) for the operation-specific grants.
 
-Use TLS certificate verification for a hosted database. Set `PGSPRITE_URL`
-through your credential tooling, and use `--ca-cert` with the server's CA
-certificate when needed. Do not copy passwords into committed scripts.
-Direct hosted connections may require IPv6. Supavisor offers two pooling modes:
+Supavisor offers two pooling modes:
 
 - **Session mode** keeps the same PostgreSQL connection for the client's session.
-  The tested session endpoint works with pg-sprite
+  The tested session endpoint works with pg-sprite and can help on IPv4-only networks
 - **Transaction mode** can assign a different PostgreSQL connection after each
   transaction. Do not use it for pg-sprite: execution limits need a stable session
 
-Disabling prepared statements does not make transaction pooling safe.
+Copy the full connection string from **Connect**, replace its password placeholder
+with your database password, and set it in your shell. Keep the host, port, and
+username from the selected connection mode; direct and pooled usernames differ.
+URL-encode special characters in the password.
 
-## Try a column addition
+```sh
+export PGSPRITE_URL='YOUR_POSTGRES_CONNECTION_URL'
+```
 
-After you [install pg-sprite](../README.md) and set `PGSPRITE_URL`, you can submit
-a change for one of your app's tables. For example, if `public.documents` exists
-and does not yet have a `title` column:
+Replace the example value with your connection string. This sets an environment
+variable without opening a connection. Keep credentials out of source control;
+your secret manager can also set this variable for you or your agent.
+
+For hosted connections, use `sslmode=verify-full` in the URL to verify the server's
+certificate and hostname. If you need to supply a CA certificate separately,
+save the certificate for your project and point pg-sprite at it:
+
+```sh
+export PGSPRITE_CA_CERT='/absolute/path/to/project-ca.crt'
+```
+
+That variable sets the certificate file used by the commands below. A certificate
+error should be fixed by checking the hostname and trusted certificate, rather
+than disabling verification. Hosted certificate handling remains a validation
+milestone for this guide.
+
+### Preview the change
+
+Run a dry run against your database:
+
+```sh
+pg-sprite migrate --alter 'ALTER TABLE public.documents ADD COLUMN title text' --dry-run --json
+```
+
+It inspects the live table and returns a plan without applying the change.
+For this column addition, an executable plan includes these fields (excerpt):
+
+```json
+{
+  "schema": "public",
+  "table": "documents",
+  "table_exists": true,
+  "disposition": "execute"
+}
+```
+
+Review the full report's `statements`, including `exec_sql` and `destructive`.
+If the table is missing, check the project and table name. If the change is
+refused, inspect the reason before proceeding.
+
+### Apply the change
+
+When you are ready, run the same command without `--dry-run`:
 
 ```sh
 pg-sprite migrate --alter 'ALTER TABLE public.documents ADD COLUMN title text' --json
 ```
 
-This command applies the change. A successful result includes:
+This command changes the database. A successful result includes (excerpt):
 
 ```json
 {"outcome": "executed-natively"}
 ```
 
-That is an excerpt; the full result includes execution details. For agents,
-use the structured `outcome` and refusal `reason` fields to decide what to do
-next. A refusal is a stopping point to inspect, not a reason to retry with
-`--force`. Keep RLS policies, grants, and Supabase-managed schemas outside the
-change unless you are deliberately managing them through another workflow.
+The execution checks the database again; an earlier dry run is not a guarantee
+that the change will still be executable. Existing rows have `NULL` in `title`
+until your app writes a value.
+
+### Check it in Supabase
+
+Open the table in **Table Editor**, or run this in **SQL Editor**:
+
+```sql
+SELECT column_name, data_type, is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'documents'
+  AND column_name = 'title';
+```
+
+Expected result:
+
+| column_name | data_type | is_nullable |
+| --- | --- | --- |
+| title | text | YES |
+
+Then read the table through your app with a normal signed-in user. Confirm that
+the new column is available and each user still sees only the rows they should.
+If your app uses Realtime, check its subscriptions too. An owner query in SQL
+Editor confirms the schema, but does not prove your users' access policies work.
+
+### Using a coding agent
+
+Give your agent the table and desired change, with database credentials supplied
+through its environment. Have it preview the change, explain the plan, apply it
+when authorized, and verify the result through your app's access path.
+
+Agents should read the structured plan and verdict fields; the JSON formats and
+exit codes are in [CLI output examples](cli-output-examples.md). A refusal is a
+stopping point to inspect, not a reason to retry with `--force`. Keep RLS policies,
+grants, and Supabase-managed schemas outside this workflow.
 
 ## What works today
 
