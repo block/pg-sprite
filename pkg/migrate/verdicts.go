@@ -21,7 +21,7 @@ import (
 // statements are never executed. Gate needs no database, so a caller can
 // refuse before dialing; [Run] re-checks it regardless.
 func Gate(st statement.Statement) (verdict.Verdict, bool) {
-	r, refused := gateRefusal(st.Kind(), st.Concurrent())
+	r, refused := gateRefusal(st.Kind(), st.Concurrent(), st.IndexTarget())
 	if !refused {
 		return verdict.Verdict{}, false
 	}
@@ -170,14 +170,20 @@ func admissionRefusalVerdict(st statement.Statement, err error, r verdict.Refusa
 // different strategy, while a blind attempt that ran past its budget is
 // doing rewrite work. A refused forced attempt still records the override.
 func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError, forced, online bool) verdict.Verdict {
+	cause := verdict.CauseNone
+	switch budgetErr.Cause {
+	case executor.CauseLock:
+		cause = verdict.CauseLockBudget
+	case executor.CauseStatement:
+		cause = verdict.CauseStatementBudget
+	}
 	v := verdict.Verdict{
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Forced:    forced,
-	}.WithRefusal(budgetExceededRefusal())
+	}.WithRefusal(budgetExceededRefusal().WithCause(cause))
 	switch budgetErr.Cause {
 	case executor.CauseLock:
-		v.Cause = verdict.CauseLockBudget
 		v.Attempts = budgetErr.Attempts
 		if budgetErr.Attempts > 1 {
 			v.Detail = fmt.Sprintf("the lock was not granted within the %s lock budget on any of %d bounded "+
@@ -188,7 +194,6 @@ func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError, forc
 		v.Detail = fmt.Sprintf("the lock was not granted within the %s lock budget: the table is too "+
 			"contended right now; nothing was executed", budgetErr.Budget)
 	case executor.CauseStatement:
-		v.Cause = verdict.CauseStatementBudget
 		if online {
 			v.Detail = fmt.Sprintf("cancelled after the %s budget: the statement already is the safe online "+
 				"idiom — the work needs more time, not a different strategy; retry with a larger budget for "+
