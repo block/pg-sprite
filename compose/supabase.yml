@@ -84,3 +84,34 @@ services:
       GOTRUE_JWT_AUD: authenticated
       GOTRUE_JWT_DEFAULT_GROUP_NAME: authenticated
       GOTRUE_DISABLE_SIGNUP: "true"
+  realtime:
+    image: supabase/realtime:v2.134.10@sha256:cbcc6a7986fc28b6dcffa798b077d5fb9c69cd25500371ab49147a86d7edbb03
+    profiles: [realtime]
+    # The image briefly starts an HTTP server while seeding. Mark only the final
+    # server phase so the test cannot subscribe to that temporary process.
+    command: [sh, -c, 'touch /tmp/pgsprite-server-ready; exec /app/bin/server']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:55442:4000"
+    environment:
+      PORT: "4000"
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: supabase_admin
+      DB_PASSWORD: pgsprite_test_only
+      DB_NAME: postgres
+      DB_AFTER_CONNECT_QUERY: SET search_path TO _realtime
+      DB_ENC_KEY: supabaserealtime
+      API_JWT_SECRET: pgsprite-local-test-jwt-secret-not-for-production
+      SECRET_KEY_BASE: pgsprite-local-test-secret-key-base-with-at-least-sixty-four-characters
+      METRICS_JWT_SECRET: pgsprite-local-test-jwt-secret-not-for-production
+      ERL_AFLAGS: -proto_dist inet_tcp
+      DNS_NODES: "''"
+      RLIMIT_NOFILE: "10000"
+      APP_NAME: realtime
+      SELF_HOST_TENANT_NAME: localhost
+      SEED_SELF_HOST: "true"
+      RUN_JANITOR: "true"
+      DISABLE_HEALTHCHECK_LOGGING: "true"

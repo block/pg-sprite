@@ -1,3 +1,4 @@
+CREATE SCHEMA IF NOT EXISTS _realtime AUTHORIZATION supabase_admin;
 -- Disposable test credentials only. The stock image creates these roles.
 ALTER ROLE supabase_auth_admin PASSWORD 'pgsprite_test_only';
 ALTER ROLE authenticator PASSWORD 'pgsprite_test_only';
