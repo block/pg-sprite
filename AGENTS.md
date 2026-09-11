@@ -92,6 +92,12 @@ is a smoke tour of the built binary, not a second test suite.
   cleanups, which run after the context is cancelled, use
   `context.WithoutCancel(t.Context())`), and named polling deadlines — no bare `time.Sleep`
   readiness waits.
+- **Test SQL must be readable by humans.** Show the complete DDL statement and desired
+  schema in the test that exercises them. Use multiline raw strings for table definitions
+  and longer SQL, with one column or clause per line. Do not make readers reconstruct SQL
+  from fragments or positional case fields; substituting a safely quoted fixture name is
+  fine. Prefer separate named tests for distinct DDL operations over one large matrix.
+  Share fixture setup and verification helpers, while keeping the SQL under test visible.
 - Errors: wrap with context and identifiers (`fmt.Errorf("create slot %s: %w", name, err)`);
   never log-and-continue; no silent branch cases; no `nolint`; no `--no-verify`.
 
