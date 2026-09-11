@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	tcnetwork "github.com/testcontainers/testcontainers-go/network"
@@ -32,6 +35,13 @@ const pgBouncerImage = "edoburu/pgbouncer:v1.25.2-p0"
 
 // pgBouncerPort is the port PgBouncer listens on inside its container.
 const pgBouncerPort = "6432"
+
+const (
+	// poolerReadyDeadline bounds how long the pooler gets to accept a login
+	// that reaches the server behind it.
+	poolerReadyDeadline = 30 * time.Second
+	poolerReadyPoll     = 100 * time.Millisecond
+)
 
 // StartPostgresBehindPgBouncer starts a PostgreSQL server with a PgBouncer
 // in front of it in the given pool mode and returns the pooled connection
@@ -114,7 +124,10 @@ func StartPostgresBehindPgBouncer(t *testing.T, mode PoolMode) (pooledURL string
 				// same reason, so the fixture does too.
 				"IGNORE_STARTUP_PARAMETERS": "lock_timeout,statement_timeout,extra_float_digits",
 			},
-			Networks:   []string{net.Name},
+			Networks: []string{net.Name},
+			// A bound port only says the process is up. The host side of a
+			// published port accepts a client before the container does, so
+			// readiness is a login through the pooler, proven below.
 			WaitingFor: wait.ForListeningPort(pgBouncerPort + "/tcp"),
 		},
 		Started: true,
@@ -126,7 +139,33 @@ func StartPostgresBehindPgBouncer(t *testing.T, mode PoolMode) (pooledURL string
 		}
 	})
 
-	return containerURL(t, pooler, pgBouncerPort, user, password, database)
+	pooledURL = containerURL(t, pooler, pgBouncerPort, user, password, database)
+	awaitPooledLogin(t, pooledURL)
+	return pooledURL
+}
+
+// awaitPooledLogin polls until a client can log in through the pooler and
+// run a statement on the server behind it — the property the returned URL
+// promises. A client that arrives earlier is accepted by the port forwarder
+// and then cut off on its first read, which looks like a broken pooler
+// rather than an early caller.
+func awaitPooledLogin(t *testing.T, pooledURL string) {
+	t.Helper()
+	require.EventuallyWithTf(t, func(collect *assert.CollectT) {
+		ctx := t.Context()
+		conn, err := pgx.Connect(ctx, pooledURL)
+		if !assert.NoError(collect, err, "log in through the pooler") {
+			return
+		}
+		defer func() {
+			if err := conn.Close(ctx); err != nil {
+				t.Logf("close the pooler readiness probe connection: %v", err)
+			}
+		}()
+		var one int
+		assert.NoError(collect, conn.QueryRow(ctx, "SELECT 1").Scan(&one), "run a statement through the pooler")
+	}, poolerReadyDeadline, poolerReadyPoll,
+		"the pooler did not accept a login that reached the server within %s", poolerReadyDeadline)
 }
 
 // containerURL builds a connection URL for a container's mapped port.
