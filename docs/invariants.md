@@ -418,6 +418,11 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`)
   is checked for completeness against the production closed sets by
   `TestRefusalRegistryIsComplete`. *Source:* [refusal classes](refusal-classes.md).
+- **RF-8** — An in-process refused verdict retains its full typed refusal proof. A verdict
+  decoded from JSON reconstructs class, reason, owner, and cause, but cannot recover the
+  unexported refusal site; eligibility decisions keyed by site therefore fail closed for
+  decoded verdicts. *Enforced:* `Verdict.WithRefusal`, `Verdict.Refusal`, and the accepted-
+  blocking eligibility gate-path tests. *Source:* [lock-budgeted passthrough](lock-budgeted-passthrough.md).
 
 ## Orchestration / control-plane (OC)
 

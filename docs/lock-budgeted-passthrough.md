@@ -102,6 +102,11 @@ it is acquired.
 | 6 | Eligibility is selected from a closed registry keyed by typed class, reason, and cause or refusal site. No renderer text or SQL substring participates in the decision. |
 | 7 | A dry-run reports the original refusal and a per-statement `blocking_passthrough_eligible` boolean, but executes nothing even when the flag is present. |
 
+The full typed refusal proof is available while its verdict remains in process. JSON carries
+class, reason, owner, and cause, but not the internal refusal site. Calling `Refusal()` on a
+decoded verdict therefore reconstructs the JSON fields but cannot restore the site, and any
+site-keyed accepted-blocking eligibility decision fails closed.
+
 “Prints before execution” is an ordering requirement for human output and an information
 requirement for JSON. Human mode prints the refusal analysis, then a separate acceptance line,
 then starts the session. JSON remains one final machine-readable object; its executed verdict

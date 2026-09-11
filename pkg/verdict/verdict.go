@@ -294,15 +294,18 @@ func (r Refusal) WithSite(site RefusalSite) Refusal {
 func (r Refusal) IsZero() bool { return r == Refusal{} }
 
 // WithRefusal returns v as a refused verdict carrying r's reason, class,
-// and owner. It is the one path from a classified refusal onto the verdict
-// contract, so a site that forgets to classify has no Reason to set.
+// owner, cause, and full in-process proof. It is the one path from a
+// classified refusal onto the verdict contract, so a site that forgets to
+// classify has no Reason to set.
 func (v Verdict) WithRefusal(r Refusal) Verdict {
-	// INV: RF-7 — the verdict's class and owner come from the proof, never
-	// from the site.
+	// INV: RF-7, RF-8 — the verdict's refusal fields and in-process proof
+	// come from the proof, never from the site.
 	v.Outcome = OutcomeRefused
 	v.Reason = r.reason
 	v.Class = r.class
 	v.Owner = r.owner
+	v.Cause = r.cause
+	v.proof = r
 	return v
 }
 
@@ -311,11 +314,26 @@ func (v Verdict) WithRefusal(r Refusal) Verdict {
 // class and owner through the same one path instead of copying fields. It
 // fails on a verdict that is not refused, or whose reason, class, and owner
 // do not validate together — a verdict this build cannot have produced.
+// An in-process verdict retains its full proof. A verdict decoded from JSON
+// reconstructs class, reason, owner, and cause, but cannot recover its refusal
+// site; site-keyed eligibility therefore fails closed after JSON decoding.
 func (v Verdict) Refusal() (Refusal, error) {
 	if v.Outcome != OutcomeRefused {
 		return Refusal{}, fmt.Errorf("verdict outcome is %q, not %q", v.Outcome, OutcomeRefused)
 	}
-	return NewRefusal(v.Class, v.Reason, v.Owner)
+	// INV: RF-8 — preserve the full in-process proof; decoded verdicts can
+	// reconstruct only the refusal fields represented in JSON.
+	if !v.proof.IsZero() {
+		return v.proof, nil
+	}
+	r, err := NewRefusal(v.Class, v.Reason, v.Owner)
+	if err != nil {
+		return Refusal{}, err
+	}
+	if v.Cause != CauseNone {
+		r = r.WithCause(v.Cause)
+	}
+	return r, nil
 }
 
 // Cause narrows ReasonBudgetExceeded to the budget that was exceeded, so
@@ -347,6 +365,8 @@ const (
 
 // Verdict is the structured outcome of one migrate invocation.
 type Verdict struct {
+	proof Refusal
+
 	// Outcome is what happened.
 	Outcome Outcome `json:"outcome"`
 	// Reason is the typed refusal cause; empty when executed.

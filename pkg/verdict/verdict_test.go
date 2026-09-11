@@ -78,10 +78,21 @@ func TestWithRefusalStampsOutcomeReasonClassOwner(t *testing.T) {
 }
 
 func TestRefusalRoundTripsThroughVerdict(t *testing.T) {
-	want := NoOnlineSafetyProblem(ReasonUnsupportedStatement, OwnerProvisioning)
+	want := ByDesign(ReasonIndexStatement).
+		WithCause(CauseStatementBudget).
+		WithSite(RefusalSiteIndexSingleRelation)
 	got, err := Verdict{Statement: "GRANT SELECT ON t TO r"}.WithRefusal(want).Refusal()
 	require.NoError(t, err)
 	assert.Equal(t, want, got)
+
+	encoded, err := json.Marshal(Verdict{}.WithRefusal(want))
+	require.NoError(t, err)
+	var decoded Verdict
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	got, err = decoded.Refusal()
+	require.NoError(t, err)
+	assert.Equal(t, CauseStatementBudget, got.Cause())
+	assert.Equal(t, RefusalSite(""), got.Site())
 
 	_, err = Verdict{Outcome: OutcomeExecuted}.Refusal()
 	require.Error(t, err, "an executed verdict carries no refusal")

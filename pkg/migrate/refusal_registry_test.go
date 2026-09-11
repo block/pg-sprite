@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -50,13 +51,13 @@ func deriveRefusalKeys() (keys []classifiedKey, admitted []string) {
 		for _, concurrent := range []bool{false, true} {
 			targets := []statement.IndexTarget{statement.IndexTargetNone}
 			if !concurrent && (k == statement.KindDropIndex || k == statement.KindReindex) {
-				targets = []statement.IndexTarget{statement.IndexTargetSingleRelation, statement.IndexTargetOther}
+				targets = statement.IndexTargets()
 			}
 			for _, target := range targets {
 				r, ok := gateRefusal(k, concurrent, target)
 				key := fmt.Sprintf("gate:%s/concurrent=%t", k, concurrent)
 				if len(targets) > 1 {
-					key = fmt.Sprintf("%s/target=%d", key, target)
+					key = fmt.Sprintf("%s/target=%s", key, target)
 				}
 				if !ok {
 					admitted = append(admitted, key)
@@ -217,19 +218,48 @@ func TestIndexStatementAcceptedBlockingEligibility(t *testing.T) {
 	}
 }
 
+func TestGateVerdictAcceptedBlockingEligibility(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{"single relation", "DROP INDEX app.i", true},
+		{"multiple relations", "DROP INDEX app.i, app.j", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := statement.ParseOne(tc.sql)
+			require.NoError(t, err)
+			v, refused := Gate(st)
+			require.True(t, refused)
+			r, err := v.Refusal()
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, AcceptedBlockingEligible(r))
+
+			if tc.want {
+				encoded, err := json.Marshal(v)
+				require.NoError(t, err)
+				var decoded verdict.Verdict
+				require.NoError(t, json.Unmarshal(encoded, &decoded))
+				decodedRefusal, err := decoded.Refusal()
+				require.NoError(t, err)
+				assert.False(t, AcceptedBlockingEligible(decodedRefusal))
+			}
+		})
+	}
+}
+
 func TestAcceptedBlockingEligibilityIgnoresRenderedText(t *testing.T) {
 	r, ok := gateRefusal(statement.KindDropIndex, false, statement.IndexTargetSingleRelation)
 	require.True(t, ok)
-	v := verdict.Verdict{Detail: "first explanation", SaferIdiom: "first rendering"}.WithRefusal(r)
-	before := AcceptedBlockingEligible(r)
-	v.Detail = "completely different"
-	v.SaferIdiom = "different rendering"
-	after := AcceptedBlockingEligible(r)
+	first, err := verdict.Verdict{Detail: "first explanation", SaferIdiom: "first rendering"}.WithRefusal(r).Refusal()
+	require.NoError(t, err)
+	second, err := verdict.Verdict{Detail: "completely different", SaferIdiom: "different rendering"}.WithRefusal(r).Refusal()
+	require.NoError(t, err)
 
-	assert.Equal(t, "completely different", v.Detail)
-	assert.Equal(t, "different rendering", v.SaferIdiom)
-	assert.True(t, before)
-	assert.Equal(t, before, after)
+	assert.Equal(t, first, second)
+	assert.Equal(t, AcceptedBlockingEligible(first), AcceptedBlockingEligible(second))
+	assert.True(t, AcceptedBlockingEligible(first))
 }
 
 // Membership and classification are one walk: an error outside the sentinel
