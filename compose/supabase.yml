@@ -11,7 +11,9 @@ services:
       - ./supabase/init.sql:/docker-entrypoint-initdb.d/init-scripts/99-pgsprite.sql:ro
     command: [postgres, -c, config_file=/etc/postgresql/postgresql.conf]
     healthcheck:
-      test: [CMD, pg_isready, -U, postgres, -d, postgres]
+      # The initialization server accepts Unix sockets before setup finishes.
+      # Dependents need the final TCP listener, not that temporary server.
+      test: [CMD, pg_isready, -h, 127.0.0.1, -U, postgres, -d, postgres]
       interval: 2s
       timeout: 5s
       retries: 30
