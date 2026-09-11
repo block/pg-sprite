@@ -64,12 +64,12 @@ gen-capabilities:
 # Regenerate the capabilities page and fail if regeneration changed it. Only the
 # generator's own edits count, so an uncommitted edit to the hand-written prose
 # outside the marker regions does not trip the gate. The target is a pure
-# check: on failure it prints the diff and puts the committed page back, so a
-# rerun fails the same way and `make gen-capabilities` is the only command
-# that writes the page.
+# check: on failure — a generator error or a diff — it puts the page back as it
+# was before the run, so a rerun fails the same way and `make gen-capabilities`
+# is the only command that writes the page.
 check-capabilities:
 	@before=$$(mktemp); cp docs/capabilities.md "$$before"; \
-	$(GEN_CAPABILITIES) || { rm -f "$$before"; exit 1; }; \
+	$(GEN_CAPABILITIES) || { cp "$$before" docs/capabilities.md; rm -f "$$before"; exit 1; }; \
 	if ! diff -u --label docs/capabilities.md --label regenerated "$$before" docs/capabilities.md; then \
 		cp "$$before" docs/capabilities.md; rm -f "$$before"; \
 		echo "docs/capabilities.md disagrees with pkg/capabilities/capabilities.yaml; run make gen-capabilities and commit the result" >&2; \

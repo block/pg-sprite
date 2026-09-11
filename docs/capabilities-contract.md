@@ -157,8 +157,9 @@ order is display order, formatting has no timestamps, and a second generation is
 The generator lands with the YAML file, not later. `make check-capabilities` runs its
 `go run` entry point and fails unless regeneration leaves the page byte-identical; only
 the generator's own edits count, so an uncommitted edit to the hand-written prose does
-not trip it, and a failing run restores the committed page so the check has no side
-effect and `make gen-capabilities` is the one command that writes it. The unconditional
+not trip it, and a failing run — a generator error or a diff — restores the page as it was
+before the run, so the check has no side effect and `make gen-capabilities` is the one
+command that writes it. The unconditional
 unit job in `.github/workflows/ci.yml` runs that target beside the unit tests on code and
 docs-only changes alike, and `.github/workflows/release.yml` repeats it for the tagged
 tree before the test sweep. The test validates semantics; regenerate-and-diff proves the
