@@ -163,7 +163,11 @@ func TestJSONOmitsEmptyOptionalFields(t *testing.T) {
 // Reason and Cause values are the machine contract automation switches on:
 // flat kebab-case tokens, no spaces or colons — prose belongs in Detail.
 func TestReasonAndCauseTokensAreFlat(t *testing.T) {
-	toks := []string{string(CauseLockBudget), string(CauseStatementBudget)}
+	toks := []string{
+		string(CauseLockBudget), string(CauseStatementBudget),
+		string(CauseParentBlockingIndexBuild), string(CauseParentConcurrentIndexBuild),
+		string(CauseParentIndexAdoption), string(CauseParentNotValidForeignKey),
+	}
 	for _, r := range Reasons() {
 		toks = append(toks, string(r))
 	}

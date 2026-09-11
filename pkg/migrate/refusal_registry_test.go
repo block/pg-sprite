@@ -35,7 +35,7 @@ func deriveRefusalKeys() (keys []classifiedKey, admitted []string) {
 		keys = append(keys, classifiedKey{"create-shape:" + string(c), r, ok})
 	}
 	for _, c := range preflight.PartitionRefusalCauses() {
-		r, ok := plan.PartitionRefusal(c)
+		r, ok := partitionRefusal(c)
 		keys = append(keys, classifiedKey{"partition:" + string(c), r, ok})
 	}
 	for _, err := range admissionSentinels() {
@@ -48,13 +48,22 @@ func deriveRefusalKeys() (keys []classifiedKey, admitted []string) {
 	}
 	for _, k := range statement.Kinds() {
 		for _, concurrent := range []bool{false, true} {
-			r, ok := gateRefusal(k, concurrent)
-			key := fmt.Sprintf("gate:%s/concurrent=%t", k, concurrent)
-			if !ok {
-				admitted = append(admitted, key)
-				continue
+			targets := []statement.IndexTarget{statement.IndexTargetNone}
+			if !concurrent && (k == statement.KindDropIndex || k == statement.KindReindex) {
+				targets = []statement.IndexTarget{statement.IndexTargetSingleRelation, statement.IndexTargetOther}
 			}
-			keys = append(keys, classifiedKey{key, r, ok})
+			for _, target := range targets {
+				r, ok := gateRefusal(k, concurrent, target)
+				key := fmt.Sprintf("gate:%s/concurrent=%t", k, concurrent)
+				if len(targets) > 1 {
+					key = fmt.Sprintf("%s/target=%d", key, target)
+				}
+				if !ok {
+					admitted = append(admitted, key)
+					continue
+				}
+				keys = append(keys, classifiedKey{key, r, ok})
+			}
 		}
 	}
 	for _, s := range siteRefusals() {
@@ -105,6 +114,9 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 			// and owner rule.
 			_, err := verdict.NewRefusal(k.refusal.Class(), k.refusal.Reason(), k.refusal.Owner())
 			require.NoError(t, err)
+			_, decided := acceptedBlockingDecision(k.refusal)
+			require.True(t, decided, "eligibility registry has no explicit decision for class=%q reason=%q cause=%q site=%q",
+				k.refusal.Class(), k.refusal.Reason(), k.refusal.Cause(), k.refusal.Site())
 			classified[k.refusal.Reason()] = true
 		})
 	}
@@ -126,15 +138,15 @@ func TestRefusalRegistryCorrespondence(t *testing.T) {
 	assert.Equal(t, verdict.ClassByDesign, class(plan.CreateShapeRefusal(executor.CreateShapeIfNotExists)))
 	assert.Equal(t, verdict.ClassCapabilityBoundary, class(plan.CreateShapeRefusal(executor.CreateShapePartitionOf)))
 	assert.Equal(t, verdict.ClassInvariantViolation, class(plan.CreateShapeRefusal(executor.CreateShapeMultipleOperations)))
-	assert.Equal(t, verdict.ClassNoOnlineSafetyProblem, class(gateRefusal(statement.KindDataChange, false)))
+	assert.Equal(t, verdict.ClassNoOnlineSafetyProblem, class(gateRefusal(statement.KindDataChange, false, statement.IndexTargetNone)))
 	// unsupported-partitioned-parent spans three.
 	assert.Equal(t, verdict.ClassCapabilityBoundary, class(plan.PartitionRefusal(preflight.PartitionCauseConcurrentIndexBuild)))
 	assert.Equal(t, verdict.ClassByDesign, class(plan.PartitionRefusal(preflight.PartitionCauseIndexAdoption)))
 	assert.Equal(t, verdict.ClassEnvironmental, class(plan.PartitionRefusal(preflight.PartitionCauseNotValidForeignKey)))
 	// index-statement: the plain form is refused by design, the concurrent
 	// form is the operator's to run.
-	assert.Equal(t, verdict.ClassByDesign, class(gateRefusal(statement.KindDropIndex, false)))
-	assert.Equal(t, verdict.ClassNoOnlineSafetyProblem, class(gateRefusal(statement.KindReindex, true)))
+	assert.Equal(t, verdict.ClassByDesign, class(gateRefusal(statement.KindDropIndex, false, statement.IndexTargetSingleRelation)))
+	assert.Equal(t, verdict.ClassNoOnlineSafetyProblem, class(gateRefusal(statement.KindReindex, true, statement.IndexTargetSingleRelation)))
 	// Owners: each no-online-safety-problem kind names who runs it.
 	for kind, owner := range map[statement.Kind]verdict.Owner{
 		statement.KindDataChange:   verdict.OwnerDataChangeRunner,
@@ -143,11 +155,11 @@ func TestRefusalRegistryCorrespondence(t *testing.T) {
 		statement.KindCreateTable:  verdict.OwnerDeclarativeFrontDoor,
 		statement.KindDropIndex:    verdict.OwnerDirectOperator,
 	} {
-		r, ok := gateRefusal(kind, kind == statement.KindDropIndex)
+		r, ok := gateRefusal(kind, kind == statement.KindDropIndex, statement.IndexTargetSingleRelation)
 		require.True(t, ok, kind)
 		assert.Equal(t, owner, r.Owner(), kind)
 	}
-	r, ok := gateRefusal(statement.KindOther, false)
+	r, ok := gateRefusal(statement.KindOther, false, statement.IndexTargetNone)
 	require.True(t, ok)
 	assert.Equal(t, verdict.ClassCapabilityBoundary, r.Class(), "unnamed grammar is a boundary, not someone else's work")
 	assert.Empty(t, r.Owner())
@@ -166,6 +178,58 @@ func TestRefusalRegistryCorrespondence(t *testing.T) {
 	require.True(t, ok)
 	fromCause, _ := plan.CreateShapeRefusal(executor.CreateShapeIfNotExists)
 	assert.Equal(t, fromCause, fromSentinel)
+}
+
+func TestAcceptedBlockingEligibleRowsArePinned(t *testing.T) {
+	index, ok := gateRefusal(statement.KindDropIndex, false, statement.IndexTargetSingleRelation)
+	require.True(t, ok)
+	parent, ok := partitionRefusal(preflight.PartitionCauseBlockingIndexBuild)
+	require.True(t, ok)
+
+	assert.True(t, AcceptedBlockingEligible(index))
+	assert.True(t, AcceptedBlockingEligible(parent))
+	assert.False(t, AcceptedBlockingEligible(rewriteRequiredRefusal()))
+	assert.False(t, AcceptedBlockingEligible(backendUnavailableRefusal()))
+}
+
+func TestIndexStatementAcceptedBlockingEligibility(t *testing.T) {
+	tests := []struct {
+		name string
+		sql  string
+		want bool
+	}{
+		{"drop one index", "DROP INDEX app.i", true},
+		{"reindex index", "REINDEX INDEX app.i", true},
+		{"reindex table", "REINDEX TABLE app.t", true},
+		{"drop multiple indexes", "DROP INDEX app.i, app.j", false},
+		{"reindex schema", "REINDEX SCHEMA app", false},
+		{"reindex database", "REINDEX DATABASE app", false},
+		{"reindex system", "REINDEX SYSTEM app", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st, err := statement.ParseOne(tc.sql)
+			require.NoError(t, err)
+			r, ok := gateRefusal(st.Kind(), st.Concurrent(), st.IndexTarget())
+			require.True(t, ok)
+			assert.Equal(t, tc.want, AcceptedBlockingEligible(r))
+		})
+	}
+}
+
+func TestAcceptedBlockingEligibilityIgnoresRenderedText(t *testing.T) {
+	r, ok := gateRefusal(statement.KindDropIndex, false, statement.IndexTargetSingleRelation)
+	require.True(t, ok)
+	v := verdict.Verdict{Detail: "first explanation", SaferIdiom: "first rendering"}.WithRefusal(r)
+	before := AcceptedBlockingEligible(r)
+	v.Detail = "completely different"
+	v.SaferIdiom = "different rendering"
+	after := AcceptedBlockingEligible(r)
+
+	assert.Equal(t, "completely different", v.Detail)
+	assert.Equal(t, "different rendering", v.SaferIdiom)
+	assert.True(t, before)
+	assert.Equal(t, before, after)
 }
 
 // Membership and classification are one walk: an error outside the sentinel

@@ -373,7 +373,7 @@ Sequence implementation as follows:
    cause or refusal site. The `index-statement` site distinguishes the single-relation forms
    from `DROP INDEX a, b` and `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM`, so the registry can
    admit the former and refuse the latter without a database. Its completeness tests make new
-   values ineligible by default and prove that render text is never consulted.
+   values ineligible by default and prove that render text is never consulted. *(done)*
 2. Add the executor path through engine-owned bounded sessions, requiring explicit non-zero
    `statement_timeout` and non-zero `lock_timeout`. At this step add lock-budget invariants to
    [the invariant registry](invariants.md): every passthrough statement runs in an

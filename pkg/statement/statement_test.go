@@ -99,27 +99,27 @@ func TestParseOneKinds(t *testing.T) {
 		{
 			name: "drop index",
 			sql:  "DROP INDEX idx_users_email",
-			want: Statement{kind: KindDropIndex},
+			want: Statement{kind: KindDropIndex, indexTarget: IndexTargetSingleRelation},
 		},
 		{
 			name: "drop index concurrently",
 			sql:  "DROP INDEX CONCURRENTLY idx_users_email",
-			want: Statement{kind: KindDropIndex, concurrent: true},
+			want: Statement{kind: KindDropIndex, concurrent: true, indexTarget: IndexTargetSingleRelation},
 		},
 		{
 			name: "reindex table",
 			sql:  "REINDEX TABLE users",
-			want: Statement{kind: KindReindex},
+			want: Statement{kind: KindReindex, indexTarget: IndexTargetSingleRelation},
 		},
 		{
 			name: "reindex index",
 			sql:  "REINDEX INDEX idx_users_email",
-			want: Statement{kind: KindReindex},
+			want: Statement{kind: KindReindex, indexTarget: IndexTargetSingleRelation},
 		},
 		{
 			name: "reindex table concurrently",
 			sql:  "REINDEX TABLE CONCURRENTLY users",
-			want: Statement{kind: KindReindex, concurrent: true},
+			want: Statement{kind: KindReindex, concurrent: true, indexTarget: IndexTargetSingleRelation},
 		},
 		{
 			name: "alter index parses as AlterTableStmt but is not a table target",

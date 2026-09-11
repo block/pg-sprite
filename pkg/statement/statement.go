@@ -89,8 +89,24 @@ type Statement struct {
 	schema      string
 	table       string
 	concurrent  bool
+	indexTarget IndexTarget
 	buildsIndex bool
 }
+
+// IndexTarget identifies whether an index-maintenance statement names one
+// relation. The gate uses this parse-only fact to keep forms requiring more
+// than one lock acknowledgement out of accepted-blocking eligibility.
+type IndexTarget int
+
+const (
+	// IndexTargetNone is carried by statements outside index maintenance.
+	IndexTargetNone IndexTarget = iota
+	// IndexTargetSingleRelation covers one DROP INDEX and REINDEX INDEX or TABLE.
+	IndexTargetSingleRelation
+	// IndexTargetOther covers multi-index DROP and REINDEX scopes that do not
+	// name one relation: SCHEMA, DATABASE, and SYSTEM.
+	IndexTargetOther
+)
 
 // SQL returns the original statement text as submitted.
 func (s Statement) SQL() string { return s.sql }
@@ -111,6 +127,9 @@ func (s Statement) Table() string { return s.table }
 // Concurrent reports whether an index statement used its CONCURRENTLY form.
 // It is always false for non-index kinds.
 func (s Statement) Concurrent() bool { return s.concurrent }
+
+// IndexTarget returns the typed target shape of an index-maintenance statement.
+func (s Statement) IndexTarget() IndexTarget { return s.indexTarget }
 
 // BuildsIndex reports whether executing the statement creates a new index:
 // every CREATE INDEX, and the ALTER TABLE shapes that build one as a side
@@ -218,12 +237,24 @@ func ParseOne(sql string) (Statement, error) {
 		if node.GetDropStmt().GetRemoveType() == pganalyze.ObjectType_OBJECT_INDEX {
 			st.kind = KindDropIndex
 			st.concurrent = node.GetDropStmt().GetConcurrent()
+			if len(node.GetDropStmt().GetObjects()) == 1 {
+				st.indexTarget = IndexTargetSingleRelation
+			} else {
+				st.indexTarget = IndexTargetOther
+			}
 		} else {
 			st.kind = KindCatalogWork
 		}
 	case node.GetReindexStmt() != nil:
 		st.kind = KindReindex
 		st.concurrent = reindexConcurrently(node.GetReindexStmt())
+		switch node.GetReindexStmt().GetKind() {
+		case pganalyze.ReindexObjectType_REINDEX_OBJECT_INDEX,
+			pganalyze.ReindexObjectType_REINDEX_OBJECT_TABLE:
+			st.indexTarget = IndexTargetSingleRelation
+		default:
+			st.indexTarget = IndexTargetOther
+		}
 	default:
 		// Parsed statements that are recognized catalog operations are direct
 		// operator work. Truly unknown grammar nodes retain KindOther.

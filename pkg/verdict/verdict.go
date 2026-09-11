@@ -185,7 +185,22 @@ type Refusal struct {
 	class  Class
 	reason Reason
 	owner  Owner
+	cause  Cause
+	site   RefusalSite
 }
+
+// RefusalSite is a typed refusal-site discriminator used when a reason spans
+// statement shapes but has no underlying cause.
+type RefusalSite string
+
+const (
+	// RefusalSiteIndexSingleRelation is the plain one-relation DROP INDEX,
+	// REINDEX INDEX, or REINDEX TABLE gate site.
+	RefusalSiteIndexSingleRelation RefusalSite = "index-statement-single-relation"
+	// RefusalSiteIndexOther is a multi-relation DROP INDEX or a REINDEX scope
+	// that does not identify one relation.
+	RefusalSiteIndexOther RefusalSite = "index-statement-other"
+)
 
 // NewRefusal validates and constructs a refusal proof. It rejects a reason
 // outside Reasons(), a class outside Classes(), an owner outside Owners(),
@@ -257,6 +272,24 @@ func (r Refusal) Reason() Reason { return r.reason }
 // no-online-safety-problem.
 func (r Refusal) Owner() Owner { return r.owner }
 
+// Cause returns the typed cause that narrows the refusal, when one exists.
+func (r Refusal) Cause() Cause { return r.cause }
+
+// Site returns the typed refusal site that narrows the refusal, when one exists.
+func (r Refusal) Site() RefusalSite { return r.site }
+
+// WithCause returns r narrowed by a typed cause.
+func (r Refusal) WithCause(cause Cause) Refusal {
+	r.cause = cause
+	return r
+}
+
+// WithSite returns r narrowed by a typed refusal site.
+func (r Refusal) WithSite(site RefusalSite) Refusal {
+	r.site = site
+	return r
+}
+
 // IsZero reports whether r was never constructed through NewRefusal.
 func (r Refusal) IsZero() bool { return r == Refusal{} }
 
@@ -299,6 +332,17 @@ const (
 	// CauseStatementBudget: the statement ran past statement_timeout and was
 	// cancelled; the change needs a rewrite.
 	CauseStatementBudget Cause = "statement-budget"
+	// CauseParentBlockingIndexBuild identifies a blocking index build on a
+	// partitioned parent.
+	CauseParentBlockingIndexBuild Cause = "parent-blocking-index-build"
+	// CauseParentConcurrentIndexBuild identifies a concurrent index build on
+	// a partitioned parent.
+	CauseParentConcurrentIndexBuild Cause = "parent-concurrent-index-build"
+	// CauseParentIndexAdoption identifies index adoption on a partitioned parent.
+	CauseParentIndexAdoption Cause = "parent-index-adoption"
+	// CauseParentNotValidForeignKey identifies a NOT VALID foreign key on a
+	// partitioned parent.
+	CauseParentNotValidForeignKey Cause = "parent-not-valid-foreign-key"
 )
 
 // Verdict is the structured outcome of one migrate invocation.

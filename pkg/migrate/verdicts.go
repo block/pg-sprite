@@ -21,7 +21,7 @@ import (
 // statements are never executed. Gate needs no database, so a caller can
 // refuse before dialing; [Run] re-checks it regardless.
 func Gate(st statement.Statement) (verdict.Verdict, bool) {
-	r, refused := gateRefusal(st.Kind(), st.Concurrent())
+	r, refused := gateRefusal(st.Kind(), st.Concurrent(), st.IndexTarget())
 	if !refused {
 		return verdict.Verdict{}, false
 	}
