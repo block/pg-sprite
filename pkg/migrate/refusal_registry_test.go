@@ -181,16 +181,86 @@ func TestRefusalRegistryCorrespondence(t *testing.T) {
 	assert.Equal(t, fromCause, fromSentinel)
 }
 
+// The eligible set is pinned from both sides over the same production walk
+// the completeness harness uses: exactly the single-relation DROP INDEX and
+// REINDEX gate keys and the blocking parent index build are eligible, and
+// every other key the closed sets name — the other partition causes, the
+// concurrent and multi-relation index forms, every create-shape cause,
+// admission sentinel, site refusal, and the route refusal — is ineligible.
+// A registry that flipped a sibling cause or dropped a class check would
+// change this set.
 func TestAcceptedBlockingEligibleRowsArePinned(t *testing.T) {
-	index, ok := gateRefusal(statement.KindDropIndex, false, statement.IndexTargetSingleRelation)
-	require.True(t, ok)
-	parent, ok := partitionRefusal(preflight.PartitionCauseBlockingIndexBuild)
-	require.True(t, ok)
+	keys, _ := deriveRefusalKeys()
+	require.NotEmpty(t, keys)
 
-	assert.True(t, AcceptedBlockingEligible(index))
-	assert.True(t, AcceptedBlockingEligible(parent))
+	var eligible []string
+	for _, k := range keys {
+		if AcceptedBlockingEligible(k.refusal) {
+			eligible = append(eligible, k.key)
+		}
+	}
+	assert.ElementsMatch(t, []string{
+		"gate:DROP INDEX/concurrent=false/target=single-relation",
+		"gate:REINDEX/concurrent=false/target=single-relation",
+		"partition:" + string(preflight.PartitionCauseBlockingIndexBuild),
+	}, eligible)
+
+	for _, cause := range preflight.PartitionRefusalCauses() {
+		r, ok := partitionRefusal(cause)
+		require.True(t, ok, cause)
+		assert.Equal(t, cause == preflight.PartitionCauseBlockingIndexBuild, AcceptedBlockingEligible(r), cause)
+	}
 	assert.False(t, AcceptedBlockingEligible(rewriteRequiredRefusal()))
 	assert.False(t, AcceptedBlockingEligible(backendUnavailableRefusal()))
+}
+
+// The registry's default arms are fail-closed, not merely undecided: a
+// reason, site, or cause outside the vocabulary it enumerates is ineligible
+// and reported as undecided, so the completeness harness rejects it. The
+// per-class constructors do not validate their reason, which is how a
+// vocabulary addition reaches the registry before it is classified.
+func TestAcceptedBlockingUnknownKeysFailClosed(t *testing.T) {
+	tests := []struct {
+		name    string
+		refusal verdict.Refusal
+	}{
+		{"unknown reason", verdict.ByDesign("brand-new-reason")},
+		{"unknown site under index-statement", verdict.ByDesign(verdict.ReasonIndexStatement).WithSite("brand-new-site")},
+		{"unknown cause under partitioned parent", verdict.CapabilityBoundary(verdict.ReasonUnsupportedPartitionedParent).WithCause("brand-new-cause")},
+		{"no cause under partitioned parent", verdict.CapabilityBoundary(verdict.ReasonUnsupportedPartitionedParent)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			eligible, decided := acceptedBlockingDecision(tc.refusal)
+			assert.False(t, eligible)
+			assert.False(t, decided)
+			assert.False(t, AcceptedBlockingEligible(tc.refusal))
+		})
+	}
+}
+
+// Each eligible row is keyed on its class as well as its reason and
+// discriminator: the same reason and site, or reason and cause, under a
+// different class is a decided ineligible key, not an eligible one.
+func TestAcceptedBlockingRowsRequireTheirClass(t *testing.T) {
+	tests := []struct {
+		name    string
+		refusal verdict.Refusal
+	}{
+		{"index site outside by-design",
+			verdict.NoOnlineSafetyProblem(verdict.ReasonIndexStatement, verdict.OwnerDirectOperator).
+				WithSite(verdict.RefusalSiteIndexSingleRelation)},
+		{"parent cause outside capability-boundary",
+			verdict.ByDesign(verdict.ReasonUnsupportedPartitionedParent).
+				WithCause(verdict.CauseParentBlockingIndexBuild)},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			eligible, decided := acceptedBlockingDecision(tc.refusal)
+			assert.False(t, eligible)
+			assert.True(t, decided)
+		})
+	}
 }
 
 func TestIndexStatementAcceptedBlockingEligibility(t *testing.T) {
