@@ -22,6 +22,7 @@ Aurora-only. Why that combination is the product is [vision.md](vision.md); star
 
 | Doc | Contents |
 | --- | --- |
+| [supabase.md](supabase.md) | Supabase native schema change experiments, connection guidance and validation boundaries |
 | [vision.md](vision.md) | The **vision statement** — what pg-sprite is (the reliable execution engine under a GitOps front-end like [SchemaBot](https://github.com/block/schemabot), as [Spirit](https://github.com/block/spirit) is for MySQL) and what it deliberately is not. Five pillars, success criteria, and explicit non-goals. Start here for the why. |
 | [architecture.md](architecture.md) | The **one-screen codebase map** — the three layers, the package map with build status, the copy-and-swap lifecycle, and where to read more. Start here for orientation. |
 | [postgres-online-ddl-reference.md](postgres-online-ddl-reference.md) | The PostgreSQL equivalent of MySQL's [InnoDB Online DDL Operations](https://dev.mysql.com/doc/refman/8.4/en/innodb-online-ddl-operations.html) reference — the **three buckets** (catalog-only / full scan / full rewrite) MySQL's `ALGORITHM` states map to, then lock levels, rewrite/scan behaviour, and concurrent-DML safety per operation. |

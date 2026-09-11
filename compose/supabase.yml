@@ -1,0 +1,15 @@
+# Disposable database-only compatibility target; does not start Auth or Realtime.
+services:
+  postgres:
+    image: supabase/postgres:17.6.1.136@sha256:f371b5f3f2ac0a05703f33d6e6134515fb2498cab708fb948a0aeb7481467c00
+    ports:
+      - "127.0.0.1:${PG_PORT:-55438}:5432"
+    environment:
+      POSTGRES_PASSWORD: pgsprite_test_only
+      POSTGRES_DB: postgres
+    command: [postgres, -c, config_file=/etc/postgresql/postgresql.conf]
+    healthcheck:
+      test: [CMD, pg_isready, -U, postgres, -d, postgres]
+      interval: 2s
+      timeout: 5s
+      retries: 30
