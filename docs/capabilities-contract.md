@@ -74,7 +74,7 @@ path on T3 rows.
             │ go:embed                   │ regenerate                  │ committed
             ▼                            ▼                             ▼
 ┌───────────────────────┐     ┌─────────────────────────────────────────────────────┐
-│ pkg/capabilities      │     │ CI gate: regenerate, then require an empty git diff │
+│ pkg/capabilities      │     │ CI gate: regenerate, then require a no-op rewrite   │
 └───────────┬───────────┘     └─────────────────────────────────────────────────────┘
             │
             ▼
@@ -154,10 +154,16 @@ markers — the introduction, tier explanation, legend, peer comparison, refusal
 and operator recipes — remains hand-written. Generated output is deterministic: source
 order is display order, formatting has no timestamps, and a second generation is a no-op.
 
-The generator lands with the YAML file, not later. A Make target runs its `go run`
-entry point. CI runs that target and then fails unless `git diff --exit-code` is empty.
-The test validates semantics; regenerate-and-diff proves the checked-in human page is
-the rendering of the validated data.
+The generator lands with the YAML file, not later. `make check-capabilities` runs its
+`go run` entry point and fails unless regeneration leaves the page byte-identical; only
+the generator's own edits count, so an uncommitted edit to the hand-written prose does
+not trip it, and a failing run — a generator error or a diff — restores the page as it was
+before the run, so the check has no side effect and `make gen-capabilities` is the one
+command that writes it. The unconditional
+unit job in `.github/workflows/ci.yml` runs that target beside the unit tests on code and
+docs-only changes alike, and `.github/workflows/release.yml` repeats it for the tagged
+tree before the test sweep. The test validates semantics; regenerate-and-diff proves the
+checked-in human page is the rendering of the validated data.
 
 The capability-statement rule still applies beyond the generated matrix. A behavior
 change updates the YAML, [limitations.md](limitations.md), and the README's short
@@ -261,7 +267,7 @@ prerequisite for the others; the rest land independently:
    and markers together, making the repository single-source on day one; *(done)*
 2. add `pg-sprite capabilities`, including `--json` and the embedded binary version;
    *(done)*
-3. add the regenerate-and-diff CI gate to the normal pipeline; and *(pending)*
+3. add the regenerate-and-diff CI gate to the normal pipeline; and *(done)*
 4. add documentation and `jq` recipes for consumers. *(done)*
 
 The generator is part of the first step rather than a cleanup step: there is never an

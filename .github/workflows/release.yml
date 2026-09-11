@@ -41,6 +41,10 @@ jobs:
           # previous workflow could have poisoned.
           cache: false
 
+      # A tag cannot ship a capabilities matrix that disagrees with its YAML.
+      - name: Check the capabilities matrix
+        run: make check-capabilities
+
       # Belt and braces on top of the ancestry gate: re-run the suite against
       # the exact tree being released.
       - name: Test the tagged tree

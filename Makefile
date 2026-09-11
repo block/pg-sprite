@@ -14,7 +14,7 @@ PG_DSN_LOCAL = postgres://$(PG_USER):$(PG_PASSWORD)@localhost:$(PG_PORT)/$(PG_DA
 # Which corpus replay project to run (replay/<project>/project.conf).
 REPLAY_PROJECT ?= buzz
 
-.PHONY: build gen-capabilities test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
+.PHONY: build gen-capabilities check-capabilities test test-unit test-db test-supported-postgres test-aws-boundary lint setup db-up db-down demos clean demo demo-seed demo-check replay replay-refresh replay-down
 
 # The first target is make's default goal: keep build here so a bare
 # `make` builds the binary rather than rewriting a checked-in document.
@@ -54,9 +54,28 @@ lint:
 	golangci-lint run
 
 # Regenerate the marked regions of docs/capabilities.md from the embedded
-# matrix (pkg/capabilities/capabilities.yaml); CI fails if they drift.
+# matrix (pkg/capabilities/capabilities.yaml); CI fails if they drift. The
+# gate below runs the same command, so the two cannot drift apart.
+GEN_CAPABILITIES = $(GO) run ./internal/cmd/gen-capabilities
+
 gen-capabilities:
-	$(GO) run ./internal/cmd/gen-capabilities
+	$(GEN_CAPABILITIES)
+
+# Regenerate the capabilities page and fail if regeneration changed it. Only the
+# generator's own edits count, so an uncommitted edit to the hand-written prose
+# outside the marker regions does not trip the gate. The target is a pure
+# check: on failure — a generator error or a diff — it puts the page back as it
+# was before the run, so a rerun fails the same way and `make gen-capabilities`
+# is the only command that writes the page.
+check-capabilities:
+	@before=$$(mktemp); cp docs/capabilities.md "$$before"; \
+	$(GEN_CAPABILITIES) || { cp "$$before" docs/capabilities.md; rm -f "$$before"; exit 1; }; \
+	if ! diff -u --label docs/capabilities.md --label regenerated "$$before" docs/capabilities.md; then \
+		cp "$$before" docs/capabilities.md; rm -f "$$before"; \
+		echo "docs/capabilities.md disagrees with pkg/capabilities/capabilities.yaml; run make gen-capabilities and commit the result" >&2; \
+		exit 1; \
+	fi; \
+	rm -f "$$before"
 
 # Configure git hooks (relative path so worktrees work too).
 setup:
