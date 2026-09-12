@@ -71,7 +71,7 @@ is a one-line summary; the linked reference entry is authoritative.
 | [`unsupported-partitioned-parent`](postgres-online-ddl-reference.md#unsupported-partitioned-parent) | The routed plan builds an index concurrently but the target is a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. Refused. |
 | [`unsupported-statement`](postgres-online-ddl-reference.md#unsupported-statement) | The planner knows no safe path for the statement (for example `SET UNLOGGED`, `CLUSTER ON`). Refused — the same typed reason the run path's refusal verdict carries. |
 | [`table-not-found`](postgres-online-ddl-reference.md#table-not-found) | The target table does not exist, so classification fell back to zero facts; running without `--dry-run` would fail. The dry run exits 2 and the report carries `table_exists: false`. |
-| [`destructive`](postgres-online-ddl-reference.md#destructive) | The change discards live data or structure (`DROP COLUMN`, `DROP TABLE`, truncating conversions). A warning alongside the routing decision, not a refusal. |
+| [`destructive`](postgres-online-ddl-reference.md#destructive) | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL` (dropping a `DEFAULT` is not destructive). A warning alongside the routing decision, not a refusal; `DROP TABLE` never reaches classification, it refuses as `unsupported-statement`. |
 | [`blocking-idiom`](lint-report.md#codes-code) | Lint-only code: the submitted form blocks readers or writers and a safer native form exists; the finding's `suggestion` carries the safer SQL when the linter can construct it. |
 
 ## Refusal reasons
@@ -93,7 +93,15 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 | `destructive-change` | The desired-state plan discards live structure — a dropped column, constraint, index, or `NOT NULL` — and desired-state execution runs no destructive statement; run the drop deliberately instead ([execution model](execution-model.md)). |
 | `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
 | `create-collision` | The greenfield create plan's table name or a claimed index, constraint-index, or sequence name is occupied. Nothing runs; re-derive the plan against the live catalog to see what holds the name, then drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column — re-planning alone reproduces the refusal. Catalog absence checks handle existing occupants. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff. |
-| `create-names-unverified` | The `CREATE TABLE` committed but the read of the constraint-index and sequence names the table owns did not complete, so whether every first-choice claim was honoured is unknown. The born table is left in place; compare its names against the desired file, rename or drop, then re-diff. |
+
+Two codes that look like refusals are not: `create-name-mismatch` and
+`create-names-unverified` are executor failure codes on a `failed` verdict (exit 1,
+`failed_step` 1), because the `CREATE TABLE` has already committed when they arise.
+The first means a claimed first-choice constraint-index or sequence name went to an
+occupant inside the probe's window and the server suffixed it; the second means the
+read of the names the table owns did not complete, so the claims are unproven, not
+failed. In both the born table is left in place — compare its names against the
+desired file, rename or drop, then re-diff.
 
 ## Migrate
 

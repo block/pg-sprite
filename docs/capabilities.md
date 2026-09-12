@@ -333,13 +333,18 @@ where one exists — the exact safer sequence or the statement an operator can r
 deliberately, outside the engine, in a maintenance window. The operator stays in
 control; the engine stays honest. `--force` never bypasses a policy refusal.
 
-A constrained variant is **planned**: an explicit, dedicated flag (distinct from
-`--force`) that executes an otherwise-refused change through the engine's own bounded
-`lock_timeout` sessions ("unsafe DDL under a bounded lock budget", which raw psql does
-not give you), with the refusal analysis still printed before execution and the verdict
-unmistakably marked as executed without an online-safety guarantee. The plain success
-contract stays reserved for online-safe paths, and refusals for unrecognized SQL are
-never eligible — only changes the engine understands but cannot run *safely*.
+A constrained variant exists as a **library primitive, with no CLI flag yet**: an
+explicit, dedicated acceptance (distinct from `--force`) executes an otherwise-refused
+change through the engine's own bounded `lock_timeout` sessions ("unsafe DDL under a
+bounded lock budget", which raw psql does not give you), with the refusal analysis still
+produced before execution and the verdict unmistakably marked as executed without an
+online-safety guarantee (`outcome: executed-without-online-safety`, exit 3 — never 0).
+`executor.ExecuteAcceptedBlocking` runs it and `Verdict.WithAcceptedBlocking` records it;
+the refused statement's `blocking_passthrough_eligible` field on the plan report says
+whether a refusal qualifies. Only changes the engine understands but cannot run *safely*
+are eligible — refusals for unrecognized SQL never are. A `migrate` flag that reaches the
+primitive is the remaining step; until it lands the CLI exits 2 for these refusals. The
+design is [lock-budgeted-passthrough.md](lock-budgeted-passthrough.md).
 
 ## Deliberately operator-owned
 

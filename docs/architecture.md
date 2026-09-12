@@ -21,18 +21,19 @@ pg-sprite is a decoupled **planner → router → executor** engine. The planner
 changes, the router decides *which strategy*, interchangeable executors decide *how*.
 
 The planner is itself a pipeline of five distinct stages. The two front-ends enter it at
-different points — an imperative `--alter` already *is* DDL, so it goes straight to parse;
-a declarative `--desired` schema must first be compared against the live database to
+different points — an imperative `migrate --alter` already *is* DDL, so it goes straight to parse;
+a declarative `diff --desired` schema must first be compared against the live database to
 *produce* DDL — and the derived statements then re-enter the parse boundary like any
 hand-written statement, so both routes converge on the same parse → classify → lint tail
 and every operation is judged by the same rules regardless of how it arrived:
 
 ```
-   user: --alter "ALTER TABLE …"           user: --desired schema.sql
+   user: migrate --alter "ALTER TABLE …"   user: diff --desired schema.sql
      (imperative: statements)               (declarative: whole schema)
                   │                                      │
         ╭─────────▼──────────────────────────────────────▼─────────╮
-        │    CLI: migrate · diff · fmt · lint · suggest · status   │
+        │  CLI: migrate · pull · diff · fmt · lint · suggest ·     │
+        │       capabilities · status                              │
         ╰─────────┬──────────────────────────────────────┬─────────╯
                   │                                      │
    ┌──────────────▼───── PLANNER (shared front-end) ─────▼──────────────┐
@@ -161,10 +162,11 @@ architectural decision; this is the permission slip. Two integration surfaces ex
 different levels of commitment:
 
 - **The CLI and its JSON output** — the intended seam for orchestrators. `diff` and
-  `--dry-run` emit machine-readable verdicts and plans; the plan report freezes as a
-  single versioned contract (an explicit schema-version field, additive-only changes
-  within a version) in Phase 2.5. Until that lands its shape may change in any PR — wait
-  for the versioned report rather than pinning the interim shape.
+  `--dry-run` emit machine-readable verdicts and plans; the plan report is a single
+  versioned contract (`format_version`, `plan.FormatVersion`; additive-only changes
+  within a version, a consumer rejects a version it does not understand), documented in
+  [plan-report.md](plan-report.md). The suggest report and `capabilities --json` carry
+  their own version fields on the same rule.
 - **The Go packages** — everything under `pkg/` is importable, and the front-end seams
   (`pkg/statement`, `pkg/schemadiff`, `pkg/planner`, `pkg/router`, `pkg/verdict`) are
   each designed as a standalone entry point; `internal/` is unimportable by
@@ -177,8 +179,8 @@ different levels of commitment:
 
 | Package | Role | Status |
 | --- | --- | --- |
-| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `diff` · `fmt` · `lint` · `suggest` · `status` | all six exist |
-| `internal/cli` | Command tree and flag handling (including `migrate --dry-run`) | all six exist |
+| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `pull` · `diff` · `fmt` · `lint` · `suggest` · `capabilities` · `status` | all eight exist |
+| `internal/cli` | Command tree and flag handling (including `migrate --dry-run`) | all eight exist |
 | `internal/testutil` | Test harness: containerized PostgreSQL, throwaway schemas | exists |
 | `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; advisory-lock mutual exclusion lands here | exists |
 | `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parse boundary, typed per-operation descriptors, and advisory rewrites (never hand-parse SQL); shadow DDL is validated by executing the retargeted statement on the empty shadow, and fingerprints come from `pkg/schemadiff`'s transaction-scoped scratch schema — execute-and-introspect, never AST surgery | exists |
