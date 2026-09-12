@@ -65,6 +65,9 @@ var ErrUnrenderableCollation = errors.New("columns with an explicit collation ca
 // valid, so the round-trip diff of such a table is exactly the create-index
 // change that rebuilds it.
 func Render(m Model) (string, error) {
+	if m.RowSecurity.present() {
+		return "", fmt.Errorf("render table %q: %w", m.Table, ErrUnrenderableRowSecurity)
+	}
 	if m.PartitionKey != "" {
 		return "", fmt.Errorf("render table %q: partitioned parent (PARTITION BY %s): %w", m.Table, m.PartitionKey, ErrUnrenderablePartition)
 	}

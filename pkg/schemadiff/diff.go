@@ -98,9 +98,14 @@ type Change struct {
 // qualifies the emitted statements' table references. Columns are compared
 // by name only: attribute order carries no semantics in PostgreSQL and is
 // deliberately out of scope for convergence.
+// RowSecurity is observational only: table-only desired files do not claim
+// ownership of access control, so missing policies never produce policy drops.
 func Diff(schema string, live, desired Model) ([]Change, error) {
 	if live.Table != desired.Table {
 		return nil, fmt.Errorf("%w: %q vs %q", ErrDifferentTables, live.Table, desired.Table)
+	}
+	if desired.RowSecurity.present() {
+		return nil, fmt.Errorf("desired row security is not managed: %w", ErrUnsupportedChange)
 	}
 	// Partitioning is table identity, not an alterable attribute: no ALTER
 	// can add, remove, or change a partition key or a partition attachment

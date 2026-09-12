@@ -55,6 +55,10 @@ Aurora-only. Why that combination is the product is [vision.md](vision.md); star
 | [testing.md](testing.md) | The **test-suite guide** — how to run the suite (unit, per-major, all supported majors, compose database), current coverage, the remaining executor-phase test obligations, and the vanilla-PostgreSQL-matrix vs real-Aurora validation boundary. |
 | [schemabot-integration.md](schemabot-integration.md) | The **single home for orchestrator integration** — how SchemaBot (the reference orchestrator) drives the engine: the pluggable-engine overview, the verb mappings, the concrete adapter contract, and the design constraints (OC-* invariants) the integration imposes on the core. |
 
+For the proposed extension to table-local access control, see
+[Declarative row security](declarative-row-security.md): the existing inspection
+boundary, the SQL format to reuse, and the remaining safety and execution work.
+
 ## The decided shape
 
 pg-sprite is a **decoupled planner → router → executor** engine — not a port of any one

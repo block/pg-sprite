@@ -66,6 +66,9 @@ refusal — never a silently wrong or incomplete result:
 
 - **Copy-and-swap** (genuine table rewrites) is not yet available — those
   changes refuse rather than fall through to a blocking rewrite.
+- **Row security** is inspected but not managed: export refuses a table with
+  RLS settings or policies rather than omit them. Declarative support is being
+  designed in [declarative-row-security.md](docs/declarative-row-security.md).
 - **Foreign keys** are out of the declarative model in either direction:
   desired files cannot declare them, and export refuses both a table that
   carries foreign keys and a table that other tables reference. FK DDL

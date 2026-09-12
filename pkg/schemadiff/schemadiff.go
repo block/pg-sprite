@@ -100,6 +100,10 @@ type Index struct {
 type Model struct {
 	// Table is the unqualified table name.
 	Table string
+	// RowSecurity records settings and policies for inspection and export
+	// refusal. Diff leaves access control separately managed; absence in a
+	// table-only desired file is not a request to remove live policies.
+	RowSecurity RowSecurity
 	// PartitionKey is the server-decompiled partition key definition
 	// (pg_get_partkeydef), e.g. "RANGE (created_at)" — empty for a
 	// non-partitioned table.
