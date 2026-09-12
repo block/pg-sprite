@@ -39,42 +39,60 @@ var exitCodeLadderDocs = []string{
 const exitCodeLadderHeader = "| Exit | Meaning |"
 
 // exitCodeLadder is every process exit code the binary produces: the
-// ExitCode* constants declared in verdict.go, read from the source so a new
-// constant is in the ladder before anyone remembers to list it, plus the two
-// shell conventions the entry point inherits without a named constant — 0
-// for success and 1 for any error kong reports.
+// ExitCode* constants declared anywhere in this package's non-test source,
+// read from the files so a new constant is in the ladder before anyone
+// remembers to list it, whichever file its author opened, plus the two shell
+// conventions the entry point inherits without a named constant — 0 for
+// success and 1 for any error kong reports.
 func exitCodeLadder(t *testing.T) map[int]struct{} {
 	t.Helper()
-	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, "verdict.go", nil, parser.SkipObjectResolution)
+	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
 
+	fset := token.NewFileSet()
 	ladder := map[int]struct{}{0: {}, 1: {}}
-	for _, decl := range file.Decls {
-		gen, ok := decl.(*ast.GenDecl)
-		if !ok || gen.Tok != token.CONST {
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		for _, spec := range gen.Specs {
-			vs, ok := spec.(*ast.ValueSpec)
-			if !ok {
+		file, err := parser.ParseFile(fset, name, nil, parser.SkipObjectResolution)
+		require.NoError(t, err)
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
 				continue
 			}
-			for i, name := range vs.Names {
-				if !strings.HasPrefix(name.Name, "ExitCode") {
-					continue
-				}
-				lit, ok := vs.Values[i].(*ast.BasicLit)
-				require.Truef(t, ok && lit.Kind == token.INT, "%s is an integer literal", name.Name)
-				code, err := strconv.Atoi(lit.Value)
-				require.NoError(t, err)
-				ladder[code] = struct{}{}
+			for _, spec := range gen.Specs {
+				collectExitCodes(t, ladder, spec)
 			}
 		}
 	}
-	require.Contains(t, ladder, ExitCodeRefused, "the walker recognises the declared constants")
-	require.Contains(t, ladder, ExitCodeAcceptedBlocking, "the walker recognises the declared constants")
+	require.Greater(t, len(ladder), 2, "the walker found at least one declared ExitCode constant")
 	return ladder
+}
+
+// collectExitCodes adds every ExitCode* name in one const spec to the
+// ladder. Each name must carry its own integer literal: a spec that repeats
+// the previous one implicitly, or derives from iota or another constant, is
+// rejected by name rather than indexed past the end of its values.
+func collectExitCodes(t *testing.T, ladder map[int]struct{}, spec ast.Spec) {
+	t.Helper()
+	vs, ok := spec.(*ast.ValueSpec)
+	if !ok {
+		return
+	}
+	for i, name := range vs.Names {
+		if !strings.HasPrefix(name.Name, "ExitCode") {
+			continue
+		}
+		require.Lessf(t, i, len(vs.Values), "%s states its value explicitly", name.Name)
+		lit, ok := vs.Values[i].(*ast.BasicLit)
+		require.Truef(t, ok && lit.Kind == token.INT, "%s is an integer literal", name.Name)
+		code, err := strconv.Atoi(lit.Value)
+		require.NoError(t, err)
+		ladder[code] = struct{}{}
+	}
 }
 
 // documentedExitCodes returns the first-cell integer of every row under
@@ -105,7 +123,7 @@ func documentedExitCodes(t *testing.T, doc string) map[int]struct{} {
 }
 
 // Every page that states the ladder must list exactly the exit codes the
-// binary produces: an exit-code constant added to verdict.go without a row
+// binary produces: an exit-code constant added to this package without a row
 // saying what it means for a shell gate fails here, a ladder table that
 // drops a code fails, and so does a row for a code the binary no longer
 // exits with.

@@ -210,7 +210,7 @@ vouch for it as online-safe.
 | 2 | Refused: no online-safe path, and the verdict names the typed `reason` (and `class`) automation switches on | no | not applicable |
 | 3 | Committed through the accepted-blocking passthrough — the operator explicitly accepted a blocking form, and the engine ran it under bounded budgets without vouching for online safety | yes | no |
 
-Three rules follow from the table:
+Three rules follow from the table, and one note for embedders:
 
 - **Gate on non-zero.** `pg-sprite migrate … || exit 1` is fail-closed for
   every code above. Allow 3 explicitly only where a maintenance-window
@@ -225,6 +225,12 @@ Three rules follow from the table:
   attempt that exceeded its statement budget did run — PostgreSQL cancelled
   it and transactional DDL rolled it back — and still exits 2, because the
   refusal is a routing answer (the change needs a different strategy).
+- **Library callers get the same facts typed, not as a status.** An
+  orchestrator that imports `pkg/executor` branches on the verdict's
+  `outcome`, `errors.As` to the executor's typed errors, and
+  `executor.OutcomeCode` — the exit code is the CLI's rendering of those
+  facts, not a surface the library exposes. The typed contract is in
+  [docs/execution-model.md](docs/execution-model.md#how-a-failure-is-reported).
 
 Exit 3 is reserved today: `executor.ExecuteAcceptedBlocking` ships as a
 library primitive, and no `migrate` flag reaches it yet, so no CLI

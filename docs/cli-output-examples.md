@@ -64,6 +64,8 @@ a verdict, not a plan report — and exit 2. The JSON report schema is
 The process status is the part of the contract a shell reads without JSON. Each
 code answers whether anything committed and whether the engine vouches for it
 as online-safe; the section headings below name the code each example exits with.
+The table is restated from the [README](../README.md#exit-codes), which is the
+canonical statement of the ladder; a wording fix lands there first.
 
 | Exit | Meaning | Anything committed? | Online-safe? |
 |---|---|---|---|

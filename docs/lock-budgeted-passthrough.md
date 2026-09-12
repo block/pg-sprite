@@ -310,11 +310,12 @@ to distinguish accepted blocking execution from the product's online-safe succes
 A distinct code is intentionally non-zero: generic CI fails closed, while a caller that
 deliberately permits this path can allow 3 explicitly.
 
-The full ladder is the binary's process contract, with the question each code answers. It is
-stated for users in the root README's [Exit codes](../README.md#exit-codes) section and at the
-head of [cli-output-examples.md](cli-output-examples.md#exit-codes), both pinned by test to the
-constants in `pkg/verdict`; this section holds the reasoning behind the two cells that are not
-obvious from the table. Refusals from every command — `migrate`, `diff`, a dry run, and
+The full ladder is the binary's process contract, with the question each code answers. Its
+canonical statement is the root README's [Exit codes](../README.md#exit-codes) section; it is
+restated at the head of [cli-output-examples.md](cli-output-examples.md#exit-codes) and, with
+this path's cells spelled out, in the table below — all three pinned by test to the constants in
+`pkg/verdict`. This section holds the reasoning behind the two cells that are not obvious from
+the table. Refusals from every command — `migrate`, `diff`, a dry run, and
 `pull` — share exit 2, so a CI author gates on the status without caring which subcommand
 produced it; exit 3 is produced by `migrate` alone, because no other command executes DDL.
 
