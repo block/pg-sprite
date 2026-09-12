@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// buildMinConns is the pool size a concurrent build needs: the build
+// session and the verdict session reserved beside it.
 const buildMinConns = 2
 
 // recoveryMinConns is the pool size a rebuild recovery needs: its own
@@ -92,6 +94,12 @@ func (b ConcurrentBudget) validate() error {
 	return nil
 }
 
+// acquireBudgetedSession acquires one pooled session and applies the
+// CONCURRENTLY wait policy to it. CONCURRENTLY statements refuse to run
+// inside a transaction block, which also rules out SET LOCAL, so the
+// overrides are session-level: the returned release resets them before the
+// session goes back to the pool and discards the session when the reset
+// cannot be proven.
 func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b ConcurrentBudget) (*pgxpool.Conn, func(), error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {

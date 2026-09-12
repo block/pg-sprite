@@ -16,6 +16,15 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 )
 
+// TestAsConcurrentBudgetError covers the cancellation partition, in
+// precedence order. A server 57014 at or past the overall budget is the
+// budget's own statement_timeout whatever the caller's context did. Below
+// that, the caller's own context ending is the caller's cancellation in
+// either mode and in either form it arrives. Under a live context SQLSTATE
+// 57014 is query_canceled generally, so an early one is an external
+// cancellation and must not read as budget exhaustion, because a consumer
+// branching on *BudgetError escalates to a heavier strategy, the wrong
+// reaction to a deliberate operator cancel.
 func TestAsConcurrentBudgetError(t *testing.T) {
 	budget := ConcurrentBudget{Overall: time.Minute}
 	callerOwned := ConcurrentBudget{CallerOwned: true}
@@ -165,6 +174,13 @@ type cancelOnSecondRead struct {
 	reads  int
 }
 
+// A pooler that drops lock_timeout and statement_timeout from the startup
+// packet leaves the pool to apply them as statements on each new session
+// instead. RESET restores what the startup packet carried, so on such an
+// endpoint it restores nothing and the session goes back to the pool with
+// both bounds at zero. The release must therefore put the bounds back by
+// value: a reused session without them is the unbounded state LK-2 exists
+// to prevent.
 func TestBudgetedSessionRestoresBoundsTheStartupPacketNeverCarried(t *testing.T) {
 	cfg, err := pgxpool.ParseConfig(testutil.StartPostgres(t))
 	require.NoError(t, err)

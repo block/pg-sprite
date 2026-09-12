@@ -155,5 +155,3 @@ var (
 	// should be left alone.
 	ErrCancelledExternally = errors.New("the build was cancelled from outside the executor")
 )
-
-// buildMinConns is the pool size a concurrent build needs: the build

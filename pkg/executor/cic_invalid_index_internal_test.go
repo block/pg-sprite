@@ -13,6 +13,13 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 )
 
+// TestInvalidIndexErrorAdviceMatchesProof is the renderer's own unit test:
+// the message may name a DROP INDEX CONCURRENTLY only in the one state
+// where the entry is proven this build's own leftover, and may point at
+// the automatic recovery only in the states that recovery accepts. Every
+// other state must not hand the operator a destructive statement — the
+// index under that name may be healthy or another actor's build in
+// progress.
 func TestInvalidIndexErrorAdviceMatchesProof(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -127,13 +134,15 @@ func TestClassifyInvalidIndexOrdersByProofStrength(t *testing.T) {
 	}
 }
 
-// TestVerifiedBuildReportFailsClosed covers the success-path
-// verification's fail-closed branches, which no admissible statement can
-// reach through the public API on current server versions (the one shape
-// that leaves an invalid entry on success — the concurrent
-// partitioned-parent build — is refused by the server itself): an invalid
-// entry under the build's name, and an unreadable catalog. Both must
-// surface as *InvalidIndexError, never as a clean report.
+// TestDroppableColumnMatchesTheServer pins the droppability predicate to
+// the server's own answer, one index shape at a time: the predicate says
+// droppable exactly when DROP INDEX CONCURRENTLY succeeds, and every shape
+// it refuses is one the server refuses too, matched by SQLSTATE. The
+// constraint term is exercised on a plain table with an index that is
+// invalid in no other respect — a foreign key's referenced unique index,
+// which no constraint of its own table names — because a constraint's
+// index can never be a failed concurrent build's debris and so is not
+// reachable through the recovery's public path.
 func TestDroppableColumnMatchesTheServer(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -196,11 +205,3 @@ func TestDroppableColumnMatchesTheServer(t *testing.T) {
 		})
 	}
 }
-
-// A pooler that drops lock_timeout and statement_timeout from the startup
-// packet leaves the pool to apply them as statements on each new session
-// instead. RESET restores what the startup packet carried, so on such an
-// endpoint it restores nothing and the session goes back to the pool with
-// both bounds at zero. The release must therefore put the bounds back by
-// value: a reused session without them is the unbounded state LK-2 exists
-// to prevent.

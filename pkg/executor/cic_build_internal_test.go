@@ -59,13 +59,13 @@ func TestBuildIndexConcurrentlyVerifiesASuccessfulBuildAfterTheCallerCancels(t *
 	assert.True(t, valid)
 }
 
-// TestInvalidIndexErrorAdviceMatchesProof is the renderer's own unit test:
-// the message may name a DROP INDEX CONCURRENTLY only in the one state
-// where the entry is proven this build's own leftover, and may point at
-// the automatic recovery only in the states that recovery accepts. Every
-// other state must not hand the operator a destructive statement — the
-// index under that name may be healthy or another actor's build in
-// progress.
+// TestVerifiedBuildReportFailsClosed covers the success-path
+// verification's fail-closed branches, which no admissible statement can
+// reach through the public API on current server versions (the one shape
+// that leaves an invalid entry on success — the concurrent
+// partitioned-parent build — is refused by the server itself): an invalid
+// entry under the build's name, and an unreadable catalog. Both must
+// surface as *InvalidIndexError, never as a clean report.
 func TestVerifiedBuildReportFailsClosed(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -221,13 +221,3 @@ func TestCatalogVerdictFailsClosedWhenInspectionFails(t *testing.T) {
 	assert.NotErrorIs(t, invalidErr.Cleanup, ErrTargetIdentityChanged, "an unreadable catalog is an inspection failure, not an identity verdict")
 	assert.NotErrorIs(t, invalidErr.Cleanup, ErrBuildLeftInvalidIndex, "an unreadable catalog cannot prove a leftover")
 }
-
-// TestDroppableColumnMatchesTheServer pins the droppability predicate to
-// the server's own answer, one index shape at a time: the predicate says
-// droppable exactly when DROP INDEX CONCURRENTLY succeeds, and every shape
-// it refuses is one the server refuses too, matched by SQLSTATE. The
-// constraint term is exercised on a plain table with an index that is
-// invalid in no other respect — a foreign key's referenced unique index,
-// which no constraint of its own table names — because a constraint's
-// index can never be a failed concurrent build's debris and so is not
-// reachable through the recovery's public path.

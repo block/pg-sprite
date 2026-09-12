@@ -96,10 +96,3 @@ func describeState(state *string) string {
 	}
 	return strconv.Quote(*state)
 }
-
-// acquireBudgetedSession acquires one pooled session and applies the
-// CONCURRENTLY wait policy to it. CONCURRENTLY statements refuse to run
-// inside a transaction block, which also rules out SET LOCAL, so the
-// overrides are session-level: the returned release resets them before the
-// session goes back to the pool and discards the session when the reset
-// cannot be proven.
