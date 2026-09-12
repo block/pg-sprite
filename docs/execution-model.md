@@ -172,8 +172,11 @@ Automation branches on `code` — the stable outcome vocabulary — never on
 prose, which is free to change. Reading the three surfaces:
 
 - **Exit codes** separate the cases: an execution failure exits 1 (as here);
-  a refusal — where nothing was ever attempted — exits 2. See
-  [cli-output-examples.md](cli-output-examples.md).
+  a refusal — where nothing committed, even if an optimistic attempt ran and
+  was rolled back — exits 2; a change the operator explicitly accepted as
+  blocking, which committed without an online-safety guarantee, exits 3.
+  Exit 0 is exclusive to online-safe execution. The full ladder is in
+  [cli-output-examples.md](cli-output-examples.md#exit-codes).
 - **Library callers** get the same facts typed: `errors.As` to
   `*executor.SequenceStepError` (`Step`, `Total`, `SQL`, `Kind` — the
   execution class, the `(brief)` in the line below — and the underlying

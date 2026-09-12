@@ -19,9 +19,11 @@ CREATE TABLE users (id bigint PRIMARY KEY, email text);
 CREATE TABLE events (id bigint, created date) PARTITION BY RANGE (created);
 ```
 
-`migrate` exit codes follow the dry-run contract (0 = executable, 2 = refused —
-including a target table that does not exist, so a typo'd name cannot gate green)
-defined with the [diagnostic codes](postgres-online-ddl-reference.md#dry-run-diagnostic-codes);
+`migrate` exit codes follow the four-code ladder under [Exit codes](#exit-codes):
+the dry run exits 0 when every statement is executable and 2 when any would be
+refused — including a target table that does not exist, so a typo'd name cannot
+gate green — as defined with the
+[diagnostic codes](postgres-online-ddl-reference.md#dry-run-diagnostic-codes);
 CI can gate on the exit code without parsing JSON. The gate is refusals only: a
 destructive-but-executable change (`DROP COLUMN`) warns and exits 0 — a gate
 that must stop drops checks `.statements[].destructive` in the JSON report.
@@ -37,6 +39,7 @@ dry run. Statement kinds `migrate` does not support (`DROP INDEX`,
 a verdict, not a plan report — and exit 2. The JSON report schema is
 [plan-report.md](plan-report.md).
 
+- [Exit codes](#exit-codes)
 - [Codes used in these examples](#codes-used-in-these-examples)
 - [Refusal reasons](#refusal-reasons)
 - [Migrate](#migrate)
@@ -55,6 +58,29 @@ a verdict, not a plan report — and exit 2. The JSON report schema is
   - [Converge to the desired state (`metadata-only`) — exit 0](#converge-to-the-desired-state-metadata-only--exit-0)
 - [Capabilities](#capabilities)
   - [Embedded support matrix with the binary version — exit 0](#embedded-support-matrix-with-the-binary-version--exit-0)
+
+## Exit codes
+
+The process status is the part of the contract a shell reads without JSON. Each
+code answers whether anything committed and whether the engine vouches for it
+as online-safe; the section headings below name the code each example exits with.
+
+| Exit | Meaning | Anything committed? | Online-safe? |
+|---|---|---|---|
+| 0 | Executed through an online-safe path; or a dry run, `diff`, or `pull` found nothing to refuse | yes (dry run, `diff`, `pull`: nothing runs) | yes |
+| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in `executed_sql` | not applicable |
+| 2 | Refused: no online-safe path; the verdict names the typed `reason` and `class` | no | not applicable |
+| 3 | Committed through the accepted-blocking passthrough, under bounded budgets, without an online-safety guarantee | yes | no |
+
+Refusals from every command — `migrate`, its dry run, `diff`, and `pull` — share
+exit 2, so a gate branches on the status without caring which subcommand produced
+it; exit 3 is `migrate`'s alone, because no other command executes DDL, and no
+`migrate` flag reaches the passthrough yet, so no CLI invocation produces it today.
+Exit 2 means nothing *committed*: an optimistic attempt that exceeded its statement
+budget did run and was rolled back, and still exits 2. A gate that treats every
+non-zero status as failure is fail-closed for all three non-zero codes; a caller
+that deliberately permits the passthrough allows 3 explicitly. The rationale is in
+[lock-budgeted-passthrough.md](lock-budgeted-passthrough.md#exit-codes).
 
 ## Codes used in these examples
 
@@ -209,8 +235,10 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UN
 ```
 
 An operator-accepted blocking refusal has a distinct marked outcome and exit
-3; exit 0 remains exclusive to online-safe execution. Nothing produces this
-outcome until `--accept-blocking` lands in a later change:
+3; exit 0 remains exclusive to online-safe execution. The executor primitive
+(`executor.ExecuteAcceptedBlocking`) and the verdict shape are shipped; the
+`--accept-blocking` flag that reaches them from `migrate` is not, so the
+command below shows the contract, not a runnable invocation yet:
 
 ```text
 executed without online safety (accepted blocking refusal)

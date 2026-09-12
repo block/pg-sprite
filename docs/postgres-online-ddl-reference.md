@@ -298,7 +298,12 @@ table), so automation that needs the cause reads the typed `reason` and
 disposition from the `--json` report. A destructive-but-executable change
 (`DROP COLUMN`, `DROP TABLE`) is **not** a refusal: it warns and exits 0. A
 gate that must stop drops checks `.statements[].destructive` in the JSON
-report.
+report. A real run adds the two codes that need something to have executed —
+**1** when execution failed (a dry run exits 1 only for an operational error
+such as an unreachable database, because it executes nothing) and **3** when
+the operator explicitly accepted a blocking form and it committed without an
+online-safety guarantee; the full ladder is in
+[cli-output-examples.md](cli-output-examples.md#exit-codes).
 
 ### `metadata-only`
 

@@ -19,6 +19,36 @@ const cliOutputExamplesDoc = "../../docs/cli-output-examples.md"
 // reason; a reason without a class row there cannot be routed by consumers.
 const refusalClassesDoc = "../../docs/refusal-classes.md"
 
+// exitCodeLadderDocs are the pages that state the process exit-code ladder
+// as a table whose first cell is the code; the README is where a CI author
+// first meets it, the CLI examples page is the machine contract, and the
+// passthrough design holds the reasoning behind the non-obvious cells.
+var exitCodeLadderDocs = []string{
+	"../../README.md",
+	cliOutputExamplesDoc,
+	"../../docs/lock-budgeted-passthrough.md",
+}
+
+// exitCodeLadder is every process exit code the binary produces. The two
+// codes without a named constant are the shell conventions the entry point
+// inherits: 0 for success and 1 for any error kong reports.
+var exitCodeLadder = []int{0, 1, ExitCodeRefused, ExitCodeAcceptedBlocking}
+
+// Every exit code must have a row in every page that states the ladder: an
+// exit-code constant added without documenting what it means for a shell
+// gate fails here, and a ladder table that drops a code fails too.
+func TestExitCodeLadderDocsListEveryCode(t *testing.T) {
+	for _, path := range exitCodeLadderDocs {
+		raw, err := os.ReadFile(path)
+		require.NoError(t, err)
+		doc := string(raw)
+		for _, code := range exitCodeLadder {
+			assert.Truef(t, strings.Contains(doc, fmt.Sprintf("\n| %d |", code)),
+				"%s is missing an exit-code ladder row for exit %d", path, code)
+		}
+	}
+}
+
 // Every refusal reason automation can meet must be documented: a Reason
 // constant added without a row in the doc's refusal-reason table fails here.
 func TestDocListsEveryRefusalReason(t *testing.T) {

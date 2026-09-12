@@ -34,7 +34,7 @@ make the behavior online-safe.
 The current [capabilities matrix](capabilities.md#why-typed-refusal-not-passthrough) makes
 refusal valuable: the engine says what it cannot vouch for instead of silently falling back
 to a blocking form. The root README reserves exit code 0 for a schema change that ran through
-an online-safe path. Exit code 2 means refused and nothing ran; exit code 1 means execution
+an online-safe path. Exit code 2 means refused and nothing committed; exit code 1 means execution
 failed. Those meanings remain useful and remain unchanged.
 
 The new path does not weaken that contract. It splits “the engine refused to call this
@@ -301,6 +301,8 @@ lookup that resolves the accepted table, which runs only on the execution path. 
 retains disposition `refuse`, reason, class, cause, and guidance. Eligibility is permission to
 request a later execution path, not a reclassification as online-safe.
 
+### Exit codes
+
 Exit code 3 means the statement committed through this marked path. Exit code 0 remains
 online-safe success, 1 remains execution failure, and 2 remains refusal with nothing committed.
 Choosing exit 0 plus a marked outcome lost because shell CI would have to parse JSON or prose
@@ -308,10 +310,13 @@ to distinguish accepted blocking execution from the product's online-safe succes
 A distinct code is intentionally non-zero: generic CI fails closed, while a caller that
 deliberately permits this path can allow 3 explicitly.
 
-The full ladder once this ships is the binary's process contract, with the question each code
-answers. Refusals from every command — `migrate`, `diff`, a dry run, and `pull` — share exit
-2, so a CI author gates on the status without caring which subcommand produced it; exit 3 is
-produced by `migrate` alone, because no other command executes DDL.
+The full ladder is the binary's process contract, with the question each code answers. It is
+stated for users in the root README's [Exit codes](../README.md#exit-codes) section and at the
+head of [cli-output-examples.md](cli-output-examples.md#exit-codes), both pinned by test to the
+constants in `pkg/verdict`; this section holds the reasoning behind the two cells that are not
+obvious from the table. Refusals from every command — `migrate`, `diff`, a dry run, and
+`pull` — share exit 2, so a CI author gates on the status without caring which subcommand
+produced it; exit 3 is produced by `migrate` alone, because no other command executes DDL.
 
 | Exit | Meaning | Anything committed? | Online-safe? |
 |------|---------|---------------------|--------------|
@@ -481,11 +486,13 @@ Sequence implementation as follows:
    its per-statement branches: it invokes `migrate` without `--accept-blocking`, so it cannot
    produce a 3, and an unexpected 3 falls through every branch to `FAIL` and skips the
    `psql` re-apply, which is the safe direction for a statement that already committed.
-   *(done in part: the outcome, the retained identity and budget fields, the exit-3 constant
-   and sentinel, plan-report eligibility, and the `cli-output-examples.md` example shipped;
-   the exit-code contract paragraph at that page's head, the five surface edits, and the
-   exit-2 gloss tightening move to step 4 with the flag, because no command can produce exit 3
-   until `--accept-blocking` exists.)*
+   *(done: the outcome, the retained identity and budget fields, the exit-3 constant and
+   sentinel, plan-report eligibility, and the `cli-output-examples.md` example shipped; the
+   four-code ladder is stated at that page's head and in the root README, pinned by test to
+   the `pkg/verdict` constants, with exit 3 marked as reserved until the flag exists; the five
+   surface edits and the exit-2 gloss tightening shipped with it. The T2 row's "exit 2" cell
+   in [capabilities.md](capabilities.md) stays as written until step 4, because it describes
+   what a caller sees today.)*
 4. Add `--accept-blocking` to imperative `migrate`, reject its combination with `--force`,
    emit the pre-execution audit record, and add demo assertions for eligibility, success,
    lock-budget refusal, statement-budget failure, mismatched acknowledgement, and exit codes.

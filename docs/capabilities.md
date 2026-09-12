@@ -82,7 +82,11 @@ Two consequences follow, and they explain most of this page:
    when the change is executable through an online-safe path; a refusal exits 2 with a
    typed reason. CI can gate on the exit code alone. That contract is only worth
    something if pg-sprite never executes what it cannot vouch for — see
-   [Why typed refusal, not passthrough](#why-typed-refusal-not-passthrough).
+   [Why typed refusal, not passthrough](#why-typed-refusal-not-passthrough). The one
+   sanctioned exception keeps the gate honest: a blocking form the operator explicitly
+   accepts runs under bounded budgets and exits 3, never 0, so a gate that fails on any
+   non-zero status stays fail-closed
+   ([the full ladder](cli-output-examples.md#exit-codes)).
 
 ## The support model: three tiers
 
