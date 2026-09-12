@@ -96,6 +96,9 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 	if m.ReferencedBy, err = introspectReferencedBy(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect incoming foreign keys of %s.%s: %w", schema, table, err)
 	}
+	if m.RowSecurity, err = introspectRowSecurity(ctx, tx, oid); err != nil {
+		return Model{}, fmt.Errorf("introspect row security of %s.%s: %w", schema, table, err)
+	}
 	return m, nil
 }
 

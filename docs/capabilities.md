@@ -269,7 +269,7 @@ review the object warrants) ·
 | PL/pgSQL function bodies (`CREATE OR REPLACE FUNCTION`) | ⚪ | — | No — owner tooling | Transactional catalog work that takes no lock on any relation; nothing for an online engine to add. No peer online executor owns it either |
 | Triggers (`CREATE TRIGGER`) | ⚪ | — | No — owner tooling | Catalog work — no scan, no rewrite — but it takes a brief `SHARE ROW EXCLUSIVE` on the table, queues behind long-running queries, and blocks writers while it waits — run it under a `lock_timeout` |
 | Extensions (`CREATE EXTENSION`) | ⚪ | — | No — owner tooling | Same: catalog bootstrap, owner tooling |
-| Grants, roles, row-level-security policies | 🔵 | — | No — provisioning / IaC | Access control, not table shape; belongs to provisioning (see [engine-role.md](engine-role.md) for what the *engine's own* role needs) |
+| Grants, roles, row-level-security policies | 🔵 | — | No — provisioning / IaC | Access control changes remain with provisioning. Table introspection records RLS settings and policies; export refuses rather than omit them. Declarative RLS is under [design](declarative-row-security.md), not an executable capability yet. See [engine-role.md](engine-role.md) for the engine's own role |
 | Standalone sequences | ⚪ | — | No — owner tooling | Transactional catalog work on an object with no readers-and-writers problem |
 | Publications, subscriptions | 🔵 | — | No — replication provisioning / IaC | Replication provisioning, not table shape (`ALTER PUBLICATION ... ADD TABLE` also takes `SHARE UPDATE EXCLUSIVE` on the table) |
 <!-- capabilities:end types_and_non_table_objects -->
