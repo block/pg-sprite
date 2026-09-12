@@ -1,3 +1,7 @@
+// White-box tests for the invalid-index outcome: the proof-strength ordering
+// of classifyInvalidIndex, the advice its renderer may give, and the
+// droppability predicate checked against the server's own answer.
+
 package executor
 
 import (

@@ -1,7 +1,7 @@
-// White-box tests for the fail-closed decision helpers of the concurrent
-// index build: the pieces whose safety branches (unknown backend states, a
-// replaced target table) cannot be reached deterministically through the
-// public API against a healthy database.
+// White-box tests for the concurrent index build's fail-closed verdicts: a
+// target table replaced mid-build, debris on another table, and an
+// unreadable catalog cannot be reached deterministically through the public
+// API against a healthy database.
 
 package executor
 

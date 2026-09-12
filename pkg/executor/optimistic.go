@@ -5,7 +5,9 @@
 // statement cleanly, nothing is executed, and a typed BudgetError surfaces
 // for the caller to turn into a not-native-safe verdict — and the native
 // executors for the classified safe idioms, starting with the concurrent
-// index build (see native.go).
+// index build (BuildIndexConcurrently). The files of the concurrent index
+// creation path — the build, its budget, its typed refusals, the backend
+// inspection, and the invalid-index outcome — carry the cic_ prefix.
 //
 // This is a safety-critical core package: see SAFETY.md. It never trusts the
 // caller's classification — its own protections are the budget, applied with

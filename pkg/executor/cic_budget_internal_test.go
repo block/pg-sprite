@@ -1,3 +1,7 @@
+// White-box tests for the concurrent build's budget: the cancellation
+// partition behind *BudgetError and the session bounds the budgeted session
+// must restore by value.
+
 package executor
 
 import (

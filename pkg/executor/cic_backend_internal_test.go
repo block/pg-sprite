@@ -1,7 +1,7 @@
-// White-box tests for the fail-closed decision helpers of the concurrent
-// index build: the pieces whose safety branches (unknown backend states, a
-// replaced target table) cannot be reached deterministically through the
-// public API against a healthy database.
+// White-box tests for the backend-state classifier of the concurrent index
+// build: the unknown and unprovable pg_stat_activity states cannot be
+// reached deterministically through the public API against a healthy
+// database.
 
 package executor
 
