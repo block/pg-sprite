@@ -519,7 +519,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "Access control, not table shape; belongs to provisioning (see [engine-role.md](engine-role.md) for what the *engine's own* role needs)"
+    reason_notes: "Access control changes remain with provisioning. Table introspection records RLS settings and policies; export refuses rather than omit them. Declarative RLS is under [design](declarative-row-security.md), not an executable capability yet. See [engine-role.md](engine-role.md) for the engine's own role"
   - id: standalone-sequences
     area: "types_and_non_table_objects"
     operation: "Standalone sequences"
