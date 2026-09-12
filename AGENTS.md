@@ -84,6 +84,12 @@ is a smoke tour of the built binary, not a second test suite.
 
 ## Conventions
 
+- **One file per concern, and keep files small.** A file holds one feature or mechanism (its
+  types, errors, helpers) with a sibling `_test.go` of the same stem; `pkg/executor/cic_*.go`
+  is the shape. Split when a file passes a few hundred lines or its declarations serve more
+  than one feature. Small scoped files are cheaper for humans and agents to load and reason
+  about, and concurrent work on different features stops colliding in one file. Move code
+  with rename-sized diffs so history follows; there is no hard line count.
 - Say **"schema change"**, not "migration", in code, CLI output, error messages, and new docs —
   pg-sprite strings surface through orchestrators that ban "migration". Use "migration" only
   when citing external sources (Spirit's `pkg/migration`, peer tools, PostgreSQL docs).
