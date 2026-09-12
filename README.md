@@ -185,7 +185,7 @@ ever commits a change — every other command is read-only or fully offline.
 | `capabilities` | none | Print the embedded support matrix as a compact table, or as the versioned automation contract with `--json` |
 | `fmt` | none | Canonicalize a schema file — parser only |
 | `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone |
-| `suggest` | none | Map risky DDL to the safer native form the engine would run, with typed caveats; advisory, always exits 0 |
+| `suggest` | none | Map risky DDL to the safer native form the engine would run, with typed caveats; advisory, exits 0 on any script it can parse |
 
 The offline commands have no connection flags at all, so they cannot be
 pointed at a database by accident.
@@ -219,7 +219,8 @@ Three rules follow from the table:
   run, `diff`, and `pull` all exit 2 on a refusal; exit 3 can come only from
   `migrate`, because no other command executes DDL. The offline `lint` exits
   1 when a script has error-severity findings (warnings alone exit 0), and
-  `suggest` always exits 0.
+  `suggest` exits 0 on any script it can parse — findings never gate; only an
+  unreadable or unparsable script exits 1.
 - **Exit 2 means nothing *committed*, not nothing ran.** An optimistic
   attempt that exceeded its statement budget did run — PostgreSQL cancelled
   it and transactional DDL rolled it back — and still exits 2, because the
