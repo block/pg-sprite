@@ -1,5 +1,5 @@
 // This file is the recovery for an abandoned concurrent index build: the
-// automatic counterpart of the refusal in native.go. A failed CREATE INDEX
+// automatic counterpart of the InvalidIndexError refusal. A failed CREATE INDEX
 // CONCURRENTLY leaves an invalid catalog entry that occupies the requested
 // name, and PostgreSQL drops by name, not identity — so removing it needs a
 // proof that the entry under that name is the abandoned one and that
