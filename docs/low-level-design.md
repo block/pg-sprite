@@ -76,10 +76,11 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
 ### Proposed architecture (end-to-end)
 
 ```
-        user: --alter "..."  OR  --desired schema.sql
+   user: migrate --alter "ALTER TABLE …"   OR   diff --desired schema.sql
                          │
         ╭────────────────▼─────────────────────────────────────────────────────╮
-        │  CLI  (Kong)   migrate · diff · fmt · lint · status                  │
+        │  CLI  (Kong)   migrate · pull · diff · fmt · lint · suggest ·        │
+        │                capabilities · status                                 │
         ╰────────────────┬─────────────────────────────────────────────────────╯
                          │
    ┌─────────────────────▼──────────────────── PLANNER / front-end (shared) ────┐
@@ -185,7 +186,9 @@ pattern *per migration*:
 
 The classifier, declarative diff, dry-run, lint, and status reporting are shared by every
 backend. An `Executor` interface (`Plan`, `Execute`, `Status`, `Abort`) is also
-planned; `pkg/executor` currently provides only the bounded optimistic native attempt. Until the
+planned; `pkg/executor` currently provides the native backend — the bounded optimistic
+attempt, the caller-owned concurrent index build with invalid-index recovery, the autocommit
+safer-sequence runner, the greenfield create path, and the accepted-blocking primitive. Until the
 in-house copy-and-swap executor
 lands in a later phase, every `needs-rewrite` change is refused as **not native-safe** rather than
 delegated to an external tool. pgroll remains a possible still-later backend.
@@ -618,7 +621,7 @@ These have **no MySQL counterpart** but are hard requirements for the logical-de
 > packages show the intended execution architecture.
 
 ```
-cmd/pg-sprite/         -> CLI (migrate, diff, fmt, lint, status) - Kong, like Spirit
+cmd/pg-sprite/         -> CLI (migrate, pull, diff, fmt, lint, suggest, capabilities, status) - Kong, like Spirit
 
 Existing:
 pkg/statement/        -> Wasm go-pgquery boundary + typed operation descriptors and rewrites
@@ -627,17 +630,28 @@ pkg/planner/          -> classify each operation and construct safer native SQL
 pkg/router/           -> assign classified statements to available backends
 pkg/plan/             -> versioned machine-readable dry-run plan report (both front doors)
 pkg/lint/             -> offline typed lint findings (errors refuse, warnings advise)
-pkg/executor/         -> bounded optimistic native attempt only
+pkg/suggest/          -> offline advisory rewrites with typed caveats
+pkg/diffplan/         -> declarative front door as a library: desired schema -> routed plan
+pkg/migrate/          -> imperative front door as a library + desired-state execution loop
+pkg/executor/         -> native backend: bounded optimistic attempt, concurrent index build
+                         and recovery, safer-sequence runner, greenfield create, accepted-blocking
+pkg/progress/         -> pollable progress snapshots (the executors' observation seam)
 pkg/dbconn/           -> bounded database connections
-pkg/preflight/        -> migration preflight checks
-pkg/verdict/          -> typed outcomes
+pkg/preflight/        -> schema-change preflight checks
+pkg/verdict/          -> typed outcomes, refusal classes, exit codes
+pkg/capabilities/     -> embedded, validated support matrix
 
-Planned:
-pkg/migration/        -> orchestrator + runner + cutover
+Contracts and types exist; implementation lands with the copy-and-swap phases:
 pkg/decode/           -> logical-decoding client
 pkg/copier/           -> PK-range chunker, dynamic sizing, parallel chunked copy
-pkg/applier/          -> captured-change apply
 pkg/checksum/         -> chunked verification and cutover gate
+pkg/checkpoint/       -> durable resume state
+
+Package doc only (the invariants it will enforce are named; no types yet):
+pkg/schemachange/     -> orchestrator + runner + cutover
+pkg/applier/          -> captured-change apply
+
+Planned:
 pkg/throttler/        -> chunk-time / slot-lag throttle (replica lag deferred, D12)
 Executor              -> Plan/Execute/Status/Abort backend interface
 ```
@@ -801,8 +815,9 @@ introspection and an ordered declarative diff complete the plan.
 
 ## Next step
 
-Phases 1 and 2.1–2.4, including the CLI front ends, classifier, router, and declarative diff, are
-implemented. Phase 3 native execution is in progress: the `CREATE INDEX CONCURRENTLY` execution
+Phases 1 and 2.1–2.5, including the CLI front ends, classifier, router, declarative diff,
+versioned plan report, offline lint, and suggest, are implemented. Phase 3 native execution is
+implemented: the `CREATE INDEX CONCURRENTLY` execution
 path exists in `pkg/executor` — session-scoped, outside any transaction, under the CONCURRENTLY
 wait policy (no per-lock timeout, one overall deadline), with invalid-index detection that
 fails closed into a typed, state-specific outcome, and a separate recovery

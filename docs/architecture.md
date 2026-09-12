@@ -21,18 +21,19 @@ pg-sprite is a decoupled **planner → router → executor** engine. The planner
 changes, the router decides *which strategy*, interchangeable executors decide *how*.
 
 The planner is itself a pipeline of five distinct stages. The two front-ends enter it at
-different points — an imperative `--alter` already *is* DDL, so it goes straight to parse;
-a declarative `--desired` schema must first be compared against the live database to
+different points — an imperative `migrate --alter` already *is* DDL, so it goes straight to parse;
+a declarative `diff --desired` schema must first be compared against the live database to
 *produce* DDL — and the derived statements then re-enter the parse boundary like any
 hand-written statement, so both routes converge on the same parse → classify → lint tail
 and every operation is judged by the same rules regardless of how it arrived:
 
 ```
-   user: --alter "ALTER TABLE …"           user: --desired schema.sql
+   user: migrate --alter "ALTER TABLE …"   user: diff --desired schema.sql
      (imperative: statements)               (declarative: whole schema)
                   │                                      │
         ╭─────────▼──────────────────────────────────────▼─────────╮
-        │    CLI: migrate · diff · fmt · lint · suggest · status   │
+        │  CLI: migrate · pull · diff · fmt · lint · suggest ·     │
+        │       capabilities · status                              │
         ╰─────────┬──────────────────────────────────────┬─────────╯
                   │                                      │
    ┌──────────────▼───── PLANNER (shared front-end) ─────▼──────────────┐
@@ -161,10 +162,15 @@ architectural decision; this is the permission slip. Two integration surfaces ex
 different levels of commitment:
 
 - **The CLI and its JSON output** — the intended seam for orchestrators. `diff` and
-  `--dry-run` emit machine-readable verdicts and plans; the plan report freezes as a
-  single versioned contract (an explicit schema-version field, additive-only changes
-  within a version) in Phase 2.5. Until that lands its shape may change in any PR — wait
-  for the versioned report rather than pinning the interim shape.
+  `--dry-run` emit machine-readable verdicts and plans; the plan report is a single
+  versioned contract (`format_version`, `plan.FormatVersion`; additive-only changes
+  within a version, a consumer rejects a version it does not understand), documented in
+  [plan-report.md](plan-report.md). The suggest report carries its own `format_version`
+  on the same rule ([suggest-report.md](suggest-report.md)). `capabilities --json` is
+  deliberately not versioned separately: its `version` is the binary version string,
+  because the matrix is committed with and tested against one binary, so consumers pin
+  the binary rather than a matrix version and ignore fields they do not recognize
+  ([capabilities-contract.md](capabilities-contract.md#versioning)).
 - **The Go packages** — everything under `pkg/` is importable, and the front-end seams
   (`pkg/statement`, `pkg/schemadiff`, `pkg/planner`, `pkg/router`, `pkg/verdict`) are
   each designed as a standalone entry point; `internal/` is unimportable by
@@ -177,8 +183,8 @@ different levels of commitment:
 
 | Package | Role | Status |
 | --- | --- | --- |
-| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `diff` · `fmt` · `lint` · `suggest` · `status` | all six exist |
-| `internal/cli` | Command tree and flag handling (including `migrate --dry-run`) | all six exist |
+| `cmd/pg-sprite` | CLI entry point (Kong): `migrate` · `pull` · `diff` · `fmt` · `lint` · `suggest` · `capabilities` · `status` | all eight exist |
+| `internal/cli` | Command tree and flag handling (including `migrate --dry-run`) | all eight exist |
 | `internal/testutil` | Test harness: containerized PostgreSQL, throwaway schemas | exists |
 | `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; advisory-lock mutual exclusion lands here | exists |
 | `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parse boundary, typed per-operation descriptors, and advisory rewrites (never hand-parse SQL); shadow DDL is validated by executing the retargeted statement on the empty shadow, and fingerprints come from `pkg/schemadiff`'s transaction-scoped scratch schema — execute-and-introspect, never AST surgery | exists |
@@ -192,7 +198,7 @@ different levels of commitment:
 | `pkg/diffplan` | The declarative front door as a library: desired schema in, routed `plan.Report` out — the CLI `diff` and embedding orchestrators share this one pipeline | exists |
 | `pkg/migrate` | The imperative front door as a library: one parsed statement in — gate, resolve, classify, route, execute — one `verdict.Verdict` out; the CLI `migrate` and embedding orchestrators share this one pipeline. Also the desired-state execution loop: `RunDesired` derives the convergence plan (`diffplan.Plan`), admits it as a whole (existence, destructive guard, dispositions, optional fingerprint pin), and runs each planned statement back through `Run` — per-statement verdicts, committed-prefix semantics | exists |
 | `pkg/router` | Route classified statements to native / copy-and-swap / refuse dispositions; copy-and-swap reports unavailable until that backend lands | exists (Phase 2.4) |
-| `pkg/executor` | Bounded optimistic native attempt, the concurrent index build, and the autocommit safer-sequence runner, with stable outcome codes; the full `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) arrives with the copy-and-swap backend | native execution exists |
+| `pkg/executor` | Native backend with stable outcome codes: the bounded optimistic attempt, the concurrent index build and its invalid-index recovery, the autocommit safer-sequence runner, the greenfield `CREATE TABLE` path, and the accepted-blocking passthrough primitive; the full `Executor` contract (`Plan`/`Execute`/`Status`/`Abort`) arrives with the copy-and-swap backend | native execution exists |
 | `pkg/progress` | Strategy-wide, pollable progress snapshots: native phase/elapsed time, sequence position, retry attempt, and server-reported concurrent-index work; optional copy counters are reserved for copy-and-swap | native progress exists |
 | `pkg/copier` | PK-range chunker over one integer-family primary key with dynamic time-based sizing (produces `Chunk` and `Watermark`; composite keys refused in v1), and the parallel chunked copy into the shadow table (never overwrites) — there is no separate chunker package | contracts exist; copy loop Phase 4 |
 | `pkg/checksum` | The mandatory correctness gate; continuous checker; repair primitive | Phase 5 |

@@ -203,10 +203,11 @@ understand.
 
 ## Shared refusal vocabulary
 
-A refusal `class` on the verdict JSON is a separate decision, recorded in
-[refusal-classes.md](refusal-classes.md); `pkg/verdict` does not emit one today. When that
-field ships, that contract owns the vocabulary and the matrix uses the same words, so a
-consumer reading a row and a consumer reading a verdict reach the same route:
+A refusal `class` on the verdict JSON is a separate contract, recorded in
+[refusal-classes.md](refusal-classes.md) and emitted by `pkg/verdict` on every refusal
+(`Verdict.WithRefusal`; the reason → class mapping is the registry in `pkg/migrate`). That
+contract owns the vocabulary and the matrix uses the same words, so a consumer reading a
+row and a consumer reading a verdict reach the same route:
 
 | Matrix row | Refusal `class` |
 | --- | --- |

@@ -127,12 +127,14 @@ is the right design on PostgreSQL specifically — is
 ## Architecture at a glance
 
 ```diagram
-        user: --alter "..."   OR   --desired schema.sql
+   user: migrate --alter "ALTER TABLE …"   OR   diff --desired schema.sql
                          │
-              ╭──────────▼──────────-╮
-              │ CLI: migrate · diff ·│
-              │ fmt · lint · status  │
-              ╰──────────┬──────────-╯
+              ╭──────────▼───────────────╮
+              │ CLI: migrate · pull ·    │
+              │ diff · fmt · lint ·      │
+              │ suggest · capabilities · │
+              │ status                   │
+              ╰──────────┬───────────────╯
                          ▼
                  ╭───────────────╮      shared front-end:
                  │   PLANNER     │      parse · introspect ·
