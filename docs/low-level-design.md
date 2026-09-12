@@ -76,10 +76,11 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
 ### Proposed architecture (end-to-end)
 
 ```
-        user: --alter "..."  OR  --desired schema.sql
+   user: migrate --alter "ALTER TABLE …"   OR   diff --desired schema.sql
                          │
         ╭────────────────▼─────────────────────────────────────────────────────╮
-        │  CLI  (Kong)   migrate · diff · fmt · lint · status                  │
+        │  CLI  (Kong)   migrate · pull · diff · fmt · lint · suggest ·        │
+        │                capabilities · status                                 │
         ╰────────────────┬─────────────────────────────────────────────────────╯
                          │
    ┌─────────────────────▼──────────────────── PLANNER / front-end (shared) ────┐
@@ -641,12 +642,14 @@ pkg/verdict/          -> typed outcomes, refusal classes, exit codes
 pkg/capabilities/     -> embedded, validated support matrix
 
 Contracts and types exist; implementation lands with the copy-and-swap phases:
-pkg/schemachange/     -> orchestrator + runner + cutover
 pkg/decode/           -> logical-decoding client
 pkg/copier/           -> PK-range chunker, dynamic sizing, parallel chunked copy
-pkg/applier/          -> captured-change apply
 pkg/checksum/         -> chunked verification and cutover gate
 pkg/checkpoint/       -> durable resume state
+
+Package doc only (the invariants it will enforce are named; no types yet):
+pkg/schemachange/     -> orchestrator + runner + cutover
+pkg/applier/          -> captured-change apply
 
 Planned:
 pkg/throttler/        -> chunk-time / slot-lag throttle (replica lag deferred, D12)
