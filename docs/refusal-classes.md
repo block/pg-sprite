@@ -6,7 +6,7 @@ answers the next question: wait for engine capability, hand the work to its owne
 named safer idiom, or change the run environment.
 
 Every refused statement has an `outcome`, a typed `reason`, a typed `class`, explanatory `detail`, and,
-where one exists, a `safer_idiom`. Exit code 2 means nothing ran. That is enough to explain a
+where one exists, a `safer_idiom`. Exit code 2 means nothing committed. That is enough to explain a
 single refusal, but not enough to route it: `unsupported-statement` alone covers a data
 backfill, an imperative `CREATE TABLE`, a permanently unsafe `CREATE INDEX IF NOT EXISTS`,
 and an admitted `ALTER TABLE` operation for which the planner has no route. Those are not
@@ -127,7 +127,7 @@ giving consumers one closed routing vocabulary.
 Encoding the class into `reason` lost because it would rename every existing token, multiply
 otherwise identical reasons, and make consumers parse a compound convention. Assigning a new
 exit code to each class lost because exit code 2 has one valuable process-level meaning:
-refused, nothing ran. Shell status is too small a surface for the reason, class, and owner
+refused, nothing committed. Shell status is too small a surface for the reason, class, and owner
 axes, and changing it would break the existing gate.
 
 For example, an `UPDATE` backfill changes only by additive fields:
