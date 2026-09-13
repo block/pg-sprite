@@ -220,7 +220,13 @@ assertion separating "instant" from "copy"
 
 ### Exit inventory
 
-| Exit | Outcome | Typed as | DDL executed? |
+Every way the lane-B attempt can end, numbered as cases for the prose that
+follows. The case numbers are not process exit codes: the process status for
+each row is the one the [README's exit-code ladder](../README.md#exit-codes)
+assigns to its outcome — 0 for a success verdict, 2 for a refusal, 1 for a
+failed sequence.
+
+| Case | Outcome | Typed as | DDL executed? |
 |---|---|---|---|
 | 1 | Online idiom / substituted sequence completed | Success verdict | Yes — online by proof |
 | 2 | Bounded attempt completed within budget | Success verdict | Yes — it was catalog-only |

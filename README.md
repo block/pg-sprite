@@ -137,7 +137,8 @@ the machine-readable shape is in
 
 **Refuse: no safe path exists, so nothing runs.** A genuine table rewrite
 needs the copy-and-swap backend (a later phase); the dry run exits 2 so CI
-can gate on it without parsing JSON. The exit-code gate stops refusals only —
+can gate on it without parsing JSON (the full four-code ladder is under
+[Exit codes](#exit-codes)). The exit-code gate stops refusals only —
 a destructive-but-executable change (`DROP COLUMN`) warns and exits 0, so a
 gate that must stop drops checks `.statements[].destructive` in the
 `--json` report. Watch it in
@@ -184,7 +185,7 @@ ever commits a change — every other command is read-only or fully offline.
 | `capabilities` | none | Print the embedded support matrix as a compact table, or as the versioned automation contract with `--json` |
 | `fmt` | none | Canonicalize a schema file — parser only |
 | `lint` | none | Flag patterns the engine would refuse, rewrite, or gate, from the DDL text alone |
-| `suggest` | none | Map risky DDL to the safer native form the engine would run, with typed caveats; advisory, always exits 0 |
+| `suggest` | none | Map risky DDL to the safer native form the engine would run, with typed caveats; advisory, exits 0 on any script it can parse |
 
 The offline commands have no connection flags at all, so they cannot be
 pointed at a database by accident.
@@ -195,6 +196,49 @@ failing step rolled back; nothing after it ran — and the verdict names the
 exact boundary. Why safer sequences run without a wrapping transaction
 (PostgreSQL forbids it for the online forms) and what each documented
 partial state means is [docs/execution-model.md](docs/execution-model.md).
+
+## Exit codes
+
+The process status is the contract a shell gate reads without parsing JSON.
+Each code answers one question: did anything commit, and does the engine
+vouch for it as online-safe.
+
+| Exit | Meaning | Anything committed? | Online-safe? |
+|---|---|---|---|
+| 0 | Executed through an online-safe path; or a dry run, `diff`, or `pull` found nothing to refuse | yes (dry run, `diff`, `pull`: nothing runs) | yes |
+| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in the verdict's `executed_sql` | not applicable |
+| 2 | Refused: no online-safe path, and the verdict names the typed `reason` (and `class`) automation switches on | no | not applicable |
+| 3 | Committed through the accepted-blocking passthrough — the operator explicitly accepted a blocking form, and the engine ran it under bounded budgets without vouching for online safety | yes | no |
+
+Three rules follow from the table, and one note for embedders:
+
+- **Gate on non-zero.** `pg-sprite migrate … || exit 1` is fail-closed for
+  every code above. Allow 3 explicitly only where a maintenance-window
+  blocking change is intended; exit 0 is never borrowed for it.
+- **Refusal is one code, whichever command produced it.** `migrate`, its dry
+  run, `diff`, and `pull` all exit 2 on a refusal; exit 3 can come only from
+  `migrate`, because no other command executes DDL. The offline `lint` exits
+  1 when a script has error-severity findings (warnings alone exit 0), and
+  `suggest` exits 0 on any script it can parse — findings never gate; only an
+  unreadable or unparsable script exits 1.
+- **Exit 2 means nothing *committed*, not nothing ran.** An optimistic
+  attempt that exceeded its statement budget did run — PostgreSQL cancelled
+  it and transactional DDL rolled it back — and still exits 2, because the
+  refusal is a routing answer (the change needs a different strategy).
+- **Library callers get the same facts typed, not as a status.** An
+  orchestrator that imports `pkg/executor` branches on the verdict's
+  `outcome`, `errors.As` to the executor's typed errors, and
+  `executor.OutcomeCode` — the exit code is the CLI's rendering of those
+  facts, not a surface the library exposes. The typed contract is in
+  [docs/execution-model.md](docs/execution-model.md#how-a-failure-is-reported).
+
+Exit 3 is reserved today: `executor.ExecuteAcceptedBlocking` ships as a
+library primitive, and no `migrate` flag reaches it yet, so no CLI
+invocation currently produces it. Why the code is non-zero, and why a
+statement-budget cancellation on that path is exit 1 rather than 2, is in
+[docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md#exit-codes);
+every code's JSON shape is in
+[docs/cli-output-examples.md](docs/cli-output-examples.md#exit-codes).
 
 ## Demo
 

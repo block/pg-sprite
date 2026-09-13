@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"bytes"
+	"fmt"
 	"testing"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // parseMigrate runs args through the real command grammar so these tests
@@ -73,6 +76,37 @@ func TestMigrateDefaultsMatchLibraryDefaults(t *testing.T) {
 	assert.Equal(t, want.MaxTableSizeBytes, got.MaxTableSizeBytes)
 	assert.Equal(t, want.Budget, got.Budget)
 	assert.Equal(t, want.Retry, got.Retry)
+}
+
+// The exit-code ladder is a constant↔behavior contract, not only a
+// constant↔docs one: each verdict outcome must reach the entry point as the
+// sentinel that maps to its documented code. The two committing outcomes
+// are the pair that must never be confused — an accepted-blocking commit
+// returning nil would exit 0 and claim online safety it does not have. A
+// failed verdict returns nil from emit by design; its caller returns the run
+// error, which exits 1.
+func TestEmitReturnsTheSentinelForEachOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		outcome verdict.Outcome
+		want    error
+	}{
+		{outcome: verdict.OutcomeExecuted, want: nil},
+		{outcome: verdict.OutcomeExecutedWithoutOnlineSafety, want: verdict.ErrAcceptedBlocking},
+		{outcome: verdict.OutcomeRefused, want: verdict.ErrRefused},
+		{outcome: verdict.OutcomeFailed, want: nil},
+	} {
+		t.Run(string(tc.outcome), func(t *testing.T) {
+			c := parseMigrate(t, "--json")
+			var out bytes.Buffer
+			got := c.emit(&out, verdict.Verdict{Outcome: tc.outcome, Statement: "ALTER TABLE t ADD COLUMN c int"})
+			if tc.want == nil {
+				assert.NoError(t, got)
+			} else {
+				assert.ErrorIs(t, got, tc.want)
+			}
+			assert.Contains(t, out.String(), fmt.Sprintf(`"outcome": %q`, tc.outcome), "the verdict is printed before the sentinel returns")
+		})
+	}
 }
 
 func TestRetryPolicyDefaults(t *testing.T) {

@@ -102,9 +102,13 @@ func (c *MigrateCmd) retryPolicy() executor.RetryPolicy {
 	return executor.RetryPolicy{MaxAttempts: c.LockAttempts, InitialBackoff: c.LockBackoff, MaxBackoff: c.LockBackoffMax}
 }
 
-// emit prints the verdict in the selected format and returns ErrRefused for
-// refusals so the exit code distinguishes them from operational errors. The
-// JSON contract stays plain; the human rendering styles its labels.
+// emit prints the verdict in the selected format and returns the sentinel
+// the entry point maps to the outcome's exit code: ErrRefused for a refusal
+// and ErrAcceptedBlocking for a commit without an online-safety guarantee,
+// so neither can be read as online-safe exit 0 or as an operational error. A
+// failed verdict returns nil here; its caller returns the run error, which
+// is what exits 1. The JSON contract stays plain; the human rendering styles
+// its labels.
 func (c *MigrateCmd) emit(out io.Writer, v verdict.Verdict) error {
 	if c.JSON {
 		text, err := v.JSON()
@@ -117,8 +121,12 @@ func (c *MigrateCmd) emit(out io.Writer, v verdict.Verdict) error {
 	} else if err := writeVerdictText(out, c.palette(out), v); err != nil {
 		return err
 	}
-	if v.Outcome == verdict.OutcomeRefused {
+	switch v.Outcome {
+	case verdict.OutcomeRefused:
 		return verdict.ErrRefused
+	case verdict.OutcomeExecutedWithoutOnlineSafety:
+		return verdict.ErrAcceptedBlocking
+	default:
+		return nil
 	}
-	return nil
 }

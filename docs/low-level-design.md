@@ -820,7 +820,10 @@ At the library seam, each executor outcome maps to a stable string code
 embedding `pkg/executor` branches on one vocabulary; the CLI's verdict JSON carries the same
 codes — an execution failure ends in a `failed` verdict (exit 1, distinct from the refusal
 exit 2) with the code, the failed step, and the committed prefix in `executed_sql`, so
-automation can distinguish nothing-committed from partial state left behind. Native execution
+automation can distinguish nothing-committed from partial state left behind; an
+operator-accepted blocking change that committed ends in an `executed-without-online-safety`
+verdict (exit 3), the one case that is committed but not vouched for as online-safe
+([the ladder](cli-output-examples.md#exit-codes)). Native execution
 exposes a caller-owned `progress.Tracker`. Embedders run a blocking executor
 call in their own bounded task and poll `Tracker.Progress(ctx)`: sequence position and elapsed
 time come from in-process state, while an active concurrent index build is read on demand from
