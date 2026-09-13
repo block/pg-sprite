@@ -120,9 +120,10 @@ implementation time):
 - **So is the set of tables.** A live table with no desired file is invisible to a per-table
   diff, and under a declarative model its only convergence is `DROP TABLE` — which pg-sprite
   refuses at both front doors and never executes. There is no `verdict.Verdict` to map: pg-sprite
-  never saw the table. The adapter enumerates the namespace's live tables itself (the catalog
-  query and its exclusions — partitions and extension-owned tables — are
-  under [Deliberately operator-owned](capabilities.md#deliberately-operator-owned)) and
+  never saw the table. The adapter enumerates the namespace's live tables itself —
+  `schemadiff.ListManagedTables` is the exported catalog query `pull` uses, and its
+  exclusions (partitions and extension-owned tables) are explained under
+  [Deliberately operator-owned](capabilities.md#deliberately-operator-owned) — and
   *synthesizes* an `engine.TableChange` per undeclared table: `ExecutionMode =
   ExecutionModeBlocked`, `IsUnsafe` with a data-loss `UnsafeReason`, and a `ModeReason` that
   names the table and the two remedies (restore or write its file; drop it through a reviewed
