@@ -236,7 +236,7 @@ failed sequence.
 |---|---|---|---|
 | 1 | Online idiom / substituted sequence completed | Success verdict | Yes — online by proof |
 | 2 | Bounded attempt completed within budget | Success verdict | Yes — it was catalog-only |
-| 3a | Lock not granted within `lock_timeout` | `reason: not-native-safe-budget-exceeded`, `cause: lock-budget` (SQLSTATE `55P03`; executor code `budget-lock-exceeded`) | No — nothing executed |
+| 3a | Lock not granted within `lock_timeout` on any attempt | `reason: not-native-safe-budget-exceeded`, `cause: lock-budget` (SQLSTATE `55P03`; executor code `budget-lock-exceeded`) | No — nothing executed |
 | 3b | Statement ran past `statement_timeout` | `reason: not-native-safe-budget-exceeded`, `cause: statement-budget` (SQLSTATE `57014`; executor code `budget-statement-exceeded`) | No — rolled back cleanly |
 | 4 | Table exceeds the size limit | `reason: not-native-safe-table-too-large` (a typed `*preflight.SizeError` underneath) | No — refused before any DDL, no lock taken |
 | 5 | Shape routes to an unimplemented strategy, or is refused by a plan/partition/tier gate | Typed plan refusal | No |
@@ -255,7 +255,7 @@ Per refusal, the operational move an orchestrator makes
 
 | Refusal | What an orchestrator does |
 |---|---|
-| `not-native-safe-budget-exceeded`, `cause: lock-budget` | Transient — retry off-peak, same plan |
+| `not-native-safe-budget-exceeded`, `cause: lock-budget` | Transient — the engine's own bounded retries are already exhausted; retry off-peak, same plan |
 | `not-native-safe-budget-exceeded`, `cause: statement-budget` | Terminal today; the future copy-and-swap on-ramp |
 | `not-native-safe-table-too-large` | Policy — an operator raises the threshold deliberately |
 | `insufficient-privileges` | Operator action — `detail` names the exact `GRANT` |

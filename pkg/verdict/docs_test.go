@@ -137,16 +137,54 @@ func TestExitCodeLadderDocsListEveryCode(t *testing.T) {
 	}
 }
 
-// Every refusal reason automation can meet must be documented: a Reason
-// constant added without a row in the doc's refusal-reason table fails here.
+// refusalReasonsHeader is the header row of the refusal-reason table; only
+// rows under this header count as the closed set, so a reason token quoted
+// in another table on the page is neither credited nor rejected here.
+const refusalReasonsHeader = "| Reason | Meaning |"
+
+// documentedRefusalReasons returns the backticked first-cell token of every
+// row under the refusal-reason header. A page with no such table yields an
+// empty set, which the equality check then reports as missing every reason.
+func documentedRefusalReasons(t *testing.T, doc string) map[Reason]struct{} {
+	t.Helper()
+	reasons := map[Reason]struct{}{}
+	lines := strings.Split(doc, "\n")
+	for i, line := range lines {
+		if !strings.HasPrefix(line, refusalReasonsHeader) {
+			continue
+		}
+		// Skip the header and the separator row, then read rows until the
+		// table ends.
+		for _, row := range lines[i+2:] {
+			if !strings.HasPrefix(row, "|") {
+				break
+			}
+			cells := strings.SplitN(row, "|", 3)
+			require.Lenf(t, cells, 3, "refusal-reason row has a first cell: %q", row)
+			token, ok := strings.CutPrefix(strings.TrimSpace(cells[1]), "`")
+			require.Truef(t, ok, "refusal-reason row's first cell is a backticked token: %q", row)
+			token, ok = strings.CutSuffix(token, "`")
+			require.Truef(t, ok, "refusal-reason row's first cell is a backticked token: %q", row)
+			reasons[Reason(token)] = struct{}{}
+		}
+	}
+	return reasons
+}
+
+// The refusal-reason table must list exactly the reasons automation can
+// meet: a Reason constant added without a row saying what it means fails
+// here, and so does a row for a token that is not a refusal reason — an
+// executor failure code, say, which a reader would otherwise take as a
+// nothing-ran refusal when the DDL has in fact committed.
 func TestDocListsEveryRefusalReason(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
-	doc := string(raw)
+	want := map[Reason]struct{}{}
 	for _, r := range Reasons() {
-		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", string(r)),
-			"docs/cli-output-examples.md is missing a refusal-reason row for %q", r)
+		want[r] = struct{}{}
 	}
+	assert.Equal(t, want, documentedRefusalReasons(t, string(raw)),
+		"docs/cli-output-examples.md must state the refusal reasons as a table under %q with one row per reason", refusalReasonsHeader)
 }
 
 // Every refusal reason must be classified: a Reason constant added without a
