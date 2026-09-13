@@ -41,6 +41,11 @@ const (
 	// that reaches the server behind it.
 	poolerReadyDeadline = 30 * time.Second
 	poolerReadyPoll     = 100 * time.Millisecond
+	// poolerReadyAttempt bounds one login probe. PgBouncer holds a client it
+	// cannot yet hand a server for its whole client_login_timeout, which is
+	// longer than the deadline above, so an unbounded attempt would consume
+	// the deadline in one try and leave no error behind to report.
+	poolerReadyAttempt = 5 * time.Second
 )
 
 // StartPostgresBehindPgBouncer starts a PostgreSQL server with a PgBouncer
@@ -125,9 +130,12 @@ func StartPostgresBehindPgBouncer(t *testing.T, mode PoolMode) (pooledURL string
 				"IGNORE_STARTUP_PARAMETERS": "lock_timeout,statement_timeout,extra_float_digits",
 			},
 			Networks: []string{net.Name},
-			// A bound port only says the process is up. The host side of a
-			// published port accepts a client before the container does, so
-			// readiness is a login through the pooler, proven below.
+			// A bound port only says the process is listening: PgBouncer
+			// accepts a client before it can serve one, and holds or drops a
+			// login that arrives before it has a server behind it. This wait
+			// also degrades to a host-side dial alone, without failing, when
+			// the image lacks a usable /bin/sh. Readiness is therefore a login
+			// through the pooler, proven below.
 			WaitingFor: wait.ForListeningPort(pgBouncerPort + "/tcp"),
 		},
 		Started: true,
@@ -146,21 +154,22 @@ func StartPostgresBehindPgBouncer(t *testing.T, mode PoolMode) (pooledURL string
 
 // awaitPooledLogin polls until a client can log in through the pooler and
 // run a statement on the server behind it — the property the returned URL
-// promises. A client that arrives earlier is accepted by the port forwarder
-// and then cut off on its first read, which looks like a broken pooler
-// rather than an early caller.
+// promises. A client that arrives earlier is accepted by the pooler and then
+// held or closed unanswered, which looks like a broken pooler rather than an
+// early caller. Each attempt is bounded on its own so that a held login ends
+// with an error the next tick can improve on, and so the last error is what
+// the deadline reports.
 func awaitPooledLogin(t *testing.T, pooledURL string) {
 	t.Helper()
 	require.EventuallyWithTf(t, func(collect *assert.CollectT) {
-		ctx := t.Context()
+		ctx, cancel := context.WithTimeout(t.Context(), poolerReadyAttempt)
+		defer cancel()
 		conn, err := pgx.Connect(ctx, pooledURL)
 		if !assert.NoError(collect, err, "log in through the pooler") {
 			return
 		}
 		defer func() {
-			if err := conn.Close(ctx); err != nil {
-				t.Logf("close the pooler readiness probe connection: %v", err)
-			}
+			assert.NoError(collect, conn.Close(ctx), "close the pooler readiness probe connection")
 		}()
 		var one int
 		assert.NoError(collect, conn.QueryRow(ctx, "SELECT 1").Scan(&one), "run a statement through the pooler")
