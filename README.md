@@ -84,6 +84,12 @@ refusal — never a silently wrong or incomplete result:
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
   the caller must not rebuild) is library-only; from the CLI the
   [runbook](docs/invalid-index-recovery.md) applies.
+- **The accepted-blocking passthrough has no CLI flag yet** — running an
+  otherwise-refused change deliberately under the engine's bounded lock
+  budget, with the verdict marked `executed-without-online-safety` (exit 3),
+  is library-only (`executor.ExecuteAcceptedBlocking`); from the CLI these
+  refusals exit 2. Design:
+  [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
   which covers one ordinary table plus its indexes per file.

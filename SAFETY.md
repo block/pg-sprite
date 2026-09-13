@@ -32,7 +32,7 @@ The invariant registry (invariant IDs referenced below) lives in
 | `pkg/capabilities` — embedded, validated support matrix and Markdown rendering | ❌ periphery | exists | — |
 | `pkg/diffplan` — desired schema → routed convergence plan, the declarative front door as a library (the CLI `diff` and embedding orchestrators share it) | ❌ periphery | exists | — |
 | `pkg/migrate` — one gated statement → resolve, classify, route, execute → one verdict; the imperative front door as a library (the CLI `migrate` and embedding orchestrators share it), plus the desired-state execution loop (`RunDesired`: derive the convergence plan, admit it as a whole, run each planned statement back through the same pipeline) | ❌ periphery² | exists | — |
-| `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`, `status`, `diff`, `fmt`, `lint`, and `suggest` exist | — |
+| `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`, `pull`, `diff`, `fmt`, `lint`, `suggest`, `capabilities`, and `status` exist | — |
 | `pkg/progress` — strategy-wide progress snapshots; the executors' observation seam (core imports it, so its locking discipline is core-critical); copy counters reserved for later | ✅ core | native progress exists | — |
 | orchestrator adapter | ❌ periphery | planned (Phase 11) | OC-* hold *at* the boundary |
 | `internal/testutil` | ❌ test-only | exists | — |

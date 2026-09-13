@@ -41,14 +41,18 @@ pg-sprite executes a PostgreSQL schema change through an escalation ladder:
    any size check — what executes is a planner-authored sequence or an already-online
    form, never a blind statement.
 2. **Bounded attempt:** every other executing shape — *including those the classifier
-   labels `metadata-only`* — runs the submitted form once, blind, under two tight
+   labels `metadata-only`* — runs the submitted form blind, under two tight
    budgets — `lock_timeout` and `statement_timeout` — set with `SET LOCAL` inside the
    attempt's transaction. If the change was really instant, it succeeds in
-   milliseconds. If it turns out to do real work (a table rewrite), the server cancels
-   it, PostgreSQL's transactional DDL rolls it back cleanly, and a typed budget error
-   surfaces. Nothing executed, no debris. The classification is a prediction, not an
-   assertion PostgreSQL honours — which is why even a `metadata-only` verdict earns a
-   budget, not an exemption.
+   milliseconds. If the lock never arrives, the attempt is retried a bounded number of
+   times with exponential backoff, each in a fresh transaction (the default policy is
+   three attempts; `--lock-attempts 1` disables the retry). If it turns out to do real
+   work (a table rewrite), the server cancels it, PostgreSQL's transactional DDL rolls
+   it back cleanly, and a typed budget error surfaces at once — a statement-budget
+   overrun is never retried, because repeating work that exceeded its execution
+   budget is not a lock-acquisition strategy. Nothing committed, no debris. The
+   classification is a prediction, not an assertion PostgreSQL honours — which is why
+   even a `metadata-only` verdict earns a budget, not an exemption.
 3. **The table-size guard** protects rung 2 only: above `Options.MaxTableSizeBytes`,
    the bounded attempt is refused *before any DDL runs* with a typed
    `*preflight.SizeError`, because on a big table even a losing gamble costs a full
@@ -201,9 +205,11 @@ What happens to one statement, in order:
      refusal, whose committed prefix stays committed
      ([execution-model.md](execution-model.md)).
    - **Lane B → bounded attempt.** `SET LOCAL lock_timeout` + `statement_timeout`,
-     then run the submitted form once ([the budget mechanics](#the-budget-mechanics)).
+     then run the submitted form, retrying only a lock-timeout overrun within the bounded
+     retry policy ([the budget mechanics](#the-budget-mechanics)).
      Three endings: it really was catalog-only and commits in milliseconds (Exit 2);
-     the lock never arrived on a contended table (Exit 3a, nothing executed); or the
+     the lock never arrived on a contended table across every attempt (Exit 3a, nothing
+     executed); or the
      statement did real work — a rewrite — and the server cancelled it, transactional
      DDL rolling it back cleanly (Exit 3b).
 7. **Every ending is typed.** Success verdicts, SQLSTATE-mapped budget refusals,
@@ -230,7 +236,7 @@ failed sequence.
 |---|---|---|---|
 | 1 | Online idiom / substituted sequence completed | Success verdict | Yes — online by proof |
 | 2 | Bounded attempt completed within budget | Success verdict | Yes — it was catalog-only |
-| 3a | Lock not granted within `lock_timeout` | `reason: not-native-safe-budget-exceeded`, `cause: lock-budget` (SQLSTATE `55P03`; executor code `budget-lock-exceeded`) | No — nothing executed |
+| 3a | Lock not granted within `lock_timeout` on any attempt | `reason: not-native-safe-budget-exceeded`, `cause: lock-budget` (SQLSTATE `55P03`; executor code `budget-lock-exceeded`) | No — nothing executed |
 | 3b | Statement ran past `statement_timeout` | `reason: not-native-safe-budget-exceeded`, `cause: statement-budget` (SQLSTATE `57014`; executor code `budget-statement-exceeded`) | No — rolled back cleanly |
 | 4 | Table exceeds the size limit | `reason: not-native-safe-table-too-large` (a typed `*preflight.SizeError` underneath) | No — refused before any DDL, no lock taken |
 | 5 | Shape routes to an unimplemented strategy, or is refused by a plan/partition/tier gate | Typed plan refusal | No |
@@ -249,7 +255,7 @@ Per refusal, the operational move an orchestrator makes
 
 | Refusal | What an orchestrator does |
 |---|---|
-| `not-native-safe-budget-exceeded`, `cause: lock-budget` | Transient — retry off-peak, same plan |
+| `not-native-safe-budget-exceeded`, `cause: lock-budget` | Transient — the engine's own bounded retries are already exhausted; retry off-peak, same plan |
 | `not-native-safe-budget-exceeded`, `cause: statement-budget` | Terminal today; the future copy-and-swap on-ramp |
 | `not-native-safe-table-too-large` | Policy — an operator raises the threshold deliberately |
 | `insufficient-privileges` | Operator action — `detail` names the exact `GRANT` |
@@ -341,7 +347,12 @@ weaken them:
 
 - **`lock_timeout`** — how long we will wait to *acquire* the `ACCESS EXCLUSIVE`
   lock. Overrun ⇒ SQLSTATE `55P03`, typed as "the table is too contended for a blind
-  attempt right now". Nothing was executed.
+  attempt right now". Nothing was executed. This is the one failure the attempt
+  retries: `executor.RetryPolicy` bounds the attempts (`DefaultRetryPolicy` is three,
+  with exponential backoff from 100 ms capped at 1 s; the CLI flags are
+  `--lock-attempts`, `--lock-backoff`, `--lock-backoff-max`), each attempt is a new
+  transaction, and the `*BudgetError` returned when every attempt fails carries the
+  attempt count.
 - **`statement_timeout`** — how long the DDL may *run while holding* the lock.
   Overrun ⇒ SQLSTATE `57014`, typed as "the change is doing real work — a rewrite —
   not an in-place catalog change". Rolled back cleanly.

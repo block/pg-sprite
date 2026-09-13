@@ -134,8 +134,12 @@ results with commit SHA + PG version. A fast wrong answer is a failure.
 Separate from Go package tests, CI runs the **built `pg-sprite` binary**
 against a real database with checked-in example inputs as the acceptance
 corpus — exit codes, output, and resulting database state asserted.
-This obligation is not yet wired into CI: CI builds the binary but does not
-run this acceptance path. *Binds:* Phase 2 (first executing command). *Source:* pgroll `make
+CI's `demo` job does this: `make demo-check` runs the demo tour
+([demo/tour.sh](../demo/tour.sh)) in check mode against the compose
+database, asserting on `--json` fields and exit codes only, never on prose.
+The operator-run [corpus replay](../replay/README.md) (`make replay`) drives
+the same binary through a real project's schema-change history and is not
+a CI gate. *Binds:* Phase 2 (first executing command). *Source:* pgroll `make
 examples` CI job; pg_repack driving its CLI through `pg_regress`.
 
 ### TM-9 — The operation must outlive the observer
@@ -167,6 +171,9 @@ capability no peer suite has.
 | `make test-supported-postgres` | Full suite against every supported major, 14 → 18 — the local mirror of the CI matrix. |
 | `make db-up` / `make test-db` / `make db-down` | Long-lived compose database on localhost; the suite connects to it via `PG_DSN` instead of starting per-test containers. Fastest loop for repeated integration runs, and the path CI's version matrix uses — per-test containers oversubscribe a small CI runner and get killed mid-test. |
 | `make test-aws-boundary` | AWS-boundary tests against Ministack's RDS/Aurora control plane. Needs Docker only; see the tier table below. |
+| `make demo-check` | The demo tour in check mode against the built `bin/pg-sprite` and the compose database — CI's artifact smoke test (TM-8). Needs Docker and `jq`. |
+| `make check-capabilities` | Regenerates the generated regions of [capabilities.md](capabilities.md) from `pkg/capabilities/capabilities.yaml` and fails if the committed page differs. CI runs it; no Docker. |
+| `make replay` / `make replay-refresh` / `make replay-down` | Corpus replay ([replay/README.md](../replay/README.md)): drive the built binary through a pinned real-project schema-change history, asserting each statement's typed outcome. Operator-run, not a CI gate. |
 
 The harness is [internal/testutil](../internal/testutil/postgres.go):
 `StartPostgres` returns a connection URL (container, or `PG_DSN` when set)
@@ -333,7 +340,10 @@ DSN resolution) lands — the day a failure means something an author can
 fix. It is also intentionally **not** part of the pre-push hook, which
 stays unit-only so pushes remain fast.
 
-## Current coverage (Phases 1 and 2.1–2.4)
+## Current coverage
+
+The table names the entry-point test file for each area; sibling `*_test.go` files in the
+same package cover the rest of it.
 
 | Area | Tests |
 | --- | --- |
@@ -355,6 +365,17 @@ stays unit-only so pushes remain fast.
 | CLI `diff`, `fmt`, and classified `migrate --dry-run`, including applying text output and re-diffing to empty (`TestDiffTextPlanIsExecutableSQL`) | [diff integration](../internal/cli/diff_integration_test.go), [fmt](../internal/cli/diff_test.go), [dry-run integration](../internal/cli/dryrun_integration_test.go) |
 | Library front door (`diffplan.Plan`): ordered routed plan, missing-table, no-op, copy-and-swap refusal, never-writes, deterministic fingerprint | [diffplan unit](../pkg/diffplan/diffplan_test.go), [diffplan integration](../pkg/diffplan/diffplan_integration_test.go) |
 | Bounded optimistic native attempt and table preflight | [pkg/executor](../pkg/executor/optimistic_integration_test.go), [pkg/preflight](../pkg/preflight/preflight_integration_test.go) |
+| Safer-sequence runner: autocommit steps, committed-prefix semantics on a mid-sequence failure | [pkg/executor](../pkg/executor/sequence_integration_test.go) |
+| Concurrent index build: caller-owned session, invalid-index detection into a typed state, and the proven recovery (`RebuildAbandonedIndex`, `DropAbandonedIndex`) | [pkg/executor](../pkg/executor/recover_integration_test.go) |
+| Greenfield `CREATE TABLE` path: shape refusals, claimed-name collisions, post-commit name verification | [pkg/executor](../pkg/executor/create_integration_test.go) |
+| Accepted-blocking execution primitive (`ExecuteAcceptedBlocking`) and its eligibility rule | [pkg/executor](../pkg/executor/accepted_blocking_integration_test.go), [pkg/verdict](../pkg/verdict/accepted_blocking_test.go) |
+| Imperative front door (`migrate.Run`): gate, resolve, route, execute, verdict; `--force` acknowledgement; refusal reason → class registry | [pkg/migrate](../pkg/migrate/run_integration_test.go), [registry](../pkg/migrate/refusal_registry_test.go) |
+| Desired-state execution loop (`migrate.RunDesired`): whole-plan admission, destructive guard, fingerprint pin, per-statement verdicts | [pkg/migrate](../pkg/migrate/desired_integration_test.go) |
+| Offline `suggest`: safer-form mapping, typed caveats, and residue checks against a live server | [pkg/suggest](../pkg/suggest/suggest_test.go), [residue](../pkg/suggest/residue_integration_test.go) |
+| `pull`: per-table export, refuse-don't-guess shapes, create-only file writes, and the managed-table catalog query | [CLI pull](../internal/cli/pull_integration_test.go), [pkg/schemadiff](../pkg/schemadiff/managed_tables_integration_test.go) |
+| Capability matrix: YAML validity, tier rules, rendered page agreement, `capabilities --json` contract | [pkg/capabilities](../pkg/capabilities/capabilities_test.go), [CLI](../internal/cli/capabilities_test.go) |
+| Progress snapshots, the observer seam, and `CancelBuild` | [pkg/progress](../pkg/progress/progress_test.go) |
+| Supabase compatibility: pooler connections through `pkg/dbconn`, and the DDL, RLS, realtime, and failure matrix against pinned Supabase services | [pkg/dbconn](../pkg/dbconn/supabase_integration_test.go), [integration/supabase](../integration/supabase/README.md) |
 
 ## Landed and deferred test obligations
 
@@ -366,8 +387,8 @@ points.
 
 | Status | Test obligations (summary) |
 | --- | --- |
-| Done — Phases 2.1–2.4 | Parse-based operation descriptors and classification, refusal contracts, declarative desired-state → ordered `ALTER` derivation, routing, and convergence testing against real PostgreSQL. |
-| Remaining — Phase 3 native executor | Each native idiom (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default, `USING INDEX`) exercised against all supported majors; bounded lock behavior under contention; invalid-index cleanup. |
+| Done — Phases 2.1–2.5 | Parse-based operation descriptors and classification, refusal contracts, declarative desired-state → ordered `ALTER` derivation, routing, the versioned plan report, offline lint and suggest, and convergence testing against real PostgreSQL. |
+| Done — Phase 3 native executor | Each native idiom (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default, `USING INDEX`) exercised against all supported majors; bounded lock behavior under contention with the lock-timeout retry; invalid-index detection and the proven recovery; the greenfield create path; the accepted-blocking primitive. |
 | Remaining — later copy-and-swap phases | Shadow table, CDC, checksum-gate, cutover, checkpoint/resume, and fault-injection obligations land with their implementations. |
 
 Copy-and-swap obligations include checksum-gate and checkpoint/resume
