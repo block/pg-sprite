@@ -886,6 +886,8 @@ func TestExecuteCreateWithOwnerFailsClosedOnOwnerMismatch(t *testing.T) {
 	var mismatch *executor.CreateOwnerMismatchError
 	require.ErrorAs(t, err, &mismatch)
 	assert.ErrorIs(t, err, executor.ErrCreateOwnerMismatch)
+	assert.Equal(t, executor.CodeCreateOwnerMismatch, executor.OutcomeCode(err),
+		"the step-1 failure carries the permanent ownership code, not the execution-failed fallback")
 	assert.Equal(t, owner, mismatch.Expected)
 	assert.Equal(t, other, mismatch.Actual)
 	assert.Empty(t, rep.Steps)
@@ -904,6 +906,8 @@ func TestExecuteCreateWithOwnerReportsUnreadableOwnerAsUnverified(t *testing.T) 
 	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr,
 		desired(t, "CREATE TABLE t (a int, v text)"), createBudget, executor.DefaultRetryPolicy())
 	require.ErrorIs(t, err, executor.ErrCreateOwnerUnverified)
+	assert.Equal(t, executor.CodeCreateOwnerUnverified, executor.OutcomeCode(err),
+		"an unreadable owner is retryable, so it must not carry the permanent mismatch code")
 	assert.Empty(t, rep.Steps)
 	assert.Equal(t, "r", relationKind(t, f.pool, f.schema, "t_moved"))
 }

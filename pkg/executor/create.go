@@ -280,11 +280,11 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 			start = tracker.Now()
 		}
 		err := executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
-			role := ""
+			owner := ""
 			if cr.SetsRole() {
-				role = cr.Role()
+				owner = cr.Owner()
 			}
-			return executeBoundedAttemptAs(ctx, pool, step, b, at.Schema(), role)
+			return executeBoundedAttemptAs(ctx, pool, step, b, at.Schema(), owner)
 		}, sleepContext, func(attempt int) {
 			if tracker != nil {
 				tracker.SetAttempt(attempt)
@@ -302,11 +302,11 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 			if err := verifyOwnedNames(ctx, pool, at, ownedClaims); err != nil {
 				return rep, &SequenceStepError{Step: 1, Total: len(steps), Kind: StepBrief, SQL: step.SQL(), Err: err}
 			}
-			// INV: ST-7 — when the proof names an owner other than the
+			// INV: ST-9 — when the proof names an owner other than the
 			// session role, the committed table must be born under it; an
-			// ownership mismatch fails closed.
+			// ownership mismatch fails closed and is never repaired.
 			if cr.SetsRole() {
-				if err := verifyCreateOwner(ctx, pool, at, cr.Role()); err != nil {
+				if err := verifyCreateOwner(ctx, pool, at, cr.Owner()); err != nil {
 					return rep, &SequenceStepError{Step: 1, Total: len(steps), Kind: StepBrief, SQL: step.SQL(), Err: err}
 				}
 			}

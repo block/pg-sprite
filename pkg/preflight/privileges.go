@@ -367,11 +367,12 @@ func ownerMembershipRefusal(f accessFacts) *PrivilegeError {
 }
 
 // checkSetRoleAccess verifies the owning-role membership is usable with
-// SET ROLE, so shadow objects are born with the correct owner. PostgreSQL
-// 16 made SET a distinct membership option (pg_has_role mode 'SET'); on
-// 14–15 SET ROLE consults plain membership, which the Tier-1 USAGE rung
-// already proved — an inheriting membership chain is a membership chain —
-// so there is nothing further to check below 16.
+// SET ROLE, so objects created under it are born with the correct owner.
+// PostgreSQL 16 made SET a distinct membership option (pg_has_role mode
+// 'SET'); on 14–15 SET ROLE consults plain membership, which every caller
+// has already proved before reaching this rung — the ownership ladder
+// through an inheriting USAGE chain (a membership chain), the create path
+// through MEMBER directly — so there is nothing further to check below 16.
 func checkSetRoleAccess(ctx context.Context, pool *pgxpool.Pool, f accessFacts) error {
 	const pg16 = 160000
 	if f.versionNum < pg16 {

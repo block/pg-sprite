@@ -66,12 +66,15 @@ Creating a new table sits outside the ladder. By default the engine role creates
 this owner-less mode deliberately preserves the original behavior. When the embedding caller
 names a create owner (`migrate.Options.CreateOwner`; the CLI has no declarative apply command
 yet), each bounded create step runs `SET LOCAL ROLE <owner>` before its SQL. Preflight proves the
-engine can assume that role (`USAGE`, plus `SET` on PostgreSQL 16+), that the owner has
-`USAGE` and `CREATE` on the schema, and that the engine has `CONNECT`. Tables, serial
-sequences, and indexes are consequently born under the owner, so that owner's default
-privileges apply. Missing access is refused with the exact `GRANT`. After the `CREATE TABLE`
-commits, the executor reads the table's catalog owner back and fails closed
-(`CreateOwnerMismatchError`) if it is not the named owner; it never repairs ownership with
+engine can assume that role — membership (`pg_has_role(..., 'MEMBER')`, which is what `SET ROLE`
+consults; a `NOINHERIT` member qualifies), plus the `SET` membership option on PostgreSQL 16+ —
+that the owner has `USAGE` and `CREATE` on the schema, and that the engine has `CONNECT`.
+Tables, serial sequences, and indexes are consequently born under the owner, so that owner's
+default privileges apply. Missing access is refused with the exact `GRANT` (`GRANT <owner> TO
+<engine>`, `WITH SET TRUE` on 16+); a named owner that is not a role on the server is refused
+before anything runs. After the `CREATE TABLE` commits, the executor reads the table's catalog
+owner back and fails closed (`create-owner-mismatch`, or `create-owner-unverified` when the
+read does not complete) if it is not the named owner; it never repairs ownership with
 `ALTER TABLE ... OWNER TO`.
 
 One owner per target, not per schema, is deliberate: a per-schema map would mirror

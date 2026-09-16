@@ -16,29 +16,42 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// ErrCreateOwnerNotFound is returned when the named create owner is not a
+// role on the server. The name is caller configuration, so the cause is
+// separated from a missing grant: no GRANT provisions a role that does not
+// exist, and nothing has run.
+var ErrCreateOwnerNotFound = errors.New("create owner role not found")
+
 // CreationRole proves the connected role holds every access a greenfield
 // CREATE TABLE in the schema needs: CONNECT on the database, USAGE and
-// CREATE on the schema. It can only be constructed by
-// CheckCreatePrivileges in this package. The schema it carries is always
-// resolved — an unqualified check records the session's creation schema.
+// CREATE on the schema for the role the table will be owned by, and — when
+// a create owner other than the connected role is named — membership that
+// lets the session SET ROLE to it. It can only be constructed by
+// CheckCreatePrivileges or CheckCreatePrivilegesAs in this package. The
+// schema it carries is always resolved — an unqualified check records the
+// session's creation schema.
 //
 // Like AbsentTarget, the proof is time-of-check and session-scoped: a
 // grant can be revoked between the check and the CREATE TABLE, in which
 // case the create fails with the server's own insufficient-privilege
 // error rather than a typed refusal.
 type CreationRole struct {
-	role     string
-	schema   string
-	setsRole bool
+	role   string
+	owner  string
+	schema string
 }
 
-// Role returns the role a created table will be owned by: the named create
-// owner when one was checked, otherwise the connected role the checks ran
-// as.
+// Role returns the connected role the checks ran as — the identity whose
+// CONNECT was proved and the grantee of any membership the create needs.
 func (c CreationRole) Role() string { return c.role }
 
-// SetsRole reports whether create steps must SET LOCAL ROLE to Role.
-func (c CreationRole) SetsRole() bool { return c.setsRole }
+// Owner returns the role a created table will be owned by: the named create
+// owner when one was checked, otherwise the connected role.
+func (c CreationRole) Owner() string { return c.owner }
+
+// SetsRole reports whether create steps must SET LOCAL ROLE to Owner
+// because it differs from the connected role.
+func (c CreationRole) SetsRole() bool { return c.owner != c.role }
 
 // Schema returns the resolved schema the access was verified in.
 func (c CreationRole) Schema() string { return c.schema }
@@ -57,6 +70,14 @@ func CheckCreatePrivileges(ctx context.Context, pool *pgxpool.Pool, schema strin
 // CheckCreatePrivilegesAs verifies creation access for owner. When owner is
 // empty, creation remains under the connected role. Otherwise the connected
 // role must be able to SET ROLE to owner, and owner must hold schema access.
+//
+// SET ROLE consults membership, not inheritance: pg_has_role(..., 'MEMBER')
+// is the predicate on every supported version, and PostgreSQL 16 adds the
+// SET membership option as a second, narrower gate. A non-inheriting member
+// can assume the owner and is admitted; the USAGE mode — whether the owner's
+// privileges are already available without SET ROLE — is not what the
+// mechanism needs, and a refusal keyed on it could not be cleared by the
+// GRANT it prints.
 func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, owner string) (CreationRole, error) {
 	// One catalog snapshot gathers every fact the check consults, so the
 	// facts cannot disagree about when they looked. The LEFT JOIN turns
@@ -71,19 +92,19 @@ func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, ow
 		       current_setting('server_version_num')::int,
 		       CASE WHEN $2 = '' THEN true ELSE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2) END,
 		       CASE WHEN $2 = '' OR $2 = current_user THEN true
-		            ELSE COALESCE(pg_has_role(current_user, (SELECT oid FROM pg_roles WHERE rolname = $2), 'USAGE'), false) END,
+		            ELSE COALESCE(pg_has_role(current_user, (SELECT oid FROM pg_roles WHERE rolname = $2), 'MEMBER'), false) END,
 		       has_database_privilege(current_user, current_database(), 'CONNECT'),
 		       COALESCE(has_schema_privilege(CASE WHEN $2 = '' THEN current_user::regrole::oid ELSE (SELECT oid FROM pg_roles WHERE rolname = $2) END, n.oid, 'USAGE'), false),
 		       COALESCE(has_schema_privilege(CASE WHEN $2 = '' THEN current_user::regrole::oid ELSE (SELECT oid FROM pg_roles WHERE rolname = $2) END, n.oid, 'CREATE'), false)
 		FROM (SELECT CASE WHEN $1 = '' THEN current_schema() ELSE $1 END AS nspname) s
 		LEFT JOIN pg_namespace n ON n.nspname = s.nspname`
 	var targetSchema *string
-	var schemaExists, ownerExists, ownerUsage, canConnect, schemaUsage, schemaCreate bool
+	var schemaExists, ownerExists, ownerMember, canConnect, schemaUsage, schemaCreate bool
 	var versionNum int
 	var role, database string
 	if err := pool.QueryRow(ctx, q, schema, owner).Scan(
 		&targetSchema, &schemaExists, &role, &database,
-		&versionNum, &ownerExists, &ownerUsage, &canConnect, &schemaUsage, &schemaCreate); err != nil {
+		&versionNum, &ownerExists, &ownerMember, &canConnect, &schemaUsage, &schemaCreate); err != nil {
 		return CreationRole{}, fmt.Errorf("gather create access facts for schema %q: %w", schema, err)
 	}
 	if targetSchema == nil {
@@ -96,7 +117,7 @@ func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, ow
 		return CreationRole{}, fmt.Errorf("%w: schema %s does not exist", ErrSchemaNotFound, *targetSchema)
 	}
 	if !ownerExists {
-		return CreationRole{}, fmt.Errorf("create owner role %q does not exist", owner)
+		return CreationRole{}, fmt.Errorf("%w: create owner role %q does not exist", ErrCreateOwnerNotFound, owner)
 	}
 	// INV: ST-6 — each missing grant is a typed refusal carrying the exact
 	// provisioning statement; the proof is only minted when every fact
@@ -105,17 +126,17 @@ func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, ow
 		return CreationRole{}, connectRefusal(role, database)
 	}
 	createRole := role
-	setsRole := owner != "" && owner != role
 	if owner != "" {
 		createRole = owner
 	}
-	if !ownerUsage {
+	setsRole := createRole != role
+	if !ownerMember {
 		grant := fmt.Sprintf("GRANT %s TO %s", pgx.Identifier{owner}.Sanitize(), pgx.Identifier{role}.Sanitize())
 		if versionNum >= 160000 {
 			grant += " WITH SET TRUE"
 		}
 		return CreationRole{}, &PrivilegeError{Tier: TierCreateTable,
-			Check: fmt.Sprintf("pg_has_role(%s, %s, 'USAGE')", role, owner), Grant: grant}
+			Check: fmt.Sprintf("pg_has_role(%s, %s, 'MEMBER')", role, owner), Grant: grant}
 	}
 	if !schemaUsage {
 		return CreationRole{}, schemaUsageRefusal(createRole, *targetSchema)
@@ -137,5 +158,5 @@ func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, ow
 			return CreationRole{}, err
 		}
 	}
-	return CreationRole{role: createRole, schema: *targetSchema, setsRole: setsRole}, nil
+	return CreationRole{role: role, owner: createRole, schema: *targetSchema}, nil
 }

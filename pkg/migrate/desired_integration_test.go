@@ -28,6 +28,15 @@ func parseDesired(t *testing.T, sql string) statement.DesiredSchema {
 	return ds
 }
 
+// With CreateOwner set, the whole desired-state path — preflight, SET LOCAL
+// ROLE per step, post-commit owner verification — runs as an engine role
+// that is a NOINHERIT member of the owner: it can SET ROLE to the owner but
+// holds none of the owner's privileges itself, which is the shape a gate
+// keyed on inheritance would wrongly refuse. Every relation the run creates
+// is owned by the owner, so the owner's default privileges reach the
+// read-write role. The control half creates without an owner and proves the
+// default is unchanged: the engine owns the table and the default privileges
+// do not apply.
 func TestRunDesiredCreatesAsOwnerAndAppliesDefaultPrivileges(t *testing.T) {
 	serverURL := testutil.StartPostgres(t)
 	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
@@ -36,7 +45,7 @@ func TestRunDesiredCreatesAsOwnerAndAppliesDefaultPrivileges(t *testing.T) {
 
 	const password = "create-owner-password"
 	owner := testutil.NewRole(t, admin, "NOLOGIN")
-	engineRole := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
+	engineRole := testutil.NewRole(t, admin, "LOGIN NOINHERIT PASSWORD '"+password+"'")
 	rw := testutil.NewRole(t, admin, "NOLOGIN")
 	schema := testutil.NewSchema(t, admin)
 	// ALTER DEFAULT PRIVILEGES FOR ROLE requires the privileges of that
@@ -261,6 +270,30 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Contains(t, res.Detail, "GRANT CREATE ON SCHEMA",
 			"the refusal names the exact provisioning statement")
 		assert.Empty(t, res.Verdicts, "nothing was attempted")
+	})
+
+	t.Run("refuses a create owner that is not a role on the server", func(t *testing.T) {
+		// The owner is caller configuration, so a misspelling is decidable
+		// before anything runs and is a refusal an operator can act on,
+		// not a failed execution attempt.
+		schema := testutil.NewSchema(t, pool)
+		opts := runOptions()
+		opts.CreateOwner = "no_such_owner_role"
+
+		res, err := migrate.RunDesired(t.Context(), pool,
+			migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, desiredSQL)}, opts)
+		require.NoError(t, err, "a nonexistent owner is a refusal, not an error")
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonInsufficientPrivileges, res.Reason)
+		assert.Contains(t, res.Detail, `"no_such_owner_role" does not exist`,
+			"the refusal names the configured owner")
+		assert.Empty(t, res.Verdicts, "nothing was attempted")
+
+		var exists bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+			 WHERE table_schema = $1 AND table_name = 't')`, schema).Scan(&exists))
+		assert.False(t, exists, "the refused plan must not create the table")
 	})
 
 	t.Run("refuses a desired PARTITION OF before anything runs", func(t *testing.T) {
