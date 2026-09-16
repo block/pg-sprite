@@ -247,16 +247,25 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 	if err != nil {
 		return stopBefore(fmt.Errorf("verify %s.%s is absent: %w", report.Schema, report.Table, err))
 	}
-	role, err := preflight.CheckCreatePrivileges(ctx, pool, req.Schema)
+	role, err := preflight.CheckCreatePrivilegesAs(ctx, pool, req.Schema, opts.CreateOwner)
 	var privErr *preflight.PrivilegeError
 	if errors.As(err, &privErr) {
 		return result.refused(insufficientPrivilegesRefusal(), privErr.Error()+"; nothing was executed"), nil
+	}
+	if errors.Is(err, preflight.ErrCreateOwnerNotFound) {
+		// The owner is caller configuration and the server has no such
+		// role: decidable before anything runs, and the same environmental
+		// class as a missing grant — the environment has to change, not the
+		// statement. No GRANT can be printed because there is no grantee.
+		return result.refused(insufficientPrivilegesRefusal(), fmt.Sprintf(
+			"the create owner role %q does not exist on the server; create the role or correct the configured owner; nothing was executed",
+			opts.CreateOwner)), nil
 	}
 	if err != nil {
 		return stopBefore(fmt.Errorf("verify creation access in schema %s: %w", report.Schema, err))
 	}
 	opts.logger().Debug("create preflight passed",
-		"schema", at.Schema(), "table", at.Table(), "role", role.Role())
+		"schema", at.Schema(), "table", at.Table(), "role", role.Role(), "create_owner", role.Owner())
 
 	rep, execErr := executor.ExecuteCreate(ctx, pool, at, role, req.Desired, opts.Budget.Brief, opts.retry())
 	// The plan's statements and the executor's steps share one order — the

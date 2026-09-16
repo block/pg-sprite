@@ -102,7 +102,24 @@ var (
 	// in place; an unproven name set is not a passing one, and the executor
 	// never drops a table it has just created.
 	ErrCreateNamesUnverified = errors.New("the CREATE TABLE committed but the relation names the table owns could not be read")
+	// ErrCreateOwnerMismatch is returned when the committed table's catalog
+	// owner differs from the creation-role proof. The executor never repairs
+	// this invariant with ALTER OWNER.
+	ErrCreateOwnerMismatch = errors.New("the CREATE TABLE committed with an unexpected owner")
+	// ErrCreateOwnerUnverified is returned when the committed table's owner
+	// could not be read back. The table is committed either way, and an
+	// unproven owner is not a passing one.
+	ErrCreateOwnerUnverified = errors.New("the CREATE TABLE committed but its owner could not be read")
 )
+
+// CreateOwnerMismatchError reports the expected and catalog-resolved owner.
+type CreateOwnerMismatchError struct{ Expected, Actual string }
+
+func (e *CreateOwnerMismatchError) Error() string {
+	return fmt.Sprintf("%s: expected %s, got %s", ErrCreateOwnerMismatch, e.Expected, e.Actual)
+}
+
+func (e *CreateOwnerMismatchError) Unwrap() error { return ErrCreateOwnerMismatch }
 
 // CreateNameMismatchError reports the owned relation names that differ
 // from the create path's first-choice claims after the CREATE TABLE
@@ -263,7 +280,11 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 			start = tracker.Now()
 		}
 		err := executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
-			return executeBoundedAttempt(ctx, pool, step, b, at.Schema())
+			owner := ""
+			if cr.SetsRole() {
+				owner = cr.Owner()
+			}
+			return executeBoundedAttemptAs(ctx, pool, step, b, at.Schema(), owner)
 		}, sleepContext, func(attempt int) {
 			if tracker != nil {
 				tracker.SetAttempt(attempt)
@@ -281,6 +302,14 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 			if err := verifyOwnedNames(ctx, pool, at, ownedClaims); err != nil {
 				return rep, &SequenceStepError{Step: 1, Total: len(steps), Kind: StepBrief, SQL: step.SQL(), Err: err}
 			}
+			// INV: ST-9 — when the proof names an owner other than the
+			// session role, the committed table must be born under it; an
+			// ownership mismatch fails closed and is never repaired.
+			if cr.SetsRole() {
+				if err := verifyCreateOwner(ctx, pool, at, cr.Owner()); err != nil {
+					return rep, &SequenceStepError{Step: 1, Total: len(steps), Kind: StepBrief, SQL: step.SQL(), Err: err}
+				}
+			}
 		}
 		rep.Steps = append(rep.Steps, StepReport{
 			SQL:      step.SQL(),
@@ -289,6 +318,24 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 		})
 	}
 	return rep, nil
+}
+
+// verifyCreateOwner proves the committed table is owned by the role the
+// creation proof names. It runs only when the proof set a role: a table
+// created under the session role is owned by that role by construction,
+// while a SET LOCAL ROLE that did not take effect — or an owner changed
+// inside the CREATE's own transaction — is a defect to surface, not to
+// repair. The executor never issues ALTER ... OWNER TO.
+func verifyCreateOwner(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, expected string) error {
+	const q = `SELECT r.rolname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner WHERE n.nspname=$1 AND c.relname=$2`
+	var actual string
+	if err := pool.QueryRow(ctx, q, at.Schema(), at.Table()).Scan(&actual); err != nil {
+		return fmt.Errorf("%w: %s: %w", ErrCreateOwnerUnverified, qualifiedName(at.Schema(), at.Table()), err)
+	}
+	if actual != expected {
+		return &CreateOwnerMismatchError{Expected: expected, Actual: actual}
+	}
+	return nil
 }
 
 // admitCreateSteps qualifies every desired statement into the proof's

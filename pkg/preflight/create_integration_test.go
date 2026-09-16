@@ -55,6 +55,8 @@ func TestCheckCreatePrivilegesWalksTheGrants(t *testing.T) {
 	proof, err := preflight.CheckCreatePrivileges(ctx, engine, schema)
 	require.NoError(t, err)
 	assert.Equal(t, role, proof.Role())
+	assert.Equal(t, role, proof.Owner(), "owner-less: the connected role creates and owns")
+	assert.False(t, proof.SetsRole())
 	assert.Equal(t, schema, proof.Schema())
 }
 
@@ -65,6 +67,96 @@ func TestCheckCreatePrivilegesRefusesMissingSchema(t *testing.T) {
 
 	_, err = preflight.CheckCreatePrivileges(t.Context(), pool, "no_such_schema")
 	assert.ErrorIs(t, err, preflight.ErrSchemaNotFound)
+}
+
+func TestCheckCreatePrivilegesAsRefusals(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+	const password = "create-as-password"
+	owner := testutil.NewRole(t, admin, "NOLOGIN")
+	engineRole := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
+	schema := testutil.NewSchema(t, admin)
+	engine := connectAs(t, serverURL, engineRole, password)
+
+	_, err = preflight.CheckCreatePrivilegesAs(t.Context(), engine, schema, "no_such_owner")
+	assert.ErrorIs(t, err, preflight.ErrCreateOwnerNotFound)
+	var privilegeErr *preflight.PrivilegeError
+	assert.NotErrorAs(t, err, &privilegeErr, "no GRANT can provision a role that does not exist")
+
+	_, err = preflight.CheckCreatePrivilegesAs(t.Context(), engine, schema, owner)
+	require.ErrorAs(t, err, &privilegeErr)
+	assert.Equal(t, fmt.Sprintf("pg_has_role(%s, %s, 'MEMBER')", engineRole, owner), privilegeErr.Check,
+		"SET ROLE consults membership, so membership is the gate")
+	expectedGrant := fmt.Sprintf("GRANT %s TO %s", pgx.Identifier{owner}.Sanitize(), pgx.Identifier{engineRole}.Sanitize())
+	var version int
+	require.NoError(t, admin.QueryRow(t.Context(), "SELECT current_setting('server_version_num')::int").Scan(&version))
+	if version >= 160000 {
+		expectedGrant += " WITH SET TRUE"
+	}
+	assert.Equal(t, expectedGrant, privilegeErr.Grant)
+
+	_, err = admin.Exec(t.Context(), expectedGrant)
+	require.NoError(t, err)
+	_, err = preflight.CheckCreatePrivilegesAs(t.Context(), engine, schema, owner)
+	require.ErrorAs(t, err, &privilegeErr)
+	assert.Equal(t, fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{owner}.Sanitize()), privilegeErr.Grant)
+	_, err = admin.Exec(t.Context(), privilegeErr.Grant)
+	require.NoError(t, err)
+	_, err = preflight.CheckCreatePrivilegesAs(t.Context(), engine, schema, owner)
+	require.ErrorAs(t, err, &privilegeErr)
+	assert.Equal(t, fmt.Sprintf("GRANT CREATE ON SCHEMA %s TO %s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{owner}.Sanitize()), privilegeErr.Grant)
+	_, err = admin.Exec(t.Context(), privilegeErr.Grant)
+	require.NoError(t, err)
+
+	proof, err := preflight.CheckCreatePrivilegesAs(t.Context(), engine, schema, owner)
+	require.NoError(t, err)
+	assert.Equal(t, engineRole, proof.Role(), "Role is the connected role whose CONNECT and membership were proved")
+	assert.Equal(t, owner, proof.Owner(), "Owner is the role the table will be born under")
+	assert.True(t, proof.SetsRole())
+}
+
+// A NOINHERIT engine role that is a member of the owner can SET ROLE to it
+// — SET ROLE consults membership, not inheritance — so the check admits it,
+// and the refusal it gets before the grant is cleared by the exact GRANT
+// the refusal prints. Inheritance is what pg_has_role's USAGE mode reports,
+// and a gate keyed on it would refuse this session for ever: the printed
+// GRANT leaves INHERIT alone.
+func TestCheckCreatePrivilegesAsAdmitsNonInheritingMember(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+	const password = "create-as-noinherit-password"
+	owner := testutil.NewRole(t, admin, "NOLOGIN")
+	engineRole := testutil.NewRole(t, admin, "LOGIN NOINHERIT PASSWORD '"+password+"'")
+	schema := testutil.NewSchema(t, admin)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("GRANT USAGE, CREATE ON SCHEMA %s TO %s",
+		pgx.Identifier{schema}.Sanitize(), pgx.Identifier{owner}.Sanitize()))
+	require.NoError(t, err)
+	engine := connectAs(t, serverURL, engineRole, password)
+
+	_, err = preflight.CheckCreatePrivilegesAs(t.Context(), engine, schema, owner)
+	var privilegeErr *preflight.PrivilegeError
+	require.ErrorAs(t, err, &privilegeErr)
+	assert.Equal(t, fmt.Sprintf("pg_has_role(%s, %s, 'MEMBER')", engineRole, owner), privilegeErr.Check)
+
+	// The remedy the refusal printed is the whole remedy: after it runs,
+	// the engine still does not inherit the owner's privileges, yet the
+	// check passes because the session can now SET ROLE.
+	_, err = admin.Exec(t.Context(), privilegeErr.Grant)
+	require.NoError(t, err)
+	var inherits bool
+	require.NoError(t, engine.QueryRow(t.Context(),
+		"SELECT pg_has_role(current_user, $1, 'USAGE')", owner).Scan(&inherits))
+	require.False(t, inherits, "the fixture must present a member that does not inherit, or the test proves nothing")
+
+	proof, err := preflight.CheckCreatePrivilegesAs(t.Context(), engine, schema, owner)
+	require.NoError(t, err, "the printed GRANT must clear the refusal it accompanied")
+	assert.Equal(t, engineRole, proof.Role())
+	assert.Equal(t, owner, proof.Owner())
+	assert.True(t, proof.SetsRole())
 }
 
 // An empty schema resolves the session's creation schema — the schema an

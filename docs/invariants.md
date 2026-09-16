@@ -406,6 +406,20 @@ was forged or mutated, and every consumer refuses it fail-closed rather than reo
 materialization relies on it to run the `CREATE TABLE` before its indexes.
 *Source:* adversarial review of the declarative front door.
 
+### ST-9 — A named create owner is proven by the catalog, never repaired
+
+When the creation proof names an owner other than the connected role, every create step
+runs under `SET LOCAL ROLE <owner>` inside its own bounded transaction, and after the
+`CREATE TABLE` commits the executor reads the table's owner back from `pg_class` and fails
+the step closed if it is not the named owner (`create-owner-mismatch`) or cannot be read
+(`create-owner-unverified`). The executor never issues `ALTER ... OWNER TO`: a silent repair
+would make the proof unfalsifiable, and the committed state is what the error names. The
+owner-less default — the connected role creates and owns — is unchanged and proven by the
+same tests. *Enforced:* `pkg/preflight` (`CheckCreatePrivilegesAs` proves membership that
+lets the session `SET ROLE` to the owner, plus the owner's schema access), `pkg/executor`
+(`ExecuteCreate` applies the role per step and verifies after commit). *Source:* adversarial
+review of the create-owner option.
+
 ## Refusals and preflight (RF)
 
 Each refusal is a preflight **error with a stated reason** — never a warning, never attempted.
@@ -540,4 +554,5 @@ about **how we write and review the code**.
 | ST-6 | 1 onward, complete by 8 | preflight matrix |
 | ST-7 | 1 | target-mismatch refusal + single-statement-by-construction tests |
 | ST-8 | 2 (declarative model) | parse-time ordering + forged-proof refusal tests at every replay site |
+| ST-9 | 2 (declarative model) | every-relation-owned-by-owner, owner-mismatch fail-closed, unreadable-owner unverified, non-inheriting member admitted |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

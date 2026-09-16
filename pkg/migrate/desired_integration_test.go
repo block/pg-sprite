@@ -1,6 +1,7 @@
 package migrate_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -25,6 +26,91 @@ func parseDesired(t *testing.T, sql string) statement.DesiredSchema {
 	ds, err := statement.ParseDesired(sql)
 	require.NoError(t, err)
 	return ds
+}
+
+// With CreateOwner set, the whole desired-state path — preflight, SET LOCAL
+// ROLE per step, post-commit owner verification — runs as an engine role
+// that is a NOINHERIT member of the owner: it can SET ROLE to the owner but
+// holds none of the owner's privileges itself, which is the shape a gate
+// keyed on inheritance would wrongly refuse. Every relation the run creates
+// is owned by the owner, so the owner's default privileges reach the
+// read-write role. The control half creates without an owner and proves the
+// default is unchanged: the engine owns the table and the default privileges
+// do not apply.
+func TestRunDesiredCreatesAsOwnerAndAppliesDefaultPrivileges(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+
+	const password = "create-owner-password"
+	owner := testutil.NewRole(t, admin, "NOLOGIN")
+	engineRole := testutil.NewRole(t, admin, "LOGIN NOINHERIT PASSWORD '"+password+"'")
+	rw := testutil.NewRole(t, admin, "NOLOGIN")
+	schema := testutil.NewSchema(t, admin)
+	// ALTER DEFAULT PRIVILEGES FOR ROLE requires the privileges of that
+	// role. The admin connection is not a superuser on every fixture
+	// (Supabase's postgres role is not), so it takes membership first.
+	// The grantee is spelled by name: the Supabase image crashes on
+	// GRANT ... TO CURRENT_USER.
+	var adminRole string
+	require.NoError(t, admin.QueryRow(t.Context(), "SELECT current_user").Scan(&adminRole))
+	_, err = admin.Exec(t.Context(), fmt.Sprintf(`GRANT USAGE, CREATE ON SCHEMA %s TO %s;
+GRANT %s TO %s;
+GRANT %s TO %s;
+ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s`,
+		pgx.Identifier{schema}.Sanitize(), pgx.Identifier{owner}.Sanitize(),
+		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{engineRole}.Sanitize(),
+		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{adminRole}.Sanitize(),
+		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{schema}.Sanitize(), pgx.Identifier{rw}.Sanitize()))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Default privileges are a dependency that blocks DROP ROLE.
+		_, err := admin.Exec(context.WithoutCancel(t.Context()), fmt.Sprintf(
+			"ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s REVOKE ALL ON TABLES FROM %s",
+			pgx.Identifier{owner}.Sanitize(), pgx.Identifier{schema}.Sanitize(), pgx.Identifier{rw}.Sanitize()))
+		if err != nil {
+			t.Logf("revoke default privileges for %s: %v", owner, err)
+		}
+	})
+	u, err := url.Parse(serverURL)
+	require.NoError(t, err)
+	u.User = url.UserPassword(engineRole, password)
+	engine, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: u.String()})
+	require.NoError(t, err)
+	t.Cleanup(engine.Close)
+
+	desired := parseDesired(t, `CREATE TABLE t (
+    id bigserial PRIMARY KEY,
+    value text
+);
+CREATE INDEX t_value_idx ON t (value);`)
+	opts := runOptions()
+	opts.CreateOwner = owner
+	res, err := migrate.RunDesired(t.Context(), engine, migrate.DesiredRequest{Schema: schema, Desired: desired}, opts)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+	require.Len(t, res.Verdicts, 2)
+	for _, relation := range []string{"t", "t_id_seq", "t_pkey", "t_value_idx"} {
+		var actual string
+		require.NoError(t, admin.QueryRow(t.Context(), `SELECT r.rolname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner WHERE n.nspname=$1 AND c.relname=$2`, schema, relation).Scan(&actual))
+		assert.Equal(t, owner, actual, relation)
+	}
+	var insert bool
+	require.NoError(t, admin.QueryRow(t.Context(), `SELECT has_table_privilege($1, quote_ident($2)||'.t', 'INSERT')`, rw, schema).Scan(&insert))
+	assert.True(t, insert)
+
+	controlSchema := testutil.NewSchema(t, admin)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("GRANT USAGE, CREATE ON SCHEMA %s TO %s", pgx.Identifier{controlSchema}.Sanitize(), pgx.Identifier{engineRole}.Sanitize()))
+	require.NoError(t, err)
+	res, err = migrate.RunDesired(t.Context(), engine, migrate.DesiredRequest{Schema: controlSchema, Desired: desired}, runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+	var controlOwner string
+	require.NoError(t, admin.QueryRow(t.Context(), `SELECT tableowner FROM pg_tables WHERE schemaname=$1 AND tablename='t'`, controlSchema).Scan(&controlOwner))
+	assert.Equal(t, engineRole, controlOwner)
+	require.NoError(t, admin.QueryRow(t.Context(), `SELECT has_table_privilege($1, quote_ident($2)||'.t', 'INSERT')`, rw, controlSchema).Scan(&insert))
+	assert.False(t, insert)
 }
 
 // RunDesired is the declarative execution loop: these tests drive the full
@@ -184,6 +270,30 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Contains(t, res.Detail, "GRANT CREATE ON SCHEMA",
 			"the refusal names the exact provisioning statement")
 		assert.Empty(t, res.Verdicts, "nothing was attempted")
+	})
+
+	t.Run("refuses a create owner that is not a role on the server", func(t *testing.T) {
+		// The owner is caller configuration, so a misspelling is decidable
+		// before anything runs and is a refusal an operator can act on,
+		// not a failed execution attempt.
+		schema := testutil.NewSchema(t, pool)
+		opts := runOptions()
+		opts.CreateOwner = "no_such_owner_role"
+
+		res, err := migrate.RunDesired(t.Context(), pool,
+			migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, desiredSQL)}, opts)
+		require.NoError(t, err, "a nonexistent owner is a refusal, not an error")
+		assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+		assert.Equal(t, verdict.ReasonInsufficientPrivileges, res.Reason)
+		assert.Contains(t, res.Detail, `"no_such_owner_role" does not exist`,
+			"the refusal names the configured owner")
+		assert.Empty(t, res.Verdicts, "nothing was attempted")
+
+		var exists bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM information_schema.tables
+			 WHERE table_schema = $1 AND table_name = 't')`, schema).Scan(&exists))
+		assert.False(t, exists, "the refused plan must not create the table")
 	})
 
 	t.Run("refuses a desired PARTITION OF before anything runs", func(t *testing.T) {

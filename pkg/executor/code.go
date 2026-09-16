@@ -103,6 +103,17 @@ const (
 	// the code names the state the step left, and that state is a standing
 	// table whose names are unproven.
 	CodeCreateNamesUnverified Code = "create-names-unverified"
+	// CodeCreateOwnerMismatch: the CREATE TABLE committed but the table's
+	// catalog owner is not the create owner the proof named; the table
+	// remains as committed for an operator to inspect, transfer, or drop —
+	// the executor never repairs ownership with ALTER ... OWNER TO.
+	CodeCreateOwnerMismatch Code = "create-owner-mismatch"
+	// CodeCreateOwnerUnverified: the CREATE TABLE committed but the read of
+	// its catalog owner did not complete, so whether it was born under the
+	// named owner is unknown; the table remains for an operator to compare
+	// its owner against the configured one. As with the unverified names,
+	// the read's own failure is the cause in the error text, never the code.
+	CodeCreateOwnerUnverified Code = "create-owner-unverified"
 	// CodeDuplicateCreateName: the desired set claims the same relation
 	// name twice; the conflict is decidable at admission and refused
 	// before anything runs.
@@ -158,6 +169,8 @@ func Codes() []Code {
 		CodeCreateCollision,
 		CodeCreateNameMismatch,
 		CodeCreateNamesUnverified,
+		CodeCreateOwnerMismatch,
+		CodeCreateOwnerUnverified,
 		CodeDuplicateCreateName,
 		CodePartitionOfUnsupported,
 		CodeUnsupportedCreateStep,
@@ -195,6 +208,7 @@ func (c Code) Permanent() bool {
 		CodeIfNotExistsUnsupported,
 		CodeCreateCollision,
 		CodeCreateNameMismatch,
+		CodeCreateOwnerMismatch,
 		CodeDuplicateCreateName,
 		CodePartitionOfUnsupported,
 		CodeUnsupportedCreateStep,
@@ -238,8 +252,8 @@ func OutcomeCode(err error) Code {
 // sentinelCode maps the package's sentinel errors to their codes. The
 // invariant sentinel is checked first: an invariant breach is the
 // fail-closed outcome regardless of which path wrapped it. The unverified
-// create sentinel is checked before the cause it wraps, because the code
-// names the state a step left, not the fault that kept it from being
+// create sentinels are checked before the causes they wrap, because the
+// code names the state a step left, not the fault that kept it from being
 // proven.
 func sentinelCode(err error) Code {
 	switch {
@@ -249,6 +263,9 @@ func sentinelCode(err error) Code {
 		// The read's cause rides inside the wrap; the code names what the
 		// step left — a standing table whose names are unproven.
 		return CodeCreateNamesUnverified
+	case errors.Is(err, ErrCreateOwnerUnverified):
+		// Same shape: a standing table whose owner is unproven.
+		return CodeCreateOwnerUnverified
 	case errors.Is(err, ErrInvalidBlockingBudget):
 		return CodeInvalidBlockingBudget
 	case errors.Is(err, ErrUnsupportedAcceptedBlocking):
@@ -275,6 +292,8 @@ func sentinelCode(err error) Code {
 		return CodeCreateCollision
 	case errors.Is(err, ErrCreateNameMismatch):
 		return CodeCreateNameMismatch
+	case errors.Is(err, ErrCreateOwnerMismatch):
+		return CodeCreateOwnerMismatch
 	case errors.Is(err, ErrDuplicateCreateName):
 		return CodeDuplicateCreateName
 	case errors.Is(err, ErrPartitionOfUnsupported):

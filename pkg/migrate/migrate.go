@@ -58,6 +58,10 @@ import (
 // sanctioned starting point (the same policy the CLI's flag defaults
 // wire), an embedding orchestrator tunes from there.
 type Options struct {
+	// CreateOwner is the role greenfield tables are created as. Empty means
+	// create as the connected role.
+	CreateOwner string
+
 	// Force is the typed acknowledgement to run the submitted form as-is,
 	// overriding a safer-sequence substitution or a rewrite-required /
 	// backend-unavailable refusal. It must name the resolved
