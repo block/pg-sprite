@@ -781,6 +781,8 @@ func TestExecuteCreateReportsUnreadableOwnedNamesAsUnverified(t *testing.T) {
 // it commits, so no read runs and nothing the read could hit can fail the
 // run. Here the table is renamed inside its own transaction, which would
 // leave a read with nothing at the claimed name; the run still passes.
+// Without a create owner the proof names the session role, so no owner
+// read runs either.
 func TestExecuteCreateSkipsTheOwnedNameReadWithoutClaims(t *testing.T) {
 	f := newCreateFixture(t, "t")
 	testutil.RunDuringDDL(t, f.pool, testutil.DDLCommandEnd, "CREATE TABLE", f.schema, "t",
@@ -790,5 +792,118 @@ func TestExecuteCreateSkipsTheOwnedNameReadWithoutClaims(t *testing.T) {
 		desired(t, "CREATE TABLE t (a int, v text)"), createBudget, executor.DefaultRetryPolicy())
 	require.NoError(t, err)
 	require.Len(t, rep.Steps, 1)
+	assert.Equal(t, "r", relationKind(t, f.pool, f.schema, "t_moved"))
+}
+
+// newCreateOwnerFixture mints the creation proof for a dedicated owner role
+// that holds USAGE and CREATE on the schema. The pool stays the fixture's
+// session role; the proof is what makes the create step SET LOCAL ROLE to
+// the owner.
+func newCreateOwnerFixture(t *testing.T, table string) (createFixture, string) {
+	t.Helper()
+	f := newCreateFixture(t, table)
+	owner := testutil.NewRole(t, f.pool, "NOLOGIN")
+	// The schema was created before the roles, so its drop would run after
+	// theirs; the roles will own and hold privileges on objects in it, so
+	// release the schema first.
+	t.Cleanup(func() {
+		_, err := f.pool.Exec(context.WithoutCancel(t.Context()),
+			fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", pgx.Identifier{f.schema}.Sanitize()))
+		assert.NoError(t, err)
+	})
+	_, err := f.pool.Exec(t.Context(), fmt.Sprintf("GRANT USAGE, CREATE ON SCHEMA %s TO %s",
+		pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{owner}.Sanitize()))
+	require.NoError(t, err)
+	cr, err := preflight.CheckCreatePrivilegesAs(t.Context(), f.pool, f.schema, owner)
+	require.NoError(t, err)
+	require.True(t, cr.SetsRole())
+	f.cr = cr
+	return f, owner
+}
+
+// relationOwner returns the pg_roles name that owns schema.name — the
+// catalog oracle for who a create run left holding the table.
+func relationOwner(t *testing.T, pool *pgxpool.Pool, schema, name string) string {
+	t.Helper()
+	var owner string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT r.rolname
+		   FROM pg_class c
+		   JOIN pg_namespace n ON n.oid = c.relnamespace
+		   JOIN pg_roles r ON r.oid = c.relowner
+		  WHERE n.nspname = $1 AND c.relname = $2`, schema, name).Scan(&owner))
+	return owner
+}
+
+// With a create owner in the proof, the CREATE TABLE and its index run
+// under SET LOCAL ROLE, so every relation the run creates — the table, its
+// constraint index, its sequence, and the follow-on index — is owned by
+// that role rather than the session role.
+func TestExecuteCreateWithOwnerCreatesEveryRelationAsOwner(t *testing.T) {
+	f, owner := newCreateOwnerFixture(t, "t")
+
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr, desired(t, `
+		CREATE TABLE t (
+			id serial PRIMARY KEY,
+			v text
+		);
+		CREATE INDEX t_v_idx ON t (v);
+	`), createBudget, executor.DefaultRetryPolicy())
+	require.NoError(t, err)
+	require.Len(t, rep.Steps, 2)
+	for _, relation := range []string{"t", "t_pkey", "t_id_seq", "t_v_idx"} {
+		assert.Equal(t, owner, relationOwner(t, f.pool, f.schema, relation), relation)
+	}
+}
+
+// When the proof names an owner but the committed table is not owned by
+// it — here the table is transferred to a second role inside the CREATE's
+// own transaction, which runs as the owner and so needs membership in
+// that role — the run fails closed with the expected and actual owners,
+// and the table is left as committed: the executor never repairs
+// ownership with ALTER ... OWNER TO.
+func TestExecuteCreateWithOwnerFailsClosedOnOwnerMismatch(t *testing.T) {
+	f, owner := newCreateOwnerFixture(t, "t")
+	other := testutil.NewRole(t, f.pool, "NOLOGIN")
+	// OWNER TO needs the transferring role to be a member of the new owner
+	// and the new owner to hold CREATE on the schema.
+	_, err := f.pool.Exec(t.Context(), fmt.Sprintf("GRANT %s TO %s; GRANT USAGE, CREATE ON SCHEMA %s TO %s",
+		pgx.Identifier{other}.Sanitize(), pgx.Identifier{owner}.Sanitize(),
+		pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{other}.Sanitize()))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// The second role is created after the fixture, so its drop runs
+		// before the fixture's schema drop; release the schema first.
+		_, err := f.pool.Exec(context.WithoutCancel(t.Context()),
+			fmt.Sprintf("DROP SCHEMA IF EXISTS %s CASCADE", pgx.Identifier{f.schema}.Sanitize()))
+		assert.NoError(t, err)
+	})
+	testutil.RunDuringDDL(t, f.pool, testutil.DDLCommandEnd, "CREATE TABLE", f.schema, "t",
+		fmt.Sprintf("ALTER TABLE %s.t OWNER TO %s", pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{other}.Sanitize()))
+
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr,
+		desired(t, "CREATE TABLE t (a int, v text)"), createBudget, executor.DefaultRetryPolicy())
+	var mismatch *executor.CreateOwnerMismatchError
+	require.ErrorAs(t, err, &mismatch)
+	assert.ErrorIs(t, err, executor.ErrCreateOwnerMismatch)
+	assert.Equal(t, owner, mismatch.Expected)
+	assert.Equal(t, other, mismatch.Actual)
+	assert.Empty(t, rep.Steps)
+	assert.Equal(t, other, relationOwner(t, f.pool, f.schema, "t"), "the committed owner is reported, not repaired")
+}
+
+// When the proof names an owner and the committed table cannot be read
+// back — here it is renamed inside its own transaction — the owner is
+// unproven and the run fails closed rather than passing on an unverified
+// owner.
+func TestExecuteCreateWithOwnerReportsUnreadableOwnerAsUnverified(t *testing.T) {
+	f, _ := newCreateOwnerFixture(t, "t")
+	testutil.RunDuringDDL(t, f.pool, testutil.DDLCommandEnd, "CREATE TABLE", f.schema, "t",
+		fmt.Sprintf("ALTER TABLE %s.t RENAME TO t_moved", pgx.Identifier{f.schema}.Sanitize()))
+
+	rep, err := executor.ExecuteCreate(t.Context(), f.pool, f.at, f.cr,
+		desired(t, "CREATE TABLE t (a int, v text)"), createBudget, executor.DefaultRetryPolicy())
+	require.ErrorIs(t, err, executor.ErrCreateOwnerUnverified)
+	assert.Empty(t, rep.Steps)
 	assert.Equal(t, "r", relationKind(t, f.pool, f.schema, "t_moved"))
 }

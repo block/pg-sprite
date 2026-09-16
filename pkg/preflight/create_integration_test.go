@@ -67,6 +67,43 @@ func TestCheckCreatePrivilegesRefusesMissingSchema(t *testing.T) {
 	assert.ErrorIs(t, err, preflight.ErrSchemaNotFound)
 }
 
+func TestCheckCreatePrivilegesAsRefusals(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+	const password = "create-as-password"
+	owner := testutil.NewRole(t, admin, "NOLOGIN")
+	engineRole := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
+	schema := testutil.NewSchema(t, admin)
+	engine := connectAs(t, serverURL, engineRole, password)
+
+	_, err = preflight.CheckCreatePrivilegesAs(t.Context(), engine, schema, "no_such_owner")
+	assert.ErrorContains(t, err, `create owner role "no_such_owner" does not exist`)
+
+	_, err = preflight.CheckCreatePrivilegesAs(t.Context(), engine, schema, owner)
+	var privilegeErr *preflight.PrivilegeError
+	require.ErrorAs(t, err, &privilegeErr)
+	expectedGrant := fmt.Sprintf("GRANT %s TO %s", pgx.Identifier{owner}.Sanitize(), pgx.Identifier{engineRole}.Sanitize())
+	var version int
+	require.NoError(t, admin.QueryRow(t.Context(), "SELECT current_setting('server_version_num')::int").Scan(&version))
+	if version >= 160000 {
+		expectedGrant += " WITH SET TRUE"
+	}
+	assert.Equal(t, expectedGrant, privilegeErr.Grant)
+
+	_, err = admin.Exec(t.Context(), expectedGrant)
+	require.NoError(t, err)
+	_, err = preflight.CheckCreatePrivilegesAs(t.Context(), engine, schema, owner)
+	require.ErrorAs(t, err, &privilegeErr)
+	assert.Equal(t, fmt.Sprintf("GRANT USAGE ON SCHEMA %s TO %s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{owner}.Sanitize()), privilegeErr.Grant)
+	_, err = admin.Exec(t.Context(), privilegeErr.Grant)
+	require.NoError(t, err)
+	_, err = preflight.CheckCreatePrivilegesAs(t.Context(), engine, schema, owner)
+	require.ErrorAs(t, err, &privilegeErr)
+	assert.Equal(t, fmt.Sprintf("GRANT CREATE ON SCHEMA %s TO %s", pgx.Identifier{schema}.Sanitize(), pgx.Identifier{owner}.Sanitize()), privilegeErr.Grant)
+}
+
 // An empty schema resolves the session's creation schema — the schema an
 // unqualified CREATE TABLE would land in — and the proof carries it.
 func TestCheckCreatePrivilegesResolvesUnqualifiedSchema(t *testing.T) {

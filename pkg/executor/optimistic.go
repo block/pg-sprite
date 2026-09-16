@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -243,6 +244,10 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 // resolve exactly as the diff resolved them, never via the session's
 // ambient search_path.
 func executeBoundedAttempt(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPathSchema string) error {
+	return executeBoundedAttemptAs(ctx, pool, st, b, searchPathSchema, "")
+}
+
+func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPathSchema, role string) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin optimistic attempt: %w", err)
@@ -267,6 +272,11 @@ func executeBoundedAttempt(ctx context.Context, pool *pgxpool.Pool, st statement
 	}
 	if _, err := tx.Exec(ctx, setBudgets); err != nil {
 		return fmt.Errorf("set attempt budgets: %w", err)
+	}
+	if role != "" {
+		if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{role}.Sanitize()); err != nil {
+			return fmt.Errorf("set create owner role %s: %w", role, err)
+		}
 	}
 
 	if _, err := tx.Exec(ctx, st.SQL()); err != nil {

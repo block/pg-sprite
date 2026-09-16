@@ -140,6 +140,7 @@ type accessFacts struct {
 	versionNum   int
 	database     string
 	schema       string
+	table        string
 	relkind      string
 	owner        string
 	canConnect   bool
@@ -233,6 +234,7 @@ func gatherAccessFacts(ctx context.Context, pool *pgxpool.Pool, schema, table st
 	if f.relkind != "r" && f.relkind != "p" {
 		return accessFacts{}, fmt.Errorf("%w: %s has relkind %q", ErrNotTable, qualifiedName(schema, table), f.relkind)
 	}
+	f.table = table
 	return f, nil
 }
 
@@ -345,6 +347,8 @@ func ownerMembershipRefusal(f accessFacts) *PrivilegeError {
 			Check: fmt.Sprintf("pg_has_role(%s, %s, 'USAGE')", f.role, f.owner),
 			Grant: fmt.Sprintf("GRANT %s TO %s WITH INHERIT TRUE",
 				pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()),
+			Hint: fmt.Sprintf("if the owner is an administrative role, transfer the table instead: ALTER TABLE %s.%s OWNER TO <role>",
+				pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{f.table}.Sanitize()),
 		}
 	}
 	if !f.roleInherit {

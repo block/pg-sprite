@@ -31,11 +31,10 @@ applies):
 
 - **An index belongs to the table's owner**, regardless of which member role created it —
   the native index path is ownership-correct automatically.
-- **A new table belongs to the role that created it.** A shadow table created by the engine
-  role would be owned by the engine role — which the cutover fidelity checklist (see
-  [low-level-design.md](low-level-design.md)) would refuse to swap. The engine therefore
-  runs `SET ROLE <owner>` before creating shadow objects, so they are born with the correct
-  owner rather than repaired afterward.
+- **A new table belongs to the role that created it.** The copy-and-swap design therefore
+  calls for `SET ROLE <owner>` before creating shadow objects so they are born with the
+  correct owner rather than repaired afterward. That path is planned; greenfield creation
+  with a create owner (below) is the first path that actually runs `SET LOCAL ROLE`.
 
 ## The tiers
 
@@ -63,12 +62,21 @@ static parameter requiring a reboot), and free `max_replication_slots` /
 
 ### Off-ladder: greenfield `CREATE TABLE`
 
-Creating a new table sits outside the ladder: the table does not exist yet, so there is no
-owning role to be a member of — the table is born owned by the role that creates it. The
-create path's preflight (`CheckCreatePrivileges`) therefore proves exactly `CONNECT` on the
-database plus `USAGE` and `CREATE` on the target schema, deliberately not the Tier 1–3
-ownership membership. A missing grant is refused with the exact `GRANT` statement, whose
-grantee is the engine role itself.
+Creating a new table sits outside the ladder. By default the engine role creates and owns it;
+this owner-less mode deliberately preserves the original behavior. When the embedding caller
+names a create owner (`migrate.Options.CreateOwner`; the CLI has no declarative apply command
+yet), each bounded create step runs `SET LOCAL ROLE <owner>` before its SQL. Preflight proves the
+engine can assume that role (`USAGE`, plus `SET` on PostgreSQL 16+), that the owner has
+`USAGE` and `CREATE` on the schema, and that the engine has `CONNECT`. Tables, serial
+sequences, and indexes are consequently born under the owner, so that owner's default
+privileges apply. Missing access is refused with the exact `GRANT`. After the `CREATE TABLE`
+commits, the executor reads the table's catalog owner back and fails closed
+(`CreateOwnerMismatchError`) if it is not the named owner; it never repairs ownership with
+`ALTER TABLE ... OWNER TO`.
+
+One owner per target, not per schema, is deliberate: a per-schema map would mirror
+schema_overrides in orchestrators and is left until a target with differently-owned schemas
+needs it.
 
 ## Provisioning
 

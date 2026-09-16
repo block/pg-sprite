@@ -9,6 +9,7 @@ package preflight
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -26,13 +27,18 @@ import (
 // case the create fails with the server's own insufficient-privilege
 // error rather than a typed refusal.
 type CreationRole struct {
-	role   string
-	schema string
+	role     string
+	schema   string
+	setsRole bool
 }
 
-// Role returns the connected role the checks ran as — the role a created
-// table would be owned by.
+// Role returns the role a created table will be owned by: the named create
+// owner when one was checked, otherwise the connected role the checks ran
+// as.
 func (c CreationRole) Role() string { return c.role }
+
+// SetsRole reports whether create steps must SET LOCAL ROLE to Role.
+func (c CreationRole) SetsRole() bool { return c.setsRole }
 
 // Schema returns the resolved schema the access was verified in.
 func (c CreationRole) Schema() string { return c.schema }
@@ -45,6 +51,13 @@ func (c CreationRole) Schema() string { return c.schema }
 // that does not exist yet has no owning role to inherit from. On success
 // it returns the CreationRole proof.
 func CheckCreatePrivileges(ctx context.Context, pool *pgxpool.Pool, schema string) (CreationRole, error) {
+	return CheckCreatePrivilegesAs(ctx, pool, schema, "")
+}
+
+// CheckCreatePrivilegesAs verifies creation access for owner. When owner is
+// empty, creation remains under the connected role. Otherwise the connected
+// role must be able to SET ROLE to owner, and owner must hold schema access.
+func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, owner string) (CreationRole, error) {
 	// One catalog snapshot gathers every fact the check consults, so the
 	// facts cannot disagree about when they looked. The LEFT JOIN turns
 	// "schema missing" into a false exists column instead of an absent
@@ -55,17 +68,22 @@ func CheckCreatePrivileges(ctx context.Context, pool *pgxpool.Pool, schema strin
 		       n.nspname IS NOT NULL,
 		       current_user::text,
 		       current_database()::text,
+		       current_setting('server_version_num')::int,
+		       CASE WHEN $2 = '' THEN true ELSE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2) END,
+		       CASE WHEN $2 = '' OR $2 = current_user THEN true
+		            ELSE COALESCE(pg_has_role(current_user, (SELECT oid FROM pg_roles WHERE rolname = $2), 'USAGE'), false) END,
 		       has_database_privilege(current_user, current_database(), 'CONNECT'),
-		       COALESCE(has_schema_privilege(current_user, n.nspname, 'USAGE'), false),
-		       COALESCE(has_schema_privilege(current_user, n.nspname, 'CREATE'), false)
+		       COALESCE(has_schema_privilege(CASE WHEN $2 = '' THEN current_user::regrole::oid ELSE (SELECT oid FROM pg_roles WHERE rolname = $2) END, n.oid, 'USAGE'), false),
+		       COALESCE(has_schema_privilege(CASE WHEN $2 = '' THEN current_user::regrole::oid ELSE (SELECT oid FROM pg_roles WHERE rolname = $2) END, n.oid, 'CREATE'), false)
 		FROM (SELECT CASE WHEN $1 = '' THEN current_schema() ELSE $1 END AS nspname) s
 		LEFT JOIN pg_namespace n ON n.nspname = s.nspname`
 	var targetSchema *string
-	var schemaExists, canConnect, schemaUsage, schemaCreate bool
+	var schemaExists, ownerExists, ownerUsage, canConnect, schemaUsage, schemaCreate bool
+	var versionNum int
 	var role, database string
-	if err := pool.QueryRow(ctx, q, schema).Scan(
+	if err := pool.QueryRow(ctx, q, schema, owner).Scan(
 		&targetSchema, &schemaExists, &role, &database,
-		&canConnect, &schemaUsage, &schemaCreate); err != nil {
+		&versionNum, &ownerExists, &ownerUsage, &canConnect, &schemaUsage, &schemaCreate); err != nil {
 		return CreationRole{}, fmt.Errorf("gather create access facts for schema %q: %w", schema, err)
 	}
 	if targetSchema == nil {
@@ -77,22 +95,47 @@ func CheckCreatePrivileges(ctx context.Context, pool *pgxpool.Pool, schema strin
 	if !schemaExists {
 		return CreationRole{}, fmt.Errorf("%w: schema %s does not exist", ErrSchemaNotFound, *targetSchema)
 	}
+	if !ownerExists {
+		return CreationRole{}, fmt.Errorf("create owner role %q does not exist", owner)
+	}
 	// INV: ST-6 — each missing grant is a typed refusal carrying the exact
 	// provisioning statement; the proof is only minted when every fact
 	// holds.
 	if !canConnect {
 		return CreationRole{}, connectRefusal(role, database)
 	}
+	createRole := role
+	setsRole := owner != "" && owner != role
+	if owner != "" {
+		createRole = owner
+	}
+	if !ownerUsage {
+		grant := fmt.Sprintf("GRANT %s TO %s", pgx.Identifier{owner}.Sanitize(), pgx.Identifier{role}.Sanitize())
+		if versionNum >= 160000 {
+			grant += " WITH SET TRUE"
+		}
+		return CreationRole{}, &PrivilegeError{Tier: TierCreateTable,
+			Check: fmt.Sprintf("pg_has_role(%s, %s, 'USAGE')", role, owner), Grant: grant}
+	}
 	if !schemaUsage {
-		return CreationRole{}, schemaUsageRefusal(role, *targetSchema)
+		return CreationRole{}, schemaUsageRefusal(createRole, *targetSchema)
 	}
 	if !schemaCreate {
 		return CreationRole{}, &PrivilegeError{
 			Tier:  TierCreateTable,
-			Check: fmt.Sprintf("has_schema_privilege(%s, %s, 'CREATE')", role, *targetSchema),
+			Check: fmt.Sprintf("has_schema_privilege(%s, %s, 'CREATE')", createRole, *targetSchema),
 			Grant: fmt.Sprintf("GRANT CREATE ON SCHEMA %s TO %s",
-				pgx.Identifier{*targetSchema}.Sanitize(), pgx.Identifier{role}.Sanitize()),
+				pgx.Identifier{*targetSchema}.Sanitize(), pgx.Identifier{createRole}.Sanitize()),
 		}
 	}
-	return CreationRole{role: role, schema: *targetSchema}, nil
+	if setsRole {
+		if err := checkSetRoleAccess(ctx, pool, accessFacts{role: role, owner: owner, versionNum: versionNum}); err != nil {
+			var privilegeErr *PrivilegeError
+			if errors.As(err, &privilegeErr) {
+				privilegeErr.Tier = TierCreateTable
+			}
+			return CreationRole{}, err
+		}
+	}
+	return CreationRole{role: createRole, schema: *targetSchema, setsRole: setsRole}, nil
 }

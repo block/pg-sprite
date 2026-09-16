@@ -247,7 +247,7 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 	if err != nil {
 		return stopBefore(fmt.Errorf("verify %s.%s is absent: %w", report.Schema, report.Table, err))
 	}
-	role, err := preflight.CheckCreatePrivileges(ctx, pool, req.Schema)
+	role, err := preflight.CheckCreatePrivilegesAs(ctx, pool, req.Schema, opts.CreateOwner)
 	var privErr *preflight.PrivilegeError
 	if errors.As(err, &privErr) {
 		return result.refused(insufficientPrivilegesRefusal(), privErr.Error()+"; nothing was executed"), nil

@@ -27,6 +27,64 @@ func parseDesired(t *testing.T, sql string) statement.DesiredSchema {
 	return ds
 }
 
+func TestRunDesiredCreatesAsOwnerAndAppliesDefaultPrivileges(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+
+	const password = "create-owner-password"
+	owner := testutil.NewRole(t, admin, "NOLOGIN")
+	engineRole := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
+	rw := testutil.NewRole(t, admin, "NOLOGIN")
+	schema := testutil.NewSchema(t, admin)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf(`GRANT USAGE, CREATE ON SCHEMA %s TO %s;
+GRANT %s TO %s;
+ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s`,
+		pgx.Identifier{schema}.Sanitize(), pgx.Identifier{owner}.Sanitize(),
+		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{engineRole}.Sanitize(),
+		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{schema}.Sanitize(), pgx.Identifier{rw}.Sanitize()))
+	require.NoError(t, err)
+	u, err := url.Parse(serverURL)
+	require.NoError(t, err)
+	u.User = url.UserPassword(engineRole, password)
+	engine, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: u.String()})
+	require.NoError(t, err)
+	t.Cleanup(engine.Close)
+
+	desired := parseDesired(t, `CREATE TABLE t (
+    id bigserial PRIMARY KEY,
+    value text
+);
+CREATE INDEX t_value_idx ON t (value);`)
+	opts := runOptions()
+	opts.CreateOwner = owner
+	res, err := migrate.RunDesired(t.Context(), engine, migrate.DesiredRequest{Schema: schema, Desired: desired}, opts)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+	require.Len(t, res.Verdicts, 2)
+	for _, relation := range []string{"t", "t_id_seq", "t_pkey", "t_value_idx"} {
+		var actual string
+		require.NoError(t, admin.QueryRow(t.Context(), `SELECT r.rolname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner WHERE n.nspname=$1 AND c.relname=$2`, schema, relation).Scan(&actual))
+		assert.Equal(t, owner, actual, relation)
+	}
+	var insert bool
+	require.NoError(t, admin.QueryRow(t.Context(), `SELECT has_table_privilege($1, quote_ident($2)||'.t', 'INSERT')`, rw, schema).Scan(&insert))
+	assert.True(t, insert)
+
+	controlSchema := testutil.NewSchema(t, admin)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf("GRANT USAGE, CREATE ON SCHEMA %s TO %s", pgx.Identifier{controlSchema}.Sanitize(), pgx.Identifier{engineRole}.Sanitize()))
+	require.NoError(t, err)
+	res, err = migrate.RunDesired(t.Context(), engine, migrate.DesiredRequest{Schema: controlSchema, Desired: desired}, runOptions())
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+	var controlOwner string
+	require.NoError(t, admin.QueryRow(t.Context(), `SELECT tableowner FROM pg_tables WHERE schemaname=$1 AND tablename='t'`, controlSchema).Scan(&controlOwner))
+	assert.Equal(t, engineRole, controlOwner)
+	require.NoError(t, admin.QueryRow(t.Context(), `SELECT has_table_privilege($1, quote_ident($2)||'.t', 'INSERT')`, rw, controlSchema).Scan(&insert))
+	assert.False(t, insert)
+}
+
 // RunDesired is the declarative execution loop: these tests drive the full
 // plan-then-execute flow against a live database — convergence and its
 // no-op re-run, the plan-time admission refusals, the fingerprint pin, and
