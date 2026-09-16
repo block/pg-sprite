@@ -1,6 +1,7 @@
 package migrate_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -38,13 +39,31 @@ func TestRunDesiredCreatesAsOwnerAndAppliesDefaultPrivileges(t *testing.T) {
 	engineRole := testutil.NewRole(t, admin, "LOGIN PASSWORD '"+password+"'")
 	rw := testutil.NewRole(t, admin, "NOLOGIN")
 	schema := testutil.NewSchema(t, admin)
+	// ALTER DEFAULT PRIVILEGES FOR ROLE requires the privileges of that
+	// role. The admin connection is not a superuser on every fixture
+	// (Supabase's postgres role is not), so it takes membership first.
+	// The grantee is spelled by name: the Supabase image crashes on
+	// GRANT ... TO CURRENT_USER.
+	var adminRole string
+	require.NoError(t, admin.QueryRow(t.Context(), "SELECT current_user").Scan(&adminRole))
 	_, err = admin.Exec(t.Context(), fmt.Sprintf(`GRANT USAGE, CREATE ON SCHEMA %s TO %s;
+GRANT %s TO %s;
 GRANT %s TO %s;
 ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO %s`,
 		pgx.Identifier{schema}.Sanitize(), pgx.Identifier{owner}.Sanitize(),
 		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{engineRole}.Sanitize(),
+		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{adminRole}.Sanitize(),
 		pgx.Identifier{owner}.Sanitize(), pgx.Identifier{schema}.Sanitize(), pgx.Identifier{rw}.Sanitize()))
 	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Default privileges are a dependency that blocks DROP ROLE.
+		_, err := admin.Exec(context.WithoutCancel(t.Context()), fmt.Sprintf(
+			"ALTER DEFAULT PRIVILEGES FOR ROLE %s IN SCHEMA %s REVOKE ALL ON TABLES FROM %s",
+			pgx.Identifier{owner}.Sanitize(), pgx.Identifier{schema}.Sanitize(), pgx.Identifier{rw}.Sanitize()))
+		if err != nil {
+			t.Logf("revoke default privileges for %s: %v", owner, err)
+		}
+	})
 	u, err := url.Parse(serverURL)
 	require.NoError(t, err)
 	u.User = url.UserPassword(engineRole, password)
