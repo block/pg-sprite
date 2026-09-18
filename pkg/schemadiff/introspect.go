@@ -45,6 +45,16 @@ func Introspect(ctx context.Context, db *pgxpool.Pool, schema, table string) (Mo
 	return m, nil
 }
 
+// IntrospectTx introspects schema.table inside the caller's open transaction,
+// so a caller that builds a relation and reads its model in one transaction
+// sees its own uncommitted DDL and leaves nothing behind if the read fails.
+// It sets the transaction-local search_path the same way Introspect does, so
+// decompiled definitions print unqualified; the caller's transaction keeps
+// that search_path until it ends.
+func IntrospectTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model, error) {
+	return introspectInTx(ctx, tx, schema, table)
+}
+
 // introspectInTx introspects schema.table inside an open transaction. It
 // sets the transaction-local search_path so decompiled definitions print
 // unqualified, resolves the relation by explicit qualification (never via

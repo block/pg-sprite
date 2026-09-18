@@ -100,6 +100,22 @@ agrees with it rather than collapsing them.
 | `parent-index-adoption` | PostgreSQL does not support adopting an existing index as a constraint on a partitioned parent in any supported version | `by-design` | No online mechanism exists; the matrix marks it ❌. Waiting for a pg-sprite release would wait for nothing. |
 | `parent-not-valid-foreign-key` | PostgreSQL before version 18 cannot add a `NOT VALID` foreign key on a partitioned table | `environmental` | The same statement, table, and pg-sprite build runs on a newer server; the action that unblocks it is a server upgrade, not an engine release. The matrix marks this row ✅ with a server-version precondition. |
 
+### Copy-and-swap shape refusals, keyed on `CopySwapRefusalCause`
+
+The closed set is `preflight.CopySwapRefusalCauses()`, raised by `CheckCopySwapShape` before
+the copy-and-swap route writes anything ([ST-6](invariants.md#st-6--preflight-before-the-first-write),
+[RF-1](invariants.md#refusals-and-preflight-rf), [RF-2](invariants.md#refusals-and-preflight-rf)).
+The verdict reason that carries these causes lands with the copy-and-swap route itself; the
+classification is fixed here first so the route inherits it.
+
+| `CopySwapRefusalCause` | What the refusal says | `class` | Why |
+| --- | --- | --- | --- |
+| `copy-and-swap-pk-unsupported` | The table has no single `smallint`, `integer`, or `bigint` primary-key column for the chunker to range over | `capability-boundary` | Wider key shapes are a planned engine capability ([D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)). |
+| `copy-and-swap-replica-identity` | The table's replica identity is `NOTHING` or a named index; `DEFAULT` or `FULL` is required | `environmental` | The same table is admitted after `ALTER TABLE … REPLICA IDENTITY DEFAULT` or `FULL`; the action that unblocks it is a catalog change, not an engine release. |
+| `copy-and-swap-foreign-keys` | A foreign key references the table or leaves it | `capability-boundary` | An OID-bound dependent the rename swap would strand on the old table; re-pointing it is a planned capability. |
+| `copy-and-swap-triggers` | The table has a user trigger or a rewrite rule | `capability-boundary` | As above. |
+| `copy-and-swap-partitioned` | The table is a partitioned parent, a partition, or part of an inheritance tree | `capability-boundary` | The per-partition copy-and-swap flow is a planned capability. |
+
 ### `unsupported-statement` on the create path, keyed on `CreateShapeCause`
 
 The closed set is `executor.CreateShapeCauses()`. The cause travels with the plan statement

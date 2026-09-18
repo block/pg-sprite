@@ -351,7 +351,7 @@ decoding but adds write-path availability and amplification costs.
 | `pkg/decode` | Produces `ChangeEvent`, including per-column presence and `OldKey` for an UPDATE that moved the primary key. | ST-3, ST-4, CO-4, CO-8 |
 | `pkg/applier` | Applies presence-aware events from the per-key buffer. | CO-4, CO-5, CO-6, CO-8, LK-3 |
 | `pkg/checkpoint` | Produces `Checkpoint`. | ST-1, ST-2 |
-| `pkg/schemachange` | Orchestrator, shadow builder, and cutover. | LK-2, LK-4, ST-5 |
+| `pkg/schemachange` | Shadow builder (`BuildShadow` produces `BuiltShadow`: fingerprints, identity handoff, copy columns, fidelity snapshot), orchestrator, and cutover. | LK-2, LK-4, ST-5, ST-7 |
 
 Each producing package owns its types. `pkg/schemachange` imports every producer; no producer
 imports `pkg/schemachange`.
