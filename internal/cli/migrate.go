@@ -33,8 +33,10 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	logger.Debug("statement parsed", "kind", st.Kind(), "schema", st.Schema(), "table", st.Table())
 	// Gate before dialing so an unsupported statement kind refuses without
 	// a database connection. Run re-checks the gate — this early check is
-	// an ordering choice, not the safety boundary.
-	if v, refused := migrate.Gate(st); refused {
+	// an ordering choice, not the safety boundary. An eligible refusal the
+	// operator acknowledged with --accept-blocking is the one gate refusal
+	// that needs the database: Run resolves the locked table and executes.
+	if v, refused := migrate.Gate(st); refused && !c.acceptsRefusal(v) {
 		return c.emit(out, cliSaferIdiom(st, v))
 	}
 
@@ -70,6 +72,7 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 func (c *MigrateCmd) options(logger *slog.Logger) migrate.Options {
 	return migrate.Options{
 		Force:             c.Force,
+		AcceptBlocking:    c.AcceptBlocking,
 		MaxTableSizeBytes: int64(c.MaxTableSize),
 		Budget: executor.SequenceBudget{
 			Brief:      executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout},
@@ -80,6 +83,15 @@ func (c *MigrateCmd) options(logger *slog.Logger) migrate.Options {
 		Logger: logger,
 		Audit:  c.audit(),
 	}
+}
+
+// acceptsRefusal reports whether --accept-blocking applies to a gate
+// refusal: the flag is present and the refusal's in-process identity is in
+// the eligible set. Ineligible refusals print and exit exactly as they do
+// without the flag.
+func (c *MigrateCmd) acceptsRefusal(v verdict.Verdict) bool {
+	_, ok := migrate.AcceptedRefusal(c.AcceptBlocking, v)
+	return ok
 }
 
 // cliSaferIdiom attaches this front door's actionable spelling to a gate

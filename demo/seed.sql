@@ -27,3 +27,8 @@ CREATE TABLE orders (
 INSERT INTO orders (user_id, total)
 SELECT (g % 10000) + 1, g
 FROM generate_series(1, 5000) g;
+
+-- An index the exec tour drops with the plain (blocking) DROP INDEX under
+-- the --accept-blocking acknowledgement. It lives on orders, which no
+-- desired-state file describes, so the diff tour's plans do not see it.
+CREATE INDEX orders_total_idx ON orders (total);

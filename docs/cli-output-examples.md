@@ -76,8 +76,8 @@ canonical statement of the ladder; a wording fix lands there first.
 
 Refusals from every command — `migrate`, its dry run, `diff`, and `pull` — share
 exit 2, so a gate branches on the status without caring which subcommand produced
-it; exit 3 is `migrate`'s alone, because no other command executes DDL, and no
-`migrate` flag reaches the passthrough yet, so no CLI invocation produces it today.
+it; exit 3 is `migrate`'s alone, because no other command executes DDL, and only
+`migrate --accept-blocking` reaches the passthrough that produces it.
 Exit 2 means nothing *committed*: an optimistic attempt that exceeded its statement
 budget did run and was rolled back, and still exits 2. A gate that treats every
 non-zero status as failure is fail-closed for all three non-zero codes; a caller
@@ -245,10 +245,11 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UN
 ```
 
 An operator-accepted blocking refusal has a distinct marked outcome and exit
-3; exit 0 remains exclusive to online-safe execution. The executor primitive
-(`executor.ExecuteAcceptedBlocking`) and the verdict shape are shipped; the
-`--accept-blocking` flag that reaches them from `migrate` is not, so the
-command below shows the contract, not a runnable invocation yet:
+3; exit 0 remains exclusive to online-safe execution. `--accept-blocking`
+takes the schema-qualified table whose lock the operator accepts, must match
+the index's owning table exactly (a mismatch executes nothing and exits 1),
+and requires an explicit `--statement-timeout`; it cannot be combined with
+`--force` or `--dry-run`. The text rendering marks the outcome as a warning:
 
 ```text
 executed without online safety (accepted blocking refusal)

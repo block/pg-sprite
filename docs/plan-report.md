@@ -215,7 +215,7 @@ statement of each class and its consumer action; this table is a copy of its row
 |---|---|
 | `capability-boundary` | The engine cannot do this yet, or has no implemented safe route. Wait for the capability or escalate. |
 | `no-online-safety-problem` | There is nothing for an online schema-change engine to make safe; another tool class owns the work, or the operator runs it directly. Hand the statement to the named `owner`. |
-| `by-design` | pg-sprite permanently refuses this form — PostgreSQL offers no online mechanism in any supported version, or a safer idiom exists and the verdict names it. Use the safer idiom, or run the blocking form outside pg-sprite in a maintenance window. |
+| `by-design` | pg-sprite permanently refuses this form — PostgreSQL offers no online mechanism in any supported version, or a safer idiom exists and the verdict names it. Use the safer idiom; for a single-relation plain `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE`, `migrate --accept-blocking SCHEMA.TABLE` runs the blocking form under bounded budgets and exits 3; otherwise run it outside pg-sprite in a maintenance window. |
 | `environmental` | The change is supportable, but not here, now, or as this role: a size policy, exhausted budget, privilege, server version, stale plan, or catalog collision stopped it. Retry, provision, upgrade, re-plan, or escalate. |
 | `invariant-violation` | pg-sprite refused because its own input or state is incoherent — a report this build cannot have produced. Report it with the verdict; do not retry, wait, or route elsewhere. |
 

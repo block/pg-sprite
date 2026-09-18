@@ -92,7 +92,7 @@ Two consequences follow, and they explain most of this page:
 
 | Tier | Meaning | What you see today |
 | --- | --- | --- |
-| **T1 — supported today** | The engine executes the change through an online-safe pattern | Execution (or the safer rewritten sequence), exit 0 |
+| **T1 — supported today** | The engine executes the change through an online-safe pattern | Execution (or the safer rewritten sequence), exit 0; where `migrate` refuses a plain index-maintenance form and names its `CONCURRENTLY` idiom, `--accept-blocking` runs the plain form under budgets and exits 3 |
 | **T2 — planned** | A known online pattern exists (or requires the copy-and-swap engine); building it is on the roadmap | A **typed refusal** naming the reason, exit 2 — never a silent fallback to a blocking form |
 | **T3 — out of scope by design** | No online-safety problem to solve, solving it belongs to a different tool class, or PostgreSQL offers no online mechanism to build on | A typed refusal or a parse-level rejection, with the reason stating *why it is not planned* |
 
@@ -223,9 +223,9 @@ review the object warrants) ·
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | `CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN | ✅ | native, safer sequence | Yes | Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification, typed invalid-index outcomes, and a proven recovery for abandoned leftovers (`RebuildAbandonedIndex`, or `DropAbandonedIndex` to remove the leftover without rebuilding; both library-only; [runbook](invalid-index-recovery.md)) |
-| `DROP INDEX` | ✅ | native, safer sequence | Yes | Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive** |
-| `REINDEX` | ✅ | native, safer sequence | Yes | Rewritten to `REINDEX ... CONCURRENTLY` |
-| Index build on a **partitioned parent** | 🟡 | native, planned flow | Yes | PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned |
+| `DROP INDEX` | ✅ | native, safer sequence | Yes | Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**. `migrate` refuses the plain form and names the idiom; a single-index `DROP INDEX` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0) |
+| `REINDEX` | ✅ | native, safer sequence | Yes | Rewritten to `REINDEX ... CONCURRENTLY`. `migrate` refuses the plain form and names the idiom; a plain `REINDEX INDEX` or `REINDEX TABLE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM` stay refused |
+| Index build on a **partitioned parent** | 🟡 | native, planned flow | Yes | PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it, and `--accept-blocking` does not reach it yet). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned |
 | `ADD CONSTRAINT ... USING INDEX` on a partitioned parent | ❌ | — | Yes — unsolvable today | PostgreSQL does not support adopting an index on a partitioned parent in any supported version; refused before execution |
 <!-- capabilities:end indexes -->
 
@@ -337,18 +337,21 @@ where one exists — the exact safer sequence or the statement an operator can r
 deliberately, outside the engine, in a maintenance window. The operator stays in
 control; the engine stays honest. `--force` never bypasses a policy refusal.
 
-A constrained variant exists as a **library primitive, with no CLI flag yet**: an
-explicit, dedicated acceptance (distinct from `--force`) executes an otherwise-refused
-change through the engine's own bounded `lock_timeout` sessions ("unsafe DDL under a
-bounded lock budget", which raw psql does not give you), with the refusal analysis still
-produced before execution and the verdict unmistakably marked as executed without an
-online-safety guarantee (`outcome: executed-without-online-safety`, exit 3 — never 0).
-`executor.ExecuteAcceptedBlocking` runs it and `Verdict.WithAcceptedBlocking` records it;
-the refused statement's `blocking_passthrough_eligible` field on the plan report says
-whether a refusal qualifies. Only changes the engine understands but cannot run *safely*
-are eligible — refusals for unrecognized SQL never are. A `migrate` flag that reaches the
-primitive is the remaining step; until it lands the CLI exits 2 for these refusals. The
-design is [lock-budgeted-passthrough.md](lock-budgeted-passthrough.md).
+A constrained variant exists: `migrate --accept-blocking SCHEMA.TABLE`, an explicit,
+dedicated acceptance (distinct from `--force`, and not combinable with it) executes an
+otherwise-refused change through the engine's own bounded `lock_timeout` /
+`statement_timeout` session ("unsafe DDL under a bounded lock budget", which raw psql does
+not give you), with the refusal analysis still produced before execution and the verdict
+unmistakably marked as executed without an online-safety guarantee
+(`outcome: executed-without-online-safety`, `blocking_passthrough: true`, exit 3 — never
+0). The value must name the table whose lock you accept — the owning table of the index —
+resolved from the catalog, and `--statement-timeout` must be spelled on the same command
+line. Only changes the engine understands but cannot run *safely* are eligible: today a
+single-relation plain `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE`. Refusals for
+unrecognized SQL never are, and the refused statement's `blocking_passthrough_eligible`
+field on the plan report says whether a refusal qualifies. An exhausted lock budget is
+still a refusal (exit 2, nothing ran); a statement cancelled by its budget is a failure
+(exit 1). The design is [lock-budgeted-passthrough.md](lock-budgeted-passthrough.md).
 
 ## Deliberately operator-owned
 

@@ -503,6 +503,20 @@ Sequence implementation as follows:
    names, and the front door resolves an index to its owning table through
    `pg_index.indrelid` after the eligibility check. It also detects an explicitly supplied
    `--statement-timeout` from the parsed command line, as the budgets section requires.
+   *(done, with three recorded deviations. First, the flag reaches the single-relation
+   `index-statement` refusals only — `DROP INDEX`, `REINDEX INDEX`, `REINDEX TABLE`. The
+   `parent-blocking-index-build` row stays eligible in the registry but unreachable from
+   `migrate`: an unforced plain `CREATE INDEX` on a partitioned parent is refused with the
+   `parent-concurrent-index-build` cause, because the partition check runs against the
+   substituted concurrent form, and the blocking cause arises only under `--force`, which the
+   flag rejects. Wiring that row needs the cause classified against the submitted form and is
+   a follow-up; RF-6 is therefore left unamended. Second, `--dry-run` is rejected with the flag,
+   mirroring `--force`, rather than reporting the refusal with the flag silently ignored.
+   Third, the demo asserts the refusal, the mismatched acknowledgement, the accepted commit
+   for both `DROP INDEX` and `REINDEX TABLE`, and their exit codes; the lock-budget refusal
+   and statement-budget failure need a concurrent lock holder or a slow index expression and
+   are pinned by the `pkg/migrate` integration tests instead of the shell smoke tour. The
+   invariants landed as AB-3..AB-5 and RF-9 with the RF-5 amendment.)*
 5. Re-tier only the newly shipped path by editing its rows in
    `pkg/capabilities/capabilities.yaml` and regenerating [capabilities.md](capabilities.md)
    with `make gen-capabilities` — the page is a rendered artifact and a hand edit fails its
