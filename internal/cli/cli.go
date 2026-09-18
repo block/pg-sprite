@@ -109,6 +109,7 @@ type MigrateCmd struct {
 	IndexBuildTimeout time.Duration `help:"Overall bound (statement_timeout) for one concurrent index build step; expect large tables to need a generous value." default:"30m"`
 	ValidateTimeout   time.Duration `help:"Overall bound (statement_timeout) for one VALIDATE CONSTRAINT step; expect large tables to need a generous value." default:"30m"`
 	Force             string        `help:"Run the submitted form as-is, overriding a safer-sequence substitution or a rewrite-required/backend-unavailable refusal. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly. The forced run is still parsed, preflighted, size-guarded, and budget-bounded; planner refusals (no known safe path) and unsupported statement kinds cannot be forced." placeholder:"SCHEMA.TABLE"`
+	AcceptBlocking    string        `help:"Run one refused blocking index statement as-is, without online safety: a plain single-relation DROP INDEX, REINDEX INDEX, or REINDEX TABLE. The value is the typed acknowledgement: it must name the schema-qualified table whose lock you accept (the index's owning table) exactly. The statement runs in an engine-owned transaction under --lock-timeout and an explicitly supplied --statement-timeout; an exhausted lock budget refuses (exit 2), a cancelled or failed statement fails (exit 1), a commit exits 3. Every other refusal stands. Cannot be combined with --force or --dry-run." placeholder:"SCHEMA.TABLE"`
 	LockAttempts      int           `help:"Maximum bounded attempts when native DDL exceeds lock_timeout; 1 disables retry." default:"3"`
 	LockBackoff       time.Duration `help:"Initial exponential backoff between lock-timeout attempts." default:"100ms"`
 	LockBackoffMax    time.Duration `help:"Maximum exponential backoff between lock-timeout attempts." default:"1s"`
@@ -117,14 +118,43 @@ type MigrateCmd struct {
 }
 
 // Validate rejects flag combinations with no coherent meaning. A dry run
-// reports the plan pg-sprite would execute without an override, so --force
-// has nothing to acknowledge there; accepting it would let a forced apply
-// ship with a dry run that reported a refusal it never checked.
-func (c *MigrateCmd) Validate() error {
+// reports the plan pg-sprite would execute without an override, so neither
+// acknowledgement has anything to acknowledge there; accepting one would
+// let an overridden apply ship with a dry run that reported a refusal it
+// never checked. --force and --accept-blocking each acknowledge a different
+// decision, and a statement reaches one; passing both would leave the audit
+// record ambiguous.
+// --accept-blocking also requires --statement-timeout on the same command
+// line: the shared flag's default would silently become the accepted
+// outage bound, so the operator has to state it. Kong records which flags
+// the command line actually carried, which is the only place "explicitly
+// supplied" is observable — the value alone cannot tell a typed default
+// from an inherited one.
+func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 	if c.DryRun && c.Force != "" {
 		return errors.New("--force cannot be combined with --dry-run: the dry run reports the unforced plan")
 	}
+	if c.DryRun && c.AcceptBlocking != "" {
+		return errors.New("--accept-blocking cannot be combined with --dry-run: the dry run reports the refusal as it stands")
+	}
+	if c.Force != "" && c.AcceptBlocking != "" {
+		return errors.New("--accept-blocking cannot be combined with --force: each acknowledges a different decision, and a statement reaches one")
+	}
+	if c.AcceptBlocking != "" && !flagSupplied(kctx, "statement-timeout") {
+		return errors.New("--accept-blocking requires --statement-timeout on the same command line: it is the outage bound you accept after the lock is granted, and the default is not an acknowledgement")
+	}
 	return nil
+}
+
+// flagSupplied reports whether the parsed command line carried the named
+// flag, as opposed to the flag holding its default or environment value.
+func flagSupplied(kctx *kong.Context, name string) bool {
+	for _, el := range kctx.Path {
+		if el.Flag != nil && el.Flag.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Run implements the migrate subcommand.

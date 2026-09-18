@@ -129,6 +129,50 @@ execute_refused() {
     fi
 }
 
+# execute_accepted table sql
+#
+# Runs a gate-refused blocking index statement under the --accept-blocking
+# acknowledgement and requires the without-online-safety verdict: its own
+# exit code 3 (never 0, which stays exclusive to online-safe execution),
+# the passthrough marker, and the table the acknowledgement named. The
+# statement budget is spelled on the command line because the flag refuses
+# to inherit the default as the accepted outage bound.
+execute_accepted() {
+    local table="$1" sql="$2" out status=0
+    step "execute (accept blocking on $table): $sql"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" migrate --url "$PG_DSN" --json --alter "$sql" \
+            --accept-blocking "$table" --statement-timeout 30s) || status=$?
+        assert_eq "accepted exit of [$sql]" 3 "$status"
+        assert_eq "outcome of [$sql]" "executed-without-online-safety" "$(jq -r '.outcome' <<<"$out")"
+        assert_eq "blocking_passthrough of [$sql]" true "$(jq -r '.blocking_passthrough' <<<"$out")"
+        assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
+        assert_eq "statement_timeout of [$sql]" 30s "$(jq -r '.statement_timeout' <<<"$out")"
+    else
+        "$PGS" migrate --url "$PG_DSN" --alter "$sql" --accept-blocking "$table" --statement-timeout 30s \
+            || echo "(exit $? — expected 3: committed without an online-safety guarantee)"
+    fi
+}
+
+# execute_accept_mismatch wrong_table sql
+#
+# The acknowledgement names the table the statement locks; naming another
+# table is a usage error (exit 1) that prints no verdict and executes
+# nothing, the same contract as a mismatched --force.
+execute_accept_mismatch() {
+    local table="$1" sql="$2" out status=0
+    step "execute (accept blocking on the wrong table $table): $sql"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" migrate --url "$PG_DSN" --json --alter "$sql" \
+            --accept-blocking "$table" --statement-timeout 30s 2>/dev/null) || status=$?
+        assert_eq "mismatch exit of [$sql]" 1 "$status"
+        assert_eq "mismatch output of [$sql]" "" "$out"
+    else
+        "$PGS" migrate --url "$PG_DSN" --alter "$sql" --accept-blocking "$table" --statement-timeout 30s \
+            || echo "(exit $? — expected 1: the acknowledgement must name the locked table; nothing ran)"
+    fi
+}
+
 # diff_plan desired_file statement_count first_sql_fragment
 diff_plan() {
     local desired="$1" count="$2" fragment="$3" out status=0
@@ -308,6 +352,13 @@ run_exec() {
     execute_native 1     CONCURRENTLY  "CREATE INDEX idx_users_email ON users (email)"
     execute_native 4     "NOT VALID"   "ALTER TABLE users ALTER COLUMN email SET NOT NULL"
     execute_refused backend-unavailable "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
+    # The plain DROP INDEX is refused (the concurrent drop is the safe
+    # idiom); the acknowledgement runs it anyway under budgets. The mismatch
+    # runs first so the index is still there to drop afterwards.
+    execute_refused         index-statement "DROP INDEX orders_total_idx"
+    execute_accept_mismatch public.users    "DROP INDEX orders_total_idx"
+    execute_accepted        public.orders   "DROP INDEX orders_total_idx"
+    execute_accepted        public.orders   "REINDEX TABLE orders"
 }
 
 case "$section" in
