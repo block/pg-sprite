@@ -199,19 +199,27 @@ the default path, per read site and per pooled session.
 
 ### LK-1 — At most one migration runs per table
 
-Migrations serialize per table via a **session-scoped advisory lock** (`pg_advisory_lock` on a
-key derived from database + table — the analog of Spirit's `GET_LOCK` `MetadataLock`), with
-Spirit's hard-won connection rules carried over:
+Migrations serialize per table via a **session-scoped advisory lock** (`pg_try_advisory_lock` on
+`hashtext('<schema>.<table>')`, which advisory locks already scope to the database — the analog
+of Spirit's `GET_LOCK` `MetadataLock`), with Spirit's hard-won connection rules carried over:
 
-- The lock is held on a **dedicated pool of exactly one connection**, exempt from client-side
+- The lock is held on a **dedicated single connection outside the pool**, exempt from client-side
   connection recycling (a recycled connection silently releases a session lock — a window in
-  which a second instance could start a concurrent migration on the same table).
-- A **keepalive** re-acquires on an interval strictly shorter than any server/idle timeout that
-  could kill the session; if the keepalive fails, the connection is torn down and re-established.
-- **Losing the lock is fail-closed:** if the lock cannot be confirmed held, the migration aborts
-  rather than continuing unprotected.
+  which a second instance could start a concurrent migration on the same table). The server
+  derives the key and attempts the lock in one statement on that session, so no client-side
+  hash precedes the attempt.
+- A held lock is **never waited for**: a second instance gets a typed contention result and
+  refuses.
+- A **keepalive** pings the session on an interval strictly shorter than any server/idle timeout
+  that could kill it; a failed ping is treated as lock loss.
+- **Losing the lock is fail-closed:** a lost session closes the lock's `Done` channel with the
+  reason, and the schema change aborts rather than continuing unprotected. The session is never
+  re-established behind the caller's back, because a re-acquired lock would hide the window in
+  which another instance could have started.
 
-*Planned enforcement:* `pkg/dbconn` lock type, verified before any write and monitored throughout.
+*Enforced today:* `pkg/dbconn` `AcquireTableLock` (`TableLock` proof carried by
+`TableLockSession`; two-instance refusal and keepalive-loss tests). *Planned enforcement:* every
+executing mode acquires it before its first write.
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
