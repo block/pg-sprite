@@ -84,11 +84,12 @@ refusal — never a silently wrong or incomplete result:
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
   the caller must not rebuild) is library-only; from the CLI the
   [runbook](docs/invalid-index-recovery.md) applies.
-- **The accepted-blocking passthrough has no CLI flag yet** — running an
-  otherwise-refused change deliberately under the engine's bounded lock
-  budget, with the verdict marked `executed-without-online-safety` (exit 3),
-  is library-only (`executor.ExecuteAcceptedBlocking`); from the CLI these
-  refusals exit 2. Design:
+- **The accepted-blocking passthrough covers index maintenance only** —
+  `migrate --accept-blocking SCHEMA.TABLE` runs an otherwise-refused plain
+  `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` deliberately under the
+  engine's bounded lock and statement budgets, with the verdict marked
+  `executed-without-online-safety` (exit 3). Every other refusal — including
+  a blocking index build on a partitioned parent — still exits 2. Design:
   [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
@@ -238,9 +239,10 @@ Three rules follow from the table, and one note for embedders:
   facts, not a surface the library exposes. The typed contract is in
   [docs/execution-model.md](docs/execution-model.md#how-a-failure-is-reported).
 
-Exit 3 is reserved today: `executor.ExecuteAcceptedBlocking` ships as a
-library primitive, and no `migrate` flag reaches it yet, so no CLI
-invocation currently produces it. Why the code is non-zero, and why a
+Exit 3 comes from exactly one invocation shape: `migrate --accept-blocking
+SCHEMA.TABLE --statement-timeout …` on a refused plain `DROP INDEX`,
+`REINDEX INDEX`, or `REINDEX TABLE`, where the value names the table whose
+lock you accept. Why the code is non-zero, and why a
 statement-budget cancellation on that path is exit 1 rather than 2, is in
 [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md#exit-codes);
 every code's JSON shape is in

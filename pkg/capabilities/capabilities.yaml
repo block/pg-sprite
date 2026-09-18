@@ -215,7 +215,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**"
+    reason_notes: "Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**. `migrate` refuses the plain form and names the idiom; a single-index `DROP INDEX` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0)"
   - id: reindex
     area: "indexes"
     operation: "`REINDEX`"
@@ -226,7 +226,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Rewritten to `REINDEX ... CONCURRENTLY`"
+    reason_notes: "Rewritten to `REINDEX ... CONCURRENTLY`. `migrate` refuses the plain form and names the idiom; a plain `REINDEX INDEX` or `REINDEX TABLE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM` stay refused"
   - id: index-build-on-a-partitioned-parent
     area: "indexes"
     operation: "Index build on a **partitioned parent**"
@@ -238,7 +238,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-partitioned-parent
-    reason_notes: "PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned"
+    reason_notes: "PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it, and `--accept-blocking` does not reach it yet). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned"
   - id: add-constraint-using-index-on-a-partitioned-parent
     area: "indexes"
     operation: "`ADD CONSTRAINT ... USING INDEX` on a partitioned parent"

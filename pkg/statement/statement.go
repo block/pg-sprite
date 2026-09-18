@@ -84,13 +84,14 @@ func (k Kind) String() string {
 // anything (invariant ST-7). It can only be constructed by ParseOne and
 // carries the facts the gate needs about that one statement.
 type Statement struct {
-	sql         string
-	kind        Kind
-	schema      string
-	table       string
-	concurrent  bool
-	indexTarget IndexTarget
-	buildsIndex bool
+	sql           string
+	kind          Kind
+	schema        string
+	table         string
+	concurrent    bool
+	indexTarget   IndexTarget
+	indexRelation IndexRelation
+	buildsIndex   bool
 }
 
 // IndexTarget identifies whether an index-maintenance statement names one
@@ -127,6 +128,33 @@ func (t IndexTarget) String() string {
 	}
 }
 
+// IndexRelationKind says whether a single-relation index-maintenance
+// statement names an index or a table.
+type IndexRelationKind int
+
+const (
+	// IndexRelationNone is carried by statements that name no single
+	// maintained relation.
+	IndexRelationNone IndexRelationKind = iota
+	// IndexRelationIndex means the statement names an index: DROP INDEX
+	// and REINDEX INDEX.
+	IndexRelationIndex
+	// IndexRelationTable means the statement names a table: REINDEX TABLE.
+	IndexRelationTable
+)
+
+// IndexRelation is the one relation a single-relation index-maintenance
+// statement maintains, as the grammar spelled it. Schema is empty when the
+// name was unqualified, so the session search_path resolves it. The
+// acknowledgement of an accepted blocking statement resolves this name to
+// the table whose lock the operator accepts; the parse boundary itself
+// never consults a catalog.
+type IndexRelation struct {
+	Schema string
+	Name   string
+	Kind   IndexRelationKind
+}
+
 // SQL returns the original statement text as submitted.
 func (s Statement) SQL() string { return s.sql }
 
@@ -149,6 +177,10 @@ func (s Statement) Concurrent() bool { return s.concurrent }
 
 // IndexTarget returns the typed target shape of an index-maintenance statement.
 func (s Statement) IndexTarget() IndexTarget { return s.indexTarget }
+
+// IndexRelation returns the relation a single-relation index-maintenance
+// statement names; the zero value for every other statement.
+func (s Statement) IndexRelation() IndexRelation { return s.indexRelation }
 
 // BuildsIndex reports whether executing the statement creates a new index:
 // every CREATE INDEX, and the ALTER TABLE shapes that build one as a side
@@ -256,8 +288,10 @@ func ParseOne(sql string) (Statement, error) {
 		if node.GetDropStmt().GetRemoveType() == pganalyze.ObjectType_OBJECT_INDEX {
 			st.kind = KindDropIndex
 			st.concurrent = node.GetDropStmt().GetConcurrent()
-			if len(node.GetDropStmt().GetObjects()) == 1 {
+			objects := node.GetDropStmt().GetObjects()
+			if len(objects) == 1 {
 				st.indexTarget = IndexTargetSingleRelation
+				st.indexRelation = droppedIndex(objects[0])
 			} else {
 				st.indexTarget = IndexTargetOther
 			}
@@ -265,12 +299,16 @@ func ParseOne(sql string) (Statement, error) {
 			st.kind = KindCatalogWork
 		}
 	case node.GetReindexStmt() != nil:
+		reindex := node.GetReindexStmt()
 		st.kind = KindReindex
-		st.concurrent = reindexConcurrently(node.GetReindexStmt())
-		switch node.GetReindexStmt().GetKind() {
-		case pganalyze.ReindexObjectType_REINDEX_OBJECT_INDEX,
-			pganalyze.ReindexObjectType_REINDEX_OBJECT_TABLE:
+		st.concurrent = reindexConcurrently(reindex)
+		switch reindex.GetKind() {
+		case pganalyze.ReindexObjectType_REINDEX_OBJECT_INDEX:
 			st.indexTarget = IndexTargetSingleRelation
+			st.indexRelation = reindexedRelation(reindex.GetRelation(), IndexRelationIndex)
+		case pganalyze.ReindexObjectType_REINDEX_OBJECT_TABLE:
+			st.indexTarget = IndexTargetSingleRelation
+			st.indexRelation = reindexedRelation(reindex.GetRelation(), IndexRelationTable)
 		default:
 			st.indexTarget = IndexTargetOther
 		}
@@ -324,6 +362,28 @@ func constraintBuildsIndex(con *pganalyze.Constraint) bool {
 	default:
 		return false
 	}
+}
+
+// droppedIndex names the one index a DROP INDEX drops. The grammar spells
+// the object as a name list whose last item is the index and whose optional
+// preceding item is its schema.
+func droppedIndex(object *pganalyze.Node) IndexRelation {
+	items := object.GetList().GetItems()
+	rel := IndexRelation{Kind: IndexRelationIndex}
+	if len(items) == 0 {
+		return rel
+	}
+	rel.Name = items[len(items)-1].GetString_().GetSval()
+	if len(items) > 1 {
+		rel.Schema = items[len(items)-2].GetString_().GetSval()
+	}
+	return rel
+}
+
+// reindexedRelation names the index or table a REINDEX INDEX or REINDEX
+// TABLE rebuilds.
+func reindexedRelation(rel *pganalyze.RangeVar, kind IndexRelationKind) IndexRelation {
+	return IndexRelation{Schema: rel.GetSchemaname(), Name: rel.GetRelname(), Kind: kind}
 }
 
 // reindexConcurrently reports whether a REINDEX statement used its

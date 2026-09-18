@@ -314,6 +314,55 @@ the typed lock-budget outcome. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlock
 `55P03`). *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#failure-and-interruption-semantics).
 
+### AB-3 — The acknowledgement names the table the statement locks, resolved from the catalog
+
+An accepted blocking statement executes only when the operator's acknowledgement names,
+exactly, the schema-qualified table the statement will lock — the owning table of a named
+index (`DROP INDEX`, `REINDEX INDEX`) or the named table itself (`REINDEX TABLE`) — as
+resolved from `pg_index` / `pg_class` on the same pool the statement runs on. A mismatched
+acknowledgement, an unresolvable relation, or a name that resolves to the wrong kind of
+relation (a table where the statement needs an index, or the reverse) is a usage error with
+no verdict — each its own typed error — and nothing executes. The acknowledgement is never
+inferred from the statement text. The resolution and the execution are separate statements
+on the pool, so a concurrent re-pointing of the index name between them is outside what this
+invariant guarantees; the design records the window. *Enforced:* `pkg/migrate`
+(`acceptBlocking`, `lockedTable`; `ErrAcceptBlockingMismatch`,
+`ErrAcceptBlockingRelationNotFound`, `ErrAcceptBlockingWrongRelationKind`),
+`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`.
+*Source:* [lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door).
+
+### AB-4 — Acceptance applies only to an eligible in-process refusal, and to nothing else
+
+The acknowledgement changes the outcome of exactly one thing: a gate refusal whose in-process
+proof the eligibility registry marks eligible (RF-8). Every other refusal — an ineligible
+gate refusal, a planner refusal, a size-guard or preflight refusal — stands exactly as it
+would without the flag, and a statement the gate admits runs its normal path. The
+acknowledgement is not `--force`: the two cannot be combined, and a dry run reports the
+refusal as it stands rather than the accepted execution. The front door requires the
+statement budget to be stated on the same command line, because the accepted outage bound is
+a decision, not a default. *Enforced:* `migrate.AcceptedRefusal`, `MigrateCmd.Validate`,
+`TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
+`TestMigrateAcceptBlockingLeavesIneligibleRefusalsAlone`. *Source:*
+[lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door).
+
+### AB-5 — The accepted outcome is distinguishable from online-safe execution at every surface
+
+A commit through the accepted path is the `executed-without-online-safety` outcome with
+`blocking_passthrough: true`, the accepted refusal's reason, class, and safer idiom, the
+budgets it ran under, and its own exit code (3). Exit 0 and `executed-natively` remain
+exclusive to online-safe execution. A lock-budget exhaustion on this path is a refusal (AB-2)
+and a statement-budget cancellation is a failure with its outcome code; neither carries the
+passthrough marker. A transaction the client lost at or after submission is a failure whose
+code is `blocking-outcome-unknown` and whose detail says the outcome is unknown and names the
+table to inspect — never the "nothing committed" wording of an ordinary rolled-back attempt.
+Every acceptance is audited at warn level before execution, regardless of `--debug`.
+*Enforced:* `Verdict.WithAcceptedBlocking`, `pkg/migrate` (`acceptBlocking`,
+`auditAcceptBlocking`), `internal/cli` exit mapping,
+`TestRunAcceptBlockingExecutesEligibleRefusals`, `TestRunAcceptBlockingBoundsTheStatement`,
+`TestRunAcceptBlockingReportsAnUnknownOutcomeHonestly`,
+`TestMigrateAcceptBlockingRunsDropIndex`, `demo/tour.sh` (`execute_accepted`). *Source:*
+[lock-budgeted passthrough](lock-budgeted-passthrough.md#exit-codes).
+
 ## State, checkpoint, and resume (ST)
 
 ### ST-1 — The checkpoint is one row per target, written atomically
@@ -439,8 +488,10 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   intent is explicit; dangerous rename-overlap patterns are refused. *Source:*
   [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options), Spirit.
 - **RF-5** — The dangerous literal never runs silently: risky statements with a safer native
-  idiom get the idiom (reported) or a recommendation; running as-submitted requires the loud,
-  typed, audited `--force`. *Source:* [high-level-design § advisory mode](high-level-design.md#advisory-mode-suggest-the-safe-rewrite-dont-silently-run-the-risky-one).
+  idiom get the idiom (reported) or a recommendation; running as-submitted requires a loud,
+  typed, audited acknowledgement: `--force` on the routes it governs, or `--accept-blocking`
+  for an eligible policy refusal (AB-3..AB-5). *Source:* [high-level-design § advisory mode](high-level-design.md#advisory-mode-suggest-the-safe-rewrite-dont-silently-run-the-risky-one),
+  [lock-budgeted passthrough](lock-budgeted-passthrough.md).
 - **RF-6** — A partitioned-parent sequence is refused before its first step when it would build
   an index, or on PostgreSQL before 18 when it would add a foreign key `NOT VALID`. pg-sprite
   does not substitute a blocking parent build for the missing partition-aware online flow.
@@ -464,6 +515,16 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestRefusalRejectsUnvalidatedProof`, `TestRefusalRejectsFieldsDivergingFromProof`, and
   `TestGateVerdictAcceptedBlockingEligibility`, which pins that the site-keyed row is eligible
   in process and ineligible after a JSON round trip. *Source:* [lock-budgeted passthrough](lock-budgeted-passthrough.md).
+- **RF-9** — Refusal analysis and identity survive accepted execution. An accepted blocking
+  statement is refused first, exactly as it would be without the acknowledgement, and the
+  resulting verdict carries that refusal's reason, class, owner, cause, and safer idiom
+  unchanged; acceptance changes the outcome and adds the passthrough marker and budgets, never
+  the analysis. A verdict cannot acquire the accepted outcome without a validating refusal
+  proof, so an accepted execution is never reported without the refusal it accepted.
+  *Enforced:* `Verdict.WithAcceptedBlocking` (fails closed on a non-validating proof),
+  `pkg/migrate` (`acceptBlocking` builds the outcome from the gate's own verdict),
+  `TestRunAcceptBlockingExecutesEligibleRefusals`. *Source:*
+  [lock-budgeted passthrough](lock-budgeted-passthrough.md#verdict-reports-and-exit-code).
 
 ## Orchestration / control-plane (OC)
 
@@ -551,6 +612,7 @@ about **how we write and review the code**.
 | LK-3 | 4–6 | cancellation/claim race test |
 | LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |
 | AB-1, AB-2 | accepted-blocking rollout step 2 | exact session bounds + lock exhaustion leaves catalog unchanged |
+| AB-3, AB-4, AB-5, RF-9 | accepted-blocking rollout step 4 | catalog-resolved acknowledgement, mismatch executes nothing, ineligible refusals untouched, grammar rejects `--force`/`--dry-run`/missing budget, accepted verdict identity and exit 3, demo exit-code smoke |
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |
 | ST-1, ST-2, ST-3, ST-4 | 8 | kill/resume, cross-version refuse, orphan-slot reap, failover reconcile |
 | ST-6 | 1 onward, complete by 8 | preflight matrix |

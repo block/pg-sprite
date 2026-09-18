@@ -49,6 +49,54 @@ func TestForceRejectedWithDryRun(t *testing.T) {
 	assert.Contains(t, err.Error(), "--force cannot be combined with --dry-run")
 }
 
+// --accept-blocking is an acknowledgement of an outage bound, so the grammar
+// requires the bound to be spelled on the same command line: the default
+// statement_timeout is a policy, not a decision the operator made for this
+// statement. The two acknowledgements name different decisions, so both at
+// once is a contradiction the grammar rejects.
+func TestAcceptBlockingFlagGrammar(t *testing.T) {
+	parse := func(args ...string) error {
+		c := New("test")
+		k, err := kong.New(c, kong.Vars{"version": "test"})
+		require.NoError(t, err)
+		_, err = k.Parse(append([]string{
+			"migrate",
+			"--url", "postgres://user@localhost:5432/app",
+			"--alter", "DROP INDEX public.users_email_idx",
+		}, args...))
+		return err
+	}
+
+	t.Run("requires --statement-timeout", func(t *testing.T) {
+		err := parse("--accept-blocking", "public.users")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--accept-blocking requires --statement-timeout")
+	})
+
+	t.Run("rejects --dry-run", func(t *testing.T) {
+		err := parse("--accept-blocking", "public.users", "--statement-timeout", "10m", "--dry-run")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--accept-blocking cannot be combined with --dry-run")
+	})
+
+	t.Run("accepts an explicit --statement-timeout", func(t *testing.T) {
+		require.NoError(t, parse("--accept-blocking", "public.users", "--statement-timeout", "10m"))
+	})
+
+	t.Run("rejects --force", func(t *testing.T) {
+		err := parse("--accept-blocking", "public.users", "--statement-timeout", "10m", "--force", "public.users")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--accept-blocking cannot be combined with --force")
+	})
+
+	t.Run("wires the acknowledgement into the engine policy", func(t *testing.T) {
+		c := parseMigrate(t, "--accept-blocking", "public.users", "--statement-timeout", "10m")
+		got := c.options(nil)
+		assert.Equal(t, "public.users", got.AcceptBlocking)
+		assert.Equal(t, 10*time.Minute, got.Budget.Brief.StatementTimeout)
+	})
+}
+
 func TestRetryFlagsWireIntoRetryPolicy(t *testing.T) {
 	c := parseMigrate(t,
 		"--lock-attempts", "5",

@@ -70,6 +70,18 @@ type Options struct {
 	// statement kinds cannot be forced.
 	Force string
 
+	// AcceptBlocking is the typed acknowledgement to run one eligible
+	// refused statement as-is, without online safety, under the engine-owned
+	// lock and statement budgets in Budget.Brief: today a plain
+	// single-relation DROP INDEX, REINDEX INDEX, or REINDEX TABLE the
+	// statement-kind gate refuses. It must name the schema-qualified table
+	// whose lock the operator accepts — the index's owning table, resolved
+	// from the catalog — exactly; empty means every refusal stands.
+	// Ineligible refusals stand regardless. Force and AcceptBlocking are
+	// mutually exclusive: a statement reaches one routing decision, and
+	// one acknowledgement names it.
+	AcceptBlocking string
+
 	// MaxTableSizeBytes is the threshold above which a blind bounded
 	// attempt of the submitted form is refused, measured as the table's
 	// full on-disk footprint: heap, indexes, and TOAST, all partitions.
@@ -145,6 +157,9 @@ func (o Options) validate() error {
 	if o.MaxTableSizeBytes <= 0 {
 		return fmt.Errorf("migrate: Options.MaxTableSizeBytes must be positive, got %d; DefaultOptions is the sanctioned starting point", o.MaxTableSizeBytes)
 	}
+	if o.Force != "" && o.AcceptBlocking != "" {
+		return errors.New("migrate: Options.Force and Options.AcceptBlocking are mutually exclusive; a statement reaches one routing decision and one acknowledgement names it")
+	}
 	return nil
 }
 
@@ -171,7 +186,10 @@ func (o Options) retry() executor.RetryPolicy {
 // error; the verdict is the error's machine-readable twin. An error with a
 // zero verdict means the pipeline stopped before reaching a verdict (a
 // resolution, introspection, or acknowledgement error) and nothing was
-// executed.
+// executed. A fourth outcome exists only under Options.AcceptBlocking: an
+// eligible gate refusal the operator acknowledged commits as
+// [verdict.OutcomeExecutedWithoutOnlineSafety] with a nil error, and the
+// caller maps it to its own exit path — never the online-safe one.
 //
 // Run does not close the pool; one pool serves any number of calls.
 func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options) (verdict.Verdict, error) {
@@ -180,6 +198,12 @@ func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 	}
 	logger := opts.logger()
 	if v, refused := Gate(st); refused {
+		if proof, ok := AcceptedRefusal(opts.AcceptBlocking, v); ok {
+			// The acknowledged passthrough: the refusal stands as
+			// analysis, and the refused statement runs as-is under the
+			// brief budgets instead of not at all.
+			return acceptBlocking(ctx, pool, st, v, proof, opts)
+		}
 		return v, nil
 	}
 	st, err := resolveTarget(ctx, pool, st, logger)
