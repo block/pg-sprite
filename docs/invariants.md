@@ -320,10 +320,15 @@ An accepted blocking statement executes only when the operator's acknowledgement
 exactly, the schema-qualified table the statement will lock — the owning table of a named
 index (`DROP INDEX`, `REINDEX INDEX`) or the named table itself (`REINDEX TABLE`) — as
 resolved from `pg_index` / `pg_class` on the same pool the statement runs on. A mismatched
-acknowledgement or an unresolvable relation is a usage error with no verdict; nothing
-executes. The acknowledgement is never inferred from the statement text. *Enforced:*
-`pkg/migrate` (`acceptBlocking`, `lockedTable`; `ErrAcceptBlockingMismatch`,
-`ErrAcceptBlockingRelationNotFound`), `TestRunAcceptBlockingRejectsFalseAcknowledgements`.
+acknowledgement, an unresolvable relation, or a name that resolves to the wrong kind of
+relation (a table where the statement needs an index, or the reverse) is a usage error with
+no verdict — each its own typed error — and nothing executes. The acknowledgement is never
+inferred from the statement text. The resolution and the execution are separate statements
+on the pool, so a concurrent re-pointing of the index name between them is outside what this
+invariant guarantees; the design records the window. *Enforced:* `pkg/migrate`
+(`acceptBlocking`, `lockedTable`; `ErrAcceptBlockingMismatch`,
+`ErrAcceptBlockingRelationNotFound`, `ErrAcceptBlockingWrongRelationKind`),
+`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`.
 *Source:* [lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door).
 
 ### AB-4 — Acceptance applies only to an eligible in-process refusal, and to nothing else
@@ -347,10 +352,14 @@ A commit through the accepted path is the `executed-without-online-safety` outco
 budgets it ran under, and its own exit code (3). Exit 0 and `executed-natively` remain
 exclusive to online-safe execution. A lock-budget exhaustion on this path is a refusal (AB-2)
 and a statement-budget cancellation is a failure with its outcome code; neither carries the
-passthrough marker. Every acceptance is audited at warn level before execution, regardless of
-`--debug`. *Enforced:* `Verdict.WithAcceptedBlocking`, `pkg/migrate` (`acceptBlocking`,
+passthrough marker. A transaction the client lost at or after submission is a failure whose
+code is `blocking-outcome-unknown` and whose detail says the outcome is unknown and names the
+table to inspect — never the "nothing committed" wording of an ordinary rolled-back attempt.
+Every acceptance is audited at warn level before execution, regardless of `--debug`.
+*Enforced:* `Verdict.WithAcceptedBlocking`, `pkg/migrate` (`acceptBlocking`,
 `auditAcceptBlocking`), `internal/cli` exit mapping,
 `TestRunAcceptBlockingExecutesEligibleRefusals`, `TestRunAcceptBlockingBoundsTheStatement`,
+`TestRunAcceptBlockingReportsAnUnknownOutcomeHonestly`,
 `TestMigrateAcceptBlockingRunsDropIndex`, `demo/tour.sh` (`execute_accepted`). *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#exit-codes).
 

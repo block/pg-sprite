@@ -24,6 +24,12 @@ var (
 	// session search_path, so there is no table to acknowledge. Nothing has
 	// executed.
 	ErrAcceptBlockingRelationNotFound = errors.New("the accepted statement names a relation that does not exist")
+	// ErrAcceptBlockingWrongRelationKind means the accepted statement names a
+	// relation that exists but is not what the statement operates on — a
+	// table where DROP INDEX / REINDEX INDEX needs an index, or an index
+	// where REINDEX TABLE needs a table — so there is no lock to
+	// acknowledge. Nothing has executed.
+	ErrAcceptBlockingWrongRelationKind = errors.New("the accepted statement names a relation of the wrong kind")
 )
 
 // AcceptedRefusal returns the refusal's in-process proof when the
@@ -100,6 +106,15 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 		// work the operator accepted when the bound cut it off.
 		v := failureVerdict(st, err, executor.SequenceReport{}, false)
 		v.Table = table
+		var unknownErr *executor.BlockingOutcomeUnknownError
+		if errors.As(err, &unknownErr) {
+			// The client lost the transaction at or after submission, so the
+			// verdict cannot claim the rollback a failed attempt normally
+			// gets: the statement may have committed.
+			v.Detail = fmt.Sprintf("outcome unknown: the connection or the caller's context ended after %s was submitted, "+
+				"so whether it committed cannot be established from the client — inspect the catalog for %s before retrying",
+				st.Kind(), table)
+		}
 		logger.Debug("accepted blocking execution failed",
 			"table", table, "code", v.Code, "elapsed", elapsed)
 		return v, fmt.Errorf("run accepted blocking statement on %s: %w", table, err)
@@ -121,29 +136,30 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 // locks: the owning table of a named index (DROP INDEX, REINDEX INDEX),
 // read from the catalog, or the named table itself (REINDEX TABLE). An
 // unqualified name resolves against the session search_path, exactly as
-// the statement will when it runs on the same pool.
+// the statement will when it runs on the same pool. A name that resolves
+// to the wrong kind of relation is its own error, so an operator who typed
+// a table where the statement needs an index is pointed at the statement,
+// not at search_path and grants.
 func lockedTable(ctx context.Context, pool *pgxpool.Pool, rel statement.IndexRelation) (string, error) {
-	var q string
-	switch rel.Kind {
-	case statement.IndexRelationIndex:
-		q = `
-			SELECT n.nspname, c.relname
-			FROM pg_index i
-			JOIN pg_class c ON c.oid = i.indrelid
-			JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE i.indexrelid = to_regclass($1)`
-	case statement.IndexRelationTable:
-		q = `
-			SELECT n.nspname, c.relname
-			FROM pg_class c
-			JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE c.oid = to_regclass($1)`
-	default:
+	if rel.Kind != statement.IndexRelationIndex && rel.Kind != statement.IndexRelationTable {
 		return "", fmt.Errorf("%w: accepted statement names no single relation", executor.ErrInvariantViolation)
 	}
+	// One row per resolved relation: its kind, and — when it is an index —
+	// the table that owns it; for a table the owner columns repeat the
+	// relation itself, so the result is always the table the statement locks.
+	const q = `
+		SELECT c.relkind::text,
+		       COALESCE(tn.nspname, n.nspname),
+		       COALESCE(t.relname, c.relname)
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		LEFT JOIN pg_index i ON i.indexrelid = c.oid
+		LEFT JOIN pg_class t ON t.oid = i.indrelid
+		LEFT JOIN pg_namespace tn ON tn.oid = t.relnamespace
+		WHERE c.oid = to_regclass($1)`
 	name := regclassName(rel)
-	var schema, table string
-	err := pool.QueryRow(ctx, q, name).Scan(&schema, &table)
+	var relkind, schema, table string
+	err := pool.QueryRow(ctx, q, name).Scan(&relkind, &schema, &table)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", fmt.Errorf("%w: %s is not visible on the session search_path; nothing was executed",
 			ErrAcceptBlockingRelationNotFound, name)
@@ -151,7 +167,63 @@ func lockedTable(ctx context.Context, pool *pgxpool.Pool, rel statement.IndexRel
 	if err != nil {
 		return "", fmt.Errorf("resolve the table %s locks: %w", name, err)
 	}
+	if !relationKindMatches(rel.Kind, relkind) {
+		return "", fmt.Errorf("%w: %s is %s, and the statement needs %s; nothing was executed",
+			ErrAcceptBlockingWrongRelationKind, name, describeRelkind(relkind), describeIndexRelationKind(rel.Kind))
+	}
 	return schema + "." + table, nil
+}
+
+// relationKindMatches reports whether a resolved pg_class.relkind is what
+// the accepted statement operates on: an index (plain or partitioned) for
+// DROP INDEX / REINDEX INDEX; a table, partitioned table, or materialized
+// view for REINDEX TABLE, which is the set PostgreSQL itself accepts there.
+func relationKindMatches(kind statement.IndexRelationKind, relkind string) bool {
+	switch kind {
+	case statement.IndexRelationIndex:
+		return relkind == "i" || relkind == "I"
+	case statement.IndexRelationTable:
+		return relkind == "r" || relkind == "p" || relkind == "m"
+	default:
+		return false
+	}
+}
+
+// describeRelkind names a pg_class.relkind for an operator-facing message.
+func describeRelkind(relkind string) string {
+	switch relkind {
+	case "r":
+		return "a table"
+	case "p":
+		return "a partitioned table"
+	case "i":
+		return "an index"
+	case "I":
+		return "a partitioned index"
+	case "m":
+		return "a materialized view"
+	case "v":
+		return "a view"
+	case "S":
+		return "a sequence"
+	case "f":
+		return "a foreign table"
+	case "c":
+		return "a composite type"
+	case "t":
+		return "a TOAST table"
+	default:
+		return fmt.Sprintf("a relation of kind %q", relkind)
+	}
+}
+
+// describeIndexRelationKind names what the accepted statement operates on,
+// for the same message.
+func describeIndexRelationKind(kind statement.IndexRelationKind) string {
+	if kind == statement.IndexRelationIndex {
+		return "an index"
+	}
+	return "a table"
 }
 
 // regclassName renders the relation as the quoted text to_regclass parses,

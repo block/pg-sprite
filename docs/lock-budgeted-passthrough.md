@@ -148,9 +148,20 @@ the index name against `search_path`, then read its owning table from `pg_index.
 That lookup runs after the refusal is produced and found eligible and only when the flag is
 present, so the statement-kind gate stays parse-only and a refusal is produced exactly where it
 is produced today. The sequence is: gate refuses, registry says eligible, flag present, dial,
-resolve the accepted table, compare it with the flag's value, then execute. A mismatch or an
-index that no longer exists is a usage error and nothing runs. The value prevents a copied
-command from silently accepting a different relation's lock.
+resolve the accepted table, compare it with the flag's value, then execute. A mismatch, an
+index that no longer exists, or a name that resolves to the wrong kind of relation (a table
+where the statement needs an index, or the reverse) is a usage error and nothing runs; each
+is its own typed error, so the operator is sent to the right thing — the acknowledgement,
+`search_path` and grants, or the statement. The value prevents a copied command from silently
+accepting a different relation's lock.
+
+The lookup and the execution are two statements on the same pool, not one transaction: the
+owning table is read on one connection and the statement then takes its lock on another. A
+concurrent drop-and-recreate of the same index name onto a different table in that window
+would lock a table the acknowledgement did not name while the verdict still reports the
+resolved one. v1 accepts this window as the cost of keeping the executor primitive a single
+submitted statement; closing it means re-checking the identity inside the engine-owned
+transaction after the lock is granted, the shape the invalid-index recovery path already uses.
 
 Eligibility itself never depends on that lookup. The registry keys row 1 on the refusal site,
 and the site distinguishes the single-relation forms — one `DROP INDEX`, `REINDEX INDEX`,
@@ -357,10 +368,13 @@ transaction, but a dropped connection at the commit boundary is ambiguous until 
 inspects the catalog. Process interruption, server restart, and operator cancellation leave
 whatever state PostgreSQL left. A retry starts classification again and is not called resume.
 
-The verdict must not claim “nothing committed” when the engine cannot establish that fact.
-Where catalog inspection can resolve a known statement shape, a later implementation may
-report the observation; v1's contract is documentation and honest ambiguity, not a synthetic
-recovery protocol.
+The verdict must not claim “nothing committed” when the engine cannot establish that fact:
+the front door maps the executor's outcome-unknown error to a failed verdict whose code is
+`blocking-outcome-unknown` and whose detail says the outcome is unknown and names the table
+to inspect, instead of the rollback wording an ordinary failed attempt carries. Where catalog
+inspection can resolve a known statement shape, a later implementation may report the
+observation; v1's contract is documentation and honest ambiguity, not a synthetic recovery
+protocol.
 
 ## `--force` interaction
 

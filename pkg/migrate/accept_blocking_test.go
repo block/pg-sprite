@@ -88,3 +88,31 @@ func TestRegclassName(t *testing.T) {
 	assert.Equal(t, `"app"."order"`,
 		regclassName(statement.IndexRelation{Schema: "app", Name: "order", Kind: statement.IndexRelationTable}))
 }
+
+// The acknowledgement resolves a relation of the kind the statement
+// operates on and nothing else: DROP INDEX / REINDEX INDEX take a plain or
+// partitioned index; REINDEX TABLE takes what PostgreSQL's REINDEX TABLE
+// takes — a table, a partitioned table, or a materialized view. A name
+// that resolves to any other kind is the wrong-kind error, not "not found".
+func TestRelationKindMatches(t *testing.T) {
+	for _, tc := range []struct {
+		kind    statement.IndexRelationKind
+		relkind string
+		want    bool
+	}{
+		{statement.IndexRelationIndex, "i", true},
+		{statement.IndexRelationIndex, "I", true},
+		{statement.IndexRelationIndex, "r", false},
+		{statement.IndexRelationIndex, "p", false},
+		{statement.IndexRelationIndex, "m", false},
+		{statement.IndexRelationTable, "r", true},
+		{statement.IndexRelationTable, "p", true},
+		{statement.IndexRelationTable, "m", true},
+		{statement.IndexRelationTable, "i", false},
+		{statement.IndexRelationTable, "v", false},
+		{statement.IndexRelationTable, "S", false},
+		{statement.IndexRelationNone, "r", false},
+	} {
+		assert.Equal(t, tc.want, relationKindMatches(tc.kind, tc.relkind), "kind %d relkind %q", tc.kind, tc.relkind)
+	}
+}

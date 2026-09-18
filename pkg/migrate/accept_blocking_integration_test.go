@@ -163,6 +163,97 @@ func TestRunAcceptBlockingRejectsFalseAcknowledgements(t *testing.T) {
 		require.ErrorIs(t, err, migrate.ErrAcceptBlockingRelationNotFound)
 		assert.Equal(t, verdict.Verdict{}, v)
 	})
+
+	// The relation exists, so "not visible on the search_path" would send
+	// the operator to check grants for a statement that simply names the
+	// wrong kind of relation. The error names the kind found instead.
+	t.Run("DROP INDEX naming a table is the wrong kind, not a missing relation", func(t *testing.T) {
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("DROP INDEX %s.orders", schema)),
+			acceptBlockingOptions(schema+".orders"))
+		require.ErrorIs(t, err, migrate.ErrAcceptBlockingWrongRelationKind)
+		assert.NotErrorIs(t, err, migrate.ErrAcceptBlockingRelationNotFound)
+		assert.Equal(t, verdict.Verdict{}, v)
+		assert.True(t, indexExists(t, pool, schema, "orders_id_idx"))
+	})
+
+	t.Run("REINDEX TABLE naming an index is the wrong kind, not a missing relation", func(t *testing.T) {
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("REINDEX TABLE %s.orders_id_idx", schema)),
+			acceptBlockingOptions(schema+".orders"))
+		require.ErrorIs(t, err, migrate.ErrAcceptBlockingWrongRelationKind)
+		assert.NotErrorIs(t, err, migrate.ErrAcceptBlockingRelationNotFound)
+		assert.Equal(t, verdict.Verdict{}, v)
+	})
+}
+
+// A caller whose context ends while the accepted statement is waiting on
+// its lock has lost the transaction from the client side: the statement
+// was submitted, and whether it committed cannot be established from
+// here. The failed verdict says so instead of claiming the rollback an
+// ordinary failed attempt gets, and its code sends the operator to the
+// catalog before any retry.
+func TestRunAcceptBlockingReportsAnUnknownOutcomeHonestly(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (id int PRIMARY KEY);
+		CREATE INDEX orders_id_idx ON %[1]s.orders (id)`, schema))
+	require.NoError(t, err)
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = holder.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.orders IN ACCESS EXCLUSIVE MODE", schema))
+	require.NoError(t, err)
+
+	// The lock budget is long enough that only the caller's cancellation
+	// can end the wait, so the outcome the test observes is the
+	// cancellation's, not the budget's.
+	opts := acceptBlockingOptions(schema + ".orders")
+	opts.Budget.Brief.LockTimeout = 30 * time.Second
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	type result struct {
+		v   verdict.Verdict
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		v, err := migrate.Run(ctx, pool,
+			parseOne(t, fmt.Sprintf("DROP INDEX %s.orders_id_idx", schema)), opts)
+		done <- result{v, err}
+	}()
+
+	// Cancel only once the DROP INDEX is provably submitted and waiting on
+	// the held lock; the polling query's own text does not start with it.
+	require.Eventually(t, func() bool {
+		var waiting bool
+		err := pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			  WHERE query LIKE 'DROP INDEX %' AND wait_event_type = 'Lock')`).Scan(&waiting)
+		return err == nil && waiting
+	}, 30*time.Second, 25*time.Millisecond, "the accepted DROP INDEX must be waiting on the holder's lock")
+	cancel()
+
+	select {
+	case res := <-done:
+		var unknownErr *executor.BlockingOutcomeUnknownError
+		require.ErrorAs(t, res.err, &unknownErr)
+		assert.Equal(t, verdict.OutcomeFailed, res.v.Outcome)
+		assert.Equal(t, string(executor.CodeBlockingOutcomeUnknown), res.v.Code)
+		assert.Equal(t, schema+".orders", res.v.Table)
+		assert.False(t, res.v.BlockingPassthrough)
+		assert.NotContains(t, res.v.Detail, "nothing committed",
+			"the client cannot establish that fact, so the verdict must not claim it")
+	case <-time.After(30 * time.Second):
+		t.Fatal("the cancelled accepted execution must return")
+	}
+	require.NoError(t, holder.Rollback(t.Context()))
+	assert.True(t, indexExists(t, pool, schema, "orders_id_idx"),
+		"the lock was never granted, so the server-side outcome here is a rollback — which the client still could not know")
 }
 
 // The budgets bound the accepted statement in both directions. An
