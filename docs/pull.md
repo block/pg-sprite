@@ -99,6 +99,7 @@ without losing meaning. Current refusals include:
 - partitioned parents (partition children are not independently exported);
 - either side of classic `INHERITS` relationships;
 - either side of a foreign-key relationship;
+- tables with RLS enabled, `FORCE ROW LEVEL SECURITY` set, or any policies, even when RLS is disabled;
 - unlogged tables and columns with explicit collations; and
 - sequence-backed defaults that cannot be rendered as an owned `serial` form.
 
