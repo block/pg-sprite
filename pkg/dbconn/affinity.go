@@ -73,7 +73,7 @@ func affinityProbeBound(connectTimeout time.Duration) time.Duration {
 // lock is the instrument here rather than the subject: it is the one piece
 // of session state whose loss a client can observe directly, which makes it
 // the way to prove the session is stable enough to carry the timeouts.
-func ProveSessionAffinity(ctx context.Context, conn *pgxpool.Conn, pinner *pgxpool.Pool, bound time.Duration) error {
+func ProveSessionAffinity(ctx context.Context, conn AdvisoryLockHolder, pinner *pgxpool.Pool, bound time.Duration) error {
 	if bound > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, bound)
@@ -122,7 +122,7 @@ func ProveSessionAffinity(ctx context.Context, conn *pgxpool.Conn, pinner *pgxpo
 //
 // The open transaction is the point: it denies conn the backend it acquired
 // on, so conn's read runs wherever the connection is routed next.
-func probeAcrossPinnedBackend(ctx context.Context, conn *pgxpool.Conn, pinner *pgxpool.Pool, key int64) (reentered, stillHeld bool, err error) {
+func probeAcrossPinnedBackend(ctx context.Context, conn AdvisoryLockHolder, pinner *pgxpool.Pool, key int64) (reentered, stillHeld bool, err error) {
 	tx, err := pinner.Begin(ctx)
 	if err != nil {
 		return false, false, fmt.Errorf("begin the session affinity probe transaction: %w", err)
@@ -146,7 +146,7 @@ func probeAcrossPinnedBackend(ctx context.Context, conn *pgxpool.Conn, pinner *p
 			return false, false, fmt.Errorf("undo the probe advisory lock re-entry: %w", err)
 		}
 	}
-	stillHeld, err = sessionHoldsAdvisoryLock(ctx, conn, key)
+	stillHeld, err = sessionHoldsAdvisoryLock(ctx, conn, singleAdvisoryLock(key))
 	if err != nil {
 		return false, false, err
 	}
@@ -160,36 +160,53 @@ type AdvisoryLockHolder interface {
 	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
+// advisoryLockRef is an advisory lock as pg_locks reports it: classid and
+// objid are unsigned OIDs widened to bigint, and objsubid tells the
+// single-argument form (1) from the two-argument form (2).
+type advisoryLockRef struct {
+	classID, objID int64
+	objsubid       int16
+}
+
+// singleAdvisoryLock is the pg_locks form of a single-argument bigint key:
+// the high and low 32 bits, each widened back out of the unsigned OID the
+// catalog stores, so a key whose high half looks negative as an int32 still
+// matches.
+func singleAdvisoryLock(key int64) advisoryLockRef {
+	return advisoryLockRef{
+		classID:  int64(uint32(uint64(key) >> 32)),
+		objID:    int64(uint32(uint64(key))),
+		objsubid: 1,
+	}
+}
+
+// pairAdvisoryLock is the pg_locks form of a two-argument (classid, objid)
+// key. Both arguments are int32 to PostgreSQL and unsigned in the catalog.
+func pairAdvisoryLock(key TableLockKey) advisoryLockRef {
+	return advisoryLockRef{
+		classID:  int64(uint32(key.ClassID)),
+		objID:    int64(uint32(key.ObjID)),
+		objsubid: 2,
+	}
+}
+
 // sessionHoldsAdvisoryLock reports whether the session behind conn is the
-// one holding the advisory lock for key.
-//
-// pg_locks reports a single-argument advisory key as objsubid 1 with the
-// key's high and low halves in classid and objid, both unsigned OIDs, so the
-// halves are split client-side and compared as bigints — a key whose high
-// half looks negative as an int32 must still match.
-func sessionHoldsAdvisoryLock(ctx context.Context, conn AdvisoryLockHolder, key int64) (bool, error) {
-	classID, objID := advisoryLockCatalogKey(key)
+// one holding the advisory lock ref.
+func sessionHoldsAdvisoryLock(ctx context.Context, conn AdvisoryLockHolder, ref advisoryLockRef) (bool, error) {
 	const query = `SELECT EXISTS (
 		SELECT 1 FROM pg_catalog.pg_locks
 		 WHERE locktype = 'advisory'
 		   AND granted
-		   AND objsubid = 1
-		   AND classid::bigint = $1
-		   AND objid::bigint = $2
+		   AND objsubid = $1
+		   AND classid::bigint = $2
+		   AND objid::bigint = $3
 		   AND pid = pg_backend_pid()
 	)`
 	var held bool
-	if err := conn.QueryRow(ctx, query, classID, objID).Scan(&held); err != nil {
+	if err := conn.QueryRow(ctx, query, ref.objsubid, ref.classID, ref.objID).Scan(&held); err != nil {
 		return false, fmt.Errorf("read the advisory lock holder from pg_locks: %w", err)
 	}
 	return held, nil
-}
-
-// advisoryLockCatalogKey splits an advisory lock key into the (classid,
-// objid) pair pg_locks reports for it: the high and low 32 bits, each
-// widened back out of the unsigned OID the catalog stores.
-func advisoryLockCatalogKey(key int64) (classID, objID int64) {
-	return int64(uint32(uint64(key) >> 32)), int64(uint32(uint64(key)))
 }
 
 // probeKey returns an advisory lock key no other caller can be using.
