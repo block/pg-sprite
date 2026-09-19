@@ -242,7 +242,14 @@ func gatherAccessFacts(ctx context.Context, pool *pgxpool.Pool, schema, table st
 // unqualified name that fails is reported as not found: search_path
 // resolution already skipped schemas the role lacks USAGE on, and there is
 // no single schema to name in a refusal.
-func unresolvedTargetCause(ctx context.Context, pool *pgxpool.Pool, schema, table string) error {
+// rowQuerier is the single-row query capability shared by a pool and a
+// transaction, so a check can run at plan time and again inside the
+// transaction that acts on its proof.
+type rowQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func unresolvedTargetCause(ctx context.Context, db rowQuerier, schema, table string) error {
 	if schema == "" {
 		return fmt.Errorf("%w: %s", ErrTableNotFound, table)
 	}
@@ -253,7 +260,7 @@ func unresolvedTargetCause(ctx context.Context, pool *pgxpool.Pool, schema, tabl
 		WHERE n.nspname = $1`
 	var role string
 	var usage bool
-	err := pool.QueryRow(ctx, q, schema).Scan(&role, &usage)
+	err := db.QueryRow(ctx, q, schema).Scan(&role, &usage)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: schema %s does not exist", ErrTableNotFound, schema)
 	}

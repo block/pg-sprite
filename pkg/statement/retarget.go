@@ -3,7 +3,6 @@ package statement
 import (
 	"errors"
 	"fmt"
-	"reflect"
 )
 
 var (
@@ -36,8 +35,8 @@ func RetargetRelation(sql, schema, table string) (string, error) {
 	return deparseOne(node)
 }
 
-// SameOpsExceptTarget proves that two ALTER TABLE statements parse to the
-// same operations, permitting only their target relations to differ. The
+// SameOpsExceptTarget proves that two ALTER TABLE syntax trees deparse
+// identically after normalizing the gated target to the retargeted relation. The
 // shadow builder runs it on the gated statement and its retargeted form
 // before executing anything on the shadow (ST-7 with the shadow as the sole
 // permitted target).
@@ -53,16 +52,20 @@ func SameOpsExceptTarget(gated, retargeted string) error {
 	if gatedNode.GetAlterTableStmt() == nil || retargetedNode.GetAlterTableStmt() == nil {
 		return ErrNotAlterTable
 	}
-	gatedOps, err := ParseOps(gated)
+	gatedAlter := gatedNode.GetAlterTableStmt()
+	retargetedAlter := retargetedNode.GetAlterTableStmt()
+	gatedAlter.Relation.Schemaname = retargetedAlter.Relation.GetSchemaname()
+	gatedAlter.Relation.Relname = retargetedAlter.Relation.GetRelname()
+	normalizedGated, err := deparseOne(gatedNode)
 	if err != nil {
 		return err
 	}
-	retargetedOps, err := ParseOps(retargeted)
+	normalizedRetargeted, err := deparseOne(retargetedNode)
 	if err != nil {
 		return err
 	}
 	// INV: ST-7
-	if !reflect.DeepEqual(gatedOps, retargetedOps) {
+	if normalizedGated != normalizedRetargeted {
 		return fmt.Errorf("%w: %q vs %q", ErrRetargetMismatch, gated, retargeted)
 	}
 	return nil

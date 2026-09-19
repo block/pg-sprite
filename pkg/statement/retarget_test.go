@@ -38,3 +38,23 @@ func TestSameOpsExceptTargetRejectsTampering(t *testing.T) {
 	err := statement.SameOpsExceptTarget(`ALTER TABLE t ALTER COLUMN id TYPE bigint`, `ALTER TABLE shadow ALTER COLUMN other TYPE bigint`)
 	require.ErrorIs(t, err, statement.ErrRetargetMismatch)
 }
+
+func TestSameOpsExceptTargetRejectsSemanticChanges(t *testing.T) {
+	tests := map[string]struct{ gated, changed string }{
+		"check expression":    {`ALTER TABLE t ADD CONSTRAINT c CHECK (qty > 0)`, `ALTER TABLE shadow ADD CONSTRAINT c CHECK (qty > 999)`},
+		"default literal":     {`ALTER TABLE t ALTER COLUMN qty SET DEFAULT 1`, `ALTER TABLE shadow ALTER COLUMN qty SET DEFAULT 2`},
+		"referenced relation": {`ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (parent_id) REFERENCES parents(id)`, `ALTER TABLE shadow ADD CONSTRAINT fk FOREIGN KEY (parent_id) REFERENCES other_parents(id)`},
+	}
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			require.ErrorIs(t, statement.SameOpsExceptTarget(tc.gated, tc.changed), statement.ErrRetargetMismatch)
+		})
+	}
+}
+
+func TestSameOpsExceptTargetAcceptsGenuineRetarget(t *testing.T) {
+	gated := `ALTER TABLE public.t ADD CONSTRAINT c CHECK (qty > 0)`
+	retargeted, err := statement.RetargetRelation(gated, "work", "shadow")
+	require.NoError(t, err)
+	require.NoError(t, statement.SameOpsExceptTarget(gated, retargeted))
+}

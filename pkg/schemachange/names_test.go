@@ -12,7 +12,7 @@ import (
 // two different shadows, and the same qualified name always derives the same
 // one, so a resumed run finds the shadow an earlier run built.
 func TestNameHashKeysOnQualifiedName(t *testing.T) {
-	assert.Equal(t, "eee6bd2f", NameHash("public", "widgets"))
+	assert.Equal(t, "b79ff6d5d91cfdaf", NameHash("public", "widgets"))
 	assert.NotEqual(t, NameHash("public", "widgets"), NameHash("sales", "widgets"))
 	assert.Equal(t, NameHash("public", "widgets"), NameHash("public", "widgets"))
 }

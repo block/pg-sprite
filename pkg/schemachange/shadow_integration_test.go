@@ -203,7 +203,7 @@ func (f shadowFixture) security(t *testing.T, table string) tableSecurity {
 
 // A table owned by a non-connected role with grants, forced row-level
 // security, policies (one to a role, one to PUBLIC), and REPLICA IDENTITY
-// FULL: the shadow is created under SET ROLE owner and carries every one of
+// FULL: the shadow is created under SET LOCAL ROLE owner and carries every one of
 // those facts, so the ST-5 gate later finds nothing to refuse on.
 func TestBuildShadowReplicatesSecurityMetadata(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
@@ -316,6 +316,39 @@ func TestBuildShadowRefusesExistingShadow(t *testing.T) {
 
 	_, err := f.build(t, "widgets", `ALTER TABLE %s.widgets ADD COLUMN note text`)
 	require.ErrorIs(t, err, schemachange.ErrShadowExists)
+}
+
+// Shape facts are re-read after SET LOCAL ROLE inside the build transaction.
+// OID-bound dependents added after proof minting therefore produce their
+// typed shape refusal before the shadow is created.
+func TestBuildShadowRefusesShapeChangedAfterProof(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.widgets (
+			id bigint PRIMARY KEY,
+			updated_at timestamptz
+		)`)
+	f.exec(t, `
+		CREATE TABLE %s.widget_refs (
+			id bigint PRIMARY KEY,
+			widget_id bigint
+		)`)
+	target := f.prove(t, "widgets")
+	f.exec(t, `
+		CREATE FUNCTION %s.touch_widget() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			NEW.updated_at := now();
+			RETURN NEW;
+		END $$`)
+	f.exec(t, `CREATE TRIGGER touch_row BEFORE UPDATE ON %s.widgets FOR EACH ROW EXECUTE FUNCTION %s.touch_widget()`)
+	f.exec(t, `ALTER TABLE %s.widget_refs ADD CONSTRAINT widget_fk FOREIGN KEY (widget_id) REFERENCES %s.widgets (id)`)
+
+	_, err := schemachange.BuildShadow(t.Context(), f.pool, target,
+		f.alter(t, `ALTER TABLE %s.widgets ADD COLUMN note text`), schemachange.Options{})
+	var shapeErr *preflight.UnsupportedCopySwapShapeError
+	require.ErrorAs(t, err, &shapeErr)
+	assert.Equal(t, preflight.CopySwapCauseForeignKeys, shapeErr.Cause)
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")))
 }
 
 // A statement that does not name the proven table, or is not an ALTER

@@ -83,6 +83,20 @@ func TestCheckCopySwapShapeAcceptsReplicaIdentityFull(t *testing.T) {
 	assert.Equal(t, preflight.PKInteger, target.PKType())
 }
 
+// An UNLOGGED source cannot use a permanent LIKE shadow without changing its
+// durability at cutover, so the shape gate refuses it.
+func TestCheckCopySwapShapeRefusesUnloggedTable(t *testing.T) {
+	f := newCopySwapShapeFixture(t)
+	f.exec(t, `
+		CREATE UNLOGGED TABLE %s.events (
+			id bigint PRIMARY KEY,
+			payload jsonb
+		)`)
+
+	_, err := f.check(t, "events")
+	requireCopySwapCause(t, err, preflight.CopySwapCauseUnlogged)
+}
+
 // An unqualified target resolves through search_path and the proof still
 // carries the catalog schema, so the shadow's deterministic names never
 // depend on the session.

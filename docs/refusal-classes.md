@@ -115,6 +115,7 @@ classification is fixed here first so the route inherits it.
 | `copy-and-swap-foreign-keys` | A foreign key references the table or leaves it | `capability-boundary` | An OID-bound dependent the rename swap would strand on the old table; re-pointing it is a planned capability. |
 | `copy-and-swap-triggers` | The table has a user trigger or a rewrite rule | `capability-boundary` | As above. |
 | `copy-and-swap-partitioned` | The table is a partitioned parent, a partition, or part of an inheritance tree | `capability-boundary` | The per-partition copy-and-swap flow is a planned capability. |
+| `copy-and-swap-unlogged` | The table is UNLOGGED, while the shadow would be permanent | `capability-boundary` | Preserving persistence requires an explicit shadow-creation path. |
 
 ### `unsupported-statement` on the create path, keyed on `CreateShapeCause`
 

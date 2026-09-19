@@ -19,13 +19,13 @@ const maxIdentifierBytes = 63
 // retains, so an operator can list the engine's leftovers by prefix.
 const namePrefix = "_pgsprite_"
 
-// NameHash is the eight-hex-digit FNV-1a hash of "schema.table" that keys
+// NameHash is the sixteen-hex-digit FNV-1a hash of "schema.table" that keys
 // every derived copy-and-swap name. The same source table always derives the
 // same names, so a resumed run finds the shadow it built earlier.
 func NameHash(schema, table string) string {
-	h := fnv.New32a()
+	h := fnv.New64a()
 	_, _ = h.Write([]byte(schema + "." + table))
-	return fmt.Sprintf("%08x", h.Sum32())
+	return fmt.Sprintf("%016x", h.Sum64())
 }
 
 // ShadowName is the shadow table's name for a source table.

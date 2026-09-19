@@ -104,7 +104,7 @@ func (b BuiltShadow) CopyColumns() []string { return append([]string(nil), b.cop
 
 // BuildShadow creates the copy-and-swap shadow for the proven target and
 // applies the gated ALTER TABLE to it, all in one bounded transaction under
-// SET ROLE owner: CREATE TABLE … LIKE INCLUDING ALL EXCLUDING IDENTITY, the
+// SET LOCAL ROLE owner: CREATE TABLE … LIKE INCLUDING ALL EXCLUDING IDENTITY, the
 // identity-sequence defaults (D5), the metadata LIKE does not carry (D2), and
 // finally the statement retargeted onto the shadow — after re-proving that
 // the retargeted form differs from the gated one only in its target relation
@@ -136,6 +136,10 @@ func BuildShadow(ctx context.Context, pool *pgxpool.Pool, target preflight.CopyS
 	}()
 	if err := setBuildSession(ctx, tx, target, opts); err != nil {
 		return BuiltShadow{}, err
+	}
+	// INV: ST-6
+	if err := preflight.RecheckCopySwapShape(ctx, tx, target); err != nil {
+		return BuiltShadow{}, fmt.Errorf("re-check copy-and-swap shape: %w", err)
 	}
 
 	oid, err := resolveRelation(ctx, tx, target.Schema(), target.Table())
@@ -334,7 +338,7 @@ func checkDependentNameLengths(ctx context.Context, tx pgx.Tx, target preflight.
 }
 
 // createShadow runs the LIKE clone and verifies the new relation is owned by
-// the source's owner: the session is under SET ROLE owner, so any other
+// the source's owner: the session is under SET LOCAL ROLE owner, so any other
 // answer means the role the proof carried is not the owner the catalog
 // reports, and the builder fails closed before shaping the shadow further.
 func createShadow(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, shadow, owner string) error {

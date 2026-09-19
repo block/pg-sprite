@@ -30,6 +30,8 @@ type FidelitySnapshot struct {
 	// Grants are the table's privileges, expanded from its ACL (or from the
 	// owner's default ACL when none is stored).
 	Grants []Grant
+	// ColumnGrants are privileges granted on individual columns.
+	ColumnGrants []ColumnGrant
 	// Policies are the table's row-level-security policies.
 	Policies []Policy
 	// UnvalidatedChecks are the CHECK constraints the user left NOT VALID.
@@ -43,6 +45,18 @@ type Grant struct {
 	// Privilege is the privilege keyword as aclexplode reports it.
 	Privilege string
 	// Grantee is the role name, or PublicRole for the PUBLIC pseudo-role.
+	Grantee string
+	// Grantable reports WITH GRANT OPTION.
+	Grantable bool
+}
+
+// ColumnGrant is one expanded per-column ACL entry.
+type ColumnGrant struct {
+	// Column is the column carrying the ACL.
+	Column string
+	// Privilege is SELECT, INSERT, UPDATE, or REFERENCES.
+	Privilege string
+	// Grantee is the role name, or PublicRole for PUBLIC.
 	Grantee string
 	// Grantable reports WITH GRANT OPTION.
 	Grantable bool
@@ -132,6 +146,9 @@ func readFidelity(ctx context.Context, tx pgx.Tx, oid uint32) (FidelitySnapshot,
 	if s.Grants, err = readGrants(ctx, tx, oid); err != nil {
 		return FidelitySnapshot{}, err
 	}
+	if s.ColumnGrants, err = readColumnGrants(ctx, tx, oid); err != nil {
+		return FidelitySnapshot{}, err
+	}
 	if s.Policies, err = readPolicies(ctx, tx, oid); err != nil {
 		return FidelitySnapshot{}, err
 	}
@@ -164,6 +181,36 @@ func readGrants(ctx context.Context, tx pgx.Tx, oid uint32) ([]Grant, error) {
 	for _, g := range grants {
 		if !isTablePrivilege(g.Privilege) {
 			return nil, fmt.Errorf("table grant to %s carries unknown privilege %q", g.Grantee, g.Privilege)
+		}
+	}
+	return grants, nil
+}
+
+func readColumnGrants(ctx context.Context, tx pgx.Tx, oid uint32) ([]ColumnGrant, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT col.attname, acl.privilege_type,
+		       CASE WHEN acl.grantee = 0 THEN $2 ELSE pg_get_userbyid(acl.grantee) END,
+		       acl.is_grantable
+		FROM pg_attribute col
+		CROSS JOIN LATERAL aclexplode(col.attacl) acl
+		WHERE col.attrelid = $1 AND col.attnum > 0 AND NOT col.attisdropped
+		ORDER BY col.attnum, 3, 2`, oid, PublicRole)
+	if err != nil {
+		return nil, fmt.Errorf("read column grants: %w", err)
+	}
+	grants, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (ColumnGrant, error) {
+		var g ColumnGrant
+		err := row.Scan(&g.Column, &g.Privilege, &g.Grantee, &g.Grantable)
+		return g, err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("read column grants: %w", err)
+	}
+	for _, g := range grants {
+		switch g.Privilege {
+		case "SELECT", "INSERT", "UPDATE", "REFERENCES":
+		default:
+			return nil, fmt.Errorf("column grant on %s to %s carries unknown privilege %q", g.Column, g.Grantee, g.Privilege)
 		}
 	}
 	return grants, nil
@@ -220,7 +267,7 @@ func readUnvalidatedChecks(ctx context.Context, tx pgx.Tx, oid uint32) ([]Unvali
 
 // applyFidelity replicates the snapshot onto the freshly created, still
 // empty shadow. Ownership is not applied here: the shadow is created under
-// SET ROLE owner, so it is owner-correct from birth and the builder verifies
+// SET LOCAL ROLE owner, so it is owner-correct from birth and the builder verifies
 // that instead. Every role and relation name goes through Sanitize; the
 // comment goes through the server's format(%L) so no literal is spliced by
 // hand; expressions, options, and constraint definitions are the server's
@@ -257,6 +304,11 @@ func applyFidelity(ctx context.Context, tx pgx.Tx, schema, shadow string, s Fide
 	for _, g := range s.Grants {
 		if _, err := tx.Exec(ctx, grantSQL(table, g)); err != nil {
 			return fmt.Errorf("grant %s on shadow to %s: %w", g.Privilege, g.Grantee, err)
+		}
+	}
+	for _, g := range s.ColumnGrants {
+		if _, err := tx.Exec(ctx, columnGrantSQL(table, g)); err != nil {
+			return fmt.Errorf("grant %s on shadow column %s to %s: %w", g.Privilege, g.Column, g.Grantee, err)
 		}
 	}
 	for _, p := range s.Policies {
@@ -301,6 +353,14 @@ func applyReplicaIdentity(ctx context.Context, tx pgx.Tx, table, identity string
 
 func grantSQL(table string, g Grant) string {
 	sql := "GRANT " + g.Privilege + " ON TABLE " + table + " TO " + roleSQL(g.Grantee)
+	if g.Grantable {
+		sql += " WITH GRANT OPTION"
+	}
+	return sql
+}
+
+func columnGrantSQL(table string, g ColumnGrant) string {
+	sql := "GRANT " + g.Privilege + " (" + pgx.Identifier{g.Column}.Sanitize() + ") ON TABLE " + table + " TO " + roleSQL(g.Grantee)
 	if g.Grantable {
 		sql += " WITH GRANT OPTION"
 	}

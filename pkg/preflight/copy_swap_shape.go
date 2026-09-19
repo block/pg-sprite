@@ -33,6 +33,9 @@ const (
 	// CopySwapCausePartitioned means the table is a partitioned parent, a
 	// partition, or part of an inheritance tree.
 	CopySwapCausePartitioned CopySwapRefusalCause = "copy-and-swap-partitioned"
+	// CopySwapCauseUnlogged means the table is UNLOGGED, while the shadow
+	// created by LIKE would be permanent.
+	CopySwapCauseUnlogged CopySwapRefusalCause = "copy-and-swap-unlogged"
 )
 
 // CopySwapRefusalCauses returns the closed set of copy-and-swap shape refusal
@@ -45,6 +48,7 @@ func CopySwapRefusalCauses() []CopySwapRefusalCause {
 		CopySwapCauseForeignKeys,
 		CopySwapCauseTriggers,
 		CopySwapCausePartitioned,
+		CopySwapCauseUnlogged,
 	}
 }
 
@@ -73,7 +77,9 @@ var ErrCopySwapProofMismatch = errors.New("privilege proof was not verified at t
 // checks cannot disagree about when they looked.
 type copySwapShapeFacts struct {
 	schema          string
+	oid             uint32
 	relkind         string
+	relpersistence  string
 	isPartition     bool
 	hasSubclass     bool
 	inheritsParents int64
@@ -106,19 +112,40 @@ func CheckCopySwapShape(ctx context.Context, pool *pgxpool.Pool, schema, table s
 	if cause, detail := refuseCopySwapShape(facts); cause != "" {
 		return CopySwapTarget{}, &UnsupportedCopySwapShapeError{Cause: cause, Detail: detail}
 	}
+	// INV: ST-6, RF-1, RF-2, RF-3
 	return CopySwapTarget{
 		schema:    facts.schema,
 		table:     table,
 		pkColumn:  facts.pkColumn,
 		pkType:    PKType(facts.pkType),
 		ownerRole: role.Owner(),
+		oid:       facts.oid,
 	}, nil
+}
+
+// RecheckCopySwapShape verifies inside the build transaction that the proven
+// relation still has the admitted shape and identity.
+func RecheckCopySwapShape(ctx context.Context, tx pgx.Tx, target CopySwapTarget) error {
+	facts, err := gatherCopySwapShapeFacts(ctx, tx, target.schema, target.table)
+	if err != nil {
+		return err
+	}
+	if facts.oid != target.oid {
+		return fmt.Errorf("%w: relation OID changed from %d to %d", ErrCopySwapProofMismatch, target.oid, facts.oid)
+	}
+	if cause, detail := refuseCopySwapShape(facts); cause != "" {
+		return &UnsupportedCopySwapShapeError{Cause: cause, Detail: detail}
+	}
+	return nil
 }
 
 // refuseCopySwapShape decides the first cause that puts the facts outside
 // v1 scope, in the order the design lists them, or the zero cause when the
 // shape is supported.
 func refuseCopySwapShape(f copySwapShapeFacts) (CopySwapRefusalCause, string) {
+	if f.relpersistence == "u" {
+		return CopySwapCauseUnlogged, "the table is UNLOGGED; the copy-and-swap shadow must be permanent"
+	}
 	switch {
 	case f.relkind == "p":
 		return CopySwapCausePartitioned, "the table is a partitioned parent"
@@ -158,10 +185,11 @@ func refuseCopySwapShape(f copySwapShapeFacts) (CopySwapRefusalCause, string) {
 // without one reports zero key columns. Internal triggers (the ones a
 // foreign key installs) are excluded from the trigger count because the
 // foreign-key cause already accounts for them.
-func gatherCopySwapShapeFacts(ctx context.Context, pool *pgxpool.Pool, schema, table string) (copySwapShapeFacts, error) {
+func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table string) (copySwapShapeFacts, error) {
 	const q = `
-		SELECT n.nspname::text,
+		SELECT n.nspname::text, c.oid,
 		       c.relkind::text,
+		       c.relpersistence::text,
 		       c.relispartition,
 		       c.relhassubclass,
 		       (SELECT count(*) FROM pg_inherits i WHERE i.inhrelid = c.oid),
@@ -181,15 +209,15 @@ func gatherCopySwapShapeFacts(ctx context.Context, pool *pgxpool.Pool, schema, t
 			CASE WHEN $1 = '' THEN quote_ident($2)
 			     ELSE quote_ident($1) || '.' || quote_ident($2) END)`
 	var f copySwapShapeFacts
-	err := pool.QueryRow(ctx, q, schema, table).Scan(
-		&f.schema, &f.relkind, &f.isPartition, &f.hasSubclass, &f.inheritsParents, &f.replicaIdentity,
+	err := db.QueryRow(ctx, q, schema, table).Scan(
+		&f.schema, &f.oid, &f.relkind, &f.relpersistence, &f.isPartition, &f.hasSubclass, &f.inheritsParents, &f.replicaIdentity,
 		&f.pkColumns, &f.pkColumn, &f.pkType, &f.foreignKeysOut, &f.foreignKeysIn, &f.triggers, &f.rules)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return copySwapShapeFacts{}, unresolvedTargetCause(ctx, pool, schema, table)
+		return copySwapShapeFacts{}, unresolvedTargetCause(ctx, db, schema, table)
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == sqlstateInsufficientPrivilege {
-		return copySwapShapeFacts{}, unresolvedTargetCause(ctx, pool, schema, table)
+		return copySwapShapeFacts{}, unresolvedTargetCause(ctx, db, schema, table)
 	}
 	if err != nil {
 		return copySwapShapeFacts{}, fmt.Errorf("gather copy-and-swap shape facts for %s: %w", qualifiedName(schema, table), err)
