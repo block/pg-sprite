@@ -82,3 +82,43 @@ func TestTableLockKeepaliveLoss(t *testing.T) {
 	require.NoError(t, replacement.Release(t.Context()))
 	assert.False(t, errors.Is(session.Err(), context.Canceled))
 }
+
+func TestTableLockAcquireContextDoesNotOwnSession(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	acquireCtx, cancelAcquire := context.WithCancel(t.Context())
+	session, err := dbconn.AcquireTableLock(acquireCtx, dbconn.Config{URL: url}, "app", "long_change")
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, session.Release(context.WithoutCancel(t.Context())))
+	})
+	cancelAcquire()
+
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	var held bool
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT EXISTS (
+		SELECT 1 FROM pg_catalog.pg_locks
+		 WHERE locktype = 'advisory' AND granted AND pid = $1
+	)`, session.BackendPID()).Scan(&held))
+	assert.True(t, held)
+	select {
+	case <-session.Done():
+		t.Fatal("table lock session ended when its acquisition context was cancelled")
+	default:
+	}
+}
+
+func TestTableLockDoneClosesOnRelease(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	session, err := dbconn.AcquireTableLock(t.Context(), dbconn.Config{URL: url}, "app", "released_orders")
+	require.NoError(t, err)
+	require.NoError(t, session.Release(t.Context()))
+
+	select {
+	case <-session.Done():
+		assert.NoError(t, session.Err())
+	default:
+		t.Fatal("table lock Done remained open after Release")
+	}
+}

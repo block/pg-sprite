@@ -210,8 +210,9 @@ of Spirit's `GET_LOCK` `MetadataLock`), with Spirit's hard-won connection rules 
   hash precedes the attempt.
 - A held lock is **never waited for**: a second instance gets a typed contention result and
   refuses.
-- A **keepalive** pings the session on an interval strictly shorter than any server/idle timeout
-  that could kill it; a failed ping is treated as lock loss.
+- A **keepalive** confirms the session still holds the lock on an interval strictly shorter than
+  any server/idle timeout that could kill it; if the lock cannot be confirmed held, it is treated
+  as lock loss.
 - **Losing the lock is fail-closed:** a lost session closes the lock's `Done` channel with the
   reason, and the schema change aborts rather than continuing unprotected. The session is never
   re-established behind the caller's back, because a re-acquired lock would hide the window in

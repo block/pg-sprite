@@ -58,8 +58,8 @@ type Config struct {
 	//
 	// NOTE: the advisory-lock connection (LK-1) must NOT come from this pool:
 	// session-scoped locks die with their session, and lifetime/idle
-	// recycling would silently release the lock. The lock helper owns a
-	// dedicated single-connection pool exempt from recycling.
+	// recycling would silently release the lock. The lock helper owns a bare
+	// dedicated connection exempt from pool recycling.
 	MaxConns              int32
 	MinConns              int32
 	MaxConnLifetime       time.Duration

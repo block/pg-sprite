@@ -42,33 +42,11 @@ func (l TableLock) Table() string { return l.table }
 // Key returns the advisory lock key.
 func (l TableLock) Key() int64 { return l.key }
 
-// TableLockTicker is the ticker capability used by the lock keepalive.
-type TableLockTicker interface {
-	C() <-chan time.Time
-	Stop()
-}
-
-// TableLockClock supplies keepalive tickers so lock monitoring is deterministic in tests.
-type TableLockClock interface {
-	NewTicker(time.Duration) TableLockTicker
-}
-
-type wallTableLockClock struct{}
-
-func (wallTableLockClock) NewTicker(interval time.Duration) TableLockTicker {
-	return wallTableLockTicker{Ticker: time.NewTicker(interval)}
-}
-
-type wallTableLockTicker struct{ *time.Ticker }
-
-func (t wallTableLockTicker) C() <-chan time.Time { return t.Ticker.C }
-
 // TableLockOption configures lock-session monitoring.
 type TableLockOption func(*tableLockOptions) error
 
 type tableLockOptions struct {
 	keepalive time.Duration
-	clock     TableLockClock
 }
 
 // WithTableLockKeepalive sets the interval between session liveness checks.
@@ -78,17 +56,6 @@ func WithTableLockKeepalive(interval time.Duration) TableLockOption {
 			return fmt.Errorf("%w: LK-1: keepalive interval must be positive", ErrInvariantViolation)
 		}
 		opts.keepalive = interval
-		return nil
-	}
-}
-
-// WithTableLockClock sets the clock used for session liveness checks.
-func WithTableLockClock(clock TableLockClock) TableLockOption {
-	return func(opts *tableLockOptions) error {
-		if clock == nil {
-			return fmt.Errorf("%w: LK-1: table lock clock is required", ErrInvariantViolation)
-		}
-		opts.clock = clock
 		return nil
 	}
 }
@@ -112,12 +79,15 @@ type TableLockSession struct {
 }
 
 // AcquireTableLock opens a dedicated, non-recycling connection and tries to
-// acquire the per-table advisory lock. It never retries a held lock.
+// acquire the per-table advisory lock. It never retries a held lock. ctx bounds
+// acquisition only; Release or detected lock loss ends the acquired session.
+// schema and table must be catalog names as stored, including case, rather than
+// unquoted SQL identifiers that PostgreSQL has not yet folded.
 func AcquireTableLock(ctx context.Context, cfg Config, schema, table string, options ...TableLockOption) (*TableLockSession, error) {
 	if schema == "" || table == "" {
 		return nil, fmt.Errorf("%w: LK-1: table lock requires non-empty schema and table", ErrInvariantViolation)
 	}
-	opts := tableLockOptions{keepalive: defaultTableLockKeepalive, clock: wallTableLockClock{}}
+	opts := tableLockOptions{keepalive: defaultTableLockKeepalive}
 	for _, option := range options {
 		if option == nil {
 			return nil, fmt.Errorf("%w: LK-1: nil table lock option", ErrInvariantViolation)
@@ -143,9 +113,8 @@ func AcquireTableLock(ctx context.Context, cfg Config, schema, table string, opt
 	if err != nil {
 		return nil, fmt.Errorf("connect dedicated table lock session: %w", err)
 	}
-	// The dedicated session is prepared exactly like a pooled one — session
-	// bounds and catalog-first search_path — so it is bounded even behind a
-	// pooler that strips startup parameters.
+	// The dedicated session is prepared exactly like a pooled one — with
+	// session bounds and a catalog-first search_path.
 	if err := pc.AfterConnect(ctx, conn); err != nil {
 		return nil, errors.Join(fmt.Errorf("prepare dedicated table lock session: %w", err), conn.Close(ctx))
 	}
@@ -164,37 +133,49 @@ func AcquireTableLock(ctx context.Context, cfg Config, schema, table string, opt
 	if !held {
 		return nil, errors.Join(&TableLockHeldError{Schema: schema, Table: table}, conn.Close(ctx))
 	}
+	// INV: LK-1 — acquisition is not a grant until this same connection can
+	// observe the session-scoped lock it reported taking.
+	confirmed, err := sessionHoldsAdvisoryLock(ctx, conn, key)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("confirm acquired table lock for %s: %w", qualified, err), conn.Close(ctx))
+	}
+	if !confirmed {
+		return nil, errors.Join(fmt.Errorf("%w: LK-1: acquired table lock for %s is not held by its session", ErrInvariantViolation, qualified), conn.Close(ctx))
+	}
 
 	s := &TableLockSession{
 		lock: TableLock{schema: schema, table: table, key: key}, pid: pid, conn: conn,
 		stop: make(chan struct{}), done: make(chan struct{}),
 	}
-	s.wg.Go(func() { s.monitor(ctx, opts) })
+	s.wg.Go(func() { s.monitor(context.WithoutCancel(ctx), opts) })
 	return s, nil
 }
 
 func tableLockQualifiedName(schema, table string) string { return schema + "." + table }
 
 func (s *TableLockSession) monitor(ctx context.Context, opts tableLockOptions) {
-	ticker := opts.clock.NewTicker(opts.keepalive)
+	ticker := time.NewTicker(opts.keepalive)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-s.stop:
 			return
-		case <-ctx.Done():
-			// INV: LK-1 — losing ownership cancellation is terminal and closes
-			// the session rather than allowing work to continue unprotected.
-			s.markLost(ctx.Err())
-			s.closeAfterLoss(ctx)
-			return
-		case <-ticker.C():
+		case <-ticker.C:
+			checkBound := max(opts.keepalive, DefaultConnectTimeout)
+			checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), checkBound)
 			s.opMu.Lock()
-			err := s.conn.Ping(ctx)
+			held, err := sessionHoldsAdvisoryLock(checkCtx, s.conn, s.lock.key)
 			s.opMu.Unlock()
+			cancel()
 			if err != nil {
 				// INV: LK-1 — an unconfirmable dedicated session is lock loss.
 				s.markLost(fmt.Errorf("table lock keepalive: %w", err))
+				s.closeAfterLoss(ctx)
+				return
+			}
+			if !held {
+				// INV: LK-1 — a responsive session without its lock is lock loss.
+				s.markLost(fmt.Errorf("%w: LK-1: table lock is no longer held by its session", ErrInvariantViolation))
 				s.closeAfterLoss(ctx)
 				return
 			}
@@ -231,10 +212,10 @@ func (s *TableLockSession) Lock() TableLock { return s.lock }
 // BackendPID returns the dedicated session's backend PID.
 func (s *TableLockSession) BackendPID() uint32 { return s.pid }
 
-// Done closes if the dedicated session loses the lock unexpectedly.
+// Done closes when the session is released or loses the lock unexpectedly.
 func (s *TableLockSession) Done() <-chan struct{} { return s.done }
 
-// Err returns the reason the lock was lost, or nil while held or after release.
+// Err returns nil while held or after a clean release, and the reason after loss.
 func (s *TableLockSession) Err() error {
 	s.stateMu.Lock()
 	defer s.stateMu.Unlock()
@@ -254,6 +235,9 @@ func (s *TableLockSession) Release(ctx context.Context) error {
 	}
 	s.released = true
 	close(s.stop)
+	if s.lostErr == nil {
+		close(s.done)
+	}
 	s.stateMu.Unlock()
 	s.wg.Wait()
 
