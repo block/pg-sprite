@@ -29,16 +29,38 @@ var (
 	// builder performed on its own work that failed. The builder never
 	// executes anything after raising it.
 	ErrInvariantViolation = errors.New("invariant violation")
+	// ErrInvalidOptions reports a timeout that cannot encode a positive
+	// PostgreSQL setting: PostgreSQL counts timeouts in whole milliseconds,
+	// and a nonzero value below one millisecond would round to zero, which
+	// the server reads as no timeout at all.
+	ErrInvalidOptions = errors.New("invalid shadow build options")
 )
 
 // Options bounds the shadow build transaction. Zero values take the dbconn
 // session defaults, so a caller that passes Options{} still gets bounded
-// waits (LK-2).
+// waits (LK-2); any other value must be at least one millisecond.
 type Options struct {
 	// LockTimeout bounds every lock wait inside the build transaction.
 	LockTimeout time.Duration
 	// StatementTimeout bounds every statement inside the build transaction.
 	StatementTimeout time.Duration
+}
+
+// validate refuses a timeout the server would read as disabled.
+func (o Options) validate() error {
+	for _, timeout := range []struct {
+		name  string
+		value time.Duration
+	}{{"lock timeout", o.LockTimeout}, {"statement timeout", o.StatementTimeout}} {
+		if timeout.value == 0 {
+			continue
+		}
+		if timeout.value < time.Millisecond {
+			// INV: LK-2
+			return fmt.Errorf("%w: %s %s is below PostgreSQL's one-millisecond resolution; use zero for the default", ErrInvalidOptions, timeout.name, timeout.value)
+		}
+	}
+	return nil
 }
 
 func (o Options) lockTimeout() time.Duration {
@@ -61,6 +83,7 @@ func (o Options) statementTimeout() time.Duration {
 // builder returned.
 type BuiltShadow struct {
 	schema, source, shadow string
+	sourceOID, shadowOID   uint32
 	sourceFingerprint      string
 	targetFingerprint      string
 	identities             []IdentityColumn
@@ -76,6 +99,13 @@ func (b BuiltShadow) SourceTable() string { return b.source }
 
 // ShadowTable is the shadow table name.
 func (b BuiltShadow) ShadowTable() string { return b.shadow }
+
+// SourceOID is the source relation's OID as resolved inside the build
+// transaction; a later stage compares it rather than re-resolving the name.
+func (b BuiltShadow) SourceOID() uint32 { return b.sourceOID }
+
+// ShadowOID is the shadow relation's OID as created by this build.
+func (b BuiltShadow) ShadowOID() uint32 { return b.shadowOID }
 
 // SourceFingerprint is the digest of the source's introspected model at
 // build time; a resume compares it to refuse a source that changed shape.
@@ -112,13 +142,13 @@ func (b BuiltShadow) CopyColumns() []string { return append([]string(nil), b.cop
 // inside the same transaction, so a failure at any step leaves no shadow
 // behind. An existing relation under the shadow's name is ErrShadowExists.
 func BuildShadow(ctx context.Context, pool *pgxpool.Pool, target preflight.CopySwapTarget, st statement.Statement, opts Options) (BuiltShadow, error) {
+	if err := opts.validate(); err != nil {
+		return BuiltShadow{}, err
+	}
 	if err := checkProof(target); err != nil {
 		return BuiltShadow{}, err
 	}
 	shadow := ShadowName(target.Schema(), target.Table())
-	if err := CheckIdentifierLengths(shadow, OldName(target.Schema(), target.Table())); err != nil {
-		return BuiltShadow{}, err
-	}
 	retargeted, err := retargetOntoShadow(st, target, shadow)
 	if err != nil {
 		return BuiltShadow{}, err
@@ -149,12 +179,15 @@ func BuildShadow(ctx context.Context, pool *pgxpool.Pool, target preflight.CopyS
 	if err := refuseExistingShadow(ctx, tx, target.Schema(), shadow); err != nil {
 		return BuiltShadow{}, err
 	}
-	if err := checkDependentNameLengths(ctx, tx, target, oid); err != nil {
-		return BuiltShadow{}, err
-	}
 	sourceModel, err := schemadiff.IntrospectTx(ctx, tx, target.Schema(), target.Table())
 	if err != nil {
 		return BuiltShadow{}, fmt.Errorf("introspect source %s.%s: %w", target.Schema(), target.Table(), err)
+	}
+	// The introspection sets its own transaction-local search_path; the
+	// build session's is re-asserted so the gated statement resolves
+	// against what this builder chose, not what a callee happened to.
+	if err := setSearchPath(ctx, tx, target.Schema()); err != nil {
+		return BuiltShadow{}, err
 	}
 	fidelity, err := readFidelity(ctx, tx, oid)
 	if err != nil {
@@ -165,13 +198,14 @@ func BuildShadow(ctx context.Context, pool *pgxpool.Pool, target preflight.CopyS
 		return BuiltShadow{}, err
 	}
 
-	if err := createShadow(ctx, tx, target, shadow, fidelity.Owner); err != nil {
+	shadowOID, err := createShadow(ctx, tx, target, shadow, fidelity.Owner)
+	if err != nil {
 		return BuiltShadow{}, err
 	}
 	if err := applyIdentityDefaults(ctx, tx, target.Schema(), shadow, identities); err != nil {
 		return BuiltShadow{}, err
 	}
-	if err := applyFidelity(ctx, tx, target.Schema(), shadow, fidelity); err != nil {
+	if err := applyFidelity(ctx, tx, target.Schema(), shadow, shadowOID, fidelity); err != nil {
 		return BuiltShadow{}, err
 	}
 	if _, err := tx.Exec(ctx, retargeted); err != nil {
@@ -197,6 +231,8 @@ func BuildShadow(ctx context.Context, pool *pgxpool.Pool, target preflight.CopyS
 		schema:            target.Schema(),
 		source:            target.Table(),
 		shadow:            shadow,
+		sourceOID:         oid,
+		shadowOID:         shadowOID,
 		sourceFingerprint: sourceFingerprint,
 		targetFingerprint: targetFingerprint,
 		identities:        identities,
@@ -217,10 +253,8 @@ func checkProof(target preflight.CopySwapTarget) error {
 
 // retargetOntoShadow produces the SQL the builder executes: the gated
 // statement with its one relation moved to the shadow. It first checks the
-// gated statement is an ALTER TABLE naming the proven table, then re-parses
-// the retargeted text and requires it to match the gated statement in every
-// operation and to name the shadow — the ST-7 check with the shadow as the
-// sole permitted target.
+// gated statement is an ALTER TABLE naming the proven table, then hands the
+// retargeted text to proveRetarget.
 func retargetOntoShadow(st statement.Statement, target preflight.CopySwapTarget, shadow string) (string, error) {
 	// INV: ST-7
 	if st.Kind() != statement.KindAlterTable {
@@ -233,17 +267,30 @@ func retargetOntoShadow(st statement.Statement, target preflight.CopySwapTarget,
 	if err != nil {
 		return "", fmt.Errorf("retarget statement onto shadow: %w", err)
 	}
-	if err := statement.SameOpsExceptTarget(st.SQL(), retargeted); err != nil {
-		return "", fmt.Errorf("%w: ST-7: %w", ErrInvariantViolation, err)
+	if err := proveRetarget(st, target.Schema(), shadow, retargeted); err != nil {
+		return "", err
+	}
+	return retargeted, nil
+}
+
+// proveRetarget is the ST-7 check with the shadow as the sole permitted
+// target: the retargeted text must re-parse, match the gated statement in
+// every operation, and name schema.shadow. It takes the retargeted text as
+// a value so the gate is provable without trusting the retarget that
+// produced it.
+func proveRetarget(gated statement.Statement, schema, shadow, retargeted string) error {
+	// INV: ST-7
+	if err := statement.SameOpsExceptTarget(gated.SQL(), retargeted); err != nil {
+		return fmt.Errorf("%w: ST-7: %w", ErrInvariantViolation, err)
 	}
 	reparsed, err := statement.ParseOne(retargeted)
 	if err != nil {
-		return "", fmt.Errorf("%w: ST-7: retargeted statement does not re-parse: %w", ErrInvariantViolation, err)
+		return fmt.Errorf("%w: ST-7: retargeted statement does not re-parse: %w", ErrInvariantViolation, err)
 	}
-	if reparsed.Schema() != target.Schema() || reparsed.Table() != shadow {
-		return "", fmt.Errorf("%w: ST-7: retargeted statement names %s.%s, not the shadow %s.%s", ErrInvariantViolation, reparsed.Schema(), reparsed.Table(), target.Schema(), shadow)
+	if reparsed.Schema() != schema || reparsed.Table() != shadow {
+		return fmt.Errorf("%w: ST-7: retargeted statement names %s.%s, not the shadow %s.%s", ErrInvariantViolation, reparsed.Schema(), reparsed.Table(), schema, shadow)
 	}
-	return retargeted, nil
+	return nil
 }
 
 // namesTarget reports whether the statement's relation is the proven table:
@@ -262,13 +309,26 @@ func namesTarget(st statement.Statement, schema, table string) bool {
 func setBuildSession(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, opts Options) error {
 	// INV: LK-2
 	budgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(opts.lockTimeout().Milliseconds(), 10) +
-		"; SET LOCAL statement_timeout = " + strconv.FormatInt(opts.statementTimeout().Milliseconds(), 10) +
-		"; " + dbconn.LocalSearchPath(target.Schema(), "public")
+		"; SET LOCAL statement_timeout = " + strconv.FormatInt(opts.statementTimeout().Milliseconds(), 10)
 	if _, err := tx.Exec(ctx, budgets); err != nil {
 		return fmt.Errorf("set shadow build budgets: %w", err)
 	}
+	if err := setSearchPath(ctx, tx, target.Schema()); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{target.OwnerRole()}.Sanitize()); err != nil {
 		return fmt.Errorf("set owner role %s: %w", target.OwnerRole(), err)
+	}
+	return nil
+}
+
+// setSearchPath puts the target schema first on the transaction-local
+// search_path, catalog-first (CO-9), so the gated statement's unqualified
+// names resolve to the proven table's schema.
+func setSearchPath(ctx context.Context, tx pgx.Tx, schema string) error {
+	// INV: CO-9
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(schema, "public")); err != nil {
+		return fmt.Errorf("set shadow build search_path: %w", err)
 	}
 	return nil
 }
@@ -307,60 +367,32 @@ func refuseExistingShadow(ctx context.Context, tx pgx.Tx, schema, shadow string)
 	return nil
 }
 
-// checkDependentNameLengths refuses before the first write if any dependent
-// of the source — index, extended-statistics object, or identity sequence —
-// would need a retained name longer than the server allows at cutover (D8).
-// The shadow's own LIKE-derived names need no check: the server shortens
-// them as it invents them, and cutover renames them back to the source's.
-func checkDependentNameLengths(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, oid uint32) error {
-	rows, err := tx.Query(ctx, `
-		SELECT i.relname FROM pg_index x JOIN pg_class i ON i.oid = x.indexrelid WHERE x.indrelid = $1
-		UNION ALL
-		SELECT stxname FROM pg_statistic_ext WHERE stxrelid = $1
-		UNION ALL
-		SELECT s.relname
-		FROM pg_depend d
-		JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S'
-		WHERE d.refclassid = 'pg_class'::regclass AND d.refobjid = $1
-		  AND d.classid = 'pg_class'::regclass AND d.deptype = 'i'`, oid)
-	if err != nil {
-		return fmt.Errorf("list dependents of %s.%s: %w", target.Schema(), target.Table(), err)
-	}
-	dependents, err := pgx.CollectRows(rows, pgx.RowTo[string])
-	if err != nil {
-		return fmt.Errorf("list dependents of %s.%s: %w", target.Schema(), target.Table(), err)
-	}
-	retained := make([]string, len(dependents))
-	for i, dependent := range dependents {
-		retained[i] = OldDependentName(target.Schema(), target.Table(), dependent)
-	}
-	return CheckIdentifierLengths(retained...)
-}
-
 // createShadow runs the LIKE clone and verifies the new relation is owned by
 // the source's owner: the session is under SET LOCAL ROLE owner, so any other
 // answer means the role the proof carried is not the owner the catalog
 // reports, and the builder fails closed before shaping the shadow further.
-func createShadow(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, shadow, owner string) error {
+// It returns the shadow's OID.
+func createShadow(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, shadow, owner string) (uint32, error) {
 	source := pgx.Identifier{target.Schema(), target.Table()}.Sanitize()
 	table := pgx.Identifier{target.Schema(), shadow}.Sanitize()
 	if _, err := tx.Exec(ctx, "CREATE TABLE "+table+" (LIKE "+source+" INCLUDING ALL EXCLUDING IDENTITY)"); err != nil {
-		return fmt.Errorf("create shadow %s: %w", table, err)
+		return 0, fmt.Errorf("create shadow %s: %w", table, err)
 	}
+	var oid uint32
 	var shadowOwner string
 	err := tx.QueryRow(ctx, `
-		SELECT pg_get_userbyid(c.relowner)
+		SELECT c.oid, pg_get_userbyid(c.relowner)
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2`, target.Schema(), shadow).Scan(&shadowOwner)
+		WHERE n.nspname = $1 AND c.relname = $2`, target.Schema(), shadow).Scan(&oid, &shadowOwner)
 	if err != nil {
-		return fmt.Errorf("read owner of shadow %s: %w", table, err)
+		return 0, fmt.Errorf("read owner of shadow %s: %w", table, err)
 	}
 	if shadowOwner != owner {
 		// INV: ST-5
-		return fmt.Errorf("%w: ST-5: shadow %s is owned by %s, source by %s", ErrInvariantViolation, table, shadowOwner, owner)
+		return 0, fmt.Errorf("%w: ST-5: shadow %s is owned by %s, source by %s", ErrInvariantViolation, table, shadowOwner, owner)
 	}
-	return nil
+	return oid, nil
 }
 
 // fingerprint digests a model as canonical JSON. Every name in the shadow's

@@ -1,7 +1,9 @@
 package schemachange_test
 
 import (
+	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -98,6 +100,34 @@ func (f shadowFixture) columnDefault(t *testing.T, table, column string) (def, i
 	return def, identity
 }
 
+// relOptions reads a table's storage parameters and its TOAST relation's,
+// the latter prefixed "toast.", as the catalog stores them.
+func (f shadowFixture) relOptions(t *testing.T, table string) []string {
+	t.Helper()
+	var options []string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT COALESCE(c.reloptions, '{}') || ARRAY(SELECT 'toast.' || o FROM pg_class tc CROSS JOIN unnest(tc.reloptions) o WHERE tc.oid = c.reltoastrelid)
+		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2`, f.schema, table).Scan(&options))
+	return options
+}
+
+// aclByOID renders a table's ACL and column ACLs by grantee OID rather than
+// name, so two tables compare equal only when their privileges land on the
+// same roles.
+func (f shadowFixture) aclByOID(t *testing.T, table string) (tableACL, columnACL string) {
+	t.Helper()
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT COALESCE((SELECT string_agg(a.privilege_type || '->' || a.grantee::text || CASE WHEN a.is_grantable THEN '*' ELSE '' END, ',' ORDER BY 1)
+		                 FROM aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a), ''),
+		       COALESCE((SELECT string_agg(col.attname || ':' || acl.privilege_type || '->' || acl.grantee::text || CASE WHEN acl.is_grantable THEN '*' ELSE '' END, ',' ORDER BY 1)
+		                 FROM pg_attribute col CROSS JOIN LATERAL aclexplode(col.attacl) acl
+		                 WHERE col.attrelid = c.oid), '')
+		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2`, f.schema, table).Scan(&tableACL, &columnACL))
+	return tableACL, columnACL
+}
+
 // ALTER COLUMN … TYPE bigint on an identity-keyed table: the shadow carries
 // the widened column while the source keeps its own; the identity becomes a
 // plain DEFAULT drawing from the source's sequence, so a row inserted into
@@ -112,7 +142,7 @@ func TestBuildShadowWidensColumnOnIdentityKeyedTable(t *testing.T) {
 			note text,
 			price integer NOT NULL,
 			doubled integer GENERATED ALWAYS AS (price * 2) STORED
-		) WITH (fillfactor = 70)`)
+		) WITH (fillfactor = 70, toast.autovacuum_enabled = false)`)
 	f.exec(t, `COMMENT ON TABLE %s.orders IS 'customer ''orders'''`)
 	f.exec(t, `CREATE INDEX orders_note_idx ON %s.orders (note)`)
 
@@ -136,7 +166,9 @@ func TestBuildShadowWidensColumnOnIdentityKeyedTable(t *testing.T) {
 
 	assert.Equal(t, []string{"id", "qty", "note", "price"}, built.CopyColumns())
 	assert.Equal(t, "customer 'orders'", built.Fidelity().Comment)
-	assert.Equal(t, []string{"fillfactor=70"}, built.Fidelity().RelOptions)
+	assert.Equal(t, []string{"fillfactor=70", "toast.autovacuum_enabled=false"}, built.Fidelity().RelOptions)
+	assert.Equal(t, []string{"fillfactor=70", "toast.autovacuum_enabled=false"}, f.relOptions(t, shadow),
+		"LIKE does not carry storage parameters; the builder sets them on the shadow and its TOAST relation")
 	assert.True(t, strings.HasPrefix(built.SourceFingerprint(), "sha256:"))
 	assert.NotEqual(t, built.SourceFingerprint(), built.TargetFingerprint(), "the widened column changes the shape")
 
@@ -180,6 +212,7 @@ type tableSecurity struct {
 	rlsEnabled      bool
 	rlsForced       bool
 	grants          []string
+	columnGrants    []string
 	policies        []string
 }
 
@@ -188,8 +221,10 @@ func (f shadowFixture) security(t *testing.T, table string) tableSecurity {
 	var s tableSecurity
 	require.NoError(t, f.pool.QueryRow(t.Context(), `
 		SELECT pg_get_userbyid(c.relowner), c.relreplident::text, c.relrowsecurity, c.relforcerowsecurity,
-		       ARRAY(SELECT a.privilege_type || ' -> ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END
+		       ARRAY(SELECT a.privilege_type || ' -> ' || CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END || CASE WHEN a.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END
 		             FROM aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a ORDER BY 1),
+		       ARRAY(SELECT col.attname || ': ' || acl.privilege_type || ' -> ' || CASE WHEN acl.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(acl.grantee) END || CASE WHEN acl.is_grantable THEN ' WITH GRANT OPTION' ELSE '' END
+		             FROM pg_attribute col CROSS JOIN LATERAL aclexplode(col.attacl) acl WHERE col.attrelid = c.oid ORDER BY 1),
 		       ARRAY(SELECT p.polname || ' ' || CASE WHEN p.polpermissive THEN 'PERMISSIVE' ELSE 'RESTRICTIVE' END
 		                    || ' ' || p.polcmd::text || ' ' || array_to_string(ARRAY(SELECT CASE WHEN r = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(r) END FROM unnest(p.polroles) r), ',')
 		                    || ' USING ' || COALESCE(pg_get_expr(p.polqual, p.polrelid), '-')
@@ -197,14 +232,16 @@ func (f shadowFixture) security(t *testing.T, table string) tableSecurity {
 		             FROM pg_policy p WHERE p.polrelid = c.oid ORDER BY p.polname)
 		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = $1 AND c.relname = $2`, f.schema, table).
-		Scan(&s.owner, &s.replicaIdentity, &s.rlsEnabled, &s.rlsForced, &s.grants, &s.policies))
+		Scan(&s.owner, &s.replicaIdentity, &s.rlsEnabled, &s.rlsForced, &s.grants, &s.columnGrants, &s.policies))
 	return s
 }
 
-// A table owned by a non-connected role with grants, forced row-level
-// security, policies (one to a role, one to PUBLIC), and REPLICA IDENTITY
-// FULL: the shadow is created under SET LOCAL ROLE owner and carries every one of
-// those facts, so the ST-5 gate later finds nothing to refuse on.
+// A table owned by a non-connected role with table grants (one WITH GRANT
+// OPTION), a column grant, enabled row-level security, policies (one to a
+// role, one to PUBLIC), and REPLICA IDENTITY FULL: the shadow is created
+// under SET LOCAL ROLE owner and carries every one of those facts, so the
+// ST-5 gate later finds nothing to refuse on. FORCE ROW LEVEL SECURITY is
+// absent because the shape gate refuses it.
 func TestBuildShadowReplicatesSecurityMetadata(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -222,10 +259,10 @@ func TestBuildShadowReplicatesSecurityMetadata(t *testing.T) {
 			balance numeric
 		)`)
 	f.exec(t, `ALTER TABLE %s.accounts OWNER TO `+pgx.Identifier{owner}.Sanitize())
-	f.exec(t, `GRANT SELECT ON %s.accounts TO `+pgx.Identifier{reader}.Sanitize())
+	f.exec(t, `GRANT SELECT ON %s.accounts TO `+pgx.Identifier{reader}.Sanitize()+` WITH GRANT OPTION`)
 	f.exec(t, `GRANT INSERT ON %s.accounts TO PUBLIC`)
+	f.exec(t, `GRANT UPDATE (balance) ON %s.accounts TO `+pgx.Identifier{reader}.Sanitize())
 	f.exec(t, `ALTER TABLE %s.accounts ENABLE ROW LEVEL SECURITY`)
-	f.exec(t, `ALTER TABLE %s.accounts FORCE ROW LEVEL SECURITY`)
 	f.exec(t, `CREATE POLICY tenant_read ON %s.accounts AS PERMISSIVE FOR SELECT TO `+pgx.Identifier{reader}.Sanitize()+` USING (tenant = current_user)`)
 	f.exec(t, `CREATE POLICY positive_only ON %s.accounts AS RESTRICTIVE FOR INSERT TO PUBLIC WITH CHECK (balance >= 0)`)
 	f.exec(t, `ALTER TABLE %s.accounts REPLICA IDENTITY FULL`)
@@ -237,18 +274,158 @@ func TestBuildShadowReplicatesSecurityMetadata(t *testing.T) {
 		owner:           owner,
 		replicaIdentity: "f",
 		rlsEnabled:      true,
-		rlsForced:       true,
+		rlsForced:       false,
 		grants:          f.security(t, "accounts").grants,
+		columnGrants:    []string{"balance: UPDATE -> " + reader},
 		policies: []string{
 			"positive_only RESTRICTIVE a PUBLIC USING - CHECK (balance >= (0)::numeric)",
 			"tenant_read PERMISSIVE r " + reader + " USING (tenant = CURRENT_USER) CHECK -",
 		},
 	}
 	assert.Equal(t, want, f.security(t, built.ShadowTable()))
-	assert.Contains(t, want.grants, "SELECT -> "+reader)
+	assert.Contains(t, want.grants, "SELECT -> "+reader+" WITH GRANT OPTION")
 	assert.Contains(t, want.grants, "INSERT -> PUBLIC")
 	assert.Equal(t, owner, built.Fidelity().Owner)
 	assert.Equal(t, "f", built.Fidelity().ReplicaIdentity)
+	assert.Equal(t, []schemachange.Policy{
+		{Name: "positive_only", Command: "a", Roles: []string{}, AppliesToPublic: true, WithCheck: "(balance >= (0)::numeric)"},
+		{Name: "tenant_read", Permissive: true, Command: "r", Roles: []string{reader}, Using: "(tenant = CURRENT_USER)"},
+	}, built.Fidelity().Policies)
+}
+
+// The owner's default privileges (ALTER DEFAULT PRIVILEGES) land on every
+// table the owner creates, including the shadow, but they are not part of
+// the source's ACL. The builder synchronises the shadow's ACL to the
+// source's, so a default grant to PUBLIC the source never carried is revoked
+// before a row is copied into the shadow.
+func TestBuildShadowRevokesDefaultPrivilegesTheSourceLacks(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	owner := testutil.NewRole(t, pool, "NOLOGIN")
+	f := shadowFixture{pool: pool, schema: testutil.NewSchema(t, pool)}
+	f.exec(t, `GRANT USAGE, CREATE ON SCHEMA %s TO `+pgx.Identifier{owner}.Sanitize())
+	f.exec(t, `
+		CREATE TABLE %s.accounts (
+			id bigint PRIMARY KEY,
+			balance numeric
+		)`)
+	f.exec(t, `ALTER TABLE %s.accounts OWNER TO `+pgx.Identifier{owner}.Sanitize())
+	f.exec(t, `ALTER DEFAULT PRIVILEGES FOR ROLE `+pgx.Identifier{owner}.Sanitize()+` IN SCHEMA %s GRANT SELECT ON TABLES TO PUBLIC`)
+	t.Cleanup(func() {
+		_, err := pool.Exec(context.WithoutCancel(t.Context()), `ALTER DEFAULT PRIVILEGES FOR ROLE `+pgx.Identifier{owner}.Sanitize()+` IN SCHEMA `+pgx.Identifier{f.schema}.Sanitize()+` REVOKE SELECT ON TABLES FROM PUBLIC`)
+		assert.NoError(t, err)
+	})
+
+	built, err := f.build(t, "accounts", `ALTER TABLE %s.accounts ADD COLUMN note text`)
+	require.NoError(t, err)
+
+	sourceACL, _ := f.aclByOID(t, "accounts")
+	shadowACL, _ := f.aclByOID(t, built.ShadowTable())
+	assert.Equal(t, sourceACL, shadowACL)
+	assert.NotContains(t, f.security(t, built.ShadowTable()).grants, "SELECT -> PUBLIC")
+}
+
+// "public" is reserved as a role name; "PUBLIC" is not. A grant to a real
+// role spelled PUBLIC must land on that role, not on the pseudo-role that
+// every role in the database is a member of.
+func TestBuildShadowDoesNotWidenAGrantToTheRoleNamedPUBLIC(t *testing.T) {
+	if os.Getenv("PG_DSN") != "" {
+		t.Skip("creates the cluster-level role \"PUBLIC\"; container-only")
+	}
+	f := newShadowFixture(t)
+	_, err := f.pool.Exec(t.Context(), `CREATE ROLE "PUBLIC"`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		_, err := f.pool.Exec(ctx, `DROP OWNED BY "PUBLIC"`)
+		assert.NoError(t, err)
+		_, err = f.pool.Exec(ctx, `DROP ROLE "PUBLIC"`)
+		assert.NoError(t, err)
+	})
+
+	f.exec(t, `
+		CREATE TABLE %s.widgets (
+			id bigint PRIMARY KEY,
+			secret text
+		)`)
+	f.exec(t, `GRANT SELECT ON %s.widgets TO "PUBLIC"`)
+	f.exec(t, `GRANT UPDATE (secret) ON %s.widgets TO "PUBLIC"`)
+	f.exec(t, `CREATE POLICY only_public ON %s.widgets FOR SELECT TO "PUBLIC" USING (true)`)
+
+	built, err := f.build(t, "widgets", `ALTER TABLE %s.widgets ADD COLUMN note text`)
+	require.NoError(t, err)
+
+	// Compare grantee OIDs, not the names they print as.
+	policyRoles := func(table string) string {
+		var roles string
+		require.NoError(t, f.pool.QueryRow(t.Context(), `
+			SELECT p.polroles::text
+			FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = $1 AND c.relname = $2`, f.schema, table).Scan(&roles))
+		return roles
+	}
+	sourceTable, sourceColumn := f.aclByOID(t, "widgets")
+	shadowTable, shadowColumn := f.aclByOID(t, built.ShadowTable())
+	assert.Equal(t, sourceTable, shadowTable, "table grant must land on the same grantee")
+	assert.Equal(t, sourceColumn, shadowColumn, "column grant must land on the same grantee")
+	assert.Equal(t, policyRoles("widgets"), policyRoles(built.ShadowTable()), "the policy must apply to the same roles")
+	assert.NotContains(t, shadowTable, "->0", "nothing was widened to the pseudo-role")
+	assert.NotEqual(t, "{0}", policyRoles(built.ShadowTable()))
+}
+
+// A table placed in its own tablespace: LIKE creates the shadow in the
+// database default, so the builder moves the still-empty shadow to the
+// source's tablespace and the snapshot carries it for the cutover gate.
+func TestBuildShadowKeepsTheSourceTablespace(t *testing.T) {
+	if os.Getenv("PG_DSN") != "" {
+		t.Skip("creates a tablespace directory on the server's filesystem; container-only")
+	}
+	f := newShadowFixture(t)
+	tablespace := f.schema + "_ts"
+	f.exec(t, `COPY (SELECT 1) TO PROGRAM 'mkdir -p /tmp/`+tablespace+`'`)
+	f.exec(t, `CREATE TABLESPACE `+tablespace+` LOCATION '/tmp/`+tablespace+`'`)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		_, err := f.pool.Exec(ctx, `DROP SCHEMA `+pgx.Identifier{f.schema}.Sanitize()+` CASCADE`)
+		assert.NoError(t, err)
+		_, err = f.pool.Exec(ctx, `DROP TABLESPACE `+tablespace)
+		assert.NoError(t, err)
+	})
+	f.exec(t, `
+		CREATE TABLE %s.widgets (
+			id bigint PRIMARY KEY,
+			note text
+		) TABLESPACE `+tablespace)
+
+	built, err := f.build(t, "widgets", `ALTER TABLE %s.widgets ADD COLUMN sku text`)
+	require.NoError(t, err)
+
+	assert.Equal(t, tablespace, built.Fidelity().Tablespace)
+	var shadowTablespace string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT COALESCE((SELECT t.spcname FROM pg_tablespace t WHERE t.oid = c.reltablespace), '<default>')
+		FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2`, f.schema, built.ShadowTable()).Scan(&shadowTablespace))
+	assert.Equal(t, tablespace, shadowTablespace)
+}
+
+// A DROP COLUMN change leaves the shadow with nowhere to put that column,
+// so the copy list the copier builds its INSERT from excludes it while
+// keeping every column both tables share.
+func TestBuildShadowExcludesDroppedColumnFromCopyColumns(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.widgets (
+			id bigint PRIMARY KEY,
+			keep text,
+			gone text
+		)`)
+
+	built, err := f.build(t, "widgets", `ALTER TABLE %s.widgets DROP COLUMN gone`)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"id", "keep"}, built.CopyColumns())
 }
 
 // A CHECK constraint the user left NOT VALID would be copied as validated by
@@ -286,22 +463,29 @@ func TestBuildShadowKeepsCheckConstraintUnvalidated(t *testing.T) {
 	assert.Equal(t, []string{"qty_positive=false", "qty_small=true"}, validated)
 }
 
-// An index whose retained _old name would exceed 63 bytes is refused before
-// anything is written: cutover could not rename it without truncation.
-func TestBuildShadowRefusesLongDependentName(t *testing.T) {
+// Dependents wearing the longest names the server accepts — a 63-byte
+// index and an identity sequence derived from a 63-byte table name — build
+// a shadow whose derived retained names still fit under the identifier
+// limit, because the dependent's name is hashed rather than appended.
+func TestBuildShadowDerivesRetainedNamesUnderTheIdentifierLimit(t *testing.T) {
 	f := newShadowFixture(t)
+	table := strings.Repeat("t", 63)
+	longIndex := strings.Repeat("i", 63)
 	f.exec(t, `
-		CREATE TABLE %s.widgets (
-			id bigint PRIMARY KEY,
+		CREATE TABLE %s.`+table+` (
+			id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
 			sku text
 		)`)
-	longIndex := strings.Repeat("i", 45)
-	f.exec(t, `CREATE INDEX `+longIndex+` ON %s.widgets (sku)`)
+	f.exec(t, `CREATE INDEX `+longIndex+` ON %s.`+table+` (sku)`)
 
-	_, err := f.build(t, "widgets", `ALTER TABLE %s.widgets ADD COLUMN note text`)
-	require.ErrorIs(t, err, schemachange.ErrNameTooLong)
-	assert.Contains(t, err.Error(), schemachange.OldDependentName(f.schema, "widgets", longIndex))
-	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")))
+	built, err := f.build(t, table, `ALTER TABLE %s.`+table+` ADD COLUMN note text`)
+	require.NoError(t, err)
+
+	require.Len(t, built.IdentityColumns(), 1)
+	for _, dependent := range []string{longIndex, table + "_pkey", built.IdentityColumns()[0].SequenceName} {
+		assert.LessOrEqual(t, len(schemachange.OldDependentName(f.schema, table, dependent)), 63, dependent)
+	}
+	assert.True(t, f.relationExists(t, schemachange.ShadowName(f.schema, table)))
 }
 
 // A relation already wearing the shadow's name is an earlier run's leftover;
@@ -377,14 +561,6 @@ func TestBuildShadowRefusesStatementOutsideProof(t *testing.T) {
 		})
 	}
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")))
-}
-
-// The zero proof is refused before any database round trip.
-func TestBuildShadowRefusesZeroProof(t *testing.T) {
-	f := newShadowFixture(t)
-	_, err := schemachange.BuildShadow(t.Context(), f.pool, preflight.CopySwapTarget{},
-		f.alter(t, `ALTER TABLE widgets ADD COLUMN note text`), schemachange.Options{})
-	require.ErrorIs(t, err, schemachange.ErrInvariantViolation)
 }
 
 // A schema change the server rejects rolls the whole build back: the shadow

@@ -26,7 +26,11 @@ type IdentityColumn struct {
 }
 
 // SequenceOptions are the pg_sequence facts cutover replays into ADD
-// GENERATED … AS IDENTITY.
+// GENERATED … AS IDENTITY. The counter's current value is deliberately not
+// among them: it is a runtime fact that moves with every insert on the
+// shared sequence, so cutover reads last_value and is_called from the
+// sequence itself at swap time and renders START WITH from that, never from
+// the Start recorded here.
 type SequenceOptions struct {
 	// Start is START WITH.
 	Start int64

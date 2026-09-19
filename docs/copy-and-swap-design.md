@@ -13,8 +13,8 @@ when the executor ships.
 
 | Classification | v1 surface |
 | --- | --- |
-| Supported in v1 | Rewrite-requiring `ALTER COLUMN … TYPE`, initially `integer` → `bigint` identity primary keys, `text` → `varchar(n)`, and `numeric` precision/scale widening; volatile-default `ADD COLUMN`; and `STORED` generated-column addition. The table is permanent, has one `smallint`, `integer`, or `bigint` primary-key column (a usable primary key), and has a replica identity of `DEFAULT` or `FULL`; no incoming or outgoing foreign keys, triggers, partitioning/inheritance, or rules; no dependent views or materialized views; no explicit membership in a publication other than the engine's own; and every derived dependent-object name fits in PostgreSQL's 63-byte identifier limit (`NAMEDATALEN - 1`). Foreign keys, triggers, dependent views, and publication membership are the OID-bound dependents a rename swap strands (RF-2): they would follow the retained `_old` table, not the live one. |
-| Typed refusal (planned) | Unsupported key (`copy-and-swap-pk-unsupported`); unsuitable replica identity (`copy-and-swap-replica-identity`); foreign keys (`copy-and-swap-foreign-keys`); triggers or rules (`copy-and-swap-triggers`); partitioned or inherited tables (`copy-and-swap-partitioned`); unlogged tables (`copy-and-swap-unlogged`); dependent views or materialized views (`copy-and-swap-dependent-views`); publication membership (`copy-and-swap-publication-member`); derived names longer than 63 bytes (`copy-and-swap-name-length`); unavailable logical decoding (`copy-and-swap-logical-decoding-unavailable`); insufficient replication-slot or WAL-sender capacity (`copy-and-swap-slot-headroom`); a same-named slot already owned by another database (`copy-and-swap-slot-collision`); insufficient disk (`copy-and-swap-disk-headroom`); or insufficient grants (`copy-and-swap-grants`). Every refusal names its reason. |
+| Supported in v1 | Rewrite-requiring `ALTER COLUMN … TYPE`, initially `integer` → `bigint` identity primary keys, `text` → `varchar(n)`, and `numeric` precision/scale widening; volatile-default `ADD COLUMN`; and `STORED` generated-column addition. The table is permanent, has one `smallint`, `integer`, or `bigint` primary-key column (a usable primary key), and has a replica identity of `DEFAULT` or `FULL`; no incoming or outgoing foreign keys, triggers, partitioning/inheritance, or rules; no dependent views or materialized views; no explicit membership in a publication other than the engine's own; and no `FORCE ROW LEVEL SECURITY`. Every name the route derives is a fixed width under PostgreSQL's 63-byte identifier limit (`NAMEDATALEN - 1`), so no source name can be refused for length. Foreign keys, triggers, dependent views, and publication membership are the OID-bound dependents a rename swap strands (RF-2): they would follow the retained `_old` table, not the live one. |
+| Typed refusal (planned) | Unsupported key (`copy-and-swap-pk-unsupported`); unsuitable replica identity (`copy-and-swap-replica-identity`); foreign keys (`copy-and-swap-foreign-keys`); triggers or rules (`copy-and-swap-triggers`); partitioned or inherited tables (`copy-and-swap-partitioned`); unlogged tables (`copy-and-swap-unlogged`); forced row-level security (`copy-and-swap-force-rls`); dependent views or materialized views (`copy-and-swap-dependent-views`); publication membership (`copy-and-swap-publication-member`); unavailable logical decoding (`copy-and-swap-logical-decoding-unavailable`); insufficient replication-slot or WAL-sender capacity (`copy-and-swap-slot-headroom`); a same-named slot already owned by another database (`copy-and-swap-slot-collision`); insufficient disk (`copy-and-swap-disk-headroom`); or insufficient grants (`copy-and-swap-grants`). Every refusal names its reason. |
 | Out of scope | All other table shapes and operations, including primary-key changes, receive a typed refusal rather than an unsafe approximation. |
 
 ## Decisions
@@ -126,6 +126,14 @@ value rather than skipping it, and no sequence value is ever spliced into SQL te
 uses `pg_get_serial_sequence` and verifies the corresponding `pg_depend` ownership edge. The old
 identity sequence is dropped with the old table.
 
+The shared counter puts a dependency edge in the direction an operator does not expect: the
+shadow's default depends on the *source's* sequence. `DROP TABLE <source>` therefore fails
+while a shadow exists, and the hint the server offers — `DROP TABLE <source> CASCADE` — drops
+the shadow's identity default silently, leaving a shadow whose key column has no default at all.
+Cleaning up after an aborted run drops the shadow **first**, never the source with `CASCADE`;
+the same ordering governs the D9 drop of the retained `_old` table, which by then owns nothing
+the live table depends on.
+
 **Why.** Copy never advances an unrelated sequence, and the post-swap table preserves generation
 kind, sequence name, and the source's exact issued-value state.
 
@@ -173,7 +181,7 @@ cases and test surfaces.
 and `_pgsprite_<16-hex-hash-of-schema.table>_old`. `LIKE` derives the shadow's index names — and
 so the names of the primary-key, unique, and exclusion constraints those indexes back — from the
 shadow's name, so cutover restores them: every index, extended-statistics object, and identity
-sequence on the old table is renamed to `_pgsprite_<hash>_old_<name>`, and the shadow's
+sequence on the old table is renamed to `_pgsprite_<hash>_old_<16-hex-hash-of-dependent-name>`, and the shadow's
 corresponding dependent is then renamed to the name the source dependent held
 (`ALTER INDEX … RENAME` renames a constraint together with its index; `CHECK` constraints keep
 their names under `LIKE` and need no rename). `LIKE` keeps none of the source's index,
@@ -184,12 +192,18 @@ with identical definitions are interchangeable, so an arbitrary pairing between 
 equivalent catalog. The post-swap catalog therefore carries the user's names —
 `ON CONFLICT ON CONSTRAINT u_slot` keeps working and a later change of the same table derives
 the same names — and only the old table's dependents wear the suffix. A shared `serial`/`nextval`
-sequence is not a dependent of the old table and keeps its name (D5). Preflight returns
-`copy-and-swap-name-length` if any derived identifier — an `_old` name, or a shadow-side `LIKE`
-name — would exceed PostgreSQL's 63-byte identifier limit (`NAMEDATALEN - 1`).
+sequence is not a dependent of the old table and keeps its name (D5). Every derived name is a
+fixed width — 30 bytes for the table names, 47 for a dependent's — because both the table and
+the dependent enter the name as hashes, never as text; no source name, however long, can push a
+derived name into the server's silent truncation at 63 bytes, so the route has no name-length
+refusal. The hash has no inverse, but a derived relation always lives in its source's schema,
+so `schemachange.SourceOfDerivedName` recovers the source by recomputing each table's derived
+names in that one schema — the query an operator runs on finding a `_pgsprite_…` relation they
+did not create.
 
 **Why.** Stable names make catalog inspection and resume deterministic; restoring user names keeps
-the swap invisible to code that names constraints; refusing truncation prevents collisions.
+the swap invisible to code that names constraints; fixed-width hashed names make truncation, and
+the collisions it would cause, unreachable.
 
 **Alternative considered → deferred.** Random names simplify initial creation but make recovery
 depend on extra durable mapping state.
@@ -345,13 +359,13 @@ decoding but adds write-path availability and amplification costs.
 | Package | Responsibility and proof types | Invariants |
 | --- | --- | --- |
 | `pkg/dbconn` | Produces `TableLock`. | LK-1 |
-| `pkg/preflight` | Produces `CopySwapTarget`, the copy-and-swap route's proof (the table facts `PreflightedTable` carries plus the v1 shape, replica identity, dependent-object, name-length, decoding, and headroom checks above); owns Tier-3 refusals. | ST-6, RF-1..RF-3 |
+| `pkg/preflight` | Produces `CopySwapTarget`, the copy-and-swap route's proof (the table facts `PreflightedTable` carries plus the v1 shape, replica identity, dependent-object, decoding, and headroom checks above); owns Tier-3 refusals. | ST-6, RF-1..RF-3 |
 | `pkg/copier` | Produces `Chunk` and `Watermark`. | CO-4, LK-3 |
 | `pkg/checksum` | Produces `VerifiedShadow` and `CleanWatermark`; their constructors are private to this package. | CO-1, CO-2, CO-3 |
 | `pkg/decode` | Produces `ChangeEvent`, including per-column presence and `OldKey` for an UPDATE that moved the primary key. | ST-3, ST-4, CO-4, CO-8 |
 | `pkg/applier` | Applies presence-aware events from the per-key buffer. | CO-4, CO-5, CO-6, CO-8, LK-3 |
 | `pkg/checkpoint` | Produces `Checkpoint`. | ST-1, ST-2 |
-| `pkg/schemachange` | Shadow builder (`BuildShadow` produces `BuiltShadow`: fingerprints, identity handoff, copy columns, fidelity snapshot), orchestrator, and cutover. | LK-2, LK-4, ST-5, ST-7 |
+| `pkg/schemachange` | Shadow builder (`BuildShadow` produces `BuiltShadow`: source and shadow OIDs, fingerprints, identity handoff, copy columns, fidelity snapshot; `SourceOfDerivedName` maps a derived name back to its table), orchestrator, and cutover. The orchestrator leaf gives `BuildShadow` a `*dbconn.TableLockSession`: the build runs under the session's `Bind` context so a lost lock cancels it, and re-asserts the lock on the session's own connection inside the build transaction, since the lock and the build are deliberately on different sessions. The same leaf adds `DropShadow` and `InspectShadow`, the resume path `ErrShadowExists` names. | LK-1 (orchestrator), LK-2, LK-4, ST-5, ST-7 |
 
 Each producing package owns its types. `pkg/schemachange` imports every producer; no producer
 imports `pkg/schemachange`.

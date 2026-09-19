@@ -36,6 +36,12 @@ const (
 	// CopySwapCauseUnlogged means the table is UNLOGGED, while the shadow
 	// created by LIKE would be permanent.
 	CopySwapCauseUnlogged CopySwapRefusalCause = "copy-and-swap-unlogged"
+	// CopySwapCauseForceRLS means the table has FORCE ROW LEVEL SECURITY:
+	// the copier runs as the owner, whose reads of the source would be
+	// filtered and whose writes into the shadow would be rejected by the
+	// replicated policies, and the shadow must carry those policies before
+	// it holds a row.
+	CopySwapCauseForceRLS CopySwapRefusalCause = "copy-and-swap-force-rls"
 )
 
 // CopySwapRefusalCauses returns the closed set of copy-and-swap shape refusal
@@ -49,6 +55,7 @@ func CopySwapRefusalCauses() []CopySwapRefusalCause {
 		CopySwapCauseTriggers,
 		CopySwapCausePartitioned,
 		CopySwapCauseUnlogged,
+		CopySwapCauseForceRLS,
 	}
 }
 
@@ -80,6 +87,7 @@ type copySwapShapeFacts struct {
 	oid             uint32
 	relkind         string
 	relpersistence  string
+	forceRLS        bool
 	isPartition     bool
 	hasSubclass     bool
 	inheritsParents int64
@@ -97,7 +105,8 @@ type copySwapShapeFacts struct {
 // schema is empty) has the shape the copy-and-swap route supports in v1: an
 // ordinary table outside any partition or inheritance tree, exactly one
 // smallint, integer, or bigint primary-key column, a replica identity of
-// DEFAULT or FULL, and no foreign keys, triggers, or rules. The role proof
+// DEFAULT or FULL, no foreign keys, triggers, or rules, and no FORCE ROW
+// LEVEL SECURITY. The role proof
 // must have been verified at TierCopyAndSwap; the owner it carries is the
 // role the shadow builder creates shadow objects as. On success it returns
 // the CopySwapTarget proof carrying the catalog-resolved schema.
@@ -140,11 +149,15 @@ func RecheckCopySwapShape(ctx context.Context, tx pgx.Tx, target CopySwapTarget)
 }
 
 // refuseCopySwapShape decides the first cause that puts the facts outside
-// v1 scope, in the order the design lists them, or the zero cause when the
-// shape is supported.
+// v1 scope, or the zero cause when the shape is supported. Whole-table
+// facts are decided before key and dependent facts, so a table with several
+// disqualifying shapes reports the one that needs the largest change.
 func refuseCopySwapShape(f copySwapShapeFacts) (CopySwapRefusalCause, string) {
 	if f.relpersistence == "u" {
 		return CopySwapCauseUnlogged, "the table is UNLOGGED; the copy-and-swap shadow must be permanent"
+	}
+	if f.forceRLS {
+		return CopySwapCauseForceRLS, "the table has FORCE ROW LEVEL SECURITY; the owner-run copier would be subject to its policies"
 	}
 	switch {
 	case f.relkind == "p":
@@ -190,6 +203,7 @@ func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table 
 		SELECT n.nspname::text, c.oid,
 		       c.relkind::text,
 		       c.relpersistence::text,
+		       c.relforcerowsecurity,
 		       c.relispartition,
 		       c.relhassubclass,
 		       (SELECT count(*) FROM pg_inherits i WHERE i.inhrelid = c.oid),
@@ -210,7 +224,7 @@ func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table 
 			     ELSE quote_ident($1) || '.' || quote_ident($2) END)`
 	var f copySwapShapeFacts
 	err := db.QueryRow(ctx, q, schema, table).Scan(
-		&f.schema, &f.oid, &f.relkind, &f.relpersistence, &f.isPartition, &f.hasSubclass, &f.inheritsParents, &f.replicaIdentity,
+		&f.schema, &f.oid, &f.relkind, &f.relpersistence, &f.forceRLS, &f.isPartition, &f.hasSubclass, &f.inheritsParents, &f.replicaIdentity,
 		&f.pkColumns, &f.pkColumn, &f.pkType, &f.foreignKeysOut, &f.foreignKeysIn, &f.triggers, &f.rules)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return copySwapShapeFacts{}, unresolvedTargetCause(ctx, db, schema, table)

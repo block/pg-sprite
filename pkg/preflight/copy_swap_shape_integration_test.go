@@ -97,6 +97,27 @@ func TestCheckCopySwapShapeRefusesUnloggedTable(t *testing.T) {
 	requireCopySwapCause(t, err, preflight.CopySwapCauseUnlogged)
 }
 
+// FORCE ROW LEVEL SECURITY subjects the owner to the table's policies, and
+// the copier runs as the owner: its reads of the source would be filtered
+// and its writes into the policy-carrying shadow rejected, so the shape gate
+// refuses. Enabled-but-not-forced RLS is accepted because the owner bypasses
+// it.
+func TestCheckCopySwapShapeRefusesForceRowLevelSecurity(t *testing.T) {
+	f := newCopySwapShapeFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.accounts (
+			id bigint PRIMARY KEY,
+			balance numeric
+		)`)
+	f.exec(t, `ALTER TABLE %s.accounts ENABLE ROW LEVEL SECURITY`)
+	_, err := f.check(t, "accounts")
+	require.NoError(t, err, "enabled row-level security does not bind the owner")
+
+	f.exec(t, `ALTER TABLE %s.accounts FORCE ROW LEVEL SECURITY`)
+	_, err = f.check(t, "accounts")
+	requireCopySwapCause(t, err, preflight.CopySwapCauseForceRLS)
+}
+
 // An unqualified target resolves through search_path and the proof still
 // carries the catalog schema, so the shadow's deterministic names never
 // depend on the session.

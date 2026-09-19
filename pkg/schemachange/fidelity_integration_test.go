@@ -34,7 +34,7 @@ func TestFidelitySnapshotComparesColumnGrants(t *testing.T) {
 	shadow, err := readFidelity(t.Context(), tx, shadowOID)
 	require.NoError(t, err)
 	assert.NotEqual(t, source, shadow)
-	assert.Equal(t, []ColumnGrant{{Column: "secret", Privilege: "SELECT", Grantee: reader}}, source.ColumnGrants)
+	assert.Equal(t, []ColumnGrant{{Column: "secret", Grant: Grant{Privilege: "SELECT", Grantee: reader}}}, source.ColumnGrants)
 
 	_, err = tx.Exec(t.Context(), `GRANT SELECT (secret) ON `+pgx.Identifier{schema, "shadow"}.Sanitize()+` TO `+pgx.Identifier{reader}.Sanitize())
 	require.NoError(t, err)

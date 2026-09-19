@@ -116,6 +116,7 @@ classification is fixed here first so the route inherits it.
 | `copy-and-swap-triggers` | The table has a user trigger or a rewrite rule | `capability-boundary` | As above. |
 | `copy-and-swap-partitioned` | The table is a partitioned parent, a partition, or part of an inheritance tree | `capability-boundary` | The per-partition copy-and-swap flow is a planned capability. |
 | `copy-and-swap-unlogged` | The table is UNLOGGED, while the shadow would be permanent | `capability-boundary` | Preserving persistence requires an explicit shadow-creation path. |
+| `copy-and-swap-force-rls` | The table has `FORCE ROW LEVEL SECURITY`, so the owner-run copier would be filtered reading the source and rejected filling the policy-carrying shadow | `capability-boundary` | Copying under a `BYPASSRLS` role or deferring the policies to cutover is a planned capability; either needs a decision the engine has not made. |
 
 ### `unsupported-statement` on the create path, keyed on `CreateShapeCause`
 

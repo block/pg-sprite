@@ -24,13 +24,19 @@ type FidelitySnapshot struct {
 	RLSForced bool
 	// Comment is the table comment, empty when none.
 	Comment string
+	// Tablespace is the table's own tablespace, empty when it lives in the
+	// database default. LIKE places the shadow in the default tablespace
+	// whatever the source uses; the builder moves the still-empty shadow.
+	Tablespace string
 	// RelOptions are the table's storage parameters as the server prints
 	// them, with the TOAST relation's parameters prefixed "toast.".
 	RelOptions []string
-	// Grants are the table's privileges, expanded from its ACL (or from the
-	// owner's default ACL when none is stored).
+	// Grants are the table's effective privileges, expanded from its ACL
+	// (or from the owner's default ACL when none is stored): one entry per
+	// privilege and grantee, grantable when any grantor made it so.
 	Grants []Grant
-	// ColumnGrants are privileges granted on individual columns.
+	// ColumnGrants are the effective privileges granted on individual
+	// columns.
 	ColumnGrants []ColumnGrant
 	// Policies are the table's row-level-security policies.
 	Policies []Policy
@@ -40,26 +46,26 @@ type FidelitySnapshot struct {
 	UnvalidatedChecks []UnvalidatedConstraint
 }
 
-// Grant is one expanded ACL entry.
+// Grant is one effective ACL entry.
 type Grant struct {
 	// Privilege is the privilege keyword as aclexplode reports it.
 	Privilege string
-	// Grantee is the role name, or PublicRole for the PUBLIC pseudo-role.
+	// Grantee is the role name; empty when Public is set.
 	Grantee string
+	// Public reports the PUBLIC pseudo-role (grantee OID 0). It is carried
+	// as a fact of its own because a real role may be named "PUBLIC": the
+	// server reserves only the folded spelling "public".
+	Public bool
 	// Grantable reports WITH GRANT OPTION.
 	Grantable bool
 }
 
-// ColumnGrant is one expanded per-column ACL entry.
+// ColumnGrant is one effective per-column ACL entry; its Privilege is
+// SELECT, INSERT, UPDATE, or REFERENCES.
 type ColumnGrant struct {
 	// Column is the column carrying the ACL.
 	Column string
-	// Privilege is SELECT, INSERT, UPDATE, or REFERENCES.
-	Privilege string
-	// Grantee is the role name, or PublicRole for PUBLIC.
-	Grantee string
-	// Grantable reports WITH GRANT OPTION.
-	Grantable bool
+	Grant
 }
 
 // Policy is one row-level-security policy.
@@ -70,8 +76,11 @@ type Policy struct {
 	Permissive bool
 	// Command is the pg_policy.polcmd code: '*', 'r', 'a', 'w', or 'd'.
 	Command string
-	// Roles are the role names the policy applies to; PublicRole for PUBLIC.
+	// Roles are the real role names the policy applies to.
 	Roles []string
+	// AppliesToPublic reports TO PUBLIC, which the server stores as the
+	// single pseudo-role OID 0 in place of any role list.
+	AppliesToPublic bool
 	// Using is the decompiled USING expression, empty when none.
 	Using string
 	// WithCheck is the decompiled WITH CHECK expression, empty when none.
@@ -88,10 +97,9 @@ type UnvalidatedConstraint struct {
 	Def string
 }
 
-// PublicRole is the spelling the snapshot uses for the PUBLIC pseudo-role
-// (grantee OID 0). PostgreSQL reserves "public" as a role name, so no real
-// role can collide with it.
-const PublicRole = "PUBLIC"
+// publicKeyword is how GRANT and CREATE POLICY spell the PUBLIC pseudo-role.
+// It is a keyword, never quoted: quoting it would name a real role.
+const publicKeyword = "PUBLIC"
 
 // isTablePrivilege reports whether the server-reported privilege keyword is
 // one this code knows a table can carry; anything else means a server this
@@ -100,6 +108,17 @@ const PublicRole = "PUBLIC"
 func isTablePrivilege(privilege string) bool {
 	switch privilege {
 	case "SELECT", "INSERT", "UPDATE", "DELETE", "TRUNCATE", "REFERENCES", "TRIGGER", "MAINTAIN":
+		return true
+	default:
+		return false
+	}
+}
+
+// isColumnPrivilege reports whether the server-reported privilege keyword is
+// one this code knows a column can carry.
+func isColumnPrivilege(privilege string) bool {
+	switch privilege {
+	case "SELECT", "INSERT", "UPDATE", "REFERENCES":
 		return true
 	default:
 		return false
@@ -132,11 +151,12 @@ func readFidelity(ctx context.Context, tx pgx.Tx, oid uint32) (FidelitySnapshot,
 		SELECT pg_get_userbyid(c.relowner), c.relreplident::text,
 		       c.relrowsecurity, c.relforcerowsecurity,
 		       COALESCE(obj_description(c.oid, 'pg_class'), ''),
+		       COALESCE((SELECT t.spcname FROM pg_tablespace t WHERE t.oid = c.reltablespace), ''),
 		       COALESCE(c.reloptions, '{}'),
 		       COALESCE((SELECT t.reloptions FROM pg_class t WHERE t.oid = c.reltoastrelid), '{}')
 		FROM pg_class c
 		WHERE c.oid = $1`, oid).
-		Scan(&s.Owner, &s.ReplicaIdentity, &s.RLSEnabled, &s.RLSForced, &s.Comment, &s.RelOptions, &toastOptions)
+		Scan(&s.Owner, &s.ReplicaIdentity, &s.RLSEnabled, &s.RLSForced, &s.Comment, &s.Tablespace, &s.RelOptions, &toastOptions)
 	if err != nil {
 		return FidelitySnapshot{}, fmt.Errorf("read table metadata: %w", err)
 	}
@@ -158,21 +178,27 @@ func readFidelity(ctx context.Context, tx pgx.Tx, oid uint32) (FidelitySnapshot,
 	return s, nil
 }
 
+// readGrants reads the table's effective ACL: aclexplode yields one row per
+// grantor, so entries are folded per privilege and grantee, grantable when
+// any grantor made them so. The PUBLIC pseudo-role is recognised by its OID,
+// never by a name the catalog can also print for a real role.
 func readGrants(ctx context.Context, tx pgx.Tx, oid uint32) ([]Grant, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT a.privilege_type,
-		       CASE WHEN a.grantee = 0 THEN $2 ELSE pg_get_userbyid(a.grantee) END,
-		       a.is_grantable
+		       CASE WHEN a.grantee = 0 THEN '' ELSE pg_get_userbyid(a.grantee) END,
+		       a.grantee = 0,
+		       bool_or(a.is_grantable)
 		FROM pg_class c
 		CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a
 		WHERE c.oid = $1
-		ORDER BY 2, 1`, oid, PublicRole)
+		GROUP BY 1, 2, 3
+		ORDER BY 3, 2, 1`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("read table grants: %w", err)
 	}
 	grants, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Grant, error) {
 		var g Grant
-		err := row.Scan(&g.Privilege, &g.Grantee, &g.Grantable)
+		err := row.Scan(&g.Privilege, &g.Grantee, &g.Public, &g.Grantable)
 		return g, err
 	})
 	if err != nil {
@@ -180,58 +206,63 @@ func readGrants(ctx context.Context, tx pgx.Tx, oid uint32) ([]Grant, error) {
 	}
 	for _, g := range grants {
 		if !isTablePrivilege(g.Privilege) {
-			return nil, fmt.Errorf("table grant to %s carries unknown privilege %q", g.Grantee, g.Privilege)
+			return nil, fmt.Errorf("table grant to %s carries unknown privilege %q", granteeLabel(g), g.Privilege)
 		}
 	}
 	return grants, nil
 }
 
+// readColumnGrants reads the effective per-column ACLs, folded per column,
+// privilege, and grantee like readGrants.
 func readColumnGrants(ctx context.Context, tx pgx.Tx, oid uint32) ([]ColumnGrant, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT col.attname, acl.privilege_type,
-		       CASE WHEN acl.grantee = 0 THEN $2 ELSE pg_get_userbyid(acl.grantee) END,
-		       acl.is_grantable
+		       CASE WHEN acl.grantee = 0 THEN '' ELSE pg_get_userbyid(acl.grantee) END,
+		       acl.grantee = 0,
+		       bool_or(acl.is_grantable)
 		FROM pg_attribute col
 		CROSS JOIN LATERAL aclexplode(col.attacl) acl
 		WHERE col.attrelid = $1 AND col.attnum > 0 AND NOT col.attisdropped
-		ORDER BY col.attnum, 3, 2`, oid, PublicRole)
+		GROUP BY col.attnum, 1, 2, 3, 4
+		ORDER BY col.attnum, 4, 3, 2`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("read column grants: %w", err)
 	}
 	grants, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (ColumnGrant, error) {
 		var g ColumnGrant
-		err := row.Scan(&g.Column, &g.Privilege, &g.Grantee, &g.Grantable)
+		err := row.Scan(&g.Column, &g.Privilege, &g.Grantee, &g.Public, &g.Grantable)
 		return g, err
 	})
 	if err != nil {
 		return nil, fmt.Errorf("read column grants: %w", err)
 	}
 	for _, g := range grants {
-		switch g.Privilege {
-		case "SELECT", "INSERT", "UPDATE", "REFERENCES":
-		default:
-			return nil, fmt.Errorf("column grant on %s to %s carries unknown privilege %q", g.Column, g.Grantee, g.Privilege)
+		if !isColumnPrivilege(g.Privilege) {
+			return nil, fmt.Errorf("column grant on %s to %s carries unknown privilege %q", g.Column, granteeLabel(g.Grant), g.Privilege)
 		}
 	}
 	return grants, nil
 }
 
+// readPolicies reads the table's policies. A policy TO PUBLIC is stored as
+// the single pseudo-role OID 0, which is reported as AppliesToPublic and
+// kept out of Roles.
 func readPolicies(ctx context.Context, tx pgx.Tx, oid uint32) ([]Policy, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT p.polname, p.polpermissive, p.polcmd::text,
-		       ARRAY(SELECT CASE WHEN r = 0 THEN $2 ELSE pg_get_userbyid(r) END
-		             FROM unnest(p.polroles) r),
+		       ARRAY(SELECT pg_get_userbyid(r)::text FROM unnest(p.polroles) r WHERE r <> 0),
+		       0 = ANY (p.polroles),
 		       COALESCE(pg_get_expr(p.polqual, p.polrelid), ''),
 		       COALESCE(pg_get_expr(p.polwithcheck, p.polrelid), '')
 		FROM pg_policy p
 		WHERE p.polrelid = $1
-		ORDER BY p.polname`, oid, PublicRole)
+		ORDER BY p.polname`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("read row-level-security policies: %w", err)
 	}
 	policies, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Policy, error) {
 		var p Policy
-		err := row.Scan(&p.Name, &p.Permissive, &p.Command, &p.Roles, &p.Using, &p.WithCheck)
+		err := row.Scan(&p.Name, &p.Permissive, &p.Command, &p.Roles, &p.AppliesToPublic, &p.Using, &p.WithCheck)
 		return p, err
 	})
 	if err != nil {
@@ -271,11 +302,19 @@ func readUnvalidatedChecks(ctx context.Context, tx pgx.Tx, oid uint32) ([]Unvali
 // that instead. Every role and relation name goes through Sanitize; the
 // comment goes through the server's format(%L) so no literal is spliced by
 // hand; expressions, options, and constraint definitions are the server's
-// own decompiled text.
-func applyFidelity(ctx context.Context, tx pgx.Tx, schema, shadow string, s FidelitySnapshot) error {
+// own decompiled text. The ACLs are synchronised rather than granted: the
+// owner's default privileges land on the shadow at CREATE and are not part
+// of the source's ACL, so the shadow's effective grants are made equal to
+// the source's and re-read to prove it.
+func applyFidelity(ctx context.Context, tx pgx.Tx, schema, shadow string, shadowOID uint32, s FidelitySnapshot) error {
 	table := pgx.Identifier{schema, shadow}.Sanitize()
 	if err := applyReplicaIdentity(ctx, tx, table, s.ReplicaIdentity); err != nil {
 		return err
+	}
+	if s.Tablespace != "" {
+		if _, err := tx.Exec(ctx, "ALTER TABLE "+table+" SET TABLESPACE "+pgx.Identifier{s.Tablespace}.Sanitize()); err != nil {
+			return fmt.Errorf("move shadow to tablespace %s: %w", s.Tablespace, err)
+		}
 	}
 	if len(s.RelOptions) > 0 {
 		if _, err := tx.Exec(ctx, "ALTER TABLE "+table+" SET ("+strings.Join(s.RelOptions, ", ")+")"); err != nil {
@@ -301,15 +340,11 @@ func applyFidelity(ctx context.Context, tx pgx.Tx, schema, shadow string, s Fide
 			return fmt.Errorf("force shadow row-level security: %w", err)
 		}
 	}
-	for _, g := range s.Grants {
-		if _, err := tx.Exec(ctx, grantSQL(table, g)); err != nil {
-			return fmt.Errorf("grant %s on shadow to %s: %w", g.Privilege, g.Grantee, err)
-		}
+	if err := syncGrants(ctx, tx, table, shadowOID, s.Grants); err != nil {
+		return err
 	}
-	for _, g := range s.ColumnGrants {
-		if _, err := tx.Exec(ctx, columnGrantSQL(table, g)); err != nil {
-			return fmt.Errorf("grant %s on shadow column %s to %s: %w", g.Privilege, g.Column, g.Grantee, err)
-		}
+	if err := syncColumnGrants(ctx, tx, table, shadowOID, s.ColumnGrants); err != nil {
+		return err
 	}
 	for _, p := range s.Policies {
 		sql, err := policySQL(table, p)
@@ -351,22 +386,6 @@ func applyReplicaIdentity(ctx context.Context, tx pgx.Tx, table, identity string
 	}
 }
 
-func grantSQL(table string, g Grant) string {
-	sql := "GRANT " + g.Privilege + " ON TABLE " + table + " TO " + roleSQL(g.Grantee)
-	if g.Grantable {
-		sql += " WITH GRANT OPTION"
-	}
-	return sql
-}
-
-func columnGrantSQL(table string, g ColumnGrant) string {
-	sql := "GRANT " + g.Privilege + " (" + pgx.Identifier{g.Column}.Sanitize() + ") ON TABLE " + table + " TO " + roleSQL(g.Grantee)
-	if g.Grantable {
-		sql += " WITH GRANT OPTION"
-	}
-	return sql
-}
-
 func policySQL(table string, p Policy) (string, error) {
 	command, known := policyCommand(p.Command)
 	if !known {
@@ -376,9 +395,12 @@ func policySQL(table string, p Policy) (string, error) {
 	if p.Permissive {
 		mode = "PERMISSIVE"
 	}
-	roles := make([]string, len(p.Roles))
-	for i, role := range p.Roles {
-		roles[i] = roleSQL(role)
+	roles := make([]string, 0, len(p.Roles)+1)
+	if p.AppliesToPublic {
+		roles = append(roles, publicKeyword)
+	}
+	for _, role := range p.Roles {
+		roles = append(roles, roleSQL(role, false))
 	}
 	sql := "CREATE POLICY " + pgx.Identifier{p.Name}.Sanitize() + " ON " + table +
 		" AS " + mode + " FOR " + command + " TO " + strings.Join(roles, ", ")
@@ -391,13 +413,22 @@ func policySQL(table string, p Policy) (string, error) {
 	return sql, nil
 }
 
-// roleSQL renders a role name for GRANT and CREATE POLICY: the PUBLIC
-// pseudo-role is a keyword and must not be quoted; every real role is.
-func roleSQL(role string) string {
-	if role == PublicRole {
-		return PublicRole
+// roleSQL renders a grantee for GRANT, REVOKE, and CREATE POLICY: the PUBLIC
+// pseudo-role is the unquoted keyword, and every real role — including one
+// that happens to be named "PUBLIC" — is quoted.
+func roleSQL(role string, public bool) string {
+	if public {
+		return publicKeyword
 	}
 	return pgx.Identifier{role}.Sanitize()
+}
+
+// granteeLabel names a grant's recipient for error messages.
+func granteeLabel(g Grant) string {
+	if g.Public {
+		return publicKeyword
+	}
+	return g.Grantee
 }
 
 // formatSQL asks the server to render a statement through format(), so
