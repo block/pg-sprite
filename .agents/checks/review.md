@@ -17,8 +17,9 @@ the reviewer's distillation.
   a core package is a review-blocking defect.
 - Dangerous APIs accept proof types (`statement.Statement`, `statement.DesiredSchema`,
   `preflight.PreflightedTable`, `preflight.AbsentTarget`, `preflight.CreationRole`,
-  `preflight.PrivilegedRole`, `preflight.CopySwapTarget`, `checksum.VerifiedShadow`,
-  `checksum.CleanWatermark`, `dbconn.TableLock`) with package-private constructors — never a
+  `preflight.PrivilegedRole`, `preflight.CopySwapTarget`, `schemachange.BuiltShadow`,
+  `checksum.VerifiedShadow`, `checksum.CleanWatermark`, `dbconn.TableLock`) with
+  package-private constructors — never a
   raw string or bool that a caller could fabricate. Core code re-verifies its own
   preconditions; it never trusts that the planner or CLI checked.
 - Invariant enforcement points carry a `// INV: <id>` comment matching

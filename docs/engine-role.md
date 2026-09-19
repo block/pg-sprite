@@ -32,7 +32,7 @@ applies):
 - **An index belongs to the table's owner**, regardless of which member role created it —
   the native index path is ownership-correct automatically.
 - **A new table belongs to the role that created it.** The copy-and-swap design therefore
-  calls for `SET ROLE <owner>` before creating shadow objects so they are born with the
+  calls for `SET LOCAL ROLE <owner>` before creating shadow objects so they are born with the
   correct owner rather than repaired afterward. That path is planned; greenfield creation
   with a create owner (below) is the first path that actually runs `SET LOCAL ROLE`.
 

@@ -75,3 +75,63 @@ func isPartitionRefusalCauseType(expr ast.Expr) bool {
 	ident, ok := expr.(*ast.Ident)
 	return ok && ident.Name == "PartitionRefusalCause"
 }
+
+// Every copy-and-swap shape refusal cause has a row in the refusal-class
+// map: a cause added to the code without a classification fails here.
+func TestRefusalClassesDocListsEveryCopySwapCause(t *testing.T) {
+	raw, err := os.ReadFile(refusalClassesDoc)
+	require.NoError(t, err)
+	doc := string(raw)
+	for _, cause := range preflight.CopySwapRefusalCauses() {
+		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", cause),
+			"docs/refusal-classes.md has no class row for copy-and-swap refusal cause %q", cause)
+	}
+}
+
+// The closed set is complete: every CopySwapRefusalCause constant declared
+// in copy_swap_shape.go is enumerated by CopySwapRefusalCauses().
+func TestCopySwapRefusalCausesEnumerateEveryDeclaredCause(t *testing.T) {
+	declared := declaredStringConstants(t, "copy_swap_shape.go", "CopySwapRefusalCause")
+	require.NotEmpty(t, declared, "copy_swap_shape.go declares the CopySwapRefusalCause constants")
+
+	enumerated := make(map[string]struct{})
+	for _, cause := range preflight.CopySwapRefusalCauses() {
+		enumerated[string(cause)] = struct{}{}
+	}
+	assert.Equal(t, declared, enumerated,
+		"CopySwapRefusalCauses() must enumerate exactly the declared CopySwapRefusalCause constants")
+}
+
+// declaredStringConstants collects the string literals of every constant of
+// the named type declared in file.
+func declaredStringConstants(t *testing.T, file, typeName string) map[string]struct{} {
+	t.Helper()
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, file, nil, parser.SkipObjectResolution)
+	require.NoError(t, err)
+	declared := make(map[string]struct{})
+	for _, decl := range parsed.Decls {
+		gen, ok := decl.(*ast.GenDecl)
+		if !ok || gen.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gen.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			ident, ok := vs.Type.(*ast.Ident)
+			if !ok || ident.Name != typeName {
+				continue
+			}
+			for _, value := range vs.Values {
+				lit, ok := value.(*ast.BasicLit)
+				require.True(t, ok && lit.Kind == token.STRING, "%s constants are string literals", typeName)
+				unquoted, err := strconv.Unquote(lit.Value)
+				require.NoError(t, err)
+				declared[unquoted] = struct{}{}
+			}
+		}
+	}
+	return declared
+}
