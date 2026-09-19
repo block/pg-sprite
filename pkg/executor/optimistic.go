@@ -34,10 +34,9 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
-// ErrInvariantViolation is the fail-closed error class for breaches of the
-// registry in docs/invariants.md (see SAFETY.md); the message names the
-// invariant ID. It is never a warning and never retried.
-var ErrInvariantViolation = errors.New("invariant violation")
+// ErrInvariantViolation aliases dbconn's fail-closed error class for breaches
+// of the registry in docs/invariants.md. It is never a warning and never retried.
+var ErrInvariantViolation = dbconn.ErrInvariantViolation
 
 // SQLSTATE codes the attempt maps to budget outcomes. Postgres errors are
 // matched by SQLSTATE, never by message text.

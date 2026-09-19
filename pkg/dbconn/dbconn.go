@@ -58,8 +58,8 @@ type Config struct {
 	//
 	// NOTE: the advisory-lock connection (LK-1) must NOT come from this pool:
 	// session-scoped locks die with their session, and lifetime/idle
-	// recycling would silently release the lock. The lock helper owns a
-	// dedicated single-connection pool exempt from recycling.
+	// recycling would silently release the lock. The lock helper owns a bare
+	// dedicated connection exempt from pool recycling.
 	MaxConns              int32
 	MinConns              int32
 	MaxConnLifetime       time.Duration
@@ -124,12 +124,24 @@ func NewPool(ctx context.Context, cfg Config) (*pgxpool.Pool, error) {
 }
 
 // proveSessionAffinity runs the affinity proof on one of the pool's own
-// connections. The second connection the proof needs comes from a throwaway
-// pool of its own rather than from the caller's: the proof would otherwise
-// need two of the caller's connections, which a pool sized at one does not
-// have — and a check that quietly skips itself on a small pool is not a
-// check. The throwaway pool lives only for the proof.
+// connections.
 func proveSessionAffinity(ctx context.Context, pool *pgxpool.Pool, pc *pgxpool.Config) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire a connection to prove session affinity: %w", err)
+	}
+	defer conn.Release()
+	return proveAffinityOn(ctx, conn, pc)
+}
+
+// proveAffinityOn runs the affinity proof on conn, a connection opened from
+// pc. The second connection the proof needs comes from a throwaway pool of
+// its own rather than from the caller's: the proof would otherwise need two
+// of the caller's connections, which a pool sized at one — or a bare
+// dedicated connection — does not have, and a check that quietly skips
+// itself is not a check. The throwaway pool lives only for the proof. A
+// refusal carries the remedy an operator acts on.
+func proveAffinityOn(ctx context.Context, conn AdvisoryLockHolder, pc *pgxpool.Config) error {
 	pinnerCfg := pc.Copy()
 	pinnerCfg.MaxConns = 1
 	pinnerCfg.MinConns = 0
@@ -139,12 +151,6 @@ func proveSessionAffinity(ctx context.Context, pool *pgxpool.Pool, pc *pgxpool.C
 		return fmt.Errorf("open a second connection to prove session affinity: %w", err)
 	}
 	defer pinner.Close()
-
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("acquire a connection to prove session affinity: %w", err)
-	}
-	defer conn.Release()
 
 	if err := ProveSessionAffinity(ctx, conn, pinner, affinityProbeBound(pc.ConnConfig.ConnectTimeout)); err != nil {
 		if errors.Is(err, ErrNoSessionAffinity) {
