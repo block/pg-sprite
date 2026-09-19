@@ -464,9 +464,11 @@ never reach the database through the executor (pgx's simple protocol would happi
 it). *Enforced:* `pkg/executor` (`ExecuteNative`; `RunSequence` admission re-proves every step's
 target against the preflight proof before the first step executes; `ExecuteCreate` re-proves
 every desired statement's target against the absence proof the same way), `pkg/statement`
-(proof construction). *Planned enforcement:* the `pkg/schemachange` shadow builder re-proves the
-retargeted statement against the gated one with the shadow as the sole permitted target
-([copy-and-swap D1](copy-and-swap-design.md#d1--no-durable-scratch-database)).
+(proof construction), `pkg/schemachange` (`BuildShadow` accepts only an `ALTER TABLE`
+`statement.Statement` naming the proven table, retargets it onto the shadow through the
+deparser, and refuses before executing unless the retargeted form re-parses to the same
+operations with the shadow as its sole target —
+[copy-and-swap D1](copy-and-swap-design.md#d1--no-durable-scratch-database)).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof

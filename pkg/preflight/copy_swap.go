@@ -18,6 +18,7 @@ type CopySwapTarget struct {
 	schema, table, pkColumn string
 	pkType                  PKType
 	ownerRole               string
+	oid                     uint32
 }
 
 // Schema returns the target schema.
@@ -33,7 +34,7 @@ func (t CopySwapTarget) PKColumn() string { return t.pkColumn }
 func (t CopySwapTarget) PKType() PKType { return t.pkType }
 
 // OwnerRole returns the catalog-resolved owner of the target table: the role
-// the shadow builder runs SET ROLE to so that the shadow table and its
+// the shadow builder runs SET LOCAL ROLE to so that the shadow table and its
 // dependents are created owner-correct, and whose SET-usable membership the
 // Tier 3 privilege check proved for the connected role.
 func (t CopySwapTarget) OwnerRole() string { return t.ownerRole }
