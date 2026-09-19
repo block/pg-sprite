@@ -10,8 +10,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 )
+
+func TestInvariantViolationAliasesDBConn(t *testing.T) {
+	assert.ErrorIs(t, dbconn.ErrInvariantViolation, executor.ErrInvariantViolation)
+}
 
 func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 	tests := []struct {

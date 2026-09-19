@@ -41,6 +41,10 @@ applies):
 Each tier includes everything above it. A schema change is admitted at the tier its plan
 requires — nothing higher.
 
+The per-table session lock uses `pg_try_advisory_lock`, which is available to every role and
+requires no additional grant in any tier. Naming the holder of a contended lock reads
+`pg_stat_activity`; a role that cannot see other sessions still gets the holder's backend PID.
+
 | Tier | Capability | Required access | Preflight check |
 | --- | --- | --- | --- |
 | 0 | Connect and resolve the target | `LOGIN`; `CONNECT` on the database; `USAGE` on the target schema (directly or via membership) | `has_database_privilege`, `has_schema_privilege(..., 'USAGE')` |

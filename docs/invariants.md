@@ -199,19 +199,47 @@ the default path, per read site and per pooled session.
 
 ### LK-1 — At most one migration runs per table
 
-Migrations serialize per table via a **session-scoped advisory lock** (`pg_advisory_lock` on a
-key derived from database + table — the analog of Spirit's `GET_LOCK` `MetadataLock`), with
-Spirit's hard-won connection rules carried over:
+Migrations serialize per table via a **session-scoped advisory lock** — the analog of Spirit's
+`GET_LOCK` `MetadataLock` — with Spirit's hard-won connection rules carried over:
 
-- The lock is held on a **dedicated pool of exactly one connection**, exempt from client-side
+- The key is the two-argument form `pg_try_advisory_lock(classid, objid)`: `classid` is the
+  pg-sprite constant `TableLockClassID` (`0x70677370`, "pgsp") and `objid` is
+  `hashtext(quote_ident(schema) || '.' || quote_ident(table))`, both visible as-is in
+  `pg_locks.classid` / `pg_locks.objid`. Advisory locks are already scoped to the database;
+  the classid gives pg-sprite a keyspace of its own inside it, so an unrelated application's
+  single-argument key can never collide with a table lock. `hashtext` is a server function on
+  the quoted names, so `"a.b"."c"` and `"a"."b.c"` hash differently and no client-side hash
+  precedes the attempt: the server derives the key and attempts the lock in one statement.
+- The lock is held on a **dedicated single connection outside the pool**, exempt from client-side
   connection recycling (a recycled connection silently releases a session lock — a window in
-  which a second instance could start a concurrent migration on the same table).
-- A **keepalive** re-acquires on an interval strictly shorter than any server/idle timeout that
-  could kill the session; if the keepalive fails, the connection is torn down and re-established.
-- **Losing the lock is fail-closed:** if the lock cannot be confirmed held, the migration aborts
-  rather than continuing unprotected.
+  which a second instance could start a concurrent migration on the same table). The session
+  is prepared like a pooled one — bounded `lock_timeout`/`statement_timeout` (LK-2) and a
+  catalog-first `search_path` (CO-9) — so nothing on it is unbounded and `hashtext` cannot be
+  shadowed by a decoy.
+- The endpoint must give the client a **stable server session**: before the lock attempt the
+  same session-affinity proof the pool runs (`ProveSessionAffinity`) runs on the lock's
+  connection, and a transaction-mode pooler is refused with `ErrNoSessionAffinity`. Behind
+  such a pooler two clients can share one backend and both "hold" the lock, so nothing is
+  taken there.
+- A held lock is **never waited for**: contention is reported immediately as a typed
+  `TableLockHeldError` naming the holder (backend PID, `application_name`, connect time) and the
+  caller refuses. Because contention refuses rather than queues, a caller that needs locks on
+  several tables applies its own ordering policy; the lock does not impose one.
+- A **keepalive** confirms the session still holds the lock on an interval strictly shorter than
+  any server/idle timeout that could kill the session (`idle_session_timeout` on the target, the
+  pooler's idle limit in front of it); the default is a pg-sprite constant, not derived from any
+  server setting, so an operator sets it per target. Each confirmation is bounded to one
+  keepalive interval, so a lost lock is reported within two intervals of the loss.
+- **Losing the lock is fail-closed:** a lost session closes the lock's `Done` channel with the
+  reason and cancels every context derived through `Bind`, so the schema change aborts rather
+  than continuing unprotected. The session is never re-established behind the caller's back,
+  because a re-acquired lock would hide the window in which another instance could have started.
+  A release that finds the lock already gone reports `ErrInvariantViolation`.
 
-*Planned enforcement:* `pkg/dbconn` lock type, verified before any write and monitored throughout.
+*Enforced today:* `pkg/dbconn` `AcquireTableLock` (`TableLock` proof carried by
+`TableLockSession`; affinity refusal, two-instance refusal, keepalive-loss, and `Bind`
+cancellation tests). *Planned enforcement:* every executing mode acquires it before its first
+write and runs its writes under a `Bind`-derived context, so loss of the lock aborts the change.
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
