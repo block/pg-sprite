@@ -58,7 +58,13 @@ func (c *PullCmd) run(ctx context.Context, out io.Writer) error {
 	if err := os.MkdirAll(c.Out, 0o755); err != nil {
 		return fmt.Errorf("create output directory %s: %w", c.Out, err)
 	}
-	results := pullTables(ctx, pool, c.Schema, c.Out, tables, pullOneTable)
+	pull := tablePuller(pullOneTable)
+	if c.RowSecurity {
+		pull = func(ctx context.Context, pool *pgxpool.Pool, schema, table, path string) error {
+			return pullOneTableUsing(ctx, pool, schema, table, path, schemadiff.RenderWithRowSecurity)
+		}
+	}
+	results := pullTables(ctx, pool, c.Schema, c.Out, tables, pull)
 	if err := writePullText(out, results); err != nil {
 		return err
 	}
@@ -116,11 +122,15 @@ func (e *renderRefusal) Error() string { return e.err.Error() }
 func (e *renderRefusal) Unwrap() error { return e.err }
 
 func pullOneTable(ctx context.Context, pool *pgxpool.Pool, schema, table, path string) error {
+	return pullOneTableUsing(ctx, pool, schema, table, path, schemadiff.Render)
+}
+
+func pullOneTableUsing(ctx context.Context, pool *pgxpool.Pool, schema, table, path string, render func(schemadiff.Model) (string, error)) error {
 	model, err := schemadiff.Introspect(ctx, pool, schema, table)
 	if err != nil {
 		return fmt.Errorf("introspect %s.%s: %w", schema, table, err)
 	}
-	rendered, err := schemadiff.Render(model)
+	rendered, err := render(model)
 	if err != nil {
 		return &renderRefusal{err: err}
 	}

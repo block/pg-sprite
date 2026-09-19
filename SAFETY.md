@@ -73,6 +73,9 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   `preflight.PrivilegedRole`, `preflight.CopySwapTarget`, `dbconn.TableLock`,
   `checksum.VerifiedShadow`, and `checksum.CleanWatermark`); dangerous APIs accept only proof types —
   e.g. the planned cutover swap will accept only a `VerifiedShadow`.
+- `statement.DesiredWithRowSecurity` proves admission for rolled-back scratch
+  inspection only. It is distinct from `DesiredSchema` and must never be accepted
+  by a live executor.
 - **Put a limit on everything.** Every loop bounded, every queue bounded, every retry counted,
   every wait deadlined. An unbounded anything in a core package is a review-blocking defect.
 - **Assert the positive and the negative space; pair assertions across boundaries.** Invariant

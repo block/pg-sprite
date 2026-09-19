@@ -27,6 +27,9 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read desired schema: %w", err)
 	}
+	if c.RowSecurity {
+		return c.runRowSecurityDiff(ctx, out, string(raw))
+	}
 	ds, err := statement.ParseDesired(string(raw))
 	if err != nil {
 		return err
@@ -48,6 +51,11 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		"table_exists", report.TableExists != nil && *report.TableExists,
 		"disposition", string(report.Disposition))
 
+	return c.writeDiffReport(out, report)
+}
+
+func (c *DiffCmd) writeDiffReport(out io.Writer, report plan.Report) error {
+	var err error
 	switch {
 	case c.JSON:
 		err = writeJSON(out, report)

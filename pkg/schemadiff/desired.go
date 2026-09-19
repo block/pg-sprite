@@ -21,6 +21,10 @@ import (
 // and server-version and extension parity with the live table hold by
 // construction because it runs on the same database.
 func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, desired statement.DesiredSchema) (Model, error) {
+	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements())
+}
+
+func introspectDesiredStatements(ctx context.Context, db *pgxpool.Pool, table string, statements []statement.Statement) (Model, error) {
 	scratch, err := scratchSchemaName()
 	if err != nil {
 		return Model{}, err
@@ -48,12 +52,22 @@ func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, desired statement.
 	}
 	// Statements arrive in execution order — the CREATE TABLE first — so
 	// an index never replays before the table it targets exists.
-	for _, st := range desired.Statements() {
+	policyPath := false
+	for _, st := range statements {
+		if st.Kind() == statement.KindProvisioning && !policyPath {
+			// Helpers and types in policy expressions must be qualified. Do not
+			// accidentally bind an unqualified helper in public instead of the
+			// target schema. The target itself remains scratch-relative.
+			if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(scratch)); err != nil {
+				return Model{}, fmt.Errorf("set policy scratch search_path: %w", err)
+			}
+			policyPath = true
+		}
 		if _, err := tx.Exec(ctx, st.SQL()); err != nil {
 			return Model{}, fmt.Errorf("execute desired statement on scratch schema: %w", err)
 		}
 	}
-	m, err := introspectInTx(ctx, tx, scratch, desired.Table())
+	m, err := introspectInTx(ctx, tx, scratch, table)
 	if err != nil {
 		return Model{}, fmt.Errorf("introspect desired state: %w", err)
 	}

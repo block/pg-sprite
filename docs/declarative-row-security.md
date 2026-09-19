@@ -1,10 +1,46 @@
 # Declarative row security
 
-**Design in progress.** Table introspection records RLS settings and policies.
-Export refuses tables carrying them so a baseline cannot silently lose access
-control. Desired files still reject policy statements; policy diffing, SQL export,
-and execution are not implemented. A library caller supplying an RLS-bearing
-desired model also receives a typed refusal rather than an incomplete plan.
+You can export a table's RLS settings and policies, keep them alongside its SQL,
+and verify that the live definition still matches. Opt in with `--row-security`.
+**Applying changes to RLS is not supported yet.** A difference produces a refusal,
+not SQL to execute.
+
+## Export and compare
+
+For a schema containing one supported table, `documents`:
+
+```sh
+pg-sprite pull --url "$PG_DSN" --schema public --out schema --row-security
+```
+
+```text
+PULLED  documents -> schema/documents.sql
+Summary: 1 pulled, 0 refused, 0 errors
+```
+
+Then compare the exported definition with the same database:
+
+```sh
+pg-sprite diff --url "$PG_DSN" --schema public --desired schema/documents.sql --row-security
+```
+
+```text
+-- no changes: live table matches the desired schema
+```
+
+`pull` never overwrites an existing file. Both commands use the usual database
+connection flags. `diff` also needs permission to create a scratch schema and
+materializes the declaration in a transaction that it rolls back; it does
+not change the live table. Roles and qualified helpers must already exist.
+
+The flag selects the **complete table-local RLS definition**, even when there are
+no policies. Every file must explicitly enable or disable RLS. Removing the last
+policy therefore remains a difference; removing the setting makes the file
+invalid. `FORCE` is optional and defaults to `NO FORCE`.
+
+Without the flag, table-only behavior is unchanged: `pull` refuses RLS-bearing
+tables, and `diff` leaves access control separately managed. `fmt`, `lint`, and
+live desired-state execution do not accept the expanded format yet.
 
 ## Keep the SQL people already use
 
@@ -13,7 +49,7 @@ write. A policy is one of those rules. Supabase uses PostgreSQL's RLS, with role
 such as `authenticated` and helpers such as `auth.uid()` to identify the caller.
 We do not need a second language for these definitions.
 
-The proposed input is ordinary SQL alongside the table definition:
+The input is ordinary SQL alongside the table definition:
 
 ```sql
 CREATE TABLE documents (
@@ -35,14 +71,32 @@ CREATE POLICY "Create your documents"
     WITH CHECK ((SELECT auth.uid()) = owner_id);
 ```
 
-This is the intended format, **not a file pg-sprite accepts today**. The role,
-helper, and necessary table grants must already exist. These policies cover reads
-and inserts, not updates or deletes. Application authorization tests remain necessary.
+This file is accepted by `diff --row-security` for inspection. The role, helper,
+and necessary table grants must already exist. These policies cover reads and
+inserts, not updates or deletes. Application authorization tests remain necessary.
 
 The format follows [Supabase's RLS guide](https://supabase.com/docs/guides/database/postgres/row-level-security)
 and [policy examples](https://github.com/supabase/supabase/blob/master/examples/prompts/database-rls-policies.md).
 Their preference for separate policies per operation is authoring guidance, not
 a reason to discard PostgreSQL's `FOR ALL` or restrictive policies during inspection.
+
+## Current boundaries
+
+Round trips preserve enabled and forced settings, permissive and restrictive
+policies, commands, roles, omitted clauses, expressions, and policy comments.
+Qualified helpers such as `auth.uid()` work, including `(SELECT auth.uid())`.
+Policy expressions that directly query a table are refused until dependency
+handling can preserve their identities. Other [table export limits](pull.md#refused-table-shapes)
+still apply.
+
+An unchanged definition produces an empty plan. Any table or RLS difference in
+this mode is refused, including a missing live table. No partial plan is emitted.
+Equal definitions do not prove equal access: grants, role membership, helper
+function bodies, and authentication configuration are outside this comparison.
+
+Library callers use `RenderWithRowSecurity`, `ParseDesiredWithRowSecurity`, and
+`diffplan.PlanWithRowSecurity`. The parser returns a separate inspection-only type
+that the existing live executors cannot accept.
 
 ## Reuse the format, define the execution contract
 
@@ -55,7 +109,7 @@ still describes `migra`; do not treat those older caveats as the current engine'
 complete support matrix.
 
 pg-sprite already compares a live table with desired SQL materialized inside a
-rolled-back scratch transaction. Extend that model instead of importing another
+rolled-back scratch transaction. This work extends that model instead of importing another
 schema engine. PostgreSQL should resolve SQL and supply its catalog representation.
 Before enabling policy execution, settle these boundaries:
 
@@ -63,7 +117,7 @@ Before enabling policy execution, settle these boundaries:
   managed. A caller must opt into managing a table's complete RLS definition.
   That scope must be independent of the policies present in the file: removing
   the last policy must remain a reviewable change, not switch management off.
-  The API for declaring that scope is still open.
+  The CLI flag and `statement.DesiredWithRowSecurity` provide that explicit scope.
 - **Complete state.** Compare `ENABLE` and `FORCE` independently, plus policy name,
   command, permissive/restrictive mode, role set, `USING`, and `WITH CHECK`.
   Preserve omitted clauses and comments. Enabled RLS without policies means
@@ -91,8 +145,8 @@ this table-scoped work.
    incomplete export. Implemented here; table-only diff behavior stays intact.
 2. **Round-trip the declaration.** Admit and export SQL under explicit RLS scope;
    materialize it in scratch and prove the unchanged definition produces an empty
-   diff. Keep policy execution refused, including greenfield creation, until the
-   executor supports the full declaration.
+   diff. Implemented with `--row-security`; policy execution remains refused,
+   including greenfield creation.
 3. **Plan and execute transitions.** Add typed security changes, exact-state
    revalidation, lock budgets, atomic application, dependency handling, and reports
    suitable for users and orchestrators.
@@ -101,8 +155,10 @@ this table-scoped work.
    and interrupted transitions. Then validate hosted connection and privilege
    boundaries on a disposable project before claiming hosted support.
 
-The [inspection tests](../pkg/schemadiff/row_security_integration_test.go) use real
-PostgreSQL and readable DDL. They prove catalog fidelity and export refusal,
+The [inspection tests](../pkg/schemadiff/row_security_integration_test.go),
+[round-trip tests](../pkg/schemadiff/row_security_roundtrip_integration_test.go), and
+[Supabase auth test](../integration/supabase/row_security_test.go) use real databases
+and readable DDL. They prove catalog fidelity, round trips, and refusal boundaries,
 **not support for applying policies**. The existing PostgreSQL CI matrix and
 Supabase compatibility job both run `pkg/schemadiff`; no separate runner is needed.
 Hosted validation is not a prerequisite for the local steps, nor replaced by them.

@@ -164,8 +164,9 @@ func (c *MigrateCmd) Run() error { return c.run(context.Background(), os.Stdout)
 type PullCmd struct {
 	DBFlags `embed:""`
 
-	Schema string `help:"Schema containing the tables to export." default:"public"`
-	Out    string `help:"Directory for create-only exported .sql files; delete or move existing files before refreshing." short:"o" default:"schema" type:"path"`
+	Schema      string `help:"Schema containing the tables to export." default:"public"`
+	Out         string `help:"Directory for create-only exported .sql files; delete or move existing files before refreshing." short:"o" default:"schema" type:"path"`
+	RowSecurity bool   `help:"Include complete table-local RLS definitions for inspection; policy execution is not supported."`
 }
 
 // Run implements the pull subcommand.
@@ -179,10 +180,11 @@ type DiffCmd struct {
 	DBFlags     `embed:""`
 	OutputFlags `embed:""`
 
-	Desired string `help:"Path to the desired-state CREATE TABLE .sql file." name:"desired" type:"existingfile" required:""`
-	Schema  string `help:"Schema containing the live table." default:"public"`
-	JSON    bool   `help:"Emit the plan as JSON."`
-	SQL     bool   `help:"Print the plan as an executable SQL script instead of the diagnostic report."`
+	Desired     string `help:"Path to the desired-state CREATE TABLE .sql file." name:"desired" type:"existingfile" required:""`
+	Schema      string `help:"Schema containing the live table." default:"public"`
+	JSON        bool   `help:"Emit the plan as JSON."`
+	SQL         bool   `help:"Print the plan as an executable SQL script instead of the diagnostic report."`
+	RowSecurity bool   `help:"Compare the complete RLS definition; only unchanged state is supported."`
 }
 
 // Validate rejects flag combinations with no coherent meaning: --json and

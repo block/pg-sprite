@@ -99,11 +99,13 @@ without losing meaning. Current refusals include:
 - partitioned parents (partition children are not independently exported);
 - either side of classic `INHERITS` relationships;
 - either side of a foreign-key relationship;
-- tables with RLS enabled, `FORCE ROW LEVEL SECURITY` set, or any policies, even when RLS is disabled;
+- by default, tables with RLS settings or policies; opt into complete RLS export
+  with [`--row-security`](declarative-row-security.md#export-and-compare), which still
+  refuses policies that directly query tables;
 - unlogged tables and columns with explicit collations; and
 - sequence-backed defaults that cannot be rendered as an owned `serial` form.
 
-Extension-owned tables are excluded from enumeration. Comments, storage
+Extension-owned tables are excluded from enumeration. Table/column comments, storage
 parameters, and non-table objects are outside the declarative model and are not
 exported; manage them separately. See the complete
 [declarative model boundaries](limitations.md#declarative-model-boundaries)
