@@ -3,6 +3,8 @@ package statement
 import (
 	"testing"
 
+	"google.golang.org/protobuf/types/known/structpb"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -102,4 +104,10 @@ func TestHasRowSecurityDeclarationUsesGrammar(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, present, sql)
 	}
+}
+
+func TestRelationWalkHandlesMessageMaps(t *testing.T) {
+	value, err := structpb.NewStruct(map[string]any{"nested": map[string]any{"value": "no relation"}})
+	require.NoError(t, err)
+	assert.False(t, messageReadsRelation(value.ProtoReflect()))
 }

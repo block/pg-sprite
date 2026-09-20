@@ -1,8 +1,13 @@
 package schemadiff_test
 
 import (
+	"context"
 	"fmt"
+	"strings"
 	"testing"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -204,4 +209,35 @@ func TestRowSecurityQualifiedEnumCastRoundTrips(t *testing.T) {
      USING ('active'::%[1]s.doc_status = 'active'::%[1]s.doc_status)`, schema))
 	require.NoError(t, err)
 	roundTripRowSecurity(t, pool, schema)
+}
+
+func TestRowSecurityDoesNotBindUnqualifiedPublicHelper(t *testing.T) {
+	pool, schema := rowSecurityTable(t)
+	name := pgx.Identifier{"rls_helper_" + schema}.Sanitize()
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE FUNCTION public.%s()
+     RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT true'`, name))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP FUNCTION public."+name+"()")
+		assert.NoError(t, err)
+	})
+	sql := fmt.Sprintf(`CREATE TABLE documents (
+     id bigint PRIMARY KEY,
+     owner_id bigint NOT NULL
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (%s());`, name)
+	desired, err := statement.ParseDesiredWithRowSecurity(sql)
+	require.NoError(t, err)
+	_, err = schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, desired)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "42883", pgErr.Code, "unqualified public helper must not resolve")
+	// The same existing helper resolves when the file states its identity.
+	qualified := strings.Replace(sql, "USING ("+name, "USING (public."+name, 1)
+	desired, err = statement.ParseDesiredWithRowSecurity(qualified)
+	require.NoError(t, err)
+	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, desired)
+	require.NoError(t, err)
+	require.Len(t, model.RowSecurity.Policies, 1)
 }

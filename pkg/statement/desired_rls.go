@@ -154,7 +154,15 @@ func messageReadsRelation(msg protoreflect.Message) bool {
 		if field.Kind() != protoreflect.MessageKind {
 			return true
 		}
-		if field.IsList() {
+		switch {
+		case field.IsMap():
+			if field.MapValue().Kind() == protoreflect.MessageKind {
+				value.Map().Range(func(_ protoreflect.MapKey, item protoreflect.Value) bool {
+					found = messageReadsRelation(item.Message())
+					return !found
+				})
+			}
+		case field.IsList():
 			list := value.List()
 			for i := 0; i < list.Len(); i++ {
 				if messageReadsRelation(list.Get(i).Message()) {
@@ -162,7 +170,7 @@ func messageReadsRelation(msg protoreflect.Message) bool {
 					break
 				}
 			}
-		} else {
+		default:
 			found = messageReadsRelation(value.Message())
 		}
 		return !found
