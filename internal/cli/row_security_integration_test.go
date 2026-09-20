@@ -87,9 +87,18 @@ func TestDiffRowSecurityRefusesDisableWithoutChangingLiveState(t *testing.T) {
      id bigint PRIMARY KEY
  );
  ALTER TABLE documents DISABLE ROW LEVEL SECURITY;`), 0600))
-	cmd := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file}
+	cmd := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file, JSON: true}
 	var out strings.Builder
 	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+	var envelope struct {
+		verdict.Verdict
+		Review schemadiff.RowSecurityReview `json:"row_security_review"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &envelope))
+	assert.Equal(t, verdict.OutcomeRefused, envelope.Outcome)
+	assert.Equal(t, 1, envelope.Review.Version)
+	require.Len(t, envelope.Review.Changes, 1)
+	assert.Equal(t, schemadiff.AccessMayWiden, envelope.Review.Changes[0].Impact)
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
 	assert.True(t, after.RowSecurity.Enabled)
