@@ -22,6 +22,8 @@ the reviewer's distillation.
   package-private constructors — never a
   raw string or bool that a caller could fabricate. Core code re-verifies its own
   preconditions; it never trusts that the planner or CLI checked.
+- `statement.DesiredWithRowSecurity` is inspection-only: keep it separate from
+  `DesiredSchema` and refuse it at every live execution boundary.
 - Invariant enforcement points carry a `// INV: <id>` comment matching
   [docs/invariants.md](../../docs/invariants.md); violations use `ErrInvariantViolation`
   naming the ID and abort fail-closed — never a warning, never retried.

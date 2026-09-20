@@ -73,6 +73,9 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   `preflight.PrivilegedRole`, `preflight.CopySwapTarget`, `dbconn.TableLock`,
   `checksum.VerifiedShadow`, and `checksum.CleanWatermark`); dangerous APIs accept only proof types —
   e.g. the planned cutover swap will accept only a `VerifiedShadow`.
+- `statement.DesiredWithRowSecurity` proves admission for rolled-back scratch
+  inspection only. It is distinct from `DesiredSchema` and must never be accepted
+  by a live executor.
 - **Put a limit on everything.** Every loop bounded, every queue bounded, every retry counted,
   every wait deadlined. An unbounded anything in a core package is a review-blocking defect.
 - **Assert the positive and the negative space; pair assertions across boundaries.** Invariant
@@ -93,6 +96,10 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   stdlib. Adding one requires a recorded decision (see the rubric in
   [docs/tcb-model.md](docs/tcb-model.md) — copy small things, take pinned dependencies only
   for load-bearing expertise).
+  Recorded decision: `google.golang.org/protobuf/reflect/protoreflect` is used
+  by the parse boundary to traverse the parser's generated AST and reject relation
+  dependencies in policy expressions. It is the parser's existing pinned runtime,
+  now a direct dependency; it does not interpret SQL or authorize execution.
   Recorded decision: `jackc/pglogrepl` (pinned) is admitted to the core for `pkg/decode` because
   the streaming-replication protocol and `pgoutput` message decoding are load-bearing
   wire-protocol expertise, under the same rubric as the parser; it is confined to `pkg/decode`
