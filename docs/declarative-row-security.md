@@ -37,8 +37,10 @@ not change the live table. Roles and qualified helpers must already exist.
 An explicit `ENABLE` or `DISABLE ROW LEVEL SECURITY` statement declares the
 **complete table-local RLS definition**, even when there are no policies. A file
 that includes policies must include that setting too. Removing the last
-policy therefore remains a difference; removing the setting makes the file
-invalid. `FORCE` is optional and defaults to `NO FORCE`.
+policy therefore remains a difference while the setting stays in the file.
+Policies without that setting are invalid. Removing every RLS declaration returns
+to table-only scope; it does not request deletion of live policies. `FORCE` is
+optional and defaults to `NO FORCE`.
 
 Files without RLS declarations keep their table-only behavior: `diff` leaves
 access control separately managed. Export preserves policies even when RLS is
