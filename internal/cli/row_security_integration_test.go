@@ -70,7 +70,7 @@ func TestDiffRowSecurityRefusesMissingTableWithoutCreatingIt(t *testing.T) {
 	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
 	_, err = schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.ErrorIs(t, err, schemadiff.ErrTableNotFound)
-	assert.Empty(t, out.String(), "no partial executable report")
+	assert.NotEmpty(t, out.String(), "refusals must be visible to operators")
 }
 
 func TestDiffRowSecurityRefusesDisableWithoutChangingLiveState(t *testing.T) {
@@ -127,7 +127,7 @@ func TestDiffPolicyWithoutExplicitSettingIsRefused(t *testing.T) {
 	var out strings.Builder
 	err := cmd.run(t.Context(), &out)
 	require.ErrorIs(t, err, statement.ErrRowSecurityDeclaration)
-	require.ErrorIs(t, err, verdict.ErrRefused)
+	require.NotErrorIs(t, err, verdict.ErrRefused)
 	assert.Empty(t, out.String())
 }
 

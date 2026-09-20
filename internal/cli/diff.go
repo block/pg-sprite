@@ -3,7 +3,6 @@ package cli
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,8 +28,11 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		return fmt.Errorf("read desired schema: %w", err)
 	}
 	ds, err := statement.ParseDesired(string(raw))
-	if errors.Is(err, statement.ErrDisallowedStatement) {
-		return c.runRowSecurityDiff(ctx, out, string(raw))
+	if err != nil {
+		carriesRLS, detectErr := statement.HasRowSecurityDeclaration(string(raw))
+		if detectErr == nil && carriesRLS {
+			return c.runRowSecurityDiff(ctx, out, string(raw))
+		}
 	}
 	if err != nil {
 		return err

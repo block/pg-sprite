@@ -169,3 +169,33 @@ func messageReadsRelation(msg protoreflect.Message) bool {
 	})
 	return found
 }
+
+// HasRowSecurityDeclaration detects RLS syntax without admitting the file for
+// execution. Callers must still use ParseDesiredWithRowSecurity for validation.
+func HasRowSecurityDeclaration(sql string) (bool, error) {
+	tree, err := pgquery.Parse(sql)
+	if err != nil {
+		return false, fmt.Errorf("parse desired schema: %w", err)
+	}
+	for _, raw := range tree.GetStmts() {
+		node := raw.GetStmt()
+		if node.GetCreatePolicyStmt() != nil {
+			return true, nil
+		}
+		if c := node.GetCommentStmt(); c != nil {
+			if c.GetObjtype() == pganalyze.ObjectType_OBJECT_POLICY {
+				return true, nil
+			}
+		}
+		if a := node.GetAlterTableStmt(); a != nil {
+			for _, cmd := range a.GetCmds() {
+				switch cmd.GetAlterTableCmd().GetSubtype() {
+				case pganalyze.AlterTableType_AT_EnableRowSecurity, pganalyze.AlterTableType_AT_DisableRowSecurity,
+					pganalyze.AlterTableType_AT_ForceRowSecurity, pganalyze.AlterTableType_AT_NoForceRowSecurity:
+					return true, nil
+				}
+			}
+		}
+	}
+	return false, nil
+}

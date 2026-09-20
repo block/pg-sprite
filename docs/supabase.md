@@ -210,11 +210,14 @@ outcome; they do not assume every unsuccessful change rolls back completely.
 
 ## What to keep in mind
 
-- Manage RLS policies, grants and roles separately. A successful table diff
-  does not mean these security settings were compared or reproduced
+- RLS declarations can be exported and compared, but policy execution remains
+  unsupported. Table-only files do not compare access rules. Grants and roles
+  remain separately managed; see [declarative RLS](declarative-row-security.md)
 - Qualify extension types and functions outside `public`, such as
   `extensions.citext`. When pg-sprite inspects a desired schema file, it
-  uses a separate workspace with its own search path
+  uses a separate workspace with its own search path. In policy expressions,
+  qualify external types and functions even in `public`, such as
+  `public.doc_status`; the policy workspace does not search `public`
 - Desired schema files do not yet model foreign keys, including references
   to `auth.users`. Use the supported statement workflow where available;
   see [capabilities.md](capabilities.md)

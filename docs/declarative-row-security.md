@@ -89,13 +89,19 @@ a reason to discard PostgreSQL's `FOR ALL` or restrictive policies during inspec
 
 Round trips preserve enabled and forced settings, permissive and restrictive
 policies, commands, roles, omitted clauses, expressions, and policy comments.
+Qualify every external helper and type in policy expressions, including objects
+in `public`: use `public.doc_status`, not `doc_status`. Policy inspection searches
+only its scratch schema and PostgreSQL built-ins, preventing accidental bindings.
 Qualified helpers such as `auth.uid()` work, including `(SELECT auth.uid())`.
 Policy expressions that directly query a table are refused until dependency
 handling can preserve their identities. Other [table export limits](pull.md#refused-table-shapes)
 still apply.
 
 An unchanged definition produces an empty plan. Any table or RLS difference in
-this mode is refused, including a missing live table. No partial plan is emitted.
+this mode is refused, including a missing live table. No partial plan is emitted. Admission errors exit 1 with a diagnostic; unsupported
+RLS comparisons exit 2 with a refusal verdict. `--json` returns a verdict with
+`outcome`, `reason`, and `detail` for those refusals; successful comparisons retain
+the normal plan format. `--sql` writes the refusal as a SQL comment.
 Equal definitions do not prove equal access: grants, role membership, helper
 function bodies, and authentication configuration are outside this comparison.
 

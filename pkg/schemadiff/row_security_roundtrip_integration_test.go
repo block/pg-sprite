@@ -194,3 +194,14 @@ func TestRowSecurityChangedPredicateIsRefused(t *testing.T) {
 	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
 	assert.Empty(t, changes, "a wider predicate must not become an empty plan")
 }
+
+func TestRowSecurityQualifiedEnumCastRoundTrips(t *testing.T) {
+	pool, schema := rowSecurityTable(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE %s.doc_status AS ENUM ('active', 'hidden')`, schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE POLICY active_documents
+     ON %[1]s.documents FOR SELECT
+     USING ('active'::%[1]s.doc_status = 'active'::%[1]s.doc_status)`, schema))
+	require.NoError(t, err)
+	roundTripRowSecurity(t, pool, schema)
+}

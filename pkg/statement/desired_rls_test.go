@@ -77,3 +77,29 @@ func TestParseDesiredWithRowSecurityRetainsExplicitDisabledScope(t *testing.T) {
 	copy[0] = Statement{}
 	assert.Equal(t, KindCreateTable, ds.Statements()[0].Kind())
 }
+
+func TestHasRowSecurityDeclarationUsesGrammar(t *testing.T) {
+	for _, sql := range []string{
+		`CREATE TABLE t (id bigint); CREATE VIEW v AS SELECT 1;`,
+		`CREATE TABLE t (id bigint); GRANT SELECT ON t TO PUBLIC;`,
+		`CREATE TABLE t (id bigint); DROP TABLE t;`,
+		`CREATE TABLE t (id bigint); ALTER TABLE t ADD COLUMN title text;`,
+		`CREATE TABLE t (title text DEFAULT 'ENABLE ROW LEVEL SECURITY');`,
+	} {
+		present, err := HasRowSecurityDeclaration(sql)
+		require.NoError(t, err)
+		assert.False(t, present, sql)
+	}
+	for _, sql := range []string{
+		`ALTER TABLE t ENABLE ROW LEVEL SECURITY;`,
+		`ALTER TABLE t DISABLE ROW LEVEL SECURITY;`,
+		`ALTER TABLE t FORCE ROW LEVEL SECURITY;`,
+		`ALTER TABLE t NO FORCE ROW LEVEL SECURITY;`,
+		`CREATE POLICY readers ON t USING (true);`,
+		`COMMENT ON POLICY readers ON t IS 'Readers';`,
+	} {
+		present, err := HasRowSecurityDeclaration(sql)
+		require.NoError(t, err)
+		assert.True(t, present, sql)
+	}
+}
