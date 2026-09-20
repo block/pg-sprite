@@ -1,7 +1,8 @@
 # Declarative row security
 
 You can export a table's RLS settings and policies, keep them alongside its SQL,
-and verify that the live definition still matches. Opt in with `--row-security`.
+and verify that the live definition still matches. `pull` includes RLS when the
+live table has settings or policies; ordinary tables get no extra SQL.
 **Applying changes to RLS is not supported yet.** A difference produces a refusal,
 not SQL to execute.
 
@@ -10,7 +11,7 @@ not SQL to execute.
 For a schema containing one supported table, `documents`:
 
 ```sh
-pg-sprite pull --url "$PG_DSN" --schema public --out schema --row-security
+pg-sprite pull --url "$PG_DSN" --schema public --out schema
 ```
 
 ```text
@@ -21,7 +22,7 @@ Summary: 1 pulled, 0 refused, 0 errors
 Then compare the exported definition with the same database:
 
 ```sh
-pg-sprite diff --url "$PG_DSN" --schema public --desired schema/documents.sql --row-security
+pg-sprite diff --url "$PG_DSN" --schema public --desired schema/documents.sql
 ```
 
 ```text
@@ -33,14 +34,16 @@ connection flags. `diff` also needs permission to create a scratch schema and
 materializes the declaration in a transaction that it rolls back; it does
 not change the live table. Roles and qualified helpers must already exist.
 
-The flag selects the **complete table-local RLS definition**, even when there are
-no policies. Every file must explicitly enable or disable RLS. Removing the last
+An explicit `ENABLE` or `DISABLE ROW LEVEL SECURITY` statement declares the
+**complete table-local RLS definition**, even when there are no policies. A file
+that includes policies must include that setting too. Removing the last
 policy therefore remains a difference; removing the setting makes the file
 invalid. `FORCE` is optional and defaults to `NO FORCE`.
 
-Without the flag, table-only behavior is unchanged: `pull` refuses RLS-bearing
-tables, and `diff` leaves access control separately managed. `fmt`, `lint`, and
-live desired-state execution do not accept the expanded format yet.
+Files without RLS declarations keep their table-only behavior: `diff` leaves
+access control separately managed. Export preserves policies even when RLS is
+disabled, and preserves enabled RLS even when there are no policies (default deny).
+`fmt`, `lint`, and live desired-state execution do not accept the expanded format yet.
 
 ## Keep the SQL people already use
 
@@ -71,7 +74,7 @@ CREATE POLICY "Create your documents"
     WITH CHECK ((SELECT auth.uid()) = owner_id);
 ```
 
-This file is accepted by `diff --row-security` for inspection. The role, helper,
+This file is accepted by `diff` for inspection. The role, helper,
 and necessary table grants must already exist. These policies cover reads and
 inserts, not updates or deletes. Application authorization tests remain necessary.
 
@@ -117,7 +120,7 @@ Before enabling policy execution, settle these boundaries:
   managed. A caller must opt into managing a table's complete RLS definition.
   That scope must be independent of the policies present in the file: removing
   the last policy must remain a reviewable change, not switch management off.
-  The CLI flag and `statement.DesiredWithRowSecurity` provide that explicit scope.
+  The SQL declaration and `statement.DesiredWithRowSecurity` provide that explicit scope.
 - **Complete state.** Compare `ENABLE` and `FORCE` independently, plus policy name,
   command, permissive/restrictive mode, role set, `USING`, and `WITH CHECK`.
   Preserve omitted clauses and comments. Enabled RLS without policies means
@@ -145,7 +148,7 @@ this table-scoped work.
    incomplete export. Implemented here; table-only diff behavior stays intact.
 2. **Round-trip the declaration.** Admit and export SQL under explicit RLS scope;
    materialize it in scratch and prove the unchanged definition produces an empty
-   diff. Implemented with `--row-security`; policy execution remains refused,
+   diff. Implemented through automatic export and SQL declarations; execution remains refused,
    including greenfield creation.
 3. **Plan and execute transitions.** Add typed security changes, exact-state
    revalidation, lock budgets, atomic application, dependency handling, and reports
