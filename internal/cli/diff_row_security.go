@@ -49,7 +49,9 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 			Table  string                       `json:"table"`
 			Review schemadiff.RowSecurityReview `json:"row_security_review"`
 		}{v, review.Schema, review.Table, review.Review}
-		if err := json.NewEncoder(out).Encode(report); err != nil {
+		encoder := json.NewEncoder(out)
+		encoder.SetIndent("", "  ")
+		if err := encoder.Encode(report); err != nil {
 			return fmt.Errorf("write RLS review: %w", err)
 		}
 	case c.JSON:
@@ -84,12 +86,4 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 		}
 	}
 	return errors.Join(verdict.ErrRefused, cause)
-}
-
-// PostgreSQL ends a line comment at either CR or LF. Normalize both before
-// prefixing every line, including untrusted identifiers and diagnostic text.
-func sqlDiagnosticComment(text string) string {
-	text = strings.ReplaceAll(text, "\r\n", "\n")
-	text = strings.ReplaceAll(text, "\r", "\n")
-	return "-- " + strings.ReplaceAll(text, "\n", "\n-- ")
 }

@@ -117,8 +117,7 @@ func writePlanText(out io.Writer, report plan.Report) error {
 		return fmt.Errorf("write plan: %w", err)
 	}
 	if tableMissing(report) {
-		if _, err := fmt.Fprintf(out, "-- table %s.%s does not exist; the plan is the full desired schema\n",
-			report.Schema, report.Table); err != nil {
+		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(fmt.Sprintf("table %s.%s does not exist; the plan is the full desired schema", report.Schema, report.Table))); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
 	}
@@ -135,16 +134,16 @@ func writePlanText(out io.Writer, report plan.Report) error {
 // copy-pasteable, and it must never carry a statement the engine refuses
 // where a reader could run it by accident.
 func writeChangeText(out io.Writer, ps plan.Statement) error {
-	if _, err := fmt.Fprintf(out, "-- %s\n", annotate(ps)); err != nil {
+	if _, err := fmt.Fprintln(out, sqlDiagnosticComment(annotate(ps))); err != nil {
 		return fmt.Errorf("write plan: %w", err)
 	}
 	if ps.Disposition == router.DispositionRefuse {
 		if ps.Cause != "" {
-			if _, err := fmt.Fprintf(out, "-- the create path refuses this statement: %s\n", ps.Cause.Description()); err != nil {
+			if _, err := fmt.Fprintln(out, sqlDiagnosticComment("the create path refuses this statement: "+ps.Cause.Description())); err != nil {
 				return fmt.Errorf("write plan: %w", err)
 			}
 		}
-		if _, err := fmt.Fprintf(out, "-- %s;\n", strings.ReplaceAll(ps.SQL, "\n", "\n-- ")); err != nil {
+		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(ps.SQL+";")); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
 		return nil
@@ -155,7 +154,7 @@ func writeChangeText(out io.Writer, ps plan.Statement) error {
 			return fmt.Errorf("write plan: %w", err)
 		}
 		for _, safer := range ps.ExecSQL {
-			if _, err := fmt.Fprintf(out, "--   %s;\n", safer); err != nil {
+			if _, err := fmt.Fprintln(out, sqlDiagnosticComment("  "+safer+";")); err != nil {
 				return fmt.Errorf("write plan: %w", err)
 			}
 		}

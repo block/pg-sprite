@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -51,4 +52,33 @@ func TestSecurityReviewSQLCommentsContainAllLineEndings(t *testing.T) {
 			require.ErrorIs(t, err, statement.ErrEmptyDesired, out.String())
 		})
 	}
+}
+
+func TestSecurityReviewDefaultTextIncludesReview(t *testing.T) {
+	before, after := true, false
+	review := &diffplan.RowSecurityReviewRequired{Schema: "public", Table: "documents", Review: schemadiff.RowSecurityReview{
+		Version: 1, TableComparisonComplete: true,
+		Changes: []schemadiff.SecurityChange{{Kind: schemadiff.SecurityEnabled, BeforeSetting: &before, AfterSetting: &after, Impact: schemadiff.AccessMayWiden}},
+	}}
+	var out strings.Builder
+	cmd := &DiffCmd{}
+	require.ErrorIs(t, cmd.writeRowSecurityRefusal(&out, review), verdict.ErrRefused)
+	assert.Contains(t, out.String(), "public.documents — row security review")
+	assert.Contains(t, out.String(), "enabled: true → false [may-widen]")
+	assert.Contains(t, out.String(), "row security review required")
+}
+
+func TestSecurityReviewJSONIsIndented(t *testing.T) {
+	review := &diffplan.RowSecurityReviewRequired{Schema: "public", Table: "documents", Review: schemadiff.RowSecurityReview{
+		Version: 1, Changes: []schemadiff.SecurityChange{}, TableComparisonComplete: true,
+	}}
+	var out strings.Builder
+	cmd := &DiffCmd{JSON: true}
+	require.ErrorIs(t, cmd.writeRowSecurityRefusal(&out, review), verdict.ErrRefused)
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &decoded))
+	expected, err := json.MarshalIndent(json.RawMessage(out.String()), "", "  ")
+	require.NoError(t, err)
+	assert.Equal(t, string(expected)+"\n", out.String())
+	assert.Equal(t, "refused", decoded["outcome"])
 }
