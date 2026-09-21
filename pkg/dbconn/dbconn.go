@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -363,7 +362,7 @@ func configureTLS(pc *pgxpool.Config, cfg Config) error {
 		}
 		pc.ConnConfig.TLSConfig = tlsCfg
 	case IsRDSHost(pc.ConnConfig.Host):
-		if strings.Contains(cfg.URL, "sslmode=") {
+		if dsnNamesSSLMode(cfg.URL) {
 			// The caller chose an sslmode; honor it — but when verification
 			// was requested without a root bundle, supply the embedded RDS
 			// roots, which are not in system trust stores.

@@ -14,15 +14,34 @@ import (
 //go:embed rdsGlobalBundle.pem
 var rdsGlobalBundle []byte
 
-// rdsHostPattern matches Amazon RDS/Aurora hostnames with an optional :port
-// suffix. The leading `\.` ensures only legitimate *.rds.amazonaws.com
-// subdomains match, so a hostname like fake-rds.amazonaws.com cannot spoof
-// its way into the auto-TLS path.
-var rdsHostPattern = regexp.MustCompile(`\.rds\.amazonaws\.com(:\d+)?$`)
+// rdsHostPattern matches Amazon RDS/Aurora hostnames in the commercial `aws`
+// partition with an optional :port suffix. The leading `\.` ensures only
+// legitimate *.rds.amazonaws.com subdomains match, so a hostname like
+// fake-rds.amazonaws.com cannot spoof its way into the auto-TLS path.
+//
+// The match is case-insensitive because DNS is: nothing normalizes the host
+// before it gets here, so an endpoint copied uppercased from a console or a
+// config file is the same server and must get the same TLS.
+var rdsHostPattern = regexp.MustCompile(`(?i)\.rds\.amazonaws\.com(:\d+)?$`)
 
-// IsRDSHost reports whether host is an Amazon RDS/Aurora endpoint.
+// govCloudHostPattern matches RDS/Aurora endpoints in the AWS GovCloud
+// partition, which rdsHostPattern would otherwise accept: unlike China
+// (`amazonaws.com.cn`), GovCloud endpoints are ordinary
+// `<name>.<hash>.us-gov-<region>.rds.amazonaws.com` names that the suffix
+// check alone cannot tell apart from commercial ones.
+var govCloudHostPattern = regexp.MustCompile(`(?i)\.us-gov-[a-z]+-\d+\.rds\.amazonaws\.com(:\d+)?$`)
+
+// IsRDSHost reports whether host is an Amazon RDS/Aurora endpoint in the
+// commercial `aws` partition, with or without a port. Such hosts get TLS
+// automatically against the embedded RDS global bundle (see configureTLS).
+//
+// GovCloud and China endpoints report false: the embedded bundle carries no
+// roots for those partitions, so treating them as RDS would replace a
+// connection that works today with one that fails certificate verification
+// for a reason the x509 error does not name. Reach them with an explicit CA
+// bundle (Config.CACertPath) holding that partition's roots.
 func IsRDSHost(host string) bool {
-	return rdsHostPattern.MatchString(host)
+	return rdsHostPattern.MatchString(host) && !govCloudHostPattern.MatchString(host)
 }
 
 // rdsRootPool returns a cert pool holding the embedded RDS global bundle.
