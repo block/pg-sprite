@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -50,8 +49,11 @@ type Config struct {
 	// DefaultConnectTimeout.
 	ConnectTimeout time.Duration
 	// CACertPath, when set, enables verify-full TLS using the given CA bundle
-	// (e.g. the RDS/Aurora global bundle). Unset, RDS/Aurora endpoints are
-	// auto-verified with the embedded bundle (see rds.go).
+	// (e.g. the RDS/Aurora global bundle). Unset, RDS/Aurora endpoints in
+	// the partitions the embedded bundle covers are auto-verified with it
+	// (see rds.go); an RDS/Aurora endpoint in any other partition (GovCloud)
+	// refuses to open with ErrRDSBundleDoesNotCoverHost unless its
+	// connection string selects an sslmode that needs no roots.
 	CACertPath string
 
 	// Pool sizing and lifecycle. Zero values keep pgxpool's defaults.
@@ -354,29 +356,63 @@ func caTLSConfig(caCertPath, host string) (*tls.Config, error) {
 // otherwise RDS/Aurora endpoints get TLS automatically via the embedded RDS
 // global bundle (see rds.go); everything else keeps whatever the connection
 // string asked for.
+//
+// An RDS/Aurora endpoint the embedded bundle cannot verify never falls
+// through to pgx's default, which is encrypted-but-unauthenticated with a
+// plaintext fallback: without an sslmode of its own, or with one that asks
+// for verification the bundle cannot supply, it is an error naming the
+// remedy. An explicit sslmode that needs no roots is honored on every
+// RDS/Aurora endpoint alike.
 func configureTLS(pc *pgxpool.Config, cfg Config) error {
+	host := pc.ConnConfig.Host
 	switch {
 	case cfg.CACertPath != "":
-		tlsCfg, err := caTLSConfig(cfg.CACertPath, pc.ConnConfig.Host)
+		tlsCfg, err := caTLSConfig(cfg.CACertPath, host)
 		if err != nil {
 			return err
 		}
 		pc.ConnConfig.TLSConfig = tlsCfg
-	case IsRDSHost(pc.ConnConfig.Host):
-		if strings.Contains(cfg.URL, "sslmode=") {
-			// The caller chose an sslmode; honor it — but when verification
-			// was requested without a root bundle, supply the embedded RDS
-			// roots, which are not in system trust stores.
-			if tc := pc.ConnConfig.TLSConfig; tc != nil && !tc.InsecureSkipVerify && tc.RootCAs == nil {
-				tc.RootCAs = rdsRootPool()
-			}
-		} else {
-			// No explicit sslmode on an RDS/Aurora endpoint: auto-enable
-			// verify-full with the embedded bundle, and drop the plaintext
-			// fallbacks the default sslmode would otherwise allow.
-			pc.ConnConfig.TLSConfig = rdsTLSConfig(pc.ConnConfig.Host)
-			pc.ConnConfig.Fallbacks = nil
+	case !IsRDSHost(host):
+		// Not a managed endpoint: the connection string's choice stands.
+	case dsnNamesSSLMode(cfg.URL):
+		// The caller chose an sslmode; honor it — but when verification
+		// was requested without a root bundle, supply the embedded RDS
+		// roots, which are not in system trust stores.
+		if !requestsVerificationWithoutRoots(pc.ConnConfig.TLSConfig) {
+			return nil
 		}
+		if !RDSBundleCovers(host) {
+			return uncoveredRDSHostError(host)
+		}
+		pc.ConnConfig.TLSConfig.RootCAs = rdsRootPool()
+	case !RDSBundleCovers(host):
+		return uncoveredRDSHostError(host)
+	default:
+		// No explicit sslmode on an RDS/Aurora endpoint: auto-enable
+		// verify-full with the embedded bundle, and drop the plaintext
+		// fallbacks the default sslmode would otherwise allow.
+		pc.ConnConfig.TLSConfig = rdsTLSConfig(host)
+		pc.ConnConfig.Fallbacks = nil
 	}
 	return nil
+}
+
+// requestsVerificationWithoutRoots reports whether a parsed TLS config asks
+// the TLS stack to verify the server certificate (sslmode=verify-full) but
+// carries no roots to verify against (no sslrootcert). pgx implements
+// verify-ca through its own peer-certificate callback with verification
+// nominally skipped, so that mode is left to it.
+func requestsVerificationWithoutRoots(tc *tls.Config) bool {
+	if tc == nil || tc.InsecureSkipVerify {
+		return false
+	}
+	return tc.RootCAs == nil
+}
+
+// uncoveredRDSHostError names the endpoint the embedded bundle cannot verify
+// and the two ways to supply roots for its partition.
+func uncoveredRDSHostError(host string) error {
+	return fmt.Errorf("configure TLS for %s: %w; set CACertPath to that partition's RDS CA bundle, "+
+		"or pass sslrootcert with sslmode=verify-full in the connection string",
+		host, ErrRDSBundleDoesNotCoverHost)
 }
