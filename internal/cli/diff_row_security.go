@@ -66,11 +66,11 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 			if err := writeRowSecurityReview(&text, review); err != nil {
 				return err
 			}
-			if _, err := fmt.Fprintln(out, "-- "+strings.ReplaceAll(strings.TrimSuffix(text.String(), "\n"), "\n", "\n-- ")); err != nil {
+			if _, err := fmt.Fprintln(out, sqlDiagnosticComment(strings.TrimSuffix(text.String(), "\n"))); err != nil {
 				return fmt.Errorf("write RLS review: %w", err)
 			}
 		}
-		if _, err := fmt.Fprintln(out, "-- refused: "+strings.ReplaceAll(cause.Error(), "\n", "\n-- ")); err != nil {
+		if _, err := fmt.Fprintln(out, sqlDiagnosticComment("refused: "+cause.Error())); err != nil {
 			return fmt.Errorf("write RLS refusal: %w", err)
 		}
 	default:
@@ -84,4 +84,12 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 		}
 	}
 	return errors.Join(verdict.ErrRefused, cause)
+}
+
+// PostgreSQL ends a line comment at either CR or LF. Normalize both before
+// prefixing every line, including untrusted identifiers and diagnostic text.
+func sqlDiagnosticComment(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return "-- " + strings.ReplaceAll(text, "\n", "\n-- ")
 }
