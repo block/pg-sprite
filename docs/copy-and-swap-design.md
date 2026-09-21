@@ -124,7 +124,9 @@ never-advanced sequence and would turn the strict `setval` into a silent no-op. 
 source (`is_called = false`) therefore leaves the new sequence at the same not-yet-issued start
 value rather than skipping it, and no sequence value is ever spliced into SQL text. Discovery
 uses `pg_get_serial_sequence` and verifies the corresponding `pg_depend` ownership edge. The old
-identity sequence is dropped with the old table.
+identity sequence is dropped with the old table. A change that drops an identity column removes
+it from the handoff: the shadow has no column to carry the default, so the proof lists only the
+identity columns the shadow kept, and that sequence too ends with the old table.
 
 The shared counter puts a dependency edge in the direction an operator does not expect: the
 shadow's default depends on the *source's* sequence. `DROP TABLE <source>` therefore fails

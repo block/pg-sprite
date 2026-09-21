@@ -2,6 +2,7 @@ package schemachange_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -67,6 +68,37 @@ func TestShadowOperationsRefuseALockForAnotherTable(t *testing.T) {
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
 }
 
+// A caller that cancels its own context, with a cause of its own choosing,
+// gets that cancellation back: the lock session still holds the table, so
+// no operation reports a lock loss that did not happen.
+func TestShadowOperationsReportACallerCancellationAsTheCallersOwn(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.widgets (
+			id bigint PRIMARY KEY,
+			qty integer NOT NULL
+		)`)
+	lock := f.lock(t, "widgets")
+	target := f.prove(t, "widgets")
+	alter := f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`)
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cancel(errors.New("operator aborted the change"))
+
+	_, err := schemachange.BuildShadow(ctx, f.pool, lock, target, alter, schemachange.Options{})
+	assert.ErrorIs(t, err, context.Canceled, "build")
+	assert.NotErrorIs(t, err, schemachange.ErrInvariantViolation, "build")
+
+	err = schemachange.DropShadow(ctx, f.pool, lock, target, schemachange.Options{})
+	assert.ErrorIs(t, err, context.Canceled, "drop")
+	assert.NotErrorIs(t, err, schemachange.ErrInvariantViolation, "drop")
+
+	_, err = schemachange.InspectShadow(ctx, f.pool, lock, target, schemachange.Options{})
+	assert.ErrorIs(t, err, context.Canceled, "inspect")
+	assert.NotErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
+
+	assert.NoError(t, lock.Err(), "the lock session held the table throughout")
+}
+
 // The build transaction confirms from its own connection that the lock
 // session's backend still holds the table. A lock session whose backend
 // is already gone — before its keepalive has noticed — is refused at that
@@ -80,11 +112,48 @@ func TestBuildShadowRefusesWhenTheLockSessionIsGone(t *testing.T) {
 		)`)
 	target := f.prove(t, "widgets")
 	alter := f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`)
+	lock := f.goneLock(t, "widgets")
 
-	// The default keepalive is long enough that the session still believes
-	// it holds the lock when the build starts; the cleanup waits for the
-	// session to notice on its own before releasing.
-	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, "widgets")
+	_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")), "a refused build creates nothing")
+}
+
+// Drop and inspect make the same in-transaction confirmation as the build:
+// with the lock session's backend gone, neither trusts the session, the
+// shadow an earlier build left is neither dropped nor reported as a proof.
+func TestDropAndInspectShadowRefuseWhenTheLockSessionIsGone(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.widgets (
+			id bigint PRIMARY KEY,
+			qty integer NOT NULL
+		)`)
+	target := f.prove(t, "widgets")
+	buildLock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, "widgets")
+	require.NoError(t, err)
+	_, err = schemachange.BuildShadow(t.Context(), f.pool, buildLock, target, f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	require.NoError(t, err)
+	require.NoError(t, buildLock.Release(t.Context()))
+	shadow := schemachange.ShadowName(f.schema, "widgets")
+	lock := f.goneLock(t, "widgets")
+
+	err = schemachange.DropShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "drop")
+	assert.True(t, f.relationExists(t, shadow), "a refused drop removes nothing")
+
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
+}
+
+// goneLock acquires the table lock and then terminates the session's
+// backend, so the server no longer grants the lock while the session still
+// believes it holds it: the default keepalive is long enough that only an
+// in-transaction confirmation can catch the loss. The cleanup waits for the
+// session to notice on its own before releasing.
+func (f shadowFixture) goneLock(t *testing.T, table string) *dbconn.TableLockSession {
+	t.Helper()
+	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, table)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		const lockLossDeadline = 30 * time.Second
@@ -97,10 +166,7 @@ func TestBuildShadowRefusesWhenTheLockSessionIsGone(t *testing.T) {
 	})
 	f.terminateBackend(t, lock.BackendPID())
 	require.NoError(t, lock.Err(), "the keepalive has not yet noticed the loss; the in-transaction check must")
-
-	_, err = schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
-	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
-	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")), "a refused build creates nothing")
+	return lock
 }
 
 // A build runs under the lock session's Bind context: losing the lock while

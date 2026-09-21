@@ -166,7 +166,7 @@ func BuildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	defer stop()
 	built, err := buildShadow(ctx, pool, lock, target, shadow, retargeted, opts)
 	if err != nil {
-		return BuiltShadow{}, lockLossCause(ctx, err)
+		return BuiltShadow{}, lockLossCause(lock, err)
 	}
 	return built, nil
 }
@@ -243,8 +243,9 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 }
 
 // newBuiltShadow assembles the proof from what a build or an inspection read
-// inside its transaction; the fingerprints and copy columns are derived from
-// the two models so the same catalog state always yields the same proof.
+// inside its transaction; the fingerprints, copy columns, and identity
+// handoffs are derived from the two models so the same catalog state always
+// yields the same proof.
 func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, shadowOID uint32, sourceModel, targetModel schemadiff.Model, identities []IdentityColumn, fidelity FidelitySnapshot) (BuiltShadow, error) {
 	sourceFingerprint, err := fingerprint(sourceModel)
 	if err != nil {
@@ -262,7 +263,7 @@ func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, s
 		shadowOID:         shadowOID,
 		sourceFingerprint: sourceFingerprint,
 		targetFingerprint: targetFingerprint,
-		identities:        identities,
+		identities:        handoffIdentities(identities, targetModel),
 		fidelity:          fidelity,
 		copyColumns:       copyColumns(sourceModel, targetModel),
 	}, nil

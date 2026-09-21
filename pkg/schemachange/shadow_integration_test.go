@@ -37,6 +37,19 @@ func newShadowFixture(t *testing.T) shadowFixture {
 	return shadowFixture{cfg: cfg, pool: pool, schema: testutil.NewSchema(t, pool)}
 }
 
+// newShadowFixtureWithRole is newShadowFixture plus one throwaway NOLOGIN
+// role, created before the schema so that a relation the test leaves in
+// the role's ownership is dropped with the schema before the role is.
+func newShadowFixtureWithRole(t *testing.T) (shadowFixture, string) {
+	t.Helper()
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	role := testutil.NewRole(t, pool, "NOLOGIN")
+	return shadowFixture{cfg: cfg, pool: pool, schema: testutil.NewSchema(t, pool)}, role
+}
+
 // lock acquires the per-table lock every shadow operation requires and
 // releases it when the test ends.
 func (f shadowFixture) lock(t *testing.T, table string, options ...dbconn.TableLockOption) *dbconn.TableLockSession {

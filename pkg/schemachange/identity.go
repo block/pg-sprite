@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/block/pg-sprite/pkg/schemadiff"
 )
 
 // IdentityColumn records one source identity column and the sequence behind
@@ -44,6 +46,25 @@ type SequenceOptions struct {
 	Cache int64
 	// Cycle reports CYCLE.
 	Cycle bool
+}
+
+// handoffIdentities keeps the source identity columns that still exist on
+// the shadow after the schema change, in source order. A change that drops
+// an identity column leaves the shadow nothing to hand the sequence to: the
+// column is not part of the proof, and the sequence ends with the old table
+// at cutover.
+func handoffIdentities(identities []IdentityColumn, shadow schemadiff.Model) []IdentityColumn {
+	onShadow := make(map[string]bool, len(shadow.Columns))
+	for _, c := range shadow.Columns {
+		onShadow[c.Name] = true
+	}
+	kept := make([]IdentityColumn, 0, len(identities))
+	for _, id := range identities {
+		if onShadow[id.Column] {
+			kept = append(kept, id)
+		}
+	}
+	return kept
 }
 
 // readIdentityColumns lists the table's identity columns with their

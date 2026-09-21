@@ -2,7 +2,6 @@ package schemachange
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -55,18 +54,17 @@ func confirmTableLock(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSess
 	return nil
 }
 
-// lockLossCause reports the table-lock loss behind a failed statement when
-// the Bind-derived context was cancelled for that reason; otherwise it
-// returns err unchanged. A statement cancelled by lock loss surfaces as an
-// invariant violation naming the loss rather than as a bare context error.
-func lockLossCause(ctx context.Context, err error) error {
-	if ctx.Err() == nil {
-		return err
-	}
-	cause := context.Cause(ctx)
-	if errors.Is(cause, ctx.Err()) {
+// lockLossCause reports the table-lock loss behind a failed operation: when
+// the session has recorded loss, the failure is an invariant violation
+// naming that loss, whatever statement error the cancelled Bind context
+// produced. A session that still holds the lock returns err unchanged, so a
+// caller's own cancellation — with whatever cause it chose — is never
+// mistaken for a lock loss that did not happen.
+func lockLossCause(lock *dbconn.TableLockSession, err error) error {
+	lost := lock.Err()
+	if lost == nil {
 		return err
 	}
 	// INV: LK-1
-	return fmt.Errorf("%w: LK-1: table lock lost during shadow operation: %w (%w)", ErrInvariantViolation, cause, err)
+	return fmt.Errorf("%w: LK-1: table lock lost during shadow operation: %w (%w)", ErrInvariantViolation, lost, err)
 }

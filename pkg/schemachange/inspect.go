@@ -24,10 +24,10 @@ var ErrShadowNotFound = errors.New("shadow table not found")
 // shadow, since the gated statement is not recoverable from the catalog.
 // What the catalog can prove, it proves here: the source still has the
 // proven shape (ST-6), the shadow is a table owned by the source's owner
-// (ST-5), and every source identity column still draws its default from the
-// source sequence on the shadow (D5) — a shadow whose default was stripped
-// would silently insert nulls into its key. A missing shadow is
-// ErrShadowNotFound.
+// (ST-5), and every source identity column the change kept on the shadow
+// still draws its default from the source sequence there (D5) — a shadow
+// whose default was stripped would silently insert nulls into its key. A
+// missing shadow is ErrShadowNotFound.
 func InspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, opts Options) (BuiltShadow, error) {
 	if err := opts.validate(); err != nil {
 		return BuiltShadow{}, err
@@ -42,7 +42,7 @@ func InspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 	defer stop()
 	built, err := inspectShadow(ctx, pool, lock, target, opts)
 	if err != nil {
-		return BuiltShadow{}, lockLossCause(ctx, err)
+		return BuiltShadow{}, lockLossCause(lock, err)
 	}
 	return built, nil
 }
@@ -81,13 +81,6 @@ func inspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 	if err != nil {
 		return BuiltShadow{}, err
 	}
-	identities, err := readIdentityColumns(ctx, tx, oid)
-	if err != nil {
-		return BuiltShadow{}, err
-	}
-	if err := verifyIdentityDefaults(ctx, tx, shadowOID, identities); err != nil {
-		return BuiltShadow{}, err
-	}
 	sourceModel, err := schemadiff.IntrospectTx(ctx, tx, target.Schema(), target.Table())
 	if err != nil {
 		return BuiltShadow{}, fmt.Errorf("introspect source %s.%s: %w", target.Schema(), target.Table(), err)
@@ -95,6 +88,17 @@ func inspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 	targetModel, err := schemadiff.IntrospectTx(ctx, tx, target.Schema(), shadow)
 	if err != nil {
 		return BuiltShadow{}, fmt.Errorf("introspect shadow %s.%s: %w", target.Schema(), shadow, err)
+	}
+	identities, err := readIdentityColumns(ctx, tx, oid)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
+	// Only the identity columns the change kept on the shadow carry a
+	// handoff; one the change dropped has no default to verify, and the
+	// fingerprint comparison the caller makes is what tells a dropped
+	// column apart from a tampered shadow.
+	if err := verifyIdentityDefaults(ctx, tx, shadowOID, handoffIdentities(identities, targetModel)); err != nil {
+		return BuiltShadow{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return BuiltShadow{}, fmt.Errorf("commit shadow inspection: %w", err)

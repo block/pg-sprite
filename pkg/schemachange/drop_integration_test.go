@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
 
@@ -59,13 +58,12 @@ func TestDropShadowReportsAMissingShadow(t *testing.T) {
 // not this engine's shadow: the drop refuses it and leaves it in place
 // rather than destroying someone else's relation.
 func TestDropShadowRefusesARelationAnotherRoleOwns(t *testing.T) {
-	f := newShadowFixture(t)
+	f, other := newShadowFixtureWithRole(t)
 	f.exec(t, `
 		CREATE TABLE %s.widgets (
 			id bigint PRIMARY KEY
 		)`)
 	shadow := schemachange.ShadowName(f.schema, "widgets")
-	other := testutil.NewRole(t, f.pool, "NOLOGIN")
 	f.exec(t, fmt.Sprintf(`CREATE TABLE %%s.%s (id bigint)`, pgx.Identifier{shadow}.Sanitize()))
 	f.exec(t, fmt.Sprintf(`ALTER TABLE %%s.%s OWNER TO %s`, pgx.Identifier{shadow}.Sanitize(), pgx.Identifier{other}.Sanitize()))
 

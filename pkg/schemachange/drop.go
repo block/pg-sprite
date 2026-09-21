@@ -33,7 +33,7 @@ func DropShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockS
 	ctx, stop := lock.Bind(ctx)
 	defer stop()
 	if err := dropShadow(ctx, pool, lock, target, opts); err != nil {
-		return lockLossCause(ctx, err)
+		return lockLossCause(lock, err)
 	}
 	return nil
 }
