@@ -97,7 +97,7 @@ func TestDiffRowSecurityRefusesDisableWithoutChangingLiveState(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &envelope))
 	assert.Equal(t, verdict.OutcomeRefused, envelope.Outcome)
-	assert.Equal(t, 1, envelope.Review.Version)
+	assert.Equal(t, 2, envelope.Review.Version)
 	require.Len(t, envelope.Review.Changes, 1)
 	assert.Equal(t, schemadiff.AccessMayWiden, envelope.Review.Changes[0].Impact)
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")

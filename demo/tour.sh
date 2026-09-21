@@ -280,10 +280,18 @@ review_rls() {
         out=$("$PGS" diff --url "$PG_DSN" --desired desired/users-rls.sql --schema public --json) || status=$?
         assert_eq "RLS review exit" 2 "$status"
         assert_eq "RLS review outcome" refused "$(jq -r '.outcome' <<<"$out")"
-        assert_eq "RLS review version" 1 "$(jq -r '.row_security_review.version' <<<"$out")"
+        assert_eq "RLS review version" 2 "$(jq -r '.row_security_review.version' <<<"$out")"
         assert_eq "RLS review changes" 2 "$(jq '.row_security_review.changes | length' <<<"$out")"
         assert_eq "RLS policy impact" may-widen "$(jq -r '.row_security_review.changes[1].access_impact' <<<"$out")"
         assert_eq "RLS table unchanged" false "$(jq '.row_security_review.table_changed' <<<"$out")"
+        local fingerprint
+        fingerprint=$(jq -r '.row_security_review.fingerprint' <<<"$out")
+        status=0
+        out=$("$PGS" diff --url "$PG_DSN" --desired desired/users-rls.sql --schema public --expect-rls-review "$fingerprint" --json) || status=$?
+        assert_eq "RLS freshness exit" 2 "$status"
+        assert_eq "RLS freshness match" true "$(jq '.review_matches' <<<"$out")"
+        assert_eq "RLS freshness identity" "$fingerprint" "$(jq -r '.row_security_review.fingerprint' <<<"$out")"
+
     else
         "$PGS" diff --url "$PG_DSN" --desired desired/users-rls.sql --schema public || echo "(exit $?)"
     fi

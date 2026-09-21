@@ -519,7 +519,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "Access control changes remain with provisioning. Export includes RLS when present; explicit RLS declarations support comparison and review-only deltas with advisory access warnings. Plain table files leave access control separately managed. RLS execution remains unsupported. See the [workflow and roadmap](declarative-row-security.md). See [engine-role.md](engine-role.md) for the engine's own role"
+    reason_notes: "Access control changes remain with provisioning. Export includes RLS when present; explicit RLS declarations support comparison and review-only deltas with advisory access warnings, captured-definition fingerprints, and fresh stale-review checks. Plain table files leave access control separately managed. RLS execution remains unsupported. See the [workflow and roadmap](declarative-row-security.md). See [engine-role.md](engine-role.md) for the engine's own role"
   - id: standalone-sequences
     area: "types_and_non_table_objects"
     operation: "Standalone sequences"

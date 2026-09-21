@@ -12,6 +12,12 @@ import (
 func writeRowSecurityReview(out io.Writer, review *diffplan.RowSecurityReviewRequired) error {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%s.%s — row security review\n", review.Schema, review.Table)
+	if review.Review.Fingerprint != "" {
+		fmt.Fprintf(&b, "Review fingerprint: %s\n", review.Review.Fingerprint)
+	}
+	if review.ReviewMatches != nil {
+		fmt.Fprintf(&b, "Reviewed definitions match: %t (execution remains unsupported)\n", *review.ReviewMatches)
+	}
 	for _, change := range review.Review.Changes {
 		if change.BeforeSetting != nil {
 			fmt.Fprintf(&b, "  %s: %t → %t [%s]\n", change.Kind, *change.BeforeSetting, *change.AfterSetting, change.Impact)

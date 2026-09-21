@@ -21,20 +21,7 @@ import (
 // type cannot be passed to RunDesired or ExecuteCreate. Inspection still needs
 // CREATE privilege for its rolled-back scratch schema, just like Plan.
 func PlanWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity) (plan.Report, error) {
-	if schema == "" {
-		return plan.Report{}, errors.New("plan desired row security: schema name is required")
-	}
-	if desired.Table() == "" {
-		return plan.Report{}, statement.ErrRowSecurityDeclaration
-	}
-	live, err := schemadiff.Introspect(ctx, pool, schema, desired.Table())
-	if errors.Is(err, schemadiff.ErrTableNotFound) {
-		return plan.Report{}, fmt.Errorf("creating tables with managed row security is not supported: %w: %w", schemadiff.ErrUnsupportedChange, err)
-	}
-	if err != nil {
-		return plan.Report{}, err
-	}
-	model, err := schemadiff.IntrospectDesiredWithRowSecurity(ctx, pool, desired)
+	live, model, err := inspectRowSecurity(ctx, pool, schema, desired)
 	if err != nil {
 		return plan.Report{}, err
 	}
@@ -64,7 +51,9 @@ type RowSecurityReviewRequired struct {
 	Schema string
 	Table  string
 	Review schemadiff.RowSecurityReview
-	cause  error
+	// ReviewMatches is present only for an explicit freshness check.
+	ReviewMatches *bool
+	cause         error
 }
 
 // Error explains why the comparison cannot produce an executable plan.
@@ -77,3 +66,45 @@ func (e *RowSecurityReviewRequired) Error() string {
 
 // Unwrap preserves the existing typed refusal.
 func (e *RowSecurityReviewRequired) Unwrap() error { return e.cause }
+
+// inspectRowSecurity captures definitions for diagnostics only. These reads do
+// not hold a lock across review and must never be reused as execution admission.
+func inspectRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity) (schemadiff.Model, schemadiff.Model, error) {
+	if schema == "" {
+		return schemadiff.Model{}, schemadiff.Model{}, errors.New("plan desired row security: schema name is required")
+	}
+	if desired.Table() == "" {
+		return schemadiff.Model{}, schemadiff.Model{}, statement.ErrRowSecurityDeclaration
+	}
+	live, err := schemadiff.Introspect(ctx, pool, schema, desired.Table())
+	if errors.Is(err, schemadiff.ErrTableNotFound) {
+		return schemadiff.Model{}, schemadiff.Model{}, fmt.Errorf("creating tables with managed row security is not supported: %w: %w", schemadiff.ErrUnsupportedChange, err)
+	}
+	if err != nil {
+		return schemadiff.Model{}, schemadiff.Model{}, err
+	}
+	model, err := schemadiff.IntrospectDesiredWithRowSecurity(ctx, pool, desired)
+	if err != nil {
+		return schemadiff.Model{}, schemadiff.Model{}, err
+	}
+	return live, model, nil
+}
+
+// VerifyRowSecurityReview freshly inspects live and desired definitions and
+// compares their identity with expected. A match returns diagnostic information,
+// never an executable plan. Database identity and external access dependencies
+// must be tracked separately by the caller; this check holds no execution lock.
+func VerifyRowSecurityReview(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity, expected string) (schemadiff.RowSecurityReview, error) {
+	if err := schemadiff.ValidateRowSecurityFingerprint(expected); err != nil {
+		return schemadiff.RowSecurityReview{}, err
+	}
+	live, model, err := inspectRowSecurity(ctx, pool, schema, desired)
+	if err != nil {
+		return schemadiff.RowSecurityReview{}, err
+	}
+	review, err := schemadiff.ReviewRowSecurity(schema, live, model)
+	if err != nil {
+		return schemadiff.RowSecurityReview{}, err
+	}
+	return review, review.CheckFingerprint(expected)
+}

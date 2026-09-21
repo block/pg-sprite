@@ -20,11 +20,28 @@ func (c *DiffCmd) runRowSecurityDiff(ctx context.Context, out io.Writer, sql str
 	if err != nil {
 		return err
 	}
+	if c.ExpectRLSReview != "" {
+		if err := schemadiff.ValidateRowSecurityFingerprint(c.ExpectRLSReview); err != nil {
+			return err
+		}
+	}
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {
 		return err
 	}
 	defer pool.Close()
+	if c.ExpectRLSReview != "" {
+		review, verifyErr := diffplan.VerifyRowSecurityReview(ctx, pool, c.Schema, desired, c.ExpectRLSReview)
+		if verifyErr != nil && !errors.Is(verifyErr, schemadiff.ErrStaleRowSecurityReview) {
+			if errors.Is(verifyErr, schemadiff.ErrUnsupportedChange) {
+				return c.writeRowSecurityRefusal(out, verifyErr)
+			}
+			return verifyErr
+		}
+		matches := verifyErr == nil
+		refusal := &diffplan.RowSecurityReviewRequired{Schema: c.Schema, Table: desired.Table(), Review: review, ReviewMatches: &matches}
+		return c.writeRowSecurityRefusal(out, errors.Join(refusal, schemadiff.ErrUnsupportedChange, verifyErr))
+	}
 	report, err := diffplan.PlanWithRowSecurity(ctx, pool, c.Schema, desired)
 	if err != nil {
 		if errors.Is(err, schemadiff.ErrUnsupportedChange) {
@@ -45,10 +62,11 @@ func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 	case c.JSON && review != nil:
 		report := struct {
 			verdict.Verdict
-			Schema string                       `json:"schema"`
-			Table  string                       `json:"table"`
-			Review schemadiff.RowSecurityReview `json:"row_security_review"`
-		}{v, review.Schema, review.Table, review.Review}
+			Schema        string                       `json:"schema"`
+			Table         string                       `json:"table"`
+			Review        schemadiff.RowSecurityReview `json:"row_security_review"`
+			ReviewMatches *bool                        `json:"review_matches,omitempty"`
+		}{v, review.Schema, review.Table, review.Review, review.ReviewMatches}
 		encoder := json.NewEncoder(out)
 		encoder.SetIndent("", "  ")
 		if err := encoder.Encode(report); err != nil {

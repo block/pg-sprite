@@ -138,7 +138,8 @@ With `--json`, the existing refusal verdict gains `schema`, `table`, and a
   "schema": "public",
   "table": "documents",
   "row_security_review": {
-    "version": 1,
+    "version": 2,
+    "fingerprint": "rls-review-v1:<64 lowercase hex characters>",
     "changes": [{
       "kind": "enabled",
       "before_setting": true,
@@ -151,7 +152,7 @@ With `--json`, the existing refusal verdict gains `schema`, `table`, and a
 }
 ```
 
-Version 1 kinds are `enabled`, `forced`, `policy-added`, `policy-removed`, and
+Version 2 kinds are `enabled`, `forced`, `policy-added`, `policy-removed`, and
 `policy-changed`. Policy changes carry `policy` and the applicable `before_policy`
 and `after_policy` snapshots. Both fields are always present: an absent side is
 JSON `null` (both are `null` for setting changes). Each snapshot contains `name`, `command` (PostgreSQL
@@ -162,13 +163,83 @@ Consumers must reject unknown versions, kinds, or impact values.
 Mixed table/policy changes set `table_changed`; the entire change remains blocked.
 If the table comparison is unsupported, `table_comparison_complete` is false and
 `table_comparison_error` explains why; `table_changed: false` then means unknown,
-not unchanged. This review contains no execution SQL or approval fingerprint.
+not unchanged. The fingerprint identifies the captured definitions; it is not execution approval.
+This review contains no execution SQL.
 `--sql` renders it entirely as comments. Unchanged files retain the normal empty
 plan response. Missing live tables remain refusals without review details.
 
 Library callers can inspect `diffplan.RowSecurityReviewRequired` with `errors.As`;
 it still unwraps to `schemadiff.ErrUnsupportedChange`. `ReviewRowSecurity` provides
 the same review from two catalog models. See the [review tests](../pkg/schemadiff/row_security_review_integration_test.go).
+
+## Recheck a saved review
+
+A review can go stale while a pull request waits. Save `row_security_review.fingerprint`
+with the database target you reviewed. When you are ready to revisit it, pass that
+value back to `diff`:
+
+```sh
+pg-sprite diff --url "$PG_DSN" --schema public --desired schema/documents.sql \
+  --expect-rls-review "$REVIEW_FINGERPRINT" --json
+```
+
+An abbreviated response when the definitions still match:
+
+```json
+{
+  "outcome": "refused",
+  "reason": "unsupported-statement",
+  "schema": "public",
+  "table": "documents",
+  "review_matches": true,
+  "row_security_review": {
+    "version": 2,
+    "fingerprint": "rls-review-v1:<the saved digest>",
+    "changes": [{
+      "kind": "enabled",
+      "before_setting": true,
+      "after_setting": false,
+      "before_policy": null,
+      "after_policy": null,
+      "access_impact": "may-widen"
+    }]
+  }
+}
+```
+
+The real response includes the current changes and table-comparison fields.
+Both matching and stale checks exit **2**: applying RLS is still unsupported.
+When either captured definition changed, `review_matches` is `false` and the
+response carries the new fingerprint and review. Review that result before saving
+its identity. An empty diff does not rescue a stale review: someone else applying
+the desired definition changes the live baseline too.
+
+The check re-reads the live catalog and rebuilds the desired SQL in scratch. Its
+SHA-256 identity covers the schema name and both complete catalog models: table
+name, columns, constraints, indexes, modeled table attributes, RLS settings, and
+all policies, including unchanged policies and comments. It hashes catalog
+representations, not file bytes. Ordering and null values are preserved; a
+representation change can conservatively require a new review. The prefix versions
+the fingerprint encoding independently of the review JSON version.
+
+Keep these boundaries in mind:
+
+- The fingerprint does **not** identify a database server or detect a table that
+  was dropped and recreated with the same definition. Keep the connection target
+  alongside the saved review; do not reuse it across databases.
+- Grants, role membership, helper bodies, data, and authentication configuration
+  are not captured. A match is not proof of equivalent application access.
+- This is a diagnostic snapshot, without an execution lock. A future executor
+  must revalidate under its own lock before making an atomic change.
+- Missing tables or failed inspection cannot produce a matching review. Malformed
+  fingerprints and files without explicit RLS scope are rejected, not silently
+  treated as an ordinary table comparison.
+
+Go callers use `diffplan.VerifyRowSecurityReview` with the saved fingerprint.
+It returns the fresh review and `nil` for a match, or
+`schemadiff.ErrStaleRowSecurityReview` for a mismatch. `errors.As` exposes
+`RowSecurityReviewStale.Expected` and `.Actual`. Inspection failures return their
+own errors. None of these results contains an executable plan.
 
 ## Reuse the format, define the execution contract
 
@@ -219,10 +290,11 @@ this table-scoped work.
    materialize it in scratch and prove the unchanged definition produces an empty
    diff. Implemented through automatic export and SQL declarations; execution remains refused,
    including greenfield creation.
-3. **Plan and execute transitions.** Add typed security changes, exact-state
-   revalidation, lock budgets, atomic application, dependency handling, and reports
-   suitable for users and orchestrators.
-4. **Prove application behavior.** Extend the local Supabase harness with real
+3. **Review transitions.** Typed changes and captured-definition fingerprints are
+   available, with fresh checks for stale reviews.
+4. **Execute atomically.** Add lock-protected revalidation, lock budgets, atomic
+   application, dependency handling, and reports suitable for users and orchestrators.
+5. **Prove application behavior.** Extend the local Supabase harness with real
    authenticated and anonymous requests, two users, allowed and denied writes,
    and interrupted transitions. Then validate hosted connection and privilege
    boundaries on a disposable project before claiming hosted support.

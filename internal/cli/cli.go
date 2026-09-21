@@ -179,10 +179,11 @@ type DiffCmd struct {
 	DBFlags     `embed:""`
 	OutputFlags `embed:""`
 
-	Desired string `help:"Path to the desired-state CREATE TABLE .sql file." name:"desired" type:"existingfile" required:""`
-	Schema  string `help:"Schema containing the live table." default:"public"`
-	JSON    bool   `help:"Emit the plan as JSON."`
-	SQL     bool   `help:"Print the plan as an executable SQL script instead of the diagnostic report."`
+	Desired         string `help:"Path to the desired-state CREATE TABLE .sql file." name:"desired" type:"existingfile" required:""`
+	Schema          string `help:"Schema containing the live table." default:"public"`
+	JSON            bool   `help:"Emit the plan as JSON."`
+	SQL             bool   `help:"Print the plan as an executable SQL script instead of the diagnostic report."`
+	ExpectRLSReview string `help:"Recheck a saved RLS review fingerprint; never authorizes execution." name:"expect-rls-review"`
 }
 
 // Validate rejects flag combinations with no coherent meaning: --json and

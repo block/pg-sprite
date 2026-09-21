@@ -37,6 +37,9 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if c.ExpectRLSReview != "" {
+		return fmt.Errorf("--expect-rls-review requires an explicit row security declaration")
+	}
 	logger.Debug("desired schema parsed", "table", ds.Table(), "statements", len(ds.Statements()))
 
 	pool, err := dbconn.NewPool(ctx, c.Config())

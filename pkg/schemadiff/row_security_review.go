@@ -36,9 +36,10 @@ type SecurityChange struct {
 	Impact        AccessImpact       `json:"access_impact"`
 }
 
-// RowSecurityReview is diagnostic only. It has no SQL or approval fingerprint.
-// Version 1 compares captured catalog definitions, not grants or helper bodies.
+// RowSecurityReview is diagnostic only. Its fingerprint identifies captured
+// definitions, not execution approval, grants, or helper bodies.
 type RowSecurityReview struct {
+	Fingerprint             string           `json:"fingerprint"`
 	Version                 int              `json:"version"`
 	Changes                 []SecurityChange `json:"changes"`
 	TableChanged            bool             `json:"table_changed"`
@@ -52,7 +53,11 @@ func ReviewRowSecurity(schema string, live, desired Model) (RowSecurityReview, e
 	if live.Table != desired.Table {
 		return RowSecurityReview{}, ErrDifferentTables
 	}
-	r := RowSecurityReview{Version: 1, Changes: make([]SecurityChange, 0)}
+	fingerprint, err := rowSecurityFingerprint(schema, live, desired)
+	if err != nil {
+		return RowSecurityReview{}, err
+	}
+	r := RowSecurityReview{Version: 2, Fingerprint: fingerprint, Changes: make([]SecurityChange, 0)}
 	a, b := live.RowSecurity, desired.RowSecurity
 	if a.Enabled != b.Enabled {
 		r.Changes = append(r.Changes, settingChange(SecurityEnabled, a.Enabled, b.Enabled))
