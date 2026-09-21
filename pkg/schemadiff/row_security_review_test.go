@@ -1,6 +1,7 @@
 package schemadiff_test
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -62,4 +63,34 @@ func TestReviewUnsupportedTableComparisonIsExplicit(t *testing.T) {
 	assert.False(t, r.TableComparisonComplete)
 	assert.NotEmpty(t, r.TableComparisonError)
 	assert.Empty(t, r.Changes)
+}
+
+func TestReviewAddedPolicyJSONHasNullBefore(t *testing.T) {
+	change := schemadiff.SecurityChange{Kind: schemadiff.SecurityPolicyAdded,
+		AfterPolicy: &schemadiff.PolicySnapshot{Name: "readers"}}
+	raw, err := json.Marshal(change)
+	require.NoError(t, err)
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &fields))
+	require.Contains(t, fields, "before_policy")
+	assert.JSONEq(t, "null", string(fields["before_policy"]))
+	require.Contains(t, fields, "after_policy")
+	var after schemadiff.PolicySnapshot
+	require.NoError(t, json.Unmarshal(fields["after_policy"], &after))
+	assert.Equal(t, "readers", after.Name)
+}
+
+func TestReviewRemovedPolicyJSONHasNullAfter(t *testing.T) {
+	change := schemadiff.SecurityChange{Kind: schemadiff.SecurityPolicyRemoved,
+		BeforePolicy: &schemadiff.PolicySnapshot{Name: "readers"}}
+	raw, err := json.Marshal(change)
+	require.NoError(t, err)
+	var fields map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &fields))
+	require.Contains(t, fields, "after_policy")
+	assert.JSONEq(t, "null", string(fields["after_policy"]))
+	require.Contains(t, fields, "before_policy")
+	var before schemadiff.PolicySnapshot
+	require.NoError(t, json.Unmarshal(fields["before_policy"], &before))
+	assert.Equal(t, "readers", before.Name)
 }

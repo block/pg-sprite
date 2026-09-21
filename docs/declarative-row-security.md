@@ -153,7 +153,8 @@ With `--json`, the existing refusal verdict gains `schema`, `table`, and a
 
 Version 1 kinds are `enabled`, `forced`, `policy-added`, `policy-removed`, and
 `policy-changed`. Policy changes carry `policy` and the applicable `before_policy`
-and `after_policy` snapshots. Each snapshot contains `name`, `command` (PostgreSQL
+and `after_policy` snapshots. Both fields are always present: an absent side is
+JSON `null` (both are `null` for setting changes). Each snapshot contains `name`, `command` (PostgreSQL
 catalog codes `*`, `r`, `a`, `w`, `d`), `permissive`, `roles`, `using`, `with_check`,
 and `comment`. Null clauses remain null; they are not rewritten as predicates.
 Consumers must reject unknown versions, kinds, or impact values.

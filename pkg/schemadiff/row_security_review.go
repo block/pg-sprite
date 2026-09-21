@@ -31,8 +31,8 @@ type SecurityChange struct {
 	Policy        string             `json:"policy,omitempty"`
 	BeforeSetting *bool              `json:"before_setting,omitempty"`
 	AfterSetting  *bool              `json:"after_setting,omitempty"`
-	BeforePolicy  *PolicySnapshot    `json:"before_policy,omitempty"`
-	AfterPolicy   *PolicySnapshot    `json:"after_policy,omitempty"`
+	BeforePolicy  *PolicySnapshot    `json:"before_policy"`
+	AfterPolicy   *PolicySnapshot    `json:"after_policy"`
 	Impact        AccessImpact       `json:"access_impact"`
 }
 
