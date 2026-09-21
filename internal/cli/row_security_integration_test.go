@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -87,9 +88,18 @@ func TestDiffRowSecurityRefusesDisableWithoutChangingLiveState(t *testing.T) {
      id bigint PRIMARY KEY
  );
  ALTER TABLE documents DISABLE ROW LEVEL SECURITY;`), 0600))
-	cmd := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file}
+	cmd := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file, JSON: true}
 	var out strings.Builder
 	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+	var envelope struct {
+		verdict.Verdict
+		Review schemadiff.RowSecurityReview `json:"row_security_review"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &envelope))
+	assert.Equal(t, verdict.OutcomeRefused, envelope.Outcome)
+	assert.Equal(t, 1, envelope.Review.Version)
+	require.Len(t, envelope.Review.Changes, 1)
+	assert.Equal(t, schemadiff.AccessMayWiden, envelope.Review.Changes[0].Impact)
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
 	assert.True(t, after.RowSecurity.Enabled)
@@ -177,4 +187,35 @@ func verifyPulledRowSecurity(t *testing.T, securitySQL string) {
 	var report plan.Report
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
 	assert.Empty(t, report.Statements)
+}
+
+func TestDiffRowSecuritySQLCarriageReturnIdentifier(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	name := "documents\rSELECT 42; --"
+	target := pgx.Identifier{schema, name}.Sanitize()
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s (
+     id bigint PRIMARY KEY
+ );`, target))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), "ALTER TABLE "+target+" ENABLE ROW LEVEL SECURITY")
+	require.NoError(t, err)
+	identifier := pgx.Identifier{name}.Sanitize()
+	sql := fmt.Sprintf(`CREATE TABLE %[1]s (
+     id bigint PRIMARY KEY
+ );
+ ALTER TABLE %[1]s DISABLE ROW LEVEL SECURITY;`, identifier)
+	file := filepath.Join(t.TempDir(), "documents.sql")
+	require.NoError(t, os.WriteFile(file, []byte(sql), 0600))
+	cmd := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file, SQL: true}
+	var out strings.Builder
+	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+	_, err = statement.ParseDesired(out.String())
+	require.ErrorIs(t, err, statement.ErrEmptyDesired, "refused SQL output must parse as zero statements")
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, name)
+	require.NoError(t, err)
+	assert.True(t, live.RowSecurity.Enabled)
 }

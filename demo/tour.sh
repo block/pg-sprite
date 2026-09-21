@@ -273,7 +273,24 @@ run_dryrun() {
     dry_run refuse         unsupported-operation  false refuse      "ALTER TABLE users ENABLE ROW LEVEL SECURITY"
 }
 
+review_rls() {
+    local out status=0
+    step "Review RLS changes without executing them"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" diff --url "$PG_DSN" --desired desired/users-rls.sql --schema public --json) || status=$?
+        assert_eq "RLS review exit" 2 "$status"
+        assert_eq "RLS review outcome" refused "$(jq -r '.outcome' <<<"$out")"
+        assert_eq "RLS review version" 1 "$(jq -r '.row_security_review.version' <<<"$out")"
+        assert_eq "RLS review changes" 2 "$(jq '.row_security_review.changes | length' <<<"$out")"
+        assert_eq "RLS policy impact" may-widen "$(jq -r '.row_security_review.changes[1].access_impact' <<<"$out")"
+        assert_eq "RLS table unchanged" false "$(jq '.row_security_review.table_changed' <<<"$out")"
+    else
+        "$PGS" diff --url "$PG_DSN" --desired desired/users-rls.sql --schema public || echo "(exit $?)"
+    fi
+}
+
 run_diff() {
+    review_rls
     heading "Declarative front door: routed convergence plans (read-only)"
     diff_plan desired/users_v2.sql 2 "ADD COLUMN bio"
     diff_plan desired/widgets_v1.sql 2 "CREATE TABLE"

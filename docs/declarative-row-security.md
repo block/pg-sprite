@@ -3,8 +3,8 @@
 You can export a table's RLS settings and policies, keep them alongside its SQL,
 and verify that the live definition still matches. `pull` includes RLS when the
 live table has settings or policies; ordinary tables get no extra SQL.
-**Applying changes to RLS is not supported yet.** A difference produces a refusal,
-not SQL to execute.
+**Applying changes to RLS is not supported yet.** A difference produces a review
+of the captured definitions and a refusal, not SQL to execute.
 
 ## Export and compare
 
@@ -108,6 +108,67 @@ function bodies, and authentication configuration are outside this comparison.
 Library callers use `RenderWithRowSecurity`, `ParseDesiredWithRowSecurity`, and
 `diffplan.PlanWithRowSecurity`. The parser returns a separate inspection-only type
 that the existing live executors cannot accept.
+
+## Review a difference
+
+Run the same `diff` command after editing the file. For example, disabling RLS
+produces this review before the refusal verdict:
+
+```text
+public.documents — row security review
+  enabled: true → false [may-widen]
+Access impact is advisory; grants, role membership, and helper bodies are not compared.
+```
+
+Policy additions, removals, and edits show complete before/after definitions,
+including roles, commands, predicates, and comments. Arbitrary predicate changes
+are `review-required`; pg-sprite does not attempt to prove SQL equivalence.
+`may-widen` flags disabling RLS, removing FORCE, adding a permissive policy,
+removing a restrictive policy, or changing restrictive to permissive. These are
+warnings about individual changes, not conclusions about combined effective access.
+Comment-only edits are `metadata-only`. Every difference still exits 2.
+
+With `--json`, the existing refusal verdict gains `schema`, `table`, and a
+`row_security_review` object. An abbreviated example:
+
+```json
+{
+  "outcome": "refused",
+  "reason": "unsupported-statement",
+  "schema": "public",
+  "table": "documents",
+  "row_security_review": {
+    "version": 1,
+    "changes": [{
+      "kind": "enabled",
+      "before_setting": true,
+      "after_setting": false,
+      "access_impact": "may-widen"
+    }],
+    "table_changed": false,
+    "table_comparison_complete": true
+  }
+}
+```
+
+Version 1 kinds are `enabled`, `forced`, `policy-added`, `policy-removed`, and
+`policy-changed`. Policy changes carry `policy` and the applicable `before_policy`
+and `after_policy` snapshots. Both fields are always present: an absent side is
+JSON `null` (both are `null` for setting changes). Each snapshot contains `name`, `command` (PostgreSQL
+catalog codes `*`, `r`, `a`, `w`, `d`), `permissive`, `roles`, `using`, `with_check`,
+and `comment`. Null clauses remain null; they are not rewritten as predicates.
+Consumers must reject unknown versions, kinds, or impact values.
+
+Mixed table/policy changes set `table_changed`; the entire change remains blocked.
+If the table comparison is unsupported, `table_comparison_complete` is false and
+`table_comparison_error` explains why; `table_changed: false` then means unknown,
+not unchanged. This review contains no execution SQL or approval fingerprint.
+`--sql` renders it entirely as comments. Unchanged files retain the normal empty
+plan response. Missing live tables remain refusals without review details.
+
+Library callers can inspect `diffplan.RowSecurityReviewRequired` with `errors.As`;
+it still unwraps to `schemadiff.ErrUnsupportedChange`. `ReviewRowSecurity` provides
+the same review from two catalog models. See the [review tests](../pkg/schemadiff/row_security_review_integration_test.go).
 
 ## Reuse the format, define the execution contract
 
