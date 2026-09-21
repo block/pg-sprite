@@ -29,6 +29,12 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	}
 	ds, err := statement.ParseDesired(string(raw))
 	if err != nil {
+		carriesRLS, detectErr := statement.HasRowSecurityDeclaration(string(raw))
+		if detectErr == nil && carriesRLS {
+			return c.runRowSecurityDiff(ctx, out, string(raw))
+		}
+	}
+	if err != nil {
 		return err
 	}
 	logger.Debug("desired schema parsed", "table", ds.Table(), "statements", len(ds.Statements()))
@@ -48,6 +54,11 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 		"table_exists", report.TableExists != nil && *report.TableExists,
 		"disposition", string(report.Disposition))
 
+	return c.writeDiffReport(out, report)
+}
+
+func (c *DiffCmd) writeDiffReport(out io.Writer, report plan.Report) error {
+	var err error
 	switch {
 	case c.JSON:
 		err = writeJSON(out, report)

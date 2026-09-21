@@ -25,7 +25,9 @@ schema/
 ```
 
 Each file contains one canonical `CREATE TABLE`, followed by that table's
-`CREATE INDEX` statements. Export is create-only: `pull` creates the output
+`CREATE INDEX` statements. Tables with RLS settings or policies also include
+[their access rules](declarative-row-security.md#export-and-compare); ordinary tables
+get no extra RLS SQL. Export is create-only: `pull` creates the output
 directory when necessary but never overwrites a file. Move or delete an old
 baseline before refreshing it.
 
@@ -75,7 +77,8 @@ runs this loop rather than parsing `pull`'s text report.
 
 This is the command-level form of `schemadiff.Render`'s round-trip guarantee:
 **introspect → render → parse → diff = zero changes**. `pull` calls
-`schemadiff.Introspect` and `schemadiff.Render` for each table; `Render` parses
+`schemadiff.Introspect` and `schemadiff.Render` for each table, with
+`RenderWithRowSecurity` for RLS-bearing tables; each renderer parses
 its own output as a desired file, and integration tests materialize that output
 and prove that its diff from the source model is empty.
 
@@ -99,11 +102,11 @@ without losing meaning. Current refusals include:
 - partitioned parents (partition children are not independently exported);
 - either side of classic `INHERITS` relationships;
 - either side of a foreign-key relationship;
-- tables with RLS enabled, `FORCE ROW LEVEL SECURITY` set, or any policies, even when RLS is disabled;
+- policies that directly query tables (qualified scalar helpers such as `auth.uid()` are supported);
 - unlogged tables and columns with explicit collations; and
 - sequence-backed defaults that cannot be rendered as an owned `serial` form.
 
-Extension-owned tables are excluded from enumeration. Comments, storage
+Extension-owned tables are excluded from enumeration. Table/column comments, storage
 parameters, and non-table objects are outside the declarative model and are not
 exported; manage them separately. See the complete
 [declarative model boundaries](limitations.md#declarative-model-boundaries)

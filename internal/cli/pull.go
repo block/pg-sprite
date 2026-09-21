@@ -121,6 +121,9 @@ func pullOneTable(ctx context.Context, pool *pgxpool.Pool, schema, table, path s
 		return fmt.Errorf("introspect %s.%s: %w", schema, table, err)
 	}
 	rendered, err := schemadiff.Render(model)
+	if errors.Is(err, schemadiff.ErrUnrenderableRowSecurity) {
+		rendered, err = schemadiff.RenderWithRowSecurity(model)
+	}
 	if err != nil {
 		return &renderRefusal{err: err}
 	}

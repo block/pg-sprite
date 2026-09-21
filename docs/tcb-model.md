@@ -91,6 +91,7 @@ to obtain the type is through the function that validates it.
 | --- | --- | --- | --- |
 | `string` (one SQL statement) | `statement.ParseOne` | `statement.Statement` (carries the text, kind, and target relation of the one statement the real grammar admitted; the executor accepts nothing else) | ST-7 |
 | `string` (desired-state schema file) | `statement.ParseDesired` | `statement.DesiredSchema` (carries the single CREATE TABLE and its indexes in execution order; every consumer replays that order) | ST-8 |
+| `string` (complete table-local RLS declaration) | `statement.ParseDesiredWithRowSecurity` | `statement.DesiredWithRowSecurity` (scratch inspection only; cannot enter the existing live executors) | Explicit RLS scope, including an empty policy set |
 | `string` (user SQL) | `statement.ParseOne` / `statement.ParseOps`, then `planner.Classify` | `planner.Plan` / `planner.Decision` | CO-7 — classification consumes parsed operation descriptors |
 | table name | preflight | `PreflightedTable` (carries the proven facts: PK, no FKs/views, replica identity, headroom) | ST-6, RF-* |
 | table name (create target) | `preflight.CheckTableAbsent` | `AbsentTarget` (carries the resolved creation schema and the verified-free name; time-of-check — minted inside the apply session, never carried across a plan boundary, and re-verified at use the way ST-7 re-verifies `PreflightedTable`) | ST-6 for the create path |
