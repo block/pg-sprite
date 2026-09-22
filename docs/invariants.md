@@ -238,8 +238,13 @@ Migrations serialize per table via a **session-scoped advisory lock** — the an
 
 *Enforced today:* `pkg/dbconn` `AcquireTableLock` (`TableLock` proof carried by
 `TableLockSession`; affinity refusal, two-instance refusal, keepalive-loss, and `Bind`
-cancellation tests). *Planned enforcement:* every executing mode acquires it before its first
-write and runs its writes under a `Bind`-derived context, so loss of the lock aborts the change.
+cancellation tests); `pkg/schemachange` shadow build, drop, and inspect each require the
+session for the proven table, run under its `Bind` context, and confirm from their own
+transaction that the session's backend holds the lock before the first write (nil-session,
+wrong-table, reported-loss, gone-session, rival-backend, mid-build-loss, and mid-drop-loss
+tests). *Planned enforcement:* the copier and
+cutover acquire the same session before their first write and run under it, so loss of the
+lock aborts the change at every stage.
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
@@ -438,7 +443,11 @@ constraint's validation state (`pg_constraint.convalidated`)** — none of which
 ALL` preserves ([copy-and-swap D2](copy-and-swap-design.md#d2--build-indexes-and-constraints-up-front)) —
 that **sequences are re-owned and advanced past the
 source's current values** (`setval`), and that indexes are valid (`pg_index.indisvalid`). Data
-equality (CO-1) plus metadata fidelity, or no swap. *Enforced:* cutover preconditions. *Source:*
+equality (CO-1) plus metadata fidelity, or no swap. *Enforced:* cutover preconditions; before
+that, `pkg/schemachange` refuses to build a shadow the source's owner does not own, and refuses
+to inspect or drop anything under the shadow's name that is not a plain table the source's
+owner owns (an inspected shadow must also still draw each identity default from the source's
+sequence). *Source:*
 [low-level-design § operational caveats](low-level-design.md#operational-caveats),
 risks-and-mitigations.
 

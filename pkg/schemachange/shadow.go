@@ -21,8 +21,9 @@ import (
 
 var (
 	// ErrShadowExists reports that the deterministic shadow name is already
-	// taken in the source schema: an earlier run's leftover, which a later
-	// resume path inspects rather than this builder overwriting it.
+	// taken in the source schema: an earlier run's leftover, which a resume
+	// verifies with InspectShadow or removes with DropShadow rather than
+	// this builder overwriting it.
 	ErrShadowExists = errors.New("shadow table already exists")
 	// ErrInvariantViolation reports a forged or empty proof, a statement
 	// that does not target the proven table, or a re-verification the
@@ -141,11 +142,19 @@ func (b BuiltShadow) CopyColumns() []string { return append([]string(nil), b.cop
 // and that the target is the shadow (ST-7). Both models are introspected
 // inside the same transaction, so a failure at any step leaves no shadow
 // behind. An existing relation under the shadow's name is ErrShadowExists.
-func BuildShadow(ctx context.Context, pool *pgxpool.Pool, target preflight.CopySwapTarget, st statement.Statement, opts Options) (BuiltShadow, error) {
+//
+// The caller holds the per-table lock (LK-1): the build runs under the lock
+// session's Bind context, so a lost lock cancels the statement in flight,
+// and the transaction confirms from its own connection that the lock
+// session's backend holds the table before its first write.
+func BuildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, st statement.Statement, opts Options) (BuiltShadow, error) {
 	if err := opts.validate(); err != nil {
 		return BuiltShadow{}, err
 	}
 	if err := checkProof(target); err != nil {
+		return BuiltShadow{}, err
+	}
+	if err := requireTableLock(lock, target); err != nil {
 		return BuiltShadow{}, err
 	}
 	shadow := ShadowName(target.Schema(), target.Table())
@@ -153,7 +162,16 @@ func BuildShadow(ctx context.Context, pool *pgxpool.Pool, target preflight.CopyS
 	if err != nil {
 		return BuiltShadow{}, err
 	}
+	ctx, stop := lock.Bind(ctx)
+	defer stop()
+	built, err := buildShadow(ctx, pool, lock, target, shadow, retargeted, opts)
+	if err != nil {
+		return BuiltShadow{}, lockLossCause(lock, err)
+	}
+	return built, nil
+}
 
+func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, shadow, retargeted string, opts Options) (BuiltShadow, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return BuiltShadow{}, fmt.Errorf("begin shadow build: %w", err)
@@ -165,6 +183,9 @@ func BuildShadow(ctx context.Context, pool *pgxpool.Pool, target preflight.CopyS
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
 	if err := setBuildSession(ctx, tx, target, opts); err != nil {
+		return BuiltShadow{}, err
+	}
+	if err := confirmTableLock(ctx, tx, lock); err != nil {
 		return BuiltShadow{}, err
 	}
 	// INV: ST-6
@@ -215,10 +236,23 @@ func BuildShadow(ctx context.Context, pool *pgxpool.Pool, target preflight.CopyS
 	if err != nil {
 		return BuiltShadow{}, fmt.Errorf("introspect shadow %s.%s: %w", target.Schema(), shadow, err)
 	}
+	// The handoff is proven on the shadow the statement left, not the one
+	// the defaults were applied to: the proof records exactly what an
+	// inspection of this shadow would accept.
+	if err := verifyIdentityDefaults(ctx, tx, shadowOID, handoffIdentities(identities, targetModel)); err != nil {
+		return BuiltShadow{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return BuiltShadow{}, fmt.Errorf("commit shadow build: %w", err)
 	}
+	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity)
+}
 
+// newBuiltShadow assembles the proof from what a build or an inspection read
+// inside its transaction; the fingerprints, copy columns, and identity
+// handoffs are derived from the two models so the same catalog state always
+// yields the same proof.
+func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, shadowOID uint32, sourceModel, targetModel schemadiff.Model, identities []IdentityColumn, fidelity FidelitySnapshot) (BuiltShadow, error) {
 	sourceFingerprint, err := fingerprint(sourceModel)
 	if err != nil {
 		return BuiltShadow{}, err
@@ -231,11 +265,11 @@ func BuildShadow(ctx context.Context, pool *pgxpool.Pool, target preflight.CopyS
 		schema:            target.Schema(),
 		source:            target.Table(),
 		shadow:            shadow,
-		sourceOID:         oid,
+		sourceOID:         sourceOID,
 		shadowOID:         shadowOID,
 		sourceFingerprint: sourceFingerprint,
 		targetFingerprint: targetFingerprint,
-		identities:        identities,
+		identities:        handoffIdentities(identities, targetModel),
 		fidelity:          fidelity,
 		copyColumns:       copyColumns(sourceModel, targetModel),
 	}, nil

@@ -23,16 +23,47 @@ import (
 // a SET-usable member of every role, so the copy-and-swap proof is minted
 // without provisioning and the tests isolate the builder.
 type shadowFixture struct {
+	cfg    dbconn.Config
 	pool   *pgxpool.Pool
 	schema string
 }
 
 func newShadowFixture(t *testing.T) shadowFixture {
 	t.Helper()
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	return shadowFixture{pool: pool, schema: testutil.NewSchema(t, pool)}
+	return shadowFixture{cfg: cfg, pool: pool, schema: testutil.NewSchema(t, pool)}
+}
+
+// newShadowFixtureWithRole is newShadowFixture plus one throwaway NOLOGIN
+// role, created before the schema so that a relation the test leaves in
+// the role's ownership is dropped with the schema before the role is.
+func newShadowFixtureWithRole(t *testing.T) (shadowFixture, string) {
+	t.Helper()
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	role := testutil.NewRole(t, pool, "NOLOGIN")
+	return shadowFixture{cfg: cfg, pool: pool, schema: testutil.NewSchema(t, pool)}, role
+}
+
+// lock acquires the per-table lock every shadow operation requires and
+// releases it when the test ends.
+func (f shadowFixture) lock(t *testing.T, table string, options ...dbconn.TableLockOption) *dbconn.TableLockSession {
+	t.Helper()
+	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, table, options...)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// A test that deliberately loses the lock has already seen Release's
+		// invariant error through Err; a clean test releases cleanly.
+		if lock.Err() == nil {
+			assert.NoError(t, lock.Release(context.WithoutCancel(t.Context())))
+		}
+	})
+	return lock
 }
 
 // exec runs DDL with %s standing for the fixture schema.
@@ -63,7 +94,7 @@ func (f shadowFixture) alter(t *testing.T, sql string) statement.Statement {
 // build runs the shadow builder for table with the given ALTER TABLE.
 func (f shadowFixture) build(t *testing.T, table, alter string) (schemachange.BuiltShadow, error) {
 	t.Helper()
-	return schemachange.BuildShadow(t.Context(), f.pool, f.prove(t, table), f.alter(t, alter), schemachange.Options{})
+	return schemachange.BuildShadow(t.Context(), f.pool, f.lock(t, table), f.prove(t, table), f.alter(t, alter), schemachange.Options{})
 }
 
 // relationExists reports whether any relation wears name in the schema.
@@ -243,14 +274,15 @@ func (f shadowFixture) security(t *testing.T, table string) tableSecurity {
 // ST-5 gate later finds nothing to refuse on. FORCE ROW LEVEL SECURITY is
 // absent because the shape gate refuses it.
 func TestBuildShadowReplicatesSecurityMetadata(t *testing.T) {
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	// Roles before the schema, so the schema (and the grants on it) is
 	// dropped before the roles are.
 	owner := testutil.NewRole(t, pool, "NOLOGIN")
 	reader := testutil.NewRole(t, pool, "NOLOGIN")
-	f := shadowFixture{pool: pool, schema: testutil.NewSchema(t, pool)}
+	f := shadowFixture{cfg: cfg, pool: pool, schema: testutil.NewSchema(t, pool)}
 	f.exec(t, `GRANT USAGE, CREATE ON SCHEMA %s TO `+pgx.Identifier{owner}.Sanitize())
 	f.exec(t, `
 		CREATE TABLE %s.accounts (
@@ -299,11 +331,12 @@ func TestBuildShadowReplicatesSecurityMetadata(t *testing.T) {
 // source's, so a default grant to PUBLIC the source never carried is revoked
 // before a row is copied into the shadow.
 func TestBuildShadowRevokesDefaultPrivilegesTheSourceLacks(t *testing.T) {
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	owner := testutil.NewRole(t, pool, "NOLOGIN")
-	f := shadowFixture{pool: pool, schema: testutil.NewSchema(t, pool)}
+	f := shadowFixture{cfg: cfg, pool: pool, schema: testutil.NewSchema(t, pool)}
 	f.exec(t, `GRANT USAGE, CREATE ON SCHEMA %s TO `+pgx.Identifier{owner}.Sanitize())
 	f.exec(t, `
 		CREATE TABLE %s.accounts (
@@ -428,6 +461,29 @@ func TestBuildShadowExcludesDroppedColumnFromCopyColumns(t *testing.T) {
 	assert.Equal(t, []string{"id", "keep"}, built.CopyColumns())
 }
 
+// A statement that drops an identity column and adds a different column
+// under the same name leaves the shadow with a column that carries no
+// handoff default. The build refuses it rather than record a handoff its
+// own inspection would reject, and the failed transaction leaves no shadow.
+func TestBuildShadowRefusesAStatementThatReplacesAnIdentityColumn(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.widgets (
+			id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+			seqno bigint GENERATED BY DEFAULT AS IDENTITY,
+			qty integer NOT NULL
+		)`)
+
+	_, err := f.build(t, "widgets", `
+		ALTER TABLE %s.widgets
+			DROP COLUMN seqno,
+			ADD COLUMN seqno text,
+			ALTER COLUMN qty TYPE bigint`)
+
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")), "a refused build creates nothing")
+}
+
 // A CHECK constraint the user left NOT VALID would be copied as validated by
 // LIKE; the builder re-adds it NOT VALID so the shadow carries the source's
 // semantics and the swap cannot silently validate it. A validated sibling
@@ -527,7 +583,7 @@ func TestBuildShadowRefusesShapeChangedAfterProof(t *testing.T) {
 	f.exec(t, `CREATE TRIGGER touch_row BEFORE UPDATE ON %s.widgets FOR EACH ROW EXECUTE FUNCTION %s.touch_widget()`)
 	f.exec(t, `ALTER TABLE %s.widget_refs ADD CONSTRAINT widget_fk FOREIGN KEY (widget_id) REFERENCES %s.widgets (id)`)
 
-	_, err := schemachange.BuildShadow(t.Context(), f.pool, target,
+	_, err := schemachange.BuildShadow(t.Context(), f.pool, f.lock(t, "widgets"), target,
 		f.alter(t, `ALTER TABLE %s.widgets ADD COLUMN note text`), schemachange.Options{})
 	var shapeErr *preflight.UnsupportedCopySwapShapeError
 	require.ErrorAs(t, err, &shapeErr)
@@ -549,6 +605,7 @@ func TestBuildShadowRefusesStatementOutsideProof(t *testing.T) {
 			id bigint PRIMARY KEY
 		)`)
 	target := f.prove(t, "widgets")
+	lock := f.lock(t, "widgets")
 
 	for name, sql := range map[string]string{
 		"other table":  `ALTER TABLE %s.other ADD COLUMN note text`,
@@ -556,7 +613,7 @@ func TestBuildShadowRefusesStatementOutsideProof(t *testing.T) {
 		"not ALTER":    `CREATE INDEX widgets_id_idx ON %s.widgets (id)`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			_, err := schemachange.BuildShadow(t.Context(), f.pool, target, f.alter(t, sql), schemachange.Options{})
+			_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, sql), schemachange.Options{})
 			require.ErrorIs(t, err, schemachange.ErrInvariantViolation)
 		})
 	}
