@@ -525,7 +525,7 @@ rows:
     operation: "Complete table-local RLS definition (Go API only)"
     tier: "t1"
     status_mark: "✅"
-    engine_path: "native_as_is"
+    engine_path: "native_safer_sequence"
     online_safety_problem: true
     front_doors:
       migrate: refused

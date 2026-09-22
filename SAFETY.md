@@ -129,5 +129,5 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   a bug in the periphery cannot corrupt data.
 
 The atomic RLS executor also admits `pkg/schemadiff` scratch introspection, table
-comparison, and render admission into the core. Those calls refuse mixed or
+comparison, render admission, and catalog-derived RLS rendering into the core. Those calls refuse mixed or
 unsupported table shapes; final catalog comparison gates commit (RS-1..RS-4).

@@ -2,11 +2,13 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
@@ -43,13 +45,37 @@ func ExecuteRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 	if err := b.validate(); err != nil {
 		return RowSecurityReport{}, err
 	}
-	security, err := desired.SecurityStatements(schema)
-	if err != nil {
-		return RowSecurityReport{}, err
+	if desired.Table() == "" || schema == "" {
+		return RowSecurityReport{}, statement.ErrRowSecurityDeclaration
 	}
 	// INV: RS-3 — the whole attempt has one deadline, not a fresh budget per policy.
-	ctx, cancel := context.WithTimeout(ctx, b.StatementTimeout)
+	attempt, cancel := context.WithTimeout(ctx, b.StatementTimeout)
 	defer cancel()
+	report, err := executeRowSecurity(attempt, pool, schema, desired, b)
+	return report, rowSecurityError(ctx, attempt, err, b)
+}
+
+func rowSecurityError(caller, attempt context.Context, err error, b Budget) error {
+	if err == nil {
+		return nil
+	}
+	var unknown *RowSecurityOutcomeUnknownError
+	if errors.As(err, &unknown) {
+		return err
+	}
+	if caller.Err() != nil && errors.Is(err, caller.Err()) {
+		return fmt.Errorf("row security caller stopped: %w", caller.Err())
+	}
+	if errors.Is(err, context.DeadlineExceeded) && errors.Is(attempt.Err(), context.DeadlineExceeded) {
+		return &BudgetError{Cause: CauseStatement, Budget: b.StatementTimeout, cause: err}
+	}
+	if budgetErr := asBudgetError(err, b); budgetErr != nil {
+		return budgetErr
+	}
+	return err
+}
+
+func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityReport, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return RowSecurityReport{}, fmt.Errorf("begin row security change: %w", err)
@@ -66,6 +92,10 @@ func ExecuteRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 	target := pgx.Identifier{schema, desired.Table()}.Sanitize()
 	// INV: RS-1 — all live comparison and DDL occur after this exclusive lock.
 	if _, err := tx.Exec(ctx, "LOCK TABLE ONLY "+target+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == sqlstateUndefinedTable {
+			return RowSecurityReport{}, fmt.Errorf("lock row security target %s: %w: %w", target, ErrTableNotFound, err)
+		}
 		return RowSecurityReport{}, fmt.Errorf("lock row security target %s: %w", target, err)
 	}
 	live, err := schemadiff.IntrospectTx(ctx, tx, schema, desired.Table())
@@ -89,13 +119,11 @@ func ExecuteRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 		for _, policy := range live.RowSecurity.Policies {
 			report.Statements = append(report.Statements, "DROP POLICY "+pgx.Identifier{policy.Name}.Sanitize()+" ON "+target)
 		}
-		report.Statements = append(report.Statements, security...)
-		// An omitted FORCE declaration means NO FORCE, not "leave it alone".
-		force := "NO FORCE"
-		if wanted.RowSecurity.Forced {
-			force = "FORCE"
+		security, err := schemadiff.RenderRowSecurity(schema, wanted)
+		if err != nil {
+			return RowSecurityReport{}, err
 		}
-		report.Statements = append(report.Statements, "ALTER TABLE "+target+" "+force+" ROW LEVEL SECURITY")
+		report.Statements = append(report.Statements, security...)
 		for _, sql := range report.Statements {
 			if _, err := tx.Exec(ctx, sql); err != nil {
 				return RowSecurityReport{}, fmt.Errorf("apply row security on %s: %w", target, err)

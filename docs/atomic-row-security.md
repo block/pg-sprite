@@ -44,12 +44,17 @@ Changing an RLS definition can widen access even when no data is deleted.
    savepoint on the same connection. Refuse unsupported table shapes or any table delta.
 4. If RLS already matches, finish without policy DDL. Otherwise replace the complete
    policy set (including unchanged policies), apply ENABLE/DISABLE and FORCE/NO FORCE, and preserve policy comments.
+   Live SQL is rendered from the inspected desired catalog, not replayed from the input.
 5. Read back the complete definition. Commit only if it matches the desired model.
 
 The lock blocks reads and writes briefly; this is bounded metadata DDL, not an
 online copy. Other sessions never see the intermediate policy set. A failure before
 commit rolls back every change. A lost commit response is an unknown outcome:
 inspect the database before retrying. There are no automatic retries.
+
+Lock exhaustion reports `budget-lock-exceeded`; the statement or whole-attempt
+deadline reports `budget-statement-exceeded`. A missing target reports
+`table-not-found`. Caller cancellation is kept separate from budget exhaustion.
 
 The caller needs table-owner privileges and permission to create the temporary
 scratch schema. Roles and qualified helpers must already exist. Grants, role

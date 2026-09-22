@@ -120,6 +120,7 @@ func TestExecuteRowSecurityLockContentionLeavesPoliciesIntact(t *testing.T) {
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr)
 	assert.Equal(t, "55P03", pgErr.Code)
+	assert.Equal(t, executor.CodeBudgetLockExceeded, executor.OutcomeCode(err))
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
 	assert.Equal(t, before, after)
@@ -204,7 +205,8 @@ func TestExecuteRowSecurityRefusesMissingTable(t *testing.T) {
      id bigint PRIMARY KEY
  );
  ALTER TABLE missing ENABLE ROW LEVEL SECURITY;`)
-	require.Error(t, err)
+	require.ErrorIs(t, err, executor.ErrTableNotFound)
+	assert.Equal(t, executor.CodeTableNotFound, executor.OutcomeCode(err))
 	assert.Empty(t, relationKind(t, pool, schema, "missing"))
 }
 
@@ -320,6 +322,7 @@ func TestExecuteRowSecurityDeadlineRollsBackLiveDDL(t *testing.T) {
 	require.NoError(t, err)
 	report, err := executor.ExecuteRowSecurity(t.Context(), pool, schema, desired, executor.Budget{LockTimeout: 50 * time.Millisecond, StatementTimeout: 2 * time.Second})
 	require.Error(t, err)
+	assert.Equal(t, executor.CodeBudgetStatementExceeded, executor.OutcomeCode(err))
 	assert.Empty(t, report.Statements)
 	var reached bool
 	require.NoError(t, pool.QueryRow(t.Context(), "SELECT is_called FROM "+pgx.Identifier{schema, "fault_reached"}.Sanitize()).Scan(&reached))
@@ -327,4 +330,50 @@ func TestExecuteRowSecurityDeadlineRollsBackLiveDDL(t *testing.T) {
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
 	assert.Equal(t, before, after)
+}
+
+// Qualified application helpers keep their binding; a target-schema function
+// with a built-in's name must not change the policy during live execution.
+func TestExecuteRowSecurityPreservesHelperResolution(t *testing.T) {
+	pool, schema := rlsFixture(t)
+	helpers := testutil.NewSchema(t, pool)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+ CREATE FUNCTION %s.allowed_owner() RETURNS bigint
+ LANGUAGE sql IMMUTABLE AS 'SELECT 9::bigint';
+ CREATE FUNCTION %s.abs(bigint) RETURNS bigint
+ LANGUAGE sql IMMUTABLE AS 'SELECT 999::bigint';
+ INSERT INTO %s.documents VALUES (1, -9), (2, -7);`, helpers, schema, schema))
+	require.NoError(t, err)
+	sql := fmt.Sprintf(`CREATE TABLE documents (
+     id bigint PRIMARY KEY,
+     owner_id bigint NOT NULL
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT
+     USING (abs(owner_id) = %s.allowed_owner());`, helpers)
+	report, err := applyRLS(t, pool, schema, sql)
+	require.NoError(t, err)
+	actual, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	require.Len(t, actual.RowSecurity.Policies, 1)
+	assert.Equal(t, "(abs(owner_id) = "+helpers+".allowed_owner())", *actual.RowSecurity.Policies[0].Using)
+	// SQL in the committed report comes from PostgreSQL's canonical catalog form.
+	assert.Contains(t, report.Statements[3], "USING ((abs(owner_id) = "+helpers+".allowed_owner()))")
+	role := pgx.Identifier{schema + "_reader"}.Sanitize()
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE ROLE %s;
+ GRANT USAGE ON SCHEMA %s, %s TO %s;
+ GRANT SELECT ON %s.documents TO %s;`, role, schema, helpers, role, schema, role))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP OWNED BY "+role+"; DROP ROLE "+role)
+		require.NoError(t, err)
+	})
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+	_, err = tx.Exec(t.Context(), "SET LOCAL ROLE "+role)
+	require.NoError(t, err)
+	var ids []int64
+	require.NoError(t, tx.QueryRow(t.Context(), "SELECT array_agg(id ORDER BY id) FROM "+pgx.Identifier{schema, "documents"}.Sanitize()).Scan(&ids))
+	assert.Equal(t, []int64{1}, ids)
 }

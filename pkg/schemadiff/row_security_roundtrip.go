@@ -48,26 +48,55 @@ func RenderWithRowSecurity(m Model) (string, error) {
 	var b strings.Builder
 	b.WriteString(base)
 	target := pgx.Identifier{m.Table}.Sanitize()
-	state := "DISABLE"
-	if m.RowSecurity.Enabled {
-		state = "ENABLE"
-	}
-	fmt.Fprintf(&b, "\nALTER TABLE %s %s ROW LEVEL SECURITY;\n", target, state)
-	force := "NO FORCE"
-	if m.RowSecurity.Forced {
-		force = "FORCE"
-	}
-	fmt.Fprintf(&b, "ALTER TABLE %s %s ROW LEVEL SECURITY;\n", target, force)
-	for _, policy := range m.RowSecurity.Policies {
-		if err := renderPolicy(&b, target, policy); err != nil {
-			return "", err
-		}
+	if err := renderRowSecurity(&b, target, m.RowSecurity); err != nil {
+		return "", err
 	}
 	out := b.String()
 	if _, err := statement.ParseDesiredWithRowSecurity(out); err != nil {
 		return "", fmt.Errorf("render row security for %q: %w", m.Table, err)
 	}
 	return out, nil
+}
+
+// RenderRowSecurity renders only settings, policies, and policy comments from
+// a catalog model. It does not authorize execution; callers must admit the model
+// and execute with pg_catalog as the search path, as used during introspection.
+func RenderRowSecurity(schema string, m Model) ([]string, error) {
+	if schema == "" || m.Table == "" {
+		return nil, ErrUnrenderableRowSecurity
+	}
+	var b strings.Builder
+	if err := renderRowSecurity(&b, pgx.Identifier{schema, m.Table}.Sanitize(), m.RowSecurity); err != nil {
+		return nil, err
+	}
+	statements, err := statement.Split(b.String())
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, len(statements))
+	for i, st := range statements {
+		result[i] = st.SQL
+	}
+	return result, nil
+}
+
+func renderRowSecurity(b *strings.Builder, target string, security RowSecurity) error {
+	state := "DISABLE"
+	if security.Enabled {
+		state = "ENABLE"
+	}
+	fmt.Fprintf(b, "\nALTER TABLE %s %s ROW LEVEL SECURITY;\n", target, state)
+	force := "NO FORCE"
+	if security.Forced {
+		force = "FORCE"
+	}
+	fmt.Fprintf(b, "ALTER TABLE %s %s ROW LEVEL SECURITY;\n", target, force)
+	for _, policy := range security.Policies {
+		if err := renderPolicy(b, target, policy); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func renderPolicy(b *strings.Builder, target string, p Policy) error {
