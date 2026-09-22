@@ -129,11 +129,11 @@ func resolveShadow(ctx context.Context, tx pgx.Tx, schema, shadow, owner string)
 	}
 	if relkind != relkindOrdinaryTable {
 		// INV: ST-5
-		return 0, fmt.Errorf("%w: ST-5: %s.%s is a relation of kind %q, not a shadow table", ErrInvariantViolation, schema, shadow, relkind)
+		return 0, refuse(CauseForeignRelation, nil, "%s.%s is a relation of kind %q, not a shadow table", schema, shadow, relkind)
 	}
 	if relOwner != owner {
 		// INV: ST-5
-		return 0, fmt.Errorf("%w: ST-5: shadow %s.%s is owned by %s, source by %s", ErrInvariantViolation, schema, shadow, relOwner, owner)
+		return 0, refuse(CauseForeignRelation, nil, "shadow %s.%s is owned by %s, source by %s", schema, shadow, relOwner, owner)
 	}
 	return oid, nil
 }

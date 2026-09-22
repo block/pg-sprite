@@ -42,5 +42,5 @@ func TestCreateShadowRefusesAShadowTheSourceOwnerDoesNotOwn(t *testing.T) {
 
 	_, err = createShadow(t.Context(), tx, target, ShadowName(schema, "widgets"), owner)
 	require.ErrorIs(t, err, ErrInvariantViolation)
-	assert.Contains(t, err.Error(), "ST-5")
+	assert.Equal(t, CauseShadowOwner, RefusalCauseOf(err))
 }
