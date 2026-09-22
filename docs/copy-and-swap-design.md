@@ -124,15 +124,18 @@ never-advanced sequence and would turn the strict `setval` into a silent no-op. 
 source (`is_called = false`) therefore leaves the new sequence at the same not-yet-issued start
 value rather than skipping it, and no sequence value is ever spliced into SQL text. Discovery
 uses `pg_get_serial_sequence` and verifies the corresponding `pg_depend` ownership edge. The old
-identity sequence is dropped with the old table.
+identity sequence is dropped with the old table. A change that drops an identity column removes
+it from the handoff: the shadow has no column to carry the default, so the proof lists only the
+identity columns the shadow kept, and that sequence too ends with the old table.
 
 The shared counter puts a dependency edge in the direction an operator does not expect: the
 shadow's default depends on the *source's* sequence. `DROP TABLE <source>` therefore fails
 while a shadow exists, and the hint the server offers — `DROP TABLE <source> CASCADE` — drops
 the shadow's identity default silently, leaving a shadow whose key column has no default at all.
-Cleaning up after an aborted run drops the shadow **first**, never the source with `CASCADE`;
-the same ordering governs the D9 drop of the retained `_old` table, which by then owns nothing
-the live table depends on.
+Cleaning up after an aborted run drops the shadow **first**, never the source with `CASCADE`
+(`DropShadow` drops exactly the shadow, without `CASCADE`, and `InspectShadow` refuses a shadow
+whose identity default no longer points at the source's sequence); the same ordering governs
+the D9 drop of the retained `_old` table, which by then owns nothing the live table depends on.
 
 **Why.** Copy never advances an unrelated sequence, and the post-swap table preserves generation
 kind, sequence name, and the source's exact issued-value state.
@@ -365,7 +368,7 @@ decoding but adds write-path availability and amplification costs.
 | `pkg/decode` | Produces `ChangeEvent`, including per-column presence and `OldKey` for an UPDATE that moved the primary key. | ST-3, ST-4, CO-4, CO-8 |
 | `pkg/applier` | Applies presence-aware events from the per-key buffer. | CO-4, CO-5, CO-6, CO-8, LK-3 |
 | `pkg/checkpoint` | Produces `Checkpoint`. | ST-1, ST-2 |
-| `pkg/schemachange` | Shadow builder (`BuildShadow` produces `BuiltShadow`: source and shadow OIDs, fingerprints, identity handoff, copy columns, fidelity snapshot; `SourceOfDerivedName` maps a derived name back to its table), orchestrator, and cutover. The orchestrator leaf gives `BuildShadow` a `*dbconn.TableLockSession`: the build runs under the session's `Bind` context so a lost lock cancels it, and re-asserts the lock on the session's own connection inside the build transaction, since the lock and the build are deliberately on different sessions. The same leaf adds `DropShadow` and `InspectShadow`, the resume path `ErrShadowExists` names. | LK-1 (orchestrator), LK-2, LK-4, ST-5, ST-7 |
+| `pkg/schemachange` | Shadow builder (`BuildShadow` produces `BuiltShadow`: source and shadow OIDs, fingerprints, identity handoff, copy columns, fidelity snapshot; `SourceOfDerivedName` maps a derived name back to its table), orchestrator, and cutover. `BuildShadow`, `DropShadow`, and `InspectShadow` each take the `*dbconn.TableLockSession` for the table — a dedicated direct server session, distinct from the working pool, that `dbconn.AcquireTableLock` refuses to open through a transaction-pooling proxy: the operation runs under the session's `Bind` context so a lost lock cancels the statement in flight, and its transaction re-asserts from its own connection that the session's backend holds the lock before the first write, since the lock and the work are deliberately on different sessions. `InspectShadow` is the resume path `ErrShadowExists` points at: it re-derives the `BuiltShadow` proof from the catalog for the caller to compare with its checkpoint; `DropShadow` is the D5 cleanup, dropping only a plain table the source's owner owns, without `CASCADE`. | LK-1, LK-2, LK-4, ST-5, ST-7 |
 
 Each producing package owns its types. `pkg/schemachange` imports every producer; no producer
 imports `pkg/schemachange`.
