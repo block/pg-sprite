@@ -2,6 +2,7 @@ package schemachange
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
@@ -125,6 +126,49 @@ func applyIdentityDefaults(ctx context.Context, tx pgx.Tx, schema, shadow string
 		}
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return fmt.Errorf("point shadow column %s at sequence %s: %w", id.Column, sequence, err)
+		}
+	}
+	return nil
+}
+
+// verifyIdentityDefaults proves each handed-off identity column carries
+// DEFAULT nextval(<source sequence>) on the shadow: a plain column (no
+// identity of its own) whose default is the source's sequence, exactly as
+// applyIdentityDefaults left it. The build runs it after the gated
+// statement, so a statement that replaced the column under the same name
+// is refused rather than recorded as a handoff; the inspection runs it so
+// a shadow whose default was stripped or re-pointed is refused. The
+// comparison is on the sequence's OID, so a renamed sequence still matches
+// and a re-created one does not.
+func verifyIdentityDefaults(ctx context.Context, tx pgx.Tx, shadowOID uint32, identities []IdentityColumn) error {
+	for _, id := range identities {
+		var identity string
+		var defaultsToSequence bool
+		err := tx.QueryRow(ctx, `
+			SELECT a.attidentity::text,
+			       EXISTS (
+			           SELECT 1
+			           FROM pg_depend s
+			           WHERE s.classid = 'pg_attrdef'::regclass AND s.objid = d.oid
+			             AND s.refclassid = 'pg_class'::regclass AND s.refobjid = to_regclass($3))
+			FROM pg_attribute a
+			LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+			WHERE a.attrelid = $1 AND a.attname = $2 AND NOT a.attisdropped`, shadowOID, id.Column,
+			pgx.Identifier{id.SequenceSchema, id.SequenceName}.Sanitize()).Scan(&identity, &defaultsToSequence)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// INV: ST-5
+			return fmt.Errorf("%w: ST-5: shadow has no column %s to carry the identity handoff", ErrInvariantViolation, id.Column)
+		}
+		if err != nil {
+			return fmt.Errorf("read shadow default for %s: %w", id.Column, err)
+		}
+		if identity != "" {
+			// INV: ST-5
+			return fmt.Errorf("%w: ST-5: shadow column %s is an identity column of its own, not a handoff from the source sequence", ErrInvariantViolation, id.Column)
+		}
+		if !defaultsToSequence {
+			// INV: ST-5
+			return fmt.Errorf("%w: ST-5: shadow column %s does not default to the source sequence %s.%s", ErrInvariantViolation, id.Column, id.SequenceSchema, id.SequenceName)
 		}
 	}
 	return nil

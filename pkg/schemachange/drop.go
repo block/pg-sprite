@@ -56,6 +56,9 @@ func dropShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockS
 	if err := confirmTableLock(ctx, tx, lock); err != nil {
 		return err
 	}
+	// The proof's owner, not the live source's: the shadow was created under
+	// SET LOCAL ROLE of the proof's owner, so that is the owner this
+	// engine's shadow has, and the source may no longer exist to ask.
 	if _, err := resolveShadow(ctx, tx, target.Schema(), shadow, target.OwnerRole()); err != nil {
 		return err
 	}

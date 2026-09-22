@@ -236,6 +236,12 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err != nil {
 		return BuiltShadow{}, fmt.Errorf("introspect shadow %s.%s: %w", target.Schema(), shadow, err)
 	}
+	// The handoff is proven on the shadow the statement left, not the one
+	// the defaults were applied to: the proof records exactly what an
+	// inspection of this shadow would accept.
+	if err := verifyIdentityDefaults(ctx, tx, shadowOID, handoffIdentities(identities, targetModel)); err != nil {
+		return BuiltShadow{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return BuiltShadow{}, fmt.Errorf("commit shadow build: %w", err)
 	}

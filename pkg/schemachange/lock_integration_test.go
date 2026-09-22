@@ -146,6 +146,144 @@ func TestDropAndInspectShadowRefuseWhenTheLockSessionIsGone(t *testing.T) {
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
 }
 
+// The in-transaction confirmation compares backends, not merely that some
+// session holds the table. Once this instance's lock session is gone, a
+// second instance can take the same lock before the first's keepalive
+// notices; the first must not keep working under a lock the server now
+// grants to someone else.
+func TestShadowOperationsRefuseALockHeldByAnotherBackend(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.widgets (
+			id bigint PRIMARY KEY,
+			qty integer NOT NULL
+		)`)
+	target := f.prove(t, "widgets")
+	buildLock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, "widgets")
+	require.NoError(t, err)
+	_, err = schemachange.BuildShadow(t.Context(), f.pool, buildLock, target, f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	require.NoError(t, err)
+	require.NoError(t, buildLock.Release(t.Context()))
+	shadow := schemachange.ShadowName(f.schema, "widgets")
+
+	stale := f.goneLock(t, "widgets")
+	rival := f.lock(t, "widgets")
+	require.NotEqual(t, stale.BackendPID(), rival.BackendPID())
+
+	err = schemachange.DropShadow(t.Context(), f.pool, stale, target, schemachange.Options{})
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "drop")
+	assert.True(t, f.relationExists(t, shadow), "a refused drop removes nothing")
+
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, stale, target, schemachange.Options{})
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
+
+	_, err = schemachange.BuildShadow(t.Context(), f.pool, stale, target, f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "build")
+	assert.NoError(t, rival.Err(), "the rival's lock is untouched")
+}
+
+// A lock session that has already reported loss is refused before any
+// connection is opened: the error names the session's loss and nothing
+// else, because no statement ran to fail under the cancelled context.
+func TestShadowOperationsRefuseALockSessionThatReportedLoss(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.widgets (
+			id bigint PRIMARY KEY,
+			qty integer NOT NULL
+		)`)
+	target := f.prove(t, "widgets")
+	alter := f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`)
+	lock := f.lock(t, "widgets", dbconn.WithTableLockKeepalive(100*time.Millisecond))
+	f.terminateBackend(t, lock.BackendPID())
+	const lockLossDeadline = 10 * time.Second
+	select {
+	case <-lock.Done():
+	case <-time.After(lockLossDeadline):
+		t.Fatalf("lock session did not report loss within %s", lockLossDeadline)
+	}
+	require.Error(t, lock.Err())
+
+	_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
+	assertRefusedBeforeAnyStatement(t, err, lock, "build")
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")), "a refused build creates nothing")
+
+	err = schemachange.DropShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
+	assertRefusedBeforeAnyStatement(t, err, lock, "drop")
+
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
+	assertRefusedBeforeAnyStatement(t, err, lock, "inspect")
+}
+
+// assertRefusedBeforeAnyStatement checks that err is the pre-connection
+// LK-1 refusal for a session that reported loss: it wraps the session's
+// own error and not the context cancellation a statement run under the
+// dead session's Bind context would have added.
+func assertRefusedBeforeAnyStatement(t *testing.T, err error, lock *dbconn.TableLockSession, op string) {
+	t.Helper()
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, op)
+	assert.ErrorIs(t, err, lock.Err(), op)
+	assert.NotErrorIs(t, err, context.Canceled, op)
+}
+
+// A drop runs under the lock session's Bind context too: losing the lock
+// while DROP TABLE is parked behind another session's lock on the shadow
+// cancels the statement, and the shadow is left in place.
+func TestDropShadowAbortsWhenTheLockIsLostMidDrop(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.widgets (
+			id bigint PRIMARY KEY,
+			qty integer NOT NULL
+		)`)
+	target := f.prove(t, "widgets")
+	buildLock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, "widgets")
+	require.NoError(t, err)
+	_, err = schemachange.BuildShadow(t.Context(), f.pool, buildLock, target, f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	require.NoError(t, err)
+	require.NoError(t, buildLock.Release(t.Context()))
+	shadow := schemachange.ShadowName(f.schema, "widgets")
+	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, "widgets",
+		dbconn.WithTableLockKeepalive(100*time.Millisecond))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.Error(t, lock.Release(context.WithoutCancel(t.Context())))
+	})
+
+	blocker, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		assert.NoError(t, blocker.Rollback(context.WithoutCancel(t.Context())))
+	})
+	_, err = blocker.Exec(t.Context(), fmt.Sprintf(`LOCK TABLE %s IN ACCESS EXCLUSIVE MODE`, pgx.Identifier{f.schema, shadow}.Sanitize()))
+	require.NoError(t, err)
+
+	const dropLockTimeout = 30 * time.Second
+	results := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		results <- schemachange.DropShadow(t.Context(), f.pool, lock, target, schemachange.Options{LockTimeout: dropLockTimeout})
+	})
+	t.Cleanup(wg.Wait)
+
+	const dropParkedDeadline = 15 * time.Second
+	require.Eventually(t, func() bool {
+		return f.backendWaitingOnLock(t, "DROP TABLE%")
+	}, dropParkedDeadline, 50*time.Millisecond, "the drop should be waiting for the shadow's lock")
+
+	f.terminateBackend(t, lock.BackendPID())
+
+	const lockLossDeadline = 10 * time.Second
+	select {
+	case err := <-results:
+		assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+		assert.ErrorIs(t, err, lock.Err(), "the loss the session reported is the cause")
+	case <-time.After(lockLossDeadline):
+		t.Fatalf("drop did not abort within %s of lock loss", lockLossDeadline)
+	}
+	assert.True(t, f.relationExists(t, shadow), "an aborted drop leaves the shadow in place")
+}
+
 // goneLock acquires the table lock and then terminates the session's
 // backend, so the server no longer grants the lock while the session still
 // believes it holds it: the default keepalive is long enough that only an

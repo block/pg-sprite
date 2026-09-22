@@ -77,6 +77,9 @@ func inspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 	if err != nil {
 		return BuiltShadow{}, err
 	}
+	// The live owner, not the proof's: the shadow was created under the
+	// proof's owner, so an owner the source acquired since the proof is
+	// shape drift and is refused like any other.
 	shadowOID, err := resolveShadow(ctx, tx, target.Schema(), shadow, fidelity.Owner)
 	if err != nil {
 		return BuiltShadow{}, err
@@ -137,43 +140,3 @@ func resolveShadow(ctx context.Context, tx pgx.Tx, schema, shadow, owner string)
 
 // relkindOrdinaryTable is pg_class.relkind for a plain table.
 const relkindOrdinaryTable = "r"
-
-// verifyIdentityDefaults proves each source identity column still carries
-// DEFAULT nextval(<source sequence>) on the shadow: the shadow must be a
-// plain column (no identity of its own) whose default is the source's
-// sequence, exactly as applyIdentityDefaults left it. The comparison is on
-// the sequence's OID, so a renamed sequence still matches and a re-created
-// one does not.
-func verifyIdentityDefaults(ctx context.Context, tx pgx.Tx, shadowOID uint32, identities []IdentityColumn) error {
-	for _, id := range identities {
-		var identity string
-		var defaultsToSequence bool
-		err := tx.QueryRow(ctx, `
-			SELECT a.attidentity::text,
-			       EXISTS (
-			           SELECT 1
-			           FROM pg_depend s
-			           WHERE s.classid = 'pg_attrdef'::regclass AND s.objid = d.oid
-			             AND s.refclassid = 'pg_class'::regclass AND s.refobjid = to_regclass($3))
-			FROM pg_attribute a
-			LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-			WHERE a.attrelid = $1 AND a.attname = $2 AND NOT a.attisdropped`, shadowOID, id.Column,
-			pgx.Identifier{id.SequenceSchema, id.SequenceName}.Sanitize()).Scan(&identity, &defaultsToSequence)
-		if errors.Is(err, pgx.ErrNoRows) {
-			// INV: ST-5
-			return fmt.Errorf("%w: ST-5: shadow has no column %s to carry the identity handoff", ErrInvariantViolation, id.Column)
-		}
-		if err != nil {
-			return fmt.Errorf("read shadow default for %s: %w", id.Column, err)
-		}
-		if identity != "" {
-			// INV: ST-5
-			return fmt.Errorf("%w: ST-5: shadow column %s is an identity column of its own, not a handoff from the source sequence", ErrInvariantViolation, id.Column)
-		}
-		if !defaultsToSequence {
-			// INV: ST-5
-			return fmt.Errorf("%w: ST-5: shadow column %s does not default to the source sequence %s.%s", ErrInvariantViolation, id.Column, id.SequenceSchema, id.SequenceName)
-		}
-	}
-	return nil
-}

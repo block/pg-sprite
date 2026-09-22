@@ -241,7 +241,8 @@ Migrations serialize per table via a **session-scoped advisory lock** — the an
 cancellation tests); `pkg/schemachange` shadow build, drop, and inspect each require the
 session for the proven table, run under its `Bind` context, and confirm from their own
 transaction that the session's backend holds the lock before the first write (nil-session,
-wrong-table, gone-session, and mid-build-loss tests). *Planned enforcement:* the copier and
+wrong-table, reported-loss, gone-session, rival-backend, mid-build-loss, and mid-drop-loss
+tests). *Planned enforcement:* the copier and
 cutover acquire the same session before their first write and run under it, so loss of the
 lock aborts the change at every stage.
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
