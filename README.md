@@ -66,8 +66,9 @@ refusal — never a silently wrong or incomplete result:
 
 - **Copy-and-swap** (genuine table rewrites) is not yet available — those
   changes refuse rather than fall through to a blocking rewrite.
-- **Row security** is included in exports when present, with reviewable before/after differences. Applying
-  policy changes is not supported yet. See the workflow and roadmap in
+- **Row security** is included in exports when present, with reviewable before/after differences. The
+  [atomic Go executor](docs/atomic-row-security.md) can apply RLS-only changes to
+  existing tables; CLI execution and mixed table/policy changes remain unsupported. See the workflow and roadmap in
   [declarative-row-security.md](docs/declarative-row-security.md).
 - **Foreign keys** are out of the declarative model in either direction:
   desired files cannot declare them, and export refuses both a table that

@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -25,21 +26,30 @@ func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, desired statement.
 }
 
 func introspectDesiredStatements(ctx context.Context, db *pgxpool.Pool, table string, statements []statement.Statement) (Model, error) {
-	scratch, err := scratchSchemaName()
-	if err != nil {
-		return Model{}, err
-	}
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return Model{}, fmt.Errorf("begin scratch transaction: %w", err)
 	}
+	return introspectDesiredTransaction(ctx, tx, table, statements)
+}
+
+// introspectDesiredTransaction owns tx, which may be a savepoint. Every exit
+// rolls it back, leaving its parent's live target and settings untouched.
+func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, statements []statement.Statement) (Model, error) {
 	// The scratch transaction is never committed: rollback is the cleanup
 	// path for success and failure alike, so the redundant-closer exception
 	// does not apply — this rollback is load-bearing and its error is
 	// surfaced on the success path below.
 	defer func() {
-		_ = tx.Rollback(context.WithoutCancel(ctx))
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		_ = tx.Rollback(cleanup)
 	}()
+
+	scratch, err := scratchSchemaName()
+	if err != nil {
+		return Model{}, err
+	}
 
 	if _, err := tx.Exec(ctx, "CREATE SCHEMA "+pgx.Identifier{scratch}.Sanitize()); err != nil {
 		return Model{}, fmt.Errorf("create scratch schema: %w", err)

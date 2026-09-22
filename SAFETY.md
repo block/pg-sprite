@@ -73,9 +73,9 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   `preflight.PrivilegedRole`, `preflight.CopySwapTarget`, `dbconn.TableLock`,
   `checksum.VerifiedShadow`, and `checksum.CleanWatermark`); dangerous APIs accept only proof types —
   e.g. the planned cutover swap will accept only a `VerifiedShadow`.
-- `statement.DesiredWithRowSecurity` proves admission for rolled-back scratch
-  inspection only. It is distinct from `DesiredSchema` and must never be accepted
-  by a live executor.
+- `statement.DesiredWithRowSecurity` proves declaration syntax, not execution safety. It stays distinct from
+  `DesiredSchema`. Only `executor.ExecuteRowSecurity` may consume it for live RLS:
+  that executor locks, checks table equality, and verifies convergence in one transaction.
 - **Put a limit on everything.** Every loop bounded, every queue bounded, every retry counted,
   every wait deadlined. An unbounded anything in a core package is a review-blocking defect.
 - **Assert the positive and the negative space; pair assertions across boundaries.** Invariant
@@ -127,3 +127,7 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   test-first with the invariant's named test obligation, small diffs, careful review.
 - **Outside the core: more AI, less steering.** Iterate at inference speed; the boundary means
   a bug in the periphery cannot corrupt data.
+
+The atomic RLS executor also admits `pkg/schemadiff` scratch introspection, table
+comparison, and render admission into the core. Those calls refuse mixed or
+unsupported table shapes; final catalog comparison gates commit (RS-1..RS-4).

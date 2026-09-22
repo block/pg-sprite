@@ -18,8 +18,9 @@ var ErrRowSecurityDeclaration = errors.New("desired row security requires one ex
 // desired-state materialization can preserve their dependency identities.
 var ErrPolicyRelationDependency = errors.New("policy relation dependencies are not supported in desired row security")
 
-// DesiredWithRowSecurity proves admission for scratch inspection only. It is
-// deliberately distinct from DesiredSchema: live executors cannot accept it.
+// DesiredWithRowSecurity proves declaration syntax for scratch inspection and
+// the dedicated atomic RLS executor. It is distinct from DesiredSchema; generic
+// native and create executors cannot accept it. Live safety needs executor checks.
 // The explicit parse entry point owns the complete table-local RLS definition,
 // including an empty policy set. Only ParseDesiredWithRowSecurity constructs it.
 type DesiredWithRowSecurity struct {

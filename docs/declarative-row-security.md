@@ -3,8 +3,9 @@
 You can export a table's RLS settings and policies, keep them alongside its SQL,
 and verify that the live definition still matches. `pull` includes RLS when the
 live table has settings or policies; ordinary tables get no extra SQL.
-**Applying changes to RLS is not supported yet.** A difference produces a review
-of the captured definitions and a refusal, not SQL to execute.
+`diff` shows the captured definitions and refuses to emit execution SQL for RLS
+changes. The dedicated [atomic Go executor](atomic-row-security.md) can apply an
+RLS-only declaration to an existing supported table. No new CLI flags are needed.
 
 ## Export and compare
 
@@ -106,8 +107,8 @@ Equal definitions do not prove equal access: grants, role membership, helper
 function bodies, and authentication configuration are outside this comparison.
 
 Library callers use `RenderWithRowSecurity`, `ParseDesiredWithRowSecurity`, and
-`diffplan.PlanWithRowSecurity`. The parser returns a separate inspection-only type
-that the existing live executors cannot accept.
+`diffplan.PlanWithRowSecurity`. The parser returns a separate declaration type. Only the dedicated atomic RLS
+executor accepts it for live execution; generic native and create executors do not.
 
 ## Review a difference
 
@@ -183,7 +184,7 @@ complete support matrix.
 pg-sprite already compares a live table with desired SQL materialized inside a
 rolled-back scratch transaction. This work extends that model instead of importing another
 schema engine. PostgreSQL should resolve SQL and supply its catalog representation.
-Before enabling policy execution, settle these boundaries:
+The execution contract preserves these boundaries:
 
 - **Explicit ownership.** Existing table-only files keep access control separately
   managed. A caller must opt into managing a table's complete RLS definition.
@@ -202,7 +203,7 @@ Before enabling policy execution, settle these boundaries:
   removing a restrictive one, disabling RLS, or changing a role can widen access
   without deleting data. A data-destruction label is not a complete authorization
   contract. Do not claim to prove arbitrary predicates equivalent.
-- **Atomic transitions.** Recheck the reviewed state under the appropriate lock
+- **Atomic transitions.** Derive the change from live state under the appropriate lock
   and apply a table's policy transition in one bounded transaction. Replacement
   must not leave a committed intermediate access rule. Refuse mixed table/policy
   plans until their execution strategy preserves that guarantee.
@@ -217,11 +218,11 @@ this table-scoped work.
    incomplete export. Implemented here; table-only diff behavior stays intact.
 2. **Round-trip the declaration.** Admit and export SQL under explicit RLS scope;
    materialize it in scratch and prove the unchanged definition produces an empty
-   diff. Implemented through automatic export and SQL declarations; execution remains refused,
-   including greenfield creation.
-3. **Plan and execute transitions.** Add typed security changes, exact-state
-   revalidation, lock budgets, atomic application, dependency handling, and reports
-   suitable for users and orchestrators.
+   diff. Implemented through automatic export and SQL declarations; greenfield
+   creation remains refused.
+3. **Execute transitions atomically.** The Go executor now locks, derives, applies,
+   and verifies one table's RLS state in one bounded transaction. Mixed changes and
+   policy relation dependencies remain unsupported. CLI integration is a follow-up.
 4. **Prove application behavior.** Extend the local Supabase harness with real
    authenticated and anonymous requests, two users, allowed and denied writes,
    and interrupted transitions. Then validate hosted connection and privilege
@@ -231,7 +232,9 @@ The [inspection tests](../pkg/schemadiff/row_security_integration_test.go),
 [round-trip tests](../pkg/schemadiff/row_security_roundtrip_integration_test.go), and
 [Supabase auth test](../integration/supabase/row_security_test.go) use real databases
 and readable DDL. They prove catalog fidelity, round trips, and refusal boundaries,
-**not support for applying policies**. The existing PostgreSQL CI matrix and
+**not support for applying policies**. The separate
+[executor tests](../pkg/executor/row_security_integration_test.go) cover atomic
+application, rollback, lock waits, and non-owner access on PostgreSQL. The existing PostgreSQL CI matrix and
 Supabase compatibility job both run `pkg/schemadiff`; no separate runner is needed.
 Hosted validation is not a prerequisite for the local steps, nor replaced by them.
 

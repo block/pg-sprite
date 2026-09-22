@@ -23,6 +23,8 @@ const (
 	// CodeBudgetStatementExceeded: the statement ran past
 	// statement_timeout and was cancelled; the change does real work.
 	CodeBudgetStatementExceeded Code = "budget-statement-exceeded"
+	// CodeRowSecurityOutcomeUnknown requires catalog inspection before retry.
+	CodeRowSecurityOutcomeUnknown Code = "row-security-outcome-unknown"
 	// CodeBlockingOutcomeUnknown requires catalog inspection before retry.
 	CodeBlockingOutcomeUnknown Code = "blocking-outcome-unknown"
 	// CodeInvalidBlockingBudget identifies an unrepresentable or disabled bound.
@@ -148,6 +150,7 @@ func Codes() []Code {
 		CodeBudgetLockExceeded,
 		CodeBudgetStatementExceeded,
 		CodeBlockingOutcomeUnknown,
+		CodeRowSecurityOutcomeUnknown,
 		CodeInvalidBlockingBudget,
 		CodeUnsupportedAcceptedBlocking,
 		CodeCancelledByCaller,
@@ -241,6 +244,10 @@ func OutcomeCode(err error) Code {
 	var budgetErr *BudgetError
 	if errors.As(err, &budgetErr) {
 		return budgetErr.Code()
+	}
+	var rlsUnknown *RowSecurityOutcomeUnknownError
+	if errors.As(err, &rlsUnknown) {
+		return CodeRowSecurityOutcomeUnknown
 	}
 	var unknownErr *BlockingOutcomeUnknownError
 	if errors.As(err, &unknownErr) {
