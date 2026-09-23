@@ -97,8 +97,8 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 		return RowSecurityReport{}, fmt.Errorf("set row security budgets: %w", err)
 	}
 	target := pgx.Identifier{schema, desired.Table()}.Sanitize()
-	// Reject roles without owner privileges before taking an application-blocking lock.
-	if err := checkRowSecurityOwner(ctx, tx, schema, desired.Table()); err != nil {
+	// Reject missing owner or scratch privileges before taking an application-blocking lock.
+	if err := checkRowSecurityPrivileges(ctx, tx, schema, desired.Table()); err != nil {
 		return RowSecurityReport{}, err
 	}
 	// INV: RS-1 — all live comparison and DDL occur after this exclusive lock.
@@ -109,8 +109,8 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 		}
 		return RowSecurityReport{}, fmt.Errorf("lock row security target %s: %w", target, err)
 	}
-	// Ownership may have changed while waiting for the lock. Recheck it under lock.
-	if err := checkRowSecurityOwner(ctx, tx, schema, desired.Table()); err != nil {
+	// Privileges may have changed while waiting for the lock. Recheck them under lock.
+	if err := checkRowSecurityPrivileges(ctx, tx, schema, desired.Table()); err != nil {
 		return RowSecurityReport{}, err
 	}
 	live, err := schemadiff.IntrospectTx(ctx, tx, schema, desired.Table())
@@ -119,7 +119,7 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 	}
 	wanted, err := schemadiff.IntrospectDesiredWithRowSecurityTx(ctx, tx, desired)
 	if err != nil {
-		return RowSecurityReport{}, fmt.Errorf("inspect desired row security for %s: %w", target, err)
+		return RowSecurityReport{}, fmt.Errorf("inspect desired row security for %s: %w", target, classifyRowSecurityDesiredError(err))
 	}
 	if err := admitRowSecurityTable(schema, live, wanted); err != nil {
 		return RowSecurityReport{}, fmt.Errorf("admit row security target %s: %w: %w", target, ErrRowSecurityRefused, err)

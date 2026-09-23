@@ -56,11 +56,12 @@ Lock exhaustion reports `budget-lock-exceeded`; the statement or whole-attempt
 deadline reports `budget-statement-exceeded`. A missing target reports
 `table-not-found`. Invalid declarations, unsupported targets, and insufficient
 privileges report permanent `row-security-refused` outcomes, preserving the underlying
-cause. Caller cancellation is kept separate from budget exhaustion.
+cause. This includes unresolved policy roles and qualified helper functions during
+scratch inspection. Caller cancellation is kept separate from budget exhaustion.
 
 The caller needs table-owner privileges and permission to create the temporary
-scratch schema. Ownership is checked before locking and checked again under the
-lock. Roles and qualified helpers must already exist. Grants, role
+scratch schema. Both privileges are checked before locking and checked again under
+the lock. Roles and qualified helpers must already exist. Grants, role
 membership, helper bodies, authentication, and Supabase-managed schemas are outside
 this operation. Application authorization tests are still needed. Concurrent
 administration of those dependencies is not serialized by the table lock.
