@@ -29,6 +29,9 @@ refused form would take, what an operator who accepts a maintenance window can d
 - [Why typed refusal, not passthrough](#why-typed-refusal-not-passthrough)
 - [Deliberately operator-owned](#deliberately-operator-owned)
 
+A ✅ marks an implemented capability; check the front-door columns for CLI access.
+The atomic RLS executor is currently a Go API only, with no `migrate` or `diff` execution.
+
 ## Query the matrix
 
 The marker-delimited regions of this page are generated from

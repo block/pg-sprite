@@ -101,6 +101,11 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 	if err := checkRowSecurityPrivileges(ctx, tx, schema, desired.Table()); err != nil {
 		return RowSecurityReport{}, err
 	}
+	// Materialize the declaration before blocking application reads and writes.
+	wanted, err := schemadiff.IntrospectDesiredWithRowSecurityTx(ctx, tx, desired)
+	if err != nil {
+		return RowSecurityReport{}, fmt.Errorf("inspect desired row security for %s: %w", target, classifyRowSecurityDesiredError(err))
+	}
 	// INV: RS-1 — all live comparison and DDL occur after this exclusive lock.
 	if _, err := tx.Exec(ctx, "LOCK TABLE ONLY "+target+" IN ACCESS EXCLUSIVE MODE"); err != nil {
 		var pgErr *pgconn.PgError
@@ -116,10 +121,6 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 	live, err := schemadiff.IntrospectTx(ctx, tx, schema, desired.Table())
 	if err != nil {
 		return RowSecurityReport{}, fmt.Errorf("inspect row security target %s: %w", target, err)
-	}
-	wanted, err := schemadiff.IntrospectDesiredWithRowSecurityTx(ctx, tx, desired)
-	if err != nil {
-		return RowSecurityReport{}, fmt.Errorf("inspect desired row security for %s: %w", target, classifyRowSecurityDesiredError(err))
 	}
 	if err := admitRowSecurityTable(schema, live, wanted); err != nil {
 		return RowSecurityReport{}, fmt.Errorf("admit row security target %s: %w: %w", target, ErrRowSecurityRefused, err)

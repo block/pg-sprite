@@ -1,9 +1,11 @@
 package executor_test
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -16,6 +18,12 @@ func TestExecuteRowSecurityRefusesMissingPolicyRole(t *testing.T) {
 	pool, schema := rlsFixture(t)
 	before, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) }()
+	_, err = holder.Exec(t.Context(), "LOCK TABLE "+pgx.Identifier{schema, "documents"}.Sanitize()+" IN ACCESS SHARE MODE")
+	require.NoError(t, err)
+	// Invalid desired SQL must be refused without waiting for the target lock.
 	report, err := applyRLS(t, pool, schema, fmt.Sprintf(`CREATE TABLE documents (
      id bigint PRIMARY KEY,
      owner_id bigint NOT NULL

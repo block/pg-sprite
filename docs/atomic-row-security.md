@@ -39,9 +39,10 @@ Changing an RLS definition can widen access even when no data is deleted.
 
 1. Validate the parsed declaration and nonzero budgets.
 2. Begin one transaction with a deadline for the entire attempt and transaction-local
-   lock and statement timeouts. Acquire `ACCESS EXCLUSIVE` on the target.
-3. Read the live definition and materialize the desired SQL in a rolled-back
-   savepoint on the same connection. Refuse unsupported table shapes or any table delta.
+   lock and statement timeouts. Materialize the desired SQL in a rolled-back savepoint
+   on the same connection before blocking the target.
+3. Acquire `ACCESS EXCLUSIVE`, recheck privileges, and read the live definition.
+   Refuse unsupported table shapes or any table delta.
 4. If RLS already matches, finish without policy DDL. Otherwise replace the complete
    policy set (including unchanged policies), apply ENABLE/DISABLE and FORCE/NO FORCE, and preserve policy comments.
    Live SQL is rendered from the inspected desired catalog, not replayed from the input.
@@ -50,10 +51,13 @@ Changing an RLS definition can widen access even when no data is deleted.
 The lock blocks reads and writes briefly; this is bounded metadata DDL, not an
 online copy. Other sessions never see the intermediate policy set. A failure before
 commit rolls back every change. A lost commit response is an unknown outcome:
-inspect the database before retrying. There are no automatic retries.
+inspect the database before retrying. This is conservative: any commit error is
+reported as unknown, even if cancellation may have prevented COMMIT from being sent.
+There are no automatic retries.
 
-Lock exhaustion reports `budget-lock-exceeded`; the statement or whole-attempt
-deadline reports `budget-statement-exceeded`. A missing target reports
+Expiration of PostgreSQL’s lock timer reports `budget-lock-exceeded`. The statement
+or whole-attempt deadline reports `budget-statement-exceeded`, including when the
+whole-attempt deadline expires during a lock wait. The first limit reached wins. A missing target reports
 `table-not-found`. Invalid declarations, unsupported targets, and insufficient
 privileges report permanent `row-security-refused` outcomes, preserving the underlying
 cause. This includes unresolved policy roles and qualified helper functions during
