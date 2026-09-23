@@ -98,6 +98,7 @@ func TestInspectShadowRefusesAShadowWhoseIdentityDefaultWasStripped(t *testing.T
 
 	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, schemachange.CauseIdentityHandoff, schemachange.RefusalCauseOf(err))
 }
 
 // A shadow whose identity default was re-pointed at a sequence of its own
@@ -120,6 +121,7 @@ func TestInspectShadowRefusesAShadowDefaultingToAnotherSequence(t *testing.T) {
 
 	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, schemachange.CauseIdentityHandoff, schemachange.RefusalCauseOf(err))
 }
 
 // A table under the shadow's name owned by someone else is not this
@@ -136,6 +138,7 @@ func TestInspectShadowRefusesAShadowWithAnotherOwner(t *testing.T) {
 
 	_, err := schemachange.InspectShadow(t.Context(), f.pool, f.lock(t, "widgets"), f.prove(t, "widgets"), schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, schemachange.CauseForeignRelation, schemachange.RefusalCauseOf(err))
 }
 
 // The source must still have the shape the proof was minted for: a trigger

@@ -28,7 +28,7 @@ func syncGrants(ctx context.Context, tx pgx.Tx, table string, shadowOID uint32, 
 	}
 	if !slices.Equal(got, want) {
 		// INV: ST-5
-		return fmt.Errorf("%w: ST-5: shadow %s grants differ from the source after synchronisation", ErrInvariantViolation, table)
+		return refuse(CauseGrantsDiffer, nil, "shadow %s grants differ from the source after synchronisation", table)
 	}
 	return nil
 }
@@ -51,7 +51,7 @@ func syncColumnGrants(ctx context.Context, tx pgx.Tx, table string, shadowOID ui
 	}
 	if !slices.Equal(got, want) {
 		// INV: ST-5
-		return fmt.Errorf("%w: ST-5: shadow %s column grants differ from the source after synchronisation", ErrInvariantViolation, table)
+		return refuse(CauseGrantsDiffer, nil, "shadow %s column grants differ from the source after synchronisation", table)
 	}
 	return nil
 }

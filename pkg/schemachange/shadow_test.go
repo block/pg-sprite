@@ -15,6 +15,7 @@ import (
 // builder past ST-6.
 func TestCheckProofRefusesTheZeroProof(t *testing.T) {
 	require.ErrorIs(t, checkProof(preflight.CopySwapTarget{}), ErrInvariantViolation)
+	require.Equal(t, CauseProofEmpty, RefusalCauseOf(checkProof(preflight.CopySwapTarget{})))
 }
 
 // PostgreSQL counts timeouts in whole milliseconds and reads zero as
@@ -41,10 +42,13 @@ func TestProveRetargetRefusesTextThatIsNotTheGatedStatementOnTheShadow(t *testin
 
 	err = proveRetarget(gated, "sales", shadow, `ALTER TABLE sales.other ADD COLUMN note text`)
 	require.ErrorIs(t, err, ErrInvariantViolation, "a retarget onto another relation")
+	require.Equal(t, CauseStatementTarget, RefusalCauseOf(err))
 
 	err = proveRetarget(gated, "sales", shadow, `ALTER TABLE sales.`+shadow+` ADD COLUMN note text NOT NULL`)
 	require.ErrorIs(t, err, ErrInvariantViolation, "an operation that differs beyond the target")
+	require.Equal(t, CauseStatementTarget, RefusalCauseOf(err))
 
 	err = proveRetarget(gated, "sales", shadow, `ALTER TABLE sales.`+shadow+` ADD COLUMN`)
 	require.ErrorIs(t, err, ErrInvariantViolation, "text that does not re-parse")
+	require.Equal(t, CauseStatementTarget, RefusalCauseOf(err))
 }

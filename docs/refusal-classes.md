@@ -118,6 +118,33 @@ classification is fixed here first so the route inherits it.
 | `copy-and-swap-unlogged` | The table is UNLOGGED, while the shadow would be permanent | `capability-boundary` | Preserving persistence requires an explicit shadow-creation path. |
 | `copy-and-swap-force-rls` | The table has `FORCE ROW LEVEL SECURITY`, so the owner-run copier would be filtered reading the source and rejected filling the policy-carrying shadow | `capability-boundary` | Copying under a `BYPASSRLS` role or deferring the policies to cutover is a planned capability; either needs a decision the engine has not made. |
 
+### Shadow operation refusals, keyed on `RefusalCause`
+
+The closed set is `schemachange.RefusalCauses()`, carried by the `*schemachange.RefusalError`
+that `BuildShadow`, `InspectShadow`, and `DropShadow` return; `schemachange.RefusalCauseOf`
+reads it through wrapping. Every one of these refusals is fail-closed under
+`ErrInvariantViolation` ([SAFETY.md](../SAFETY.md#rules-inside-the-core)): the sentinel is the
+mechanism that stops the operation, and the cause is what tells the importer which way to
+react. Only the causes that mean the caller handed the engine an incoherent input, or that the
+engine's own write did not take, are `invariant-violation`; the rest describe a lock, a proof,
+or a relation whose state moved under the operation, and the importer retries, re-plans, or
+cleans up. No verdict reason carries these causes yet; the classification is fixed here first
+so the cutover route inherits it.
+
+| `RefusalCause` | What the refusal says | `class` | Why |
+| --- | --- | --- | --- |
+| `shadow-lock-unproven` | The operation was handed no table lock session, or one whose proof is empty or names a different table ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `invariant-violation` | A caller passed a lock that cannot cover this table; no retry against the server changes that. |
+| `shadow-lock-lost` | The table lock session reported that it lost the lock, before or during the operation ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | The operation's transaction is aborted and nothing is written; re-acquire the lock and repeat. |
+| `shadow-lock-held-elsewhere` | `pg_locks` shows the table lock granted to a backend other than the lock session's own ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | Another engine instance holds the table; this one yields and the operator decides which run continues. |
+| `shadow-lock-unconfirmed` | `pg_locks` shows no session holding the table lock, although the lock session has not reported loss ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | The lock is gone from the server's point of view before the session noticed; re-acquire and repeat. |
+| `shadow-proof-empty` | The copy-and-swap target proof is the zero value ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | Only the shape check mints a populated proof; a zero one was constructed, not earned. |
+| `shadow-source-shape` | The source's catalog is outside the shape the proof admits: an identity column without an internally owned sequence, or a replica identity other than `DEFAULT` or `FULL` ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `environmental` | The catalog changed after preflight admitted the table; re-run preflight against the table as it is now. |
+| `shadow-statement-target` | The gated statement is not an `ALTER TABLE` on the proven table, or its retargeted form does not name the shadow with the same operations ([ST-7](invariants.md#st-7--the-executor-runs-exactly-the-statement-that-was-gated)) | `invariant-violation` | The caller gated one statement and handed the build another; the pairing is the caller's, not the server's. |
+| `shadow-owner-mismatch` | The shadow the build created is not owned by the source's owner ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | The owner the proof carries is no longer the owner the catalog reports; the shadow is dropped and preflight re-run. |
+| `shadow-foreign-relation` | The relation wearing the shadow's name is not a plain table owned by the source's owner ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | The engine did not build it and will not touch it; an operator removes or renames the relation. |
+| `shadow-grants-differ` | The shadow's grants still differ from the source's after the build synchronised them ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `invariant-violation` | The build wrote the grants under the table lock and read back something else; that is the engine's write, not the environment. |
+| `shadow-identity-handoff` | A source identity column the change kept on the shadow does not carry `DEFAULT nextval(<source sequence>)` there, or the shadow declares an identity of its own ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | The change itself, or a later edit to the shadow, replaced the handoff; change the statement or drop the shadow and rebuild. |
+
 ### `unsupported-statement` on the create path, keyed on `CreateShapeCause`
 
 The closed set is `executor.CreateShapeCauses()`. The cause travels with the plan statement
@@ -227,9 +254,9 @@ same reason: do not maintain a test-only shadow list that can drift from product
 not let the derivation's own failure look like success.
 
 The map in this document is pinned: the `docs_test.go` guards
-in `pkg/verdict`, `pkg/executor`, and `pkg/preflight` fail when a `Reason`,
-`CreateShapeCause`, or `PartitionRefusalCause` exists in the code without a row here, so a
-new discriminator value cannot land unclassified.
+in `pkg/verdict`, `pkg/executor`, `pkg/preflight`, and `pkg/schemachange` fail when a `Reason`,
+`CreateShapeCause`, `PartitionRefusalCause`, `CopySwapRefusalCause`, or `RefusalCause` exists
+in the code without a row here, so a new discriminator value cannot land unclassified.
 
 ## Shared vocabulary with the capabilities matrix
 
