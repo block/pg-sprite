@@ -15,76 +15,76 @@ import (
 // the same snapshot from both tables and refuses to swap unless they match.
 type FidelitySnapshot struct {
 	// Owner is the catalog owner of the table.
-	Owner string
+	Owner string `json:"owner"`
 	// ReplicaIdentity is pg_class.relreplident: 'd' for DEFAULT, 'f' for FULL.
-	ReplicaIdentity string
+	ReplicaIdentity string `json:"replica_identity"`
 	// RLSEnabled and RLSForced are the row-level-security switches.
-	RLSEnabled bool
+	RLSEnabled bool `json:"rls_enabled"`
 	// RLSForced reports FORCE ROW LEVEL SECURITY.
-	RLSForced bool
+	RLSForced bool `json:"rls_forced"`
 	// Comment is the table comment, empty when none.
-	Comment string
+	Comment string `json:"comment"`
 	// Tablespace is the table's own tablespace, empty when it lives in the
 	// database default. LIKE places the shadow in the default tablespace
 	// whatever the source uses; the builder moves the still-empty shadow.
-	Tablespace string
+	Tablespace string `json:"tablespace"`
 	// RelOptions are the table's storage parameters as the server prints
 	// them, with the TOAST relation's parameters prefixed "toast.".
-	RelOptions []string
+	RelOptions []string `json:"rel_options"`
 	// Grants are the table's effective privileges, expanded from its ACL
 	// (or from the owner's default ACL when none is stored): one entry per
 	// privilege and grantee, grantable when any grantor made it so.
-	Grants []Grant
+	Grants []Grant `json:"grants"`
 	// ColumnGrants are the effective privileges granted on individual
 	// columns.
-	ColumnGrants []ColumnGrant
+	ColumnGrants []ColumnGrant `json:"column_grants"`
 	// Policies are the table's row-level-security policies.
-	Policies []Policy
+	Policies []Policy `json:"policies"`
 	// UnvalidatedChecks are the CHECK constraints the user left NOT VALID.
 	// LIKE copies them as validated; the builder re-adds them NOT VALID so
 	// the copier accepts every row the source legally holds.
-	UnvalidatedChecks []UnvalidatedConstraint
+	UnvalidatedChecks []UnvalidatedConstraint `json:"unvalidated_checks"`
 }
 
 // Grant is one effective ACL entry.
 type Grant struct {
 	// Privilege is the privilege keyword as aclexplode reports it.
-	Privilege string
+	Privilege string `json:"privilege"`
 	// Grantee is the role name; empty when Public is set.
-	Grantee string
+	Grantee string `json:"grantee"`
 	// Public reports the PUBLIC pseudo-role (grantee OID 0). It is carried
 	// as a fact of its own because a real role may be named "PUBLIC": the
 	// server reserves only the folded spelling "public".
-	Public bool
+	Public bool `json:"public"`
 	// Grantable reports WITH GRANT OPTION.
-	Grantable bool
+	Grantable bool `json:"grantable"`
 }
 
 // ColumnGrant is one effective per-column ACL entry; its Privilege is
 // SELECT, INSERT, UPDATE, or REFERENCES.
 type ColumnGrant struct {
 	// Column is the column carrying the ACL.
-	Column string
+	Column string `json:"column"`
 	Grant
 }
 
 // Policy is one row-level-security policy.
 type Policy struct {
 	// Name is the policy name.
-	Name string
+	Name string `json:"name"`
 	// Permissive reports AS PERMISSIVE (false is AS RESTRICTIVE).
-	Permissive bool
+	Permissive bool `json:"permissive"`
 	// Command is the pg_policy.polcmd code: '*', 'r', 'a', 'w', or 'd'.
-	Command string
+	Command string `json:"command"`
 	// Roles are the real role names the policy applies to.
-	Roles []string
+	Roles []string `json:"roles"`
 	// AppliesToPublic reports TO PUBLIC, which the server stores as the
 	// single pseudo-role OID 0 in place of any role list.
-	AppliesToPublic bool
+	AppliesToPublic bool `json:"applies_to_public"`
 	// Using is the decompiled USING expression, empty when none.
-	Using string
+	Using string `json:"using"`
 	// WithCheck is the decompiled WITH CHECK expression, empty when none.
-	WithCheck string
+	WithCheck string `json:"with_check"`
 }
 
 // UnvalidatedConstraint is one CHECK constraint whose pg_constraint row has
@@ -92,9 +92,9 @@ type Policy struct {
 // NOT VALID).
 type UnvalidatedConstraint struct {
 	// Name is the constraint name.
-	Name string
+	Name string `json:"name"`
 	// Def is the pg_get_constraintdef text.
-	Def string
+	Def string `json:"def"`
 }
 
 // publicKeyword is how GRANT and CREATE POLICY spell the PUBLIC pseudo-role.
@@ -382,7 +382,7 @@ func applyReplicaIdentity(ctx context.Context, tx pgx.Tx, table, identity string
 		return nil
 	default:
 		// INV: ST-6
-		return fmt.Errorf("%w: ST-6: source replica identity %q is outside the copy-and-swap shape the proof admits", ErrInvariantViolation, identity)
+		return refuse(CauseSourceShape, nil, "source replica identity %q is outside the copy-and-swap shape the proof admits", identity)
 	}
 }
 

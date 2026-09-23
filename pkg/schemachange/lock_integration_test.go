@@ -31,13 +31,16 @@ func TestShadowOperationsRequireATableLock(t *testing.T) {
 
 	_, err := schemachange.BuildShadow(t.Context(), f.pool, nil, target, alter, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "build")
+	assert.Equal(t, schemachange.CauseLockUnproven, schemachange.RefusalCauseOf(err), "build")
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")), "a refused build creates nothing")
 
 	err = schemachange.DropShadow(t.Context(), f.pool, nil, target, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "drop")
+	assert.Equal(t, schemachange.CauseLockUnproven, schemachange.RefusalCauseOf(err), "drop")
 
 	_, err = schemachange.InspectShadow(t.Context(), f.pool, nil, target, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
+	assert.Equal(t, schemachange.CauseLockUnproven, schemachange.RefusalCauseOf(err), "inspect")
 }
 
 // A lock on some other table is not a lock on the proven one: the session
@@ -59,13 +62,16 @@ func TestShadowOperationsRefuseALockForAnotherTable(t *testing.T) {
 
 	_, err := schemachange.BuildShadow(t.Context(), f.pool, otherLock, target, alter, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "build")
+	assert.Equal(t, schemachange.CauseLockUnproven, schemachange.RefusalCauseOf(err), "build")
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")), "a refused build creates nothing")
 
 	err = schemachange.DropShadow(t.Context(), f.pool, otherLock, target, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "drop")
+	assert.Equal(t, schemachange.CauseLockUnproven, schemachange.RefusalCauseOf(err), "drop")
 
 	_, err = schemachange.InspectShadow(t.Context(), f.pool, otherLock, target, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
+	assert.Equal(t, schemachange.CauseLockUnproven, schemachange.RefusalCauseOf(err), "inspect")
 }
 
 // A caller that cancels its own context, with a cause of its own choosing,
@@ -87,14 +93,17 @@ func TestShadowOperationsReportACallerCancellationAsTheCallersOwn(t *testing.T) 
 	_, err := schemachange.BuildShadow(ctx, f.pool, lock, target, alter, schemachange.Options{})
 	assert.ErrorIs(t, err, context.Canceled, "build")
 	assert.NotErrorIs(t, err, schemachange.ErrInvariantViolation, "build")
+	assert.Empty(t, schemachange.RefusalCauseOf(err), "build")
 
 	err = schemachange.DropShadow(ctx, f.pool, lock, target, schemachange.Options{})
 	assert.ErrorIs(t, err, context.Canceled, "drop")
 	assert.NotErrorIs(t, err, schemachange.ErrInvariantViolation, "drop")
+	assert.Empty(t, schemachange.RefusalCauseOf(err), "drop")
 
 	_, err = schemachange.InspectShadow(ctx, f.pool, lock, target, schemachange.Options{})
 	assert.ErrorIs(t, err, context.Canceled, "inspect")
 	assert.NotErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
+	assert.Empty(t, schemachange.RefusalCauseOf(err), "inspect")
 
 	assert.NoError(t, lock.Err(), "the lock session held the table throughout")
 }
@@ -116,6 +125,7 @@ func TestBuildShadowRefusesWhenTheLockSessionIsGone(t *testing.T) {
 
 	_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, schemachange.CauseLockUnconfirmed, schemachange.RefusalCauseOf(err))
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")), "a refused build creates nothing")
 }
 
@@ -140,10 +150,12 @@ func TestDropAndInspectShadowRefuseWhenTheLockSessionIsGone(t *testing.T) {
 
 	err = schemachange.DropShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "drop")
+	assert.Equal(t, schemachange.CauseLockUnconfirmed, schemachange.RefusalCauseOf(err), "drop")
 	assert.True(t, f.relationExists(t, shadow), "a refused drop removes nothing")
 
 	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
+	assert.Equal(t, schemachange.CauseLockUnconfirmed, schemachange.RefusalCauseOf(err), "inspect")
 }
 
 // The in-transaction confirmation compares backends, not merely that some
@@ -172,13 +184,16 @@ func TestShadowOperationsRefuseALockHeldByAnotherBackend(t *testing.T) {
 
 	err = schemachange.DropShadow(t.Context(), f.pool, stale, target, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "drop")
+	assert.Equal(t, schemachange.CauseLockHeldElsewhere, schemachange.RefusalCauseOf(err), "drop")
 	assert.True(t, f.relationExists(t, shadow), "a refused drop removes nothing")
 
 	_, err = schemachange.InspectShadow(t.Context(), f.pool, stale, target, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
+	assert.Equal(t, schemachange.CauseLockHeldElsewhere, schemachange.RefusalCauseOf(err), "inspect")
 
 	_, err = schemachange.BuildShadow(t.Context(), f.pool, stale, target, f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "build")
+	assert.Equal(t, schemachange.CauseLockHeldElsewhere, schemachange.RefusalCauseOf(err), "build")
 	assert.NoError(t, rival.Err(), "the rival's lock is untouched")
 }
 
@@ -222,6 +237,7 @@ func TestShadowOperationsRefuseALockSessionThatReportedLoss(t *testing.T) {
 func assertRefusedBeforeAnyStatement(t *testing.T, err error, lock *dbconn.TableLockSession, op string) {
 	t.Helper()
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, op)
+	assert.Equal(t, schemachange.CauseLockLost, schemachange.RefusalCauseOf(err), op)
 	assert.ErrorIs(t, err, lock.Err(), op)
 	assert.NotErrorIs(t, err, context.Canceled, op)
 }
@@ -277,6 +293,7 @@ func TestDropShadowAbortsWhenTheLockIsLostMidDrop(t *testing.T) {
 	select {
 	case err := <-results:
 		assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+		assert.Equal(t, schemachange.CauseLockLost, schemachange.RefusalCauseOf(err))
 		assert.ErrorIs(t, err, lock.Err(), "the loss the session reported is the cause")
 	case <-time.After(lockLossDeadline):
 		t.Fatalf("drop did not abort within %s of lock loss", lockLossDeadline)
@@ -355,6 +372,7 @@ func TestBuildShadowAbortsWhenTheLockIsLostMidBuild(t *testing.T) {
 	select {
 	case err := <-results:
 		assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+		assert.Equal(t, schemachange.CauseLockLost, schemachange.RefusalCauseOf(err))
 		assert.ErrorIs(t, err, lock.Err(), "the loss the session reported is the cause")
 	case <-time.After(lockLossDeadline):
 		t.Fatalf("build did not abort within %s of lock loss", lockLossDeadline)

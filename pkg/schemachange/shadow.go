@@ -25,10 +25,12 @@ var (
 	// verifies with InspectShadow or removes with DropShadow rather than
 	// this builder overwriting it.
 	ErrShadowExists = errors.New("shadow table already exists")
-	// ErrInvariantViolation reports a forged or empty proof, a statement
-	// that does not target the proven table, or a re-verification the
-	// builder performed on its own work that failed. The builder never
-	// executes anything after raising it.
+	// ErrInvariantViolation is the sentinel every shadow refusal wraps: a
+	// forged or empty proof, a statement that does not target the proven
+	// table, a lock the operation cannot trust, or a re-verification of the
+	// engine's own work that failed. No operation executes anything after
+	// raising it. The refusal itself is a *RefusalError, whose Cause says
+	// which of those it was.
 	ErrInvariantViolation = errors.New("invariant violation")
 	// ErrInvalidOptions reports a timeout that cannot encode a positive
 	// PostgreSQL setting: PostgreSQL counts timeouts in whole milliseconds,
@@ -280,7 +282,7 @@ func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, s
 func checkProof(target preflight.CopySwapTarget) error {
 	if target.Schema() == "" || target.Table() == "" || target.OwnerRole() == "" || target.PKColumn() == "" {
 		// INV: ST-6
-		return fmt.Errorf("%w: ST-6: copy-and-swap proof is empty", ErrInvariantViolation)
+		return refuse(CauseProofEmpty, nil, "copy-and-swap proof is empty")
 	}
 	return nil
 }
@@ -292,10 +294,10 @@ func checkProof(target preflight.CopySwapTarget) error {
 func retargetOntoShadow(st statement.Statement, target preflight.CopySwapTarget, shadow string) (string, error) {
 	// INV: ST-7
 	if st.Kind() != statement.KindAlterTable {
-		return "", fmt.Errorf("%w: ST-7: shadow builder accepts only ALTER TABLE, got %s", ErrInvariantViolation, st.Kind())
+		return "", refuse(CauseStatementTarget, nil, "shadow builder accepts only ALTER TABLE, got %s", st.Kind())
 	}
 	if !namesTarget(st, target.Schema(), target.Table()) {
-		return "", fmt.Errorf("%w: ST-7: statement targets %s, proof is for %s.%s", ErrInvariantViolation, st.Table(), target.Schema(), target.Table())
+		return "", refuse(CauseStatementTarget, nil, "statement targets %s, proof is for %s.%s", st.Table(), target.Schema(), target.Table())
 	}
 	retargeted, err := statement.RetargetRelation(st.SQL(), target.Schema(), shadow)
 	if err != nil {
@@ -315,14 +317,14 @@ func retargetOntoShadow(st statement.Statement, target preflight.CopySwapTarget,
 func proveRetarget(gated statement.Statement, schema, shadow, retargeted string) error {
 	// INV: ST-7
 	if err := statement.SameOpsExceptTarget(gated.SQL(), retargeted); err != nil {
-		return fmt.Errorf("%w: ST-7: %w", ErrInvariantViolation, err)
+		return refuse(CauseStatementTarget, []error{err}, "retargeted statement differs from the gated one")
 	}
 	reparsed, err := statement.ParseOne(retargeted)
 	if err != nil {
-		return fmt.Errorf("%w: ST-7: retargeted statement does not re-parse: %w", ErrInvariantViolation, err)
+		return refuse(CauseStatementTarget, []error{err}, "retargeted statement does not re-parse")
 	}
 	if reparsed.Schema() != schema || reparsed.Table() != shadow {
-		return fmt.Errorf("%w: ST-7: retargeted statement names %s.%s, not the shadow %s.%s", ErrInvariantViolation, reparsed.Schema(), reparsed.Table(), schema, shadow)
+		return refuse(CauseStatementTarget, nil, "retargeted statement names %s.%s, not the shadow %s.%s", reparsed.Schema(), reparsed.Table(), schema, shadow)
 	}
 	return nil
 }
@@ -424,7 +426,7 @@ func createShadow(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarge
 	}
 	if shadowOwner != owner {
 		// INV: ST-5
-		return 0, fmt.Errorf("%w: ST-5: shadow %s is owned by %s, source by %s", ErrInvariantViolation, table, shadowOwner, owner)
+		return 0, refuse(CauseShadowOwner, nil, "shadow %s is owned by %s, source by %s", table, shadowOwner, owner)
 	}
 	return oid, nil
 }

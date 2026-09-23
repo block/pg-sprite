@@ -481,6 +481,7 @@ func TestBuildShadowRefusesAStatementThatReplacesAnIdentityColumn(t *testing.T) 
 			ALTER COLUMN qty TYPE bigint`)
 
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, schemachange.CauseIdentityHandoff, schemachange.RefusalCauseOf(err))
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")), "a refused build creates nothing")
 }
 
@@ -615,6 +616,7 @@ func TestBuildShadowRefusesStatementOutsideProof(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, sql), schemachange.Options{})
 			require.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+			assert.Equal(t, schemachange.CauseStatementTarget, schemachange.RefusalCauseOf(err))
 		})
 	}
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")))

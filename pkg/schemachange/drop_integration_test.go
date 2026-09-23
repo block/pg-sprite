@@ -69,6 +69,7 @@ func TestDropShadowRefusesARelationAnotherRoleOwns(t *testing.T) {
 
 	err := schemachange.DropShadow(t.Context(), f.pool, f.lock(t, "widgets"), f.prove(t, "widgets"), schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, schemachange.CauseForeignRelation, schemachange.RefusalCauseOf(err))
 	assert.True(t, f.relationExists(t, shadow), "the refused relation is left in place")
 }
 
@@ -85,5 +86,6 @@ func TestDropShadowRefusesAViewUnderTheShadowName(t *testing.T) {
 
 	err := schemachange.DropShadow(t.Context(), f.pool, f.lock(t, "widgets"), f.prove(t, "widgets"), schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, schemachange.CauseForeignRelation, schemachange.RefusalCauseOf(err))
 	assert.True(t, f.relationExists(t, shadow), "the refused relation is left in place")
 }

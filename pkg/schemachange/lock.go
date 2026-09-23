@@ -17,17 +17,17 @@ import (
 func requireTableLock(lock *dbconn.TableLockSession, target preflight.CopySwapTarget) error {
 	// INV: LK-1
 	if lock == nil {
-		return fmt.Errorf("%w: LK-1: shadow operations require a table lock session", ErrInvariantViolation)
+		return refuse(CauseLockUnproven, nil, "shadow operations require a table lock session")
 	}
 	held := lock.Lock()
 	if held.Table() == "" {
-		return fmt.Errorf("%w: LK-1: table lock proof is empty", ErrInvariantViolation)
+		return refuse(CauseLockUnproven, nil, "table lock proof is empty")
 	}
 	if held.Schema() != target.Schema() || held.Table() != target.Table() {
-		return fmt.Errorf("%w: LK-1: table lock is for %s.%s, proof is for %s.%s", ErrInvariantViolation, held.Schema(), held.Table(), target.Schema(), target.Table())
+		return refuse(CauseLockUnproven, nil, "table lock is for %s.%s, proof is for %s.%s", held.Schema(), held.Table(), target.Schema(), target.Table())
 	}
 	if err := lock.Err(); err != nil {
-		return fmt.Errorf("%w: LK-1: table lock was lost: %w", ErrInvariantViolation, err)
+		return refuse(CauseLockLost, []error{err}, "table lock was lost before the shadow operation")
 	}
 	return nil
 }
@@ -46,10 +46,10 @@ func confirmTableLock(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSess
 	}
 	// INV: LK-1
 	if !found {
-		return fmt.Errorf("%w: LK-1: no session holds the table lock on %s.%s", ErrInvariantViolation, held.Schema(), held.Table())
+		return refuse(CauseLockUnconfirmed, nil, "no session holds the table lock on %s.%s", held.Schema(), held.Table())
 	}
 	if holder.PID != lock.BackendPID() {
-		return fmt.Errorf("%w: LK-1: table lock on %s.%s is held by backend %d, not the lock session's backend %d", ErrInvariantViolation, held.Schema(), held.Table(), holder.PID, lock.BackendPID())
+		return refuse(CauseLockHeldElsewhere, nil, "table lock on %s.%s is held by backend %d, not the lock session's backend %d", held.Schema(), held.Table(), holder.PID, lock.BackendPID())
 	}
 	return nil
 }
@@ -66,5 +66,5 @@ func lockLossCause(lock *dbconn.TableLockSession, err error) error {
 		return err
 	}
 	// INV: LK-1
-	return fmt.Errorf("%w: LK-1: table lock lost during shadow operation: %w (%w)", ErrInvariantViolation, lost, err)
+	return refuse(CauseLockLost, []error{lost, err}, "table lock was lost during the shadow operation")
 }
