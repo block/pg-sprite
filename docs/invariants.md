@@ -22,6 +22,7 @@ several of these unrepresentable, and the in-TCB engineering rules live in
 - [Correctness (CO)](#correctness-co)
 - [Locking and concurrency (LK)](#locking-and-concurrency-lk)
 - [Accepted blocking execution (AB)](#accepted-blocking-execution-ab)
+- [Atomic row security (RS)](#atomic-row-security-rs)
 - [State, checkpoint, and resume (ST)](#state-checkpoint-and-resume-st)
 - [Refusals and preflight (RF)](#refusals-and-preflight-rf)
 - [Orchestration / control-plane (OC)](#orchestration--control-plane-oc)
@@ -395,6 +396,17 @@ Every acceptance is audited at warn level before execution, regardless of `--deb
 `TestRunAcceptBlockingReportsAnUnknownOutcomeHonestly`,
 `TestMigrateAcceptBlockingRunsDropIndex`, `demo/tour.sh` (`execute_accepted`). *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#exit-codes).
+
+## Atomic row security (RS)
+
+The [atomic RLS contract](atomic-row-security.md) defines these executor obligations:
+
+| ID | Must hold | Enforcement and test obligation |
+| --- | --- | --- |
+| RS-1 | Lock the live target before deriving the change; refuse mixed table changes | `ExecuteRowSecurity`; contention and mixed-change tests |
+| RS-2 | Policy changes and convergence verification commit together or roll back | `ExecuteRowSecurity`; real DDL fault injection restores original policies |
+| RS-3 | Bound lock waits, statements, and the whole attempt | `ExecuteRowSecurity`; lock contention and deadline cancellation |
+| RS-4 | Run only admitted, qualified RLS DDL; keep scratch disposable | `RenderRowSecurity` from the scratch catalog and executor readback; qualified-helper, quoted-name, and scratch-cleanup tests |
 
 ## State, checkpoint, and resume (ST)
 

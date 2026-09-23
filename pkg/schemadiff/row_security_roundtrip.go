@@ -22,6 +22,19 @@ func IntrospectDesiredWithRowSecurity(ctx context.Context, db *pgxpool.Pool, des
 	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements())
 }
 
+// IntrospectDesiredWithRowSecurityTx materializes the declaration in a nested
+// transaction (savepoint) and always rolls it back. The parent's locks survive.
+func IntrospectDesiredWithRowSecurityTx(ctx context.Context, tx pgx.Tx, desired statement.DesiredWithRowSecurity) (Model, error) {
+	if desired.Table() == "" {
+		return Model{}, statement.ErrRowSecurityDeclaration
+	}
+	scratch, err := tx.Begin(ctx)
+	if err != nil {
+		return Model{}, fmt.Errorf("begin desired row security savepoint: %w", err)
+	}
+	return introspectDesiredTransaction(ctx, scratch, desired.Table(), desired.Statements())
+}
+
 // RenderWithRowSecurity exports the complete table-local RLS definition,
 // including explicit DISABLE when RLS is off. The result is admitted only by
 // ParseDesiredWithRowSecurity and cannot be passed to the live create executor.
@@ -35,26 +48,55 @@ func RenderWithRowSecurity(m Model) (string, error) {
 	var b strings.Builder
 	b.WriteString(base)
 	target := pgx.Identifier{m.Table}.Sanitize()
-	state := "DISABLE"
-	if m.RowSecurity.Enabled {
-		state = "ENABLE"
-	}
-	fmt.Fprintf(&b, "\nALTER TABLE %s %s ROW LEVEL SECURITY;\n", target, state)
-	force := "NO FORCE"
-	if m.RowSecurity.Forced {
-		force = "FORCE"
-	}
-	fmt.Fprintf(&b, "ALTER TABLE %s %s ROW LEVEL SECURITY;\n", target, force)
-	for _, policy := range m.RowSecurity.Policies {
-		if err := renderPolicy(&b, target, policy); err != nil {
-			return "", err
-		}
+	if err := renderRowSecurity(&b, target, m.RowSecurity); err != nil {
+		return "", err
 	}
 	out := b.String()
 	if _, err := statement.ParseDesiredWithRowSecurity(out); err != nil {
 		return "", fmt.Errorf("render row security for %q: %w", m.Table, err)
 	}
 	return out, nil
+}
+
+// RenderRowSecurity renders only settings, policies, and policy comments from
+// a catalog model. It does not authorize execution; callers must admit the model
+// and execute with pg_catalog as the search path, as used during introspection.
+func RenderRowSecurity(schema string, m Model) ([]string, error) {
+	if schema == "" || m.Table == "" {
+		return nil, ErrUnrenderableRowSecurity
+	}
+	var b strings.Builder
+	if err := renderRowSecurity(&b, pgx.Identifier{schema, m.Table}.Sanitize(), m.RowSecurity); err != nil {
+		return nil, err
+	}
+	statements, err := statement.Split(b.String())
+	if err != nil {
+		return nil, err
+	}
+	result := make([]string, len(statements))
+	for i, st := range statements {
+		result[i] = st.SQL
+	}
+	return result, nil
+}
+
+func renderRowSecurity(b *strings.Builder, target string, security RowSecurity) error {
+	state := "DISABLE"
+	if security.Enabled {
+		state = "ENABLE"
+	}
+	fmt.Fprintf(b, "\nALTER TABLE %s %s ROW LEVEL SECURITY;\n", target, state)
+	force := "NO FORCE"
+	if security.Forced {
+		force = "FORCE"
+	}
+	fmt.Fprintf(b, "ALTER TABLE %s %s ROW LEVEL SECURITY;\n", target, force)
+	for _, policy := range security.Policies {
+		if err := renderPolicy(b, target, policy); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func renderPolicy(b *strings.Builder, target string, p Policy) error {
@@ -107,16 +149,16 @@ func renderPolicy(b *strings.Builder, target string, p Policy) error {
 	return nil
 }
 
-// DiffWithRowSecurity checks a complete RLS-scoped declaration. Only unchanged
-// state is admitted in this phase: security deltas and mixed table/security
-// changes are refused as ErrUnsupportedChange. No executable policy SQL is
-// produced. Table-only callers retain the independent Diff contract.
+// DiffWithRowSecurity checks equality of a complete RLS-scoped declaration.
+// Security deltas and mixed table/security changes return ErrUnsupportedChange;
+// this comparison never emits executable policy SQL. The dedicated atomic
+// executor uses it to verify convergence. Table-only callers retain Diff.
 func DiffWithRowSecurity(schema string, live, desired Model) ([]Change, error) {
 	if live.Table != desired.Table {
 		return nil, ErrDifferentTables
 	}
 	if !rowSecurityEqual(live.RowSecurity, desired.RowSecurity) {
-		return nil, fmt.Errorf("row security differs; policy execution is not supported: %w", ErrUnsupportedChange)
+		return nil, fmt.Errorf("row security differs; use the dedicated atomic RLS executor: %w", ErrUnsupportedChange)
 	}
 	live.RowSecurity = RowSecurity{}
 	desired.RowSecurity = RowSecurity{}

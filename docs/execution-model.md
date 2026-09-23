@@ -289,6 +289,8 @@ concurrently is.
 | --- | --- | --- |
 | `budget-lock-exceeded` | no | The lock was not granted within `lock_timeout`; nothing executed |
 | `budget-statement-exceeded` | no | The statement ran past `statement_timeout` and was cancelled |
+| `row-security-refused` | yes | Change the declaration, unsupported target shape, or privileges before retrying |
+| `row-security-outcome-unknown` | no | The atomic RLS commit response is uncertain; inspect the catalog before retrying |
 | `blocking-outcome-unknown` | no | The accepted blocking transaction reached an ambiguous client boundary; inspect the catalog before retrying |
 | `invalid-blocking-budget` | yes | An accepted blocking bound is disabled or cannot be represented by PostgreSQL |
 | `unsupported-accepted-blocking` | yes | The statement is outside the accepted blocking executor's narrow index-maintenance set, or the server will not run it inside the engine-owned transaction (`REINDEX` on a partitioned relation, SQLSTATE `25001`) |

@@ -509,7 +509,7 @@ rows:
     reason_notes: "Same: catalog bootstrap, owner tooling"
   - id: grants-roles-row-level-security-policies
     area: "types_and_non_table_objects"
-    operation: "Grants, roles, row-level-security policies"
+    operation: "Grants, roles, and CLI policy DDL"
     tier: "t3"
     status_mark: "🔵"
     engine_path: "none"
@@ -519,7 +519,19 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "Access control changes remain with provisioning. Export includes RLS when present; explicit RLS declarations support comparison and review-only deltas with advisory access warnings. Plain table files leave access control separately managed. RLS execution remains unsupported. See the [workflow and roadmap](declarative-row-security.md). See [engine-role.md](engine-role.md) for the engine's own role"
+    reason_notes: "Access control changes remain with provisioning. Export includes RLS when present; explicit RLS declarations support comparison and review-only deltas with advisory access warnings. Plain table files leave access control separately managed. The separate [atomic RLS Go executor](atomic-row-security.md) supports RLS-only changes on existing supported tables; it does not route through these CLI front doors. See the [workflow and roadmap](declarative-row-security.md). See [engine-role.md](engine-role.md) for the engine's own role"
+  - id: declarative-row-security-library
+    area: "types_and_non_table_objects"
+    operation: "Complete table-local RLS definition (Go API only)"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_safer_sequence"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "The [atomic RLS executor](atomic-row-security.md) locks an existing supported table, refuses structural changes, replaces policies/settings, and verifies convergence before committing. Lock waits and the whole transaction are bounded. No CLI execution or new diff flags"
   - id: standalone-sequences
     area: "types_and_non_table_objects"
     operation: "Standalone sequences"

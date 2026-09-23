@@ -21,7 +21,7 @@ func validRow() Row {
 func TestEmbeddedCapabilitiesValidate(t *testing.T) {
 	rows, err := Rows()
 	require.NoError(t, err)
-	assert.Len(t, rows, 53)
+	assert.Len(t, rows, 54)
 }
 
 // The engine refuses a partitioned parent with its own target-fact reason
@@ -93,7 +93,7 @@ func TestValidateRules(t *testing.T) {
 }
 
 // An enum error names the row, the field, and the offending value, so a
-// typo in a 53-row file is found without diffing the vocabulary by hand.
+// typo in the capability file is found without diffing the vocabulary by hand.
 func TestValidateNamesTheFieldAndValue(t *testing.T) {
 	tests := map[string]struct {
 		mutate func(*Row)

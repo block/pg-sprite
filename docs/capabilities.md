@@ -29,6 +29,9 @@ refused form would take, what an operator who accepts a maintenance window can d
 - [Why typed refusal, not passthrough](#why-typed-refusal-not-passthrough)
 - [Deliberately operator-owned](#deliberately-operator-owned)
 
+A ✅ marks an implemented capability; check the front-door columns for CLI access.
+The atomic RLS executor is currently a Go API only, with no `migrate` or `diff` execution.
+
 ## Query the matrix
 
 The marker-delimited regions of this page are generated from
@@ -176,7 +179,7 @@ the canonical example.
 > `make gen-capabilities`; do not edit the generated regions below by hand.
 
 <!-- capabilities:begin summary -->
-**53 operations: 18 supported today, 19 planned behind a typed refusal, 14 out of scope
+**54 operations: 19 supported today, 19 planned behind a typed refusal, 14 out of scope
 by design, and 2 with no online mechanism in PostgreSQL to build on.**
 <!-- capabilities:end summary -->
 
@@ -269,7 +272,8 @@ review the object warrants) ·
 | PL/pgSQL function bodies (`CREATE OR REPLACE FUNCTION`) | ⚪ | — | No — owner tooling | Transactional catalog work that takes no lock on any relation; nothing for an online engine to add. No peer online executor owns it either |
 | Triggers (`CREATE TRIGGER`) | ⚪ | — | No — owner tooling | Catalog work — no scan, no rewrite — but it takes a brief `SHARE ROW EXCLUSIVE` on the table, queues behind long-running queries, and blocks writers while it waits — run it under a `lock_timeout` |
 | Extensions (`CREATE EXTENSION`) | ⚪ | — | No — owner tooling | Same: catalog bootstrap, owner tooling |
-| Grants, roles, row-level-security policies | 🔵 | — | No — provisioning / IaC | Access control changes remain with provisioning. Export includes RLS when present; explicit RLS declarations support comparison and review-only deltas with advisory access warnings. Plain table files leave access control separately managed. RLS execution remains unsupported. See the [workflow and roadmap](declarative-row-security.md). See [engine-role.md](engine-role.md) for the engine's own role |
+| Grants, roles, and CLI policy DDL | 🔵 | — | No — provisioning / IaC | Access control changes remain with provisioning. Export includes RLS when present; explicit RLS declarations support comparison and review-only deltas with advisory access warnings. Plain table files leave access control separately managed. The separate [atomic RLS Go executor](atomic-row-security.md) supports RLS-only changes on existing supported tables; it does not route through these CLI front doors. See the [workflow and roadmap](declarative-row-security.md). See [engine-role.md](engine-role.md) for the engine's own role |
+| Complete table-local RLS definition (Go API only) | ✅ | native, safer sequence | Yes | The [atomic RLS executor](atomic-row-security.md) locks an existing supported table, refuses structural changes, replaces policies/settings, and verifies convergence before committing. Lock waits and the whole transaction are bounded. No CLI execution or new diff flags |
 | Standalone sequences | ⚪ | — | No — owner tooling | Transactional catalog work on an object with no readers-and-writers problem |
 | Publications, subscriptions | 🔵 | — | No — replication provisioning / IaC | Replication provisioning, not table shape (`ALTER PUBLICATION ... ADD TABLE` also takes `SHARE UPDATE EXCLUSIVE` on the table) |
 <!-- capabilities:end types_and_non_table_objects -->
