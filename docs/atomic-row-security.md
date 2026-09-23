@@ -54,10 +54,13 @@ inspect the database before retrying. There are no automatic retries.
 
 Lock exhaustion reports `budget-lock-exceeded`; the statement or whole-attempt
 deadline reports `budget-statement-exceeded`. A missing target reports
-`table-not-found`. Caller cancellation is kept separate from budget exhaustion.
+`table-not-found`. Invalid declarations, unsupported targets, and insufficient
+privileges report permanent `row-security-refused` outcomes, preserving the underlying
+cause. Caller cancellation is kept separate from budget exhaustion.
 
 The caller needs table-owner privileges and permission to create the temporary
-scratch schema. Roles and qualified helpers must already exist. Grants, role
+scratch schema. Ownership is checked before locking and checked again under the
+lock. Roles and qualified helpers must already exist. Grants, role
 membership, helper bodies, authentication, and Supabase-managed schemas are outside
 this operation. Application authorization tests are still needed. Concurrent
 administration of those dependencies is not serialized by the table lock.
@@ -65,7 +68,8 @@ administration of those dependencies is not serialized by the table lock.
 ## Invariants and tests
 
 - **RS-1:** Read the live baseline only after taking the target lock; never accept a
-  caller-supplied diff as execution authority. Refuse mixed changes before live DDL.
+  caller-supplied diff as execution authority. Verify ownership before and after locking.
+  Refuse mixed changes and unsupported table shapes before live DDL.
 - **RS-2:** All policy/settings changes and the final catalog comparison share one
   transaction. Fault injection after live DDL must prove the original state survives.
 - **RS-3:** Bound lock waits, individual statements, and the entire attempt. Cancellation

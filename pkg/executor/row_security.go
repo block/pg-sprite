@@ -46,7 +46,7 @@ func ExecuteRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 		return RowSecurityReport{}, err
 	}
 	if desired.Table() == "" || schema == "" {
-		return RowSecurityReport{}, statement.ErrRowSecurityDeclaration
+		return RowSecurityReport{}, fmt.Errorf("%w: %w", ErrRowSecurityRefused, statement.ErrRowSecurityDeclaration)
 	}
 	// INV: RS-3 — the whole attempt has one deadline, not a fresh budget per policy.
 	attempt, cancel := context.WithTimeout(ctx, b.StatementTimeout)
@@ -72,6 +72,13 @@ func rowSecurityError(caller, attempt context.Context, err error, b Budget) erro
 	if budgetErr := asBudgetError(err, b); budgetErr != nil {
 		return budgetErr
 	}
+	if errors.Is(err, statement.ErrPolicyRelationDependency) || errors.Is(err, statement.ErrRowSecurityDeclaration) {
+		return fmt.Errorf("%w: %w", ErrRowSecurityRefused, err)
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "42501" {
+		return fmt.Errorf("%w: %w", ErrRowSecurityRefused, err)
+	}
 	return err
 }
 
@@ -90,6 +97,10 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 		return RowSecurityReport{}, fmt.Errorf("set row security budgets: %w", err)
 	}
 	target := pgx.Identifier{schema, desired.Table()}.Sanitize()
+	// Reject roles without owner privileges before taking an application-blocking lock.
+	if err := checkRowSecurityOwner(ctx, tx, schema, desired.Table()); err != nil {
+		return RowSecurityReport{}, err
+	}
 	// INV: RS-1 — all live comparison and DDL occur after this exclusive lock.
 	if _, err := tx.Exec(ctx, "LOCK TABLE ONLY "+target+" IN ACCESS EXCLUSIVE MODE"); err != nil {
 		var pgErr *pgconn.PgError
@@ -98,30 +109,34 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 		}
 		return RowSecurityReport{}, fmt.Errorf("lock row security target %s: %w", target, err)
 	}
+	// Ownership may have changed while waiting for the lock. Recheck it under lock.
+	if err := checkRowSecurityOwner(ctx, tx, schema, desired.Table()); err != nil {
+		return RowSecurityReport{}, err
+	}
 	live, err := schemadiff.IntrospectTx(ctx, tx, schema, desired.Table())
 	if err != nil {
-		return RowSecurityReport{}, err
+		return RowSecurityReport{}, fmt.Errorf("inspect row security target %s: %w", target, err)
 	}
 	wanted, err := schemadiff.IntrospectDesiredWithRowSecurityTx(ctx, tx, desired)
 	if err != nil {
-		return RowSecurityReport{}, err
+		return RowSecurityReport{}, fmt.Errorf("inspect desired row security for %s: %w", target, err)
 	}
 	if err := admitRowSecurityTable(schema, live, wanted); err != nil {
-		return RowSecurityReport{}, err
+		return RowSecurityReport{}, fmt.Errorf("admit row security target %s: %w: %w", target, ErrRowSecurityRefused, err)
 	}
 	report := RowSecurityReport{Schema: schema, Table: desired.Table(), Statements: []string{}}
 	if _, err := schemadiff.DiffWithRowSecurity(schema, live, wanted); err != nil {
 		// INV: RS-4 — helpers are explicitly qualified; no target-schema function
 		// may shadow a built-in while replaying policy expressions.
 		if _, err := tx.Exec(ctx, dbconn.LocalSearchPath("pg_catalog")); err != nil {
-			return RowSecurityReport{}, err
+			return RowSecurityReport{}, fmt.Errorf("set row security search path for %s: %w", target, err)
 		}
 		for _, policy := range live.RowSecurity.Policies {
 			report.Statements = append(report.Statements, "DROP POLICY "+pgx.Identifier{policy.Name}.Sanitize()+" ON "+target)
 		}
 		security, err := schemadiff.RenderRowSecurity(schema, wanted)
 		if err != nil {
-			return RowSecurityReport{}, err
+			return RowSecurityReport{}, fmt.Errorf("render row security for %s: %w: %w", target, ErrRowSecurityRefused, err)
 		}
 		report.Statements = append(report.Statements, security...)
 		for _, sql := range report.Statements {
@@ -133,7 +148,7 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 	// INV: RS-2 — verify convergence before committing, while retaining the lock.
 	actual, err := schemadiff.IntrospectTx(ctx, tx, schema, desired.Table())
 	if err != nil {
-		return RowSecurityReport{}, err
+		return RowSecurityReport{}, fmt.Errorf("verify row security target %s: %w", target, err)
 	}
 	if err := admitRowSecurityTable(schema, actual, wanted); err != nil {
 		return RowSecurityReport{}, fmt.Errorf("%w: RS-2: target shape changed: %w", ErrInvariantViolation, err)

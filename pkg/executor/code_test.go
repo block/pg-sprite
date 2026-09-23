@@ -163,6 +163,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeBudgetLockExceeded:              false,
 		executor.CodeBudgetStatementExceeded:         false,
 		executor.CodeBlockingOutcomeUnknown:          false,
+		executor.CodeRowSecurityRefused:              true,
 		executor.CodeRowSecurityOutcomeUnknown:       false,
 		executor.CodeInvalidBlockingBudget:           true,
 		executor.CodeUnsupportedAcceptedBlocking:     true,

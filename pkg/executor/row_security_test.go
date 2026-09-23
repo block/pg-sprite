@@ -20,6 +20,10 @@ func TestExecuteRowSecurityRejectsInvalidInputsBeforeConnecting(t *testing.T) {
 	budget := executor.Budget{LockTimeout: time.Millisecond, StatementTimeout: time.Second}
 	_, err = executor.ExecuteRowSecurity(t.Context(), nil, "public", statement.DesiredWithRowSecurity{}, budget)
 	require.ErrorIs(t, err, statement.ErrRowSecurityDeclaration)
+	require.Equal(t, executor.CodeRowSecurityRefused, executor.OutcomeCode(err))
+	require.True(t, executor.OutcomeCode(err).Permanent())
 	_, err = executor.ExecuteRowSecurity(t.Context(), nil, "", desired, budget)
 	require.ErrorIs(t, err, statement.ErrRowSecurityDeclaration)
+	require.Equal(t, executor.CodeRowSecurityRefused, executor.OutcomeCode(err))
+	require.True(t, executor.OutcomeCode(err).Permanent())
 }

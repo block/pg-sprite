@@ -97,6 +97,8 @@ func TestExecuteRowSecurityRefusesMixedChanges(t *testing.T) {
  );
  ALTER TABLE documents DISABLE ROW LEVEL SECURITY;`)
 	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+	assert.Equal(t, executor.CodeRowSecurityRefused, executor.OutcomeCode(err))
+	assert.True(t, executor.OutcomeCode(err).Permanent())
 	assert.Empty(t, report.Statements)
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)

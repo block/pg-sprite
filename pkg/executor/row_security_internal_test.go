@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 )
@@ -41,4 +42,13 @@ func TestRowSecurityErrorClassification(t *testing.T) {
 		err := rowSecurityError(t.Context(), attempt, &RowSecurityOutcomeUnknownError{Err: context.DeadlineExceeded}, budget)
 		assert.Equal(t, CodeRowSecurityOutcomeUnknown, OutcomeCode(err))
 	})
+}
+
+func TestRowSecurityAdmissionErrorsArePermanent(t *testing.T) {
+	for _, cause := range []error{statement.ErrPolicyRelationDependency, statement.ErrRowSecurityDeclaration, &pgconn.PgError{Code: "42501"}} {
+		err := rowSecurityError(t.Context(), t.Context(), cause, Budget{})
+		assert.ErrorIs(t, err, cause)
+		assert.Equal(t, CodeRowSecurityRefused, OutcomeCode(err))
+		assert.True(t, OutcomeCode(err).Permanent())
+	}
 }
