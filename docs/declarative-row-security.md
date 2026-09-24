@@ -223,10 +223,11 @@ this table-scoped work.
 3. **Execute transitions atomically.** The Go executor now locks, derives, applies,
    and verifies one table's RLS state in one bounded transaction. Mixed changes and
    policy relation dependencies remain unsupported. CLI integration is a follow-up.
-4. **Prove application behavior.** Extend the local Supabase harness with real
-   authenticated and anonymous requests, two users, allowed and denied writes,
-   and interrupted transitions. Then validate hosted connection and privilege
-   boundaries on a disposable project before claiming hosted support.
+4. **Prove application behavior.** The local Supabase harness now checks real
+   PostgREST requests from two authenticated users and anonymous callers, allowed
+   and denied writes, changed visibility, and rollback after a cancelled apply.
+   Hosted connection and privilege validation remains a follow-up on a disposable
+   project; local results do not establish hosted support.
 
 The [inspection tests](../pkg/schemadiff/row_security_integration_test.go),
 [round-trip tests](../pkg/schemadiff/row_security_roundtrip_integration_test.go), and
@@ -241,3 +242,10 @@ Hosted validation is not a prerequisite for the local steps, nor replaced by the
 PostgreSQL's [`pg_policy` catalog](https://www.postgresql.org/docs/current/catalog-pg-policy.html)
 and [`CREATE POLICY` reference](https://www.postgresql.org/docs/current/sql-createpolicy.html)
 define the policy fields and behavior.
+
+The [RLS API tests](../integration/supabase/row_security_api_test.go) and
+[cancellation test](../integration/supabase/row_security_api_rollback_test.go)
+exercise the atomic executor on the pinned Supabase stack through application
+requests. They run automatically in the existing Supabase compatibility CI job.
+Tokens are fixture-signed; signup/login flows and Realtime authorization changes
+are outside these tests.
