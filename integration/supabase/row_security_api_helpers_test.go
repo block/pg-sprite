@@ -2,6 +2,7 @@ package supabase_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +20,7 @@ import (
 func rlsAPITable(t *testing.T, name string) *pgxpool.Pool {
 	t.Helper()
 	pool := fixture(t)
+	waitForRLSAuth(t, pool)
 	table := newTable(t, pool, name)
 	// Grant table access to both roles so refusals prove RLS, not missing grants.
 	execSQL(t, pool, "GRANT SELECT, INSERT, UPDATE, DELETE ON "+table+" TO authenticated, anon")
@@ -102,4 +104,28 @@ func assertRLSDenied(t *testing.T, status int, body []byte, wantStatus int) {
 	}
 	require.NoError(t, json.Unmarshal(body, &result))
 	assert.Equal(t, "42501", result.Code)
+}
+
+// Auth initializes the JWT-aware helper after PostgreSQL itself is healthy.
+// Probe its behavior without changing the function or leaking session settings.
+func waitForRLSAuth(t *testing.T, pool *pgxpool.Pool) {
+	t.Helper()
+	const authDeadline = 30 * time.Second
+	const authPoll = 200 * time.Millisecond
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		tx, err := pool.Begin(t.Context())
+		if !assert.NoError(c, err) {
+			return
+		}
+		defer func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) }()
+		_, err = tx.Exec(t.Context(), "SELECT set_config('request.jwt.claims', $1, true)", fmt.Sprintf(`{"sub":%q}`, tenantID(1)))
+		if !assert.NoError(c, err) {
+			return
+		}
+		var subject string
+		if !assert.NoError(c, tx.QueryRow(t.Context(), "SELECT COALESCE(auth.uid()::text, '')").Scan(&subject)) {
+			return
+		}
+		assert.Equal(c, tenantID(1), subject, "Auth must initialize auth.uid() for PostgREST JWT claims")
+	}, authDeadline, authPoll)
 }

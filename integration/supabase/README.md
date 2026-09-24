@@ -46,7 +46,10 @@ Preserving publication membership alone would not prove event delivery.
 [row_security_api_test.go](row_security_api_test.go) applies complete policy definitions
 through the Go executor, then makes real PostgREST requests as two authenticated
 users and as an anonymous caller. Table grants deliberately allow these operations:
-the policy rules decide which rows are visible and which writes succeed. Empty
+the policy rules decide which rows are visible and which writes succeed.
+The fixture waits for Auth to initialize `auth.uid()` for PostgREST JWT claims,
+then waits for PostgREST to discover the table. PostgreSQL readiness alone does
+not establish either condition. Empty
 results for an unauthorized update or delete mean no rows were changed; a denied
 insert or ownership reassignment returns PostgreSQL error `42501` through the API.
 The tests also cover changed visibility, removing the last policy, and repeat apply.
