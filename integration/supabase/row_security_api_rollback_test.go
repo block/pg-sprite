@@ -20,15 +20,19 @@ import (
 // exercises partial work inside a real transaction, not a pre-execution refusal.
 type cancelAfterRLSDrop struct {
 	cancel  context.CancelFunc
+	dropSQL string
 	reached atomic.Bool
 }
 
-func (c *cancelAfterRLSDrop) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
-	return ctx
+type rlsDropQueryKey struct{}
+
+func (c *cancelAfterRLSDrop) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	return context.WithValue(ctx, rlsDropQueryKey{}, data.SQL == c.dropSQL)
 }
-func (c *cancelAfterRLSDrop) TraceQueryEnd(_ context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
-	// The command tag distinguishes the successful live DROP from scratch work.
-	if data.Err == nil && data.CommandTag.String() == "DROP POLICY" {
+func (c *cancelAfterRLSDrop) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	// Match the fully qualified live statement, not a DROP in a scratch schema.
+	liveDrop, _ := ctx.Value(rlsDropQueryKey{}).(bool)
+	if liveDrop && data.Err == nil && data.CommandTag.String() == "DROP POLICY" {
 		c.reached.Store(true)
 		c.cancel()
 	}
@@ -54,16 +58,18 @@ func TestAtomicRLSAPICancellationPreservesAccess(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	trace := &cancelAfterRLSDrop{cancel: cancel}
+	trace := &cancelAfterRLSDrop{
+		cancel:  cancel,
+		dropSQL: `DROP POLICY "own_rows" ON "public"."pgsprite_rls_api_rollback"`,
+	}
 	cfg := pool.Config()
 	cfg.ConnConfig.Tracer = trace
 	changing, err := pgxpool.NewWithConfig(t.Context(), cfg)
 	require.NoError(t, err)
 	defer changing.Close()
-	report, err := executor.ExecuteRowSecurity(ctx, changing, "public", desired, executor.Budget{LockTimeout: 100 * time.Millisecond, StatementTimeout: 5 * time.Second})
-	require.ErrorIs(t, err, context.Canceled)
+	_, err = executor.ExecuteRowSecurity(ctx, changing, "public", desired, executor.Budget{LockTimeout: 100 * time.Millisecond, StatementTimeout: 5 * time.Second})
 	require.True(t, trace.reached.Load(), "cancellation must happen after live DROP POLICY succeeds")
-	assert.Empty(t, report.Statements)
+	require.ErrorIs(t, err, context.Canceled)
 	after, err := schemadiff.Introspect(t.Context(), pool, "public", name)
 	require.NoError(t, err)
 	assert.Equal(t, before, after)

@@ -30,7 +30,26 @@ func TestAtomicRLSAPIEnforcesUserBoundaries(t *testing.T) {
  CREATE POLICY removers ON pgsprite_rls_api_boundaries
      FOR DELETE TO authenticated USING ((SELECT auth.uid()) = owner_id);`
 	report := applyAPIRLS(t, pool, sql)
-	assert.NotEmpty(t, report.Statements)
+	// The API behavior alone cannot distinguish own_rows from these four policies.
+	// Check the complete replacement and its order as well as authorization below.
+	assert.Equal(t, []string{
+		`DROP POLICY "own_rows" ON "public"."pgsprite_rls_api_boundaries"`,
+		`ALTER TABLE "public"."pgsprite_rls_api_boundaries" ENABLE ROW LEVEL SECURITY`,
+		`ALTER TABLE "public"."pgsprite_rls_api_boundaries" NO FORCE ROW LEVEL SECURITY`,
+		`CREATE POLICY "editors" ON "public"."pgsprite_rls_api_boundaries"
+    AS PERMISSIVE FOR UPDATE TO "authenticated"
+    USING ((( SELECT auth.uid() AS uid) = owner_id))
+    WITH CHECK ((( SELECT auth.uid() AS uid) = owner_id))`,
+		`CREATE POLICY "readers" ON "public"."pgsprite_rls_api_boundaries"
+    AS PERMISSIVE FOR SELECT TO "authenticated"
+    USING ((( SELECT auth.uid() AS uid) = owner_id))`,
+		`CREATE POLICY "removers" ON "public"."pgsprite_rls_api_boundaries"
+    AS PERMISSIVE FOR DELETE TO "authenticated"
+    USING ((( SELECT auth.uid() AS uid) = owner_id))`,
+		`CREATE POLICY "writers" ON "public"."pgsprite_rls_api_boundaries"
+    AS PERMISSIVE FOR INSERT TO "authenticated"
+    WITH CHECK ((( SELECT auth.uid() AS uid) = owner_id))`,
+	}, report.Statements)
 	assertRLSRead(t, name, 1, 1)
 	assertRLSRead(t, name, 2, 2)
 	assertRLSRead(t, name, 0)
