@@ -30,7 +30,8 @@ refused form would take, what an operator who accepts a maintenance window can d
 - [Deliberately operator-owned](#deliberately-operator-owned)
 
 A ✅ marks an implemented capability; check the front-door columns for CLI access.
-The atomic RLS executor is currently a Go API only, with no `migrate` or `diff` execution.
+The atomic RLS executor is available through `migrate --desired` and the Go API;
+`diff` shows RLS changes for review without emitting executable SQL.
 
 ## Query the matrix
 
@@ -52,8 +53,8 @@ pg-sprite capabilities --json | jq '.capabilities[] | select(.tier == "t2")'
 # What is waiting on the copy engine, across tiers.
 pg-sprite capabilities --json | jq '.capabilities[] | select(.engine_path == "copy_and_swap")'
 
-# Everything the declarative door refuses. Both doors carry the same disposition on
-# every row today; the map exists so they can diverge, so query the door you use.
+# Everything diff refuses. Query the door you use: RLS changes are review-only
+# in diff, but can execute through migrate --desired.
 pg-sprite capabilities --json | jq '.capabilities[] | select(.front_doors.diff == "refused")'
 
 # Rows another tool class owns: the ⚪ and 🔵 rows. The ❌ rows name no owner, because

@@ -154,8 +154,8 @@ What happens to one statement, in order:
    same gates below. An orchestrator embedding the library (see
    [schemabot-integration.md](schemabot-integration.md)) enters the same way. The
    doors differ before the fork, not after it. The declarative door rejects lane F
-   outright (`ErrForceNotSupported`), is library-only today (`RunDesired`; no CLI
-   verb — [limitations.md](limitations.md)), and runs a whole-plan admission gate
+   outright (`ErrForceNotSupported`), is available through `migrate --desired` and
+   `RunDesired` ([limitations.md](limitations.md)), and runs a whole-plan admission gate
    before any statement enters the walk: the plan is refused all-or-nothing when the
    plan derived at execution time is not the pinned one (`plan-fingerprint-mismatch`),
    any planned statement discards live structure (`destructive-change`), or the plan

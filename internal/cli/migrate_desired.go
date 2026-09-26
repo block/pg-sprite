@@ -57,7 +57,7 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 		// Preview uses desired-state admission: a routed native step can still
 		// discard live structure, which RunDesired refuses before execution.
 		plan.RefuseDestructive(&report)
-		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, JSON: c.JSON}
+		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, JSON: c.JSON}
 		return diff.writeDiffReport(out, report)
 	}
 	result, runErr := migrate.RunDesired(ctx, pool, migrate.DesiredRequest{Schema: c.Schema, Desired: desired}, c.options(c.diag()))

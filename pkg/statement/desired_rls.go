@@ -45,8 +45,12 @@ func ParseDesiredWithRowSecurity(sql string) (DesiredWithRowSecurity, error) {
 	}
 	var tableSQL strings.Builder
 	var security []*pganalyze.Node
+	hasTable := false
 	for _, raw := range tree.GetStmts() {
 		node := raw.GetStmt()
+		if node.GetCreateStmt() != nil {
+			hasTable = true
+		}
 		if node.GetCreateStmt() != nil || node.GetIndexStmt() != nil {
 			text, err := deparseOne(node)
 			if err != nil {
@@ -56,6 +60,9 @@ func ParseDesiredWithRowSecurity(sql string) (DesiredWithRowSecurity, error) {
 		} else {
 			security = append(security, node)
 		}
+	}
+	if !hasTable {
+		return DesiredWithRowSecurity{}, fmt.Errorf("desired row security requires a CREATE TABLE definition: %w", ErrRowSecurityDeclaration)
 	}
 	table, err := ParseDesired(tableSQL.String())
 	if err != nil {

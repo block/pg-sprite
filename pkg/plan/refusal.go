@@ -78,3 +78,14 @@ func PartitionRefusal(cause preflight.PartitionRefusalCause) (verdict.Refusal, b
 func RouteRefusal() verdict.Refusal {
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)
 }
+
+// DestructiveChangeRefusal classifies desired-state admission of a plan that
+// would discard live structure; the operator must choose an explicit statement.
+func DestructiveChangeRefusal() verdict.Refusal {
+	return verdict.ByDesign(verdict.ReasonDestructiveChange)
+}
+
+// RowSecurityReviewRefusal keeps policy deltas review-only in diff output.
+func RowSecurityReviewRefusal() verdict.Refusal {
+	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)
+}

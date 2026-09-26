@@ -368,6 +368,7 @@ run_rls_apply() {
     out=$("$PGS" migrate --url "$PG_DSN" --schema demo_security --desired desired-rls.sql --dry-run --json) || status=$?
     if [ "$CHECK" = 1 ]; then
         assert_eq "RLS preview exit" 2 "$status"
+        assert_eq "RLS preview class" capability-boundary "$(jq -r '.class' <<<"$out")"
         assert_eq "RLS preview changes" true "$(jq '.row_security_review.changes | length > 0' <<<"$out")"
     else
         printf '%s\n' "$out"

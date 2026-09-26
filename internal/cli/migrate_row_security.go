@@ -7,18 +7,19 @@ import (
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, sql string) error {
-	desired, err := statement.ParseDesiredWithRowSecurity(sql)
-	if err != nil {
-		return err
-	}
 	if c.DryRun {
 		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, JSON: c.JSON}
 		return diff.runRowSecurityDiff(ctx, out, sql)
+	}
+	desired, err := statement.ParseDesiredWithRowSecurity(sql)
+	if err != nil {
+		return err
 	}
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {
@@ -47,11 +48,8 @@ func rowSecurityVerdict(table string, report executor.RowSecurityReport, err err
 	v.Outcome = verdict.OutcomeFailed
 	v.ExecutedSQL = nil
 	v.Detail = err.Error()
-	if errors.Is(err, executor.ErrRowSecurityRefused) {
-		return v.WithRefusal(verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement))
-	}
-	if errors.Is(err, executor.ErrTableNotFound) {
-		return v.WithRefusal(verdict.Environmental(verdict.ReasonUnsupportedStatement))
+	if refusal, ok := migrate.RowSecurityRefusal(err); ok {
+		return v.WithRefusal(refusal)
 	}
 	v.Code = string(executor.OutcomeCode(err))
 	return v

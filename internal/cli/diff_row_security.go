@@ -10,6 +10,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
+	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -40,7 +41,7 @@ func (c *DiffCmd) runRowSecurityDiff(ctx context.Context, out io.Writer, sql str
 func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 	var review *diffplan.RowSecurityReviewRequired
 	errors.As(cause, &review)
-	v := verdict.Verdict{Outcome: verdict.OutcomeRefused, Reason: verdict.ReasonUnsupportedStatement, Detail: cause.Error()}
+	v := verdict.Verdict{Detail: cause.Error()}.WithRefusal(plan.RowSecurityReviewRefusal())
 	switch {
 	case c.JSON && review != nil:
 		report := struct {

@@ -54,7 +54,7 @@ func budgetExceededRefusal() verdict.Refusal {
 // destructiveChangeRefusal: desired-state execution never infers permission
 // to discard live structure; the deliberate path is the imperative statement.
 func destructiveChangeRefusal() verdict.Refusal {
-	return verdict.ByDesign(verdict.ReasonDestructiveChange)
+	return plan.DestructiveChangeRefusal()
 }
 
 // fingerprintMismatchRefusal: the live table or desired schema moved under
@@ -94,6 +94,8 @@ func siteRefusals() []siteRefusal {
 		{"plan-fingerprint-mismatch", fingerprintMismatchRefusal()},
 		{"create-collision", createCollisionRefusal()},
 		{"plan-incoherent", planIncoherentRefusal()},
+		{"row-security-unsupported", rowSecurityUnsupportedRefusal()},
+		{"row-security-missing-table", rowSecurityMissingTableRefusal()},
 	}
 }
 
@@ -213,4 +215,28 @@ func isInSentinelSet(err error, set []error) bool {
 		}
 	}
 	return false
+}
+
+func rowSecurityUnsupportedRefusal() verdict.Refusal {
+	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)
+}
+
+func rowSecurityMissingTableRefusal() verdict.Refusal {
+	return verdict.Environmental(verdict.ReasonUnsupportedStatement)
+}
+
+// RowSecurityRefusal classifies typed admission failures from the atomic RLS
+// executor. Operational errors are not refusals. Privilege causes take priority
+// over the general admission sentinel they also wrap.
+func RowSecurityRefusal(err error) (verdict.Refusal, bool) {
+	if errors.Is(err, executor.ErrRowSecurityPrivileges) {
+		return insufficientPrivilegesRefusal(), true
+	}
+	if errors.Is(err, executor.ErrRowSecurityRefused) {
+		return rowSecurityUnsupportedRefusal(), true
+	}
+	if errors.Is(err, executor.ErrTableNotFound) {
+		return rowSecurityMissingTableRefusal(), true
+	}
+	return verdict.Refusal{}, false
 }

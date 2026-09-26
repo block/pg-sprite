@@ -26,7 +26,6 @@ func TestRefuseDestructiveWithdrawsExecutionAndRehashes(t *testing.T) {
 	}}
 	report.Fingerprint = plan.Fingerprint(report.Statements)
 	before := report.Fingerprint
-	untouched := report.Statements[1]
 	plan.RefuseDestructive(&report)
 	st := report.Statements[0]
 	assert.Equal(t, router.DispositionRefuse, report.Disposition)
@@ -40,7 +39,25 @@ func TestRefuseDestructiveWithdrawsExecutionAndRehashes(t *testing.T) {
 	assert.Empty(t, st.Decisions[0].SaferSQLExecution)
 	require.NotNil(t, st.BlockingPassthroughEligible)
 	assert.False(t, *st.BlockingPassthroughEligible)
-	assert.Equal(t, untouched, report.Statements[1])
+	assert.Equal(t, router.DispositionRefuse, report.Statements[1].Disposition)
+	assert.Equal(t, verdict.ReasonDestructiveChange, report.Statements[1].Reason)
+	assert.Empty(t, report.Statements[1].Backend)
 	assert.NotEqual(t, before, report.Fingerprint)
 	assert.Equal(t, plan.Fingerprint(report.Statements), report.Fingerprint)
+}
+
+func TestRefuseDestructiveLeavesNondestructivePlanUnchanged(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Disposition = router.DispositionExecute
+	report.Statements = []plan.Statement{{
+		SQL:     "ALTER TABLE documents ADD COLUMN body text",
+		Backend: router.BackendNative, Disposition: router.DispositionExecute,
+	}}
+	report.Fingerprint = plan.Fingerprint(report.Statements)
+	before := report.Statements[0]
+	fingerprint := report.Fingerprint
+	plan.RefuseDestructive(&report)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+	assert.Equal(t, before, report.Statements[0])
+	assert.Equal(t, fingerprint, report.Fingerprint)
 }

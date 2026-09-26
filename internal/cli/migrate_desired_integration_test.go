@@ -44,6 +44,9 @@ func TestMigrateDesiredRLSAppliesAndConverges(t *testing.T) {
 	var out strings.Builder
 	cmd.DryRun = true
 	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+	var preview verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &preview))
+	assert.Equal(t, verdict.ClassCapabilityBoundary, preview.Class)
 	before, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
 	assert.False(t, before.RowSecurity.Enabled, "preview must not change access")
@@ -126,14 +129,24 @@ func TestMigrateDesiredTableRefusesDestructiveChange(t *testing.T) {
 	url, schema, pool := desiredFixture(t)
 	cmd := desiredCommand(t, url, schema, `CREATE TABLE documents (
  id int PRIMARY KEY
- );`)
+ );
+ CREATE INDEX documents_id_idx ON documents (id);`)
+	before, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
 	var out strings.Builder
 	cmd.DryRun = true
 	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
 	var preview plan.Report
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &preview))
 	assert.Equal(t, router.DispositionRefuse, preview.Disposition)
-	require.Len(t, preview.Statements, 1)
+	require.Len(t, preview.Statements, 2)
+	for _, st := range preview.Statements {
+		assert.Equal(t, router.DispositionRefuse, st.Disposition)
+		assert.Equal(t, verdict.ReasonDestructiveChange, st.Reason)
+		assert.Empty(t, st.Backend)
+		assert.Empty(t, st.ExecSQL)
+		assert.Empty(t, st.Execution)
+	}
 	assert.Equal(t, verdict.ReasonDestructiveChange, preview.Statements[0].Reason)
 	assert.Equal(t, verdict.ReasonDestructiveChange, preview.Reason)
 	assert.Empty(t, preview.Statements[0].Backend)
@@ -149,7 +162,7 @@ func TestMigrateDesiredTableRefusesDestructiveChange(t *testing.T) {
 	assert.Empty(t, result.Verdicts)
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
-	assert.Len(t, after.Columns, 2)
+	assert.Equal(t, before, after, "whole-plan admission must leave both columns and indexes unchanged")
 }
 
 func TestMigrateDesiredCreatesMissingTable(t *testing.T) {

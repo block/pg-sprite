@@ -5,15 +5,19 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-// RefuseDestructive marks destructive steps as non-executable for desired-state
-// previews. It preserves existing refusals, withdraws execution metadata, and
+// RefuseDestructive marks the whole desired-state preview non-executable when
+// any step is destructive. It preserves existing refusals, withdraws execution metadata, and
 // fingerprints the resulting plan. Execution still enforces its own admission.
 func RefuseDestructive(report *Report) {
-	refuseStatements(report, func(i int) (verdict.Refusal, executor.CreateShapeCause) {
-		if report.Statements[i].Destructive {
-			return verdict.ByDesign(verdict.ReasonDestructiveChange), ""
-		}
-		return verdict.Refusal{}, ""
+	destructive := false
+	for _, st := range report.Statements {
+		destructive = destructive || st.Destructive
+	}
+	if !destructive {
+		return
+	}
+	refuseStatements(report, func(_ int) (verdict.Refusal, executor.CreateShapeCause) {
+		return DestructiveChangeRefusal(), ""
 	})
 	report.Fingerprint = Fingerprint(report.Statements)
 }
