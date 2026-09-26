@@ -186,7 +186,9 @@ hosted-project or complete Supabase stack test.
 | Desired plan containing a column removal | Refused with `destructive-change`; no safe prefix applied | [Whole-plan admission](../integration/supabase/failure_test.go) |
 | Lock contention, null rows during `SET NOT NULL`, and duplicate rows during a unique index build | Typed outcomes and durable database state verified; tenant API access preserved | [Failure paths](../integration/supabase/failure_test.go) |
 | API and Realtime after each copy-and-swap refusal | Tenant reads and new INSERT events still worked on the original sockets | [Service continuity](../integration/supabase/continuity_test.go) |
-| Enable RLS through the schema-change entry point | Refused with `unsupported-statement` | [Refusals](../integration/supabase/schema_test.go) |
+| Apply a complete RLS declaration through the Go API | PostgREST enforces tenant reads and writes, anonymous denial, changed visibility, and default deny; repeated apply is a no-op | [RLS application behavior](../integration/supabase/row_security_api_test.go) |
+| Cancel an RLS apply after a live policy is dropped | Transaction rollback restores the catalog and previous API access, including allowed and denied writes | [RLS rollback](../integration/supabase/row_security_api_rollback_test.go) |
+| Enable RLS through the statement/CLI entry point | Refused with `unsupported-statement` | [Refusals](../integration/supabase/schema_test.go) |
 | Supavisor session endpoint | Column addition and concurrent index succeeded; session timeouts verified | [Execution](../integration/supabase/services_test.go), [timeouts](../pkg/dbconn/supabase_integration_test.go) |
 | Supavisor transaction endpoint | Refused with `ErrNoSessionAffinity`, even with named prepared statements disabled | [Pooler boundary](../pkg/dbconn/supabase_integration_test.go) |
 | PostgREST after direct/session schema changes | New columns became available through automatic schema-cache reload | [API and tenants](../integration/supabase/services_test.go) |
@@ -210,9 +212,10 @@ outcome; they do not assume every unsuccessful change rolls back completely.
 
 ## What to keep in mind
 
-- RLS declarations can be exported and compared, but policy execution remains
-  unsupported. Table-only files do not compare access rules. Grants and roles
-  remain separately managed; see [declarative RLS](declarative-row-security.md)
+- RLS declarations can be exported, compared, and applied through the
+  [atomic Go API](atomic-row-security.md). CLI execution remains unsupported.
+  Table-only files do not compare access rules. Grants and roles remain separately
+  managed; see [declarative RLS](declarative-row-security.md)
 - Qualify extension types and functions outside `public`, such as
   `extensions.citext`. When pg-sprite inspects a desired schema file, it
   uses a separate workspace with its own search path. In policy expressions,

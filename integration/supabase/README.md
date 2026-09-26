@@ -43,6 +43,23 @@ and verify those leftovers; they do not assume every failure rolls back all work
 while a column addition and concurrent index build run with ongoing writes.
 Preserving publication membership alone would not prove event delivery.
 
+[row_security_api_test.go](row_security_api_test.go) applies complete policy definitions
+through the Go executor, then makes real PostgREST requests as two authenticated
+users and as an anonymous caller. Table grants deliberately allow these operations:
+the policy rules decide which rows are visible and which writes succeed.
+The fixture waits for Auth to initialize `auth.uid()` for PostgREST JWT claims,
+then waits for PostgREST to discover the table. PostgreSQL readiness alone does
+not establish either condition. Empty
+results for an unauthorized update or delete mean no rows were changed; a denied
+insert or ownership reassignment returns PostgreSQL error `42501` through the API.
+The tests also cover changed visibility, removing the last policy, and repeat apply.
+
+[row_security_api_rollback_test.go](row_security_api_rollback_test.go) cancels the
+executor immediately after PostgreSQL confirms a live `DROP POLICY`. It verifies
+catalog rollback and the same allowed and denied API access afterward. The tracer
+only triggers cancellation; all DDL and rollback run against the real database.
+These tests do not prove Realtime behavior during RLS changes or hosted support.
+
 ## Scope of the evidence
 
 The suite uses real local Supabase services and fixture-signed user tokens.
