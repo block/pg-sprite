@@ -42,9 +42,8 @@ default when the submitted form blocks (reported in the verdict's `executed_sql`
 optimistic native attempt otherwise. A gated `--force` runs the submitted form as-is under the
 same budgets. Changes without an available backend get a structured refusal (exit code 2).
 Desired-state execution — converging a live table onto a `CREATE TABLE` file, including
-creating the table when it does not exist yet — is a Go API today: `migrate.RunDesired`
-in [`pkg/migrate`](pkg/migrate/desired.go); the CLI's `migrate` verb takes one imperative
-statement.
+creating the table when it does not exist yet — is available through `migrate --desired schema.sql` and
+`migrate.RunDesired` in [`pkg/migrate`](pkg/migrate/desired.go).
 The design docs and the phased
 build plan live in [docs/](docs/) — start with
 [docs/README.md](docs/README.md); the vision — what pg-sprite is and is not —
@@ -67,8 +66,8 @@ refusal — never a silently wrong or incomplete result:
 - **Copy-and-swap** (genuine table rewrites) is not yet available — those
   changes refuse rather than fall through to a blocking rewrite.
 - **Row security** is included in exports when present, with reviewable before/after differences. The
-  [atomic Go executor](docs/atomic-row-security.md) can apply RLS-only changes to
-  existing tables; CLI execution and mixed table/policy changes remain unsupported. See the workflow and roadmap in
+  [atomic executor](docs/atomic-row-security.md), also available through `migrate --desired`, applies RLS-only changes to
+  existing tables; mixed table/policy changes remain unsupported. See the workflow and roadmap in
   [declarative-row-security.md](docs/declarative-row-security.md).
 - **Foreign keys** are out of the declarative model in either direction:
   desired files cannot declare them, and export refuses both a table that
@@ -79,10 +78,9 @@ refusal — never a silently wrong or incomplete result:
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.
-- **Desired-state execution has no CLI verb yet** — `migrate.RunDesired`
-  (including the greenfield `CREATE TABLE` path for a table that does not
-  exist) is library-only; the CLI's `migrate` takes one imperative
-  statement.
+- **Destructive desired-state plans are refused as a whole** — `migrate --desired`
+  creates missing tables and converges supported changes, but never infers permission
+  to discard live structure.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
   build's leftover is reported with a typed state, and the proven removal
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when

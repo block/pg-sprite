@@ -77,7 +77,7 @@ func rowSecurityError(caller, attempt context.Context, err error, b Budget) erro
 	}
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == "42501" {
-		return fmt.Errorf("%w: %w", ErrRowSecurityRefused, err)
+		return fmt.Errorf("%w: %w: %w", ErrRowSecurityRefused, ErrRowSecurityPrivileges, err)
 	}
 	return err
 }

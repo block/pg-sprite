@@ -22,6 +22,12 @@ import (
 // prefix — and still returns the operational error. --dry-run diverts to
 // the classify-and-route plan instead.
 func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
+	if err := c.validateInput(); err != nil {
+		return err
+	}
+	if c.Desired != "" {
+		return c.runDesired(ctx, out)
+	}
 	if c.DryRun {
 		return c.runDryRun(ctx, out)
 	}

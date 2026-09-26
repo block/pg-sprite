@@ -32,3 +32,11 @@ FROM generate_series(1, 5000) g;
 -- the --accept-blocking acknowledgement. It lives on orders, which no
 -- desired-state file describes, so the diff tour's plans do not see it.
 CREATE INDEX orders_total_idx ON orders (total);
+
+-- Dedicated fixture for atomic desired-state row security.
+CREATE SCHEMA IF NOT EXISTS demo_security;
+DROP TABLE IF EXISTS demo_security.demo_rls;
+CREATE TABLE demo_security.demo_rls (
+    id bigint PRIMARY KEY,
+    owner_id bigint NOT NULL
+);

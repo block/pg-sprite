@@ -8,6 +8,7 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRowSecurityErrorClassification(t *testing.T) {
@@ -51,4 +52,12 @@ func TestRowSecurityAdmissionErrorsArePermanent(t *testing.T) {
 		assert.Equal(t, CodeRowSecurityRefused, OutcomeCode(err))
 		assert.True(t, OutcomeCode(err).Permanent())
 	}
+}
+
+func TestRowSecurityPermissionDeniedRetainsPrivilegeCause(t *testing.T) {
+	cause := &pgconn.PgError{Code: "42501"}
+	err := rowSecurityError(t.Context(), t.Context(), cause, Budget{})
+	require.ErrorIs(t, err, ErrRowSecurityRefused)
+	require.ErrorIs(t, err, ErrRowSecurityPrivileges)
+	require.ErrorIs(t, err, cause)
 }

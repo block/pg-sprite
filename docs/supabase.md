@@ -163,6 +163,34 @@ exit codes are in [CLI output examples](cli-output-examples.md). A refusal is a
 stopping point to inspect, not a reason to retry with `--force`. Keep RLS policies,
 grants, and Supabase-managed schemas outside this workflow.
 
+## Apply your RLS definition
+
+Use a direct or session-pooled connection with table-owner privileges and database
+CREATE permission for scratch inspection. Keep Supabase-managed schemas outside
+the target. In the [declarative RLS example](declarative-row-security.md#keep-the-sql-people-already-use),
+`authenticated` and `auth.uid()` come from Supabase; your application grants remain
+separately managed.
+
+Save the complete definition as `schema/documents.sql`, matching the existing
+table's columns, indexes, and constraints. Review before applying:
+
+```sh
+pg-sprite diff --url "$PG_DSN" --schema public --desired schema/documents.sql
+```
+
+The preview lists policy/settings differences and access warnings, then exits 2
+because RLS diff output is review-only. Apply the reviewed declaration:
+
+```sh
+pg-sprite migrate --url "$PG_DSN" --schema public --desired schema/documents.sql
+```
+
+The result lists the statements committed in one transaction. Applying it again
+reports that row security already matches. A mixed column/index and RLS edit
+refuses without committing either part. See [output and failure handling](declarative-row-security.md#apply-the-declaration).
+This CLI route is covered by PostgreSQL integration tests; local Supabase API
+coverage uses the same executor. Hosted validation remains a separate step.
+
 ## What works today
 
 A disposable local `supabase/postgres:17.6.1.136` database (PostgreSQL 17.6)
@@ -188,7 +216,7 @@ hosted-project or complete Supabase stack test.
 | API and Realtime after each copy-and-swap refusal | Tenant reads and new INSERT events still worked on the original sockets | [Service continuity](../integration/supabase/continuity_test.go) |
 | Apply a complete RLS declaration through the Go API | PostgREST enforces tenant reads and writes, anonymous denial, changed visibility, and default deny; repeated apply is a no-op | [RLS application behavior](../integration/supabase/row_security_api_test.go) |
 | Cancel an RLS apply after a live policy is dropped | Transaction rollback restores the catalog and previous API access, including allowed and denied writes | [RLS rollback](../integration/supabase/row_security_api_rollback_test.go) |
-| Enable RLS through the statement/CLI entry point | Refused with `unsupported-statement` | [Refusals](../integration/supabase/schema_test.go) |
+| Enable RLS through `migrate --alter` | Refused with `unsupported-statement` | [Refusals](../integration/supabase/schema_test.go) |
 | Supavisor session endpoint | Column addition and concurrent index succeeded; session timeouts verified | [Execution](../integration/supabase/services_test.go), [timeouts](../pkg/dbconn/supabase_integration_test.go) |
 | Supavisor transaction endpoint | Refused with `ErrNoSessionAffinity`, even with named prepared statements disabled | [Pooler boundary](../pkg/dbconn/supabase_integration_test.go) |
 | PostgREST after direct/session schema changes | New columns became available through automatic schema-cache reload | [API and tenants](../integration/supabase/services_test.go) |
@@ -213,7 +241,7 @@ outcome; they do not assume every unsuccessful change rolls back completely.
 ## What to keep in mind
 
 - RLS declarations can be exported, compared, and applied through the
-  [atomic Go API](atomic-row-security.md). CLI execution remains unsupported.
+  [atomic Go API](atomic-row-security.md). Use `migrate --desired` for the same atomic execution from the CLI.
   Table-only files do not compare access rules. Grants and roles remain separately
   managed; see [declarative RLS](declarative-row-security.md)
 - Qualify extension types and functions outside `public`, such as

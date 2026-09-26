@@ -104,7 +104,9 @@ type MigrateCmd struct {
 	DBFlags     `embed:""`
 	OutputFlags `embed:""`
 
-	Alter             string        `help:"Imperative ALTER statement to run." name:"alter" required:""`
+	Alter             string        `help:"Imperative ALTER statement to run." name:"alter"`
+	Desired           string        `help:"Converge one table from a desired SQL file; mutually exclusive with --alter." type:"existingfile"`
+	Schema            string        `help:"Target schema for --desired." default:"public"`
 	MaxTableSize      byteSize      `help:"Size threshold above which the optimistic attempt is skipped, measured as the table's full on-disk footprint: heap, indexes, and TOAST, all partitions (binary units: B, KiB, MiB, GiB, TiB). Planner-proven online steps (concurrent index builds, constraint validation) are not size-guarded." default:"1GiB"`
 	IndexBuildTimeout time.Duration `help:"Overall bound (statement_timeout) for one concurrent index build step; expect large tables to need a generous value." default:"30m"`
 	ValidateTimeout   time.Duration `help:"Overall bound (statement_timeout) for one VALIDATE CONSTRAINT step; expect large tables to need a generous value." default:"30m"`
@@ -131,6 +133,12 @@ type MigrateCmd struct {
 // supplied" is observable — the value alone cannot tell a typed default
 // from an inherited one.
 func (c *MigrateCmd) Validate(kctx *kong.Context) error {
+	if err := c.validateInput(); err != nil {
+		return err
+	}
+	if c.Desired == "" && flagSupplied(kctx, "schema") {
+		return errors.New("--schema requires --desired; qualify the table in --alter instead")
+	}
 	if c.DryRun && c.Force != "" {
 		return errors.New("--force cannot be combined with --dry-run: the dry run reports the unforced plan")
 	}

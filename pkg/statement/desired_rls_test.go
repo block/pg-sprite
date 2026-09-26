@@ -111,3 +111,10 @@ func TestRelationWalkHandlesMessageMaps(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, messageReadsRelation(value.ProtoReflect()))
 }
+
+func TestDesiredRowSecurityRequiresTableDefinition(t *testing.T) {
+	_, err := ParseDesiredWithRowSecurity(`ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (true);`)
+	require.ErrorIs(t, err, ErrRowSecurityDeclaration)
+	require.ErrorIs(t, err, ErrRowSecurityTableDefinitionRequired)
+}

@@ -362,8 +362,39 @@ run_offline() {
     fi
 }
 
+run_rls_apply() {
+    step "Apply a complete RLS definition"
+    local out status=0
+    out=$("$PGS" migrate --url "$PG_DSN" --schema demo_security --desired desired-rls.sql --dry-run --json) || status=$?
+    if [ "$CHECK" = 1 ]; then
+        assert_eq "RLS preview exit" 2 "$status"
+        assert_eq "RLS preview class" capability-boundary "$(jq -r '.class' <<<"$out")"
+        assert_eq "RLS preview changes" true "$(jq '.row_security_review.changes | length > 0' <<<"$out")"
+    else
+        printf '%s\n' "$out"
+    fi
+    status=0
+    out=$("$PGS" migrate --url "$PG_DSN" --schema demo_security --desired desired-rls.sql --json) || status=$?
+    if [ "$CHECK" = 1 ]; then
+        assert_eq "RLS apply exit" 0 "$status"
+        assert_eq "RLS apply outcome" executed-natively "$(jq -r '.outcome' <<<"$out")"
+        assert_eq "RLS committed statements" 3 "$(jq '.executed_sql | length' <<<"$out")"
+    else
+        printf '%s\n' "$out"
+    fi
+    status=0
+    out=$("$PGS" migrate --url "$PG_DSN" --schema demo_security --desired desired-rls.sql --json) || status=$?
+    if [ "$CHECK" = 1 ]; then
+        assert_eq "RLS repeat exit" 0 "$status"
+        assert_eq "RLS repeat statements" 0 "$(jq '.executed_sql // [] | length' <<<"$out")"
+    else
+        printf '%s\n' "$out"
+    fi
+}
+
 run_exec() {
     heading "Real executions against the seeded tables (make demo reseeds each run)"
+    run_rls_apply
     #              steps fragment
     execute_native 0     ""            "ALTER TABLE users ADD COLUMN bio text"
     execute_native 1     CONCURRENTLY  "CREATE INDEX idx_users_email ON users (email)"
