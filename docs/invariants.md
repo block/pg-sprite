@@ -107,8 +107,14 @@ remove every shadow row with a key above W, or checkpoint the cut frontier along
 whole int64 key space (first open below, last open above), so every key a row can carry belongs
 to exactly one chunk, and `Cut` reports the frontier so that "not yet cut" always names a chunk
 the copier will still read (coverage, resume-from-watermark, empty-table, frontier-after-each-cut,
-and cross-type key tests). *Planned enforcement:* copier/applier SQL shapes, the in-flight chunk
-registry, and flush scheduling that defers any flush overlapping an in-flight chunk's key range
+and cross-type key tests); `pkg/copier` `Copier` — every chunk runs one frozen
+`INSERT … SELECT … WHERE pk BETWEEN $1 AND $2 ON CONFLICT (pk) DO NOTHING` in its own bounded
+transaction, a chunk is registered in flight before its transaction begins and removed only after
+it commits or rolls back, and `Position` snapshots the cut frontier, the in-flight chunks, and the
+landed watermark under one lock so `Position.Classify` gives the applier the three-way answer
+(uncut / in-flight / landed) for any key (whole-table, never-overwrites, resume-from-watermark,
+out-of-order landing, and pinned-chunk cancellation tests). *Planned enforcement:* the applier's
+SQL shape and flush scheduling that defers any flush overlapping an in-flight chunk's key range
 (mutual exclusion, not tombstone retention). *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
@@ -261,9 +267,11 @@ cancellation tests); `pkg/schemachange` shadow build, drop, and inspect each req
 session for the proven table, run under its `Bind` context, and confirm from their own
 transaction that the session's backend holds the lock before the first write (nil-session,
 wrong-table, reported-loss, gone-session, rival-backend, mid-build-loss, and mid-drop-loss
-tests). *Planned enforcement:* the copier and
-cutover acquire the same session before their first write and run under it, so loss of the
-lock aborts the change at every stage.
+tests); `pkg/copier` `Copier` requires the same session, runs every chunk transaction under
+its `Bind` context, and calls `TableLockSession.Confirm` from each chunk's own connection before
+the insert (wrong-table, gone-session, rival-backend, and mid-copy-loss tests). *Planned
+enforcement:* cutover acquires the same session before its first write and runs under it, so
+loss of the lock aborts the change at every stage.
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
@@ -297,8 +305,11 @@ pending set **and** incrementing an in-flight counter **in the same critical sec
 one path (success, error, or cancellation cleanup) can claim an entry, so its completion callback
 runs exactly once. The claimer invokes the callback **without** holding the lock (callbacks may
 be slow or re-enter the applier). `Wait()` returns only when the pending set is empty **and** the
-in-flight counter is zero — it can never return while a callback is still running. *Enforced:*
-applier/copier concurrency structure. *Source:* Spirit `pkg/applier/single_target.go` +
+in-flight counter is zero — it can never return while a callback is still running. *Enforced
+today:* `pkg/copier` `Copier.Run` returns only after every worker has exited, so no chunk
+transaction is in flight and the in-flight set is empty when a caller checkpoints the watermark
+(cancellation and lock-loss tests pin one chunk mid-insert and assert nothing remains in flight).
+*Planned enforcement:* applier concurrency structure. *Source:* Spirit `pkg/applier/single_target.go` +
 `sharded.go` ("Completion invariant", block/spirit#765).
 
 ### LK-4 — An ambiguous cutover outcome is resolved by inspection, never assumed
