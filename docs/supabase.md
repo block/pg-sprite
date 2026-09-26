@@ -4,8 +4,9 @@ Your Supabase app runs on PostgreSQL. pg-sprite helps you change its tables as
 you build: add a column for a new feature, or add an index as your queries grow.
 
 Local tests cover column additions and concurrent index builds alongside
-Supabase's access policies, Data API, and Realtime subscriptions. Hosted projects
-are the next validation step. Changes that need a replacement table are refused
+Supabase's access policies, Data API, and Realtime subscriptions. An opt-in [hosted suite](../integration/supabase/hosted/README.md) also exercises
+real Auth users and service endpoints. Hosted Realtime startup failures remain
+under investigation; a local pass is not a hosted compatibility guarantee. Changes that need a replacement table are refused
 today because copy-and-swap is not implemented yet.
 
 Start with [your first change](#make-your-first-change). The [test results](#what-works-today)
@@ -32,7 +33,7 @@ and the [Data API](https://supabase.com/docs/guides/api) for more detail.
 
 This walkthrough adds a nullable `title` column to an existing `public.documents`
 table. Substitute your own app table and column. Start on a development project;
-the compatibility results below come from local Supabase services.
+the capability matrix below describes the pinned local Supabase services.
 
 ### Install pg-sprite
 
@@ -57,7 +58,7 @@ See [engine-role.md](engine-role.md) for the operation-specific grants.
 Supavisor offers two pooling modes:
 
 - **Session mode** keeps the same PostgreSQL connection for the client's session.
-  The tested session endpoint works with pg-sprite and can help on IPv4-only networks
+  The locally tested session endpoint works with pg-sprite and can help on IPv4-only networks
 - **Transaction mode** can assign a different PostgreSQL connection after each
   transaction. Do not use it for pg-sprite: execution limits need a stable session
 
@@ -84,8 +85,10 @@ export PGSPRITE_CA_CERT='/absolute/path/to/project-ca.crt'
 
 That variable sets the certificate file used by the commands below. A certificate
 error should be fixed by checking the hostname and trusted certificate, rather
-than disabling verification. Hosted certificate handling remains a validation
-milestone for this guide.
+than disabling verification. A hosted default-URI check connected over TLS without this extra configuration.
+That observation does not establish certificate verification; explicit
+`verify-full` certificate handling remains under investigation. Test the supplied
+URI separately from stricter TLS configuration when reporting compatibility.
 
 ### Preview the change
 
