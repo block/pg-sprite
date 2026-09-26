@@ -4,8 +4,8 @@ You can export a table's RLS settings and policies, keep them alongside its SQL,
 and verify that the live definition still matches. `pull` includes RLS when the
 live table has settings or policies; ordinary tables get no extra SQL.
 `diff` shows the captured definitions and refuses to emit execution SQL for RLS
-changes. The dedicated [atomic Go executor](atomic-row-security.md) can apply an
-RLS-only declaration to an existing supported table. No new CLI flags are needed.
+changes. Use `migrate --desired` to apply an RLS-only declaration to an existing supported table
+through the [atomic executor](atomic-row-security.md). No RLS-specific flags are needed.
 
 ## Export and compare
 
@@ -46,7 +46,57 @@ optional and defaults to `NO FORCE`.
 Files without RLS declarations keep their table-only behavior: `diff` leaves
 access control separately managed. Export preserves policies even when RLS is
 disabled, and preserves enabled RLS even when there are no policies (default deny).
-`fmt`, `lint`, and live desired-state execution do not accept the expanded format yet.
+`fmt` and `lint` do not accept the expanded format yet.
+
+## Apply the declaration
+
+After reviewing the differences, apply the same file:
+
+```sh
+pg-sprite migrate --url "$PG_DSN" --schema public --desired schema/documents.sql
+```
+
+The command prints an executed verdict and the SQL that committed. A second apply
+prints an already-converged verdict and runs no policy DDL. For scripts, add `--json`:
+
+```sh
+pg-sprite migrate --url "$PG_DSN" --schema public --desired schema/documents.sql --json
+```
+
+An already-converged response is:
+
+```json
+{
+  "outcome": "executed-natively",
+  "statement": "",
+  "table": "public.documents",
+  "detail": "already converged: row security matches; nothing to run"
+}
+```
+
+On a change, `executed_sql` contains the ordered statements committed together.
+The input owns the complete policy set: removing a policy from the file removes it
+from the table. Disabling RLS or widening a policy changes access deliberately;
+review that meaning and test application authorization before applying.
+
+`--dry-run` uses the same review as `diff`: RLS differences exit 2 and show the
+review without executing. That exit code describes the review-only preview,
+not a claim that the atomic executor cannot apply an RLS-only difference.
+Apply independently reads and validates the current table under its lock; it does
+not execute a saved preview or pin the reviewed definition with a fingerprint.
+
+Apply exits 0 after commit or a no-op, 2 for an unsupported declaration/target,
+and 1 for an operational failure. JSON includes the executor's `code` on failure.
+`row-security-outcome-unknown` means the commit response was lost or failed:
+inspect the live state before retrying; do not assume rollback. The whole RLS
+attempt uses `--statement-timeout`, including scratch inspection and lock waits;
+`--lock-timeout` bounds lock acquisition. RLS applies do not automatically retry.
+
+Ordinary files use the existing desired-state sequence instead; their JSON is
+`migrate.DesiredResult` with `plan`, `verdicts`, and overall `outcome`. Earlier
+committed steps stay committed if a later step fails. Mixed table/RLS changes
+are refused as a whole. `--desired` cannot be combined with `--alter`, `--force`,
+or `--accept-blocking`.
 
 ## Keep the SQL people already use
 
@@ -77,7 +127,7 @@ CREATE POLICY "Create your documents"
     WITH CHECK ((SELECT auth.uid()) = owner_id);
 ```
 
-This file is accepted by `diff` for inspection. The role, helper,
+This file is accepted by `diff` for inspection and by `migrate --desired` for execution. The role, helper,
 and necessary table grants must already exist. These policies cover reads and
 inserts, not updates or deletes. Application authorization tests remain necessary.
 
@@ -222,7 +272,7 @@ this table-scoped work.
    creation remains refused.
 3. **Execute transitions atomically.** The Go executor now locks, derives, applies,
    and verifies one table's RLS state in one bounded transaction. Mixed changes and
-   policy relation dependencies remain unsupported. CLI integration is a follow-up.
+   policy relation dependencies remain unsupported. The CLI selects this executor for explicit RLS declarations through `migrate --desired`.
 4. **Prove application behavior.** The local Supabase harness now checks real
    PostgREST requests from two authenticated users and anonymous callers, allowed
    and denied writes, changed visibility, and rollback after a cancelled apply.
