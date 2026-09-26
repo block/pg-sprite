@@ -44,7 +44,11 @@ var (
 	ErrInvariantViolation = errors.New("invariant violation")
 )
 
-// ChunkerOptions bounds chunk sizing. Zero values take the defaults above.
+// ChunkerOptions bounds chunk sizing. Zero values take the defaults above,
+// fitted to whatever bounds the caller did set: a floor or ceiling given on
+// its own pulls the other defaults inside it, so setting one bound never
+// makes the defaults contradict it. Explicitly set values are validated as
+// given.
 type ChunkerOptions struct {
 	// TargetChunkTime is the copy duration each chunk is sized toward (D12).
 	TargetChunkTime time.Duration
@@ -60,14 +64,26 @@ func (o ChunkerOptions) withDefaults() ChunkerOptions {
 	if o.TargetChunkTime == 0 {
 		o.TargetChunkTime = DefaultTargetChunkTime
 	}
-	if o.InitialRows == 0 {
-		o.InitialRows = DefaultInitialChunkRows
-	}
+	// Bounds first, each fitted inside the other when only one was given,
+	// then the initial size fitted inside both. Only positive bounds are
+	// fitted to; a non-positive one is left for validate to refuse as given.
 	if o.MinRows == 0 {
 		o.MinRows = DefaultMinChunkRows
+		if o.MaxRows > 0 {
+			o.MinRows = min(o.MinRows, o.MaxRows)
+		}
 	}
 	if o.MaxRows == 0 {
-		o.MaxRows = DefaultMaxChunkRows
+		o.MaxRows = max(DefaultMaxChunkRows, o.MinRows)
+	}
+	if o.InitialRows == 0 {
+		o.InitialRows = DefaultInitialChunkRows
+		if o.MinRows > 0 {
+			o.InitialRows = max(o.InitialRows, o.MinRows)
+		}
+		if o.MaxRows > 0 {
+			o.InitialRows = min(o.InitialRows, o.MaxRows)
+		}
 	}
 	return o
 }
@@ -98,9 +114,16 @@ func (o ChunkerOptions) validate() error {
 // chunk is open below (its lower bound is the smallest int64) and the last
 // is open above (its upper bound is the largest), so a row that arrives
 // under a key outside the table's bounds at the time chunking began is still
-// covered by some chunk. That coverage is what lets the applier discard a
-// captured change whose key lies above the copier's watermark: the copier
-// will read the live row when it reaches that key (CO-4).
+// covered by some chunk (CO-4 coverage).
+//
+// Coverage alone tells the applier which chunk a key belongs to, not whether
+// the copier has read that key yet. The keys the copier will still read are
+// exactly those in chunks Next has not yet returned; a chunk Next has
+// returned may be in flight or landed whatever the watermark says, because
+// concurrent workers land chunks out of order and the watermark advances only
+// over the contiguous landed prefix. Cut reports the frontier between the two,
+// so the applier discards a captured change only for a key beyond it; the
+// low watermark alone is not that signal.
 //
 // Boundaries are cut by keyset: the upper bound of the next chunk is the
 // key that makes the chunk hold exactly the current row count, read from
@@ -124,7 +147,7 @@ type Chunker struct {
 func NewChunker(target preflight.CopySwapTarget, from Watermark, opts ChunkerOptions) (*Chunker, error) {
 	// INV: ST-6
 	if target.Table() == "" {
-		return nil, fmt.Errorf("%w: copy-and-swap target proof is empty", ErrInvariantViolation)
+		return nil, fmt.Errorf("%w (ST-6): copy-and-swap target proof is empty", ErrInvariantViolation)
 	}
 	opts = opts.withDefaults()
 	if err := opts.validate(); err != nil {
@@ -139,6 +162,7 @@ func NewChunker(target preflight.CopySwapTarget, from Watermark, opts ChunkerOpt
 // copied means the key space is covered from its smallest value; a
 // watermark at the largest value means nothing is left to cover.
 func startAfter(from Watermark) (lower int64, done bool) {
+	// INV: CO-4
 	if !from.Valid() {
 		return math.MinInt64, false
 	}
@@ -153,6 +177,24 @@ func (c *Chunker) Rows() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.rows
+}
+
+// Cut reports the highest key inside any chunk Next has returned, or that
+// the chunker resumed past; ok is false while no key has been cut. Every key
+// above it lies in a chunk the copier has not started reading, so a change
+// captured for such a key can be discarded (CO-4); every key at or below it
+// lies in a chunk that is in flight or landed and must be applied or
+// deferred, whatever the watermark says.
+func (c *Chunker) Cut() (upper int64, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.done {
+		return math.MaxInt64, true
+	}
+	if c.next == math.MinInt64 {
+		return 0, false
+	}
+	return c.next - 1, true
 }
 
 // Next cuts the next chunk from the live table with one bounded query on
@@ -170,8 +212,10 @@ func (c *Chunker) Next(ctx context.Context, db dbconn.RowQuerier) (chunk Chunk, 
 	}
 	chunk, err = NewChunk(c.next, upper)
 	if err != nil {
-		return Chunk{}, false, fmt.Errorf("%w: chunk boundary: %w", ErrInvariantViolation, err)
+		return Chunk{}, false, fmt.Errorf("%w (CO-4): chunk boundary: %w", ErrInvariantViolation, err)
 	}
+	chunk.rows = c.rows
+	// INV: CO-4
 	if upper == math.MaxInt64 {
 		c.done = true
 	} else {
@@ -187,15 +231,17 @@ func (c *Chunker) boundary(ctx context.Context, db dbconn.RowQuerier, lower, row
 	var upper *int64
 	err := db.QueryRow(ctx, boundarySQL(c.target), lower, rows-1).Scan(&upper)
 	if errors.Is(err, pgx.ErrNoRows) {
+		// INV: CO-4
 		return math.MaxInt64, nil
 	}
 	if err != nil {
 		return 0, fmt.Errorf("cut chunk boundary on %s.%s from %d: %w", c.target.Schema(), c.target.Table(), lower, err)
 	}
 	if upper == nil {
+		// INV: ST-6
 		// The key column is a primary key and can never be NULL; a NULL here is
 		// a table that is not the one the proof described.
-		return 0, fmt.Errorf("%w: chunk boundary on %s.%s from %d is NULL", ErrInvariantViolation, c.target.Schema(), c.target.Table(), lower)
+		return 0, fmt.Errorf("%w (ST-6): chunk boundary on %s.%s from %d is NULL", ErrInvariantViolation, c.target.Schema(), c.target.Table(), lower)
 	}
 	return *upper, nil
 }
@@ -217,14 +263,22 @@ func boundarySQL(target preflight.CopySwapTarget) string {
 		" OFFSET $2::bigint LIMIT 1"
 }
 
-// Feedback reports how long the last chunk took to copy so the next one is
-// sized toward the target time (D12). One step changes the size by at most
-// a factor of two in either direction, within the configured floor and
-// ceiling.
-func (c *Chunker) Feedback(elapsed time.Duration) {
+// Feedback reports how long chunk took to copy so the next chunk is sized
+// toward the target time (D12). The new size is scaled from the row count
+// chunk was cut to, not from the current size, so reports from workers
+// copying concurrently each propose a size for the work they measured
+// instead of compounding on one another. One step changes the size by at
+// most a factor of two in either direction, within the configured floor and
+// ceiling. A chunk this chunker did not cut is refused.
+func (c *Chunker) Feedback(chunk Chunk, elapsed time.Duration) error {
+	// INV: ST-6
+	if chunk.rows <= 0 {
+		return fmt.Errorf("%w (ST-6): feedback for chunk [%d, %d] that no chunker cut", ErrInvariantViolation, chunk.Lower(), chunk.Upper())
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.rows = nextRows(c.rows, elapsed, c.opts)
+	c.rows = nextRows(chunk.rows, elapsed, c.opts)
+	return nil
 }
 
 // nextRows scales rows by target/elapsed, clamped per step and to the

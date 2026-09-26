@@ -12,6 +12,7 @@ func TestNewChunk(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(-2), c.Lower())
 	assert.Equal(t, int64(4), c.Upper())
+	assert.Equal(t, int64(0), c.Rows(), "a range built by hand carries no cut size")
 	_, err = NewChunk(4, 3)
 	assert.EqualError(t, err, "chunk lower bound 4 exceeds upper bound 3")
 }

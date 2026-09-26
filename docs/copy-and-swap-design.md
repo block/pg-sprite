@@ -275,9 +275,9 @@ checkpoint intervals bounded.
 observation and policy.
 
 **Where enforced.** `pkg/copier` (`Chunker`: chunks are sized in rows and cut by keyset from the
-live table, so sparse and dense key spaces yield equal work per chunk; each timing feedback moves
-the next chunk's row count toward the target by at most a factor of two, within a configured floor
-and ceiling) and `pkg/decode`; LK-3, ST-3.
+live table, so sparse and dense key spaces yield equal work per chunk; each timing feedback scales
+the measured chunk's own row count toward the target by at most a factor of two, within a configured
+floor and ceiling, so concurrent workers' reports do not compound) and `pkg/decode`; LK-3, ST-3.
 
 ### D13 — Recover unique-secondary-key moves batch-wide
 

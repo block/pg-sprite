@@ -66,7 +66,9 @@ func (f chunkerFixture) createSparse(t *testing.T, keyType string) preflight.Cop
 	return f.prove(t, "sparse")
 }
 
-// drain cuts chunks until the chunker reports the key space covered.
+// drain cuts chunks until the chunker reports the key space covered,
+// checking after every cut that the frontier Cut reports is the upper bound
+// of the chunk just returned.
 func drain(t *testing.T, c *Chunker, db dbconn.RowQuerier) []Chunk {
 	t.Helper()
 	var chunks []Chunk
@@ -76,6 +78,9 @@ func drain(t *testing.T, c *Chunker, db dbconn.RowQuerier) []Chunk {
 		if !ok {
 			return chunks
 		}
+		cut, cutOK := c.Cut()
+		require.True(t, cutOK, "a returned chunk is a cut")
+		assert.Equal(t, chunk.Upper(), cut, "the frontier is the last returned chunk's upper bound")
 		chunks = append(chunks, chunk)
 		require.Less(t, len(chunks), 100, "chunking must terminate")
 	}
@@ -124,6 +129,8 @@ func TestChunkerCutsByRowCountNotKeyWidth(t *testing.T) {
 
 	c, err := NewChunker(target, Watermark{}, ChunkerOptions{InitialRows: 4, MinRows: 4, MaxRows: 4})
 	require.NoError(t, err)
+	_, cutOK := c.Cut()
+	assert.False(t, cutOK, "nothing is cut before the first chunk")
 
 	chunks := drain(t, c, f.pool)
 	require.Len(t, chunks, 3)
@@ -136,6 +143,11 @@ func TestChunkerCutsByRowCountNotKeyWidth(t *testing.T) {
 	assert.Equal(t, int64(4), f.countIn(t, target, chunks[1]))
 	assert.Equal(t, int64(3), f.countIn(t, target, chunks[2]))
 	f.assertCoverage(t, target, chunks, 11)
+	// Every chunk records the size it was cut to, including the final one
+	// that holds fewer keys than that.
+	for i, chunk := range chunks {
+		assert.Equal(t, int64(4), chunk.Rows(), "chunk %d cut size", i)
+	}
 
 	// Once covered, the chunker stays exhausted.
 	_, ok, err := c.Next(t.Context(), f.pool)
@@ -211,21 +223,28 @@ func TestChunkerFeedbackResizesTheNextChunk(t *testing.T) {
 
 	// The first chunk copied in a quarter of the target time: the next one
 	// doubles (the per-step cap), so it holds four keys {2,3,10,11}.
-	c.Feedback(DefaultTargetChunkTime / 4)
+	require.NoError(t, c.Feedback(first, DefaultTargetChunkTime/4))
 	assert.Equal(t, int64(4), c.Rows())
 	second, ok, err := c.Next(t.Context(), f.pool)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assertChunk(t, second, 2, 11)
+	assert.Equal(t, int64(4), second.Rows())
 
 	// The second chunk took three times the target: the next one shrinks by
 	// half to two keys {12,13}.
-	c.Feedback(3 * DefaultTargetChunkTime)
+	require.NoError(t, c.Feedback(second, 3*DefaultTargetChunkTime))
 	assert.Equal(t, int64(2), c.Rows())
 	third, ok, err := c.Next(t.Context(), f.pool)
 	require.NoError(t, err)
 	require.True(t, ok)
 	assertChunk(t, third, 12, 13)
+
+	// A late report for the first chunk (two rows, a quarter of the target)
+	// proposes four rows from that chunk's size, not from the current two:
+	// feedback is about the chunk measured, whatever arrived since.
+	require.NoError(t, c.Feedback(first, DefaultTargetChunkTime/4))
+	assert.Equal(t, int64(4), c.Rows())
 }
 
 // TestChunkerSmallKeyTypes proves the bigint parameter discipline: bounds
