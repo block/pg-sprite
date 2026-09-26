@@ -11,7 +11,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/migrate"
-	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -56,15 +56,7 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 		}
 		// Preview uses desired-state admission: a routed native step can still
 		// discard live structure, which RunDesired refuses before execution.
-		for i := range report.Statements {
-			st := &report.Statements[i]
-			if st.Destructive {
-				st.Disposition = router.DispositionRefuse
-				st.Class = verdict.ClassByDesign
-				st.Reason = verdict.ReasonDestructiveChange
-				report.Disposition = router.DispositionRefuse
-			}
-		}
+		plan.RefuseDestructive(&report)
 		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, JSON: c.JSON}
 		return diff.writeDiffReport(out, report)
 	}

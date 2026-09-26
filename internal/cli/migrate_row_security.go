@@ -46,7 +46,6 @@ func rowSecurityVerdict(table string, report executor.RowSecurityReport, err err
 	}
 	v.Outcome = verdict.OutcomeFailed
 	v.ExecutedSQL = nil
-	v.Code = string(executor.OutcomeCode(err))
 	v.Detail = err.Error()
 	if errors.Is(err, executor.ErrRowSecurityRefused) {
 		return v.WithRefusal(verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement))
@@ -54,5 +53,6 @@ func rowSecurityVerdict(table string, report executor.RowSecurityReport, err err
 	if errors.Is(err, executor.ErrTableNotFound) {
 		return v.WithRefusal(verdict.Environmental(verdict.ReasonUnsupportedStatement))
 	}
+	v.Code = string(executor.OutcomeCode(err))
 	return v
 }

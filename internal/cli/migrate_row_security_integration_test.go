@@ -55,7 +55,8 @@ func TestMigrateDesiredRLSMissingTableIsRefused(t *testing.T) {
 	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
 	var v verdict.Verdict
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
-	assert.Equal(t, string(executor.CodeTableNotFound), v.Code)
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Empty(t, v.Code)
 	_, err = schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.ErrorIs(t, err, schemadiff.ErrTableNotFound)
 }

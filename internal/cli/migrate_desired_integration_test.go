@@ -8,7 +8,6 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
-	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/router"
@@ -85,7 +84,8 @@ func TestMigrateDesiredRLSRefusesMixedChanges(t *testing.T) {
 	var v verdict.Verdict
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
-	assert.Equal(t, string(executor.CodeRowSecurityRefused), v.Code)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+	assert.Empty(t, v.Code)
 	assert.Empty(t, v.ExecutedSQL)
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
@@ -135,6 +135,11 @@ func TestMigrateDesiredTableRefusesDestructiveChange(t *testing.T) {
 	assert.Equal(t, router.DispositionRefuse, preview.Disposition)
 	require.Len(t, preview.Statements, 1)
 	assert.Equal(t, verdict.ReasonDestructiveChange, preview.Statements[0].Reason)
+	assert.Equal(t, verdict.ReasonDestructiveChange, preview.Reason)
+	assert.Empty(t, preview.Statements[0].Backend)
+	assert.Empty(t, preview.Statements[0].ExecSQL)
+	assert.Empty(t, preview.Statements[0].Execution)
+	assert.Equal(t, plan.Fingerprint(preview.Statements), preview.Fingerprint)
 	cmd.DryRun = false
 	out.Reset()
 	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)

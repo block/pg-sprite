@@ -82,3 +82,19 @@ func TestMigrateDesiredWriterFailure(t *testing.T) {
 type failingDesiredWriter struct{ err error }
 
 func (w failingDesiredWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestMigrateRequiresOneInput(t *testing.T) {
+	root := New("test")
+	parser, err := kong.New(root, kong.Vars{"version": "test"})
+	require.NoError(t, err)
+	_, err = parser.Parse([]string{"migrate", "--url", "postgres://localhost/test"})
+	require.EqualError(t, err, "migrate: provide exactly one of --alter or --desired")
+}
+
+func TestMigrateAlterRejectsSchemaFlag(t *testing.T) {
+	root := New("test")
+	parser, err := kong.New(root, kong.Vars{"version": "test"})
+	require.NoError(t, err)
+	_, err = parser.Parse([]string{"migrate", "--url", "postgres://localhost/test", "--alter", "ALTER TABLE documents ADD COLUMN body text", "--schema", "app"})
+	require.EqualError(t, err, "migrate: --schema requires --desired; qualify the table in --alter instead")
+}

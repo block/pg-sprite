@@ -85,8 +85,11 @@ not a claim that the atomic executor cannot apply an RLS-only difference.
 Apply independently reads and validates the current table under its lock; it does
 not execute a saved preview or pin the reviewed definition with a fingerprint.
 
-Apply exits 0 after commit or a no-op, 2 for an unsupported declaration/target,
-and 1 for an operational failure. JSON includes the executor's `code` on failure.
+Apply exits 0 after commit or a no-op and 2 for executor/target refusals.
+Invalid or unsupported input declarations fail admission before execution and
+exit 1 with a diagnostic, without a verdict. Operational failures also exit 1;
+their JSON verdict includes the executor's `code`. Refusal verdicts use `reason`
+and `class`, without a failure code.
 `row-security-outcome-unknown` means the commit response was lost or failed:
 inspect the live state before retrying; do not assume rollback. The whole RLS
 attempt uses `--statement-timeout`, including scratch inspection and lock waits;
