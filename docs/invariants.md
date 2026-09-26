@@ -90,7 +90,11 @@ complete unchanged-TOAST markers; the tombstone form is not available to the v1 
 ([copy-and-swap D13](copy-and-swap-design.md#d13--recover-unique-secondary-key-moves-batch-wide)).
 Full statement and the races these resolve:
 [low-level-design § copy and apply ordering](low-level-design.md#copy-and-apply-ordering-the-core-correctness-subtlety).
-*Enforced:* copier/applier SQL shapes + flush scheduling that defers any flush overlapping an
+*Enforced today:* `pkg/copier` `Chunker` — chunks are consecutive closed ranges that tile the
+whole int64 key space (first open below, last open above), so every key a row can carry belongs
+to exactly one chunk and "above the watermark" always names a chunk the copier will still read
+(coverage, resume-from-watermark, empty-table, and cross-type key tests). *Planned enforcement:*
+copier/applier SQL shapes + flush scheduling that defers any flush overlapping an
 in-flight chunk's key range (mutual exclusion, not tombstone retention). *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a

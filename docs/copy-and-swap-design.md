@@ -274,7 +274,10 @@ checkpoint intervals bounded.
 **Alternative considered → deferred.** Replica-lag-based throttling needs topology-specific
 observation and policy.
 
-**Where enforced.** `pkg/copier` and `pkg/decode`; LK-3, ST-3.
+**Where enforced.** `pkg/copier` (`Chunker`: chunks are sized in rows and cut by keyset from the
+live table, so sparse and dense key spaces yield equal work per chunk; each timing feedback moves
+the next chunk's row count toward the target by at most a factor of two, within a configured floor
+and ceiling) and `pkg/decode`; LK-3, ST-3.
 
 ### D13 — Recover unique-secondary-key moves batch-wide
 
@@ -363,7 +366,7 @@ decoding but adds write-path availability and amplification costs.
 | --- | --- | --- |
 | `pkg/dbconn` | Produces `TableLock`. | LK-1 |
 | `pkg/preflight` | Produces `CopySwapTarget`, the copy-and-swap route's proof (the table facts `PreflightedTable` carries plus the v1 shape, replica identity, dependent-object, decoding, and headroom checks above); owns Tier-3 refusals. | ST-6, RF-1..RF-3 |
-| `pkg/copier` | Produces `Chunk` and `Watermark`. | CO-4, LK-3 |
+| `pkg/copier` | Produces `Chunk` and `Watermark`; `Chunker` (built only from a `CopySwapTarget`) cuts consecutive chunks that tile the whole int64 key space — first open below, last open above — so every key a row can carry belongs to exactly one chunk and a watermark at the largest value means the copy is complete. | CO-4, LK-3 |
 | `pkg/checksum` | Produces `VerifiedShadow` and `CleanWatermark`; their constructors are private to this package. | CO-1, CO-2, CO-3 |
 | `pkg/decode` | Produces `ChangeEvent`, including per-column presence and `OldKey` for an UPDATE that moved the primary key. | ST-3, ST-4, CO-4, CO-8 |
 | `pkg/applier` | Applies presence-aware events from the per-key buffer. | CO-4, CO-5, CO-6, CO-8, LK-3 |
