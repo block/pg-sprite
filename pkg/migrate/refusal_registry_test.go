@@ -71,6 +71,7 @@ func deriveRefusalKeys() (keys []classifiedKey, admitted []string) {
 		keys = append(keys, classifiedKey{"site:" + s.site, s.refusal, true})
 	}
 	keys = append(keys, classifiedKey{"route", plan.RouteRefusal(), true})
+	keys = append(keys, classifiedKey{"row-security-review", plan.RowSecurityReviewRefusal(), true})
 	return keys, admitted
 }
 
@@ -356,4 +357,28 @@ func hasKey(keys []classifiedKey, key string) bool {
 		}
 	}
 	return false
+}
+
+func TestRowSecurityRefusalRegistry(t *testing.T) {
+	cases := []struct {
+		name   string
+		cause  error
+		reason verdict.Reason
+		class  verdict.Class
+	}{
+		{"privileges", errors.Join(executor.ErrRowSecurityRefused, executor.ErrRowSecurityPrivileges), verdict.ReasonInsufficientPrivileges, verdict.ClassEnvironmental},
+		{"unsupported", executor.ErrRowSecurityRefused, verdict.ReasonUnsupportedStatement, verdict.ClassCapabilityBoundary},
+		{"missing-table", executor.ErrTableNotFound, verdict.ReasonUnsupportedStatement, verdict.ClassEnvironmental},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			refusal, ok := RowSecurityRefusal(fmt.Errorf("wrapped: %w", tc.cause))
+			require.True(t, ok)
+			v := verdict.Verdict{}.WithRefusal(refusal)
+			assert.Equal(t, tc.reason, v.Reason)
+			assert.Equal(t, tc.class, v.Class)
+		})
+	}
+	_, ok := RowSecurityRefusal(errors.New("operational failure"))
+	assert.False(t, ok)
 }

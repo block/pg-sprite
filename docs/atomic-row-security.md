@@ -1,8 +1,8 @@
 # Atomic row security changes
 
-The dedicated Go executor converges the complete RLS definition of one existing
+The dedicated executor, available through the Go API and `migrate --desired`, converges the complete RLS definition of one existing
 ordinary table. It does not change columns, indexes, or constraints and does not
-create missing tables. `diff` remains a preview; no new CLI flags are required.
+create missing tables. `diff` remains a preview. See the [CLI workflow](declarative-row-security.md#apply-the-declaration) for commands and output.
 
 ## Call the Go API
 
