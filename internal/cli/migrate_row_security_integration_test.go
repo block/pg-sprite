@@ -53,12 +53,17 @@ func TestMigrateDesiredRLSMissingTableIsRefused(t *testing.T) {
  owner_id int NOT NULL
  );
  ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`)
-	var out strings.Builder
-	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
-	var v verdict.Verdict
-	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
-	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
-	assert.Empty(t, v.Code)
+	for _, dryRun := range []bool{true, false} {
+		cmd.DryRun = dryRun
+		var out strings.Builder
+		require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+		assert.Equal(t, verdict.ClassEnvironmental, v.Class)
+		assert.Empty(t, v.Code)
+	}
 	_, err = schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.ErrorIs(t, err, schemadiff.ErrTableNotFound)
 }
@@ -126,15 +131,16 @@ func TestMigrateDesiredRLSPrivilegeRefusals(t *testing.T) {
    );
    ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`)
 			var out strings.Builder
-			require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+			runErr := cmd.run(t.Context(), &out)
+			require.ErrorIs(t, runErr, verdict.ErrRefused)
 			var v verdict.Verdict
 			require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 			assert.Equal(t, verdict.ReasonInsufficientPrivileges, v.Reason)
 			assert.Equal(t, verdict.ClassEnvironmental, v.Class)
 			if owner {
-				assert.Contains(t, v.Detail, "requires CREATE on the database")
+				assert.ErrorIs(t, runErr, executor.ErrRowSecurityDatabaseCreateRequired)
 			} else {
-				assert.Contains(t, v.Detail, "requires owner privileges")
+				assert.ErrorIs(t, runErr, executor.ErrRowSecurityOwnerRequired)
 			}
 			assert.Empty(t, v.ExecutedSQL)
 			after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")

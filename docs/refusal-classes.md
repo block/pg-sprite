@@ -237,7 +237,7 @@ from production (`verdict.Reasons()`, `executor.CreateShapeCauses()`,
 refusal sites) and fails if a key is absent, carries the zero class, or violates the owner
 rule. The registry has two halves: `pkg/plan/refusal.go` classifies the keys that travel with
 a planned statement (`CreateShapeRefusal`, `PartitionRefusal`, `RouteRefusal`,
-`DestructiveChangeRefusal`, `RowSecurityReviewRefusal`), and
+`DestructiveChangeRefusal`, `RowSecurityReviewRefusal`, `RowSecurityMissingTableRefusal`), and
 `pkg/migrate/refusal_registry.go` classifies statement kinds at the gate, the admission
 sentinel sets, and the imperative sites; `TestRefusalRegistryIsComplete` in `pkg/migrate`
 covers both halves. Keying on causes is what gives the test correspondence rather than presence: a registry
@@ -245,8 +245,9 @@ keyed on sites alone would go green with `admissionRefusalVerdict` classified
 `capability-boundary` while it minted a `by-design` refusal for every `CREATE ... IF NOT
 EXISTS`.
 
-RLS preview uses the plan registry's `capability-boundary` refusal: its deltas
-are review-only. Atomic RLS execution uses `migrate.RowSecurityRefusal`:
+RLS preview uses the plan registry's `capability-boundary` refusal for review-only
+policy deltas. A missing target uses the shared `RowSecurityMissingTableRefusal`
+in both preview and apply, with class `environmental`. Atomic RLS execution uses `migrate.RowSecurityRefusal`:
 missing owner or database CREATE privileges (including PostgreSQL SQLSTATE 42501)
 carry `insufficient-privileges` / `environmental`; an absent target table carries
 `unsupported-statement` / `environmental`; unsupported declarations or target

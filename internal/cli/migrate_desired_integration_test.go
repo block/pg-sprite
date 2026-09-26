@@ -183,3 +183,36 @@ func TestMigrateDesiredCreatesMissingTable(t *testing.T) {
 	assert.Len(t, after.Columns, 2)
 	assert.Equal(t, "id", after.Columns[0].Name)
 }
+
+func TestMigrateDesiredDestructiveAndUnsupportedPreviewMatchesApply(t *testing.T) {
+	url, schema, pool := desiredFixture(t)
+	before, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	cmd := desiredCommand(t, url, schema, `CREATE TABLE documents (
+  id int PRIMARY KEY,
+  CONSTRAINT unique_id EXCLUDE USING btree (id WITH =)
+ );`)
+	var out strings.Builder
+	cmd.DryRun = true
+	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+	var preview plan.Report
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &preview))
+	require.Len(t, preview.Statements, 2)
+	assert.Equal(t, verdict.ReasonDestructiveChange, preview.Reason)
+	assert.Equal(t, verdict.ClassByDesign, preview.Class)
+	for _, st := range preview.Statements {
+		assert.Equal(t, router.DispositionRefuse, st.Disposition)
+		assert.Empty(t, st.ExecSQL)
+	}
+	out.Reset()
+	cmd.DryRun = false
+	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused)
+	var result migrate.DesiredResult
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &result))
+	assert.Equal(t, preview.Reason, result.Reason)
+	assert.Equal(t, preview.Class, result.Class)
+	assert.Empty(t, result.Verdicts)
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
+}

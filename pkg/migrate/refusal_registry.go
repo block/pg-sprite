@@ -95,7 +95,7 @@ func siteRefusals() []siteRefusal {
 		{"create-collision", createCollisionRefusal()},
 		{"plan-incoherent", planIncoherentRefusal()},
 		{"row-security-unsupported", rowSecurityUnsupportedRefusal()},
-		{"row-security-missing-table", rowSecurityMissingTableRefusal()},
+		{"row-security-missing-table", plan.RowSecurityMissingTableRefusal()},
 	}
 }
 
@@ -221,10 +221,6 @@ func rowSecurityUnsupportedRefusal() verdict.Refusal {
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)
 }
 
-func rowSecurityMissingTableRefusal() verdict.Refusal {
-	return verdict.Environmental(verdict.ReasonUnsupportedStatement)
-}
-
 // RowSecurityRefusal classifies typed admission failures from the atomic RLS
 // executor. Operational errors are not refusals. Privilege causes take priority
 // over the general admission sentinel they also wrap.
@@ -236,7 +232,7 @@ func RowSecurityRefusal(err error) (verdict.Refusal, bool) {
 		return rowSecurityUnsupportedRefusal(), true
 	}
 	if errors.Is(err, executor.ErrTableNotFound) {
-		return rowSecurityMissingTableRefusal(), true
+		return plan.RowSecurityMissingTableRefusal(), true
 	}
 	return verdict.Refusal{}, false
 }

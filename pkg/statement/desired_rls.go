@@ -14,6 +14,9 @@ import (
 // ErrRowSecurityDeclaration reports an incomplete or contradictory RLS declaration.
 var ErrRowSecurityDeclaration = errors.New("desired row security requires one explicit ENABLE or DISABLE on the desired table")
 
+// ErrRowSecurityTableDefinitionRequired identifies a missing table definition in an RLS file.
+var ErrRowSecurityTableDefinitionRequired = errors.New("desired row security requires a CREATE TABLE definition")
+
 // ErrPolicyRelationDependency refuses policy subqueries that read relations until
 // desired-state materialization can preserve their dependency identities.
 var ErrPolicyRelationDependency = errors.New("policy relation dependencies are not supported in desired row security")
@@ -62,7 +65,7 @@ func ParseDesiredWithRowSecurity(sql string) (DesiredWithRowSecurity, error) {
 		}
 	}
 	if !hasTable {
-		return DesiredWithRowSecurity{}, fmt.Errorf("desired row security requires a CREATE TABLE definition: %w", ErrRowSecurityDeclaration)
+		return DesiredWithRowSecurity{}, fmt.Errorf("%w: %w", ErrRowSecurityTableDefinitionRequired, ErrRowSecurityDeclaration)
 	}
 	table, err := ParseDesired(tableSQL.String())
 	if err != nil {

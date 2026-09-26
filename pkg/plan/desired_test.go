@@ -61,3 +61,23 @@ func TestRefuseDestructiveLeavesNondestructivePlanUnchanged(t *testing.T) {
 	assert.Equal(t, before, report.Statements[0])
 	assert.Equal(t, fingerprint, report.Fingerprint)
 }
+
+func TestRefuseDestructiveOverridesAggregateRouteRefusal(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Disposition = router.DispositionRefuse
+	report.Statements = []plan.Statement{{
+		SQL: "ALTER TABLE documents DROP COLUMN body", Destructive: true,
+		Disposition: router.DispositionExecute, Backend: router.BackendNative,
+	}, {
+		SQL:         "ALTER TABLE documents ADD CONSTRAINT ex EXCLUDE USING btree (id WITH =)",
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement, Class: verdict.ClassCapabilityBoundary,
+	}}
+	plan.RefuseDestructive(&report)
+	assert.Equal(t, verdict.ReasonDestructiveChange, report.Reason)
+	assert.Equal(t, verdict.ClassByDesign, report.Class)
+	assert.Empty(t, report.Owner)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, report.Statements[1].Reason)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, report.Statements[1].Class)
+	assert.Equal(t, plan.Fingerprint(report.Statements), report.Fingerprint)
+}

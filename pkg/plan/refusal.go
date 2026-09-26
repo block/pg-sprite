@@ -89,3 +89,9 @@ func DestructiveChangeRefusal() verdict.Refusal {
 func RowSecurityReviewRefusal() verdict.Refusal {
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)
 }
+
+// RowSecurityMissingTableRefusal classifies an absent RLS target in preview
+// and apply. The operator must create the table before managing its policies.
+func RowSecurityMissingTableRefusal() verdict.Refusal {
+	return verdict.Environmental(verdict.ReasonUnsupportedStatement)
+}

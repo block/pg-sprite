@@ -41,7 +41,11 @@ func (c *DiffCmd) runRowSecurityDiff(ctx context.Context, out io.Writer, sql str
 func (c *DiffCmd) writeRowSecurityRefusal(out io.Writer, cause error) error {
 	var review *diffplan.RowSecurityReviewRequired
 	errors.As(cause, &review)
-	v := verdict.Verdict{Detail: cause.Error()}.WithRefusal(plan.RowSecurityReviewRefusal())
+	refusal := plan.RowSecurityReviewRefusal()
+	if errors.Is(cause, schemadiff.ErrTableNotFound) {
+		refusal = plan.RowSecurityMissingTableRefusal()
+	}
+	v := verdict.Verdict{Detail: cause.Error()}.WithRefusal(refusal)
 	switch {
 	case c.JSON && review != nil:
 		report := struct {

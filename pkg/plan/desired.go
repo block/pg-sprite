@@ -19,5 +19,10 @@ func RefuseDestructive(report *Report) {
 	refuseStatements(report, func(_ int) (verdict.Refusal, executor.CreateShapeCause) {
 		return DestructiveChangeRefusal(), ""
 	})
+	// Whole-plan admission checks destructiveness before routed dispositions.
+	// Preserve each statement's specific refusal, but give the aggregate the same
+	// precedence as apply, including when routing already refused the report.
+	r := DestructiveChangeRefusal()
+	report.Reason, report.Class, report.Owner = r.Reason(), r.Class(), r.Owner()
 	report.Fingerprint = Fingerprint(report.Statements)
 }
