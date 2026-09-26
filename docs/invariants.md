@@ -90,8 +90,20 @@ complete unchanged-TOAST markers; the tombstone form is not available to the v1 
 ([copy-and-swap D13](copy-and-swap-design.md#d13--recover-unique-secondary-key-moves-batch-wide)).
 Full statement and the races these resolve:
 [low-level-design § copy and apply ordering](low-level-design.md#copy-and-apply-ordering-the-core-correctness-subtlety).
-*Enforced:* copier/applier SQL shapes + flush scheduling that defers any flush overlapping an
-in-flight chunk's key range (mutual exclusion, not tombstone retention). *Test obligation:* a
+Under concurrent copy workers two positions matter and only one of them is the discard rule's:
+the **cut frontier** (`Chunker.Cut`, the highest key of any chunk the copier has started reading)
+and the **landed watermark** (`Watermark`, the contiguous prefix of landed chunks, which is what
+is checkpointed and resumed from). Chunks land out of order, so a key can lie above the landed
+watermark yet inside a chunk already read; discarding a change for it would lose it. The applier
+therefore discards only for keys above the cut frontier, applies for keys in landed chunks, and
+defers for keys in in-flight chunks. With one worker the two positions coincide.
+*Enforced today:* `pkg/copier` `Chunker` — chunks are consecutive closed ranges that tile the
+whole int64 key space (first open below, last open above), so every key a row can carry belongs
+to exactly one chunk, and `Cut` reports the frontier so that "not yet cut" always names a chunk
+the copier will still read (coverage, resume-from-watermark, empty-table, frontier-after-each-cut,
+and cross-type key tests). *Planned enforcement:* copier/applier SQL shapes, the in-flight chunk
+registry, and flush scheduling that defers any flush overlapping an in-flight chunk's key range
+(mutual exclusion, not tombstone retention). *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark

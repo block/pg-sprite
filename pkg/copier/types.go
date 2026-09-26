@@ -8,6 +8,9 @@ import "fmt"
 type Chunk struct {
 	lower int64
 	upper int64
+	// rows is the row count a Chunker cut this chunk to; zero for a chunk
+	// built by NewChunk, which sizes nothing.
+	rows int64
 }
 
 // NewChunk validates and returns the closed range [lower, upper].
@@ -23,6 +26,11 @@ func (c Chunk) Lower() int64 { return c.lower }
 
 // Upper returns the inclusive upper bound.
 func (c Chunk) Upper() int64 { return c.upper }
+
+// Rows returns the row count a Chunker cut the chunk to: the number of keys
+// it holds, except for the final open-above chunk, which holds fewer. It is
+// zero for a chunk not cut by a Chunker.
+func (c Chunk) Rows() int64 { return c.rows }
 
 // Watermark identifies the highest primary key below which every chunk was
 // copied. The zero value means no chunk has been copied yet; a valid
