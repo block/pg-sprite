@@ -84,3 +84,24 @@ administration of those dependencies is not serialized by the table lock.
 
 These checks belong to the executor, regardless of whether a CLI or orchestrator
 calls it. SchemaBot can retain its existing replan and consent workflow.
+
+## Bind execution to reviewed SQL
+
+`PreviewRowSecurity` derives an ordered `RowSecurityPlan` using the same locked
+admission and rendering as execution, then rolls back without target DDL. Preview
+also takes a bounded exclusive table lock; it is not a lock-free catalog query.
+Pass its `Statements` to `ExecuteReviewedRowSecurity` alongside the desired
+schema. The executor regenerates the sequence under its own lock and compares
+it exactly, including order and duplicates, before changing any target policy.
+A mismatch returns `ErrRowSecurityPlanChanged` and a zero report. An empty
+reviewed sequence authorizes only a no-op; it never disables this check.
+
+This binds the SQL to review, not every detail of the earlier database state.
+For example, editing an existing policy predicate can leave the replacement SQL
+unchanged because replacement drops and recreates that policy. Changes to roles,
+helper functions, grants, and authentication remain outside the table lock.
+Orchestrators still own replan, consent, and application authorization tests.
+There are no new CLI flags, approval tokens, or fingerprints.
+
+- **RS-5:** Reviewed execution compares the full ordered generated SQL sequence
+  under the target lock, before target DDL, and refuses any mismatch.
