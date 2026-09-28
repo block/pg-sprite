@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -218,19 +219,49 @@ func TestCopierCopiesTheWholeTable(t *testing.T) {
 	assert.ErrorIs(t, c.Run(t.Context(), f.pool), copier.ErrAlreadyRun)
 }
 
-// A row the applier already wrote into the shadow carries a fresher image
-// than the copier's read; the copier leaves it alone (CO-4). A copy from the
-// zero watermark clears nothing first: the shadow was built empty, so every
-// row in it is the applier's.
+// A row the applier writes into the shadow carries a fresher image than the
+// copier's read; the copier leaves it alone (CO-4). The applier's write is
+// committed while the copy is running — the copier's insert of the chunk
+// holding the key waits on the uncommitted row and then finds it committed —
+// which is the only way a row can be in the shadow ahead of the copier,
+// since a copy that starts from nothing first clears the shadow.
 func TestCopierNeverOverwritesAShadowRow(t *testing.T) {
 	f := newCopierFixture(t)
 	const rows = 300
 	target, lock, shadow := f.prepare(t, rows)
-	f.exec(t, `INSERT INTO %s.`+pgx.Identifier{shadow.ShadowTable()}.Sanitize()+` (id, qty) VALUES (30, 999)`)
-
-	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{Workers: 1})
+	applied, err := f.pool.Begin(t.Context())
 	require.NoError(t, err)
-	require.NoError(t, c.Run(t.Context(), f.pool))
+	// Redundant safety closer: the test commits, after which Rollback
+	// returns the guaranteed ErrTxClosed.
+	t.Cleanup(func() { _ = applied.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = applied.Exec(t.Context(), "INSERT INTO "+pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()+" (id, qty) VALUES (30, 999)")
+	require.NoError(t, err)
+
+	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{
+		Workers:     1,
+		LockTimeout: 30 * time.Second,
+		Chunker:     copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},
+	})
+	require.NoError(t, err)
+	results := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Go(func() { results <- c.Run(t.Context(), f.pool) })
+	t.Cleanup(wg.Wait)
+
+	const inFlightDeadline = 15 * time.Second
+	require.Eventually(t, func() bool {
+		pos := c.Position()
+		return len(pos.InFlight) == 1 && pos.InFlight[0].Lower() == math.MinInt64
+	}, inFlightDeadline, 20*time.Millisecond, "the first chunk, holding key 30, should be in flight")
+	require.NoError(t, applied.Commit(t.Context()))
+
+	const stopDeadline = 30 * time.Second
+	select {
+	case err := <-results:
+		require.NoError(t, err)
+	case <-time.After(stopDeadline):
+		t.Fatalf("copy did not finish within %s of the applier's commit", stopDeadline)
+	}
 
 	var qty int64
 	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT qty FROM "+pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()+" WHERE id = 30").Scan(&qty))
@@ -261,6 +292,28 @@ func TestCopierResumesAfterTheWatermark(t *testing.T) {
 	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "id > 150 AND qty = 0"), "stale rows above the watermark are gone")
 	assert.Equal(t, int64(150), f.count(t, shadow.ShadowTable(), "id > 150 AND qty = id"), "every key above the watermark was read from the source")
 	assert.Equal(t, int64(150), c.Position().RowsInserted)
+	assert.Equal(t, copier.NewWatermark(math.MaxInt64), c.Position().Watermark)
+}
+
+// A zero watermark means nothing landed, not that the shadow is empty: a run
+// whose first chunk never landed may have landed chunks anywhere above it.
+// The resumed copy therefore clears the whole shadow — down to the smallest
+// key a row can carry — before its first chunk is cut, so a stale row for a
+// key the applier had discarded changes for cannot survive (CO-4).
+func TestCopierResumesFromTheZeroWatermark(t *testing.T) {
+	f := newCopierFixture(t)
+	target, lock, shadow := f.prepare(t, 300)
+	shadowName := pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()
+	f.exec(t, "INSERT INTO "+shadowName+" (id, qty) SELECT n, 0 FROM generate_series(101, 300) AS n")
+	f.exec(t, "INSERT INTO "+shadowName+" (id, qty) VALUES ("+strconv.FormatInt(math.MinInt64, 10)+", 0)")
+
+	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{Workers: 2, Chunker: copier.ChunkerOptions{InitialRows: 40, MaxRows: 40}})
+	require.NoError(t, err)
+	require.NoError(t, c.Run(t.Context(), f.pool))
+
+	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "qty = 0"), "every stale row is gone, including the one at the smallest key")
+	f.assertConverged(t, shadow)
+	assert.Equal(t, int64(300), c.Position().RowsInserted, "every source row was read again")
 	assert.Equal(t, copier.NewWatermark(math.MaxInt64), c.Position().Watermark)
 }
 
@@ -466,6 +519,32 @@ func TestCopierRefusesAnUnconfirmedLock(t *testing.T) {
 	assert.Equal(t, rival.BackendPID(), heldErr.Holder.PID)
 	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "true"))
 	assert.NoError(t, rival.Err(), "the rival's lock is untouched")
+	require.NoError(t, rival.Release(t.Context()))
+
+	lost := f.lostLock(t, "orders")
+	_, err = copier.NewCopier(target, shadow, lost, copier.Watermark{}, copier.Options{})
+	require.ErrorIs(t, err, copier.ErrInvariantViolation, "a session that already reported loss")
+	assert.ErrorIs(t, err, lost.Err(), "the refusal names what the session saw")
+	assert.Contains(t, err.Error(), "(LK-1)")
+}
+
+// lostLock acquires the table lock with a short keepalive, terminates the
+// session's backend, and waits until the session itself has reported the
+// loss, so Err is set before the copier ever sees the session.
+func (f copierFixture) lostLock(t *testing.T, table string) *dbconn.TableLockSession {
+	t.Helper()
+	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, table, dbconn.WithTableLockKeepalive(200*time.Millisecond))
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.Error(t, lock.Release(context.WithoutCancel(t.Context()))) })
+	f.terminateBackend(t, lock.BackendPID())
+	const lockLossDeadline = 30 * time.Second
+	select {
+	case <-lock.Done():
+	case <-time.After(lockLossDeadline):
+		t.Fatalf("lock session did not report loss within %s", lockLossDeadline)
+	}
+	require.Error(t, lock.Err())
+	return lock
 }
 
 // pinShadowKey inserts key into the shadow in a transaction it leaves open,

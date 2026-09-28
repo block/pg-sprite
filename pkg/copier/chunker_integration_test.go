@@ -21,16 +21,18 @@ import (
 // is a SET-usable member of every role, so the copy-and-swap proof the
 // chunker demands is minted without provisioning.
 type chunkerFixture struct {
+	cfg    dbconn.Config
 	pool   *pgxpool.Pool
 	schema string
 }
 
 func newChunkerFixture(t *testing.T) chunkerFixture {
 	t.Helper()
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	return chunkerFixture{pool: pool, schema: testutil.NewSchema(t, pool)}
+	return chunkerFixture{cfg: cfg, pool: pool, schema: testutil.NewSchema(t, pool)}
 }
 
 // exec runs SQL with %s standing for the fixture schema.

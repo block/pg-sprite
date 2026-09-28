@@ -67,14 +67,16 @@ func TestNewCopierRefusesAShadowThatIsNotTheTargets(t *testing.T) {
 		shadow Shadow
 		detail string
 	}{
-		"nil shadow":     {nil, "copy requires a built shadow"},
-		"zero shadow":    {fakeShadow{}, "shadow proof is empty"},
-		"other schema":   {withSchema(good, "other"), "shadow is for other.orders, proof is for " + f.schema + ".orders"},
-		"other source":   {withSource(good, "invoices"), "shadow is for " + f.schema + ".invoices, proof is for " + f.schema + ".orders"},
-		"no source OID":  {withOIDs(good, 0, 2), "shadow proof for " + f.schema + ".orders carries no relation OIDs"},
-		"no shadow OID":  {withOIDs(good, 1, 0), "shadow proof for " + f.schema + ".orders carries no relation OIDs"},
-		"no columns":     {withColumns(good), "shadow copy columns for " + f.schema + ".orders do not include the primary key id"},
-		"no primary key": {withColumns(good, "qty"), "shadow copy columns for " + f.schema + ".orders do not include the primary key id"},
+		"nil shadow":                       {nil, "copy requires a built shadow"},
+		"zero shadow":                      {fakeShadow{}, "shadow proof is empty"},
+		"other schema":                     {withSchema(good, "other"), "shadow is for other.orders, proof is for " + f.schema + ".orders"},
+		"other source":                     {withSource(good, "invoices"), "shadow is for " + f.schema + ".invoices, proof is for " + f.schema + ".orders"},
+		"shadow is the source by name":     {withShadowTable(good, "orders"), "shadow of " + f.schema + ".orders is the source table itself"},
+		"no source OID":                    {withOIDs(good, 0, 2), "shadow proof for " + f.schema + ".orders carries no relation OIDs"},
+		"no shadow OID":                    {withOIDs(good, 1, 0), "shadow proof for " + f.schema + ".orders carries no relation OIDs"},
+		"shadow is the source by relation": {withOIDs(good, 7, 7), "shadow proof for " + f.schema + ".orders names relation 7 as both source and shadow"},
+		"no columns":                       {withColumns(good), "shadow copy columns for " + f.schema + ".orders do not include the primary key id"},
+		"no primary key":                   {withColumns(good, "qty"), "shadow copy columns for " + f.schema + ".orders do not include the primary key id"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -91,6 +93,10 @@ func TestNewCopierRefusesAShadowThatIsNotTheTargets(t *testing.T) {
 
 func withSchema(s fakeShadow, schema string) fakeShadow { s.schema = schema; return s }
 func withSource(s fakeShadow, source string) fakeShadow { s.source = source; return s }
+func withShadowTable(s fakeShadow, shadow string) fakeShadow {
+	s.shadow = shadow
+	return s
+}
 func withOIDs(s fakeShadow, source, shadow uint32) fakeShadow {
 	s.sourceOID, s.shadowOID = source, shadow
 	return s

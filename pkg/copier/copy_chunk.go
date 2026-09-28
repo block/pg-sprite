@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 )
 
@@ -83,14 +84,31 @@ func setCopySession(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTar
 }
 
 // confirmLock asks the server, on the connection about to write, whether the
-// lock session's own backend holds the table. Any other answer is an
-// invariant violation for the copier, whichever way dbconn reports it.
-func (c *Copier) confirmLock(ctx context.Context, tx pgx.Tx) error {
-	// INV: LK-1
-	if err := c.lock.Confirm(ctx, tx); err != nil {
+// lock session's own backend holds the table. A server that answers "no one"
+// or "another backend" has contradicted the session the copier trusts, and
+// that is the copier's invariant violation; a lookup that got no answer is
+// the connection's error, reported as such.
+func (c *Copier) confirmLock(ctx context.Context, conn dbconn.AdvisoryLockHolder) error {
+	err := c.lock.Confirm(ctx, conn)
+	if err == nil {
+		return nil
+	}
+	if lockDenied(err) {
+		// INV: LK-1
 		return fmt.Errorf("%w (LK-1): %w", ErrInvariantViolation, err)
 	}
-	return nil
+	return fmt.Errorf("confirm the table lock from the copy transaction: %w", err)
+}
+
+// lockDenied reports whether a Confirm error is the server's word that the
+// session does not hold the table, in either of the two forms dbconn gives
+// it.
+func lockDenied(err error) bool {
+	if errors.Is(err, dbconn.ErrTableLockNotHeld) {
+		return true
+	}
+	var heldElsewhere *dbconn.TableLockHeldError
+	return errors.As(err, &heldElsewhere)
 }
 
 // holdRelations takes the weakest table lock on the source and the shadow
@@ -155,7 +173,11 @@ func confirmRelation(role, schema, table string, proven uint32, found *uint32) e
 // concurrently (CO-4). The bounds are declared bigint whatever the key's
 // integer type, as the chunker's boundary query declares them, so a bound
 // outside a smaller key type's range can still be sent and the primary-key
-// index still serves the range scan.
+// index still serves the range scan. The statement carries no conversion
+// expression: a column whose type differs between the two tables is
+// converted by the server's assignment cast, so a type change that needs a
+// USING expression cannot be copied by this statement and must not be routed
+// to the copier until it can carry one.
 func copySQL(target preflight.CopySwapTarget, shadow Shadow) string {
 	columns := make([]string, 0, len(shadow.CopyColumns()))
 	for _, column := range shadow.CopyColumns() {

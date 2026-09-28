@@ -114,12 +114,14 @@ does not start just above the frontier, so the frontier never runs ahead of an u
 chunk; a chunk is registered in flight before its transaction begins and leaves the in-flight set
 only when it commits — a chunk whose transaction did not commit stays in flight, so its keys
 never read as landed; a resumed copy first deletes every shadow row above W in bounded batches,
-each in its own guarded transaction, before its first chunk is cut, so every key above W is
-genuinely uncut when the applier starts discarding for it; and `Position` snapshots the cut
+each in its own guarded transaction, before its first chunk is cut — the whole shadow when
+nothing landed, since a zero watermark says nothing about what an earlier run left above it — so
+every key above W is genuinely uncut when the applier starts discarding for it; and `Position` snapshots the cut
 frontier, the in-flight chunks, and the landed watermark under one lock so `Position.Classify`
 gives the applier the three-way answer (uncut / in-flight / landed) for any key (whole-table with
 a Position-consistency sampler, never-overwrites, resume-from-watermark with stale rows above and
-below W, out-of-order landing, pinned-chunk cancellation followed by a resume that re-copies the
+below W, resume-from-zero-watermark with stale rows down to the smallest key, out-of-order
+landing, pinned-chunk cancellation followed by a resume that re-copies the
 cleared tail, and frontier-ordered ledger tests). *Planned enforcement:* the applier's
 SQL shape and flush scheduling that defers any flush overlapping an in-flight chunk's key range
 (mutual exclusion, not tombstone retention). *Test obligation:* a
