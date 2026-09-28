@@ -4,9 +4,12 @@ Your Supabase app runs on PostgreSQL. pg-sprite helps you change its tables as
 you build: add a column for a new feature, or add an index as your queries grow.
 
 Local tests cover column additions and concurrent index builds alongside
-Supabase's access policies, Data API, and Realtime subscriptions. Hosted projects
-are the next validation step. Changes that need a replacement table are refused
-today because copy-and-swap is not implemented yet.
+Supabase's access policies, Data API, and Realtime subscriptions. An opt-in [hosted suite](../integration/supabase/hosted/README.md) also exercises
+real Auth users and service endpoints. Its Realtime schema change cases initialize
+one shared fixture and verify baseline delivery before applying changes, then
+check that events and tenant isolation survive on the same connections. Changes
+that need a replacement table are refused today because copy-and-swap is not
+implemented yet.
 
 Start with [your first change](#make-your-first-change). The [test results](#what-works-today)
 and [roadmap](#where-we-go-next) show how far the current coverage goes.
@@ -32,7 +35,7 @@ and the [Data API](https://supabase.com/docs/guides/api) for more detail.
 
 This walkthrough adds a nullable `title` column to an existing `public.documents`
 table. Substitute your own app table and column. Start on a development project;
-the compatibility results below come from local Supabase services.
+the capability matrix below describes the pinned local Supabase services.
 
 ### Install pg-sprite
 
@@ -57,7 +60,7 @@ See [engine-role.md](engine-role.md) for the operation-specific grants.
 Supavisor offers two pooling modes:
 
 - **Session mode** keeps the same PostgreSQL connection for the client's session.
-  The tested session endpoint works with pg-sprite and can help on IPv4-only networks
+  The locally tested session endpoint works with pg-sprite and can help on IPv4-only networks
 - **Transaction mode** can assign a different PostgreSQL connection after each
   transaction. Do not use it for pg-sprite: execution limits need a stable session
 
@@ -74,9 +77,9 @@ Replace the example value with your connection string. This sets an environment
 variable without opening a connection. Keep credentials out of source control;
 your secret manager can also set this variable for you or your agent.
 
-For hosted connections, use `sslmode=verify-full` in the URL to verify the server's
-certificate and hostname. If you need to supply a CA certificate separately,
-save the certificate for your project and point pg-sprite at it:
+For certificate and hostname verification, download the CA from **Database
+Settings → SSL Configuration** and follow [Supabase's verification instructions](https://supabase.com/docs/guides/platform/ssl-enforcement#a-note-about-postgres-ssl-modes).
+Use `sslmode=verify-full` with `sslrootcert` in the URL, or point pg-sprite at the CA:
 
 ```sh
 export PGSPRITE_CA_CERT='/absolute/path/to/project-ca.crt'
@@ -84,8 +87,10 @@ export PGSPRITE_CA_CERT='/absolute/path/to/project-ca.crt'
 
 That variable sets the certificate file used by the commands below. A certificate
 error should be fixed by checking the hostname and trusted certificate, rather
-than disabling verification. Hosted certificate handling remains a validation
-milestone for this guide.
+than disabling verification. Hosted checks passed with the default URI,
+`sslmode=require`, and `verify-full` with the downloaded CA. The default connection
+used TLS, which alone does not establish server identity verification. An unrelated
+CA and a mismatched expected hostname were rejected in the [hosted TLS tests](../integration/supabase/hosted/tls_test.go).
 
 ### Preview the change
 
@@ -189,7 +194,9 @@ The result lists the statements committed in one transaction. Applying it again
 reports that row security already matches. A mixed column/index and RLS edit
 refuses without committing either part. See [output and failure handling](declarative-row-security.md#apply-the-declaration).
 This CLI route is covered by PostgreSQL integration tests; local Supabase API
-coverage uses the same executor. Hosted validation remains a separate step.
+coverage uses the same executor. The [hosted suite](../integration/supabase/hosted/README.md)
+also exercised preview, apply, convergence, and atomic rollback as the owning
+`postgres` role. Hosted non-owner privilege validation remains a follow-up.
 
 ## What works today
 
@@ -257,26 +264,31 @@ outcome; they do not assume every unsuccessful change rolls back completely.
 - Realtime coverage is limited to INSERT/UPDATE subscriptions during the tested
   native changes. Deletes, reconnect recovery, column removal, and table
   replacement need separate validation
-- PostgREST cache refresh was exercised with the image's schema-change event triggers;
+- PostgREST cache refresh was exercised with the image's schema change event triggers;
   a deployment without those triggers needs its own reload workflow
 
-Hosted role configuration and TLS remain unverified. The Auth
-service runs its schema initialization; JWTs are signed by the test fixture,
-so this does not test signup or login. These local results are not an
-unrestricted Supabase support claim.
+Hosted checks have passed as the owning `postgres` role on PostgreSQL 17.6,
+including CA-based TLS verification, the CLI schema lifecycle, real Auth defaults
+and foreign keys, and atomic RLS rollback. Hosted poolers remain untested and
+Realtime checks cover continuity after fixture initialization; see the
+[hosted suite](../integration/supabase/hosted/README.md) for cases and limits.
+In the local suite, Auth runs its schema initialization and the fixture signs JWTs,
+so those cases do not test login. Hosted cases create
+confirmed test users through the Auth admin API and sign in with their passwords;
+they do not test public signup, email delivery, or OAuth. Neither suite establishes
+unrestricted Supabase support.
 
 ## Where we go next
 
-The next milestones build on the local tests. Each needs repeatable evidence
+The next milestones build on the local and scoped hosted tests. Each needs repeatable evidence
 before we expand the support claim:
 
-1. **Validate hosted projects.** Run the same checks on a disposable Supabase
-   project, including certificate verification, network access, and hosted roles
-2. **Validate declarative schema workflows.** Export an existing Supabase schema,
-   edit the desired SQL files, preview the diff, and apply supported changes.
-   Verify that the live schema matches the files and a second diff is empty,
-   while access policies and Realtime subscriptions still work. Make clear which
-   objects the files describe and which remain managed separately
+1. **Finish hosted validation.** Core direct-connection and TLS cases have passed;
+   validate the hosted pooler endpoints
+2. **Publish a reproducible declarative workflow.** The hosted CLI cases cover
+   create, export, edit, apply, RLS, and convergence. Complete a fresh-project
+   walkthrough from the published guide, with clear boundaries for managed objects
+   and Realtime behavior
 3. **Cover more app workflows.** Exercise deletes and reconnects in Realtime,
    Realtime payloads after column renames and removals, and real signup/login
    flows. Make the limits of desired schema files and access-policy handling

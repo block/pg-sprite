@@ -100,3 +100,9 @@ Handle unrelated upgrades in a separate follow-up. When making an upgrade:
 
 This check is triggered by agent work, not a scheduled update bot. Fresh CI
 runners pull the pinned images on each run, which also exposes unavailable pins.
+
+## Hosted projects
+
+The separate [hosted suite](hosted/README.md) uses real Auth users and managed
+endpoints with an explicit opt-in. Do not redirect this local fixture at a hosted
+project: its fixed names, JWT signer, and Docker lifecycle are local-only.
