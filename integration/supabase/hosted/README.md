@@ -135,6 +135,15 @@ committed without events during the observation; a later write arrived when the
 slot started. The database rows were not lost. This is why schema-change continuity
 and cold-start delivery are separate results.
 
+An independent comparison using `@supabase/supabase-js` 2.116.0 reproduced the
+gap with authenticated subscriptions. Both the default client and
+`postgres_changes_options: {wait: true}` acknowledged before the reader started.
+Of 13 committed INSERTs, both received only the last two; the earlier 11 did not
+arrive during the observation. Wire-level checks ruled out SDK callback filtering.
+No pg-sprite DDL ran. A separate control that waited for the reader delivered all
+three writes to both clients, without retrying writes. These observations do not
+identify the hosted server revision or establish a public readiness contract.
+
 Run the startup diagnostics explicitly:
 
 ```sh

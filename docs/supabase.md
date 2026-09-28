@@ -6,9 +6,10 @@ you build: add a column for a new feature, or add an index as your queries grow.
 Local tests cover column additions and concurrent index builds alongside
 Supabase's access policies, Data API, and Realtime subscriptions. An opt-in [hosted suite](../integration/supabase/hosted/README.md) also exercises
 real Auth users and service endpoints. Its Realtime schema-change cases initialize
-one shared fixture before testing continuity; cold-start diagnostics are separate
-and have known failures. A passing continuity run is not a guarantee about startup
-delivery. Changes that need a replacement table are refused
+one shared fixture before testing continuity. Hosted testing also reproduced a
+Realtime startup gap with the official Supabase client, without pg-sprite DDL:
+subscription confirmation arrived before the reader was active, and early events
+were not delivered. A passing continuity run does not resolve that startup gap. Changes that need a replacement table are refused
 today because copy-and-swap is not implemented yet.
 
 Start with [your first change](#make-your-first-change). The [test results](#what-works-today)
