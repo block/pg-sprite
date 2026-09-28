@@ -40,8 +40,8 @@ func TestTableLockConfirmDistinguishesHolderGoneFromHolderElsewhere(t *testing.T
 
 	stale := goneLock(t, cfg, pool, "app", "orders")
 	err = stale.Confirm(t.Context(), tx)
-	assert.ErrorIs(t, err, dbconn.ErrInvariantViolation)
 	assert.ErrorIs(t, err, dbconn.ErrTableLockNotHeld)
+	assert.NotErrorIs(t, err, dbconn.ErrInvariantViolation, "Confirm reports; the writing caller decides")
 
 	rival, err := dbconn.AcquireTableLock(t.Context(), cfg, "app", "orders")
 	require.NoError(t, err)

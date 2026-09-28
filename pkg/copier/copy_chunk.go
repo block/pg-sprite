@@ -2,22 +2,25 @@ package copier
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/preflight"
 )
 
-// copyChunk copies one chunk in its own bounded transaction under the
-// source owner's role: it confirms from this connection that the lock
-// session's backend still holds the table and that the source and shadow are
-// still the relations the proofs describe, then inserts the chunk's live rows
-// into the shadow without overwriting any row already there. It returns the
-// number of rows the insert added.
+// sqlstateUndefinedTable is the SQLSTATE the server raises when a statement
+// names a relation that does not exist.
+const sqlstateUndefinedTable = "42P01"
+
+// copyChunk copies one chunk in its own guarded transaction: it inserts the
+// chunk's live rows into the shadow without overwriting any row already
+// there and returns the number of rows the insert added.
 func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk) (int64, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -29,13 +32,7 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 		// the transaction with its session either way.
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
-	if err := setCopySession(ctx, tx, c.target, c.opts); err != nil {
-		return 0, err
-	}
-	if err := c.confirmLock(ctx, tx); err != nil {
-		return 0, err
-	}
-	if err := c.confirmRelations(ctx, tx); err != nil {
+	if err := c.guard(ctx, tx); err != nil {
 		return 0, err
 	}
 	tag, err := tx.Exec(ctx, c.sql, chunk.Lower(), chunk.Upper())
@@ -46,6 +43,26 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 		return 0, fmt.Errorf("commit chunk [%d, %d] of %s.%s: %w", chunk.Lower(), chunk.Upper(), c.target.Schema(), c.target.Table(), err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+// guard prepares the transaction every write into the shadow runs in: it
+// bounds it, puts it under the source owner's role, and confirms from this
+// connection that the lock session's backend still holds the table and that
+// the source and shadow are still the relations the proofs describe. Both
+// relations are locked by name before their identity is checked, so nothing
+// can replace either one between the check and the statements that follow
+// it in the same transaction.
+func (c *Copier) guard(ctx context.Context, tx pgx.Tx) error {
+	if err := setCopySession(ctx, tx, c.target, c.opts); err != nil {
+		return err
+	}
+	if err := c.confirmLock(ctx, tx); err != nil {
+		return err
+	}
+	if err := c.holdRelations(ctx, tx); err != nil {
+		return err
+	}
+	return c.confirmRelations(ctx, tx)
 }
 
 // setCopySession bounds the transaction and puts it in the owner's shoes.
@@ -74,6 +91,27 @@ func (c *Copier) confirmLock(ctx context.Context, tx pgx.Tx) error {
 		return fmt.Errorf("%w (LK-1): %w", ErrInvariantViolation, err)
 	}
 	return nil
+}
+
+// holdRelations takes the weakest table lock on the source and the shadow
+// for the rest of the transaction. LOCK TABLE resolves the names as the
+// statements after it will, and holding even ACCESS SHARE keeps a DROP or
+// rename from completing until the transaction ends, so the identity check
+// that follows stays true for every statement in it. A name that no longer
+// resolves is a relation replaced or gone since its proof was minted.
+func (c *Copier) holdRelations(ctx context.Context, tx pgx.Tx) error {
+	source := pgx.Identifier{c.shadow.Schema(), c.shadow.SourceTable()}.Sanitize()
+	shadow := pgx.Identifier{c.shadow.Schema(), c.shadow.ShadowTable()}.Sanitize()
+	_, err := tx.Exec(ctx, "LOCK TABLE "+source+", "+shadow+" IN ACCESS SHARE MODE")
+	if err == nil {
+		return nil
+	}
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == sqlstateUndefinedTable {
+		// INV: ST-6
+		return fmt.Errorf("%w (ST-6): %s or its shadow %s no longer exists: %w", ErrInvariantViolation, source, shadow, err)
+	}
+	return fmt.Errorf("lock %s and %s for the copy: %w", source, shadow, err)
 }
 
 // confirmRelations refuses to write when the source or the shadow is no

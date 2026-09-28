@@ -1,7 +1,6 @@
 package copier
 
 import (
-	"cmp"
 	"math"
 	"slices"
 )
@@ -9,9 +8,9 @@ import (
 // ledger is the copier's bookkeeping of which chunks are claimed and which
 // have landed. It knows nothing about the database or about goroutines: the
 // copier mutates it under one lock and snapshots it into a Position. Chunks
-// arrive in claim order but land in any order, so the watermark advances only
-// over the contiguous prefix of landed chunks, while the cut frontier follows
-// claims.
+// are claimed in key order but land in any order, so the watermark advances
+// only over the contiguous prefix of landed chunks, while the cut frontier
+// follows claims.
 type ledger struct {
 	cut      int64
 	cutValid bool
@@ -22,6 +21,8 @@ type ledger struct {
 	next     int64
 	complete bool
 
+	// inFlight holds claimed chunks that have not landed, in key order: a
+	// chunk is claimed only at the frontier, so claim order is key order.
 	inFlight []Chunk
 	// landed holds chunks that committed above the watermark and wait for
 	// the chunks below them.
@@ -41,33 +42,44 @@ func newLedger(from Watermark) *ledger {
 }
 
 // claim registers a chunk a worker is about to read and moves the cut
-// frontier to its upper bound.
-func (l *ledger) claim(chunk Chunk) {
-	l.inFlight = append(l.inFlight, chunk)
+// frontier to its upper bound. It reports false, registering nothing, for a
+// chunk that does not start just above the frontier: the frontier is the
+// applier's discard boundary, and a chunk registered ahead of an unregistered
+// one would make the gap between them read as landed.
+func (l *ledger) claim(chunk Chunk) bool {
 	// INV: CO-4
-	if !l.cutValid || chunk.upper > l.cut {
-		l.cut, l.cutValid = chunk.upper, true
+	if !l.startsAtFrontier(chunk) {
+		return false
 	}
+	l.inFlight = append(l.inFlight, chunk)
+	l.cut, l.cutValid = chunk.upper, true
+	return true
 }
 
-// release forgets a claimed chunk whose transaction did not commit. It
-// reports false when the chunk was not in flight.
-func (l *ledger) release(chunk Chunk) bool {
+// startsAtFrontier reports whether chunk is the next consecutive chunk: the
+// first chunk of the key space while nothing is cut, and otherwise the chunk
+// whose lower bound is one past the frontier.
+func (l *ledger) startsAtFrontier(chunk Chunk) bool {
+	if !l.cutValid {
+		return chunk.lower == math.MinInt64
+	}
+	if l.cut == math.MaxInt64 {
+		return false
+	}
+	return chunk.lower == l.cut+1
+}
+
+// land records that a claimed chunk committed rows rows and advances the
+// watermark over every landed chunk now contiguous with it. It reports false
+// when the chunk was not in flight. A chunk whose transaction did not commit
+// is never landed: it stays in flight, so the applier keeps deferring for its
+// keys and the watermark cannot pass it.
+func (l *ledger) land(chunk Chunk, rows int64) bool {
 	i := slices.Index(l.inFlight, chunk)
 	if i < 0 {
 		return false
 	}
 	l.inFlight = slices.Delete(l.inFlight, i, i+1)
-	return true
-}
-
-// land records that a claimed chunk committed rows rows and advances the
-// watermark over every landed chunk now contiguous with it. It reports false
-// when the chunk was not in flight.
-func (l *ledger) land(chunk Chunk, rows int64) bool {
-	if !l.release(chunk) {
-		return false
-	}
 	l.rows += rows
 	l.landed = append(l.landed, chunk)
 	l.advance()
@@ -95,16 +107,14 @@ func (l *ledger) advance() {
 	}
 }
 
-// position snapshots the ledger. The in-flight chunks are copied and sorted
-// so the caller can read them without the copier's lock.
+// position snapshots the ledger. The in-flight chunks are copied so the
+// caller can read them without the copier's lock.
 func (l *ledger) position() Position {
-	inFlight := slices.Clone(l.inFlight)
-	slices.SortFunc(inFlight, func(a, b Chunk) int { return cmp.Compare(a.lower, b.lower) })
 	return Position{
 		Watermark:    l.watermark,
 		Cut:          l.cut,
 		CutValid:     l.cutValid,
-		InFlight:     inFlight,
+		InFlight:     slices.Clone(l.inFlight),
 		RowsInserted: l.rows,
 	}
 }

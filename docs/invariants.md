@@ -109,11 +109,18 @@ to exactly one chunk, and `Cut` reports the frontier so that "not yet cut" alway
 the copier will still read (coverage, resume-from-watermark, empty-table, frontier-after-each-cut,
 and cross-type key tests); `pkg/copier` `Copier` — every chunk runs one frozen
 `INSERT … SELECT … WHERE pk BETWEEN $1 AND $2 ON CONFLICT (pk) DO NOTHING` in its own bounded
-transaction, a chunk is registered in flight before its transaction begins and removed only after
-it commits or rolls back, and `Position` snapshots the cut frontier, the in-flight chunks, and the
-landed watermark under one lock so `Position.Classify` gives the applier the three-way answer
-(uncut / in-flight / landed) for any key (whole-table, never-overwrites, resume-from-watermark,
-out-of-order landing, and pinned-chunk cancellation tests). *Planned enforcement:* the applier's
+transaction; chunks are cut and registered under one lock, and the ledger refuses a chunk that
+does not start just above the frontier, so the frontier never runs ahead of an unregistered
+chunk; a chunk is registered in flight before its transaction begins and leaves the in-flight set
+only when it commits — a chunk whose transaction did not commit stays in flight, so its keys
+never read as landed; a resumed copy first deletes every shadow row above W in bounded batches,
+each in its own guarded transaction, before its first chunk is cut, so every key above W is
+genuinely uncut when the applier starts discarding for it; and `Position` snapshots the cut
+frontier, the in-flight chunks, and the landed watermark under one lock so `Position.Classify`
+gives the applier the three-way answer (uncut / in-flight / landed) for any key (whole-table with
+a Position-consistency sampler, never-overwrites, resume-from-watermark with stale rows above and
+below W, out-of-order landing, pinned-chunk cancellation followed by a resume that re-copies the
+cleared tail, and frontier-ordered ledger tests). *Planned enforcement:* the applier's
 SQL shape and flush scheduling that defers any flush overlapping an in-flight chunk's key range
 (mutual exclusion, not tombstone retention). *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
@@ -306,10 +313,15 @@ one path (success, error, or cancellation cleanup) can claim an entry, so its co
 runs exactly once. The claimer invokes the callback **without** holding the lock (callbacks may
 be slow or re-enter the applier). `Wait()` returns only when the pending set is empty **and** the
 in-flight counter is zero — it can never return while a callback is still running. *Enforced
-today:* `pkg/copier` `Copier.Run` returns only after every worker has exited, so no chunk
-transaction is in flight and the in-flight set is empty when a caller checkpoints the watermark
-(cancellation and lock-loss tests pin one chunk mid-insert and assert nothing remains in flight).
-*Planned enforcement:* applier concurrency structure. *Source:* Spirit `pkg/applier/single_target.go` +
+today (client side):* `pkg/copier` `Copier.Run` returns only after every worker has exited, so the
+copier holds no chunk transaction and a caller that then checkpoints `Position().Watermark`
+records only committed work; a chunk whose transaction did not commit stays in `InFlight`, so its
+keys never read as landed (cancellation and lock-loss tests pin one chunk mid-insert and assert
+the pinned chunk, and only it, remains in flight). The server side is bounded separately: a
+cancelled chunk's statement keeps running on the server until it finishes or hits the
+transaction's `statement_timeout` (LK-2), and only then is its transaction rolled back, so Run's
+return does not mean the server has finished with the chunk. *Planned enforcement:* applier
+concurrency structure. *Source:* Spirit `pkg/applier/single_target.go` +
 `sharded.go` ("Completion invariant", block/spirit#765).
 
 ### LK-4 — An ambiguous cutover outcome is resolved by inspection, never assumed

@@ -34,20 +34,21 @@ func requireTableLock(lock *dbconn.TableLockSession, target preflight.CopySwapTa
 
 // confirmTableLock re-asserts the lock from inside the working transaction,
 // before its first write, and names the refusal cause behind each way the
-// server can disagree with the lock session about who holds the table.
+// server can disagree with the lock session about who holds the table. The
+// wrapped error already names the table and any holder, so the detail says
+// only what this transaction was doing.
 func confirmTableLock(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession) error {
 	err := lock.Confirm(ctx, tx)
 	if err == nil {
 		return nil
 	}
-	held := lock.Lock()
 	// INV: LK-1
 	if errors.Is(err, dbconn.ErrTableLockNotHeld) {
-		return refuse(CauseLockUnconfirmed, []error{err}, "no session holds the table lock on %s.%s", held.Schema(), held.Table())
+		return refuse(CauseLockUnconfirmed, []error{err}, "confirming the table lock from the working transaction")
 	}
 	var heldElsewhere *dbconn.TableLockHeldError
 	if errors.As(err, &heldElsewhere) {
-		return refuse(CauseLockHeldElsewhere, []error{err}, "table lock on %s.%s is held by backend %d, not the lock session's backend %d", held.Schema(), held.Table(), heldElsewhere.Holder.PID, lock.BackendPID())
+		return refuse(CauseLockHeldElsewhere, []error{err}, "the working transaction sees the table lock held by another backend, not the lock session's backend %d", lock.BackendPID())
 	}
 	return err
 }

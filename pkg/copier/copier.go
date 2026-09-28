@@ -92,7 +92,14 @@ type Copier struct {
 	// sql is the one insert statement every chunk runs, frozen at
 	// construction so no worker builds SQL.
 	sql string
+	// clearSQL removes one batch of shadow rows above the resume watermark.
+	clearSQL string
 
+	// claimMu is held from cutting a chunk to registering it, so chunks are
+	// registered in the order they were cut. It is the only lock held
+	// across the chunker's boundary query; Position never waits on it.
+	claimMu sync.Mutex
+	// mu guards the ledger and the run flag.
 	mu     sync.Mutex
 	ledger *ledger
 	ran    bool
@@ -122,13 +129,14 @@ func NewCopier(target preflight.CopySwapTarget, shadow Shadow, lock *dbconn.Tabl
 		return nil, err
 	}
 	return &Copier{
-		target:  target,
-		shadow:  shadow,
-		lock:    lock,
-		chunker: chunker,
-		opts:    opts,
-		sql:     copySQL(target, shadow),
-		ledger:  newLedger(from),
+		target:   target,
+		shadow:   shadow,
+		lock:     lock,
+		chunker:  chunker,
+		opts:     opts,
+		sql:      copySQL(target, shadow),
+		clearSQL: clearAboveSQL(target, shadow),
+		ledger:   newLedger(from),
 	}, nil
 }
 
@@ -163,17 +171,29 @@ func (c *Copier) Position() Position {
 
 // Run copies every chunk after the resume watermark and returns once the
 // whole key space has landed, or once the first failure or cancellation has
-// stopped every worker. It returns only after every worker has exited, so no
-// chunk transaction is in flight when it does (LK-3); a caller that then
-// checkpoints Position().Watermark records only committed work. Every
-// chunk transaction runs under the lock session's Bind context, so losing
-// the table lock cancels the statements in flight and Run reports the loss.
+// stopped every worker. A resumed copy first clears the shadow above the
+// watermark, so every key above it is genuinely uncut (CO-4). Run returns
+// only after every worker has exited, so the copier holds no chunk
+// transaction when it does (LK-3) and a caller that then checkpoints
+// Position().Watermark records only committed work; a chunk whose
+// transaction did not commit stays in Position().InFlight. Every chunk
+// transaction runs under the lock session's Bind context, so losing the
+// table lock cancels the statements in flight and Run reports the loss.
+//
+// Cancellation reaches the server as a closed connection, so a statement
+// that was running keeps running until it finishes or hits the transaction's
+// statement_timeout, and only then is its transaction rolled back; the
+// server-side end of a cancelled chunk is bounded by that timeout, not by
+// Run's return.
 func (c *Copier) Run(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := c.start(); err != nil {
 		return err
 	}
 	ctx, unbind := c.lock.Bind(ctx)
 	defer unbind()
+	if err := c.clearAbove(ctx, pool, c.Position().Watermark); err != nil {
+		return c.finish(err)
+	}
 	ctx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
 
@@ -200,10 +220,9 @@ func (c *Copier) start() error {
 	return nil
 }
 
-// finish turns the reason the workers stopped into Run's result. A lost
-// table lock outranks whatever statement error the cancelled context
-// produced; a clean stop must have covered the key space with nothing left
-// in flight.
+// finish turns the reason the copy stopped into Run's result. A lost table
+// lock outranks whatever statement error the cancelled context produced; a
+// clean stop must have covered the key space with nothing left in flight.
 func (c *Copier) finish(cause error) error {
 	if lost := c.lock.Err(); lost != nil {
 		// INV: LK-1
@@ -228,7 +247,8 @@ func (c *Copier) finish(cause error) error {
 // land it, and tell the chunker how long it took. It returns nil when the
 // chunker has no chunk left and the first error otherwise; a cancelled
 // context ends the loop with the context's error, which Run resolves to
-// the cancellation's cause.
+// the cancellation's cause. A chunk whose copy failed is left in flight: it
+// did not land, so its keys must not read as landed.
 func (c *Copier) work(ctx context.Context, pool *pgxpool.Pool) error {
 	for ctx.Err() == nil {
 		chunk, ok, err := c.claim(ctx, pool)
@@ -241,7 +261,7 @@ func (c *Copier) work(ctx context.Context, pool *pgxpool.Pool) error {
 		started := c.opts.Clock.Now()
 		inserted, err := c.copyChunk(ctx, pool, chunk)
 		if err != nil {
-			return errors.Join(err, c.release(chunk))
+			return err
 		}
 		if err := c.land(chunk, inserted); err != nil {
 			return err
@@ -255,8 +275,12 @@ func (c *Copier) work(ctx context.Context, pool *pgxpool.Pool) error {
 
 // claim cuts the next chunk and registers it in flight before any worker
 // reads it, so a Position taken at any later instant shows the chunk as in
-// flight until it lands.
+// flight until it lands. Cutting and registering happen under one lock, so
+// chunks are registered in the order they were cut and the ledger's frontier
+// never runs ahead of an unregistered chunk.
 func (c *Copier) claim(ctx context.Context, pool *pgxpool.Pool) (Chunk, bool, error) {
+	c.claimMu.Lock()
+	defer c.claimMu.Unlock()
 	chunk, ok, err := c.chunker.Next(ctx, pool)
 	if err != nil || !ok {
 		return Chunk{}, false, err
@@ -264,18 +288,10 @@ func (c *Copier) claim(ctx context.Context, pool *pgxpool.Pool) (Chunk, bool, er
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	// INV: CO-4
-	c.ledger.claim(chunk)
-	return chunk, true, nil
-}
-
-func (c *Copier) release(chunk Chunk) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	// INV: LK-3
-	if !c.ledger.release(chunk) {
-		return fmt.Errorf("%w (LK-3): released chunk [%d, %d] was not in flight", ErrInvariantViolation, chunk.Lower(), chunk.Upper())
+	if !c.ledger.claim(chunk) {
+		return Chunk{}, false, fmt.Errorf("%w (CO-4): claimed chunk [%d, %d] does not start at the cut frontier", ErrInvariantViolation, chunk.Lower(), chunk.Upper())
 	}
-	return nil
+	return chunk, true, nil
 }
 
 func (c *Copier) land(chunk Chunk, inserted int64) error {

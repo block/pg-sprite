@@ -9,10 +9,11 @@ const (
 	// reading. A change captured for it can be discarded: the copier's own
 	// read will see the change.
 	KeyUncut KeyState = iota
-	// KeyInFlight lies in a chunk a worker is reading now. A change for it
-	// must wait for the chunk to land: applied earlier, a stale copy could
+	// KeyInFlight lies in a chunk a worker is reading now, or in a chunk
+	// whose transaction did not commit before the run failed. A change for
+	// it must wait for the chunk to land: applied earlier, a stale copy could
 	// resurrect a deleted row or the applier could read a shadow row that is
-	// not there yet.
+	// not there yet. A resumed run re-copies such a chunk.
 	KeyInFlight
 	// KeyLanded lies in a chunk whose transaction committed (or that a
 	// resumed run had already copied). A change for it applies immediately.
@@ -44,7 +45,8 @@ type Position struct {
 	Cut      int64
 	CutValid bool
 	// InFlight are the claimed, unlanded chunks, in ascending key order. It is
-	// empty once Run has returned.
+	// empty once Run has returned nil; after a failed Run it lists the chunks
+	// whose transactions did not commit, so their keys never read as landed.
 	InFlight []Chunk
 	// RowsInserted counts rows the copier inserted into the shadow, excluding
 	// rows the applier had already written (the insert never overwrites).

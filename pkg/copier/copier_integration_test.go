@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/stretchr/testify/assert"
@@ -129,9 +130,70 @@ func (f copierFixture) assertConverged(t *testing.T, shadow schemachange.BuiltSh
 		testutil.ConvergeOptions{IgnoreColumns: []string{"note"}})
 }
 
+// samplePositions reads the copier's Position every millisecond until the
+// returned stop is called and checks each snapshot for consistency. A
+// snapshot is consistent when a run that has cut nothing has landed nothing;
+// when the lowest in-flight chunk starts just above the watermark, because a
+// landed chunk there would have moved the watermark; when every in-flight
+// chunk lies below the cut; and when a snapshot with nothing in flight has
+// the watermark at the cut, because every claimed chunk has landed.
+func samplePositions(t *testing.T, c *copier.Copier) (stop func()) {
+	t.Helper()
+	const sampleInterval = time.Millisecond
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		ticker := time.NewTicker(sampleInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				assertPositionConsistent(t, c.Position())
+			}
+		}
+	})
+	var once sync.Once
+	stop = func() {
+		once.Do(func() {
+			close(done)
+			wg.Wait()
+		})
+	}
+	t.Cleanup(stop)
+	return stop
+}
+
+func assertPositionConsistent(t *testing.T, pos copier.Position) {
+	t.Helper()
+	if !pos.CutValid {
+		assert.False(t, pos.Watermark.Valid(), "nothing can land before anything is cut: %+v", pos)
+		assert.Empty(t, pos.InFlight, "nothing can be in flight before anything is cut: %+v", pos)
+		return
+	}
+	if len(pos.InFlight) == 0 {
+		if assert.True(t, pos.Watermark.Valid(), "a cut with nothing in flight has landed: %+v", pos) {
+			assert.Equal(t, pos.Cut, pos.Watermark.Value(), "with nothing in flight every claimed chunk has landed: %+v", pos)
+		}
+		return
+	}
+	frontier := int64(math.MinInt64)
+	if pos.Watermark.Valid() {
+		frontier = pos.Watermark.Value() + 1
+	}
+	assert.Equal(t, frontier, pos.InFlight[0].Lower(), "the lowest in-flight chunk starts just above the watermark: %+v", pos)
+	for _, chunk := range pos.InFlight {
+		assert.LessOrEqual(t, chunk.Upper(), pos.Cut, "an in-flight chunk lies at or below the cut: %+v", pos)
+	}
+}
+
 // The copier copies every source row into the shadow with several workers
 // and small chunks, finishes with the watermark at the largest key and
-// nothing in flight, and runs once.
+// nothing in flight, and runs once. Every Position sampled while it runs is
+// consistent: the lowest in-flight chunk starts just above the watermark
+// and every in-flight chunk lies at or below the cut, so no key between the
+// two frontiers reads as landed before its chunk committed (CO-4).
 func TestCopierCopiesTheWholeTable(t *testing.T) {
 	f := newCopierFixture(t)
 	const rows = 5000
@@ -139,10 +201,12 @@ func TestCopierCopiesTheWholeTable(t *testing.T) {
 
 	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{
 		Workers: 3,
-		Chunker: copier.ChunkerOptions{InitialRows: 700, MaxRows: 700},
+		Chunker: copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},
 	})
 	require.NoError(t, err)
+	stopSampling := samplePositions(t, c)
 	require.NoError(t, c.Run(t.Context(), f.pool))
+	stopSampling()
 
 	f.assertConverged(t, shadow)
 	pos := c.Position()
@@ -155,7 +219,9 @@ func TestCopierCopiesTheWholeTable(t *testing.T) {
 }
 
 // A row the applier already wrote into the shadow carries a fresher image
-// than the copier's read; the copier leaves it alone (CO-4).
+// than the copier's read; the copier leaves it alone (CO-4). A copy from the
+// zero watermark clears nothing first: the shadow was built empty, so every
+// row in it is the applier's.
 func TestCopierNeverOverwritesAShadowRow(t *testing.T) {
 	f := newCopierFixture(t)
 	const rows = 300
@@ -174,28 +240,40 @@ func TestCopierNeverOverwritesAShadowRow(t *testing.T) {
 }
 
 // Resuming after a watermark copies only the keys above it: the rows below
-// are the checkpointed prefix an earlier run already landed.
+// are the checkpointed prefix an earlier run already landed and are left
+// exactly as found. Whatever the earlier run's unlanded chunks left above
+// the watermark is cleared first, in batches smaller than the tail, so the
+// resumed copy reads every key above the watermark from the source (CO-4):
+// a stale shadow row there would otherwise survive ON CONFLICT DO NOTHING.
 func TestCopierResumesAfterTheWatermark(t *testing.T) {
 	f := newCopierFixture(t)
 	target, lock, shadow := f.prepare(t, 300)
+	shadowName := pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()
+	f.exec(t, "INSERT INTO "+shadowName+" (id, qty) VALUES (100, 999)")
+	f.exec(t, "INSERT INTO "+shadowName+" (id, qty) SELECT n, 0 FROM generate_series(151, 250) AS n")
 
 	c, err := copier.NewCopier(target, shadow, lock, copier.NewWatermark(150), copier.Options{Workers: 2, Chunker: copier.ChunkerOptions{InitialRows: 40, MaxRows: 40}})
 	require.NoError(t, err)
 	require.NoError(t, c.Run(t.Context(), f.pool))
 
-	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "id <= 150"), "keys at or below the watermark are not copied")
-	assert.Equal(t, int64(150), f.count(t, shadow.ShadowTable(), "id > 150"))
+	assert.Equal(t, int64(1), f.count(t, shadow.ShadowTable(), "id <= 150"), "keys at or below the watermark are neither copied nor cleared")
+	assert.Equal(t, int64(1), f.count(t, shadow.ShadowTable(), "id = 100 AND qty = 999"), "the landed prefix keeps its rows")
+	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "id > 150 AND qty = 0"), "stale rows above the watermark are gone")
+	assert.Equal(t, int64(150), f.count(t, shadow.ShadowTable(), "id > 150 AND qty = id"), "every key above the watermark was read from the source")
 	assert.Equal(t, int64(150), c.Position().RowsInserted)
 	assert.Equal(t, copier.NewWatermark(math.MaxInt64), c.Position().Watermark)
 }
 
-// A cancelled copy returns only once every chunk transaction has ended
-// (LK-3): nothing is in flight, every key at or below the watermark is in
-// the shadow, and a fresh copier resumed from that watermark converges.
-// One chunk is pinned mid-insert by an uncommitted shadow row for one of its
-// keys, so the cancellation lands on a statement that is genuinely in flight
-// while the chunks around it have landed out of order.
-func TestCopierCancellationLeavesNothingInFlight(t *testing.T) {
+// A cancelled copy returns only once every worker has exited (LK-3), and its
+// Position still tells the truth: the cancelled chunk stays in flight, so
+// its keys never read as landed, while every key at or below the watermark
+// is in the shadow. A fresh copier resumed from that watermark clears the
+// tail above it — including the chunks that had landed out of order, whose
+// rows the applier may have discarded changes for as uncut — and converges
+// on a source that changed in that tail meanwhile. One chunk is pinned
+// mid-insert by an uncommitted shadow row for one of its keys, so the
+// cancellation lands on a statement that is genuinely in flight.
+func TestCopierCancellationKeepsTheCancelledChunkInFlight(t *testing.T) {
 	f := newCopierFixture(t)
 	const rows = 2000
 	target, lock, shadow := f.prepare(t, rows)
@@ -233,23 +311,30 @@ func TestCopierCancellationLeavesNothingInFlight(t *testing.T) {
 		t.Fatalf("copy did not stop within %s of cancellation", stopDeadline)
 	}
 	stopped := c.Position()
-	assert.Empty(t, stopped.InFlight, "Run returns only after every chunk transaction has ended")
+	require.Len(t, stopped.InFlight, 1, "the cancelled chunk stays in flight: it did not land")
+	assert.Equal(t, int64(1001), stopped.InFlight[0].Lower())
+	assert.Equal(t, int64(1100), stopped.InFlight[0].Upper())
+	assert.Equal(t, copier.KeyInFlight, stopped.Classify(1050), "a key in the cancelled chunk never reads as landed")
+	assert.Equal(t, copier.KeyLanded, stopped.Classify(1200))
 	assert.Equal(t, copier.NewWatermark(1000), stopped.Watermark)
 	assert.Equal(t, int64(1000), f.count(t, shadow.ShadowTable(), "id <= 1000"), "every key at or below the watermark landed")
 	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "id BETWEEN 1001 AND 1100"), "the cancelled chunk left nothing behind")
 	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "id = 1050"))
 	release()
 
+	// A change the applier would have discarded as uncut, had it read this
+	// Position: key 1500 is above the checkpointed watermark.
+	f.exec(t, "UPDATE %s.orders SET qty = 999 WHERE id = 1500")
 	resumed, err := copier.NewCopier(target, shadow, lock, stopped.Watermark, copier.Options{Workers: 2})
 	require.NoError(t, err)
 	require.NoError(t, resumed.Run(t.Context(), f.pool))
 	f.assertConverged(t, shadow)
-	assert.Equal(t, int64(100), resumed.Position().RowsInserted, "only the cancelled chunk's rows were missing")
+	assert.Equal(t, int64(1000), resumed.Position().RowsInserted, "everything above the watermark was cleared and copied again")
 }
 
 // Losing the table lock mid-copy cancels the statements in flight and Run
 // reports the loss as an invariant violation naming what the session saw
-// (LK-1); the copy leaves nothing in flight.
+// (LK-1); the chunk the loss interrupted stays in flight.
 func TestCopierAbortsWhenTheLockIsLostMidCopy(t *testing.T) {
 	f := newCopierFixture(t)
 	f.createOrders(t, 2000)
@@ -287,7 +372,10 @@ func TestCopierAbortsWhenTheLockIsLostMidCopy(t *testing.T) {
 	case <-time.After(lockLossDeadline):
 		t.Fatalf("copy did not abort within %s of lock loss", lockLossDeadline)
 	}
-	assert.Empty(t, c.Position().InFlight)
+	stopped := c.Position()
+	require.Len(t, stopped.InFlight, 1, "the interrupted chunk did not land")
+	assert.Equal(t, copier.KeyInFlight, stopped.Classify(1050))
+	assert.Equal(t, copier.NewWatermark(1000), stopped.Watermark)
 }
 
 // The copy refuses to write when the shadow, or the source, has been
@@ -321,6 +409,25 @@ func TestCopierRefusesReplacedRelations(t *testing.T) {
 		require.ErrorIs(t, err, copier.ErrInvariantViolation)
 		assert.Contains(t, err.Error(), "(ST-6): source")
 		assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "true"), "nothing is copied from a table nobody proved")
+	})
+	// A relation that is gone fails the write transaction's own lock on it
+	// before its identity is checked. The copy resumes after a watermark so
+	// the first guarded transaction — the resume clear — runs before the
+	// chunker's boundary query would report the missing table on its own.
+	t.Run("source dropped", func(t *testing.T) {
+		f := newCopierFixture(t)
+		target, lock, shadow := f.prepare(t, 100)
+		f.exec(t, "DROP TABLE %s.orders")
+
+		c, err := copier.NewCopier(target, shadow, lock, copier.NewWatermark(50), copier.Options{Workers: 1})
+		require.NoError(t, err)
+		err = c.Run(t.Context(), f.pool)
+		require.ErrorIs(t, err, copier.ErrInvariantViolation)
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, err, &pgErr, "the server's refusal to lock a missing relation is the cause")
+		assert.Equal(t, "42P01", pgErr.Code, "undefined_table")
+		assert.Contains(t, err.Error(), "(ST-6)")
+		assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "true"))
 	})
 }
 
