@@ -24,32 +24,9 @@ func (f *fixture) apply(t *testing.T, sql string) verdict.Verdict {
 	return result
 }
 
-// Native operations preserve the table's identity, tenant API access, and subscriptions.
-func TestHostedNativeColumnAndIndex(t *testing.T) {
-	f := newFixture(t)
-	f.seed(t)
-	first, second := f.subscribe(t, 0), f.subscribe(t, 1)
-	var oid uint32
-	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT $1::regclass::oid", f.table).Scan(&oid))
-	f.apply(t, "ALTER TABLE "+f.table+" ADD COLUMN title text")
-	index := pgx.Identifier{f.name + "_body"}.Sanitize()
-	result := f.apply(t, "CREATE INDEX "+index+" ON "+f.table+" (body)")
-	require.Len(t, result.ExecutedSQL, 1)
-	assert.Regexp(t, `^CREATE INDEX CONCURRENTLY `, result.ExecutedSQL[0])
-	f.assertAccess(t)
-	f.exec(t, "UPDATE "+f.table+" SET body='after schema change'")
-	first.row(t, "UPDATE", 1)
-	second.row(t, "UPDATE", 2)
-	var current uint32
-	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT $1::regclass::oid", f.table).Scan(&current))
-	assert.Equal(t, oid, current)
-}
-
 // Volatile defaults require copy-and-swap; refusal must preserve the live table.
-func TestHostedRefuseVolatileUUID(t *testing.T) {
-	f := newFixture(t)
-	f.seed(t)
-	f.refuse(t, "ALTER TABLE "+f.table+" ADD COLUMN token uuid DEFAULT gen_random_uuid()", fmt.Sprintf(`CREATE TABLE %s (
+func realtimeRefuseUUID(t *testing.T, f *fixture, first, second *stream) {
+	f.refuse(t, first, second, "ALTER TABLE "+f.table+" ADD COLUMN token uuid DEFAULT gen_random_uuid()", fmt.Sprintf(`CREATE TABLE %s (
  id integer PRIMARY KEY,
  owner_id uuid NOT NULL,
  body text NOT NULL,
@@ -57,10 +34,8 @@ func TestHostedRefuseVolatileUUID(t *testing.T) {
  token uuid DEFAULT gen_random_uuid()
  )`, pgx.Identifier{f.name}.Sanitize()))
 }
-func TestHostedRefuseVolatileTimestamp(t *testing.T) {
-	f := newFixture(t)
-	f.seed(t)
-	f.refuse(t, "ALTER TABLE "+f.table+" ADD COLUMN created_at timestamptz DEFAULT clock_timestamp()", fmt.Sprintf(`CREATE TABLE %s (
+func realtimeRefuseTimestamp(t *testing.T, f *fixture, first, second *stream) {
+	f.refuse(t, first, second, "ALTER TABLE "+f.table+" ADD COLUMN created_at timestamptz DEFAULT clock_timestamp()", fmt.Sprintf(`CREATE TABLE %s (
  id integer PRIMARY KEY,
  owner_id uuid NOT NULL,
  body text NOT NULL,
@@ -80,12 +55,8 @@ func (f *fixture) snapshot(t *testing.T) string {
  )::text`, f.table).Scan(&result))
 	return result
 }
-func (f *fixture) refuse(t *testing.T, sql, desired string) {
+func (f *fixture) refuse(t *testing.T, first, second *stream, sql, desired string) {
 	t.Helper()
-	first, second := f.subscribe(t, 0), f.subscribe(t, 1)
-	f.exec(t, "UPDATE "+f.table+" SET body='baseline changed'")
-	first.row(t, "UPDATE", 1)
-	second.row(t, "UPDATE", 2)
 	before := f.snapshot(t)
 	st, err := statement.ParseOne(sql)
 	require.NoError(t, err)
@@ -106,7 +77,7 @@ func (f *fixture) refuse(t *testing.T, sql, desired string) {
 	assert.Empty(t, report.Verdicts)
 	assert.Equal(t, before, f.snapshot(t))
 	f.assertAccess(t)
-	f.exec(t, "UPDATE "+f.table+" SET body='after refusal'")
-	first.row(t, "UPDATE", 1)
-	second.row(t, "UPDATE", 2)
+	f.exec(t, "UPDATE "+f.table+" SET body=$1", "after "+t.Name())
+	first.exactRow(t, "UPDATE", 1)
+	second.exactRow(t, "UPDATE", 2)
 }

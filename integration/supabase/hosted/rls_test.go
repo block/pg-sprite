@@ -17,7 +17,7 @@ import (
 func TestHostedDeclarativeRLS(t *testing.T) {
 	f := newFixture(t)
 	name := pgx.Identifier{f.name}.Sanitize()
-	f.seed(t)
+	f.seedUnpublished(t)
 	desired := fmt.Sprintf(`CREATE TABLE %s (
  id integer PRIMARY KEY,
  owner_id uuid NOT NULL,

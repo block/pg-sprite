@@ -1,6 +1,8 @@
 package hosted_test
 
 import (
+	"context"
+	"fmt"
 	"net/url"
 	"testing"
 	"time"
@@ -51,6 +53,7 @@ func (f *fixture) subscribe(t *testing.T, tenant int) *stream {
 		"payload": map[string]any{"access_token": f.users[tenant].Token, "config": map[string]any{"postgres_changes": []map[string]any{{"event": "*", "schema": "public", "table": f.name}}}},
 	}))
 	s := &stream{conn: conn, owner: f.users[tenant].ID}
+	s.startHeartbeat(t)
 	s.await(t, func(e event) bool {
 		return e.Event == "system" && e.Payload.Extension == "postgres_changes" && e.Payload.Status == "ok"
 	})
@@ -88,7 +91,8 @@ func (s *stream) row(t *testing.T, operation string, id int) {
 
 // This probe separates subscription acknowledgements from actual delivery.
 // It deliberately does not run pg-sprite DDL, reconnect, or retry missing events.
-func TestHostedRealtimeBaseline(t *testing.T) {
+func TestHostedRealtimeStartupBaseline(t *testing.T) {
+	requireStartupDiagnostic(t)
 	f := newFixture(t)
 	f.seed(t)
 	first, second := f.subscribe(t, 0), f.subscribe(t, 1)
@@ -104,4 +108,33 @@ func TestHostedRealtimeBaseline(t *testing.T) {
 	first.row(t, "UPDATE", 3)
 	second.row(t, "UPDATE", 4)
 	t.Log("received INSERT and UPDATE for both tenants without schema changes")
+}
+
+// Keep long fixture initialization alive using the protocol heartbeat, not reconnects.
+// The writer is stopped and joined before the earlier socket-close cleanup runs.
+func (s *stream) startHeartbeat(t *testing.T) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for ref := 2; ; ref++ {
+			select {
+			case <-ctx.Done():
+				done <- nil
+				return
+			case <-ticker.C:
+				if err := s.conn.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+					done <- err
+					return
+				}
+				if err := s.conn.WriteJSON(map[string]any{"topic": "phoenix", "event": "heartbeat", "payload": map[string]any{}, "ref": fmt.Sprint(ref)}); err != nil {
+					done <- err
+					return
+				}
+			}
+		}
+	}()
+	t.Cleanup(func() { cancel(); assert.NoError(t, <-done, "Realtime heartbeat failed") })
 }

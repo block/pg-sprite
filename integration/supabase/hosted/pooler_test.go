@@ -17,7 +17,7 @@ func TestHostedSessionPooler(t *testing.T) {
 		t.Skip("set SUPABASE_HOSTED_SESSION_URL to test the session pooler")
 	}
 	f := newFixture(t)
-	f.seed(t)
+	f.seedUnpublished(t)
 	f.checkPoolerProject(t, dsn)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: dsn})
 	require.NoError(t, err)

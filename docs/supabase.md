@@ -5,8 +5,10 @@ you build: add a column for a new feature, or add an index as your queries grow.
 
 Local tests cover column additions and concurrent index builds alongside
 Supabase's access policies, Data API, and Realtime subscriptions. An opt-in [hosted suite](../integration/supabase/hosted/README.md) also exercises
-real Auth users and service endpoints. Hosted Realtime startup failures remain
-under investigation; a local pass is not a hosted compatibility guarantee. Changes that need a replacement table are refused
+real Auth users and service endpoints. Its Realtime schema-change cases initialize
+one shared fixture before testing continuity; cold-start diagnostics are separate
+and have known failures. A passing continuity run is not a guarantee about startup
+delivery. Changes that need a replacement table are refused
 today because copy-and-swap is not implemented yet.
 
 Start with [your first change](#make-your-first-change). The [test results](#what-works-today)
@@ -75,9 +77,9 @@ Replace the example value with your connection string. This sets an environment
 variable without opening a connection. Keep credentials out of source control;
 your secret manager can also set this variable for you or your agent.
 
-For hosted connections, use `sslmode=verify-full` in the URL to verify the server's
-certificate and hostname. If you need to supply a CA certificate separately,
-save the certificate for your project and point pg-sprite at it:
+For certificate and hostname verification, download the CA from **Database
+Settings → SSL Configuration** and follow [Supabase's verification instructions](https://supabase.com/docs/guides/platform/ssl-enforcement#a-note-about-postgres-ssl-modes).
+Use `sslmode=verify-full` with `sslrootcert` in the URL, or point pg-sprite at the CA:
 
 ```sh
 export PGSPRITE_CA_CERT='/absolute/path/to/project-ca.crt'
@@ -85,10 +87,10 @@ export PGSPRITE_CA_CERT='/absolute/path/to/project-ca.crt'
 
 That variable sets the certificate file used by the commands below. A certificate
 error should be fixed by checking the hostname and trusted certificate, rather
-than disabling verification. A hosted default-URI check connected over TLS without this extra configuration.
-That observation does not establish certificate verification; explicit
-`verify-full` certificate handling remains under investigation. Test the supplied
-URI separately from stricter TLS configuration when reporting compatibility.
+than disabling verification. Hosted checks passed with the default URI,
+`sslmode=require`, and `verify-full` with the downloaded CA. The default connection
+used TLS, which alone does not establish server identity verification. An unrelated
+CA and a mismatched expected hostname were rejected in the [hosted TLS tests](../integration/supabase/hosted/tls_test.go).
 
 ### Preview the change
 
@@ -263,23 +265,27 @@ outcome; they do not assume every unsuccessful change rolls back completely.
 - PostgREST cache refresh was exercised with the image's schema-change event triggers;
   a deployment without those triggers needs its own reload workflow
 
-Hosted role configuration and TLS remain unverified. The Auth
-service runs its schema initialization; JWTs are signed by the test fixture,
-so this does not test signup or login. These local results are not an
-unrestricted Supabase support claim.
+Hosted checks have passed as the owning `postgres` role on PostgreSQL 17.6,
+including CA-based TLS verification, the CLI schema lifecycle, real Auth defaults
+and foreign keys, and atomic RLS rollback. Hosted poolers remain untested and
+Realtime cold-start gaps have been reproduced; see the [hosted suite](../integration/supabase/hosted/README.md)
+for separate cases and limits. In the local suite, Auth runs its schema initialization
+and the fixture signs JWTs, so those cases do not test login. Hosted cases create
+confirmed test users through the Auth admin API and sign in with their passwords;
+they do not test public signup, email delivery, or OAuth. Neither suite establishes
+unrestricted Supabase support.
 
 ## Where we go next
 
-The next milestones build on the local tests. Each needs repeatable evidence
+The next milestones build on the local and scoped hosted tests. Each needs repeatable evidence
 before we expand the support claim:
 
-1. **Validate hosted projects.** Run the same checks on a disposable Supabase
-   project, including certificate verification, network access, and hosted roles
-2. **Validate declarative schema workflows.** Export an existing Supabase schema,
-   edit the desired SQL files, preview the diff, and apply supported changes.
-   Verify that the live schema matches the files and a second diff is empty,
-   while access policies and Realtime subscriptions still work. Make clear which
-   objects the files describe and which remain managed separately
+1. **Finish hosted validation.** Core direct-connection and TLS cases have passed;
+   investigate Realtime startup and validate the hosted pooler endpoints separately
+2. **Publish a reproducible declarative workflow.** The hosted CLI cases cover
+   create, export, edit, apply, RLS, and convergence. Complete a fresh-project
+   walkthrough from the published guide, with clear boundaries for managed objects
+   and Realtime behavior
 3. **Cover more app workflows.** Exercise deletes and reconnects in Realtime,
    Realtime payloads after column renames and removals, and real signup/login
    flows. Make the limits of desired schema files and access-policy handling

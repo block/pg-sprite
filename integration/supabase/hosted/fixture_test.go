@@ -156,6 +156,21 @@ func (f *fixture) exec(t *testing.T, sql string, args ...any) {
 }
 func (f *fixture) seed(t *testing.T) {
 	t.Helper()
+	f.seedTable(t)
+	f.exec(t, "ALTER PUBLICATION supabase_realtime ADD TABLE "+f.table)
+	f.waitForAPI(t)
+	f.assertAccess(t)
+}
+
+func (f *fixture) seedUnpublished(t *testing.T) {
+	t.Helper()
+	f.seedTable(t)
+	f.waitForAPI(t)
+	f.assertAccess(t)
+}
+
+func (f *fixture) seedTable(t *testing.T) {
+	t.Helper()
 	f.exec(t, fmt.Sprintf(`CREATE TABLE %s (
  id integer PRIMARY KEY,
  owner_id uuid NOT NULL,
@@ -171,14 +186,16 @@ func (f *fixture) seed(t *testing.T) {
 	f.exec(t, "CREATE POLICY own_rows ON "+f.table+" TO authenticated USING (owner_id = auth.uid()) WITH CHECK (owner_id = auth.uid())")
 	f.exec(t, "GRANT SELECT, INSERT, UPDATE, DELETE ON "+f.table+" TO authenticated, anon")
 	f.exec(t, "INSERT INTO "+f.table+" VALUES (1,$1,'first'),(2,$2,'second')", f.users[0].ID, f.users[1].ID)
-	f.exec(t, "ALTER PUBLICATION supabase_realtime ADD TABLE "+f.table)
+}
+
+func (f *fixture) waitForAPI(t *testing.T) {
+	t.Helper()
 	f.exec(t, "NOTIFY pgrst, 'reload schema'")
 	const cacheDeadline = 30 * time.Second
 	require.Eventually(t, func() bool {
 		status, _, err := f.request(t.Context(), http.MethodGet, "/rest/v1/"+f.name+"?select=id", f.keys.Publishable, f.users[0].Token, nil)
 		return err == nil && status == http.StatusOK
 	}, cacheDeadline, 200*time.Millisecond, "Data API must discover the fixture")
-	f.assertAccess(t)
 }
 
 func (f *fixture) assertRows(t *testing.T, token string, want ...int) {
