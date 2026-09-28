@@ -279,8 +279,10 @@ this table-scoped work.
 4. **Prove application behavior.** The local Supabase harness now checks real
    PostgREST requests from two authenticated users and anonymous callers, allowed
    and denied writes, changed visibility, and rollback after a cancelled apply.
-   Hosted connection and privilege validation remains a follow-up on a disposable
-   project; local results do not establish hosted support.
+   The [hosted suite](../integration/supabase/hosted/README.md) also exercised
+   preview, apply, convergence, tenant access, and atomic rollback as the owning
+   `postgres` role on a disposable project. Hosted non-owner privilege validation
+   remains a follow-up; owner-role results do not establish that boundary.
 
 The [inspection tests](../pkg/schemadiff/row_security_integration_test.go),
 [round-trip tests](../pkg/schemadiff/row_security_roundtrip_integration_test.go), and
