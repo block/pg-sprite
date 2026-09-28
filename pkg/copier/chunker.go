@@ -40,15 +40,16 @@ var (
 	// bounded chunk: a non-positive target time or row count, or a floor
 	// above the ceiling.
 	ErrInvalidChunkerOptions = errors.New("invalid chunker options")
-	// ErrInvariantViolation is the sentinel a forged or empty proof wraps.
-	ErrInvariantViolation = errors.New("invariant violation")
+	// ErrInvariantViolation aliases dbconn's fail-closed error class so one
+	// errors.Is check covers a breach raised here or in the connection layer.
+	ErrInvariantViolation = dbconn.ErrInvariantViolation
 )
 
 // ChunkerOptions bounds chunk sizing. Zero values take the defaults above,
-// fitted to whatever bounds the caller did set: a floor or ceiling given on
-// its own pulls the other defaults inside it, so setting one bound never
-// makes the defaults contradict it. Explicitly set values are validated as
-// given.
+// fitted to whatever the caller did set: a floor, ceiling, or initial size
+// given on its own pulls the other defaults around it, so setting one value
+// never makes the defaults contradict it. Explicitly set values are
+// validated as given.
 type ChunkerOptions struct {
 	// TargetChunkTime is the copy duration each chunk is sized toward (D12).
 	TargetChunkTime time.Duration
@@ -64,17 +65,24 @@ func (o ChunkerOptions) withDefaults() ChunkerOptions {
 	if o.TargetChunkTime == 0 {
 		o.TargetChunkTime = DefaultTargetChunkTime
 	}
-	// Bounds first, each fitted inside the other when only one was given,
-	// then the initial size fitted inside both. Only positive bounds are
-	// fitted to; a non-positive one is left for validate to refuse as given.
+	// Bounds first, each fitted inside the other and around an explicit
+	// initial size when only some were given, then the initial size fitted
+	// inside both. Only positive values are fitted to; a non-positive one is
+	// left for validate to refuse as given.
 	if o.MinRows == 0 {
 		o.MinRows = DefaultMinChunkRows
 		if o.MaxRows > 0 {
 			o.MinRows = min(o.MinRows, o.MaxRows)
 		}
+		if o.InitialRows > 0 {
+			o.MinRows = min(o.MinRows, o.InitialRows)
+		}
 	}
 	if o.MaxRows == 0 {
 		o.MaxRows = max(DefaultMaxChunkRows, o.MinRows)
+		if o.InitialRows > 0 {
+			o.MaxRows = max(o.MaxRows, o.InitialRows)
+		}
 	}
 	if o.InitialRows == 0 {
 		o.InitialRows = DefaultInitialChunkRows
@@ -131,11 +139,17 @@ func (o ChunkerOptions) validate() error {
 // yield chunks of the same row count rather than the same key width.
 //
 // A Chunker is safe for concurrent use: Next serializes callers so chunks
-// stay consecutive, and Feedback may arrive from any worker.
+// stay consecutive, while Cut, Rows, and Feedback never wait behind the
+// boundary query a Next in progress is running.
 type Chunker struct {
 	target preflight.CopySwapTarget
 	opts   ChunkerOptions
 
+	// nextMu serializes Next so consecutive chunks are cut from consecutive
+	// positions. It is the only lock held across the boundary query.
+	nextMu sync.Mutex
+	// mu guards the cursor state and is held only for reads and writes of it,
+	// never across a database round trip.
 	mu   sync.Mutex
 	next int64 // lower bound of the next chunk; meaningful only while !done
 	rows int64 // current chunk size in rows
@@ -201,27 +215,45 @@ func (c *Chunker) Cut() (upper int64, ok bool) {
 // db. ok is false once the key space is covered; the last chunk returned
 // before that has the largest int64 as its upper bound.
 func (c *Chunker) Next(ctx context.Context, db dbconn.RowQuerier) (chunk Chunk, ok bool, err error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.done {
+	c.nextMu.Lock()
+	defer c.nextMu.Unlock()
+	lower, rows, done := c.cursor()
+	if done {
 		return Chunk{}, false, nil
 	}
-	upper, err := c.boundary(ctx, db, c.next, c.rows)
+	upper, err := c.boundary(ctx, db, lower, rows)
 	if err != nil {
 		return Chunk{}, false, err
 	}
-	chunk, err = NewChunk(c.next, upper)
+	chunk, err = NewChunk(lower, upper)
 	if err != nil {
 		return Chunk{}, false, fmt.Errorf("%w (CO-4): chunk boundary: %w", ErrInvariantViolation, err)
 	}
-	chunk.rows = c.rows
+	chunk.rows = rows
+	c.advance(upper)
+	return chunk, true, nil
+}
+
+// cursor snapshots the position and size the next chunk is cut with. Only
+// Next moves the position, and Next is serialized, so the snapshot stays
+// current for the boundary query even though mu is released while it runs.
+func (c *Chunker) cursor() (lower, rows int64, done bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.next, c.rows, c.done
+}
+
+// advance moves the position past a chunk closed at upper, or marks the key
+// space covered when that chunk was open above.
+func (c *Chunker) advance(upper int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	// INV: CO-4
 	if upper == math.MaxInt64 {
 		c.done = true
-	} else {
-		c.next = upper + 1
+		return
 	}
-	return chunk, true, nil
+	c.next = upper + 1
 }
 
 // boundary returns the key that closes a chunk of rows starting at lower:
@@ -269,7 +301,8 @@ func boundarySQL(target preflight.CopySwapTarget) string {
 // copying concurrently each propose a size for the work they measured
 // instead of compounding on one another. One step changes the size by at
 // most a factor of two in either direction, within the configured floor and
-// ceiling. A chunk this chunker did not cut is refused.
+// ceiling. A chunk no chunker cut, such as a zero Chunk or one built with
+// NewChunk, is refused.
 func (c *Chunker) Feedback(chunk Chunk, elapsed time.Duration) error {
 	// INV: ST-6
 	if chunk.rows <= 0 {
@@ -290,6 +323,14 @@ func nextRows(rows int64, elapsed time.Duration, opts ChunkerOptions) int64 {
 		ratio = float64(opts.TargetChunkTime) / float64(elapsed)
 	}
 	ratio = math.Min(maxGrowthPerStep, math.Max(maxShrinkPerStep, ratio))
-	scaled := int64(math.Round(float64(rows) * ratio))
-	return min(opts.MaxRows, max(opts.MinRows, scaled))
+	// Clamp before converting: a scaled value past the ceiling can also be
+	// past what int64 holds, and converting it first would wrap.
+	scaled := float64(rows) * ratio
+	if scaled >= float64(opts.MaxRows) {
+		return opts.MaxRows
+	}
+	if scaled <= float64(opts.MinRows) {
+		return opts.MinRows
+	}
+	return int64(math.Round(scaled))
 }

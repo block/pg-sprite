@@ -97,6 +97,12 @@ is checkpointed and resumed from). Chunks land out of order, so a key can lie ab
 watermark yet inside a chunk already read; discarding a change for it would lose it. The applier
 therefore discards only for keys above the cut frontier, applies for keys in landed chunks, and
 defers for keys in in-flight chunks. With one worker the two positions coincide.
+Resume reopens the gap between them: a run that stopped after checkpointing watermark W may have
+landed chunks above W, and the resumed chunker's cut frontier starts at W, so the applier
+discards changes for those keys while the copy's `ON CONFLICT DO NOTHING` would keep the stale
+shadow rows. A resumed copy therefore owes one of two things before its first chunk is cut:
+remove every shadow row with a key above W, or checkpoint the cut frontier alongside W and treat
+(W, cut] as apply-not-discard.
 *Enforced today:* `pkg/copier` `Chunker` — chunks are consecutive closed ranges that tile the
 whole int64 key space (first open below, last open above), so every key a row can carry belongs
 to exactly one chunk, and `Cut` reports the frontier so that "not yet cut" always names a chunk

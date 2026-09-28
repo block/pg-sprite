@@ -1,10 +1,13 @@
 package copier
 
 import (
+	"context"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -50,6 +53,18 @@ func TestChunkerOptionsDefaults(t *testing.T) {
 		"initial size alone is kept as given": {
 			ChunkerOptions{InitialRows: 300},
 			ChunkerOptions{TargetChunkTime: DefaultTargetChunkTime, InitialRows: 300, MinRows: DefaultMinChunkRows, MaxRows: DefaultMaxChunkRows},
+		},
+		"initial size below the default floor pulls the floor down": {
+			ChunkerOptions{InitialRows: 50},
+			ChunkerOptions{TargetChunkTime: DefaultTargetChunkTime, InitialRows: 50, MinRows: 50, MaxRows: DefaultMaxChunkRows},
+		},
+		"initial size above the default ceiling pulls the ceiling up": {
+			ChunkerOptions{InitialRows: 200_000},
+			ChunkerOptions{TargetChunkTime: DefaultTargetChunkTime, InitialRows: 200_000, MinRows: DefaultMinChunkRows, MaxRows: 200_000},
+		},
+		"initial size fits between an explicit ceiling and the fitted floor": {
+			ChunkerOptions{InitialRows: 50, MaxRows: 80},
+			ChunkerOptions{TargetChunkTime: DefaultTargetChunkTime, InitialRows: 50, MinRows: 50, MaxRows: 80},
 		},
 	}
 	for name, tc := range cases {
@@ -183,6 +198,100 @@ func TestChunkerFeedbackSizesFromTheTimedChunk(t *testing.T) {
 	assert.Equal(t, int64(500), c.Rows())
 }
 
+// TestChunkerCutAndFeedbackDoNotWaitForNext pins the lock split: while one
+// worker's Next is out on its boundary query, the other workers' Cut, Rows,
+// and Feedback calls are answered from the cursor state instead of queuing
+// behind that round trip. The chunk Next finally returns still carries the
+// size it was cut with, not the size Feedback moved to meanwhile.
+func TestChunkerCutAndFeedbackDoNotWaitForNext(t *testing.T) {
+	const observeDeadline = 5 * time.Second
+	opts := ChunkerOptions{}.withDefaults()
+	c := &Chunker{opts: opts, rows: opts.InitialRows}
+	c.next, c.done = startAfter(NewWatermark(1000))
+	db := &heldBoundary{started: make(chan struct{}), release: make(chan struct{}), upper: 2000}
+	releaseBoundary := sync.OnceFunc(func() { close(db.release) })
+	t.Cleanup(releaseBoundary)
+
+	var wg sync.WaitGroup
+	var chunk Chunk
+	var ok bool
+	var nextErr error
+	wg.Go(func() { chunk, ok, nextErr = c.Next(t.Context(), db) })
+	select {
+	case <-db.started:
+	case <-time.After(observeDeadline):
+		t.Fatal("Next never reached the boundary query")
+	}
+
+	observed := make(chan struct{})
+	var cut int64
+	var cutOK bool
+	var rowsDuringNext int64
+	var feedbackErr error
+	wg.Go(func() {
+		defer close(observed)
+		cut, cutOK = c.Cut()
+		earlier := Chunk{lower: 1, upper: 1000, rows: opts.InitialRows}
+		feedbackErr = c.Feedback(earlier, DefaultTargetChunkTime/5)
+		rowsDuringNext = c.Rows()
+	})
+	select {
+	case <-observed:
+	case <-time.After(observeDeadline):
+		t.Fatal("Cut, Rows, or Feedback waited behind Next's boundary query")
+	}
+	releaseBoundary()
+	wg.Wait()
+
+	require.NoError(t, feedbackErr)
+	assert.True(t, cutOK)
+	assert.Equal(t, int64(1000), cut, "the frontier is the resumed watermark until Next lands its chunk")
+	assert.Equal(t, 2*opts.InitialRows, rowsDuringNext, "Feedback resized while Next was in flight")
+
+	require.NoError(t, nextErr)
+	require.True(t, ok)
+	assert.Equal(t, int64(1001), chunk.Lower())
+	assert.Equal(t, int64(2000), chunk.Upper())
+	assert.Equal(t, opts.InitialRows, chunk.rows, "the chunk keeps the size it was cut with")
+	cut, cutOK = c.Cut()
+	assert.True(t, cutOK)
+	assert.Equal(t, int64(2000), cut)
+}
+
+// heldBoundary is a RowQuerier whose boundary query blocks until released,
+// so a test can observe the chunker while a Next is mid round trip.
+type heldBoundary struct {
+	started chan struct{}
+	release chan struct{}
+	upper   int64
+}
+
+func (h *heldBoundary) QueryRow(ctx context.Context, _ string, _ ...any) pgx.Row {
+	close(h.started)
+	select {
+	case <-h.release:
+		return heldRow{upper: h.upper}
+	case <-ctx.Done():
+		return heldRow{err: ctx.Err()}
+	}
+}
+
+// heldRow answers the boundary scan with one key, the way pgx does for a
+// row whose single column is the chunk's upper bound.
+type heldRow struct {
+	upper int64
+	err   error
+}
+
+func (r heldRow) Scan(dest ...any) error {
+	if r.err != nil {
+		return r.err
+	}
+	upper := r.upper
+	*(dest[0].(**int64)) = &upper
+	return nil
+}
+
 func TestNextRows(t *testing.T) {
 	opts := ChunkerOptions{TargetChunkTime: time.Second, InitialRows: 1000, MinRows: 100, MaxRows: 5000}
 
@@ -207,4 +316,12 @@ func TestNextRows(t *testing.T) {
 	// by zero or a shrink.
 	assert.Equal(t, int64(2000), nextRows(1000, 0, opts))
 	assert.Equal(t, int64(2000), nextRows(1000, -time.Second, opts))
+
+	// A ceiling at the top of int64 is legal, and a fast chunk near it must
+	// hit the ceiling rather than wrap around to the floor.
+	unbounded := ChunkerOptions{TargetChunkTime: time.Second, InitialRows: 1000, MinRows: 100, MaxRows: math.MaxInt64}
+	assert.Equal(t, int64(math.MaxInt64), nextRows(math.MaxInt64/2+1, 500*time.Millisecond, unbounded))
+	assert.Equal(t, int64(math.MaxInt64), nextRows(math.MaxInt64, time.Millisecond, unbounded))
+	// float64 rounds the ceiling up to 2^63, so halving lands exactly on 2^62.
+	assert.Equal(t, int64(1)<<62, nextRows(math.MaxInt64, 2*time.Second, unbounded), "a slow chunk at the ceiling still halves")
 }
