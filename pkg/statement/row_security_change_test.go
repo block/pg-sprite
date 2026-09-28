@@ -108,3 +108,30 @@ func parseRowSecurityTestChange(t *testing.T, sql []string) (RowSecurityChange, 
 	t.Helper()
 	return ParseRowSecurityChange(strings.Join(sql, "\n"))
 }
+
+func TestRowSecurityChangeNamespaceComparison(t *testing.T) {
+	first, err := ParseRowSecurityChange(`
+  DROP POLICY readers ON staging.documents;
+  ALTER TABLE staging.documents ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY readers ON staging.documents USING (owner_id = auth.uid());
+  COMMENT ON POLICY readers ON staging.documents IS 'Access';
+ `)
+	require.NoError(t, err)
+	second, err := ParseRowSecurityChange(`
+  DROP POLICY readers ON production.documents;
+  ALTER TABLE production.documents ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY readers ON production.documents USING (owner_id = auth.uid());
+  COMMENT ON POLICY readers ON production.documents IS 'Access';
+ `)
+	require.NoError(t, err)
+	a, err := first.CanonicalSQLForNamespace()
+	require.NoError(t, err)
+	b, err := second.CanonicalSQLForNamespace()
+	require.NoError(t, err)
+	assert.Equal(t, a, b)
+	assert.Contains(t, a, "auth.uid()")
+	assert.NotEqual(t, first.CanonicalSQL(), second.CanonicalSQL())
+	var empty RowSecurityChange
+	_, err = empty.CanonicalSQLForNamespace()
+	require.ErrorIs(t, err, ErrRowSecurityChange)
+}

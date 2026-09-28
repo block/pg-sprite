@@ -151,3 +151,40 @@ func rowSecurityPolicyMatches(node *pgproto.Node, schema, table string) bool {
 	}
 	return names[2].GetString_().GetSval() != ""
 }
+
+// CanonicalSQLForNamespace omits only the operation's target schema qualifier.
+// Use it when the comparison key already contains a canonical namespace and
+// table. Qualified policy helpers and all expressions remain unchanged.
+// This is a comparison representation, never executable SQL.
+func (c RowSecurityChange) CanonicalSQLForNamespace() (string, error) {
+	if c.schema == "" || c.table == "" {
+		return "", ErrRowSecurityChange
+	}
+	parts := make([]string, 0, len(c.canonical))
+	for _, sql := range c.canonical {
+		node, err := parseSingle(sql)
+		if err != nil {
+			return "", err
+		}
+		switch {
+		case node.GetCreatePolicyStmt() != nil:
+			node.GetCreatePolicyStmt().Table.Schemaname = ""
+		case node.GetAlterTableStmt() != nil:
+			node.GetAlterTableStmt().Relation.Schemaname = ""
+		case node.GetDropStmt() != nil:
+			object := node.GetDropStmt().Objects[0].GetList()
+			object.Items = object.Items[1:]
+		case node.GetCommentStmt() != nil:
+			object := node.GetCommentStmt().Object.GetList()
+			object.Items = object.Items[1:]
+		default:
+			return "", ErrRowSecurityChange
+		}
+		canonical, err := deparseOne(node)
+		if err != nil {
+			return "", err
+		}
+		parts = append(parts, canonical)
+	}
+	return strings.Join(parts, ";\n"), nil
+}
