@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/pg-sprite/pkg/verdict"
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -88,7 +89,7 @@ CREATE POLICY readers ON %s FOR SELECT TO authenticated
 	f.assertAccess(t)
 	before := f.snapshot(t)
 	result := f.cli(t, 0, "migrate", "--desired", path, "--json")
-	assert.Equal(t, "executed", result["outcome"])
+	assert.Equal(t, string(verdict.OutcomeExecuted), result["outcome"])
 	assert.Empty(t, result["executed_sql"])
 	assert.Equal(t, before, f.snapshot(t))
 	f.assertExportConverges(t)
