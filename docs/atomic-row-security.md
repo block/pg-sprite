@@ -121,3 +121,9 @@ There are no new CLI flags, approval tokens, or fingerprints.
 
 - **RS-5:** Reviewed execution compares the full ordered generated SQL sequence
   under the target lock, before target DDL, and refuses any mismatch.
+
+For persisted SQL scripts, `statement.ParseRowSecurityChange` validates that every
+statement belongs to one qualified table's RLS operation. `Statements()` retains
+the original ordered SQL for reviewed execution; `CanonicalSQL()` normalizes
+formatting for comparison without reordering or dropping duplicates. This syntax
+proof does not authorize execution or replace the executor's live checks.
