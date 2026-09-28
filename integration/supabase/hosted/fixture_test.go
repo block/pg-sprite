@@ -171,17 +171,12 @@ func (f *fixture) seedUnpublished(t *testing.T) {
 
 func (f *fixture) seedTable(t *testing.T) {
 	t.Helper()
+	f.prepareTableCleanup(t)
 	f.exec(t, fmt.Sprintf(`CREATE TABLE %s (
  id integer PRIMARY KEY,
  owner_id uuid NOT NULL,
  body text NOT NULL
  )`, f.table))
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 15*time.Second)
-		defer cancel()
-		_, err := f.pool.Exec(ctx, "DROP TABLE "+f.table)
-		assert.NoError(t, err)
-	})
 	f.exec(t, "ALTER TABLE "+f.table+" ENABLE ROW LEVEL SECURITY")
 	f.exec(t, "CREATE POLICY own_rows ON "+f.table+" TO authenticated USING (owner_id = auth.uid()) WITH CHECK (owner_id = auth.uid())")
 	f.exec(t, "GRANT SELECT, INSERT, UPDATE, DELETE ON "+f.table+" TO authenticated, anon")

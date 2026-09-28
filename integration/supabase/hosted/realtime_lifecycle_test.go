@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// One fixture and two sockets cover the entire steady-state schema-change lifecycle.
+// One fixture and two sockets cover the entire steady-state schema change lifecycle.
 // Initialization is observable and separate from the unchanged 30s delivery deadline.
 func TestHostedRealtimeContinuity(t *testing.T) {
 	f := newFixture(t)

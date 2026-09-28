@@ -5,7 +5,7 @@ you build: add a column for a new feature, or add an index as your queries grow.
 
 Local tests cover column additions and concurrent index builds alongside
 Supabase's access policies, Data API, and Realtime subscriptions. An opt-in [hosted suite](../integration/supabase/hosted/README.md) also exercises
-real Auth users and service endpoints. Its Realtime schema-change cases initialize
+real Auth users and service endpoints. Its Realtime schema change cases initialize
 one shared fixture and verify baseline delivery before applying changes, then
 check that events and tenant isolation survive on the same connections. Changes
 that need a replacement table are refused today because copy-and-swap is not
@@ -262,7 +262,7 @@ outcome; they do not assume every unsuccessful change rolls back completely.
 - Realtime coverage is limited to INSERT/UPDATE subscriptions during the tested
   native changes. Deletes, reconnect recovery, column removal, and table
   replacement need separate validation
-- PostgREST cache refresh was exercised with the image's schema-change event triggers;
+- PostgREST cache refresh was exercised with the image's schema change event triggers;
   a deployment without those triggers needs its own reload workflow
 
 Hosted checks have passed as the owning `postgres` role on PostgreSQL 17.6,

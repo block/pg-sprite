@@ -27,19 +27,6 @@ func TestHostedSessionPooler(t *testing.T) {
 	pooled.apply(t, "ALTER TABLE "+f.table+" ADD COLUMN session_note text")
 	f.assertAccess(t)
 }
-func TestHostedTransactionPoolerRefusesSessionAffinity(t *testing.T) {
-	dsn := os.Getenv("SUPABASE_HOSTED_TRANSACTION_URL")
-	if dsn == "" {
-		t.Skip("set SUPABASE_HOSTED_TRANSACTION_URL to test transaction pooling")
-	}
-	f := newFixture(t)
-	f.checkPoolerProject(t, dsn)
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: dsn, QueryExecMode: pgx.QueryExecModeExec})
-	if pool != nil {
-		t.Cleanup(pool.Close)
-	}
-	require.ErrorIs(t, err, dbconn.ErrNoSessionAffinity)
-}
 func (f *fixture) checkPoolerProject(t *testing.T, dsn string) {
 	t.Helper()
 	cfg, err := pgx.ParseConfig(dsn)

@@ -49,16 +49,6 @@ func desiredFile(t *testing.T, sql string) string {
 	return path
 }
 
-func (f *fixture) cleanupTable(t *testing.T) {
-	t.Helper()
-	t.Cleanup(func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(t.Context()), 15*time.Second)
-		defer cancel()
-		_, err := f.pool.Exec(ctx, "DROP TABLE "+f.table)
-		assert.NoError(t, err)
-	})
-}
-
 func (f *fixture) assertExportConverges(t *testing.T) {
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), "export")
@@ -80,8 +70,8 @@ func TestHostedCLICreateExportAndRLS(t *testing.T) {
 );`, name)
 	path := desiredFile(t, base)
 	f.cli(t, 0, "migrate", "--desired", path, "--dry-run", "--json")
+	f.prepareTableCleanup(t)
 	f.cli(t, 0, "migrate", "--desired", path, "--json")
-	f.cleanupTable(t)
 	f.exec(t, "INSERT INTO "+f.table+" VALUES (1,$1,'first'),(2,$2,'second')", f.users[0].ID, f.users[1].ID)
 	f.assertExportConverges(t)
 

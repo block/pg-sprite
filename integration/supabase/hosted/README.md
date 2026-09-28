@@ -45,11 +45,15 @@ unset, cases print a skip reason and make no database or API requests. The basel
 requires a direct hostname matching the API project. Do not run multiple copies
 against the same project: publication changes affect its shared Realtime service.
 
-To test poolers, also set `SUPABASE_HOSTED_SESSION_URL` and
-`SUPABASE_HOSTED_TRANSACTION_URL` to the corresponding URLs from **Connect**.
-Their host, port, and username differ from the direct endpoint. Add password-file
-entries for those exact endpoints. Missing pooler URLs produce explicit skips;
-a failed connection is not accepted as proof that transaction pooling was refused.
+To test the session pooler, set `SUPABASE_HOSTED_SESSION_URL` to its URL from
+**Connect** and add a password-file entry for that exact endpoint. Its host,
+port, and username differ from the direct endpoint. A missing URL produces an
+explicit skip.
+
+Transaction-pooler refusal stays in the [controlled local suite](../../../pkg/dbconn/supabase_integration_test.go).
+An idle hosted transaction pooler can reuse one backend and pass the session
+probe, so a hosted assertion cannot reliably prove refusal. A passing probe
+does not make transaction pooling supported; use direct or session connections.
 
 To run the CLI lifecycle independently of Realtime and pooler tests:
 
@@ -105,7 +109,6 @@ rejection of plaintext connections.
 | `TestHostedRealtimeContinuity/add_index` | A concurrent index preserves events, API isolation, and table identity |
 | `TestHostedDeclarativeRLS` | Policy changes alter real users' HTTP access; removing the last policy denies reads while retaining the data |
 | `TestHostedSessionPooler` | A column change succeeds through the supplied session endpoint |
-| `TestHostedTransactionPoolerRefusesSessionAffinity` | Connection setup returns the specific session-affinity refusal |
 
 A passing refusal case means **safe rejection**, not support for executing that
 DDL. None of these tests establishes support for every Supabase feature or plan.
