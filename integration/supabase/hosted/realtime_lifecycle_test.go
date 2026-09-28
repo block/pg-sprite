@@ -10,15 +10,14 @@ import (
 )
 
 // One fixture and two sockets cover the entire steady-state schema change lifecycle.
-// Initialization is observable and separate from the unchanged 30s delivery deadline.
+// Initialization is observable and has a separate deadline from event delivery.
 func TestHostedRealtimeContinuity(t *testing.T) {
 	f := newFixture(t)
 	f.seed(t)
 	first, second := f.subscribe(t, 0), f.subscribe(t, 1)
 	if !t.Run("initialize", func(t *testing.T) {
 		started := time.Now()
-		// Hosted publication discovery was observed at ~60s. Wait for an actual
-		// reader, not a fixed sleep, before sending the single baseline write.
+		// Wait for an active publication reader before sending the baseline write.
 		const publicationStartupDeadline = 75 * time.Second
 		require.EventuallyWithT(t, func(c *assert.CollectT) {
 			var ready bool

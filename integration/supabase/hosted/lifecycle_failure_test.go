@@ -40,8 +40,10 @@ func TestHostedCLIRefuseDropColumn(t *testing.T) {
     id integer PRIMARY KEY,
     owner_id uuid NOT NULL
 );`, pgx.Identifier{f.name}.Sanitize()))
-	f.cli(t, 2, "migrate", "--desired", path, "--dry-run", "--json")
-	f.cli(t, 2, "migrate", "--desired", path, "--json")
+	preview := f.cli(t, 2, "migrate", "--desired", path, "--dry-run", "--json")
+	assert.Equal(t, "destructive-change", preview["reason"])
+	result := f.cli(t, 2, "migrate", "--desired", path, "--json")
+	assert.Equal(t, "destructive-change", result["reason"])
 	assert.Equal(t, before, f.snapshot(t))
 	f.assertAccess(t)
 }

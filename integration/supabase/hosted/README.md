@@ -90,6 +90,7 @@ rejection of plaintext connections.
 
 | Case | Passing result |
 | --- | --- |
+| `TestHostedTableCleanup` | Cleanup handles absent tables and tables committed before a later error |
 | `TestHostedCLIAuthDefault` | A desired `auth.uid()` default uses the real HTTP caller; spoofing another owner is denied |
 | `TestHostedCLIAuthForeignKey` | A validated reference to real Auth users rejects orphan writes |
 | `TestHostedCLIUniqueIndexFailure` | Duplicate data causes a typed failure and a reported invalid index; rows and access survive |
@@ -132,11 +133,17 @@ readiness sleeps, retried writes, or reconnects. This setup predicate is specifi
 to the fixture, not a public Supabase readiness API. The suite tests whether
 pg-sprite preserves established delivery, not Supabase's cold-start guarantees.
 
-To validate a fixture fix with the repository's fail-fast, race-enabled procedure:
+To validate a fixture fix, export the credentials and `SUPABASE_HOSTED_TEST=1`
+as shown above, then use the repository's fail-fast, race-enabled procedure:
 
 ```sh
+: "${SUPABASE_HOSTED_TEST:?Export SUPABASE_HOSTED_TEST=1 first}"
+test "$SUPABASE_HOSTED_TEST" = 1 || exit 1
 scripts/test-flaky.sh TestHostedRealtimeContinuity 10 ./integration/supabase/hosted
 ```
 
 The script stops at the first failure. A successful validation prints
 `PASSED all 10 iterations`; it never retries a failed run to obtain a pass.
+
+A success line is evidence only when the hosted case ran. Without the opt-in,
+Go skips it and the flake script can still report success.

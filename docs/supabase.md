@@ -194,7 +194,9 @@ The result lists the statements committed in one transaction. Applying it again
 reports that row security already matches. A mixed column/index and RLS edit
 refuses without committing either part. See [output and failure handling](declarative-row-security.md#apply-the-declaration).
 This CLI route is covered by PostgreSQL integration tests; local Supabase API
-coverage uses the same executor. Hosted validation remains a separate step.
+coverage uses the same executor. The [hosted suite](../integration/supabase/hosted/README.md)
+also exercised preview, apply, convergence, and atomic rollback as the owning
+`postgres` role. Hosted non-owner privilege validation remains a follow-up.
 
 ## What works today
 

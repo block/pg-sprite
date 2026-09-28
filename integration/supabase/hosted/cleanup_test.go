@@ -5,8 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/block/pg-sprite/internal/testutil"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,27 +27,22 @@ func (f *fixture) prepareTableCleanup(t *testing.T) {
 }
 
 // Cleanup covers a command that never created its table and one that committed
-// the table before a later error. These cases run locally without hosted keys.
-func TestTableCleanup(t *testing.T) {
-	dsn := testutil.StartPostgres(t)
+// the table before a later error. The same hosted opt-in and project checks apply.
+func TestHostedTableCleanup(t *testing.T) {
+	f := newFixture(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 	defer cancel()
-	pool, err := pgxpool.New(ctx, dsn)
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
-	require.NoError(t, pool.Ping(ctx))
-	f := &fixture{pool: pool, table: `public.cleanup_test`}
 	t.Run("no committed table", func(t *testing.T) {
 		f.prepareTableCleanup(t)
 	})
 	t.Run("table committed before failure", func(t *testing.T) {
 		f.prepareTableCleanup(t)
-		_, err := pool.Exec(ctx, "CREATE TABLE public.cleanup_test (id integer PRIMARY KEY)")
+		_, err := f.pool.Exec(ctx, "CREATE TABLE "+f.table+" (id integer PRIMARY KEY)")
 		require.NoError(t, err)
-		_, err = pool.Exec(ctx, "SELECT 1 / 0")
+		_, err = f.pool.Exec(ctx, "SELECT 1 / 0")
 		require.Error(t, err)
 	})
 	var exists bool
-	require.NoError(t, pool.QueryRow(ctx, "SELECT to_regclass('public.cleanup_test') IS NOT NULL").Scan(&exists))
+	require.NoError(t, f.pool.QueryRow(ctx, "SELECT to_regclass($1) IS NOT NULL", f.table).Scan(&exists))
 	assert.False(t, exists, "cleanup removes the committed table despite the later failure")
 }
