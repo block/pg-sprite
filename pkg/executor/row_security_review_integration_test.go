@@ -168,3 +168,29 @@ func TestReviewedRowSecurityRechecksAfterLockWait(t *testing.T) {
 	assert.Equal(t, "renamed_readers", after.RowSecurity.Policies[0].Name)
 	assert.Equal(t, "(owner_id = 7)", *after.RowSecurity.Policies[0].Using)
 }
+
+func TestReviewedRowSecurityBindsSQLNotEarlierPredicate(t *testing.T) {
+	pool, schema := rlsFixture(t)
+	desired, err := statement.ParseDesiredWithRowSecurity(`
+ CREATE TABLE documents (
+   id bigint PRIMARY KEY,
+   owner_id bigint NOT NULL
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (owner_id = 9);
+ `)
+	require.NoError(t, err)
+	budget := executor.Budget{LockTimeout: time.Second, StatementTimeout: 5 * time.Second}
+	plan, err := executor.PreviewRowSecurity(t.Context(), pool, schema, desired, budget)
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), "ALTER POLICY readers ON "+pgx.Identifier{schema, "documents"}.Sanitize()+" USING (owner_id = 8)")
+	require.NoError(t, err)
+	// Replacement still drops the same policy and creates the same desired policy.
+	// The SQL review contract deliberately does not bind the previous predicate.
+	report, err := executor.ExecuteReviewedRowSecurity(t.Context(), pool, schema, desired, plan.Statements, budget)
+	require.NoError(t, err)
+	assert.Equal(t, plan.Statements, report.Statements)
+	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+	require.NoError(t, err)
+	assert.Equal(t, "(owner_id = 9)", *after.RowSecurity.Policies[0].Using)
+}

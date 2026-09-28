@@ -93,6 +93,22 @@ also takes a bounded exclusive table lock; it is not a lock-free catalog query.
 Pass its `Statements` to `ExecuteReviewedRowSecurity` alongside the desired
 schema. The executor regenerates the sequence under its own lock and compares
 it exactly, including order and duplicates, before changing any target policy.
+For example, after parsing `desired` as above:
+
+```go
+budget := executor.Budget{LockTimeout: 100 * time.Millisecond, StatementTimeout: 5 * time.Second}
+plan, err := executor.PreviewRowSecurity(ctx, pool, "public", desired, budget)
+if err != nil {
+    return err
+}
+// Present plan.Statements for review, then pass the reviewed sequence unchanged.
+report, err := executor.ExecuteReviewedRowSecurity(ctx, pool, "public", desired, plan.Statements, budget)
+if err != nil {
+    return err
+}
+// report.Statements is exactly the reviewed sequence, committed atomically.
+```
+
 A mismatch returns `ErrRowSecurityPlanChanged` and a zero report. An empty
 reviewed sequence authorizes only a no-op; it never disables this check.
 
