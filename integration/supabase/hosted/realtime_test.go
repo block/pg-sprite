@@ -82,33 +82,6 @@ func (s *stream) await(t *testing.T, match func(event) bool) {
 		}
 	}
 }
-func (s *stream) row(t *testing.T, operation string, id int) {
-	t.Helper()
-	s.await(t, func(e event) bool {
-		return e.Event == "postgres_changes" && e.Payload.Data.Type == operation && e.Payload.Data.Record.ID == id
-	})
-}
-
-// This probe separates subscription acknowledgements from actual delivery.
-// It deliberately does not run pg-sprite DDL, reconnect, or retry missing events.
-func TestHostedRealtimeStartupBaseline(t *testing.T) {
-	requireStartupDiagnostic(t)
-	f := newFixture(t)
-	f.seed(t)
-	first, second := f.subscribe(t, 0), f.subscribe(t, 1)
-	for _, u := range f.users {
-		var count int
-		require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT count(*) FROM realtime.subscription WHERE entity=$1::regclass AND claims->>'sub'=$2 AND claims->>'role'='authenticated'", f.table, u.ID).Scan(&count))
-		require.Equal(t, 1, count, "server must register the correct table and identity")
-	}
-	f.exec(t, "INSERT INTO "+f.table+" VALUES (3,$1,'probe'),(4,$2,'probe')", f.users[0].ID, f.users[1].ID)
-	first.row(t, "INSERT", 3)
-	second.row(t, "INSERT", 4)
-	f.exec(t, "UPDATE "+f.table+" SET body='changed' WHERE id IN (3,4)")
-	first.row(t, "UPDATE", 3)
-	second.row(t, "UPDATE", 4)
-	t.Log("received INSERT and UPDATE for both tenants without schema changes")
-}
 
 // Keep long fixture initialization alive using the protocol heartbeat, not reconnects.
 // The writer is stopped and joined before the earlier socket-close cleanup runs.

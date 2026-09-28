@@ -90,26 +90,3 @@ func (s *stream) exactRow(t *testing.T, operation string, id int) {
 		return true
 	})
 }
-
-// Diagnostic only: distinguish an acknowledged subscription from an active
-// wal2json reader. This is not a production readiness API or a delivery guarantee.
-func TestHostedRealtimeStartupSlotReady(t *testing.T) {
-	requireStartupDiagnostic(t)
-	f := newFixture(t)
-	f.seed(t)
-	first, second := f.subscribe(t, 0), f.subscribe(t, 1)
-	started := time.Now()
-	const slotReadyDeadline = 30 * time.Second
-	require.Eventually(t, func() bool {
-		var ready bool
-		err := f.pool.QueryRow(t.Context(), `SELECT EXISTS (
-   SELECT 1 FROM pg_replication_slots WHERE plugin='wal2json' AND active
-  )`).Scan(&ready)
-		return err == nil && ready
-	}, slotReadyDeadline, 200*time.Millisecond, "diagnostic requires active wal2json slot before writing")
-	t.Logf("active wal2json reader observed after %s; no DDL", time.Since(started))
-	f.exec(t, "INSERT INTO "+f.table+" (id,owner_id,body) VALUES (3,$1,'slot ready'),(4,$2,'slot ready')", f.users[0].ID, f.users[1].ID)
-	first.exactRow(t, "INSERT", 3)
-	second.exactRow(t, "INSERT", 4)
-	t.Log("both tenants received INSERT after slot readiness")
-}

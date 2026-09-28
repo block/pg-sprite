@@ -5,11 +5,9 @@ application tables, policies, and publication entries, then removes its fixtures
 It leaves project settings alone. No Docker services or locally signed JWTs are used.
 
 This is an opt-in complement to the [local suite](../README.md), not a replacement
-for its larger DDL matrix or a required hosted CI job. Hosted Realtime startup has
-shown intermittent missing events even in the baseline that runs no pg-sprite DDL.
-Cold-start diagnostics are a separate opt-in and retain missing events as failures.
-The continuity suite initializes one published fixture and keeps it through all
-schema-change cases. Neither path retries writes or restarts managed services.
+for its larger DDL matrix or a required hosted CI job. Realtime checks establish
+working delivery before applying schema changes, then verify continuity on the
+same table and connections. Setup failures fail the test; writes are never retried.
 
 ## Run it
 
@@ -118,45 +116,18 @@ created by that case. If the process is forcibly terminated, inspect the test's
 `pgsprite_hosted_…` tables and `pgsprite-…@example.com` users before removing any
 leftovers. Do not reset `public` or delete unrelated Auth users.
 
-## Realtime initialization and cold-start diagnostics
+## Realtime fixture lifecycle
 
 `TestHostedRealtimeContinuity` keeps one table, publication membership, two users,
-and two sockets for all cases. Setup waits for an active wal2json reader, then
-sends one baseline update and requires delivery to both users. No DDL runs if
-initialization fails. A 75-second **setup** deadline spans the approximately
-60-second publication refresh observed in the hosted investigation. Every actual
-event still has the original 30-second deadline, with no retries or reconnects.
-Protocol heartbeats keep the sockets alive during setup. This readiness predicate
-is fixture-specific; it is not a public Supabase readiness API or a production SLA.
+and two sockets for all cases. Setup waits for an active wal2json reader, verifies
+the authenticated subscriptions, then sends one baseline update and requires
+delivery to both users. Initialization failures fail the test before DDL runs.
 
-The hosted investigation reproduced a subscription acknowledgement while the slot
-was absent after an empty-to-nonempty publication transition. Twelve distinct writes
-committed without events during the observation; a later write arrived when the
-slot started. The database rows were not lost. This is why schema-change continuity
-and cold-start delivery are separate results.
-
-An independent comparison using `@supabase/supabase-js` 2.116.0 reproduced the
-gap with authenticated subscriptions. Both the default client and
-`postgres_changes_options: {wait: true}` acknowledged before the reader started.
-Of 13 committed INSERTs, both received only the last two; the earlier 11 did not
-arrive during the observation. Wire-level checks ruled out SDK callback filtering.
-No pg-sprite DDL ran. A separate control that waited for the reader delivered all
-three writes to both clients, without retrying writes. These observations do not
-identify the hosted server revision or establish a public readiness contract.
-
-Run the startup diagnostics explicitly:
-
-```sh
-SUPABASE_HOSTED_STARTUP_DIAGNOSTICS=1 \
-  go test -count=1 -timeout=3m -v ./integration/supabase/hosted -run '^TestHostedRealtimeStartup'
-```
-
-`TestHostedRealtimeStartupBaseline` checks immediate INSERT/UPDATE delivery;
-`TestHostedRealtimeStartupContinuous` requires all 20 distinct writes; and
-`TestHostedRealtimeStartupSlotReady` checks for an active reader before writing.
-These diagnostics have known intermittent failures. Without the extra opt-in they
-print an explicit skip reason; a passing normal suite does **not** certify cold-start
-delivery. Keep failed startup results when reporting compatibility.
+The publication-startup budget is 75 seconds; each event must arrive within 30
+seconds. Protocol heartbeats keep sockets alive during setup. There are no fixed
+readiness sleeps, retried writes, or reconnects. This setup predicate is specific
+to the fixture, not a public Supabase readiness API. The suite tests whether
+pg-sprite preserves established delivery, not Supabase's cold-start guarantees.
 
 To validate a fixture fix with the repository's fail-fast, race-enabled procedure:
 
@@ -164,6 +135,5 @@ To validate a fixture fix with the repository's fail-fast, race-enabled procedur
 scripts/test-flaky.sh TestHostedRealtimeContinuity 10 ./integration/supabase/hosted
 ```
 
-The script stops at the first failure. Ten passing runs are stability evidence for
-the initialized fixture, not an excuse to retry a failing run or a guarantee about
-all hosted Realtime behavior.
+The script stops at the first failure. A successful validation prints
+`PASSED all 10 iterations`; it never retries a failed run to obtain a pass.

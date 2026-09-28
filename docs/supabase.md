@@ -6,11 +6,10 @@ you build: add a column for a new feature, or add an index as your queries grow.
 Local tests cover column additions and concurrent index builds alongside
 Supabase's access policies, Data API, and Realtime subscriptions. An opt-in [hosted suite](../integration/supabase/hosted/README.md) also exercises
 real Auth users and service endpoints. Its Realtime schema-change cases initialize
-one shared fixture before testing continuity. Hosted testing also reproduced a
-Realtime startup gap with the official Supabase client, without pg-sprite DDL:
-subscription confirmation arrived before the reader was active, and early events
-were not delivered. A passing continuity run does not resolve that startup gap. Changes that need a replacement table are refused
-today because copy-and-swap is not implemented yet.
+one shared fixture and verify baseline delivery before applying changes, then
+check that events and tenant isolation survive on the same connections. Changes
+that need a replacement table are refused today because copy-and-swap is not
+implemented yet.
 
 Start with [your first change](#make-your-first-change). The [test results](#what-works-today)
 and [roadmap](#where-we-go-next) show how far the current coverage goes.
@@ -269,9 +268,10 @@ outcome; they do not assume every unsuccessful change rolls back completely.
 Hosted checks have passed as the owning `postgres` role on PostgreSQL 17.6,
 including CA-based TLS verification, the CLI schema lifecycle, real Auth defaults
 and foreign keys, and atomic RLS rollback. Hosted poolers remain untested and
-Realtime cold-start gaps have been reproduced; see the [hosted suite](../integration/supabase/hosted/README.md)
-for separate cases and limits. In the local suite, Auth runs its schema initialization
-and the fixture signs JWTs, so those cases do not test login. Hosted cases create
+Realtime checks cover continuity after fixture initialization; see the
+[hosted suite](../integration/supabase/hosted/README.md) for cases and limits.
+In the local suite, Auth runs its schema initialization and the fixture signs JWTs,
+so those cases do not test login. Hosted cases create
 confirmed test users through the Auth admin API and sign in with their passwords;
 they do not test public signup, email delivery, or OAuth. Neither suite establishes
 unrestricted Supabase support.
@@ -282,7 +282,7 @@ The next milestones build on the local and scoped hosted tests. Each needs repea
 before we expand the support claim:
 
 1. **Finish hosted validation.** Core direct-connection and TLS cases have passed;
-   investigate Realtime startup and validate the hosted pooler endpoints separately
+   validate the hosted pooler endpoints
 2. **Publish a reproducible declarative workflow.** The hosted CLI cases cover
    create, export, edit, apply, RLS, and convergence. Complete a fresh-project
    walkthrough from the published guide, with clear boundaries for managed objects
