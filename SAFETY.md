@@ -74,8 +74,11 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   `checksum.VerifiedShadow`, and `checksum.CleanWatermark`); dangerous APIs accept only proof types —
   e.g. the planned cutover swap will accept only a `VerifiedShadow`.
 - `statement.DesiredWithRowSecurity` proves declaration syntax, not execution safety. It stays distinct from
-  `DesiredSchema`. Only `executor.ExecuteRowSecurity` and `executor.ExecuteReviewedRowSecurity` may consume it for live RLS:
-  that executor locks, checks table equality, and verifies convergence in one transaction.
+  `DesiredSchema`. `executor.PreviewRowSecurity`, `executor.ExecuteRowSecurity`, and
+  `executor.ExecuteReviewedRowSecurity` consume it. All take a bounded exclusive table lock,
+  check table equality, and derive SQL through scratch introspection. Preview rolls back
+  before target DDL; execution verifies convergence before commit. Reviewed execution also
+  checks the exact ordered SQL under the lock (RS-5).
 - **Put a limit on everything.** Every loop bounded, every queue bounded, every retry counted,
   every wait deadlined. An unbounded anything in a core package is a review-blocking defect.
 - **Assert the positive and the negative space; pair assertions across boundaries.** Invariant
@@ -130,4 +133,5 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
 
 The atomic RLS executor also admits `pkg/schemadiff` scratch introspection, table
 comparison, render admission, and catalog-derived RLS rendering into the core. Those calls refuse mixed or
-unsupported table shapes; final catalog comparison gates commit (RS-1..RS-4).
+unsupported table shapes; final catalog comparison gates commit (RS-1..RS-4). Reviewed execution binds the locked SQL to the
+caller’s review before target DDL (RS-5).

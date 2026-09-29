@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -35,14 +36,21 @@ func TestReviewedRowSecurityPreviewAndApply(t *testing.T) {
 	assert.Equal(t, schema, plan.Schema)
 	assert.Equal(t, "documents", plan.Table)
 	require.NotEmpty(t, plan.Statements)
+	// Transport the actual rendered SQL through the parser, as an orchestrator does.
+	change, err := statement.ParseRowSecurityChange(strings.Join(plan.Statements, ";\n"))
+	require.NoError(t, err)
+	assert.Equal(t, schema, change.Schema())
+	assert.Equal(t, "documents", change.Table())
+	require.Equal(t, plan.Statements, change.Statements())
 	afterPreview, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
 	assert.Equal(t, before, afterPreview, "preview must not change the target")
-	report, err := executor.ExecuteReviewedRowSecurity(t.Context(), pool, schema, desired, plan.Statements, budget)
+	report, err := executor.ExecuteReviewedRowSecurity(t.Context(), pool, schema, desired, change.Statements(), budget)
 	require.NoError(t, err)
 	assert.Equal(t, plan.Statements, report.Statements)
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
+	require.Len(t, after.RowSecurity.Policies, 1)
 	assert.Equal(t, "(owner_id = 9)", *after.RowSecurity.Policies[0].Using)
 	// A previous nonempty review does not authorize a different (now empty) sequence.
 	_, err = executor.ExecuteReviewedRowSecurity(t.Context(), pool, schema, desired, plan.Statements, budget)
@@ -84,7 +92,7 @@ func TestReviewedRowSecurityRefusesDifferentSequences(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			report, err := executor.ExecuteReviewedRowSecurity(t.Context(), pool, schema, desired, reviewed, budget)
 			require.ErrorIs(t, err, executor.ErrRowSecurityPlanChanged)
-			assert.Equal(t, executor.CodeRowSecurityRefused, executor.OutcomeCode(err))
+			assert.Equal(t, executor.CodeRowSecurityPlanChanged, executor.OutcomeCode(err))
 			assert.Equal(t, executor.RowSecurityReport{}, report)
 			after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 			require.NoError(t, err)
@@ -192,5 +200,6 @@ func TestReviewedRowSecurityBindsSQLNotEarlierPredicate(t *testing.T) {
 	assert.Equal(t, plan.Statements, report.Statements)
 	after, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
+	require.Len(t, after.RowSecurity.Policies, 1)
 	assert.Equal(t, "(owner_id = 9)", *after.RowSecurity.Policies[0].Using)
 }

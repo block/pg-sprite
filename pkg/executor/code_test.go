@@ -24,6 +24,7 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		err  error
 		want executor.Code
 	}{
+		{name: "row security review changed", err: fmt.Errorf("review: %w", executor.ErrRowSecurityPlanChanged), want: executor.CodeRowSecurityPlanChanged},
 		{name: "row security unknown commit", err: &executor.RowSecurityOutcomeUnknownError{Err: errors.New("connection lost")}, want: executor.CodeRowSecurityOutcomeUnknown},
 		{name: "nil error has no code", err: nil, want: executor.Code("")},
 		{
@@ -164,6 +165,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeBudgetStatementExceeded:         false,
 		executor.CodeBlockingOutcomeUnknown:          false,
 		executor.CodeRowSecurityRefused:              true,
+		executor.CodeRowSecurityPlanChanged:          true,
 		executor.CodeRowSecurityOutcomeUnknown:       false,
 		executor.CodeInvalidBlockingBudget:           true,
 		executor.CodeUnsupportedAcceptedBlocking:     true,

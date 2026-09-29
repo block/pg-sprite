@@ -60,7 +60,9 @@ or whole-attempt deadline reports `budget-statement-exceeded`, including when th
 whole-attempt deadline expires during a lock wait. The first limit reached wins. A missing target reports
 `table-not-found`. Invalid declarations, unsupported targets, and insufficient
 privileges report permanent `row-security-refused` outcomes, preserving the underlying
-cause. This includes unresolved policy roles and qualified helper functions during
+cause. A reviewed SQL mismatch reports permanent `row-security-plan-changed`: no target
+RLS statements ran; preview again and review the new SQL before retrying. This is separate
+from declaration and privilege refusals, which include unresolved policy roles and qualified helper functions during
 scratch inspection. Caller cancellation is kept separate from budget exhaustion.
 
 The caller needs table-owner privileges and permission to create the temporary

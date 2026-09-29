@@ -188,7 +188,7 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 	}
 	// INV: RS-5 — compare the complete ordered sequence under lock before target DDL.
 	if mode == rowSecurityReviewed && !slices.Equal(reviewed, report.Statements) {
-		return RowSecurityReport{}, fmt.Errorf("review row security on %s: %w: %w", target, ErrRowSecurityRefused, ErrRowSecurityPlanChanged)
+		return RowSecurityReport{}, fmt.Errorf("review row security on %s: %w", target, ErrRowSecurityPlanChanged)
 	}
 	if mode == rowSecurityPreview {
 		if err := tx.Rollback(ctx); err != nil {
