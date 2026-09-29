@@ -531,7 +531,7 @@ rows:
       migrate: supported
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "The [atomic RLS executor](atomic-row-security.md) locks an existing supported table, refuses structural changes, replaces policies/settings, and verifies convergence before committing. Lock waits and the whole transaction are bounded. Available through `migrate --desired` without RLS-specific flags; `diff` remains a review-only surface"
+    reason_notes: "The [atomic RLS executor](atomic-row-security.md) locks an existing supported table, refuses structural changes, replaces policies/settings, and verifies convergence before committing. Go callers can preview the ordered SQL and require it to match under lock before execution. This is a SQL review contract, not a catalog snapshot. Lock waits and the whole transaction are bounded. Available through `migrate --desired` without RLS-specific flags; `diff` remains a review-only surface"
   - id: standalone-sequences
     area: "types_and_non_table_objects"
     operation: "Standalone sequences"
