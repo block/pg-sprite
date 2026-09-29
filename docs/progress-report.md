@@ -4,8 +4,9 @@ The progress snapshot is the machine-readable observation a caller receives when
 running schema change through the `*WithProgress` executor entry points. It is the one JSON
 shape an operator or orchestrator consumes to display or act on execution progress. This
 document is the contract: the fields, the closed vocabularies, and the behavior required of
-a consumer. The Go source of truth is `pkg/progress`; `TestSnapshotJSONShape` pins the exact
-keys, including the example at the end of this page.
+a consumer. The Go source of truth is `pkg/progress`; `TestSnapshotJSONShape` and
+`TestSnapshotJSONShapeForACopyStep` pin the exact keys, including the two examples at the end
+of this page.
 
 ## Versioning: `format_version`
 
@@ -56,8 +57,11 @@ licenses a consumer to intervene in the change itself.
 | `current_locker_pid` | int | while waiting on a locker | PostgreSQL backend PID currently blocking the concurrent build; omitted when none is published. |
 | `work` | object | measured work only | Present exactly when something measured the step's work — the server published a progress row for a concurrent build, or the engine reported the copy step's counters; then **every** counter below is present, so a fresh build or an empty copy reports honest zeros rather than an empty object. |
 
-`statement` is the submitter's statement after qualification and canonicalization, so a
-consumer rendering it into a shared surface must clamp and escape it.
+`statement` is the SQL the engine is running for the step: for a native operation the
+submitter's statement after qualification and canonicalization, for a `copy` step the
+engine's own frozen chunk insert (the template with its `$1`/`$2` key bounds, not a chunk's
+rendered values). Either way it is real SQL that reached the server, so a consumer rendering
+it into a shared surface must clamp and escape it.
 
 ### Work counters
 
