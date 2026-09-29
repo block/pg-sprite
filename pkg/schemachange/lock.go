@@ -2,7 +2,7 @@ package schemachange
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"github.com/jackc/pgx/v5"
 
@@ -33,25 +33,24 @@ func requireTableLock(lock *dbconn.TableLockSession, target preflight.CopySwapTa
 }
 
 // confirmTableLock re-asserts the lock from inside the working transaction,
-// before its first write: pg_locks, read on the connection about to write,
-// must show the lock granted to the lock session's own backend. The lock
-// and the work are deliberately on different sessions, so this is the one
-// point where the server confirms that the session this transaction trusts
-// is the session that actually holds the table.
+// before its first write, and names the refusal cause behind each way the
+// server can disagree with the lock session about who holds the table. The
+// wrapped error already names the table and any holder, so the detail says
+// only what this transaction was doing.
 func confirmTableLock(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession) error {
-	held := lock.Lock()
-	holder, found, err := dbconn.LookupTableLockHolder(ctx, tx, held.Schema(), held.Table())
-	if err != nil {
-		return fmt.Errorf("confirm table lock on %s.%s: %w", held.Schema(), held.Table(), err)
+	err := lock.Confirm(ctx, tx)
+	if err == nil {
+		return nil
 	}
 	// INV: LK-1
-	if !found {
-		return refuse(CauseLockUnconfirmed, nil, "no session holds the table lock on %s.%s", held.Schema(), held.Table())
+	if errors.Is(err, dbconn.ErrTableLockNotHeld) {
+		return refuse(CauseLockUnconfirmed, []error{err}, "confirming the table lock from the working transaction")
 	}
-	if holder.PID != lock.BackendPID() {
-		return refuse(CauseLockHeldElsewhere, nil, "table lock on %s.%s is held by backend %d, not the lock session's backend %d", held.Schema(), held.Table(), holder.PID, lock.BackendPID())
+	var heldElsewhere *dbconn.TableLockHeldError
+	if errors.As(err, &heldElsewhere) {
+		return refuse(CauseLockHeldElsewhere, []error{err}, "the working transaction sees the table lock held by another backend, not the lock session's backend %d", lock.BackendPID())
 	}
-	return nil
+	return err
 }
 
 // lockLossCause reports the table-lock loss behind a failed operation: when

@@ -21,16 +21,18 @@ import (
 // is a SET-usable member of every role, so the copy-and-swap proof the
 // chunker demands is minted without provisioning.
 type chunkerFixture struct {
+	cfg    dbconn.Config
 	pool   *pgxpool.Pool
 	schema string
 }
 
 func newChunkerFixture(t *testing.T) chunkerFixture {
 	t.Helper()
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	return chunkerFixture{pool: pool, schema: testutil.NewSchema(t, pool)}
+	return chunkerFixture{cfg: cfg, pool: pool, schema: testutil.NewSchema(t, pool)}
 }
 
 // exec runs SQL with %s standing for the fixture schema.
@@ -78,9 +80,7 @@ func drain(t *testing.T, c *Chunker, db dbconn.RowQuerier) []Chunk {
 		if !ok {
 			return chunks
 		}
-		cut, cutOK := c.Cut()
-		require.True(t, cutOK, "a returned chunk is a cut")
-		assert.Equal(t, chunk.Upper(), cut, "the frontier is the last returned chunk's upper bound")
+		assert.Equal(t, NewWatermark(chunk.Upper()), c.Cut(), "the frontier is the last returned chunk's upper bound")
 		chunks = append(chunks, chunk)
 		require.Less(t, len(chunks), 100, "chunking must terminate")
 	}
@@ -129,8 +129,7 @@ func TestChunkerCutsByRowCountNotKeyWidth(t *testing.T) {
 
 	c, err := NewChunker(target, Watermark{}, ChunkerOptions{InitialRows: 4, MinRows: 4, MaxRows: 4})
 	require.NoError(t, err)
-	_, cutOK := c.Cut()
-	assert.False(t, cutOK, "nothing is cut before the first chunk")
+	assert.Equal(t, Watermark{}, c.Cut(), "nothing is cut before the first chunk")
 
 	chunks := drain(t, c, f.pool)
 	require.Len(t, chunks, 3)

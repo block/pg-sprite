@@ -51,7 +51,9 @@ var (
 // never makes the defaults contradict it. Explicitly set values are
 // validated as given.
 type ChunkerOptions struct {
-	// TargetChunkTime is the copy duration each chunk is sized toward (D12).
+	// TargetChunkTime is the copy duration each chunk is sized toward: the
+	// chunk-time throttle of
+	// docs/copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag.
 	TargetChunkTime time.Duration
 	// InitialRows is the first chunk's row count.
 	InitialRows int64
@@ -193,22 +195,22 @@ func (c *Chunker) Rows() int64 {
 	return c.rows
 }
 
-// Cut reports the highest key inside any chunk Next has returned, or that
-// the chunker resumed past; ok is false while no key has been cut. Every key
-// above it lies in a chunk the copier has not started reading, so a change
-// captured for such a key can be discarded (CO-4); every key at or below it
-// lies in a chunk that is in flight or landed and must be applied or
-// deferred, whatever the watermark says.
-func (c *Chunker) Cut() (upper int64, ok bool) {
+// Cut reports the cut frontier: the highest key inside any chunk Next has
+// returned, or that the chunker resumed past. Its zero value means no key
+// has been cut. Every key above the frontier lies in a chunk the copier has
+// not started reading, so a change captured for such a key can be discarded
+// (CO-4); every key at or below it lies in a chunk that is in flight or
+// landed and must be applied or deferred, whatever the watermark says.
+func (c *Chunker) Cut() Watermark {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.done {
-		return math.MaxInt64, true
+		return NewWatermark(math.MaxInt64)
 	}
 	if c.next == math.MinInt64 {
-		return 0, false
+		return Watermark{}
 	}
-	return c.next - 1, true
+	return NewWatermark(c.next - 1)
 }
 
 // Next cuts the next chunk from the live table with one bounded query on
@@ -296,7 +298,9 @@ func boundarySQL(target preflight.CopySwapTarget) string {
 }
 
 // Feedback reports how long chunk took to copy so the next chunk is sized
-// toward the target time (D12). The new size is scaled from the row count
+// toward the target time — the chunk-time throttle of
+// docs/copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag.
+// The new size is scaled from the row count
 // chunk was cut to, not from the current size, so reports from workers
 // copying concurrently each propose a size for the work they measured
 // instead of compounding on one another. One step changes the size by at
