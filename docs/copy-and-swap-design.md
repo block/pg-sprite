@@ -38,14 +38,14 @@ re-parsed, it must equal the gated statement in every respect except the target 
 must equal the shadow (the ST-7 check, with the shadow as the permitted target).
 
 **Comparison-only exception.** `RowSecurityChange.CanonicalSQLForNamespace` may erase
-  Validate the expected physical schema and table from the caller’s target configuration;
-  never derive those expected values from the SQL being checked.
 only the validated RLS operation target's schema on a fresh parsed tree. This supports
 comparison across physical schemas when the key separately carries the canonical
 namespace and table. It preserves policy names, roles, expressions, qualified helpers,
 statement order, and duplicates. Its output is never executable SQL and never replaces
 the executor's exact comparison of reviewed SQL under lock. Original statements and the
-fully qualified canonical representation remain unchanged. This exception does not apply
+fully qualified canonical representation remain unchanged.
+Validate the expected physical schema and table from the caller’s target configuration;
+never derive those expected values from the SQL being checked. This exception does not apply
 to shadow DDL generation or checkpoint fingerprints.
 
 **Why.** The real server remains the semantic authority while the only durable temporary object is
