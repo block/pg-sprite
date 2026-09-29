@@ -46,7 +46,7 @@ const (
 // field semantics. Adding a phase or operation value is a contract change
 // and bumps this version, even when no field is added or renamed. Adding a
 // field also bumps this version so strict consumers can detect the new shape.
-const FormatVersion = 3
+const FormatVersion = 4
 
 // Operation is the current operation's execution class.
 type Operation string
@@ -63,13 +63,18 @@ const (
 	OperationValidate Operation = "validate-constraint"
 	// OperationConcurrentIndex is a concurrent index build.
 	OperationConcurrentIndex Operation = "concurrent-index-build"
+	// OperationCopy is the copy-and-swap row copy from the source table into
+	// its shadow.
+	OperationCopy Operation = "copy"
 )
 
-// Work reports server-observed work. It is present only when the server
-// published a progress row, and then every counter marshals explicitly — a
-// fresh build reports honest zeros, never an empty object a consumer must
-// guess at. Rows and bytes are reserved for copy-and-swap; native operations
-// do not fabricate them.
+// Work reports observed work. It is present only when something measured
+// it — the server published a progress row for a concurrent build, or the
+// engine's own WorkSource reported the step's counters — and then every
+// counter marshals explicitly — a fresh build reports honest zeros, never an
+// empty object a consumer must guess at. Rows and bytes belong to the
+// copy-and-swap row copy; blocks, tuples and lockers to a concurrent index
+// build. Neither operation fabricates the other's counters.
 type Work struct {
 	RowsCopied   uint64 `json:"rows_copied"`
 	RowsTotal    uint64 `json:"rows_total"`
@@ -112,27 +117,32 @@ type Snapshot struct {
 
 // Tracker is a concurrency-safe progress source. The caller owns it; it has
 // no goroutines. Progress performs the one read needed for an active index
-// build, making polling lifetime identical to the caller's context.
+// build, or the one WorkSource call for an engine-measured step, making
+// polling lifetime identical to the caller's context.
 //
 // Two locks split the tracker's concerns: mu guards the state fields and is
 // held only for memory access, so the executor's own updates never wait for
 // a database read; pollMu serializes observers, so the reserved session —
 // a single pgx connection that is not safe for concurrent use — only ever
-// carries one progress query at a time.
+// carries one progress query at a time, and a WorkSource sees one poll at a
+// time.
 //
-// StopConcurrentBuild is the one state change that takes pollMu, because it
-// is the fence between the build and the pool: the executor calls it before
-// the build's session can be released, so an observation or cancel signal
-// still in flight completes against a backend the build still owns. Start,
-// StartStep and Finish also clear the build fields, but as resets under mu
-// alone — by the time they run the build's step has already passed through
-// StopConcurrentBuild, and a reset that waited behind an observation would
-// make polling a gate on execution.
+// StopConcurrentBuild and StopWorkSource are the two state changes that
+// take pollMu, because each is the fence between the step's work and its
+// release: the executor calls StopConcurrentBuild before the build's
+// session can be released, so an observation or cancel signal still in
+// flight completes against a backend the build still owns, and the engine
+// calls StopWorkSource before the source's state goes away. Start,
+// StartStep and Finish also clear those fields, but as resets under mu
+// alone — by the time they run the step has already passed through its
+// fence, and a reset that waited behind an observation would make polling a
+// gate on execution.
 type Tracker struct {
 	mu        sync.RWMutex
 	pollMu    sync.Mutex
 	clock     Clock
 	session   dbconn.RowQuerier
+	source    WorkSource
 	phase     Phase
 	started   time.Time
 	stepStart time.Time
@@ -163,18 +173,18 @@ func (t *Tracker) Start(total int, operation Operation) {
 	defer t.mu.Unlock()
 	t.phase, t.started, t.stepStart, t.ended = PhaseRunning, now, now, time.Time{}
 	t.step, t.total, t.detail = 0, total, Detail{Operation: operation, Active: true}
-	t.session, t.buildPID = nil, 0
+	t.session, t.buildPID, t.source = nil, 0, nil
 }
 
 // StartStep advances a sequence to a 1-based step, records the exact SQL the
-// executor will run, and drops any build session from a prior step, so a later
-// step can never poll a stale build.
+// executor will run, and drops any build session or work source from a prior
+// step, so a later step can never poll a stale build or a finished source.
 func (t *Tracker) StartStep(step int, operation Operation, statement string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.step, t.stepStart = step, t.clock.Now()
 	t.detail = Detail{Operation: operation, Statement: statement, Active: true}
-	t.session, t.buildPID = nil, 0
+	t.session, t.buildPID, t.source = nil, 0, nil
 }
 
 // SetAttempt records the current bounded retry attempt.
@@ -186,11 +196,13 @@ func (t *Tracker) SetAttempt(attempt int) {
 
 // SetConcurrentBuild enables on-demand server progress for pid. The executor
 // supplies its reserved verdict session so polling cannot starve behind the
-// build session even when the pool has only two connections.
+// build session even when the pool has only two connections. A step's work
+// comes from one place, so any WorkSource the step had is dropped.
 func (t *Tracker) SetConcurrentBuild(session dbconn.RowQuerier, pid uint32) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.session, t.buildPID = session, pid
+	t.source = nil
 }
 
 var (
@@ -374,15 +386,16 @@ func (t *Tracker) Finish(err error) {
 	}
 	t.ended = now
 	t.detail.Active = false
-	t.session, t.buildPID = nil, 0
+	t.session, t.buildPID, t.source = nil, 0, nil
 }
 
 // Progress returns a snapshot and, for an active concurrent index build,
-// queries PostgreSQL's progress view by the executor-owned backend PID. On a
-// query error the snapshot still carries the last-known tracker state. The
-// state lock is released before the query, so concurrent pollers serialize
-// only against each other (and StopConcurrentBuild), never against the
-// executor's own state updates.
+// queries PostgreSQL's progress view by the executor-owned backend PID; for
+// a step with a WorkSource it asks the source for the step's counters. On a
+// query or source error the snapshot still carries the last-known tracker
+// state. The state lock is released before the query, so concurrent pollers
+// serialize only against each other (and the two stop fences), never against
+// the executor's own state updates.
 func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
 	t.pollMu.Lock()
 	defer t.pollMu.Unlock()
@@ -396,9 +409,15 @@ func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
 		s.Elapsed = now.Sub(t.started)
 		s.StepElapsed = now.Sub(t.stepStart)
 	}
-	session, pid := t.session, t.buildPID
+	session, pid, source := t.session, t.buildPID, t.source
 	t.mu.RUnlock()
-	if pid == 0 || session == nil || s.Phase != PhaseRunning {
+	if s.Phase != PhaseRunning {
+		return s, nil
+	}
+	if source != nil {
+		return observeEngineWork(ctx, s, source)
+	}
+	if pid == 0 || session == nil {
 		return s, nil
 	}
 	p, active, err := dbconn.ConcurrentIndexProgress(ctx, session, pid)
