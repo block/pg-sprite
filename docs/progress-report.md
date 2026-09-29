@@ -86,6 +86,17 @@ the step. Every counter is something the engine measured — a row count from co
 a size read from the catalog — never a projection; a counter the engine cannot measure stays
 `0`. Native operations report no rows or bytes.
 
+| Counter | Meaning |
+| --- | --- |
+| `rows_copied` | Rows this run's committed chunks inserted into the shadow: exact and monotone. A resumed run counts only its own rows, not those the earlier run landed below the watermark. |
+| `rows_total` | The source's catalog row count (`pg_class.reltuples`) read once when the copy started; `0` for a table `ANALYZE` has never visited. A count, not a scan. |
+| `bytes_copied` | The shadow's on-disk table size (`pg_table_size`: heap, TOAST, maps; no indexes) measured at the poll. |
+| `bytes_total` | The source's on-disk table size, measured the same way at the same poll. |
+
+The two tables differ in shape, so `bytes_copied` ends above or below `bytes_total` rather than
+equal to it; a consumer that wants a rate derives it from two snapshots of `rows_copied` and
+`elapsed_ns`.
+
 ## Phases
 
 | Value | Meaning |
