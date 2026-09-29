@@ -47,6 +47,8 @@ const (
 
 // PreviewRowSecurity derives the same SQL as execution under a bounded exclusive
 // table lock, then rolls back without changing target policies or settings.
+// While held, ACCESS EXCLUSIVE blocks all reads and writes on the target.
+// LockTimeout bounds acquisition; StatementTimeout bounds the whole attempt.
 func PreviewRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityPlan, error) {
 	report, err := runRowSecurity(ctx, pool, schema, desired, b, rowSecurityPreview, nil)
 	if err != nil {
@@ -171,11 +173,6 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 	}
 	report := RowSecurityReport{Schema: schema, Table: desired.Table(), Statements: []string{}}
 	if _, err := schemadiff.DiffWithRowSecurity(schema, live, wanted); err != nil {
-		// INV: RS-4 — helpers are explicitly qualified; no target-schema function
-		// may shadow a built-in while replaying policy expressions.
-		if _, err := tx.Exec(ctx, dbconn.LocalSearchPath("pg_catalog")); err != nil {
-			return RowSecurityReport{}, fmt.Errorf("set row security search path for %s: %w", target, err)
-		}
 		for _, policy := range live.RowSecurity.Policies {
 			report.Statements = append(report.Statements, "DROP POLICY "+pgx.Identifier{policy.Name}.Sanitize()+" ON "+target)
 		}
@@ -195,6 +192,11 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 			return RowSecurityReport{}, fmt.Errorf("rollback row security preview for %s: %w", target, err)
 		}
 		return report, nil
+	}
+	// INV: RS-4 — helpers are explicitly qualified; no target-schema function
+	// may shadow a built-in while replaying policy expressions.
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath("pg_catalog")); err != nil {
+		return RowSecurityReport{}, fmt.Errorf("set row security search path for %s: %w", target, err)
 	}
 	for _, sql := range report.Statements {
 		if _, err := tx.Exec(ctx, sql); err != nil {

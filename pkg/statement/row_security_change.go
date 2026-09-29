@@ -49,7 +49,7 @@ func ParseRowSecurityChange(sql string) (RowSecurityChange, error) {
 		return RowSecurityChange{}, fmt.Errorf("%w: %w", ErrRowSecurityChange, err)
 	}
 	if len(tree.GetStmts()) == 0 {
-		return RowSecurityChange{}, ErrRowSecurityChange
+		return RowSecurityChange{}, fmt.Errorf("%w: no statements", ErrRowSecurityChange)
 	}
 	schema, table := rowSecurityOperationTarget(tree.Stmts[0].Stmt)
 	if schema == "" || table == "" {
@@ -69,6 +69,9 @@ func ParseRowSecurityChange(sql string) (RowSecurityChange, error) {
 	source, err := Split(sql)
 	if err != nil {
 		return RowSecurityChange{}, fmt.Errorf("%w: %w", ErrRowSecurityChange, err)
+	}
+	if len(source) != len(result.canonical) {
+		return RowSecurityChange{}, fmt.Errorf("%w: %d statements parsed, %d split", ErrRowSecurityChange, len(result.canonical), len(source))
 	}
 	for _, stmt := range source {
 		result.statements = append(result.statements, stmt.SQL)
@@ -153,18 +156,26 @@ func rowSecurityPolicyMatches(node *pgproto.Node, schema, table string) bool {
 }
 
 // CanonicalSQLForNamespace omits only the operation's target schema qualifier.
+// The expected physical schema and table must come from the caller’s target
+// configuration, not from this operation. A mismatch refuses normalization.
 // Use it when the comparison key already contains a canonical namespace and
 // table. Qualified policy helpers and all expressions remain unchanged.
 // This is a comparison representation, never executable SQL.
-func (c RowSecurityChange) CanonicalSQLForNamespace() (string, error) {
+func (c RowSecurityChange) CanonicalSQLForNamespace(schema, table string) (string, error) {
 	if c.schema == "" || c.table == "" {
 		return "", ErrRowSecurityChange
+	}
+	if c.schema != schema || c.table != table {
+		return "", fmt.Errorf("%w: operation targets %q.%q, not %q.%q", ErrRowSecurityChange, c.schema, c.table, schema, table)
 	}
 	parts := make([]string, 0, len(c.canonical))
 	for _, sql := range c.canonical {
 		node, err := parseSingle(sql)
 		if err != nil {
 			return "", err
+		}
+		if !rowSecurityStatementTarget(node, schema, table) {
+			return "", fmt.Errorf("%w: canonical statement target changed", ErrRowSecurityChange)
 		}
 		switch {
 		case node.GetCreatePolicyStmt() != nil:

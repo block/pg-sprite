@@ -45,6 +45,8 @@ the reviewer's distillation.
   checkpoint fingerprints come from the transaction-scoped scratch schema — execute-and-introspect;
   the only executable-SQL AST edit is the single relation retarget reprinted through the deparser.
   `RowSecurityChange.CanonicalSQLForNamespace` may erase only the validated target schema
+  Validate the expected physical schema and table from the caller’s target configuration;
+  never derive those expected values from the SQL being checked.
   on a fresh tree for comparison with a namespace/table key. Preserve every other detail;
   never execute that projection or substitute it for the exact reviewed-SQL comparison.
   Flag any other AST surgery that constructs the shadow schema, and any fingerprinting of SQL text.

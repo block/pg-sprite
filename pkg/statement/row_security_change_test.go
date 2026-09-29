@@ -126,9 +126,9 @@ func TestRowSecurityChangeNamespaceComparison(t *testing.T) {
 	require.NoError(t, err)
 	originalStatements := first.Statements()
 	originalCanonical := first.CanonicalSQL()
-	a, err := first.CanonicalSQLForNamespace()
+	a, err := first.CanonicalSQLForNamespace("staging", "documents")
 	require.NoError(t, err)
-	b, err := second.CanonicalSQLForNamespace()
+	b, err := second.CanonicalSQLForNamespace("production", "documents")
 	require.NoError(t, err)
 	assert.Equal(t, a, b)
 	assert.Contains(t, a, "auth.uid()")
@@ -136,6 +136,43 @@ func TestRowSecurityChangeNamespaceComparison(t *testing.T) {
 	assert.Equal(t, originalCanonical, first.CanonicalSQL())
 	assert.NotEqual(t, first.CanonicalSQL(), second.CanonicalSQL())
 	var empty RowSecurityChange
-	_, err = empty.CanonicalSQLForNamespace()
+	_, err = empty.CanonicalSQLForNamespace("public", "documents")
 	require.ErrorIs(t, err, ErrRowSecurityChange)
+}
+
+func TestRowSecurityNamespaceComparisonRejectsWrongTarget(t *testing.T) {
+	change, err := ParseRowSecurityChange(`ALTER TABLE tenant_a.orders ENABLE ROW LEVEL SECURITY;`)
+	require.NoError(t, err)
+	for _, target := range []struct{ schema, table string }{{"tenant_b", "orders"}, {"tenant_a", "documents"}} {
+		sql, err := change.CanonicalSQLForNamespace(target.schema, target.table)
+		require.ErrorIs(t, err, ErrRowSecurityChange)
+		assert.Empty(t, sql)
+	}
+}
+
+func TestRowSecurityChangeSplitHandlesQuotedSemicolons(t *testing.T) {
+	change, err := ParseRowSecurityChange(`
+ -- a comment; not a statement
+ CREATE POLICY "read;ers" ON public.documents USING (label = $$hello;world$$);
+ COMMENT ON POLICY "read;ers" ON public.documents IS 'it''s; quoted';
+ `)
+	require.NoError(t, err)
+	require.Len(t, change.Statements(), 2)
+	again, err := ParseRowSecurityChange(strings.Join(change.Statements(), ";\n"))
+	require.NoError(t, err)
+	assert.Equal(t, change.CanonicalSQL(), again.CanonicalSQL())
+}
+
+func TestRowSecurityNamespaceComparisonRevalidatesCanonicalShape(t *testing.T) {
+	for _, sql := range []string{
+		`DROP POLICY readers ON other.documents`,
+		`CREATE TABLE public.documents (id int)`,
+		`COMMENT ON TABLE public.documents IS 'not a policy'`,
+	} {
+		t.Run(sql, func(t *testing.T) {
+			change := RowSecurityChange{schema: "public", table: "documents", canonical: []string{sql}}
+			_, err := change.CanonicalSQLForNamespace("public", "documents")
+			require.ErrorIs(t, err, ErrRowSecurityChange)
+		})
+	}
 }
