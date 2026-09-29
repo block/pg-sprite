@@ -124,12 +124,16 @@ func TestRowSecurityChangeNamespaceComparison(t *testing.T) {
   COMMENT ON POLICY readers ON production.documents IS 'Access';
  `)
 	require.NoError(t, err)
+	originalStatements := first.Statements()
+	originalCanonical := first.CanonicalSQL()
 	a, err := first.CanonicalSQLForNamespace()
 	require.NoError(t, err)
 	b, err := second.CanonicalSQLForNamespace()
 	require.NoError(t, err)
 	assert.Equal(t, a, b)
 	assert.Contains(t, a, "auth.uid()")
+	assert.Equal(t, originalStatements, first.Statements())
+	assert.Equal(t, originalCanonical, first.CanonicalSQL())
 	assert.NotEqual(t, first.CanonicalSQL(), second.CanonicalSQL())
 	var empty RowSecurityChange
 	_, err = empty.CanonicalSQLForNamespace()

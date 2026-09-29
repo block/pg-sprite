@@ -106,9 +106,15 @@ is a smoke tour of the built binary, not a second test suite.
   with `pkg/statement` as the parse boundary. No `strings.Split(";")`, no hand-parsing; a parse failure is an
   error surfaced to the caller. Shadow-table DDL and checkpoint fingerprints are derived by
   execute-and-introspect on the empty shadow and in the transaction-scoped scratch schema,
-  never by AST transformation; the one AST edit permitted is retargeting a single statement's
+  never by AST transformation; the executable-SQL AST edit permitted here is retargeting a single statement's
   one relation name (`pkg/statement` `Qualify`), which changes no semantics (see
-  [docs/copy-and-swap-design.md](docs/copy-and-swap-design.md#d1--no-durable-scratch-database)).
+  [docs/copy-and-swap-design.md](docs/copy-and-swap-design.md#d1--no-durable-scratch-database)). A separate,
+  comparison-only exception permits `RowSecurityChange.CanonicalSQLForNamespace` to erase
+  only the validated operation target's schema on a fresh parsed tree. The comparison key
+  must already include the canonical namespace and table. Preserve policy names, roles,
+  expressions, qualified helpers, ordering, and duplicates; never execute this projection
+  or use it instead of the executor's exact reviewed-SQL comparison. Stored executable SQL
+  must remain unchanged.
 - Tests use testify (`require` for setup, `assert` for verification), `t.Context()` (in
   cleanups, which run after the context is cancelled, use
   `context.WithoutCancel(t.Context())`), and named polling deadlines — no bare `time.Sleep`
