@@ -14,8 +14,7 @@ import (
 func TestPositionClassifiesKeysAgainstTheCutFrontier(t *testing.T) {
 	pos := Position{
 		Watermark: NewWatermark(10),
-		Cut:       30,
-		CutValid:  true,
+		Cut:       NewWatermark(30),
 		InFlight:  []Chunk{mustChunk(t, 11, 20)},
 	}
 	cases := map[int64]KeyState{

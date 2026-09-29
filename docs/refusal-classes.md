@@ -145,6 +145,16 @@ so the cutover route inherits it.
 | `shadow-grants-differ` | The shadow's grants still differ from the source's after the build synchronised them ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `invariant-violation` | The build wrote the grants under the table lock and read back something else; that is the engine's write, not the environment. |
 | `shadow-identity-handoff` | A source identity column the change kept on the shadow does not carry `DEFAULT nextval(<source sequence>)` there, or the shadow declares an identity of its own ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | The change itself, or a later edit to the shadow, replaced the handoff; change the statement or drop the shadow and rebuild. |
 
+The copier's own refusals — a lock the server does not confirm from the writing connection
+([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)), a source or shadow replaced
+since its proof was minted ([ST-6](invariants.md#st-6--preflight-before-the-first-write)), a
+copy that stopped with chunks in flight or short of the key space
+([CO-4](invariants.md#co-4--the-copyapply-ordering-invariants), LK-3) — are fail-closed
+`ErrInvariantViolation` values tagged with the invariant in prose. They join this table with a
+typed cause when the orchestrator that runs the copy is wired: that orchestrator is the first
+importer that routes on the cause, and a cause classified before any importer exists would be
+classified against a guess.
+
 ### `unsupported-statement` on the create path, keyed on `CreateShapeCause`
 
 The closed set is `executor.CreateShapeCauses()`. The cause travels with the plan statement

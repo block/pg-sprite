@@ -21,7 +21,7 @@ func mustChunk(t *testing.T, lower, upper int64) Chunk {
 func TestLedgerWatermarkFollowsTheContiguousPrefix(t *testing.T) {
 	l := newLedger(Watermark{})
 	fresh := l.position()
-	assert.False(t, fresh.CutValid, "nothing claimed, nothing cut")
+	assert.False(t, fresh.Cut.Valid(), "nothing claimed, nothing cut")
 	assert.False(t, fresh.Watermark.Valid())
 	assert.Empty(t, fresh.InFlight)
 
@@ -32,8 +32,7 @@ func TestLedgerWatermarkFollowsTheContiguousPrefix(t *testing.T) {
 	require.True(t, l.claim(second))
 	require.True(t, l.claim(last))
 	claimed := l.position()
-	assert.True(t, claimed.CutValid)
-	assert.Equal(t, int64(math.MaxInt64), claimed.Cut, "the frontier is the highest claimed key")
+	assert.Equal(t, NewWatermark(math.MaxInt64), claimed.Cut, "the frontier is the highest claimed key")
 	assert.Equal(t, []Chunk{first, second, last}, claimed.InFlight)
 
 	require.True(t, l.land(second, 10))
@@ -66,12 +65,12 @@ func TestLedgerClaimsOnlyAtTheFrontier(t *testing.T) {
 
 	l := newLedger(Watermark{})
 	assert.False(t, l.claim(second), "the first claim must be the chunk open below")
-	assert.False(t, l.position().CutValid, "a refused claim cuts nothing")
+	assert.False(t, l.position().Cut.Valid(), "a refused claim cuts nothing")
 	require.True(t, l.claim(first))
 	assert.False(t, l.claim(last), "a chunk past the frontier is refused")
 	assert.False(t, l.claim(first), "a chunk at or below the frontier is refused")
 	assert.Equal(t, []Chunk{first}, l.position().InFlight)
-	assert.Equal(t, int64(10), l.position().Cut)
+	assert.Equal(t, NewWatermark(10), l.position().Cut)
 	require.True(t, l.claim(second))
 	require.True(t, l.claim(last))
 	assert.False(t, l.claim(mustChunk(t, 30, 40)), "nothing can be claimed once the key space is cut")
@@ -80,6 +79,27 @@ func TestLedgerClaimsOnlyAtTheFrontier(t *testing.T) {
 	assert.False(t, resumed.claim(mustChunk(t, 100, 200)), "a resumed ledger's first chunk starts just above the watermark")
 	assert.False(t, resumed.claim(mustChunk(t, 102, 200)))
 	require.True(t, resumed.claim(mustChunk(t, 101, 200)))
+}
+
+// Once the frontier sits at the largest key there is no key above it to
+// start from, so every further claim is refused — including the chunk that
+// is open below, which is the only chunk a frontier-less ledger accepts and
+// the one a naive "next lower bound is cut+1" check would wrap around to.
+// The frontier does not move on refusal.
+func TestLedgerRefusesEveryClaimOnceTheKeySpaceIsCut(t *testing.T) {
+	l := newLedger(Watermark{})
+	whole := mustChunk(t, math.MinInt64, math.MaxInt64)
+	require.True(t, l.claim(whole), "the whole key space is one chunk that starts at the frontier")
+	assert.Equal(t, NewWatermark(math.MaxInt64), l.position().Cut)
+
+	assert.False(t, l.claim(mustChunk(t, math.MinInt64, 10)), "the chunk open below is refused after the key space is cut")
+	assert.False(t, l.claim(mustChunk(t, math.MinInt64, math.MaxInt64)), "the whole key space cannot be claimed twice")
+	assert.Equal(t, NewWatermark(math.MaxInt64), l.position().Cut, "a refused claim leaves the frontier where it was")
+	assert.Equal(t, []Chunk{whole}, l.position().InFlight, "a refused claim registers nothing")
+
+	complete := newLedger(NewWatermark(math.MaxInt64))
+	assert.False(t, complete.claim(mustChunk(t, math.MinInt64, 10)), "a ledger resumed past the largest key accepts no claim")
+	assert.Equal(t, NewWatermark(math.MaxInt64), complete.position().Cut)
 }
 
 // A chunk whose transaction did not commit stays in flight: the frontier
@@ -96,7 +116,7 @@ func TestLedgerUnlandedChunkStaysInFlight(t *testing.T) {
 	require.True(t, l.land(second, 10))
 	pos := l.position()
 	assert.Equal(t, []Chunk{first}, pos.InFlight)
-	assert.Equal(t, int64(20), pos.Cut)
+	assert.Equal(t, NewWatermark(20), pos.Cut)
 	assert.False(t, pos.Watermark.Valid(), "the watermark waits for the unlanded chunk")
 	assert.Equal(t, KeyInFlight, pos.Classify(5), "a key in the unlanded chunk is deferred, not landed")
 	assert.Equal(t, KeyLanded, pos.Classify(15), "a key in the chunk that landed above it is landed")
@@ -113,8 +133,7 @@ func TestLedgerResumesAfterTheWatermark(t *testing.T) {
 	l := newLedger(NewWatermark(100))
 	resumed := l.position()
 	assert.Equal(t, NewWatermark(100), resumed.Watermark)
-	assert.True(t, resumed.CutValid)
-	assert.Equal(t, int64(100), resumed.Cut, "keys at or below the resume watermark are landed, not uncut")
+	assert.Equal(t, NewWatermark(100), resumed.Cut, "keys at or below the resume watermark are landed, not uncut")
 
 	next := mustChunk(t, 101, 200)
 	require.True(t, l.claim(next))

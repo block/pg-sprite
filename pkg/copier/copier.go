@@ -42,7 +42,8 @@ type Options struct {
 	StatementTimeout time.Duration
 	// Chunker sizes the chunks.
 	Chunker ChunkerOptions
-	// Clock times each chunk for the chunker's feedback (D12).
+	// Clock times each chunk for the chunker's chunk-time throttling
+	// feedback (docs/copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag).
 	Clock progress.Clock
 }
 
@@ -94,6 +95,9 @@ type Copier struct {
 	sql string
 	// clearSQL removes one batch of shadow rows above the resume watermark.
 	clearSQL string
+	// fenceSQL makes the first clear batch wait for the earlier run's
+	// straggling chunk transactions.
+	fenceSQL string
 
 	// claimMu is held from cutting a chunk to registering it, so chunks are
 	// registered in the order they were cut. It is the only lock held
@@ -136,6 +140,7 @@ func NewCopier(target preflight.CopySwapTarget, shadow Shadow, lock *dbconn.Tabl
 		opts:     opts,
 		sql:      copySQL(target, shadow),
 		clearSQL: clearAboveSQL(target, shadow),
+		fenceSQL: fenceStragglersSQL(shadow),
 		ledger:   newLedger(from),
 	}, nil
 }

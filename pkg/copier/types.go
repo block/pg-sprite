@@ -32,22 +32,25 @@ func (c Chunk) Upper() int64 { return c.upper }
 // zero for a chunk not cut by a Chunker.
 func (c Chunk) Rows() int64 { return c.rows }
 
-// Watermark identifies the highest primary key below which every chunk was
-// copied. The zero value means no chunk has been copied yet; a valid
-// watermark is obtainable only from NewWatermark, so a value can never be
-// paired with the wrong validity flag.
+// Watermark is a frontier in the primary-key space: every key at or below
+// its value is on one side of the copy. The copier reports two — the
+// copied-through watermark (every key at or below it has landed) and the cut
+// frontier (every key at or below it is in a chunk a worker has started
+// reading). The zero value means the frontier has not been reached, so
+// there is no key on that side; a valid watermark is obtainable only from
+// NewWatermark, so a value can never be paired with the wrong validity flag.
 type Watermark struct {
 	value int64
 	valid bool
 }
 
-// NewWatermark returns a valid copied-through watermark.
+// NewWatermark returns a valid watermark at value.
 func NewWatermark(value int64) Watermark { return Watermark{value: value, valid: true} }
 
-// Valid reports whether any chunk has been copied. Value is meaningful only
-// when Valid is true.
+// Valid reports whether the frontier has been reached. Value is meaningful
+// only when Valid is true.
 func (w Watermark) Valid() bool { return w.valid }
 
-// Value returns the copied-through primary key. It is zero for an invalid
+// Value returns the frontier's primary key. It is zero for an invalid
 // watermark; callers check Valid first.
 func (w Watermark) Value() int64 { return w.value }

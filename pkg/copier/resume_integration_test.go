@@ -29,3 +29,17 @@ func TestClearAboveSQLIsFrozen(t *testing.T) {
 		` WHERE "order" >= $1::bigint ORDER BY "order" LIMIT $2::bigint)`
 	assert.Equal(t, want, clearAboveSQL(target, shadow))
 }
+
+// The fence is one lock statement on the shadow in SHARE MODE: the weakest
+// mode that conflicts with the ROW EXCLUSIVE lock an insert holds until its
+// commit completes, and one that still admits the ACCESS SHARE readers.
+// A stronger mode would block readers for nothing; a weaker one would not
+// wait for the straggler at all.
+func TestFenceStragglersSQLIsFrozen(t *testing.T) {
+	shadow := fakeShadow{
+		schema: "t_1", source: "orders", shadow: "_pgsprite_orders_new",
+		sourceOID: 1, shadowOID: 2,
+		columns: []string{"id", "qty"},
+	}
+	assert.Equal(t, `LOCK TABLE "t_1"."_pgsprite_orders_new" IN SHARE MODE`, fenceStragglersSQL(shadow))
+}

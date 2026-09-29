@@ -168,15 +168,13 @@ func samplePositions(t *testing.T, c *copier.Copier) (stop func()) {
 
 func assertPositionConsistent(t *testing.T, pos copier.Position) {
 	t.Helper()
-	if !pos.CutValid {
+	if !pos.Cut.Valid() {
 		assert.False(t, pos.Watermark.Valid(), "nothing can land before anything is cut: %+v", pos)
 		assert.Empty(t, pos.InFlight, "nothing can be in flight before anything is cut: %+v", pos)
 		return
 	}
 	if len(pos.InFlight) == 0 {
-		if assert.True(t, pos.Watermark.Valid(), "a cut with nothing in flight has landed: %+v", pos) {
-			assert.Equal(t, pos.Cut, pos.Watermark.Value(), "with nothing in flight every claimed chunk has landed: %+v", pos)
-		}
+		assert.Equal(t, pos.Cut, pos.Watermark, "with nothing in flight every claimed chunk has landed: %+v", pos)
 		return
 	}
 	frontier := int64(math.MinInt64)
@@ -185,7 +183,7 @@ func assertPositionConsistent(t *testing.T, pos copier.Position) {
 	}
 	assert.Equal(t, frontier, pos.InFlight[0].Lower(), "the lowest in-flight chunk starts just above the watermark: %+v", pos)
 	for _, chunk := range pos.InFlight {
-		assert.LessOrEqual(t, chunk.Upper(), pos.Cut, "an in-flight chunk lies at or below the cut: %+v", pos)
+		assert.LessOrEqual(t, chunk.Upper(), pos.Cut.Value(), "an in-flight chunk lies at or below the cut: %+v", pos)
 	}
 }
 
@@ -220,27 +218,23 @@ func TestCopierCopiesTheWholeTable(t *testing.T) {
 }
 
 // A row the applier writes into the shadow carries a fresher image than the
-// copier's read; the copier leaves it alone (CO-4). The applier's write is
-// committed while the copy is running — the copier's insert of the chunk
-// holding the key waits on the uncommitted row and then finds it committed —
-// which is the only way a row can be in the shadow ahead of the copier,
-// since a copy that starts from nothing first clears the shadow.
+// copier's read; the copier leaves it alone (CO-4). The applier's write
+// begins once the copy is under way and is committed while the chunk holding
+// the key is in flight — the copier's insert waits on the uncommitted row
+// and then finds it committed — which is the only way a row can be in the
+// shadow ahead of the copier, since a copy that starts from nothing first
+// clears the shadow and waits for every writer that preceded it.
 func TestCopierNeverOverwritesAShadowRow(t *testing.T) {
 	f := newCopierFixture(t)
 	const rows = 300
 	target, lock, shadow := f.prepare(t, rows)
-	applied, err := f.pool.Begin(t.Context())
-	require.NoError(t, err)
-	// Redundant safety closer: the test commits, after which Rollback
-	// returns the guaranteed ErrTxClosed.
-	t.Cleanup(func() { _ = applied.Rollback(context.WithoutCancel(t.Context())) })
-	_, err = applied.Exec(t.Context(), "INSERT INTO "+pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()+" (id, qty) VALUES (30, 999)")
-	require.NoError(t, err)
+	applied := f.pinShadowKeyAtFirstChunk(t, shadow, 30, 999)
 
 	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{
 		Workers:     1,
 		LockTimeout: 30 * time.Second,
 		Chunker:     copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},
+		Clock:       applied.clock,
 	})
 	require.NoError(t, err)
 	results := make(chan error, 1)
@@ -248,12 +242,13 @@ func TestCopierNeverOverwritesAShadowRow(t *testing.T) {
 	wg.Go(func() { results <- c.Run(t.Context(), f.pool) })
 	t.Cleanup(wg.Wait)
 
+	applied.wait(t)
 	const inFlightDeadline = 15 * time.Second
 	require.Eventually(t, func() bool {
 		pos := c.Position()
 		return len(pos.InFlight) == 1 && pos.InFlight[0].Lower() == math.MinInt64
 	}, inFlightDeadline, 20*time.Millisecond, "the first chunk, holding key 30, should be in flight")
-	require.NoError(t, applied.Commit(t.Context()))
+	applied.commit(t)
 
 	const stopDeadline = 30 * time.Second
 	select {
@@ -324,18 +319,20 @@ func TestCopierResumesFromTheZeroWatermark(t *testing.T) {
 // tail above it — including the chunks that had landed out of order, whose
 // rows the applier may have discarded changes for as uncut — and converges
 // on a source that changed in that tail meanwhile. One chunk is pinned
-// mid-insert by an uncommitted shadow row for one of its keys, so the
-// cancellation lands on a statement that is genuinely in flight.
+// mid-insert by an uncommitted shadow row for one of its keys, written once
+// the copy is under way, so the cancellation lands on a statement that is
+// genuinely in flight.
 func TestCopierCancellationKeepsTheCancelledChunkInFlight(t *testing.T) {
 	f := newCopierFixture(t)
 	const rows = 2000
 	target, lock, shadow := f.prepare(t, rows)
-	release := f.pinShadowKey(t, shadow, 1050)
+	pin := f.pinShadowKeyAtFirstChunk(t, shadow, 1050, 0)
 
 	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{
 		Workers:     4,
 		LockTimeout: 30 * time.Second,
 		Chunker:     copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},
+		Clock:       pin.clock,
 	})
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(t.Context())
@@ -345,10 +342,11 @@ func TestCopierCancellationKeepsTheCancelledChunkInFlight(t *testing.T) {
 	wg.Go(func() { results <- c.Run(ctx, f.pool) })
 	t.Cleanup(wg.Wait)
 
+	pin.wait(t)
 	const pinnedDeadline = 15 * time.Second
 	require.Eventually(t, func() bool {
 		pos := c.Position()
-		return pos.CutValid && pos.Cut == math.MaxInt64 && len(pos.InFlight) == 1
+		return pos.Cut == copier.NewWatermark(math.MaxInt64) && len(pos.InFlight) == 1
 	}, pinnedDeadline, 20*time.Millisecond, "every chunk but the pinned one should land")
 	pinned := c.Position()
 	assert.Equal(t, copier.NewWatermark(1000), pinned.Watermark, "the watermark stops below the pinned chunk")
@@ -373,7 +371,7 @@ func TestCopierCancellationKeepsTheCancelledChunkInFlight(t *testing.T) {
 	assert.Equal(t, int64(1000), f.count(t, shadow.ShadowTable(), "id <= 1000"), "every key at or below the watermark landed")
 	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "id BETWEEN 1001 AND 1100"), "the cancelled chunk left nothing behind")
 	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "id = 1050"))
-	release()
+	pin.release(t)
 
 	// A change the applier would have discarded as uncut, had it read this
 	// Position: key 1500 is above the checkpointed watermark.
@@ -396,12 +394,12 @@ func TestCopierAbortsWhenTheLockIsLostMidCopy(t *testing.T) {
 	shadow := f.build(t, buildLock, target)
 	require.NoError(t, buildLock.Release(t.Context()))
 	lock := f.lock(t, "orders", dbconn.WithTableLockKeepalive(100*time.Millisecond))
-	release := f.pinShadowKey(t, shadow, 1050)
-	defer release()
+	pin := f.pinShadowKeyAtFirstChunk(t, shadow, 1050, 0)
 
 	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{
 		Workers:     2,
 		LockTimeout: 30 * time.Second,
+		Clock:       pin.clock,
 		Chunker:     copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},
 	})
 	require.NoError(t, err)
@@ -409,11 +407,12 @@ func TestCopierAbortsWhenTheLockIsLostMidCopy(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Go(func() { results <- c.Run(t.Context(), f.pool) })
 	t.Cleanup(wg.Wait)
+	pin.wait(t)
 
 	const pinnedDeadline = 15 * time.Second
 	require.Eventually(t, func() bool {
 		pos := c.Position()
-		return pos.CutValid && pos.Cut == math.MaxInt64 && len(pos.InFlight) == 1
+		return pos.Cut == copier.NewWatermark(math.MaxInt64) && len(pos.InFlight) == 1
 	}, pinnedDeadline, 20*time.Millisecond, "every chunk but the pinned one should land")
 	f.terminateBackend(t, lock.BackendPID())
 
@@ -547,21 +546,98 @@ func (f copierFixture) lostLock(t *testing.T, table string) *dbconn.TableLockSes
 	return lock
 }
 
-// pinShadowKey inserts key into the shadow in a transaction it leaves open,
-// so the copier's insert of the chunk holding key waits on that transaction
-// and the chunk stays in flight until the returned release rolls it back.
-func (f copierFixture) pinShadowKey(t *testing.T, shadow schemachange.BuiltShadow, key int64) (release func()) {
+// hookedClock is a Clock whose first reading runs a hook. The copier reads
+// the clock once per chunk, after the chunk is claimed and before its
+// transaction begins, so the hook lands after the resume clear's guarded
+// transaction has committed and before the first chunk's begins.
+type hookedClock struct {
+	once sync.Once
+	hook func()
+}
+
+func (c *hookedClock) Now() time.Time {
+	c.once.Do(c.hook)
+	return time.Now()
+}
+
+// shadowPin is a row inserted into the shadow by a transaction left open,
+// standing in for an applier write that is under way while the copier runs:
+// the copier's insert of the chunk holding the key waits on it, so that
+// chunk stays in flight until the pin is committed or rolled back.
+type shadowPin struct {
+	// clock places the pin; the copier under test takes it as Options.Clock.
+	clock *hookedClock
+	// pinned is closed once tx and err are set.
+	pinned chan struct{}
+	tx     pgx.Tx
+	err    error
+	done   sync.Once
+}
+
+// pinShadowKeyAtFirstChunk arranges for key to be pinned in the shadow with
+// image qty at the copier's first clock reading — after the resume clear and
+// the first claim, before the first chunk transaction — so the pin is a
+// concurrent writer the copy meets, not a straggler the clear's fence waits
+// for. Callers wait before touching the pin and end it with commit or
+// release; a pin still open at cleanup is rolled back.
+func (f copierFixture) pinShadowKeyAtFirstChunk(t *testing.T, shadow schemachange.BuiltShadow, key, qty int64) *shadowPin {
 	t.Helper()
-	tx, err := f.pool.Begin(t.Context())
-	require.NoError(t, err)
-	_, err = tx.Exec(t.Context(), "INSERT INTO "+pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()+" (id, qty) VALUES ($1, 0)", key)
-	require.NoError(t, err)
-	var once sync.Once
-	release = func() {
-		once.Do(func() { assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context()))) })
+	pin := &shadowPin{pinned: make(chan struct{})}
+	pin.clock = &hookedClock{hook: func() {
+		defer close(pin.pinned)
+		// The hook runs on a copier worker; failures are reported through
+		// err and checked by wait on the test goroutine.
+		tx, err := f.pool.Begin(t.Context())
+		if err != nil {
+			pin.err = fmt.Errorf("begin the pin: %w", err)
+			return
+		}
+		if _, err := tx.Exec(t.Context(), "INSERT INTO "+pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()+" (id, qty) VALUES ($1, $2)", key, qty); err != nil {
+			pin.err = fmt.Errorf("pin key %d: %w", key, err)
+			// Redundant safety closer: the failed insert aborted the
+			// transaction, and the server ends it with the connection.
+			_ = tx.Rollback(context.WithoutCancel(t.Context()))
+			return
+		}
+		pin.tx = tx
+	}}
+	t.Cleanup(func() {
+		select {
+		case <-pin.pinned:
+			pin.release(t)
+		default:
+		}
+	})
+	return pin
+}
+
+// wait blocks until the pin is in place and fails the test if placing it
+// did not succeed.
+func (p *shadowPin) wait(t *testing.T) {
+	t.Helper()
+	const pinDeadline = 15 * time.Second
+	select {
+	case <-p.pinned:
+	case <-time.After(pinDeadline):
+		t.Fatalf("the copier did not reach its first chunk within %s", pinDeadline)
 	}
-	t.Cleanup(release)
-	return release
+	require.NoError(t, p.err)
+}
+
+// release rolls the pin back, once.
+func (p *shadowPin) release(t *testing.T) {
+	t.Helper()
+	p.done.Do(func() {
+		if p.tx != nil {
+			assert.NoError(t, p.tx.Rollback(context.WithoutCancel(t.Context())))
+		}
+	})
+}
+
+// commit publishes the pinned row, once.
+func (p *shadowPin) commit(t *testing.T) {
+	t.Helper()
+	p.done.Do(func() { require.NoError(t, p.tx.Commit(t.Context())) })
 }
 
 // goneLock acquires the table lock and then terminates the session's

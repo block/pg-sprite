@@ -116,13 +116,19 @@ only when it commits — a chunk whose transaction did not commit stays in fligh
 never read as landed; a resumed copy first deletes every shadow row above W in bounded batches,
 each in its own guarded transaction, before its first chunk is cut — the whole shadow when
 nothing landed, since a zero watermark says nothing about what an earlier run left above it — so
-every key above W is genuinely uncut when the applier starts discarding for it; and `Position` snapshots the cut
+every key above W is genuinely uncut when the applier starts discarding for it; the first clear
+batch takes `LOCK TABLE <shadow> IN SHARE MODE` before its delete, so a chunk transaction of the
+earlier run that is still committing into the shadow (holding `ROW EXCLUSIVE` through a
+synchronous-commit wait) ends before the clear reads, and a row it publishes cannot outlive the
+clear (straggler test); and `Position` snapshots the cut
 frontier, the in-flight chunks, and the landed watermark under one lock so `Position.Classify`
 gives the applier the three-way answer (uncut / in-flight / landed) for any key (whole-table with
 a Position-consistency sampler, never-overwrites, resume-from-watermark with stale rows above and
 below W, resume-from-zero-watermark with stale rows down to the smallest key, out-of-order
 landing, pinned-chunk cancellation followed by a resume that re-copies the
-cleared tail, and frontier-ordered ledger tests). *Planned enforcement:* the applier's
+cleared tail, a resume that waits behind a straggling chunk transaction, a shadow replaced
+between a chunk's claim and its transaction, and frontier-ordered ledger tests including the
+frontier at the largest key refusing every claim). *Planned enforcement:* the applier's
 SQL shape and flush scheduling that defers any flush overlapping an in-flight chunk's key range
 (mutual exclusion, not tombstone retention). *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk

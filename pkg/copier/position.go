@@ -39,11 +39,11 @@ type Position struct {
 	// Watermark is the contiguous prefix of landed chunks — the value that is
 	// checkpointed and resumed from. Its zero value means nothing has landed.
 	Watermark Watermark
-	// Cut is the highest key of any chunk a worker has claimed; every key
-	// above it is in a chunk the copier has not started reading. CutValid is
-	// false while nothing has been claimed, and then every key is uncut.
-	Cut      int64
-	CutValid bool
+	// Cut is the cut frontier: the highest key of any chunk a worker has
+	// claimed, so every key above it is in a chunk the copier has not started
+	// reading. Its zero value means nothing has been claimed, and then every
+	// key is uncut.
+	Cut Watermark
 	// InFlight are the claimed, unlanded chunks, in ascending key order. It is
 	// empty once Run has returned nil; after a failed Run it lists the chunks
 	// whose transactions did not commit, so their keys never read as landed.
@@ -58,7 +58,7 @@ type Position struct {
 // flight when a claimed chunk covers it and landed otherwise.
 func (p Position) Classify(key int64) KeyState {
 	// INV: CO-4
-	if !p.CutValid || key > p.Cut {
+	if !p.Cut.Valid() || key > p.Cut.Value() {
 		return KeyUncut
 	}
 	for _, chunk := range p.InFlight {

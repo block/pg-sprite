@@ -142,28 +142,21 @@ func TestStartAfter(t *testing.T) {
 // state after each Next is asserted by the integration tests.
 func TestChunkerCutBeforeAnyQuery(t *testing.T) {
 	fresh := &Chunker{next: math.MinInt64}
-	_, ok := fresh.Cut()
-	assert.False(t, ok, "nothing has been cut before the first chunk")
+	assert.Equal(t, Watermark{}, fresh.Cut(), "nothing has been cut before the first chunk")
 
 	resumed := &Chunker{}
 	resumed.next, resumed.done = startAfter(NewWatermark(3))
-	upper, ok := resumed.Cut()
-	assert.True(t, ok)
-	assert.Equal(t, int64(3), upper, "a resumed chunker has cut through its watermark")
+	assert.Equal(t, NewWatermark(3), resumed.Cut(), "a resumed chunker has cut through its watermark")
 
 	// A watermark at the smallest key resumes from the key after it, and
 	// that is a real cut, not the nothing-cut state.
 	lowest := &Chunker{}
 	lowest.next, lowest.done = startAfter(NewWatermark(math.MinInt64))
-	upper, ok = lowest.Cut()
-	assert.True(t, ok)
-	assert.Equal(t, int64(math.MinInt64), upper)
+	assert.Equal(t, NewWatermark(math.MinInt64), lowest.Cut())
 
 	complete := &Chunker{}
 	complete.next, complete.done = startAfter(NewWatermark(math.MaxInt64))
-	upper, ok = complete.Cut()
-	assert.True(t, ok)
-	assert.Equal(t, int64(math.MaxInt64), upper, "a complete chunker has cut the whole key space")
+	assert.Equal(t, NewWatermark(math.MaxInt64), complete.Cut(), "a complete chunker has cut the whole key space")
 }
 
 // TestChunkerFeedbackSizesFromTheTimedChunk shows why Feedback scales the
@@ -224,13 +217,12 @@ func TestChunkerCutAndFeedbackDoNotWaitForNext(t *testing.T) {
 	}
 
 	observed := make(chan struct{})
-	var cut int64
-	var cutOK bool
+	var cut Watermark
 	var rowsDuringNext int64
 	var feedbackErr error
 	wg.Go(func() {
 		defer close(observed)
-		cut, cutOK = c.Cut()
+		cut = c.Cut()
 		earlier := Chunk{lower: 1, upper: 1000, rows: opts.InitialRows}
 		feedbackErr = c.Feedback(earlier, DefaultTargetChunkTime/5)
 		rowsDuringNext = c.Rows()
@@ -244,8 +236,7 @@ func TestChunkerCutAndFeedbackDoNotWaitForNext(t *testing.T) {
 	wg.Wait()
 
 	require.NoError(t, feedbackErr)
-	assert.True(t, cutOK)
-	assert.Equal(t, int64(1000), cut, "the frontier is the resumed watermark until Next lands its chunk")
+	assert.Equal(t, NewWatermark(1000), cut, "the frontier is the resumed watermark until Next lands its chunk")
 	assert.Equal(t, 2*opts.InitialRows, rowsDuringNext, "Feedback resized while Next was in flight")
 
 	require.NoError(t, nextErr)
@@ -253,9 +244,7 @@ func TestChunkerCutAndFeedbackDoNotWaitForNext(t *testing.T) {
 	assert.Equal(t, int64(1001), chunk.Lower())
 	assert.Equal(t, int64(2000), chunk.Upper())
 	assert.Equal(t, opts.InitialRows, chunk.rows, "the chunk keeps the size it was cut with")
-	cut, cutOK = c.Cut()
-	assert.True(t, cutOK)
-	assert.Equal(t, int64(2000), cut)
+	assert.Equal(t, NewWatermark(2000), c.Cut())
 }
 
 // heldBoundary is a RowQuerier whose boundary query blocks until released,

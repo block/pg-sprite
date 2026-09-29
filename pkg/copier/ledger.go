@@ -12,9 +12,7 @@ import (
 // only over the contiguous prefix of landed chunks, while the cut frontier
 // follows claims.
 type ledger struct {
-	cut      int64
-	cutValid bool
-
+	cut       Watermark
 	watermark Watermark
 	// next is the lower bound of the chunk that will extend the watermark;
 	// meaningful while !complete.
@@ -33,11 +31,8 @@ type ledger struct {
 // newLedger resumes bookkeeping after from: every key at or below it counts
 // as landed, and the first chunk to extend the watermark starts just above it.
 func newLedger(from Watermark) *ledger {
-	l := &ledger{watermark: from}
+	l := &ledger{cut: from, watermark: from}
 	l.next, l.complete = startAfter(from)
-	if from.Valid() {
-		l.cut, l.cutValid = from.Value(), true
-	}
 	return l
 }
 
@@ -52,7 +47,7 @@ func (l *ledger) claim(chunk Chunk) bool {
 		return false
 	}
 	l.inFlight = append(l.inFlight, chunk)
-	l.cut, l.cutValid = chunk.upper, true
+	l.cut = NewWatermark(chunk.upper)
 	return true
 }
 
@@ -60,13 +55,13 @@ func (l *ledger) claim(chunk Chunk) bool {
 // first chunk of the key space while nothing is cut, and otherwise the chunk
 // whose lower bound is one past the frontier.
 func (l *ledger) startsAtFrontier(chunk Chunk) bool {
-	if !l.cutValid {
+	if !l.cut.Valid() {
 		return chunk.lower == math.MinInt64
 	}
-	if l.cut == math.MaxInt64 {
+	if l.cut.Value() == math.MaxInt64 {
 		return false
 	}
-	return chunk.lower == l.cut+1
+	return chunk.lower == l.cut.Value()+1
 }
 
 // land records that a claimed chunk committed rows rows and advances the
@@ -113,7 +108,6 @@ func (l *ledger) position() Position {
 	return Position{
 		Watermark:    l.watermark,
 		Cut:          l.cut,
-		CutValid:     l.cutValid,
 		InFlight:     slices.Clone(l.inFlight),
 		RowsInserted: l.rows,
 	}

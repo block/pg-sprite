@@ -22,7 +22,9 @@ import (
 // run finds the shadow empty and its one batch removes nothing. A watermark
 // at the largest key has nothing above it. The clear runs in bounded
 // batches, each in its own guarded transaction, so no single statement holds
-// locks or a snapshot for the whole tail.
+// locks or a snapshot for the whole tail; the first batch also fences the
+// earlier run's straggling chunk transactions, so a row they commit after
+// the clear began cannot survive it.
 func (c *Copier) clearAbove(ctx context.Context, pool *pgxpool.Pool, from Watermark) error {
 	// INV: CO-4
 	lower, done := startAfter(from)
@@ -30,20 +32,23 @@ func (c *Copier) clearAbove(ctx context.Context, pool *pgxpool.Pool, from Waterm
 		return nil
 	}
 	batch := c.chunker.Rows()
+	fence := true
 	for {
-		removed, err := c.clearBatch(ctx, pool, lower, batch)
+		removed, err := c.clearBatch(ctx, pool, lower, batch, fence)
 		if err != nil {
 			return err
 		}
 		if removed < batch {
 			return nil
 		}
+		fence = false
 	}
 }
 
 // clearBatch deletes up to limit shadow rows whose key is at or above lower
-// in one guarded transaction and reports how many it removed.
-func (c *Copier) clearBatch(ctx context.Context, pool *pgxpool.Pool, lower, limit int64) (int64, error) {
+// in one guarded transaction and reports how many it removed. With fence set
+// it first waits for the earlier run's straggling chunk transactions.
+func (c *Copier) clearBatch(ctx context.Context, pool *pgxpool.Pool, lower, limit int64, fence bool) (int64, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("begin clear of %s from %d: %w", c.shadow.ShadowTable(), lower, err)
@@ -57,6 +62,11 @@ func (c *Copier) clearBatch(ctx context.Context, pool *pgxpool.Pool, lower, limi
 	if err := c.guard(ctx, tx); err != nil {
 		return 0, err
 	}
+	if fence {
+		if err := c.fenceStragglers(ctx, tx); err != nil {
+			return 0, err
+		}
+	}
 	tag, err := tx.Exec(ctx, c.clearSQL, lower, limit)
 	if err != nil {
 		return 0, fmt.Errorf("clear %s from %d: %w", c.shadow.ShadowTable(), lower, err)
@@ -65,6 +75,35 @@ func (c *Copier) clearBatch(ctx context.Context, pool *pgxpool.Pool, lower, limi
 		return 0, fmt.Errorf("commit clear of %s from %d: %w", c.shadow.ShadowTable(), lower, err)
 	}
 	return tag.RowsAffected(), nil
+}
+
+// fenceStragglers waits for every chunk transaction of the earlier run that
+// is still writing into the shadow, or still committing into it, before the
+// clear reads the shadow. Such a transaction holds ROW EXCLUSIVE on the
+// shadow until its commit completes — through a wait for a synchronous
+// standby included — and its rows are invisible to the clear until then, so
+// a clear that ran ahead of it would leave a row above the watermark that
+// the resumed run's own insert never overwrites (CO-4). SHARE MODE conflicts
+// with ROW EXCLUSIVE, so the lock is granted only once every straggler has
+// ended and the delete that follows, in the same transaction, sees whatever
+// they committed; the wait is bounded by the transaction's lock_timeout.
+// Only the first batch needs the fence: no transaction of the earlier run
+// can begin after the table lock passed to this one, since every chunk
+// transaction confirms the lock before it writes.
+func (c *Copier) fenceStragglers(ctx context.Context, tx pgx.Tx) error {
+	// INV: CO-4
+	if _, err := tx.Exec(ctx, c.fenceSQL); err != nil {
+		return fmt.Errorf("fence %s against the earlier run's chunk transactions: %w", c.shadow.ShadowTable(), err)
+	}
+	return nil
+}
+
+// fenceStragglersSQL is the one statement the first clear batch runs before
+// its delete: a SHARE MODE lock on the shadow, which waits behind any ROW
+// EXCLUSIVE holder — an insert into it that has not finished committing —
+// and blocks none of the ACCESS SHARE readers.
+func fenceStragglersSQL(shadow Shadow) string {
+	return "LOCK TABLE " + pgx.Identifier{shadow.Schema(), shadow.ShadowTable()}.Sanitize() + " IN SHARE MODE"
 }
 
 // clearAboveSQL is the one statement every clear batch runs: delete the
