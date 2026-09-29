@@ -22,8 +22,11 @@ the reviewer's distillation.
   package-private constructors — never a
   raw string or bool that a caller could fabricate. Core code re-verifies its own
   preconditions; it never trusts that the planner or CLI checked.
-- `statement.DesiredWithRowSecurity` stays separate from `DesiredSchema`. Its only
-  live consumer is `executor.ExecuteRowSecurity`, which must enforce RS-1..RS-4;
+- `statement.DesiredWithRowSecurity` stays separate from `DesiredSchema`. Its live
+  entry points are `executor.PreviewRowSecurity`, `executor.ExecuteRowSecurity`, and
+  `executor.ExecuteReviewedRowSecurity`. Preview locks and renders, then rolls back;
+  execution verifies convergence before commit, and reviewed execution enforces RS-5
+  alongside RS-1..RS-4;
   generic native and create executors must still refuse policy SQL.
 - Invariant enforcement points carry a `// INV: <id>` comment matching
   [docs/invariants.md](../../docs/invariants.md); violations use `ErrInvariantViolation`
@@ -40,7 +43,12 @@ the reviewer's distillation.
   escape hatch, not the default). A parse failure is an error surfaced to the caller.
   Shadow-table DDL is validated by executing the retargeted statement on the empty shadow and
   checkpoint fingerprints come from the transaction-scoped scratch schema — execute-and-introspect;
-  the only permitted AST edit is the single relation retarget reprinted through the deparser.
+  the only executable-SQL AST edit is the single relation retarget reprinted through the deparser.
+  `RowSecurityChange.CanonicalSQLForNamespace` may erase only the validated target schema
+  on a fresh tree for comparison with a namespace/table key. Preserve every other detail;
+  never execute that projection or substitute it for the exact reviewed-SQL comparison.
+  Validate the expected physical schema and table from the caller’s target configuration;
+  never derive those expected values from the SQL being checked.
   Flag any other AST surgery that constructs the shadow schema, and any fingerprinting of SQL text.
 - Generated SQL quotes every user-supplied or introspected identifier
   (`pgx.Identifier{...}.Sanitize()` / `quote_ident()`) — flag raw interpolation of names into

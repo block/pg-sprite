@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -24,6 +25,47 @@ type RowSecurityReport struct {
 	Statements []string `json:"statements"`
 }
 
+// RowSecurityPlan contains generated RLS statements in execution order. Preview
+// rolls back without target DDL; a plan is not an execution permission.
+type RowSecurityPlan struct {
+	Schema     string   `json:"schema"`
+	Table      string   `json:"table"`
+	Statements []string `json:"statements"`
+}
+
+// ErrRowSecurityPlanChanged means the locked SQL sequence differs from review.
+// No target RLS statements have executed. Preview and review the new plan.
+var ErrRowSecurityPlanChanged = errors.New("row security SQL differs from reviewed plan")
+
+type rowSecurityMode uint8
+
+const (
+	rowSecurityExecute rowSecurityMode = iota
+	rowSecurityPreview
+	rowSecurityReviewed
+)
+
+// PreviewRowSecurity derives the same SQL as execution under a bounded exclusive
+// table lock, then rolls back without changing target policies or settings.
+// While held, ACCESS EXCLUSIVE blocks all reads and writes on the target.
+// LockTimeout bounds acquisition; StatementTimeout bounds the whole attempt.
+func PreviewRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityPlan, error) {
+	report, err := runRowSecurity(ctx, pool, schema, desired, b, rowSecurityPreview, nil)
+	if err != nil {
+		return RowSecurityPlan{}, err
+	}
+	return RowSecurityPlan(report), nil
+}
+
+// ExecuteReviewedRowSecurity regenerates SQL under the target lock and refuses
+// any difference from reviewed, including order and duplicates. Empty reviewed
+// authorizes only a no-op. The supplied SQL is compared, never executed directly.
+// This binds execution to SQL, not to a snapshot of the earlier live definition.
+// Budgets, admission, verification and atomicity match ExecuteRowSecurity.
+func ExecuteReviewedRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity, reviewed []string, b Budget) (RowSecurityReport, error) {
+	return runRowSecurity(ctx, pool, schema, desired, b, rowSecurityReviewed, slices.Clone(reviewed))
+}
+
 // RowSecurityOutcomeUnknownError means the commit response was lost or failed.
 // Inspect the catalog before retrying; an error does not prove rollback here.
 type RowSecurityOutcomeUnknownError struct{ Err error }
@@ -42,6 +84,10 @@ func (e *RowSecurityOutcomeUnknownError) Unwrap() error { return e.Err }
 // connection acquisition, scratch inspection, and lock waits. No retries occur.
 // The caller must have table-owner and scratch-schema creation privileges.
 func ExecuteRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityReport, error) {
+	return runRowSecurity(ctx, pool, schema, desired, b, rowSecurityExecute, nil)
+}
+
+func runRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity, b Budget, mode rowSecurityMode, reviewed []string) (RowSecurityReport, error) {
 	if err := b.validate(); err != nil {
 		return RowSecurityReport{}, err
 	}
@@ -51,7 +97,7 @@ func ExecuteRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 	// INV: RS-3 — the whole attempt has one deadline, not a fresh budget per policy.
 	attempt, cancel := context.WithTimeout(ctx, b.StatementTimeout)
 	defer cancel()
-	report, err := executeRowSecurity(attempt, pool, schema, desired, b)
+	report, err := executeRowSecurity(attempt, pool, schema, desired, b, mode, reviewed)
 	return report, rowSecurityError(ctx, attempt, err, b)
 }
 
@@ -82,7 +128,7 @@ func rowSecurityError(caller, attempt context.Context, err error, b Budget) erro
 	return err
 }
 
-func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity, b Budget) (RowSecurityReport, error) {
+func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity, b Budget, mode rowSecurityMode, reviewed []string) (RowSecurityReport, error) {
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return RowSecurityReport{}, fmt.Errorf("begin row security change: %w", err)
@@ -127,11 +173,6 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 	}
 	report := RowSecurityReport{Schema: schema, Table: desired.Table(), Statements: []string{}}
 	if _, err := schemadiff.DiffWithRowSecurity(schema, live, wanted); err != nil {
-		// INV: RS-4 — helpers are explicitly qualified; no target-schema function
-		// may shadow a built-in while replaying policy expressions.
-		if _, err := tx.Exec(ctx, dbconn.LocalSearchPath("pg_catalog")); err != nil {
-			return RowSecurityReport{}, fmt.Errorf("set row security search path for %s: %w", target, err)
-		}
 		for _, policy := range live.RowSecurity.Policies {
 			report.Statements = append(report.Statements, "DROP POLICY "+pgx.Identifier{policy.Name}.Sanitize()+" ON "+target)
 		}
@@ -140,12 +181,29 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 			return RowSecurityReport{}, fmt.Errorf("render row security for %s: %w: %w", target, ErrRowSecurityRefused, err)
 		}
 		report.Statements = append(report.Statements, security...)
-		for _, sql := range report.Statements {
-			if _, err := tx.Exec(ctx, sql); err != nil {
-				return RowSecurityReport{}, fmt.Errorf("apply row security on %s: %w", target, err)
-			}
+
+	}
+	// INV: RS-5 — compare the complete ordered sequence under lock before target DDL.
+	if mode == rowSecurityReviewed && !slices.Equal(reviewed, report.Statements) {
+		return RowSecurityReport{}, fmt.Errorf("review row security on %s: %w", target, ErrRowSecurityPlanChanged)
+	}
+	if mode == rowSecurityPreview {
+		if err := tx.Rollback(ctx); err != nil {
+			return RowSecurityReport{}, fmt.Errorf("rollback row security preview for %s: %w", target, err)
+		}
+		return report, nil
+	}
+	// INV: RS-4 — helpers are explicitly qualified; no target-schema function
+	// may shadow a built-in while replaying policy expressions.
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath("pg_catalog")); err != nil {
+		return RowSecurityReport{}, fmt.Errorf("set row security search path for %s: %w", target, err)
+	}
+	for _, sql := range report.Statements {
+		if _, err := tx.Exec(ctx, sql); err != nil {
+			return RowSecurityReport{}, fmt.Errorf("apply row security on %s: %w", target, err)
 		}
 	}
+
 	// INV: RS-2 — verify convergence before committing, while retaining the lock.
 	actual, err := schemadiff.IntrospectTx(ctx, tx, schema, desired.Table())
 	if err != nil {

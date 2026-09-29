@@ -23,6 +23,8 @@ const (
 	// CodeBudgetStatementExceeded: the statement ran past
 	// statement_timeout and was cancelled; the change does real work.
 	CodeBudgetStatementExceeded Code = "budget-statement-exceeded"
+	// CodeRowSecurityPlanChanged requires a fresh preview and SQL review before retry.
+	CodeRowSecurityPlanChanged Code = "row-security-plan-changed"
 	// CodeRowSecurityRefused requires a declaration, target, or privilege change.
 	CodeRowSecurityRefused Code = "row-security-refused"
 	// CodeRowSecurityOutcomeUnknown requires catalog inspection before retry.
@@ -152,6 +154,7 @@ func Codes() []Code {
 		CodeBudgetLockExceeded,
 		CodeBudgetStatementExceeded,
 		CodeBlockingOutcomeUnknown,
+		CodeRowSecurityPlanChanged,
 		CodeRowSecurityRefused,
 		CodeRowSecurityOutcomeUnknown,
 		CodeInvalidBlockingBudget,
@@ -201,7 +204,7 @@ func Codes() []Code {
 // permanent.
 func (c Code) Permanent() bool {
 	switch c {
-	case CodeRowSecurityRefused, CodeInvalidIndexOtherTable,
+	case CodeRowSecurityPlanChanged, CodeRowSecurityRefused, CodeInvalidIndexOtherTable,
 		CodeInvalidIndexNotDroppable,
 		CodeInvalidBlockingBudget,
 		CodeUnsupportedAcceptedBlocking,
@@ -312,6 +315,8 @@ func sentinelCode(err error) Code {
 		return CodeUnsupportedCreateStep
 	case errors.Is(err, ErrPoolTooSmall):
 		return CodePoolTooSmall
+	case errors.Is(err, ErrRowSecurityPlanChanged):
+		return CodeRowSecurityPlanChanged
 	case errors.Is(err, ErrRowSecurityRefused):
 		return CodeRowSecurityRefused
 	case errors.Is(err, ErrTableNotFound):

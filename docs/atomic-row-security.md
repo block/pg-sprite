@@ -60,7 +60,9 @@ or whole-attempt deadline reports `budget-statement-exceeded`, including when th
 whole-attempt deadline expires during a lock wait. The first limit reached wins. A missing target reports
 `table-not-found`. Invalid declarations, unsupported targets, and insufficient
 privileges report permanent `row-security-refused` outcomes, preserving the underlying
-cause. This includes unresolved policy roles and qualified helper functions during
+cause. A reviewed SQL mismatch reports permanent `row-security-plan-changed`: no target
+RLS statements ran; preview again and review the new SQL before retrying. This is separate
+from declaration and privilege refusals, which include unresolved policy roles and qualified helper functions during
 scratch inspection. Caller cancellation is kept separate from budget exhaustion.
 
 The caller needs table-owner privileges and permission to create the temporary
@@ -84,3 +86,46 @@ administration of those dependencies is not serialized by the table lock.
 
 These checks belong to the executor, regardless of whether a CLI or orchestrator
 calls it. SchemaBot can retain its existing replan and consent workflow.
+
+## Bind execution to reviewed SQL
+
+`PreviewRowSecurity` derives an ordered `RowSecurityPlan` using the same locked
+admission and rendering as execution, then rolls back without target DDL. Preview
+also takes a bounded exclusive table lock; it is not a lock-free catalog query.
+Pass its `Statements` to `ExecuteReviewedRowSecurity` alongside the desired
+schema. The executor regenerates the sequence under its own lock and compares
+it exactly, including order and duplicates, before changing any target policy.
+For example, after parsing `desired` as above:
+
+```go
+budget := executor.Budget{LockTimeout: 100 * time.Millisecond, StatementTimeout: 5 * time.Second}
+plan, err := executor.PreviewRowSecurity(ctx, pool, "public", desired, budget)
+if err != nil {
+    return err
+}
+// Present plan.Statements for review, then pass the reviewed sequence unchanged.
+report, err := executor.ExecuteReviewedRowSecurity(ctx, pool, "public", desired, plan.Statements, budget)
+if err != nil {
+    return err
+}
+// report.Statements is exactly the reviewed sequence, committed atomically.
+```
+
+A mismatch returns `ErrRowSecurityPlanChanged` and a zero report. An empty
+reviewed sequence authorizes only a no-op; it never disables this check.
+
+This binds the SQL to review, not every detail of the earlier database state.
+For example, editing an existing policy predicate can leave the replacement SQL
+unchanged because replacement drops and recreates that policy. Changes to roles,
+helper functions, grants, and authentication remain outside the table lock.
+Orchestrators still own replan, consent, and application authorization tests.
+There are no new CLI flags, approval tokens, or fingerprints.
+
+- **RS-5:** Reviewed execution compares the full ordered generated SQL sequence
+  under the target lock, before target DDL, and refuses any mismatch.
+
+For persisted SQL scripts, `statement.ParseRowSecurityChange` validates that every
+statement belongs to one qualified table's RLS operation. `Statements()` retains
+the original ordered SQL for reviewed execution; `CanonicalSQL()` normalizes
+formatting for comparison without reordering or dropping duplicates. This syntax
+proof does not authorize execution or replace the executor's live checks.
