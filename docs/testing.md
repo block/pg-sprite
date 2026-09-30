@@ -185,6 +185,15 @@ generated CA for verify-full tests. The harness has its own tests proving
 the version selected by `PG_VERSION` is the version actually running, and
 that throwaway schemas are isolated.
 
+Event triggers are database-global, and under `make test-db` every package
+shares one database, so a test installs one only through
+`InstallEventTrigger` (or `RunDuringDDL`, built on it): its cleanup keeps
+the trigger's function alive until every transaction that may still hold
+the trigger in its event-trigger cache has ended, where an inline drop
+would fail another package's in-flight DDL with `cache lookup failed for
+function`. A harness test fails the build on an inline
+`CREATE EVENT TRIGGER` elsewhere in the suite.
+
 The privilege-ladder tests additionally create throwaway **cluster-level
 roles** (`NewRole`), so the role behind an external `PG_DSN` needs
 `CREATEROLE` — a step up from "a database you can create schemas in".
