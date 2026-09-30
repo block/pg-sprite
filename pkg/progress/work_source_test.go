@@ -282,10 +282,11 @@ func TestProgressSerializesConcurrentWorkSourcePolls(t *testing.T) {
 	assert.Equal(t, int32(2), entries.Load(), "both pollers must complete, one after the other")
 }
 
-// StopWorkSource must drain an in-flight observation before returning: the
-// engine releases the state the source reads as soon as StopWorkSource
-// returns.
-func TestStopWorkSourceDrainsInFlightObservation(t *testing.T) {
+// assertHandoffDrainsInFlightObservation starts a poll that blocks inside the
+// source, then runs handoff on another goroutine and requires that it does
+// not return until the observation has left the source.
+func assertHandoffDrainsInFlightObservation(t *testing.T, handoff func(*progress.Tracker)) {
+	t.Helper()
 	entered := make(chan struct{})
 	release := make(chan struct{})
 	var observationFinished atomic.Bool
@@ -303,25 +304,46 @@ func TestStopWorkSourceDrainsInFlightObservation(t *testing.T) {
 	})
 	<-entered
 
-	stopReturned := make(chan struct{})
+	handoffReturned := make(chan struct{})
 	workers.Go(func() {
-		tracker.StopWorkSource()
+		handoff(tracker)
 		assert.True(t, observationFinished.Load(),
-			"StopWorkSource must not return while an observation still reads the source")
-		close(stopReturned)
+			"the handoff must not return while an observation still reads the source")
+		close(handoffReturned)
 	})
-	stopMustStillBlock := time.After(100 * time.Millisecond)
+	handoffMustStillBlock := time.After(100 * time.Millisecond)
 	select {
-	case <-stopReturned:
-		t.Fatal("StopWorkSource returned while an observation was in flight")
-	case <-stopMustStillBlock:
+	case <-handoffReturned:
+		t.Fatal("the handoff returned while an observation was in flight")
+	case <-handoffMustStillBlock:
 	}
 	close(release)
 	workers.Wait()
 }
 
+// Every call that ends the source's ownership of the step's work drains an
+// in-flight observation before returning: the engine releases the state the
+// source reads as soon as the call returns, whether it stopped the source or
+// replaced it with another source or a concurrent build.
+func TestSourceHandoffsDrainInFlightObservation(t *testing.T) {
+	t.Run("StopWorkSource", func(t *testing.T) {
+		assertHandoffDrainsInFlightObservation(t, (*progress.Tracker).StopWorkSource)
+	})
+	t.Run("SetWorkSource", func(t *testing.T) {
+		assertHandoffDrainsInFlightObservation(t, func(tracker *progress.Tracker) {
+			tracker.SetWorkSource(countingSource(new(atomic.Int32)))
+		})
+	})
+	t.Run("SetConcurrentBuild", func(t *testing.T) {
+		assertHandoffDrainsInFlightObservation(t, func(tracker *progress.Tracker) {
+			tracker.SetConcurrentBuild(neverQueried(t), 4242)
+		})
+	})
+}
+
 // The engine's own state updates never wait behind a slow source poll:
-// polling is observability, not a gate on the copy.
+// polling is observability, not a gate on the copy. Only the handoffs that
+// end a poll target's ownership wait; the resets that advance the run do not.
 func TestStateMutatorsDoNotWaitForInFlightWorkSourcePoll(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
@@ -343,7 +365,9 @@ func TestStateMutatorsDoNotWaitForInFlightWorkSourcePoll(t *testing.T) {
 	mutated := make(chan struct{})
 	workers.Go(func() {
 		tracker.SetAttempt(2)
-		tracker.SetWorkSource(countingSource(new(atomic.Int32)))
+		tracker.StartStep(2, progress.OperationBrief, "ALTER TABLE public.t ADD COLUMN c integer")
+		tracker.Finish(nil)
+		tracker.Start(1, progress.OperationCopy)
 		close(mutated)
 	})
 	mutatorDeadline := time.After(5 * time.Second)

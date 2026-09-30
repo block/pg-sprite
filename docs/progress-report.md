@@ -19,8 +19,9 @@ is added or renamed.
 Adding a field bumps `format_version` so a strict consumer can detect the new shape from the
 version. The current version is **4**: version 2 added `detail.statement`; version 3 added
 `detail.current_locker_pid`, `work.lockers_total`, and `work.lockers_done`; version 4 added
-the `copy` operation, whose `work` is measured by the engine rather than read from a server
-progress view.
+the `copy` operation and split `work` into two counter families — the server-observed build
+counters and the engine-measured copy counters (`rows_*`, `bytes_*`) — selected by
+`detail.operation`, so `work` is no longer a signal that a concurrent index build is running.
 
 The [plan report](plan-report.md), [lint report](lint-report.md), and
 [suggest report](suggest-report.md) are separate contracts with their own `format_version`;
@@ -55,7 +56,7 @@ licenses a consumer to intervene in the change itself.
 | `active` | bool | always | Whether an operation is executing now. `false` with `phase: "running"` means a concurrent build's progress row has left the server view. |
 | `attempt` | int | bounded retries only | The current attempt number when the executor is inside its bounded retry loop. |
 | `current_locker_pid` | int | while waiting on a locker | PostgreSQL backend PID currently blocking the concurrent build; omitted when none is published. |
-| `work` | object | measured work only | Present exactly when something measured the step's work — the server published a progress row for a concurrent build, or the engine reported the copy step's counters; then **every** counter below is present, so a fresh build or an empty copy reports honest zeros rather than an empty object. |
+| `work` | object | measured work only | Present exactly when something measured the step's work — the server published a progress row for a concurrent build, or the engine reported the copy step's counters; then **every** counter below is present, so a fresh build or an empty copy reports honest zeros rather than an empty object. Which counters mean anything is decided by `operation`, not by `work` being present — see [Work counters](#work-counters). |
 
 `statement` is the SQL the engine is running for the step: for a native operation the
 submitter's statement after qualification and canonicalization, for a `copy` step the
@@ -66,7 +67,12 @@ it into a shared surface must clamp and escape it.
 ### Work counters
 
 Two operations publish `work`, and each measures only its own counters; the other
-operation's counters are `0`, never estimated.
+operation's counters are `0`, never estimated. A consumer selects the counter family from
+`detail.operation`, never from the presence of `work`: a present `work` says only that
+something measured the step, and a consumer that reads its presence as "a concurrent index
+build is running" will show a `copy` step as a build with zero blocks. Render the build
+counters for `concurrent-index-build`, the copy counters for `copy`, and nothing from `work`
+for an operation you do not recognize.
 
 **Server-observed** (`concurrent-index-build`): `blocks_done` / `blocks_total`,
 `tuples_done` / `tuples_total`, and `lockers_done` / `lockers_total` come from
@@ -113,6 +119,15 @@ error the returned snapshot still carries the last-known tracker state — `phas
 empty — with the error returned alongside for the caller to classify. Pollers serialize
 against each other, so the reserved session and the work source each see one observation
 at a time.
+
+The handoffs that end a poll target's ownership of the step — stopping a build or a work
+source, or replacing one with the other — wait for an observation in flight before they
+return, so the engine never releases a session or the state a source reads while a poll is
+still using it. That makes the work source part of the engine's stop path: its `Work` must
+bound itself (memory reads, or catalog reads on a session with `statement_timeout` set) and
+honour the poll's context, because a poll that returns only when its observer gives up
+would stall the engine behind an observer that never does. A `Work` that reads the catalog
+is a CO-9 read site — `pg_catalog`-qualified, tested under a shadowing `search_path`.
 
 The tracker is also the operator's stop path for a running concurrent index build:
 `Tracker.CancelBuild` signals the build's backend over the same reserved session, and only

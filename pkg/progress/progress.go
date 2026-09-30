@@ -1,6 +1,8 @@
 // Package progress defines the strategy-wide, machine-readable execution
-// progress contract. It deliberately contains copy counters that native
-// operations leave empty so copy-and-swap can implement the same contract.
+// progress contract. One snapshot shape serves every operation: a concurrent
+// index build's counters are read from the server's progress view, the
+// copy-and-swap row copy's counters come from the engine's own WorkSource,
+// and each operation leaves the other's counters at zero.
 package progress
 
 import (
@@ -127,16 +129,18 @@ type Snapshot struct {
 // carries one progress query at a time, and a WorkSource sees one poll at a
 // time.
 //
-// StopConcurrentBuild and StopWorkSource are the two state changes that
-// take pollMu, because each is the fence between the step's work and its
-// release: the executor calls StopConcurrentBuild before the build's
-// session can be released, so an observation or cancel signal still in
-// flight completes against a backend the build still owns, and the engine
-// calls StopWorkSource before the source's state goes away. Start,
-// StartStep and Finish also clear those fields, but as resets under mu
-// alone — by the time they run the step has already passed through its
-// fence, and a reset that waited behind an observation would make polling a
-// gate on execution.
+// Four state changes take pollMu, because each ends a poll target's
+// ownership of the step's work and must not do so under a poll still in
+// flight: StopConcurrentBuild and SetWorkSource release the build's
+// session, which the executor calls before that session can return to the
+// pool, so an observation or cancel signal in flight completes against a
+// backend the build still owns; StopWorkSource and SetConcurrentBuild
+// release the source, which the engine calls before the state the source
+// reads goes away. Each takes pollMu before mu, the one order every taker
+// uses. Start, StartStep and Finish also clear those fields, but as resets
+// under mu alone — by the time they run the step has already passed through
+// its fence, and a reset that waited behind an observation would make
+// polling a gate on execution.
 type Tracker struct {
 	mu        sync.RWMutex
 	pollMu    sync.Mutex
@@ -197,8 +201,12 @@ func (t *Tracker) SetAttempt(attempt int) {
 // SetConcurrentBuild enables on-demand server progress for pid. The executor
 // supplies its reserved verdict session so polling cannot starve behind the
 // build session even when the pool has only two connections. A step's work
-// comes from one place, so any WorkSource the step had is dropped.
+// comes from one place, so any WorkSource the step had is dropped — after
+// waiting, as StopWorkSource does, for a poll still reading it, so the
+// source's owner never finds its state observed after the handoff.
 func (t *Tracker) SetConcurrentBuild(session dbconn.RowQuerier, pid uint32) {
+	t.pollMu.Lock()
+	defer t.pollMu.Unlock()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.session, t.buildPID = session, pid
@@ -252,7 +260,9 @@ const cancelBuildSQL = `SELECT state,
 // StopConcurrentBuild, which the executor calls before the build's session
 // can return to the pool, so the PID it signals still belongs to the build
 // — never to an unrelated statement that reused the same pooled backend.
-// The signal is sent only to a backend the server reports active in the
+// A step whose work a WorkSource owns has no build to signal and reports
+// ErrNoActiveBuild; the snapshot's operation tells a caller which case it
+// is in. The signal is sent only to a backend the server reports active in the
 // same statement as the read, which rules out the common way a cancel is
 // lost — a signal landing on an idle backend — without making the signal
 // itself observable.
@@ -394,8 +404,8 @@ func (t *Tracker) Finish(err error) {
 // a step with a WorkSource it asks the source for the step's counters. On a
 // query or source error the snapshot still carries the last-known tracker
 // state. The state lock is released before the query, so concurrent pollers
-// serialize only against each other (and the two stop fences), never against
-// the executor's own state updates.
+// serialize only against each other (and the four handoff fences), never
+// against the executor's own state updates.
 func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
 	t.pollMu.Lock()
 	defer t.pollMu.Unlock()
