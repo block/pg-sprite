@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -24,6 +25,15 @@ const (
 	// the caller sees the commit.
 	DDLCommandEnd DDLEvent = "ddl_command_end"
 )
+
+// eventTriggerDrainTimeout bounds how long a trigger's drop waits for the
+// transactions that may still hold the trigger in their event-trigger
+// cache. Those are other tests' transactions, each bounded by its own
+// statement_timeout; a wait this long means a transaction leaked.
+const eventTriggerDrainTimeout = 30 * time.Second
+
+// eventTriggerDrainPoll is the interval between checks for open transactions.
+const eventTriggerDrainPoll = 20 * time.Millisecond
 
 // RunDuringDDL installs an event trigger that executes sql from inside the
 // next DDL command with the given tag whose text names schema.table, at
@@ -56,11 +66,71 @@ func RunDuringDDL(t *testing.T, pool *pgxpool.Pool, event DDLEvent, tag, schema,
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		ctx := context.WithoutCancel(t.Context())
-		_, cleanupErr := pool.Exec(ctx, fmt.Sprintf("DROP EVENT TRIGGER IF EXISTS %s", triggerName))
-		assert.NoError(t, cleanupErr)
-		_, cleanupErr = pool.Exec(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", functionName))
-		assert.NoError(t, cleanupErr)
+		assert.NoError(t, dropEventTrigger(ctx, pool, triggerName, functionName, eventTriggerDrainTimeout))
 	})
+}
+
+// openTransactionsBeforeSQL counts the other sessions in this database whose
+// current transaction began before the given instant.
+const openTransactionsBeforeSQL = `SELECT pg_catalog.count(*)
+  FROM pg_catalog.pg_stat_activity
+ WHERE datname OPERATOR(pg_catalog.=) pg_catalog.current_database()
+   AND pid OPERATOR(pg_catalog.<>) pg_catalog.pg_backend_pid()
+   AND xact_start OPERATOR(pg_catalog.<) $1`
+
+// dropEventTrigger drops the trigger, waits until no transaction that began
+// before the drop is still open, and only then drops the function.
+//
+// Event triggers are cached per backend, and a backend refreshes that cache
+// only when it accepts catalog invalidations — at transaction start and
+// when it takes a lock. A transaction already open when the trigger is
+// dropped keeps the trigger in its cache until then; ddl_command_start
+// fires before any lock, so its next DDL statement still calls the
+// trigger's function. Were the function gone by then, that statement —
+// another test's, in another package sharing the database — would fail
+// with "cache lookup failed for function". Keeping the function alive until
+// every such transaction has ended makes the stale entry harmless: the
+// function runs, its tag and query predicate do not match, and it returns.
+// Transactions that begin after the drop see no trigger at all.
+func dropEventTrigger(ctx context.Context, pool *pgxpool.Pool, triggerName, functionName string, drainTimeout time.Duration) error {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("drop event trigger %s: acquire connection: %w", triggerName, err)
+	}
+	defer conn.Release()
+	if _, err := conn.Exec(ctx, "DROP EVENT TRIGGER IF EXISTS "+triggerName); err != nil {
+		return fmt.Errorf("drop event trigger %s: %w", triggerName, err)
+	}
+	// The drop has committed by the time this statement runs, so any
+	// transaction that begins at or after this instant accepted the
+	// invalidation at its start and never sees the trigger.
+	var dropped time.Time
+	if err := conn.QueryRow(ctx, "SELECT pg_catalog.clock_timestamp()").Scan(&dropped); err != nil {
+		return fmt.Errorf("drop event trigger %s: read the drop instant: %w", triggerName, err)
+	}
+	deadline := time.Now().Add(drainTimeout)
+	for {
+		var open int
+		if err := conn.QueryRow(ctx, openTransactionsBeforeSQL, dropped).Scan(&open); err != nil {
+			return fmt.Errorf("drop event trigger %s: count open transactions: %w", triggerName, err)
+		}
+		if open == 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("drop event trigger %s: %d transactions that began before the drop are still open after %s; the function %s is left in place",
+				triggerName, open, drainTimeout, functionName)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("drop event trigger %s: %w", triggerName, ctx.Err())
+		case <-time.After(eventTriggerDrainPoll):
+		}
+	}
+	if _, err := conn.Exec(ctx, "DROP FUNCTION IF EXISTS "+functionName+"()"); err != nil {
+		return fmt.Errorf("drop event trigger function %s: %w", functionName, err)
+	}
+	return nil
 }
 
 // quoteLiteral renders s as a standard-conforming SQL string literal:
