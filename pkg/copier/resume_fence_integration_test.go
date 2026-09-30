@@ -74,11 +74,18 @@ func TestCopierResumeWaitsForAStragglingChunkTransaction(t *testing.T) {
 // lock on relation oid: the fence, blocked behind a straggler.
 func (f copierFixture) waitsForShareLock(t *testing.T, oid uint32) bool {
 	t.Helper()
+	return f.waitsForLock(t, oid, "ShareLock")
+}
+
+// waitsForLock reports whether some backend is waiting for a lock of mode
+// (as pg_locks spells it) on relation oid.
+func (f copierFixture) waitsForLock(t *testing.T, oid uint32, mode string) bool {
+	t.Helper()
 	var waiting bool
 	require.NoError(t, f.pool.QueryRow(t.Context(), `
 		SELECT EXISTS (
 			SELECT 1 FROM pg_locks
-			WHERE locktype = 'relation' AND relation = $1 AND mode = 'ShareLock' AND NOT granted
-		)`, oid).Scan(&waiting))
+			WHERE locktype = 'relation' AND relation = $1 AND mode = $2 AND NOT granted
+		)`, oid, mode).Scan(&waiting))
 	return waiting
 }

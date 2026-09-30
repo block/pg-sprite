@@ -95,7 +95,15 @@ a size read from the catalog — never a projection; a counter the engine cannot
 
 The two tables differ in shape, so `bytes_copied` ends above or below `bytes_total` rather than
 equal to it; a consumer that wants a rate derives it from two snapshots of `rows_copied` and
-`elapsed_ns`.
+`elapsed_ns`. On a resumed run `rows_copied` / `rows_total` is this run's share of the source,
+not the copy's completion: the rows the earlier run landed below the watermark are in the
+shadow but not in this run's count, so the ratio ends short of `1`. Completion is the copy's
+watermark reaching the top of the key space, which the engine reports as the step ending.
+
+The size read runs in a read-only transaction of the copy's own, under the copy's
+`lock_timeout` and `statement_timeout`: a poll queued behind a lock on either table ends at
+that timeout whatever session defaults the caller's pool carries, so an observer never holds
+the copy's stop path open.
 
 ## Phases
 
