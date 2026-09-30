@@ -33,7 +33,7 @@ The invariant registry (invariant IDs referenced below) lives in
 | `pkg/diffplan` — desired schema → routed convergence plan, the declarative front door as a library (the CLI `diff` and embedding orchestrators share it) | ❌ periphery | exists | — |
 | `pkg/migrate` — one gated statement → resolve, classify, route, execute → one verdict; the imperative front door as a library (the CLI `migrate` and embedding orchestrators share it), plus the desired-state execution loop (`RunDesired`: derive the convergence plan, admit it as a whole, run each planned statement back through the same pipeline) | ❌ periphery² | exists | — |
 | `internal/cli` — CLI, flags, help, prompts | ❌ periphery | `migrate`, `pull`, `diff`, `fmt`, `lint`, `suggest`, `capabilities`, and `status` exist | — |
-| `pkg/progress` — strategy-wide progress snapshots; the executors' observation seam (core imports it, so its locking discipline is core-critical); copy counters reserved for later | ✅ core | native progress exists | — |
+| `pkg/progress` — strategy-wide progress snapshots; the executors' observation seam (core imports it, so its locking discipline is core-critical); the `WorkSource` seam for engine-measured steps such as the copy | ✅ core | native progress and the work-source seam exist | — |
 | orchestrator adapter | ❌ periphery | planned (Phase 11) | OC-* hold *at* the boundary |
 | `internal/testutil` | ❌ test-only | exists | — |
 
@@ -93,9 +93,13 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   `pkg/progress` (the executors' progress-observation seam: they write state into a
   caller-owned tracker whose mutators take only a memory lock, and its polling reads ride
   the reserved verdict session behind a separate poll lock — the executor's own state
-  updates never wait for a database read, but the verdict handoff *is* observer-gated:
-  `StopConcurrentBuild` deliberately drains an in-flight poll before the executor reclaims
-  the session, a wait bounded by the poller's context and the session's `statement_timeout`),
+  updates never wait for a database read, but the handoffs that end a poll target's
+  ownership *are* observer-gated: `StopConcurrentBuild` and `SetWorkSource` drain an
+  in-flight poll before the executor reclaims the build's session, a wait bounded by the
+  poller's context and the session's `statement_timeout`, and `StopWorkSource` and
+  `SetConcurrentBuild` drain one before an engine step releases the state its `WorkSource`
+  reads, a wait the `WorkSource` contract requires `Work` to bound itself — memory reads or
+  catalog reads under a session `statement_timeout`, never the observer's context alone),
   stdlib. Adding one requires a recorded decision (see the rubric in
   [docs/tcb-model.md](docs/tcb-model.md) — copy small things, take pinned dependencies only
   for load-bearing expertise).
