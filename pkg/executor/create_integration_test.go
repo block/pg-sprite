@@ -133,26 +133,12 @@ func TestExecuteCreateWithProgressReportsQualifiedStepStatementsInOrder(t *testi
 	tracker, err := progress.NewTracker(progress.WallClock{})
 	require.NoError(t, err)
 
-	functionName := pgx.Identifier{f.schema, "delay_create_progress"}.Sanitize()
-	triggerName := pgx.Identifier{f.schema + "_delay_create_progress"}.Sanitize()
-	_, err = f.pool.Exec(t.Context(), fmt.Sprintf(`
-		CREATE FUNCTION %s() RETURNS event_trigger LANGUAGE plpgsql AS $$
-		BEGIN
+	// Hold each of this test's DDL statements long enough for the tracker
+	// to be observed mid-step.
+	testutil.InstallEventTrigger(t, f.pool, testutil.DDLCommandStart, f.schema, "delay_create_progress", fmt.Sprintf(`
 			IF current_query() LIKE '%%%s%%' THEN
 				PERFORM pg_sleep(0.25);
-			END IF;
-		END
-		$$;
-		CREATE EVENT TRIGGER %s ON ddl_command_start EXECUTE FUNCTION %s()`,
-		functionName, f.schema, triggerName, functionName))
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx := context.WithoutCancel(t.Context())
-		_, cleanupErr := f.pool.Exec(ctx, fmt.Sprintf("DROP EVENT TRIGGER IF EXISTS %s", triggerName))
-		assert.NoError(t, cleanupErr)
-		_, cleanupErr = f.pool.Exec(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", functionName))
-		assert.NoError(t, cleanupErr)
-	})
+			END IF;`, f.schema))
 
 	type result struct {
 		rep executor.SequenceReport
