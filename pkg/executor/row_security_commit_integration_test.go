@@ -1,16 +1,15 @@
 package executor_test
 
 import (
-	"context"
 	"fmt"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 )
@@ -18,10 +17,7 @@ import (
 // Fire only for live CREATE POLICY, never for the disposable scratch declaration.
 func onLiveRLSPolicy(t *testing.T, pool *pgxpool.Pool, schema, action string) {
 	t.Helper()
-	trigger := pgx.Identifier{schema + "_policy_fault"}.Sanitize()
-	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE FUNCTION %s.policy_fault() RETURNS event_trigger
- LANGUAGE plpgsql AS $$
- BEGIN
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, "policy_fault", fmt.Sprintf(`
      IF EXISTS (
          SELECT 1 FROM pg_event_trigger_ddl_commands() d
          JOIN pg_policy p ON d.classid = 'pg_policy'::regclass AND d.objid = p.oid
@@ -30,15 +26,7 @@ func onLiveRLSPolicy(t *testing.T, pool *pgxpool.Pool, schema, action string) {
          WHERE n.nspname = '%s' AND d.command_tag = 'CREATE POLICY'
      ) THEN
          %s
-     END IF;
- END;
- $$;
- CREATE EVENT TRIGGER %s ON ddl_command_end EXECUTE FUNCTION %s.policy_fault();`, schema, schema, action, trigger, schema))
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP EVENT TRIGGER "+trigger)
-		require.NoError(t, err)
-	})
+     END IF;`, schema, action))
 }
 
 func TestExecuteRowSecurityRollsBackPolicyDivergence(t *testing.T) {

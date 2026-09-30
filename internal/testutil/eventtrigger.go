@@ -2,6 +2,7 @@ package testutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -28,12 +29,51 @@ const (
 
 // eventTriggerDrainTimeout bounds how long a trigger's drop waits for the
 // transactions that may still hold the trigger in their event-trigger
-// cache. Those are other tests' transactions, each bounded by its own
-// statement_timeout; a wait this long means a transaction leaked.
+// cache. Those are other tests' transactions, bounded by the statements
+// they run; a wait this long means a transaction was left open.
 const eventTriggerDrainTimeout = 30 * time.Second
 
 // eventTriggerDrainPoll is the interval between checks for open transactions.
 const eventTriggerDrainPoll = 20 * time.Millisecond
+
+// errEventTriggerDrainTimedOut reports that transactions older than the
+// trigger's drop were still open when the drain gave up, so the function
+// was not dropped.
+var errEventTriggerDrainTimedOut = errors.New("event trigger drain timed out")
+
+// InstallEventTrigger creates the plpgsql event-trigger function
+// schema.name() with the given body and an event trigger on event that
+// calls it, and registers their drop for the end of the test. Event
+// triggers are database-global, so every test that installs one goes
+// through this: the drop keeps the function alive until every transaction
+// that may still hold the trigger in its event-trigger cache has ended
+// (see dropEventTrigger), which an inline DROP EVENT TRIGGER followed by
+// the function's drop — or the schema's cascade — does not.
+func InstallEventTrigger(t *testing.T, pool *pgxpool.Pool, event DDLEvent, schema, name, body string) {
+	t.Helper()
+	functionName := pgx.Identifier{schema, name}.Sanitize()
+	triggerName := pgx.Identifier{schema + "_" + name}.Sanitize()
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE FUNCTION %s() RETURNS event_trigger LANGUAGE plpgsql AS $body$
+		BEGIN
+			%s
+		END
+		$body$;
+		CREATE EVENT TRIGGER %s ON %s EXECUTE FUNCTION %s()`,
+		functionName, body, triggerName, string(event), functionName))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		err := dropEventTrigger(ctx, pool, triggerName, functionName, eventTriggerDrainTimeout)
+		if errors.Is(err, errEventTriggerDrainTimedOut) {
+			// Failing this test would not protect the transaction that is
+			// still open; the function goes with the schema drop.
+			t.Logf("%v", err)
+			return
+		}
+		assert.NoError(t, err)
+	})
+}
 
 // RunDuringDDL installs an event trigger that executes sql from inside the
 // next DDL command with the given tag whose text names schema.table, at
@@ -45,29 +85,16 @@ const eventTriggerDrainPoll = 20 * time.Millisecond
 // and its function are dropped when the test ends.
 func RunDuringDDL(t *testing.T, pool *pgxpool.Pool, event DDLEvent, tag, schema, table, sql string) {
 	t.Helper()
-	functionName := pgx.Identifier{schema, "run_during_ddl"}.Sanitize()
-	triggerName := pgx.Identifier{schema + "_run_during_ddl"}.Sanitize()
 	// The command text carries the qualified name followed by a space
 	// (the column list or the next clause); the pattern escapes the
 	// name's own LIKE metacharacters so an underscore in a schema or table
 	// name matches only itself.
 	pattern := "%" + escapeLikePattern(schema+"."+table) + " %"
-	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
-		CREATE FUNCTION %s() RETURNS event_trigger LANGUAGE plpgsql AS $body$
-		BEGIN
+	InstallEventTrigger(t, pool, event, schema, "run_during_ddl", fmt.Sprintf(`
 			IF TG_TAG = %s AND current_query() LIKE %s THEN
 				EXECUTE %s;
-			END IF;
-		END
-		$body$;
-		CREATE EVENT TRIGGER %s ON %s EXECUTE FUNCTION %s()`,
-		functionName, quoteLiteral(tag), quoteLiteral(pattern), quoteLiteral(sql),
-		triggerName, string(event), functionName))
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx := context.WithoutCancel(t.Context())
-		assert.NoError(t, dropEventTrigger(ctx, pool, triggerName, functionName, eventTriggerDrainTimeout))
-	})
+			END IF;`,
+		quoteLiteral(tag), quoteLiteral(pattern), quoteLiteral(sql)))
 }
 
 // openTransactionsBeforeSQL counts the other sessions in this database whose
@@ -90,7 +117,7 @@ const openTransactionsBeforeSQL = `SELECT pg_catalog.count(*)
 // another test's, in another package sharing the database — would fail
 // with "cache lookup failed for function". Keeping the function alive until
 // every such transaction has ended makes the stale entry harmless: the
-// function runs, its tag and query predicate do not match, and it returns.
+// function runs, its predicate does not match, and it returns.
 // Transactions that begin after the drop see no trigger at all.
 func dropEventTrigger(ctx context.Context, pool *pgxpool.Pool, triggerName, functionName string, drainTimeout time.Duration) error {
 	conn, err := pool.Acquire(ctx)
@@ -98,16 +125,30 @@ func dropEventTrigger(ctx context.Context, pool *pgxpool.Pool, triggerName, func
 		return fmt.Errorf("drop event trigger %s: acquire connection: %w", triggerName, err)
 	}
 	defer conn.Release()
+	dropped, err := dropTrigger(ctx, conn, triggerName)
+	if err != nil {
+		return err
+	}
+	return dropFunctionAfterDrain(ctx, conn, triggerName, functionName, dropped, drainTimeout)
+}
+
+// dropTrigger drops the trigger and returns the server instant after the
+// drop committed: any transaction that begins at or after it accepted the
+// invalidation at its start and never sees the trigger.
+func dropTrigger(ctx context.Context, conn *pgxpool.Conn, triggerName string) (dropped time.Time, err error) {
 	if _, err := conn.Exec(ctx, "DROP EVENT TRIGGER IF EXISTS "+triggerName); err != nil {
-		return fmt.Errorf("drop event trigger %s: %w", triggerName, err)
+		return time.Time{}, fmt.Errorf("drop event trigger %s: %w", triggerName, err)
 	}
-	// The drop has committed by the time this statement runs, so any
-	// transaction that begins at or after this instant accepted the
-	// invalidation at its start and never sees the trigger.
-	var dropped time.Time
 	if err := conn.QueryRow(ctx, "SELECT pg_catalog.clock_timestamp()").Scan(&dropped); err != nil {
-		return fmt.Errorf("drop event trigger %s: read the drop instant: %w", triggerName, err)
+		return time.Time{}, fmt.Errorf("drop event trigger %s: read the drop instant: %w", triggerName, err)
 	}
+	return dropped, nil
+}
+
+// dropFunctionAfterDrain waits until no other transaction that began before
+// dropped is open, then drops the function. Past drainTimeout it returns
+// errEventTriggerDrainTimedOut and leaves the function in place.
+func dropFunctionAfterDrain(ctx context.Context, conn *pgxpool.Conn, triggerName, functionName string, dropped time.Time, drainTimeout time.Duration) error {
 	deadline := time.Now().Add(drainTimeout)
 	for {
 		var open int
@@ -118,8 +159,8 @@ func dropEventTrigger(ctx context.Context, pool *pgxpool.Pool, triggerName, func
 			break
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("drop event trigger %s: %d transactions that began before the drop are still open after %s; the function %s is left in place",
-				triggerName, open, drainTimeout, functionName)
+			return fmt.Errorf("drop event trigger %s: giving up after %s with %d transactions that began before the drop still open; the function %s stays until its schema is dropped: %w",
+				triggerName, drainTimeout, open, functionName, errEventTriggerDrainTimedOut)
 		}
 		select {
 		case <-ctx.Done():

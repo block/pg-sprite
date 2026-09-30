@@ -103,26 +103,12 @@ func TestRunSequenceWithProgressTracksStepsAndFinishes(t *testing.T) {
 	tracker, err := progress.NewTracker(progress.WallClock{})
 	require.NoError(t, err)
 
-	functionName := pgx.Identifier{schema, "delay_sequence_progress"}.Sanitize()
-	triggerName := pgx.Identifier{schema + "_delay_sequence_progress"}.Sanitize()
-	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
-		CREATE FUNCTION %s() RETURNS event_trigger LANGUAGE plpgsql AS $$
-		BEGIN
+	// Hold each of this test's DDL statements long enough for the tracker
+	// to be observed mid-step.
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandStart, schema, "delay_sequence_progress", fmt.Sprintf(`
 			IF current_query() LIKE '%%%s%%' THEN
 				PERFORM pg_sleep(0.25);
-			END IF;
-		END
-		$$;
-		CREATE EVENT TRIGGER %s ON ddl_command_start EXECUTE FUNCTION %s()`,
-		functionName, schema, triggerName, functionName))
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		ctx := context.WithoutCancel(t.Context())
-		_, cleanupErr := pool.Exec(ctx, fmt.Sprintf("DROP EVENT TRIGGER IF EXISTS %s", triggerName))
-		assert.NoError(t, cleanupErr)
-		_, cleanupErr = pool.Exec(ctx, fmt.Sprintf("DROP FUNCTION IF EXISTS %s()", functionName))
-		assert.NoError(t, cleanupErr)
-	})
+			END IF;`, schema))
 
 	steps := saferSequence(t, fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT v_positive CHECK (v > 0)", schema))
 	type result struct {

@@ -134,10 +134,7 @@ func TestExecuteRowSecurityRollsBackAfterLiveDDLFailure(t *testing.T) {
 	require.NoError(t, err)
 	// A real server-side failure after DROP POLICY and CREATE POLICY proves that
 	// the transaction restores the original policy, rather than just refusing early.
-	trigger := pgx.Identifier{schema + "_fail_policy"}.Sanitize()
-	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE FUNCTION %s.fail_policy() RETURNS event_trigger
- LANGUAGE plpgsql AS $$
- BEGIN
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, "fail_policy", fmt.Sprintf(`
      IF EXISTS (
          SELECT 1 FROM pg_event_trigger_ddl_commands() d
          JOIN pg_policy p ON d.classid = 'pg_policy'::regclass AND d.objid = p.oid
@@ -146,15 +143,7 @@ func TestExecuteRowSecurityRollsBackAfterLiveDDLFailure(t *testing.T) {
          WHERE n.nspname = '%s' AND d.command_tag = 'CREATE POLICY'
      ) THEN
          RAISE EXCEPTION 'injected policy failure';
-     END IF;
- END;
- $$;
- CREATE EVENT TRIGGER %s ON ddl_command_end EXECUTE FUNCTION %s.fail_policy();`, schema, schema, trigger, schema))
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP EVENT TRIGGER "+trigger)
-		require.NoError(t, err)
-	})
+     END IF;`, schema))
 	report, err := applyRLS(t, pool, schema, `CREATE TABLE documents (
      id bigint PRIMARY KEY,
      owner_id bigint NOT NULL
@@ -293,10 +282,7 @@ func TestExecuteRowSecurityDeadlineRollsBackLiveDDL(t *testing.T) {
 	// The policy drops and additions must all roll back on cancellation.
 	_, err = pool.Exec(t.Context(), "CREATE SEQUENCE "+pgx.Identifier{schema, "fault_reached"}.Sanitize())
 	require.NoError(t, err)
-	trigger := pgx.Identifier{schema + "_fail_policy"}.Sanitize()
-	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE FUNCTION %s.fail_policy() RETURNS event_trigger
- LANGUAGE plpgsql AS $$
- BEGIN
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, "fail_policy", fmt.Sprintf(`
      IF EXISTS (
          SELECT 1 FROM pg_event_trigger_ddl_commands() d
          JOIN pg_policy p ON d.classid = 'pg_policy'::regclass AND d.objid = p.oid
@@ -306,15 +292,7 @@ func TestExecuteRowSecurityDeadlineRollsBackLiveDDL(t *testing.T) {
      ) THEN
          PERFORM nextval('%s.fault_reached');
          PERFORM pg_sleep(10);
-     END IF;
- END;
- $$;
- CREATE EVENT TRIGGER %s ON ddl_command_end EXECUTE FUNCTION %s.fail_policy();`, schema, schema, schema, trigger, schema))
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		_, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP EVENT TRIGGER "+trigger)
-		require.NoError(t, err)
-	})
+     END IF;`, schema, schema))
 	desired, err := statement.ParseDesiredWithRowSecurity(`CREATE TABLE documents (
      id bigint PRIMARY KEY,
      owner_id bigint NOT NULL

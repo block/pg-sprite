@@ -13,9 +13,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// privatePool connects to a database of the test's own: the drain counts
+// sessions in pg_stat_activity, which throwaway schemas do not isolate, and
+// the trigger it drops is database-global, so no other package's backend
+// may see it.
+func privatePool(t *testing.T) *pgxpool.Pool {
+	t.Helper()
+	pool, err := pgxpool.New(t.Context(), NewDatabase(t, StartPostgres(t)))
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return pool
+}
+
 // installedEventTrigger is a trigger and function created the way
-// RunDuringDDL creates them, without RunDuringDDL's own cleanup, so a test
-// can drive the drop itself.
+// InstallEventTrigger creates them, without its cleanup, so a test can
+// drive the drop itself.
 type installedEventTrigger struct {
 	triggerName  string
 	functionName string
@@ -61,16 +73,6 @@ func (i installedEventTrigger) functionExists(t *testing.T, pool *pgxpool.Pool) 
 	return exists
 }
 
-// triggerExists reports whether the event trigger is still in the catalog.
-func (i installedEventTrigger) triggerExists(t *testing.T, pool *pgxpool.Pool) bool {
-	t.Helper()
-	var exists bool
-	require.NoError(t, pool.QueryRow(t.Context(), `
-		SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_event_trigger WHERE evtname = $1)`,
-		i.schema+"_run_during_ddl").Scan(&exists))
-	return exists
-}
-
 // beginTransaction opens a transaction on its own connection and returns
 // the function that commits it. The transaction has run a statement, so the
 // server records its xact_start.
@@ -98,9 +100,7 @@ func beginTransaction(t *testing.T, pool *pgxpool.Pool) (commit func()) {
 // the trigger in its event-trigger cache and call the function from its next
 // DDL statement. Once the older transaction ends, the function goes.
 func TestDropEventTriggerKeepsTheFunctionWhileAnOlderTransactionIsOpen(t *testing.T) {
-	pool, err := pgxpool.New(t.Context(), StartPostgres(t))
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
+	pool := privatePool(t)
 	installed := installEventTrigger(t, pool)
 	commit := beginTransaction(t, pool)
 
@@ -129,46 +129,52 @@ func TestDropEventTriggerKeepsTheFunctionWhileAnOlderTransactionIsOpen(t *testin
 }
 
 // A transaction that never ends must not hang the test's cleanup: past the
-// drain timeout the drop reports the leak and leaves the function for the
-// schema drop to remove.
+// drain timeout the drop reports the leak with a typed error and leaves the
+// function for the schema drop to remove.
 func TestDropEventTriggerReportsAnOlderTransactionThatOutlivesTheDrain(t *testing.T) {
-	pool, err := pgxpool.New(t.Context(), StartPostgres(t))
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
+	pool := privatePool(t)
 	installed := installEventTrigger(t, pool)
 	beginTransaction(t, pool)
 
-	err = dropEventTrigger(t.Context(), pool, installed.triggerName, installed.functionName, 200*time.Millisecond)
-	require.Error(t, err)
+	err := dropEventTrigger(t.Context(), pool, installed.triggerName, installed.functionName, 200*time.Millisecond)
+	require.ErrorIs(t, err, errEventTriggerDrainTimedOut)
 	assert.True(t, installed.functionExists(t, pool), "a drop that gave up must not remove the function a cached trigger may still call")
 }
 
 // A transaction that begins after the drop never saw the trigger, so it
 // does not hold the drop back: only transactions older than the drop do.
+// The newer transaction is opened after the drop instant has been read, so
+// the test does not depend on when the drain samples the clock.
 func TestDropEventTriggerIgnoresTransactionsThatBeganAfterTheDrop(t *testing.T) {
-	pool, err := pgxpool.New(t.Context(), StartPostgres(t))
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
+	pool := privatePool(t)
 	installed := installEventTrigger(t, pool)
 	commitOlder := beginTransaction(t, pool)
 
-	dropReturned := make(chan error, 1)
-	go func() {
-		dropReturned <- dropEventTrigger(t.Context(), pool, installed.triggerName, installed.functionName, eventTriggerDrainTimeout)
-	}()
-	// Wait for the trigger's drop to commit, then open a transaction the
-	// drain must not wait for.
-	require.Eventually(t, func() bool { return !installed.triggerExists(t, pool) },
-		10*time.Second, eventTriggerDrainPoll, "the trigger's drop must commit before the drain begins")
+	conn, err := pool.Acquire(t.Context())
+	require.NoError(t, err)
+	// The drain owns conn until it returns; release only after that, or a
+	// failing deadline below would release a connection still in use.
+	var drain sync.WaitGroup
+	t.Cleanup(func() {
+		drain.Wait()
+		conn.Release()
+	})
+	dropped, err := dropTrigger(t.Context(), conn, installed.triggerName)
+	require.NoError(t, err)
 	beginTransaction(t, pool)
 
+	drainReturned := make(chan error, 1)
+	drain.Go(func() {
+		drainReturned <- dropFunctionAfterDrain(t.Context(), conn, installed.triggerName, installed.functionName, dropped, eventTriggerDrainTimeout)
+	})
+
 	commitOlder()
-	dropDeadline := time.After(10 * time.Second)
+	drainDeadline := time.After(10 * time.Second)
 	select {
-	case err := <-dropReturned:
+	case err := <-drainReturned:
 		require.NoError(t, err)
-	case <-dropDeadline:
-		t.Fatal("dropEventTrigger waited for a transaction that began after the drop")
+	case <-drainDeadline:
+		t.Fatal("the drain waited for a transaction that began after the drop")
 	}
 	assert.False(t, installed.functionExists(t, pool))
 }
