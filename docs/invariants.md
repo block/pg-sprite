@@ -36,7 +36,14 @@ several of these unrepresentable, and the in-TCB engineering rules live in
 A migration that cannot prove shadow == source **must refuse to cut over**. No flag, mode, or
 capture mechanism removes the gate; it is also the repair primitive for
 [slot-loss reconciliation](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
-*Enforced:* cutover entry condition. *Source:* [design-principles](design-principles.md#correctness-and-safety),
+*Enforced:* cutover entry condition. *Enforced today:* `pkg/checksum` `Verifier` — the
+comparison the gate will demand: every chunk up to the landed watermark digested on both sides
+inside one read-only `REPEATABLE READ` transaction, with every column cast to the shadow's type,
+and every differing chunk reported with its two row counts (clean-copy, changed-row,
+missing-and-extra-row, converted-type, watermark-clamp, shadowing-`search_path`,
+replaced-relation, and lost-lock tests). *Planned enforcement:* the `VerifiedShadow` constructor
+accepts only a clean `Report`, and cutover accepts only a `VerifiedShadow`.
+*Source:* [design-principles](design-principles.md#correctness-and-safety),
 risks-and-mitigations; Spirit's "never skip it".
 
 ### CO-2 — A persisted checksum watermark describes only chunks verified clean on a fresh read
@@ -231,7 +238,9 @@ not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary ob
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
 *Enforced:* `pkg/dbconn` (session hook, `LocalSearchPath`, and the test that keeps it the only
 `search_path` writer under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
-`pkg/progress`, `pkg/schemadiff`. *Test obligation:* a shadowing `search_path` (`<schema>,
+`pkg/progress`, `pkg/schemadiff`, and `pkg/checksum` (the column-type read, the relation check,
+and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
+decoy `md5` and `format_type` test). *Test obligation:* a shadowing `search_path` (`<schema>,
 pg_catalog` with decoy catalog relations and functions in the schema) yields the same answer as
 the default path, per read site and per pooled session.
 
@@ -284,7 +293,10 @@ transaction that the session's backend holds the lock before the first write (ni
 wrong-table, reported-loss, gone-session, rival-backend, mid-build-loss, and mid-drop-loss
 tests); `pkg/copier` `Copier` requires the same session, runs every chunk transaction under
 its `Bind` context, and calls `TableLockSession.Confirm` from each chunk's own connection before
-the insert (wrong-table, gone-session, rival-backend, and mid-copy-loss tests). *Planned
+the insert (wrong-table, gone-session, rival-backend, and mid-copy-loss tests); `pkg/checksum`
+`Verifier` requires the same session, runs every read transaction under its `Bind` context, and
+confirms the lock from each transaction's own connection before the first read (wrong-table,
+gone-session, reported-loss, and mid-pass-loss tests). *Planned
 enforcement:* cutover acquires the same session before its first write and runs under it, so
 loss of the lock aborts the change at every stage.
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
