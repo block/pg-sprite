@@ -45,6 +45,11 @@ type Options struct {
 	// Clock times each chunk for the chunker's chunk-time throttling
 	// feedback (docs/copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag).
 	Clock progress.Clock
+	// Tracker, when set, is told the copy's work for the lifetime of Run: the
+	// copier is its progress.WorkSource from before the first chunk until
+	// just before Run returns. The caller owns the tracker's steps; the
+	// copier only fills the current step's counters.
+	Tracker *progress.Tracker
 }
 
 func (o Options) withDefaults() Options {
@@ -103,10 +108,16 @@ type Copier struct {
 	// registered in the order they were cut. It is the only lock held
 	// across the chunker's boundary query; Position never waits on it.
 	claimMu sync.Mutex
-	// mu guards the ledger and the run flag.
+	// mu guards the ledger, the run flag, and the work fields.
 	mu     sync.Mutex
 	ledger *ledger
 	ran    bool
+	// db is the caller's pool while Run is in progress; Work measures the
+	// two tables over it and finds it nil at any other time.
+	db *pgxpool.Pool
+	// rowsTotal is the source's catalog row count read once at the start of
+	// Run.
+	rowsTotal uint64
 }
 
 // NewCopier prepares a copy of target into shadow that resumes after from
@@ -184,6 +195,8 @@ func (c *Copier) Position() Position {
 // transaction did not commit stays in Position().InFlight. Every chunk
 // transaction runs under the lock session's Bind context, so losing the
 // table lock cancels the statements in flight and Run reports the loss.
+// While it runs the copier is the tracker's work source (Options.Tracker),
+// and it has stopped being one by the time Run returns.
 //
 // Cancellation reaches the server as a closed connection, so a statement
 // that was running keeps running until it finishes or hits the transaction's
@@ -196,6 +209,11 @@ func (c *Copier) Run(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	ctx, unbind := c.lock.Bind(ctx)
 	defer unbind()
+	if err := c.measureRowsTotal(ctx, pool); err != nil {
+		return c.finish(err)
+	}
+	stopReporting := c.report(pool)
+	defer stopReporting()
 	if err := c.clearAbove(ctx, pool, c.Position().Watermark); err != nil {
 		return c.finish(err)
 	}
