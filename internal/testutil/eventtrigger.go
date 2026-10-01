@@ -108,17 +108,18 @@ const openTransactionsBeforeSQL = `SELECT pg_catalog.count(*)
 // dropEventTrigger drops the trigger, waits until no transaction that began
 // before the drop is still open, and only then drops the function.
 //
-// Event triggers are cached per backend, and a backend refreshes that cache
-// only when it accepts catalog invalidations — at transaction start and
-// when it takes a lock. A transaction already open when the trigger is
-// dropped keeps the trigger in its cache until then; ddl_command_start
-// fires before any lock, so its next DDL statement still calls the
-// trigger's function. Were the function gone by then, that statement —
-// another test's, in another package sharing the database — would fail
-// with "cache lookup failed for function". Keeping the function alive until
-// every such transaction has ended makes the stale entry harmless: the
+// Event triggers are cached per backend. A backend whose transaction began
+// before the drop may still hold the trigger in that cache — or already be
+// inside a DDL statement whose run list named it — and so call the
+// trigger's function after the trigger is gone. Were the function gone
+// too, that statement — another test's, in another package sharing the
+// database — would fail with "cache lookup failed for function". The drain
+// relies on one invariant: any backend that can still reference the
+// function is inside a transaction that started before the drop, because
+// a transaction that starts afterwards accepts the drop's invalidation at
+// its start and never sees the trigger. Keeping the function alive until
+// every such transaction has ended makes the stale reference harmless: the
 // function runs, its predicate does not match, and it returns.
-// Transactions that begin after the drop see no trigger at all.
 func dropEventTrigger(ctx context.Context, pool *pgxpool.Pool, triggerName, functionName string, drainTimeout time.Duration) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
