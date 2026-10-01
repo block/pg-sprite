@@ -447,12 +447,15 @@ func TestCheckCopySwapShapeRefusesSubscriptionTarget(t *testing.T) {
 			assert.NoError(t, err, sql)
 		}
 		const slotReleaseDeadline = 10 * time.Second
-		assert.Eventually(t, func() bool {
+		assert.EventuallyWithT(t, func(collect *assert.CollectT) {
 			var active bool
 			err := publisher.QueryRow(ctx,
 				`SELECT active FROM pg_replication_slots WHERE slot_name = 'sub_applied'`).Scan(&active)
-			return err == nil && !active
-		}, slotReleaseDeadline, 50*time.Millisecond, "the apply worker's walsender should release the slot")
+			if !assert.NoError(collect, err, "read the slot") {
+				return
+			}
+			assert.False(collect, active, "the apply worker's walsender still holds the slot")
+		}, slotReleaseDeadline, 50*time.Millisecond)
 		_, err := publisher.Exec(ctx, `SELECT pg_drop_replication_slot('sub_applied')`)
 		assert.NoError(t, err)
 	})
