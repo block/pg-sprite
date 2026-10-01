@@ -1,6 +1,10 @@
 package decode
 
-import "fmt"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // ChangeKind identifies a decoded row operation.
 type ChangeKind uint8
@@ -33,6 +37,25 @@ type LSN uint64
 
 // String renders the PostgreSQL X/Y representation.
 func (l LSN) String() string { return fmt.Sprintf("%X/%X", uint64(l)>>32, uint64(l)&0xffffffff) }
+
+// ParseLSN reads the PostgreSQL X/Y representation — the text form of a
+// pg_lsn value — back into an LSN. Both halves are hexadecimal and each
+// must fit in 32 bits; anything else is an error naming the input.
+func ParseLSN(s string) (LSN, error) {
+	high, low, ok := strings.Cut(s, "/")
+	if !ok {
+		return 0, fmt.Errorf("parse LSN %q: want the X/Y form", s)
+	}
+	hi, err := strconv.ParseUint(high, 16, 32)
+	if err != nil {
+		return 0, fmt.Errorf("parse LSN %q: high half: %w", s, err)
+	}
+	lo, err := strconv.ParseUint(low, 16, 32)
+	if err != nil {
+		return 0, fmt.Errorf("parse LSN %q: low half: %w", s, err)
+	}
+	return LSN(hi<<32 | lo), nil
+}
 
 // Column is one decoded column. Present=false means pgoutput omitted an
 // unchanged TOAST value, so an applier must leave the target column untouched.
