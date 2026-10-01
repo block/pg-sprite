@@ -13,6 +13,11 @@ const (
 	// changes; on Aurora/RDS the setting behind it is
 	// rds.logical_replication, a static parameter that needs a reboot.
 	CopySwapCauseLogicalDecodingUnavailable CopySwapRefusalCause = "copy-and-swap-logical-decoding-unavailable"
+	// CopySwapCauseSlotCollision means a replication slot already carries
+	// the name derived for this target and belongs to another database or
+	// is a physical slot: slot names are cluster-wide, so the route can
+	// neither share nor drop it.
+	CopySwapCauseSlotCollision CopySwapRefusalCause = "copy-and-swap-slot-collision"
 	// CopySwapCauseSlotHeadroom means the cluster has no free replication
 	// slot or no free WAL sender for the one logical-decoding connection
 	// the route opens.
@@ -38,7 +43,9 @@ type CopySwapSetting string
 
 const (
 	// CopySwapSettingWALLevel is wal_level itself, which a self-managed
-	// server changes directly.
+	// server changes directly. It is also what the refusal names on a
+	// managed service other than RDS; where such a service drives
+	// wal_level from a switch of its own, the operator sets that switch.
 	CopySwapSettingWALLevel CopySwapSetting = "wal_level"
 	// CopySwapSettingRDSLogicalReplication is the parameter-group switch
 	// that drives wal_level on Aurora and RDS, where wal_level cannot be
@@ -93,18 +100,31 @@ type copySwapEnvironmentFacts struct {
 	usedSlots           int64
 	maxWALSenders       int64
 	usedWALSenders      int64
-	totalBytes          int64
+	// slotName is the name the route derives for the target's slot, and
+	// foreignSlots counts replication slots carrying it that are not this
+	// database's logical slot.
+	slotName     string
+	foreignSlots int64
+	totalBytes   int64
 }
 
 // CheckCopySwapEnvironment verifies that the cluster and the volume can
-// carry a copy-and-swap of the proven target: logical decoding is enabled
-// and has a free slot and WAL sender when the run decodes WAL, and the
-// caller-measured free disk covers the shadow copy. It runs after
+// carry a copy-and-swap of the proven target: when the run decodes WAL,
+// logical decoding is enabled, no other database holds the slot name the
+// route derives for the target, and a slot and WAL sender are free; in
+// every run the caller-measured free disk covers the shadow copy. A run
+// that decodes WAL must present a target whose privilege proof verified
+// replication access, or it is a proof mismatch. It runs after
 // CheckCopySwapShape and before the first write; a refusal is a
-// *CopySwapEnvironmentError.
+// *CopySwapEnvironmentError. The reads are pg_catalog-qualified, so the
+// result does not depend on the pool's search_path; the pool should still
+// come from dbconn.NewPool, which bounds every session's timeouts.
 func CheckCopySwapEnvironment(ctx context.Context, pool *pgxpool.Pool, target CopySwapTarget, env CopySwapEnvironment) error {
 	if target.Table() == "" || target.oid == 0 {
 		return fmt.Errorf("%w: zero copy-and-swap target", ErrCopySwapProofMismatch)
+	}
+	if env.LogicalDecoding && !target.LogicalDecoding() {
+		return fmt.Errorf("%w: the run decodes WAL but the target's privilege proof did not verify replication access", ErrCopySwapProofMismatch)
 	}
 	facts, err := gatherCopySwapEnvironmentFacts(ctx, pool, target)
 	if err != nil {
@@ -120,12 +140,19 @@ func CheckCopySwapEnvironment(ctx context.Context, pool *pgxpool.Pool, target Co
 
 // refuseCopySwapEnvironment decides the first cause that puts the facts
 // outside what the run needs, or nil when the environment is sufficient.
-// Enablement is decided before capacity, and capacity before disk, so the
-// refusal names the change the operator must make first.
+// Enablement is decided before the slot name, the slot name before
+// capacity, and capacity before disk, so the refusal names the change the
+// operator must make first.
 func refuseCopySwapEnvironment(f copySwapEnvironmentFacts, env CopySwapEnvironment) *CopySwapEnvironmentError {
 	if env.LogicalDecoding {
 		if f.walLevel != walLevelLogical {
 			return refuseLogicalDecoding(f)
+		}
+		if f.foreignSlots > 0 {
+			return &CopySwapEnvironmentError{
+				Cause:  CopySwapCauseSlotCollision,
+				Detail: fmt.Sprintf("replication slot %s already exists and is not this database's logical slot; the route can neither share nor drop it", f.slotName),
+			}
 		}
 		if free := f.maxReplicationSlots - f.usedSlots; free < 1 {
 			return &CopySwapEnvironmentError{
@@ -160,8 +187,9 @@ func refuseCopySwapEnvironment(f copySwapEnvironmentFacts, env CopySwapEnvironme
 
 // refuseLogicalDecoding names the setting that enables logical decoding on
 // this server: the RDS parameter where the server carries it, because
-// wal_level cannot be set directly there; wal_level itself everywhere else,
-// including other managed services that expose their own switch for it.
+// wal_level cannot be set directly there; wal_level itself everywhere else.
+// A managed service other than RDS that drives wal_level from a switch of
+// its own is not detected, so the refusal names wal_level there too.
 func refuseLogicalDecoding(f copySwapEnvironmentFacts) *CopySwapEnvironmentError {
 	if f.rdsParameterPresent {
 		return &CopySwapEnvironmentError{
@@ -178,22 +206,30 @@ func refuseLogicalDecoding(f copySwapEnvironmentFacts) *CopySwapEnvironmentError
 }
 
 // gatherCopySwapEnvironmentFacts snapshots the settings, the slot and WAL
-// sender occupancy, and the proven relation's total size in one query.
-// Occupancy counts every slot and every WAL sender on the cluster, whatever
-// database owns it, because the limits are cluster-wide.
+// sender occupancy, the slots carrying the target's derived name, and the
+// proven relation's total size in one query. Occupancy counts every slot
+// and every WAL sender on the cluster, whatever database owns it, because
+// the limits are cluster-wide. A slot of the derived name counts as a
+// collision unless it is a logical slot of this database — that one is the
+// route's own, left by an earlier run for the reaper or the resume path.
+// Every catalog name is pg_catalog-qualified so the facts resolve to the
+// real catalog whatever search_path the session carries.
 func gatherCopySwapEnvironmentFacts(ctx context.Context, pool *pgxpool.Pool, target CopySwapTarget) (copySwapEnvironmentFacts, error) {
 	const q = `
-		SELECT current_setting('wal_level')::text,
-		       current_setting('rds.logical_replication', true) IS NOT NULL,
-		       current_setting('max_replication_slots')::bigint,
-		       (SELECT count(*) FROM pg_replication_slots),
-		       current_setting('max_wal_senders')::bigint,
-		       (SELECT count(*) FROM pg_stat_replication),
-		       (SELECT pg_total_relation_size(c.oid) FROM pg_class c WHERE c.oid = $1)`
-	var f copySwapEnvironmentFacts
+		SELECT pg_catalog.current_setting('wal_level')::text,
+		       pg_catalog.current_setting('rds.logical_replication', true) IS NOT NULL,
+		       pg_catalog.current_setting('max_replication_slots')::bigint,
+		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_replication_slots),
+		       pg_catalog.current_setting('max_wal_senders')::bigint,
+		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_replication),
+		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_replication_slots s
+		         WHERE s.slot_name = $2
+		           AND s.database IS DISTINCT FROM pg_catalog.current_database()),
+		       (SELECT pg_catalog.pg_total_relation_size(c.oid) FROM pg_catalog.pg_class c WHERE c.oid = $1)`
+	f := copySwapEnvironmentFacts{slotName: target.DecodingName()}
 	var totalBytes *int64
-	err := pool.QueryRow(ctx, q, target.oid).Scan(
-		&f.walLevel, &f.rdsParameterPresent, &f.maxReplicationSlots, &f.usedSlots, &f.maxWALSenders, &f.usedWALSenders, &totalBytes)
+	err := pool.QueryRow(ctx, q, target.oid, f.slotName).Scan(
+		&f.walLevel, &f.rdsParameterPresent, &f.maxReplicationSlots, &f.usedSlots, &f.maxWALSenders, &f.usedWALSenders, &f.foreignSlots, &totalBytes)
 	if err != nil {
 		return copySwapEnvironmentFacts{}, fmt.Errorf("gather copy-and-swap environment facts for %s: %w", qualifiedName(target.Schema(), target.Table()), err)
 	}

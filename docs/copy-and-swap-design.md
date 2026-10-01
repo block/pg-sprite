@@ -13,8 +13,8 @@ when the executor ships.
 
 | Classification | v1 surface |
 | --- | --- |
-| Supported in v1 | Rewrite-requiring `ALTER COLUMN … TYPE`, initially `integer` → `bigint` identity primary keys, `text` → `varchar(n)`, and `numeric` precision/scale widening; volatile-default `ADD COLUMN`; and `STORED` generated-column addition. The table is permanent, has one `smallint`, `integer`, or `bigint` primary-key column (a usable primary key), and has a replica identity of `DEFAULT` or `FULL`; no incoming or outgoing foreign keys, triggers, partitioning/inheritance, or rules; no dependent views or materialized views; no explicit membership in a publication other than the engine's own; and no `FORCE ROW LEVEL SECURITY`. Every name the route derives is a fixed width under PostgreSQL's 63-byte identifier limit (`NAMEDATALEN - 1`), so no source name can be refused for length. Foreign keys, triggers, dependent views, and publication membership are the OID-bound dependents a rename swap strands (RF-2): they would follow the retained `_old` table, not the live one. |
-| Typed refusal (planned) | Unsupported key (`copy-and-swap-pk-unsupported`); unsuitable replica identity (`copy-and-swap-replica-identity`); foreign keys (`copy-and-swap-foreign-keys`); triggers or rules (`copy-and-swap-triggers`); partitioned or inherited tables (`copy-and-swap-partitioned`); unlogged tables (`copy-and-swap-unlogged`); forced row-level security (`copy-and-swap-force-rls`); dependent views or materialized views (`copy-and-swap-dependent-views`); publication membership (`copy-and-swap-publication-member`); unavailable logical decoding (`copy-and-swap-logical-decoding-unavailable`); insufficient replication-slot or WAL-sender capacity (`copy-and-swap-slot-headroom`); a same-named slot already owned by another database (`copy-and-swap-slot-collision`); or insufficient disk (`copy-and-swap-disk-headroom`). Insufficient grants are refused by the tiered privilege check that runs first (`*preflight.PrivilegeError`, reason `insufficient-privileges`), naming the exact `GRANT`. Every refusal names its reason. |
+| Supported in v1 | Rewrite-requiring `ALTER COLUMN … TYPE`, initially `integer` → `bigint` identity primary keys, `text` → `varchar(n)`, and `numeric` precision/scale widening; volatile-default `ADD COLUMN`; and `STORED` generated-column addition. The table is permanent, has one `smallint`, `integer`, or `bigint` primary-key column (a usable primary key), and has a replica identity of `DEFAULT` or `FULL`; no incoming or outgoing foreign keys, triggers, partitioning/inheritance, or rules; no dependent views or materialized views; no publication other than the engine's own publishing it (explicit membership, `FOR ALL TABLES`, or `FOR TABLES IN SCHEMA`); no subscription applying into it; no other object depending on its OID or row type; and no `FORCE ROW LEVEL SECURITY`. Every name the route derives is a fixed width under PostgreSQL's 63-byte identifier limit (`NAMEDATALEN - 1`), so no source name can be refused for length. Foreign keys, triggers, dependent views, publications, subscriptions, and the remaining `pg_depend` dependents are what a rename swap strands (RF-2): they would follow the retained `_old` table, not the live one, or publish the shadow's copy writes. |
+| Typed refusal (planned) | Unsupported key (`copy-and-swap-pk-unsupported`); unsuitable replica identity (`copy-and-swap-replica-identity`); foreign keys (`copy-and-swap-foreign-keys`); triggers or rules (`copy-and-swap-triggers`); partitioned or inherited tables (`copy-and-swap-partitioned`); unlogged tables (`copy-and-swap-unlogged`); forced row-level security (`copy-and-swap-force-rls`); dependent views or materialized views (`copy-and-swap-dependent-views`); a publication other than the engine's own (`copy-and-swap-publication-member`); a subscription applying into the table (`copy-and-swap-subscription-target`); any other OID- or row-type-bound dependent (`copy-and-swap-dependents`); unavailable logical decoding (`copy-and-swap-logical-decoding-unavailable`); insufficient replication-slot or WAL-sender capacity (`copy-and-swap-slot-headroom`); a same-named slot owned by another database or held as a physical slot (`copy-and-swap-slot-collision`); or insufficient disk (`copy-and-swap-disk-headroom`). Insufficient grants are refused by the tiered privilege check that runs first (`*preflight.PrivilegeError`, reason `insufficient-privileges`), naming the exact `GRANT`. Every refusal names its reason. |
 | Out of scope | All other table shapes and operations, including primary-key changes, receive a typed refusal rather than an unsafe approximation. |
 
 ## Decisions
@@ -256,8 +256,12 @@ later mode.
 **Decision.** Slot and single-table publication are both named `pgsprite_<8hex>`, where the hash
 covers `database.schema.table`: a replication slot is cluster-wide while the checkpoint table
 (D3) is per-database, so two databases holding a same-named table must not derive the same slot
-name. If a slot of the derived name already exists for another database — a hash collision —
-preflight refuses (`copy-and-swap-slot-collision`) rather than sharing or dropping it. The
+name. If a slot of the derived name already exists for another database, or as a physical slot — a hash
+collision or a foreign naming choice — preflight refuses (`copy-and-swap-slot-collision`) rather
+than sharing or dropping it; a logical slot of the derived name in the current database is the
+route's own earlier slot and is left to the reaper or the resume path. Preflight also sets the
+engine's publication aside from the publication refusal by this exact derived name, so a
+publication that merely wears the `pgsprite_` prefix is treated as somebody else's. The
 checkpoint row is written and committed **before** the slot is created, so a slot with no row is
 an orphan and never a slot mid-creation. Preflight checks free `max_replication_slots` and
 `max_wal_senders` capacity. Slot lag has a hard byte ceiling, default 1 GiB; crossing it aborts
@@ -273,7 +277,7 @@ database, or a reaper in one database would push another's in-flight change into
 
 **Alternative considered → deferred.** Best-effort cleanup alone cannot cover process death.
 
-**Where enforced.** `pkg/decode`, `pkg/checkpoint`, and `pkg/preflight`; ST-3, ST-4, ST-6.
+**Where enforced.** `pkg/decode`, `pkg/checkpoint`, and `pkg/preflight` (`CopySwapDecodingName` derives the name; `CheckCopySwapEnvironment` refuses the collision); ST-3, ST-4, ST-6.
 
 ### D12 — Throttle by chunk time and slot lag
 

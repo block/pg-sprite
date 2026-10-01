@@ -1,10 +1,14 @@
 package preflight_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -311,14 +315,16 @@ func TestCheckCopySwapShapeRefusesDependentViews(t *testing.T) {
 	require.NoError(t, err, "a view over another table is not this table's dependent")
 }
 
-// Explicit membership in a publication is bound to the table's OID, so
-// subscribers would keep following the old table. A FOR ALL TABLES
-// publication binds to the database, not the table, and is accepted; so is
-// the engine's own pgsprite_-prefixed single-table publication. The test
-// runs in a database of its own: a FOR ALL TABLES publication makes every
-// UPDATE and DELETE in its database demand a replica identity, which must
-// not reach tables other tests share.
-func TestCheckCopySwapShapeRefusesExplicitPublicationMembership(t *testing.T) {
+// Any publication other than the engine's own for the table is a dependent:
+// explicit membership is bound to the table's OID, so subscribers would keep
+// following the old table, and a FOR ALL TABLES publication would publish
+// the shadow's copy writes. Only the publication wearing the exact name the
+// route derives for the table is set aside; a publication that merely wears
+// the engine prefix is somebody else's. The test runs in a database of its
+// own: a FOR ALL TABLES publication makes every UPDATE and DELETE in its
+// database demand a replica identity, which must not reach tables other
+// tests share.
+func TestCheckCopySwapShapeRefusesPublicationsOtherThanTheEngineOwn(t *testing.T) {
 	f := newCopySwapShapeFixtureInOwnDatabase(t)
 	f.exec(t, `
 		CREATE TABLE %s.published (
@@ -329,20 +335,261 @@ func TestCheckCopySwapShapeRefusesExplicitPublicationMembership(t *testing.T) {
 			id bigint PRIMARY KEY
 		)`)
 	f.exec(t, `
+		CREATE TABLE %s.prefix_published (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `
 		CREATE TABLE %s.unpublished (
 			id bigint PRIMARY KEY
 		)`)
 	f.exec(t, `CREATE PUBLICATION pub_explicit FOR TABLE %s.published`)
-	f.exec(t, `CREATE PUBLICATION pgsprite_0badf00d FOR TABLE %s.engine_published`)
-	_, err := f.pool.Exec(t.Context(), `CREATE PUBLICATION pub_all FOR ALL TABLES`)
-	require.NoError(t, err)
+	f.exec(t, `CREATE PUBLICATION pgsprite_0badf00d FOR TABLE %s.prefix_published`)
+	f.exec(t, `CREATE PUBLICATION `+preflight.CopySwapDecodingName(f.database(t), f.schema, "engine_published")+` FOR TABLE %s.engine_published`)
 
-	_, err = f.check(t, "published")
+	_, err := f.check(t, "published")
+	requireCopySwapCause(t, err, preflight.CopySwapCausePublicationMember)
+	_, err = f.check(t, "prefix_published")
 	requireCopySwapCause(t, err, preflight.CopySwapCausePublicationMember)
 	_, err = f.check(t, "engine_published")
-	require.NoError(t, err, "the engine's own publication is not a dependent")
+	require.NoError(t, err, "the engine's own publication for the table is not a dependent")
 	_, err = f.check(t, "unpublished")
-	require.NoError(t, err, "a FOR ALL TABLES publication is not an explicit membership")
+	require.NoError(t, err)
+
+	_, err = f.pool.Exec(t.Context(), `CREATE PUBLICATION pub_all FOR ALL TABLES`)
+	require.NoError(t, err)
+	_, err = f.check(t, "unpublished")
+	requireCopySwapCause(t, err, preflight.CopySwapCausePublicationMember)
+	_, err = f.check(t, "engine_published")
+	requireCopySwapCause(t, err, preflight.CopySwapCausePublicationMember)
+}
+
+// A FOR TABLES IN SCHEMA publication publishes every table in its schema,
+// the shadow included, so a table in that schema is refused while a table
+// in another schema is not. The form exists from PostgreSQL 15.
+func TestCheckCopySwapShapeRefusesSchemaPublication(t *testing.T) {
+	if major(t) < 15 {
+		t.Skip("FOR TABLES IN SCHEMA publications exist from PostgreSQL 15")
+	}
+	f := newCopySwapShapeFixtureInOwnDatabase(t)
+	f.exec(t, `
+		CREATE TABLE %s.in_schema (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `CREATE PUBLICATION pub_schema FOR TABLES IN SCHEMA %s`)
+	other := copySwapShapeFixture{serverURL: f.serverURL, pool: f.pool, schema: testutil.NewSchema(t, f.pool)}
+	other.exec(t, `
+		CREATE TABLE %s.elsewhere (
+			id bigint PRIMARY KEY
+		)`)
+
+	_, err := f.check(t, "in_schema")
+	requireCopySwapCause(t, err, preflight.CopySwapCausePublicationMember)
+	_, err = other.check(t, "elsewhere")
+	require.NoError(t, err, "a schema publication does not publish tables of other schemas")
+}
+
+// A subscription applying into the table binds it by OID: after the swap
+// the apply worker would find no state for the new relation and skip its
+// changes. The publisher is another database on the same cluster, with the
+// slot created ahead of the subscription as same-cluster replication
+// requires; a sibling table the subscription does not apply into is
+// accepted.
+func TestCheckCopySwapShapeRefusesSubscriptionTarget(t *testing.T) {
+	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=logical")
+	publisherURL := testutil.NewDatabase(t, serverURL)
+	publisher, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: publisherURL})
+	require.NoError(t, err)
+	t.Cleanup(publisher.Close)
+	_, err = publisher.Exec(t.Context(), `
+		CREATE TABLE public.applied (
+			id bigint PRIMARY KEY
+		)`)
+	require.NoError(t, err)
+	_, err = publisher.Exec(t.Context(), `CREATE PUBLICATION pub_applied FOR TABLE public.applied`)
+	require.NoError(t, err)
+	_, err = publisher.Exec(t.Context(), `SELECT pg_create_logical_replication_slot('sub_applied', 'pgoutput')`)
+	require.NoError(t, err)
+
+	subscriberURL := testutil.NewDatabase(t, serverURL)
+	subscriber, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: subscriberURL})
+	require.NoError(t, err)
+	t.Cleanup(subscriber.Close)
+	_, err = subscriber.Exec(t.Context(), `
+		CREATE TABLE public.applied (
+			id bigint PRIMARY KEY
+		)`)
+	require.NoError(t, err)
+	_, err = subscriber.Exec(t.Context(), `
+		CREATE TABLE public.sibling (
+			id bigint PRIMARY KEY
+		)`)
+	require.NoError(t, err)
+	_, err = subscriber.Exec(t.Context(), `
+		CREATE SUBSCRIPTION sub_applied
+			CONNECTION '`+sameClusterConnInfo(t, publisherURL)+`'
+			PUBLICATION pub_applied
+			WITH (create_slot = false, slot_name = 'sub_applied', copy_data = false)`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// The subscription is detached from its slot before it is dropped so
+		// the drop needs no publisher connection; the slot then goes with
+		// the publisher database.
+		ctx := context.WithoutCancel(t.Context())
+		for _, sql := range []string{
+			`ALTER SUBSCRIPTION sub_applied DISABLE`,
+			`ALTER SUBSCRIPTION sub_applied SET (slot_name = NONE)`,
+			`DROP SUBSCRIPTION sub_applied`,
+		} {
+			_, err := subscriber.Exec(ctx, sql)
+			assert.NoError(t, err, sql)
+		}
+		_, err := publisher.Exec(ctx, `SELECT pg_drop_replication_slot('sub_applied')`)
+		assert.NoError(t, err)
+	})
+	f := copySwapShapeFixture{serverURL: subscriberURL, pool: subscriber, schema: "public"}
+
+	_, err = f.check(t, "applied")
+	requireCopySwapCause(t, err, preflight.CopySwapCauseSubscriptionTarget)
+	_, err = f.check(t, "sibling")
+	require.NoError(t, err, "a table the subscription does not apply into is not its target")
+}
+
+// sameClusterConnInfo is the keyword/value connection string a subscription
+// on this cluster uses to reach databaseURL from the server's own side.
+func sameClusterConnInfo(t *testing.T, databaseURL string) string {
+	t.Helper()
+	cfg, err := pgx.ParseConfig(databaseURL)
+	require.NoError(t, err)
+	quote := func(v string) string { return strings.ReplaceAll(v, "'", "''") }
+	return fmt.Sprintf("host=localhost port=5432 dbname=%s user=%s password=%s",
+		quote(cfg.Database), quote(cfg.User), quote(cfg.Password))
+}
+
+// Objects the named causes do not cover can still depend on the table's OID
+// or its row type, and the swap carries none of them: a rule on another
+// table writing into it, a SQL-standard function body reading it, a policy
+// on another table whose expression consults it, and a column of its row
+// type each follow the retained old table. Each is refused with the
+// description the catalog gives the dependent.
+func TestCheckCopySwapShapeRefusesDependentsTheSwapDoesNotCarry(t *testing.T) {
+	f := newCopySwapShapeFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.audit (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `
+		CREATE TABLE %s.source (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `CREATE RULE log_insert AS ON INSERT TO %s.source DO ALSO INSERT INTO %[1]s.audit (id) VALUES (NEW.id)`)
+	f.exec(t, `
+		CREATE TABLE %s.counted (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `
+		CREATE FUNCTION %s.count_rows() RETURNS bigint LANGUAGE sql
+		BEGIN ATOMIC
+			SELECT count(*) FROM %[1]s.counted;
+		END`)
+	f.exec(t, `
+		CREATE TABLE %s.allowlist (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `
+		CREATE TABLE %s.guarded (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `CREATE POLICY allowlisted ON %s.guarded USING (EXISTS (SELECT 1 FROM %[1]s.allowlist a WHERE a.id = guarded.id))`)
+	f.exec(t, `
+		CREATE TABLE %s.typed (
+			id bigint PRIMARY KEY,
+			label text
+		)`)
+	f.exec(t, `
+		CREATE TABLE %s.snapshots (
+			id bigint PRIMARY KEY,
+			row_copy %[1]s.typed
+		)`)
+
+	for table, dependent := range map[string]string{
+		"audit":     "rule log_insert on table " + f.schema + ".source",
+		"counted":   "function " + f.schema + ".count_rows()",
+		"allowlist": "policy allowlisted on table " + f.schema + ".guarded",
+		"typed":     "column row_copy of table " + f.schema + ".snapshots",
+	} {
+		_, err := f.check(t, table)
+		requireCopySwapCause(t, err, preflight.CopySwapCauseDependents)
+		var shapeErr *preflight.UnsupportedCopySwapShapeError
+		require.ErrorAs(t, err, &shapeErr)
+		assert.Contains(t, shapeErr.Detail, dependent, table)
+	}
+}
+
+// The table's own objects — its identity sequence, indexes, constraints,
+// defaults, and policies — also depend on its OID, through edges the swap
+// carries or recreates; they are not dependents, and neither is an object
+// of another table that happens to live beside it.
+func TestCheckCopySwapShapeAcceptsTheTablesOwnObjects(t *testing.T) {
+	f := newCopySwapShapeFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.owned (
+			id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+			amount numeric NOT NULL DEFAULT 0 CHECK (amount >= 0),
+			owner_name text NOT NULL DEFAULT current_user,
+			lower_name text GENERATED ALWAYS AS (lower(owner_name)) STORED
+		)`)
+	f.exec(t, `CREATE INDEX owned_lower_name_idx ON %s.owned (lower_name) WHERE amount > 0`)
+	f.exec(t, `ALTER TABLE %s.owned ENABLE ROW LEVEL SECURITY`)
+	f.exec(t, `CREATE POLICY own_rows ON %s.owned USING (owner_name = current_user)`)
+	f.exec(t, `CREATE STATISTICS %s.owned_stats ON amount, owner_name FROM %[1]s.owned`)
+	f.exec(t, `
+		CREATE TABLE %s.neighbour (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `CREATE VIEW %s.neighbour_view AS SELECT id FROM %[1]s.neighbour`)
+
+	_, err := f.check(t, "owned")
+	require.NoError(t, err)
+}
+
+// The publication read resolves to the real catalog whatever the session's
+// search_path says: an impostor pg_publication_tables ahead of pg_catalog
+// that publishes nothing does not hide a FOR ALL TABLES publication.
+func TestCheckCopySwapShapeIgnoresTheSessionSearchPath(t *testing.T) {
+	f := newCopySwapShapeFixtureInOwnDatabase(t)
+	f.exec(t, `
+		CREATE TABLE %s.published (
+			id bigint PRIMARY KEY
+		)`)
+	_, err := f.pool.Exec(t.Context(), `CREATE PUBLICATION pub_all FOR ALL TABLES`)
+	require.NoError(t, err)
+	f.exec(t, `
+		CREATE VIEW %s.pg_publication_tables AS
+		SELECT pubname, schemaname, tablename
+		FROM pg_catalog.pg_publication_tables
+		WHERE false`)
+	shadowing := testutil.NewCatalogShadowingPool(t, f.serverURL, f.schema)
+
+	role, err := preflight.CheckPrivileges(t.Context(), shadowing, f.schema, "published", preflight.Requirement{Tier: preflight.TierCopyAndSwap})
+	require.NoError(t, err)
+	_, err = preflight.CheckCopySwapShape(t.Context(), shadowing, f.schema, "published", role)
+	requireCopySwapCause(t, err, preflight.CopySwapCausePublicationMember)
+}
+
+// database is the catalog's name for the database the fixture pool is on.
+func (f copySwapShapeFixture) database(t *testing.T) string {
+	t.Helper()
+	var name string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT current_database()`).Scan(&name))
+	return name
+}
+
+// major is the PostgreSQL major version under test.
+func major(t *testing.T) int {
+	t.Helper()
+	v, err := strconv.Atoi(testutil.PGVersion())
+	require.NoError(t, err)
+	return v
 }
 
 // newCopySwapShapeFixtureInOwnDatabase is newCopySwapShapeFixture on a

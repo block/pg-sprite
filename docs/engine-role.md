@@ -102,16 +102,20 @@ GRANT app_owner TO pgsprite_engine;
 GRANT USAGE, CREATE ON SCHEMA app TO app_owner;  -- if the owner lacks it
 
 -- Tier 3: shadow objects are created under the owner, so the membership
--- must be usable with SET ROLE (the default; on PostgreSQL 16+ a grant made
--- WITH SET FALSE would fail this tier)
-GRANT app_owner TO pgsprite_engine WITH SET TRUE;  -- 16+ spelling of the default
+-- must be usable with SET ROLE. The Tier 1 grant above already is: SET is
+-- the default. On PostgreSQL 16+ only, a grant can be made WITH SET FALSE,
+-- which fails this tier; the 16+ spelling of the default is
+--   GRANT app_owner TO pgsprite_engine WITH SET TRUE;
+-- and is a syntax error on 14 and 15.
 
 -- Tier 3, only when copy-and-swap decodes WAL: one of
 GRANT rds_replication TO pgsprite_engine;          -- Aurora/RDS
 ALTER ROLE pgsprite_engine WITH REPLICATION;       -- self-managed
 
 -- Not grants, but checked alongside them for a run that decodes WAL:
---   wal_level = logical          (rds.logical_replication = 1 on Aurora/RDS; both need a restart)
+--   wal_level = logical          (rds.logical_replication = 1 on Aurora/RDS; both need a restart;
+--                                 another managed service's own switch for it is not detected)
+--   no slot of the name derived for the table held by another database or as a physical slot
 --   one free slot under max_replication_slots and one free sender under max_wal_senders
 ```
 

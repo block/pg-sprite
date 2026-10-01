@@ -1,10 +1,13 @@
 package preflight_test
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -26,14 +29,22 @@ type copySwapEnvironmentFixture struct {
 
 // newCopySwapEnvironmentFixture creates a bigint-keyed table with enough
 // rows to occupy heap pages, so the disk requirement is a real size rather
-// than an empty relation's, and mints its copy-and-swap proof.
+// than an empty relation's, and mints its copy-and-swap proof with
+// replication access verified, so the proof admits a decoding run.
 func newCopySwapEnvironmentFixture(t *testing.T, serverURL string) copySwapEnvironmentFixture {
 	t.Helper()
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
+	return newCopySwapEnvironmentFixtureOn(t, pool, preflight.Requirement{Tier: preflight.TierCopyAndSwap, LogicalDecoding: true})
+}
+
+// newCopySwapEnvironmentFixtureOn is newCopySwapEnvironmentFixture on a
+// pool the test built, with the proof minted for req.
+func newCopySwapEnvironmentFixtureOn(t *testing.T, pool *pgxpool.Pool, req preflight.Requirement) copySwapEnvironmentFixture {
+	t.Helper()
 	schema := testutil.NewSchema(t, pool)
-	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %s.ledger (
 			id bigint PRIMARY KEY,
 			note text
@@ -44,7 +55,7 @@ func newCopySwapEnvironmentFixture(t *testing.T, serverURL string) copySwapEnvir
 		SELECT g, repeat('x', 100) FROM generate_series(1, 1000) AS g`, schema))
 	require.NoError(t, err)
 
-	role, err := preflight.CheckPrivileges(t.Context(), pool, schema, "ledger", preflight.Requirement{Tier: preflight.TierCopyAndSwap})
+	role, err := preflight.CheckPrivileges(t.Context(), pool, schema, "ledger", req)
 	require.NoError(t, err)
 	target, err := preflight.CheckCopySwapShape(t.Context(), pool, schema, "ledger", role)
 	require.NoError(t, err)
@@ -173,4 +184,118 @@ func TestCheckCopySwapEnvironmentRejectsUnprovenTargets(t *testing.T) {
 	err = f.check(t, env)
 	require.ErrorIs(t, err, preflight.ErrCopySwapProofMismatch)
 	assert.Empty(t, preflight.CopySwapRefusalCauseOf(err))
+}
+
+// A run that decodes WAL must present a target whose privilege proof
+// verified replication access: a proof minted without it would let the
+// route reach slot creation as a role that cannot create one. The same
+// target still admits a quiesced run, which creates no slot.
+func TestCheckCopySwapEnvironmentRefusesDecodingWithoutReplicationProof(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	f := newCopySwapEnvironmentFixtureOn(t, pool, preflight.Requirement{Tier: preflight.TierCopyAndSwap})
+	require.False(t, f.target.LogicalDecoding())
+
+	err = f.check(t, preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: unlimitedDisk})
+	require.ErrorIs(t, err, preflight.ErrCopySwapProofMismatch)
+	assert.Empty(t, preflight.CopySwapRefusalCauseOf(err))
+
+	require.NoError(t, f.check(t, preflight.CopySwapEnvironment{LogicalDecoding: false, FreeDiskBytes: unlimitedDisk}))
+}
+
+// The settings are read from the real catalog whatever the session's
+// search_path says: an impostor current_setting ahead of pg_catalog that
+// reports wal_level = logical does not admit a replica-level cluster.
+func TestCheckCopySwapEnvironmentIgnoresTheSessionSearchPath(t *testing.T) {
+	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=replica")
+	f := newCopySwapEnvironmentFixture(t, serverURL)
+	_, err := f.pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE FUNCTION %s.current_setting(text) RETURNS text LANGUAGE sql STABLE
+		AS 'SELECT ''logical''::text'`, f.schema))
+	require.NoError(t, err)
+	shadowing := testutil.NewCatalogShadowingPool(t, serverURL, f.schema)
+
+	err = preflight.CheckCopySwapEnvironment(t.Context(), shadowing, f.target, preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: unlimitedDisk})
+	requireCopySwapEnvironmentCause(t, err, preflight.CopySwapCauseLogicalDecodingUnavailable, preflight.CopySwapSettingWALLevel)
+}
+
+// WAL sender occupancy is the live count: a replication connection that
+// holds the cluster's only sender refuses the run while it is open and
+// admits it again once closed, with no slot ever created.
+func TestCheckCopySwapEnvironmentCountsLiveWALSenders(t *testing.T) {
+	serverURL := testutil.StartPostgresWithSettings(t,
+		"wal_level=logical", "max_replication_slots=1", "max_wal_senders=1")
+	f := newCopySwapEnvironmentFixture(t, serverURL)
+	decoding := preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: unlimitedDisk}
+	require.NoError(t, f.check(t, decoding))
+
+	cfg, err := pgconn.ParseConfig(serverURL)
+	require.NoError(t, err)
+	cfg.RuntimeParams["replication"] = "database"
+	sender, err := pgconn.ConnectConfig(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Closing a connection the test already closed is a no-op.
+		if err := sender.Close(context.WithoutCancel(t.Context())); err != nil {
+			t.Logf("close replication connection: %v", err)
+		}
+	})
+	const senderVisible = 10 * time.Second
+	require.Eventually(t, func() bool { return f.walSenders(t) == 1 }, senderVisible, 50*time.Millisecond,
+		"the replication connection must appear in pg_stat_replication")
+
+	err = f.check(t, decoding)
+	requireCopySwapEnvironmentCause(t, err, preflight.CopySwapCauseSlotHeadroom, preflight.CopySwapSettingMaxWALSenders)
+
+	require.NoError(t, sender.Close(t.Context()))
+	require.Eventually(t, func() bool { return f.walSenders(t) == 0 }, senderVisible, 50*time.Millisecond,
+		"the closed replication connection must leave pg_stat_replication")
+	require.NoError(t, f.check(t, decoding))
+}
+
+// walSenders is the server's own count of WAL sender processes.
+func (f copySwapEnvironmentFixture) walSenders(t *testing.T) int64 {
+	t.Helper()
+	var n int64
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT count(*) FROM pg_stat_replication`).Scan(&n))
+	return n
+}
+
+// Slot names are cluster-wide: a slot already wearing the name the route
+// derives for the target refuses the run when another database owns it or
+// when it is a physical slot, and names no setting, because the operator
+// resolves it by renaming or dropping the slot. The same name held by a
+// logical slot of the target's own database is the route's own earlier
+// slot, not a collision.
+func TestCheckCopySwapEnvironmentRefusesForeignSlotOfTheDerivedName(t *testing.T) {
+	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=logical")
+	f := newCopySwapEnvironmentFixture(t, serverURL)
+	decoding := preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: unlimitedDisk}
+	slot := f.target.DecodingName()
+	other, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.NewDatabase(t, serverURL)})
+	require.NoError(t, err)
+	t.Cleanup(other.Close)
+
+	_, err = other.Exec(t.Context(), `SELECT pg_create_logical_replication_slot($1, 'pgoutput')`, slot)
+	require.NoError(t, err)
+	err = f.check(t, decoding)
+	requireCopySwapEnvironmentCause(t, err, preflight.CopySwapCauseSlotCollision, "")
+	_, err = other.Exec(t.Context(), `SELECT pg_drop_replication_slot($1)`, slot)
+	require.NoError(t, err)
+
+	_, err = f.pool.Exec(t.Context(), `SELECT pg_create_physical_replication_slot($1)`, slot)
+	require.NoError(t, err)
+	err = f.check(t, decoding)
+	requireCopySwapEnvironmentCause(t, err, preflight.CopySwapCauseSlotCollision, "")
+	_, err = f.pool.Exec(t.Context(), `SELECT pg_drop_replication_slot($1)`, slot)
+	require.NoError(t, err)
+
+	_, err = f.pool.Exec(t.Context(), `SELECT pg_create_logical_replication_slot($1, 'pgoutput')`, slot)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := f.pool.Exec(context.WithoutCancel(t.Context()), `SELECT pg_drop_replication_slot($1)`, slot)
+		assert.NoError(t, err)
+	})
+	require.NoError(t, f.check(t, decoding), "this database's own logical slot of the derived name is not a collision")
 }

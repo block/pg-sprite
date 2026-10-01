@@ -116,11 +116,14 @@ func (e *PrivilegeError) Error() string {
 // requirement's tier needs against the target table. It can only be
 // constructed by CheckPrivileges in this package. The owning role it
 // carries is the catalog-resolved owner the copy-and-swap path will SET
-// ROLE to for shadow objects.
+// ROLE to for shadow objects. It records whether replication access was
+// among the verified grants, so a later check that needs it can tell a
+// proof that covers it from one that does not.
 type PrivilegedRole struct {
-	role  string
-	owner string
-	tier  Tier
+	role            string
+	owner           string
+	tier            Tier
+	logicalDecoding bool
 }
 
 // Role returns the connected role the checks ran as.
@@ -131,6 +134,10 @@ func (p PrivilegedRole) Owner() string { return p.owner }
 
 // Tier returns the tier the role was verified at.
 func (p PrivilegedRole) Tier() Tier { return p.tier }
+
+// LogicalDecoding reports whether the requirement the role was verified
+// against included replication access.
+func (p PrivilegedRole) LogicalDecoding() bool { return p.logicalDecoding }
 
 // accessFacts is one catalog snapshot of every privilege fact the tier
 // ladder consults, gathered in a single round trip so the checks cannot
@@ -179,7 +186,7 @@ func CheckPrivileges(ctx context.Context, pool *pgxpool.Pool, schema, table stri
 			return PrivilegedRole{}, err
 		}
 	}
-	return PrivilegedRole{role: facts.role, owner: facts.owner, tier: req.Tier}, nil
+	return PrivilegedRole{role: facts.role, owner: facts.owner, tier: req.Tier, logicalDecoding: req.LogicalDecoding}, nil
 }
 
 // gatherAccessFacts resolves the target's schema and owner from the catalog

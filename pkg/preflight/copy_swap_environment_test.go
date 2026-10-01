@@ -18,6 +18,7 @@ func sufficientCopySwapEnvironment() (copySwapEnvironmentFacts, CopySwapEnvironm
 		usedSlots:           3,
 		maxWALSenders:       4,
 		usedWALSenders:      3,
+		slotName:            CopySwapDecodingName("app", "public", "orders"),
 		totalBytes:          tableBytes,
 	}
 	env := CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: copySwapDiskHeadroomFactor * tableBytes}
@@ -29,6 +30,7 @@ func sufficientCopySwapEnvironment() (copySwapEnvironmentFacts, CopySwapEnvironm
 // enumerated set.
 var environmentCauseRaisedBy = map[CopySwapRefusalCause]func(f *copySwapEnvironmentFacts, env *CopySwapEnvironment){
 	CopySwapCauseLogicalDecodingUnavailable: func(f *copySwapEnvironmentFacts, _ *CopySwapEnvironment) { f.walLevel = "replica" },
+	CopySwapCauseSlotCollision:              func(f *copySwapEnvironmentFacts, _ *CopySwapEnvironment) { f.foreignSlots = 1 },
 	CopySwapCauseSlotHeadroom:               func(f *copySwapEnvironmentFacts, _ *CopySwapEnvironment) { f.usedSlots = f.maxReplicationSlots },
 	CopySwapCauseDiskHeadroom:               func(_ *copySwapEnvironmentFacts, env *CopySwapEnvironment) { env.FreeDiskBytes-- },
 }
@@ -132,11 +134,13 @@ func TestRefuseCopySwapEnvironmentRequiresMeasuredDisk(t *testing.T) {
 	require.Nil(t, refuseCopySwapEnvironment(facts, env))
 }
 
-// Enablement is decided before capacity and capacity before disk, so an
-// operator fixes the setting that gates everything else first.
+// Enablement is decided before the slot name, the slot name before
+// capacity, and capacity before disk, so an operator fixes the setting
+// that gates everything else first.
 func TestRefuseCopySwapEnvironmentDecidesEnablementFirst(t *testing.T) {
 	facts, env := sufficientCopySwapEnvironment()
 	facts.walLevel = "minimal"
+	facts.foreignSlots = 1
 	facts.usedSlots = facts.maxReplicationSlots
 	env.FreeDiskBytes = 0
 	refusal := refuseCopySwapEnvironment(facts, env)
@@ -146,5 +150,26 @@ func TestRefuseCopySwapEnvironmentDecidesEnablementFirst(t *testing.T) {
 	facts.walLevel = "logical"
 	refusal = refuseCopySwapEnvironment(facts, env)
 	require.NotNil(t, refusal)
+	assert.Equal(t, CopySwapCauseSlotCollision, refusal.Cause)
+
+	facts.foreignSlots = 0
+	refusal = refuseCopySwapEnvironment(facts, env)
+	require.NotNil(t, refusal)
 	assert.Equal(t, CopySwapCauseSlotHeadroom, refusal.Cause)
+}
+
+// A slot collision is a name the route cannot take, not a setting the
+// operator can raise, so the refusal names no setting; a quiesced run
+// creates no slot and is not refused by one.
+func TestRefuseCopySwapEnvironmentSlotCollisionNamesNoSetting(t *testing.T) {
+	facts, env := sufficientCopySwapEnvironment()
+	facts.foreignSlots = 1
+	refusal := refuseCopySwapEnvironment(facts, env)
+	require.NotNil(t, refusal)
+	assert.Equal(t, CopySwapCauseSlotCollision, refusal.Cause)
+	assert.Empty(t, refusal.Setting)
+	assert.NotEmpty(t, refusal.Detail)
+
+	env.LogicalDecoding = false
+	assert.Nil(t, refuseCopySwapEnvironment(facts, env))
 }
