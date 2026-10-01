@@ -8,8 +8,10 @@
 // runs under the table's lock session and refuses relations that are no
 // longer the ones the proofs describe. Verify reports what differed; Check
 // runs the same pass under a DivergencePolicy the caller states for every
-// pass — abort on a difference, or recopy each differing chunk from the
-// source with the copier's own statement and read it again. Only a pass
+// pass — abort on a difference, or recopy every differing chunk from the
+// source with the copier's own statement in one transaction and read each
+// again, assuming nothing else writes the shadow and the source rows it
+// recopies hold still until the rereads. Only a pass
 // that found no difference and repaired nothing mints a CleanWatermark,
 // and a VerifiedShadow when its watermark is complete; the proofs'
 // constructors are private to this package.

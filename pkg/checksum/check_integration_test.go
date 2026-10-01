@@ -124,7 +124,10 @@ func TestCheckAbortsOnDivergenceAndLeavesTheShadowAlone(t *testing.T) {
 	assert.Equal(t, chunk(t, math.MinInt64, 1000), divergence.Report.Mismatches[0].Chunk)
 	assert.Equal(t, chunk(t, 1001, 2000), divergence.Report.Mismatches[1].Chunk)
 	assert.Equal(t, chunk(t, 2001, math.MaxInt64), divergence.Report.Mismatches[2].Chunk)
-	assert.EqualError(t, err, "source and shadow differ in 3 of 3 chunks through watermark 9223372036854775807")
+	assert.EqualError(t, err, "verify "+f.schema+".orders: source and shadow differ in 3 of 3 chunks through watermark 9223372036854775807")
+	assert.False(t, outcome.Clean(), "a pass that found a difference is not clean")
+	assert.Equal(t, divergence.Report, outcome.Report, "the outcome carries the comparison too")
+	assert.Empty(t, outcome.Repairs)
 	assertNoProofs(t, outcome)
 	f.assertCorrupted(t, shadow)
 }
@@ -200,7 +203,9 @@ func TestCheckRefusesARepairThatDidNotTake(t *testing.T) {
 	assert.Equal(t, int64(1000), failed.After.Source.Rows)
 	assert.Equal(t, int64(1000), failed.After.Shadow.Rows, "every row is back, with the wrong value")
 	assert.NotEqual(t, failed.After.Source.Hash, failed.After.Shadow.Hash)
-	assert.EqualError(t, err, "chunk [1001, 2000] still differs after its repair: source 1000 rows, shadow 1000 rows")
+	assert.EqualError(t, err, "verify "+f.schema+".orders: chunk [1001, 2000] still differs after its repair: source 1000 rows, shadow 1000 rows")
+	assert.False(t, outcome.Clean())
+	assert.Equal(t, []checksum.Repair{failed.Repair}, outcome.Repairs, "the committed recopy is reported with the refusal")
 	assertNoProofs(t, outcome)
 
 	var zeroed int64
@@ -224,6 +229,7 @@ func TestCheckRefusesAPassWithoutAPolicy(t *testing.T) {
 			outcome, err := f.check(t, f.pool, target, shadow, lock, copier.NewWatermark(math.MaxInt64), policy)
 			require.ErrorIs(t, err, checksum.ErrNoDivergencePolicy)
 			assert.Zero(t, outcome.Report.Chunks, "no pass ran")
+			assert.False(t, outcome.Clean(), "a pass that compared nothing is not clean")
 			assertNoProofs(t, outcome)
 		})
 	}

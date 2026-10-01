@@ -26,6 +26,17 @@ const (
 // difference means.
 var ErrNoDivergencePolicy = errors.New("no divergence policy")
 
+// ParseDivergencePolicy returns the policy a configuration value or flag
+// names, or ErrNoDivergencePolicy when it names neither, so a caller can
+// refuse a setting when it loads it rather than at its first pass.
+func ParseDivergencePolicy(value string) (DivergencePolicy, error) {
+	policy := DivergencePolicy(value)
+	if err := policy.validate(); err != nil {
+		return "", err
+	}
+	return policy, nil
+}
+
 // validate refuses every value but the two named policies.
 func (p DivergencePolicy) validate() error {
 	// INV: CO-3
@@ -54,8 +65,10 @@ func (e *DivergenceError) Error() string {
 // RepairError is a chunk that still differed when read again after its
 // repair. A recopy that does not converge means something other than the
 // copier writes the shadow, or the source changed between the recopy and
-// the read; either way the pass cannot vouch for the chunk, and repairing
-// it again would not say why.
+// the read, which a repair pass assumes does not happen; either way the
+// pass cannot vouch for the chunk, and repairing it again would not say
+// why. The recopy has committed, with every other chunk's: the Outcome
+// returned alongside lists them.
 type RepairError struct {
 	// Repair is the recopy that did not take.
 	Repair Repair

@@ -440,9 +440,12 @@ implicit in the implementation. The races to design against:
   the shadow regresses to the older image.
 - **Ghost-row resurrection.** The copier reads a row, the applier applies that row's `DELETE`,
   then the chunk insert lands — re-inserting a row that no longer exists on the source.
-- **The same races during reconciliation.** The checksum-repair pass after
+- **Reconciliation is kept out of the race.** The checksum-repair pass after
   [slot loss](#failover-during-migration-what-survives-and-what-doesnt) re-copies divergent
-  chunks while the new slot's stream is being applied — the same two races, a second exposure.
+  chunks by deleting and re-inserting their rows, which does overwrite; it runs before the new
+  slot's stream is applied, with no applier writing the shadow, and a source write that lands
+  inside the pass makes the repaired chunk read different again and fails the pass closed
+  rather than being repaired twice.
 
 The invariants that resolve them (Spirit's model, translated):
 

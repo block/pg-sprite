@@ -11,6 +11,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/internal/chunksql"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/progress"
 )
@@ -84,9 +85,11 @@ type Verifier struct {
 	shadow copier.Shadow
 	lock   *dbconn.TableLockSession
 	opts   Options
-	// repairSQL clears one chunk of the shadow before its recopy, frozen at
-	// construction so no pass builds SQL.
+	// repairSQL clears one chunk of the shadow before its recopy and
+	// copySQL puts the source's rows back, the chunk insert the copier
+	// runs; both are frozen at construction so no pass builds SQL.
 	repairSQL string
+	copySQL   string
 }
 
 // NewVerifier prepares verification of target against shadow. It refuses a
@@ -114,7 +117,11 @@ func NewVerifier(target preflight.CopySwapTarget, shadow copier.Shadow, lock *db
 	if _, err := copier.NewChunker(target, copier.Watermark{}, opts.Chunker); err != nil {
 		return nil, err
 	}
-	return &Verifier{target: target, shadow: shadow, lock: lock, opts: opts, repairSQL: repairSQL(target, shadow)}, nil
+	return &Verifier{
+		target: target, shadow: shadow, lock: lock, opts: opts,
+		repairSQL: repairSQL(target, shadow),
+		copySQL:   chunksql.Insert(shadow.Schema(), shadow.SourceTable(), shadow.ShadowTable(), target.PKColumn(), shadow.CopyColumns()),
+	}, nil
 }
 
 // checkShadow refuses a shadow proof that does not describe the proven

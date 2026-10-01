@@ -26,12 +26,30 @@ func TestDivergencePolicyValidate(t *testing.T) {
 	assert.EqualError(t, err, `no divergence policy: "Abort" is not "abort" or "repair"`)
 }
 
-// An Outcome nobody minted carries no proof: both accessors say so, so a
-// consumer that checks the flag cannot be handed the forgeable zero value
-// as a proof.
+// A caller loading the policy from configuration gets the typed value for
+// the two names and the same refusal Check would give for anything else,
+// so a wrong setting is refused before any copy runs.
+func TestParseDivergencePolicy(t *testing.T) {
+	policy, err := ParseDivergencePolicy("abort")
+	require.NoError(t, err)
+	assert.Equal(t, DivergenceAbort, policy)
+	policy, err = ParseDivergencePolicy("repair")
+	require.NoError(t, err)
+	assert.Equal(t, DivergenceRepair, policy)
+
+	policy, err = ParseDivergencePolicy("")
+	require.ErrorIs(t, err, ErrNoDivergencePolicy)
+	assert.Empty(t, policy, "a refused value yields no policy to pass on")
+	_, err = ParseDivergencePolicy("fix")
+	require.ErrorIs(t, err, ErrNoDivergencePolicy)
+}
+
+// An Outcome nobody minted carries no proof and is not clean: a consumer
+// that reads Clean, or either flag, before the error cannot be handed the
+// forgeable zero value as a clean pass.
 func TestOutcomeZeroValueMintsNothing(t *testing.T) {
 	var outcome Outcome
-	assert.True(t, outcome.Clean(), "an empty report has no mismatches")
+	assert.False(t, outcome.Clean(), "no pass read anything clean")
 	_, minted := outcome.CleanWatermark()
 	assert.False(t, minted)
 	_, minted = outcome.VerifiedShadow()

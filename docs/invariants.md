@@ -87,8 +87,10 @@ inferred from whether a recopier happens to be wired up:
 that is not `abort` or `repair` with `ErrNoDivergencePolicy` before reading anything; under
 `abort` a difference is a `DivergenceError` carrying the report with the shadow untouched,
 under `repair` every differing chunk is recopied with the copier's own statement inside one
-guarded transaction (delete the chunk's shadow rows, then the copy statement) and read again
-(no-policy, abort-leaves-shadow-alone, and repairs-every-chunk tests). *Source:* Spirit AGENTS.md
+guarded transaction (delete every chunk's shadow rows, then the copy statement for every chunk)
+and read again, with the committed repairs reported alongside any refusal (no-policy,
+abort-leaves-shadow-alone, repairs-every-chunk, moved-unique-value, and
+later-repair-fails tests). *Source:* Spirit AGENTS.md
 (block/spirit#994 policy) — maps directly onto our failover-reconcile design.
 
 ### CO-4 — The copy/apply ordering invariants
