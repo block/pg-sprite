@@ -196,13 +196,15 @@ func TestVerifierLocatesAChangedShadowRow(t *testing.T) {
 	assert.NotEqual(t, found.Source.Hash, found.Shadow.Hash)
 }
 
-// A row missing from the shadow and a row the shadow holds that the source
+// Rows missing from the shadow and a row the shadow holds that the source
 // does not are each reported in their own chunk, in key order, and the row
-// counts on the two sides say which way each chunk differs.
+// counts on the two sides say which way each chunk differs. Two rows go
+// missing and one is added, so the shadow holds fewer rows than the source
+// and the report's row count can only be the source's.
 func TestVerifierCountsMissingAndExtraShadowRows(t *testing.T) {
 	f := newVerifierFixture(t)
 	target, lock, shadow := f.prepare(t)
-	f.exec(t, "DELETE FROM "+f.shadowName(shadow)+" WHERE id = 5")
+	f.exec(t, "DELETE FROM "+f.shadowName(shadow)+" WHERE id IN (5, 6)")
 	f.exec(t, "INSERT INTO "+f.shadowName(shadow)+" (id, qty) VALUES (2600, 2600)")
 
 	report, err := f.verify(t, f.pool, target, shadow, lock, copier.NewWatermark(math.MaxInt64))
@@ -211,7 +213,7 @@ func TestVerifierCountsMissingAndExtraShadowRows(t *testing.T) {
 	missing, extra := report.Mismatches[0], report.Mismatches[1]
 	assert.Equal(t, chunk(t, math.MinInt64, 1000), missing.Chunk)
 	assert.Equal(t, int64(1000), missing.Source.Rows)
-	assert.Equal(t, int64(999), missing.Shadow.Rows)
+	assert.Equal(t, int64(998), missing.Shadow.Rows)
 	assert.Equal(t, chunk(t, 2001, math.MaxInt64), extra.Chunk)
 	assert.Equal(t, int64(500), extra.Source.Rows)
 	assert.Equal(t, int64(501), extra.Shadow.Rows)
@@ -236,6 +238,80 @@ func TestVerifierComparesThroughTheShadowsTypes(t *testing.T) {
 	assert.Equal(t, int64(rows), report.Rows)
 }
 
+// A float that differs from its source only beyond the fifteenth
+// significant digit is a mismatch whatever extra_float_digits the database
+// configures: the digest hashes each row's text rendering, and at
+// extra_float_digits <= 0 that rendering rounds to fifteen digits, so 0.3
+// and 0.1 + 0.2 would spell, and hash, the same. The pass pins the setting
+// itself, so a pool that connects to a database configured at 0 still finds
+// the row. The database setting applies at connect, so the pass runs on a
+// pool opened after it is set.
+func TestVerifierHashesFloatsAtFullPrecision(t *testing.T) {
+	f := newVerifierFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.readings (
+			id bigint PRIMARY KEY,
+			v double precision NOT NULL,
+			note text
+		)`)
+	f.exec(t, fmt.Sprintf(`
+		INSERT INTO %%s.readings (id, v, note)
+		SELECT n, 0.3, 'reading ' || n FROM generate_series(1, %d) AS n`, rows))
+	target := f.prove(t, "readings")
+	lock := f.lock(t, "readings")
+	shadow := f.build(t, lock, target, `ALTER TABLE %s DROP COLUMN note`)
+	f.copy(t, target, shadow, lock)
+	f.exec(t, "UPDATE "+f.shadowName(shadow)+" SET v = 0.1::float8 + 0.2::float8 WHERE id = 7")
+	f.exec(t, `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET extra_float_digits = 0', current_database()); END $$`)
+	t.Cleanup(func() {
+		_, err := f.pool.Exec(context.WithoutCancel(t.Context()), `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I RESET extra_float_digits', current_database()); END $$`)
+		assert.NoError(t, err)
+	})
+	rounding, err := dbconn.NewPool(t.Context(), f.cfg)
+	require.NoError(t, err)
+	t.Cleanup(rounding.Close)
+	var digits string
+	require.NoError(t, rounding.QueryRow(t.Context(), "SHOW extra_float_digits").Scan(&digits))
+	require.Equal(t, "0", digits, "the database setting must reach the session the pass reads on")
+
+	report, err := f.verify(t, rounding, target, shadow, lock, copier.NewWatermark(math.MaxInt64))
+	require.NoError(t, err)
+	require.Len(t, report.Mismatches, 1)
+	assert.Equal(t, chunk(t, math.MinInt64, 1000), report.Mismatches[0].Chunk)
+	assert.Equal(t, report.Mismatches[0].Source.Rows, report.Mismatches[0].Shadow.Rows, "the rows differ in value, not in number")
+}
+
+// A chunk's two digests describe one snapshot (CO-1): a shadow row another
+// session changes after the chunk's source digest has been read, and before
+// its shadow digest is, is not seen by that chunk, so the pass compares
+// clean. Under a snapshot per statement the shadow digest would see the
+// change and report the chunk. The change is made from a query hook on the
+// pool the pass reads on, which fires once, when the source digest of the
+// chunk holding the key completes. The next pass takes new snapshots and
+// finds the row.
+func TestVerifierDigestsBothSidesInOneSnapshot(t *testing.T) {
+	f := newVerifierFixture(t)
+	target, lock, shadow := f.prepare(t)
+	sourceDigest := " FROM " + pgx.Identifier{f.schema, "orders"}.Sanitize() + " WHERE "
+	var once sync.Once
+	hooked := f.hookedPool(t, func(sql string) {
+		if !strings.HasPrefix(sql, "SELECT pg_catalog.count(*)") || !strings.Contains(sql, sourceDigest) {
+			return
+		}
+		once.Do(func() { f.exec(t, "UPDATE "+f.shadowName(shadow)+" SET qty = 0 WHERE id = 500") })
+	})
+
+	report, err := f.verify(t, hooked, target, shadow, lock, copier.NewWatermark(math.MaxInt64))
+	require.NoError(t, err)
+	assert.True(t, report.Clean(), "mismatches: %+v", report.Mismatches)
+	assert.Equal(t, 3, report.Chunks)
+
+	report, err = f.verify(t, f.pool, target, shadow, lock, copier.NewWatermark(math.MaxInt64))
+	require.NoError(t, err)
+	require.Len(t, report.Mismatches, 1, "the change landed; a pass with new snapshots sees it")
+	assert.Equal(t, chunk(t, math.MinInt64, 1000), report.Mismatches[0].Chunk)
+}
+
 // A pass compares only the keys at or below the watermark it is given: the
 // chunk straddling the watermark is clamped to it, a difference below is
 // found, and a difference above — in a chunk the copier has not finished —
@@ -257,10 +333,14 @@ func TestVerifierStopsAtTheWatermark(t *testing.T) {
 
 // The pass resolves every catalog object it names through pg_catalog, so a
 // session whose search_path puts a schema of impostors first (CO-9) neither
-// misreads the shadow's types nor hashes with someone else's md5: an
-// impostor format_type that would make every numeric compare as text
-// produces no false mismatch, and an impostor md5 that answers the same for
-// every row hides no real one.
+// misreads the shadow's types nor hashes with someone else's md5 nor
+// compares keys with someone else's operator: an impostor format_type that
+// would make every numeric compare as text produces no false mismatch, an
+// impostor md5 that answers the same for every row hides no real one, and
+// an impostor bigint <= that is never true, which would empty the key range
+// on both sides and compare nothing clean, is not the <= that BETWEEN
+// resolves to. Functions are qualified in the statement itself; the
+// operator can only be pinned by the transaction's own search_path.
 func TestVerifierIgnoresTheSessionSearchPath(t *testing.T) {
 	f := newVerifierFixture(t)
 	f.createOrders(t)
@@ -270,6 +350,8 @@ func TestVerifierIgnoresTheSessionSearchPath(t *testing.T) {
 	f.copy(t, target, shadow, lock)
 	f.exec(t, `CREATE FUNCTION %s.md5(text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT ''impostor''::text'`)
 	f.exec(t, `CREATE FUNCTION %s.format_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS 'SELECT ''text''::text'`)
+	f.exec(t, `CREATE FUNCTION %s.never_le(bigint, bigint) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT false'`)
+	f.exec(t, `CREATE OPERATOR %s.<= (LEFTARG = bigint, RIGHTARG = bigint, FUNCTION = %s.never_le)`)
 	shadowing := testutil.NewCatalogShadowingPool(t, f.cfg.URL, f.schema)
 
 	report, err := f.verify(t, shadowing, target, shadow, lock, copier.NewWatermark(math.MaxInt64))
@@ -319,6 +401,50 @@ func TestVerifierRefusesReplacedRelations(t *testing.T) {
 		assert.Equal(t, "42P01", pgErr.Code, "undefined_table")
 		assert.Contains(t, err.Error(), "(ST-6)")
 	})
+}
+
+// A shadow that has lost a column the proof lists for copy is not the shadow
+// the proof describes, even though it is still the same relation (ST-6):
+// the pass refuses before any digest, naming the column, rather than
+// comparing the columns that remain.
+func TestVerifierRefusesAShadowMissingACopyColumn(t *testing.T) {
+	f := newVerifierFixture(t)
+	target, lock, shadow := f.prepare(t)
+	f.exec(t, "ALTER TABLE "+f.shadowName(shadow)+" DROP COLUMN qty")
+
+	_, err := f.verify(t, f.pool, target, shadow, lock, copier.NewWatermark(math.MaxInt64))
+	require.ErrorIs(t, err, checksum.ErrInvariantViolation)
+	assert.Contains(t, err.Error(), "(ST-6): shadow")
+	assert.Contains(t, err.Error(), "no column qty")
+}
+
+// Every read runs with the source owner's privileges, not the connected
+// role's (SET LOCAL ROLE owner): a source the owner may no longer read is
+// not read with the superuser's power behind the pool, and the server's
+// refusal is the error. The owner is a throwaway role whose own SELECT on
+// the table is revoked after the shadow is built and copied; the superuser
+// pool would read it regardless.
+func TestVerifierReadsAsTheTableOwner(t *testing.T) {
+	f := newVerifierFixture(t)
+	owner := testutil.NewRole(t, f.pool, "NOLOGIN")
+	f.exec(t, "GRANT USAGE, CREATE ON SCHEMA %s TO "+pgx.Identifier{owner}.Sanitize())
+	f.createOrders(t)
+	f.exec(t, "ALTER TABLE %s.orders OWNER TO "+pgx.Identifier{owner}.Sanitize())
+	target := f.prove(t, "orders")
+	require.Equal(t, owner, target.OwnerRole(), "the proof names the owner the pass reads as")
+	lock := f.lock(t, "orders")
+	shadow := f.build(t, lock, target, `ALTER TABLE %s DROP COLUMN note`)
+	f.copy(t, target, shadow, lock)
+
+	report, err := f.verify(t, f.pool, target, shadow, lock, copier.NewWatermark(math.MaxInt64))
+	require.NoError(t, err)
+	assert.True(t, report.Clean(), "mismatches: %+v", report.Mismatches)
+
+	f.exec(t, "REVOKE SELECT ON %s.orders FROM "+pgx.Identifier{owner}.Sanitize())
+	_, err = f.verify(t, f.pool, target, shadow, lock, copier.NewWatermark(math.MaxInt64))
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "42501", pgErr.Code, "insufficient_privilege: the owner, not the superuser, was refused")
 }
 
 // The verifier trusts the lock session only as far as the server confirms
@@ -448,4 +574,34 @@ type hookedClock struct {
 func (c *hookedClock) Now() time.Time {
 	c.once.Do(c.hook)
 	return time.Now()
+}
+
+// hookedPool is a pool on the fixture's server whose every query, once its
+// result has been read, runs hook with the query's SQL on the calling
+// goroutine, so a test can act between two statements of one transaction.
+func (f verifierFixture) hookedPool(t *testing.T, hook func(sql string)) *pgxpool.Pool {
+	t.Helper()
+	pc, err := pgxpool.ParseConfig(f.cfg.URL)
+	require.NoError(t, err)
+	pc.ConnConfig.Tracer = queryHook(hook)
+	pool, err := pgxpool.NewWithConfig(t.Context(), pc)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return pool
+}
+
+// queryHook is a pgx query tracer that runs after each query completes,
+// carrying the SQL from the query's start to its end through the context.
+type queryHook func(sql string)
+
+type hookedSQLKey struct{}
+
+func (queryHook) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.TraceQueryStartData) context.Context {
+	return context.WithValue(ctx, hookedSQLKey{}, data.SQL)
+}
+
+func (h queryHook) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+	if sql, ok := ctx.Value(hookedSQLKey{}).(string); ok {
+		h(sql)
+	}
 }

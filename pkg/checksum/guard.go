@@ -57,14 +57,24 @@ func (v *Verifier) guard(ctx context.Context, tx pgx.Tx) error {
 	return v.confirmRelations(ctx, tx)
 }
 
-// setVerifySession bounds the transaction, restricts its search_path to the
-// catalog so every unqualified operator, cast, and type name resolves there
-// (CO-9), and puts it in the owner's shoes. SET LOCAL cannot take bind
-// parameters; the timeouts are integer milliseconds.
+// setVerifySession bounds the transaction, pins the one output setting that
+// can merge two distinct values, restricts its search_path to the catalog
+// so every unqualified operator, cast, and type name resolves there (CO-9),
+// and puts it in the owner's shoes. The digest hashes each row's text
+// rendering, and for float4, float8, and the geometric types that
+// rendering follows extra_float_digits: at zero or below the server rounds
+// to fifteen significant digits, so two floats that differ in their last
+// digits would render, and hash, the same. The maximum of 3 renders every
+// float exactly whatever the database or role configures. The other output
+// settings (DateStyle, IntervalStyle, TimeZone, bytea_output) change the
+// spelling of a value but never make two values spell the same, and both
+// sides share the session. SET LOCAL cannot take bind parameters; the
+// timeouts are integer milliseconds.
 func setVerifySession(ctx context.Context, tx pgx.Tx, owner string, opts Options) error {
 	// INV: LK-2
 	budgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(opts.LockTimeout.Milliseconds(), 10) +
 		"; SET LOCAL statement_timeout = " + strconv.FormatInt(opts.StatementTimeout.Milliseconds(), 10) +
+		"; SET LOCAL extra_float_digits = 3" +
 		"; " + dbconn.LocalSearchPath("pg_catalog")
 	if _, err := tx.Exec(ctx, budgets); err != nil {
 		return fmt.Errorf("set verification budgets: %w", err)
