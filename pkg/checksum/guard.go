@@ -17,14 +17,18 @@ import (
 // names a relation that does not exist.
 const sqlstateUndefinedTable = "42P01"
 
-// begin opens the read-only transaction one chunk's two digests run in and
-// guards it. The transaction is REPEATABLE READ so its two reads see one
-// snapshot: the source and the shadow are compared as they stood at the
-// same instant, and the snapshot is taken by the first query after both
-// relations are locked, so no rename or drop can slip between the lock and
-// the reads.
-func (v *Verifier) begin(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error) {
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+// snapshotRead is the transaction one chunk's two digests run in: read-only
+// and REPEATABLE READ, so its two reads see one snapshot — the source and
+// the shadow are compared as they stood at the same instant — and the
+// snapshot is taken by the first query after both relations are locked, so
+// no rename or drop can slip between the lock and the reads.
+func snapshotRead() pgx.TxOptions {
+	return pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}
+}
+
+// begin opens a transaction with the given options and guards it.
+func (v *Verifier) begin(ctx context.Context, pool *pgxpool.Pool, options pgx.TxOptions) (pgx.Tx, error) {
+	tx, err := pool.BeginTx(ctx, options)
 	if err != nil {
 		return nil, fmt.Errorf("begin verification of %s.%s: %w", v.target.Schema(), v.target.Table(), err)
 	}
@@ -37,13 +41,14 @@ func (v *Verifier) begin(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error
 	return tx, nil
 }
 
-// guard prepares the transaction every read runs in: it bounds it, puts the
-// catalog alone on its search_path, puts it under the source owner's role,
-// locks both relations by name, and then confirms from this connection that
-// the lock session's backend still holds the table and that the source and
-// shadow are still the relations the proofs describe. Holding even ACCESS
-// SHARE keeps a DROP or rename from completing until the transaction ends,
-// so the identity check stays true for every statement after it.
+// guard prepares the transaction every read and every repair runs in: it
+// bounds it, puts the catalog alone on its search_path, puts it under the
+// source owner's role, locks both relations by name, and then confirms from
+// this connection that the lock session's backend still holds the table and
+// that the source and shadow are still the relations the proofs describe.
+// Holding even ACCESS SHARE keeps a DROP or rename from completing until the
+// transaction ends, so the identity check stays true for every statement
+// after it.
 func (v *Verifier) guard(ctx context.Context, tx pgx.Tx) error {
 	if err := setVerifySession(ctx, tx, v.target.OwnerRole(), v.opts); err != nil {
 		return err
