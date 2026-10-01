@@ -91,6 +91,7 @@ type BuiltShadow struct {
 	targetFingerprint      string
 	identities             []IdentityColumn
 	fidelity               FidelitySnapshot
+	shadowFidelity         FidelitySnapshot
 	copyColumns            []string
 }
 
@@ -124,9 +125,16 @@ func (b BuiltShadow) IdentityColumns() []IdentityColumn {
 	return append([]IdentityColumn(nil), b.identities...)
 }
 
-// Fidelity is the metadata snapshot replicated onto the shadow; the ST-5
-// gate re-reads both tables and compares against it before the swap.
+// Fidelity is the source's metadata snapshot at build time, the one the
+// builder replicated onto the shadow; the ST-5 gate re-reads the source and
+// refuses a source that drifted from it.
 func (b BuiltShadow) Fidelity() FidelitySnapshot { return b.fidelity }
+
+// ShadowFidelity is the shadow's metadata snapshot as the gated statement
+// left it. It is kept apart from Fidelity because the statement may change
+// metadata on purpose — a NOT VALID constraint, a storage parameter — so
+// the ST-5 gate compares the shadow against this, not against the source.
+func (b BuiltShadow) ShadowFidelity() FidelitySnapshot { return b.shadowFidelity }
 
 // CopyColumns are the columns the copier moves: every non-generated source
 // column that still exists on the shadow after the schema change. Generated
@@ -156,7 +164,7 @@ func BuildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err := checkProof(target); err != nil {
 		return BuiltShadow{}, err
 	}
-	if err := requireTableLock(lock, target); err != nil {
+	if err := requireTableLock(lock, target.Schema(), target.Table()); err != nil {
 		return BuiltShadow{}, err
 	}
 	shadow := ShadowName(target.Schema(), target.Table())
@@ -231,6 +239,9 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err := applyFidelity(ctx, tx, target.Schema(), shadow, shadowOID, fidelity); err != nil {
 		return BuiltShadow{}, err
 	}
+	if err := carryExtendedStatisticsTargets(ctx, tx, target.Schema(), oid, shadowOID, fidelity.ExtendedStatisticsTargets); err != nil {
+		return BuiltShadow{}, err
+	}
 	if _, err := tx.Exec(ctx, retargeted); err != nil {
 		return BuiltShadow{}, fmt.Errorf("apply schema change to shadow %s.%s: %w", target.Schema(), shadow, err)
 	}
@@ -244,17 +255,21 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err := verifyIdentityDefaults(ctx, tx, shadowOID, handoffIdentities(identities, targetModel)); err != nil {
 		return BuiltShadow{}, err
 	}
+	shadowFidelity, err := readFidelity(ctx, tx, shadowOID)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return BuiltShadow{}, fmt.Errorf("commit shadow build: %w", err)
 	}
-	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity)
+	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity, shadowFidelity)
 }
 
 // newBuiltShadow assembles the proof from what a build or an inspection read
 // inside its transaction; the fingerprints, copy columns, and identity
 // handoffs are derived from the two models so the same catalog state always
 // yields the same proof.
-func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, shadowOID uint32, sourceModel, targetModel schemadiff.Model, identities []IdentityColumn, fidelity FidelitySnapshot) (BuiltShadow, error) {
+func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, shadowOID uint32, sourceModel, targetModel schemadiff.Model, identities []IdentityColumn, fidelity, shadowFidelity FidelitySnapshot) (BuiltShadow, error) {
 	sourceFingerprint, err := fingerprint(sourceModel)
 	if err != nil {
 		return BuiltShadow{}, err
@@ -273,6 +288,7 @@ func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, s
 		targetFingerprint: targetFingerprint,
 		identities:        handoffIdentities(identities, targetModel),
 		fidelity:          fidelity,
+		shadowFidelity:    shadowFidelity,
 		copyColumns:       copyColumns(sourceModel, targetModel),
 	}, nil
 }
@@ -343,17 +359,24 @@ func namesTarget(st statement.Statement, schema, table string) bool {
 // SET LOCAL cannot take bind parameters; the timeouts are integer
 // milliseconds and the search_path comes from dbconn so it upholds CO-9.
 func setBuildSession(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, opts Options) error {
+	return setSession(ctx, tx, target.Schema(), target.OwnerRole(), opts)
+}
+
+// setSession is setBuildSession for any schema and owner role: the build
+// takes both from the copy-and-swap proof, the cutover gate from the built
+// shadow's snapshot.
+func setSession(ctx context.Context, tx pgx.Tx, schema, owner string, opts Options) error {
 	// INV: LK-2
 	budgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(opts.lockTimeout().Milliseconds(), 10) +
 		"; SET LOCAL statement_timeout = " + strconv.FormatInt(opts.statementTimeout().Milliseconds(), 10)
 	if _, err := tx.Exec(ctx, budgets); err != nil {
 		return fmt.Errorf("set shadow build budgets: %w", err)
 	}
-	if err := setSearchPath(ctx, tx, target.Schema()); err != nil {
+	if err := setSearchPath(ctx, tx, schema); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{target.OwnerRole()}.Sanitize()); err != nil {
-		return fmt.Errorf("set owner role %s: %w", target.OwnerRole(), err)
+	if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{owner}.Sanitize()); err != nil {
+		return fmt.Errorf("set owner role %s: %w", owner, err)
 	}
 	return nil
 }

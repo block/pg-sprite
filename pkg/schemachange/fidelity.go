@@ -11,8 +11,13 @@ import (
 // FidelitySnapshot is the table metadata that CREATE TABLE … LIKE INCLUDING
 // ALL does not carry and the shadow builder therefore replicates itself:
 // the ST-5 checklist minus the data-side facts (sequence positions, index
-// validity) that only exist once rows have been copied. Cutover re-reads
-// the same snapshot from both tables and refuses to swap unless they match.
+// validity) that only exist once rows have been copied. The build records
+// one snapshot per table — the source's before the shadow was made, and
+// the shadow's as the gated statement left it, which legitimately differs
+// where the statement changed metadata on purpose. The cutover gate
+// re-reads each table's snapshot and refuses to swap when either drifted
+// from its record; it compares the two tables with each other only on the
+// facts the gated statement cannot change.
 type FidelitySnapshot struct {
 	// Owner is the catalog owner of the table.
 	Owner string `json:"owner"`
@@ -44,6 +49,13 @@ type FidelitySnapshot struct {
 	// LIKE copies them as validated; the builder re-adds them NOT VALID so
 	// the copier accepts every row the source legally holds.
 	UnvalidatedChecks []UnvalidatedConstraint `json:"unvalidated_checks"`
+	// ColumnStatisticsTargets are the columns with an explicit SET
+	// STATISTICS target, which LIKE resets to the default.
+	ColumnStatisticsTargets []ColumnStatisticsTarget `json:"column_statistics_targets"`
+	// ExtendedStatisticsTargets are the extended-statistics objects with an
+	// explicit SET STATISTICS target, which LIKE leaves at the default on
+	// the copies it makes.
+	ExtendedStatisticsTargets []ExtendedStatisticsTarget `json:"extended_statistics_targets"`
 }
 
 // Grant is one effective ACL entry.
@@ -173,6 +185,12 @@ func readFidelity(ctx context.Context, tx pgx.Tx, oid uint32) (FidelitySnapshot,
 		return FidelitySnapshot{}, err
 	}
 	if s.UnvalidatedChecks, err = readUnvalidatedChecks(ctx, tx, oid); err != nil {
+		return FidelitySnapshot{}, err
+	}
+	if s.ColumnStatisticsTargets, err = readColumnStatisticsTargets(ctx, tx, oid); err != nil {
+		return FidelitySnapshot{}, err
+	}
+	if s.ExtendedStatisticsTargets, err = readExtendedStatisticsTargets(ctx, tx, oid); err != nil {
 		return FidelitySnapshot{}, err
 	}
 	return s, nil
@@ -364,7 +382,7 @@ func applyFidelity(ctx context.Context, tx pgx.Tx, schema, shadow string, shadow
 			return fmt.Errorf("re-add check constraint %s NOT VALID on shadow: %w", c.Name, err)
 		}
 	}
-	return nil
+	return applyColumnStatisticsTargets(ctx, tx, table, s.ColumnStatisticsTargets)
 }
 
 // applyReplicaIdentity carries the source's replica identity onto the shadow.

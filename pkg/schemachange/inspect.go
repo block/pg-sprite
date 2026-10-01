@@ -20,8 +20,11 @@ var ErrShadowNotFound = errors.New("shadow table not found")
 // InspectShadow re-derives the BuiltShadow proof for a shadow an earlier
 // build left behind, from the catalog alone, in one bounded read
 // transaction under SET LOCAL ROLE owner. It is the resume path: the caller
-// compares the returned fingerprints with its checkpoint before trusting the
-// shadow, since the gated statement is not recoverable from the catalog.
+// compares the returned proof's whole Proof — fingerprints and both
+// fidelity snapshots — with its checkpoint before trusting the shadow,
+// since the gated statement is not recoverable from the catalog and a
+// snapshot re-read from the catalog records the table as it is now, not as
+// the build left it.
 // What the catalog can prove, it proves here: the source still has the
 // proven shape (ST-6), the shadow is a table owned by the source's owner
 // (ST-5), and every source identity column the change kept on the shadow
@@ -35,7 +38,7 @@ func InspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 	if err := checkProof(target); err != nil {
 		return BuiltShadow{}, err
 	}
-	if err := requireTableLock(lock, target); err != nil {
+	if err := requireTableLock(lock, target.Schema(), target.Table()); err != nil {
 		return BuiltShadow{}, err
 	}
 	ctx, stop := lock.Bind(ctx)
@@ -103,10 +106,14 @@ func inspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 	if err := verifyIdentityDefaults(ctx, tx, shadowOID, handoffIdentities(identities, targetModel)); err != nil {
 		return BuiltShadow{}, err
 	}
+	shadowFidelity, err := readFidelity(ctx, tx, shadowOID)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return BuiltShadow{}, fmt.Errorf("commit shadow inspection: %w", err)
 	}
-	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity)
+	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity, shadowFidelity)
 }
 
 // resolveShadow returns the OID of the relation wearing the shadow's name,

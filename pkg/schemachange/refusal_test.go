@@ -8,11 +8,35 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// Every cause upholds a registered invariant; an unknown cause upholds none.
+// Every cause upholds the one invariant docs/invariants.md files it under —
+// the lock causes under LK-1, the relation-identity causes under ST-6, the
+// statement-target cause under ST-7, the fidelity and swap-readiness causes
+// under ST-5, and the proof cause under CO-1 — and an unknown cause upholds
+// none. The refusal text leads with this identifier, so an operator looking
+// it up must land on the right entry.
 func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
-	registered := map[string]bool{"LK-1": true, "ST-5": true, "ST-6": true, "ST-7": true}
+	want := map[RefusalCause]string{
+		CauseLockUnproven:      "LK-1",
+		CauseLockLost:          "LK-1",
+		CauseLockHeldElsewhere: "LK-1",
+		CauseLockUnconfirmed:   "LK-1",
+		CauseProofEmpty:        "ST-6",
+		CauseSourceShape:       "ST-6",
+		CauseRelationReplaced:  "ST-6",
+		CauseStatementTarget:   "ST-7",
+		CauseShadowOwner:       "ST-5",
+		CauseForeignRelation:   "ST-5",
+		CauseGrantsDiffer:      "ST-5",
+		CauseIdentityHandoff:   "ST-5",
+		CauseSchemaDrift:       "ST-5",
+		CauseFidelityDrift:     "ST-5",
+		CauseIndexInvalid:      "ST-5",
+		CauseNameTaken:         "ST-5",
+		CauseCutoverUnverified: "CO-1",
+	}
+	assert.Len(t, RefusalCauses(), len(want), "every registered cause has an expected invariant")
 	for _, cause := range RefusalCauses() {
-		assert.True(t, registered[cause.Invariant()], "cause %q names invariant %q", cause, cause.Invariant())
+		assert.Equal(t, want[cause], cause.Invariant(), "cause %q", cause)
 	}
 	assert.Empty(t, RefusalCause("not-a-cause").Invariant())
 }

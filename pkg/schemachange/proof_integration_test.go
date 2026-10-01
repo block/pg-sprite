@@ -66,13 +66,56 @@ var proofKeyPaths = []string{
 	"fidelity.unvalidated_checks",
 	"fidelity.unvalidated_checks[].name",
 	"fidelity.unvalidated_checks[].def",
+	"fidelity.column_statistics_targets",
+	"fidelity.column_statistics_targets[].column",
+	"fidelity.column_statistics_targets[].target",
+	"fidelity.extended_statistics_targets",
+	"fidelity.extended_statistics_targets[].name",
+	"fidelity.extended_statistics_targets[].target",
+	"shadow_fidelity",
+	"shadow_fidelity.owner",
+	"shadow_fidelity.replica_identity",
+	"shadow_fidelity.rls_enabled",
+	"shadow_fidelity.rls_forced",
+	"shadow_fidelity.comment",
+	"shadow_fidelity.tablespace",
+	"shadow_fidelity.rel_options",
+	"shadow_fidelity.grants",
+	"shadow_fidelity.grants[].privilege",
+	"shadow_fidelity.grants[].grantee",
+	"shadow_fidelity.grants[].public",
+	"shadow_fidelity.grants[].grantable",
+	"shadow_fidelity.column_grants",
+	"shadow_fidelity.column_grants[].column",
+	"shadow_fidelity.column_grants[].privilege",
+	"shadow_fidelity.column_grants[].grantee",
+	"shadow_fidelity.column_grants[].public",
+	"shadow_fidelity.column_grants[].grantable",
+	"shadow_fidelity.policies",
+	"shadow_fidelity.policies[].name",
+	"shadow_fidelity.policies[].permissive",
+	"shadow_fidelity.policies[].command",
+	"shadow_fidelity.policies[].roles",
+	"shadow_fidelity.policies[].applies_to_public",
+	"shadow_fidelity.policies[].using",
+	"shadow_fidelity.policies[].with_check",
+	"shadow_fidelity.unvalidated_checks",
+	"shadow_fidelity.unvalidated_checks[].name",
+	"shadow_fidelity.unvalidated_checks[].def",
+	"shadow_fidelity.column_statistics_targets",
+	"shadow_fidelity.column_statistics_targets[].column",
+	"shadow_fidelity.column_statistics_targets[].target",
+	"shadow_fidelity.extended_statistics_targets",
+	"shadow_fidelity.extended_statistics_targets[].name",
+	"shadow_fidelity.extended_statistics_targets[].target",
 	"copy_columns",
 }
 
 // A checkpoint stores the built shadow as JSON and a resume decodes it back
 // into a Proof to compare with what InspectShadow found. The table carries
 // an identity column, storage parameters, a table grant, a column grant, a
-// policy and a NOT VALID check, so every nested type is present in the
+// policy, a NOT VALID check, a column statistics target, and an extended
+// statistics target, so every nested type is present in the
 // encoding and the key-path walk sees each of its fields; Go's encoder and
 // decoder agree by field name when a tag is missing, so equality of the two
 // proofs alone would not notice a lost tag.
@@ -87,6 +130,9 @@ func TestBuiltShadowJSONRoundTripsAsTheProofInspectionRederives(t *testing.T) {
 		) WITH (fillfactor = 70)`)
 	f.exec(t, `COMMENT ON TABLE %s.orders IS 'customer orders'`)
 	f.exec(t, `ALTER TABLE %s.orders ADD CONSTRAINT qty_positive CHECK (qty > 0) NOT VALID`)
+	f.exec(t, `ALTER TABLE %s.orders ALTER COLUMN tenant SET STATISTICS 500`)
+	f.exec(t, `CREATE STATISTICS %s.orders_tenant_note_stat ON tenant, note FROM %s.orders`)
+	f.exec(t, `ALTER STATISTICS %s.orders_tenant_note_stat SET STATISTICS 250`)
 	f.exec(t, `GRANT SELECT ON %s.orders TO `+pgx.Identifier{reader}.Sanitize())
 	f.exec(t, `GRANT UPDATE (note) ON %s.orders TO `+pgx.Identifier{reader}.Sanitize())
 	f.exec(t, `ALTER TABLE %s.orders ENABLE ROW LEVEL SECURITY`)
@@ -107,6 +153,7 @@ func TestBuiltShadowJSONRoundTripsAsTheProofInspectionRederives(t *testing.T) {
 	assert.Equal(t, built.TargetFingerprint(), proof.TargetFingerprint)
 	assert.Equal(t, built.IdentityColumns(), proof.IdentityColumns)
 	assert.Equal(t, built.Fidelity(), proof.Fidelity)
+	assert.Equal(t, built.ShadowFidelity(), proof.ShadowFidelity)
 	assert.Equal(t, built.CopyColumns(), proof.CopyColumns)
 	require.NotEmpty(t, proof.IdentityColumns, "the fixture populates the identity handoff")
 	require.NotEmpty(t, proof.Fidelity.RelOptions, "the fixture populates the storage parameters")
@@ -114,6 +161,16 @@ func TestBuiltShadowJSONRoundTripsAsTheProofInspectionRederives(t *testing.T) {
 	require.NotEmpty(t, proof.Fidelity.ColumnGrants, "the fixture populates the column grants")
 	require.NotEmpty(t, proof.Fidelity.Policies, "the fixture populates the policies")
 	require.NotEmpty(t, proof.Fidelity.UnvalidatedChecks, "the fixture populates the unvalidated checks")
+	require.NotEmpty(t, proof.Fidelity.ColumnStatisticsTargets, "the fixture populates the column statistics targets")
+	require.NotEmpty(t, proof.Fidelity.ExtendedStatisticsTargets, "the fixture populates the extended statistics targets")
+	assert.Equal(t, proof.Fidelity.ColumnStatisticsTargets, proof.ShadowFidelity.ColumnStatisticsTargets)
+	assert.Equal(t, []schemachange.ExtendedStatisticsTarget{{Name: built.ShadowTable() + "_tenant_note_stat", Target: 250}}, proof.ShadowFidelity.ExtendedStatisticsTargets,
+		"LIKE names the shadow's statistics object after the shadow; the builder carries the source's target to it")
+	sansStatistics := func(s schemachange.FidelitySnapshot) schemachange.FidelitySnapshot {
+		s.ExtendedStatisticsTargets = nil
+		return s
+	}
+	assert.Equal(t, sansStatistics(proof.Fidelity), sansStatistics(proof.ShadowFidelity), "a type change leaves the shadow's other metadata equal to the source's")
 
 	encoded, err := json.Marshal(built)
 	require.NoError(t, err)
