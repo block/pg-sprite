@@ -6,6 +6,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -243,9 +244,10 @@ func TestVerifierComparesThroughTheShadowsTypes(t *testing.T) {
 // configures: the digest hashes each row's text rendering, and at
 // extra_float_digits <= 0 that rendering rounds to fifteen digits, so 0.3
 // and 0.1 + 0.2 would spell, and hash, the same. The pass pins the setting
-// itself, so a pool that connects to a database configured at 0 still finds
-// the row. The database setting applies at connect, so the pass runs on a
-// pool opened after it is set.
+// itself, so a pool whose every session starts at 0 still finds the row.
+// The setting is a connection parameter of the pool the pass reads on, not
+// a database setting, so nothing outlives the test or reaches another one
+// on the same server.
 func TestVerifierHashesFloatsAtFullPrecision(t *testing.T) {
 	f := newVerifierFixture(t)
 	f.exec(t, `
@@ -262,17 +264,10 @@ func TestVerifierHashesFloatsAtFullPrecision(t *testing.T) {
 	shadow := f.build(t, lock, target, `ALTER TABLE %s DROP COLUMN note`)
 	f.copy(t, target, shadow, lock)
 	f.exec(t, "UPDATE "+f.shadowName(shadow)+" SET v = 0.1::float8 + 0.2::float8 WHERE id = 7")
-	f.exec(t, `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I SET extra_float_digits = 0', current_database()); END $$`)
-	t.Cleanup(func() {
-		_, err := f.pool.Exec(context.WithoutCancel(t.Context()), `DO $$ BEGIN EXECUTE format('ALTER DATABASE %I RESET extra_float_digits', current_database()); END $$`)
-		assert.NoError(t, err)
-	})
-	rounding, err := dbconn.NewPool(t.Context(), f.cfg)
-	require.NoError(t, err)
-	t.Cleanup(rounding.Close)
+	rounding := f.poolWithRuntimeParam(t, "extra_float_digits", "0")
 	var digits string
 	require.NoError(t, rounding.QueryRow(t.Context(), "SHOW extra_float_digits").Scan(&digits))
-	require.Equal(t, "0", digits, "the database setting must reach the session the pass reads on")
+	require.Equal(t, "0", digits, "the connection parameter must reach the session the pass reads on")
 
 	report, err := f.verify(t, rounding, target, shadow, lock, copier.NewWatermark(math.MaxInt64))
 	require.NoError(t, err)
@@ -292,10 +287,9 @@ func TestVerifierHashesFloatsAtFullPrecision(t *testing.T) {
 func TestVerifierDigestsBothSidesInOneSnapshot(t *testing.T) {
 	f := newVerifierFixture(t)
 	target, lock, shadow := f.prepare(t)
-	sourceDigest := " FROM " + pgx.Identifier{f.schema, "orders"}.Sanitize() + " WHERE "
 	var once sync.Once
-	hooked := f.hookedPool(t, func(sql string) {
-		if !strings.HasPrefix(sql, "SELECT pg_catalog.count(*)") || !strings.Contains(sql, sourceDigest) {
+	hooked := f.hookedPool(t, func(_ context.Context, _ *pgx.Conn, sql string) {
+		if !f.isSourceDigest(sql) {
 			return
 		}
 		once.Do(func() { f.exec(t, "UPDATE "+f.shadowName(shadow)+" SET qty = 0 WHERE id = 500") })
@@ -310,6 +304,44 @@ func TestVerifierDigestsBothSidesInOneSnapshot(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, report.Mismatches, 1, "the change landed; a pass with new snapshots sees it")
 	assert.Equal(t, chunk(t, math.MinInt64, 1000), report.Mismatches[0].Chunk)
+}
+
+// The transaction a chunk's digests run in is read-only (CO-9): a write
+// issued on that transaction's own connection, between its two digests, is
+// refused by the server with read_only_sql_transaction rather than landing
+// on the shadow, and the pass fails because the transaction is aborted. The
+// write is attempted from a query hook on the pool the pass reads on, on
+// the connection the hook is handed, so it runs inside the verify
+// transaction and not beside it.
+func TestVerifierTransactionRefusesWrites(t *testing.T) {
+	f := newVerifierFixture(t)
+	target, lock, shadow := f.prepare(t)
+	var attempted atomic.Bool
+	var writeErr error
+	hooked := f.hookedPool(t, func(ctx context.Context, conn *pgx.Conn, sql string) {
+		if !f.isSourceDigest(sql) || !attempted.CompareAndSwap(false, true) {
+			return
+		}
+		_, writeErr = conn.Exec(ctx, "UPDATE "+f.shadowName(shadow)+" SET qty = 0 WHERE id = 500")
+	})
+
+	_, err := f.verify(t, hooked, target, shadow, lock, copier.NewWatermark(math.MaxInt64))
+	require.Error(t, err, "a transaction with a refused statement in it cannot finish the pass")
+	require.True(t, attempted.Load(), "the write must have been attempted inside the verify transaction")
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, writeErr, &pgErr)
+	assert.Equal(t, "25006", pgErr.Code, "read_only_sql_transaction")
+
+	var qty int
+	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT qty FROM "+f.shadowName(shadow)+" WHERE id = 500").Scan(&qty))
+	assert.NotEqual(t, 0, qty, "the refused write left the shadow row as the copier wrote it")
+}
+
+// isSourceDigest reports whether sql is the statement that digests a chunk
+// of the fixture's orders table, the first of a chunk's two reads.
+func (f verifierFixture) isSourceDigest(sql string) bool {
+	sourceDigest := " FROM " + pgx.Identifier{f.schema, "orders"}.Sanitize() + " WHERE "
+	return strings.HasPrefix(sql, "SELECT pg_catalog.count(*)") && strings.Contains(sql, sourceDigest)
 }
 
 // A pass compares only the keys at or below the watermark it is given: the
@@ -576,10 +608,26 @@ func (c *hookedClock) Now() time.Time {
 	return time.Now()
 }
 
+// poolWithRuntimeParam is a pool on the fixture's server whose every session
+// starts with the named setting at value, as a connection parameter: the
+// setting reaches no other pool and nothing is left behind on the server.
+func (f verifierFixture) poolWithRuntimeParam(t *testing.T, name, value string) *pgxpool.Pool {
+	t.Helper()
+	pc, err := pgxpool.ParseConfig(f.cfg.URL)
+	require.NoError(t, err)
+	pc.ConnConfig.RuntimeParams[name] = value
+	pool, err := pgxpool.NewWithConfig(t.Context(), pc)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return pool
+}
+
 // hookedPool is a pool on the fixture's server whose every query, once its
-// result has been read, runs hook with the query's SQL on the calling
-// goroutine, so a test can act between two statements of one transaction.
-func (f verifierFixture) hookedPool(t *testing.T, hook func(sql string)) *pgxpool.Pool {
+// result has been read, runs hook with the query's SQL and the connection
+// it ran on, on the calling goroutine, so a test can act between two
+// statements of one transaction, on that transaction's own connection or
+// on another.
+func (f verifierFixture) hookedPool(t *testing.T, hook func(ctx context.Context, conn *pgx.Conn, sql string)) *pgxpool.Pool {
 	t.Helper()
 	pc, err := pgxpool.ParseConfig(f.cfg.URL)
 	require.NoError(t, err)
@@ -592,7 +640,7 @@ func (f verifierFixture) hookedPool(t *testing.T, hook func(sql string)) *pgxpoo
 
 // queryHook is a pgx query tracer that runs after each query completes,
 // carrying the SQL from the query's start to its end through the context.
-type queryHook func(sql string)
+type queryHook func(ctx context.Context, conn *pgx.Conn, sql string)
 
 type hookedSQLKey struct{}
 
@@ -600,8 +648,8 @@ func (queryHook) TraceQueryStart(ctx context.Context, _ *pgx.Conn, data pgx.Trac
 	return context.WithValue(ctx, hookedSQLKey{}, data.SQL)
 }
 
-func (h queryHook) TraceQueryEnd(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryEndData) {
+func (h queryHook) TraceQueryEnd(ctx context.Context, conn *pgx.Conn, _ pgx.TraceQueryEndData) {
 	if sql, ok := ctx.Value(hookedSQLKey{}).(string); ok {
-		h(sql)
+		h(ctx, conn, sql)
 	}
 }
