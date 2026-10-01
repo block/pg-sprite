@@ -37,12 +37,15 @@ A migration that cannot prove shadow == source **must refuse to cut over**. No f
 capture mechanism removes the gate; it is also the repair primitive for
 [slot-loss reconciliation](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 *Enforced:* cutover entry condition. *Enforced today:* `pkg/checksum` `Verifier` — the
-comparison the gate will demand: every chunk up to the landed watermark digested on both sides
+comparison the gate demands: every chunk up to the landed watermark digested on both sides
 inside one read-only `REPEATABLE READ` transaction, with every column cast to the shadow's type,
 and every differing chunk reported with its two row counts (clean-copy, changed-row,
 missing-and-extra-row, converted-type, watermark-clamp, shadowing-`search_path`,
-replaced-relation, and lost-lock tests). *Planned enforcement:* the `VerifiedShadow` constructor
-accepts only a clean `Report`, and cutover accepts only a `VerifiedShadow`.
+replaced-relation, and lost-lock tests); `Check` mints a `VerifiedShadow` only from a pass that
+compared through the complete watermark, found no difference, and repaired nothing, and a
+`CleanWatermark` from any clean pass — both constructors are private to the package, and a
+partial clean pass mints only the watermark (clean-complete, partial-watermark, and
+repairs-mint-nothing tests). *Planned enforcement:* cutover accepts only a `VerifiedShadow`.
 *Source:* [design-principles](design-principles.md#correctness-and-safety),
 risks-and-mitigations; Spirit's "never skip it".
 
@@ -59,6 +62,11 @@ loop; a deferred-cutover mode, if ever built, would run the same checker longer)
 from a stale watermark after a continuous-checker repair would let a re-run "pass" by verifying
 only trailing chunks — silently neutralizing a deliberate divergence abort.
 *Enforced:* checkpoint writer (watermark dropped unless **all** active checkers are clean).
+*Enforced today:* `pkg/checksum` `Check` — a pass that repaired any chunk returns its `Repair`s
+and no `CleanWatermark`, even though every repaired chunk was read again and found equal; the
+proof comes only from the next pass, which reads every chunk fresh (repairs-mint-nothing test).
+A repaired chunk that still differs on the fresh read is a `RepairError`, not a second repair
+(repair-did-not-take test). The checkpoint writer that persists the watermark is planned.
 *Source:* Spirit `pkg/migration/runner.go` + `pkg/move/runner.go` ("Safety invariant").
 
 ### CO-3 — Divergence policy is an explicit setting, never inferred
@@ -74,7 +82,13 @@ inferred from whether a recopier happens to be wired up:
   as fatal).
 - The two knobs stay decoupled: fatal-divergence aborts even if a recopier is supplied.
 
-*Enforced:* checker configuration per lifecycle mode. *Source:* Spirit AGENTS.md
+*Enforced:* checker configuration per lifecycle mode. *Enforced today:* `pkg/checksum`
+`Check` takes a `DivergencePolicy` on every call and refuses the zero value and any string
+that is not `abort` or `repair` with `ErrNoDivergencePolicy` before reading anything; under
+`abort` a difference is a `DivergenceError` carrying the report with the shadow untouched,
+under `repair` every differing chunk is recopied with the copier's own statement inside one
+guarded transaction (delete the chunk's shadow rows, then the copy statement) and read again
+(no-policy, abort-leaves-shadow-alone, and repairs-every-chunk tests). *Source:* Spirit AGENTS.md
 (block/spirit#994 policy) — maps directly onto our failover-reconcile design.
 
 ### CO-4 — The copy/apply ordering invariants

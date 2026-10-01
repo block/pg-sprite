@@ -182,7 +182,7 @@ func startAfter(from Watermark) (lower int64, done bool) {
 	if !from.Valid() {
 		return math.MinInt64, false
 	}
-	if from.Value() == math.MaxInt64 {
+	if from.Complete() {
 		return 0, true
 	}
 	return from.Value() + 1, false

@@ -36,12 +36,30 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 	if err := c.guard(ctx, tx); err != nil {
 		return 0, err
 	}
-	tag, err := tx.Exec(ctx, c.sql, chunk.Lower(), chunk.Upper())
+	inserted, err := insertChunk(ctx, tx, c.sql, c.shadow, chunk)
 	if err != nil {
-		return 0, fmt.Errorf("copy chunk [%d, %d] of %s.%s into %s: %w", chunk.Lower(), chunk.Upper(), c.target.Schema(), c.target.Table(), c.shadow.ShadowTable(), err)
+		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit chunk [%d, %d] of %s.%s: %w", chunk.Lower(), chunk.Upper(), c.target.Schema(), c.target.Table(), err)
+	}
+	return inserted, nil
+}
+
+// InsertChunk runs the copier's one chunk statement inside the caller's
+// transaction: it inserts the chunk's live source rows into the shadow,
+// skipping any key the shadow already holds, and returns the number of rows
+// added. It is how a repair recopies a chunk with exactly the statement the
+// copy used, so the two cannot drift; the caller owns the transaction and
+// its guard.
+func InsertChunk(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, shadow Shadow, chunk Chunk) (int64, error) {
+	return insertChunk(ctx, tx, copySQL(target, shadow), shadow, chunk)
+}
+
+func insertChunk(ctx context.Context, tx pgx.Tx, sql string, shadow Shadow, chunk Chunk) (int64, error) {
+	tag, err := tx.Exec(ctx, sql, chunk.Lower(), chunk.Upper())
+	if err != nil {
+		return 0, fmt.Errorf("copy chunk [%d, %d] of %s.%s into %s: %w", chunk.Lower(), chunk.Upper(), shadow.Schema(), shadow.SourceTable(), shadow.ShadowTable(), err)
 	}
 	return tag.RowsAffected(), nil
 }

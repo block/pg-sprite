@@ -1,6 +1,9 @@
 package copier
 
-import "fmt"
+import (
+	"fmt"
+	"math"
+)
 
 // Chunk is a closed range of a single-column integer primary key. Its fields
 // are unexported so that lower <= upper holds for every value the chunker
@@ -54,3 +57,8 @@ func (w Watermark) Valid() bool { return w.valid }
 // Value returns the frontier's primary key. It is zero for an invalid
 // watermark; callers check Valid first.
 func (w Watermark) Value() int64 { return w.value }
+
+// Complete reports whether the frontier is past every key an int64 can
+// hold: the chunker's final open-above chunk has landed, so no key remains
+// on the other side of the watermark.
+func (w Watermark) Complete() bool { return w.valid && w.value == math.MaxInt64 }
