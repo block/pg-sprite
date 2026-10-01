@@ -96,6 +96,7 @@ func (v *Verifier) recopy(ctx context.Context, pool *pgxpool.Pool, mismatches []
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit repair of %d chunks of %s.%s: %w", len(repairs), v.target.Schema(), v.target.Table(), err)
 	}
+	v.countRepaired(len(repairs))
 	return repairs, nil
 }
 

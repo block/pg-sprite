@@ -5,7 +5,8 @@ import "context"
 // WorkSource reports engine-derived work for the current step: the counters
 // of an operation whose progress PostgreSQL publishes no view for, such as
 // the copy-and-swap row copy, which knows its own rows copied from the
-// chunks it has landed. The tracker polls it inside Progress, on the
+// chunks it has landed, or the checksum pass, which knows the chunks it has
+// compared and repaired. The tracker polls it inside Progress, on the
 // observer's context, so the source must be safe to call from any goroutine
 // while the step runs; the tracker itself never calls it from more than one
 // goroutine at a time. Every counter the source does not measure stays zero

@@ -68,11 +68,15 @@ func (o Outcome) VerifiedShadow() (VerifiedShadow, bool) {
 // capture then carries. A write that lands inside the pass makes the
 // repaired chunk read different again, and the pass refuses it as a
 // RepairError rather than repair it twice.
+//
+// While it runs, through the repair phase as well, the verifier is the
+// tracker's work source (Options.Tracker).
 func (v *Verifier) Check(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark, policy DivergencePolicy) (Outcome, error) {
 	if err := policy.validate(); err != nil {
 		return Outcome{}, v.verifyError(err)
 	}
-	report, err := v.Verify(ctx, pool, through)
+	defer v.report()()
+	report, err := v.verify(ctx, pool, through)
 	if err != nil {
 		return Outcome{}, err
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -44,6 +45,12 @@ type Options struct {
 	// Clock times each chunk for the chunker's chunk-time sizing feedback
 	// (docs/copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag).
 	Clock progress.Clock
+	// Tracker, when set, is told the pass's work for the lifetime of Verify
+	// or Check: the verifier is its progress.WorkSource from before the
+	// first chunk until just before the call returns, through the repair
+	// phase as well. The caller owns the tracker's steps; the verifier only
+	// fills the current step's counters.
+	Tracker *progress.Tracker
 }
 
 func (o Options) withDefaults() Options {
@@ -78,8 +85,9 @@ func (o Options) validate() error {
 // its own short read-only transaction whose one snapshot covers both
 // tables, so a chunk's two digests describe the same instant and no pass
 // holds a snapshot open for longer than one chunk. It runs only under the
-// table's lock session. A Verifier holds no state between passes; the same
-// one can run a pass after every repair.
+// table's lock session. The only state a Verifier keeps between passes is
+// the counters of the pass in progress, which the next pass resets, so the
+// same one runs a pass after every repair, one pass at a time.
 type Verifier struct {
 	target preflight.CopySwapTarget
 	shadow copier.Shadow
@@ -90,6 +98,10 @@ type Verifier struct {
 	// runs; both are frozen at construction so no pass builds SQL.
 	repairSQL string
 	copySQL   string
+
+	// mu guards work, the counters Work reports for the pass in progress.
+	mu   sync.Mutex
+	work progress.Work
 }
 
 // NewVerifier prepares verification of target against shadow. It refuses a
@@ -185,7 +197,15 @@ func requireTableLock(lock *dbconn.TableLockSession, target preflight.CopySwapTa
 // an error, and the caller's divergence policy decides what to do with it.
 // Every transaction runs under the lock session's Bind context, so losing
 // the table lock cancels the read in flight and Verify reports the loss.
+// While it runs the verifier is the tracker's work source (Options.Tracker).
 func (v *Verifier) Verify(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark) (Report, error) {
+	defer v.report()()
+	return v.verify(ctx, pool, through)
+}
+
+// verify is the pass Verify and Check share, run with the work source
+// already registered by the caller.
+func (v *Verifier) verify(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark) (Report, error) {
 	if !through.Valid() {
 		return Report{}, fmt.Errorf("%w: %s.%s", ErrNothingLanded, v.target.Schema(), v.target.Table())
 	}
@@ -254,6 +274,7 @@ func (v *Verifier) pass(ctx context.Context, pool *pgxpool.Pool, through copier.
 				return Report{}, fmt.Errorf("%w (CO-1): verified chunk: %w", ErrInvariantViolation, err)
 			}
 			report.Mismatches = append(report.Mismatches, Mismatch{Chunk: compared, Source: source, Shadow: shadow})
+			v.countMismatch()
 		}
 		if upper == through.Value() {
 			return report, nil
@@ -314,5 +335,6 @@ func (v *Verifier) digestChunk(ctx context.Context, pool *pgxpool.Pool, sourceSQ
 	if err := tx.Commit(ctx); err != nil {
 		return Digest{}, Digest{}, fmt.Errorf("commit digest of chunk [%d, %d] of %s.%s: %w", lower, upper, v.target.Schema(), v.target.Table(), err)
 	}
+	v.countCompared(source.Rows)
 	return source, shadow, nil
 }
