@@ -27,8 +27,11 @@ type Proof struct {
 	TargetFingerprint string `json:"target_fingerprint"`
 	// IdentityColumns are the source identity columns cutover hands over.
 	IdentityColumns []IdentityColumn `json:"identity_columns"`
-	// Fidelity is the metadata snapshot replicated onto the shadow.
+	// Fidelity is the source's metadata snapshot at build time.
 	Fidelity FidelitySnapshot `json:"fidelity"`
+	// ShadowFidelity is the shadow's metadata snapshot as the gated
+	// statement left it.
+	ShadowFidelity FidelitySnapshot `json:"shadow_fidelity"`
 	// CopyColumns are the columns the copier moves.
 	CopyColumns []string `json:"copy_columns"`
 }
@@ -46,6 +49,7 @@ func (b BuiltShadow) Proof() Proof {
 		TargetFingerprint: b.targetFingerprint,
 		IdentityColumns:   b.IdentityColumns(),
 		Fidelity:          b.fidelity,
+		ShadowFidelity:    b.shadowFidelity,
 		CopyColumns:       b.CopyColumns(),
 	}
 }

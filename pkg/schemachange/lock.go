@@ -7,14 +7,13 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
-	"github.com/block/pg-sprite/pkg/preflight"
 )
 
 // requireTableLock refuses to touch a shadow without the per-table lock that
 // keeps a second engine instance off the same table: the session must exist,
-// carry a populated proof for the proven table, and not have reported loss.
-// It runs before any connection is opened, so a refusal costs nothing.
-func requireTableLock(lock *dbconn.TableLockSession, target preflight.CopySwapTarget) error {
+// carry a populated proof for schema.table, and not have reported loss. It
+// runs before any connection is opened, so a refusal costs nothing.
+func requireTableLock(lock *dbconn.TableLockSession, schema, table string) error {
 	// INV: LK-1
 	if lock == nil {
 		return refuse(CauseLockUnproven, nil, "shadow operations require a table lock session")
@@ -23,8 +22,8 @@ func requireTableLock(lock *dbconn.TableLockSession, target preflight.CopySwapTa
 	if held.Table() == "" {
 		return refuse(CauseLockUnproven, nil, "table lock proof is empty")
 	}
-	if held.Schema() != target.Schema() || held.Table() != target.Table() {
-		return refuse(CauseLockUnproven, nil, "table lock is for %s.%s, proof is for %s.%s", held.Schema(), held.Table(), target.Schema(), target.Table())
+	if held.Schema() != schema || held.Table() != table {
+		return refuse(CauseLockUnproven, nil, "table lock is for %s.%s, proof is for %s.%s", held.Schema(), held.Table(), schema, table)
 	}
 	if err := lock.Err(); err != nil {
 		return refuse(CauseLockLost, []error{err}, "table lock was lost before the shadow operation")
