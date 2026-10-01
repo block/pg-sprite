@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/internal/chunksql"
 	"github.com/block/pg-sprite/pkg/preflight"
 )
 
@@ -38,7 +38,7 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 	}
 	tag, err := tx.Exec(ctx, c.sql, chunk.Lower(), chunk.Upper())
 	if err != nil {
-		return 0, fmt.Errorf("copy chunk [%d, %d] of %s.%s into %s: %w", chunk.Lower(), chunk.Upper(), c.target.Schema(), c.target.Table(), c.shadow.ShadowTable(), err)
+		return 0, fmt.Errorf("copy chunk [%d, %d] of %s.%s into %s: %w", chunk.Lower(), chunk.Upper(), c.shadow.Schema(), c.shadow.SourceTable(), c.shadow.ShadowTable(), err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit chunk [%d, %d] of %s.%s: %w", chunk.Lower(), chunk.Upper(), c.target.Schema(), c.target.Table(), err)
@@ -47,12 +47,13 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 }
 
 // guard prepares the transaction every write into the shadow runs in: it
-// bounds it, puts it under the source owner's role, and confirms from this
-// connection that the lock session's backend still holds the table and that
-// the source and shadow are still the relations the proofs describe. Both
-// relations are locked by name before their identity is checked, so nothing
-// can replace either one between the check and the statements that follow
-// it in the same transaction.
+// bounds it, puts the catalog alone on its search_path, puts it under the
+// source owner's role, and confirms from this connection that the lock
+// session's backend still holds the table and that the source and shadow
+// are still the relations the proofs describe. Both relations are locked by
+// name before their identity is checked, so nothing can replace either one
+// between the check and the statements that follow it in the same
+// transaction.
 func (c *Copier) guard(ctx context.Context, tx pgx.Tx) error {
 	if err := setCopySession(ctx, tx, c.target, c.opts); err != nil {
 		return err
@@ -66,12 +67,19 @@ func (c *Copier) guard(ctx context.Context, tx pgx.Tx) error {
 	return c.confirmRelations(ctx, tx)
 }
 
-// setCopySession bounds the transaction and puts it in the owner's shoes.
-// Every identifier the copy touches is schema-qualified, so the session's
-// search_path plays no part.
+// setCopySession bounds the transaction, restricts its search_path to the
+// catalog, and puts it in the owner's shoes. Every relation the copy names
+// is schema-qualified, but the key range's BETWEEN resolves its operators
+// through the search_path, and a shadow default or trigger fires under it
+// too; pinning the catalog keeps a schema ahead of it on the caller's pool
+// from answering either (CO-9), and gives the verifier's repair, which runs
+// the same statement under the same pin, the same session as the copy.
 func setCopySession(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, opts Options) error {
 	if err := setBudgets(ctx, tx, opts); err != nil {
 		return err
+	}
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath("pg_catalog")); err != nil {
+		return fmt.Errorf("set copy search_path: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{target.OwnerRole()}.Sanitize()); err != nil {
 		return fmt.Errorf("set owner role %s: %w", target.OwnerRole(), err)
@@ -160,10 +168,10 @@ func (c *Copier) confirmRelations(ctx context.Context, tx pgx.Tx) error {
 }
 
 // relationOIDsSQL resolves the source ($2) and shadow ($3) in schema $1 by
-// explicit qualification; a missing relation scans as NULL. The transaction
-// sets no search_path of its own, so every catalog name is qualified: a
-// decoy pg_class ahead of the catalog on the session's path must not answer
-// the identity check (CO-9).
+// explicit qualification; a missing relation scans as NULL. Every catalog
+// name in it is qualified as well as pinned by the session: a decoy
+// pg_class ahead of the catalog on the caller's path must not answer the
+// identity check (CO-9).
 const relationOIDsSQL = `
 	SELECT
 		(SELECT c.oid
@@ -185,29 +193,8 @@ func confirmRelation(role, schema, table string, proven uint32, found *uint32) e
 	return nil
 }
 
-// copySQL is the one statement every chunk runs: insert the shared columns
-// of the source rows whose key lies in the closed range [$1, $2] into the
-// shadow, skipping any key the shadow already holds — the applier always
-// overwrites and the copier never does, which is what lets the two run
-// concurrently (CO-4). The bounds are declared bigint whatever the key's
-// integer type, as the chunker's boundary query declares them, so a bound
-// outside a smaller key type's range can still be sent and the primary-key
-// index still serves the range scan. The statement carries no conversion
-// expression: a column whose type differs between the two tables is
-// converted by the server's assignment cast, so a type change that needs a
-// USING expression cannot be copied by this statement and must not be routed
-// to the copier until it can carry one.
+// copySQL is the one statement every chunk runs, the chunk insert shared
+// with the verifier's repair, built for this target and shadow.
 func copySQL(target preflight.CopySwapTarget, shadow Shadow) string {
-	columns := make([]string, 0, len(shadow.CopyColumns()))
-	for _, column := range shadow.CopyColumns() {
-		columns = append(columns, pgx.Identifier{column}.Sanitize())
-	}
-	list := strings.Join(columns, ", ")
-	key := pgx.Identifier{target.PKColumn()}.Sanitize()
-	return "INSERT INTO " + pgx.Identifier{shadow.Schema(), shadow.ShadowTable()}.Sanitize() +
-		" (" + list + ")" +
-		" SELECT " + list +
-		" FROM " + pgx.Identifier{shadow.Schema(), shadow.SourceTable()}.Sanitize() +
-		" WHERE " + key + " BETWEEN $1::bigint AND $2::bigint" +
-		" ON CONFLICT (" + key + ") DO NOTHING"
+	return chunksql.Insert(shadow.Schema(), shadow.SourceTable(), shadow.ShadowTable(), target.PKColumn(), shadow.CopyColumns())
 }

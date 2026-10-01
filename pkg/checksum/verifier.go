@@ -11,6 +11,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/internal/chunksql"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/progress"
 )
@@ -84,6 +85,11 @@ type Verifier struct {
 	shadow copier.Shadow
 	lock   *dbconn.TableLockSession
 	opts   Options
+	// repairSQL clears one chunk of the shadow before its recopy and
+	// copySQL puts the source's rows back, the chunk insert the copier
+	// runs; both are frozen at construction so no pass builds SQL.
+	repairSQL string
+	copySQL   string
 }
 
 // NewVerifier prepares verification of target against shadow. It refuses a
@@ -111,7 +117,11 @@ func NewVerifier(target preflight.CopySwapTarget, shadow copier.Shadow, lock *db
 	if _, err := copier.NewChunker(target, copier.Watermark{}, opts.Chunker); err != nil {
 		return nil, err
 	}
-	return &Verifier{target: target, shadow: shadow, lock: lock, opts: opts}, nil
+	return &Verifier{
+		target: target, shadow: shadow, lock: lock, opts: opts,
+		repairSQL: repairSQL(target, shadow),
+		copySQL:   chunksql.Insert(shadow.Schema(), shadow.SourceTable(), shadow.ShadowTable(), target.PKColumn(), shadow.CopyColumns()),
+	}, nil
 }
 
 // checkShadow refuses a shadow proof that does not describe the proven
@@ -182,11 +192,34 @@ func (v *Verifier) Verify(ctx context.Context, pool *pgxpool.Pool, through copie
 	ctx, unbind := v.lock.Bind(ctx)
 	defer unbind()
 	report, err := v.pass(ctx, pool, through)
-	if lost := v.lock.Err(); lost != nil {
-		// INV: LK-1
-		return Report{}, fmt.Errorf("%w (LK-1): table lock was lost during verification: %w", ErrInvariantViolation, lost)
+	if err != nil {
+		return Report{}, v.lostOr(err)
 	}
-	return report, err
+	if lost := v.lockLost(); lost != nil {
+		return Report{}, lost
+	}
+	return report, nil
+}
+
+// lockLost reports the table lock's loss as the verifier's invariant
+// violation, or nil while the session still holds it.
+func (v *Verifier) lockLost() error {
+	lost := v.lock.Err()
+	if lost == nil {
+		return nil
+	}
+	// INV: LK-1
+	return fmt.Errorf("%w (LK-1): table lock was lost during verification: %w", ErrInvariantViolation, lost)
+}
+
+// lostOr returns the lock's loss when the session has reported one — a read
+// cancelled by Bind is explained by the loss, not by its own error — and err
+// otherwise.
+func (v *Verifier) lostOr(err error) error {
+	if lost := v.lockLost(); lost != nil {
+		return lost
+	}
+	return err
 }
 
 func (v *Verifier) pass(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark) (Report, error) {
@@ -235,7 +268,7 @@ func (v *Verifier) pass(ctx context.Context, pool *pgxpool.Pool, through copier.
 // shadow's column types, read in a guarded transaction so the shadow whose
 // types they name is the shadow the proof describes.
 func (v *Verifier) digestStatements(ctx context.Context, pool *pgxpool.Pool) (sourceSQL, shadowSQL string, err error) {
-	tx, err := v.begin(ctx, pool)
+	tx, err := v.begin(ctx, pool, snapshotRead())
 	if err != nil {
 		return "", "", err
 	}
@@ -260,7 +293,7 @@ func (v *Verifier) digestStatements(ctx context.Context, pool *pgxpool.Pool) (so
 // digestChunk reads both sides of the closed range [lower, upper] in one
 // guarded transaction, so the two digests describe one snapshot.
 func (v *Verifier) digestChunk(ctx context.Context, pool *pgxpool.Pool, sourceSQL, shadowSQL string, lower, upper int64) (source, shadow Digest, err error) {
-	tx, err := v.begin(ctx, pool)
+	tx, err := v.begin(ctx, pool, snapshotRead())
 	if err != nil {
 		return Digest{}, Digest{}, err
 	}
