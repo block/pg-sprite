@@ -531,11 +531,19 @@ constraint's validation state (`pg_constraint.convalidated`)** — none of which
 ALL` preserves ([copy-and-swap D2](copy-and-swap-design.md#d2--build-indexes-and-constraints-up-front)) —
 that **sequences are re-owned and advanced past the
 source's current values** (`setval`), and that indexes are valid (`pg_index.indisvalid`). Data
-equality (CO-1) plus metadata fidelity, or no swap. *Enforced:* cutover preconditions; before
-that, `pkg/schemachange` refuses to build a shadow the source's owner does not own, and refuses
-to inspect or drop anything under the shadow's name that is not a plain table the source's
-owner owns (an inspected shadow must also still draw each identity default from the source's
-sequence). *Source:*
+equality (CO-1) plus metadata fidelity, or no swap. *Enforced:* `pkg/schemachange.GateCutover`
+mints the `CutoverReady` proof the swap requires, and refuses (`cutover-*` causes in
+[refusal-classes.md](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause)) when
+either proof it is handed is empty or partial, when either relation's OID moved, when either
+table's fingerprint or fidelity snapshot — owner, grants, policies, comment, storage
+parameters, replica identity, per-column statistics targets, unvalidated checks, identity
+sequence options — no longer matches what the build recorded, when a shadow index is
+invalid, or when a name the swap must assign is already taken; it also pairs every source
+index and extended statistics object with its shadow counterpart by catalog definition and
+lists the sequences the swap must re-own. Before that, `pkg/schemachange` refuses to build a
+shadow the source's owner does not own, and refuses to inspect or drop anything under the
+shadow's name that is not a plain table the source's owner owns (an inspected shadow must also
+still draw each identity default from the source's sequence). *Source:*
 [low-level-design § operational caveats](low-level-design.md#operational-caveats),
 risks-and-mitigations.
 

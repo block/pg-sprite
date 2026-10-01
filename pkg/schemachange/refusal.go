@@ -61,6 +61,33 @@ const (
 	// (ST-5): at build, the gated statement altered the column; at
 	// inspection, the shadow was altered since the build.
 	CauseIdentityHandoff RefusalCause = "shadow-identity-handoff"
+	// CauseCutoverUnverified means the cutover gate was handed no usable
+	// data-equality proof (CO-1): the built-shadow proof or the verified
+	// shadow proof is empty, the two name different relations, or the
+	// verified watermark does not cover the whole key space.
+	CauseCutoverUnverified RefusalCause = "cutover-unverified"
+	// CauseRelationReplaced means the source or the shadow under its name
+	// is no longer the relation the build proved (ST-6): the OID moved, so
+	// the proof describes a table that no longer exists.
+	CauseRelationReplaced RefusalCause = "cutover-relation-replaced"
+	// CauseSchemaDrift means the source's or the shadow's introspected model
+	// no longer matches the fingerprint the build recorded (ST-5): a
+	// column, constraint, or index was added, dropped, or changed since.
+	CauseSchemaDrift RefusalCause = "cutover-schema-drift"
+	// CauseFidelityDrift means the source's or the shadow's metadata — owner,
+	// grants, policies, comment, storage parameters, replica identity,
+	// statistics targets, unvalidated checks, or identity sequence options —
+	// no longer matches the snapshot the build recorded (ST-5).
+	CauseFidelityDrift RefusalCause = "cutover-fidelity-drift"
+	// CauseIndexInvalid means a shadow index has pg_index.indisvalid false
+	// (ST-5): swapping it in would put an index the planner never uses
+	// under the user's name.
+	CauseIndexInvalid RefusalCause = "cutover-index-invalid"
+	// CauseNameTaken means a name cutover must assign is already worn
+	// (D8): a derived _old name by a relation or statistics object in the
+	// schema, or a source dependent's name by a shadow constraint that is
+	// not the one being renamed to it.
+	CauseNameTaken RefusalCause = "cutover-name-taken"
 )
 
 // RefusalCauses returns the closed set of shadow refusal causes, so
@@ -79,6 +106,12 @@ func RefusalCauses() []RefusalCause {
 		CauseForeignRelation,
 		CauseGrantsDiffer,
 		CauseIdentityHandoff,
+		CauseCutoverUnverified,
+		CauseRelationReplaced,
+		CauseSchemaDrift,
+		CauseFidelityDrift,
+		CauseIndexInvalid,
+		CauseNameTaken,
 	}
 }
 
@@ -88,12 +121,15 @@ func (c RefusalCause) Invariant() string {
 	switch c {
 	case CauseLockUnproven, CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed:
 		return "LK-1"
-	case CauseProofEmpty, CauseSourceShape:
+	case CauseProofEmpty, CauseSourceShape, CauseRelationReplaced:
 		return "ST-6"
 	case CauseStatementTarget:
 		return "ST-7"
-	case CauseShadowOwner, CauseForeignRelation, CauseGrantsDiffer, CauseIdentityHandoff:
+	case CauseShadowOwner, CauseForeignRelation, CauseGrantsDiffer, CauseIdentityHandoff,
+		CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid, CauseNameTaken:
 		return "ST-5"
+	case CauseCutoverUnverified:
+		return "CO-1"
 	default:
 		return ""
 	}

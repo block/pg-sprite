@@ -27,7 +27,7 @@ func DropShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockS
 	if err := checkProof(target); err != nil {
 		return err
 	}
-	if err := requireTableLock(lock, target); err != nil {
+	if err := requireTableLock(lock, target.Schema(), target.Table()); err != nil {
 		return err
 	}
 	ctx, stop := lock.Bind(ctx)

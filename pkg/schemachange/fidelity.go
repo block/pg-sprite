@@ -44,6 +44,9 @@ type FidelitySnapshot struct {
 	// LIKE copies them as validated; the builder re-adds them NOT VALID so
 	// the copier accepts every row the source legally holds.
 	UnvalidatedChecks []UnvalidatedConstraint `json:"unvalidated_checks"`
+	// ColumnStatisticsTargets are the columns with an explicit SET
+	// STATISTICS target, which LIKE resets to the default.
+	ColumnStatisticsTargets []ColumnStatisticsTarget `json:"column_statistics_targets"`
 }
 
 // Grant is one effective ACL entry.
@@ -173,6 +176,9 @@ func readFidelity(ctx context.Context, tx pgx.Tx, oid uint32) (FidelitySnapshot,
 		return FidelitySnapshot{}, err
 	}
 	if s.UnvalidatedChecks, err = readUnvalidatedChecks(ctx, tx, oid); err != nil {
+		return FidelitySnapshot{}, err
+	}
+	if s.ColumnStatisticsTargets, err = readColumnStatisticsTargets(ctx, tx, oid); err != nil {
 		return FidelitySnapshot{}, err
 	}
 	return s, nil
@@ -364,7 +370,7 @@ func applyFidelity(ctx context.Context, tx pgx.Tx, schema, shadow string, shadow
 			return fmt.Errorf("re-add check constraint %s NOT VALID on shadow: %w", c.Name, err)
 		}
 	}
-	return nil
+	return applyColumnStatisticsTargets(ctx, tx, table, s.ColumnStatisticsTargets)
 }
 
 // applyReplicaIdentity carries the source's replica identity onto the shadow.
