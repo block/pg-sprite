@@ -67,18 +67,28 @@ func (c *Copier) guard(ctx context.Context, tx pgx.Tx) error {
 }
 
 // setCopySession bounds the transaction and puts it in the owner's shoes.
-// SET LOCAL cannot take bind parameters; the timeouts are integer
-// milliseconds. Every identifier the copy touches is schema-qualified, so
-// the session's search_path plays no part.
+// Every identifier the copy touches is schema-qualified, so the session's
+// search_path plays no part.
 func setCopySession(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, opts Options) error {
+	if err := setBudgets(ctx, tx, opts); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{target.OwnerRole()}.Sanitize()); err != nil {
+		return fmt.Errorf("set owner role %s: %w", target.OwnerRole(), err)
+	}
+	return nil
+}
+
+// setBudgets bounds every lock wait and statement in the transaction with
+// the copier's own timeouts, whatever session defaults the caller's pool
+// carries. SET LOCAL cannot take bind parameters; the timeouts are integer
+// milliseconds.
+func setBudgets(ctx context.Context, tx pgx.Tx, opts Options) error {
 	// INV: LK-2
 	budgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(opts.LockTimeout.Milliseconds(), 10) +
 		"; SET LOCAL statement_timeout = " + strconv.FormatInt(opts.StatementTimeout.Milliseconds(), 10)
 	if _, err := tx.Exec(ctx, budgets); err != nil {
-		return fmt.Errorf("set chunk copy budgets: %w", err)
-	}
-	if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{target.OwnerRole()}.Sanitize()); err != nil {
-		return fmt.Errorf("set owner role %s: %w", target.OwnerRole(), err)
+		return fmt.Errorf("set copy budgets: %w", err)
 	}
 	return nil
 }
@@ -150,11 +160,20 @@ func (c *Copier) confirmRelations(ctx context.Context, tx pgx.Tx) error {
 }
 
 // relationOIDsSQL resolves the source ($2) and shadow ($3) in schema $1 by
-// explicit qualification; a missing relation scans as NULL.
+// explicit qualification; a missing relation scans as NULL. The transaction
+// sets no search_path of its own, so every catalog name is qualified: a
+// decoy pg_class ahead of the catalog on the session's path must not answer
+// the identity check (CO-9).
 const relationOIDsSQL = `
 	SELECT
-		(SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $2),
-		(SELECT c.oid FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relname = $3)`
+		(SELECT c.oid
+		   FROM pg_catalog.pg_class c
+		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		  WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2),
+		(SELECT c.oid
+		   FROM pg_catalog.pg_class c
+		   JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		  WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $3)`
 
 func confirmRelation(role, schema, table string, proven uint32, found *uint32) error {
 	if found == nil {

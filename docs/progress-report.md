@@ -86,6 +86,25 @@ the step. Every counter is something the engine measured — a row count from co
 a size read from the catalog — never a projection; a counter the engine cannot measure stays
 `0`. Native operations report no rows or bytes.
 
+| Counter | Meaning |
+| --- | --- |
+| `rows_copied` | Rows this run's committed chunks inserted into the shadow: exact and monotone. A resumed run counts only its own rows, not those the earlier run landed below the watermark. |
+| `rows_total` | The source's catalog row count (`pg_class.reltuples`) read once when the copy started; `0` for a table `ANALYZE` has never visited. A count, not a scan. |
+| `bytes_copied` | The shadow's on-disk table size (`pg_table_size`: heap, TOAST, maps; no indexes) measured at the poll. |
+| `bytes_total` | The source's on-disk table size, measured the same way at the same poll. |
+
+The two tables differ in shape, so `bytes_copied` ends above or below `bytes_total` rather than
+equal to it; a consumer that wants a rate derives it from two snapshots of `rows_copied` and
+`elapsed_ns`. On a resumed run `rows_copied` / `rows_total` is this run's share of the source,
+not the copy's completion: the rows the earlier run landed below the watermark are in the
+shadow but not in this run's count, so the ratio ends short of `1`. Completion is the copy's
+watermark reaching the top of the key space, which the engine reports as the step ending.
+
+The size read runs in a read-only transaction of the copy's own, under the copy's
+`lock_timeout` and `statement_timeout`: a poll queued behind a lock on either table ends at
+that timeout whatever session defaults the caller's pool carries, so an observer never holds
+the copy's stop path open.
+
 ## Phases
 
 | Value | Meaning |
