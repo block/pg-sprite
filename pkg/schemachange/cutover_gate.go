@@ -146,7 +146,7 @@ func gateCutoverTx(ctx context.Context, tx pgx.Tx, built BuiltShadow, verified c
 	if err != nil {
 		return CutoverReady{}, fmt.Errorf("source %s.%s: %w", schema, source, err)
 	}
-	indexes, err := pairIndexes(sourceIndexes, shadowIndexes)
+	indexes, err := pairIndexes(sourceIndexes, shadowIndexes, retypedColumns(sourceModel, targetModel))
 	if err != nil {
 		return CutoverReady{}, err
 	}
@@ -287,19 +287,6 @@ func confirmIdentities(ctx context.Context, tx pgx.Tx, built BuiltShadow, target
 		return refuse(CauseFidelityDrift, nil, "source %s.%s identity columns or their sequence options changed since the shadow was built", built.Schema(), built.SourceTable())
 	}
 	return nil
-}
-
-// pairIndexes pairs the two tables' indexes by definition.
-func pairIndexes(source, shadow []indexEntry) (DependentPairing, error) {
-	sourceDependents, err := indexDependents(source)
-	if err != nil {
-		return DependentPairing{}, err
-	}
-	shadowDependents, err := indexDependents(shadow)
-	if err != nil {
-		return DependentPairing{}, err
-	}
-	return pairByDefinition(DependentIndex, sourceDependents, shadowDependents), nil
 }
 
 // pairStatistics pairs the two tables' extended-statistics objects by

@@ -166,11 +166,12 @@ func readIndexes(ctx context.Context, tx pgx.Tx, oid uint32) ([]indexEntry, erro
 	return indexes, nil
 }
 
-// dependents renders the indexes as pairing inputs.
-func indexDependents(indexes []indexEntry) ([]dependent, error) {
+// indexDependents renders the indexes as pairing inputs, each definition
+// relaxed across the retyped columns when any are given.
+func indexDependents(indexes []indexEntry, retyped map[string]bool) ([]dependent, error) {
 	out := make([]dependent, 0, len(indexes))
 	for _, e := range indexes {
-		key, err := json.Marshal(e.definition)
+		key, err := json.Marshal(e.definition.relaxedAcross(retyped))
 		if err != nil {
 			return nil, fmt.Errorf("render definition of index %s: %w", e.name, err)
 		}
