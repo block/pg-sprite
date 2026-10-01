@@ -10,7 +10,7 @@ import (
 
 // Every cause upholds a registered invariant; an unknown cause upholds none.
 func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
-	registered := map[string]bool{"CO-1": true, "LK-1": true, "ST-5": true, "ST-6": true, "ST-7": true}
+	registered := map[string]bool{"CO-1": true, "LK-1": true, "LK-4": true, "ST-5": true, "ST-6": true, "ST-7": true}
 	for _, cause := range RefusalCauses() {
 		assert.True(t, registered[cause.Invariant()], "cause %q names invariant %q", cause, cause.Invariant())
 	}
