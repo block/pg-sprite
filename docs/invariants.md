@@ -551,7 +551,12 @@ below. Failing hours into a copy on something knowable up front is a bug. Copy-a
 durable scratch database or `CREATEDB`: its gated DDL executes against the empty shadow and its
 checkpoint fingerprint uses the rolled-back, transaction-scoped `pkg/schemadiff` scratch schema.
 The server is the semantic authority and client-side parsing is advisory. *Enforced today:*
-declarative diff. *Planned enforcement:* all execution paths in preflight. *Source:*
+declarative diff; for the copy-and-swap route, `pkg/preflight` `CheckPrivileges` (tiered
+grants, including the logical-decoding role), `CheckCopySwapShape` (PK usability, `REPLICA
+IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
+(`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
+caller-measured disk headroom against the shadow copy's requirement). *Planned enforcement:* wiring those checks into the route, and
+all other execution paths in preflight. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 
 ### ST-7 — The executor runs exactly the statement that was gated
@@ -606,8 +611,12 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
 - **RF-1** — The table must have a usable PK (or `NOT NULL UNIQUE` key), and the migration must
   not alter or drop it. The PK is simultaneously chunk key, conflict target, and resume
   watermark. *Source:* [low-level-design](low-level-design.md#table-shape-requirements-preconditions-to-even-start), Spirit.
-- **RF-2** — No FKs referencing the table, no triggers on it, no dependent **views**, no
-  **publication membership** (v1) — the OID-bound dependents a rename-swap strands.
+- **RF-2** — No object the swap does not carry may depend on the table: no FKs referencing
+  it, no triggers on it, no dependent **views**, no **publication** other than the engine's own
+  publishing it (explicit, `FOR ALL TABLES`, or `FOR TABLES IN SCHEMA`), no **subscription**
+  applying into it, and no other `pg_depend` dependent of its OID or row type (v1) — a
+  rename-swap strands every one of them on the retained table, and a scope publication would
+  publish the shadow's copy writes.
   *Source:* [low-level-design coverage](low-level-design.md#schema-shapes), risks-and-mitigations.
 - **RF-3** — Lossy **or failable** conversions are refused up front (shortening below max data
   length, `NOT NULL` without default on null data, `text→jsonb` with unvalidatable rows) rather

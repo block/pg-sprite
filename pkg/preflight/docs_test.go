@@ -89,10 +89,18 @@ func TestRefusalClassesDocListsEveryCopySwapCause(t *testing.T) {
 }
 
 // The closed set is complete: every CopySwapRefusalCause constant declared
-// in copy_swap_shape.go is enumerated by CopySwapRefusalCauses().
+// in copy_swap_shape.go or copy_swap_environment.go is enumerated by
+// CopySwapRefusalCauses().
 func TestCopySwapRefusalCausesEnumerateEveryDeclaredCause(t *testing.T) {
 	declared := declaredStringConstants(t, "copy_swap_shape.go", "CopySwapRefusalCause")
-	require.NotEmpty(t, declared, "copy_swap_shape.go declares the CopySwapRefusalCause constants")
+	require.NotEmpty(t, declared, "copy_swap_shape.go declares the shape CopySwapRefusalCause constants")
+	environment := declaredStringConstants(t, "copy_swap_environment.go", "CopySwapRefusalCause")
+	require.NotEmpty(t, environment, "copy_swap_environment.go declares the environment CopySwapRefusalCause constants")
+	for cause := range environment {
+		_, duplicate := declared[cause]
+		require.False(t, duplicate, "cause %q is declared in both files", cause)
+		declared[cause] = struct{}{}
+	}
 
 	enumerated := make(map[string]struct{})
 	for _, cause := range preflight.CopySwapRefusalCauses() {
