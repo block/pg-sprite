@@ -522,7 +522,12 @@ below. Failing hours into a copy on something knowable up front is a bug. Copy-a
 durable scratch database or `CREATEDB`: its gated DDL executes against the empty shadow and its
 checkpoint fingerprint uses the rolled-back, transaction-scoped `pkg/schemadiff` scratch schema.
 The server is the semantic authority and client-side parsing is advisory. *Enforced today:*
-declarative diff. *Planned enforcement:* all execution paths in preflight. *Source:*
+declarative diff; for the copy-and-swap route, `pkg/preflight` `CheckPrivileges` (tiered
+grants, including the logical-decoding role), `CheckCopySwapShape` (PK usability, `REPLICA
+IDENTITY`, and the OID-bound dependents RF-2 names), and `CheckCopySwapEnvironment`
+(`wal_level`, slot and WAL-sender headroom, caller-measured disk headroom against the
+shadow copy's requirement). *Planned enforcement:* wiring those checks into the route, and
+all other execution paths in preflight. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 
 ### ST-7 — The executor runs exactly the statement that was gated

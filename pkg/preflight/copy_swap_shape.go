@@ -42,11 +42,22 @@ const (
 	// replicated policies, and the shadow must carry those policies before
 	// it holds a row.
 	CopySwapCauseForceRLS CopySwapRefusalCause = "copy-and-swap-force-rls"
+	// CopySwapCauseDependentViews means a view or materialized view
+	// selects from the table; its rewrite rule is bound to the table's OID
+	// and would keep reading the retained old table after the swap.
+	CopySwapCauseDependentViews CopySwapRefusalCause = "copy-and-swap-dependent-views"
+	// CopySwapCausePublicationMember means the table is an explicit member
+	// of a publication other than the engine's own; membership is bound to
+	// the table's OID, so subscribers would keep following the old table.
+	// FOR ALL TABLES and FOR TABLES IN SCHEMA publications bind to the
+	// database or schema, not the table, and are not a dependent.
+	CopySwapCausePublicationMember CopySwapRefusalCause = "copy-and-swap-publication-member"
 )
 
-// CopySwapRefusalCauses returns the closed set of copy-and-swap shape refusal
-// causes, so documentation and consumers can enumerate them instead of
-// maintaining their own list.
+// CopySwapRefusalCauses returns the closed set of copy-and-swap refusal
+// causes — the shape causes above and the environment causes in
+// copy_swap_environment.go — so documentation and consumers can enumerate
+// them instead of maintaining their own list.
 func CopySwapRefusalCauses() []CopySwapRefusalCause {
 	return []CopySwapRefusalCause{
 		CopySwapCausePKUnsupported,
@@ -56,7 +67,27 @@ func CopySwapRefusalCauses() []CopySwapRefusalCause {
 		CopySwapCausePartitioned,
 		CopySwapCauseUnlogged,
 		CopySwapCauseForceRLS,
+		CopySwapCauseDependentViews,
+		CopySwapCausePublicationMember,
+		CopySwapCauseLogicalDecodingUnavailable,
+		CopySwapCauseSlotHeadroom,
+		CopySwapCauseDiskHeadroom,
 	}
+}
+
+// CopySwapRefusalCauseOf returns the cause carried by a copy-and-swap shape
+// or environment refusal anywhere in err's chain, or the zero cause when
+// err is neither.
+func CopySwapRefusalCauseOf(err error) CopySwapRefusalCause {
+	var shape *UnsupportedCopySwapShapeError
+	if errors.As(err, &shape) {
+		return shape.Cause
+	}
+	var env *CopySwapEnvironmentError
+	if errors.As(err, &env) {
+		return env.Cause
+	}
+	return ""
 }
 
 // UnsupportedCopySwapShapeError reports that the target table's shape is
@@ -99,17 +130,21 @@ type copySwapShapeFacts struct {
 	foreignKeysIn   int64
 	triggers        int64
 	rules           int64
+	dependentViews  int64
+	publications    int64
 }
 
 // CheckCopySwapShape verifies that schema.table (search_path resolution when
 // schema is empty) has the shape the copy-and-swap route supports in v1: an
 // ordinary table outside any partition or inheritance tree, exactly one
 // smallint, integer, or bigint primary-key column, a replica identity of
-// DEFAULT or FULL, no foreign keys, triggers, or rules, and no FORCE ROW
-// LEVEL SECURITY. The role proof
+// DEFAULT or FULL, no foreign keys, triggers, rules, dependent views, or
+// publication membership, and no FORCE ROW LEVEL SECURITY. The role proof
 // must have been verified at TierCopyAndSwap; the owner it carries is the
 // role the shadow builder creates shadow objects as. On success it returns
-// the CopySwapTarget proof carrying the catalog-resolved schema.
+// the CopySwapTarget proof carrying the catalog-resolved schema. The facts
+// the server cannot settle from the table alone — logical decoding, slot
+// and disk headroom — are CheckCopySwapEnvironment's.
 func CheckCopySwapShape(ctx context.Context, pool *pgxpool.Pool, schema, table string, role PrivilegedRole) (CopySwapTarget, error) {
 	if role.Tier() != TierCopyAndSwap || role.Owner() == "" {
 		return CopySwapTarget{}, fmt.Errorf("%w: tier %q, owner %q", ErrCopySwapProofMismatch, role.Tier(), role.Owner())
@@ -190,14 +225,29 @@ func refuseCopySwapShape(f copySwapShapeFacts) (CopySwapRefusalCause, string) {
 	if f.triggers > 0 || f.rules > 0 {
 		return CopySwapCauseTriggers, fmt.Sprintf("the table has %d user triggers and %d rules", f.triggers, f.rules)
 	}
+	if f.dependentViews > 0 {
+		return CopySwapCauseDependentViews, fmt.Sprintf("%d views or materialized views select from the table", f.dependentViews)
+	}
+	if f.publications > 0 {
+		return CopySwapCausePublicationMember, fmt.Sprintf("the table is an explicit member of %d publications", f.publications)
+	}
 	return "", ""
 }
+
+// copySwapEnginePublicationPattern is the LIKE pattern of the engine's own
+// single-table publications (D11 derives their names as pgsprite_<hash>);
+// membership in one of those is the route's doing, not a dependent.
+const copySwapEnginePublicationPattern = `pgsprite\_%`
 
 // gatherCopySwapShapeFacts snapshots the shape facts in one query. The
 // primary-key facts come from the table's PRIMARY KEY constraint; a table
 // without one reports zero key columns. Internal triggers (the ones a
 // foreign key installs) are excluded from the trigger count because the
-// foreign-key cause already accounts for them.
+// foreign-key cause already accounts for them. Dependent views are the
+// distinct views and materialized views whose rewrite rules pg_depend
+// records against the table; the table's own rules are counted as rules.
+// Publication membership is the explicit pg_publication_rel rows for the
+// table outside the engine's own publications.
 func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table string) (copySwapShapeFacts, error) {
 	const q = `
 		SELECT n.nspname::text, c.oid,
@@ -216,16 +266,30 @@ func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table 
 		       (SELECT count(*) FROM pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'f'),
 		       (SELECT count(*) FROM pg_constraint k WHERE k.confrelid = c.oid AND k.contype = 'f'),
 		       (SELECT count(*) FROM pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal),
-		       (SELECT count(*) FROM pg_rewrite r WHERE r.ev_class = c.oid)
+		       (SELECT count(*) FROM pg_rewrite r WHERE r.ev_class = c.oid),
+		       (SELECT count(DISTINCT v.oid)
+		          FROM pg_depend d
+		          JOIN pg_rewrite r ON r.oid = d.objid
+		          JOIN pg_class v ON v.oid = r.ev_class
+		         WHERE d.classid = 'pg_rewrite'::regclass
+		           AND d.refclassid = 'pg_class'::regclass
+		           AND d.refobjid = c.oid
+		           AND v.oid <> c.oid
+		           AND v.relkind IN ('v', 'm')),
+		       (SELECT count(*)
+		          FROM pg_publication_rel pr
+		          JOIN pg_publication p ON p.oid = pr.prpubid
+		         WHERE pr.prrelid = c.oid
+		           AND p.pubname NOT LIKE $3)
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE c.oid = to_regclass(
 			CASE WHEN $1 = '' THEN quote_ident($2)
 			     ELSE quote_ident($1) || '.' || quote_ident($2) END)`
 	var f copySwapShapeFacts
-	err := db.QueryRow(ctx, q, schema, table).Scan(
+	err := db.QueryRow(ctx, q, schema, table, copySwapEnginePublicationPattern).Scan(
 		&f.schema, &f.oid, &f.relkind, &f.relpersistence, &f.forceRLS, &f.isPartition, &f.hasSubclass, &f.inheritsParents, &f.replicaIdentity,
-		&f.pkColumns, &f.pkColumn, &f.pkType, &f.foreignKeysOut, &f.foreignKeysIn, &f.triggers, &f.rules)
+		&f.pkColumns, &f.pkColumn, &f.pkType, &f.foreignKeysOut, &f.foreignKeysIn, &f.triggers, &f.rules, &f.dependentViews, &f.publications)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return copySwapShapeFacts{}, unresolvedTargetCause(ctx, db, schema, table)
 	}

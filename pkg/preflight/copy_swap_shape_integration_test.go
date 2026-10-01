@@ -281,6 +281,83 @@ func TestCheckCopySwapShapeRefusesPartitioningAndInheritance(t *testing.T) {
 	requireCopySwapCause(t, err, preflight.CopySwapCausePartitioned)
 }
 
+// A view or materialized view selecting from the table is an OID-bound
+// dependent: its rewrite rule would keep reading the retained old table
+// after the swap. A view over an unrelated table does not count against it.
+func TestCheckCopySwapShapeRefusesDependentViews(t *testing.T) {
+	f := newCopySwapShapeFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.viewed (
+			id bigint PRIMARY KEY,
+			amount numeric
+		)`)
+	f.exec(t, `CREATE VIEW %s.viewed_totals AS SELECT sum(amount) AS total FROM %[1]s.viewed`)
+	f.exec(t, `
+		CREATE TABLE %s.materialized (
+			id bigint PRIMARY KEY,
+			amount numeric
+		)`)
+	f.exec(t, `CREATE MATERIALIZED VIEW %s.materialized_totals AS SELECT sum(amount) AS total FROM %[1]s.materialized`)
+	f.exec(t, `
+		CREATE TABLE %s.unviewed (
+			id bigint PRIMARY KEY
+		)`)
+
+	_, err := f.check(t, "viewed")
+	requireCopySwapCause(t, err, preflight.CopySwapCauseDependentViews)
+	_, err = f.check(t, "materialized")
+	requireCopySwapCause(t, err, preflight.CopySwapCauseDependentViews)
+	_, err = f.check(t, "unviewed")
+	require.NoError(t, err, "a view over another table is not this table's dependent")
+}
+
+// Explicit membership in a publication is bound to the table's OID, so
+// subscribers would keep following the old table. A FOR ALL TABLES
+// publication binds to the database, not the table, and is accepted; so is
+// the engine's own pgsprite_-prefixed single-table publication. The test
+// runs in a database of its own: a FOR ALL TABLES publication makes every
+// UPDATE and DELETE in its database demand a replica identity, which must
+// not reach tables other tests share.
+func TestCheckCopySwapShapeRefusesExplicitPublicationMembership(t *testing.T) {
+	f := newCopySwapShapeFixtureInOwnDatabase(t)
+	f.exec(t, `
+		CREATE TABLE %s.published (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `
+		CREATE TABLE %s.engine_published (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `
+		CREATE TABLE %s.unpublished (
+			id bigint PRIMARY KEY
+		)`)
+	f.exec(t, `CREATE PUBLICATION pub_explicit FOR TABLE %s.published`)
+	f.exec(t, `CREATE PUBLICATION pgsprite_0badf00d FOR TABLE %s.engine_published`)
+	_, err := f.pool.Exec(t.Context(), `CREATE PUBLICATION pub_all FOR ALL TABLES`)
+	require.NoError(t, err)
+
+	_, err = f.check(t, "published")
+	requireCopySwapCause(t, err, preflight.CopySwapCausePublicationMember)
+	_, err = f.check(t, "engine_published")
+	require.NoError(t, err, "the engine's own publication is not a dependent")
+	_, err = f.check(t, "unpublished")
+	require.NoError(t, err, "a FOR ALL TABLES publication is not an explicit membership")
+}
+
+// newCopySwapShapeFixtureInOwnDatabase is newCopySwapShapeFixture on a
+// throwaway database, for fixtures whose database-wide objects must not
+// touch the tables other tests share.
+func newCopySwapShapeFixtureInOwnDatabase(t *testing.T) copySwapShapeFixture {
+	t.Helper()
+	serverURL := testutil.StartPostgres(t)
+	databaseURL := testutil.NewDatabase(t, serverURL)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: databaseURL})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return copySwapShapeFixture{serverURL: databaseURL, pool: pool, schema: testutil.NewSchema(t, pool)}
+}
+
 // A proof verified below the copy-and-swap tier cannot mint a target: the
 // owner it carries was never proven SET-usable, so shadow objects could be
 // created as the wrong role.

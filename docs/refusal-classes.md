@@ -100,11 +100,18 @@ agrees with it rather than collapsing them.
 | `parent-index-adoption` | PostgreSQL does not support adopting an existing index as a constraint on a partitioned parent in any supported version | `by-design` | No online mechanism exists; the matrix marks it ❌. Waiting for a pg-sprite release would wait for nothing. |
 | `parent-not-valid-foreign-key` | PostgreSQL before version 18 cannot add a `NOT VALID` foreign key on a partitioned table | `environmental` | The same statement, table, and pg-sprite build runs on a newer server; the action that unblocks it is a server upgrade, not an engine release. The matrix marks this row ✅ with a server-version precondition. |
 
-### Copy-and-swap shape refusals, keyed on `CopySwapRefusalCause`
+### Copy-and-swap preflight refusals, keyed on `CopySwapRefusalCause`
 
-The closed set is `preflight.CopySwapRefusalCauses()`, raised by `CheckCopySwapShape` before
-the copy-and-swap route writes anything ([ST-6](invariants.md#st-6--preflight-before-the-first-write),
+The closed set is `preflight.CopySwapRefusalCauses()`, raised before the copy-and-swap route
+writes anything ([ST-6](invariants.md#st-6--preflight-before-the-first-write),
 [RF-1](invariants.md#refusals-and-preflight-rf), [RF-2](invariants.md#refusals-and-preflight-rf)).
+`CheckCopySwapShape` raises the shape causes as an `*UnsupportedCopySwapShapeError` and
+`CheckCopySwapEnvironment` raises the cluster and volume causes as a
+`*CopySwapEnvironmentError`; `CopySwapRefusalCauseOf` reads the cause through either. An
+environment refusal also carries the typed `CopySwapSetting` the operator must change
+(`wal_level`, or `rds.logical_replication` where the server defines that parameter;
+`max_replication_slots` or `max_wal_senders`; none for disk), so an adapter never parses
+the prose detail to learn which knob to turn.
 The verdict reason that carries these causes lands with the copy-and-swap route itself; the
 classification is fixed here first so the route inherits it.
 
@@ -117,6 +124,11 @@ classification is fixed here first so the route inherits it.
 | `copy-and-swap-partitioned` | The table is a partitioned parent, a partition, or part of an inheritance tree | `capability-boundary` | The per-partition copy-and-swap flow is a planned capability. |
 | `copy-and-swap-unlogged` | The table is UNLOGGED, while the shadow would be permanent | `capability-boundary` | Preserving persistence requires an explicit shadow-creation path. |
 | `copy-and-swap-force-rls` | The table has `FORCE ROW LEVEL SECURITY`, so the owner-run copier would be filtered reading the source and rejected filling the policy-carrying shadow | `capability-boundary` | Copying under a `BYPASSRLS` role or deferring the policies to cutover is a planned capability; either needs a decision the engine has not made. |
+| `copy-and-swap-dependent-views` | A view or materialized view selects from the table | `capability-boundary` | The view's rewrite rule is bound to the table's OID and would keep reading the retained old table after the swap; recreating dependents at cutover is a planned capability. |
+| `copy-and-swap-publication-member` | The table is an explicit member of a publication other than the engine's own (`FOR ALL TABLES` and `FOR TABLES IN SCHEMA` publications bind to the database or schema and are not refused) | `capability-boundary` | Membership is bound to the table's OID, so subscribers would keep following the old table; re-adding the swapped-in table under the publication's lock is a planned capability. |
+| `copy-and-swap-logical-decoding-unavailable` | A run that decodes WAL needs `wal_level = logical`, and the server reports another level. The refusal names `wal_level` on any server that lets it be set directly, including managed services that expose their own switch for it, and `rds.logical_replication = 1` on Aurora and RDS, where the server defines that parameter and `wal_level` follows it | `environmental` | The same table is admitted after the static setting is changed and the server restarted; a quiesced run on the same server is admitted as is. |
+| `copy-and-swap-slot-headroom` | A run that decodes WAL needs one free replication slot and one free WAL sender, and `max_replication_slots` or `max_wal_senders` is exhausted | `environmental` | Dropping a stale slot or raising the setting admits the same run; nothing about the table changes. |
+| `copy-and-swap-disk-headroom` | The free space the caller measured on the database volume is below the shadow copy's headroom, a fixed multiple of the table's total size, or was not measured at all | `environmental` | Freeing or adding space admits the same run. An unmeasured volume is refused rather than assumed sufficient, because the shadow and retained old table would otherwise fill it mid-copy. |
 
 ### Shadow operation refusals, keyed on `RefusalCause`
 
