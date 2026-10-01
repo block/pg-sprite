@@ -57,7 +57,11 @@ for execute-and-introspect; it does not add a higher privilege tier or require `
 [the D1 decision](copy-and-swap-design.md#d1--no-durable-scratch-database). The scratch schema
 does need `CREATE` **on the database** (`CREATE SCHEMA` is a database-level privilege) — a
 requirement of every declarative plan, not only copy-and-swap, that the tier table does not yet
-carry and preflight's privilege probe does not yet check; both are open follow-ups.
+carry and preflight's privilege probe does not yet check; both are open follow-ups. The
+checkpoint table ([D3](copy-and-swap-design.md#d3--store-checkpoints-in-the-target-database))
+lives in an engine-owned `pgsprite` schema created on first use, so a copy-and-swap run needs
+the same database-level `CREATE` once, and `pkg/checkpoint` reports the server's refusal as is
+when the engine lacks it.
 
 Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are checked by
 `preflight.CheckCopySwapEnvironment` once the privilege check has passed and the shape check

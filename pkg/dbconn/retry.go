@@ -12,21 +12,29 @@ import (
 
 // SQLSTATE codes the engine treats as transient. lock_not_available is the
 // expected outcome of every bounded lock acquisition (the lock-queue
-// mitigation), so it must be retryable by design.
+// mitigation), so it must be retryable by design. The three operator
+// intervention codes are what a backend reports when the server ends its
+// session from outside the session — pg_terminate_backend, a shutdown, or a
+// restart still in recovery — which is how a failover looks from the client.
 const (
 	codeLockNotAvailable     = "55P03"
 	codeDeadlockDetected     = "40P01"
 	codeSerializationFailure = "40001"
+	codeAdminShutdown        = "57P01"
+	codeCrashShutdown        = "57P02"
+	codeCannotConnectNow     = "57P03"
 	classConnectionException = "08"
 )
 
 // Retryable reports whether err is transient: a bounded lock wait that timed
-// out, a deadlock or serialization failure, or a connection-level error.
+// out, a deadlock or serialization failure, a session the server ended from
+// outside it, or a connection-level error.
 func Retryable(err error) bool {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) {
 		switch pgErr.Code {
-		case codeLockNotAvailable, codeDeadlockDetected, codeSerializationFailure:
+		case codeLockNotAvailable, codeDeadlockDetected, codeSerializationFailure,
+			codeAdminShutdown, codeCrashShutdown, codeCannotConnectNow:
 			return true
 		}
 		return strings.HasPrefix(pgErr.Code, classConnectionException)

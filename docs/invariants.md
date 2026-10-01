@@ -496,9 +496,10 @@ The [atomic RLS contract](atomic-row-security.md) defines these executor obligat
 
 The checkpoint table keeps **one row per `(schema, table)`** (upsert on that key) so a crash can
 never leave a partial pair for one target — its record is either the old or the new one.
-Unbounded append-style checkpoint history is not used. *Planned enforcement (Phase 8):*
-`pkg/checkpoint` write path (`INSERT … ON CONFLICT (schema_name, table_name) DO UPDATE`, the REPLACE
-analog). *Source:* Spirit `pkg/checkpoint` (single-row REPLACE on `id=1`), scoped per target by
+Unbounded append-style checkpoint history is not used. *Enforced:* `pkg/checkpoint`
+`Store.Save` — one `INSERT … ON CONFLICT (schema_name, table_name) DO UPDATE` (the REPLACE
+analog) per save, so a reader sees the previous record or the new one and never a mix;
+`TestSaveUpsertsTheOneRowPerTarget`, `TestSaveKeepsOneRowPerTarget`. *Source:* Spirit `pkg/checkpoint` (single-row REPLACE on `id=1`), scoped per target by
 [copy-and-swap D3](copy-and-swap-design.md#d3--store-checkpoints-in-the-target-database).
 
 ### ST-2 — An incompatible checkpoint is distinguishable from a transient read error
@@ -506,10 +507,20 @@ analog). *Source:* Spirit `pkg/checkpoint` (single-row REPLACE on `id=1`), scope
 Resume must tell apart: (a) a readable, matching checkpoint → resume; (b) a checkpoint written by
 an incompatible engine version or for a **different statement** → refuse to resume, start fresh
 (never mix state across versions/statements); (c) a *transient* read failure → retry, and never
-trigger fresh-start recovery on a blip. *Enforced:* checkpoint read/validation path (version +
-statement fingerprint stored with the watermark; the fingerprint will hash the
-execute-and-introspect after-schema model, not SQL text, so textually-different-but-identical statements match and
-cosmetic edits don't force a fresh start). *Source:* Spirit `checkpoint.IsIncompatible` +
+trigger fresh-start recovery on a blip. *Enforced:* `pkg/checkpoint` `Store.Load` returns the
+`Checkpoint` for (a), a typed `IncompatibleError` for (b) — the row format version and both
+model fingerprints are stored with the watermark, and the fingerprints are
+`pkg/schemachange`'s digests of the execute-and-introspect source and after-schema models, not
+SQL text, so textually-different-but-identical statements match and cosmetic edits don't force
+a fresh start — and for (c) retries through `dbconn.Retryable` errors under bounded attempts
+before returning an error that is neither `ErrNotFound` nor incompatible; `ErrNotFound` is
+returned only for a completed read that found no row. `Store.Save` applies the same identity
+guard on the write path, so a run can never write its state over another statement's row;
+`Delete` is the explicit fresh start. `TestLoadRetriesAcrossATerminatedBackend`,
+`TestLoadReportsAnotherStatementsRowAsIncompatible`,
+`TestLoadReportsAnotherFormatVersionAsIncompatible`,
+`TestSaveRefusesToOverwriteAnotherStatementsRow`,
+`TestResumeFromCheckpointConvergesAfterAMidCopyKill`. *Source:* Spirit `checkpoint.IsIncompatible` +
 "resume requires the identical ALTER".
 
 ### ST-3 — Slot cleanup is guaranteed on success, failure, and crash
