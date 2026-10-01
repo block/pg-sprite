@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
+
+	"github.com/block/pg-sprite/pkg/schemadiff"
 )
 
 // OwnedSequence is one sequence a source column owns through OWNED BY — a
@@ -47,4 +49,22 @@ func readOwnedSequences(ctx context.Context, tx pgx.Tx, oid uint32) ([]OwnedSequ
 		return nil, fmt.Errorf("read owned sequences: %w", err)
 	}
 	return sequences, nil
+}
+
+// keptSequences keeps the owned sequences whose owning column the gated
+// statement kept on the shadow. A sequence owned by a dropped column has no
+// column on the live table to be re-owned to; it goes with the old table,
+// as the server's own DROP COLUMN would have taken it.
+func keptSequences(sequences []OwnedSequence, shadow schemadiff.Model) []OwnedSequence {
+	onShadow := make(map[string]bool, len(shadow.Columns))
+	for _, c := range shadow.Columns {
+		onShadow[c.Name] = true
+	}
+	kept := make([]OwnedSequence, 0, len(sequences))
+	for _, s := range sequences {
+		if onShadow[s.Column] {
+			kept = append(kept, s)
+		}
+	}
+	return kept
 }

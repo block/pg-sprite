@@ -4,41 +4,37 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"strings"
 )
 
 // fidelityDrift names the facts of have that differ from want, in snapshot
 // field order, so a refusal can say what moved rather than that something
-// did. Each fact is compared as its canonical JSON, the same encoding the
+// did. The facts are the snapshot's fields, named by their JSON tags, so a
+// field added to the snapshot is compared without this function changing.
+// Each fact is compared as its canonical JSON, the same encoding the
 // checkpoint stores, so the two paths agree on what "equal" means.
 func fidelityDrift(have, want FidelitySnapshot) ([]string, error) {
-	facts := []struct {
-		name       string
-		have, want any
-	}{
-		{"owner", have.Owner, want.Owner},
-		{"replica_identity", have.ReplicaIdentity, want.ReplicaIdentity},
-		{"rls_enabled", have.RLSEnabled, want.RLSEnabled},
-		{"rls_forced", have.RLSForced, want.RLSForced},
-		{"comment", have.Comment, want.Comment},
-		{"tablespace", have.Tablespace, want.Tablespace},
-		{"rel_options", have.RelOptions, want.RelOptions},
-		{"grants", have.Grants, want.Grants},
-		{"column_grants", have.ColumnGrants, want.ColumnGrants},
-		{"policies", have.Policies, want.Policies},
-		{"unvalidated_checks", have.UnvalidatedChecks, want.UnvalidatedChecks},
-		{"column_statistics_targets", have.ColumnStatisticsTargets, want.ColumnStatisticsTargets},
-	}
+	haveValue, wantValue := reflect.ValueOf(have), reflect.ValueOf(want)
 	var drifted []string
-	for _, f := range facts {
-		same, err := jsonEqual(f.have, f.want)
+	for _, field := range reflect.VisibleFields(haveValue.Type()) {
+		name := fidelityFactName(field)
+		same, err := jsonEqual(haveValue.FieldByIndex(field.Index).Interface(), wantValue.FieldByIndex(field.Index).Interface())
 		if err != nil {
-			return nil, fmt.Errorf("compare %s: %w", f.name, err)
+			return nil, fmt.Errorf("compare %s: %w", name, err)
 		}
 		if !same {
-			drifted = append(drifted, f.name)
+			drifted = append(drifted, name)
 		}
 	}
 	return drifted, nil
+}
+
+// fidelityFactName is the snapshot field's JSON name, which is the name the
+// checkpoint and the refusal detail both use for the fact.
+func fidelityFactName(field reflect.StructField) string {
+	name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+	return name
 }
 
 // jsonEqual reports whether two values share one JSON encoding. A nil

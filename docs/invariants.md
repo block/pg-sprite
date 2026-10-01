@@ -45,7 +45,10 @@ replaced-relation, and lost-lock tests); `Check` mints a `VerifiedShadow` only f
 compared through the complete watermark, found no difference, and repaired nothing, and a
 `CleanWatermark` from any clean pass — both constructors are private to the package, and a
 partial clean pass mints only the watermark (clean-complete, partial-watermark, and
-repairs-mint-nothing tests). *Planned enforcement:* cutover accepts only a `VerifiedShadow`.
+repairs-mint-nothing tests). `pkg/schemachange.GateCutover` accepts only a `VerifiedShadow`,
+and only one minted for the relations it is gating: the proof carries the source and shadow
+OIDs the pass compared, and a shadow dropped and rebuilt under the same derived name is a new
+relation the pass never read, so the gate refuses it (`cutover-unverified`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety),
 risks-and-mitigations; Spirit's "never skip it".
 
@@ -528,19 +531,22 @@ disappearance rather than blindly continuing.
 
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum
 
-Before cutover the engine verifies the shadow carries the source's **owner, grants/ACLs, RLS
-policies, comments, storage parameters, replica identity (`pg_class.relreplident`), and each
-constraint's validation state (`pg_constraint.convalidated`)** — none of which `LIKE … INCLUDING
-ALL` preserves ([copy-and-swap D2](copy-and-swap-design.md#d2--build-indexes-and-constraints-up-front)) —
-that **sequences are re-owned and advanced past the
+Before cutover the engine verifies that each table — source and shadow — still carries the
+**owner, grants/ACLs, RLS policies, comments, storage parameters, replica identity
+(`pg_class.relreplident`), per-column and extended statistics targets, and each constraint's
+validation state (`pg_constraint.convalidated`)** the build recorded for it — none of which
+`LIKE … INCLUDING ALL` preserves ([copy-and-swap D2](copy-and-swap-design.md#d2--build-indexes-and-constraints-up-front)) —
+and that the two tables' table-level grants agree, since the gated statement cannot change
+those; that **sequences are re-owned and advanced past the
 source's current values** (`setval`), and that indexes are valid (`pg_index.indisvalid`). Data
 equality (CO-1) plus metadata fidelity, or no swap. *Enforced:* `pkg/schemachange.GateCutover`
 mints the `CutoverReady` proof the swap requires, and refuses (`cutover-*` causes in
 [refusal-classes.md](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause)) when
 either proof it is handed is empty or partial, when either relation's OID moved, when either
 table's fingerprint or fidelity snapshot — owner, grants, policies, comment, storage
-parameters, replica identity, per-column statistics targets, unvalidated checks, identity
-sequence options — no longer matches what the build recorded, when a shadow index is
+parameters, replica identity, per-column and extended statistics targets, unvalidated checks,
+identity sequence options — no longer matches what the build recorded, when the source's
+grants no longer match the shadow's, when a shadow index is
 invalid, or when a name the swap must assign is already taken; it also pairs every source
 index and extended statistics object with its shadow counterpart by catalog definition and
 lists the sequences the swap must re-own. Before that, `pkg/schemachange` refuses to build a

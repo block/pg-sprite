@@ -239,6 +239,9 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err := applyFidelity(ctx, tx, target.Schema(), shadow, shadowOID, fidelity); err != nil {
 		return BuiltShadow{}, err
 	}
+	if err := carryExtendedStatisticsTargets(ctx, tx, target.Schema(), oid, shadowOID, fidelity.ExtendedStatisticsTargets); err != nil {
+		return BuiltShadow{}, err
+	}
 	if _, err := tx.Exec(ctx, retargeted); err != nil {
 		return BuiltShadow{}, fmt.Errorf("apply schema change to shadow %s.%s: %w", target.Schema(), shadow, err)
 	}

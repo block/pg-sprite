@@ -69,6 +69,9 @@ var proofKeyPaths = []string{
 	"fidelity.column_statistics_targets",
 	"fidelity.column_statistics_targets[].column",
 	"fidelity.column_statistics_targets[].target",
+	"fidelity.extended_statistics_targets",
+	"fidelity.extended_statistics_targets[].name",
+	"fidelity.extended_statistics_targets[].target",
 	"shadow_fidelity",
 	"shadow_fidelity.owner",
 	"shadow_fidelity.replica_identity",
@@ -102,14 +105,17 @@ var proofKeyPaths = []string{
 	"shadow_fidelity.column_statistics_targets",
 	"shadow_fidelity.column_statistics_targets[].column",
 	"shadow_fidelity.column_statistics_targets[].target",
+	"shadow_fidelity.extended_statistics_targets",
+	"shadow_fidelity.extended_statistics_targets[].name",
+	"shadow_fidelity.extended_statistics_targets[].target",
 	"copy_columns",
 }
 
 // A checkpoint stores the built shadow as JSON and a resume decodes it back
 // into a Proof to compare with what InspectShadow found. The table carries
 // an identity column, storage parameters, a table grant, a column grant, a
-// policy, a NOT VALID check, and a column statistics target, so every
-// nested type is present in the
+// policy, a NOT VALID check, a column statistics target, and an extended
+// statistics target, so every nested type is present in the
 // encoding and the key-path walk sees each of its fields; Go's encoder and
 // decoder agree by field name when a tag is missing, so equality of the two
 // proofs alone would not notice a lost tag.
@@ -125,6 +131,8 @@ func TestBuiltShadowJSONRoundTripsAsTheProofInspectionRederives(t *testing.T) {
 	f.exec(t, `COMMENT ON TABLE %s.orders IS 'customer orders'`)
 	f.exec(t, `ALTER TABLE %s.orders ADD CONSTRAINT qty_positive CHECK (qty > 0) NOT VALID`)
 	f.exec(t, `ALTER TABLE %s.orders ALTER COLUMN tenant SET STATISTICS 500`)
+	f.exec(t, `CREATE STATISTICS %s.orders_tenant_note_stat ON tenant, note FROM %s.orders`)
+	f.exec(t, `ALTER STATISTICS %s.orders_tenant_note_stat SET STATISTICS 250`)
 	f.exec(t, `GRANT SELECT ON %s.orders TO `+pgx.Identifier{reader}.Sanitize())
 	f.exec(t, `GRANT UPDATE (note) ON %s.orders TO `+pgx.Identifier{reader}.Sanitize())
 	f.exec(t, `ALTER TABLE %s.orders ENABLE ROW LEVEL SECURITY`)
@@ -154,7 +162,15 @@ func TestBuiltShadowJSONRoundTripsAsTheProofInspectionRederives(t *testing.T) {
 	require.NotEmpty(t, proof.Fidelity.Policies, "the fixture populates the policies")
 	require.NotEmpty(t, proof.Fidelity.UnvalidatedChecks, "the fixture populates the unvalidated checks")
 	require.NotEmpty(t, proof.Fidelity.ColumnStatisticsTargets, "the fixture populates the column statistics targets")
-	assert.Equal(t, proof.Fidelity, proof.ShadowFidelity, "a type change leaves the shadow's metadata equal to the source's")
+	require.NotEmpty(t, proof.Fidelity.ExtendedStatisticsTargets, "the fixture populates the extended statistics targets")
+	assert.Equal(t, proof.Fidelity.ColumnStatisticsTargets, proof.ShadowFidelity.ColumnStatisticsTargets)
+	assert.Equal(t, []schemachange.ExtendedStatisticsTarget{{Name: built.ShadowTable() + "_tenant_note_stat", Target: 250}}, proof.ShadowFidelity.ExtendedStatisticsTargets,
+		"LIKE names the shadow's statistics object after the shadow; the builder carries the source's target to it")
+	sansStatistics := func(s schemachange.FidelitySnapshot) schemachange.FidelitySnapshot {
+		s.ExtendedStatisticsTargets = nil
+		return s
+	}
+	assert.Equal(t, sansStatistics(proof.Fidelity), sansStatistics(proof.ShadowFidelity), "a type change leaves the shadow's other metadata equal to the source's")
 
 	encoded, err := json.Marshal(built)
 	require.NoError(t, err)

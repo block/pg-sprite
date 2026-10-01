@@ -94,11 +94,15 @@ func pairByDefinition(kind DependentKind, source, shadow []dependent) DependentP
 // with its index. Storage parameters and tablespace are not part of it; two
 // indexes that differ only there deliver the same schema.
 type indexDefinition struct {
-	AccessMethod string   `json:"access_method"`
-	Unique       bool     `json:"unique"`
-	Primary      bool     `json:"primary"`
-	KeyColumns   []string `json:"key_columns"`
-	Included     []string `json:"included"`
+	AccessMethod string `json:"access_method"`
+	Unique       bool   `json:"unique"`
+	Primary      bool   `json:"primary"`
+	// NullsNotDistinct is pg_index.indnullsnotdistinct: whether a unique
+	// index treats two NULL keys as duplicates. Servers without the column
+	// read it as false, which is the only behaviour they have.
+	NullsNotDistinct bool     `json:"nulls_not_distinct"`
+	KeyColumns       []string `json:"key_columns"`
+	Included         []string `json:"included"`
 	// Opclasses and Collations are per key column, schema-qualified; the
 	// collation is empty for a column whose type is not collatable.
 	Opclasses  []string `json:"opclasses"`
@@ -124,10 +128,12 @@ type indexEntry struct {
 // Every column reference comes back by name (pg_get_indexdef with a column
 // position prints the column name or expression), never by attnum, because
 // a source with a dropped column numbers its columns differently from the
-// shadow LIKE built.
+// shadow LIKE built. The NULLS NOT DISTINCT flag is read through the row's
+// JSON rendering so the query parses on servers whose pg_index lacks it.
 func readIndexes(ctx context.Context, tx pgx.Tx, oid uint32) ([]indexEntry, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT ic.relname, i.indisvalid, am.amname, i.indisunique, i.indisprimary,
+		       COALESCE((to_jsonb(i) ->> 'indnullsnotdistinct')::bool, false),
 		       ARRAY(SELECT pg_get_indexdef(i.indexrelid, k, true)
 		             FROM generate_series(1, i.indnkeyatts) k),
 		       ARRAY(SELECT pg_get_indexdef(i.indexrelid, k, true)
@@ -156,7 +162,7 @@ func readIndexes(ctx context.Context, tx pgx.Tx, oid uint32) ([]indexEntry, erro
 	indexes, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (indexEntry, error) {
 		var e indexEntry
 		d := &e.definition
-		err := row.Scan(&e.name, &e.valid, &d.AccessMethod, &d.Unique, &d.Primary,
+		err := row.Scan(&e.name, &e.valid, &d.AccessMethod, &d.Unique, &d.Primary, &d.NullsNotDistinct,
 			&d.KeyColumns, &d.Included, &d.Opclasses, &d.Collations, &d.Options, &d.Predicate, &d.Constraint)
 		return e, err
 	})

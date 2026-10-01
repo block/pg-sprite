@@ -11,8 +11,13 @@ import (
 // FidelitySnapshot is the table metadata that CREATE TABLE … LIKE INCLUDING
 // ALL does not carry and the shadow builder therefore replicates itself:
 // the ST-5 checklist minus the data-side facts (sequence positions, index
-// validity) that only exist once rows have been copied. Cutover re-reads
-// the same snapshot from both tables and refuses to swap unless they match.
+// validity) that only exist once rows have been copied. The build records
+// one snapshot per table — the source's before the shadow was made, and
+// the shadow's as the gated statement left it, which legitimately differs
+// where the statement changed metadata on purpose. The cutover gate
+// re-reads each table's snapshot and refuses to swap when either drifted
+// from its record; it compares the two tables with each other only on the
+// facts the gated statement cannot change.
 type FidelitySnapshot struct {
 	// Owner is the catalog owner of the table.
 	Owner string `json:"owner"`
@@ -47,6 +52,10 @@ type FidelitySnapshot struct {
 	// ColumnStatisticsTargets are the columns with an explicit SET
 	// STATISTICS target, which LIKE resets to the default.
 	ColumnStatisticsTargets []ColumnStatisticsTarget `json:"column_statistics_targets"`
+	// ExtendedStatisticsTargets are the extended-statistics objects with an
+	// explicit SET STATISTICS target, which LIKE leaves at the default on
+	// the copies it makes.
+	ExtendedStatisticsTargets []ExtendedStatisticsTarget `json:"extended_statistics_targets"`
 }
 
 // Grant is one effective ACL entry.
@@ -179,6 +188,9 @@ func readFidelity(ctx context.Context, tx pgx.Tx, oid uint32) (FidelitySnapshot,
 		return FidelitySnapshot{}, err
 	}
 	if s.ColumnStatisticsTargets, err = readColumnStatisticsTargets(ctx, tx, oid); err != nil {
+		return FidelitySnapshot{}, err
+	}
+	if s.ExtendedStatisticsTargets, err = readExtendedStatisticsTargets(ctx, tx, oid); err != nil {
 		return FidelitySnapshot{}, err
 	}
 	return s, nil

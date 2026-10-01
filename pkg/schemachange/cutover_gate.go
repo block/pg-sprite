@@ -81,8 +81,11 @@ func GateCutover(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	return ready, nil
 }
 
+// gateCutover runs the checklist in a read-only REPEATABLE READ transaction:
+// every catalog read sees one snapshot, so the pairing and the names the
+// proof carries describe the same instant as the fingerprints it checked.
 func gateCutover(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, built BuiltShadow, verified checksum.VerifiedShadow, opts Options) (CutoverReady, error) {
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
 	if err != nil {
 		return CutoverReady{}, fmt.Errorf("begin cutover gate: %w", err)
 	}
@@ -166,14 +169,17 @@ func gateCutoverTx(ctx context.Context, tx pgx.Tx, built BuiltShadow, verified c
 		verified:   verified,
 		indexes:    indexes,
 		statistics: statistics,
-		sequences:  sequences,
+		sequences:  keptSequences(sequences, targetModel),
 	}, nil
 }
 
 // checkCutoverProofs refuses proofs that cannot describe one verified copy:
 // an empty built shadow, an empty verified shadow, two proofs naming
-// different relations, or a verification that stopped short of the whole
-// key space and so proves only a prefix.
+// different relations by name or by OID, or a verification that stopped
+// short of the whole key space and so proves only a prefix. The OIDs
+// matter because the shadow's name is derived from the source's: a shadow
+// dropped and rebuilt after the pass wears the same name and holds no rows
+// the pass compared.
 func checkCutoverProofs(built BuiltShadow, verified checksum.VerifiedShadow) error {
 	// INV: CO-1
 	if built.ShadowTable() == "" {
@@ -185,6 +191,10 @@ func checkCutoverProofs(built BuiltShadow, verified checksum.VerifiedShadow) err
 	if verified.Schema() != built.Schema() || verified.Table() != built.SourceTable() || verified.Shadow() != built.ShadowTable() {
 		return refuse(CauseCutoverUnverified, nil, "verified shadow proof is for %s.%s into %s, built shadow is %s.%s into %s",
 			verified.Schema(), verified.Table(), verified.Shadow(), built.Schema(), built.SourceTable(), built.ShadowTable())
+	}
+	if verified.SourceOID() != built.SourceOID() || verified.ShadowOID() != built.ShadowOID() {
+		return refuse(CauseCutoverUnverified, nil, "verified shadow proof compared relations %d and %d, built shadow is relations %d and %d",
+			verified.SourceOID(), verified.ShadowOID(), built.SourceOID(), built.ShadowOID())
 	}
 	if !verified.Watermark().Complete() {
 		return refuse(CauseCutoverUnverified, nil, "verified shadow proof covers the key space only through %d", verified.Watermark().Value())
@@ -242,7 +252,12 @@ func confirmFingerprints(built BuiltShadow, sourceModel, targetModel schemadiff.
 }
 
 // confirmFidelity re-reads both metadata snapshots and refuses a table
-// whose snapshot drifted from the build's, naming the drifted facts.
+// whose snapshot drifted from the proof's, naming the drifted facts. It
+// also holds the live shadow to the live source on the table grants: the
+// gated ALTER TABLE cannot change them, so they must agree whatever the
+// proof recorded — a proof re-derived from the catalog by InspectShadow
+// records each table as it is, and would otherwise let a privilege revoked
+// on the source after the build ride into the swap on the shadow.
 func confirmFidelity(ctx context.Context, tx pgx.Tx, built BuiltShadow) error {
 	source, err := readFidelity(ctx, tx, built.SourceOID())
 	if err != nil {
@@ -266,6 +281,9 @@ func confirmFidelity(ctx context.Context, tx pgx.Tx, built BuiltShadow) error {
 	}
 	if len(drifted) > 0 {
 		return refuse(CauseFidelityDrift, nil, "shadow %s.%s metadata changed since it was built: %s", built.Schema(), built.ShadowTable(), joinNames(drifted))
+	}
+	if !slices.Equal(source.Grants, shadow.Grants) {
+		return refuse(CauseFidelityDrift, nil, "shadow %s.%s grants differ from source %s.%s", built.Schema(), built.ShadowTable(), built.Schema(), built.SourceTable())
 	}
 	return nil
 }

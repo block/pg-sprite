@@ -78,6 +78,8 @@ func TestProveMintsTheVerifiedShadowOnlyWhenComplete(t *testing.T) {
 	assert.Equal(t, "app", verified.Schema())
 	assert.Equal(t, "orders", verified.Table())
 	assert.Equal(t, "_pgsprite_orders_new", verified.Shadow())
+	assert.Equal(t, uint32(1), verified.SourceOID())
+	assert.Equal(t, uint32(2), verified.ShadowOID())
 	assert.Equal(t, copier.NewWatermark(math.MaxInt64), verified.Watermark())
 	assert.Equal(t, now, verified.VerifiedAt())
 }
