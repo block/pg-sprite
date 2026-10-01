@@ -188,7 +188,7 @@ different levels of commitment:
 | `internal/testutil` | Test harness: containerized PostgreSQL, throwaway schemas | exists |
 | `pkg/dbconn` | Pool with bounded session timeouts, retries, RDS/Aurora auto-TLS (embedded CA bundle), terminate-blockers; advisory-lock mutual exclusion lands here | exists |
 | `pkg/statement` | `go-pgquery` (Wasm `libpg_query`) parse boundary, typed per-operation descriptors, and advisory rewrites (never hand-parse SQL); shadow DDL is validated by executing the retargeted statement on the empty shadow, and fingerprints come from `pkg/schemadiff`'s transaction-scoped scratch schema — execute-and-introspect, never AST surgery | exists |
-| `pkg/preflight` | Precondition verification and refusals before any write: target facts + table-size guard, tiered privilege checks (a refusal carries the exact provisioning `GRANT`), partitioned-table support gates | exists |
+| `pkg/preflight` | Precondition verification and refusals before any write: target facts + table-size guard, tiered privilege checks (a refusal carries the exact provisioning `GRANT`), partitioned-table support gates, the copy-and-swap shape proof and its cluster/volume environment check | exists |
 | `pkg/verdict` | Structured outcome contract (executed / refused / failed + reason, stable executor code, and safer idiom), rendering, exit codes | exists (Phase 1) |
 | `pkg/schemadiff` | Execute-and-introspect desired state, introspect the live catalog, and produce an ordered declarative diff | exists |
 | `pkg/planner` | Classify typed operations and emit safer native SQL | exists |

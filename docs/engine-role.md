@@ -59,10 +59,15 @@ does need `CREATE` **on the database** (`CREATE SCHEMA` is a database-level priv
 requirement of every declarative plan, not only copy-and-swap, that the tier table does not yet
 carry and preflight's privilege probe does not yet check; both are open follow-ups.
 
-Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are checked in the
-same preflight: `wal_level = logical` (`rds.logical_replication = 1` on Aurora/RDS, a
+Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are checked by
+`preflight.CheckCopySwapEnvironment` once the privilege check has passed and the shape check
+has minted its target: `wal_level = logical` (`rds.logical_replication = 1` on Aurora/RDS, a
 static parameter requiring a reboot), and free `max_replication_slots` /
-`max_wal_senders` headroom.
+`max_wal_senders` headroom. Both apply only to a run that decodes WAL; a quiesced run skips
+them. The same check compares the free disk the caller measured on the database volume —
+PostgreSQL has no function that reports it — against the shadow copy's headroom, and
+refuses an unmeasured volume rather than assuming it is large enough. Each refusal carries
+its own cause ([refusal-classes.md](refusal-classes.md#copy-and-swap-preflight-refusals-keyed-on-copyswaprefusalcause)).
 
 ### Off-ladder: greenfield `CREATE TABLE`
 
@@ -96,8 +101,22 @@ GRANT app_owner TO pgsprite_engine;
 -- Tier 2: index builds and shadow objects live in the schema
 GRANT USAGE, CREATE ON SCHEMA app TO app_owner;  -- if the owner lacks it
 
--- Tier 3: only when copy-and-swap with logical decoding is in play (Aurora/RDS)
-GRANT rds_replication TO pgsprite_engine;
+-- Tier 3: shadow objects are created under the owner, so the membership
+-- must be usable with SET ROLE. The Tier 1 grant above already is: SET is
+-- the default. On PostgreSQL 16+ only, a grant can be made WITH SET FALSE,
+-- which fails this tier; the 16+ spelling of the default is
+--   GRANT app_owner TO pgsprite_engine WITH SET TRUE;
+-- and is a syntax error on 14 and 15.
+
+-- Tier 3, only when copy-and-swap decodes WAL: one of
+GRANT rds_replication TO pgsprite_engine;          -- Aurora/RDS
+ALTER ROLE pgsprite_engine WITH REPLICATION;       -- self-managed
+
+-- Not grants, but checked alongside them for a run that decodes WAL:
+--   wal_level = logical          (rds.logical_replication = 1 on Aurora/RDS; both need a restart;
+--                                 another managed service's own switch for it is not detected)
+--   no slot of the name derived for the table held by another database or as a physical slot
+--   one free slot under max_replication_slots and one free sender under max_wal_senders
 ```
 
 The contract covers the target table's own access. A `FOREIGN KEY` that references a

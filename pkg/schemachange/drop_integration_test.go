@@ -74,7 +74,9 @@ func TestDropShadowRefusesARelationAnotherRoleOwns(t *testing.T) {
 }
 
 // A view under the shadow's name is not a shadow table either, whoever owns
-// it: only a plain table is ever dropped.
+// it: only a plain table is ever dropped. The view selects from nothing so
+// that it is not a dependent of the source, which preflight refuses on its
+// own before the drop is reached.
 func TestDropShadowRefusesAViewUnderTheShadowName(t *testing.T) {
 	f := newShadowFixture(t)
 	f.exec(t, `
@@ -82,7 +84,7 @@ func TestDropShadowRefusesAViewUnderTheShadowName(t *testing.T) {
 			id bigint PRIMARY KEY
 		)`)
 	shadow := schemachange.ShadowName(f.schema, "widgets")
-	f.exec(t, fmt.Sprintf(`CREATE VIEW %%s.%s AS SELECT id FROM %%s.widgets`, pgx.Identifier{shadow}.Sanitize()))
+	f.exec(t, fmt.Sprintf(`CREATE VIEW %%s.%s AS SELECT 1::bigint AS id`, pgx.Identifier{shadow}.Sanitize()))
 
 	err := schemachange.DropShadow(t.Context(), f.pool, f.lock(t, "widgets"), f.prove(t, "widgets"), schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)

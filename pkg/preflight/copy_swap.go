@@ -15,14 +15,30 @@ const (
 // CopySwapTarget proves ST-6 prerequisites for a copy-and-swap target. Its
 // zero value is forgeable; consumers must reject it when Table is empty.
 type CopySwapTarget struct {
-	schema, table, pkColumn string
-	pkType                  PKType
-	ownerRole               string
-	oid                     uint32
+	database, schema, table, pkColumn string
+	pkType                            PKType
+	ownerRole                         string
+	oid                               uint32
+	logicalDecoding                   bool
 }
+
+// Database returns the catalog-resolved database the target lives in.
+func (t CopySwapTarget) Database() string { return t.database }
 
 // Schema returns the target schema.
 func (t CopySwapTarget) Schema() string { return t.schema }
+
+// DecodingName returns the name of the replication slot and publication the
+// route creates for this target, derived from its database, schema, and
+// table (see CopySwapDecodingName).
+func (t CopySwapTarget) DecodingName() string {
+	return CopySwapDecodingName(t.database, t.schema, t.table)
+}
+
+// LogicalDecoding reports whether the privilege proof this target was minted
+// from verified replication access, so a run that decodes WAL can be refused
+// as a proof mismatch when it was not.
+func (t CopySwapTarget) LogicalDecoding() bool { return t.logicalDecoding }
 
 // Table returns the target table.
 func (t CopySwapTarget) Table() string { return t.table }

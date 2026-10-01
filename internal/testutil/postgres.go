@@ -61,6 +61,39 @@ func StartPostgres(t *testing.T) string {
 	return url
 }
 
+// StartPostgresWithSettings returns a connection URL for a dedicated
+// PostgreSQL container started with the given postgresql.conf settings
+// (each "name=value"), for tests that control a restart-only setting such
+// as wal_level or max_replication_slots. Unlike StartPostgres it never uses
+// PG_DSN — a shared server cannot change those settings — and so costs a
+// container start of its own. Set SKIP_INTEGRATION=1 to skip.
+func StartPostgresWithSettings(t *testing.T, settings ...string) string {
+	t.Helper()
+	if os.Getenv("SKIP_INTEGRATION") != "" {
+		t.Skip("SKIP_INTEGRATION set; skipping test that needs a database")
+	}
+	args := make([]string, 0, 2*len(settings))
+	for _, setting := range settings {
+		args = append(args, "-c", setting)
+	}
+	// t.Context only governs the start request; the running container is
+	// not tied to it and is terminated via t.Cleanup below.
+	ctx := t.Context()
+	ctr, err := tcpostgres.Run(ctx, "postgres:"+PGVersion(),
+		tcpostgres.BasicWaitStrategies(),
+		testcontainers.WithCmdArgs(args...),
+	)
+	require.NoError(t, err, "start postgres container with settings %v", settings)
+	t.Cleanup(func() {
+		if err := testcontainers.TerminateContainer(ctr); err != nil {
+			t.Logf("terminate postgres container: %v", err)
+		}
+	})
+	url, err := ctr.ConnectionString(ctx, "sslmode=disable")
+	require.NoError(t, err, "container connection string")
+	return url
+}
+
 var schemaSeq atomic.Int64
 
 // NewDatabase creates a unique throwaway database on the server at serverURL,
