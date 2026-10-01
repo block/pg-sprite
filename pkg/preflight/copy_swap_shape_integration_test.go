@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -432,8 +433,10 @@ func TestCheckCopySwapShapeRefusesSubscriptionTarget(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		// The subscription is detached from its slot before it is dropped so
-		// the drop needs no publisher connection; the slot then goes with
-		// the publisher database.
+		// the drop needs no publisher connection. Disabling only signals the
+		// apply worker to exit, and the publisher's walsender keeps the slot
+		// active until that worker's connection closes, so the slot is
+		// dropped once it is released rather than racing the worker.
 		ctx := context.WithoutCancel(t.Context())
 		for _, sql := range []string{
 			`ALTER SUBSCRIPTION sub_applied DISABLE`,
@@ -443,6 +446,13 @@ func TestCheckCopySwapShapeRefusesSubscriptionTarget(t *testing.T) {
 			_, err := subscriber.Exec(ctx, sql)
 			assert.NoError(t, err, sql)
 		}
+		const slotReleaseDeadline = 10 * time.Second
+		assert.Eventually(t, func() bool {
+			var active bool
+			err := publisher.QueryRow(ctx,
+				`SELECT active FROM pg_replication_slots WHERE slot_name = 'sub_applied'`).Scan(&active)
+			return err == nil && !active
+		}, slotReleaseDeadline, 50*time.Millisecond, "the apply worker's walsender should release the slot")
 		_, err := publisher.Exec(ctx, `SELECT pg_drop_replication_slot('sub_applied')`)
 		assert.NoError(t, err)
 	})
