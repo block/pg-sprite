@@ -65,9 +65,11 @@ func (s fakeShadow) ShadowOID() uint32     { return s.shadowOID }
 func (s fakeShadow) CopyColumns() []string { return s.columns }
 
 // The digest statement is the D7 contract in one string: every copy column
-// cast to the shadow's type inside a record, hashed per row, aggregated in
-// key order, over a closed bigint-typed key range, with every function
-// pg_catalog-qualified. Only the table differs between the two sides.
+// cast to the shadow's type inside a record, SHA-256-hashed per row from
+// its UTF-8 bytes, aggregated as bytes in key order and hashed again, hex
+// only at the end, over a closed bigint-typed key range, with every
+// function pg_catalog-qualified. Only the table differs between the two
+// sides.
 // Quoting goes through pgx.Identifier, so a column named like a keyword
 // survives, while the type spelling is format_type's and is not quoted.
 func TestDigestSQLIsFrozen(t *testing.T) {
@@ -85,7 +87,7 @@ func TestDigestSQLIsFrozen(t *testing.T) {
 		{name: "qty", typeName: "numeric(10,2)"},
 	}
 	want := `SELECT pg_catalog.count(*),` +
-		` pg_catalog.md5(COALESCE(pg_catalog.string_agg(pg_catalog.md5(ROW("id"::bigint, "select"::character varying(20), "qty"::numeric(10,2))::text), '' ORDER BY "id"), ''))` +
+		` pg_catalog.encode(pg_catalog.sha256(COALESCE(pg_catalog.string_agg(pg_catalog.sha256(pg_catalog.convert_to(ROW("id"::bigint, "select"::character varying(20), "qty"::numeric(10,2))::text, 'UTF8')), ''::bytea ORDER BY "id"), ''::bytea)), 'hex')` +
 		` FROM "` + f.schema + `"."_pgsprite_orders_new"` +
 		` WHERE "id" BETWEEN $1::bigint AND $2::bigint`
 	assert.Equal(t, want, digestSQL(target, f.schema, "_pgsprite_orders_new", types))

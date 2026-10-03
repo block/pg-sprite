@@ -365,14 +365,15 @@ func TestVerifierStopsAtTheWatermark(t *testing.T) {
 
 // The pass resolves every catalog object it names through pg_catalog, so a
 // session whose search_path puts a schema of impostors first (CO-9) neither
-// misreads the shadow's types nor hashes with someone else's md5 nor
+// misreads the shadow's types nor hashes with someone else's functions nor
 // compares keys with someone else's operator: an impostor format_type that
-// would make every numeric compare as text produces no false mismatch, an
-// impostor md5 that answers the same for every row hides no real one, and
-// an impostor bigint <= that is never true, which would empty the key range
-// on both sides and compare nothing clean, is not the <= that BETWEEN
-// resolves to. Functions are qualified in the statement itself; the
-// operator can only be pinned by the transaction's own search_path.
+// would make every numeric compare as text produces no false mismatch; an
+// impostor sha256, convert_to, or encode that answers the same for every
+// input hides no real difference; and an impostor bigint <= that is never
+// true, which would empty the key range on both sides and compare nothing
+// clean, is not the <= that BETWEEN resolves to. Functions are qualified in
+// the statement itself; the operator can only be pinned by the
+// transaction's own search_path.
 func TestVerifierIgnoresTheSessionSearchPath(t *testing.T) {
 	f := newVerifierFixture(t)
 	f.createOrders(t)
@@ -380,7 +381,9 @@ func TestVerifierIgnoresTheSessionSearchPath(t *testing.T) {
 	lock := f.lock(t, "orders")
 	shadow := f.build(t, lock, target, `ALTER TABLE %s ALTER COLUMN qty TYPE numeric(10,2)`)
 	f.copy(t, target, shadow, lock)
-	f.exec(t, `CREATE FUNCTION %s.md5(text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT ''impostor''::text'`)
+	f.exec(t, `CREATE FUNCTION %s.sha256(bytea) RETURNS bytea LANGUAGE sql IMMUTABLE AS 'SELECT ''\x00''::bytea'`)
+	f.exec(t, `CREATE FUNCTION %s.convert_to(text, name) RETURNS bytea LANGUAGE sql IMMUTABLE AS 'SELECT ''\x00''::bytea'`)
+	f.exec(t, `CREATE FUNCTION %s.encode(bytea, text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT ''impostor''::text'`)
 	f.exec(t, `CREATE FUNCTION %s.format_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS 'SELECT ''text''::text'`)
 	f.exec(t, `CREATE FUNCTION %s.never_le(bigint, bigint) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT false'`)
 	f.exec(t, `CREATE OPERATOR %s.<= (LEFTARG = bigint, RIGHTARG = bigint, FUNCTION = %s.never_le)`)
