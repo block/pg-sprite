@@ -341,7 +341,11 @@ transactionally clean (the constraint simply stays `NOT VALID`; no debris), so t
 executor's validate class deliberately keeps a bounded per-lock timeout — queueing behind a
 conflicting lock holder must not stall a sequence for the whole scan budget — while the scan
 itself runs under its own generous overall budget. *Enforced:* every DDL execution path in the
-native and copy-and-swap executors.
+native and copy-and-swap executors; in `pkg/copier` and `pkg/checksum`, every statement on the
+caller's pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repair — runs
+inside a transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so
+a pool built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued
+behind `ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 

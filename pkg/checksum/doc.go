@@ -1,8 +1,9 @@
 // Package checksum compares the shadow table with its source and mints the
 // proofs the cutover demands of that comparison (CO-1, CO-2, CO-3).
 // A Verifier reads every key at or below the copier's landed watermark in
-// chunks, digesting both tables inside one read-only REPEATABLE READ
-// transaction per chunk so the two digests describe one snapshot, with
+// chunks, cutting each chunk and digesting both tables inside one read-only
+// REPEATABLE READ transaction per chunk so the cut and the two digests
+// describe one snapshot and the cut is bounded like the reads (LK-2), with
 // every column cast to the type the shadow declares so a schema change that
 // converts a column compares as the shadow holds it (D7). Each transaction
 // runs under the table's lock session and refuses relations that are no

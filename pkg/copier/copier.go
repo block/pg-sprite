@@ -296,15 +296,16 @@ func (c *Copier) work(ctx context.Context, pool *pgxpool.Pool) error {
 	return ctx.Err()
 }
 
-// claim cuts the next chunk and registers it in flight before any worker
-// reads it, so a Position taken at any later instant shows the chunk as in
-// flight until it lands. Cutting and registering happen under one lock, so
-// chunks are registered in the order they were cut and the ledger's frontier
-// never runs ahead of an unregistered chunk.
+// claim cuts the next chunk in a bounded transaction and registers it in
+// flight before any worker reads it, so a Position taken at any later
+// instant shows the chunk as in flight until it lands. Cutting and
+// registering happen under one lock, so chunks are registered in the order
+// they were cut and the ledger's frontier never runs ahead of an
+// unregistered chunk.
 func (c *Copier) claim(ctx context.Context, pool *pgxpool.Pool) (Chunk, bool, error) {
 	c.claimMu.Lock()
 	defer c.claimMu.Unlock()
-	chunk, ok, err := c.chunker.Next(ctx, pool)
+	chunk, ok, err := c.cut(ctx, pool)
 	if err != nil || !ok {
 		return Chunk{}, false, err
 	}
