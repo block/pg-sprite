@@ -172,7 +172,7 @@ equivalent is given alongside.
 | `SHOW BINARY LOG STATUS` → file:offset position | LSN + slot `confirmed_flush_lsn` |
 | `REPLACE INTO target VALUES (...)` (apply) | `INSERT ... ON CONFLICT (pk) DO UPDATE SET ...` + explicit delete handling |
 | `INSERT IGNORE ... SELECT` (copy) | `INSERT INTO shadow SELECT ... FROM src WHERE <pk range> ON CONFLICT DO NOTHING` |
-| `CRC32(CONCAT(col,...))` checksum | `md5(row::text)` aggregated per chunk, or `sum(hashtext(...))` / count compare |
+| `CRC32(CONCAT(col,...))` checksum | `sha256(row::text)` aggregated per chunk (not `md5`, which a FIPS-mode OpenSSL refuses), or `sum(hashtext(...))` / count compare |
 | `RENAME TABLE old→_old, new→old` under `LOCK TABLES` (needs MySQL 8.0.13+) | `BEGIN; LOCK TABLE src IN ACCESS EXCLUSIVE MODE; <final drain>; ALTER TABLE src RENAME TO src_old; ALTER TABLE shadow RENAME TO src; COMMIT;` — **PostgreSQL's transactional DDL makes this cleaner than MySQL** |
 | Force-kill via `performance_schema` | `pg_terminate_backend()` + `lock_timeout`/`statement_timeout` to bound the cutover wait |
 | TiDB SQL parser (`pkg/statement`) | [`wasilibs/go-pgquery`](https://github.com/wasilibs/go-pgquery) (libpg_query compiled to Wasm — the real PostgreSQL grammar, no cgo) for parsing `ALTER` / `CREATE TABLE` |
