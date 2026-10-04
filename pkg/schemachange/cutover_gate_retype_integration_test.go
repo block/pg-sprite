@@ -77,6 +77,76 @@ func TestGateCutoverPairsIndexesAcrossARetypedColumn(t *testing.T) {
 	}, ready.Indexes())
 }
 
+// Retyping an integer column to text gives its index a collation as well as
+// a new operator class; both are the server's own derivations, so both are
+// set aside and the index still pairs (D8).
+func TestGateCutoverPairsAnIndexAcrossARetypeThatAddsACollation(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createAccounts(t)
+	s := f.stage(t, "accounts", `ALTER TABLE %s.accounts ALTER COLUMN balance TYPE text`)
+	shadow := s.built.ShadowTable()
+
+	ready, err := f.gate(t, s)
+	require.NoError(t, err)
+
+	assert.Contains(t, ready.Indexes().Pairs, schemachange.DependentPair{Kind: schemachange.DependentIndex, SourceName: "accounts_balance_idx", ShadowName: shadow + "_balance_idx"})
+}
+
+// Two indexes on one column that differ only in a collation written in the
+// index stay distinct across a retype: the server keeps the written
+// collation on the rebuild and re-derives only the column's own, so each
+// source index pairs with the shadow index that carries its collation, and
+// neither takes the other's name at the swap (ST-5, D8). The index names
+// sort in the opposite order to the shadow's LIKE-derived ones, so a
+// pairing by position would cross them.
+func TestGateCutoverRetypeKeepsAnExplicitCollationApart(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createAccounts(t)
+	f.exec(t, `CREATE INDEX accounts_label_plain ON %s.accounts (label)`)
+	f.exec(t, `CREATE INDEX accounts_label_c ON %s.accounts (label COLLATE "C")`)
+	s := f.stage(t, "accounts", `ALTER TABLE %s.accounts ALTER COLUMN label TYPE char(20)`)
+	shadow := s.built.ShadowTable()
+
+	ready, err := f.gate(t, s)
+	require.NoError(t, err)
+
+	pairs := ready.Indexes().Pairs
+	assert.Contains(t, pairs, schemachange.DependentPair{Kind: schemachange.DependentIndex, SourceName: "accounts_label_plain", ShadowName: shadow + "_label_idx"})
+	assert.Contains(t, pairs, schemachange.DependentPair{Kind: schemachange.DependentIndex, SourceName: "accounts_label_c", ShadowName: shadow + "_label_idx1"})
+}
+
+// An operator class written in the index survives a rebuild the same way:
+// a char column retyped to text under another collation keeps
+// bpchar_pattern_ops where it was written (text is binary-coercible to the
+// opclass's type) and moves only the plain index from bpchar_ops to
+// text_ops, while both rebuilt indexes take the column's new collation as
+// their own. Neither pairs exactly; the written operator class keeps them
+// apart, so each pairs with its own shadow copy rather than by position
+// (ST-5, D8).
+func TestGateCutoverRetypeKeepsAnExplicitOpclassApart(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createAccounts(t)
+	f.exec(t, `ALTER TABLE %s.accounts ALTER COLUMN label TYPE char(20)`)
+	f.exec(t, `CREATE INDEX accounts_label_plain ON %s.accounts (label)`)
+	f.exec(t, `CREATE INDEX accounts_label_pattern ON %s.accounts (label bpchar_pattern_ops)`)
+	s := f.stage(t, "accounts", `ALTER TABLE %s.accounts ALTER COLUMN label TYPE text COLLATE "C"`)
+	shadow := s.built.ShadowTable()
+
+	// The precondition: the plain index's opclass moved with the type, the
+	// written one stayed.
+	assert.Equal(t, []string{"bpchar_ops"}, f.indexOpclasses(t, "accounts_label_plain"))
+	assert.Equal(t, []string{"text_ops"}, f.indexOpclasses(t, shadow+"_label_idx"))
+	assert.Equal(t, []string{"bpchar_pattern_ops"}, f.indexOpclasses(t, "accounts_label_pattern"))
+	assert.Equal(t, []string{"bpchar_pattern_ops"}, f.indexOpclasses(t, shadow+"_label_idx1"))
+
+	ready, err := f.gate(t, s)
+	require.NoError(t, err)
+
+	pairs := ready.Indexes().Pairs
+	assert.Contains(t, pairs, schemachange.DependentPair{Kind: schemachange.DependentIndex, SourceName: "accounts_label_plain", ShadowName: shadow + "_label_idx"})
+	assert.Contains(t, pairs, schemachange.DependentPair{Kind: schemachange.DependentIndex, SourceName: "accounts_label_pattern", ShadowName: shadow + "_label_idx1"})
+}
+
 // A retyped column explains an operator-class difference on its own
 // indexes only. When the change also drops the column a third index covers,
 // that index stays unpaired on the source side as before, and the retyped

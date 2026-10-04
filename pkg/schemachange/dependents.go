@@ -107,6 +107,14 @@ type indexDefinition struct {
 	// collation is empty for a column whose type is not collatable.
 	Opclasses  []string `json:"opclasses"`
 	Collations []string `json:"collations"`
+	// DefaultOpclasses and OwnCollations are per key column: whether the
+	// operator class is the default for its type, and whether the collation
+	// is the key column's own rather than one written in the index. They
+	// say where each fact came from, not what it is, so they are not part
+	// of the rendered definition; they decide which facts the relaxed
+	// pairing across a retyped column may set aside.
+	DefaultOpclasses []bool `json:"-"`
+	OwnCollations    []bool `json:"-"`
 	// Options are pg_index.indoption per key column (DESC and NULLS FIRST
 	// flags), which the per-column pg_get_indexdef form does not print.
 	Options   []int16 `json:"options"`
@@ -146,6 +154,15 @@ func readIndexes(ctx context.Context, tx pgx.Tx, oid uint32) ([]indexEntry, erro
 		             FROM unnest(i.indcollation::oid[]) WITH ORDINALITY u(o, k)
 		             LEFT JOIN pg_collation co ON co.oid = u.o
 		             ORDER BY k),
+		       ARRAY(SELECT oc.opcdefault
+		             FROM unnest(i.indclass::oid[]) WITH ORDINALITY u(o, k)
+		             JOIN pg_opclass oc ON oc.oid = u.o
+		             ORDER BY k),
+		       ARRAY(SELECT u.o = COALESCE(a.attcollation, u.o)
+		             FROM unnest(i.indcollation::oid[], i.indkey::int2[]) WITH ORDINALITY u(o, n, k)
+		             LEFT JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = u.n AND u.n > 0
+		             WHERE u.k <= i.indnkeyatts
+		             ORDER BY k),
 		       ARRAY(SELECT u.o FROM unnest(i.indoption::int2[]) WITH ORDINALITY u(o, k) ORDER BY k),
 		       COALESCE(pg_get_expr(i.indpred, i.indrelid), ''),
 		       COALESCE(pg_get_constraintdef(con.oid), '')
@@ -163,7 +180,8 @@ func readIndexes(ctx context.Context, tx pgx.Tx, oid uint32) ([]indexEntry, erro
 		var e indexEntry
 		d := &e.definition
 		err := row.Scan(&e.name, &e.valid, &d.AccessMethod, &d.Unique, &d.Primary, &d.NullsNotDistinct,
-			&d.KeyColumns, &d.Included, &d.Opclasses, &d.Collations, &d.Options, &d.Predicate, &d.Constraint)
+			&d.KeyColumns, &d.Included, &d.Opclasses, &d.Collations, &d.DefaultOpclasses, &d.OwnCollations,
+			&d.Options, &d.Predicate, &d.Constraint)
 		return e, err
 	})
 	if err != nil {

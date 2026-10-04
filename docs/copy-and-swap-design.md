@@ -204,22 +204,26 @@ unique-constraint, or statistics names, so "corresponding" is established by **d
 by name: indexed columns or expressions, access method, operator classes, uniqueness, and
 predicate for an index; the column set and kinds for a statistics object. One difference is set
 aside: PostgreSQL re-creates an index on a column the gated statement retypes for the new type,
-with that type's default operator class and collation, so for a key column the statement retyped
-— the same name on both sides, a different canonical type — the operator class and collation do
-not count, and everything else about the two definitions must still agree; an expression over
-such a column, and every column the statement did not retype, is held to an exact match. Two
-source indexes with identical definitions are interchangeable, so an arbitrary pairing between
-them restores an equivalent catalog. The post-swap catalog therefore carries the user's names —
-`ON CONFLICT ON CONSTRAINT u_slot` keeps working and a later change of the same table derives
-the same names — and only the old table's dependents wear the suffix. A shared `serial`/`nextval`
-sequence is not a dependent of the old table and keeps its name (D5). Every derived name is a
-fixed width — 30 bytes for the table names, 47 for a dependent's — because both the table and
-the dependent enter the name as hashes, never as text; no source name, however long, can push a
-derived name into the server's silent truncation at 63 bytes, so the route has no name-length
-refusal. The hash has no inverse, but a derived relation always lives in its source's schema,
-so `schemachange.SourceOfDerivedName` recovers the source by recomputing each table's derived
-names in that one schema — the query an operator runs on finding a `_pgsprite_…` relation they
-did not create.
+re-deriving that type's default operator class and the column's own collation while keeping an
+operator class or collation written in the index, so for a key column the statement retyped —
+the same name on both sides, a different canonical type — the default operator class and the
+column's own collation do not count, and everything else about the two definitions, a written
+operator class or collation included, must still agree; an expression or a predicate over such
+a column (the server may render either differently for the new type), and every column the
+statement did not retype, is held to an exact match. Two source indexes with identical
+definitions are interchangeable, so an arbitrary pairing between them restores an equivalent
+catalog; two that are identical only once the set-aside facts are removed are not shown to be,
+so the relaxed rule pairs neither and both stay unpaired. The post-swap catalog therefore
+carries the user's names — `ON CONFLICT ON CONSTRAINT u_slot` keeps working and a later change
+of the same table derives the same names — and only the old table's dependents wear the suffix.
+A shared `serial`/`nextval` sequence is not a dependent of the old table and keeps its name (D5).
+Every derived name is a fixed width — 30 bytes for the table names, 47 for a dependent's —
+because both the table and the dependent enter the name as hashes, never as text; no source
+name, however long, can push a derived name into the server's silent truncation at 63 bytes, so
+the route has no name-length refusal. The hash has no inverse, but a derived relation always
+lives in its source's schema, so `schemachange.SourceOfDerivedName` recovers the source by
+recomputing each table's derived names in that one schema — the query an operator runs on
+finding a `_pgsprite_…` relation they did not create.
 
 **Why.** Stable names make catalog inspection and resume deterministic; restoring user names keeps
 the swap invisible to code that names constraints; fixed-width hashed names make truncation, and
@@ -396,7 +400,7 @@ decoding but adds write-path availability and amplification costs.
 | `pkg/decode` | Produces `ChangeEvent`, including per-column presence and `OldKey` for an UPDATE that moved the primary key. | ST-3, ST-4, CO-4, CO-8 |
 | `pkg/applier` | Applies presence-aware events from the per-key buffer. | CO-4, CO-5, CO-6, CO-8, LK-3 |
 | `pkg/checkpoint` | Produces `Checkpoint`. | ST-1, ST-2 |
-| `pkg/schemachange` | Shadow builder (`BuildShadow` produces `BuiltShadow`: source and shadow OIDs, fingerprints, identity handoff, copy columns, fidelity snapshot; `SourceOfDerivedName` maps a derived name back to its table), orchestrator, and cutover. `BuildShadow`, `DropShadow`, and `InspectShadow` each take the `*dbconn.TableLockSession` for the table — a dedicated direct server session, distinct from the working pool, that `dbconn.AcquireTableLock` refuses to open through a transaction-pooling proxy: the operation runs under the session's `Bind` context so a lost lock cancels the statement in flight, and its transaction re-asserts from its own connection that the session's backend holds the lock before the first write, since the lock and the work are deliberately on different sessions. `InspectShadow` is the resume path `ErrShadowExists` points at: it re-derives the `BuiltShadow` proof from the catalog for the caller to compare with its checkpoint — `BuiltShadow.Proof()` is the plain, JSON-encodable view of that proof (`BuiltShadow` marshals as it), and nothing decodes back into a `BuiltShadow`, so only the builder and the inspection mint one; `DropShadow` is the D5 cleanup, dropping only a plain table the source's owner owns, without `CASCADE`. `GateCutover` is the ST-5 fidelity gate: handed a `BuiltShadow` and a `checksum.VerifiedShadow` for the same table, it re-reads both relations under the lock, refuses on a moved OID, a fingerprint or fidelity snapshot that drifted from the build's record, an invalid shadow index, or a swap name already taken, and otherwise mints `CutoverReady` — the pairing of every source index and extended statistics object with its shadow counterpart by catalog definition (not by name, since `LIKE` renames them; the operator class and collation of a key column the statement retyped are set aside, since the server re-creates that index for the new type), and the sequences the swap must re-own; the swap itself consumes that proof. Every refusal the four operations return is a `*RefusalError` carrying a `RefusalCause` from the closed set in [refusal-classes.md](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause), so an importer routes on the cause rather than on message text. | LK-1, LK-2, LK-4, CO-1, ST-5, ST-7 |
+| `pkg/schemachange` | Shadow builder (`BuildShadow` produces `BuiltShadow`: source and shadow OIDs, fingerprints, identity handoff, copy columns, fidelity snapshot; `SourceOfDerivedName` maps a derived name back to its table), orchestrator, and cutover. `BuildShadow`, `DropShadow`, and `InspectShadow` each take the `*dbconn.TableLockSession` for the table — a dedicated direct server session, distinct from the working pool, that `dbconn.AcquireTableLock` refuses to open through a transaction-pooling proxy: the operation runs under the session's `Bind` context so a lost lock cancels the statement in flight, and its transaction re-asserts from its own connection that the session's backend holds the lock before the first write, since the lock and the work are deliberately on different sessions. `InspectShadow` is the resume path `ErrShadowExists` points at: it re-derives the `BuiltShadow` proof from the catalog for the caller to compare with its checkpoint — `BuiltShadow.Proof()` is the plain, JSON-encodable view of that proof (`BuiltShadow` marshals as it), and nothing decodes back into a `BuiltShadow`, so only the builder and the inspection mint one; `DropShadow` is the D5 cleanup, dropping only a plain table the source's owner owns, without `CASCADE`. `GateCutover` is the ST-5 fidelity gate: handed a `BuiltShadow` and a `checksum.VerifiedShadow` for the same table, it re-reads both relations under the lock, refuses on a moved OID, a fingerprint or fidelity snapshot that drifted from the build's record, an invalid shadow index, or a swap name already taken, and otherwise mints `CutoverReady` — the pairing of every source index and extended statistics object with its shadow counterpart by catalog definition (not by name, since `LIKE` renames them; the default operator class and the column's own collation of a key column the statement retyped are set aside, since the server re-derives them for the new type; a written operator class or collation still has to agree, and a relaxed definition two indexes share pairs neither), and the sequences the swap must re-own; the swap itself consumes that proof. Every refusal the four operations return is a `*RefusalError` carrying a `RefusalCause` from the closed set in [refusal-classes.md](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause), so an importer routes on the cause rather than on message text. | LK-1, LK-2, LK-4, CO-1, ST-5, ST-7 |
 
 Each producing package owns its types. `pkg/schemachange` imports every producer; no producer
 imports `pkg/schemachange`.

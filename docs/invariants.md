@@ -549,8 +549,9 @@ identity sequence options — no longer matches what the build recorded, when th
 grants no longer match the shadow's, when a shadow index is
 invalid, or when a name the swap must assign is already taken; it also pairs every source
 index and extended statistics object with its shadow counterpart by catalog definition (setting
-aside only the operator class and collation of a key column the statement retyped, which the
-server re-creates for the new type) and lists the sequences the swap must re-own. Before that,
+aside only the default operator class and the column's own collation of a key column the
+statement retyped, which the server re-derives for the new type; an operator class or collation
+written in the index still has to agree) and lists the sequences the swap must re-own. Before that,
 `pkg/schemachange` refuses to build a shadow the source's owner does not own, and refuses to inspect or drop anything under the
 shadow's name that is not a plain table the source's owner owns (an inspected shadow must also
 still draw each identity default from the source's sequence). *Source:*
