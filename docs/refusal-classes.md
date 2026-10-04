@@ -166,6 +166,14 @@ so the cutover route inherits it.
 | `cutover-index-invalid` | A shadow index is marked invalid in `pg_index`, so the swap would put an index the planner never uses under the user's name ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | A concurrent build on the shadow failed or was cancelled; reindex or rebuild the index and gate again. |
 | `cutover-name-taken` | A name cutover must assign is already worn: a derived `_old` name by a relation or statistics object in the schema, or a source dependent's name by a shadow constraint that is not the one being renamed to it ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | A leftover from an earlier run, or a constraint the gated statement named after a source index, occupies the name; an operator removes or renames it and gates again. |
 
+Not every error a shadow operation returns is a refusal. `BuildShadow` applies the gated
+statement to the empty shadow, and a statement the server itself rejects there — an index
+whose access method has no operator class for a retyped column (SQLSTATE `42804`), a
+constraint the new type cannot satisfy — surfaces as the server's `*pgconn.PgError`, wrapped
+with the shadow's name and reachable with `errors.As`; `RefusalCauseOf` returns the empty cause
+for it. An importer routes those by SQLSTATE, as it does for any other statement it runs, and
+need not expect a `RefusalCause` for a change the server would have rejected on the source too.
+
 The copier's own refusals — a lock the server does not confirm from the writing connection
 ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)), a source or shadow replaced
 since its proof was minted ([ST-6](invariants.md#st-6--preflight-before-the-first-write)), a
