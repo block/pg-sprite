@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
 )
 
@@ -23,6 +24,43 @@ type recordingSleep struct{ waits []time.Duration }
 func (s *recordingSleep) sleep(_ context.Context, d time.Duration) error {
 	s.waits = append(s.waits, d)
 	return nil
+}
+
+// A session the server ended from outside it is transient for the
+// checkpoint read alone: the engine-wide classifier keeps those codes
+// terminal, because a write they interrupt has an ambiguous outcome.
+func TestReadRetryableWidensTheEngineClassifierForServerEndedSessions(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		read bool
+	}{
+		{"admin_shutdown (terminated backend)", &pgconn.PgError{Code: "57P01"}, true},
+		{"crash_shutdown", &pgconn.PgError{Code: "57P02"}, true},
+		{"cannot_connect_now (server in recovery)", &pgconn.PgError{Code: "57P03"}, true},
+		{"database_dropped", &pgconn.PgError{Code: "57P04"}, false},
+		{"query_canceled", &pgconn.PgError{Code: "57014"}, false},
+		{"undefined_table", &pgconn.PgError{Code: "42P01"}, false},
+		{"plain error", errors.New("boom"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.read, readRetryable(tc.err), "read classification")
+			assert.False(t, dbconn.Retryable(tc.err), "the engine-wide classifier must not retry a write through this")
+		})
+	}
+	for _, tc := range []struct {
+		name string
+		code string
+	}{
+		{"lock_not_available", "55P03"},
+		{"connection_exception", "08006"},
+	} {
+		t.Run(tc.name+" stays transient for reads too", func(t *testing.T) {
+			err := &pgconn.PgError{Code: tc.code}
+			assert.True(t, dbconn.Retryable(err))
+			assert.True(t, readRetryable(err))
+		})
+	}
 }
 
 // A transient error is retried with a linearly growing backoff until the

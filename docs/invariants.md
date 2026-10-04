@@ -512,7 +512,8 @@ trigger fresh-start recovery on a blip. *Enforced:* `pkg/checkpoint` `Store.Load
 model fingerprints are stored with the watermark, and the fingerprints are
 `pkg/schemachange`'s digests of the execute-and-introspect source and after-schema models, not
 SQL text, so textually-different-but-identical statements match and cosmetic edits don't force
-a fresh start — and for (c) retries through `dbconn.Retryable` errors under bounded attempts
+a fresh start — and for (c) retries through transient errors (what `dbconn.Retryable` names, plus a session the
+server ended from outside it, `57P01`/`57P02`/`57P03`, which only a read may safely repeat) under bounded attempts
 before returning an error that is neither `ErrNotFound` nor incompatible; `ErrNotFound` is
 returned only for a completed read that found no row. `Store.Save` applies the same identity
 guard on the write path, so a run can never write its state over another statement's row;

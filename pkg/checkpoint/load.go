@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/block/pg-sprite/pkg/copier"
@@ -51,8 +52,38 @@ func (s *Store) load(ctx context.Context, q dbconn.RowQuerier, schema, table str
 	return cp, nil
 }
 
+// SQLSTATE codes a backend reports when the server ends its session from
+// outside the session — pg_terminate_backend, a shutdown, or a restart still
+// in recovery — which is how a failover looks from the client. A write
+// interrupted this way has an ambiguous outcome and must not be retried,
+// which is why dbconn.Retryable does not list them; Load is a read, so
+// repeating it is safe and these count as transient for it alone.
+const (
+	codeAdminShutdown    = "57P01"
+	codeCrashShutdown    = "57P02"
+	codeCannotConnectNow = "57P03"
+)
+
+// readRetryable reports whether a failed read of the checkpoint row may be
+// repeated: anything the engine treats as transient, plus a session the
+// server ended from outside it.
+func readRetryable(err error) bool {
+	if dbconn.Retryable(err) {
+		return true
+	}
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	switch pgErr.Code {
+	case codeAdminShutdown, codeCrashShutdown, codeCannotConnectNow:
+		return true
+	}
+	return false
+}
+
 // retryTransient runs attempt up to attempts times, waiting between tries
-// with a linearly growing backoff, and retries only errors dbconn.Retryable
+// with a linearly growing backoff, and retries only errors readRetryable
 // classifies as transient. Any other error, including no row, returns at
 // once; the context's end wins over a pending wait.
 func retryTransient(ctx context.Context, attempts int, backoff time.Duration, attempt func(context.Context) error, sleep SleepFunc) error {
@@ -62,7 +93,7 @@ func retryTransient(ctx context.Context, attempts int, backoff time.Duration, at
 		if last == nil {
 			return nil
 		}
-		if !dbconn.Retryable(last) {
+		if !readRetryable(last) {
 			return last
 		}
 		if i == attempts {
