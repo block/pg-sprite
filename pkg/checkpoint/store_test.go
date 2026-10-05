@@ -35,8 +35,19 @@ func TestNewStoreOptions(t *testing.T) {
 // constants too; it must stay what pgx would render for the two names.
 func TestTableIdentMatchesPgxQuoting(t *testing.T) {
 	assert.Equal(t, pgx.Identifier{SchemaName, TableName}.Sanitize(), tableIdent)
-	assert.Contains(t, ensureSQL, "CREATE SCHEMA IF NOT EXISTS "+pgx.Identifier{SchemaName}.Sanitize()+";")
-	assert.Contains(t, ensureSQL, "CREATE TABLE IF NOT EXISTS "+tableIdent+" (")
+	assert.Equal(t, "CREATE SCHEMA "+pgx.Identifier{SchemaName}.Sanitize(), createSchemaSQL)
+	assert.True(t, strings.HasPrefix(createTableSQL, "CREATE TABLE "+tableIdent+" ("), createTableSQL)
+}
+
+// Delete's statement matches the whole row identity, so a row that another
+// statement wrote after the caller read its IncompatibleError is never the
+// one removed (ST-2).
+func TestDeleteSQLMatchesTheRowIdentity(t *testing.T) {
+	_, where, found := strings.Cut(deleteSQL, " WHERE ")
+	require.True(t, found, "the delete is conditional")
+	for _, column := range []string{"schema_name", "table_name", "format_version", "source_fingerprint", "target_fingerprint"} {
+		assert.Contains(t, where, column+" = $")
+	}
 }
 
 // The copier's zero watermark is the NULL column, and a valid one carries

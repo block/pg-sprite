@@ -2,9 +2,11 @@ package checkpoint
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -111,65 +113,6 @@ func NewStore(pool *pgxpool.Pool, opts Options) (*Store, error) {
 	return &Store{pool: pool, opts: opts}, nil
 }
 
-// tableIdent is the schema-qualified checkpoint table as it appears in
-// SQL: SchemaName and TableName quoted, which a unit test pins to what
-// pgx.Identifier would render for them. Both names are the engine's own
-// constants, never a caller's.
-const tableIdent = `"` + SchemaName + `"."` + TableName + `"`
-
-// ensureSQL creates the engine schema and the checkpoint table when they do
-// not exist. watermark is NULL while nothing has landed; phase holds the
-// stable Phase name so an operator reading the row during an incident sees
-// "copying", not a number.
-const ensureSQL = "CREATE SCHEMA IF NOT EXISTS \"" + SchemaName + "\";\n" +
-	"CREATE TABLE IF NOT EXISTS " + tableIdent + ` (
-	schema_name        text NOT NULL,
-	table_name         text NOT NULL,
-	format_version     integer NOT NULL,
-	shadow_table       text NOT NULL,
-	slot_name          text NOT NULL,
-	publication_name   text NOT NULL,
-	watermark          bigint,
-	last_applied_lsn   pg_lsn NOT NULL,
-	source_fingerprint text NOT NULL,
-	target_fingerprint text NOT NULL,
-	phase              text NOT NULL,
-	updated_at         timestamptz NOT NULL,
-	PRIMARY KEY (schema_name, table_name)
-)`
-
-// ensureLockSQL takes the engine's own advisory key for the checkpoint
-// table — the key pkg/dbconn's table lock would derive for it — for the
-// creating transaction, so two engines reaching the same database for the
-// first time at once serialize their creates instead of racing CREATE … IF
-// NOT EXISTS into a duplicate-key failure in the catalog.
-const ensureLockSQL = "SELECT pg_advisory_xact_lock($1, hashtext(quote_ident($2) || '.' || quote_ident($3)))"
-
-// Ensure creates the checkpoint table on first use and is a no-op once it
-// exists. The engine role runs it, so the table is the engine's.
-func (s *Store) Ensure(ctx context.Context) error {
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return fmt.Errorf("begin create of %s: %w", tableIdent, err)
-	}
-	defer func() {
-		// Redundant safety closer: after a successful Commit this returns
-		// the guaranteed ErrTxClosed; on a failure path the server aborts
-		// the transaction with its session either way.
-		_ = tx.Rollback(context.WithoutCancel(ctx))
-	}()
-	if _, err := tx.Exec(ctx, ensureLockSQL, dbconn.TableLockClassID, SchemaName, TableName); err != nil {
-		return fmt.Errorf("lock for create of %s: %w", tableIdent, err)
-	}
-	if _, err := tx.Exec(ctx, ensureSQL); err != nil {
-		return fmt.Errorf("create %s: %w", tableIdent, err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit create of %s: %w", tableIdent, err)
-	}
-	return nil
-}
-
 // saveSQL is the one statement Save runs: insert the row, or update the
 // existing row for the same target — but only when that row carries this
 // run's format version and fingerprints. A row that carries another's is
@@ -195,12 +138,21 @@ WHERE ` + tableIdent + `.format_version = EXCLUDED.format_version
 // previous record or this one, never a mix (ST-1). It refuses, with
 // IncompatibleError, to write over a row that another statement or another
 // row format owns; a run that means to start fresh calls Delete first
-// (ST-2). UpdatedAt is taken from the store's clock, not from cp.
-func (s *Store) Save(ctx context.Context, cp Checkpoint) error {
+// (ST-2). The write runs under the target's table lock session and
+// confirms, from its own transaction, that the session still holds the
+// table (LK-1): a run whose lock went to another engine cannot stamp its
+// stale state over the newer engine's row. UpdatedAt is taken from the
+// store's clock, not from cp.
+func (s *Store) Save(ctx context.Context, lock *dbconn.TableLockSession, cp Checkpoint) error {
 	// INV: ST-1
 	if err := cp.validate(); err != nil {
 		return err
 	}
+	if err := requireTableLock(lock, cp.Schema, cp.Table); err != nil {
+		return err
+	}
+	ctx, unbind := lock.Bind(ctx)
+	defer unbind()
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin save of checkpoint for %s.%s: %w", cp.Schema, cp.Table, err)
@@ -209,12 +161,15 @@ func (s *Store) Save(ctx context.Context, cp Checkpoint) error {
 		// Redundant safety closer: see Ensure.
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
+	if err := confirmTableLock(ctx, tx, lock); err != nil {
+		return fmt.Errorf("save checkpoint for %s.%s: %w", cp.Schema, cp.Table, err)
+	}
 	tag, err := tx.Exec(ctx, saveSQL,
 		cp.Schema, cp.Table, FormatVersion, cp.ShadowTable, cp.SlotName, cp.PublicationName,
 		watermarkColumn(cp.Watermark), cp.LastAppliedLSN.String(),
 		cp.SourceFingerprint, cp.TargetFingerprint, cp.Phase.String(), s.opts.Clock.Now())
 	if err != nil {
-		return fmt.Errorf("save checkpoint for %s.%s: %w", cp.Schema, cp.Table, err)
+		return fmt.Errorf("save checkpoint for %s.%s: %w", cp.Schema, cp.Table, missingTable(err))
 	}
 	if tag.RowsAffected() == 0 {
 		// INV: ST-2
@@ -242,16 +197,60 @@ func watermarkColumn(w copier.Watermark) pgtype.Int8 {
 	return pgtype.Int8{Int64: w.Value(), Valid: w.Valid()}
 }
 
-// deleteSQL removes the target's row.
-const deleteSQL = "DELETE FROM " + tableIdent + " WHERE schema_name = $1 AND table_name = $2"
+// deleteSQL removes the target's row, but only the row the caller was
+// shown: one carrying the format version and fingerprints it names. A row
+// that has since been replaced by another statement's is left in place and
+// the statement reports zero rows.
+const deleteSQL = "DELETE FROM " + tableIdent + ` WHERE schema_name = $1 AND table_name = $2
+	AND format_version = $3 AND source_fingerprint = $4 AND target_fingerprint = $5`
 
 // Delete removes the target's row so a fresh run can Save its own. It is
 // the one deliberate step between an IncompatibleError and a fresh start,
-// and it is idempotent: a target with no row is already in the state Delete
-// produces.
-func (s *Store) Delete(ctx context.Context, schema, table string) error {
-	if _, err := s.pool.Exec(ctx, deleteSQL, schema, table); err != nil {
+// and it removes only the row with the Identity the caller was shown —
+// IncompatibleError.Stored, or a loaded Checkpoint's Identity — so a row
+// another engine wrote in the meantime survives and comes back as a new
+// IncompatibleError (ST-2). It runs under the target's table lock like
+// Save (LK-1), and it is idempotent: a target with no row is already in
+// the state Delete produces.
+func (s *Store) Delete(ctx context.Context, lock *dbconn.TableLockSession, schema, table string, stored Identity) error {
+	if err := requireTableLock(lock, schema, table); err != nil {
+		return err
+	}
+	ctx, unbind := lock.Bind(ctx)
+	defer unbind()
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin delete of checkpoint for %s.%s: %w", schema, table, err)
+	}
+	defer func() {
+		// Redundant safety closer: see Ensure.
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+	}()
+	if err := confirmTableLock(ctx, tx, lock); err != nil {
 		return fmt.Errorf("delete checkpoint for %s.%s: %w", schema, table, err)
+	}
+	tag, err := tx.Exec(ctx, deleteSQL, schema, table, stored.FormatVersion, stored.Fingerprints.Source, stored.Fingerprints.Target)
+	if err != nil {
+		return fmt.Errorf("delete checkpoint for %s.%s: %w", schema, table, missingTable(err))
+	}
+	if tag.RowsAffected() == 0 {
+		// INV: ST-2
+		// Either there is no row, which is the state Delete produces, or
+		// the row is not the one the caller was shown.
+		current, err := readRow(ctx, tx, schema, table)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("delete checkpoint for %s.%s: the row that refused the delete could not be read back: %w", schema, table, err)
+		}
+		if incompatible := current.incompatibleWith(stored); incompatible != nil {
+			return incompatible
+		}
+		return fmt.Errorf("%w: delete of checkpoint for %s.%s removed no row although the existing row matches", ErrInvariantViolation, schema, table)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit delete of checkpoint for %s.%s: %w", schema, table, err)
 	}
 	return nil
 }

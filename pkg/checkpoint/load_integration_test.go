@@ -30,7 +30,7 @@ func TestLoadReportsNotFoundForATargetWithNoRow(t *testing.T) {
 func TestLoadReportsAnotherStatementsRowAsIncompatible(t *testing.T) {
 	f := newStoreFixture(t)
 	f.ensure(t)
-	require.NoError(t, f.store.Save(t.Context(), ordersCheckpoint()))
+	require.NoError(t, f.store.Save(t.Context(), f.ordersLock(t), ordersCheckpoint()))
 
 	_, err := f.store.Load(t.Context(), "app", "orders", checkpoint.Fingerprints{Source: "src-a", Target: "tgt-after-edit"})
 	var incompatible *checkpoint.IncompatibleError
@@ -46,7 +46,7 @@ func TestLoadReportsAnotherStatementsRowAsIncompatible(t *testing.T) {
 func TestLoadReportsAnotherFormatVersionAsIncompatible(t *testing.T) {
 	f := newStoreFixture(t)
 	f.ensure(t)
-	require.NoError(t, f.store.Save(t.Context(), ordersCheckpoint()))
+	require.NoError(t, f.store.Save(t.Context(), f.ordersLock(t), ordersCheckpoint()))
 	_, err := f.pool.Exec(t.Context(), "UPDATE pgsprite.pgsprite_checkpoint SET format_version = format_version + 1")
 	require.NoError(t, err)
 
@@ -66,7 +66,7 @@ func TestLoadReportsAnotherFormatVersionAsIncompatible(t *testing.T) {
 func TestLoadRetriesAcrossATerminatedBackend(t *testing.T) {
 	f := newStoreFixture(t)
 	f.ensure(t)
-	require.NoError(t, f.store.Save(t.Context(), ordersCheckpoint()))
+	require.NoError(t, f.store.Save(t.Context(), f.ordersLock(t), ordersCheckpoint()))
 
 	single, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: f.url, MaxConns: 1, MinConns: 1})
 	require.NoError(t, err)

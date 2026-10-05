@@ -169,7 +169,7 @@ func TestResumeFromCheckpointConvergesAfterAMidCopyKill(t *testing.T) {
 	require.Equal(t, copier.NewWatermark(1000), killed.Watermark, "the watermark stops below the pinned chunk")
 
 	// The run checkpoints what it committed, keyed on the shadow it built.
-	require.NoError(t, f.store.Save(t.Context(), checkpoint.Checkpoint{
+	require.NoError(t, f.store.Save(t.Context(), lock, checkpoint.Checkpoint{
 		Schema:            target.Schema(),
 		Table:             target.Table(),
 		ShadowTable:       shadow.ShadowTable(),
@@ -201,7 +201,7 @@ func TestResumeFromCheckpointConvergesAfterAMidCopyKill(t *testing.T) {
 	assert.Equal(t, int64(rows-1000), resumed.Position().RowsInserted, "everything above the watermark was cleared and copied again")
 
 	// The completed copy checkpoints the complete watermark over the same row.
-	require.NoError(t, f.store.Save(t.Context(), checkpoint.Checkpoint{
+	require.NoError(t, f.store.Save(t.Context(), lock, checkpoint.Checkpoint{
 		Schema:            target.Schema(),
 		Table:             target.Table(),
 		ShadowTable:       shadow.ShadowTable(),

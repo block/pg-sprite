@@ -61,7 +61,14 @@ carry and preflight's privilege probe does not yet check; both are open follow-u
 checkpoint table ([D3](copy-and-swap-design.md#d3--store-checkpoints-in-the-target-database))
 lives in an engine-owned `pgsprite` schema created on first use, so a copy-and-swap run needs
 the same database-level `CREATE` once, and `pkg/checkpoint` reports the server's refusal as is
-when the engine lacks it.
+when the engine lacks it. A deployment that keeps database-level `CREATE` away from the engine
+role can pre-provision instead: have a role that holds `CREATE` run the engine's first use
+once, which creates the `pgsprite` schema and the `pgsprite.pgsprite_checkpoint` table, then
+`ALTER SCHEMA pgsprite OWNER TO <engine>` and `ALTER TABLE pgsprite.pgsprite_checkpoint OWNER TO
+<engine>`. `Ensure` creates only what is absent, so it issues no `CREATE` against objects that
+already exist, and it refuses — rather than adopts — a schema or table that another role still
+owns, because anything that role hangs off them would run with the engine's privileges on every
+checkpoint write.
 
 Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are checked by
 `preflight.CheckCopySwapEnvironment` once the privilege check has passed and the shape check

@@ -23,7 +23,10 @@ import (
 // from or written over; a read that did not complete is retried through
 // transient errors under the store's bounded attempts and, once they are
 // spent, returned as an error that is none of the above — a blip never
-// reads as "no checkpoint".
+// reads as "no checkpoint". A database where Ensure has never run has no
+// table to read, which is ErrTableMissing: also none of the above, so a
+// status reader can report "no checkpoint table" without resume mistaking
+// it for ErrNotFound.
 func (s *Store) Load(ctx context.Context, schema, table string, want Fingerprints) (Checkpoint, error) {
 	return s.load(ctx, s.pool, schema, table, want)
 }
@@ -40,7 +43,7 @@ func (s *Store) load(ctx context.Context, q dbconn.RowQuerier, schema, table str
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Checkpoint{}, fmt.Errorf("%w: %s.%s", ErrNotFound, schema, table)
 		}
-		return Checkpoint{}, fmt.Errorf("load checkpoint for %s.%s: %w", schema, table, err)
+		return Checkpoint{}, fmt.Errorf("load checkpoint for %s.%s: %w", schema, table, missingTable(err))
 	}
 	if incompatible := stored.incompatibility(want); incompatible != nil {
 		return Checkpoint{}, incompatible
@@ -141,24 +144,38 @@ func readRow(ctx context.Context, q dbconn.RowQuerier, schema, table string) (ro
 	return r, nil
 }
 
+// identity is the stored row's guarded fields.
+func (r row) identity() Identity {
+	return Identity{
+		FormatVersion: r.formatVersion,
+		Fingerprints:  Fingerprints{Source: r.sourceFingerprint, Target: r.targetFingerprint},
+	}
+}
+
 // incompatibility reports the first identity field on which the stored row
 // disagrees with the run, format version first: a row in another format
 // cannot be trusted to carry fingerprints that mean the same thing. It is
 // nil for a row the run may resume from.
 func (r row) incompatibility(want Fingerprints) *IncompatibleError {
+	return r.incompatibleWith(Identity{FormatVersion: FormatVersion, Fingerprints: want})
+}
+
+// incompatibleWith reports the first field on which the stored row's
+// identity differs from want, in the same order; nil when they agree.
+func (r row) incompatibleWith(want Identity) *IncompatibleError {
 	// INV: ST-2
+	mismatch := &IncompatibleError{Schema: r.schema, Table: r.table, Stored: r.identity()}
 	switch {
-	case r.formatVersion != FormatVersion:
-		return &IncompatibleError{Schema: r.schema, Table: r.table, Mismatch: MismatchFormat,
-			Have: fmt.Sprint(r.formatVersion), Want: fmt.Sprint(FormatVersion)}
-	case r.sourceFingerprint != want.Source:
-		return &IncompatibleError{Schema: r.schema, Table: r.table, Mismatch: MismatchSource,
-			Have: r.sourceFingerprint, Want: want.Source}
-	case r.targetFingerprint != want.Target:
-		return &IncompatibleError{Schema: r.schema, Table: r.table, Mismatch: MismatchTarget,
-			Have: r.targetFingerprint, Want: want.Target}
+	case r.formatVersion != want.FormatVersion:
+		mismatch.Mismatch, mismatch.Have, mismatch.Want = MismatchFormat, fmt.Sprint(r.formatVersion), fmt.Sprint(want.FormatVersion)
+	case r.sourceFingerprint != want.Fingerprints.Source:
+		mismatch.Mismatch, mismatch.Have, mismatch.Want = MismatchSource, r.sourceFingerprint, want.Fingerprints.Source
+	case r.targetFingerprint != want.Fingerprints.Target:
+		mismatch.Mismatch, mismatch.Have, mismatch.Want = MismatchTarget, r.targetFingerprint, want.Fingerprints.Target
+	default:
+		return nil
 	}
-	return nil
+	return mismatch
 }
 
 // checkpoint decodes a compatible row. A value Save could not have written

@@ -267,19 +267,41 @@ func TestRowIncompatibilityOrdersFormatThenSourceThenTarget(t *testing.T) {
 	other := base
 	other.formatVersion = FormatVersion + 1
 	other.sourceFingerprint = "src-b"
-	assert.Equal(t, &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchFormat, Have: "2", Want: "1"},
+	assert.Equal(t, &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchFormat, Have: "2", Want: "1",
+		Stored: Identity{FormatVersion: 2, Fingerprints: Fingerprints{Source: "src-b", Target: "tgt-a"}}},
 		other.incompatibility(wantFP))
 
 	other = base
 	other.sourceFingerprint = "src-b"
 	other.targetFingerprint = "tgt-b"
-	assert.Equal(t, &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchSource, Have: "src-b", Want: "src-a"},
+	assert.Equal(t, &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchSource, Have: "src-b", Want: "src-a",
+		Stored: Identity{FormatVersion: 1, Fingerprints: Fingerprints{Source: "src-b", Target: "tgt-b"}}},
 		other.incompatibility(wantFP))
 
 	other = base
 	other.targetFingerprint = "tgt-b"
-	assert.Equal(t, &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchTarget, Have: "tgt-b", Want: "tgt-a"},
+	assert.Equal(t, &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchTarget, Have: "tgt-b", Want: "tgt-a",
+		Stored: Identity{FormatVersion: 1, Fingerprints: Fingerprints{Source: "src-a", Target: "tgt-b"}}},
 		other.incompatibility(wantFP))
+}
+
+// Delete judges the row against the identity the caller was shown, so a
+// row in the caller's format but written by another statement is reported
+// with that statement's fingerprint; the identity Save writes for a
+// checkpoint is the one Delete accepts for its own row.
+func TestRowIncompatibleWithJudgesTheWholeIdentity(t *testing.T) {
+	stored := row{schema: "app", table: "orders", formatVersion: FormatVersion, sourceFingerprint: "src-a", targetFingerprint: "tgt-a"}
+	assert.Nil(t, stored.incompatibleWith(Identity{FormatVersion: FormatVersion, Fingerprints: wantFP}))
+
+	cp := Checkpoint{SourceFingerprint: "src-a", TargetFingerprint: "tgt-a"}
+	assert.Nil(t, stored.incompatibleWith(cp.Identity()))
+
+	shown := Identity{FormatVersion: FormatVersion, Fingerprints: Fingerprints{Source: "src-a", Target: "tgt-old"}}
+	assert.Equal(t, &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchTarget, Have: "tgt-a", Want: "tgt-old",
+		Stored: stored.identity()}, stored.incompatibleWith(shown))
+
+	shown.FormatVersion = FormatVersion + 1
+	assert.Equal(t, MismatchFormat, stored.incompatibleWith(shown).Mismatch)
 }
 
 // Load judges compatibility on the row it read, so a different statement's

@@ -77,6 +77,15 @@ type Fingerprints struct {
 	Target string
 }
 
+// Identity is everything a stored row is guarded on: the row format it was
+// written in and the statement it belongs to. Save refuses to write over a
+// row with another Identity, and Delete removes a row only when its
+// Identity is the one the caller was shown.
+type Identity struct {
+	FormatVersion int32
+	Fingerprints  Fingerprints
+}
+
 // Checkpoint is the single durable resume record.
 type Checkpoint struct {
 	Schema          string
@@ -100,6 +109,13 @@ type Checkpoint struct {
 // Fingerprints returns the statement identity the checkpoint carries.
 func (c Checkpoint) Fingerprints() Fingerprints {
 	return Fingerprints{Source: c.SourceFingerprint, Target: c.TargetFingerprint}
+}
+
+// Identity returns the row identity a Save of this checkpoint writes: the
+// current FormatVersion and the checkpoint's fingerprints. A run that wants
+// to discard its own row hands it to Delete.
+func (c Checkpoint) Identity() Identity {
+	return Identity{FormatVersion: FormatVersion, Fingerprints: c.Fingerprints()}
 }
 
 // validate refuses a checkpoint the store must not persist: the key, the

@@ -29,7 +29,7 @@ func TestParseLSN(t *testing.T) {
 		require.NoError(t, err, text)
 		assert.Equal(t, want, got, text)
 	}
-	for _, bad := range []string{"", "16", "16/", "/B374D848", "1/FFFFFFFFF", "0x16/1", "16/B374D848/0"} {
+	for _, bad := range []string{"", "16", "16/", "/B374D848", "1/FFFFFFFFF", "100000000/0", "0x16/1", "16/B374D848/0"} {
 		_, err := ParseLSN(bad)
 		assert.Error(t, err, bad)
 	}
