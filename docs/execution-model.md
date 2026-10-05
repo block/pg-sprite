@@ -293,7 +293,7 @@ concurrently is.
 | `row-security-refused` | yes | Change the declaration, unsupported target shape, or privileges before retrying |
 | `row-security-outcome-unknown` | no | The atomic RLS commit response is uncertain; inspect the catalog before retrying |
 | `blocking-outcome-unknown` | no | The accepted blocking transaction reached an ambiguous client boundary; inspect the catalog before retrying |
-| `invalid-blocking-budget` | yes | An accepted blocking bound is disabled or cannot be represented by PostgreSQL |
+| `invalid-blocking-budget` | yes | An accepted blocking bound is disabled, cannot be represented by PostgreSQL, or the statement bound is not longer than the lock bound |
 | `unsupported-accepted-blocking` | yes | The statement is outside the accepted blocking executor's narrow index-maintenance set, or the server will not run it inside the engine-owned transaction (`REINDEX` on a partitioned relation, SQLSTATE `25001`) |
 | `cancelled-by-caller` | no | The caller's own context ended while the statement ran and the budget had not elapsed; in caller-owned mode this is the build's ordinary exit |
 | `cancelled-externally` | no | The statement was cancelled from outside the executor — not by its caller and not by its budget; an operator's `pg_cancel_backend` or `Tracker.CancelBuild` |

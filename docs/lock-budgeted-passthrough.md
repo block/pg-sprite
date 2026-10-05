@@ -245,6 +245,17 @@ CLI default may pre-populate budgets for safe paths, but accepting blocking exec
 requires the operator to state `--statement-timeout` explicitly on that invocation. This is
 the maximum server-side execution time the operator is accepting after lock acquisition.
 
+The statement bound must also be longer than the lock bound. PostgreSQL's `statement_timeout`
+clock starts when the statement is received and keeps running while the statement waits for
+its lock, so a statement bound that is not longer than `lock_timeout` could cancel a statement
+whose lock was never granted — and that cancellation arrives as SQLSTATE `57014`, which this
+path classifies as a statement failure, not a lock refusal. Requiring `statement_timeout >
+lock_timeout` makes `lock_timeout` the only bound that can end a lock wait, so an ungranted
+lock is always the lock-budget refusal
+([AB-2](invariants.md#ab-2--lock-budget-exhaustion-executes-nothing)), and the statement
+budget measures only work that started. A budget pair in the wrong order is refused before a
+session is acquired, like any other invalid bound.
+
 Explicit is a stronger requirement than non-zero, and the flag's current shape cannot express
 it: `--statement-timeout` is a shared connection flag with a non-zero default, so the command
 receives the same duration whether the operator typed it or not. The implementation must
@@ -360,7 +371,10 @@ operational failure and exit 1.
 Failure before the statement starts, including an exhausted lock budget, remains a typed
 refusal with exit code 2 because nothing ran. A PostgreSQL error or statement-budget
 cancellation after execution starts is a typed `failed` verdict with the executor's stable
-code and exit code 1. Failure never reports the marked-success exit code.
+code and exit code 1. The budget ordering rule above is what keeps those two classes apart:
+because the statement bound is longer than the lock bound, a statement-budget cancellation on
+this path always means the lock was granted and the work had started. Failure never reports
+the marked-success exit code.
 
 There is no resume promise. The path creates no checkpoint and has no committed-prefix model
 beyond the one submitted statement. A normal statement error or cancellation rolls back its

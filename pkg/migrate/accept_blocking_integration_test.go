@@ -217,12 +217,13 @@ func TestRunAcceptBlockingReportsAnUnknownOutcomeHonestly(t *testing.T) {
 	// Both budgets are long enough that only the caller's cancellation can
 	// end the wait, so the outcome the test observes is the cancellation's,
 	// not a budget's. statement_timeout counts the lock wait too, so it
-	// has to be widened along with lock_timeout: at the fixture's default
-	// a slow poll below would let the server cancel the statement first,
-	// and that is a statement-budget failure, not an unknown outcome.
+	// has to be widened along with lock_timeout and stay the longer of the
+	// two: at the fixture's default a slow poll below would let the server
+	// cancel the statement first, and that is a statement-budget failure,
+	// not an unknown outcome.
 	opts := acceptBlockingOptions(schema + ".orders")
 	opts.Budget.Brief.LockTimeout = 30 * time.Second
-	opts.Budget.Brief.StatementTimeout = 30 * time.Second
+	opts.Budget.Brief.StatementTimeout = time.Minute
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	type result struct {
@@ -265,6 +266,39 @@ func TestRunAcceptBlockingReportsAnUnknownOutcomeHonestly(t *testing.T) {
 		"the lock was never granted, so the server-side outcome here is a rollback — which the client still could not know")
 }
 
+// statement_timeout counts the lock wait, so a statement budget that is
+// not longer than the lock budget could end an ungranted lock wait and be
+// reported as work that ran. Such a budget is refused before a session is
+// acquired: no verdict, nothing submitted, and the index stands even with
+// the table locked by someone else.
+func TestRunAcceptBlockingRefusesAStatementBudgetThatCouldEndTheLockWait(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (id int PRIMARY KEY);
+		CREATE INDEX orders_id_idx ON %[1]s.orders (id)`, schema))
+	require.NoError(t, err)
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = holder.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.orders IN ACCESS EXCLUSIVE MODE", schema))
+	require.NoError(t, err)
+
+	opts := acceptBlockingOptions(schema + ".orders")
+	opts.Budget.Brief.LockTimeout = 10 * time.Second
+	opts.Budget.Brief.StatementTimeout = time.Second
+	v, err := migrate.Run(t.Context(), pool,
+		parseOne(t, fmt.Sprintf("DROP INDEX %s.orders_id_idx", schema)), opts)
+
+	require.ErrorIs(t, err, executor.ErrInvalidBlockingBudget)
+	assert.Equal(t, verdict.Verdict{}, v)
+	require.NoError(t, holder.Rollback(t.Context()))
+	assert.True(t, indexExists(t, pool, schema, "orders_id_idx"))
+}
+
 // The budgets bound the accepted statement in both directions. An
 // ungranted lock is a refusal — the statement never ran, so the refusal
 // contract applies and the index stands. A statement cut off by its
@@ -305,8 +339,10 @@ func TestRunAcceptBlockingBoundsTheStatement(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		// An index over a function that sleeps per row makes the rebuild
 		// take longer than the statement budget: ten rows at 50ms each is
-		// half a second against a 100ms bound, so the cancellation is
-		// deterministic and the whole test still finishes quickly.
+		// half a second against a 200ms bound, so the cancellation is
+		// deterministic and the whole test still finishes quickly. The
+		// bound stays longer than the fixture's lock budget, as the budget
+		// validation requires.
 		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 			CREATE TABLE %[1]s.orders (id int PRIMARY KEY);
 			INSERT INTO %[1]s.orders SELECT g FROM generate_series(1, 10) g;
@@ -318,7 +354,7 @@ func TestRunAcceptBlockingBoundsTheStatement(t *testing.T) {
 			CREATE INDEX orders_slow_idx ON %[1]s.orders (%[1]s.slow_key(id))`, schema))
 		require.NoError(t, err)
 		opts := acceptBlockingOptions(schema + ".orders")
-		opts.Budget.Brief.StatementTimeout = 100 * time.Millisecond
+		opts.Budget.Brief.StatementTimeout = 200 * time.Millisecond
 
 		v, err := migrate.Run(t.Context(), pool,
 			parseOne(t, fmt.Sprintf("REINDEX INDEX %s.orders_slow_idx", schema)), opts)

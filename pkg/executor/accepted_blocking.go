@@ -16,7 +16,8 @@ import (
 
 var (
 	// ErrInvalidBlockingBudget means an accepted-blocking bound would be
-	// disabled or cannot be represented by PostgreSQL.
+	// disabled, cannot be represented by PostgreSQL, or lets the statement
+	// budget end a lock wait the lock budget owns.
 	ErrInvalidBlockingBudget = errors.New("invalid accepted-blocking budget")
 	// ErrUnsupportedAcceptedBlocking means the statement is not one of the
 	// single-relation blocking index forms this executor admits, or the
@@ -39,14 +40,23 @@ type BlockingBudget struct {
 }
 
 func (b BlockingBudget) validate() error {
-	// INV: AB-1 — both limits are non-zero and representable before a
-	// session is acquired; whole milliseconds avoid PostgreSQL's zero/off
-	// truncation.
+	// INV: AB-1 — both limits are non-zero, representable, and ordered
+	// before a session is acquired; whole milliseconds avoid PostgreSQL's
+	// zero/off truncation.
 	if b.LockTimeout < minBudget || b.LockTimeout > maxOverallBudget {
 		return fmt.Errorf("%w: lock timeout must be between %s and %s, got %s", ErrInvalidBlockingBudget, minBudget, maxOverallBudget, b.LockTimeout)
 	}
 	if b.StatementTimeout < minBudget || b.StatementTimeout > maxOverallBudget {
 		return fmt.Errorf("%w: statement timeout must be between %s and %s, got %s", ErrInvalidBlockingBudget, minBudget, maxOverallBudget, b.StatementTimeout)
+	}
+	// statement_timeout counts the lock wait, so a statement budget that is
+	// not longer than the lock budget could cancel a statement whose lock
+	// was never granted and report it as work that ran. Requiring the
+	// statement bound to be the longer one keeps every ungranted lock a
+	// lock-budget outcome.
+	if b.StatementTimeout <= b.LockTimeout {
+		return fmt.Errorf("%w: statement timeout must be longer than lock timeout, got statement %s and lock %s",
+			ErrInvalidBlockingBudget, b.StatementTimeout, b.LockTimeout)
 	}
 	return nil
 }

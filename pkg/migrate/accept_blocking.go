@@ -103,7 +103,10 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 	if err != nil {
 		// A statement-budget cancellation is a failure on this path, not a
 		// refusal: the lock was granted and the statement was doing the
-		// work the operator accepted when the bound cut it off.
+		// work the operator accepted when the bound cut it off. The budget
+		// validation keeps the statement bound longer than the lock bound,
+		// so statement_timeout cannot fire while the lock is still waited
+		// for; an ungranted lock always arrives as CauseLock above.
 		v := failureVerdict(st, err, executor.SequenceReport{}, false)
 		v.Table = table
 		var unknownErr *executor.BlockingOutcomeUnknownError

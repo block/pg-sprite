@@ -443,9 +443,11 @@ every `CONCURRENTLY` index command; [invalid-index-recovery](invalid-index-recov
 ### AB-1 — Every accepted blocking statement runs under both engine-owned bounds
 
 Every accepted blocking statement runs in one engine-owned session and transaction with an
-explicit, non-zero `lock_timeout` and `statement_timeout`. Transaction-local settings override
-ambient defaults, and an absent, sub-millisecond, or server-unrepresentable bound is refused
-before a session is acquired. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`). *Source:*
+explicit, non-zero `lock_timeout` and a `statement_timeout` longer than it. Transaction-local
+settings override ambient defaults, and an absent, sub-millisecond, or server-unrepresentable
+bound — or a statement bound that is not longer than the lock bound, which could end an
+ungranted lock wait as a statement failure — is refused before a session is acquired.
+*Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`). *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#engine-owned-session-and-budgets).
 
 ### AB-2 — Lock-budget exhaustion executes nothing
