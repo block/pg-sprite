@@ -197,7 +197,12 @@ func TestRunAcceptBlockingReportsAnUnknownOutcomeHonestly(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
-	defer pool.Close()
+	// Closing the pool waits for every checked-out connection, and the
+	// holder below keeps one until its own cleanup rolls it back. Cleanups
+	// run last-registered first, so registering the close here — before
+	// the holder's cleanup — is what lets a failed assertion end the test
+	// instead of parking it on Close until the package deadline.
+	t.Cleanup(pool.Close)
 	schema := testutil.NewSchema(t, pool)
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.orders (id int PRIMARY KEY);
@@ -209,11 +214,15 @@ func TestRunAcceptBlockingReportsAnUnknownOutcomeHonestly(t *testing.T) {
 	_, err = holder.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.orders IN ACCESS EXCLUSIVE MODE", schema))
 	require.NoError(t, err)
 
-	// The lock budget is long enough that only the caller's cancellation
-	// can end the wait, so the outcome the test observes is the
-	// cancellation's, not the budget's.
+	// Both budgets are long enough that only the caller's cancellation can
+	// end the wait, so the outcome the test observes is the cancellation's,
+	// not a budget's. statement_timeout counts the lock wait too, so it
+	// has to be widened along with lock_timeout: at the fixture's default
+	// a slow poll below would let the server cancel the statement first,
+	// and that is a statement-budget failure, not an unknown outcome.
 	opts := acceptBlockingOptions(schema + ".orders")
 	opts.Budget.Brief.LockTimeout = 30 * time.Second
+	opts.Budget.Brief.StatementTimeout = 30 * time.Second
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	type result struct {
