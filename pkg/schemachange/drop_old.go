@@ -13,17 +13,18 @@ import (
 // DropOldTable removes the retained source after a committed swap (D9), in
 // one bounded transaction separate from the swap's, under SET LOCAL ROLE
 // owner and only while the caller holds the table lock. It accepts only
-// the SwappedTable proof Cutover minted and drops only the relation whose
-// OID that proof recorded as the source — a different relation under the
-// _old name is refused, not dropped. The drop is without CASCADE: the old
-// table owns its renamed indexes and its old identity sequences, which go
-// with it, and nothing the live table depends on. A caller that wants the
-// old table kept for a rollback window simply does not call this.
+// the SwappedTable proof Cutover or InspectSwapped minted and drops only
+// the relation whose OID that proof recorded as the source — a different
+// relation under the _old name is refused, not dropped. The drop is
+// without CASCADE: the old table owns its renamed indexes and its old
+// identity sequences, which go with it, and nothing the live table depends
+// on. A caller that wants the old table kept for a rollback window simply
+// does not call this.
 func DropOldTable(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, swapped SwappedTable, opts Options) error {
 	if err := opts.validate(); err != nil {
 		return err
 	}
-	if swapped.built.ShadowTable() == "" {
+	if swapped.table == "" {
 		return refuse(CauseProofEmpty, nil, "swapped table proof is empty")
 	}
 	if err := requireTableLock(lock, swapped.Schema(), swapped.Table()); err != nil {
@@ -49,7 +50,7 @@ func dropOldTable(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLoc
 		// the transaction with its session either way.
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
-	if err := setGateSession(ctx, tx, swapped.built, opts); err != nil {
+	if err := setSession(ctx, tx, schema, swapped.Owner(), opts); err != nil {
 		return err
 	}
 	if err := confirmTableLock(ctx, tx, lock); err != nil {

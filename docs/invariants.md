@@ -389,9 +389,12 @@ outcome is known: the attempt's backend, which may still be deciding inside `COM
 followed to its exit under a context the caller's cancellation no longer governs, bounded by the
 attempt's own `lock_timeout` plus `statement_timeout`, and a backend still present at that bound
 is refused as `cutover-outcome-ambiguous` rather than read around; then a fresh connection reads
-which OID bears the source name: the shadow's OID is reported as the committed swap it was, the
-source's OID as a rollback carrying the connection error, and any other state — no relation, or
-one the build never proved — is refused as `cutover-outcome-ambiguous`. Every attempt the
+the catalog the way `pkg/schemachange.InspectSwapped` does — the two share one read, so the
+resume path and the lost-attempt path cannot disagree — which OID bears the source name: the
+shadow's OID is reported as the committed swap it was, its `SwappedTable` re-derived from what
+the swap left behind, the source's OID as a rollback carrying the connection error, and any
+other state — no relation, or one the build never proved — is refused as
+`cutover-outcome-ambiguous`. Every attempt the
 catalog shows rolled back — a lock timeout, a drain error, a refusal inside the transaction, or
 a lost connection the inspection resolved — is reported wrapping `ErrCutoverRolledBack`, so a
 caller distinguishes "the source is still live, retry is safe" from an unresolved outcome
