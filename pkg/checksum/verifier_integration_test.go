@@ -197,6 +197,25 @@ func TestVerifierLocatesAChangedShadowRow(t *testing.T) {
 	assert.NotEqual(t, found.Source.Hash, found.Shadow.Hash)
 }
 
+// A chunk the shadow holds no rows of is a mismatch, not a failed pass: the
+// empty side digests as zero rows and the SHA-256 of the empty input, so
+// the report names the chunk and the policy decides what happens next.
+func TestVerifierReportsAChunkTheShadowIsMissingEntirely(t *testing.T) {
+	f := newVerifierFixture(t)
+	target, lock, shadow := f.prepare(t)
+	f.exec(t, "DELETE FROM "+f.shadowName(shadow)+" WHERE id > 2000")
+
+	report, err := f.verify(t, f.pool, target, shadow, lock, copier.NewWatermark(math.MaxInt64))
+	require.NoError(t, err)
+	require.Len(t, report.Mismatches, 1)
+	empty := report.Mismatches[0]
+	assert.Equal(t, chunk(t, 2001, math.MaxInt64), empty.Chunk)
+	assert.Equal(t, int64(500), empty.Source.Rows)
+	assert.Equal(t, int64(0), empty.Shadow.Rows)
+	assert.Equal(t, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", empty.Shadow.Hash,
+		"the SHA-256 of the empty input")
+}
+
 // Rows missing from the shadow and a row the shadow holds that the source
 // does not are each reported in their own chunk, in key order, and the row
 // counts on the two sides say which way each chunk differs. Two rows go
@@ -365,14 +384,17 @@ func TestVerifierStopsAtTheWatermark(t *testing.T) {
 
 // The pass resolves every catalog object it names through pg_catalog, so a
 // session whose search_path puts a schema of impostors first (CO-9) neither
-// misreads the shadow's types nor hashes with someone else's md5 nor
+// misreads the shadow's types nor hashes with someone else's functions nor
 // compares keys with someone else's operator: an impostor format_type that
-// would make every numeric compare as text produces no false mismatch, an
-// impostor md5 that answers the same for every row hides no real one, and
-// an impostor bigint <= that is never true, which would empty the key range
-// on both sides and compare nothing clean, is not the <= that BETWEEN
-// resolves to. Functions are qualified in the statement itself; the
-// operator can only be pinned by the transaction's own search_path.
+// would make every numeric compare as text produces no false mismatch; an
+// impostor sha256, convert_to, or encode that answers the same for every
+// input hides no real difference; an impostor getdatabaseencoding that
+// names no encoding would fail every conversion and so every pass; and an
+// impostor bigint <= that is never
+// true, which would empty the key range on both sides and compare nothing
+// clean, is not the <= that BETWEEN resolves to. Functions are qualified in
+// the statement itself; the operator can only be pinned by the
+// transaction's own search_path.
 func TestVerifierIgnoresTheSessionSearchPath(t *testing.T) {
 	f := newVerifierFixture(t)
 	f.createOrders(t)
@@ -380,7 +402,10 @@ func TestVerifierIgnoresTheSessionSearchPath(t *testing.T) {
 	lock := f.lock(t, "orders")
 	shadow := f.build(t, lock, target, `ALTER TABLE %s ALTER COLUMN qty TYPE numeric(10,2)`)
 	f.copy(t, target, shadow, lock)
-	f.exec(t, `CREATE FUNCTION %s.md5(text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT ''impostor''::text'`)
+	f.exec(t, `CREATE FUNCTION %s.sha256(bytea) RETURNS bytea LANGUAGE sql IMMUTABLE AS 'SELECT ''\x00''::bytea'`)
+	f.exec(t, `CREATE FUNCTION %s.convert_to(text, name) RETURNS bytea LANGUAGE sql IMMUTABLE AS 'SELECT ''\x00''::bytea'`)
+	f.exec(t, `CREATE FUNCTION %s.getdatabaseencoding() RETURNS name LANGUAGE sql STABLE AS 'SELECT ''impostor''::name'`)
+	f.exec(t, `CREATE FUNCTION %s.encode(bytea, text) RETURNS text LANGUAGE sql IMMUTABLE AS 'SELECT ''impostor''::text'`)
 	f.exec(t, `CREATE FUNCTION %s.format_type(oid, integer) RETURNS text LANGUAGE sql STABLE AS 'SELECT ''text''::text'`)
 	f.exec(t, `CREATE FUNCTION %s.never_le(bigint, bigint) RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT false'`)
 	f.exec(t, `CREATE OPERATOR %s.<= (LEFTARG = bigint, RIGHTARG = bigint, FUNCTION = %s.never_le)`)

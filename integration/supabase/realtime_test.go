@@ -110,7 +110,7 @@ func (s *subscription) receiveUntil(t *testing.T, check func(realtimeMessage) bo
 func TestRealtimeDuringNativeChanges(t *testing.T) {
 	pool := fixture(t)
 	table := newTable(t, pool, "pgsprite_realtime_probe")
-	execSQL(t, pool, "INSERT INTO "+table+" SELECT n+100000,'00000000-0000-0000-0000-000000000003',md5(n::text) FROM generate_series(1,100000) n")
+	execSQL(t, pool, "INSERT INTO "+table+" SELECT n+100000,'00000000-0000-0000-0000-000000000003',encode(sha256(convert_to(n::text, 'UTF8')), 'hex') FROM generate_series(1,100000) n")
 	execSQL(t, pool, "ALTER PUBLICATION supabase_realtime ADD TABLE "+table)
 	var oid uint32
 	require.NoError(t, pool.QueryRow(t.Context(), "SELECT $1::regclass::oid", table).Scan(&oid))

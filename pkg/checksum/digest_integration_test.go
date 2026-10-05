@@ -1,6 +1,7 @@
 package checksum
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -65,9 +66,11 @@ func (s fakeShadow) ShadowOID() uint32     { return s.shadowOID }
 func (s fakeShadow) CopyColumns() []string { return s.columns }
 
 // The digest statement is the D7 contract in one string: every copy column
-// cast to the shadow's type inside a record, hashed per row, aggregated in
-// key order, over a closed bigint-typed key range, with every function
-// pg_catalog-qualified. Only the table differs between the two sides.
+// cast to the shadow's type inside a record, SHA-256-hashed per row from
+// its UTF-8 bytes, aggregated as bytes in key order and hashed again, hex
+// only at the end, over a closed bigint-typed key range, with every
+// function pg_catalog-qualified. Only the table differs between the two
+// sides.
 // Quoting goes through pgx.Identifier, so a column named like a keyword
 // survives, while the type spelling is format_type's and is not quoted.
 func TestDigestSQLIsFrozen(t *testing.T) {
@@ -85,12 +88,43 @@ func TestDigestSQLIsFrozen(t *testing.T) {
 		{name: "qty", typeName: "numeric(10,2)"},
 	}
 	want := `SELECT pg_catalog.count(*),` +
-		` pg_catalog.md5(COALESCE(pg_catalog.string_agg(pg_catalog.md5(ROW("id"::bigint, "select"::character varying(20), "qty"::numeric(10,2))::text), '' ORDER BY "id"), ''))` +
+		` pg_catalog.encode(pg_catalog.sha256(COALESCE(pg_catalog.string_agg(pg_catalog.sha256(pg_catalog.convert_to(ROW("id"::bigint, "select"::character varying(20), "qty"::numeric(10,2))::text, pg_catalog.getdatabaseencoding())), ''::bytea ORDER BY "id"), ''::bytea)), 'hex')` +
 		` FROM "` + f.schema + `"."_pgsprite_orders_new"` +
 		` WHERE "id" BETWEEN $1::bigint AND $2::bigint`
 	assert.Equal(t, want, digestSQL(target, f.schema, "_pgsprite_orders_new", types))
 	assert.Equal(t, strings.Replace(want, `"_pgsprite_orders_new"`, `"orders"`, 1), digestSQL(target, f.schema, "orders", types),
 		"the source side is the same statement over the source table")
+}
+
+// A SQL_ASCII database stores whatever bytes a client sends, including
+// bytes that are valid in no encoding. The digest hashes each row's
+// rendering in the database's own encoding, so such a row digests like any
+// other instead of failing every pass over its chunk.
+func TestDigestHashesARowThatIsNotValidUTF8(t *testing.T) {
+	url := testutil.NewDatabaseWithEncoding(t, testutil.StartPostgres(t), "SQL_ASCII")
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	f := proofFixture{pool: pool, schema: testutil.NewSchema(t, pool)}
+	f.exec(t, `
+		CREATE TABLE %s.orders (
+			id bigint PRIMARY KEY,
+			note text NOT NULL
+		)`)
+	f.exec(t, `INSERT INTO %s.orders VALUES (1, pg_catalog.convert_from('\xff'::bytea, 'SQL_ASCII'))`)
+	target := f.prove(t, "orders")
+	sql := digestSQL(target, f.schema, "orders", []columnType{
+		{name: "id", typeName: "bigint"},
+		{name: "note", typeName: "text"},
+	})
+
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context()))) })
+	d, err := digest(t.Context(), tx, sql, 1, 1)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), d.Rows)
+	assert.Len(t, d.Hash, 64)
 }
 
 // Every way a shadow proof can fail to describe the proven target is
