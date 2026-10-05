@@ -29,6 +29,12 @@ var (
 	// watermark, below which no key has been copied: there is nothing to
 	// compare, and a pass that compared nothing must not read as clean.
 	ErrNothingLanded = errors.New("nothing has landed to verify")
+	// ErrPassRunning reports a pass started on a verifier whose previous
+	// pass has not returned. A verifier runs one pass at a time: the
+	// counters it reports and its registration with the tracker belong to
+	// the pass in progress, and a second pass would reset the one and end
+	// the other.
+	ErrPassRunning = errors.New("a verification pass is already running")
 )
 
 // Options bounds a verification pass. Zero values take the defaults: the
@@ -87,7 +93,8 @@ func (o Options) validate() error {
 // holds a snapshot open for longer than one chunk. It runs only under the
 // table's lock session. The only state a Verifier keeps between passes is
 // the counters of the pass in progress, which the next pass resets, so the
-// same one runs a pass after every repair, one pass at a time.
+// same one runs a pass after every repair, one pass at a time; a pass
+// started while another runs is refused with ErrPassRunning.
 type Verifier struct {
 	target preflight.CopySwapTarget
 	shadow copier.Shadow
@@ -99,9 +106,11 @@ type Verifier struct {
 	repairSQL string
 	copySQL   string
 
-	// mu guards work, the counters Work reports for the pass in progress.
-	mu   sync.Mutex
-	work progress.Work
+	// mu guards work, the counters Work reports for the pass in progress,
+	// and running, which is set from report until its stop runs.
+	mu      sync.Mutex
+	work    progress.Work
+	running bool
 }
 
 // NewVerifier prepares verification of target against shadow. It refuses a
@@ -198,8 +207,14 @@ func requireTableLock(lock *dbconn.TableLockSession, target preflight.CopySwapTa
 // Every transaction runs under the lock session's Bind context, so losing
 // the table lock cancels the read in flight and Verify reports the loss.
 // While it runs the verifier is the tracker's work source (Options.Tracker).
+// A Verify that overlaps a pass still running on this verifier is refused
+// with ErrPassRunning.
 func (v *Verifier) Verify(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark) (Report, error) {
-	defer v.report()()
+	stop, err := v.report()
+	if err != nil {
+		return Report{}, v.verifyError(err)
+	}
+	defer stop()
 	return v.verify(ctx, pool, through)
 }
 
@@ -266,6 +281,7 @@ func (v *Verifier) pass(ctx context.Context, pool *pgxpool.Pool, through copier.
 		if err != nil {
 			return Report{}, err
 		}
+		v.countCompared(source.Rows)
 		report.Chunks++
 		report.Rows += source.Rows
 		if source != shadow {
@@ -312,7 +328,8 @@ func (v *Verifier) digestStatements(ctx context.Context, pool *pgxpool.Pool) (so
 }
 
 // digestChunk reads both sides of the closed range [lower, upper] in one
-// guarded transaction, so the two digests describe one snapshot.
+// guarded transaction, so the two digests describe one snapshot. It counts
+// nothing: the caller knows whether the digest is a comparison or a reread.
 func (v *Verifier) digestChunk(ctx context.Context, pool *pgxpool.Pool, sourceSQL, shadowSQL string, lower, upper int64) (source, shadow Digest, err error) {
 	tx, err := v.begin(ctx, pool, snapshotRead())
 	if err != nil {
@@ -335,6 +352,5 @@ func (v *Verifier) digestChunk(ctx context.Context, pool *pgxpool.Pool, sourceSQ
 	if err := tx.Commit(ctx); err != nil {
 		return Digest{}, Digest{}, fmt.Errorf("commit digest of chunk [%d, %d] of %s.%s: %w", lower, upper, v.target.Schema(), v.target.Table(), err)
 	}
-	v.countCompared(source.Rows)
 	return source, shadow, nil
 }

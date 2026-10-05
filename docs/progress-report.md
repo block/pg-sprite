@@ -23,7 +23,7 @@ the `copy` operation and split `work` into two counter families — the server-o
 counters and the engine-measured copy counters (`rows_*`, `bytes_*`) — selected by
 `detail.operation`, so `work` is no longer a signal that a concurrent index build is running;
 version 5 added the `checksum` operation and its engine-measured counter family
-(`chunks_compared`, `rows_hashed`, `chunks_mismatched`, `chunks_repaired`).
+(`chunks_compared`, `rows_hashed`, `chunks_mismatched`, `chunks_repaired`, `chunks_reread`).
 
 The [plan report](plan-report.md), [lint report](lint-report.md), and
 [suggest report](suggest-report.md) are separate contracts with their own `format_version`;
@@ -109,25 +109,36 @@ The size read runs in a read-only transaction of the copy's own, under the copy'
 that timeout whatever session defaults the caller's pool carries, so an observer never holds
 the copy's stop path open.
 
-**Engine-measured** (`checksum`): `chunks_compared`, `rows_hashed`, `chunks_mismatched` and
-`chunks_repaired` come from the checksum pass itself, which cuts its own chunks and digests
-each one on both tables inside one snapshot. The counters cover a whole `Check`: the
-comparison that finds differing chunks and, under the `repair` policy, the recopy and the
-reread that follow it, so a pass that spends most of its time repairing still shows movement.
-They are read from the pass's memory — no catalog read, nothing for a poll to wait on — and
-reset to zero when a pass starts. Native and `copy` operations report none of them.
+**Engine-measured** (`checksum`): `chunks_compared`, `rows_hashed`, `chunks_mismatched`,
+`chunks_repaired` and `chunks_reread` come from the checksum pass itself, which cuts its own
+chunks and digests each one on both tables inside one snapshot. The counters cover a whole
+`Check`: the comparison that finds differing chunks and, under the `repair` policy, the recopy
+and the reread that follow it, so a pass that spends most of its time repairing still shows
+movement. They are read from the pass's memory — no catalog read, nothing for a poll to wait
+on — and reset to zero when a pass starts. Native and `copy` operations report none of them.
 
 | Counter | Meaning |
 | --- | --- |
-| `chunks_compared` | Two-sided chunk digests this pass has completed: every chunk of the comparison once, and every repaired chunk once more when its reread completes. It therefore passes the chunk count of the comparison during the repair phase. |
-| `rows_hashed` | Source rows those digests covered, summed the same way: a repaired chunk's rows count again at its reread. |
+| `chunks_compared` | Chunks the comparison has digested on both sides; a digest counts when its transaction commits. The rereads of the repair phase are not in this count. |
+| `rows_hashed` | Source rows those comparison digests covered. |
 | `chunks_mismatched` | Chunks the comparison found differing. Under `abort` this is the finding the pass returns with; under `repair` it is the number of chunks the recopy covers. |
-| `chunks_repaired` | Chunks whose recopy from the source has committed. Every differing chunk is recopied in one transaction, so this moves from `0` to `chunks_mismatched` at that commit and `chunks_compared` then advances as each repaired chunk is reread. A chunk still differing at its reread stops the pass; it stays counted here because its recopy did commit. |
+| `chunks_repaired` | Chunks whose recopy from the source has committed. Every differing chunk is recopied in one transaction, so this moves from `0` to `chunks_mismatched` at that commit. A chunk still differing at its reread stops the pass; it stays counted here because its recopy did commit. |
+| `chunks_reread` | Repaired chunks digested again after the recopy, in a fresh snapshot. It climbs from `0` towards `chunks_repaired` as the rereads commit, so `chunks_repaired − chunks_reread` is the repair phase's remaining work; a chunk that still differs at its reread is counted here before the pass stops on it. |
 
-There is no chunk total: a pass sizes its chunks from the time each one takes, so the count
-of chunks is known only when the pass ends. A consumer that wants a completion figure for the
-comparison phase has the copy step's `rows_total` from the previous step and this step's
-`rows_hashed`.
+There is no completion figure for the comparison. A pass sizes its chunks from the time each
+one takes, so the chunk count is known only when the pass ends, and no row total describes the
+comparison either: the copy step's `rows_total` is `reltuples` at the copy's start, `0` on a
+table `ANALYZE` has never visited and short on a source that kept growing, so `rows_hashed`
+over it is an estimate dressed as a ratio, not a measure. As with the copy, completion is the
+step ending, and a rate comes from two snapshots of `rows_hashed` and `step_elapsed_ns`. The
+repair phase does have a measure: once `chunks_repaired` has moved, `chunks_reread` /
+`chunks_repaired` is the share of the rereads done.
+
+The counters are the pass's, not the step's. Once the pass returns, `work` leaves the snapshot
+with it: a terminal snapshot carries no `work`, and a poll that lands after the pass returned
+and before the step ends carries none either. The pass's final figures — under `abort`, the
+mismatches it found — are the `Report` or `Outcome` the pass returned to its caller, not the
+last snapshot a poller happened to take.
 
 ## Phases
 
@@ -222,6 +233,7 @@ A poll during step 2 of a 3-step sequence, mid concurrent index build:
       "rows_hashed": 0,
       "chunks_mismatched": 0,
       "chunks_repaired": 0,
+      "chunks_reread": 0,
       "blocks_done": 11,
       "blocks_total": 40,
       "tuples_done": 7,
@@ -257,6 +269,7 @@ pins it):
       "rows_hashed": 0,
       "chunks_mismatched": 0,
       "chunks_repaired": 0,
+      "chunks_reread": 0,
       "blocks_done": 0,
       "blocks_total": 0,
       "tuples_done": 0,
@@ -292,6 +305,7 @@ three chunks compared, two found differing and recopied, one of the two reread s
       "rows_hashed": 3500,
       "chunks_mismatched": 2,
       "chunks_repaired": 2,
+      "chunks_reread": 1,
       "blocks_done": 0,
       "blocks_total": 0,
       "tuples_done": 0,

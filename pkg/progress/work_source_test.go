@@ -93,6 +93,7 @@ func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 				"rows_hashed": 0,
 				"chunks_mismatched": 0,
 				"chunks_repaired": 0,
+				"chunks_reread": 0,
 				"blocks_done": 0,
 				"blocks_total": 0,
 				"tuples_done": 0,
@@ -105,10 +106,10 @@ func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 	assert.Equal(t, int32(1), polls.Load(), "one poll asks the source once")
 }
 
-// checksumCounters are distinct per field so a swapped pair cannot pass:
-// a repair pass that compared three chunks, found two differing, recopied
-// both, and has reread one of them so far.
-var checksumCounters = progress.Work{ChunksCompared: 4, RowsHashed: 3500, ChunksMismatched: 2, ChunksRepaired: 2}
+// checksumCounters are distinct where the pass allows so a swapped pair
+// cannot pass: a repair pass that compared four chunks, found two differing,
+// recopied both, and has reread one of them so far.
+var checksumCounters = progress.Work{ChunksCompared: 4, RowsHashed: 3500, ChunksMismatched: 2, ChunksRepaired: 2, ChunksReread: 1}
 
 // The checksum step's JSON is the adapter-facing contract for the checksum
 // operation: its operation value, and work carrying the engine's chunk and
@@ -146,6 +147,7 @@ func TestSnapshotJSONShapeForAChecksumStep(t *testing.T) {
 				"rows_hashed": 3500,
 				"chunks_mismatched": 2,
 				"chunks_repaired": 2,
+				"chunks_reread": 1,
 				"blocks_done": 0,
 				"blocks_total": 0,
 				"tuples_done": 0,

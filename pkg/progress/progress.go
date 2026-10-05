@@ -80,9 +80,10 @@ const (
 // engine's own WorkSource reported the step's counters — and then every
 // counter marshals explicitly — a fresh build reports honest zeros, never an
 // empty object a consumer must guess at. Rows and bytes belong to the
-// copy-and-swap row copy; chunks compared, rows hashed, chunks mismatched
-// and chunks repaired to the checksum pass; blocks, tuples and lockers to a
-// concurrent index build. No operation fabricates another's counters.
+// copy-and-swap row copy; chunks compared, rows hashed, chunks mismatched,
+// chunks repaired and chunks reread to the checksum pass; blocks, tuples
+// and lockers to a concurrent index build. No operation fabricates
+// another's counters.
 type Work struct {
 	RowsCopied       uint64 `json:"rows_copied"`
 	RowsTotal        uint64 `json:"rows_total"`
@@ -92,6 +93,7 @@ type Work struct {
 	RowsHashed       uint64 `json:"rows_hashed"`
 	ChunksMismatched uint64 `json:"chunks_mismatched"`
 	ChunksRepaired   uint64 `json:"chunks_repaired"`
+	ChunksReread     uint64 `json:"chunks_reread"`
 	BlocksDone       uint64 `json:"blocks_done"`
 	BlocksTotal      uint64 `json:"blocks_total"`
 	TuplesDone       uint64 `json:"tuples_done"`

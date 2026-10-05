@@ -21,8 +21,8 @@ func runningTracker(t *testing.T) *progress.Tracker {
 }
 
 // The counters accumulate what the pass tells them: compared chunks carry
-// their source row counts, a mismatch and a repair count chunks, and
-// nothing else moves. A fresh verifier reports all zeros.
+// their source row counts, a mismatch, a repair and a reread count chunks,
+// and nothing else moves. A fresh verifier reports all zeros.
 func TestWorkAccumulatesTheCountersAPassReports(t *testing.T) {
 	v := &Verifier{}
 	work, err := v.Work(t.Context())
@@ -33,6 +33,7 @@ func TestWorkAccumulatesTheCountersAPassReports(t *testing.T) {
 	v.countCompared(500)
 	v.countMismatch()
 	v.countRepaired(2)
+	v.countReread()
 
 	work, err = v.Work(t.Context())
 	require.NoError(t, err)
@@ -41,6 +42,7 @@ func TestWorkAccumulatesTheCountersAPassReports(t *testing.T) {
 		RowsHashed:       1500,
 		ChunksMismatched: 1,
 		ChunksRepaired:   2,
+		ChunksReread:     1,
 	}, work)
 }
 
@@ -54,7 +56,8 @@ func TestReportResetsTheCountersAndRegistersForThePass(t *testing.T) {
 	v.countCompared(1000)
 	v.countMismatch()
 
-	stop := v.report()
+	stop, err := v.report()
+	require.NoError(t, err)
 	v.countCompared(250)
 
 	polled, err := tracker.Progress(t.Context())
@@ -78,11 +81,39 @@ func TestReportWithoutATrackerOnlyResetsTheCounters(t *testing.T) {
 	v := &Verifier{}
 	v.countRepaired(3)
 
-	stop := v.report()
+	stop, err := v.report()
+	require.NoError(t, err)
 	v.countCompared(10)
 	stop()
 
 	work, err := v.Work(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, progress.Work{ChunksCompared: 1, RowsHashed: 10}, work)
+}
+
+// A verifier runs one pass at a time: a report while a pass runs is refused
+// with ErrPassRunning and changes nothing — the running pass keeps its
+// counters and stays the tracker's work source — and the next report is
+// accepted once the running pass's stop has run.
+func TestReportRefusesAnOverlappingPass(t *testing.T) {
+	tracker := runningTracker(t)
+	v := &Verifier{opts: Options{Tracker: tracker}}
+	stop, err := v.report()
+	require.NoError(t, err)
+	v.countCompared(1000)
+
+	_, err = v.report()
+	require.ErrorIs(t, err, ErrPassRunning)
+	polled, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, polled.Detail.Work, "the refused pass did not end the running pass's registration")
+	assert.Equal(t, progress.Work{ChunksCompared: 1, RowsHashed: 1000}, *polled.Detail.Work, "the refused pass did not reset the running pass's counters")
+
+	stop()
+	next, err := v.report()
+	require.NoError(t, err)
+	defer next()
+	work, err := v.Work(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, progress.Work{}, work, "the next pass starts from zero once the previous one has stopped")
 }

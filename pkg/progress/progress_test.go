@@ -176,7 +176,7 @@ func TestStartResetsPriorRunState(t *testing.T) {
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
 // omissions, driven through a real poll so the test pins what a consumer
-// actually receives. A consumer pins format_version 4 against this test.
+// actually receives; a consumer pins the current format_version against it.
 func TestSnapshotJSONShape(t *testing.T) {
 	session := fakeSession{query: func(context.Context, string, ...any) pgx.Row {
 		return fakeRow{scan: func(dest ...any) error {
@@ -229,6 +229,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 				"rows_hashed": 0,
 				"chunks_mismatched": 0,
 				"chunks_repaired": 0,
+				"chunks_reread": 0,
 				"blocks_done": 11,
 				"blocks_total": 40,
 				"tuples_done": 7,

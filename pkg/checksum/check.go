@@ -70,12 +70,17 @@ func (o Outcome) VerifiedShadow() (VerifiedShadow, bool) {
 // RepairError rather than repair it twice.
 //
 // While it runs, through the repair phase as well, the verifier is the
-// tracker's work source (Options.Tracker).
+// tracker's work source (Options.Tracker). A Check that overlaps a pass
+// still running on this verifier is refused with ErrPassRunning.
 func (v *Verifier) Check(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark, policy DivergencePolicy) (Outcome, error) {
 	if err := policy.validate(); err != nil {
 		return Outcome{}, v.verifyError(err)
 	}
-	defer v.report()()
+	stop, err := v.report()
+	if err != nil {
+		return Outcome{}, v.verifyError(err)
+	}
+	defer stop()
 	report, err := v.verify(ctx, pool, through)
 	if err != nil {
 		return Outcome{}, err

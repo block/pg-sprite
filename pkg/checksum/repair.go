@@ -101,13 +101,15 @@ func (v *Verifier) recopy(ctx context.Context, pool *pgxpool.Pool, mismatches []
 }
 
 // reread digests the repaired chunk in a fresh snapshot and refuses a chunk
-// that still differs.
+// that still differs. The reread is counted when its digest has committed,
+// whatever it found: a chunk that still differs was reread all the same.
 func (v *Verifier) reread(ctx context.Context, pool *pgxpool.Pool, sourceSQL, shadowSQL string, repair Repair) error {
 	chunk := repair.Mismatch.Chunk
 	source, shadow, err := v.digestChunk(ctx, pool, sourceSQL, shadowSQL, chunk.Lower(), chunk.Upper())
 	if err != nil {
 		return err
 	}
+	v.countReread()
 	if source != shadow {
 		// INV: CO-2
 		return &RepairError{Repair: repair, After: Mismatch{Chunk: chunk, Source: source, Shadow: shadow}}
