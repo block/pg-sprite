@@ -196,23 +196,49 @@ func readFidelity(ctx context.Context, tx pgx.Tx, oid uint32) (FidelitySnapshot,
 	return s, nil
 }
 
-// readGrants reads the table's effective ACL: aclexplode yields one row per
+// readGrants reads the table's effective ACL and refuses a privilege this
+// code does not know a table can carry.
+func readGrants(ctx context.Context, tx pgx.Tx, oid uint32) ([]Grant, error) {
+	grants, err := readACL(ctx, tx, oid, aclTable)
+	if err != nil {
+		return nil, err
+	}
+	for _, g := range grants {
+		if !isTablePrivilege(g.Privilege) {
+			return nil, fmt.Errorf("table grant to %s carries unknown privilege %q", granteeLabel(g), g.Privilege)
+		}
+	}
+	return grants, nil
+}
+
+// aclDefaultKind is the object-type code acldefault() takes for the kind:
+// the privileges an owner holds on an object with no ACL set.
+func aclDefaultKind(object aclObject) string {
+	switch object {
+	case aclSequence:
+		return "S"
+	default:
+		return "r"
+	}
+}
+
+// readACL reads a relation's effective ACL: aclexplode yields one row per
 // grantor, so entries are folded per privilege and grantee, grantable when
 // any grantor made them so. The PUBLIC pseudo-role is recognised by its OID,
 // never by a name the catalog can also print for a real role.
-func readGrants(ctx context.Context, tx pgx.Tx, oid uint32) ([]Grant, error) {
+func readACL(ctx context.Context, tx pgx.Tx, oid uint32, object aclObject) ([]Grant, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT a.privilege_type,
 		       CASE WHEN a.grantee = 0 THEN '' ELSE pg_get_userbyid(a.grantee) END,
 		       a.grantee = 0,
 		       bool_or(a.is_grantable)
 		FROM pg_class c
-		CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault('r', c.relowner))) a
+		CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault($2, c.relowner))) a
 		WHERE c.oid = $1
 		GROUP BY 1, 2, 3
-		ORDER BY 3, 2, 1`, oid)
+		ORDER BY 3, 2, 1`, oid, aclDefaultKind(object))
 	if err != nil {
-		return nil, fmt.Errorf("read table grants: %w", err)
+		return nil, fmt.Errorf("read %s grants: %w", strings.ToLower(string(object)), err)
 	}
 	grants, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (Grant, error) {
 		var g Grant
@@ -220,12 +246,7 @@ func readGrants(ctx context.Context, tx pgx.Tx, oid uint32) ([]Grant, error) {
 		return g, err
 	})
 	if err != nil {
-		return nil, fmt.Errorf("read table grants: %w", err)
-	}
-	for _, g := range grants {
-		if !isTablePrivilege(g.Privilege) {
-			return nil, fmt.Errorf("table grant to %s carries unknown privilege %q", granteeLabel(g), g.Privilege)
-		}
+		return nil, fmt.Errorf("read %s grants: %w", strings.ToLower(string(object)), err)
 	}
 	return grants, nil
 }
