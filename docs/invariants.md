@@ -259,7 +259,7 @@ proxy that hands the server connection to another client keeps the rewritten, st
 `search_path` writer under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
 `pkg/progress`, `pkg/schemadiff`, and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
-decoy `sha256`, `convert_to`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
+decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin). *Test obligation:* a shadowing `search_path` (`<schema>,
 pg_catalog` with decoy catalog relations and functions in the schema) yields the same answer as
 the default path, per read site and per pooled session.

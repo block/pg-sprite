@@ -83,10 +83,14 @@ func shadowColumnTypes(ctx context.Context, tx pgx.Tx, shadow copier.Shadow) ([]
 // SHA-256 rather than md5 because PostgreSQL built against OpenSSL routes
 // md5() through it, and an OpenSSL in FIPS mode refuses MD5, which would
 // fail every pass on such a host; the digest never leaves the process, so
-// the choice of hash has no compatibility surface. The record text is
-// converted to UTF-8 bytes for hashing, so the digest is the same whatever
-// the client encoding; the per-row hashes are aggregated as bytes and only
-// the chunk's hash is rendered as hex.
+// the choice of hash has no compatibility surface. sha256 takes bytes, so
+// the record text goes through convert_to with the database's own
+// encoding as the target: that performs no conversion and hashes the bytes
+// as the server stores them, which is what md5(text) hashed, and so a
+// SQL_ASCII database holding bytes that are not valid in any encoding
+// digests like any other instead of failing every pass over the chunk.
+// The per-row hashes are aggregated as bytes and only the chunk's hash is
+// rendered as hex.
 // The source side is where the casts do work: a column whose type the
 // schema change widens or narrows hashes as the value the shadow holds,
 // and both sides run the identical expression so nothing but the data can
@@ -104,7 +108,7 @@ func digestSQL(target preflight.CopySwapTarget, schema, table string, types []co
 		cast = append(cast, pgx.Identifier{c.name}.Sanitize()+"::"+c.typeName)
 	}
 	key := pgx.Identifier{target.PKColumn()}.Sanitize()
-	rowHash := "pg_catalog.sha256(pg_catalog.convert_to(ROW(" + strings.Join(cast, ", ") + ")::text, 'UTF8'))"
+	rowHash := "pg_catalog.sha256(pg_catalog.convert_to(ROW(" + strings.Join(cast, ", ") + ")::text, pg_catalog.getdatabaseencoding()))"
 	return "SELECT pg_catalog.count(*)," +
 		" pg_catalog.encode(pg_catalog.sha256(COALESCE(pg_catalog.string_agg(" + rowHash + ", ''::bytea ORDER BY " + key + "), ''::bytea)), 'hex')" +
 		" FROM " + pgx.Identifier{schema, table}.Sanitize() +

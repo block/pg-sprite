@@ -188,8 +188,8 @@ remove the marker; it only increases WAL and mutates user configuration.
 
 ### D7 — Checksum through the destination types
 
-**Decision.** Each chunk computes `sha256(string_agg(row_hash, '' ORDER BY pk))` on both sides,
-where `row_hash` is `sha256(convert_to(row::text, 'UTF8'))`; only the chunk's hash is rendered
+**Decision.** Each chunk computes `sha256(string_agg(row_hash, ''::bytea ORDER BY pk))` on both sides,
+where `row_hash` is `sha256(convert_to(row::text, getdatabaseencoding()))`; only the chunk's hash is rendered
 as hex. Every compared source value is cast to the shadow column's type before its row hash is
 formed. SHA-256 rather than `md5`: PostgreSQL built against OpenSSL routes `md5()` through it,
 and an OpenSSL in FIPS mode refuses MD5, which would fail every pass on such a host; the digest
