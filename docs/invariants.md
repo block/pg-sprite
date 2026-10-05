@@ -321,7 +321,11 @@ gone-session, reported-loss, and mid-pass-loss tests); `pkg/schemachange` `GateC
 confirm from the swap's and the drop's own transactions that the session's backend holds the
 lock before the first rename or the drop (nil-session, rival-backend, and lost-mid-attempt
 tests for the swap; nil-session and rival-backend tests for the drop), so loss of the lock
-aborts the change at every stage.
+aborts the change at every stage; `pkg/checkpoint` `Store.Save` and `Store.Delete` require the
+same session for the checkpoint's target, run under its `Bind` context, and confirm the lock
+from the write's own transaction before the upsert or the delete (nil-session, wrong-table,
+and rival-backend tests), so a run whose lock went to another engine cannot stamp its stale
+checkpoint over the newer engine's row.
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
@@ -519,9 +523,11 @@ The [atomic RLS contract](atomic-row-security.md) defines these executor obligat
 
 The checkpoint table keeps **one row per `(schema, table)`** (upsert on that key) so a crash can
 never leave a partial pair for one target — its record is either the old or the new one.
-Unbounded append-style checkpoint history is not used. *Planned enforcement (Phase 8):*
-`pkg/checkpoint` write path (`INSERT … ON CONFLICT (schema_name, table_name) DO UPDATE`, the REPLACE
-analog). *Source:* Spirit `pkg/checkpoint` (single-row REPLACE on `id=1`), scoped per target by
+Unbounded append-style checkpoint history is not used. *Enforced:* `pkg/checkpoint`
+`Store.Save` — one `INSERT … ON CONFLICT (schema_name, table_name) DO UPDATE` (the REPLACE
+analog) per save, under the target's table lock (LK-1), so a reader sees the previous record or
+the new one and never a mix; `TestSaveUpsertsTheOneRowPerTarget`, `TestSaveKeepsOneRowPerTarget`,
+`TestSaveRefusesWhenAnotherBackendHoldsTheTable`. *Source:* Spirit `pkg/checkpoint` (single-row REPLACE on `id=1`), scoped per target by
 [copy-and-swap D3](copy-and-swap-design.md#d3--store-checkpoints-in-the-target-database).
 
 ### ST-2 — An incompatible checkpoint is distinguishable from a transient read error
@@ -529,10 +535,25 @@ analog). *Source:* Spirit `pkg/checkpoint` (single-row REPLACE on `id=1`), scope
 Resume must tell apart: (a) a readable, matching checkpoint → resume; (b) a checkpoint written by
 an incompatible engine version or for a **different statement** → refuse to resume, start fresh
 (never mix state across versions/statements); (c) a *transient* read failure → retry, and never
-trigger fresh-start recovery on a blip. *Enforced:* checkpoint read/validation path (version +
-statement fingerprint stored with the watermark; the fingerprint will hash the
-execute-and-introspect after-schema model, not SQL text, so textually-different-but-identical statements match and
-cosmetic edits don't force a fresh start). *Source:* Spirit `checkpoint.IsIncompatible` +
+trigger fresh-start recovery on a blip. *Enforced:* `pkg/checkpoint` `Store.Load` returns the
+`Checkpoint` for (a), a typed `IncompatibleError` for (b) — the row format version and both
+model fingerprints are stored with the watermark, and the fingerprints are
+`pkg/schemachange`'s digests of the execute-and-introspect source and after-schema models, not
+SQL text, so textually-different-but-identical statements match and cosmetic edits don't force
+a fresh start — and for (c) retries through transient errors (what `dbconn.Retryable` names, plus a session the
+server ended from outside it, `57P01`/`57P02`/`57P03`, which only a read may safely repeat) under bounded attempts
+before returning an error that is neither `ErrNotFound` nor incompatible; `ErrNotFound` is
+returned only for a completed read that found no row, and a database where the checkpoint table
+was never created is the typed `ErrTableMissing`, never `ErrNotFound`. `Store.Save` applies the
+same identity guard on the write path, so a run can never write its state over another
+statement's row; `Delete` is the explicit fresh start, and it removes only the row whose
+`Identity` the caller was shown (`IncompatibleError.Stored`), so a row another engine wrote in
+between survives and surfaces as a new `IncompatibleError`. `TestLoadRetriesAcrossATerminatedBackend`,
+`TestLoadReportsAnotherStatementsRowAsIncompatible`,
+`TestLoadReportsAnotherFormatVersionAsIncompatible`,
+`TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestDeleteRefusesARowTheCallerWasNotShown`,
+`TestWritesAndReadsWithoutEnsureReportTheMissingTable`,
+`TestResumeFromCheckpointConvergesAfterAMidCopyKill`. *Source:* Spirit `checkpoint.IsIncompatible` +
 "resume requires the identical ALTER".
 
 ### ST-3 — Slot cleanup is guaranteed on success, failure, and crash
