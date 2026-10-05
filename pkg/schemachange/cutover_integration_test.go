@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
 
@@ -267,6 +270,7 @@ func TestCutoverStopsAfterTheBoundedLockAttempts(t *testing.T) {
 	_, err := f.cutover(t, s, opts)
 
 	require.ErrorIs(t, err, schemachange.ErrLockRetriesExhausted)
+	require.ErrorIs(t, err, schemachange.ErrCutoverRolledBack, "every attempt rolled back, so the caller may retry")
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr)
 	assert.Equal(t, "55P03", pgErr.Code, "the last answer was lock_not_available")
@@ -321,6 +325,7 @@ func TestCutoverRunsTheDrainUnderTheLockAndAbortsOnItsError(t *testing.T) {
 		_, err = schemachange.Cutover(t.Context(), f.pool, s.lock, ready, drain, schemachange.CutoverOptions{})
 
 		require.ErrorIs(t, err, drainFailed)
+		require.ErrorIs(t, err, schemachange.ErrCutoverRolledBack)
 		assert.NotErrorIs(t, err, schemachange.ErrLockRetriesExhausted, "a drain failure is not retried")
 		assert.Equal(t, s.built.SourceOID(), f.relationOID(t, "orders"), "the source is still live")
 		assert.True(t, f.relationExists(t, s.built.ShadowTable()))
@@ -355,6 +360,7 @@ func TestCutoverResolvesALostConnectionByInspectingTheCatalog(t *testing.T) {
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr)
 	assert.Equal(t, "57P01", pgErr.Code, "the server's admin_shutdown is what the swap saw")
+	require.ErrorIs(t, err, schemachange.ErrCutoverRolledBack, "the catalog showed the source live, and the error says so")
 	assert.NotErrorIs(t, err, schemachange.ErrInvariantViolation, "a rolled-back attempt is a plain failure, not an ambiguity")
 	assert.NotErrorIs(t, err, schemachange.ErrLockRetriesExhausted)
 	assert.Equal(t, s.built.SourceOID(), f.relationOID(t, "orders"), "the source is still live")
@@ -374,9 +380,11 @@ func TestCutoverRefusesAZeroProofAndAMissingLock(t *testing.T) {
 
 	_, err = schemachange.Cutover(t.Context(), f.pool, s.lock, schemachange.CutoverReady{}, nil, schemachange.CutoverOptions{})
 	assert.Equal(t, schemachange.CauseCutoverUnverified, schemachange.RefusalCauseOf(err), "zero proof")
+	assert.NotErrorIs(t, err, schemachange.ErrCutoverRolledBack, "nothing was attempted, so nothing rolled back")
 
 	_, err = schemachange.Cutover(t.Context(), f.pool, nil, ready, nil, schemachange.CutoverOptions{})
 	assert.Equal(t, schemachange.CauseLockUnproven, schemachange.RefusalCauseOf(err), "no lock")
+	assert.NotErrorIs(t, err, schemachange.ErrCutoverRolledBack)
 
 	assert.Equal(t, s.built.SourceOID(), f.relationOID(t, "orders"), "nothing was swapped")
 }
@@ -409,4 +417,110 @@ func TestDropOldTableRefusesARelationThatIsNotTheRetainedSource(t *testing.T) {
 	require.NoError(t, schemachange.DropOldTable(t.Context(), f.pool, s.lock, swapped, schemachange.Options{}))
 	assert.False(t, f.relationExists(t, old))
 	assert.Equal(t, s.built.ShadowOID(), f.relationOID(t, "orders"), "the live table is untouched")
+}
+
+// A lock timeout after the drain rolls back what the drain applied and
+// runs the drain again on the next attempt: each attempt's drain starts
+// from a shadow that holds none of the previous attempt's rows, which is
+// the contract DrainFunc documents.
+func TestCutoverRunsTheDrainOncePerAttempt(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+	s := f.stage(t, "orders", `ALTER TABLE %s.orders DROP COLUMN note`)
+	ready, err := f.gate(t, s)
+	require.NoError(t, err)
+	// A transaction that drew from the serial sequence holds it until it
+	// ends, so re-owning the sequence after the drain times out.
+	holder, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	_, err = holder.Exec(t.Context(), `SELECT nextval($1::regclass)`, pgx.Identifier{f.schema, "orders_id_seq"}.Sanitize())
+	require.NoError(t, err)
+	var once sync.Once
+	release := func() { once.Do(func() { assert.NoError(t, holder.Rollback(context.WithoutCancel(t.Context()))) }) }
+	t.Cleanup(release)
+
+	var seen []int64
+	drain := func(ctx context.Context, tx pgx.Tx) error {
+		var drained int64
+		if err := tx.QueryRow(ctx, `SELECT count(*) FROM `+f.shadowName(s.built)+` WHERE sku = 'drained'`).Scan(&drained); err != nil {
+			return err
+		}
+		seen = append(seen, drained)
+		_, err := tx.Exec(ctx, `INSERT INTO `+f.shadowName(s.built)+` (id, qty, sku) VALUES (9000 + $1, 1, 'drained')`, len(seen))
+		return err
+	}
+	opts := schemachange.CutoverOptions{
+		Options:      schemachange.Options{LockTimeout: 200 * time.Millisecond},
+		LockAttempts: 3,
+		LockBackoff:  time.Millisecond,
+		Sleep:        func(context.Context, time.Duration) error { release(); return nil },
+	}
+	swapped, err := schemachange.Cutover(t.Context(), f.pool, s.lock, ready, drain, opts)
+	require.NoError(t, err)
+
+	assert.Equal(t, 2, swapped.Attempts())
+	assert.Equal(t, []int64{0, 0}, seen, "the drain ran once per attempt, and the second found the first's row rolled back")
+	assert.Equal(t, int64(2501), f.rowCount(t, "orders"))
+}
+
+// The swap re-runs the gate's checklist under its own lock: an index added
+// to the source after the gate minted CutoverReady is drift the swap
+// refuses, not a dependent it leaves behind on the retained table (ST-5).
+func TestCutoverRefusesDriftBetweenTheGateAndTheLock(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+	s := f.stage(t, "orders", `ALTER TABLE %s.orders DROP COLUMN note`)
+	ready, err := f.gate(t, s)
+	require.NoError(t, err)
+	f.exec(t, `CREATE INDEX orders_sku_idx ON %s.orders (sku)`)
+
+	_, err = schemachange.Cutover(t.Context(), f.pool, s.lock, ready, nil, schemachange.CutoverOptions{})
+
+	require.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, "ST-5", schemachange.RefusalCauseOf(err).Invariant())
+	require.ErrorIs(t, err, schemachange.ErrCutoverRolledBack, "a refusal inside the transaction leaves the source live")
+	assert.Equal(t, s.built.SourceOID(), f.relationOID(t, "orders"))
+}
+
+// Only the swap's ACCESS EXCLUSIVE keeps a new view, foreign key, or
+// trigger from attaching to the source, so the copy-and-swap shape is
+// re-checked under it: a view created on the source after the shape was
+// proven would be stranded on the retained table by the rename, and the
+// swap refuses it rather than strand it (RF-2).
+func TestCutoverRefusesAViewCreatedAfterTheShapeWasProven(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+	s := f.stage(t, "orders", `ALTER TABLE %s.orders DROP COLUMN note`)
+	ready, err := f.gate(t, s)
+	require.NoError(t, err)
+	f.exec(t, `CREATE VIEW %s.orders_v AS SELECT id, qty FROM %s.orders`)
+
+	_, err = schemachange.Cutover(t.Context(), f.pool, s.lock, ready, nil, schemachange.CutoverOptions{})
+
+	assert.Equal(t, preflight.CopySwapCauseDependentViews, preflight.CopySwapRefusalCauseOf(err))
+	require.ErrorIs(t, err, schemachange.ErrCutoverRolledBack)
+	assert.Equal(t, s.built.SourceOID(), f.relationOID(t, "orders"), "the view's table is still the live one")
+	assert.True(t, f.relationExists(t, s.built.ShadowTable()), "the shadow is kept for after the view is dealt with")
+}
+
+// The swap confirms from its own transaction that the lock session's
+// backend holds the table lock, so a session whose backend is gone while a
+// second instance holds the lock swaps nothing (LK-1).
+func TestCutoverRefusesALockHeldByAnotherBackend(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+	own, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, "orders")
+	require.NoError(t, err)
+	s := f.stageUnder(t, own, "orders", `ALTER TABLE %s.orders DROP COLUMN note`)
+	ready, err := f.gate(t, s)
+	require.NoError(t, err)
+	require.NoError(t, own.Release(t.Context()))
+	stale := f.goneLock(t, "orders")
+	rival := f.lock(t, "orders")
+
+	_, err = schemachange.Cutover(t.Context(), f.pool, stale, ready, nil, schemachange.CutoverOptions{})
+
+	assert.Equal(t, schemachange.CauseLockHeldElsewhere, schemachange.RefusalCauseOf(err))
+	assert.Equal(t, s.built.SourceOID(), f.relationOID(t, "orders"))
+	assert.NoError(t, rival.Err(), "the rival's lock is untouched")
 }

@@ -8,17 +8,20 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/preflight"
 )
 
-// swapOnce is one attempt at the swap transaction: lock, drain, re-gate,
-// rename, hand off, recheck, commit. Any error leaves the transaction
-// rolled back on the server unless the connection broke around COMMIT,
-// which the caller resolves by inspection.
-func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, opts Options) (SwappedTable, error) {
+// swapOnce is one attempt at the swap transaction: lock, drain, re-check
+// the shape, re-gate, rename, hand off, recheck, commit. Any error leaves
+// the transaction rolled back on the server unless the client stopped
+// hearing from it, which the caller resolves by following the backend
+// returned here to its exit and then inspecting the catalog. The backend
+// is zero when the attempt ended before its transaction ran a statement.
+func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, opts Options) (SwappedTable, swapBackend, error) {
 	built := ready.built
 	tx, err := pool.Begin(ctx)
 	if err != nil {
-		return SwappedTable{}, fmt.Errorf("begin cutover: %w", err)
+		return SwappedTable{}, swapBackend{}, fmt.Errorf("begin cutover: %w", err)
 	}
 	defer func() {
 		// Redundant safety closer: after a successful Commit this returns
@@ -26,6 +29,24 @@ func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSes
 		// the transaction with its session either way.
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
+	backend, err := readSwapBackend(ctx, tx)
+	if err != nil {
+		return SwappedTable{}, swapBackend{}, err
+	}
+	swapped, err := swapInTx(ctx, tx, lock, ready, drain, opts)
+	if err != nil {
+		return SwappedTable{}, backend, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return SwappedTable{}, backend, fmt.Errorf("commit cutover of %s.%s: %w", built.Schema(), built.SourceTable(), err)
+	}
+	return swapped, backend, nil
+}
+
+// swapInTx runs every statement of the swap inside the open transaction,
+// up to but not including COMMIT.
+func swapInTx(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, opts Options) (SwappedTable, error) {
+	built := ready.built
 	if err := setGateSession(ctx, tx, built, opts); err != nil {
 		return SwappedTable{}, err
 	}
@@ -40,6 +61,13 @@ func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSes
 			return SwappedTable{}, fmt.Errorf("drain captured changes into %s.%s: %w", built.Schema(), built.ShadowTable(), err)
 		}
 	}
+	// Only this lock keeps a new view, foreign key, trigger, or publication
+	// from attaching to the source, so only a check under it can promise
+	// the rename strands nothing. Any check run earlier is advisory.
+	// INV: RF-2
+	if err := preflight.RecheckCopySwapShape(ctx, tx, built.target); err != nil {
+		return SwappedTable{}, fmt.Errorf("re-check copy-and-swap shape under the swap lock: %w", err)
+	}
 	// The pairing the swap renames by is the one read under this lock, not
 	// the gate's earlier read: the checklist refuses any drift in between,
 	// so when it passes the two agree, and the lock makes this one final.
@@ -50,16 +78,14 @@ func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSes
 	if err := renameForSwap(ctx, tx, fresh); err != nil {
 		return SwappedTable{}, err
 	}
-	if err := handOffSequences(ctx, tx, fresh); err != nil {
+	identities, err := handOffSequences(ctx, tx, fresh)
+	if err != nil {
 		return SwappedTable{}, err
 	}
-	if err := confirmSwap(ctx, tx, fresh); err != nil {
+	if err := confirmSwap(ctx, tx, fresh, identities); err != nil {
 		return SwappedTable{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return SwappedTable{}, fmt.Errorf("commit cutover of %s.%s: %w", built.Schema(), built.SourceTable(), err)
-	}
-	return newSwappedTable(fresh, 0), nil
+	return newSwappedTable(fresh, identities, 0), nil
 }
 
 // lockForSwap takes ACCESS EXCLUSIVE on the source and the shadow in one

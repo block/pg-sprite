@@ -63,6 +63,21 @@ func TestConnectionLostDistinguishesLostConnectionsFromServerAnswers(t *testing.
 	assert.False(t, connectionLost(nil))
 }
 
+// A caller's context ending mid-attempt leaves the outcome unknown just as
+// a lost connection does: the COMMIT may have reached the server before
+// the client stopped waiting for its answer. The server's own answers do
+// not, so a lock or statement timeout is never inspected as unknown.
+func TestOutcomeUnknownCoversLostConnectionsAndEndedContexts(t *testing.T) {
+	assert.True(t, outcomeUnknown(fmt.Errorf("commit: %w", context.Canceled)))
+	assert.True(t, outcomeUnknown(context.DeadlineExceeded))
+	assert.True(t, outcomeUnknown(&pgconn.PgError{Code: codeAdminShutdown}), "a lost connection stays unknown")
+
+	assert.False(t, outcomeUnknown(&pgconn.PgError{Code: codeLockNotAvailable}), "a lock timeout is the server's answer")
+	assert.False(t, outcomeUnknown(&pgconn.PgError{Code: "57014"}), "a statement timeout is the server's answer")
+	assert.False(t, outcomeUnknown(errors.New("plain failure")))
+	assert.False(t, outcomeUnknown(nil))
+}
+
 // The identity clause replays every declared option of the source
 // sequence and nothing about its position, so the recreated sequence's
 // catalog row equals the source's and the position is set separately.

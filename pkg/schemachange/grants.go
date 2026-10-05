@@ -19,7 +19,7 @@ func syncGrants(ctx context.Context, tx pgx.Tx, table string, shadowOID uint32, 
 	if err != nil {
 		return err
 	}
-	if err := reconcileACL(ctx, tx, table, "", have, want); err != nil {
+	if err := reconcileACL(ctx, tx, aclTable, table, "", have, want); err != nil {
 		return err
 	}
 	got, err := readGrants(ctx, tx, shadowOID)
@@ -41,7 +41,7 @@ func syncColumnGrants(ctx context.Context, tx pgx.Tx, table string, shadowOID ui
 		return err
 	}
 	for _, column := range columnsOf(have, want) {
-		if err := reconcileACL(ctx, tx, table, column, grantsOnColumn(have, column), grantsOnColumn(want, column)); err != nil {
+		if err := reconcileACL(ctx, tx, aclTable, table, column, grantsOnColumn(have, column), grantsOnColumn(want, column)); err != nil {
 			return err
 		}
 	}
@@ -56,6 +56,14 @@ func syncColumnGrants(ctx context.Context, tx pgx.Tx, table string, shadowOID ui
 	return nil
 }
 
+// aclObject is the kind of object a GRANT or REVOKE names.
+type aclObject string
+
+const (
+	aclTable    aclObject = "TABLE"
+	aclSequence aclObject = "SEQUENCE"
+)
+
 // grantee identifies who holds a privilege; two entries with the same
 // grantee and privilege differ at most in their grant option.
 type grantee struct {
@@ -69,11 +77,12 @@ func granteeOf(g Grant) grantee {
 }
 
 // reconcileACL issues the REVOKE and GRANT statements that move one ACL —
-// the table's when column is empty, otherwise that column's — from have to
-// want. A grant option the source lacks is revoked on its own, so the
-// privilege beneath it survives; a grant option the source has is added by
-// re-granting with it.
-func reconcileACL(ctx context.Context, tx pgx.Tx, table, column string, have, want []Grant) error {
+// the object's when column is empty, otherwise that column's — from have
+// to want. name is the object's quoted, schema-qualified name. A grant
+// option the source lacks is revoked on its own, so the privilege beneath
+// it survives; a grant option the source has is added by re-granting with
+// it.
+func reconcileACL(ctx context.Context, tx pgx.Tx, object aclObject, name, column string, have, want []Grant) error {
 	wanted := make(map[grantee]Grant, len(want))
 	for _, w := range want {
 		wanted[granteeOf(w)] = w
@@ -83,14 +92,14 @@ func reconcileACL(ctx context.Context, tx pgx.Tx, table, column string, have, wa
 		held[granteeOf(h)] = h
 		w, isWanted := wanted[granteeOf(h)]
 		if !isWanted {
-			if _, err := tx.Exec(ctx, revokeSQL(table, column, h, false)); err != nil {
-				return fmt.Errorf("revoke %s on shadow from %s: %w", privilegeLabel(h, column), granteeLabel(h), err)
+			if _, err := tx.Exec(ctx, revokeSQL(object, name, column, h, false)); err != nil {
+				return fmt.Errorf("revoke %s on %s from %s: %w", privilegeLabel(h, column), name, granteeLabel(h), err)
 			}
 			continue
 		}
 		if h.Grantable && !w.Grantable {
-			if _, err := tx.Exec(ctx, revokeSQL(table, column, h, true)); err != nil {
-				return fmt.Errorf("revoke grant option for %s on shadow from %s: %w", privilegeLabel(h, column), granteeLabel(h), err)
+			if _, err := tx.Exec(ctx, revokeSQL(object, name, column, h, true)); err != nil {
+				return fmt.Errorf("revoke grant option for %s on %s from %s: %w", privilegeLabel(h, column), name, granteeLabel(h), err)
 			}
 		}
 	}
@@ -104,8 +113,8 @@ func reconcileACL(ctx context.Context, tx pgx.Tx, table, column string, have, wa
 			// itself is already held.
 			continue
 		}
-		if _, err := tx.Exec(ctx, grantSQL(table, column, w)); err != nil {
-			return fmt.Errorf("grant %s on shadow to %s: %w", privilegeLabel(w, column), granteeLabel(w), err)
+		if _, err := tx.Exec(ctx, grantSQL(object, name, column, w)); err != nil {
+			return fmt.Errorf("grant %s on %s to %s: %w", privilegeLabel(w, column), name, granteeLabel(w), err)
 		}
 	}
 	return nil
@@ -150,18 +159,18 @@ func privilegeLabel(g Grant, column string) string {
 	return g.Privilege + " on column " + column
 }
 
-func grantSQL(table, column string, g Grant) string {
-	sql := "GRANT " + privilegeSQL(g.Privilege, column) + " ON TABLE " + table + " TO " + roleSQL(g.Grantee, g.Public)
+func grantSQL(object aclObject, name, column string, g Grant) string {
+	sql := "GRANT " + privilegeSQL(g.Privilege, column) + " ON " + string(object) + " " + name + " TO " + roleSQL(g.Grantee, g.Public)
 	if g.Grantable {
 		sql += " WITH GRANT OPTION"
 	}
 	return sql
 }
 
-func revokeSQL(table, column string, g Grant, grantOptionOnly bool) string {
+func revokeSQL(object aclObject, name, column string, g Grant, grantOptionOnly bool) string {
 	sql := "REVOKE "
 	if grantOptionOnly {
 		sql += "GRANT OPTION FOR "
 	}
-	return sql + privilegeSQL(g.Privilege, column) + " ON TABLE " + table + " FROM " + roleSQL(g.Grantee, g.Public)
+	return sql + privilegeSQL(g.Privilege, column) + " ON " + string(object) + " " + name + " FROM " + roleSQL(g.Grantee, g.Public)
 }

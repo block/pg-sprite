@@ -316,9 +316,12 @@ its `Bind` context, and calls `TableLockSession.Confirm` from each chunk's own c
 the insert (wrong-table, gone-session, rival-backend, and mid-copy-loss tests); `pkg/checksum`
 `Verifier` requires the same session, runs every read transaction under its `Bind` context, and
 confirms the lock from each transaction's own connection before the first read (wrong-table,
-gone-session, reported-loss, and mid-pass-loss tests). *Planned
-enforcement:* cutover acquires the same session before its first write and runs under it, so
-loss of the lock aborts the change at every stage.
+gone-session, reported-loss, and mid-pass-loss tests); `pkg/schemachange` `GateCutover`,
+`Cutover`, and `DropOldTable` require the same session, run under its `Bind` context, and
+confirm from the swap's and the drop's own transactions that the session's backend holds the
+lock before the first rename or the drop (nil-session, rival-backend, and lost-mid-attempt
+tests for the swap; nil-session and rival-backend tests for the drop), so loss of the lock
+aborts the change at every stage.
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
@@ -377,12 +380,20 @@ did or didn't commit. PostgreSQL's transactional DDL makes the swap itself atomi
 *client's knowledge* of the outcome is not. Retries of the cutover must be written against this
 ambiguity. *Enforced:* `pkg/schemachange.Cutover` — a swap attempt that ends in a lost connection
 (the server's `admin_shutdown`/`crash_shutdown`, a connection-exception SQLSTATE, a network
-error, or an EOF) is never retried or reported until a fresh connection has read which OID bears
-the source name: the shadow's OID is reported as the committed swap it was, the source's OID as
-a rollback carrying the connection error, and any other state — no relation, or one the build
-never proved — is refused as `cutover-outcome-ambiguous`; a lock timeout or a statement error
-the server answered is known to have rolled back and skips the inspection (terminated-backend
-test; three-catalog-state inspection test). *Source:* Spirit's cutover
+error, or an EOF) or in the caller's context ending is never retried or reported until the
+outcome is known: the attempt's backend, which may still be deciding inside `COMMIT`, is first
+followed to its exit under a context the caller's cancellation no longer governs, bounded by the
+attempt's own `lock_timeout` plus `statement_timeout`, and a backend still present at that bound
+is refused as `cutover-outcome-ambiguous` rather than read around; then a fresh connection reads
+which OID bears the source name: the shadow's OID is reported as the committed swap it was, the
+source's OID as a rollback carrying the connection error, and any other state — no relation, or
+one the build never proved — is refused as `cutover-outcome-ambiguous`. Every attempt the
+catalog shows rolled back — a lock timeout, a drain error, a refusal inside the transaction, or
+a lost connection the inspection resolved — is reported wrapping `ErrCutoverRolledBack`, so a
+caller distinguishes "the source is still live, retry is safe" from an unresolved outcome
+without reading the catalog itself (terminated-backend test; commit-the-client-never-heard-of
+test; context-ends-during-commit test; backend-still-running test; three-catalog-state
+inspection test). *Source:* Spirit's cutover
 (`information_schema` inspection on dropped connection,
 [Spirit README](https://github.com/block/spirit#cut-over-and-cleanup)).
 
@@ -644,7 +655,12 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   publishing it (explicit, `FOR ALL TABLES`, or `FOR TABLES IN SCHEMA`), no **subscription**
   applying into it, and no other `pg_depend` dependent of its OID or row type (v1) — a
   rename-swap strands every one of them on the retained table, and a scope publication would
-  publish the shadow's copy writes.
+  publish the shadow's copy writes. *Enforced:* `pkg/preflight.CheckCopySwapShape` proves the
+  shape before the build, and `pkg/schemachange.Cutover` re-runs the same checklist
+  (`RecheckCopySwapShape`) inside the swap transaction under `ACCESS EXCLUSIVE` — the only lock
+  that keeps a new view, foreign key, or trigger from attaching to the source between the proof
+  and the rename — refusing with the shape's own cause and rolling the attempt back
+  (view-after-shape-proven test).
   *Source:* [low-level-design coverage](low-level-design.md#schema-shapes), risks-and-mitigations.
 - **RF-3** — Lossy **or failable** conversions are refused up front (shortening below max data
   length, `NOT NULL` without default on null data, `text→jsonb` with unvalidatable rows) rather

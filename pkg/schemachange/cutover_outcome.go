@@ -20,16 +20,20 @@ type SwappedTable struct {
 	indexes    DependentPairing
 	statistics DependentPairing
 	sequences  []OwnedSequence
+	identities []IdentityColumn
 	attempts   int
 }
 
 // newSwappedTable records what the swap transaction renamed and handed off.
-func newSwappedTable(ready CutoverReady, attempts int) SwappedTable {
+// The identities are the ones the handoff left on the live table, read back
+// from it, not the source's: a widened column carries widened bounds.
+func newSwappedTable(ready CutoverReady, identities []IdentityColumn, attempts int) SwappedTable {
 	return SwappedTable{
 		built:      ready.built,
 		indexes:    ready.indexes,
 		statistics: ready.statistics,
 		sequences:  ready.sequences,
+		identities: identities,
 		attempts:   attempts,
 	}
 }
@@ -61,8 +65,12 @@ func (s SwappedTable) OwnedSequences() []OwnedSequence {
 }
 
 // IdentityColumns are the identity columns the swap recreated on the live
-// table, each with the source sequence's options.
-func (s SwappedTable) IdentityColumns() []IdentityColumn { return s.built.IdentityColumns() }
+// table, each with the options its sequence now declares: the source
+// sequence's, with a bound the source took from its column's old type
+// moved to the new type when the statement widened the column.
+func (s SwappedTable) IdentityColumns() []IdentityColumn {
+	return append([]IdentityColumn(nil), s.identities...)
+}
 
 // Attempts is how many ACCESS EXCLUSIVE acquisitions the swap needed.
 func (s SwappedTable) Attempts() int { return s.attempts }
@@ -113,9 +121,11 @@ func inspectOutcome(ctx context.Context, pool *pgxpool.Pool, built BuiltShadow) 
 // the swap set out to produce: the shadow's OID under the source name, the
 // source's OID under the _old name, every paired shadow dependent under its
 // source partner's name, every owned sequence on the live table, and every
-// identity column recreated with the source sequence's options under the
-// source sequence's name.
-func confirmSwap(ctx context.Context, tx pgx.Tx, ready CutoverReady) error {
+// identity column recreated under the source sequence's name with the
+// options the handoff set out to declare — computed from the source's and
+// the live column's type before the handoff ran, so this read checks the
+// handoff's work rather than repeating it.
+func confirmSwap(ctx context.Context, tx pgx.Tx, ready CutoverReady, identities []IdentityColumn) error {
 	built := ready.built
 	schema, live, old := built.Schema(), built.SourceTable(), OldName(built.Schema(), built.SourceTable())
 	liveOID, err := resolveRelation(ctx, tx, schema, live)
@@ -162,14 +172,38 @@ func confirmSwap(ctx context.Context, tx pgx.Tx, ready CutoverReady) error {
 	if !slices.Equal(sequences, ready.sequences) {
 		return refuse(CauseSwapMismatch, nil, "after the swap live %s.%s owns different sequences than the source did", schema, live)
 	}
-	identities, err := readIdentityColumns(ctx, tx, liveOID)
+	onLive, err := readIdentityColumns(ctx, tx, liveOID)
 	if err != nil {
 		return fmt.Errorf("live %s.%s: %w", schema, live, err)
 	}
-	if !slices.Equal(identities, built.IdentityColumns()) {
-		return refuse(CauseSwapMismatch, nil, "after the swap live %s.%s identity columns differ from the source's", schema, live)
+	if !slices.Equal(onLive, identities) {
+		return refuse(CauseSwapMismatch, nil, "after the swap live %s.%s identity columns differ from what the handoff declared", schema, live)
 	}
 	return nil
+}
+
+// readLiveIdentities reads the identity columns the live table carries,
+// from a fresh connection, for a swap whose commit the client never heard
+// of: the SwappedTable it mints must say what the handoff left behind, and
+// only the catalog knows.
+func readLiveIdentities(ctx context.Context, pool *pgxpool.Pool, built BuiltShadow) ([]IdentityColumn, error) {
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read live identities of %s.%s: %w", built.Schema(), built.SourceTable(), err)
+	}
+	defer func() {
+		// Redundant safety closer: a read-only transaction that is
+		// rolled back below either way.
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+	}()
+	identities, err := readIdentityColumns(ctx, tx, built.ShadowOID())
+	if err != nil {
+		return nil, fmt.Errorf("live %s.%s: %w", built.Schema(), built.SourceTable(), err)
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		return nil, fmt.Errorf("read live identities of %s.%s: %w", built.Schema(), built.SourceTable(), err)
+	}
+	return identities, nil
 }
 
 // missingNames lists each pair's source name that the live table does not

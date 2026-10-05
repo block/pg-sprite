@@ -4,9 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"net"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -22,22 +19,23 @@ import (
 // refusal, so errors.As against *pgconn.PgError still reaches it.
 var ErrLockRetriesExhausted = errors.New("cutover lock retries exhausted")
 
+// ErrCutoverRolledBack reports a failed swap whose source is known to be
+// live: every attempt rolled back, so the shadow is still in place and the
+// caller may retry Cutover. It wraps the failure itself — a lock exhaustion,
+// a refusal, a drain error, a statement error the server answered, or a
+// lost connection or ended context whose attempt the catalog showed rolled
+// back. A failure that does not carry it says nothing about the source:
+// an option or proof refused before any connection opened, an inspection
+// that itself failed, or an ambiguous outcome. An orchestrator decides
+// whether to retry with errors.Is(err, ErrCutoverRolledBack).
+var ErrCutoverRolledBack = errors.New("cutover rolled back")
+
 // SQLSTATE codes a bounded ACCESS EXCLUSIVE acquisition retries on: the
 // lock_timeout expiry every attempt is designed to end in, and a deadlock
 // the server resolved by cancelling this side.
 const (
 	codeLockNotAvailable = "55P03"
 	codeDeadlockDetected = "40P01"
-)
-
-// SQLSTATE codes that mean the connection ended without an answer to the
-// statement in flight: the server terminated this backend, crashed, or
-// reported a connection exception. These leave the swap's outcome unknown
-// until the catalog is inspected (LK-4).
-const (
-	codeAdminShutdown        = "57P01"
-	codeCrashShutdown        = "57P02"
-	classConnectionException = "08"
 )
 
 // Default bounds for the ACCESS EXCLUSIVE acquisition: five tries with a
@@ -54,6 +52,13 @@ const (
 // drain and before the rename. The transaction is bounded by the swap's
 // options and runs as the table's owner. A nil DrainFunc drains nothing: a
 // quiesced table, or a caller that has already applied the final position.
+//
+// The drain runs once per attempt. An attempt can still fail after the
+// drain — a lock wait later in the transaction times out, say — and that
+// rolls back everything the drain applied; the next attempt calls the
+// drain again against a shadow holding none of the previous run's work.
+// Derive what to apply from durable state (the captured changes and the
+// position they end at), never from what an earlier call consumed.
 type DrainFunc func(ctx context.Context, tx pgx.Tx) error
 
 // CutoverOptions bounds the swap transaction and the ACCESS EXCLUSIVE
@@ -68,8 +73,10 @@ type CutoverOptions struct {
 	// LockBackoff is the wait after the first failed attempt; each later
 	// wait is one step longer. Zero means the default.
 	LockBackoff time.Duration
-	// Sleep waits between attempts; nil waits on the wall clock. Tests
-	// inject one to drive the retry loop without real time passing.
+	// Sleep waits between attempts, and between polls of the catalog while
+	// a lost attempt's backend is followed to its exit; nil waits on the
+	// wall clock. Tests inject one to drive the retry loop without real
+	// time passing.
 	Sleep func(ctx context.Context, d time.Duration) error
 }
 
@@ -134,11 +141,15 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 // (D5), re-reads the catalog to confirm each rename and handoff took, and
 // commits. The old table is left in place for DropOldTable (D9).
 //
-// A failed attempt is never assumed to have rolled back: before retrying
-// or returning, the catalog is read from a fresh connection to learn which
-// relation now bears the source name (LK-4). A commit the connection
-// dropped on is reported as the success it was; a name neither the source
-// nor the shadow bears is refused rather than guessed at.
+// A failed attempt is never assumed to have rolled back: an attempt that
+// lost its connection or whose context ended is followed to its backend's
+// exit on the server, and only then is the catalog read from a fresh
+// connection to learn which relation now bears the source name (LK-4). A
+// commit the client never heard of is reported as the success it was; a
+// name neither the source nor the shadow bears is refused rather than
+// guessed at. Every failure that leaves the source live wraps
+// ErrCutoverRolledBack, so a caller can tell "retry later" from "do not
+// assume" without reading the message.
 //
 // The caller holds the per-table lock (LK-1) and passes the CutoverReady
 // the gate minted; a zero proof is refused before any connection opens.
@@ -163,60 +174,37 @@ func Cutover(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSess
 
 // cutoverWithRetry is the LK-2 loop around one swap attempt. A lock
 // timeout or a deadlock is the server telling this side it rolled back,
-// so the loop waits out the backoff and tries again. A lost connection is
-// the one failure that says nothing about the outcome, so the catalog is
-// asked (LK-4) before the error is returned. Every other failure is a
-// refusal or a statement error the server answered, which means the
-// transaction rolled back, and the loop returns it as is.
+// so the loop waits out the backoff and tries again. A lost connection or
+// an ended context is the failure that says nothing about the outcome, so
+// the attempt is followed to its end and the catalog asked (LK-4) before
+// anything is returned. Every other failure is a refusal or a statement
+// error the server answered, which means the transaction rolled back, and
+// the loop returns it marked as such.
 func cutoverWithRetry(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, opts CutoverOptions) (SwappedTable, error) {
 	attempts := opts.lockAttempts()
 	var last error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		swapped, err := swapOnce(ctx, pool, lock, ready, drain, opts.Options)
+		swapped, backend, err := swapOnce(ctx, pool, lock, ready, drain, opts.Options)
 		if err == nil {
 			swapped.attempts = attempt
 			return swapped, nil
 		}
-		if connectionLost(err) {
-			return resolveLostConnection(ctx, pool, ready, attempt, err)
+		if outcomeUnknown(err) {
+			return resolveUnknownOutcome(ctx, pool, ready, backend, attempt, err, opts)
 		}
 		if !lockRetryable(err) {
-			return SwappedTable{}, err
+			return SwappedTable{}, rolledBack(err)
 		}
 		last = err
 		if attempt == attempts {
 			break
 		}
 		if err := opts.sleep()(ctx, opts.lockBackoff()*time.Duration(attempt)); err != nil {
-			return SwappedTable{}, err
+			return SwappedTable{}, rolledBack(err)
 		}
 	}
 	// INV: LK-2
-	return SwappedTable{}, fmt.Errorf("%w after %d attempts on %s.%s: %w", ErrLockRetriesExhausted, attempts, ready.built.Schema(), ready.built.SourceTable(), last)
-}
-
-// resolveLostConnection reads the outcome of an attempt whose connection
-// broke from a fresh connection (LK-4): a swap the server committed before
-// the client lost it is the success it was; a source still under its own
-// name rolled back, and the connection error is returned for the caller to
-// decide on; a name borne by neither relation is refused.
-func resolveLostConnection(ctx context.Context, pool *pgxpool.Pool, ready CutoverReady, attempt int, lost error) (SwappedTable, error) {
-	outcome, err := inspectOutcome(ctx, pool, ready.built)
-	if err != nil {
-		return SwappedTable{}, errors.Join(lost, err)
-	}
-	schema, source := ready.built.Schema(), ready.built.SourceTable()
-	switch outcome {
-	case outcomeSwapped:
-		// INV: LK-4
-		return newSwappedTable(ready, attempt), nil
-	case outcomeNotSwapped:
-		return SwappedTable{}, fmt.Errorf("cutover of %s.%s rolled back when its connection was lost: %w", schema, source, lost)
-	default:
-		// INV: LK-4
-		return SwappedTable{}, refuse(CauseOutcomeAmbiguous, []error{lost},
-			"after a lost connection neither the source nor the shadow bears the name %s.%s", schema, source)
-	}
+	return SwappedTable{}, rolledBack(fmt.Errorf("%w after %d attempts on %s.%s: %w", ErrLockRetriesExhausted, attempts, ready.built.Schema(), ready.built.SourceTable(), last))
 }
 
 // lockRetryable reports whether a failed attempt ended the way a bounded
@@ -229,20 +217,4 @@ func lockRetryable(err error) bool {
 		return false
 	}
 	return pgErr.Code == codeLockNotAvailable || pgErr.Code == codeDeadlockDetected
-}
-
-// connectionLost reports whether a failed attempt lost its connection
-// rather than receiving an answer: the server terminated the backend, a
-// connection-exception SQLSTATE came back, the socket failed, or pgx
-// reports the connection closed. Only then is the outcome unknown.
-func connectionLost(err error) bool {
-	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) {
-		return pgErr.Code == codeAdminShutdown || pgErr.Code == codeCrashShutdown || strings.HasPrefix(pgErr.Code, classConnectionException)
-	}
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		return true
-	}
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || pgconn.SafeToRetry(err)
 }
