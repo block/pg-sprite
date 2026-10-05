@@ -85,6 +85,9 @@ func (o Options) statementTimeout() time.Duration {
 // constructor is private: the copier and cutover accept only a value this
 // builder returned.
 type BuiltShadow struct {
+	// target is the copy-and-swap shape proof the build ran under; the
+	// swap re-checks it under its own lock.
+	target                 preflight.CopySwapTarget
 	schema, source, shadow string
 	sourceOID, shadowOID   uint32
 	sourceFingerprint      string
@@ -279,6 +282,7 @@ func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, s
 		return BuiltShadow{}, err
 	}
 	return BuiltShadow{
+		target:            target,
 		schema:            target.Schema(),
 		source:            target.Table(),
 		shadow:            shadow,

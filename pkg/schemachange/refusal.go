@@ -88,6 +88,18 @@ const (
 	// schema, or a source dependent's name by a shadow constraint that is
 	// not the one being renamed to it.
 	CauseNameTaken RefusalCause = "cutover-name-taken"
+	// CauseSwapMismatch means the catalog, re-read inside the swap
+	// transaction after the renames and handoffs, does not show what the
+	// swap set out to produce — the shadow under the source's name, the
+	// source under its _old name, a paired dependent under its new name,
+	// or the live table's sequences and identities as the source had them
+	// (ST-6). The transaction is rolled back and nothing is swapped.
+	CauseSwapMismatch RefusalCause = "cutover-swap-mismatch"
+	// CauseOutcomeAmbiguous means that after a failed swap attempt the
+	// source's name is borne by neither the source nor the shadow (LK-4):
+	// the catalog cannot say whether the swap committed, so the engine
+	// stops rather than retry or report either outcome.
+	CauseOutcomeAmbiguous RefusalCause = "cutover-outcome-ambiguous"
 )
 
 // RefusalCauses returns the closed set of shadow refusal causes, so
@@ -112,6 +124,8 @@ func RefusalCauses() []RefusalCause {
 		CauseFidelityDrift,
 		CauseIndexInvalid,
 		CauseNameTaken,
+		CauseSwapMismatch,
+		CauseOutcomeAmbiguous,
 	}
 }
 
@@ -121,7 +135,7 @@ func (c RefusalCause) Invariant() string {
 	switch c {
 	case CauseLockUnproven, CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed:
 		return "LK-1"
-	case CauseProofEmpty, CauseSourceShape, CauseRelationReplaced:
+	case CauseProofEmpty, CauseSourceShape, CauseRelationReplaced, CauseSwapMismatch:
 		return "ST-6"
 	case CauseStatementTarget:
 		return "ST-7"
@@ -130,6 +144,8 @@ func (c RefusalCause) Invariant() string {
 		return "ST-5"
 	case CauseCutoverUnverified:
 		return "CO-1"
+	case CauseOutcomeAmbiguous:
+		return "LK-4"
 	default:
 		return ""
 	}

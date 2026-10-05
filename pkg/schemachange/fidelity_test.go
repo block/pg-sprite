@@ -48,13 +48,17 @@ func TestRoleSQLQuotesEveryRealRole(t *testing.T) {
 	assert.Equal(t, `"app reader"`, roleSQL("app reader", false))
 }
 
-// GRANT and REVOKE render the privilege, the optional column, the grantee,
-// and the grant option in the server's syntax.
+// GRANT and REVOKE render the object kind, the privilege, the optional
+// column, the grantee, and the grant option in the server's syntax.
 func TestGrantAndRevokeSQL(t *testing.T) {
 	reader := Grant{Privilege: "SELECT", Grantee: "reader", Grantable: true}
 	public := Grant{Privilege: "INSERT", Public: true}
-	assert.Equal(t, `GRANT SELECT ON TABLE "s"."t" TO "reader" WITH GRANT OPTION`, grantSQL(`"s"."t"`, "", reader))
-	assert.Equal(t, `GRANT INSERT ("balance") ON TABLE "s"."t" TO PUBLIC`, grantSQL(`"s"."t"`, "balance", public))
-	assert.Equal(t, `REVOKE SELECT ON TABLE "s"."t" FROM "reader"`, revokeSQL(`"s"."t"`, "", reader, false))
-	assert.Equal(t, `REVOKE GRANT OPTION FOR SELECT ("balance") ON TABLE "s"."t" FROM "reader"`, revokeSQL(`"s"."t"`, "balance", reader, true))
+	assert.Equal(t, `GRANT SELECT ON TABLE "s"."t" TO "reader" WITH GRANT OPTION`, grantSQL(aclTable, `"s"."t"`, "", reader))
+	assert.Equal(t, `GRANT INSERT ("balance") ON TABLE "s"."t" TO PUBLIC`, grantSQL(aclTable, `"s"."t"`, "balance", public))
+	assert.Equal(t, `REVOKE SELECT ON TABLE "s"."t" FROM "reader"`, revokeSQL(aclTable, `"s"."t"`, "", reader, false))
+	assert.Equal(t, `REVOKE GRANT OPTION FOR SELECT ("balance") ON TABLE "s"."t" FROM "reader"`, revokeSQL(aclTable, `"s"."t"`, "balance", reader, true))
+
+	usage := Grant{Privilege: "USAGE", Grantee: "app"}
+	assert.Equal(t, `GRANT USAGE ON SEQUENCE "s"."t_id_seq" TO "app"`, grantSQL(aclSequence, `"s"."t_id_seq"`, "", usage))
+	assert.Equal(t, `REVOKE USAGE ON SEQUENCE "s"."t_id_seq" FROM "app"`, revokeSQL(aclSequence, `"s"."t_id_seq"`, "", usage, false))
 }
