@@ -11,9 +11,10 @@ import (
 // Every cause upholds the one invariant docs/invariants.md files it under —
 // the lock causes under LK-1, the relation-identity causes under ST-6, the
 // statement-target cause under ST-7, the fidelity and swap-readiness causes
-// under ST-5, and the proof cause under CO-1 — and an unknown cause upholds
-// none. The refusal text leads with this identifier, so an operator looking
-// it up must land on the right entry.
+// under ST-5, the proof cause under CO-1, and the ambiguous-outcome cause
+// under LK-4 — and an unknown cause upholds none. The refusal text leads
+// with this identifier, so an operator looking it up must land on the right
+// entry.
 func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 	want := map[RefusalCause]string{
 		CauseLockUnproven:      "LK-1",
@@ -33,6 +34,8 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 		CauseIndexInvalid:      "ST-5",
 		CauseNameTaken:         "ST-5",
 		CauseCutoverUnverified: "CO-1",
+		CauseSwapMismatch:      "ST-6",
+		CauseOutcomeAmbiguous:  "LK-4",
 	}
 	assert.Len(t, RefusalCauses(), len(want), "every registered cause has an expected invariant")
 	for _, cause := range RefusalCauses() {

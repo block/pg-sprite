@@ -316,9 +316,16 @@ its `Bind` context, and calls `TableLockSession.Confirm` from each chunk's own c
 the insert (wrong-table, gone-session, rival-backend, and mid-copy-loss tests); `pkg/checksum`
 `Verifier` requires the same session, runs every read transaction under its `Bind` context, and
 confirms the lock from each transaction's own connection before the first read (wrong-table,
-gone-session, reported-loss, and mid-pass-loss tests). *Planned
-enforcement:* cutover acquires the same session before its first write and runs under it, so
-loss of the lock aborts the change at every stage.
+gone-session, reported-loss, and mid-pass-loss tests); `pkg/schemachange` `GateCutover`,
+`Cutover`, and `DropOldTable` require the same session, run under its `Bind` context, and
+confirm from the swap's and the drop's own transactions that the session's backend holds the
+lock before the first rename or the drop (nil-session, rival-backend, and lost-mid-attempt
+tests for the swap; nil-session and rival-backend tests for the drop), so loss of the lock
+aborts the change at every stage; `pkg/checkpoint` `Store.Save` and `Store.Delete` require the
+same session for the checkpoint's target, run under its `Bind` context, and confirm the lock
+from the write's own transaction before the upsert or the delete (nil-session, wrong-table,
+and rival-backend tests), so a run whose lock went to another engine cannot stamp its stale
+checkpoint over the newer engine's row.
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
@@ -341,11 +348,16 @@ transactionally clean (the constraint simply stays `NOT VALID`; no debris), so t
 executor's validate class deliberately keeps a bounded per-lock timeout — queueing behind a
 conflicting lock holder must not stall a sequence for the whole scan budget — while the scan
 itself runs under its own generous overall budget. *Enforced:* every DDL execution path in the
-native and copy-and-swap executors; in `pkg/copier` and `pkg/checksum`, every statement on the
-caller's pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repair — runs
-inside a transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so
-a pool built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued
-behind `ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
+native and copy-and-swap executors; `pkg/schemachange.Cutover` takes `ACCESS EXCLUSIVE` on the
+source and the shadow in one `LOCK TABLE` under the transaction's `lock_timeout`, and on
+`lock_not_available` or `deadlock_detected` rolls back and retries after a linearly growing
+backoff for a bounded number of attempts (`CutoverOptions.LockAttempts`, `LockBackoff`), then
+returns `ErrLockRetriesExhausted` with the source still live (reader-held-then-released and
+never-released tests); in `pkg/copier` and `pkg/checksum`, every statement on the caller's
+pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repair — runs inside a
+transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so a pool
+built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued behind
+`ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -374,7 +386,22 @@ If the connection drops mid-swap (around `COMMIT`), the engine must determine fr
 **which table now bears the source name** before retrying or reporting — never assume the rename
 did or didn't commit. PostgreSQL's transactional DDL makes the swap itself atomic, but the
 *client's knowledge* of the outcome is not. Retries of the cutover must be written against this
-ambiguity. *Enforced:* cutover retry loop. *Source:* Spirit's cutover
+ambiguity. *Enforced:* `pkg/schemachange.Cutover` — a swap attempt that ends in a lost connection
+(the server's `admin_shutdown`/`crash_shutdown`, a connection-exception SQLSTATE, a network
+error, or an EOF) or in the caller's context ending is never retried or reported until the
+outcome is known: the attempt's backend, which may still be deciding inside `COMMIT`, is first
+followed to its exit under a context the caller's cancellation no longer governs, bounded by the
+attempt's own `lock_timeout` plus `statement_timeout`, and a backend still present at that bound
+is refused as `cutover-outcome-ambiguous` rather than read around; then a fresh connection reads
+which OID bears the source name: the shadow's OID is reported as the committed swap it was, the
+source's OID as a rollback carrying the connection error, and any other state — no relation, or
+one the build never proved — is refused as `cutover-outcome-ambiguous`. Every attempt the
+catalog shows rolled back — a lock timeout, a drain error, a refusal inside the transaction, or
+a lost connection the inspection resolved — is reported wrapping `ErrCutoverRolledBack`, so a
+caller distinguishes "the source is still live, retry is safe" from an unresolved outcome
+without reading the catalog itself (terminated-backend test; commit-the-client-never-heard-of
+test; context-ends-during-commit test; backend-still-running test; three-catalog-state
+inspection test). *Source:* Spirit's cutover
 (`information_schema` inspection on dropped connection,
 [Spirit README](https://github.com/block/spirit#cut-over-and-cleanup)).
 
@@ -500,9 +527,11 @@ The [atomic RLS contract](atomic-row-security.md) defines these executor obligat
 
 The checkpoint table keeps **one row per `(schema, table)`** (upsert on that key) so a crash can
 never leave a partial pair for one target — its record is either the old or the new one.
-Unbounded append-style checkpoint history is not used. *Planned enforcement (Phase 8):*
-`pkg/checkpoint` write path (`INSERT … ON CONFLICT (schema_name, table_name) DO UPDATE`, the REPLACE
-analog). *Source:* Spirit `pkg/checkpoint` (single-row REPLACE on `id=1`), scoped per target by
+Unbounded append-style checkpoint history is not used. *Enforced:* `pkg/checkpoint`
+`Store.Save` — one `INSERT … ON CONFLICT (schema_name, table_name) DO UPDATE` (the REPLACE
+analog) per save, under the target's table lock (LK-1), so a reader sees the previous record or
+the new one and never a mix; `TestSaveUpsertsTheOneRowPerTarget`, `TestSaveKeepsOneRowPerTarget`,
+`TestSaveRefusesWhenAnotherBackendHoldsTheTable`. *Source:* Spirit `pkg/checkpoint` (single-row REPLACE on `id=1`), scoped per target by
 [copy-and-swap D3](copy-and-swap-design.md#d3--store-checkpoints-in-the-target-database).
 
 ### ST-2 — An incompatible checkpoint is distinguishable from a transient read error
@@ -510,10 +539,25 @@ analog). *Source:* Spirit `pkg/checkpoint` (single-row REPLACE on `id=1`), scope
 Resume must tell apart: (a) a readable, matching checkpoint → resume; (b) a checkpoint written by
 an incompatible engine version or for a **different statement** → refuse to resume, start fresh
 (never mix state across versions/statements); (c) a *transient* read failure → retry, and never
-trigger fresh-start recovery on a blip. *Enforced:* checkpoint read/validation path (version +
-statement fingerprint stored with the watermark; the fingerprint will hash the
-execute-and-introspect after-schema model, not SQL text, so textually-different-but-identical statements match and
-cosmetic edits don't force a fresh start). *Source:* Spirit `checkpoint.IsIncompatible` +
+trigger fresh-start recovery on a blip. *Enforced:* `pkg/checkpoint` `Store.Load` returns the
+`Checkpoint` for (a), a typed `IncompatibleError` for (b) — the row format version and both
+model fingerprints are stored with the watermark, and the fingerprints are
+`pkg/schemachange`'s digests of the execute-and-introspect source and after-schema models, not
+SQL text, so textually-different-but-identical statements match and cosmetic edits don't force
+a fresh start — and for (c) retries through transient errors (what `dbconn.Retryable` names, plus a session the
+server ended from outside it, `57P01`/`57P02`/`57P03`, which only a read may safely repeat) under bounded attempts
+before returning an error that is neither `ErrNotFound` nor incompatible; `ErrNotFound` is
+returned only for a completed read that found no row, and a database where the checkpoint table
+was never created is the typed `ErrTableMissing`, never `ErrNotFound`. `Store.Save` applies the
+same identity guard on the write path, so a run can never write its state over another
+statement's row; `Delete` is the explicit fresh start, and it removes only the row whose
+`Identity` the caller was shown (`IncompatibleError.Stored`), so a row another engine wrote in
+between survives and surfaces as a new `IncompatibleError`. `TestLoadRetriesAcrossATerminatedBackend`,
+`TestLoadReportsAnotherStatementsRowAsIncompatible`,
+`TestLoadReportsAnotherFormatVersionAsIncompatible`,
+`TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestDeleteRefusesARowTheCallerWasNotShown`,
+`TestWritesAndReadsWithoutEnsureReportTheMissingTable`,
+`TestResumeFromCheckpointConvergesAfterAMidCopyKill`. *Source:* Spirit `checkpoint.IsIncompatible` +
 "resume requires the identical ALTER".
 
 ### ST-3 — Slot cleanup is guaranteed on success, failure, and crash
@@ -552,9 +596,11 @@ parameters, replica identity, per-column and extended statistics targets, unvali
 identity sequence options — no longer matches what the build recorded, when the source's
 grants no longer match the shadow's, when a shadow index is
 invalid, or when a name the swap must assign is already taken; it also pairs every source
-index and extended statistics object with its shadow counterpart by catalog definition and
-lists the sequences the swap must re-own. Before that, `pkg/schemachange` refuses to build a
-shadow the source's owner does not own, and refuses to inspect or drop anything under the
+index and extended statistics object with its shadow counterpart by catalog definition (setting
+aside only the default operator class and the column's own collation of a key column the
+statement retyped, which the server re-derives for the new type; an operator class or collation
+written in the index still has to agree) and lists the sequences the swap must re-own. Before that,
+`pkg/schemachange` refuses to build a shadow the source's owner does not own, and refuses to inspect or drop anything under the
 shadow's name that is not a plain table the source's owner owns (an inspected shadow must also
 still draw each identity default from the source's sequence). *Source:*
 [low-level-design § operational caveats](low-level-design.md#operational-caveats),
@@ -634,7 +680,12 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   publishing it (explicit, `FOR ALL TABLES`, or `FOR TABLES IN SCHEMA`), no **subscription**
   applying into it, and no other `pg_depend` dependent of its OID or row type (v1) — a
   rename-swap strands every one of them on the retained table, and a scope publication would
-  publish the shadow's copy writes.
+  publish the shadow's copy writes. *Enforced:* `pkg/preflight.CheckCopySwapShape` proves the
+  shape before the build, and `pkg/schemachange.Cutover` re-runs the same checklist
+  (`RecheckCopySwapShape`) inside the swap transaction under `ACCESS EXCLUSIVE` — the only lock
+  that keeps a new view, foreign key, or trigger from attaching to the source between the proof
+  and the rename — refusing with the shape's own cause and rolling the attempt back
+  (view-after-shape-proven test).
   *Source:* [low-level-design coverage](low-level-design.md#schema-shapes), risks-and-mitigations.
 - **RF-3** — Lossy **or failable** conversions are refused up front (shortening below max data
   length, `NOT NULL` without default on null data, `text→jsonb` with unvalidatable rows) rather

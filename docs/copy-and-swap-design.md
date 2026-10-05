@@ -87,8 +87,13 @@ needs separate resumability, validity, uniqueness, and resource controls.
 
 ### D3 — Store checkpoints in the target database
 
-**Decision.** The engine role creates `pgsprite_checkpoint` in the target database on first use.
-It contains one row per `(schema, table)`.
+**Decision.** The engine role creates `pgsprite_checkpoint` in the target database on first use,
+in an engine-owned `pgsprite` schema — the target's schemas are never written to, and `public`
+is not assumed writable (PostgreSQL 15 revoked `CREATE` on it from `PUBLIC`). It contains one
+row per `(schema, table)`, keyed on the row format version and the two model fingerprints
+(ST-2); a write for a target whose row carries another statement's fingerprints or another
+format is refused, typed, and a fresh start deletes the row explicitly first. Creating the
+schema needs `CREATE` on the database, the same privilege the scratch schema already needs.
 
 **Why.** Ordinary table data follows the database through failover and gives each target one
 atomic, local resume record.
@@ -125,9 +130,16 @@ table's. Identity metadata is excluded from the shadow. The shadow instead recei
 `ACCESS EXCLUSIVE`, cutover renames the source identity sequence to its `_old` name (D8), drops
 that default, recreates identity with
 `ALTER TABLE … ALTER COLUMN … ADD GENERATED ALWAYS|BY DEFAULT AS IDENTITY` using the source
-sequence's options, renames the server-named new identity sequence to the name the source's
-held (freed by its `_old` rename, so a user-renamed identity sequence keeps its name), and
-copies the source sequence's exact position with
+sequence's declared options — except that a bound the source left at its own integer type's
+limit follows the column to the new type's limit when the gated statement widened the column
+(`integer` → `bigint` moves a default `MAXVALUE 2147483647` to `9223372036854775807`; a bound
+the user set explicitly inside the old range is kept), since replaying the old limit would
+have the new sequence stop where the old type stopped — renames the server-named new identity
+sequence to the name the source's held (freed by its `_old` rename, so a user-renamed identity
+sequence keeps its name), re-grants on it every `USAGE`, `SELECT`, and `UPDATE` privilege the
+source's sequence carried (the server creates the new sequence with the owner's default ACL,
+and a role that called `nextval` through the source's grant would otherwise lose it at the
+swap), and copies the source sequence's exact position with
 `setval('<new-identity-sequence>', last_value, is_called)`, both values read in the same
 transaction from the sequence relation itself (`SELECT last_value, is_called FROM <sequence>`)
 — not from `pg_sequences.last_value` or `pg_sequence_last_value()`, which report NULL for a
@@ -202,19 +214,28 @@ corresponding dependent is then renamed to the name the source dependent held
 their names under `LIKE` and need no rename). `LIKE` keeps none of the source's index,
 unique-constraint, or statistics names, so "corresponding" is established by **definition**, not
 by name: indexed columns or expressions, access method, operator classes, uniqueness, and
-predicate for an index; the column set and kinds for a statistics object. Two source indexes
-with identical definitions are interchangeable, so an arbitrary pairing between them restores an
-equivalent catalog. The post-swap catalog therefore carries the user's names —
-`ON CONFLICT ON CONSTRAINT u_slot` keeps working and a later change of the same table derives
-the same names — and only the old table's dependents wear the suffix. A shared `serial`/`nextval`
-sequence is not a dependent of the old table and keeps its name (D5). Every derived name is a
-fixed width — 30 bytes for the table names, 47 for a dependent's — because both the table and
-the dependent enter the name as hashes, never as text; no source name, however long, can push a
-derived name into the server's silent truncation at 63 bytes, so the route has no name-length
-refusal. The hash has no inverse, but a derived relation always lives in its source's schema,
-so `schemachange.SourceOfDerivedName` recovers the source by recomputing each table's derived
-names in that one schema — the query an operator runs on finding a `_pgsprite_…` relation they
-did not create.
+predicate for an index; the column set and kinds for a statistics object. One difference is set
+aside: PostgreSQL re-creates an index on a column the gated statement retypes for the new type,
+re-deriving that type's default operator class and the column's own collation while keeping an
+operator class or collation written in the index, so for a key column the statement retyped —
+the same name on both sides, a different canonical type — the default operator class and the
+column's own collation do not count, and everything else about the two definitions, a written
+operator class or collation included, must still agree; an expression or a predicate over such
+a column (the server may render either differently for the new type), and every column the
+statement did not retype, is held to an exact match. Two source indexes with identical
+definitions are interchangeable, so an arbitrary pairing between them restores an equivalent
+catalog; two that are identical only once the set-aside facts are removed are not shown to be,
+so the relaxed rule pairs neither and both stay unpaired. The post-swap catalog therefore
+carries the user's names — `ON CONFLICT ON CONSTRAINT u_slot` keeps working and a later change
+of the same table derives the same names — and only the old table's dependents wear the suffix.
+A shared `serial`/`nextval` sequence is not a dependent of the old table and keeps its name (D5).
+Every derived name is a fixed width — 30 bytes for the table names, 47 for a dependent's —
+because both the table and the dependent enter the name as hashes, never as text; no source
+name, however long, can push a derived name into the server's silent truncation at 63 bytes, so
+the route has no name-length refusal. The hash has no inverse, but a derived relation always
+lives in its source's schema, so `schemachange.SourceOfDerivedName` recovers the source by
+recomputing each table's derived names in that one schema — the query an operator runs on
+finding a `_pgsprite_…` relation they did not create.
 
 **Why.** Stable names make catalog inspection and resume deterministic; restoring user names keeps
 the swap invisible to code that names constraints; fixed-width hashed names make truncation, and
@@ -390,19 +411,22 @@ decoding but adds write-path availability and amplification costs.
 | `pkg/checksum` | `Verifier` (built from a `CopySwapTarget`, a `copier.Shadow`, and the table's `TableLockSession`) compares the source with its shadow up to the copier's landed watermark and returns a `Report` of the chunks that differ. It cuts its own chunks with a `copier.Chunker`, cutting and digesting each chunk in one read-only `REPEATABLE READ` transaction, so the cut and the chunk's two digests describe one snapshot, no snapshot outlives one chunk, and the cut's lock wait is bounded like the reads (LK-2); each transaction runs the copier's guard — owner role, catalog-only `search_path`, `ACCESS SHARE` on both relations taken before the snapshot, lock confirmation, relation-OID check — and pins `extra_float_digits` to its maximum, since the digest hashes each row's text rendering and a database or role configured at zero or below would render two floats that differ only in their last digits the same. Both sides run the identical frozen statement — row count plus `md5` of the key-ordered concatenation of each row's `md5(ROW(col::shadow_type, …)::text)` over `pk BETWEEN $1 AND $2` — so only the data can differ, and the cast on every column is D7: a converted column hashes as the value the shadow holds. Only the copy columns are compared; generated columns present on both sides are not yet hashed. A `Report` proves nothing. `Check` runs the same pass under a `DivergencePolicy` the caller states every time (the zero value is refused): `abort` returns a `DivergenceError` carrying the report with the shadow untouched; `repair` replaces every differing chunk inside one guarded read-write transaction — delete the shadow's rows over every chunk's key range, then the copy statement itself for every chunk, so a unique value the source moved from one differing chunk to another lands instead of colliding with the stale row — and digests each chunk again in a fresh snapshot, returning a `RepairError` for the first that still differs alongside the `Outcome` listing every repair that committed. A repair pass assumes nothing else writes the shadow and the source rows it recopies hold still until the rereads; a write inside the pass reads as a `RepairError`, never as a second repair. `ParseDivergencePolicy` lets a caller refuse a configured policy before any pass. Only a pass that found nothing and repaired nothing mints the proofs, whose constructors are private to the package: a `CleanWatermark` at the watermark it read through, and a `VerifiedShadow` only when that watermark is complete; `Outcome.Clean` is true only when the clean watermark was minted. A pass with repairs returns its `Repair`s and no proof; the next pass mints. | CO-1, CO-2, CO-3, CO-9, LK-1, LK-2 |
 | `pkg/decode` | Produces `ChangeEvent`, including per-column presence and `OldKey` for an UPDATE that moved the primary key. | ST-3, ST-4, CO-4, CO-8 |
 | `pkg/applier` | Applies presence-aware events from the per-key buffer. | CO-4, CO-5, CO-6, CO-8, LK-3 |
-| `pkg/checkpoint` | Produces `Checkpoint`. | ST-1, ST-2 |
-| `pkg/schemachange` | Shadow builder (`BuildShadow` produces `BuiltShadow`: source and shadow OIDs, fingerprints, identity handoff, copy columns, fidelity snapshot; `SourceOfDerivedName` maps a derived name back to its table), orchestrator, and cutover. `BuildShadow`, `DropShadow`, and `InspectShadow` each take the `*dbconn.TableLockSession` for the table — a dedicated direct server session, distinct from the working pool, that `dbconn.AcquireTableLock` refuses to open through a transaction-pooling proxy: the operation runs under the session's `Bind` context so a lost lock cancels the statement in flight, and its transaction re-asserts from its own connection that the session's backend holds the lock before the first write, since the lock and the work are deliberately on different sessions. `InspectShadow` is the resume path `ErrShadowExists` points at: it re-derives the `BuiltShadow` proof from the catalog for the caller to compare with its checkpoint — `BuiltShadow.Proof()` is the plain, JSON-encodable view of that proof (`BuiltShadow` marshals as it), and nothing decodes back into a `BuiltShadow`, so only the builder and the inspection mint one; `DropShadow` is the D5 cleanup, dropping only a plain table the source's owner owns, without `CASCADE`. `GateCutover` is the ST-5 fidelity gate: handed a `BuiltShadow` and a `checksum.VerifiedShadow` for the same table, it re-reads both relations under the lock, refuses on a moved OID, a fingerprint or fidelity snapshot that drifted from the build's record, an invalid shadow index, or a swap name already taken, and otherwise mints `CutoverReady` — the pairing of every source index and extended statistics object with its shadow counterpart by catalog definition (not by name, since `LIKE` renames them), and the sequences the swap must re-own; the swap itself consumes that proof. Every refusal the four operations return is a `*RefusalError` carrying a `RefusalCause` from the closed set in [refusal-classes.md](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause), so an importer routes on the cause rather than on message text. | LK-1, LK-2, LK-4, CO-1, ST-5, ST-7 |
+| `pkg/checkpoint` | Produces `Checkpoint` and persists it: `Store` (over a `pkg/dbconn` pool) creates `pgsprite.pgsprite_checkpoint` on first use (`Ensure`, serialized under the engine's advisory key so concurrent first users never race the create; it creates only what is absent, so a pre-provisioned schema and table the engine owns need no database `CREATE`, and refuses with `ErrForeignObject` a schema or table another role owns), `Save` takes the target's `TableLockSession`, confirms it from the write's own transaction, and writes the target's one row in one `INSERT … ON CONFLICT DO UPDATE` whose update is guarded on the row's format version and fingerprints — zero rows updated is an `IncompatibleError`, never a silent overwrite — `Load` returns the row for a run with the same `Fingerprints`, `ErrNotFound` for no row, `ErrTableMissing` when `Ensure` never ran, an `IncompatibleError` naming the first disagreeing field (format, then source, then target fingerprint) and carrying the row's whole `Identity`, or, after bounded retries through transient errors (`dbconn.Retryable` plus a session the server ended from outside it, `57P01`/`57P02`/`57P03`) with an injected sleep, an error that is none of those; `Delete`, under the same lock, is the explicit fresh start and removes only the row whose `Identity` the caller was shown. The watermark column is `NULL` while nothing has landed, the LSN is a `pg_lsn`, and the phase is stored by its stable name. | ST-1, ST-2, LK-1 |
+| `pkg/schemachange` | Shadow builder (`BuildShadow` produces `BuiltShadow`: source and shadow OIDs, fingerprints, identity handoff, copy columns, fidelity snapshot; `SourceOfDerivedName` maps a derived name back to its table), orchestrator, and cutover. `BuildShadow`, `DropShadow`, and `InspectShadow` each take the `*dbconn.TableLockSession` for the table — a dedicated direct server session, distinct from the working pool, that `dbconn.AcquireTableLock` refuses to open through a transaction-pooling proxy: the operation runs under the session's `Bind` context so a lost lock cancels the statement in flight, and its transaction re-asserts from its own connection that the session's backend holds the lock before the first write, since the lock and the work are deliberately on different sessions. `InspectShadow` is the resume path `ErrShadowExists` points at: it re-derives the `BuiltShadow` proof from the catalog for the caller to compare with its checkpoint — `BuiltShadow.Proof()` is the plain, JSON-encodable view of that proof (`BuiltShadow` marshals as it), and nothing decodes back into a `BuiltShadow`, so only the builder and the inspection mint one; `DropShadow` is the D5 cleanup, dropping only a plain table the source's owner owns, without `CASCADE`. `GateCutover` is the ST-5 fidelity gate: handed a `BuiltShadow` and a `checksum.VerifiedShadow` for the same table, it re-reads both relations under the lock, refuses on a moved OID, a fingerprint or fidelity snapshot that drifted from the build's record, an invalid shadow index, or a swap name already taken, and otherwise mints `CutoverReady` — the pairing of every source index and extended statistics object with its shadow counterpart by catalog definition (not by name, since `LIKE` renames them; the default operator class and the column's own collation of a key column the statement retyped are set aside, since the server re-derives them for the new type; a written operator class or collation still has to agree, and a relaxed definition two indexes share pairs neither), and the sequences the swap must re-own; the swap itself consumes that proof. `Cutover` is the swap: one transaction under the lock session that takes `ACCESS EXCLUSIVE` on the source and the shadow under `lock_timeout` with bounded retry and backoff, runs the caller's `DrainFunc` (nil for a quiesced table) once per attempt once writers are excluded — a rolled-back attempt takes the drain's work with it, so the next attempt drains again from the same state — re-runs the copy-and-swap shape check (RF-2) and the gate's checklist so the pairing it renames by is as fresh as the lock, performs the D8 renames (every source dependent to its derived `_old` name, the source to `_old`, the shadow to the source's name, each paired shadow dependent to its partner's name), completes the D5 handoff (re-owning shared sequences; recreating each identity column with the source sequence's declared options — bounds following a widened column's type — under the source sequence's name, carrying the source sequence's grants, and `setval` to its `(last_value, is_called)`), re-reads the catalog to confirm every rename and handoff before committing, and mints `SwappedTable`; an attempt whose connection broke or whose context ended is resolved by following its backend to its exit and then reading from a fresh connection which OID bears the source name, never assumed (LK-4), and every attempt the catalog shows rolled back is reported wrapping `ErrCutoverRolledBack`. `DropOldTable` is the D9 drop: a separate bounded transaction that drops only the relation whose OID the `SwappedTable` recorded as the source, without `CASCADE`. Every refusal the six operations return is a `*RefusalError` carrying a `RefusalCause` from the closed set in [refusal-classes.md](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause), so an importer routes on the cause rather than on message text. | LK-1, LK-2, LK-4, CO-1, ST-5, ST-6, ST-7 |
 
 Each producing package owns its types. `pkg/schemachange` imports every producer; no producer
 imports `pkg/schemachange`.
 
 ## Cutover transaction, step by step
 
-1. Begin a bounded transaction, set `lock_timeout`, and acquire `ACCESS EXCLUSIVE` on the source;
-   on `lock_timeout` roll back and retry with bounded backoff, never queue behind readers (LK-2).
-2. Drain captured changes through the final WAL position and re-verify the `VerifiedShadow` and
-   fidelity proofs already minted before the lock was taken — no checksum runs under the lock
-   (CO-1, ST-5).
+1. Begin a bounded transaction, set `lock_timeout`, and acquire `ACCESS EXCLUSIVE` on the source
+   and the shadow in one statement (the shadow lock excludes a straggling copier or applier
+   connection); on `lock_timeout` roll back and retry with bounded backoff, never queue behind
+   readers (LK-2).
+2. Drain captured changes through the final WAL position — once per attempt, since a
+   rolled-back attempt takes the drain's rows with it — then re-check the copy-and-swap shape
+   (RF-2) and re-verify the `VerifiedShadow` and fidelity proofs already minted before the lock
+   was taken; no checksum runs under the lock (CO-1, ST-5).
 3. Rename the source's indexes, extended-statistics objects, and identity sequence to their
    deterministic `_old` names, the source to `_old`, and the shadow to the source name; then
    rename the shadow's indexes and statistics objects — paired with the source's by definition —
