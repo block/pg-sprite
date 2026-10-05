@@ -18,13 +18,13 @@ import (
 )
 
 // copySwapEnvironmentFixture is a schema holding one admitted table and the
-// CopySwapTarget proof minted for it, on whichever server the test needs:
+// CopySwapShape proof minted for it, on whichever server the test needs:
 // the shared harness for disk headroom, a dedicated container for the
 // restart-only settings.
 type copySwapEnvironmentFixture struct {
 	pool   *pgxpool.Pool
 	schema string
-	target preflight.CopySwapTarget
+	shape  preflight.CopySwapShape
 }
 
 // newCopySwapEnvironmentFixture creates a bigint-keyed table with enough
@@ -57,9 +57,9 @@ func newCopySwapEnvironmentFixtureOn(t *testing.T, pool *pgxpool.Pool, req prefl
 
 	role, err := preflight.CheckPrivileges(t.Context(), pool, schema, "ledger", req)
 	require.NoError(t, err)
-	target, err := preflight.CheckCopySwapShape(t.Context(), pool, schema, "ledger", role)
+	shape, err := preflight.CheckCopySwapShape(t.Context(), pool, schema, "ledger", role)
 	require.NoError(t, err)
-	return copySwapEnvironmentFixture{pool: pool, schema: schema, target: target}
+	return copySwapEnvironmentFixture{pool: pool, schema: schema, shape: shape}
 }
 
 // totalBytes is the table's heap, indexes, and TOAST as the server
@@ -73,9 +73,12 @@ func (f copySwapEnvironmentFixture) totalBytes(t *testing.T) int64 {
 	return total
 }
 
+// check runs the environment check and reports only its verdict; tests
+// that need the minted target call CheckCopySwapEnvironment directly.
 func (f copySwapEnvironmentFixture) check(t *testing.T, env preflight.CopySwapEnvironment) error {
 	t.Helper()
-	return preflight.CheckCopySwapEnvironment(t.Context(), f.pool, f.target, env)
+	_, err := preflight.CheckCopySwapEnvironment(t.Context(), f.pool, f.shape, env)
+	return err
 }
 
 // requireCopySwapEnvironmentCause asserts the refusal's cause and the
@@ -169,6 +172,28 @@ func TestCheckCopySwapEnvironmentRequiresDiskHeadroom(t *testing.T) {
 	requireCopySwapEnvironmentCause(t, err, preflight.CopySwapCauseDiskHeadroom, "")
 }
 
+// The environment check is the only minter of the target: the target it
+// returns carries the shape's facts unchanged and records the run mode the
+// cluster was verified for, so a quiesced run's target cannot later pass
+// for one whose slot and sender were proven free.
+func TestCheckCopySwapEnvironmentMintsTheTargetForTheVerifiedRunMode(t *testing.T) {
+	f := newCopySwapEnvironmentFixture(t, testutil.StartPostgresWithSettings(t, "wal_level=logical"))
+
+	quiesced, err := preflight.CheckCopySwapEnvironment(t.Context(), f.pool, f.shape, preflight.CopySwapEnvironment{FreeDiskBytes: unlimitedDisk})
+	require.NoError(t, err)
+	assert.False(t, quiesced.DecodesWAL())
+	assert.Equal(t, f.shape.Schema(), quiesced.Schema())
+	assert.Equal(t, "ledger", quiesced.Table())
+	assert.Equal(t, "id", quiesced.PKColumn())
+	assert.Equal(t, preflight.PKBigint, quiesced.PKType())
+	assert.Equal(t, f.shape.OwnerRole(), quiesced.OwnerRole())
+	assert.Equal(t, f.shape.DecodingName(), quiesced.DecodingName())
+
+	decoding, err := preflight.CheckCopySwapEnvironment(t.Context(), f.pool, f.shape, preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: unlimitedDisk})
+	require.NoError(t, err)
+	assert.True(t, decoding.DecodesWAL())
+}
+
 // The check measures the proven relation, so a forged zero proof and a
 // proof whose relation has since been dropped are both proof mismatches,
 // never environment refusals.
@@ -176,7 +201,7 @@ func TestCheckCopySwapEnvironmentRejectsUnprovenTargets(t *testing.T) {
 	f := newCopySwapEnvironmentFixture(t, testutil.StartPostgres(t))
 	env := preflight.CopySwapEnvironment{FreeDiskBytes: unlimitedDisk}
 
-	err := preflight.CheckCopySwapEnvironment(t.Context(), f.pool, preflight.CopySwapTarget{}, env)
+	_, err := preflight.CheckCopySwapEnvironment(t.Context(), f.pool, preflight.CopySwapShape{}, env)
 	require.ErrorIs(t, err, preflight.ErrCopySwapProofMismatch)
 
 	_, err = f.pool.Exec(t.Context(), fmt.Sprintf(`DROP TABLE %s.ledger`, f.schema))
@@ -195,7 +220,7 @@ func TestCheckCopySwapEnvironmentRefusesDecodingWithoutReplicationProof(t *testi
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	f := newCopySwapEnvironmentFixtureOn(t, pool, preflight.Requirement{Tier: preflight.TierCopyAndSwap})
-	require.False(t, f.target.LogicalDecoding())
+	require.False(t, f.shape.LogicalDecoding())
 
 	err = f.check(t, preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: unlimitedDisk})
 	require.ErrorIs(t, err, preflight.ErrCopySwapProofMismatch)
@@ -216,7 +241,7 @@ func TestCheckCopySwapEnvironmentIgnoresTheSessionSearchPath(t *testing.T) {
 	require.NoError(t, err)
 	shadowing := testutil.NewCatalogShadowingPool(t, serverURL, f.schema)
 
-	err = preflight.CheckCopySwapEnvironment(t.Context(), shadowing, f.target, preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: unlimitedDisk})
+	_, err = preflight.CheckCopySwapEnvironment(t.Context(), shadowing, f.shape, preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: unlimitedDisk})
 	requireCopySwapEnvironmentCause(t, err, preflight.CopySwapCauseLogicalDecodingUnavailable, preflight.CopySwapSettingWALLevel)
 }
 
@@ -272,7 +297,7 @@ func TestCheckCopySwapEnvironmentRefusesForeignSlotOfTheDerivedName(t *testing.T
 	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=logical")
 	f := newCopySwapEnvironmentFixture(t, serverURL)
 	decoding := preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: unlimitedDisk}
-	slot := f.target.DecodingName()
+	slot := f.shape.DecodingName()
 	other, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.NewDatabase(t, serverURL)})
 	require.NoError(t, err)
 	t.Cleanup(other.Close)

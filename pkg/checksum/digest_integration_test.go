@@ -2,6 +2,7 @@ package checksum
 
 import (
 	"context"
+	"math"
 	"strings"
 	"testing"
 
@@ -42,9 +43,9 @@ func (f proofFixture) exec(t *testing.T, sql string) {
 // prove mints the copy-and-swap proof for table.
 func (f proofFixture) prove(t *testing.T, table string) preflight.CopySwapTarget {
 	t.Helper()
-	role, err := preflight.CheckPrivileges(t.Context(), f.pool, f.schema, table, preflight.Requirement{Tier: preflight.TierCopyAndSwap})
-	require.NoError(t, err)
-	target, err := preflight.CheckCopySwapShape(t.Context(), f.pool, f.schema, table, role)
+	// The volume is not measured in tests; an unbounded free-disk figure
+	// admits the environment check so the proof under test is the shape.
+	target, err := preflight.CheckCopySwap(t.Context(), f.pool, f.schema, table, preflight.CopySwapEnvironment{FreeDiskBytes: math.MaxInt64})
 	require.NoError(t, err)
 	return target
 }

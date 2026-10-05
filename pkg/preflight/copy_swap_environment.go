@@ -109,33 +109,34 @@ type copySwapEnvironmentFacts struct {
 }
 
 // CheckCopySwapEnvironment verifies that the cluster and the volume can
-// carry a copy-and-swap of the proven target: when the run decodes WAL,
+// carry a copy-and-swap of the proven shape: when the run decodes WAL,
 // logical decoding is enabled, no other database holds the slot name the
 // route derives for the target, and a slot and WAL sender are free; in
 // every run the caller-measured free disk covers the shadow copy. A run
-// that decodes WAL must present a target whose privilege proof verified
-// replication access, or it is a proof mismatch. It runs after
-// CheckCopySwapShape and before the first write; a refusal is a
-// *CopySwapEnvironmentError. The reads are pg_catalog-qualified, so the
-// result does not depend on the pool's search_path; the pool should still
-// come from dbconn.NewPool, which bounds every session's timeouts.
-func CheckCopySwapEnvironment(ctx context.Context, pool *pgxpool.Pool, target CopySwapTarget, env CopySwapEnvironment) error {
-	if target.Table() == "" || target.oid == 0 {
-		return fmt.Errorf("%w: zero copy-and-swap target", ErrCopySwapProofMismatch)
+// that decodes WAL must present a shape whose privilege proof verified
+// replication access, or it is a proof mismatch. On success it mints the
+// CopySwapTarget — the only way one is minted — recording the run mode it
+// was verified for; a refusal is a *CopySwapEnvironmentError. The reads are
+// pg_catalog-qualified, so the result does not depend on the pool's
+// search_path; the pool should still come from dbconn.NewPool, which bounds
+// every session's timeouts.
+func CheckCopySwapEnvironment(ctx context.Context, pool *pgxpool.Pool, shape CopySwapShape, env CopySwapEnvironment) (CopySwapTarget, error) {
+	if shape.zero() {
+		return CopySwapTarget{}, fmt.Errorf("%w: zero copy-and-swap shape", ErrCopySwapProofMismatch)
 	}
-	if env.LogicalDecoding && !target.LogicalDecoding() {
-		return fmt.Errorf("%w: the run decodes WAL but the target's privilege proof did not verify replication access", ErrCopySwapProofMismatch)
+	if env.LogicalDecoding && !shape.LogicalDecoding() {
+		return CopySwapTarget{}, fmt.Errorf("%w: the run decodes WAL but the shape's privilege proof did not verify replication access", ErrCopySwapProofMismatch)
 	}
-	facts, err := gatherCopySwapEnvironmentFacts(ctx, pool, target)
+	facts, err := gatherCopySwapEnvironmentFacts(ctx, pool, shape)
 	if err != nil {
-		return err
+		return CopySwapTarget{}, err
 	}
 	// INV: ST-6 — enablement, headroom, and disk are decided before any
 	// write, from live settings and a live size, never from assumptions.
 	if refusal := refuseCopySwapEnvironment(facts, env); refusal != nil {
-		return refusal
+		return CopySwapTarget{}, refusal
 	}
-	return nil
+	return CopySwapTarget{copySwapShape: shape.copySwapShape, decodesWAL: env.LogicalDecoding}, nil
 }
 
 // refuseCopySwapEnvironment decides the first cause that puts the facts
@@ -214,7 +215,7 @@ func refuseLogicalDecoding(f copySwapEnvironmentFacts) *CopySwapEnvironmentError
 // route's own, left by an earlier run for the reaper or the resume path.
 // Every catalog name is pg_catalog-qualified so the facts resolve to the
 // real catalog whatever search_path the session carries.
-func gatherCopySwapEnvironmentFacts(ctx context.Context, pool *pgxpool.Pool, target CopySwapTarget) (copySwapEnvironmentFacts, error) {
+func gatherCopySwapEnvironmentFacts(ctx context.Context, pool *pgxpool.Pool, shape CopySwapShape) (copySwapEnvironmentFacts, error) {
 	const q = `
 		SELECT pg_catalog.current_setting('wal_level')::text,
 		       pg_catalog.current_setting('rds.logical_replication', true) IS NOT NULL,
@@ -226,15 +227,15 @@ func gatherCopySwapEnvironmentFacts(ctx context.Context, pool *pgxpool.Pool, tar
 		         WHERE s.slot_name = $2
 		           AND s.database IS DISTINCT FROM pg_catalog.current_database()),
 		       (SELECT pg_catalog.pg_total_relation_size(c.oid) FROM pg_catalog.pg_class c WHERE c.oid = $1)`
-	f := copySwapEnvironmentFacts{slotName: target.DecodingName()}
+	f := copySwapEnvironmentFacts{slotName: shape.DecodingName()}
 	var totalBytes *int64
-	err := pool.QueryRow(ctx, q, target.oid, f.slotName).Scan(
+	err := pool.QueryRow(ctx, q, shape.oid, f.slotName).Scan(
 		&f.walLevel, &f.rdsParameterPresent, &f.maxReplicationSlots, &f.usedSlots, &f.maxWALSenders, &f.usedWALSenders, &f.foreignSlots, &totalBytes)
 	if err != nil {
-		return copySwapEnvironmentFacts{}, fmt.Errorf("gather copy-and-swap environment facts for %s: %w", qualifiedName(target.Schema(), target.Table()), err)
+		return copySwapEnvironmentFacts{}, fmt.Errorf("gather copy-and-swap environment facts for %s: %w", qualifiedName(shape.Schema(), shape.Table()), err)
 	}
 	if totalBytes == nil {
-		return copySwapEnvironmentFacts{}, fmt.Errorf("%w: relation OID %d no longer exists", ErrCopySwapProofMismatch, target.oid)
+		return copySwapEnvironmentFacts{}, fmt.Errorf("%w: relation OID %d no longer exists", ErrCopySwapProofMismatch, shape.oid)
 	}
 	f.totalBytes = *totalBytes
 	return f, nil

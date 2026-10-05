@@ -45,7 +45,7 @@ func (f copySwapShapeFixture) exec(t *testing.T, ddl string) {
 }
 
 // check mints the tier proof and runs the shape check on table.
-func (f copySwapShapeFixture) check(t *testing.T, table string) (preflight.CopySwapTarget, error) {
+func (f copySwapShapeFixture) check(t *testing.T, table string) (preflight.CopySwapShape, error) {
 	t.Helper()
 	role, err := preflight.CheckPrivileges(t.Context(), f.pool, f.schema, table, preflight.Requirement{Tier: preflight.TierCopyAndSwap})
 	require.NoError(t, err)
@@ -618,7 +618,7 @@ func newCopySwapShapeFixtureInOwnDatabase(t *testing.T) copySwapShapeFixture {
 	return copySwapShapeFixture{serverURL: databaseURL, pool: pool, schema: testutil.NewSchema(t, pool)}
 }
 
-// A proof verified below the copy-and-swap tier cannot mint a target: the
+// A proof verified below the copy-and-swap tier cannot mint a shape proof: the
 // owner it carries was never proven SET-usable, so shadow objects could be
 // created as the wrong role.
 func TestCheckCopySwapShapeRejectsLowerTierProof(t *testing.T) {

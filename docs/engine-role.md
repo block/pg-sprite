@@ -72,7 +72,8 @@ checkpoint write.
 
 Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are checked by
 `preflight.CheckCopySwapEnvironment` once the privilege check has passed and the shape check
-has minted its target: `wal_level = logical` (`rds.logical_replication = 1` on Aurora/RDS, a
+has minted its `CopySwapShape`; the environment check is what mints the `CopySwapTarget`
+every writing step requires: `wal_level = logical` (`rds.logical_replication = 1` on Aurora/RDS, a
 static parameter requiring a reboot), and free `max_replication_slots` /
 `max_wal_senders` headroom. Both apply only to a run that decodes WAL; a quiesced run skips
 them. The same check compares the free disk the caller measured on the database volume —
