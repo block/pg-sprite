@@ -16,9 +16,9 @@ import (
 type Digest struct {
 	// Rows is the number of rows whose key lies in the chunk.
 	Rows int64
-	// Hash is md5 over the concatenation, in key order, of the per-row md5
-	// of the row's copy columns rendered as a record. It is the md5 of the
-	// empty string for an empty range.
+	// Hash is the hex SHA-256 of the concatenation, in key order, of the
+	// per-row SHA-256 of the row's copy columns rendered as a record. It is
+	// the SHA-256 of the empty input for an empty range.
 	Hash string
 }
 
@@ -76,15 +76,27 @@ func shadowColumnTypes(ctx context.Context, tx pgx.Tx, shadow copier.Shadow) ([]
 
 // digestSQL is the one statement run on each side of a chunk, with the
 // table it reads the only difference between the two: the row count and
-// the md5 of the key-ordered concatenation of every row's md5, each row
-// rendered as a record of its copy columns cast to the shadow's types —
-// the D7 rule of docs/copy-and-swap-design.md#d7--checksum-through-the-destination-types.
+// the SHA-256 of the key-ordered concatenation of every row's SHA-256,
+// each row rendered as a record of its copy columns cast to the shadow's
+// types — the D7 rule of
+// docs/copy-and-swap-design.md#d7--checksum-through-the-destination-types.
+// SHA-256 rather than md5 because PostgreSQL built against OpenSSL routes
+// md5() through it, and an OpenSSL in FIPS mode refuses MD5, which would
+// fail every pass on such a host; the digest never leaves the process, so
+// the choice of hash has no compatibility surface. sha256 takes bytes, so
+// the record text goes through convert_to with the database's own
+// encoding as the target: that performs no conversion and hashes the bytes
+// as the server stores them, which is what md5(text) hashed, and so a
+// SQL_ASCII database holding bytes that are not valid in any encoding
+// digests like any other instead of failing every pass over the chunk.
+// The per-row hashes are aggregated as bytes and only the chunk's hash is
+// rendered as hex.
 // The source side is where the casts do work: a column whose type the
 // schema change widens or narrows hashes as the value the shadow holds,
 // and both sides run the identical expression so nothing but the data can
 // differ. The record rendering tells NULL from the empty string, and
 // hashing per row before aggregating bounds the aggregate's input to one
-// md5 per row. The bounds are declared bigint whatever the key's integer
+// hash per row. The bounds are declared bigint whatever the key's integer
 // type, as the chunker's boundary query declares them, so the primary-key
 // index serves the range scan. Every function is pg_catalog-qualified, and
 // the guarded session's search_path is pg_catalog alone for the operators
@@ -96,8 +108,9 @@ func digestSQL(target preflight.CopySwapTarget, schema, table string, types []co
 		cast = append(cast, pgx.Identifier{c.name}.Sanitize()+"::"+c.typeName)
 	}
 	key := pgx.Identifier{target.PKColumn()}.Sanitize()
+	rowHash := "pg_catalog.sha256(pg_catalog.convert_to(ROW(" + strings.Join(cast, ", ") + ")::text, pg_catalog.getdatabaseencoding()))"
 	return "SELECT pg_catalog.count(*)," +
-		" pg_catalog.md5(COALESCE(pg_catalog.string_agg(pg_catalog.md5(ROW(" + strings.Join(cast, ", ") + ")::text), '' ORDER BY " + key + "), ''))" +
+		" pg_catalog.encode(pg_catalog.sha256(COALESCE(pg_catalog.string_agg(" + rowHash + ", ''::bytea ORDER BY " + key + "), ''::bytea)), 'hex')" +
 		" FROM " + pgx.Identifier{schema, table}.Sanitize() +
 		" WHERE " + key + " BETWEEN $1::bigint AND $2::bigint"
 }

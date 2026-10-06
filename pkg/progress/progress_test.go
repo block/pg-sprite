@@ -176,7 +176,7 @@ func TestStartResetsPriorRunState(t *testing.T) {
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
 // omissions, driven through a real poll so the test pins what a consumer
-// actually receives. A consumer pins format_version 4 against this test.
+// actually receives; a consumer pins the current format_version against it.
 func TestSnapshotJSONShape(t *testing.T) {
 	session := fakeSession{query: func(context.Context, string, ...any) pgx.Row {
 		return fakeRow{scan: func(dest ...any) error {
@@ -207,7 +207,7 @@ func TestSnapshotJSONShape(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 4,
+		"format_version": 5,
 		"phase": "running",
 		"step": 2,
 		"total_steps": 3,
@@ -225,6 +225,11 @@ func TestSnapshotJSONShape(t *testing.T) {
 				"rows_total": 0,
 				"bytes_copied": 0,
 				"bytes_total": 0,
+				"chunks_compared": 0,
+				"rows_hashed": 0,
+				"chunks_mismatched": 0,
+				"chunks_repaired": 0,
+				"chunks_reread": 0,
 				"blocks_done": 11,
 				"blocks_total": 40,
 				"tuples_done": 7,
@@ -266,7 +271,7 @@ func TestSnapshotJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 4,
+		"format_version": 5,
 		"phase": "pending",
 		"elapsed_ns": 0,
 		"step_elapsed_ns": 0,
