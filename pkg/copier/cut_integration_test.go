@@ -62,6 +62,11 @@ func TestCopierCutIsBoundedOnACallerBuiltPool(t *testing.T) {
 	source := pgx.Identifier{f.schema, shadow.SourceTable()}.Sanitize()
 	reader, err := f.pool.Begin(t.Context())
 	require.NoError(t, err)
+	// Redundant safety closer: the test rolls the reader back on its last
+	// line, after which Rollback returns the guaranteed ErrTxClosed. A
+	// failure before that line must still release the connection, or the
+	// fixture's pool close waits on it for the package deadline.
+	t.Cleanup(func() { _ = reader.Rollback(context.WithoutCancel(t.Context())) })
 	_, err = reader.Exec(t.Context(), "LOCK TABLE "+source+" IN ACCESS SHARE MODE")
 	require.NoError(t, err)
 

@@ -15,8 +15,9 @@ import (
 // relation that no longer exists also reads -1: the count is a measurement,
 // and whether the source is still the proven relation is the chunk guard's
 // question (ST-6), answered from inside the write transaction. It runs
-// under the session's own search_path, so every catalog name in it is
-// qualified (CO-9).
+// under the bounded read's catalog-only search_path, and every catalog
+// name in it is qualified as well, so the figure does not depend on the
+// path either way (CO-9).
 const rowsTotalSQL = `
 	SELECT COALESCE(
 		(SELECT c.reltuples

@@ -26,7 +26,7 @@ func (c *Copier) cut(ctx context.Context, pool *pgxpool.Pool) (chunk Chunk, ok b
 		return err
 	})
 	if err != nil {
-		return Chunk{}, false, err
+		return Chunk{}, false, fmt.Errorf("cut the next chunk of %s.%s: %w", c.target.Schema(), c.target.Table(), err)
 	}
 	return chunk, ok, nil
 }
