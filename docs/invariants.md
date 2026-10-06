@@ -154,8 +154,15 @@ below W, resume-from-zero-watermark with stale rows down to the smallest key, ou
 landing, pinned-chunk cancellation followed by a resume that re-copies the
 cleared tail, a resume that waits behind a straggling chunk transaction, a shadow replaced
 between a chunk's claim and its transaction, and frontier-ordered ledger tests including the
-frontier at the largest key refusing every claim). *Planned enforcement:* the applier's
-SQL shape and flush scheduling that defers any flush overlapping an in-flight chunk's key range
+frontier at the largest key refusing every claim); `pkg/applier` `Buffer.Drain` — every
+buffered key is judged against one `Position` snapshot: landed flushes, uncut is discarded,
+in-flight stays buffered until a later drain finds its chunk landed, and a key-moving UPDATE's
+two entries are judged per key, except that once neither is uncut the image and its old key's
+entry wait together and flush together, so the flush never deletes or copies the old key's row
+while an image still needs it for completion (three-way rule, discard-all before the first claim,
+deferred entry keeps merging, straddling move, pair waits in either direction, uncut half judged
+alone, deferral spreading through a shared old key). *Planned enforcement:* the applier's
+SQL shape and the flush that consumes `Drain`'s batch
 (mutual exclusion, not tombstone retention). *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
@@ -177,8 +184,15 @@ key's shadow row (D13 completes it from there). The buffer is a single keyed map
 integer-family PK
 ([copy-and-swap D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)),
 so Spirit's map ↔ FIFO-queue mode toggle for non-memory-comparable keys has no v1 counterpart
-and returns only if queue mode is ever built. *Enforced:* buffer data structure (merge on
-overlay). *Source:* Spirit `pkg/change/subscription_buffered.go` (stated invariant), narrowed to
+and returns only if queue mode is ever built. *Enforced:* `pkg/applier` `Buffer` — one `Entry`
+per key; `Add` merges in stream order (UPDATE overlays present columns by name, DELETE replaces
+with a marker, INSERT replaces a marker with a complete image, a key-moving UPDATE enters a
+marker at the old key and an image at the new key that starts from the old key's buffered image
+and records `OldKey`) and refuses with `ErrInvariantViolation` an event the source could not
+have produced given the buffer — an INSERT over a live image or with an omitted column (CO-8),
+an UPDATE over a marker, a move from a deleted key or onto a live one; `OldestPending` bounds
+the position a stream may confirm without losing a buffered entry on replay. *Source:* Spirit
+`pkg/change/subscription_buffered.go` (stated invariant), narrowed to
 the v1 key shape; the merge rule is this doc set's addition for pgoutput's partial images.
 
 ### CO-6 — Unique-secondary-key moves must converge (PostgreSQL-specific gap)
