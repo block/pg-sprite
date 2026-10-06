@@ -165,7 +165,10 @@ while an image still needs it for completion (three-way rule, discard-all before
 deferred entry keeps merging, straddling move, pair waits in either direction, uncut half judged
 alone, deferral spreading through a shared old key and along a chain of pairs); `Drain`
 judges against a `Position` read after the last `Add`, and returns a `Batch` whose `Deferred`
-count is what a catch-up is waiting on the copier for. *Planned enforcement:* the applier's
+count is what a catch-up is waiting on the copier for and whose `CompleteFirst` names the
+moved, marker-bearing images the flush must complete from the old key's shadow row before it
+writes anything — `Entries` are in key order, which does not order a moved image before the
+delete marker at its old key. *Planned enforcement:* the applier's
 SQL shape and the flush that consumes `Drain`'s batch
 (mutual exclusion, not tombstone retention). *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk

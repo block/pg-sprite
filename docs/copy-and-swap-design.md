@@ -374,7 +374,10 @@ or a later one, and any later change arrives as a later event that overlays it, 
 converges either way; an absent source row means a later event deletes or moves the key again,
 and the flush skips the image rather than invent a value. The buffer keeps the image and the old
 key's entry together across the drain (CO-4) so the old key's row is neither deleted nor copied
-between completion and apply.
+between completion and apply, and the drained `Batch` names those images in `CompleteFirst`:
+its `Entries` are in key order, which puts a moved image after or before the delete marker at
+its old key as the keys happen to sort, so the flush completes everything `CompleteFirst` names
+before it writes anything, rather than reading the batch in slice order.
 CO-6's second test vector therefore moves the primary key
 of a row whose out-of-line column is untouched, and asserts the fallback completes it from the
 old key's row rather than aborting; a third vector moves a row whose old key never landed and

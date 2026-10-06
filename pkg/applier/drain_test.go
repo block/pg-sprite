@@ -227,6 +227,48 @@ func TestDrainKeyMovePairsWithReinsertedOldKey(t *testing.T) {
 	assert.Equal(t, 2, b.Len())
 }
 
+// Key order is not a write order. A moved image that still carries a marker
+// sorts by its new key, after the delete marker at the key whose shadow row
+// holds the marker's value, so the batch names it in CompleteFirst; an image
+// that lost its marker to a later UPDATE, or that never moved, needs no
+// completion read and is not named.
+func TestDrainBatchNamesMovedImagesToCompleteFirst(t *testing.T) {
+	t.Run("moved image with a marker", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 5, 5000, col("label", "a"), marker("doc"))))
+
+		batch := b.Drain(position(t, 6000))
+
+		require.Equal(t, []int64{5, 5000}, keys(batch.Entries), "the delete at 5 sorts before the image that must read 5's row")
+		first := batch.CompleteFirst()
+		require.Len(t, first, 1)
+		assert.Equal(t, int64(5000), first[0].Key)
+		require.NotNil(t, first[0].OldKey)
+		assert.Equal(t, int64(5), *first[0].OldKey)
+	})
+	t.Run("moved image whose marker a later update filled", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 5, 5000, col("label", "a"), marker("doc"))))
+		require.NoError(t, b.Add(update(20, 5000, col("doc", "filled"))))
+
+		batch := b.Drain(position(t, 6000))
+
+		require.Equal(t, []int64{5, 5000}, keys(batch.Entries))
+		assert.Empty(t, batch.CompleteFirst(), "the image is whole; nothing in the batch has to be read first")
+	})
+	t.Run("image with a marker that did not move", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(update(10, 7, col("label", "a"), marker("doc"))))
+		require.NoError(t, b.Add(del(20, 5)))
+
+		batch := b.Drain(position(t, 6000))
+
+		require.Equal(t, []int64{5, 7}, keys(batch.Entries))
+		assert.True(t, batch.Entries[1].HasMarker())
+		assert.Empty(t, batch.CompleteFirst(), "the marker stands for 7's own shadow row, which no other entry deletes")
+	})
+}
+
 func sortedPair(a, b int64) []int64 {
 	if a < b {
 		return []int64{a, b}
