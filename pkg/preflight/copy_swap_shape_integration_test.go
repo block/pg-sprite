@@ -184,6 +184,33 @@ func TestCheckCopySwapShapeRefusesCompositeAndMissingKey(t *testing.T) {
 	requireCopySwapCause(t, err, preflight.CopySwapCausePKUnsupported)
 }
 
+// A DEFERRABLE primary key is checked at the end of each statement, so one
+// statement can move a row onto a key another row still holds and the decoded
+// stream no longer has one row per key, which the applier's buffer relies on.
+// The server also will not use a deferrable key as the DEFAULT replica
+// identity, so every UPDATE on the published table would fail. Both the FULL
+// and the DEFAULT identity forms are refused, whichever way the constraint is
+// initially timed.
+func TestCheckCopySwapShapeRefusesDeferrablePrimaryKey(t *testing.T) {
+	f := newCopySwapShapeFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.slots_full (
+			id bigint PRIMARY KEY DEFERRABLE INITIALLY IMMEDIATE,
+			label text
+		)`)
+	f.exec(t, `ALTER TABLE %s.slots_full REPLICA IDENTITY FULL`)
+	f.exec(t, `
+		CREATE TABLE %s.slots_default (
+			id bigint PRIMARY KEY DEFERRABLE INITIALLY DEFERRED,
+			label text
+		)`)
+
+	_, err := f.check(t, "slots_full")
+	requireCopySwapCause(t, err, preflight.CopySwapCausePKUnsupported)
+	_, err = f.check(t, "slots_default")
+	requireCopySwapCause(t, err, preflight.CopySwapCausePKUnsupported)
+}
+
 // REPLICA IDENTITY NOTHING strips the key from decoded UPDATE and DELETE
 // events; a named index is outside v1 even when it is the key's own index.
 func TestCheckCopySwapShapeRefusesNothingAndIndexReplicaIdentity(t *testing.T) {

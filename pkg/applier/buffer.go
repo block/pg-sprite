@@ -18,6 +18,12 @@ var ErrInvariantViolation = dbconn.ErrInvariantViolation
 // goroutine.
 type Buffer struct {
 	entries map[int64]*Entry
+	// oldest is the least FirstLSN among entries, kept as entries are
+	// written and recomputed by Drain, so OldestPending is read without a
+	// scan however often the stream owner asks; hasOldest is false when the
+	// buffer is empty.
+	oldest    decode.LSN
+	hasOldest bool
 }
 
 // NewBuffer returns an empty buffer.
@@ -28,18 +34,11 @@ func (b *Buffer) Len() int { return len(b.entries) }
 
 // OldestPending returns the earliest FirstLSN among buffered entries. A
 // stream confirmed at or past it could not replay those entries after a
-// restart, so the confirmed position must stay below it. The second result
-// is false when the buffer is empty.
+// restart, so the confirmed position must stay below it — and, until the
+// flush of a drained Batch commits, below that batch's OldestFirstLSN too.
+// The second result is false when the buffer is empty.
 func (b *Buffer) OldestPending() (decode.LSN, bool) {
-	var oldest decode.LSN
-	found := false
-	for _, e := range b.entries {
-		if !found || e.FirstLSN < oldest {
-			oldest = e.FirstLSN
-			found = true
-		}
-	}
-	return oldest, found
+	return b.oldest, b.hasOldest
 }
 
 // Add merges one decoded change into the buffer in stream order. An event the
@@ -77,7 +76,7 @@ func (b *Buffer) addInsert(ev decode.ChangeEvent) error {
 			return fmt.Errorf("%w (CO-8): buffer key %d: insert omits column %s", ErrInvariantViolation, ev.Key, c.Name)
 		}
 	}
-	b.entries[ev.Key] = &Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: firstLSN(ev.LSN, cur)}
+	b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: firstLSN(ev.LSN, cur)})
 	return nil
 }
 
@@ -88,7 +87,7 @@ func (b *Buffer) addInsert(ev decode.ChangeEvent) error {
 func (b *Buffer) addUpdate(ev decode.ChangeEvent) error {
 	cur, ok := b.entries[ev.Key]
 	if !ok {
-		b.entries[ev.Key] = &Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: ev.LSN}
+		b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: ev.LSN})
 		return nil
 	}
 	if cur.Kind == DeleteMarker {
@@ -100,11 +99,15 @@ func (b *Buffer) addUpdate(ev decode.ChangeEvent) error {
 
 // addKeyMove enters an UPDATE that moved the primary key as two entries: a
 // delete marker at the old key and an image at the new key that remembers the
-// old key (CO-5). The new image starts from the old key's buffered image when
-// there is one, so a column the move's event omitted keeps a value an earlier
-// event at the old key supplied, and overlays the move's present columns. The
-// source cannot move a row from a key it has deleted or onto a key that is
-// still live.
+// key the row's pre-buffer version lives under (CO-5). The new image starts
+// from the old key's buffered image when there is one, so a column the move's
+// event omitted keeps a value an earlier event at the old key supplied, and
+// overlays the move's present columns. When that buffered image had itself
+// moved, the new image inherits its OldKey: the row's shadow row, which the
+// flush completes a surviving marker from (D13), is under the key the row
+// started at, not the key it passed through, whose shadow row is absent or
+// another row's. The source cannot move a row from a key it has deleted or
+// onto a key that is still live.
 func (b *Buffer) addKeyMove(ev decode.ChangeEvent) error {
 	oldKey := *ev.OldKey
 	cur := b.entries[ev.Key]
@@ -119,18 +122,39 @@ func (b *Buffer) addKeyMove(ev decode.ChangeEvent) error {
 	if from != nil {
 		moved.Columns = cloneColumns(from.Columns)
 		moved.overlay(ev.Columns)
+		if from.OldKey != nil {
+			origin := *from.OldKey
+			moved.OldKey = &origin
+		}
 	} else {
 		moved.Columns = cloneColumns(ev.Columns)
 	}
-	b.entries[ev.Key] = moved
-	b.entries[oldKey] = &Entry{Key: oldKey, Kind: DeleteMarker, FirstLSN: firstLSN(ev.LSN, from)}
+	b.put(moved)
+	b.put(&Entry{Key: oldKey, Kind: DeleteMarker, FirstLSN: firstLSN(ev.LSN, from)})
 	return nil
 }
 
 // addDelete replaces whatever the key held with a delete marker: the newest
 // fact about the key is that its row is gone (CO-5).
 func (b *Buffer) addDelete(ev decode.ChangeEvent) {
-	b.entries[ev.Key] = &Entry{Key: ev.Key, Kind: DeleteMarker, FirstLSN: firstLSN(ev.LSN, b.entries[ev.Key])}
+	b.put(&Entry{Key: ev.Key, Kind: DeleteMarker, FirstLSN: firstLSN(ev.LSN, b.entries[ev.Key])})
+}
+
+// put stores the entry under its key and keeps the oldest pending position
+// current. An entry only ever replaces one with an equal or later FirstLSN,
+// so the minimum never rises on a write.
+func (b *Buffer) put(e *Entry) {
+	b.entries[e.Key] = e
+	b.trackOldest(e.FirstLSN)
+}
+
+// trackOldest lowers the oldest pending position to lsn when lsn is below it
+// or nothing is tracked yet.
+func (b *Buffer) trackOldest(lsn decode.LSN) {
+	if !b.hasOldest || lsn < b.oldest {
+		b.oldest = lsn
+		b.hasOldest = true
+	}
 }
 
 // firstLSN is the earliest position a new entry still owes the stream: this

@@ -103,8 +103,10 @@ overwrites** (`ON CONFLICT (pk) DO UPDATE` + explicit deletes); captured changes
 copier's watermark are **discarded, judged per key**, which is sound only because v1 restricts
 the chunk key to one integer-family PK with a monotonic watermark
 ([copy-and-swap D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key))
-— the precondition is the `CopySwapTarget` proof, whose preflight refuses composite and
-non-comparable PKs with `copy-and-swap-pk-unsupported` rather than queueing them. An UPDATE that
+— the precondition is the `CopySwapTarget` proof, whose preflight refuses composite,
+non-comparable, and DEFERRABLE PKs with `copy-and-swap-pk-unsupported` rather than queueing
+them (a deferrable key is checked per statement, not per row, so one statement can put two
+rows through one key and the decoded stream stops having one row per key). An UPDATE that
 moved the primary key (`ChangeEvent.OldKey` set) is two changes — a deletion of the old key and
 an image of the new — each judged against the watermark on its own, so the deletion below the
 watermark is applied even when the new key above it is discarded. A buffered change for **any**
@@ -161,7 +163,9 @@ two entries are judged per key, except that once neither is uncut the image and 
 entry wait together and flush together, so the flush never deletes or copies the old key's row
 while an image still needs it for completion (three-way rule, discard-all before the first claim,
 deferred entry keeps merging, straddling move, pair waits in either direction, uncut half judged
-alone, deferral spreading through a shared old key). *Planned enforcement:* the applier's
+alone, deferral spreading through a shared old key and along a chain of pairs); `Drain`
+judges against a `Position` read after the last `Add`, and returns a `Batch` whose `Deferred`
+count is what a catch-up is waiting on the copier for. *Planned enforcement:* the applier's
 SQL shape and the flush that consumes `Drain`'s batch
 (mutual exclusion, not tombstone retention). *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
@@ -179,8 +183,11 @@ buffered image, so an unchanged-TOAST marker (CO-8) survives dedup only when no 
 for that key ever held the column's value; a delete marker replaces the image outright, and an
 INSERT after a delete replaces the marker. An UPDATE that moved the primary key
 (`ChangeEvent.OldKey` set) enters the buffer as two entries — a delete marker for the old key and
-an image for the new key — and the image's marker, if any, stands for the value in the **old**
-key's shadow row (D13 completes it from there). The buffer is a single keyed map: v1 has one
+an image for the new key — and the image's marker, if any, stands for the value in the shadow
+row of the key the row **started at** (D13 completes it from there): when a row moves more than
+once inside one flush window the image's `OldKey` is the origin of the chain, not the key it
+passed through, whose shadow row is absent or another row's, and it equals the image's own key
+when the row moved away and back. The buffer is a single keyed map: v1 has one
 integer-family PK
 ([copy-and-swap D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)),
 so Spirit's map ↔ FIFO-queue mode toggle for non-memory-comparable keys has no v1 counterpart
@@ -188,11 +195,13 @@ and returns only if queue mode is ever built. *Enforced:* `pkg/applier` `Buffer`
 per key; `Add` merges in stream order (UPDATE overlays present columns by name, DELETE replaces
 with a marker, INSERT replaces a marker with a complete image, a key-moving UPDATE enters a
 marker at the old key and an image at the new key that starts from the old key's buffered image
-and records `OldKey`) and refuses with `ErrInvariantViolation` an event the source could not
+and records as `OldKey` the key the row started at, inherited through a chain of moves) and
+refuses with `ErrInvariantViolation` an event the source could not
 have produced given the buffer — an INSERT over a live image or with an omitted column (CO-8),
 an UPDATE over a marker, a move from a deleted key or onto a live one; `OldestPending` bounds
-the position a stream may confirm without losing a buffered entry on replay. *Source:* Spirit
-`pkg/change/subscription_buffered.go` (stated invariant), narrowed to
+the position a stream may confirm without losing a buffered entry on replay, and a drained
+`Batch.OldestFirstLSN` bounds it for the batch's own entries until their flush commits.
+*Source:* Spirit `pkg/change/subscription_buffered.go` (stated invariant), narrowed to
 the v1 key shape; the merge rule is this doc set's addition for pgoutput's partial images.
 
 ### CO-6 — Unique-secondary-key moves must converge (PostgreSQL-specific gap)
@@ -210,9 +219,12 @@ exchange collides in both orders. The fallback inserts whole rows, so it must no
 for an unchanged-TOAST column (CO-8): before deleting, it completes any surviving image that
 still carries a marker from the current shadow row — the row for the key, or for
 `ChangeEvent.OldKey` when the UPDATE moved the primary key (`SELECT … FOR UPDATE`, same
-transaction) — and treats an absent shadow row for such an image as an invariant violation (fail
-closed) — CO-5's merge rule guarantees the marker only survives for values that live in a shadow
-row the batch did not create. Convergence must still be proved under test. *Test obligation:*
+transaction). An absent shadow row for an image whose row did **not** move is an invariant
+violation (fail closed) — CO-5's merge rule guarantees the marker only survives for values that
+live in a shadow row the batch did not create; a **moved** image whose old key's shadow row is
+absent is instead completed from the source row under `Key`, because a move captured while the
+old key was uncut leaves no shadow row under either key and the buffer cannot tell that history
+from one whose old row landed (D13). Convergence must still be proved under test. *Test obligation:*
 `seats(id int PRIMARY KEY, slot text UNIQUE)` holding `(1,'A'),(2,'B')`, flushed with the batch
 `{1→'B', 2→'A'}`, converges in one flush; a second vector adds a column stored **out of line**
 (`SET STORAGE EXTERNAL`, proven by the test harness's `ToastBytes()` — a large value under the

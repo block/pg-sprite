@@ -34,11 +34,13 @@ func (k EntryKind) String() string {
 type Entry struct {
 	Key  int64
 	Kind EntryKind
-	// OldKey is set on an Image whose latest event moved the row from
-	// another key. The entry at that key, if still buffered, is flushed in
-	// the same batch as this image or deferred with it, never before it,
-	// because the flush completes this image's unchanged-TOAST markers before
-	// it deletes anything (D13).
+	// OldKey is set on an Image whose row moved since the last flush. It is
+	// the key the row started at — the only key whose shadow row can hold
+	// the row's pre-buffer version — however many moves the buffer merged,
+	// and it equals Key when the row moved away and back. The entry at that
+	// key, if still buffered, is flushed in the same batch as this image or
+	// deferred with it, never before it, because the flush completes this
+	// image's unchanged-TOAST markers before it deletes anything (D13).
 	OldKey *int64
 	// Columns is the merged row image for an Image, in the decoded column
 	// order; a column with Present=false is an unchanged-TOAST marker whose

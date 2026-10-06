@@ -105,15 +105,20 @@ consistency boundary and unbounded history.
 
 ### D4 — Restrict the chunk key to one integer-family primary key
 
-**Decision.** v1 accepts one `smallint`, `integer`, or `bigint` primary-key column. It uses
+**Decision.** v1 accepts one non-deferrable `smallint`, `integer`, or `bigint` primary-key
+column. It uses
 monotonic PK-range chunks and may discard captured changes above the copier watermark under
 CO-4, judged **per key**: an UPDATE that moved the primary key (`ChangeEvent.OldKey` set) is a
 deletion of the old key and an image of the new one, each judged against the watermark on its
 own, so the deletion below the watermark is applied even when the new key above it is discarded.
-Composite, `uuid`, and text keys return `copy-and-swap-pk-unsupported`.
+Composite, `uuid`, text, and `DEFERRABLE` keys return `copy-and-swap-pk-unsupported`.
 
 **Why.** A totally ordered, compact key makes chunk boundaries, resume watermarks, and the
-watermark-discard proof share one representation.
+watermark-discard proof share one representation. A deferrable key is checked at the end of
+each statement rather than per row, so one statement can move a row onto a key another row still
+holds; the decoded stream then no longer has one row per key, which the CO-5 buffer's refusals
+and its carry-forward of the old key's image both rest on, and the server declines to use such a
+key as the DEFAULT replica identity, so every UPDATE on the published table would fail.
 
 **Alternative considered → deferred.** Queue-mode apply for arbitrary keys remains a later
 extension.
@@ -338,7 +343,9 @@ unchanged-TOAST marker (`u`, D6) survives dedup only when no buffered image for 
 carried that column's value — that is, the value lives in a shadow row the batch did not
 create: the row for the key itself, or, when the UPDATE moved the primary key
 (`ChangeEvent.OldKey` set), the row for the old key, since a key-moving UPDATE emits a
-marker-bearing image under a key the shadow has never held. Second, before the fallback deletes
+marker-bearing image under a key the shadow has never held — and when the row moved more than
+once inside the window, the old key is the one the row **started at**, the only key whose shadow
+row can hold its pre-buffer version (CO-5). Second, before the fallback deletes
 anything it completes every surviving image that still carries a marker by reading those columns
 from the current shadow row — the row for `Key`, or for `OldKey` when the image carries one
 (`SELECT … FOR UPDATE` on the affected keys, in the same transaction, after the savepoint

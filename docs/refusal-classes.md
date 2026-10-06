@@ -130,7 +130,7 @@ classification is fixed here first so the route inherits it.
 
 | `CopySwapRefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
-| `copy-and-swap-pk-unsupported` | The table has no single `smallint`, `integer`, or `bigint` primary-key column for the chunker to range over | `capability-boundary` | Wider key shapes are a planned engine capability ([D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)). |
+| `copy-and-swap-pk-unsupported` | The table has no single non-deferrable `smallint`, `integer`, or `bigint` primary-key column for the chunker to range over and the buffer to key on | `capability-boundary` | Wider key shapes are a planned engine capability ([D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)). |
 | `copy-and-swap-replica-identity` | The table's replica identity is `NOTHING` or a named index; `DEFAULT` or `FULL` is required | `environmental` | The same table is admitted after `ALTER TABLE … REPLICA IDENTITY DEFAULT` or `FULL`; the action that unblocks it is a catalog change, not an engine release. |
 | `copy-and-swap-foreign-keys` | A foreign key references the table or leaves it | `capability-boundary` | An OID-bound dependent the rename swap would strand on the old table; re-pointing it is a planned capability. |
 | `copy-and-swap-triggers` | The table has a user trigger or a rewrite rule | `capability-boundary` | As above. |

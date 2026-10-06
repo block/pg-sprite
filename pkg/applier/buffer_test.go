@@ -128,20 +128,43 @@ func TestBufferKeyMoveCarriesOldKeyImageForward(t *testing.T) {
 	assert.Equal(t, decode.LSN(10), entry(t, b, 5).FirstLSN)
 }
 
-// A chain of moves links each image to the key it last left, not the first:
-// the middle key becomes a marker and the final image points at it.
-func TestBufferKeyMoveChainLinksToLatestOldKey(t *testing.T) {
+// A row that moves twice inside one flush window still has its pre-buffer
+// version under the key it started at, so the final image links there. Key 2
+// held a different row, X, whose deletion is buffered and whose shadow row is
+// still present, so completing the moved image's marker from key 2 would copy
+// X's value into it; the middle key is left a marker of its own.
+func TestBufferKeyMoveChainCompletesFromOrigin(t *testing.T) {
 	b := NewBuffer()
-	require.NoError(t, b.Add(keyMove(10, 1, 2, col("label", "a"), marker("doc"))))
-	require.NoError(t, b.Add(keyMove(20, 2, 3, col("label", "a"), marker("doc"))))
+	require.NoError(t, b.Add(del(10, 2)))
+	require.NoError(t, b.Add(keyMove(20, 1, 2, col("label", "r"), marker("doc"))))
+	require.NoError(t, b.Add(keyMove(30, 2, 3, col("label", "r"), marker("doc"))))
 
 	assert.Equal(t, DeleteMarker, entry(t, b, 1).Kind)
 	assert.Equal(t, DeleteMarker, entry(t, b, 2).Kind)
 	last := entry(t, b, 3)
+	assert.True(t, last.HasMarker())
 	require.NotNil(t, last.OldKey)
-	assert.Equal(t, int64(2), *last.OldKey)
-	assert.Equal(t, decode.LSN(10), last.FirstLSN)
+	assert.Equal(t, int64(1), *last.OldKey, "doc's value lives in key 1's shadow row; key 2's shadow row is X's")
+	assert.Equal(t, decode.LSN(10), last.FirstLSN, "the window the image continues opened with X's deletion at key 2")
 	assert.Equal(t, 3, b.Len())
+}
+
+// A row that moves away and back is still a moved image with OldKey equal to
+// its Key, not a plain update: its shadow row under that key may be absent
+// when the chunk was read while the row was elsewhere, and only a moved image
+// may complete from the source instead of failing closed (D13).
+func TestBufferKeyMoveBackToOriginKeepsOldKey(t *testing.T) {
+	b := NewBuffer()
+	require.NoError(t, b.Add(keyMove(10, 1, 2, col("label", "a"), marker("doc"))))
+	require.NoError(t, b.Add(keyMove(20, 2, 1, col("label", "b"), marker("doc"))))
+
+	got := entry(t, b, 1)
+	assert.Equal(t, Image, got.Kind)
+	require.NotNil(t, got.OldKey)
+	assert.Equal(t, int64(1), *got.OldKey)
+	assert.Equal(t, []decode.Column{col("label", "b"), marker("doc")}, got.Columns)
+	assert.Equal(t, DeleteMarker, entry(t, b, 2).Kind)
+	assert.Equal(t, 2, b.Len())
 }
 
 // A row may move onto a key the buffer holds deleted; the marker is replaced.

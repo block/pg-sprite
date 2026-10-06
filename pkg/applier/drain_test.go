@@ -41,19 +41,26 @@ func TestDrainJudgesEachKeyAgainstThePosition(t *testing.T) {
 	require.NoError(t, b.Add(update(30, 5, col("label", "landed-low"))))
 	require.NoError(t, b.Add(del(40, 40)))
 
-	flush, discarded := b.Drain(position(t, 30, [2]int64{11, 20}))
+	batch := b.Drain(position(t, 30, [2]int64{11, 20}))
 
-	assert.Equal(t, []int64{5, 30}, keys(flush))
-	assert.Equal(t, 1, discarded, "key 40 is above the cut frontier")
-	assert.Equal(t, 1, b.Len(), "key 15 waits for its chunk")
+	assert.Equal(t, []int64{5, 30}, keys(batch.Entries))
+	assert.Equal(t, 1, batch.Discarded, "key 40 is above the cut frontier")
+	assert.Equal(t, 1, batch.Deferred, "key 15 waits for its chunk")
+	assert.Equal(t, 1, b.Len())
 	oldest, ok := b.OldestPending()
 	require.True(t, ok)
 	assert.Equal(t, decode.LSN(20), oldest, "the confirmed position may not pass the deferred entry")
+	oldest, ok = batch.OldestFirstLSN()
+	require.True(t, ok)
+	assert.Equal(t, decode.LSN(10), oldest, "nor the batch's first event until its flush commits")
 
-	flush, discarded = b.Drain(position(t, 30))
-	assert.Equal(t, []int64{15}, keys(flush))
-	assert.Equal(t, 0, discarded)
+	batch = b.Drain(position(t, 30))
+	assert.Equal(t, []int64{15}, keys(batch.Entries))
+	assert.Equal(t, 0, batch.Discarded)
+	assert.Equal(t, 0, batch.Deferred)
 	assert.Equal(t, 0, b.Len())
+	_, ok = b.OldestPending()
+	assert.False(t, ok, "an emptied buffer owes the stream nothing")
 }
 
 // Before the copier claims anything every key is uncut: the whole buffer is
@@ -62,10 +69,12 @@ func TestDrainDiscardsEverythingBeforeTheFirstClaim(t *testing.T) {
 	b := NewBuffer()
 	require.NoError(t, b.Add(update(10, 1, col("label", "a"))))
 	require.NoError(t, b.Add(del(20, 2)))
-	flush, discarded := b.Drain(copier.Position{})
-	assert.Empty(t, flush)
-	assert.Equal(t, 2, discarded)
+	batch := b.Drain(copier.Position{})
+	assert.Empty(t, batch.Entries)
+	assert.Equal(t, 2, batch.Discarded)
 	assert.Equal(t, 0, b.Len())
+	_, ok := batch.OldestFirstLSN()
+	assert.False(t, ok, "an empty batch bounds nothing")
 }
 
 // A deferred entry keeps merging later events until its chunk lands, so the
@@ -73,10 +82,10 @@ func TestDrainDiscardsEverythingBeforeTheFirstClaim(t *testing.T) {
 func TestDrainDeferredEntryKeepsMerging(t *testing.T) {
 	b := NewBuffer()
 	require.NoError(t, b.Add(update(10, 15, col("label", "first"), col("doc", "d"))))
-	_, _ = b.Drain(position(t, 30, [2]int64{11, 20}))
+	_ = b.Drain(position(t, 30, [2]int64{11, 20}))
 	require.NoError(t, b.Add(update(20, 15, col("label", "second"), marker("doc"))))
 
-	flush, _ := b.Drain(position(t, 30))
+	flush := b.Drain(position(t, 30)).Entries
 	require.Len(t, flush, 1)
 	assert.Equal(t, []decode.Column{col("label", "second"), col("doc", "d")}, flush[0].Columns)
 }
@@ -86,7 +95,7 @@ func TestDrainDeferredEntryKeepsMerging(t *testing.T) {
 func TestDrainReturnsCopies(t *testing.T) {
 	b := NewBuffer()
 	require.NoError(t, b.Add(update(10, 1, col("label", "a"))))
-	flush, _ := b.Drain(position(t, 30))
+	flush := b.Drain(position(t, 30)).Entries
 	require.NoError(t, b.Add(update(20, 1, col("label", "b"))))
 	assert.Equal(t, "a", flush[0].Columns[0].Value)
 }
@@ -97,12 +106,12 @@ func TestDrainKeyMoveStraddlingTheFrontier(t *testing.T) {
 	b := NewBuffer()
 	require.NoError(t, b.Add(keyMove(10, 5, 5000, col("label", "a"))))
 
-	flush, discarded := b.Drain(position(t, 1000))
+	batch := b.Drain(position(t, 1000))
 
-	require.Len(t, flush, 1)
-	assert.Equal(t, int64(5), flush[0].Key)
-	assert.Equal(t, DeleteMarker, flush[0].Kind)
-	assert.Equal(t, 1, discarded, "the image at 5000 is uncut; the copier will read the moved row")
+	require.Len(t, batch.Entries, 1)
+	assert.Equal(t, int64(5), batch.Entries[0].Key)
+	assert.Equal(t, DeleteMarker, batch.Entries[0].Kind)
+	assert.Equal(t, 1, batch.Discarded, "the image at 5000 is uncut; the copier will read the moved row")
 	assert.Equal(t, 0, b.Len())
 }
 
@@ -121,13 +130,14 @@ func TestDrainKeyMovePairWaitsTogether(t *testing.T) {
 			b := NewBuffer()
 			require.NoError(t, b.Add(keyMove(10, tc.from, tc.to, col("label", "a"), marker("doc"))))
 
-			flush, discarded := b.Drain(position(t, 30, [2]int64{11, 20}))
-			assert.Empty(t, flush)
-			assert.Equal(t, 0, discarded)
+			batch := b.Drain(position(t, 30, [2]int64{11, 20}))
+			assert.Empty(t, batch.Entries)
+			assert.Equal(t, 0, batch.Discarded)
+			assert.Equal(t, 2, batch.Deferred)
 			assert.Equal(t, 2, b.Len())
 
-			flush, _ = b.Drain(position(t, 30))
-			assert.Equal(t, sortedPair(tc.from, tc.to), keys(flush), "both halves flush in one batch once the chunk lands")
+			batch = b.Drain(position(t, 30))
+			assert.Equal(t, sortedPair(tc.from, tc.to), keys(batch.Entries), "both halves flush in one batch once the chunk lands")
 		})
 	}
 }
@@ -140,18 +150,29 @@ func TestDrainKeyMoveUncutHalfIsJudgedAlone(t *testing.T) {
 	t.Run("old key uncut, image landed", func(t *testing.T) {
 		b := NewBuffer()
 		require.NoError(t, b.Add(keyMove(10, 5000, 25, col("label", "a"), marker("doc"))))
-		flush, discarded := b.Drain(position(t, 30, [2]int64{11, 20}))
-		assert.Equal(t, []int64{25}, keys(flush))
-		assert.Equal(t, 1, discarded)
+		batch := b.Drain(position(t, 30, [2]int64{11, 20}))
+		assert.Equal(t, []int64{25}, keys(batch.Entries))
+		assert.Equal(t, 1, batch.Discarded)
 		assert.Equal(t, 0, b.Len())
 	})
 	t.Run("old key in flight, image uncut", func(t *testing.T) {
 		b := NewBuffer()
 		require.NoError(t, b.Add(keyMove(10, 15, 5000, col("label", "a"))))
-		flush, discarded := b.Drain(position(t, 30, [2]int64{11, 20}))
-		assert.Empty(t, flush)
-		assert.Equal(t, 1, discarded)
-		assert.Equal(t, 1, b.Len(), "the marker at 15 waits for its own chunk")
+		batch := b.Drain(position(t, 30, [2]int64{11, 20}))
+		assert.Empty(t, batch.Entries)
+		assert.Equal(t, 1, batch.Discarded)
+		assert.Equal(t, 1, batch.Deferred, "the marker at 15 waits for its own chunk")
+		assert.Equal(t, 1, b.Len())
+	})
+	t.Run("old key uncut, image in flight", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 5000, 15, col("label", "a"), marker("doc"))))
+		batch := b.Drain(position(t, 30, [2]int64{11, 20}))
+		assert.Empty(t, batch.Entries)
+		assert.Equal(t, 1, batch.Discarded, "the marker at 5000 is uncut; nothing of that row will be copied")
+		assert.Equal(t, 1, batch.Deferred, "the image at 15 waits for its own chunk")
+		assert.Equal(t, 1, b.Len())
+		assert.Equal(t, Image, entry(t, b, 15).Kind)
 	})
 }
 
@@ -163,10 +184,35 @@ func TestDrainDeferralSpreadsThroughSharedOldKey(t *testing.T) {
 	require.NoError(t, b.Add(insert(20, 25, col("label", "reinserted"))))
 	require.NoError(t, b.Add(keyMove(30, 25, 28, col("label", "second"))))
 
-	flush, discarded := b.Drain(position(t, 30, [2]int64{11, 20}))
-	assert.Empty(t, flush, "15 is in flight, so 25 waits, so 28 waits")
-	assert.Equal(t, 0, discarded)
+	batch := b.Drain(position(t, 30, [2]int64{11, 20}))
+	assert.Empty(t, batch.Entries, "15 is in flight, so 25 waits, so 28 waits")
+	assert.Equal(t, 0, batch.Discarded)
+	assert.Equal(t, 3, batch.Deferred)
 	assert.Equal(t, 3, b.Len())
+}
+
+// The spread is transitive however long the chain. Four rows each move onto
+// the key the previous row just left, so every old key is itself a moved
+// image: 15 came from 25, 25's new row came from 35, 35's from 45, 45's from
+// 55. Only 55, the key vacated last, is in flight; every other pair is
+// landed on both sides until the deferral reaches it through the pair after
+// it, so the whole chain defers only if the pairs are decided from the far
+// end back, which one pass over a map cannot promise.
+func TestDrainDeferralSpreadsAlongAChainOfPairs(t *testing.T) {
+	b := NewBuffer()
+	require.NoError(t, b.Add(keyMove(10, 25, 15, col("label", "a"))))
+	require.NoError(t, b.Add(keyMove(20, 35, 25, col("label", "b"))))
+	require.NoError(t, b.Add(keyMove(30, 45, 35, col("label", "c"))))
+	require.NoError(t, b.Add(keyMove(40, 55, 45, col("label", "d"))))
+
+	batch := b.Drain(position(t, 60, [2]int64{51, 60}))
+	assert.Empty(t, batch.Entries, "55 is in flight, so 45 waits, so 35, 25 and 15 wait")
+	assert.Equal(t, 0, batch.Discarded)
+	assert.Equal(t, 5, batch.Deferred)
+	assert.Equal(t, 5, b.Len())
+
+	batch = b.Drain(position(t, 60))
+	assert.Equal(t, []int64{15, 25, 35, 45, 55}, keys(batch.Entries), "the whole chain flushes together once the chunk lands")
 }
 
 // The link is to the entry buffered at the old key, whatever its kind: a row
@@ -176,8 +222,8 @@ func TestDrainKeyMovePairsWithReinsertedOldKey(t *testing.T) {
 	require.NoError(t, b.Add(keyMove(10, 15, 25, col("label", "moved"))))
 	require.NoError(t, b.Add(insert(20, 15, col("label", "reinserted"))))
 
-	flush, _ := b.Drain(position(t, 30, [2]int64{11, 20}))
-	assert.Empty(t, flush, "the landed image at 25 waits for the in-flight re-inserted row at 15")
+	batch := b.Drain(position(t, 30, [2]int64{11, 20}))
+	assert.Empty(t, batch.Entries, "the landed image at 25 waits for the in-flight re-inserted row at 15")
 	assert.Equal(t, 2, b.Len())
 }
 
