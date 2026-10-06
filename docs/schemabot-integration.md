@@ -111,7 +111,11 @@ implementation time):
   what the role must *not* have, is [engine-role.md](engine-role.md)). The adapter surfaces
   this per target: each configured database names its engine-role credentials, and a target
   whose grants stop at Tier 1 can still run in-place changes while copy-and-swap refuses
-  with the exact missing `GRANT`.
+  with the exact missing `GRANT`. `preflight.CheckCopySwap` is the one call the adapter
+  makes for the copy-and-swap route: it folds the privilege, shape, and environment checks
+  and returns the `CopySwapTarget` every writing step requires; how to classify each of its
+  refusals is in
+  [refusal-classes.md](refusal-classes.md#copy-and-swap-preflight-refusals-keyed-on-copyswaprefusalcause).
 - **Fan-out is per table.** A `DesiredSchema` is one `CREATE TABLE` plus its indexes, while
   SchemaBot's declarative roots are directories of many tables: the adapter loops `Plan` per
   table and merges into one `PlanResult`. One pool serves the whole fan-out (`Plan` does not

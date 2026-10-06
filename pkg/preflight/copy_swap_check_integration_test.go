@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -17,7 +18,7 @@ import (
 // verified for.
 func TestCheckCopySwapMintsTheTargetTheThreeChecksMint(t *testing.T) {
 	f := newCopySwapEnvironmentFixture(t, testutil.StartPostgresWithSettings(t, "wal_level=logical"))
-	env := preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: unlimitedDisk}
+	env := preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: testutil.UnlimitedDisk}
 
 	target, err := preflight.CheckCopySwap(t.Context(), f.pool, f.schema, "ledger", env)
 	require.NoError(t, err)
@@ -34,7 +35,7 @@ func TestCheckCopySwapMintsTheTargetTheThreeChecksMint(t *testing.T) {
 // engine role with no access is a privilege refusal, a composite key is a
 // shape refusal, and an unmeasured volume is an environment refusal.
 func TestCheckCopySwapReportsEachCheckInItsOwnVocabulary(t *testing.T) {
-	sufficient := preflight.CopySwapEnvironment{FreeDiskBytes: unlimitedDisk}
+	sufficient := preflight.CopySwapEnvironment{FreeDiskBytes: testutil.UnlimitedDisk}
 
 	t.Run("privileges", func(t *testing.T) {
 		f := newPrivilegeFixture(t)
@@ -65,4 +66,30 @@ func TestCheckCopySwapReportsEachCheckInItsOwnVocabulary(t *testing.T) {
 		_, err := preflight.CheckCopySwap(t.Context(), f.pool, f.schema, "ledger", preflight.CopySwapEnvironment{FreeDiskBytes: 0})
 		requireCopySwapEnvironmentCause(t, err, preflight.CopySwapCauseDiskHeadroom, "")
 	})
+}
+
+// The fold asks for replication access only when the run decodes WAL: an
+// engine role holding the copy-and-swap tier without REPLICATION is
+// admitted for a quiesced run, and the same role is refused a decoding run
+// as a privilege refusal naming the grant, before any shape or cluster
+// read.
+func TestCheckCopySwapAsksForReplicationOnlyWhenTheRunDecodesWAL(t *testing.T) {
+	f := newPrivilegeFixture(t)
+	f.grant(t, fmt.Sprintf("GRANT USAGE, CREATE ON SCHEMA %s TO %s",
+		f.schema, pgx.Identifier{f.role}.Sanitize()))
+	f.grant(t, fmt.Sprintf("GRANT %s TO %s",
+		pgx.Identifier{f.owner}.Sanitize(), pgx.Identifier{f.role}.Sanitize()))
+
+	quiesced, err := preflight.CheckCopySwap(t.Context(), f.engine, f.schema, "target",
+		preflight.CopySwapEnvironment{FreeDiskBytes: testutil.UnlimitedDisk})
+	require.NoError(t, err)
+	assert.False(t, quiesced.DecodesWAL())
+	assert.Equal(t, "target", quiesced.Table())
+
+	_, err = preflight.CheckCopySwap(t.Context(), f.engine, f.schema, "target",
+		preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: testutil.UnlimitedDisk})
+	var privErr *preflight.PrivilegeError
+	require.ErrorAs(t, err, &privErr)
+	assert.Equal(t, fmt.Sprintf("ALTER ROLE %s WITH REPLICATION",
+		pgx.Identifier{f.role}.Sanitize()), privErr.Grant)
 }

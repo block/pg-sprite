@@ -20,7 +20,6 @@ type copySwapShape struct {
 	pkType                            PKType
 	ownerRole                         string
 	oid                               uint32
-	logicalDecoding                   bool
 }
 
 // CopySwapShape proves that a table has the shape the copy-and-swap route
@@ -28,9 +27,17 @@ type copySwapShape struct {
 // it. It is minted only by CheckCopySwapShape and is the sole admission to
 // CheckCopySwapEnvironment, which mints the CopySwapTarget every writing
 // step requires: the three checks cannot be reordered or skipped by type.
+// The role proof's replication bit lives here, not on the shared facts, so
+// the target answers "may this run decode WAL" through DecodesWAL alone.
 type CopySwapShape struct {
 	copySwapShape
+	logicalDecoding bool
 }
+
+// LogicalDecoding reports whether the privilege proof this shape was minted
+// from verified replication access, so a run that decodes WAL can be refused
+// as a proof mismatch when it was not.
+func (s CopySwapShape) LogicalDecoding() bool { return s.logicalDecoding }
 
 // CopySwapTarget proves ST-6 prerequisites for a copy-and-swap target: the
 // shape a CopySwapShape proves and, on top of it, that the cluster and the
@@ -60,11 +67,6 @@ func (s copySwapShape) Schema() string { return s.schema }
 func (s copySwapShape) DecodingName() string {
 	return CopySwapDecodingName(s.database, s.schema, s.table)
 }
-
-// LogicalDecoding reports whether the privilege proof this shape was minted
-// from verified replication access, so a run that decodes WAL can be refused
-// as a proof mismatch when it was not.
-func (s copySwapShape) LogicalDecoding() bool { return s.logicalDecoding }
 
 // Table returns the target table.
 func (s copySwapShape) Table() string { return s.table }

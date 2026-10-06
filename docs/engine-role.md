@@ -78,8 +78,14 @@ static parameter requiring a reboot), and free `max_replication_slots` /
 `max_wal_senders` headroom. Both apply only to a run that decodes WAL; a quiesced run skips
 them. The same check compares the free disk the caller measured on the database volume —
 PostgreSQL has no function that reports it — against the shadow copy's headroom, and
-refuses an unmeasured volume rather than assuming it is large enough. Each refusal carries
-its own cause ([refusal-classes.md](refusal-classes.md#copy-and-swap-preflight-refusals-keyed-on-copyswaprefusalcause)).
+refuses an unmeasured volume rather than assuming it is large enough. The figure is the
+bytes the volume can still absorb before writes fail: on a fixed-size volume, the free
+space the host reports for the data directory; on a managed volume that grows on demand
+(an Aurora cluster volume), the distance to the service's storage limit or to the quota
+the operator set — the shadow copy and the WAL a replication slot pins both land there.
+Never pass a sentinel such as the largest integer; that disables the only check that stands
+between the copy and a full volume. Each refusal carries its own cause
+([refusal-classes.md](refusal-classes.md#copy-and-swap-preflight-refusals-keyed-on-copyswaprefusalcause)).
 
 ### Off-ladder: greenfield `CREATE TABLE`
 

@@ -1,7 +1,6 @@
 package schemachange
 
 import (
-	"math"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
@@ -30,9 +29,7 @@ func TestCreateShadowRefusesAShadowTheSourceOwnerDoesNotOwn(t *testing.T) {
 	require.NoError(t, err)
 	_, err = pool.Exec(t.Context(), `ALTER TABLE `+pgx.Identifier{schema, "widgets"}.Sanitize()+` OWNER TO `+pgx.Identifier{owner}.Sanitize())
 	require.NoError(t, err)
-	// The volume is not measured in tests; an unbounded free-disk figure
-	// admits the environment check so the proof under test is the shape.
-	target, err := preflight.CheckCopySwap(t.Context(), pool, schema, "widgets", preflight.CopySwapEnvironment{FreeDiskBytes: math.MaxInt64})
+	target, err := preflight.CheckCopySwap(t.Context(), pool, schema, "widgets", preflight.CopySwapEnvironment{FreeDiskBytes: testutil.UnlimitedDisk})
 	require.NoError(t, err)
 
 	// The transaction deliberately runs as the connected superuser, not

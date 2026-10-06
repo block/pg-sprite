@@ -70,9 +70,7 @@ func (f copierFixture) createOrders(t *testing.T, rows int64) {
 // prove mints the copy-and-swap proof for table.
 func (f copierFixture) prove(t *testing.T, table string) preflight.CopySwapTarget {
 	t.Helper()
-	// The volume is not measured in tests; an unbounded free-disk figure
-	// admits the environment check so the proof under test is the shape.
-	target, err := preflight.CheckCopySwap(t.Context(), f.pool, f.schema, table, preflight.CopySwapEnvironment{FreeDiskBytes: math.MaxInt64})
+	target, err := preflight.CheckCopySwap(t.Context(), f.pool, f.schema, table, preflight.CopySwapEnvironment{FreeDiskBytes: testutil.UnlimitedDisk})
 	require.NoError(t, err)
 	return target
 }

@@ -114,7 +114,8 @@ type copySwapEnvironmentFacts struct {
 // route derives for the target, and a slot and WAL sender are free; in
 // every run the caller-measured free disk covers the shadow copy. A run
 // that decodes WAL must present a shape whose privilege proof verified
-// replication access, or it is a proof mismatch. On success it mints the
+// replication access, or it is a proof mismatch, as is a pool on any
+// database other than the one the shape was proven in. On success it mints the
 // CopySwapTarget — the only way one is minted — recording the run mode it
 // was verified for; a refusal is a *CopySwapEnvironmentError. The reads are
 // pg_catalog-qualified, so the result does not depend on the pool's
@@ -213,8 +214,12 @@ func refuseLogicalDecoding(f copySwapEnvironmentFacts) *CopySwapEnvironmentError
 // the limits are cluster-wide. A slot of the derived name counts as a
 // collision unless it is a logical slot of this database — that one is the
 // route's own, left by an earlier run for the reaper or the resume path.
-// Every catalog name is pg_catalog-qualified so the facts resolve to the
-// real catalog whatever search_path the session carries.
+// The size is read only when the pool is on the shape's database: a
+// database cloned from a template keeps the template's relation OIDs, so
+// the OID alone would resolve on the clone and the slot verdict would be
+// decided against the wrong database. Every catalog name is
+// pg_catalog-qualified so the facts resolve to the real catalog whatever
+// search_path the session carries.
 func gatherCopySwapEnvironmentFacts(ctx context.Context, pool *pgxpool.Pool, shape CopySwapShape) (copySwapEnvironmentFacts, error) {
 	const q = `
 		SELECT pg_catalog.current_setting('wal_level')::text,
@@ -226,16 +231,17 @@ func gatherCopySwapEnvironmentFacts(ctx context.Context, pool *pgxpool.Pool, sha
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_replication_slots s
 		         WHERE s.slot_name = $2
 		           AND s.database IS DISTINCT FROM pg_catalog.current_database()),
-		       (SELECT pg_catalog.pg_total_relation_size(c.oid) FROM pg_catalog.pg_class c WHERE c.oid = $1)`
+		       (SELECT pg_catalog.pg_total_relation_size(c.oid) FROM pg_catalog.pg_class c
+		         WHERE c.oid = $1 AND pg_catalog.current_database() = $3)`
 	f := copySwapEnvironmentFacts{slotName: shape.DecodingName()}
 	var totalBytes *int64
-	err := pool.QueryRow(ctx, q, shape.oid, f.slotName).Scan(
+	err := pool.QueryRow(ctx, q, shape.oid, f.slotName, shape.database).Scan(
 		&f.walLevel, &f.rdsParameterPresent, &f.maxReplicationSlots, &f.usedSlots, &f.maxWALSenders, &f.usedWALSenders, &f.foreignSlots, &totalBytes)
 	if err != nil {
 		return copySwapEnvironmentFacts{}, fmt.Errorf("gather copy-and-swap environment facts for %s: %w", qualifiedName(shape.Schema(), shape.Table()), err)
 	}
 	if totalBytes == nil {
-		return copySwapEnvironmentFacts{}, fmt.Errorf("%w: relation OID %d no longer exists", ErrCopySwapProofMismatch, shape.oid)
+		return copySwapEnvironmentFacts{}, fmt.Errorf("%w: relation OID %d does not exist in database %s on this pool", ErrCopySwapProofMismatch, shape.oid, shape.database)
 	}
 	f.totalBytes = *totalBytes
 	return f, nil

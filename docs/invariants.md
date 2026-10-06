@@ -260,7 +260,11 @@ proxy that hands the server connection to another client keeps the rewritten, st
 `pkg/progress`, `pkg/schemadiff`, and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
-`search_path` alone can pin). *Test obligation:* a shadowing `search_path` (`<schema>,
+`search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
+the chunk cut, and the progress measurements — under a `LocalSearchPath("pg_catalog")`
+transaction, and the verifier's cut runs inside its guarded transaction under the same pin
+(decoy bigint `>=` operator test in both packages: under the session path every cut returns the
+same key and the second cut fails CO-4). *Test obligation:* a shadowing `search_path` (`<schema>,
 pg_catalog` with decoy catalog relations and functions in the schema) yields the same answer as
 the default path, per read site and per pooled session.
 
@@ -353,7 +357,11 @@ source and the shadow in one `LOCK TABLE` under the transaction's `lock_timeout`
 `lock_not_available` or `deadlock_detected` rolls back and retries after a linearly growing
 backoff for a bounded number of attempts (`CutoverOptions.LockAttempts`, `LockBackoff`), then
 returns `ErrLockRetriesExhausted` with the source still live (reader-held-then-released and
-never-released tests).
+never-released tests); in `pkg/copier` and `pkg/checksum`, every statement on the caller's
+pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repair — runs inside a
+transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so a pool
+built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued behind
+`ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 

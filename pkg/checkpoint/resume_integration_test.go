@@ -59,9 +59,7 @@ func (f copyFixture) prepare(t *testing.T, rows int64) (preflight.CopySwapTarget
 		INSERT INTO %%s.orders (id, qty, note)
 		SELECT n, n, 'order ' || n FROM generate_series(1, %d) AS n`, rows))
 
-	// The volume is not measured in tests; an unbounded free-disk figure
-	// admits the environment check so the proof under test is the shape.
-	target, err := preflight.CheckCopySwap(t.Context(), f.pool, f.schema, "orders", preflight.CopySwapEnvironment{FreeDiskBytes: math.MaxInt64})
+	target, err := preflight.CheckCopySwap(t.Context(), f.pool, f.schema, "orders", preflight.CopySwapEnvironment{FreeDiskBytes: testutil.UnlimitedDisk})
 	require.NoError(t, err)
 
 	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, "orders")

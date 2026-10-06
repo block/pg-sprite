@@ -187,16 +187,18 @@ func CheckCopySwapShape(ctx context.Context, pool *pgxpool.Pool, schema, table s
 		return CopySwapShape{}, &UnsupportedCopySwapShapeError{Cause: cause, Detail: detail}
 	}
 	// INV: ST-6, RF-1, RF-2, RF-3
-	return CopySwapShape{copySwapShape{
-		database:        facts.database,
-		schema:          facts.schema,
-		table:           table,
-		pkColumn:        facts.pkColumn,
-		pkType:          PKType(facts.pkType),
-		ownerRole:       role.Owner(),
-		oid:             facts.oid,
+	return CopySwapShape{
+		copySwapShape: copySwapShape{
+			database:  facts.database,
+			schema:    facts.schema,
+			table:     table,
+			pkColumn:  facts.pkColumn,
+			pkType:    PKType(facts.pkType),
+			ownerRole: role.Owner(),
+			oid:       facts.oid,
+		},
 		logicalDecoding: role.LogicalDecoding(),
-	}}, nil
+	}, nil
 }
 
 // RecheckCopySwapShape verifies inside the build transaction that the proven
