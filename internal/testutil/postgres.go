@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -115,6 +116,20 @@ func NewDatabase(t *testing.T, serverURL string) string {
 func NewDatabaseWithEncoding(t *testing.T, serverURL, encoding string) string {
 	t.Helper()
 	return newDatabase(t, serverURL, " ENCODING "+quoteLiteral(encoding)+" LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0")
+}
+
+// NewDatabaseFromTemplate is NewDatabase for a database cloned from the
+// one templateURL connects to, for tests whose subject is what a clone
+// shares with its template: the relations keep their OIDs. The server must
+// hold no other session on the template while it is copied, so the caller
+// closes every pool on it first.
+func NewDatabaseFromTemplate(t *testing.T, serverURL, templateURL string) string {
+	t.Helper()
+	u, err := url.Parse(templateURL)
+	require.NoError(t, err, "parse template URL")
+	template := strings.TrimPrefix(u.Path, "/")
+	require.NotEmpty(t, template, "template URL names no database")
+	return newDatabase(t, serverURL, " TEMPLATE "+pgx.Identifier{template}.Sanitize())
 }
 
 func newDatabase(t *testing.T, serverURL, createOptions string) string {

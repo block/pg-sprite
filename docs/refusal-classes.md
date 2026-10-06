@@ -112,6 +112,19 @@ environment refusal also carries the typed `CopySwapSetting` the operator must c
 (`wal_level`, or `rds.logical_replication` where the server defines that parameter;
 `max_replication_slots` or `max_wal_senders`; none for disk), so an adapter never parses
 the prose detail to learn which knob to turn.
+
+An adapter that calls `CheckCopySwap`, which folds the privilege, shape, and environment checks
+into one call, sees refusals from all three in that order, and must read each in its own
+vocabulary — `CopySwapRefusalCauseOf` answers only for the shape and environment refusals:
+
+| Outcome of `CheckCopySwap` | How to read it | What it means |
+| --- | --- | --- |
+| `*PrivilegeError` | `errors.As`; `Grant` is the exact statement to run | The engine role lacks the copy-and-swap tier against this table, or (for a run that decodes WAL) replication access. Raised before any shape or cluster read. |
+| `*UnsupportedCopySwapShapeError` | `CopySwapRefusalCauseOf` → a shape cause from the table below | The table's shape is outside what the route supports. |
+| `*CopySwapEnvironmentError` | `CopySwapRefusalCauseOf` → a cluster or volume cause from the table below, plus `Setting` | The cluster or the volume cannot carry the run. |
+| `ErrCopySwapProofMismatch` | `errors.Is` | The proofs handed in do not fit together: a shape minted for another database or dropped relation, or a decoding run on a shape whose privilege proof did not verify replication access. An adapter that calls the fold never produces this. |
+| any other error | wrapped query error | A catalog read failed; retry or surface it as an engine failure. |
+
 The verdict reason that carries these causes lands with the copy-and-swap route itself; the
 classification is fixed here first so the route inherits it.
 

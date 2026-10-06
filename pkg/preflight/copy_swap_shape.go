@@ -166,33 +166,37 @@ type copySwapShapeFacts struct {
 // publishing it, no subscription applying into it, and no other object
 // depending on its OID or row type. The role proof must have been verified
 // at TierCopyAndSwap; the owner it carries is the role the shadow builder
-// creates shadow objects as. On success it returns the CopySwapTarget proof
-// carrying the catalog-resolved database and schema. The facts the server
-// cannot settle from the table alone — logical decoding, slot and disk
-// headroom — are CheckCopySwapEnvironment's. The catalog reads are
+// creates shadow objects as. On success it returns the CopySwapShape proof
+// carrying the catalog-resolved database and schema, which only
+// CheckCopySwapEnvironment accepts: the facts the server cannot settle from
+// the table alone — logical decoding, slot and disk headroom — are that
+// check's, and the CopySwapTarget every writing step requires is minted
+// there. CheckCopySwap runs the whole sequence. The catalog reads are
 // pg_catalog-qualified, so the result does not depend on the pool's
 // search_path; the pool should still come from dbconn.NewPool, which bounds
 // every session's timeouts.
-func CheckCopySwapShape(ctx context.Context, pool *pgxpool.Pool, schema, table string, role PrivilegedRole) (CopySwapTarget, error) {
+func CheckCopySwapShape(ctx context.Context, pool *pgxpool.Pool, schema, table string, role PrivilegedRole) (CopySwapShape, error) {
 	if role.Tier() != TierCopyAndSwap || role.Owner() == "" {
-		return CopySwapTarget{}, fmt.Errorf("%w: tier %q, owner %q", ErrCopySwapProofMismatch, role.Tier(), role.Owner())
+		return CopySwapShape{}, fmt.Errorf("%w: tier %q, owner %q", ErrCopySwapProofMismatch, role.Tier(), role.Owner())
 	}
 	facts, err := gatherCopySwapShapeFacts(ctx, pool, schema, table)
 	if err != nil {
-		return CopySwapTarget{}, err
+		return CopySwapShape{}, err
 	}
 	if cause, detail := refuseCopySwapShape(facts); cause != "" {
-		return CopySwapTarget{}, &UnsupportedCopySwapShapeError{Cause: cause, Detail: detail}
+		return CopySwapShape{}, &UnsupportedCopySwapShapeError{Cause: cause, Detail: detail}
 	}
 	// INV: ST-6, RF-1, RF-2, RF-3
-	return CopySwapTarget{
-		database:        facts.database,
-		schema:          facts.schema,
-		table:           table,
-		pkColumn:        facts.pkColumn,
-		pkType:          PKType(facts.pkType),
-		ownerRole:       role.Owner(),
-		oid:             facts.oid,
+	return CopySwapShape{
+		copySwapShape: copySwapShape{
+			database:  facts.database,
+			schema:    facts.schema,
+			table:     table,
+			pkColumn:  facts.pkColumn,
+			pkType:    PKType(facts.pkType),
+			ownerRole: role.Owner(),
+			oid:       facts.oid,
+		},
 		logicalDecoding: role.LogicalDecoding(),
 	}, nil
 }

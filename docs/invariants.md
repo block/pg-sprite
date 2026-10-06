@@ -623,7 +623,9 @@ declarative diff; for the copy-and-swap route, `pkg/preflight` `CheckPrivileges`
 grants, including the logical-decoding role), `CheckCopySwapShape` (PK usability, `REPLICA
 IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
-caller-measured disk headroom against the shadow copy's requirement). *Planned enforcement:* wiring those checks into the route, and
+caller-measured disk headroom against the shadow copy's requirement), chained by type —
+each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
+require is minted by the last. *Planned enforcement:* wiring those checks into the route, and
 all other execution paths in preflight. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 
