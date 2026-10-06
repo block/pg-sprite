@@ -59,9 +59,7 @@ func (f copyFixture) prepare(t *testing.T, rows int64) (preflight.CopySwapTarget
 		INSERT INTO %%s.orders (id, qty, note)
 		SELECT n, n, 'order ' || n FROM generate_series(1, %d) AS n`, rows))
 
-	role, err := preflight.CheckPrivileges(t.Context(), f.pool, f.schema, "orders", preflight.Requirement{Tier: preflight.TierCopyAndSwap})
-	require.NoError(t, err)
-	target, err := preflight.CheckCopySwapShape(t.Context(), f.pool, f.schema, "orders", role)
+	target, err := preflight.CheckCopySwap(t.Context(), f.pool, f.schema, "orders", preflight.CopySwapEnvironment{FreeDiskBytes: testutil.UnlimitedDisk})
 	require.NoError(t, err)
 
 	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, "orders")

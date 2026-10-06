@@ -76,9 +76,7 @@ func (f shadowFixture) exec(t *testing.T, ddl string) {
 // prove mints the copy-and-swap proof for table.
 func (f shadowFixture) prove(t *testing.T, table string) preflight.CopySwapTarget {
 	t.Helper()
-	role, err := preflight.CheckPrivileges(t.Context(), f.pool, f.schema, table, preflight.Requirement{Tier: preflight.TierCopyAndSwap})
-	require.NoError(t, err)
-	target, err := preflight.CheckCopySwapShape(t.Context(), f.pool, f.schema, table, role)
+	target, err := preflight.CheckCopySwap(t.Context(), f.pool, f.schema, table, preflight.CopySwapEnvironment{FreeDiskBytes: testutil.UnlimitedDisk})
 	require.NoError(t, err)
 	return target
 }
