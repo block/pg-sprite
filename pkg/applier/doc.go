@@ -3,7 +3,13 @@
 // delete marker, with an UPDATE overlaying only the columns it carries so an
 // unchanged-TOAST marker is never mistaken for a value (CO-5, CO-8) — and
 // Drain judges every key against the copier's Position: landed keys flush,
-// uncut keys are discarded, in-flight keys wait for their chunk (CO-4). The
-// flush itself, the column-wise upsert and the unique-move fallback, is the
-// package's other half (CO-6, LK-3).
+// uncut keys are discarded, in-flight keys wait for their chunk (CO-4). A
+// Flusher applies the drained Batch in one guarded transaction under the
+// table lock: it first completes every moved marker-bearing image the batch
+// names from the old key's shadow row, or from the source when the old key
+// was reused, then writes column-wise — a delete, an upsert of a whole image,
+// or an UPDATE of only the columns an image carries — and on a unique
+// violation falls back to deleting every key in the batch and inserting
+// every surviving whole row (CO-6, CO-8). A batch a unique index still
+// refuses comes back as ErrBatchDeferred for the caller to Requeue.
 package applier
