@@ -219,10 +219,31 @@ copy-and-swap is not a reason to add passthrough eligibility; it removes the ref
 
 ## Engine-owned session and budgets
 
-An eligible statement runs as one statement in one engine-owned session and transaction, in
-exactly one attempt. The runner sets `lock_timeout` and `statement_timeout` in the transaction
-before the statement. It does not hand SQL to a shell, inherit an unbounded caller session, or
-use the caller-owned concurrent-index exception.
+An eligible statement runs in one engine-owned session and transaction, in exactly one
+attempt. The runner sets `lock_timeout` and `statement_timeout` in the transaction, then
+requests the acknowledged table's `ACCESS EXCLUSIVE` lock with a `LOCK TABLE` statement of
+its own, then runs the submitted statement. It does not hand SQL to a shell, inherit an
+unbounded caller session, or use the caller-owned concurrent-index exception.
+
+The separate lock request is what makes the two budgets measure two different things. The
+admitted statements acquire several locks one at a time — `DROP INDEX` locks the table and
+then the index, `REINDEX INDEX` the table and then the index, `REINDEX TABLE` the table and
+then each index in turn — and `lock_timeout` bounds each acquisition on its own while
+`statement_timeout` counts them all together. Left to acquire its own locks, a statement
+whose first wait was granted could be cancelled by the statement bound during its second,
+and that cancellation is indistinguishable from work that was cut off. Holding the table's
+`ACCESS EXCLUSIVE` lock first removes the later waits: every session that holds a lock on an
+index of the table also holds one on the table, so once the engine has the table nothing
+conflicting remains on any index, and the statement's own requests are granted at once. The
+lock request recurses to a partitioned table's partitions, which the statement would lock in
+turn. The one target `LOCK TABLE` cannot name is a materialized view; `REINDEX TABLE` on one
+acquires its own locks, and a statement cancellation there cannot tell a wait from work.
+
+The mode is `ACCESS EXCLUSIVE` for every admitted form. It is the mode `DROP INDEX` takes on
+the table itself. `REINDEX` takes `SHARE` on the table and `ACCESS EXCLUSIVE` on each index,
+which in practice blocks every new query on the table anyway, because planning opens every
+index of a table under a lock the index's `ACCESS EXCLUSIVE` conflicts with; the engine's
+stronger table lock adds nothing an operator who acknowledged the table has not accepted.
 
 The single attempt is deliberate and differs from brief native execution, which retries a
 lock-budget miss up to three times. The operator accepted one bounded `ACCESS EXCLUSIVE`
@@ -246,15 +267,20 @@ requires the operator to state `--statement-timeout` explicitly on that invocati
 the maximum server-side execution time the operator is accepting after lock acquisition.
 
 The statement bound must also be longer than the lock bound. PostgreSQL's `statement_timeout`
-clock starts when the statement is received and keeps running while the statement waits for
-its lock, so a statement bound that is not longer than `lock_timeout` could cancel a statement
-whose lock was never granted — and that cancellation arrives as SQLSTATE `57014`, which this
-path classifies as a statement failure, not a lock refusal. Requiring `statement_timeout >
-lock_timeout` makes `lock_timeout` the only bound that can end a lock wait, so an ungranted
-lock is always the lock-budget refusal
-([AB-2](invariants.md#ab-2--lock-budget-exhaustion-executes-nothing)), and the statement
-budget measures only work that started. A budget pair in the wrong order is refused before a
-session is acquired, like any other invalid bound.
+clock starts when a statement is received and keeps running while it waits for a lock, so a
+statement bound that is not longer than `lock_timeout` would end every lock wait before the
+lock bound could: the pair is contradictory, and the lock budget could never be the operative
+bound. A budget pair in the wrong order is refused before a session is acquired, like any
+other invalid bound.
+
+The ordering rule is a consistency check, not what keeps a lock wait from being reported as
+work. That is the separate `LOCK TABLE` request described above: every way its wait can end
+— `lock_timeout` (SQLSTATE `55P03`), a statement cancellation of the request itself (`57014`,
+reachable only when the request recurses to partitions and their waits add up), or the
+caller's context — arrives before anything has been submitted, and is reported as a lock
+refusal or as the caller's cancellation, never as statement work
+([AB-2](invariants.md#ab-2--lock-budget-exhaustion-executes-nothing)). The statement budget
+then measures the submitted statement, whose lock requests are already granted.
 
 Explicit is a stronger requirement than non-zero, and the flag's current shape cannot express
 it: `--statement-timeout` is a shared connection flag with a non-zero default, so the command
@@ -371,10 +397,15 @@ operational failure and exit 1.
 Failure before the statement starts, including an exhausted lock budget, remains a typed
 refusal with exit code 2 because nothing ran. A PostgreSQL error or statement-budget
 cancellation after execution starts is a typed `failed` verdict with the executor's stable
-code and exit code 1. The budget ordering rule above is what keeps those two classes apart:
-because the statement bound is longer than the lock bound, a statement-budget cancellation on
-this path always means the lock was granted and the work had started. Failure never reports
-the marked-success exit code.
+code and exit code 1. The separate table lock request is what keeps those two classes apart:
+the engine holds the acknowledged table's lock before it submits the statement, so a
+statement-budget cancellation on this path means the statement was running with its locks
+granted, and an ungranted lock is always the lock refusal. The caller's own context ending
+during the lock wait is reported as `cancelled-by-caller`, a `failed` verdict that can say
+nothing was submitted; the same cancellation while the statement runs is the unknown outcome
+below. The one exception is `REINDEX TABLE` on a materialized view, which `LOCK TABLE` cannot
+name: there the statement acquires its own locks, and its statement-budget cancellation may
+have ended a wait. Failure never reports the marked-success exit code.
 
 There is no resume promise. The path creates no checkpoint and has no committed-prefix model
 beyond the one submitted statement. A normal statement error or cancellation rolls back its

@@ -295,7 +295,7 @@ concurrently is.
 | `blocking-outcome-unknown` | no | The accepted blocking transaction reached an ambiguous client boundary; inspect the catalog before retrying |
 | `invalid-blocking-budget` | yes | An accepted blocking bound is disabled, cannot be represented by PostgreSQL, or the statement bound is not longer than the lock bound |
 | `unsupported-accepted-blocking` | yes | The statement is outside the accepted blocking executor's narrow index-maintenance set, or the server will not run it inside the engine-owned transaction (`REINDEX` on a partitioned relation, SQLSTATE `25001`) |
-| `cancelled-by-caller` | no | The caller's own context ended while the statement ran and the budget had not elapsed; in caller-owned mode this is the build's ordinary exit |
+| `cancelled-by-caller` | no | The caller's own context ended while the statement ran — or, on the accepted blocking path, while the engine's table lock request was still waiting, so nothing was submitted — and the budget had not elapsed; in caller-owned mode this is the build's ordinary exit |
 | `cancelled-externally` | no | The statement was cancelled from outside the executor — not by its caller and not by its budget; an operator's `pg_cancel_backend` or `Tracker.CancelBuild` |
 | `invalid-index-own-leftover` | no | The failed build's own INVALID index remains; `RebuildAbandonedIndex` removes it under proof ([recovery runbook](invalid-index-recovery.md)) |
 | `invalid-index-build-in-flight` | no | The INVALID index under the requested name is another backend's concurrent build still running; wait, never drop |
