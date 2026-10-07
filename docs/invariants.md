@@ -604,7 +604,10 @@ between survives and surfaces as a new `IncompatibleError`. `TestLoadRetriesAcro
 Replication slots are created with a recognizable name prefix; a reaper drops orphaned
 engine-prefixed slots (including one stranded on a demoted writer after failover); a hard
 slot-lag ceiling aborts the migration before an abandoned slot can fill the volume. No exit path
-leaves a slot behind silently. *Enforced:* slot lifecycle manager + reaper + throttler ceiling.
+leaves a slot behind silently. *Enforced:* `pkg/decode` slot lifecycle (`CreateSlot` makes the
+publication before the slot so a refusal leaves nothing to reap; `DropSlot` waits for a holder
+under the caller's context alone, reports a cut-off wait as an error and never as a drop, and
+is idempotent) + reaper + throttler ceiling (planned).
 *Source:* risks-and-mitigations § logical-decoding risks.
 
 ### ST-4 — Slot loss is a modeled state transition, not a crash

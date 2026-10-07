@@ -38,7 +38,6 @@ linters:
             - "**/pkg/checksum/**"
             - "**/pkg/copier/**"
             - "**/pkg/applier/**"
-            - "**/pkg/decode/**"
             - "**/pkg/checkpoint/**"
             - "**/pkg/schemachange/**"
             - "**/pkg/internal/**"
@@ -59,6 +58,30 @@ linters:
             - github.com/block/pg-sprite/pkg/internal/chunksql
             - github.com/block/pg-sprite/pkg/statement
             - github.com/block/pg-sprite/pkg/schemadiff
+        # pkg/decode is the one core package admitted to import the pinned
+        # replication-protocol dependency (SAFETY.md's recorded decision on
+        # jackc/pglogrepl); every other core package is held to the list above.
+        decode:
+          files:
+            - "**/pkg/decode/**"
+            - "!$test"
+          allow:
+            - $gostd
+            - github.com/jackc/pgx/v5
+            - github.com/block/pg-sprite/pkg/dbconn
+            - github.com/block/pg-sprite/pkg/preflight
+            - github.com/block/pg-sprite/pkg/executor
+            - github.com/block/pg-sprite/pkg/progress
+            - github.com/block/pg-sprite/pkg/checksum
+            - github.com/block/pg-sprite/pkg/copier
+            - github.com/block/pg-sprite/pkg/applier
+            - github.com/block/pg-sprite/pkg/decode
+            - github.com/block/pg-sprite/pkg/checkpoint
+            - github.com/block/pg-sprite/pkg/schemachange
+            - github.com/block/pg-sprite/pkg/internal/chunksql
+            - github.com/block/pg-sprite/pkg/statement
+            - github.com/block/pg-sprite/pkg/schemadiff
+            - github.com/jackc/pglogrepl
     sloglint:
       static-msg: true
       key-naming-case: snake
