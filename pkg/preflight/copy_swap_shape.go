@@ -17,8 +17,13 @@ type CopySwapRefusalCause string
 
 const (
 	// CopySwapCausePKUnsupported means the table has no primary key, a
-	// multi-column one, or one whose type is outside the integer family
-	// the chunker keys on.
+	// multi-column one, one whose type is outside the integer family the
+	// chunker keys on, or a DEFERRABLE one. A deferrable key is checked at
+	// the end of each statement rather than per row, so one statement can
+	// move a row onto a key another row still holds and the decoded stream
+	// no longer has one row per key, which the applier's buffer relies on;
+	// the server also declines to use it as the DEFAULT replica identity,
+	// so every UPDATE on a published table would fail.
 	CopySwapCausePKUnsupported CopySwapRefusalCause = "copy-and-swap-pk-unsupported"
 	// CopySwapCauseReplicaIdentity means the table's replica identity is
 	// neither DEFAULT nor FULL, so decoded UPDATE and DELETE events would
@@ -143,6 +148,7 @@ type copySwapShapeFacts struct {
 	pkColumns       int64
 	pkColumn        string
 	pkType          string
+	pkDeferrable    bool
 	foreignKeysOut  int64
 	foreignKeysIn   int64
 	triggers        int64
@@ -160,8 +166,8 @@ type copySwapShapeFacts struct {
 // CheckCopySwapShape verifies that schema.table (search_path resolution when
 // schema is empty) has the shape the copy-and-swap route supports in v1: an
 // ordinary table outside any partition or inheritance tree, exactly one
-// smallint, integer, or bigint primary-key column, a replica identity of
-// DEFAULT or FULL, no FORCE ROW LEVEL SECURITY, no foreign keys, triggers,
+// non-deferrable smallint, integer, or bigint primary-key column, a replica
+// identity of DEFAULT or FULL, no FORCE ROW LEVEL SECURITY, no foreign keys, triggers,
 // or rules, no dependent views, no publication other than the engine's own
 // publishing it, no subscription applying into it, and no other object
 // depending on its OID or row type. The role proof must have been verified
@@ -244,6 +250,9 @@ func refuseCopySwapShape(f copySwapShapeFacts) (CopySwapRefusalCause, string) {
 	default:
 		return CopySwapCausePKUnsupported, fmt.Sprintf("primary-key column %s has type %s; smallint, integer, or bigint is required", f.pkColumn, f.pkType)
 	}
+	if f.pkDeferrable {
+		return CopySwapCausePKUnsupported, "the primary key is DEFERRABLE; a non-deferrable key is required"
+	}
 	// pg_class.relreplident: d = DEFAULT (the primary key), f = FULL,
 	// n = NOTHING, i = a named index.
 	switch f.replicaIdentity {
@@ -307,6 +316,7 @@ func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table 
 		                 WHERE k.conrelid = c.oid AND k.contype = 'p' AND pg_catalog.cardinality(k.conkey) = 1), ''),
 		       COALESCE((SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.conkey[1]
 		                 WHERE k.conrelid = c.oid AND k.contype = 'p' AND pg_catalog.cardinality(k.conkey) = 1), ''),
+		       COALESCE((SELECT k.condeferrable FROM pg_catalog.pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'p'), false),
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'f'),
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k WHERE k.confrelid = c.oid AND k.contype = 'f'),
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal),
@@ -344,7 +354,7 @@ func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table 
 	var publications []string
 	err := db.QueryRow(ctx, q, schema, table).Scan(
 		&f.database, &f.schema, &f.oid, &f.relkind, &f.relpersistence, &f.forceRLS, &f.isPartition, &f.hasSubclass, &f.inheritsParents, &f.replicaIdentity,
-		&f.pkColumns, &f.pkColumn, &f.pkType, &f.foreignKeysOut, &f.foreignKeysIn, &f.triggers, &f.rules, &f.dependentViews,
+		&f.pkColumns, &f.pkColumn, &f.pkType, &f.pkDeferrable, &f.foreignKeysOut, &f.foreignKeysIn, &f.triggers, &f.rules, &f.dependentViews,
 		&publications, &f.subscriptions, &f.dependents)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return copySwapShapeFacts{}, unresolvedTargetCause(ctx, db, schema, table)
