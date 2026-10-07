@@ -42,6 +42,14 @@ type Entry struct {
 	// deferred with it, never before it, because the flush completes this
 	// image's unchanged-TOAST markers before it deletes anything (D13).
 	OldKey *int64
+	// OldKeyReused is set on an Image with an OldKey when the source has
+	// since put another row at that key, so the shadow row the copier reads
+	// or has read there is that row's, not this one's pre-buffer version.
+	// The flush completes a reused image's markers from the source row under
+	// Key, never from the old key's shadow row (D13). Inherited through a
+	// chain of moves with OldKey; a row returning to its own origin is not a
+	// reuse.
+	OldKeyReused bool
 	// Columns is the merged row image for an Image, in the decoded column
 	// order; a column with Present=false is an unchanged-TOAST marker whose
 	// value no buffered event carried. It is nil for a DeleteMarker.

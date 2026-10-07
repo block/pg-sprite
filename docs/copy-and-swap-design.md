@@ -364,20 +364,27 @@ applier. With that discipline, a marker-bearing image for a key that did not mov
 row is absent is a protocol error, not a case to handle: the row pre-exists on the source under
 that key, so the key is either above the cut frontier (discarded under CO-4 at drain) or inside
 an in-flight chunk (whose flush is deferred). The applier aborts the change fail closed if it
-observes one. A moved image is different: its old key's shadow row exists only if the chunk
-covering the old key was read **before** the move — a move captured while the old key was uncut,
-or inside a chunk read after the move, leaves no shadow row under either key, and the buffer
-cannot tell the two histories apart. The flush therefore completes a moved image from the old
-key's shadow row when that row is present and otherwise from the **source** row under `Key`,
-read in the flush's transaction; a source value read this way is the value the marker stood for
-or a later one, and any later change arrives as a later event that overlays it, so the shadow
-converges either way; an absent source row means a later event deletes or moves the key again,
-and the flush skips the image rather than invent a value. The buffer keeps the image and the old
-key's entry together across the drain (CO-4) so the old key's row is neither deleted nor copied
-between completion and apply, and the drained `Batch` names those images in `CompleteFirst`:
-its `Entries` are in key order, which puts a moved image after or before the delete marker at
-its old key as the keys happen to sort, so the flush completes everything `CompleteFirst` names
-before it writes anything, rather than reading the batch in slice order.
+observes one. A moved image is different: its old key's shadow row holds the row's pre-buffer
+version only if the chunk covering the old key was read **before** the move. A move captured
+while the old key was uncut, or inside a chunk read after the move, leaves no shadow row under
+either key, and the buffer cannot tell the two histories apart. And when the source puts
+**another row** at the old key before the copier reads it — an INSERT, a different row's move
+onto it, or an UPDATE of a key the buffer does not hold — the chunk the copier reads copies that
+row, so the old key's shadow row is present but is not this row's; the buffer sees the reuse,
+marks every buffered image that left the key (`Entry.OldKeyReused`, inherited through a chain
+of moves; a row returning to the key it started at is not a reuse), and a flagged image is never
+completed from the old key's shadow row. The flush therefore completes a moved image from the old
+key's shadow row when that row is present and the image is not flagged, and otherwise from the
+**source** row under `Key`, read in the flush's transaction; a source value read this way is the
+value the marker stood for or a later one, and any later change arrives as a later event that
+overlays it, so the shadow converges either way; an absent source row means a later event
+deletes or moves the key again, and the flush skips the image rather than invent a value. The
+buffer keeps the image and the old key's entry together across the drain (CO-4) so the old key's
+row is neither deleted nor copied between completion and apply, and the drained `Batch` names
+the images to complete in `CompleteFirst`, as pointers into its `Entries` so the completion is
+what the flush writes: `Entries` are in key order, which puts a moved image after or before the
+delete marker at its old key as the keys happen to sort, so the flush completes everything
+`CompleteFirst` names before it writes anything, rather than reading the batch in slice order.
 CO-6's second test vector therefore moves the primary key
 of a row whose out-of-line column is untouched, and asserts the fallback completes it from the
 old key's row rather than aborting; a third vector moves a row whose old key never landed and

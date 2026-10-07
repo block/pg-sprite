@@ -267,6 +267,35 @@ func TestDrainBatchNamesMovedImagesToCompleteFirst(t *testing.T) {
 		assert.True(t, batch.Entries[1].HasMarker())
 		assert.Empty(t, batch.CompleteFirst(), "the marker stands for 7's own shadow row, which no other entry deletes")
 	})
+	t.Run("moved image whose old key was reused", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 50, 25, col("label", "r"), marker("doc"))))
+		require.NoError(t, b.Add(insert(20, 50, col("label", "s"), col("doc", "S-doc"))))
+
+		batch := b.Drain(position(t, 6000))
+
+		require.Equal(t, []int64{25, 50}, keys(batch.Entries))
+		first := batch.CompleteFirst()
+		require.Len(t, first, 1)
+		assert.Equal(t, int64(25), first[0].Key)
+		assert.True(t, first[0].OldKeyReused, "50's shadow row is S's; the flush completes from the source row under 25")
+	})
+}
+
+// CompleteFirst points into Entries, so a completion the flush writes through
+// it is the image the flush then writes; a copy would let the two drift.
+func TestDrainCompleteFirstWritesThroughToEntries(t *testing.T) {
+	b := NewBuffer()
+	require.NoError(t, b.Add(keyMove(10, 5, 5000, col("label", "a"), marker("doc"))))
+	batch := b.Drain(position(t, 6000))
+	first := batch.CompleteFirst()
+	require.Len(t, first, 1)
+
+	first[0].Columns = []decode.Column{col("label", "a"), col("doc", "completed")}
+
+	require.Equal(t, int64(5000), batch.Entries[1].Key)
+	assert.False(t, batch.Entries[1].HasMarker())
+	assert.Equal(t, "completed", batch.Entries[1].Columns[1].Value)
 }
 
 func sortedPair(a, b int64) []int64 {

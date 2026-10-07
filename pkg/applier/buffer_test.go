@@ -149,6 +149,94 @@ func TestBufferKeyMoveChainCompletesFromOrigin(t *testing.T) {
 	assert.Equal(t, 3, b.Len())
 }
 
+// R moves off key 50 before the copier has read it, and the source then puts
+// another row, S, at 50. Whenever the copier reads 50's chunk it copies S, so
+// key 50's shadow row is never R's pre-buffer version and the moved image's
+// doc marker must not be completed from it. The same holds when the reuse
+// happens after the old key's own entry was discarded, and through a chain,
+// and when the reuse is seen as an UPDATE of a key the buffer does not hold.
+func TestBufferReusedOldKeyIsNotACompletionSource(t *testing.T) {
+	t.Run("single move", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 50, 25, col("label", "r"), marker("doc"))))
+		require.NoError(t, b.Add(insert(20, 50, col("label", "s"), col("doc", "S-doc"))))
+		got := entry(t, b, 25)
+		require.True(t, got.HasMarker())
+		assert.True(t, got.OldKeyReused, "key 50's shadow row is S's once the copier reads it")
+	})
+	t.Run("chain, after the old key's marker was discarded", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 50, 15, col("label", "r"), marker("doc"))))
+		_ = b.Drain(position(t, 30, [2]int64{11, 20}))
+		require.NoError(t, b.Add(insert(20, 50, col("label", "s"), col("doc", "S-doc"))))
+		require.NoError(t, b.Add(keyMove(30, 15, 25, col("label", "r"), marker("doc"))))
+		got := entry(t, b, 25)
+		require.NotNil(t, got.OldKey)
+		assert.Equal(t, int64(50), *got.OldKey)
+		assert.True(t, got.OldKeyReused)
+	})
+	t.Run("reuse seen as an update of a key the buffer does not hold", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 50, 25, col("label", "r"), marker("doc"))))
+		_ = b.Drain(position(t, 30, [2]int64{21, 30}))
+		require.NoError(t, b.Add(update(20, 50, col("label", "s2"))))
+		assert.True(t, entry(t, b, 25).OldKeyReused, "a live row at 50 is not R")
+	})
+	t.Run("reuse by a different row moving onto the old key", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 50, 25, col("label", "r"), marker("doc"))))
+		require.NoError(t, b.Add(keyMove(20, 7, 50, col("label", "s"), marker("doc"))))
+		assert.True(t, entry(t, b, 25).OldKeyReused)
+		assert.False(t, entry(t, b, 50).OldKeyReused, "7 was not reused")
+	})
+	t.Run("a row returning to its own origin is not a reuse", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 1, 2, col("label", "a"), marker("doc"))))
+		require.NoError(t, b.Add(keyMove(20, 2, 1, col("label", "a"), marker("doc"))))
+		assert.False(t, entry(t, b, 1).OldKeyReused)
+	})
+	t.Run("a reuse before the return travels with the row", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 1, 2, col("label", "a"), marker("doc"))))
+		require.NoError(t, b.Add(insert(20, 1, col("label", "s"), col("doc", "S-doc"))))
+		require.NoError(t, b.Add(del(30, 1)))
+		require.NoError(t, b.Add(keyMove(40, 2, 1, col("label", "a"), marker("doc"))))
+		assert.True(t, entry(t, b, 1).OldKeyReused, "key 1's shadow row may be S's")
+	})
+}
+
+// The images that left a key are found through an index the buffer keeps
+// exact: an image the drain flushed, or that a later event replaced, is no
+// longer found when its old key is reused.
+func TestBufferReuseIndexFollowsTheEntries(t *testing.T) {
+	t.Run("image drained, then the old key reused", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 50, 25, col("label", "r"), marker("doc"))))
+		batch := b.Drain(position(t, 6000))
+		require.Equal(t, []int64{25, 50}, keys(batch.Entries))
+		require.NoError(t, b.Add(insert(20, 50, col("label", "s"), col("doc", "S-doc"))))
+		assert.Equal(t, 1, b.Len())
+		assert.Empty(t, b.movedFrom)
+	})
+	t.Run("moved image deleted, then the old key reused", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 50, 25, col("label", "r"), marker("doc"))))
+		require.NoError(t, b.Add(del(20, 25)))
+		require.NoError(t, b.Add(insert(30, 50, col("label", "s"), col("doc", "S-doc"))))
+		assert.False(t, entry(t, b, 25).OldKeyReused, "the marker at 25 is not an image that left 50")
+		assert.Empty(t, b.movedFrom)
+	})
+	t.Run("moved image moved on, then the origin reused", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 50, 15, col("label", "r"), marker("doc"))))
+		require.NoError(t, b.Add(keyMove(20, 15, 25, col("label", "r"), marker("doc"))))
+		require.NoError(t, b.Add(insert(30, 50, col("label", "s"), col("doc", "S-doc"))))
+		assert.True(t, entry(t, b, 25).OldKeyReused)
+		assert.False(t, entry(t, b, 15).OldKeyReused, "the marker at 15 is not an image that left 50")
+		assert.Equal(t, map[int64]map[int64]struct{}{50: {25: {}}}, b.movedFrom)
+	})
+}
+
 // A row that moves away and back is still a moved image with OldKey equal to
 // its Key, not a plain update: its shadow row under that key may be absent
 // when the chunk was read while the row was elsewhere, and only a moved image

@@ -165,10 +165,10 @@ while an image still needs it for completion (three-way rule, discard-all before
 deferred entry keeps merging, straddling move, pair waits in either direction, uncut half judged
 alone, deferral spreading through a shared old key and along a chain of pairs); `Drain`
 judges against a `Position` read after the last `Add`, and returns a `Batch` whose `Deferred`
-count is what a catch-up is waiting on the copier for and whose `CompleteFirst` names the
-moved, marker-bearing images the flush must complete from the old key's shadow row before it
-writes anything — `Entries` are in key order, which does not order a moved image before the
-delete marker at its old key. *Planned enforcement:* the applier's
+count is what a catch-up is waiting on the copier for and whose `CompleteFirst` names, as
+pointers into `Entries`, the moved, marker-bearing images the flush must complete — from the old
+key's shadow row, or from the source when `OldKeyReused` — before it writes anything; `Entries`
+are in key order, which does not order a moved image before the delete marker at its old key. *Planned enforcement:* the applier's
 SQL shape and the flush that consumes `Drain`'s batch
 (mutual exclusion, not tombstone retention). *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
@@ -187,10 +187,13 @@ for that key ever held the column's value; a delete marker replaces the image ou
 INSERT after a delete replaces the marker. An UPDATE that moved the primary key
 (`ChangeEvent.OldKey` set) enters the buffer as two entries — a delete marker for the old key and
 an image for the new key — and the image's marker, if any, stands for the value in the shadow
-row of the key the row **started at** (D13 completes it from there): when a row moves more than
+row of the key the row **started at** unless the source has since reused that key (D13 completes
+it from there, or from the source row when the key was reused): when a row moves more than
 once inside one flush window the image's `OldKey` is the origin of the chain, not the key it
 passed through, whose shadow row is absent or another row's, and it equals the image's own key
-when the row moved away and back. The buffer is a single keyed map: v1 has one
+when the row moved away and back; an INSERT, a different row's move, or an UPDATE of an unheld
+key landing on a key some buffered image left marks that image `OldKeyReused`, inherited along
+the chain, and a row returning to its own origin is not a reuse. The buffer is a single keyed map: v1 has one
 integer-family PK
 ([copy-and-swap D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)),
 so Spirit's map ↔ FIFO-queue mode toggle for non-memory-comparable keys has no v1 counterpart
@@ -198,7 +201,9 @@ and returns only if queue mode is ever built. *Enforced:* `pkg/applier` `Buffer`
 per key; `Add` merges in stream order (UPDATE overlays present columns by name, DELETE replaces
 with a marker, INSERT replaces a marker with a complete image, a key-moving UPDATE enters a
 marker at the old key and an image at the new key that starts from the old key's buffered image
-and records as `OldKey` the key the row started at, inherited through a chain of moves) and
+and records as `OldKey` the key the row started at, inherited through a chain of moves; an
+event that lands a row on a key marks `OldKeyReused` on every buffered image that left it, found
+through an index the buffer keeps exact) and
 refuses with `ErrInvariantViolation` an event the source could not
 have produced given the buffer — an INSERT over a live image or with an omitted column (CO-8),
 an UPDATE over a marker, a move from a deleted key or onto a live one; `OldestPending` bounds
@@ -225,9 +230,10 @@ still carries a marker from the current shadow row — the row for the key, or f
 transaction). An absent shadow row for an image whose row did **not** move is an invariant
 violation (fail closed) — CO-5's merge rule guarantees the marker only survives for values that
 live in a shadow row the batch did not create; a **moved** image whose old key's shadow row is
-absent is instead completed from the source row under `Key`, because a move captured while the
-old key was uncut leaves no shadow row under either key and the buffer cannot tell that history
-from one whose old row landed (D13). Convergence must still be proved under test. *Test obligation:*
+absent, or whose old key the source has reused (`Entry.OldKeyReused`), is instead completed from
+the source row under `Key`, because a move captured while the old key was uncut leaves no shadow
+row under either key and the buffer cannot tell that history from one whose old row landed, and
+a reused old key's shadow row is another row's (D13). Convergence must still be proved under test. *Test obligation:*
 `seats(id int PRIMARY KEY, slot text UNIQUE)` holding `(1,'A'),(2,'B')`, flushed with the batch
 `{1→'B', 2→'A'}`, converges in one flush; a second vector adds a column stored **out of line**
 (`SET STORAGE EXTERNAL`, proven by the test harness's `ToastBytes()` — a large value under the

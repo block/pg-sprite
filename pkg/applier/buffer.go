@@ -18,6 +18,11 @@ var ErrInvariantViolation = dbconn.ErrInvariantViolation
 // goroutine.
 type Buffer struct {
 	entries map[int64]*Entry
+	// movedFrom indexes the images that left each key: the keys of every
+	// buffered Image whose OldKey is the map key. It is kept exact by put
+	// and remove so an event that lands a row on a key finds the images
+	// that left it without a scan.
+	movedFrom map[int64]map[int64]struct{}
 	// oldest is the least FirstLSN among entries, kept as entries are
 	// written and recomputed by Drain, so OldestPending is read without a
 	// scan however often the stream owner asks; hasOldest is false when the
@@ -27,7 +32,9 @@ type Buffer struct {
 }
 
 // NewBuffer returns an empty buffer.
-func NewBuffer() *Buffer { return &Buffer{entries: make(map[int64]*Entry)} }
+func NewBuffer() *Buffer {
+	return &Buffer{entries: make(map[int64]*Entry), movedFrom: make(map[int64]map[int64]struct{})}
+}
 
 // Len reports how many keys are buffered, including entries a Drain deferred.
 func (b *Buffer) Len() int { return len(b.entries) }
@@ -65,7 +72,9 @@ func (b *Buffer) Add(ev decode.ChangeEvent) error {
 }
 
 // addInsert creates a complete image; an INSERT carries every column's value
-// (CO-8) and can only follow a deletion or nothing at all.
+// (CO-8) and can only follow a deletion or nothing at all. The inserted row
+// is a different row from any that left this key, so those images can no
+// longer complete from the key's shadow row.
 func (b *Buffer) addInsert(ev decode.ChangeEvent) error {
 	cur := b.entries[ev.Key]
 	if cur != nil && cur.Kind == Image {
@@ -76,6 +85,7 @@ func (b *Buffer) addInsert(ev decode.ChangeEvent) error {
 			return fmt.Errorf("%w (CO-8): buffer key %d: insert omits column %s", ErrInvariantViolation, ev.Key, c.Name)
 		}
 	}
+	b.markOldKeyReused(ev.Key, nil)
 	b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: firstLSN(ev.LSN, cur)})
 	return nil
 }
@@ -83,10 +93,13 @@ func (b *Buffer) addInsert(ev decode.ChangeEvent) error {
 // addUpdate overlays the event's present columns onto the buffered image for
 // the key, so a column the event omitted keeps the value an earlier event
 // supplied — or stays a marker when none did (CO-8). An UPDATE of a key the
-// buffer holds deleted cannot have happened on the source.
+// buffer holds deleted cannot have happened on the source. An UPDATE of a key
+// the buffer does not hold shows a live row there, which is a different row
+// from any that left the key.
 func (b *Buffer) addUpdate(ev decode.ChangeEvent) error {
 	cur, ok := b.entries[ev.Key]
 	if !ok {
+		b.markOldKeyReused(ev.Key, nil)
 		b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: ev.LSN})
 		return nil
 	}
@@ -106,8 +119,11 @@ func (b *Buffer) addUpdate(ev decode.ChangeEvent) error {
 // moved, the new image inherits its OldKey: the row's shadow row, which the
 // flush completes a surviving marker from (D13), is under the key the row
 // started at, not the key it passed through, whose shadow row is absent or
-// another row's. The source cannot move a row from a key it has deleted or
-// onto a key that is still live.
+// another row's; it inherits OldKeyReused with it. The moving row is a
+// different row from any other that left the new key, so those images can no
+// longer complete from its shadow row — but a row returning to its own origin
+// is not a reuse of it. The source cannot move a row from a key it has
+// deleted or onto a key that is still live.
 func (b *Buffer) addKeyMove(ev decode.ChangeEvent) error {
 	oldKey := *ev.OldKey
 	cur := b.entries[ev.Key]
@@ -118,6 +134,7 @@ func (b *Buffer) addKeyMove(ev decode.ChangeEvent) error {
 	if from != nil && from.Kind == DeleteMarker {
 		return fmt.Errorf("%w (CO-5): buffer key %d: key move from %d, which is buffered deleted", ErrInvariantViolation, ev.Key, oldKey)
 	}
+	b.markOldKeyReused(ev.Key, from)
 	moved := &Entry{Key: ev.Key, Kind: Image, OldKey: &oldKey, FirstLSN: firstLSN(ev.LSN, cur, from)}
 	if from != nil {
 		moved.Columns = cloneColumns(from.Columns)
@@ -125,6 +142,7 @@ func (b *Buffer) addKeyMove(ev decode.ChangeEvent) error {
 		if from.OldKey != nil {
 			origin := *from.OldKey
 			moved.OldKey = &origin
+			moved.OldKeyReused = from.OldKeyReused
 		}
 	} else {
 		moved.Columns = cloneColumns(ev.Columns)
@@ -140,12 +158,53 @@ func (b *Buffer) addDelete(ev decode.ChangeEvent) {
 	b.put(&Entry{Key: ev.Key, Kind: DeleteMarker, FirstLSN: firstLSN(ev.LSN, b.entries[ev.Key])})
 }
 
-// put stores the entry under its key and keeps the oldest pending position
-// current. An entry only ever replaces one with an equal or later FirstLSN,
-// so the minimum never rises on a write.
+// markOldKeyReused records that key now holds a row other than the one each
+// buffered image that left it carried, so those images' markers cannot be
+// completed from key's shadow row (D13). mover is the entry of the row now
+// landing on key, when the landing is a move: a row returning to the key it
+// started at is not a reuse of it.
+func (b *Buffer) markOldKeyReused(key int64, mover *Entry) {
+	for imageKey := range b.movedFrom[key] {
+		if e := b.entries[imageKey]; e != mover {
+			e.OldKeyReused = true
+		}
+	}
+}
+
+// put stores the entry under its key, keeps movedFrom exact, and keeps the
+// oldest pending position current. An entry only ever replaces one with an
+// equal or later FirstLSN, so the minimum never rises on a write.
 func (b *Buffer) put(e *Entry) {
+	b.unindex(b.entries[e.Key])
 	b.entries[e.Key] = e
+	if e.OldKey != nil {
+		images := b.movedFrom[*e.OldKey]
+		if images == nil {
+			images = make(map[int64]struct{})
+			b.movedFrom[*e.OldKey] = images
+		}
+		images[e.Key] = struct{}{}
+	}
 	b.trackOldest(e.FirstLSN)
+}
+
+// remove drops the entry under key and keeps movedFrom exact.
+func (b *Buffer) remove(key int64) {
+	b.unindex(b.entries[key])
+	delete(b.entries, key)
+}
+
+// unindex takes a replaced or removed entry out of movedFrom; nil and an
+// entry without an OldKey are not indexed.
+func (b *Buffer) unindex(e *Entry) {
+	if e == nil || e.OldKey == nil {
+		return
+	}
+	images := b.movedFrom[*e.OldKey]
+	delete(images, e.Key)
+	if len(images) == 0 {
+		delete(b.movedFrom, *e.OldKey)
+	}
 }
 
 // trackOldest lowers the oldest pending position to lsn when lsn is below it

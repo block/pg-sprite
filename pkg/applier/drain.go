@@ -45,20 +45,25 @@ func (b Batch) OldestFirstLSN() (decode.LSN, bool) {
 	return oldest, found
 }
 
-// CompleteFirst returns the images whose write depends on a shadow row that
-// another entry in the same batch deletes: a moved image still carrying an
-// unchanged-TOAST marker. Its value lives in the shadow row under OldKey
-// (D13), and the delete marker at that old key is in the batch too, sorted by
-// its own key, so a flush that wrote Entries in order could delete the row
-// before reading it. The flush completes these images first, then writes. An
-// image that did not move is not named: its marker stands for the row under
-// its own key, which no other entry deletes — the primary path's upsert
-// writes only present columns and leaves that value in place, and the
-// fallback, which needs every image whole, completes it from that row before
-// the fallback's own deletes. The result shares Entries' order.
-func (b Batch) CompleteFirst() []Entry {
-	var first []Entry
-	for _, e := range b.Entries {
+// CompleteFirst returns the images whose write depends on a row the flush
+// must read before it writes anything in the batch: the moved images still
+// carrying an unchanged-TOAST marker. For an image whose OldKey was not
+// reused, the value lives in the shadow row under OldKey (D13), and the delete
+// marker at that old key may be in the batch too, sorted by its own key, so a
+// flush that wrote Entries in order could delete the row before reading it.
+// For an image whose OldKeyReused is set, the old key's shadow row is another
+// row's and the value is read from the source row under Key; it is named all
+// the same, since it has to be whole before the write. An image that did not
+// move is not named: its marker stands for the row under its own key, which
+// no other entry deletes — the primary path's upsert writes only present
+// columns and leaves that value in place, and the fallback, which needs every
+// image whole, completes it from that row before the fallback's own deletes.
+// The result points into Entries, in Entries' order, so a completion written
+// through it is what the flush then writes.
+func (b Batch) CompleteFirst() []*Entry {
+	var first []*Entry
+	for i := range b.Entries {
+		e := &b.Entries[i]
 		if e.Kind == Image && e.OldKey != nil && e.HasMarker() {
 			first = append(first, e)
 		}
@@ -97,10 +102,10 @@ func (b *Buffer) Drain(pos copier.Position) Batch {
 	for key, e := range b.entries {
 		switch state[key] {
 		case copier.KeyUncut:
-			delete(b.entries, key)
+			b.remove(key)
 			batch.Discarded++
 		case copier.KeyLanded:
-			delete(b.entries, key)
+			b.remove(key)
 			batch.Entries = append(batch.Entries, *e)
 		case copier.KeyInFlight:
 			batch.Deferred++
