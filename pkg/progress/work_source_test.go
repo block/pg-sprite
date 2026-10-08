@@ -54,9 +54,9 @@ func runningTrackerWithSource(t *testing.T, source progress.WorkSource) *progres
 	return tracker
 }
 
-// The copy step's JSON is the adapter-facing contract for format_version 4:
-// the copy operation value, and work carrying the engine's rows and bytes
-// with the build counters at honest zero.
+// The copy step's JSON is the adapter-facing contract for the copy
+// operation: its operation value, and work carrying the engine's rows and
+// bytes with the checksum and build counters at honest zero.
 func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 	var polls atomic.Int32
 	clock := &fakeClock{now: time.Unix(100, 0)}
@@ -74,7 +74,7 @@ func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 4,
+		"format_version": 5,
 		"phase": "running",
 		"step": 2,
 		"total_steps": 4,
@@ -89,6 +89,11 @@ func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 				"rows_total": 5000,
 				"bytes_copied": 98304,
 				"bytes_total": 409600,
+				"chunks_compared": 0,
+				"rows_hashed": 0,
+				"chunks_mismatched": 0,
+				"chunks_repaired": 0,
+				"chunks_reread": 0,
 				"blocks_done": 0,
 				"blocks_total": 0,
 				"tuples_done": 0,
@@ -99,6 +104,59 @@ func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 		}
 	}`, string(raw))
 	assert.Equal(t, int32(1), polls.Load(), "one poll asks the source once")
+}
+
+// checksumCounters are distinct where the pass allows so a swapped pair
+// cannot pass: a repair pass that compared four chunks, found two differing,
+// recopied both, and has reread one of them so far.
+var checksumCounters = progress.Work{ChunksCompared: 4, RowsHashed: 3500, ChunksMismatched: 2, ChunksRepaired: 2, ChunksReread: 1}
+
+// The checksum step's JSON is the adapter-facing contract for the checksum
+// operation: its operation value, and work carrying the engine's chunk and
+// row counters with the copy and build counters at honest zero.
+func TestSnapshotJSONShapeForAChecksumStep(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(100, 0)}
+	tracker, err := progress.NewTracker(clock)
+	require.NoError(t, err)
+	tracker.Start(4, progress.OperationAdmitting)
+	clock.now = clock.now.Add(2 * time.Second)
+	tracker.StartStep(3, progress.OperationChecksum, "")
+	tracker.SetWorkSource(fakeSource{work: func(context.Context) (progress.Work, error) { return checksumCounters, nil }})
+	clock.now = clock.now.Add(750 * time.Millisecond)
+
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	raw, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"format_version": 5,
+		"phase": "running",
+		"step": 3,
+		"total_steps": 4,
+		"elapsed_ns": 2750000000,
+		"step_elapsed_ns": 750000000,
+		"detail": {
+			"operation": "checksum",
+			"active": true,
+			"work": {
+				"rows_copied": 0,
+				"rows_total": 0,
+				"bytes_copied": 0,
+				"bytes_total": 0,
+				"chunks_compared": 4,
+				"rows_hashed": 3500,
+				"chunks_mismatched": 2,
+				"chunks_repaired": 2,
+				"chunks_reread": 1,
+				"blocks_done": 0,
+				"blocks_total": 0,
+				"tuples_done": 0,
+				"tuples_total": 0,
+				"lockers_total": 0,
+				"lockers_done": 0
+			}
+		}
+	}`, string(raw))
 }
 
 // Each poll asks the source afresh, so the counters a consumer sees are the

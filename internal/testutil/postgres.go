@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 
@@ -104,12 +105,41 @@ var schemaSeq atomic.Int64
 // always returns.
 func NewDatabase(t *testing.T, serverURL string) string {
 	t.Helper()
+	return newDatabase(t, serverURL, "")
+}
+
+// NewDatabaseWithEncoding is NewDatabase for a database created with the
+// given server encoding (e.g. "SQL_ASCII") under the C locale, for tests
+// whose subject is how the engine treats the bytes a database stores.
+// template0 is the template, as a server encoding other than the
+// cluster's requires.
+func NewDatabaseWithEncoding(t *testing.T, serverURL, encoding string) string {
+	t.Helper()
+	return newDatabase(t, serverURL, " ENCODING "+quoteLiteral(encoding)+" LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0")
+}
+
+// NewDatabaseFromTemplate is NewDatabase for a database cloned from the
+// one templateURL connects to, for tests whose subject is what a clone
+// shares with its template: the relations keep their OIDs. The server must
+// hold no other session on the template while it is copied, so the caller
+// closes every pool on it first.
+func NewDatabaseFromTemplate(t *testing.T, serverURL, templateURL string) string {
+	t.Helper()
+	u, err := url.Parse(templateURL)
+	require.NoError(t, err, "parse template URL")
+	template := strings.TrimPrefix(u.Path, "/")
+	require.NotEmpty(t, template, "template URL names no database")
+	return newDatabase(t, serverURL, " TEMPLATE "+pgx.Identifier{template}.Sanitize())
+}
+
+func newDatabase(t *testing.T, serverURL, createOptions string) string {
+	t.Helper()
 	name := fmt.Sprintf("db_%d_%d", os.Getpid(), schemaSeq.Add(1))
 
 	pool, err := pgxpool.New(t.Context(), serverURL)
 	require.NoError(t, err, "connect to create throwaway database")
 	t.Cleanup(pool.Close)
-	_, err = pool.Exec(t.Context(), "CREATE DATABASE "+pgx.Identifier{name}.Sanitize())
+	_, err = pool.Exec(t.Context(), "CREATE DATABASE "+pgx.Identifier{name}.Sanitize()+createOptions)
 	require.NoError(t, err, "create throwaway database")
 	t.Cleanup(func() {
 		// t.Context is cancelled by cleanup time; strip the cancellation.

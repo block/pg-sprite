@@ -64,7 +64,7 @@ func (w WorkloadTable) ToastBytes(ctx context.Context) (int64, error) {
 
 // SeedRows inserts n deterministic rows.
 func (w WorkloadTable) SeedRows(ctx context.Context, n int) error {
-	q := `INSERT INTO ` + w.Qualified() + ` (uniq, amount, label, blob) SELECT g, g::numeric/100, 'row-'||g, repeat(md5(g::text), 300) FROM generate_series(1,$1) g`
+	q := `INSERT INTO ` + w.Qualified() + ` (uniq, amount, label, blob) SELECT g, g::numeric/100, 'row-'||g, repeat(encode(sha256(convert_to(g::text, 'UTF8')), 'hex'), 150) FROM generate_series(1,$1) g`
 	_, err := w.pool.Exec(ctx, q, n)
 	if err != nil {
 		return fmt.Errorf("seed workload table %s: %w", w.Qualified(), err)
@@ -239,7 +239,7 @@ func (g *LoadGenerator) update(ctx context.Context, pool *pgxpool.Pool, table Wo
 	rewrite := rng.Float64() < spec.ToastRewriteFraction
 	q := `UPDATE ` + table.Qualified() + ` SET amount=amount+1, label=label||'u', updated_at=now()`
 	if rewrite {
-		q += `, blob=repeat(md5(random()::text),300)`
+		q += `, blob=repeat(encode(sha256(convert_to(random()::text, 'UTF8')), 'hex'), 150)`
 	}
 	q += ` WHERE id=$1`
 	tag, err := pool.Exec(ctx, q, id)

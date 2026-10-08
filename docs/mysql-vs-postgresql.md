@@ -172,10 +172,10 @@ equivalent is given alongside.
 | `SHOW BINARY LOG STATUS` → file:offset position | LSN + slot `confirmed_flush_lsn` |
 | `REPLACE INTO target VALUES (...)` (apply) | `INSERT ... ON CONFLICT (pk) DO UPDATE SET ...` + explicit delete handling |
 | `INSERT IGNORE ... SELECT` (copy) | `INSERT INTO shadow SELECT ... FROM src WHERE <pk range> ON CONFLICT DO NOTHING` |
-| `CRC32(CONCAT(col,...))` checksum | `md5(row::text)` aggregated per chunk, or `sum(hashtext(...))` / count compare |
+| `CRC32(CONCAT(col,...))` checksum | `sha256(convert_to(row::text, getdatabaseencoding()))` aggregated per chunk (not `md5`, which a FIPS-mode OpenSSL refuses), or `sum(hashtext(...))` / count compare |
 | `RENAME TABLE old→_old, new→old` under `LOCK TABLES` (needs MySQL 8.0.13+) | `BEGIN; LOCK TABLE src IN ACCESS EXCLUSIVE MODE; <final drain>; ALTER TABLE src RENAME TO src_old; ALTER TABLE shadow RENAME TO src; COMMIT;` — **PostgreSQL's transactional DDL makes this cleaner than MySQL** |
 | Force-kill via `performance_schema` | `pg_terminate_backend()` + `lock_timeout`/`statement_timeout` to bound the cutover wait |
 | TiDB SQL parser (`pkg/statement`) | [`wasilibs/go-pgquery`](https://github.com/wasilibs/go-pgquery) (libpg_query compiled to Wasm — the real PostgreSQL grammar, no cgo) for parsing `ALTER` / `CREATE TABLE` |
 | Aurora MySQL throttling (active threads, replica lag) | Replication **slot lag** (`pg_replication_slots`), WAL generation rate, replica lag (`pg_stat_replication`; *Aurora:* `aurora_replica_status()`, CloudWatch) |
-| `AUTO_INCREMENT` optimistic chunker | `smallint`/`integer`/`bigint` PK range chunker; composite and non-integer keys are refused in v1 (`copy-and-swap-pk-unsupported`, [D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)) |
+| `AUTO_INCREMENT` optimistic chunker | `smallint`/`integer`/`bigint` PK range chunker; composite, non-integer, and `DEFERRABLE` keys are refused in v1 (`copy-and-swap-pk-unsupported`, [D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)) |
 | TLS / RDS CA auto-detection | same idea, the RDS/Aurora CA bundle for `pgx` when the target is a managed service |

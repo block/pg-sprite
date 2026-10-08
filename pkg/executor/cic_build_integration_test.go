@@ -127,7 +127,7 @@ func TestBuildIndexConcurrentlyCallerOwnedBuildsValidIndex(t *testing.T) {
 func TestBuildIndexConcurrentlyReportsServerProgressAndFinishes(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.progress_t AS
-		SELECT n AS id, repeat(md5(n::text), 4) AS payload FROM generate_series(1, 1000000) n`, schema))
+		SELECT n AS id, repeat(encode(sha256(convert_to(n::text, 'UTF8')), 'hex'), 2) AS payload FROM generate_series(1, 1000000) n`, schema))
 	require.NoError(t, err)
 	tracker, err := progress.NewTracker(progress.WallClock{})
 	require.NoError(t, err)

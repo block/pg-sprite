@@ -112,12 +112,25 @@ environment refusal also carries the typed `CopySwapSetting` the operator must c
 (`wal_level`, or `rds.logical_replication` where the server defines that parameter;
 `max_replication_slots` or `max_wal_senders`; none for disk), so an adapter never parses
 the prose detail to learn which knob to turn.
+
+An adapter that calls `CheckCopySwap`, which folds the privilege, shape, and environment checks
+into one call, sees refusals from all three in that order, and must read each in its own
+vocabulary — `CopySwapRefusalCauseOf` answers only for the shape and environment refusals:
+
+| Outcome of `CheckCopySwap` | How to read it | What it means |
+| --- | --- | --- |
+| `*PrivilegeError` | `errors.As`; `Grant` is the exact statement to run | The engine role lacks the copy-and-swap tier against this table, or (for a run that decodes WAL) replication access. Raised before any shape or cluster read. |
+| `*UnsupportedCopySwapShapeError` | `CopySwapRefusalCauseOf` → a shape cause from the table below | The table's shape is outside what the route supports. |
+| `*CopySwapEnvironmentError` | `CopySwapRefusalCauseOf` → a cluster or volume cause from the table below, plus `Setting` | The cluster or the volume cannot carry the run. |
+| `ErrCopySwapProofMismatch` | `errors.Is` | The proofs handed in do not fit together: a shape minted for another database or dropped relation, or a decoding run on a shape whose privilege proof did not verify replication access. An adapter that calls the fold never produces this. |
+| any other error | wrapped query error | A catalog read failed; retry or surface it as an engine failure. |
+
 The verdict reason that carries these causes lands with the copy-and-swap route itself; the
 classification is fixed here first so the route inherits it.
 
 | `CopySwapRefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
-| `copy-and-swap-pk-unsupported` | The table has no single `smallint`, `integer`, or `bigint` primary-key column for the chunker to range over | `capability-boundary` | Wider key shapes are a planned engine capability ([D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)). |
+| `copy-and-swap-pk-unsupported` | The table has no single non-deferrable `smallint`, `integer`, or `bigint` primary-key column for the chunker to range over and the buffer to key on | `capability-boundary` | Wider key shapes are a planned engine capability ([D4](copy-and-swap-design.md#d4--restrict-the-chunk-key-to-one-integer-family-primary-key)). |
 | `copy-and-swap-replica-identity` | The table's replica identity is `NOTHING` or a named index; `DEFAULT` or `FULL` is required | `environmental` | The same table is admitted after `ALTER TABLE … REPLICA IDENTITY DEFAULT` or `FULL`; the action that unblocks it is a catalog change, not an engine release. |
 | `copy-and-swap-foreign-keys` | A foreign key references the table or leaves it | `capability-boundary` | An OID-bound dependent the rename swap would strand on the old table; re-pointing it is a planned capability. |
 | `copy-and-swap-triggers` | The table has a user trigger or a rewrite rule | `capability-boundary` | As above. |

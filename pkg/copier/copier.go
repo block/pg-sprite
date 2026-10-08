@@ -198,6 +198,13 @@ func (c *Copier) Position() Position {
 // While it runs the copier is the tracker's work source (Options.Tracker),
 // and it has stopped being one by the time Run returns.
 //
+// A cut or a copy that ends at the chunk's lock_timeout — the source was
+// held by a stronger lock for longer than Options.LockTimeout — returns
+// the server's error wrapped, and dbconn.Retryable identifies it. The
+// copier is single-use, but Position is resumable as it stands: a new
+// Copier from Position().Watermark clears the shadow above the watermark
+// and continues, so a caller can back off and resume behind a busy table.
+//
 // Cancellation reaches the server as a closed connection, so a statement
 // that was running keeps running until it finishes or hits the transaction's
 // statement_timeout, and only then is its transaction rolled back; the
@@ -296,15 +303,16 @@ func (c *Copier) work(ctx context.Context, pool *pgxpool.Pool) error {
 	return ctx.Err()
 }
 
-// claim cuts the next chunk and registers it in flight before any worker
-// reads it, so a Position taken at any later instant shows the chunk as in
-// flight until it lands. Cutting and registering happen under one lock, so
-// chunks are registered in the order they were cut and the ledger's frontier
-// never runs ahead of an unregistered chunk.
+// claim cuts the next chunk in a bounded transaction and registers it in
+// flight before any worker reads it, so a Position taken at any later
+// instant shows the chunk as in flight until it lands. Cutting and
+// registering happen under one lock, so chunks are registered in the order
+// they were cut and the ledger's frontier never runs ahead of an
+// unregistered chunk.
 func (c *Copier) claim(ctx context.Context, pool *pgxpool.Pool) (Chunk, bool, error) {
 	c.claimMu.Lock()
 	defer c.claimMu.Unlock()
-	chunk, ok, err := c.chunker.Next(ctx, pool)
+	chunk, ok, err := c.cut(ctx, pool)
 	if err != nil || !ok {
 		return Chunk{}, false, err
 	}

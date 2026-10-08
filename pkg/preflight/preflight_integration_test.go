@@ -87,7 +87,7 @@ func TestCheckTableCountsIndexBytes(t *testing.T) {
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, a text, b text)", schema))
 	require.NoError(t, err)
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(
-		"INSERT INTO %s.t SELECT g, md5(g::text), md5((g+1)::text) FROM generate_series(1, 20000) g", schema))
+		"INSERT INTO %s.t SELECT g, left(encode(sha256(convert_to(g::text, 'UTF8')), 'hex'), 32), left(encode(sha256(convert_to((g+1)::text, 'UTF8')), 'hex'), 32) FROM generate_series(1, 20000) g", schema))
 	require.NoError(t, err)
 	for _, idx := range []string{
 		fmt.Sprintf("CREATE INDEX ON %s.t (a, b)", schema),

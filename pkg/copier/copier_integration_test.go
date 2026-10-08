@@ -70,9 +70,7 @@ func (f copierFixture) createOrders(t *testing.T, rows int64) {
 // prove mints the copy-and-swap proof for table.
 func (f copierFixture) prove(t *testing.T, table string) preflight.CopySwapTarget {
 	t.Helper()
-	role, err := preflight.CheckPrivileges(t.Context(), f.pool, f.schema, table, preflight.Requirement{Tier: preflight.TierCopyAndSwap})
-	require.NoError(t, err)
-	target, err := preflight.CheckCopySwapShape(t.Context(), f.pool, f.schema, table, role)
+	target, err := preflight.CheckCopySwap(t.Context(), f.pool, f.schema, table, preflight.CopySwapEnvironment{FreeDiskBytes: testutil.UnlimitedDisk})
 	require.NoError(t, err)
 	return target
 }

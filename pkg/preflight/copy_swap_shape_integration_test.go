@@ -45,7 +45,7 @@ func (f copySwapShapeFixture) exec(t *testing.T, ddl string) {
 }
 
 // check mints the tier proof and runs the shape check on table.
-func (f copySwapShapeFixture) check(t *testing.T, table string) (preflight.CopySwapTarget, error) {
+func (f copySwapShapeFixture) check(t *testing.T, table string) (preflight.CopySwapShape, error) {
 	t.Helper()
 	role, err := preflight.CheckPrivileges(t.Context(), f.pool, f.schema, table, preflight.Requirement{Tier: preflight.TierCopyAndSwap})
 	require.NoError(t, err)
@@ -181,6 +181,33 @@ func TestCheckCopySwapShapeRefusesCompositeAndMissingKey(t *testing.T) {
 	_, err := f.check(t, "memberships")
 	requireCopySwapCause(t, err, preflight.CopySwapCausePKUnsupported)
 	_, err = f.check(t, "heap")
+	requireCopySwapCause(t, err, preflight.CopySwapCausePKUnsupported)
+}
+
+// A DEFERRABLE primary key is checked at the end of each statement, so one
+// statement can move a row onto a key another row still holds and the decoded
+// stream no longer has one row per key, which the applier's buffer relies on.
+// The server also will not use a deferrable key as the DEFAULT replica
+// identity, so every UPDATE on the published table would fail. Both the FULL
+// and the DEFAULT identity forms are refused, whichever way the constraint is
+// initially timed.
+func TestCheckCopySwapShapeRefusesDeferrablePrimaryKey(t *testing.T) {
+	f := newCopySwapShapeFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.slots_full (
+			id bigint PRIMARY KEY DEFERRABLE INITIALLY IMMEDIATE,
+			label text
+		)`)
+	f.exec(t, `ALTER TABLE %s.slots_full REPLICA IDENTITY FULL`)
+	f.exec(t, `
+		CREATE TABLE %s.slots_default (
+			id bigint PRIMARY KEY DEFERRABLE INITIALLY DEFERRED,
+			label text
+		)`)
+
+	_, err := f.check(t, "slots_full")
+	requireCopySwapCause(t, err, preflight.CopySwapCausePKUnsupported)
+	_, err = f.check(t, "slots_default")
 	requireCopySwapCause(t, err, preflight.CopySwapCausePKUnsupported)
 }
 
@@ -618,7 +645,7 @@ func newCopySwapShapeFixtureInOwnDatabase(t *testing.T) copySwapShapeFixture {
 	return copySwapShapeFixture{serverURL: databaseURL, pool: pool, schema: testutil.NewSchema(t, pool)}
 }
 
-// A proof verified below the copy-and-swap tier cannot mint a target: the
+// A proof verified below the copy-and-swap tier cannot mint a shape proof: the
 // owner it carries was never proven SET-usable, so shadow objects could be
 // created as the wrong role.
 func TestCheckCopySwapShapeRejectsLowerTierProof(t *testing.T) {

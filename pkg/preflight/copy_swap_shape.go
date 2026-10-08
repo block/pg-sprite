@@ -17,8 +17,13 @@ type CopySwapRefusalCause string
 
 const (
 	// CopySwapCausePKUnsupported means the table has no primary key, a
-	// multi-column one, or one whose type is outside the integer family
-	// the chunker keys on.
+	// multi-column one, one whose type is outside the integer family the
+	// chunker keys on, or a DEFERRABLE one. A deferrable key is checked at
+	// the end of each statement rather than per row, so one statement can
+	// move a row onto a key another row still holds and the decoded stream
+	// no longer has one row per key, which the applier's buffer relies on;
+	// the server also declines to use it as the DEFAULT replica identity,
+	// so every UPDATE on a published table would fail.
 	CopySwapCausePKUnsupported CopySwapRefusalCause = "copy-and-swap-pk-unsupported"
 	// CopySwapCauseReplicaIdentity means the table's replica identity is
 	// neither DEFAULT nor FULL, so decoded UPDATE and DELETE events would
@@ -143,6 +148,7 @@ type copySwapShapeFacts struct {
 	pkColumns       int64
 	pkColumn        string
 	pkType          string
+	pkDeferrable    bool
 	foreignKeysOut  int64
 	foreignKeysIn   int64
 	triggers        int64
@@ -160,39 +166,43 @@ type copySwapShapeFacts struct {
 // CheckCopySwapShape verifies that schema.table (search_path resolution when
 // schema is empty) has the shape the copy-and-swap route supports in v1: an
 // ordinary table outside any partition or inheritance tree, exactly one
-// smallint, integer, or bigint primary-key column, a replica identity of
-// DEFAULT or FULL, no FORCE ROW LEVEL SECURITY, no foreign keys, triggers,
+// non-deferrable smallint, integer, or bigint primary-key column, a replica
+// identity of DEFAULT or FULL, no FORCE ROW LEVEL SECURITY, no foreign keys, triggers,
 // or rules, no dependent views, no publication other than the engine's own
 // publishing it, no subscription applying into it, and no other object
 // depending on its OID or row type. The role proof must have been verified
 // at TierCopyAndSwap; the owner it carries is the role the shadow builder
-// creates shadow objects as. On success it returns the CopySwapTarget proof
-// carrying the catalog-resolved database and schema. The facts the server
-// cannot settle from the table alone — logical decoding, slot and disk
-// headroom — are CheckCopySwapEnvironment's. The catalog reads are
+// creates shadow objects as. On success it returns the CopySwapShape proof
+// carrying the catalog-resolved database and schema, which only
+// CheckCopySwapEnvironment accepts: the facts the server cannot settle from
+// the table alone — logical decoding, slot and disk headroom — are that
+// check's, and the CopySwapTarget every writing step requires is minted
+// there. CheckCopySwap runs the whole sequence. The catalog reads are
 // pg_catalog-qualified, so the result does not depend on the pool's
 // search_path; the pool should still come from dbconn.NewPool, which bounds
 // every session's timeouts.
-func CheckCopySwapShape(ctx context.Context, pool *pgxpool.Pool, schema, table string, role PrivilegedRole) (CopySwapTarget, error) {
+func CheckCopySwapShape(ctx context.Context, pool *pgxpool.Pool, schema, table string, role PrivilegedRole) (CopySwapShape, error) {
 	if role.Tier() != TierCopyAndSwap || role.Owner() == "" {
-		return CopySwapTarget{}, fmt.Errorf("%w: tier %q, owner %q", ErrCopySwapProofMismatch, role.Tier(), role.Owner())
+		return CopySwapShape{}, fmt.Errorf("%w: tier %q, owner %q", ErrCopySwapProofMismatch, role.Tier(), role.Owner())
 	}
 	facts, err := gatherCopySwapShapeFacts(ctx, pool, schema, table)
 	if err != nil {
-		return CopySwapTarget{}, err
+		return CopySwapShape{}, err
 	}
 	if cause, detail := refuseCopySwapShape(facts); cause != "" {
-		return CopySwapTarget{}, &UnsupportedCopySwapShapeError{Cause: cause, Detail: detail}
+		return CopySwapShape{}, &UnsupportedCopySwapShapeError{Cause: cause, Detail: detail}
 	}
 	// INV: ST-6, RF-1, RF-2, RF-3
-	return CopySwapTarget{
-		database:        facts.database,
-		schema:          facts.schema,
-		table:           table,
-		pkColumn:        facts.pkColumn,
-		pkType:          PKType(facts.pkType),
-		ownerRole:       role.Owner(),
-		oid:             facts.oid,
+	return CopySwapShape{
+		copySwapShape: copySwapShape{
+			database:  facts.database,
+			schema:    facts.schema,
+			table:     table,
+			pkColumn:  facts.pkColumn,
+			pkType:    PKType(facts.pkType),
+			ownerRole: role.Owner(),
+			oid:       facts.oid,
+		},
 		logicalDecoding: role.LogicalDecoding(),
 	}, nil
 }
@@ -239,6 +249,9 @@ func refuseCopySwapShape(f copySwapShapeFacts) (CopySwapRefusalCause, string) {
 	case PKSmallint, PKInteger, PKBigint:
 	default:
 		return CopySwapCausePKUnsupported, fmt.Sprintf("primary-key column %s has type %s; smallint, integer, or bigint is required", f.pkColumn, f.pkType)
+	}
+	if f.pkDeferrable {
+		return CopySwapCausePKUnsupported, "the primary key is DEFERRABLE; a non-deferrable key is required"
 	}
 	// pg_class.relreplident: d = DEFAULT (the primary key), f = FULL,
 	// n = NOTHING, i = a named index.
@@ -303,6 +316,7 @@ func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table 
 		                 WHERE k.conrelid = c.oid AND k.contype = 'p' AND pg_catalog.cardinality(k.conkey) = 1), ''),
 		       COALESCE((SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.conkey[1]
 		                 WHERE k.conrelid = c.oid AND k.contype = 'p' AND pg_catalog.cardinality(k.conkey) = 1), ''),
+		       COALESCE((SELECT k.condeferrable FROM pg_catalog.pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'p'), false),
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'f'),
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k WHERE k.confrelid = c.oid AND k.contype = 'f'),
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal),
@@ -340,7 +354,7 @@ func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table 
 	var publications []string
 	err := db.QueryRow(ctx, q, schema, table).Scan(
 		&f.database, &f.schema, &f.oid, &f.relkind, &f.relpersistence, &f.forceRLS, &f.isPartition, &f.hasSubclass, &f.inheritsParents, &f.replicaIdentity,
-		&f.pkColumns, &f.pkColumn, &f.pkType, &f.foreignKeysOut, &f.foreignKeysIn, &f.triggers, &f.rules, &f.dependentViews,
+		&f.pkColumns, &f.pkColumn, &f.pkType, &f.pkDeferrable, &f.foreignKeysOut, &f.foreignKeysIn, &f.triggers, &f.rules, &f.dependentViews,
 		&publications, &f.subscriptions, &f.dependents)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return copySwapShapeFacts{}, unresolvedTargetCause(ctx, db, schema, table)

@@ -29,9 +29,7 @@ func TestCreateShadowRefusesAShadowTheSourceOwnerDoesNotOwn(t *testing.T) {
 	require.NoError(t, err)
 	_, err = pool.Exec(t.Context(), `ALTER TABLE `+pgx.Identifier{schema, "widgets"}.Sanitize()+` OWNER TO `+pgx.Identifier{owner}.Sanitize())
 	require.NoError(t, err)
-	role, err := preflight.CheckPrivileges(t.Context(), pool, schema, "widgets", preflight.Requirement{Tier: preflight.TierCopyAndSwap})
-	require.NoError(t, err)
-	target, err := preflight.CheckCopySwapShape(t.Context(), pool, schema, "widgets", role)
+	target, err := preflight.CheckCopySwap(t.Context(), pool, schema, "widgets", preflight.CopySwapEnvironment{FreeDiskBytes: testutil.UnlimitedDisk})
 	require.NoError(t, err)
 
 	// The transaction deliberately runs as the connected superuser, not
