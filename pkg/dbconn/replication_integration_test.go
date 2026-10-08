@@ -75,3 +75,28 @@ func TestConnectReplicationAppliesBeforeConnect(t *testing.T) {
 		assert.Equal(collect, "pg-sprite-probe", applicationName)
 	}, senderVisible, 50*time.Millisecond)
 }
+
+// The replication connection asks for warnings itself: a database set to
+// send its sessions only errors cannot keep the walsender's warning — the
+// one word that it will withhold changes — from the connection.
+func TestConnectReplicationAsksForWarningsOverTheDatabaseSetting(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	databaseURL := testutil.NewDatabase(t, serverURL)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: databaseURL})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	var database string
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT current_database()`).Scan(&database))
+	_, err = pool.Exec(t.Context(), `ALTER DATABASE `+pgx.Identifier{database}.Sanitize()+` SET client_min_messages = error`)
+	require.NoError(t, err)
+
+	conn, err := dbconn.ConnectReplication(t.Context(), dbconn.Config{URL: databaseURL})
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, conn.Close(context.WithoutCancel(t.Context()))) })
+
+	results, err := conn.Exec(t.Context(), `SHOW client_min_messages`).ReadAll()
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	require.Len(t, results[0].Rows, 1)
+	assert.Equal(t, "warning", string(results[0].Rows[0][0]))
+}

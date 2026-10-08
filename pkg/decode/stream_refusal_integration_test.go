@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -100,14 +101,47 @@ func TestStreamReturnsTheDecodersError(t *testing.T) {
 	f := newSlotFixture(t)
 	slot := f.createSlot(t)
 	stream := f.openStream(t, slot.ConsistentPoint())
+
+	f.dropPublicationUnder(t, slot)
+	f.requireDroppedPublicationStops(t, stream)
+}
+
+// A database that sends its sessions only errors cannot hide a withheld
+// change from the stream: the replication connection asks for warnings
+// itself, so a publication dropped under the stream still ends it with the
+// server's SQLSTATE on every major.
+func TestStreamStopsOnTheWarningWhenTheDatabaseSendsOnlyErrors(t *testing.T) {
+	f := newSlotFixture(t)
+	slot := f.createSlot(t)
+	var database string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT current_database()`).Scan(&database))
+	_, err := f.pool.Exec(t.Context(), `ALTER DATABASE `+pgx.Identifier{database}.Sanitize()+` SET client_min_messages = error`)
+	require.NoError(t, err)
+	stream := f.openStream(t, slot.ConsistentPoint())
+
+	f.dropPublicationUnder(t, slot)
+	f.requireDroppedPublicationStops(t, stream)
+}
+
+// dropPublicationUnder drops the slot's publication under an open stream and
+// commits one change the walsender can no longer send.
+func (f slotFixture) dropPublicationUnder(t *testing.T, slot *decode.Slot) {
+	t.Helper()
 	_, err := f.pool.Exec(t.Context(), `DROP PUBLICATION `+slot.Name())
 	require.NoError(t, err)
 	f.exec(t, `INSERT INTO %s.ledger (id, note) VALUES (101, 'unpublished')`)
+}
 
+// requireDroppedPublicationStops asserts the stream ends with the server's
+// SQLSTATE for a dropped publication: the decoder's missing-publication
+// error before PostgreSQL 18, the stream's own ST-4 refusal of the
+// skipped-publication warning from 18.
+func (f slotFixture) requireDroppedPublicationStops(t *testing.T, stream *decode.Stream) {
+	t.Helper()
 	var version int
 	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT current_setting('server_version_num')::int`).Scan(&version))
 	const skipsAMissingPublicationSince = 180000
-	err = nextError(t, stream)
+	err := nextError(t, stream)
 	if version >= skipsAMissingPublicationSince {
 		require.ErrorIs(t, err, decode.ErrInvariantViolation)
 		requireSQLState(t, err, "55000")

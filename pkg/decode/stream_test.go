@@ -242,3 +242,17 @@ func TestConfirmRefusesARegressionAndAnOverreach(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvariantViolation)
 	assert.Equal(t, LSN(150), s.Confirmed())
 }
+
+// The stream reads the unlocalized severity: a server running with a
+// non-English lc_messages localizes Severity, and its warning must still
+// stop the stream.
+func TestStreamStopsOnALocalizedWarning(t *testing.T) {
+	s := &Stream{delivered: 100, confirmed: 90}
+
+	_, yielded, err := s.handleMessage(t.Context(), &pgproto3.NoticeResponse{
+		Severity: "WARNUNG", SeverityUnlocalized: "WARNING", Code: "55000", Message: "skipped loading publication",
+	})
+
+	require.ErrorIs(t, err, ErrInvariantViolation)
+	assert.False(t, yielded)
+}

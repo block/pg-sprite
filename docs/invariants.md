@@ -684,13 +684,15 @@ a position, sets write, flush, and apply to it explicitly, refuses a regression 
 beyond `Delivered`, and records nothing the server was not told; a keepalive reply carries the
 confirmed position alone; a warning the server sends in copy-both mode — the walsender saying it
 will withhold changes, as from a publication it skipped loading — stops the stream fail-closed
-before a keepalive can deliver a position past them; the server ending replication with the slot intact is `ErrStreamEnded`,
+before a keepalive can deliver a position past them, and the replication connection asks for
+warnings itself so no role, database, or server setting can keep them from it; the server ending replication with the slot intact is `ErrStreamEnded`,
 distinct from a fail-closed violation, so a resume tells a clean restart from slot loss; a
 reopened stream replays every transaction that committed above the confirmed position
 (confirm-moves-the-slot, keepalive-replies-leave-it, refuse-beyond-delivered,
 reopen-replays-from-confirmed, interleaved-transaction-below-the-confirmed-position,
 confirm-refuses-after-stop, confirm-leaves-the-record-when-the-send-fails,
-stops-on-a-warning-from-the-server tests).
+stops-on-a-warning-from-the-server, stops-on-a-localized-warning,
+stops-on-the-warning-when-the-database-sends-only-errors tests).
 The reconcile-mode transition itself is the checkpoint/resume state machine (Phase 8). *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 

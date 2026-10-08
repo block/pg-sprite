@@ -34,6 +34,11 @@ func ConnectReplication(ctx context.Context, cfg Config) (*pgconn.PgConn, error)
 		}
 	}
 	connConfig.RuntimeParams["replication"] = "database"
+	// A walsender reports what it will withhold from the stream as a
+	// warning. A startup parameter outranks the role's, the database's, and
+	// the server's client_min_messages, so none of them can keep that
+	// warning from reaching the connection.
+	connConfig.RuntimeParams["client_min_messages"] = "warning"
 	conn, err := pgconn.ConnectConfig(ctx, &connConfig.Config)
 	if err != nil {
 		return nil, fmt.Errorf("connect replication session: %w", err)
