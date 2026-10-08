@@ -36,112 +36,83 @@ func TestFlushConvergesAUniqueExchange(t *testing.T) {
 	f.assertConverged(t, p.shadow)
 }
 
-// The second CO-6 vector: the exchange moves one row's primary key, and
-// both updated rows left their out-of-line document unchanged, so both
-// images carry a marker. The moved image is completed from the old key's
-// shadow row before anything is written, the fallback completes the other
-// from the row under its own key, and both documents survive byte for byte
-// (CO-8, D13).
+// The same exchange when both updated rows left their out-of-line document
+// unchanged, so both images carry a marker. The fallback needs every image
+// whole: it completes each from the shadow row under its own key before its
+// deletes, and both documents survive byte for byte (CO-8, D13).
 func TestFlushFallbackCompletesMarkersFromTheShadow(t *testing.T) {
 	f := newFlushFixture(t)
 	f.createSeats(t, 2)
 	p := f.prepare(t, "seats")
 	doc1, _ := f.text(t, "seats", "doc", 1)
 	doc2, _ := f.text(t, "seats", "doc", 2)
-	f.exec(t, `UPDATE %s.seats SET slot = NULL WHERE id = 2`)
+	f.exec(t, `UPDATE %s.seats SET slot = NULL WHERE id = 1`)
+	f.exec(t, `UPDATE %s.seats SET slot = 'A' WHERE id = 2`)
 	f.exec(t, `UPDATE %s.seats SET slot = 'B' WHERE id = 1`)
-	f.exec(t, `UPDATE %s.seats SET id = 10, slot = 'A' WHERE id = 2`)
 
 	result, err := p.flush.Flush(t.Context(), f.pool, batch(
 		image(1, col("slot", "B"), marker("doc")),
-		deleted(2),
-		moved(2, 10, col("slot", "A"), marker("doc")),
+		image(2, col("slot", "A"), marker("doc")),
 	))
 
 	require.NoError(t, err)
-	assert.Equal(t, applier.Result{Images: 2, Deletes: 1, CompletedFromShadow: 2, Fallback: true}, result)
+	assert.Equal(t, applier.Result{Images: 2, Completed: 2, Fallback: true}, result)
 	f.assertConverged(t, p.shadow)
 	got1, _ := f.text(t, p.shadow.ShadowTable(), "doc", 1)
-	got10, _ := f.text(t, p.shadow.ShadowTable(), "doc", 10)
-	assert.Equal(t, *doc1, *got1, "the document under the unmoved key was completed from its own row")
-	assert.Equal(t, *doc2, *got10, "the moved row's document was completed from the old key's row before that row was deleted")
+	got2, _ := f.text(t, p.shadow.ShadowTable(), "doc", 2)
+	assert.Equal(t, *doc1, *got1, "completed from the row under its own key before that row was deleted")
+	assert.Equal(t, *doc2, *got2)
 }
 
-// The third CO-6 vector: a move whose old key never landed — the copier
-// read the old key's chunk after the row had left it, so no shadow row
-// holds the pre-move version under either key — is completed from the live
-// source row under the new key (D13).
-func TestFlushCompletesAMoveWhoseOldKeyNeverLandedFromTheSource(t *testing.T) {
+// A row that moves to a lower key and keeps its unique slot is not an
+// exchange: the only row holding the slot is its own, under the old key.
+// The flush writes the batch's delete markers before its images, so the
+// upsert at the new key finds the slot free and the batch stays column-wise
+// (CO-6).
+func TestFlushMoveToALowerKeyStaysColumnWise(t *testing.T) {
 	f := newFlushFixture(t)
 	f.createSeats(t, 3)
 	p := f.prepare(t, "seats")
-	doc2, _ := f.text(t, "seats", "doc", 2)
-	// The copier's read of the chunk holding key 2 came after the move and
-	// found no row there; the shadow never held one.
-	f.exec(t, `DELETE FROM %s.`+p.shadow.ShadowTable()+` WHERE id = 2`)
-	f.exec(t, `UPDATE %s.seats SET id = 10 WHERE id = 2`)
-
-	result, err := p.flush.Flush(t.Context(), f.pool, batch(moved(2, 10, col("slot", "B"), marker("doc"))))
-
-	require.NoError(t, err)
-	assert.Equal(t, applier.Result{Images: 1, CompletedFromSource: 1}, result)
-	f.assertConverged(t, p.shadow)
-	got, _ := f.text(t, p.shadow.ShadowTable(), "doc", 10)
-	assert.Equal(t, *doc2, *got)
-}
-
-// A moved image whose old key the source has since reused is never
-// completed from the old key's shadow row, which is the other row's: the
-// copier read that chunk after the reuse, so the shadow row under key 2 is
-// the new row's document, and the moved row's document comes from the
-// source (D13).
-func TestFlushCompletesAReusedOldKeyFromTheSource(t *testing.T) {
-	f := newFlushFixture(t)
-	f.createSeats(t, 3)
-	p := f.prepare(t, "seats")
-	doc2, _ := f.text(t, "seats", "doc", 2)
-	f.exec(t, `UPDATE %s.seats SET id = 10 WHERE id = 2`)
-	f.exec(t, `INSERT INTO %s.seats (id, slot, doc, note) VALUES (2, 'Z', 'the other row''s document', 'seat 2 again')`)
-	// The copier read key 2's chunk after the reuse: the shadow row under
-	// key 2 is the other row's.
-	f.exec(t, `UPDATE %s.`+p.shadow.ShadowTable()+` SET slot = 'Z', doc = 'the other row''s document' WHERE id = 2`)
-	movedImage := moved(2, 10, col("slot", "B"), marker("doc"))
-	movedImage.OldKeyReused = true
+	doc3, _ := f.text(t, "seats", "doc", 3)
+	f.exec(t, `UPDATE %s.seats SET id = 0 WHERE id = 3`)
 
 	result, err := p.flush.Flush(t.Context(), f.pool, batch(
-		image(2, col("slot", "Z"), col("doc", "the other row's document")),
-		movedImage,
+		moved(3, 0, col("slot", "C"), col("doc", *doc3)),
+		deleted(3),
 	))
 
 	require.NoError(t, err)
-	assert.Equal(t, applier.Result{Images: 2, CompletedFromSource: 1}, result)
+	assert.Equal(t, applier.Result{Images: 1, Deletes: 1}, result, "only the row's own old key held its slot")
 	f.assertConverged(t, p.shadow)
-	got, _ := f.text(t, p.shadow.ShadowTable(), "doc", 10)
-	assert.Equal(t, *doc2, *got, "the moved row's own document, not the row that took its old key")
 }
 
-// A moved image with a marker that neither the old key's shadow row nor the
-// source row under the new key can complete has been removed from the
-// source since: a later event deletes or moves the key again, and the flush
-// skips the image rather than invent a document (D13).
-func TestFlushSkipsAMovedImageWhoseRowIsGone(t *testing.T) {
+// An exclusion constraint refuses an exchange exactly as a unique index
+// does, with its own SQLSTATE; the flush takes the same fallback and the
+// batch converges (CO-6). The constraint is a btree equality exclusion,
+// which preflight admits.
+func TestFlushConvergesAnExclusionExchange(t *testing.T) {
 	f := newFlushFixture(t)
-	f.createSeats(t, 3)
+	f.exec(t, `
+		CREATE TABLE %s.seats (
+			id bigint PRIMARY KEY,
+			slot text,
+			doc text,
+			note text,
+			EXCLUDE USING btree (slot WITH =)
+		)`)
+	f.exec(t, `INSERT INTO %s.seats VALUES (1, 'A', 'd1', 'n1'), (2, 'B', 'd2', 'n2')`)
 	p := f.prepare(t, "seats")
-	f.exec(t, `DELETE FROM %s.`+p.shadow.ShadowTable()+` WHERE id = 2`)
-	f.exec(t, `UPDATE %s.seats SET id = 10 WHERE id = 2`)
-	f.exec(t, `DELETE FROM %s.seats WHERE id = 10`)
-	f.exec(t, `UPDATE %s.seats SET slot = 'Y' WHERE id = 3`)
+	f.exec(t, `UPDATE %s.seats SET slot = NULL WHERE id = 1`)
+	f.exec(t, `UPDATE %s.seats SET slot = 'A' WHERE id = 2`)
+	f.exec(t, `UPDATE %s.seats SET slot = 'B' WHERE id = 1`)
 
 	result, err := p.flush.Flush(t.Context(), f.pool, batch(
-		image(3, col("slot", "Y"), marker("doc")),
-		moved(2, 10, col("slot", "B"), marker("doc")),
+		image(1, col("slot", "B"), col("doc", "d1")),
+		image(2, col("slot", "A"), col("doc", "d2")),
 	))
 
 	require.NoError(t, err)
-	assert.Equal(t, applier.Result{Images: 1, Skipped: 1}, result)
-	_, present := f.text(t, p.shadow.ShadowTable(), "slot", 10)
-	assert.False(t, present, "no row was invented for the skipped image")
+	assert.Equal(t, applier.Result{Images: 2, Fallback: true}, result)
 	f.assertConverged(t, p.shadow)
 }
 

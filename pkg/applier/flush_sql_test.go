@@ -63,10 +63,11 @@ func TestDeleteSQL(t *testing.T) {
 }
 
 // A completion read renders each marker column as text so the value makes
-// the round trip through a text bind whatever its type.
-func TestRowSQLRendersEachColumnAsText(t *testing.T) {
+// the round trip through a text bind whatever its type, and reads the WAL
+// insert position last, in the same statement as the values.
+func TestRowSQLRendersEachColumnAsTextWithTheReadPosition(t *testing.T) {
 	assert.Equal(t,
-		`SELECT "blob"::text, "paid at"::text FROM "app"."orders_shadow" WHERE "id" = $1`,
+		`SELECT "blob"::text, "paid at"::text, pg_catalog.pg_current_wal_insert_lsn()::text FROM "app"."orders_shadow" WHERE "id" = $1`,
 		rowSQL(testRelation, testPK, []string{"blob", "paid at"}))
 }
 

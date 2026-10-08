@@ -36,20 +36,6 @@ func TestRequeuePutsTheBatchBack(t *testing.T) {
 	assert.Equal(t, []decode.Column{{Name: "label", Value: "a", Present: true}}, again.Entries[0].Columns)
 }
 
-// A completion the flush wrote into the batch travels back with it: the
-// value a marker stood for is now a value, and the buffer keeps it.
-func TestRequeueKeepsACompletedImage(t *testing.T) {
-	b := NewBuffer()
-	require.NoError(t, b.Add(keyMove(20, 7, 8, marker("blob"))))
-	batch := b.Drain(position(t, 100))
-	batch.CompleteFirst()[0].overlay([]decode.Column{{Name: "blob", Value: "completed", Present: true}})
-
-	require.NoError(t, b.Requeue(batch))
-
-	assert.Equal(t, []decode.Column{{Name: "blob", Value: "completed", Present: true}}, entry(t, b, 8).Columns)
-	assert.False(t, entry(t, b, 8).HasMarker())
-}
-
 // The stream owner adds nothing between a Drain and its Requeue, so a
 // buffered entry under a batch key is a protocol breach: the requeue is
 // refused whole and the buffer is as it was.

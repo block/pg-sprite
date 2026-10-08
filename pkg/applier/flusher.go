@@ -21,18 +21,25 @@ var (
 	// would read as no timeout at all.
 	ErrInvalidOptions = errors.New("invalid flusher options")
 	// ErrBatchDeferred reports a batch the flush could not apply because a
-	// unique index refused it even after the delete-all-then-insert-all
-	// fallback (CO-6): a surviving image collides with a shadow row the batch
-	// does not name — a stale row whose own deletion is buffered behind an
-	// in-flight chunk. The transaction was rolled back and the shadow is as it
-	// was; the stream owner puts the batch back with Buffer.Requeue and drains
-	// again once the copier has moved.
-	ErrBatchDeferred = errors.New("batch deferred: a unique index refused it")
+	// unique index or exclusion constraint refused it even after the
+	// delete-all-then-insert-all fallback (CO-6): a surviving image collides
+	// with a shadow row the batch does not name — a stale row whose own
+	// deletion is buffered behind an in-flight chunk. The transaction was
+	// rolled back and the shadow is as it was; the stream owner puts the
+	// batch back with Buffer.Requeue and drains again once the copier has
+	// moved.
+	ErrBatchDeferred = errors.New("batch deferred: a unique index or exclusion constraint refused it")
 )
 
-// sqlstateUniqueViolation is the SQLSTATE a unique index raises when an
-// insert or update would duplicate one of its keys.
-const sqlstateUniqueViolation = "23505"
+const (
+	// sqlstateUniqueViolation is the SQLSTATE a unique index raises when an
+	// insert or update would duplicate one of its keys.
+	sqlstateUniqueViolation = "23505"
+	// sqlstateExclusionViolation is the SQLSTATE an exclusion constraint
+	// raises when an insert or update would conflict with a row it already
+	// admits; it refuses the same exchanges a unique index does.
+	sqlstateExclusionViolation = "23P01"
+)
 
 // Options bounds a flush. Zero values take the dbconn session timeout
 // defaults.
@@ -67,29 +74,35 @@ func (o Options) validate() error {
 	return nil
 }
 
-// Result is what one Flush wrote.
+// Result is what one Flush wrote, and what it read but did not write.
 type Result struct {
 	// Images is the number of row images written, by upsert or, under
 	// Fallback, by whole-row insert.
 	Images int
-	// Deletes is the number of delete markers applied. Under Fallback every
-	// key in the batch is deleted before the inserts; those deletes are not
-	// counted here, only the markers.
+	// Deletes is the number of delete markers applied, counting the delete
+	// written for each key in Skipped. Under Fallback every key in the
+	// batch is deleted before the inserts; those deletes are not counted
+	// here, only the markers.
 	Deletes int
-	// CompletedFromShadow is the number of images whose unchanged-TOAST
-	// markers the flush filled in from a shadow row (D13).
-	CompletedFromShadow int
-	// CompletedFromSource is the number of moved images whose markers the
-	// flush filled in from the source row under Key, because the old key's
-	// shadow row was absent or another row's (D13).
-	CompletedFromSource int
-	// Skipped is the number of moved images the flush did not write because
-	// neither the old key's shadow row nor the source row under Key could
-	// complete them: the source has since deleted or moved the key again,
-	// and that later event removes the key (D13).
-	Skipped int
-	// Fallback reports that a unique index refused the column-wise upserts
-	// and the batch was applied as delete-all-then-insert-all (CO-6).
+	// Completed is the number of images whose unchanged-TOAST markers the
+	// fallback filled in from the shadow row under their own key before
+	// writing them whole (CO-6, D13).
+	Completed int
+	// Held are the moved images the flush completed from the old key's
+	// shadow row, or from the source row under Key, and did not write: the
+	// row read can be newer than the stream, so the buffer takes each
+	// completion only once the stream has passed its read position (D13).
+	// The stream owner gives them to Buffer.Hold before its next Add.
+	Held []HeldImage
+	// Skipped are the keys of the moved images the flush wrote as a delete
+	// because neither the old key's shadow row nor the source row under Key
+	// could complete them: the source holds no row under the key, so the
+	// shadow must not either, and the event that removed it arrives later
+	// (D13).
+	Skipped []int64
+	// Fallback reports that a unique index or exclusion constraint refused
+	// the column-wise writes and the batch was applied as
+	// delete-all-then-insert-all (CO-6).
 	Fallback bool
 }
 
@@ -142,21 +155,28 @@ func NewFlusher(target preflight.CopySwapTarget, shadow copier.Shadow, lock *dbc
 }
 
 // Flush applies one drained batch to the shadow in one transaction, or
-// writes nothing. It completes every image Batch.CompleteFirst names before
-// it writes anything (D13), then applies the entries in key order: a delete
-// marker deletes the key's row, an image without markers upserts every
-// column, an image with markers updates its present columns and must find
-// the key's row (CO-8). When a unique index refuses an upsert the flush
-// rolls back to its savepoint, completes every surviving image that still
-// carries a marker from the shadow row under its key, deletes every key in
-// the batch, and inserts every surviving image whole (CO-6); a unique index
-// that refuses that too means a collision with a row the batch does not
-// name, and the flush returns ErrBatchDeferred with the shadow unchanged.
-// An image the source could not have produced given the shadow — a marker
-// for a row the shadow does not hold — is ErrInvariantViolation, and the
-// flush commits nothing. The transaction runs under the lock session's Bind
-// context, so losing the table lock cancels the flush and it reports the
-// loss. An empty batch is a no-op.
+// writes nothing. It first reads a completion for every image
+// Batch.CompleteFirst names (D13): from the shadow row under its old key,
+// locked, or from the source row under Key when the old key was reused or
+// its shadow row is absent. Those images are not written; each comes back
+// in Result.Held with its completion and the WAL position of the read, for
+// Buffer.Hold, because the row read can be newer than the stream. An image
+// neither row can complete is written as a delete of its key, which the
+// source holds no row under, and named in Result.Skipped. The flush then
+// applies the other entries: every delete marker first, then every image —
+// one without markers upserts every column, one with markers updates its
+// present columns and must find the key's row (CO-8). When a unique index
+// or exclusion constraint refuses a write the flush rolls back to its
+// savepoint, completes every image that still carries a marker from the
+// shadow row under its key, deletes every key in the batch, and inserts
+// every image whole (CO-6); a constraint that refuses that too means a
+// collision with a row the batch does not name, and the flush returns
+// ErrBatchDeferred with the shadow unchanged. An image the source could not
+// have produced given the shadow — a marker for a row the shadow does not
+// hold — is ErrInvariantViolation, and the flush commits nothing. The
+// transaction runs under the lock session's Bind context, so losing the
+// table lock cancels the flush and it reports the loss. An empty batch is a
+// no-op.
 func (f *Flusher) Flush(ctx context.Context, pool *pgxpool.Pool, batch Batch) (Result, error) {
 	if len(batch.Entries) == 0 {
 		return Result{}, nil
@@ -191,17 +211,12 @@ func (f *Flusher) flush(ctx context.Context, pool *pgxpool.Pool, batch Batch) (R
 	}
 	// INV: CO-5, CO-6, CO-8
 	if err := f.applyColumnWise(ctx, tx, entries, &result); err != nil {
-		if !uniqueViolation(err) {
+		if !constraintCollision(err) {
 			return Result{}, err
 		}
-		result = Result{
-			CompletedFromShadow: result.CompletedFromShadow,
-			CompletedFromSource: result.CompletedFromSource,
-			Skipped:             result.Skipped,
-			Fallback:            true,
-		}
+		result = Result{Held: result.Held, Skipped: result.Skipped, Fallback: true}
 		if err := f.applyWholeRows(ctx, tx, entries, &result); err != nil {
-			if uniqueViolation(err) {
+			if constraintCollision(err) {
 				return Result{}, fmt.Errorf("%w: %s.%s: %w", ErrBatchDeferred, f.shadow.Schema(), f.shadow.ShadowTable(), err)
 			}
 			return Result{}, err
@@ -213,74 +228,108 @@ func (f *Flusher) flush(ctx context.Context, pool *pgxpool.Pool, batch Batch) (R
 	return result, nil
 }
 
-// completeMoved fills in the markers of every image Batch.CompleteFirst
-// names and returns the entries to write: the batch's, less any image the
-// source has since removed. An image whose OldKey was not reused reads the
-// shadow row under OldKey, locked so the delete marker at that key, applied
-// later in this transaction, cannot race it; when that row is absent, or
-// the image is flagged OldKeyReused, it reads the source row under Key
-// instead; when the source row is absent too the image is skipped (D13).
+// completeMoved reads a completion for every image Batch.CompleteFirst
+// names and returns the entries to write: the batch's, with each named
+// image taken out — held in the result with its completion, or replaced by
+// a delete marker at its key when no row could complete it. An image whose
+// OldKey was not reused reads the shadow row under OldKey, locked so the
+// delete marker at that key, applied later in this transaction, cannot
+// race it; when that row is absent, or the image is flagged OldKeyReused,
+// it reads the source row under Key instead (D13). The batch's own entries
+// are left as they are, so Requeue puts the image back uncompleted.
 func (f *Flusher) completeMoved(ctx context.Context, tx pgx.Tx, batch Batch, result *Result) ([]Entry, error) {
-	skip := make(map[int64]bool)
-	for _, e := range batch.CompleteFirst() {
-		if !e.OldKeyReused {
-			found, err := f.completeFrom(ctx, tx, f.shadowRowSQL(e), *e.OldKey, e)
-			if err != nil {
-				return nil, err
-			}
-			if found {
-				result.CompletedFromShadow++
-				continue
-			}
-		}
-		found, err := f.completeFrom(ctx, tx, f.sourceRowSQL(e), e.Key, e)
+	named := batch.CompleteFirst()
+	if len(named) == 0 {
+		return batch.Entries, nil
+	}
+	replace := make(map[int64]*Entry, len(named))
+	for i := range named {
+		e := &named[i]
+		held, found, err := f.completeOne(ctx, tx, e)
 		if err != nil {
 			return nil, err
 		}
 		if found {
-			result.CompletedFromSource++
+			result.Held = append(result.Held, held)
+			replace[e.Key] = nil
 			continue
 		}
-		skip[e.Key] = true
-		result.Skipped++
+		result.Skipped = append(result.Skipped, e.Key)
+		replace[e.Key] = &Entry{Key: e.Key, Kind: DeleteMarker, FirstLSN: e.FirstLSN}
 	}
-	if len(skip) == 0 {
-		return batch.Entries, nil
-	}
-	entries := make([]Entry, 0, len(batch.Entries)-len(skip))
+	entries := make([]Entry, 0, len(batch.Entries))
 	for _, e := range batch.Entries {
-		if !skip[e.Key] {
+		replacement, named := replace[e.Key]
+		switch {
+		case !named:
 			entries = append(entries, e)
+		case replacement != nil:
+			entries = append(entries, *replacement)
 		}
 	}
 	return entries, nil
 }
 
-// applyColumnWise writes the entries in a savepoint, each by its kind, so a
-// unique violation rolls the writes back and leaves the completions in
-// place. A savepoint inside a pgx transaction is what Begin on it makes.
+// completeOne reads the completion for one named image, from the old key's
+// shadow row when that can be the row's own, else from the source row under
+// Key, and reports false when neither holds a row.
+func (f *Flusher) completeOne(ctx context.Context, tx pgx.Tx, e *Entry) (HeldImage, bool, error) {
+	if !e.OldKeyReused {
+		c, found, err := f.completeFrom(ctx, tx, f.shadowRowSQL(e), *e.OldKey, e)
+		if err != nil {
+			return HeldImage{}, false, err
+		}
+		if found {
+			return HeldImage{Entry: *e, Completed: c.columns, ReadLSN: c.readLSN}, true, nil
+		}
+	}
+	c, found, err := f.completeFrom(ctx, tx, f.sourceRowSQL(e), e.Key, e)
+	if err != nil {
+		return HeldImage{}, false, err
+	}
+	if !found {
+		return HeldImage{}, false, nil
+	}
+	return HeldImage{Entry: *e, Completed: c.columns, FromSource: true, ReadLSN: c.readLSN}, true, nil
+}
+
+// applyColumnWise writes the entries in a savepoint, every delete marker
+// first and then every image, so a unique violation rolls the writes back
+// and leaves the transaction usable for the fallback. Deletes first means
+// a row that moved to a lower key, keeping a unique value, finds its old
+// row gone before its upsert, which is always sound: no key holds both an
+// image and a delete marker. A savepoint inside a pgx transaction is what
+// Begin on it makes.
 func (f *Flusher) applyColumnWise(ctx context.Context, tx pgx.Tx, entries []Entry, result *Result) error {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("save point before the column-wise flush: %w", err)
 	}
-	for i := range entries {
-		e := &entries[i]
+	write := func(e *Entry) error {
 		switch e.Kind {
 		case DeleteMarker:
-			err = f.deleteRow(ctx, sp, e.Key)
 			result.Deletes++
+			return f.deleteRow(ctx, sp, e.Key)
 		case Image:
-			err = f.writeImage(ctx, sp, e)
 			result.Images++
+			return f.writeImage(ctx, sp, e)
 		default:
-			err = fmt.Errorf("%w (CO-5): flush key %d: unknown entry kind %s", ErrInvariantViolation, e.Key, e.Kind)
+			return fmt.Errorf("%w (CO-5): flush key %d: unknown entry kind %s", ErrInvariantViolation, e.Key, e.Kind)
 		}
-		if err != nil {
-			if rollbackErr := sp.Rollback(ctx); rollbackErr != nil {
-				return errors.Join(err, fmt.Errorf("roll back to the save point: %w", rollbackErr))
+	}
+	// The first pass applies the delete markers, the second everything else.
+	for _, deletes := range []bool{true, false} {
+		for i := range entries {
+			e := &entries[i]
+			if (e.Kind == DeleteMarker) != deletes {
+				continue
 			}
-			return err
+			if err := write(e); err != nil {
+				if rollbackErr := sp.Rollback(ctx); rollbackErr != nil {
+					return errors.Join(err, fmt.Errorf("roll back to the save point: %w", rollbackErr))
+				}
+				return err
+			}
 		}
 	}
 	if err := sp.Commit(ctx); err != nil {
@@ -310,12 +359,14 @@ func (f *Flusher) writeImage(ctx context.Context, tx pgx.Tx, e *Entry) error {
 	return nil
 }
 
-// applyWholeRows is the CO-6 fallback: complete every surviving image that
-// still carries a marker from the shadow row under its own key — present by
-// CO-8 and the drain's deferral rule, so an absent row is a protocol error —
-// then delete every key in the batch and insert every surviving image whole,
-// so no row the batch names is left to collide with the inserts (D13). The
-// deletes come after every completion read, and the reads lock their rows.
+// applyWholeRows is the CO-6 fallback: complete every image that still
+// carries a marker from the shadow row under its own key — the row of an
+// image that did not move, present by CO-8 and the drain's deferral rule,
+// so an absent row is a protocol error — then delete every key in the batch
+// and insert every image whole, so no row the batch names is left to
+// collide with the inserts (D13). The deletes come after every completion
+// read, and the reads lock their rows. The entries are the flush's own
+// copies, so completing them in place changes nothing the batch keeps.
 func (f *Flusher) applyWholeRows(ctx context.Context, tx pgx.Tx, entries []Entry, result *Result) error {
 	// INV: CO-6, CO-8
 	keys := make([]int64, 0, len(entries))
@@ -325,7 +376,7 @@ func (f *Flusher) applyWholeRows(ctx context.Context, tx pgx.Tx, entries []Entry
 		if e.Kind != Image || !e.HasMarker() {
 			continue
 		}
-		found, err := f.completeFrom(ctx, tx, f.shadowRowSQL(e), e.Key, e)
+		c, found, err := f.completeFrom(ctx, tx, f.shadowRowSQL(e), e.Key, e)
 		if err != nil {
 			return err
 		}
@@ -333,7 +384,8 @@ func (f *Flusher) applyWholeRows(ctx context.Context, tx pgx.Tx, entries []Entry
 			_, markers := f.split(e)
 			return fmt.Errorf("%w (CO-8): flush key %d: image omits %v and the shadow holds no row to complete them from", ErrInvariantViolation, e.Key, markers)
 		}
-		result.CompletedFromShadow++
+		e.overlay(c.columns)
+		result.Completed++
 	}
 	if err := f.deleteRows(ctx, tx, keys); err != nil {
 		return err
@@ -357,9 +409,14 @@ func (f *Flusher) applyWholeRows(ctx context.Context, tx pgx.Tx, entries []Entry
 	return nil
 }
 
-// uniqueViolation reports whether err is the server refusing a write on a
-// unique index.
-func uniqueViolation(err error) bool {
+// constraintCollision reports whether err is the server refusing a write
+// because a unique index or an exclusion constraint already admits a row
+// that conflicts with it: the refusals a batch-wide reorder can resolve
+// (CO-6).
+func constraintCollision(err error) bool {
 	var pgErr *pgconn.PgError
-	return errors.As(err, &pgErr) && pgErr.Code == sqlstateUniqueViolation
+	if !errors.As(err, &pgErr) {
+		return false
+	}
+	return pgErr.Code == sqlstateUniqueViolation || pgErr.Code == sqlstateExclusionViolation
 }

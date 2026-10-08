@@ -4,10 +4,10 @@ import "fmt"
 
 // Requeue puts a drained batch back into the buffer after a Flush returned
 // ErrBatchDeferred, so the next Drain judges its entries again once the
-// copier has moved. The entries go back as the flush left them: a completed
-// image keeps the values the completion read, which are the values its
-// markers stood for. The stream owner adds nothing between the Drain and
-// the Requeue, so no buffered entry can hold a batch key; one that does is
+// copier has moved. The entries go back as the drain handed them out: the
+// flush wrote nothing and completed nothing the batch keeps, so a marker is
+// still a marker. The stream owner adds nothing between the Drain and the
+// Requeue, so no buffered entry can hold a batch key; one that does is
 // ErrInvariantViolation, and the buffer is left as it was.
 func (b *Buffer) Requeue(batch Batch) error {
 	// INV: CO-5

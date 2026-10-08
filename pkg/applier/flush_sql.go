@@ -108,12 +108,16 @@ func deleteAllSQL(relation, pk string) string {
 }
 
 // rowSQL reads the named columns of relation's row under key $1, each
-// rendered as text.
+// rendered as text, and last the server's WAL insert position as text. The
+// position is taken inside the statement, after its snapshot: every change
+// the read saw committed below it, so the buffer can tell when the stream
+// has delivered everything the read knew about.
 func rowSQL(relation, pk string, names []string) string {
-	cols := make([]string, len(names))
-	for i, name := range names {
-		cols[i] = pgx.Identifier{name}.Sanitize() + "::text"
+	cols := make([]string, 0, len(names)+1)
+	for _, name := range names {
+		cols = append(cols, pgx.Identifier{name}.Sanitize()+"::text")
 	}
+	cols = append(cols, "pg_catalog.pg_current_wal_insert_lsn()::text")
 	return "SELECT " + strings.Join(cols, ", ") + " FROM " + relation + " WHERE " + pk + " = $1"
 }
 

@@ -46,9 +46,11 @@ func TestFlusherOptionsRefuseUnboundedValues(t *testing.T) {
 	}
 }
 
-// The flush recognises the server's unique-index refusal by SQLSTATE alone.
-func TestUniqueViolationMatchesBySQLSTATE(t *testing.T) {
-	assert.True(t, uniqueViolation(fmt.Errorf("insert key 1: %w", &pgconn.PgError{Code: sqlstateUniqueViolation})))
-	assert.False(t, uniqueViolation(fmt.Errorf("insert key 1: %w", &pgconn.PgError{Code: sqlstateUndefinedTable})))
-	assert.False(t, uniqueViolation(assert.AnError))
+// The flush recognises the server's refusal of a colliding write by SQLSTATE
+// alone: a unique index's and an exclusion constraint's, and no other.
+func TestConstraintCollisionMatchesBySQLSTATE(t *testing.T) {
+	assert.True(t, constraintCollision(fmt.Errorf("insert key 1: %w", &pgconn.PgError{Code: sqlstateUniqueViolation})))
+	assert.True(t, constraintCollision(fmt.Errorf("insert key 1: %w", &pgconn.PgError{Code: sqlstateExclusionViolation})))
+	assert.False(t, constraintCollision(fmt.Errorf("insert key 1: %w", &pgconn.PgError{Code: sqlstateUndefinedTable})))
+	assert.False(t, constraintCollision(assert.AnError))
 }
