@@ -656,11 +656,11 @@ engine-prefixed slots (including one stranded on a demoted writer after failover
 slot-lag ceiling aborts the migration before an abandoned slot can fill the volume. No exit path
 leaves a slot behind silently. *Enforced:* `pkg/decode` slot lifecycle (`CreateSlot` makes the
 publication before the slot so a refusal leaves no slot — the publication stays for the next
-attempt to reuse — and drops a slot the server created but did not describe usably; both
-`CreateSlot` and `DropSlot` prove the replication connection and the pool are sessions of one
-database on one cluster, by `IDENTIFY_SYSTEM` against `pg_control_system()`, before any slot
-command; `DropSlot` waits for a holder under the caller's context alone, reports a cut-off wait
-as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
+attempt to reuse — and drops a slot the server created but did not describe usably;
+`CreateSlot`, `DropSlot`, and `OpenStream` prove the replication connection and the pool are
+sessions of one database on one cluster, by `IDENTIFY_SYSTEM` against `pg_control_system()`,
+before any slot command or `START_REPLICATION`; `DropSlot` waits for a holder under the
+caller's context alone, reports a cut-off wait as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
 drops only a publication of the shape `CreateSlot` makes, and is idempotent) + reaper +
 throttler ceiling (planned).
 *Source:* risks-and-mitigations § logical-decoding risks.
@@ -682,12 +682,15 @@ at or below; every `ChangeEvent` carries the `Delivered` it arrived with, the po
 may confirm while that change is unapplied; `Confirm` is the only standby-status report carrying
 a position, sets write, flush, and apply to it explicitly, refuses a regression or a position
 beyond `Delivered`, and records nothing the server was not told; a keepalive reply carries the
-confirmed position alone; the server ending replication with the slot intact is `ErrStreamEnded`,
+confirmed position alone; a warning the server sends in copy-both mode — the walsender saying it
+will withhold changes, as from a publication it skipped loading — stops the stream fail-closed
+before a keepalive can deliver a position past them; the server ending replication with the slot intact is `ErrStreamEnded`,
 distinct from a fail-closed violation, so a resume tells a clean restart from slot loss; a
 reopened stream replays every transaction that committed above the confirmed position
 (confirm-moves-the-slot, keepalive-replies-leave-it, refuse-beyond-delivered,
 reopen-replays-from-confirmed, interleaved-transaction-below-the-confirmed-position,
-confirm-refuses-after-stop, confirm-leaves-the-record-when-the-send-fails tests).
+confirm-refuses-after-stop, confirm-leaves-the-record-when-the-send-fails,
+stops-on-a-warning-from-the-server tests).
 The reconcile-mode transition itself is the checkpoint/resume state machine (Phase 8). *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 
