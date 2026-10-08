@@ -47,10 +47,19 @@ type SlotStatus struct {
 	// ConfirmedFlushLSN is the position up to which the consumer has
 	// confirmed receipt; zero for a physical slot or when unset.
 	ConfirmedFlushLSN LSN
-	// RetainedBytes is the WAL between RestartLSN and the current write
+	// Retained is the WAL between RestartLSN and the current write
 	// position — what the slot keeps on the volume and what D11's lag
-	// ceiling bounds. Zero when RestartLSN is unset.
-	RetainedBytes int64
+	// ceiling bounds.
+	Retained RetainedWAL
+}
+
+// RetainedWAL is the WAL a slot keeps on the volume. Known is false when
+// the server cannot measure it — the slot has no restart position, as
+// after the server removed the WAL it needed — so an unknown amount is
+// never read as nothing retained.
+type RetainedWAL struct {
+	Bytes int64
+	Known bool
 }
 
 // InspectSlot reads the named slot from pg_replication_slots on pool. found
@@ -95,7 +104,7 @@ func InspectSlot(ctx context.Context, pool *pgxpool.Pool, name string) (status S
 		}
 	}
 	if retained != nil {
-		status.RetainedBytes = *retained
+		status.Retained = RetainedWAL{Bytes: *retained, Known: true}
 	}
 	return status, true, nil
 }

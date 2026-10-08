@@ -54,8 +54,11 @@ type Entry struct {
 	// order; a column with Present=false is an unchanged-TOAST marker whose
 	// value no buffered event carried. It is nil for a DeleteMarker.
 	Columns []decode.Column
-	// FirstLSN is the position of the earliest event this entry still holds:
-	// a stream confirmed past it would lose the entry on replay.
+	// FirstLSN is the delivered position the earliest event this entry still
+	// holds arrived with (decode.ChangeEvent.Delivered): a stream confirmed
+	// past it could have discarded that event's transaction, so the entry
+	// would be lost on replay. It is not the event's own LSN, which can lie
+	// below a position already confirmed.
 	FirstLSN decode.LSN
 }
 
@@ -78,6 +81,27 @@ func (e *Entry) overlay(cols []decode.Column) {
 			continue
 		}
 		if i := e.index(c.Name); i >= 0 {
+			e.Columns[i] = c
+			continue
+		}
+		e.Columns = append(e.Columns, c)
+	}
+}
+
+// fill assigns every present column of cols that the image still carries as
+// a marker, or does not hold yet, and leaves a column the image already has
+// a value for alone: a value an event supplied after the completion was read
+// is newer than the completion.
+func (e *Entry) fill(cols []decode.Column) {
+	for _, c := range cols {
+		if !c.Present {
+			continue
+		}
+		i := e.index(c.Name)
+		if i >= 0 && e.Columns[i].Present {
+			continue
+		}
+		if i >= 0 {
 			e.Columns[i] = c
 			continue
 		}

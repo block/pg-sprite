@@ -166,11 +166,15 @@ deferred entry keeps merging, straddling move, pair waits in either direction, u
 alone, deferral spreading through a shared old key and along a chain of pairs); `Drain`
 judges against a `Position` read after the last `Add`, and returns a `Batch` whose `Deferred`
 count is what a catch-up is waiting on the copier for and whose `CompleteFirst` names, as
-pointers into `Entries`, the moved, marker-bearing images the flush must complete — from the old
+copies of its `Entries`, the moved, marker-bearing images the flush must complete — from the old
 key's shadow row, or from the source when `OldKeyReused` — before it writes anything; `Entries`
-are in key order, which does not order a moved image before the delete marker at its old key. *Planned enforcement:* the applier's
-SQL shape and the flush that consumes `Drain`'s batch
-(mutual exclusion, not tombstone retention). *Test obligation:* a
+are in key order, which does not order a moved image before the delete marker at its old key;
+`Flusher.Flush` consumes that batch, reading every `CompleteFirst` completion before its first
+write and never writing a key the batch did not land; a completed image is not written but
+returned held (`Result.Held`), and `Buffer.Hold` keeps it buffered with its old key's entry gone,
+so a later drain judges the image alone under `Key` (CO-6, D13). *Planned enforcement:* the scheduling
+that makes a chunk copy and a backlog flush mutually exclusive (mutual exclusion, not tombstone
+retention). *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark
@@ -233,15 +237,34 @@ live in a shadow row the batch did not create; a **moved** image whose old key's
 absent, or whose old key the source has reused (`Entry.OldKeyReused`), is instead completed from
 the source row under `Key`, because a move captured while the old key was uncut leaves no shadow
 row under either key and the buffer cannot tell that history from one whose old row landed, and
-a reused old key's shadow row is another row's (D13). Convergence must still be proved under test. *Test obligation:*
+a reused old key's shadow row is another row's (D13). A moved image's completion is read from a
+row that can be newer than the stream, so it is never written in the flush that read it: the
+image returns held with the read's WAL position and waits in the buffer until the stream has
+delivered everything the read could have seen, and an event for the key meanwhile drops the
+read in favour of the stream's own values (D13). Convergence must still be proved under test. *Test obligation:*
 `seats(id int PRIMARY KEY, slot text UNIQUE)` holding `(1,'A'),(2,'B')`, flushed with the batch
 `{1→'B', 2→'A'}`, converges in one flush; a second vector adds a column stored **out of line**
 (`SET STORAGE EXTERNAL`, proven by the test harness's `ToastBytes()` — a large value under the
 default `EXTENDED` storage may compress inline and never emit the marker) left untouched by both
 updates, asserts it survives the fallback byte-for-byte, and moves one row's primary key so the
 completion reads the old key's row rather than aborting. The checksum (CO-1)
-backstops, but the applier must converge without it. *Enforced:* applier batch semantics
-(Phase 6). *Source:* Spirit
+backstops, but the applier must converge without it. *Enforced:* `pkg/applier` `Flusher` —
+the column-wise pass runs inside a savepoint, every delete marker before any image; SQLSTATE
+`23505` or `23P01` (a unique index or an exclusion constraint, matched by SQLSTATE) rolls back
+to it and the flush reapplies the batch whole-row in the same transaction: every remaining
+marker completed from the shadow row under its own key (`FOR UPDATE`), one
+`DELETE … WHERE pk = ANY($1)` over every key in the batch, then a plain `INSERT` of every
+surviving image, so a unique value two rows exchange lands without either insert seeing the
+other's stale row; a second collision returns `ErrBatchDeferred` with the shadow untouched and
+`Buffer.Requeue` holds the batch for a later drain. A moved image the flush completed is
+returned in `Result.Held` with the read's `pg_current_wal_insert_lsn()`, and `Buffer.Hold` /
+`Buffer.Release` gate it on the stream; a moved image neither row completes is written as a
+delete at its key. Both test vectors run in the integration suite: the `seats` exchange
+converges in one flush (and an `EXCLUDE` constraint's exchange with it), the out-of-line column
+survives the fallback byte-for-byte, and a moved image is held with the old key's value, with
+the source's when the old key never landed, and never with another row's when the source
+reused the old key before the stream delivered the reuse. The load-generator form of the
+obligation still waits on the convergence harness. *Source:* Spirit
 `pkg/change/README.md` (the REPLACE rationale) — the PG translation in
 [mysql-vs-postgresql](mysql-vs-postgresql.md#copy-and-swap-executor-spirit-mysql--postgresql-primitive-mapping)
 is incomplete without this.
@@ -268,8 +291,14 @@ unchanged", not NULL or an empty value. A full-row upsert that invents a value f
 would overwrite live shadow data and silently break convergence. *Enforced:* `pkg/decode`
 per-column presence on `ChangeEvent` — the `Stream` carries a text value or NULL as a present
 column and the marker as an absent one, and refuses a tuple whose column count does not match
-the relation rather than line columns up by guess; `pkg/applier` column-wise UPDATE construction
-from it.
+the relation rather than line columns up by guess; `pkg/applier` `Buffer` keeps the marker through every
+merge, and `Flusher` writes a marker-bearing image of a row that did not move as an `UPDATE` of
+only its present columns — zero rows updated is an `ErrInvariantViolation`, never an insert
+that invents the omitted value — and completes a marker before the whole-row fallback inserts
+the row, from the shadow row the marker refers to, refusing when that row is absent; a moved
+image's marker, whose value lives under another key, is completed from the old key's shadow row
+or the source row and held in the buffer until the stream has passed the read, so a value read
+from a row newer than the stream is never written over the stream's own.
 *Source:* [copy-and-swap D6](copy-and-swap-design.md#d6--preserve-omitted-toast-values).
 *Test obligation:* a convergence test updates other columns while leaving a column stored out of
 line untouched (`SET STORAGE EXTERNAL`, proven by the test harness's `ToastBytes()` — size alone
@@ -359,11 +388,12 @@ the insert (wrong-table, gone-session, rival-backend, and mid-copy-loss tests); 
 `Verifier` requires the same session, runs every read transaction under its `Bind` context, and
 confirms the lock from each transaction's own connection before the first read (wrong-table,
 gone-session, reported-loss, and mid-pass-loss tests); `pkg/schemachange` `GateCutover`,
-`Cutover`, and `DropOldTable` require the same session, run under its `Bind` context, and
-confirm from the swap's and the drop's own transactions that the session's backend holds the
-lock before the first rename or the drop (nil-session, rival-backend, and lost-mid-attempt
-tests for the swap; nil-session and rival-backend tests for the drop), so loss of the lock
-aborts the change at every stage; `pkg/checkpoint` `Store.Save` and `Store.Delete` require the
+`Cutover`, `InspectSwapped`, and `DropOldTable` require the same session, run under its `Bind`
+context, and confirm from the swap's, the inspection's, and the drop's own transactions that the
+session's backend holds the lock before the first rename, the catalog read, or the drop
+(nil-session, rival-backend, and lost-mid-attempt tests for the swap; nil-session and
+rival-backend tests for the inspection and for the drop), so loss of the lock aborts the change
+at every stage; `pkg/checkpoint` `Store.Save` and `Store.Delete` require the
 same session for the checkpoint's target, run under its `Bind` context, and confirm the lock
 from the write's own transaction before the upsert or the delete (nil-session, wrong-table,
 and rival-backend tests), so a run whose lock went to another engine cannot stamp its stale
@@ -435,9 +465,17 @@ outcome is known: the attempt's backend, which may still be deciding inside `COM
 followed to its exit under a context the caller's cancellation no longer governs, bounded by the
 attempt's own `lock_timeout` plus `statement_timeout`, and a backend still present at that bound
 is refused as `cutover-outcome-ambiguous` rather than read around; then a fresh connection reads
-which OID bears the source name: the shadow's OID is reported as the committed swap it was, the
-source's OID as a rollback carrying the connection error, and any other state — no relation, or
-one the build never proved — is refused as `cutover-outcome-ambiguous`. Every attempt the
+the catalog the way `pkg/schemachange.InspectSwapped` does — the two share one read, and that
+read owns its own preconditions: it refuses as `cutover-outcome-ambiguous` while any other
+backend holds `ACCESS EXCLUSIVE` on either relation the proof names, since a swap whose `COMMIT`
+is still deciding holds both until its outcome is visible, so neither path can answer from a
+catalog the commit has not reached; the lost-attempt path additionally follows its own backend
+first, the resume path has no backend to follow and relies on the guard alone — which OID bears
+the source name: the shadow's OID is reported as the committed swap it was, its `SwappedTable`
+re-derived from what
+the swap left behind, the source's OID as a rollback carrying the connection error, and any
+other state — no relation, or one the build never proved — is refused as
+`cutover-outcome-ambiguous`. Every attempt the
 catalog shows rolled back — a lock timeout, a drain error, a refusal inside the transaction, or
 a lost connection the inspection resolved — is reported wrapping `ErrCutoverRolledBack`, so a
 caller distinguishes "the source is still live, retry is safe" from an unresolved outcome
@@ -489,17 +527,24 @@ every `CONCURRENTLY` index command; [invalid-index-recovery](invalid-index-recov
 ### AB-1 — Every accepted blocking statement runs under both engine-owned bounds
 
 Every accepted blocking statement runs in one engine-owned session and transaction with an
-explicit, non-zero `lock_timeout` and `statement_timeout`. Transaction-local settings override
-ambient defaults, and an absent, sub-millisecond, or server-unrepresentable bound is refused
-before a session is acquired. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`). *Source:*
+explicit, non-zero `lock_timeout` and a `statement_timeout` longer than it. Transaction-local
+settings override ambient defaults, and an absent, sub-millisecond, or server-unrepresentable
+bound — or a statement bound that is not longer than the lock bound, under which the lock
+budget could never be the operative bound — is refused before a session is acquired.
+*Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`). *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#engine-owned-session-and-budgets).
 
 ### AB-2 — Lock-budget exhaustion executes nothing
 
-An accepted blocking statement that cannot acquire its lock within `lock_timeout` is not
-retried: PostgreSQL aborts that transaction before the DDL executes, and the executor returns
-the typed lock-budget outcome. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`, SQLSTATE
-`55P03`). *Source:*
+The executor requests the acknowledged table's `ACCESS EXCLUSIVE` lock as a statement of its
+own before it submits the DDL, so every way that wait can end — `lock_timeout`, a statement
+cancellation of the request, or the caller's context — arrives while nothing has been
+submitted and is reported as a lock refusal or the caller's cancellation, never as statement
+work. The DDL's own lock requests are then granted at once. An ungranted lock is not retried:
+PostgreSQL aborts that transaction, and the executor returns the typed lock-budget outcome.
+A materialized view, which `LOCK TABLE` cannot name, is the one target whose statement
+acquires its own locks. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`, SQLSTATE
+`55P03` and `57014` on the lock request). *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#failure-and-interruption-semantics).
 
 ### AB-3 — The acknowledgement names the table the statement locks, resolved from the catalog
@@ -608,9 +653,14 @@ Replication slots are created with a recognizable name prefix; a reaper drops or
 engine-prefixed slots (including one stranded on a demoted writer after failover); a hard
 slot-lag ceiling aborts the migration before an abandoned slot can fill the volume. No exit path
 leaves a slot behind silently. *Enforced:* `pkg/decode` slot lifecycle (`CreateSlot` makes the
-publication before the slot so a refusal leaves nothing to reap; `DropSlot` waits for a holder
-under the caller's context alone, reports a cut-off wait as an error and never as a drop, and
-is idempotent) + reaper + throttler ceiling (planned).
+publication before the slot so a refusal leaves no slot — the publication stays for the next
+attempt to reuse — and drops a slot the server created but did not describe usably; both
+`CreateSlot` and `DropSlot` prove the replication connection and the pool are sessions of one
+database on one cluster, by `IDENTIFY_SYSTEM` against `pg_control_system()`, before any slot
+command; `DropSlot` waits for a holder under the caller's context alone, reports a cut-off wait
+as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
+drops only a publication of the shape `CreateSlot` makes, and is idempotent) + reaper +
+throttler ceiling (planned).
 *Source:* risks-and-mitigations § logical-decoding risks.
 
 ### ST-4 — Slot loss is a modeled state transition, not a crash

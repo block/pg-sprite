@@ -19,13 +19,6 @@ import (
 // is not the engine's.
 var ErrInvariantViolation = dbconn.ErrInvariantViolation
 
-// ErrForeignDecodingState is returned when the publication or the slot of
-// the derived name turns out not to be this route's: a publication that
-// publishes anything but the target table, or a slot another database owns.
-// Neither is ever adopted or dropped; the operator resolves it by renaming
-// or dropping the foreign object.
-var ErrForeignDecodingState = errors.New("logical-decoding state of the derived name is not this route's")
-
 // SlotExistsError is returned by CreateSlot when a logical slot of the
 // derived name already exists in the target's database. Preflight has
 // already ruled out a foreign slot of that name, so this is the route's own
@@ -92,13 +85,20 @@ func (s *Slot) Close(ctx context.Context) error {
 // replication slot for a copy-and-swap target, both under the name preflight
 // derived for it, and returns the slot with its exported snapshot and
 // consistent point. The publication is created on pool first — a publication
-// the engine already created for exactly this table is reused — so a
-// privilege refusal (CREATE on the database) leaves no slot behind. The slot
-// is created on a fresh replication connection built from cfg, which must
-// reach the target's database; the connection stays open inside the returned
-// Slot. A logical slot of the derived name already present in the target's
-// database is reported as a *SlotExistsError.
+// the engine already created for exactly this table is reused, one that
+// publishes anything else or anything less is refused as a
+// *ForeignStateError — so a privilege refusal (*PublicationPrivilegeError)
+// leaves no slot behind. The slot is created on a fresh replication
+// connection built from cfg, proven to be on the pool's own cluster and
+// database before the slot exists anywhere; the connection stays open inside
+// the returned Slot. A logical slot of the derived name already present in
+// the target's database is reported as a *SlotExistsError.
 //
+// No error leaves a slot behind: a refusal before the create makes none, a
+// create the caller's context cuts off is dropped by the server with its
+// walsender, and a slot the server created but did not describe usably is
+// dropped before the error is returned. The publication is left in place
+// between the two — it is the route's own and the next attempt reuses it.
 // The caller has committed the target's checkpoint row before calling: a
 // slot with no row is an orphan for the reaper, never a slot mid-creation.
 func CreateSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, target preflight.CopySwapTarget) (*Slot, error) {
@@ -120,16 +120,11 @@ func CreateSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, targ
 	if err != nil {
 		return nil, fmt.Errorf("create slot %s: %w", name, err)
 	}
-	// INV: ST-3 — the slot is named for the target's database and must be
-	// created there; cfg is the caller's and is proven against the target
-	// before a slot of that name exists anywhere else.
-	identity, err := pglogrepl.IdentifySystem(ctx, conn)
-	if err != nil {
-		return nil, errors.Join(fmt.Errorf("identify replication system for slot %s: %w", name, err), conn.Close(ctx))
-	}
-	if identity.DBName != target.Database() {
-		return nil, errors.Join(fmt.Errorf("%w: ST-3: replication connection is on database %q, the target is in %q",
-			ErrInvariantViolation, identity.DBName, target.Database()), conn.Close(ctx))
+	// The pool was proven to be on the target's database when the
+	// publication was made; proving the connection is on the pool's cluster
+	// and database puts the slot where the name says.
+	if err := proveSameServer(ctx, conn, pool); err != nil {
+		return nil, errors.Join(fmt.Errorf("create slot %s: %w", name, err), conn.Close(ctx))
 	}
 
 	result, err := pglogrepl.CreateReplicationSlot(ctx, conn, name, outputPlugin, pglogrepl.CreateReplicationSlotOptions{
@@ -145,12 +140,27 @@ func CreateSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, targ
 	}
 	consistentPoint, err := ParseLSN(result.ConsistentPoint)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("create slot %s: consistent point: %w", name, err), conn.Close(ctx))
+		return nil, dropUnusableSlot(ctx, conn, name, fmt.Errorf("create slot %s: consistent point: %w", name, err))
 	}
 	if result.SnapshotName == "" {
-		return nil, errors.Join(fmt.Errorf("%w: ST-3: slot %s was created without an exported snapshot", ErrInvariantViolation, name), conn.Close(ctx))
+		return nil, dropUnusableSlot(ctx, conn, name,
+			fmt.Errorf("%w: ST-3: slot %s was created without an exported snapshot", ErrInvariantViolation, name))
 	}
 	return &Slot{name: name, consistentPoint: consistentPoint, snapshotName: result.SnapshotName, conn: conn}, nil
+}
+
+// dropUnusableSlot drops a slot the server has just created but described
+// in a way this package cannot hand back, on the connection that created
+// it, so the cause is returned with no slot behind it; the connection is
+// closed whatever the outcome. Nothing streams from a slot this new, so the
+// drop does not wait.
+func dropUnusableSlot(ctx context.Context, conn *pgconn.PgConn, name string, cause error) error {
+	// INV: ST-3 — a CreateSlot error never leaves a slot to reap.
+	dropErr := pglogrepl.DropReplicationSlot(ctx, conn, name, pglogrepl.DropReplicationSlotOptions{})
+	if dropErr != nil {
+		dropErr = fmt.Errorf("drop unusable slot %s: %w", name, dropErr)
+	}
+	return errors.Join(cause, dropErr, conn.Close(ctx))
 }
 
 // isSQLState reports whether err is a PostgreSQL error carrying the SQLSTATE.

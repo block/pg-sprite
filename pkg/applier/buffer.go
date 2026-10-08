@@ -23,6 +23,11 @@ type Buffer struct {
 	// and remove so an event that lands a row on a key finds the images
 	// that left it without a scan.
 	movedFrom map[int64]map[int64]struct{}
+	// pending holds, by key, the completion a held image is waiting to take
+	// (see Hold and Release). A key's entry and its pending completion are
+	// written together by Hold and dropped together by any later write to
+	// the key.
+	pending map[int64]pendingCompletion
 	// oldest is the least FirstLSN among entries, kept as entries are
 	// written and recomputed by Drain, so OldestPending is read without a
 	// scan however often the stream owner asks; hasOldest is false when the
@@ -33,17 +38,25 @@ type Buffer struct {
 
 // NewBuffer returns an empty buffer.
 func NewBuffer() *Buffer {
-	return &Buffer{entries: make(map[int64]*Entry), movedFrom: make(map[int64]map[int64]struct{})}
+	return &Buffer{
+		entries:   make(map[int64]*Entry),
+		movedFrom: make(map[int64]map[int64]struct{}),
+		pending:   make(map[int64]pendingCompletion),
+	}
 }
 
-// Len reports how many keys are buffered, including entries a Drain deferred.
+// Len reports how many keys are buffered, including entries a Drain deferred
+// or held.
 func (b *Buffer) Len() int { return len(b.entries) }
 
-// OldestPending returns the earliest FirstLSN among buffered entries. A
-// stream confirmed at or past it could not replay those entries after a
-// restart, so the confirmed position must stay below it — and, until the
-// flush of a drained Batch commits, below that batch's OldestFirstLSN too.
-// The second result is false when the buffer is empty.
+// OldestPending returns the earliest FirstLSN among buffered entries: the
+// delivered position the earliest buffered event arrived with. A stream
+// confirmed past it could have discarded that event's transaction, so the
+// confirmed position must stay at or below it — and, until the flush of a
+// drained Batch commits, at or below that batch's OldestFirstLSN too. It
+// never falls below what the stream had confirmed when the event arrived,
+// so a stream always accepts it. The second result is false when the buffer
+// is empty.
 func (b *Buffer) OldestPending() (decode.LSN, bool) {
 	return b.oldest, b.hasOldest
 }
@@ -86,7 +99,7 @@ func (b *Buffer) addInsert(ev decode.ChangeEvent) error {
 		}
 	}
 	b.markOldKeyReused(ev.Key, nil)
-	b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: firstLSN(ev.LSN, cur)})
+	b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: firstLSN(ev.Delivered, cur)})
 	return nil
 }
 
@@ -100,7 +113,7 @@ func (b *Buffer) addUpdate(ev decode.ChangeEvent) error {
 	cur, ok := b.entries[ev.Key]
 	if !ok {
 		b.markOldKeyReused(ev.Key, nil)
-		b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: ev.LSN})
+		b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: ev.Delivered})
 		return nil
 	}
 	if cur.Kind == DeleteMarker {
@@ -135,7 +148,7 @@ func (b *Buffer) addKeyMove(ev decode.ChangeEvent) error {
 		return fmt.Errorf("%w (CO-5): buffer key %d: key move from %d, which is buffered deleted", ErrInvariantViolation, ev.Key, oldKey)
 	}
 	b.markOldKeyReused(ev.Key, from)
-	moved := &Entry{Key: ev.Key, Kind: Image, OldKey: &oldKey, FirstLSN: firstLSN(ev.LSN, cur, from)}
+	moved := &Entry{Key: ev.Key, Kind: Image, OldKey: &oldKey, FirstLSN: firstLSN(ev.Delivered, cur, from)}
 	if from != nil {
 		moved.Columns = cloneColumns(from.Columns)
 		moved.overlay(ev.Columns)
@@ -148,34 +161,39 @@ func (b *Buffer) addKeyMove(ev decode.ChangeEvent) error {
 		moved.Columns = cloneColumns(ev.Columns)
 	}
 	b.put(moved)
-	b.put(&Entry{Key: oldKey, Kind: DeleteMarker, FirstLSN: firstLSN(ev.LSN, from)})
+	b.put(&Entry{Key: oldKey, Kind: DeleteMarker, FirstLSN: firstLSN(ev.Delivered, from)})
 	return nil
 }
 
 // addDelete replaces whatever the key held with a delete marker: the newest
 // fact about the key is that its row is gone (CO-5).
 func (b *Buffer) addDelete(ev decode.ChangeEvent) {
-	b.put(&Entry{Key: ev.Key, Kind: DeleteMarker, FirstLSN: firstLSN(ev.LSN, b.entries[ev.Key])})
+	b.put(&Entry{Key: ev.Key, Kind: DeleteMarker, FirstLSN: firstLSN(ev.Delivered, b.entries[ev.Key])})
 }
 
 // markOldKeyReused records that key now holds a row other than the one each
 // buffered image that left it carried, so those images' markers cannot be
-// completed from key's shadow row (D13). mover is the entry of the row now
+// completed from key's shadow row (D13), and a completion one of them is
+// holding may have read that other row. mover is the entry of the row now
 // landing on key, when the landing is a move: a row returning to the key it
 // started at is not a reuse of it.
 func (b *Buffer) markOldKeyReused(key int64, mover *Entry) {
 	for imageKey := range b.movedFrom[key] {
 		if e := b.entries[imageKey]; e != mover {
 			e.OldKeyReused = true
+			b.dropPending(imageKey)
 		}
 	}
 }
 
-// put stores the entry under its key, keeps movedFrom exact, and keeps the
-// oldest pending position current. An entry only ever replaces one with an
-// equal or later FirstLSN, so the minimum never rises on a write.
+// put stores the entry under its key, keeps movedFrom exact, drops any
+// completion pending under the key — the write is an event the completion
+// read may have seen — and keeps the oldest pending position current. An
+// entry only ever replaces one with an equal or later FirstLSN, so the
+// minimum never rises on a write.
 func (b *Buffer) put(e *Entry) {
 	b.unindex(b.entries[e.Key])
+	b.dropPending(e.Key)
 	b.entries[e.Key] = e
 	if e.OldKey != nil {
 		images := b.movedFrom[*e.OldKey]
@@ -188,9 +206,11 @@ func (b *Buffer) put(e *Entry) {
 	b.trackOldest(e.FirstLSN)
 }
 
-// remove drops the entry under key and keeps movedFrom exact.
+// remove drops the entry under key, with any completion pending for it, and
+// keeps movedFrom exact.
 func (b *Buffer) remove(key int64) {
 	b.unindex(b.entries[key])
+	b.dropPending(key)
 	delete(b.entries, key)
 }
 
@@ -216,8 +236,9 @@ func (b *Buffer) trackOldest(lsn decode.LSN) {
 	}
 }
 
-// firstLSN is the earliest position a new entry still owes the stream: this
-// event's, or an earlier one carried by any entry it replaces or continues.
+// firstLSN is the earliest position a new entry still owes the stream: the
+// delivered position this event arrived with, or an earlier one carried by
+// any entry it replaces or continues.
 func firstLSN(lsn decode.LSN, replaced ...*Entry) decode.LSN {
 	for _, e := range replaced {
 		if e != nil && e.FirstLSN < lsn {

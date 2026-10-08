@@ -2,9 +2,12 @@ package decode_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -107,6 +110,11 @@ func TestCreateSlotRefusesWithoutCreateOnTheDatabaseBeforeAnySlotExists(t *testi
 
 	_, err = decode.CreateSlot(t.Context(), ownerCfg, ownerPool, target)
 	requireSQLState(t, err, sqlstateInsufficientPrivilege)
+	var privilege *decode.PublicationPrivilegeError
+	require.ErrorAs(t, err, &privilege)
+	assert.Equal(t, target.DecodingName(), privilege.Publication)
+	assert.Equal(t, target.Database(), privilege.Database)
+	assert.Equal(t, "CREATE", privilege.Privilege)
 	_, found, err := decode.InspectSlot(t.Context(), f.pool, target.DecodingName())
 	require.NoError(t, err)
 	assert.False(t, found, "no slot is created when the publication is refused")
@@ -137,6 +145,62 @@ func TestCreateSlotRefusesAConnectionOnAnotherDatabase(t *testing.T) {
 	require.NoError(t, other.QueryRow(t.Context(),
 		`SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = $1)`, f.target.DecodingName()).Scan(&exists))
 	assert.False(t, exists, "nothing is created on the other database")
+}
+
+// A database name is not a server: a replication connection to a database
+// of the target's name on another cluster is refused before a slot exists
+// anywhere, and nothing is created on the other cluster.
+func TestCreateSlotRefusesAReplicationConnectionOnAnotherServer(t *testing.T) {
+	f := newSlotFixture(t)
+	elsewhere := sameNamedDatabaseElsewhere(t, f)
+
+	slot, err := decode.CreateSlot(t.Context(), elsewhere.cfg, f.pool, f.target)
+	require.ErrorIs(t, err, decode.ErrInvariantViolation)
+	assert.Nil(t, slot)
+	_, found, err := decode.InspectSlot(t.Context(), f.pool, f.target.DecodingName())
+	require.NoError(t, err)
+	assert.False(t, found, "nothing is created on the pool's cluster")
+	_, found, err = decode.InspectSlot(t.Context(), elsewhere.pool, f.target.DecodingName())
+	require.NoError(t, err)
+	assert.False(t, found, "nothing is created on the other cluster")
+}
+
+// A create the caller's context cuts off while the server still waits for a
+// consistent point leaves no slot behind: the server drops a slot it never
+// finished creating once its walsender goes away, and nothing completes the
+// create later when the point becomes reachable.
+func TestCreateSlotEndedByItsContextLeavesNoSlot(t *testing.T) {
+	f := newSlotFixture(t)
+	// An open write transaction keeps the server from reaching a consistent
+	// point, so the create blocks for as long as it is held.
+	held, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if err := held.Rollback(context.WithoutCancel(t.Context())); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			t.Logf("roll back held transaction: %v", err)
+		}
+	})
+	_, err = held.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s.ledger (id, note) VALUES (5000, 'in flight')`, f.schema))
+	require.NoError(t, err)
+
+	const createBudget = 500 * time.Millisecond
+	ctx, cancel := context.WithTimeout(t.Context(), createBudget)
+	defer cancel()
+	slot, err := decode.CreateSlot(ctx, f.cfg, f.pool, f.target)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Nil(t, slot)
+
+	const slotGone = 10 * time.Second
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		_, found, err := decode.InspectSlot(t.Context(), f.pool, f.target.DecodingName())
+		assert.NoError(collect, err)
+		assert.False(collect, found, "the unfinished slot is dropped with its walsender")
+	}, slotGone, 50*time.Millisecond)
+	require.NoError(t, held.Rollback(t.Context()))
+	_, found, err := decode.InspectSlot(t.Context(), f.pool, f.target.DecodingName())
+	require.NoError(t, err)
+	assert.False(t, found, "nothing completes the create once the consistent point is reachable")
+	assert.True(t, f.publicationExists(t, f.target.DecodingName()), "the publication stays for the next attempt")
 }
 
 // A target that was not verified for a run that decodes WAL has no business

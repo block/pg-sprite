@@ -189,6 +189,7 @@ func (f slotFixture) holdSlot(t *testing.T, slot *decode.Slot) func() {
 			return
 		}
 		assert.True(collect, status.Active, "the streaming walsender must hold the slot")
+		assert.Equal(collect, int32(holder.PID()), status.ActivePID, "the holder is the walsender the catalog names")
 	}, slotHeld, 50*time.Millisecond)
 	released := false
 	release := func() {
@@ -200,6 +201,40 @@ func (f slotFixture) holdSlot(t *testing.T, slot *decode.Slot) func() {
 	}
 	t.Cleanup(release)
 	return release
+}
+
+// elsewhere is a database of the fixture's database's name on a second
+// cluster, so a test can hand CreateSlot or DropSlot a replication
+// connection whose database name matches and whose server does not.
+type elsewhere struct {
+	cfg  dbconn.Config
+	pool *pgxpool.Pool
+}
+
+// sameNamedDatabaseElsewhere starts a second cluster that decodes WAL and
+// creates on it a database named exactly as the fixture's.
+func sameNamedDatabaseElsewhere(t *testing.T, f slotFixture) elsewhere {
+	t.Helper()
+	otherServerURL := testutil.StartPostgresWithSettings(t, "wal_level=logical")
+	u, err := url.Parse(f.databaseURL)
+	require.NoError(t, err)
+	database := strings.TrimPrefix(u.Path, "/")
+	require.NotEmpty(t, database)
+
+	admin, err := pgxpool.New(t.Context(), otherServerURL)
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+	_, err = admin.Exec(t.Context(), `CREATE DATABASE `+pgx.Identifier{database}.Sanitize())
+	require.NoError(t, err)
+
+	ou, err := url.Parse(otherServerURL)
+	require.NoError(t, err)
+	ou.Path = "/" + database
+	cfg := dbconn.Config{URL: ou.String()}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return elsewhere{cfg: cfg, pool: pool}
 }
 
 func quoteLiteral(s string) string {

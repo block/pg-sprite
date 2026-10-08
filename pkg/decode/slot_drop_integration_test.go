@@ -109,6 +109,10 @@ func TestDropSlotRefusesAForeignSlotOfTheName(t *testing.T) {
 	require.NoError(t, err)
 	err = decode.DropSlot(t.Context(), f.cfg, f.pool, name)
 	require.ErrorIs(t, err, decode.ErrForeignDecodingState)
+	var foreign *decode.ForeignStateError
+	require.ErrorAs(t, err, &foreign)
+	assert.Equal(t, decode.ForeignObjectSlot, foreign.Object)
+	assert.Equal(t, name, foreign.Name)
 	_, found, err := decode.InspectSlot(t.Context(), f.pool, name)
 	require.NoError(t, err)
 	assert.True(t, found, "another database's slot is left alone")
@@ -126,4 +130,45 @@ func TestDropSlotRefusesAForeignSlotOfTheName(t *testing.T) {
 	_, found, err = decode.InspectSlot(t.Context(), f.pool, name)
 	require.NoError(t, err)
 	assert.True(t, found, "a physical slot is left alone")
+}
+
+// The pool and the replication config are separate inputs. A drop whose
+// replication connection reaches another cluster — even one holding a
+// database of the same name — is refused before anything is dropped
+// anywhere: the pool's slot and publication stay.
+func TestDropSlotOnAnotherServerIsNotADrop(t *testing.T) {
+	f := newSlotFixture(t)
+	slot := f.createSlot(t)
+	require.NoError(t, slot.Close(t.Context()))
+	elsewhere := sameNamedDatabaseElsewhere(t, f)
+
+	err := decode.DropSlot(t.Context(), elsewhere.cfg, f.pool, slot.Name())
+	require.ErrorIs(t, err, decode.ErrInvariantViolation)
+	_, found, err := decode.InspectSlot(t.Context(), f.pool, slot.Name())
+	require.NoError(t, err)
+	assert.True(t, found, "the pool's slot is still there")
+	assert.True(t, f.publicationExists(t, slot.Name()), "the publication stays with its slot")
+}
+
+// A publication of the name that CreateSlot refuses as foreign is never the
+// drop's to remove either: with no slot of the name, the drop refuses on the
+// publication and leaves it as found.
+func TestDropSlotLeavesAForeignPublicationOfTheName(t *testing.T) {
+	f := newSlotFixture(t)
+	name := f.target.DecodingName()
+	_, err := f.pool.Exec(t.Context(), `CREATE PUBLICATION `+name+` FOR ALL TABLES`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, err := f.pool.Exec(context.WithoutCancel(t.Context()), `DROP PUBLICATION IF EXISTS `+name)
+		assert.NoError(t, err)
+	})
+	_, err = decode.CreateSlot(t.Context(), f.cfg, f.pool, f.target)
+	require.ErrorIs(t, err, decode.ErrForeignDecodingState)
+
+	err = decode.DropSlot(t.Context(), f.cfg, f.pool, name)
+	var foreign *decode.ForeignStateError
+	require.ErrorAs(t, err, &foreign)
+	assert.Equal(t, decode.ForeignObjectPublication, foreign.Object)
+	assert.Equal(t, name, foreign.Name)
+	assert.True(t, f.publicationExists(t, name), "a publication CreateSlot calls foreign is left as found")
 }

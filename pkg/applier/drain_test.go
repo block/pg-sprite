@@ -282,20 +282,19 @@ func TestDrainBatchNamesMovedImagesToCompleteFirst(t *testing.T) {
 	})
 }
 
-// CompleteFirst points into Entries, so a completion the flush writes through
-// it is the image the flush then writes; a copy would let the two drift.
-func TestDrainCompleteFirstWritesThroughToEntries(t *testing.T) {
+// CompleteFirst copies the entries it names: a completion is not written
+// into the batch, so a batch the flush requeues carries its markers intact.
+func TestDrainCompleteFirstCopiesTheEntries(t *testing.T) {
 	b := NewBuffer()
 	require.NoError(t, b.Add(keyMove(10, 5, 5000, col("label", "a"), marker("doc"))))
 	batch := b.Drain(position(t, 6000))
 	first := batch.CompleteFirst()
 	require.Len(t, first, 1)
 
-	first[0].Columns = []decode.Column{col("label", "a"), col("doc", "completed")}
+	first[0].overlay([]decode.Column{col("doc", "completed")})
 
 	require.Equal(t, int64(5000), batch.Entries[1].Key)
-	assert.False(t, batch.Entries[1].HasMarker())
-	assert.Equal(t, "completed", batch.Entries[1].Columns[1].Value)
+	assert.True(t, batch.Entries[1].HasMarker(), "the batch's entry still carries the marker")
 }
 
 func sortedPair(a, b int64) []int64 {
