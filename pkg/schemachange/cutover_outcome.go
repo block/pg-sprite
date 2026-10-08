@@ -61,7 +61,9 @@ func (s SwappedTable) LiveOID() uint32 { return s.liveOID }
 func (s SwappedTable) OldOID() uint32 { return s.oldOID }
 
 // Owner is the role that owns both tables, which the old table's drop
-// runs as.
+// runs as. It is the role the build recorded; the swap carries it forward
+// and the inspection confirms both relations are still owned by it before
+// minting, so a proof never names an owner the catalog disagrees with.
 func (s SwappedTable) Owner() string { return s.owner }
 
 // Indexes are the index renames the swap performed, paired by definition.

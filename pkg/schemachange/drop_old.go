@@ -56,6 +56,9 @@ func dropOldTable(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLoc
 	if err := confirmTableLock(ctx, tx, lock); err != nil {
 		return err
 	}
+	if err := lockOldTable(ctx, tx, schema, old); err != nil {
+		return err
+	}
 	oid, err := resolveRelation(ctx, tx, schema, old)
 	if err != nil {
 		return err
@@ -69,6 +72,21 @@ func dropOldTable(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLoc
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit old table drop: %w", err)
+	}
+	return nil
+}
+
+// lockOldTable takes ACCESS EXCLUSIVE on whatever bears the _old name,
+// under the session's lock_timeout, before the OID is read. DROP TABLE
+// resolves its name again once it holds its own lock, so a rename that
+// commits while the drop waits would otherwise move the proven relation
+// out from under the name and put another in its place; once the relation
+// is locked it cannot be renamed, and the OID check and the drop see the
+// same one (ST-6). Nothing under the name surfaces as the server's
+// undefined_table error, reachable by SQLSTATE.
+func lockOldTable(ctx context.Context, tx pgx.Tx, schema, old string) error {
+	if _, err := tx.Exec(ctx, "LOCK TABLE "+pgx.Identifier{schema, old}.Sanitize()+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+		return fmt.Errorf("lock old table %s.%s: %w", schema, old, err)
 	}
 	return nil
 }

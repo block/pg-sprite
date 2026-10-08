@@ -6,7 +6,9 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -74,4 +76,43 @@ func TestDropOldTableRefusesALockHeldByAnotherBackend(t *testing.T) {
 	assert.True(t, errors.Is(err, schemachange.ErrInvariantViolation))
 	assert.True(t, f.relationExists(t, swapped.OldTable()), "a refused drop removes nothing")
 	assert.NoError(t, rival.Err(), "the rival's lock is untouched")
+}
+
+// The relation the drop proved by OID is the relation it drops: the drop
+// locks whatever bears the _old name before it reads the OID, so a rename
+// that moves the retained source away from the name and puts another
+// table there while the drop waits is refused once it commits, not
+// followed to the newcomer (ST-6).
+func TestDropOldTableDropsOnlyTheRelationItProved(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+	s := f.stage(t, "orders", `ALTER TABLE %s.orders DROP COLUMN note`)
+	swapped, err := f.cutover(t, s, schemachange.CutoverOptions{})
+	require.NoError(t, err)
+	old := pgx.Identifier{f.schema, swapped.OldTable()}.Sanitize()
+
+	rival, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Redundant safety closer: the rival commits below, so this
+		// returns the guaranteed ErrTxClosed.
+		_ = rival.Rollback(context.WithoutCancel(t.Context()))
+	})
+	_, err = rival.Exec(t.Context(), `ALTER TABLE `+old+` RENAME TO orders_retained`)
+	require.NoError(t, err)
+	_, err = rival.Exec(t.Context(), `CREATE TABLE `+old+` (impostor integer)`)
+	require.NoError(t, err)
+
+	dropped := make(chan error, 1)
+	go func() {
+		dropped <- schemachange.DropOldTable(t.Context(), f.pool, s.lock, swapped, schemachange.Options{})
+	}()
+	const dropWaits = 10 * time.Second
+	require.Eventually(t, func() bool { return f.backendWaitingOnLock(t, "%"+swapped.OldTable()+"%") }, dropWaits, 20*time.Millisecond)
+	require.NoError(t, rival.Commit(t.Context()))
+	err = <-dropped
+
+	assert.Equal(t, schemachange.CauseRelationReplaced, schemachange.RefusalCauseOf(err))
+	assert.True(t, f.relationExists(t, swapped.OldTable()), "the table that took the _old name is not dropped")
+	assert.True(t, f.relationExists(t, "orders_retained"), "nor is the retained source")
 }

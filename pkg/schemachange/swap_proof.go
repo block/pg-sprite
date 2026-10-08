@@ -1,11 +1,16 @@
 package schemachange
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"slices"
+)
 
 // SwapProof is the plain view of a SwappedTable: the same facts as its
 // accessors, as exported fields a checkpoint can encode and decode. A
-// resume decodes the checkpoint it kept into a SwapProof and compares it
-// with the SwapProof of what InspectSwapped returned. SwapProof is a view
+// resume decodes the checkpoint it kept into a SwapProof and asks SameSwap
+// whether what InspectSwapped returned describes the same swap; the two
+// are not compared field for field, since a proof re-derived after the
+// fact cannot carry everything the cutover's did. SwapProof is a view
 // only: nothing turns it back into a SwappedTable, so DropOldTable still
 // accepts only a value the cutover or the inspection minted.
 type SwapProof struct {
@@ -50,6 +55,28 @@ func (s SwappedTable) Proof() SwapProof {
 		IdentityColumns: s.IdentityColumns(),
 		Attempts:        s.Attempts(),
 	}
+}
+
+// SameSwap reports whether the two proofs describe the same committed
+// swap: the same two relations by OID under the same names in the same
+// schema, owned by the same role, with the same sequences re-owned to the
+// live table and the same identity columns recreated on it. These are the
+// facts that identify what the swap left, and every one of them is read
+// back from the catalog whichever way the proof was minted. The dependent
+// pairings and Attempts are left out on purpose: the cutover's pairing
+// names the shadow dependents the swap renamed, a pairing re-derived
+// afterwards cannot (the derived names have no inverse), and no later read
+// can know how many lock acquisitions the swap needed. A resume compares
+// its checkpoint with the inspection through this, not through ==.
+func (p SwapProof) SameSwap(other SwapProof) bool {
+	return p.Schema == other.Schema &&
+		p.Table == other.Table &&
+		p.OldTable == other.OldTable &&
+		p.LiveOID == other.LiveOID &&
+		p.OldOID == other.OldOID &&
+		p.Owner == other.Owner &&
+		slices.Equal(p.OwnedSequences, other.OwnedSequences) &&
+		slices.Equal(p.IdentityColumns, other.IdentityColumns)
 }
 
 // MarshalJSON encodes the swapped table as its SwapProof, so a checkpoint

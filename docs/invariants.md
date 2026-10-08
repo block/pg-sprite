@@ -386,11 +386,12 @@ the insert (wrong-table, gone-session, rival-backend, and mid-copy-loss tests); 
 `Verifier` requires the same session, runs every read transaction under its `Bind` context, and
 confirms the lock from each transaction's own connection before the first read (wrong-table,
 gone-session, reported-loss, and mid-pass-loss tests); `pkg/schemachange` `GateCutover`,
-`Cutover`, and `DropOldTable` require the same session, run under its `Bind` context, and
-confirm from the swap's and the drop's own transactions that the session's backend holds the
-lock before the first rename or the drop (nil-session, rival-backend, and lost-mid-attempt
-tests for the swap; nil-session and rival-backend tests for the drop), so loss of the lock
-aborts the change at every stage; `pkg/checkpoint` `Store.Save` and `Store.Delete` require the
+`Cutover`, `InspectSwapped`, and `DropOldTable` require the same session, run under its `Bind`
+context, and confirm from the swap's, the inspection's, and the drop's own transactions that the
+session's backend holds the lock before the first rename, the catalog read, or the drop
+(nil-session, rival-backend, and lost-mid-attempt tests for the swap; nil-session and
+rival-backend tests for the inspection and for the drop), so loss of the lock aborts the change
+at every stage; `pkg/checkpoint` `Store.Save` and `Store.Delete` require the
 same session for the checkpoint's target, run under its `Bind` context, and confirm the lock
 from the write's own transaction before the upsert or the delete (nil-session, wrong-table,
 and rival-backend tests), so a run whose lock went to another engine cannot stamp its stale
@@ -462,9 +463,14 @@ outcome is known: the attempt's backend, which may still be deciding inside `COM
 followed to its exit under a context the caller's cancellation no longer governs, bounded by the
 attempt's own `lock_timeout` plus `statement_timeout`, and a backend still present at that bound
 is refused as `cutover-outcome-ambiguous` rather than read around; then a fresh connection reads
-the catalog the way `pkg/schemachange.InspectSwapped` does — the two share one read, so the
-resume path and the lost-attempt path cannot disagree — which OID bears the source name: the
-shadow's OID is reported as the committed swap it was, its `SwappedTable` re-derived from what
+the catalog the way `pkg/schemachange.InspectSwapped` does — the two share one read, and that
+read owns its own preconditions: it refuses as `cutover-outcome-ambiguous` while any other
+backend holds `ACCESS EXCLUSIVE` on either relation the proof names, since a swap whose `COMMIT`
+is still deciding holds both until its outcome is visible, so neither path can answer from a
+catalog the commit has not reached; the lost-attempt path additionally follows its own backend
+first, the resume path has no backend to follow and relies on the guard alone — which OID bears
+the source name: the shadow's OID is reported as the committed swap it was, its `SwappedTable`
+re-derived from what
 the swap left behind, the source's OID as a rollback carrying the connection error, and any
 other state — no relation, or one the build never proved — is refused as
 `cutover-outcome-ambiguous`. Every attempt the

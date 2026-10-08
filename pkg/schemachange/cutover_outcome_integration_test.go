@@ -15,8 +15,10 @@ import (
 // source name means the attempt rolled back, the shadow's OID means it
 // committed and the proof is minted from the two relations, and a name
 // borne by neither — absent, or taken by a relation the build never
-// proved — is ambiguous. The same two relations are walked through every
-// state so only the catalog differs between verdicts.
+// proved — is ambiguous. A free _old name is dropped only when the
+// source's OID is gone from the catalog; a source renamed away from it is
+// refused. The same two relations are walked through every state so only
+// the catalog differs between verdicts.
 func TestReadOutcomeDecidesByWhichOIDBearsTheSourceName(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -29,12 +31,15 @@ func TestReadOutcomeDecidesByWhichOIDBearsTheSourceName(t *testing.T) {
 	require.NoError(t, err)
 	tx, err := pool.Begin(t.Context())
 	require.NoError(t, err)
+	var owner string
+	require.NoError(t, tx.QueryRow(t.Context(), `SELECT current_user`).Scan(&owner))
 	expected := Proof{
 		Schema:      schema,
 		SourceTable: "orders",
 		ShadowTable: ShadowName(schema, "orders"),
 		SourceOID:   relationOID(t, tx, schema, "orders"),
 		ShadowOID:   relationOID(t, tx, schema, ShadowName(schema, "orders")),
+		Fidelity:    FidelitySnapshot{Owner: owner},
 	}
 	require.NoError(t, tx.Rollback(t.Context()))
 	read := func() (SwappedTable, error) {
@@ -55,7 +60,12 @@ func TestReadOutcomeDecidesByWhichOIDBearsTheSourceName(t *testing.T) {
 	_, err = pool.Exec(t.Context(), `ALTER TABLE `+old+` RENAME TO orders_retained`)
 	require.NoError(t, err)
 	_, err = read()
-	assert.ErrorIs(t, err, ErrOldTableNotFound, "nothing bears the _old name")
+	assert.Equal(t, CauseRelationReplaced, RefusalCauseOf(err), "nothing bears the _old name, but the retained source still exists under another")
+
+	_, err = pool.Exec(t.Context(), `DROP TABLE `+pgx.Identifier{schema, "orders_retained"}.Sanitize())
+	require.NoError(t, err)
+	_, err = read()
+	assert.ErrorIs(t, err, ErrOldTableNotFound, "nothing bears the _old name and the retained source is gone")
 
 	_, err = pool.Exec(t.Context(), `CREATE TABLE `+old+` (impostor integer)`)
 	require.NoError(t, err)
