@@ -266,7 +266,10 @@ value in the new tuple as the unchanged-TOAST marker (type byte `u`) — the col
 column count is the full count, and there is no value; the marker means "leave the stored value
 unchanged", not NULL or an empty value. A full-row upsert that invents a value for that column
 would overwrite live shadow data and silently break convergence. *Enforced:* `pkg/decode`
-per-column presence on `ChangeEvent`, `pkg/applier` column-wise UPDATE construction from it.
+per-column presence on `ChangeEvent` — the `Stream` carries a text value or NULL as a present
+column and the marker as an absent one, and refuses a tuple whose column count does not match
+the relation rather than line columns up by guess; `pkg/applier` column-wise UPDATE construction
+from it.
 *Source:* [copy-and-swap D6](copy-and-swap-design.md#d6--preserve-omitted-toast-values).
 *Test obligation:* a convergence test updates other columns while leaving a column stored out of
 line untouched (`SET STORAGE EXTERNAL`, proven by the test harness's `ToastBytes()` — size alone
@@ -615,8 +618,16 @@ is idempotent) + reaper + throttler ceiling (planned).
 Losing the slot (Aurora failover) enters **reconcile mode** — keep the shadow and copy watermark,
 new slot, checksum-repair pass under the CO-3 self-heal policy — and is handled distinctly from a
 process crash (slot survives, clean resume). The engine detects writer-identity changes and slot
-disappearance rather than blindly continuing.
-*Enforced:* checkpoint/resume state machine (Phase 8). *Source:*
+disappearance rather than blindly continuing. The slot's confirmed position is the resume point
+a clean resume replays from, so it moves only on the consumer's word: never from a keepalive
+reply, never past a change the consumer has not been handed.
+*Enforced:* `pkg/decode` `Stream` — `Delivered` moves on a transaction's commit or on a keepalive
+between transactions and never names a position with an unyielded change below it; `Confirm` is
+the only standby-status report carrying a position and refuses a regression or a position beyond
+`Delivered`; a keepalive reply carries the confirmed position alone; a reopened stream replays
+every transaction that committed above the confirmed position (confirm-moves-the-slot,
+keepalive-replies-leave-it, refuse-beyond-delivered, reopen-replays-from-confirmed tests).
+The reconcile-mode transition itself is the checkpoint/resume state machine (Phase 8). *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum

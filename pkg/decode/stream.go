@@ -1,0 +1,429 @@
+package decode
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
+
+	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/preflight"
+)
+
+// ErrUnsupportedChange is returned when the stream decodes a change to the
+// target table that the route does not replay row by row — a TRUNCATE. The
+// shadow cannot be brought back into step by applying rows, so the stream
+// stops and the route decides whether to restart the copy.
+var ErrUnsupportedChange = errors.New("the source table received a change the route does not replay")
+
+// protocolVersion is the pgoutput protocol the stream speaks: version 1,
+// which every supported server offers, without streaming of in-progress
+// transactions, so every change the stream yields has already committed.
+const protocolVersion = "1"
+
+// Delivery is what one call to Stream.Next yields: a decoded change, or
+// nothing but a position when the server reported progress without a change
+// — a transaction's commit, or a keepalive while the table is quiet.
+type Delivery struct {
+	// Change is the decoded row change; nil for a progress-only delivery.
+	Change *ChangeEvent
+	// Delivered is the stream's position after this delivery: every change
+	// at or below it has been yielded, so it is the ceiling of what the
+	// caller may confirm.
+	Delivered LSN
+}
+
+// Stream decodes the route's slot into ChangeEvents. It owns one replication
+// connection from the start position onwards and keeps two positions: what
+// it has delivered to the caller, and what the caller has confirmed applied,
+// which is the only position it ever reports to the server (ST-4 — the
+// slot's confirmed position is the resume point, so it moves only on the
+// caller's word). A Stream is used from one goroutine, which must call Next
+// often enough to answer the server's keepalives within wal_sender_timeout.
+type Stream struct {
+	conn     *pgconn.PgConn
+	slotName string
+	target   preflight.CopySwapTarget
+	// start is the position decoding began from; a transaction that
+	// committed above it may carry changes written below it.
+	start     LSN
+	delivered LSN
+	confirmed LSN
+	// relation is the target table as pgoutput last described it; nil
+	// until the first change arrives.
+	relation      *relation
+	inTransaction bool
+	// failed is the error that ended the stream, returned from then on.
+	failed error
+}
+
+// OpenStream starts decoding the target's slot from a position, on a fresh
+// replication connection built from cfg and proven to be on the target's
+// database. The position is the slot's consistent point for a first run or
+// the checkpointed applied position for a resume; the server replays every
+// transaction that committed above the slot's confirmed position, so a
+// resume sees again what it applied but never confirmed. The exported
+// snapshot of a Slot is unaffected, since the slot's own connection is not
+// used.
+func OpenStream(ctx context.Context, cfg dbconn.Config, target preflight.CopySwapTarget, from LSN) (*Stream, error) {
+	if target.Table() == "" {
+		return nil, fmt.Errorf("%w: ST-3: zero copy-and-swap target", ErrInvariantViolation)
+	}
+	if !target.DecodesWAL() {
+		return nil, fmt.Errorf("%w: ST-3: the target's environment was not verified for a run that decodes WAL", ErrInvariantViolation)
+	}
+	name := target.DecodingName()
+	if !slotNamePattern.MatchString(name) {
+		return nil, fmt.Errorf("%w: ST-3: derived name %q is not an engine slot name", ErrInvariantViolation, name)
+	}
+	if from == 0 {
+		return nil, fmt.Errorf("%w: ST-4: stream from slot %s has no start position", ErrInvariantViolation, name)
+	}
+
+	conn, err := dbconn.ConnectReplication(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("open stream from slot %s: %w", name, err)
+	}
+	// INV: ST-3 — the slot is named for the target's database; a connection
+	// anywhere else would decode another database's slot of the same name.
+	identity, err := pglogrepl.IdentifySystem(ctx, conn)
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("identify replication system for slot %s: %w", name, err), conn.Close(ctx))
+	}
+	if identity.DBName != target.Database() {
+		return nil, errors.Join(fmt.Errorf("%w: ST-3: replication connection is on database %q, the target is in %q",
+			ErrInvariantViolation, identity.DBName, target.Database()), conn.Close(ctx))
+	}
+
+	err = pglogrepl.StartReplication(ctx, conn, name, pglogrepl.LSN(from), pglogrepl.StartReplicationOptions{
+		Mode: pglogrepl.LogicalReplication,
+		PluginArgs: []string{
+			"proto_version '" + protocolVersion + "'",
+			"publication_names " + quoteLiteral(name),
+		},
+	})
+	if err != nil {
+		return nil, errors.Join(fmt.Errorf("start replication from slot %s at %s: %w", name, from, err), conn.Close(ctx))
+	}
+	return &Stream{conn: conn, slotName: name, target: target, start: from, delivered: from}, nil
+}
+
+// quoteLiteral renders s as a SQL string literal for a replication command,
+// which takes its options as literals rather than parameters.
+func quoteLiteral(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
+// Start is the position decoding began from.
+func (s *Stream) Start() LSN { return s.start }
+
+// Delivered is the position every yielded change lies at or below.
+func (s *Stream) Delivered() LSN { return s.delivered }
+
+// Confirmed is the position last reported to the server as applied; zero
+// before the first Confirm.
+func (s *Stream) Confirmed() LSN { return s.confirmed }
+
+// Next yields the next delivery: a decoded change, or a progress-only
+// delivery when a transaction commits or the server sends a keepalive. When
+// nothing arrives within wait it yields the current position with no
+// change, so a quiet table never blocks the caller for longer than wait. A
+// keepalive that asks for a reply is answered with the confirmed position,
+// never the server's own. An error from the server or a change the stream
+// cannot decode ends the stream: the error is returned now and from every
+// later call.
+func (s *Stream) Next(ctx context.Context, wait time.Duration) (Delivery, error) {
+	if s.failed != nil {
+		return Delivery{}, s.failed
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, wait)
+	defer cancel()
+	for {
+		msg, err := s.conn.ReceiveMessage(waitCtx)
+		if err != nil {
+			if waitElapsed(ctx, waitCtx, err) {
+				return s.progress(), nil
+			}
+			return Delivery{}, s.fail(fmt.Errorf("receive from slot %s: %w", s.slotName, err))
+		}
+		switch msg := msg.(type) {
+		case *pgproto3.CopyData:
+			delivery, yielded, err := s.handleCopyData(ctx, msg.Data)
+			if err != nil {
+				return Delivery{}, s.fail(err)
+			}
+			if yielded {
+				return delivery, nil
+			}
+		case *pgproto3.ErrorResponse:
+			pgErr := pgconn.ErrorResponseToPgError(msg)
+			return Delivery{}, s.fail(fmt.Errorf("stream from slot %s: %w", s.slotName, pgErr))
+		case *pgproto3.NoticeResponse, *pgproto3.ParameterStatus:
+			// Asynchronous messages the connection has already recorded.
+		default:
+			return Delivery{}, s.fail(fmt.Errorf("%w: ST-4: stream from slot %s received %T outside of copy-both mode",
+				ErrInvariantViolation, s.slotName, msg))
+		}
+	}
+}
+
+// waitElapsed reports whether a receive error is only the wait running out:
+// the wait's own deadline passed while the caller's context is still live,
+// which leaves the connection usable.
+func waitElapsed(ctx, waitCtx context.Context, err error) bool {
+	return pgconn.Timeout(err) && errors.Is(waitCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil
+}
+
+// handleCopyData dispatches one replication message. yielded is true when
+// the message produces a delivery.
+func (s *Stream) handleCopyData(ctx context.Context, data []byte) (delivery Delivery, yielded bool, err error) {
+	if len(data) == 0 {
+		return Delivery{}, false, fmt.Errorf("%w: ST-4: stream from slot %s received an empty replication message",
+			ErrInvariantViolation, s.slotName)
+	}
+	switch data[0] {
+	case pglogrepl.PrimaryKeepaliveMessageByteID:
+		keepalive, err := pglogrepl.ParsePrimaryKeepaliveMessage(data[1:])
+		if err != nil {
+			return Delivery{}, false, fmt.Errorf("stream from slot %s: keepalive: %w", s.slotName, err)
+		}
+		return s.handleKeepalive(ctx, keepalive)
+	case pglogrepl.XLogDataByteID:
+		xld, err := pglogrepl.ParseXLogData(data[1:])
+		if err != nil {
+			return Delivery{}, false, fmt.Errorf("stream from slot %s: WAL data: %w", s.slotName, err)
+		}
+		return s.handleWALData(xld)
+	default:
+		return Delivery{}, false, fmt.Errorf("%w: ST-4: stream from slot %s received replication message %q",
+			ErrInvariantViolation, s.slotName, data[0])
+	}
+}
+
+// handleKeepalive records the server's position when it is safe to and
+// answers a reply request. Between transactions the keepalive position is
+// one the decoder has sent everything below, so it is delivered; inside a
+// transaction it is not, since the transaction's remaining changes lie below
+// it and have not been yielded.
+func (s *Stream) handleKeepalive(ctx context.Context, keepalive pglogrepl.PrimaryKeepaliveMessage) (Delivery, bool, error) {
+	// INV: ST-4 — Delivered never names a position with an unyielded change below it.
+	if !s.inTransaction {
+		s.raiseDelivered(LSN(keepalive.ServerWALEnd))
+	}
+	if keepalive.ReplyRequested {
+		if err := s.sendStatus(ctx); err != nil {
+			return Delivery{}, false, err
+		}
+	}
+	return s.progress(), true, nil
+}
+
+// handleWALData decodes one pgoutput message. The carrying WAL position is
+// the change's LSN.
+func (s *Stream) handleWALData(xld pglogrepl.XLogData) (Delivery, bool, error) {
+	msg, err := pglogrepl.Parse(xld.WALData)
+	if err != nil {
+		return Delivery{}, false, fmt.Errorf("%w: stream from slot %s at %s: %w",
+			ErrInvariantViolation, s.slotName, LSN(xld.WALStart), err)
+	}
+	switch msg := msg.(type) {
+	case *pglogrepl.BeginMessage:
+		if s.inTransaction {
+			return Delivery{}, false, fmt.Errorf("%w: ST-4: stream from slot %s at %s: BEGIN inside a transaction",
+				ErrInvariantViolation, s.slotName, LSN(xld.WALStart))
+		}
+		s.inTransaction = true
+		return Delivery{}, false, nil
+	case *pglogrepl.CommitMessage:
+		if !s.inTransaction {
+			return Delivery{}, false, fmt.Errorf("%w: ST-4: stream from slot %s at %s: COMMIT outside a transaction",
+				ErrInvariantViolation, s.slotName, LSN(xld.WALStart))
+		}
+		s.inTransaction = false
+		s.raiseDelivered(LSN(msg.TransactionEndLSN))
+		return s.progress(), true, nil
+	case *pglogrepl.RelationMessage:
+		return Delivery{}, false, s.recordRelation(msg)
+	case *pglogrepl.InsertMessage:
+		ev, err := s.decodeInsert(msg, LSN(xld.WALStart))
+		return Delivery{Change: ev, Delivered: s.delivered}, err == nil, err
+	case *pglogrepl.UpdateMessage:
+		ev, err := s.decodeUpdate(msg, LSN(xld.WALStart))
+		return Delivery{Change: ev, Delivered: s.delivered}, err == nil, err
+	case *pglogrepl.DeleteMessage:
+		ev, err := s.decodeDelete(msg, LSN(xld.WALStart))
+		return Delivery{Change: ev, Delivered: s.delivered}, err == nil, err
+	case *pglogrepl.TruncateMessage:
+		return Delivery{}, false, fmt.Errorf("%w: TRUNCATE of %s.%s at %s",
+			ErrUnsupportedChange, s.target.Schema(), s.target.Table(), LSN(xld.WALStart))
+	case *pglogrepl.TypeMessage, *pglogrepl.OriginMessage:
+		return Delivery{}, false, nil
+	default:
+		return Delivery{}, false, fmt.Errorf("%w: ST-4: stream from slot %s at %s: pgoutput message %T",
+			ErrInvariantViolation, s.slotName, LSN(xld.WALStart), msg)
+	}
+}
+
+// recordRelation checks a relation message against the target and against
+// the description the stream already holds; a second description that
+// differs is a shape change.
+func (s *Stream) recordRelation(msg *pglogrepl.RelationMessage) error {
+	rel, err := newRelation(msg, s.target)
+	if err != nil {
+		return err
+	}
+	if s.relation != nil && !s.relation.sameShape(rel) {
+		return fmt.Errorf("%w: %s.%s", ErrSourceShapeChanged, s.target.Schema(), s.target.Table())
+	}
+	s.relation = rel
+	return nil
+}
+
+// changeRelation is the relation a change message refers to, which must be
+// the one the stream holds and must arrive inside a transaction.
+func (s *Stream) changeRelation(relationID uint32, lsn LSN) (*relation, error) {
+	if !s.inTransaction {
+		return nil, fmt.Errorf("%w: ST-4: stream from slot %s at %s: change outside a transaction",
+			ErrInvariantViolation, s.slotName, lsn)
+	}
+	if s.relation == nil {
+		return nil, fmt.Errorf("%w: ST-4: stream from slot %s at %s: change before any relation",
+			ErrInvariantViolation, s.slotName, lsn)
+	}
+	if relationID != s.relation.id {
+		return nil, fmt.Errorf("%w: ST-3: stream from slot %s at %s: change to relation %d, the target is %d",
+			ErrInvariantViolation, s.slotName, lsn, relationID, s.relation.id)
+	}
+	return s.relation, nil
+}
+
+func (s *Stream) decodeInsert(msg *pglogrepl.InsertMessage, lsn LSN) (*ChangeEvent, error) {
+	rel, err := s.changeRelation(msg.RelationID, lsn)
+	if err != nil {
+		return nil, err
+	}
+	columns, err := decodeColumns(rel, msg.Tuple)
+	if err != nil {
+		return nil, fmt.Errorf("insert at %s: %w", lsn, err)
+	}
+	key, err := decodeKey(rel, msg.Tuple)
+	if err != nil {
+		return nil, fmt.Errorf("insert at %s: %w", lsn, err)
+	}
+	return &ChangeEvent{Kind: Insert, LSN: lsn, Key: key, Columns: columns}, nil
+}
+
+// decodeUpdate reads the new image and, when pgoutput sent an old tuple —
+// the key under DEFAULT replica identity when it changed, the whole row
+// under FULL — the key the row had, which is reported as OldKey only when
+// it differs (CO-4: a key-moving UPDATE is a deletion and an image).
+func (s *Stream) decodeUpdate(msg *pglogrepl.UpdateMessage, lsn LSN) (*ChangeEvent, error) {
+	rel, err := s.changeRelation(msg.RelationID, lsn)
+	if err != nil {
+		return nil, err
+	}
+	columns, err := decodeColumns(rel, msg.NewTuple)
+	if err != nil {
+		return nil, fmt.Errorf("update at %s: %w", lsn, err)
+	}
+	key, err := decodeKey(rel, msg.NewTuple)
+	if err != nil {
+		return nil, fmt.Errorf("update at %s: %w", lsn, err)
+	}
+	ev := &ChangeEvent{Kind: Update, LSN: lsn, Key: key, Columns: columns}
+	if msg.OldTuple != nil {
+		oldKey, err := decodeKey(rel, msg.OldTuple)
+		if err != nil {
+			return nil, fmt.Errorf("update at %s: old tuple: %w", lsn, err)
+		}
+		if oldKey != key {
+			ev.OldKey = &oldKey
+		}
+	}
+	return ev, nil
+}
+
+// decodeDelete reads the deleted row's key from the old tuple, which both
+// admitted replica identities send.
+func (s *Stream) decodeDelete(msg *pglogrepl.DeleteMessage, lsn LSN) (*ChangeEvent, error) {
+	rel, err := s.changeRelation(msg.RelationID, lsn)
+	if err != nil {
+		return nil, err
+	}
+	key, err := decodeKey(rel, msg.OldTuple)
+	if err != nil {
+		return nil, fmt.Errorf("delete at %s: %w", lsn, err)
+	}
+	return &ChangeEvent{Kind: Delete, LSN: lsn, Key: key}, nil
+}
+
+// Confirm reports to the server that every change at or below lsn has been
+// applied durably, which lets the slot release the WAL below it and makes
+// lsn the point a later stream resumes from. The position must not fall
+// below an earlier confirmation and must not exceed what the stream has
+// delivered: confirming further would let the server discard changes the
+// caller never saw. The server itself never moves the slot's position
+// backwards, so confirming a position below the slot's current one — which
+// a resumed stream can produce from a replayed transaction's early changes
+// — is accepted and has no effect on the server.
+func (s *Stream) Confirm(ctx context.Context, lsn LSN) error {
+	if s.failed != nil {
+		return s.failed
+	}
+	// INV: ST-4 — the slot's confirmed position moves only on the caller's
+	// word and never past what the caller could have applied.
+	if lsn < s.confirmed {
+		return fmt.Errorf("%w: ST-4: confirm %s below the %s already confirmed on slot %s",
+			ErrInvariantViolation, lsn, s.confirmed, s.slotName)
+	}
+	if lsn > s.delivered {
+		return fmt.Errorf("%w: ST-4: confirm %s beyond the %s delivered from slot %s",
+			ErrInvariantViolation, lsn, s.delivered, s.slotName)
+	}
+	s.confirmed = lsn
+	return s.sendStatus(ctx)
+}
+
+// sendStatus reports the confirmed position to the server. Before the first
+// Confirm every position is zero, which the server reads as no position: the
+// message still counts as the reply a keepalive asked for.
+func (s *Stream) sendStatus(ctx context.Context) error {
+	err := pglogrepl.SendStandbyStatusUpdate(ctx, s.conn, pglogrepl.StandbyStatusUpdate{
+		WALWritePosition: pglogrepl.LSN(s.confirmed),
+	})
+	if err != nil {
+		return fmt.Errorf("confirm %s on slot %s: %w", s.confirmed, s.slotName, err)
+	}
+	return nil
+}
+
+// raiseDelivered moves the delivered position forward; a position already
+// passed is left alone.
+func (s *Stream) raiseDelivered(lsn LSN) {
+	if lsn > s.delivered {
+		s.delivered = lsn
+	}
+}
+
+// progress is the delivery for a position with no change.
+func (s *Stream) progress() Delivery { return Delivery{Delivered: s.delivered} }
+
+// fail records the error that ended the stream and returns it.
+func (s *Stream) fail(err error) error {
+	s.failed = err
+	return err
+}
+
+// Close ends the replication connection. The slot persists with the
+// position last confirmed.
+func (s *Stream) Close(ctx context.Context) error {
+	if err := s.conn.Close(ctx); err != nil {
+		return fmt.Errorf("close stream from slot %s: %w", s.slotName, err)
+	}
+	return nil
+}
