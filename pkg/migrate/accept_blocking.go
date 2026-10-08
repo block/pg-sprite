@@ -62,10 +62,11 @@ func AcceptedRefusal(ack string, v verdict.Verdict) (verdict.Refusal, bool) {
 // unsupported.
 func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	refused verdict.Verdict, proof verdict.Refusal, opts Options) (verdict.Verdict, error) {
-	table, err := lockedTable(ctx, pool, st.IndexRelation())
+	locked, err := lockedTable(ctx, pool, st.IndexRelation())
 	if err != nil {
 		return verdict.Verdict{}, err
 	}
+	table := locked.qualified()
 	if table != opts.AcceptBlocking {
 		return verdict.Verdict{}, fmt.Errorf("%w: %s locks %q, got %q; nothing was executed",
 			ErrAcceptBlockingMismatch, st.Kind(), table, opts.AcceptBlocking)
@@ -77,7 +78,7 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 	auditAcceptBlocking(opts.audit(), st, table, proof, budget)
 
 	start := time.Now()
-	_, err = executor.ExecuteAcceptedBlocking(ctx, pool, st.SQL(), budget)
+	_, err = executor.ExecuteAcceptedBlocking(ctx, pool, st.SQL(), locked.preLock(), budget)
 	elapsed := time.Since(start)
 	logger := opts.logger()
 	if errors.Is(err, executor.ErrInvalidBlockingBudget) {
@@ -102,8 +103,12 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 	}
 	if err != nil {
 		// A statement-budget cancellation is a failure on this path, not a
-		// refusal: the lock was granted and the statement was doing the
-		// work the operator accepted when the bound cut it off.
+		// refusal: the executor holds the acknowledged table's lock before
+		// it submits the statement, so the bound cut off work the operator
+		// accepted, and an ungranted lock always arrives as CauseLock
+		// above. A materialized view is the one target the executor cannot
+		// lock first; there the statement's own wait is what the bound
+		// counted.
 		v := failureVerdict(st, err, executor.SequenceReport{}, false)
 		v.Table = table
 		var unknownErr *executor.BlockingOutcomeUnknownError
@@ -132,6 +137,28 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 	return v, nil
 }
 
+// acceptedTable is the table an accepted statement locks, as the catalog
+// resolved it, with the relkind of that table.
+type acceptedTable struct {
+	schema, name string
+	relkind      string
+}
+
+// qualified renders the table as the acknowledgement must spell it.
+func (t acceptedTable) qualified() string { return t.schema + "." + t.name }
+
+// preLock names the table for the executor to lock before the statement,
+// or nil for a materialized view, which LOCK TABLE cannot name; the
+// statement then acquires its own locks.
+func (t acceptedTable) preLock() pgx.Identifier {
+	if t.relkind == relkindMaterializedView {
+		return nil
+	}
+	return pgx.Identifier{t.schema, t.name}
+}
+
+const relkindMaterializedView = "m"
+
 // lockedTable resolves the table an accepted single-relation index statement
 // locks: the owning table of a named index (DROP INDEX, REINDEX INDEX),
 // read from the catalog, or the named table itself (REINDEX TABLE). An
@@ -140,17 +167,19 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 // to the wrong kind of relation is its own error, so an operator who typed
 // a table where the statement needs an index is pointed at the statement,
 // not at search_path and grants.
-func lockedTable(ctx context.Context, pool *pgxpool.Pool, rel statement.IndexRelation) (string, error) {
+func lockedTable(ctx context.Context, pool *pgxpool.Pool, rel statement.IndexRelation) (acceptedTable, error) {
 	if rel.Kind != statement.IndexRelationIndex && rel.Kind != statement.IndexRelationTable {
-		return "", fmt.Errorf("%w: accepted statement names no single relation", executor.ErrInvariantViolation)
+		return acceptedTable{}, fmt.Errorf("%w: accepted statement names no single relation", executor.ErrInvariantViolation)
 	}
 	// One row per resolved relation: its kind, and — when it is an index —
-	// the table that owns it; for a table the owner columns repeat the
-	// relation itself, so the result is always the table the statement locks.
+	// the table that owns it and that table's kind; for a table the owner
+	// columns repeat the relation itself, so the result is always the table
+	// the statement locks.
 	const q = `
 		SELECT c.relkind::text,
 		       COALESCE(tn.nspname, n.nspname),
-		       COALESCE(t.relname, c.relname)
+		       COALESCE(t.relname, c.relname),
+		       COALESCE(t.relkind, c.relkind)::text
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		LEFT JOIN pg_index i ON i.indexrelid = c.oid
@@ -158,20 +187,21 @@ func lockedTable(ctx context.Context, pool *pgxpool.Pool, rel statement.IndexRel
 		LEFT JOIN pg_namespace tn ON tn.oid = t.relnamespace
 		WHERE c.oid = to_regclass($1)`
 	name := regclassName(rel)
-	var relkind, schema, table string
-	err := pool.QueryRow(ctx, q, name).Scan(&relkind, &schema, &table)
+	var relkind string
+	var table acceptedTable
+	err := pool.QueryRow(ctx, q, name).Scan(&relkind, &table.schema, &table.name, &table.relkind)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return "", fmt.Errorf("%w: %s is not visible on the session search_path; nothing was executed",
+		return acceptedTable{}, fmt.Errorf("%w: %s is not visible on the session search_path; nothing was executed",
 			ErrAcceptBlockingRelationNotFound, name)
 	}
 	if err != nil {
-		return "", fmt.Errorf("resolve the table %s locks: %w", name, err)
+		return acceptedTable{}, fmt.Errorf("resolve the table %s locks: %w", name, err)
 	}
 	if !relationKindMatches(rel.Kind, relkind) {
-		return "", fmt.Errorf("%w: %s is %s, and the statement needs %s; nothing was executed",
+		return acceptedTable{}, fmt.Errorf("%w: %s is %s, and the statement needs %s; nothing was executed",
 			ErrAcceptBlockingWrongRelationKind, name, describeRelkind(relkind), describeIndexRelationKind(rel.Kind))
 	}
-	return schema + "." + table, nil
+	return table, nil
 }
 
 // relationKindMatches reports whether a resolved pg_class.relkind is what
@@ -183,7 +213,7 @@ func relationKindMatches(kind statement.IndexRelationKind, relkind string) bool 
 	case statement.IndexRelationIndex:
 		return relkind == "i" || relkind == "I"
 	case statement.IndexRelationTable:
-		return relkind == "r" || relkind == "p" || relkind == "m"
+		return relkind == "r" || relkind == "p" || relkind == relkindMaterializedView
 	default:
 		return false
 	}

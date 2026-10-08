@@ -104,6 +104,26 @@ func TestRunAcceptBlockingExecutesEligibleRefusals(t *testing.T) {
 		assertAccepted(t, v, schema)
 	})
 
+	t.Run("REINDEX TABLE of a materialized view acknowledges the view", func(t *testing.T) {
+		// LOCK TABLE cannot name a materialized view, so this is the one
+		// target the engine does not lock before the statement; the
+		// statement still commits under the budgets.
+		schema := seed(t)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE MATERIALIZED VIEW %[1]s.order_ids AS SELECT id FROM %[1]s.orders;
+			CREATE UNIQUE INDEX order_ids_id_idx ON %[1]s.order_ids (id)`, schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("REINDEX TABLE %s.order_ids", schema)),
+			acceptBlockingOptions(schema+".order_ids"))
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecutedWithoutOnlineSafety, v.Outcome)
+		assert.True(t, v.BlockingPassthrough)
+		assert.Equal(t, schema+".order_ids", v.Table)
+		assert.True(t, indexExists(t, pool, schema, "order_ids_id_idx"), "REINDEX keeps the index")
+	})
+
 	t.Run("an unqualified index resolves on the session search_path", func(t *testing.T) {
 		schema := seed(t)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE INDEX shared_idx ON %s.orders (id)", schema))
@@ -187,33 +207,35 @@ func TestRunAcceptBlockingRejectsFalseAcknowledgements(t *testing.T) {
 	})
 }
 
-// A caller whose context ends while the accepted statement is waiting on
-// its lock has lost the transaction from the client side: the statement
-// was submitted, and whether it committed cannot be established from
-// here. The failed verdict says so instead of claiming the rollback an
-// ordinary failed attempt gets, and its code sends the operator to the
-// catalog before any retry.
+// The caller's context ending while the accepted statement runs is an
+// outcome the client cannot establish: the statement was submitted and
+// the server decides whether its transaction rolled back. The verdict says
+// so and claims nothing about the catalog.
 func TestRunAcceptBlockingReportsAnUnknownOutcomeHonestly(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	schema := testutil.NewSchema(t, pool)
+	// An index over a function that sleeps per row keeps the rebuild
+	// running long enough to be cancelled while it is provably executing.
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.orders (id int PRIMARY KEY);
-		CREATE INDEX orders_id_idx ON %[1]s.orders (id)`, schema))
-	require.NoError(t, err)
-	holder, err := pool.Begin(t.Context())
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })
-	_, err = holder.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.orders IN ACCESS EXCLUSIVE MODE", schema))
+		INSERT INTO %[1]s.orders SELECT g FROM generate_series(1, 100) g;
+		CREATE FUNCTION %[1]s.slow_key(int) RETURNS int LANGUAGE plpgsql IMMUTABLE AS $$
+		BEGIN
+			PERFORM pg_sleep(0.1);
+			RETURN $1;
+		END $$;
+		CREATE INDEX orders_slow_idx ON %[1]s.orders (%[1]s.slow_key(id))`, schema))
 	require.NoError(t, err)
 
-	// The lock budget is long enough that only the caller's cancellation
-	// can end the wait, so the outcome the test observes is the
-	// cancellation's, not the budget's.
+	// Both budgets are long enough that only the caller's cancellation can
+	// end the statement, so the outcome the test observes is the
+	// cancellation's, not a budget's.
 	opts := acceptBlockingOptions(schema + ".orders")
 	opts.Budget.Brief.LockTimeout = 30 * time.Second
+	opts.Budget.Brief.StatementTimeout = time.Minute
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	type result struct {
@@ -223,19 +245,19 @@ func TestRunAcceptBlockingReportsAnUnknownOutcomeHonestly(t *testing.T) {
 	done := make(chan result, 1)
 	go func() {
 		v, err := migrate.Run(ctx, pool,
-			parseOne(t, fmt.Sprintf("DROP INDEX %s.orders_id_idx", schema)), opts)
+			parseOne(t, fmt.Sprintf("REINDEX INDEX %s.orders_slow_idx", schema)), opts)
 		done <- result{v, err}
 	}()
 
-	// Cancel only once the DROP INDEX is provably submitted and waiting on
-	// the held lock; the polling query's own text does not start with it.
+	// Cancel only once the REINDEX is provably submitted and running; the
+	// polling query's own text does not start with it.
 	require.Eventually(t, func() bool {
-		var waiting bool
+		var running bool
 		err := pool.QueryRow(t.Context(),
 			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
-			  WHERE query LIKE 'DROP INDEX %' AND wait_event_type = 'Lock')`).Scan(&waiting)
-		return err == nil && waiting
-	}, 30*time.Second, 25*time.Millisecond, "the accepted DROP INDEX must be waiting on the holder's lock")
+			  WHERE query LIKE 'REINDEX INDEX %' AND state = 'active')`).Scan(&running)
+		return err == nil && running
+	}, 30*time.Second, 25*time.Millisecond, "the accepted REINDEX must be running")
 	cancel()
 
 	select {
@@ -251,9 +273,115 @@ func TestRunAcceptBlockingReportsAnUnknownOutcomeHonestly(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("the cancelled accepted execution must return")
 	}
+	assert.True(t, indexExists(t, pool, schema, "orders_slow_idx"),
+		"the server-side outcome here is a rollback — which the client still could not know")
+}
+
+// The acknowledged table's lock is requested before the statement, as a
+// statement of its own. The caller's context ending during that wait is
+// therefore not an unknown outcome: nothing was submitted, the verdict
+// names the caller's cancellation, and the index stands.
+func TestRunAcceptBlockingReportsACancelledLockWaitAsNothingSubmitted(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	// Closing the pool waits for every checked-out connection, and the
+	// holder below keeps one until its own cleanup rolls it back. Cleanups
+	// run last-registered first, so registering the close here — before
+	// the holder's cleanup — is what lets a failed assertion end the test
+	// instead of parking it on Close until the package deadline.
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (id int PRIMARY KEY);
+		CREATE INDEX orders_id_idx ON %[1]s.orders (id)`, schema))
+	require.NoError(t, err)
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = holder.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.orders IN ACCESS EXCLUSIVE MODE", schema))
+	require.NoError(t, err)
+
+	// Both budgets are long enough that only the caller's cancellation can
+	// end the wait.
+	opts := acceptBlockingOptions(schema + ".orders")
+	opts.Budget.Brief.LockTimeout = 30 * time.Second
+	opts.Budget.Brief.StatementTimeout = time.Minute
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	type result struct {
+		v   verdict.Verdict
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		v, err := migrate.Run(ctx, pool,
+			parseOne(t, fmt.Sprintf("DROP INDEX %s.orders_id_idx", schema)), opts)
+		done <- result{v, err}
+	}()
+
+	// Cancel only once the engine's table lock request is provably waiting
+	// on the holder; the polling query's own text does not start with it.
+	require.Eventually(t, func() bool {
+		var waiting bool
+		err := pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+			  WHERE query LIKE 'LOCK TABLE %' AND wait_event_type = 'Lock')`).Scan(&waiting)
+		return err == nil && waiting
+	}, 30*time.Second, 25*time.Millisecond, "the engine's table lock request must be waiting on the holder's lock")
+	cancel()
+
+	select {
+	case res := <-done:
+		require.ErrorIs(t, res.err, executor.ErrCancelledByCaller)
+		assert.Equal(t, verdict.OutcomeFailed, res.v.Outcome)
+		assert.Equal(t, string(executor.CodeCancelledByCaller), res.v.Code)
+		assert.Equal(t, schema+".orders", res.v.Table)
+		assert.False(t, res.v.BlockingPassthrough)
+		assert.Contains(t, res.v.Detail, "nothing committed",
+			"the statement was never submitted, so the verdict can say so")
+	case <-time.After(30 * time.Second):
+		t.Fatal("the cancelled lock wait must return")
+	}
+	// Release the holder so the catalog read below does not queue behind
+	// it; the cleanup's second rollback is a no-op on a finished transaction.
 	require.NoError(t, holder.Rollback(t.Context()))
-	assert.True(t, indexExists(t, pool, schema, "orders_id_idx"),
-		"the lock was never granted, so the server-side outcome here is a rollback — which the client still could not know")
+	assert.True(t, indexExists(t, pool, schema, "orders_id_idx"), "the lock was never granted, so the index stands")
+}
+
+// statement_timeout counts a lock wait too, so a statement budget that is
+// not longer than the lock budget would end every lock wait before the
+// lock budget could apply. Such a pair is refused before a session is
+// acquired: no verdict, nothing submitted, and the index stands even with
+// the table locked by someone else.
+func TestRunAcceptBlockingRefusesAStatementBudgetThatCouldEndTheLockWait(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (id int PRIMARY KEY);
+		CREATE INDEX orders_id_idx ON %[1]s.orders (id)`, schema))
+	require.NoError(t, err)
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = holder.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.orders IN ACCESS EXCLUSIVE MODE", schema))
+	require.NoError(t, err)
+
+	opts := acceptBlockingOptions(schema + ".orders")
+	opts.Budget.Brief.LockTimeout = 10 * time.Second
+	opts.Budget.Brief.StatementTimeout = time.Second
+	v, err := migrate.Run(t.Context(), pool,
+		parseOne(t, fmt.Sprintf("DROP INDEX %s.orders_id_idx", schema)), opts)
+
+	require.ErrorIs(t, err, executor.ErrInvalidBlockingBudget)
+	assert.Equal(t, verdict.Verdict{}, v)
+	// Release the holder so the catalog read below does not queue behind
+	// it; the cleanup's second rollback is a no-op on a finished transaction.
+	require.NoError(t, holder.Rollback(t.Context()))
+	assert.True(t, indexExists(t, pool, schema, "orders_id_idx"))
 }
 
 // The budgets bound the accepted statement in both directions. An
@@ -288,6 +416,9 @@ func TestRunAcceptBlockingBoundsTheStatement(t *testing.T) {
 		assert.Equal(t, verdict.CauseLockBudget, v.Cause)
 		assert.Equal(t, schema+".orders", v.Table)
 		assert.False(t, v.BlockingPassthrough, "a refusal is not a passthrough execution")
+		// Release the holder so the catalog read below does not queue
+		// behind it; the cleanup's second rollback is a no-op on a finished
+		// transaction.
 		require.NoError(t, holder.Rollback(t.Context()))
 		assert.True(t, indexExists(t, pool, schema, "orders_id_idx"), "the lock was never granted, so the index stands")
 	})
@@ -296,8 +427,10 @@ func TestRunAcceptBlockingBoundsTheStatement(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		// An index over a function that sleeps per row makes the rebuild
 		// take longer than the statement budget: ten rows at 50ms each is
-		// half a second against a 100ms bound, so the cancellation is
-		// deterministic and the whole test still finishes quickly.
+		// half a second against a 200ms bound, so the cancellation is
+		// deterministic and the whole test still finishes quickly. The
+		// bound stays longer than the fixture's lock budget, as the budget
+		// validation requires.
 		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
 			CREATE TABLE %[1]s.orders (id int PRIMARY KEY);
 			INSERT INTO %[1]s.orders SELECT g FROM generate_series(1, 10) g;
@@ -309,7 +442,7 @@ func TestRunAcceptBlockingBoundsTheStatement(t *testing.T) {
 			CREATE INDEX orders_slow_idx ON %[1]s.orders (%[1]s.slow_key(id))`, schema))
 		require.NoError(t, err)
 		opts := acceptBlockingOptions(schema + ".orders")
-		opts.Budget.Brief.StatementTimeout = 100 * time.Millisecond
+		opts.Budget.Brief.StatementTimeout = 200 * time.Millisecond
 
 		v, err := migrate.Run(t.Context(), pool,
 			parseOne(t, fmt.Sprintf("REINDEX INDEX %s.orders_slow_idx", schema)), opts)
