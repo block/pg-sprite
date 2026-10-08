@@ -30,6 +30,9 @@ type DependentPair struct {
 	// dependent takes after the swap.
 	SourceName string `json:"source_name"`
 	// ShadowName is the name the shadow dependent holds before the swap.
+	// It is empty in a pairing re-derived after the swap: the shadow
+	// dependent bears SourceName by then, and the catalog does not keep
+	// the name it gave up.
 	ShadowName string `json:"shadow_name"`
 }
 
@@ -202,6 +205,24 @@ func indexDependents(indexes []indexEntry, retyped map[string]bool) ([]dependent
 		out = append(out, dependent{name: e.name, key: string(key)})
 	}
 	return out, nil
+}
+
+// indexNames lists the indexes' names in the order read.
+func indexNames(indexes []indexEntry) []string {
+	names := make([]string, 0, len(indexes))
+	for _, e := range indexes {
+		names = append(names, e.name)
+	}
+	return names
+}
+
+// dependentNames lists the dependents' names in the order read.
+func dependentNames(dependents []dependent) []string {
+	names := make([]string, 0, len(dependents))
+	for _, d := range dependents {
+		names = append(names, d.name)
+	}
+	return names
 }
 
 // invalidIndexes names the indexes whose pg_index.indisvalid is false.

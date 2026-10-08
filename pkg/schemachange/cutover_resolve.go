@@ -8,6 +8,7 @@ import (
 	"net"
 	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -33,11 +34,12 @@ func rolledBack(err error) error {
 // COMMIT behind a synchronous standby or a deferred trigger — so it is
 // first followed to its exit, under a context the caller's cancellation no
 // longer governs: the answer is owed whatever cut the attempt short. Then
-// a fresh connection reads which relation bears the source name: the
-// shadow means the swap committed and is the success it was, with the
-// identities the handoff left on the live table read back from it; the
-// source means the attempt rolled back; a name borne by neither relation,
-// or a backend that outlives its own timeouts, is refused.
+// a fresh connection reads the catalog the way InspectSwapped does: the
+// shadow bearing the source name means the swap committed and is the
+// success it was, its proof re-derived from what the swap left behind; the
+// source still bearing it means the attempt rolled back; a name borne by
+// neither relation, or a backend that outlives its own timeouts, is
+// refused.
 func resolveUnknownOutcome(ctx context.Context, pool *pgxpool.Pool, ready CutoverReady, backend swapBackend, attempt int, lost error, opts CutoverOptions) (SwappedTable, error) {
 	ctx = context.WithoutCancel(ctx)
 	schema, source := ready.built.Schema(), ready.built.SourceTable()
@@ -51,25 +53,39 @@ func resolveUnknownOutcome(ctx context.Context, pool *pgxpool.Pool, ready Cutove
 		return SwappedTable{}, refuse(CauseOutcomeAmbiguous, []error{lost, err},
 			"the outcome of the cutover of %s.%s cannot be read while its attempt is still running", schema, source)
 	}
-	outcome, err := inspectOutcome(ctx, pool, ready.built)
-	if err != nil {
-		return SwappedTable{}, errors.Join(lost, err)
-	}
-	switch outcome {
-	case outcomeSwapped:
-		identities, err := readLiveIdentities(ctx, pool, ready.built)
-		if err != nil {
-			return SwappedTable{}, errors.Join(lost, err)
-		}
+	swapped, err := readOutcome(ctx, pool, ready.built.Proof())
+	switch {
+	case err == nil:
 		// INV: LK-4
-		return newSwappedTable(ready, identities, attempt), nil
-	case outcomeNotSwapped:
+		swapped.attempts = attempt
+		return swapped, nil
+	case errors.Is(err, ErrNotSwapped):
 		return SwappedTable{}, rolledBack(fmt.Errorf("cutover of %s.%s rolled back when its attempt was cut short: %w", schema, source, lost))
 	default:
-		// INV: LK-4
-		return SwappedTable{}, refuse(CauseOutcomeAmbiguous, []error{lost},
-			"after a lost attempt neither the source nor the shadow bears the name %s.%s", schema, source)
+		return SwappedTable{}, errors.Join(lost, err)
 	}
+}
+
+// readOutcome reads the swap's outcome from a fresh connection, in a
+// read-only transaction that is rolled back either way.
+func readOutcome(ctx context.Context, pool *pgxpool.Pool, expected Proof) (SwappedTable, error) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return SwappedTable{}, fmt.Errorf("inspect cutover outcome for %s.%s: %w", expected.Schema, expected.SourceTable, err)
+	}
+	defer func() {
+		// Redundant safety closer: a read-only transaction that is
+		// rolled back below either way.
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+	}()
+	swapped, err := readSwappedTable(ctx, tx, expected)
+	if err != nil {
+		return SwappedTable{}, err
+	}
+	if err := tx.Rollback(ctx); err != nil {
+		return SwappedTable{}, fmt.Errorf("inspect cutover outcome for %s.%s: %w", expected.Schema, expected.SourceTable, err)
+	}
+	return swapped, nil
 }
 
 // outcomeUnknown reports whether a failed attempt ended without an answer
