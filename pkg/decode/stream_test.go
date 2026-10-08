@@ -80,29 +80,32 @@ func TestKeepalivePositionIsDeliveredOnlyBetweenTransactions(t *testing.T) {
 	assert.Equal(t, LSN(195), d.Delivered, "a position already passed does not move it back")
 }
 
-// The server's position is kept from every message that carries it — a
-// keepalive or a change — even inside a transaction, where Delivered holds,
-// so a caller can measure the stream's lag without a second connection.
-func TestServerWALEndFollowsEveryServerReport(t *testing.T) {
+// For logical decoding the walsender writes the record's own position into
+// XLogData's end field, so a change reports where it was written, not where
+// the server is: only a keepalive moves ServerWALEnd, it is kept inside a
+// transaction where Delivered holds, and it never reads below Delivered.
+func TestServerWALEndIsNotMovedByAChange(t *testing.T) {
 	s := &Stream{delivered: 100, relation: keyOnlyRelation(7)}
-	assert.Equal(t, LSN(0), s.ServerWALEnd(), "nothing is known before the server reports")
+	assert.Equal(t, LSN(100), s.ServerWALEnd(), "Delivered until the server reports")
 
-	_, _, err := s.handleKeepalive(t.Context(), pglogrepl.PrimaryKeepaliveMessage{ServerWALEnd: 150})
+	_, _, err := s.handleKeepalive(t.Context(), pglogrepl.PrimaryKeepaliveMessage{ServerWALEnd: 200})
 	require.NoError(t, err)
-	assert.Equal(t, LSN(150), s.ServerWALEnd())
+	assert.Equal(t, LSN(200), s.ServerWALEnd())
+	assert.Equal(t, LSN(200), s.Delivered(), "a keepalive between transactions is delivered")
 
-	_, _, err = s.handleWALData(walData(160, beginMessage(190)))
+	_, _, err = s.handleWALData(walData(160, beginMessage(240)))
 	require.NoError(t, err)
-	_, _, err = s.handleKeepalive(t.Context(), pglogrepl.PrimaryKeepaliveMessage{ServerWALEnd: 200})
+	_, _, err = s.handleWALData(walData(170, insertMessage(7, "101")))
 	require.NoError(t, err)
-	assert.Equal(t, LSN(200), s.ServerWALEnd(), "the server's position is kept inside a transaction")
-	assert.Equal(t, LSN(150), s.Delivered(), "while the delivered position holds")
+	assert.Equal(t, LSN(200), s.ServerWALEnd(), "a change written below the keepalive does not move it")
+	_, _, err = s.handleKeepalive(t.Context(), pglogrepl.PrimaryKeepaliveMessage{ServerWALEnd: 230})
+	require.NoError(t, err)
+	assert.Equal(t, LSN(230), s.ServerWALEnd(), "a keepalive inside a transaction moves it")
+	assert.Equal(t, LSN(200), s.Delivered(), "while the delivered position holds")
 
-	xld := walData(170, insertMessage(7, "101"))
-	xld.ServerWALEnd = 210
-	_, _, err = s.handleWALData(xld)
+	_, _, err = s.handleWALData(walData(250, commitMessage(240, 250)))
 	require.NoError(t, err)
-	assert.Equal(t, LSN(210), s.ServerWALEnd(), "a change carries the server's position too")
+	assert.Equal(t, LSN(250), s.ServerWALEnd(), "a commit past the last keepalive is the furthest position known")
 }
 
 // A change is stamped with the delivered position it arrives with — the

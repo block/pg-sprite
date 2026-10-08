@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -22,10 +23,13 @@ import (
 var ErrUnsupportedChange = errors.New("the source table received a change the route does not replay")
 
 // ErrStreamEnded is returned when the server ends replication in an orderly
-// way — a shutdown with the slot intact — rather than with an error. The
-// slot keeps the position last confirmed, so this is the clean resume ST-4
-// separates from slot loss: a new stream from that position continues
-// where this one stopped.
+// way — a shutdown with the slot intact — rather than with an error. This
+// is the clean resume ST-4 separates from slot loss: the slot survives with
+// a position at or below the last confirm (a confirm that only moves the
+// slot's confirmed position is not always written out before a shutdown),
+// and a new stream started from the caller's own checkpoint continues where
+// this one stopped, since the server forwards a start that lies below the
+// slot's position.
 var ErrStreamEnded = errors.New("the server ended the replication stream")
 
 // protocolVersion is the pgoutput protocol the stream speaks: version 1,
@@ -72,8 +76,9 @@ type Stream struct {
 	start     LSN
 	delivered LSN
 	confirmed LSN
-	// serverWALEnd is the server's position as it last reported it, with
-	// a keepalive or alongside a change; it can run ahead of delivered.
+	// serverWALEnd is the walsender's send position from its last
+	// keepalive; a change does not move it, since a change's XLogData
+	// carries only the change's own position.
 	serverWALEnd LSN
 	// relation is the target table as pgoutput last described it; nil
 	// until the first change arrives.
@@ -84,14 +89,17 @@ type Stream struct {
 }
 
 // OpenStream starts decoding the target's slot from a position, on a fresh
-// replication connection built from cfg and proven to be on the target's
-// database. The position is the slot's consistent point for a first run or
+// replication connection built from cfg and proven to be a session of the
+// pool's cluster on the target's database — a database of the target's
+// name on another cluster holds a slot of the same derived name, whose rows
+// would otherwise arrive as this target's changes. The position is the
+// slot's consistent point for a first run or
 // the checkpointed applied position for a resume; the server replays every
 // transaction that committed above the slot's confirmed position, so a
 // resume sees again what it applied but never confirmed. The exported
 // snapshot of a Slot is unaffected, since the slot's own connection is not
 // used.
-func OpenStream(ctx context.Context, cfg dbconn.Config, target preflight.CopySwapTarget, from LSN) (*Stream, error) {
+func OpenStream(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, target preflight.CopySwapTarget, from LSN) (*Stream, error) {
 	if target.Table() == "" {
 		return nil, fmt.Errorf("%w: ST-3: zero copy-and-swap target", ErrInvariantViolation)
 	}
@@ -110,15 +118,16 @@ func OpenStream(ctx context.Context, cfg dbconn.Config, target preflight.CopySwa
 	if err != nil {
 		return nil, fmt.Errorf("open stream from slot %s: %w", name, err)
 	}
-	// INV: ST-3 — the slot is named for the target's database; a connection
-	// anywhere else would decode another database's slot of the same name.
-	identity, err := pglogrepl.IdentifySystem(ctx, conn)
+	// INV: ST-3 — the slot is named for the target's database on the pool's
+	// cluster; a connection anywhere else would decode another database's
+	// slot of the same name.
+	identity, err := proveSameServer(ctx, conn, pool)
 	if err != nil {
-		return nil, errors.Join(fmt.Errorf("identify replication system for slot %s: %w", name, err), conn.Close(ctx))
+		return nil, errors.Join(fmt.Errorf("open stream from slot %s: %w", name, err), conn.Close(ctx))
 	}
-	if identity.DBName != target.Database() {
+	if identity.database != target.Database() {
 		return nil, errors.Join(fmt.Errorf("%w: ST-3: replication connection is on database %q, the target is in %q",
-			ErrInvariantViolation, identity.DBName, target.Database()), conn.Close(ctx))
+			ErrInvariantViolation, identity.database, target.Database()), conn.Close(ctx))
 	}
 
 	err = pglogrepl.StartReplication(ctx, conn, name, pglogrepl.LSN(from), pglogrepl.StartReplicationOptions{
@@ -150,12 +159,17 @@ func (s *Stream) Start() LSN { return s.start }
 // or below, and the ceiling of what the caller may confirm.
 func (s *Stream) Delivered() LSN { return s.delivered }
 
-// ServerWALEnd is the server's position as it last reported it: with a
-// keepalive, or alongside a change. It runs ahead of Delivered while a
-// transaction is being sent and by whatever the server has written that
-// the stream has not been sent, so Delivered subtracted from it is the
-// stream's lag as the server measures it. Zero until the server reports.
-func (s *Stream) ServerWALEnd() LSN { return s.serverWALEnd }
+// ServerWALEnd is the walsender's send position from its last keepalive —
+// the end of the last record it decoded — and never less than Delivered. A
+// change does not move it: a change's XLogData carries the change's own
+// position, which under commit ordering can lie below Delivered. Delivered
+// subtracted from it is a lower bound on the stream's lag, not the lag
+// itself: while the walsender works through a backlog, most of the backlog
+// is WAL it has not decoded yet, so the figure stays small exactly when the
+// stream is furthest behind. Lag against the server's WAL end is measured
+// on a pool, against pg_current_wal_lsn(). Delivered until the server
+// reports.
+func (s *Stream) ServerWALEnd() LSN { return max(s.serverWALEnd, s.delivered) }
 
 // Next yields the next delivery: a decoded change, or a progress-only
 // delivery when a transaction commits or the server sends a keepalive. When
@@ -266,9 +280,11 @@ func (s *Stream) handleKeepalive(ctx context.Context, keepalive pglogrepl.Primar
 
 // handleWALData decodes one pgoutput message. The carrying WAL position is
 // the change's LSN; the delivered position it arrives with is the stream's
-// at that moment, which lies below the transaction's commit.
+// at that moment, which lies below the transaction's commit. The message's
+// server position is not the walsender's: for logical decoding the server
+// writes the record's own position into both fields, so only a keepalive
+// moves ServerWALEnd.
 func (s *Stream) handleWALData(xld pglogrepl.XLogData) (Delivery, bool, error) {
-	s.serverWALEnd = LSN(xld.ServerWALEnd)
 	msg, err := pglogrepl.Parse(xld.WALData)
 	if err != nil {
 		return Delivery{}, false, fmt.Errorf("%w: stream from slot %s at %s: %w",

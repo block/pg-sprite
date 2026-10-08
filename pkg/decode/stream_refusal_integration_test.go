@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
@@ -21,12 +22,28 @@ func TestOpenStreamRefusesAQuiescedTargetAndAnotherDatabase(t *testing.T) {
 	slot := f.createSlot(t)
 
 	quiesced := f.mintTarget(t, f.pool, false)
-	_, err := decode.OpenStream(t.Context(), f.cfg, quiesced, slot.ConsistentPoint())
+	_, err := decode.OpenStream(t.Context(), f.cfg, f.pool, quiesced, slot.ConsistentPoint())
 	require.ErrorIs(t, err, decode.ErrInvariantViolation)
 
 	other := dbconn.Config{URL: testutil.NewDatabase(t, f.serverURL)}
-	_, err = decode.OpenStream(t.Context(), other, f.target, slot.ConsistentPoint())
+	_, err = decode.OpenStream(t.Context(), other, f.pool, f.target, slot.ConsistentPoint())
 	require.ErrorIs(t, err, decode.ErrInvariantViolation)
+}
+
+// A database name is not a server: the same table on two clusters derives
+// the same slot name, so a replication connection to a database of the
+// target's name on another cluster is refused before START_REPLICATION,
+// rather than decoding that cluster's slot as this target's changes (ST-3).
+// The refusal is the stream's own, not the other server's complaint that
+// the slot does not exist there.
+func TestOpenStreamRefusesAReplicationConnectionOnAnotherServer(t *testing.T) {
+	f := newSlotFixture(t)
+	slot := f.createSlot(t)
+	elsewhere := sameNamedDatabaseElsewhere(t, f)
+
+	stream, err := decode.OpenStream(t.Context(), elsewhere.cfg, f.pool, f.target, slot.ConsistentPoint())
+	require.ErrorIs(t, err, decode.ErrInvariantViolation)
+	assert.Nil(t, stream)
 }
 
 // A source renamed under the stream is no longer the target: its next

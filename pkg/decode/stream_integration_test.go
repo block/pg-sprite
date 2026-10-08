@@ -14,12 +14,12 @@ import (
 // The stream is refused before any connection is made when the target is
 // not a decoding target or the start position is missing.
 func TestOpenStreamRefusesTheZeroTargetAndAMissingPosition(t *testing.T) {
-	stream, err := decode.OpenStream(t.Context(), dbconn.Config{}, preflight.CopySwapTarget{}, 1)
+	stream, err := decode.OpenStream(t.Context(), dbconn.Config{}, nil, preflight.CopySwapTarget{}, 1)
 	require.ErrorIs(t, err, decode.ErrInvariantViolation)
 	assert.Nil(t, stream)
 
 	f := newSlotFixture(t)
-	stream, err = decode.OpenStream(t.Context(), f.cfg, f.target, 0)
+	stream, err = decode.OpenStream(t.Context(), f.cfg, f.pool, f.target, 0)
 	require.ErrorIs(t, err, decode.ErrInvariantViolation)
 	assert.Nil(t, stream)
 }
