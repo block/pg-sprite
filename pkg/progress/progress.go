@@ -1,8 +1,9 @@
 // Package progress defines the strategy-wide, machine-readable execution
 // progress contract. One snapshot shape serves every operation: a concurrent
 // index build's counters are read from the server's progress view, the
-// copy-and-swap row copy's counters come from the engine's own WorkSource,
-// and each operation leaves the other's counters at zero.
+// copy-and-swap row copy's and checksum pass's counters come from the
+// engine's own WorkSource, and each operation leaves the others' counters
+// at zero.
 package progress
 
 import (
@@ -48,7 +49,7 @@ const (
 // field semantics. Adding a phase or operation value is a contract change
 // and bumps this version, even when no field is added or renamed. Adding a
 // field also bumps this version so strict consumers can detect the new shape.
-const FormatVersion = 4
+const FormatVersion = 5
 
 // Operation is the current operation's execution class.
 type Operation string
@@ -68,6 +69,10 @@ const (
 	// OperationCopy is the copy-and-swap row copy from the source table into
 	// its shadow.
 	OperationCopy Operation = "copy"
+	// OperationChecksum is the copy-and-swap checksum pass comparing the
+	// source table with its shadow chunk by chunk, and repairing differing
+	// chunks when its policy says so.
+	OperationChecksum Operation = "checksum"
 )
 
 // Work reports observed work. It is present only when something measured
@@ -75,19 +80,26 @@ const (
 // engine's own WorkSource reported the step's counters — and then every
 // counter marshals explicitly — a fresh build reports honest zeros, never an
 // empty object a consumer must guess at. Rows and bytes belong to the
-// copy-and-swap row copy; blocks, tuples and lockers to a concurrent index
-// build. Neither operation fabricates the other's counters.
+// copy-and-swap row copy; chunks compared, rows hashed, chunks mismatched,
+// chunks repaired and chunks reread to the checksum pass; blocks, tuples
+// and lockers to a concurrent index build. No operation fabricates
+// another's counters.
 type Work struct {
-	RowsCopied   uint64 `json:"rows_copied"`
-	RowsTotal    uint64 `json:"rows_total"`
-	BytesCopied  uint64 `json:"bytes_copied"`
-	BytesTotal   uint64 `json:"bytes_total"`
-	BlocksDone   uint64 `json:"blocks_done"`
-	BlocksTotal  uint64 `json:"blocks_total"`
-	TuplesDone   uint64 `json:"tuples_done"`
-	TuplesTotal  uint64 `json:"tuples_total"`
-	LockersTotal uint64 `json:"lockers_total"`
-	LockersDone  uint64 `json:"lockers_done"`
+	RowsCopied       uint64 `json:"rows_copied"`
+	RowsTotal        uint64 `json:"rows_total"`
+	BytesCopied      uint64 `json:"bytes_copied"`
+	BytesTotal       uint64 `json:"bytes_total"`
+	ChunksCompared   uint64 `json:"chunks_compared"`
+	RowsHashed       uint64 `json:"rows_hashed"`
+	ChunksMismatched uint64 `json:"chunks_mismatched"`
+	ChunksRepaired   uint64 `json:"chunks_repaired"`
+	ChunksReread     uint64 `json:"chunks_reread"`
+	BlocksDone       uint64 `json:"blocks_done"`
+	BlocksTotal      uint64 `json:"blocks_total"`
+	TuplesDone       uint64 `json:"tuples_done"`
+	TuplesTotal      uint64 `json:"tuples_total"`
+	LockersTotal     uint64 `json:"lockers_total"`
+	LockersDone      uint64 `json:"lockers_done"`
 }
 
 // Detail describes the operation currently executing.

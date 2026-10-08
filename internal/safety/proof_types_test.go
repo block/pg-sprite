@@ -27,11 +27,13 @@ var proofTypeRegistries = []string{
 // sentinelProofTypes must be among the derived set: a walker that finds
 // nothing, or that stops recognising the established shape, fails here
 // rather than passing vacuously.
-var sentinelProofTypes = []string{"PreflightedTable", "VerifiedShadow", "TableLock"}
+var sentinelProofTypes = []string{"PreflightedTable", "VerifiedShadow", "TableLock", "CopySwapShape", "CopySwapTarget"}
 
 // A proof type is an exported struct whose every field is unexported and
 // whose doc comment opens "<Name> proves": the shape SAFETY.md prescribes
-// for a value only its validating passage can mint.
+// for a value only its validating passage can mint. An embedded field is
+// named by its type, so embedding an exported type is an exported field:
+// `X{Y: y}` compiles in any package and mints X from a Y.
 func isProofType(spec *ast.TypeSpec, doc *ast.CommentGroup) bool {
 	if !spec.Name.IsExported() {
 		return false
@@ -41,6 +43,9 @@ func isProofType(spec *ast.TypeSpec, doc *ast.CommentGroup) bool {
 		return false
 	}
 	for _, field := range st.Fields.List {
+		if len(field.Names) == 0 && embeddedTypeExported(field.Type) {
+			return false
+		}
 		for _, name := range field.Names {
 			if name.IsExported() {
 				return false
@@ -51,6 +56,23 @@ func isProofType(spec *ast.TypeSpec, doc *ast.CommentGroup) bool {
 		return false
 	}
 	return strings.HasPrefix(doc.Text(), spec.Name.Name+" proves ")
+}
+
+// embeddedTypeExported reports whether an embedded field's type, and so
+// the field's own name, is exported. Any type expression the switch does
+// not recognise is treated as exported, so an unfamiliar embedding fails
+// closed out of the proof set rather than passing as sealed.
+func embeddedTypeExported(expr ast.Expr) bool {
+	if star, ok := expr.(*ast.StarExpr); ok {
+		expr = star.X
+	}
+	switch e := expr.(type) {
+	case *ast.Ident:
+		return e.IsExported()
+	case *ast.SelectorExpr:
+		return e.Sel.IsExported()
+	}
+	return true
 }
 
 // inventory is what the walk learns about the code under one root: the
@@ -177,4 +199,50 @@ func TestStaleMentions(t *testing.T) {
 	inv := inventoryOf(t, "../../pkg")
 	prose := "`statement.Statement`, `statement.Classified`, `time.Sleep`, `runner.go`, `Tracker.CancelBuild`"
 	assert.Equal(t, []string{"statement.Classified"}, inv.staleMentions(prose))
+}
+
+// A proof type is mintable only inside its package when no field can be
+// named from outside it. An embedded field is named by its type, so
+// embedding an exported type (another proof, say) is an exported field:
+// `X{Y: y}` compiles anywhere and mints X from a Y.
+func TestIsProofTypeTreatsAnEmbeddedExportedTypeAsAnExportedField(t *testing.T) {
+	src := `package p
+
+// Sealed proves something; its embedded field is unexported.
+type Sealed struct {
+	inner
+}
+
+// Open proves something, but its embedded field is exported.
+type Open struct {
+	Inner
+}
+
+// Pointer proves something, but its embedded field is exported.
+type Pointer struct {
+	*Inner
+}
+
+// Foreign proves something, but its embedded field is another package's
+// exported type.
+type Foreign struct {
+	q.Inner
+}
+`
+	file, err := parser.ParseFile(token.NewFileSet(), "p.go", src, parser.ParseComments)
+	require.NoError(t, err)
+	got := map[string]bool{}
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		require.True(t, ok)
+		for _, spec := range gd.Specs {
+			ts, ok := spec.(*ast.TypeSpec)
+			require.True(t, ok)
+			got[ts.Name.Name] = isProofType(ts, gd.Doc)
+		}
+	}
+	assert.True(t, got["Sealed"], "an embedded unexported type keeps the proof sealed")
+	assert.False(t, got["Open"], "an embedded exported type is an exported field")
+	assert.False(t, got["Pointer"], "an embedded exported pointer type is an exported field")
+	assert.False(t, got["Foreign"], "an embedded exported type from another package is an exported field")
 }

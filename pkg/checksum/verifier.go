@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/copier"
@@ -28,6 +30,12 @@ var (
 	// watermark, below which no key has been copied: there is nothing to
 	// compare, and a pass that compared nothing must not read as clean.
 	ErrNothingLanded = errors.New("nothing has landed to verify")
+	// ErrPassRunning reports a pass started on a verifier whose previous
+	// pass has not returned. A verifier runs one pass at a time: the
+	// counters it reports and its registration with the tracker belong to
+	// the pass in progress, and a second pass would reset the one and end
+	// the other.
+	ErrPassRunning = errors.New("a verification pass is already running")
 )
 
 // Options bounds a verification pass. Zero values take the defaults: the
@@ -44,6 +52,12 @@ type Options struct {
 	// Clock times each chunk for the chunker's chunk-time sizing feedback
 	// (docs/copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag).
 	Clock progress.Clock
+	// Tracker, when set, is told the pass's work for the lifetime of Verify
+	// or Check: the verifier is its progress.WorkSource from before the
+	// first chunk until just before the call returns, through the repair
+	// phase as well. The caller owns the tracker's steps; the verifier only
+	// fills the current step's counters.
+	Tracker *progress.Tracker
 }
 
 func (o Options) withDefaults() Options {
@@ -78,8 +92,10 @@ func (o Options) validate() error {
 // its own short read-only transaction whose one snapshot covers both
 // tables, so a chunk's two digests describe the same instant and no pass
 // holds a snapshot open for longer than one chunk. It runs only under the
-// table's lock session. A Verifier holds no state between passes; the same
-// one can run a pass after every repair.
+// table's lock session. The only state a Verifier keeps between passes is
+// the counters of the pass in progress, which the next pass resets, so the
+// same one runs a pass after every repair, one pass at a time; a pass
+// started while another runs is refused with ErrPassRunning.
 type Verifier struct {
 	target preflight.CopySwapTarget
 	shadow copier.Shadow
@@ -90,6 +106,12 @@ type Verifier struct {
 	// runs; both are frozen at construction so no pass builds SQL.
 	repairSQL string
 	copySQL   string
+
+	// mu guards work, the counters Work reports for the pass in progress,
+	// and running, which is set from report until its stop runs.
+	mu      sync.Mutex
+	work    progress.Work
+	running bool
 }
 
 // NewVerifier prepares verification of target against shadow. It refuses a
@@ -180,12 +202,27 @@ func requireTableLock(lock *dbconn.TableLockSession, target preflight.CopySwapTa
 // what it found. Keys above the watermark are not compared: they are in
 // chunks the copier has not finished, and a difference there is expected,
 // not a finding. The pass reads the shadow's column types once, then cuts
-// its own chunks from the live source and digests each in its own guarded
-// transaction. It stops at the first error; a report with mismatches is not
+// and digests each chunk in one guarded transaction of its own, so the cut
+// and both digests read one snapshot and the cut's lock wait is bounded
+// like the reads. It stops at the first error; a report with mismatches is not
 // an error, and the caller's divergence policy decides what to do with it.
 // Every transaction runs under the lock session's Bind context, so losing
 // the table lock cancels the read in flight and Verify reports the loss.
+// While it runs the verifier is the tracker's work source (Options.Tracker).
+// A Verify that overlaps a pass still running on this verifier is refused
+// with ErrPassRunning.
 func (v *Verifier) Verify(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark) (Report, error) {
+	stop, err := v.report()
+	if err != nil {
+		return Report{}, v.verifyError(err)
+	}
+	defer stop()
+	return v.verify(ctx, pool, through)
+}
+
+// verify is the pass Verify and Check share, run with the work source
+// already registered by the caller.
+func (v *Verifier) verify(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark) (Report, error) {
 	if !through.Valid() {
 		return Report{}, fmt.Errorf("%w: %s.%s", ErrNothingLanded, v.target.Schema(), v.target.Table())
 	}
@@ -233,35 +270,38 @@ func (v *Verifier) pass(ctx context.Context, pool *pgxpool.Pool, through copier.
 	}
 	report := Report{Through: through}
 	for {
-		chunk, ok, err := chunker.Next(ctx, pool)
+		started := v.opts.Clock.Now()
+		next, ok, err := v.compareNext(ctx, pool, chunker, sourceSQL, shadowSQL, through)
 		if err != nil {
 			return Report{}, err
 		}
 		if !ok {
 			return report, nil
 		}
-		lower, upper := chunk.Lower(), min(chunk.Upper(), through.Value())
-		started := v.opts.Clock.Now()
-		source, shadow, err := v.digestChunk(ctx, pool, sourceSQL, shadowSQL, lower, upper)
-		if err != nil {
-			return Report{}, err
-		}
+		v.countCompared(next.source.Rows)
 		report.Chunks++
-		report.Rows += source.Rows
-		if source != shadow {
-			compared, err := copier.NewChunk(lower, upper)
-			if err != nil {
-				return Report{}, fmt.Errorf("%w (CO-1): verified chunk: %w", ErrInvariantViolation, err)
-			}
-			report.Mismatches = append(report.Mismatches, Mismatch{Chunk: compared, Source: source, Shadow: shadow})
+		report.Rows += next.source.Rows
+		if next.source != next.shadow {
+			report.Mismatches = append(report.Mismatches, Mismatch{Chunk: next.compared, Source: next.source, Shadow: next.shadow})
+			v.countMismatch()
 		}
-		if upper == through.Value() {
+		if next.compared.Upper() == through.Value() {
 			return report, nil
 		}
-		if err := chunker.Feedback(chunk, v.opts.Clock.Now().Sub(started)); err != nil {
+		if err := chunker.Feedback(next.cut, v.opts.Clock.Now().Sub(started)); err != nil {
 			return Report{}, err
 		}
 	}
+}
+
+// comparison is one chunk of a pass: the chunk the chunker cut, the closed
+// range the pass compared — that chunk capped at the pass's watermark — and
+// the two digests of that range.
+type comparison struct {
+	cut      copier.Chunk
+	compared copier.Chunk
+	source   Digest
+	shadow   Digest
 }
 
 // digestStatements freezes the two digest statements for this pass from the
@@ -290,8 +330,53 @@ func (v *Verifier) digestStatements(ctx context.Context, pool *pgxpool.Pool) (so
 		nil
 }
 
+// compareNext cuts the next chunk from the source and reads both sides of
+// it in one guarded transaction, so the cut and the two digests describe
+// one snapshot: the chunk holds exactly its row count as the digests saw
+// the table. The cut runs after the guard has bounded the transaction and
+// locked both relations, so a cut queued behind a strong lock on the source
+// ends at the verifier's lock timeout whatever the caller's pool carries
+// (LK-2). ok is false once the key space is covered.
+func (v *Verifier) compareNext(ctx context.Context, pool *pgxpool.Pool, chunker *copier.Chunker, sourceSQL, shadowSQL string, through copier.Watermark) (comparison, bool, error) {
+	tx, err := v.begin(ctx, pool, snapshotRead())
+	if err != nil {
+		return comparison{}, false, err
+	}
+	defer func() {
+		// Redundant safety closer: after a successful Commit this returns
+		// the guaranteed ErrTxClosed; on a failure path the server aborts
+		// the transaction with its session either way.
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+	}()
+	cut, ok, err := chunker.Next(ctx, tx)
+	if err != nil {
+		return comparison{}, false, err
+	}
+	if !ok {
+		if err := tx.Commit(ctx); err != nil {
+			return comparison{}, false, fmt.Errorf("commit final cut of %s.%s: %w", v.target.Schema(), v.target.Table(), err)
+		}
+		return comparison{}, false, nil
+	}
+	lower, upper := cut.Lower(), min(cut.Upper(), through.Value())
+	source, shadow, err := v.digestRange(ctx, tx, sourceSQL, shadowSQL, lower, upper)
+	if err != nil {
+		return comparison{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return comparison{}, false, fmt.Errorf("commit digest of chunk [%d, %d] of %s.%s: %w", lower, upper, v.target.Schema(), v.target.Table(), err)
+	}
+	compared, err := copier.NewChunk(lower, upper)
+	if err != nil {
+		return comparison{}, false, fmt.Errorf("%w (CO-1): verified chunk: %w", ErrInvariantViolation, err)
+	}
+	return comparison{cut: cut, compared: compared, source: source, shadow: shadow}, true, nil
+}
+
 // digestChunk reads both sides of the closed range [lower, upper] in one
-// guarded transaction, so the two digests describe one snapshot.
+// guarded transaction of its own, so the two digests describe one snapshot.
+// It counts nothing: the caller knows whether the digest is a comparison or a
+// reread.
 func (v *Verifier) digestChunk(ctx context.Context, pool *pgxpool.Pool, sourceSQL, shadowSQL string, lower, upper int64) (source, shadow Digest, err error) {
 	tx, err := v.begin(ctx, pool, snapshotRead())
 	if err != nil {
@@ -303,6 +388,18 @@ func (v *Verifier) digestChunk(ctx context.Context, pool *pgxpool.Pool, sourceSQ
 		// the transaction with its session either way.
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
+	source, shadow, err = v.digestRange(ctx, tx, sourceSQL, shadowSQL, lower, upper)
+	if err != nil {
+		return Digest{}, Digest{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Digest{}, Digest{}, fmt.Errorf("commit digest of chunk [%d, %d] of %s.%s: %w", lower, upper, v.target.Schema(), v.target.Table(), err)
+	}
+	return source, shadow, nil
+}
+
+// digestRange reads both sides of the closed range [lower, upper] in tx.
+func (v *Verifier) digestRange(ctx context.Context, tx pgx.Tx, sourceSQL, shadowSQL string, lower, upper int64) (source, shadow Digest, err error) {
 	source, err = digest(ctx, tx, sourceSQL, lower, upper)
 	if err != nil {
 		return Digest{}, Digest{}, fmt.Errorf("digest chunk [%d, %d] of %s.%s: %w", lower, upper, v.shadow.Schema(), v.shadow.SourceTable(), err)
@@ -310,9 +407,6 @@ func (v *Verifier) digestChunk(ctx context.Context, pool *pgxpool.Pool, sourceSQ
 	shadow, err = digest(ctx, tx, shadowSQL, lower, upper)
 	if err != nil {
 		return Digest{}, Digest{}, fmt.Errorf("digest chunk [%d, %d] of shadow %s.%s: %w", lower, upper, v.shadow.Schema(), v.shadow.ShadowTable(), err)
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Digest{}, Digest{}, fmt.Errorf("commit digest of chunk [%d, %d] of %s.%s: %w", lower, upper, v.target.Schema(), v.target.Table(), err)
 	}
 	return source, shadow, nil
 }

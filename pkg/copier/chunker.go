@@ -213,9 +213,14 @@ func (c *Chunker) Cut() Watermark {
 	return NewWatermark(c.next - 1)
 }
 
-// Next cuts the next chunk from the live table with one bounded query on
-// db. ok is false once the key space is covered; the last chunk returned
-// before that has the largest int64 as its upper bound.
+// Next cuts the next chunk from the live table with one query on db. The
+// query is bounded only as far as db is: it takes ACCESS SHARE on the
+// source and resolves its key comparison through the session's
+// search_path, so the caller passes a transaction that has set
+// lock_timeout and statement_timeout and pinned search_path to pg_catalog,
+// as Copier and checksum.Verifier do (LK-2, CO-9). ok is false once the key
+// space is covered; the last chunk returned before that has the largest
+// int64 as its upper bound.
 func (c *Chunker) Next(ctx context.Context, db dbconn.RowQuerier) (chunk Chunk, ok bool, err error) {
 	c.nextMu.Lock()
 	defer c.nextMu.Unlock()

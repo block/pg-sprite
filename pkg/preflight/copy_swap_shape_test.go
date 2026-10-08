@@ -62,6 +62,21 @@ func TestRefuseCopySwapShapeRaisesEveryEnumeratedCause(t *testing.T) {
 	assert.Empty(t, detail)
 }
 
+// A DEFERRABLE key is refused under the key cause even when its arity and
+// type are supported, and the arity and type decide before deferrability,
+// since each of those needs a larger change to the table.
+func TestRefuseCopySwapShapeRefusesDeferrableKey(t *testing.T) {
+	facts := supportedCopySwapShape()
+	facts.pkDeferrable = true
+	cause, detail := refuseCopySwapShape(facts)
+	assert.Equal(t, CopySwapCausePKUnsupported, cause)
+	assert.Contains(t, detail, "DEFERRABLE")
+
+	facts.pkType = "uuid"
+	_, detail = refuseCopySwapShape(facts)
+	assert.Contains(t, detail, "uuid")
+}
+
 // Dependents are decided after the table's own facts, and the named
 // dependent kinds before the generic one: a table with a trigger and a
 // dependent view reports the trigger; one that is both viewed and
