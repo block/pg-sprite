@@ -525,17 +525,24 @@ every `CONCURRENTLY` index command; [invalid-index-recovery](invalid-index-recov
 ### AB-1 — Every accepted blocking statement runs under both engine-owned bounds
 
 Every accepted blocking statement runs in one engine-owned session and transaction with an
-explicit, non-zero `lock_timeout` and `statement_timeout`. Transaction-local settings override
-ambient defaults, and an absent, sub-millisecond, or server-unrepresentable bound is refused
-before a session is acquired. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`). *Source:*
+explicit, non-zero `lock_timeout` and a `statement_timeout` longer than it. Transaction-local
+settings override ambient defaults, and an absent, sub-millisecond, or server-unrepresentable
+bound — or a statement bound that is not longer than the lock bound, under which the lock
+budget could never be the operative bound — is refused before a session is acquired.
+*Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`). *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#engine-owned-session-and-budgets).
 
 ### AB-2 — Lock-budget exhaustion executes nothing
 
-An accepted blocking statement that cannot acquire its lock within `lock_timeout` is not
-retried: PostgreSQL aborts that transaction before the DDL executes, and the executor returns
-the typed lock-budget outcome. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`, SQLSTATE
-`55P03`). *Source:*
+The executor requests the acknowledged table's `ACCESS EXCLUSIVE` lock as a statement of its
+own before it submits the DDL, so every way that wait can end — `lock_timeout`, a statement
+cancellation of the request, or the caller's context — arrives while nothing has been
+submitted and is reported as a lock refusal or the caller's cancellation, never as statement
+work. The DDL's own lock requests are then granted at once. An ungranted lock is not retried:
+PostgreSQL aborts that transaction, and the executor returns the typed lock-budget outcome.
+A materialized view, which `LOCK TABLE` cannot name, is the one target whose statement
+acquires its own locks. *Enforced:* `pkg/executor` (`ExecuteAcceptedBlocking`, SQLSTATE
+`55P03` and `57014` on the lock request). *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#failure-and-interruption-semantics).
 
 ### AB-3 — The acknowledgement names the table the statement locks, resolved from the catalog
