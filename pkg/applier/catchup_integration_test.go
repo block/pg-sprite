@@ -126,7 +126,7 @@ func startCatchup(t *testing.T, f catchupFixture, opts applier.CatchupOptions) *
 	shadow, err := schemachange.BuildShadow(t.Context(), f.pool, lock, f.target, alter, schemachange.Options{})
 	require.NoError(t, err)
 
-	stream, err := decode.OpenStream(t.Context(), f.cfg, f.target, slot.ConsistentPoint())
+	stream, err := decode.OpenStream(t.Context(), f.cfg, f.pool, f.target, slot.ConsistentPoint())
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		assert.NoError(t, stream.Close(context.WithoutCancel(t.Context())))

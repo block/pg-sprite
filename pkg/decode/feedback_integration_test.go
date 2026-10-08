@@ -191,6 +191,39 @@ func TestStreamDeliversAnInterleavedTransactionBelowTheConfirmedPosition(t *test
 	assertSameChange(t, *late.Change, replayed)
 }
 
+// A transaction that wrote before another committed arrives after that
+// commit. Its change carries the WAL position it was written at, which lies
+// below what the stream already delivered, so the server position the
+// stream reports for lag must not follow it there: the lag read from it
+// would otherwise wrap below zero.
+func TestServerWALEndNeverTrailsDelivered(t *testing.T) {
+	f := newSlotFixture(t)
+	slot := f.createSlot(t)
+	stream := f.openStream(t, slot.ConsistentPoint())
+
+	open, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Rolling back a transaction the test already committed is a no-op.
+		if err := open.Rollback(context.WithoutCancel(t.Context())); err != nil && !errors.Is(err, pgx.ErrTxClosed) {
+			t.Logf("roll back the open transaction: %v", err)
+		}
+	})
+	_, err = open.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s.ledger (id, note) VALUES (201, 'written first')`, f.schema))
+	require.NoError(t, err)
+	f.exec(t, `INSERT INTO %s.ledger (id, note) VALUES (202, 'committed first')`)
+	first := nextChange(t, stream)
+	require.EqualValues(t, 202, first.Key)
+	awaitDelivered(t, stream, first.LSN+1)
+	assert.GreaterOrEqual(t, stream.ServerWALEnd(), stream.Delivered(), "after a commit")
+
+	require.NoError(t, open.Commit(t.Context()))
+	late := nextChangeDelivery(t, stream)
+	require.EqualValues(t, 201, late.Change.Key)
+	require.Less(t, late.Change.LSN, stream.Delivered(), "the change was written below the delivered position")
+	assert.GreaterOrEqual(t, stream.ServerWALEnd(), stream.Delivered(), "after a change written below Delivered")
+}
+
 // A stopped stream refuses to confirm with the error that stopped it: the
 // caller's position is no longer one the stream can vouch for, and the
 // record of what was confirmed is unchanged.

@@ -25,7 +25,7 @@ const (
 // to be closed after the test.
 func (f slotFixture) openStream(t *testing.T, from decode.LSN) *decode.Stream {
 	t.Helper()
-	stream, err := decode.OpenStream(t.Context(), f.cfg, f.target, from)
+	stream, err := decode.OpenStream(t.Context(), f.cfg, f.pool, f.target, from)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		// A test that already closed the stream leaves a closed connection
