@@ -1,0 +1,387 @@
+package schemachange
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/block/pg-sprite/pkg/dbconn"
+)
+
+// ErrNotSwapped reports that the source still bears its name: no swap
+// committed, so there is no swapped table to inspect and the caller runs
+// Cutover.
+var ErrNotSwapped = errors.New("source table is still live, not swapped")
+
+// ErrOldTableNotFound reports that the shadow bears the source's name and
+// the retained source no longer exists under any name: the drop already
+// committed, so the swap is complete and there is nothing left for
+// DropOldTable to do.
+var ErrOldTableNotFound = errors.New("old table not found")
+
+// InspectSwapped re-derives the SwappedTable proof for a swap an earlier
+// run committed, from the catalog alone, in one bounded read transaction
+// under SET LOCAL ROLE owner. It is the resume path for a run that stopped
+// between Cutover and DropOldTable, and the one home of LK-4's committed
+// branch. The expectation is the BuiltShadow proof the caller checkpointed
+// before the cutover: only the catalog can say what the swap did, but only
+// that proof can say which two relations the swap was about. The live
+// name must be borne by the proof's shadow OID and the derived _old name
+// by the proof's source OID (ST-6); both must still be owned by the role
+// the build recorded; the dependent renames are re-derived from the names
+// the swap gave, each live dependent paired with the old-table dependent
+// under its derived name; and every identity column the proof handed off
+// must be an identity column on the live table drawing from the sequence
+// the handoff recreated under the source sequence's name.
+//
+// The catalog states the proof does not describe each get their own
+// answer: the source still live is ErrNotSwapped, the retained source gone
+// under every name is ErrOldTableNotFound, the _old name borne by another
+// relation or the retained source renamed away from it is refused as
+// cutover-relation-replaced, a live or old table owned by another role is
+// refused as cutover-swap-mismatch, and the live name borne by neither
+// relation is refused as cutover-outcome-ambiguous (LK-4). A swap whose
+// COMMIT is still deciding holds both relations exclusively and the
+// catalog does not yet show it, so the read is refused as ambiguous until
+// that backend lets go; the same call answers once it has.
+func InspectSwapped(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, expected Proof, opts Options) (SwappedTable, error) {
+	if err := opts.validate(); err != nil {
+		return SwappedTable{}, err
+	}
+	if expected.ShadowTable == "" {
+		return SwappedTable{}, refuse(CauseProofEmpty, nil, "built shadow proof is empty")
+	}
+	if err := requireTableLock(lock, expected.Schema, expected.SourceTable); err != nil {
+		return SwappedTable{}, err
+	}
+	ctx, stop := lock.Bind(ctx)
+	defer stop()
+	swapped, err := inspectSwapped(ctx, pool, lock, expected, opts)
+	if err != nil {
+		return SwappedTable{}, lockLossCause(lock, err)
+	}
+	return swapped, nil
+}
+
+func inspectSwapped(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, expected Proof, opts Options) (SwappedTable, error) {
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return SwappedTable{}, fmt.Errorf("begin swapped table inspection: %w", err)
+	}
+	defer func() {
+		// Redundant safety closer: after a successful Commit this returns
+		// the guaranteed ErrTxClosed; on a failure path the server aborts
+		// the transaction with its session either way.
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+	}()
+	if err := setSession(ctx, tx, expected.Schema, expected.Fidelity.Owner, opts); err != nil {
+		return SwappedTable{}, err
+	}
+	if err := confirmTableLock(ctx, tx, lock); err != nil {
+		return SwappedTable{}, err
+	}
+	swapped, err := readSwappedTable(ctx, tx, expected)
+	if err != nil {
+		return SwappedTable{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return SwappedTable{}, fmt.Errorf("commit swapped table inspection: %w", err)
+	}
+	return swapped, nil
+}
+
+// readSwappedTable reads the swap's outcome inside the caller's
+// transaction and mints the proof when the catalog shows the committed
+// swap the expectation describes. It is the one read both the resume path
+// and the lost-attempt path make (LK-4), so every precondition of the
+// catalog's answer lives here: a swap still deciding is refused before
+// the names are read. Attempts is zero: the inspection cannot know how
+// many lock acquisitions the swap needed.
+func readSwappedTable(ctx context.Context, tx pgx.Tx, expected Proof) (SwappedTable, error) {
+	schema, table := expected.Schema, expected.SourceTable
+	if err := refuseSwapInFlight(ctx, tx, expected); err != nil {
+		return SwappedTable{}, err
+	}
+	liveOID, err := confirmLive(ctx, tx, expected)
+	if err != nil {
+		return SwappedTable{}, err
+	}
+	oldOID, err := confirmOld(ctx, tx, expected)
+	if err != nil {
+		return SwappedTable{}, err
+	}
+	if err := confirmOwner(ctx, tx, expected, liveOID, oldOID); err != nil {
+		return SwappedTable{}, err
+	}
+	liveIndexes, err := readIndexes(ctx, tx, liveOID)
+	if err != nil {
+		return SwappedTable{}, fmt.Errorf("live %s.%s: %w", schema, table, err)
+	}
+	oldIndexes, err := readIndexes(ctx, tx, oldOID)
+	if err != nil {
+		return SwappedTable{}, fmt.Errorf("old %s.%s: %w", schema, OldName(schema, table), err)
+	}
+	liveStatistics, err := readStatistics(ctx, tx, liveOID)
+	if err != nil {
+		return SwappedTable{}, fmt.Errorf("live %s.%s: %w", schema, table, err)
+	}
+	oldStatistics, err := readStatistics(ctx, tx, oldOID)
+	if err != nil {
+		return SwappedTable{}, fmt.Errorf("old %s.%s: %w", schema, OldName(schema, table), err)
+	}
+	sequences, err := readOwnedSequences(ctx, tx, liveOID)
+	if err != nil {
+		return SwappedTable{}, fmt.Errorf("live %s.%s: %w", schema, table, err)
+	}
+	identities, err := readIdentityColumns(ctx, tx, liveOID)
+	if err != nil {
+		return SwappedTable{}, fmt.Errorf("live %s.%s: %w", schema, table, err)
+	}
+	if err := confirmHandoff(expected, identities); err != nil {
+		return SwappedTable{}, err
+	}
+	return SwappedTable{
+		schema:     schema,
+		table:      table,
+		liveOID:    liveOID,
+		oldOID:     oldOID,
+		owner:      expected.Fidelity.Owner,
+		indexes:    pairByDerivedName(DependentIndex, schema, table, indexNames(oldIndexes), indexNames(liveIndexes)),
+		statistics: pairByDerivedName(DependentStatistics, schema, table, dependentNames(oldStatistics), dependentNames(liveStatistics)),
+		sequences:  sequences,
+		identities: identities,
+	}, nil
+}
+
+// refuseSwapInFlight refuses while another backend holds ACCESS EXCLUSIVE
+// on either relation the proof names. A swap whose COMMIT is still
+// deciding — behind a synchronous standby, a deferred trigger, or a slow
+// WAL flush — holds both until its outcome is visible, since the server
+// releases a transaction's locks only after its commit can be seen; until
+// then the catalog shows the source live for a swap about to commit, and
+// an answer read from it would be wrong moments later (LK-4). An empty
+// answer here means the read that follows is authoritative. The refusal
+// is retryable: the same call answers once that backend exits.
+func refuseSwapInFlight(ctx context.Context, tx pgx.Tx, expected Proof) error {
+	var holders int
+	err := tx.QueryRow(ctx, `
+		SELECT count(*)
+		FROM pg_catalog.pg_locks l
+		WHERE l.locktype = 'relation'
+		  AND l.granted
+		  AND l.database = (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database())
+		  AND l.relation IN ($1::oid, $2::oid)
+		  AND l.mode = 'AccessExclusiveLock'
+		  AND l.pid <> pg_catalog.pg_backend_pid()`, expected.SourceOID, expected.ShadowOID).Scan(&holders)
+	if err != nil {
+		return fmt.Errorf("check for a swap in flight on %s.%s: %w", expected.Schema, expected.SourceTable, err)
+	}
+	if holders > 0 {
+		// INV: LK-4
+		return refuse(CauseOutcomeAmbiguous, nil, "another backend holds %s.%s or its shadow exclusively, so the swap's outcome cannot be read yet", expected.Schema, expected.SourceTable)
+	}
+	return nil
+}
+
+// confirmLive reads which relation bears the source's name and returns
+// its OID when it is the shadow the build proved. The source's own OID
+// means no swap committed; any other state — no relation, or one the build
+// never proved — leaves the swap's outcome unreadable.
+func confirmLive(ctx context.Context, tx pgx.Tx, expected Proof) (uint32, error) {
+	schema, table := expected.Schema, expected.SourceTable
+	liveOID, found, err := lookupRelation(ctx, tx, schema, table)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		// INV: LK-4
+		return 0, refuse(CauseOutcomeAmbiguous, nil, "nothing bears the name %s.%s", schema, table)
+	}
+	if liveOID == expected.SourceOID {
+		return 0, fmt.Errorf("%w: %s.%s is still relation %d", ErrNotSwapped, schema, table, liveOID)
+	}
+	if liveOID != expected.ShadowOID {
+		// INV: LK-4
+		return 0, refuse(CauseOutcomeAmbiguous, nil, "%s.%s is relation %d, which is neither the source %d nor the shadow %d", schema, table, liveOID, expected.SourceOID, expected.ShadowOID)
+	}
+	return liveOID, nil
+}
+
+// confirmOld reads which relation bears the derived _old name and returns
+// its OID when it is the source the build proved. Another relation under
+// the name is refused, since a drop by name would remove something the
+// swap never retained. A free name alone does not mean the retained source
+// is gone: the source's own OID is looked up, and only when the catalog no
+// longer has it is the drop known to have committed; a source that still
+// exists under some other name is refused, naming where it went, so a
+// resume never reports complete while the copy it budgeted for is still
+// on disk.
+func confirmOld(ctx context.Context, tx pgx.Tx, expected Proof) (uint32, error) {
+	schema, old := expected.Schema, OldName(expected.Schema, expected.SourceTable)
+	oldOID, found, err := lookupRelation(ctx, tx, schema, old)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, confirmSourceGone(ctx, tx, expected)
+	}
+	// INV: ST-6
+	if oldOID != expected.SourceOID {
+		return 0, refuse(CauseRelationReplaced, nil, "old table %s.%s is relation %d, the swap retained %d", schema, old, oldOID, expected.SourceOID)
+	}
+	return oldOID, nil
+}
+
+// confirmSourceGone answers for a free _old name: ErrOldTableNotFound when
+// the catalog no longer has the source's OID, a refusal naming the source's
+// current name when it does.
+func confirmSourceGone(ctx context.Context, tx pgx.Tx, expected Proof) error {
+	schema, old := expected.Schema, OldName(expected.Schema, expected.SourceTable)
+	nowSchema, nowName, exists, err := lookupRelationName(ctx, tx, expected.SourceOID)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("%w: %s.%s", ErrOldTableNotFound, schema, old)
+	}
+	// INV: ST-6
+	return refuse(CauseRelationReplaced, nil, "nothing bears the old name %s.%s, the retained source %d is now %s.%s", schema, old, expected.SourceOID, nowSchema, nowName)
+}
+
+// confirmOwner refuses a live or old table owned by a role other than the
+// one the build recorded. DropOldTable runs as that role, and a proof
+// minted here says the role owns both tables; an owner changed since the
+// swap is a table the swap did not leave, and the operator reads the
+// catalog before anything runs as the recorded role.
+func confirmOwner(ctx context.Context, tx pgx.Tx, expected Proof, liveOID, oldOID uint32) error {
+	schema, table := expected.Schema, expected.SourceTable
+	liveOwner, err := readOwner(ctx, tx, liveOID)
+	if err != nil {
+		return fmt.Errorf("live %s.%s: %w", schema, table, err)
+	}
+	oldOwner, err := readOwner(ctx, tx, oldOID)
+	if err != nil {
+		return fmt.Errorf("old %s.%s: %w", schema, OldName(schema, table), err)
+	}
+	// INV: ST-6
+	if liveOwner != expected.Fidelity.Owner {
+		return refuse(CauseSwapMismatch, nil, "live %s.%s is owned by %s, the swap left it owned by %s", schema, table, liveOwner, expected.Fidelity.Owner)
+	}
+	if oldOwner != expected.Fidelity.Owner {
+		return refuse(CauseSwapMismatch, nil, "old %s.%s is owned by %s, the swap left it owned by %s", schema, OldName(schema, table), oldOwner, expected.Fidelity.Owner)
+	}
+	return nil
+}
+
+// readOwner returns the name of the role that owns the relation.
+func readOwner(ctx context.Context, tx pgx.Tx, oid uint32) (string, error) {
+	var owner string
+	err := tx.QueryRow(ctx, `SELECT pg_get_userbyid(c.relowner) FROM pg_class c WHERE c.oid = $1`, oid).Scan(&owner)
+	if err != nil {
+		return "", fmt.Errorf("read owner of relation %d: %w", oid, err)
+	}
+	return owner, nil
+}
+
+// confirmHandoff refuses a live table on which an identity column the
+// swap was to recreate is missing, generated differently, or drawing from
+// a sequence other than the one recreated under the source sequence's
+// name. The sequence options are not compared: a widened column carries
+// rebased bounds by design.
+func confirmHandoff(expected Proof, live []IdentityColumn) error {
+	schema, table := expected.Schema, expected.SourceTable
+	onLive := make(map[string]IdentityColumn, len(live))
+	for _, id := range live {
+		onLive[id.Column] = id
+	}
+	for _, want := range expected.IdentityColumns {
+		got, found := onLive[want.Column]
+		// INV: ST-6
+		if !found {
+			return refuse(CauseSwapMismatch, nil, "live %s.%s has no identity column %s the swap was to recreate", schema, table, want.Column)
+		}
+		if got.Always != want.Always {
+			return refuse(CauseSwapMismatch, nil, "identity column %s on live %s.%s is not generated as the source's was", want.Column, schema, table)
+		}
+		if got.SequenceSchema != want.SequenceSchema || got.SequenceName != want.SequenceName {
+			return refuse(CauseSwapMismatch, nil, "identity column %s on live %s.%s draws from %s.%s, the swap was to recreate it under %s.%s",
+				want.Column, schema, table, got.SequenceSchema, got.SequenceName, want.SequenceSchema, want.SequenceName)
+		}
+	}
+	return nil
+}
+
+// pairByDerivedName re-derives a pairing from the names the swap gave
+// (D8): a live dependent bearing name N took it from the source dependent
+// the swap renamed to the derived name of N, so the two pair when the old
+// table carries that derived name. A live dependent with no such partner
+// kept its shadow-derived name; an old-table dependent with no such
+// partner is listed under the derived name it bears, since the hash the
+// name was derived from has no inverse. The live order decides the pair
+// order.
+func pairByDerivedName(kind DependentKind, schema, table string, old, live []string) DependentPairing {
+	unpairedOld := make(map[string]bool, len(old))
+	for _, name := range old {
+		unpairedOld[name] = true
+	}
+	pairing := DependentPairing{
+		Pairs:          []DependentPair{},
+		UnpairedSource: []string{},
+		UnpairedShadow: []string{},
+	}
+	for _, name := range live {
+		derived := OldDependentName(schema, table, name)
+		if !unpairedOld[derived] {
+			pairing.UnpairedShadow = append(pairing.UnpairedShadow, name)
+			continue
+		}
+		pairing.Pairs = append(pairing.Pairs, DependentPair{Kind: kind, SourceName: name})
+		delete(unpairedOld, derived)
+	}
+	for _, name := range old {
+		if unpairedOld[name] {
+			pairing.UnpairedSource = append(pairing.UnpairedSource, name)
+		}
+	}
+	return pairing
+}
+
+// lookupRelation returns the OID of schema.name and whether any relation
+// bears it; unlike resolveRelation, a missing relation is an answer here,
+// not an error.
+func lookupRelation(ctx context.Context, tx pgx.Tx, schema, name string) (uint32, bool, error) {
+	var oid uint32
+	err := tx.QueryRow(ctx, `
+		SELECT c.oid
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2`, schema, name).Scan(&oid)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("look up relation %s.%s: %w", schema, name, err)
+	}
+	return oid, true, nil
+}
+
+// lookupRelationName returns the schema and name a relation currently
+// bears and whether the catalog still has it; a dropped relation is an
+// answer here, not an error.
+func lookupRelationName(ctx context.Context, tx pgx.Tx, oid uint32) (schema, name string, exists bool, err error) {
+	err = tx.QueryRow(ctx, `
+		SELECT n.nspname, c.relname
+		FROM pg_class c
+		JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE c.oid = $1`, oid).Scan(&schema, &name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("look up relation %d: %w", oid, err)
+	}
+	return schema, name, true, nil
+}
