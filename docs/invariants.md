@@ -172,9 +172,16 @@ are in key order, which does not order a moved image before the delete marker at
 `Flusher.Flush` consumes that batch, reading every `CompleteFirst` completion before its first
 write and never writing a key the batch did not land; a completed image is not written but
 returned held (`Result.Held`), and `Buffer.Hold` keeps it buffered with its old key's entry gone,
-so a later drain judges the image alone under `Key` (CO-6, D13). *Planned enforcement:* the scheduling
-that makes a chunk copy and a backlog flush mutually exclusive (mutual exclusion, not tombstone
-retention). *Test obligation:* a
+so a later drain judges the image alone under `Key` (CO-6, D13). `pkg/applier` `Catchup` orders the
+race rather than locking it out: every drain judges the buffer against a copier `Position` read
+after the buffer's last `Add`, so a key the copier cuts in between is in flight and waits for its
+chunk, a deferred batch stays buffered until the next pass, and the confirmed position never
+passes a change still buffered, held, or deferred (convergence tests under mixed load, key
+moves, hot-row contention, unchanged-TOAST updates, and unique-key swaps). *Open:* a source
+transaction whose commit the walsender has already sent while its backend is still in a
+synchronous-commit wait is not yet visible to a snapshot taken after the stream delivered it, so
+an uncut key's change can be discarded ahead of a chunk read that does not see it; the drain
+has no rule for that window yet. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark
@@ -929,7 +936,7 @@ about **how we write and review the code**.
 | LK-1 | 0–1 (before any executing mode ships) | two-instance mutual-exclusion + keepalive-loss test |
 | LK-2 | 3 (native), 7 (cutover) | lock-bounding + CIC-exception tests |
 | CO-1, CO-2, CO-3 | 5 (gate), 8 (watermark/divergence policy) | inject-divergence, repair-invalidates-watermark |
-| CO-4, CO-5, CO-6, CO-8 | 6 | one convergence test per race, incl. unique-value move and TOAST-unchanged update |
+| CO-4, CO-5, CO-6, CO-8 | 6 | one convergence test per race, incl. unique-value move and TOAST-unchanged update (`pkg/applier` catch-up convergence tests) |
 | CO-9 | 3 onward | shadowing-search_path tests per read site and per pooled session |
 | LK-3 | 4–6 | cancellation/claim race test |
 | LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |

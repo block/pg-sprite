@@ -15,5 +15,11 @@
 // only the columns an image carries. On a unique or exclusion violation it
 // falls back to deleting every key in the batch and inserting every
 // surviving whole row (CO-6, CO-8). A batch a constraint still refuses comes
-// back as ErrBatchDeferred for the caller to Requeue.
+// back as ErrBatchDeferred for the caller to Requeue. Catchup owns the loop:
+// it reads the stream into the buffer, releases held images as the stream
+// passes their reads, drains against the copier's Position read after the
+// last Add, flushes, requeues a deferred batch or holds its images, and
+// confirms the lesser of the delivered position and the oldest pending
+// change (ST-4); it is the tracker's WorkSource for a catch-up step
+// (changes_applied, changes_buffered, lag_bytes).
 package applier

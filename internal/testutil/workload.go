@@ -72,12 +72,15 @@ func (w WorkloadTable) SeedRows(ctx context.Context, n int) error {
 	return nil
 }
 
-// Mix gives relative weights to workload mutations.
+// Mix gives relative weights to workload mutations. KeyMove is an update
+// of a row's primary key to a fresh identity value, the change that
+// arrives as an image under a new key with a delete under the old one.
 type Mix struct {
 	Insert     int
 	Update     int
 	Delete     int
 	UniqueMove int
+	KeyMove    int
 }
 
 // LoadSpec configures a deterministic concurrent workload.
@@ -97,7 +100,7 @@ type LoadSpec struct {
 }
 
 // total returns the summed mutation weight.
-func (m Mix) total() int { return m.Insert + m.Update + m.Delete + m.UniqueMove }
+func (m Mix) total() int { return m.Insert + m.Update + m.Delete + m.UniqueMove + m.KeyMove }
 
 // validate rejects a spec that would start a generator writing nothing or
 // picking mutations from an empty mix; a convergence test running against
@@ -109,7 +112,7 @@ func (s LoadSpec) validate() error {
 	if s.RatePerSecond < 1 {
 		return fmt.Errorf("load spec: rate per second must be at least 1, got %d", s.RatePerSecond)
 	}
-	if s.Mix.Insert < 0 || s.Mix.Update < 0 || s.Mix.Delete < 0 || s.Mix.UniqueMove < 0 {
+	if s.Mix.Insert < 0 || s.Mix.Update < 0 || s.Mix.Delete < 0 || s.Mix.UniqueMove < 0 || s.Mix.KeyMove < 0 {
 		return fmt.Errorf("load spec: mix weights must not be negative, got %+v", s.Mix)
 	}
 	if s.Mix.total() < 1 {
@@ -134,6 +137,7 @@ type Summary struct {
 	Updates     int
 	Deletes     int
 	UniqueMoves int
+	KeyMoves    int
 	Races       int
 	InsertedIDs []int64
 	DeletedIDs  []int64
@@ -207,8 +211,10 @@ func (g *LoadGenerator) mutate(ctx context.Context, pool *pgxpool.Pool, table Wo
 		return g.update(ctx, pool, table, spec, rng)
 	case pick < spec.Mix.Insert+spec.Mix.Update+spec.Mix.Delete:
 		return g.delete(ctx, pool, table)
-	default:
+	case pick < spec.Mix.Insert+spec.Mix.Update+spec.Mix.Delete+spec.Mix.UniqueMove:
 		return g.uniqueMove(ctx, pool, table, rng)
+	default:
+		return g.keyMove(ctx, pool, table)
 	}
 }
 
@@ -296,6 +302,23 @@ func (g *LoadGenerator) uniqueMove(ctx context.Context, pool *pgxpool.Pool, tabl
 	if err = tx.Commit(ctx); err == nil {
 		g.mu.Lock()
 		g.summary.UniqueMoves++
+		g.mu.Unlock()
+	}
+	return err
+}
+
+// keyMove gives a random row a fresh primary key from the table's identity
+// sequence, so the change decodes as an image under the new key carrying
+// the old key: the two halves the buffer pairs and the drain judges
+// together. A worker whose chosen row vanished under it sees the
+// vanished-row race.
+func (g *LoadGenerator) keyMove(ctx context.Context, pool *pgxpool.Pool, table WorkloadTable) error {
+	var id int64
+	q := `UPDATE ` + table.Qualified() + ` SET id=nextval(pg_get_serial_sequence($1,'id')), updated_at=now() WHERE id=(` + randomIDQuery(table) + `) RETURNING id`
+	err := pool.QueryRow(ctx, q, table.Qualified()).Scan(&id)
+	if err == nil {
+		g.mu.Lock()
+		g.summary.KeyMoves++
 		g.mu.Unlock()
 	}
 	return err

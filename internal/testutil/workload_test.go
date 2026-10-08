@@ -23,8 +23,8 @@ func TestLoadSpecValidate(t *testing.T) {
 		"zero workers":       {func(s *LoadSpec) { s.Workers = 0 }, "load spec: workers must be at least 1, got 0"},
 		"negative rate":      {func(s *LoadSpec) { s.RatePerSecond = -5 }, "load spec: rate per second must be at least 1, got -5"},
 		"zero rate":          {func(s *LoadSpec) { s.RatePerSecond = 0 }, "load spec: rate per second must be at least 1, got 0"},
-		"negative weight":    {func(s *LoadSpec) { s.Mix.Delete = -1 }, "load spec: mix weights must not be negative, got {Insert:1 Update:1 Delete:-1 UniqueMove:0}"},
-		"empty mix":          {func(s *LoadSpec) { s.Mix = Mix{} }, "load spec: mix must have positive total weight, got {Insert:0 Update:0 Delete:0 UniqueMove:0}"},
+		"negative weight":    {func(s *LoadSpec) { s.Mix.Delete = -1 }, "load spec: mix weights must not be negative, got {Insert:1 Update:1 Delete:-1 UniqueMove:0 KeyMove:0}"},
+		"empty mix":          {func(s *LoadSpec) { s.Mix = Mix{} }, "load spec: mix must have positive total weight, got {Insert:0 Update:0 Delete:0 UniqueMove:0 KeyMove:0}"},
 		"hot fraction > 1":   {func(s *LoadSpec) { s.HotRowFraction = 1.5 }, "load spec: hot row fraction must be within [0, 1], got 1.5"},
 		"toast fraction < 0": {func(s *LoadSpec) { s.ToastRewriteFraction = -0.1 }, "load spec: toast rewrite fraction must be within [0, 1], got -0.1"},
 	}
