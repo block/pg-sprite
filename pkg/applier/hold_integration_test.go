@@ -26,19 +26,19 @@ func everyKeyLanded() copier.Position {
 }
 
 func moveEvent(lsn decode.LSN, from, to int64, cols ...decode.Column) decode.ChangeEvent {
-	return decode.ChangeEvent{Kind: decode.Update, LSN: lsn, Key: to, OldKey: &from, Columns: cols}
+	return decode.ChangeEvent{Kind: decode.Update, LSN: lsn, Delivered: lsn, Key: to, OldKey: &from, Columns: cols}
 }
 
 func insertEvent(lsn decode.LSN, key int64, cols ...decode.Column) decode.ChangeEvent {
-	return decode.ChangeEvent{Kind: decode.Insert, LSN: lsn, Key: key, Columns: cols}
+	return decode.ChangeEvent{Kind: decode.Insert, LSN: lsn, Delivered: lsn, Key: key, Columns: cols}
 }
 
 func updateEvent(lsn decode.LSN, key int64, cols ...decode.Column) decode.ChangeEvent {
-	return decode.ChangeEvent{Kind: decode.Update, LSN: lsn, Key: key, Columns: cols}
+	return decode.ChangeEvent{Kind: decode.Update, LSN: lsn, Delivered: lsn, Key: key, Columns: cols}
 }
 
 func deleteEvent(lsn decode.LSN, key int64) decode.ChangeEvent {
-	return decode.ChangeEvent{Kind: decode.Delete, LSN: lsn, Key: key}
+	return decode.ChangeEvent{Kind: decode.Delete, LSN: lsn, Delivered: lsn, Key: key}
 }
 
 // flushAll drains every landed key and flushes it, then puts the held

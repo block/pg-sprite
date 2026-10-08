@@ -49,11 +49,14 @@ func NewBuffer() *Buffer {
 // or held.
 func (b *Buffer) Len() int { return len(b.entries) }
 
-// OldestPending returns the earliest FirstLSN among buffered entries. A
-// stream confirmed at or past it could not replay those entries after a
-// restart, so the confirmed position must stay below it — and, until the
-// flush of a drained Batch commits, below that batch's OldestFirstLSN too.
-// The second result is false when the buffer is empty.
+// OldestPending returns the earliest FirstLSN among buffered entries: the
+// delivered position the earliest buffered event arrived with. A stream
+// confirmed past it could have discarded that event's transaction, so the
+// confirmed position must stay at or below it — and, until the flush of a
+// drained Batch commits, at or below that batch's OldestFirstLSN too. It
+// never falls below what the stream had confirmed when the event arrived,
+// so a stream always accepts it. The second result is false when the buffer
+// is empty.
 func (b *Buffer) OldestPending() (decode.LSN, bool) {
 	return b.oldest, b.hasOldest
 }
@@ -96,7 +99,7 @@ func (b *Buffer) addInsert(ev decode.ChangeEvent) error {
 		}
 	}
 	b.markOldKeyReused(ev.Key, nil)
-	b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: firstLSN(ev.LSN, cur)})
+	b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: firstLSN(ev.Delivered, cur)})
 	return nil
 }
 
@@ -110,7 +113,7 @@ func (b *Buffer) addUpdate(ev decode.ChangeEvent) error {
 	cur, ok := b.entries[ev.Key]
 	if !ok {
 		b.markOldKeyReused(ev.Key, nil)
-		b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: ev.LSN})
+		b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: ev.Delivered})
 		return nil
 	}
 	if cur.Kind == DeleteMarker {
@@ -145,7 +148,7 @@ func (b *Buffer) addKeyMove(ev decode.ChangeEvent) error {
 		return fmt.Errorf("%w (CO-5): buffer key %d: key move from %d, which is buffered deleted", ErrInvariantViolation, ev.Key, oldKey)
 	}
 	b.markOldKeyReused(ev.Key, from)
-	moved := &Entry{Key: ev.Key, Kind: Image, OldKey: &oldKey, FirstLSN: firstLSN(ev.LSN, cur, from)}
+	moved := &Entry{Key: ev.Key, Kind: Image, OldKey: &oldKey, FirstLSN: firstLSN(ev.Delivered, cur, from)}
 	if from != nil {
 		moved.Columns = cloneColumns(from.Columns)
 		moved.overlay(ev.Columns)
@@ -158,14 +161,14 @@ func (b *Buffer) addKeyMove(ev decode.ChangeEvent) error {
 		moved.Columns = cloneColumns(ev.Columns)
 	}
 	b.put(moved)
-	b.put(&Entry{Key: oldKey, Kind: DeleteMarker, FirstLSN: firstLSN(ev.LSN, from)})
+	b.put(&Entry{Key: oldKey, Kind: DeleteMarker, FirstLSN: firstLSN(ev.Delivered, from)})
 	return nil
 }
 
 // addDelete replaces whatever the key held with a delete marker: the newest
 // fact about the key is that its row is gone (CO-5).
 func (b *Buffer) addDelete(ev decode.ChangeEvent) {
-	b.put(&Entry{Key: ev.Key, Kind: DeleteMarker, FirstLSN: firstLSN(ev.LSN, b.entries[ev.Key])})
+	b.put(&Entry{Key: ev.Key, Kind: DeleteMarker, FirstLSN: firstLSN(ev.Delivered, b.entries[ev.Key])})
 }
 
 // markOldKeyReused records that key now holds a row other than the one each
@@ -233,8 +236,9 @@ func (b *Buffer) trackOldest(lsn decode.LSN) {
 	}
 }
 
-// firstLSN is the earliest position a new entry still owes the stream: this
-// event's, or an earlier one carried by any entry it replaces or continues.
+// firstLSN is the earliest position a new entry still owes the stream: the
+// delivered position this event arrived with, or an earlier one carried by
+// any entry it replaces or continues.
 func firstLSN(lsn decode.LSN, replaced ...*Entry) decode.LSN {
 	for _, e := range replaced {
 		if e != nil && e.FirstLSN < lsn {

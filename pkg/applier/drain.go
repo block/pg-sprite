@@ -36,7 +36,8 @@ type Batch struct {
 // position the stream owner may confirm is bounded by this and by the
 // buffer's OldestPending together, whichever is lower: the batch's entries
 // have left the buffer, so OldestPending alone no longer covers them, and a
-// restart after a failed flush must replay from below their first event.
+// restart after a failed flush must replay from a position their first
+// event's transaction committed above.
 func (b Batch) OldestFirstLSN() (decode.LSN, bool) {
 	var oldest decode.LSN
 	found := false

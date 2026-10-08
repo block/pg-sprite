@@ -74,10 +74,12 @@ Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are 
 `preflight.CheckCopySwapEnvironment` once the privilege check has passed and the shape check
 has minted its `CopySwapShape`; the environment check is what mints the `CopySwapTarget`
 every writing step requires: `wal_level = logical` (`rds.logical_replication = 1` on Aurora/RDS, a
-static parameter requiring a reboot), and free `max_replication_slots` /
-`max_wal_senders` headroom. Both apply only to a run that decodes WAL; a quiesced run skips
-them. The same check compares the free disk the caller measured on the database volume —
-PostgreSQL has no function that reports it — against the shadow copy's headroom, and
+static parameter requiring a reboot), one free slot under `max_replication_slots`, and two free
+senders under `max_wal_senders` — the slot's connection holds its exported snapshot while the
+copy imports it, and the stream decodes on a connection of its own. Both apply only to a run
+that decodes WAL; a quiesced run skips them. The same check compares the free disk the
+caller measured on the database volume — PostgreSQL has no function that reports it —
+against the shadow copy's headroom, and
 refuses an unmeasured volume rather than assuming it is large enough. The figure is the
 bytes the volume can still absorb before writes fail: on a fixed-size volume, the free
 space the host reports for the data directory; on a managed volume that grows on demand
@@ -134,7 +136,8 @@ ALTER ROLE pgsprite_engine WITH REPLICATION;       -- self-managed
 --   wal_level = logical          (rds.logical_replication = 1 on Aurora/RDS; both need a restart;
 --                                 another managed service's own switch for it is not detected)
 --   no slot of the name derived for the table held by another database or as a physical slot
---   one free slot under max_replication_slots and one free sender under max_wal_senders
+--   one free slot under max_replication_slots and two free senders under max_wal_senders
+--                                 (the slot's snapshot connection and the decoding stream)
 ```
 
 The contract covers the target table's own access. A `FOREIGN KEY` that references a

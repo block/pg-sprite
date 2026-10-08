@@ -19,13 +19,20 @@ const (
 	// neither share nor drop it.
 	CopySwapCauseSlotCollision CopySwapRefusalCause = "copy-and-swap-slot-collision"
 	// CopySwapCauseSlotHeadroom means the cluster has no free replication
-	// slot or no free WAL sender for the one logical-decoding connection
-	// the route opens.
+	// slot, or fewer free WAL senders than the route's two replication
+	// connections need: one holds the slot's exported snapshot while the
+	// copy imports it, one decodes.
 	CopySwapCauseSlotHeadroom CopySwapRefusalCause = "copy-and-swap-slot-headroom"
 	// CopySwapCauseDiskHeadroom means the volume's free space is below the
 	// headroom the shadow copy needs, or was not measured at all.
 	CopySwapCauseDiskHeadroom CopySwapRefusalCause = "copy-and-swap-disk-headroom"
 )
+
+// copySwapWALSenders is how many WAL senders a run that decodes WAL holds
+// at once: the slot's own connection keeps its exported snapshot alive while
+// the copy imports it, and the stream decodes on a connection of its own
+// from the moment the slot exists.
+const copySwapWALSenders = 2
 
 // copySwapDiskHeadroomFactor is the multiple of the source's total size
 // (heap, indexes, TOAST) the volume must have free: the shadow grows to the
@@ -62,8 +69,9 @@ const (
 type CopySwapEnvironment struct {
 	// LogicalDecoding is whether the run captures changes through a
 	// replication slot. When true the server must have wal_level =
-	// logical and a free replication slot and WAL sender; a quiesced run
-	// has no such need.
+	// logical, a free replication slot, and a free WAL sender for each of
+	// the route's two replication connections; a quiesced run has no such
+	// need.
 	LogicalDecoding bool
 	// FreeDiskBytes is the free space on the volume the database writes
 	// to, as the caller measured it — PostgreSQL has no function that
@@ -111,8 +119,9 @@ type copySwapEnvironmentFacts struct {
 // CheckCopySwapEnvironment verifies that the cluster and the volume can
 // carry a copy-and-swap of the proven shape: when the run decodes WAL,
 // logical decoding is enabled, no other database holds the slot name the
-// route derives for the target, and a slot and WAL sender are free; in
-// every run the caller-measured free disk covers the shadow copy. A run
+// route derives for the target, and a slot and the WAL senders for the
+// route's two replication connections are free; in every run the
+// caller-measured free disk covers the shadow copy. A run
 // that decodes WAL must present a shape whose privilege proof verified
 // replication access, or it is a proof mismatch, as is a pool on any
 // database other than the one the shape was proven in. On success it mints the
@@ -163,11 +172,12 @@ func refuseCopySwapEnvironment(f copySwapEnvironmentFacts, env CopySwapEnvironme
 				Detail:  fmt.Sprintf("%d of max_replication_slots = %d are in use; one free slot is required", f.usedSlots, f.maxReplicationSlots),
 			}
 		}
-		if free := f.maxWALSenders - f.usedWALSenders; free < 1 {
+		if free := f.maxWALSenders - f.usedWALSenders; free < copySwapWALSenders {
 			return &CopySwapEnvironmentError{
 				Cause:   CopySwapCauseSlotHeadroom,
 				Setting: CopySwapSettingMaxWALSenders,
-				Detail:  fmt.Sprintf("%d of max_wal_senders = %d are in use; one free WAL sender is required", f.usedWALSenders, f.maxWALSenders),
+				Detail: fmt.Sprintf("%d of max_wal_senders = %d are in use; %d free WAL senders are required: one holds the slot's snapshot while the copy imports it, one decodes",
+					f.usedWALSenders, f.maxWALSenders, copySwapWALSenders),
 			}
 		}
 	}
