@@ -36,8 +36,10 @@ func TestInspectSlotMeasuresTheWALTheSlotRetains(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, fresh.RestartLSN, after.RestartLSN, "nothing confirmed, so the slot's floor does not move")
-	assert.Greater(t, after.RetainedBytes, fresh.RetainedBytes)
-	assert.GreaterOrEqual(t, after.RetainedBytes, int64(written-after.RestartLSN),
+	require.True(t, fresh.Retained.Known)
+	require.True(t, after.Retained.Known)
+	assert.Greater(t, after.Retained.Bytes, fresh.Retained.Bytes)
+	assert.GreaterOrEqual(t, after.Retained.Bytes, int64(written-after.RestartLSN),
 		"retained bytes span from the restart position to at least the write position the insert reached")
 }
 
@@ -65,6 +67,7 @@ func TestInspectSlotReportsWALTheServerHasLost(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, found)
 	assert.Equal(t, decode.WALStatusLost, status.WALStatus)
+	assert.False(t, status.Retained.Known, "a slot with no restart position retains an unknown amount, not zero")
 }
 
 // A name no slot wears is not an error; it is the answer "no slot".
