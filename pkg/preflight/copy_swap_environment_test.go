@@ -8,8 +8,9 @@ import (
 )
 
 // sufficientCopySwapEnvironment is a logical-decoding cluster with one free
-// slot and sender and a volume holding exactly the required headroom for a
-// 1 MiB table: every refusal below is one fact away from it.
+// slot, exactly the free senders the route's replication connections need,
+// and a volume holding exactly the required headroom for a 1 MiB table:
+// every refusal below is one fact away from it.
 func sufficientCopySwapEnvironment() (copySwapEnvironmentFacts, CopySwapEnvironment) {
 	const tableBytes = 1 << 20
 	facts := copySwapEnvironmentFacts{
@@ -17,7 +18,7 @@ func sufficientCopySwapEnvironment() (copySwapEnvironmentFacts, CopySwapEnvironm
 		maxReplicationSlots: 4,
 		usedSlots:           3,
 		maxWALSenders:       4,
-		usedWALSenders:      3,
+		usedWALSenders:      4 - copySwapWALSenders,
 		slotName:            CopySwapDecodingName("app", "public", "orders"),
 		totalBytes:          tableBytes,
 	}
@@ -82,8 +83,11 @@ func TestRefuseCopySwapEnvironmentIgnoresTheRDSParameterWhenDecodingIsEnabled(t 
 }
 
 // A WAL sender shortage is the same capacity cause as a slot shortage: the
-// route needs one of each, and either missing stops it. The setting tells
-// them apart, so an operator raises the limit that is actually exhausted.
+// route needs one slot and a sender for each of its replication
+// connections, and either missing stops it. One free sender is a shortage
+// — the slot's snapshot connection and the stream hold one each at the
+// same time. The setting tells the causes apart, so an operator raises the
+// limit that is actually exhausted.
 func TestRefuseCopySwapEnvironmentCountsSendersAsSlotHeadroom(t *testing.T) {
 	facts, env := sufficientCopySwapEnvironment()
 	facts.usedWALSenders = facts.maxWALSenders
@@ -92,6 +96,13 @@ func TestRefuseCopySwapEnvironmentCountsSendersAsSlotHeadroom(t *testing.T) {
 	assert.Equal(t, CopySwapCauseSlotHeadroom, refusal.Cause)
 	assert.Equal(t, CopySwapSettingMaxWALSenders, refusal.Setting)
 	assert.NotEmpty(t, refusal.Detail)
+
+	facts, env = sufficientCopySwapEnvironment()
+	facts.usedWALSenders = facts.maxWALSenders - 1
+	refusal = refuseCopySwapEnvironment(facts, env)
+	require.NotNil(t, refusal, "one free sender is not enough for two replication connections")
+	assert.Equal(t, CopySwapCauseSlotHeadroom, refusal.Cause)
+	assert.Equal(t, CopySwapSettingMaxWALSenders, refusal.Setting)
 
 	facts, env = sufficientCopySwapEnvironment()
 	facts.usedSlots = facts.maxReplicationSlots

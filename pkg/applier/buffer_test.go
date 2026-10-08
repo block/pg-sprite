@@ -17,19 +17,19 @@ func col(name string, value any) decode.Column {
 func marker(name string) decode.Column { return decode.Column{Name: name, Present: false} }
 
 func insert(lsn decode.LSN, key int64, cols ...decode.Column) decode.ChangeEvent {
-	return decode.ChangeEvent{Kind: decode.Insert, LSN: lsn, Key: key, Columns: cols}
+	return decode.ChangeEvent{Kind: decode.Insert, LSN: lsn, Delivered: lsn, Key: key, Columns: cols}
 }
 
 func update(lsn decode.LSN, key int64, cols ...decode.Column) decode.ChangeEvent {
-	return decode.ChangeEvent{Kind: decode.Update, LSN: lsn, Key: key, Columns: cols}
+	return decode.ChangeEvent{Kind: decode.Update, LSN: lsn, Delivered: lsn, Key: key, Columns: cols}
 }
 
 func keyMove(lsn decode.LSN, from, to int64, cols ...decode.Column) decode.ChangeEvent {
-	return decode.ChangeEvent{Kind: decode.Update, LSN: lsn, Key: to, OldKey: &from, Columns: cols}
+	return decode.ChangeEvent{Kind: decode.Update, LSN: lsn, Delivered: lsn, Key: to, OldKey: &from, Columns: cols}
 }
 
 func del(lsn decode.LSN, key int64) decode.ChangeEvent {
-	return decode.ChangeEvent{Kind: decode.Delete, LSN: lsn, Key: key}
+	return decode.ChangeEvent{Kind: decode.Delete, LSN: lsn, Delivered: lsn, Key: key}
 }
 
 func entry(t *testing.T, b *Buffer, key int64) Entry {
@@ -343,6 +343,24 @@ func TestBufferOldestPending(t *testing.T) {
 	oldest, ok := b.OldestPending()
 	require.True(t, ok)
 	assert.Equal(t, decode.LSN(10), oldest)
+}
+
+// The position an entry owes the stream is the delivered position its
+// event arrived with, not the event's own LSN: a change written before an
+// earlier transaction committed arrives with an LSN below what the caller
+// has already confirmed, and bounding the confirm by that LSN would ask the
+// stream to go backwards.
+func TestBufferOldestPendingIsTheDeliveredPositionNotTheChangesLSN(t *testing.T) {
+	b := NewBuffer()
+	writtenFirstCommittedLast := decode.ChangeEvent{
+		Kind: decode.Insert, LSN: 50, Delivered: 80, Key: 1, Columns: []decode.Column{col("label", "a")},
+	}
+	require.NoError(t, b.Add(writtenFirstCommittedLast))
+
+	oldest, ok := b.OldestPending()
+	require.True(t, ok)
+	assert.Equal(t, decode.LSN(80), oldest)
+	assert.Equal(t, decode.LSN(80), b.entries[1].FirstLSN)
 }
 
 func TestEntryKindStrings(t *testing.T) {

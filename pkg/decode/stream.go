@@ -21,6 +21,13 @@ import (
 // stops and the route decides whether to restart the copy.
 var ErrUnsupportedChange = errors.New("the source table received a change the route does not replay")
 
+// ErrStreamEnded is returned when the server ends replication in an orderly
+// way — a shutdown with the slot intact — rather than with an error. The
+// slot keeps the position last confirmed, so this is the clean resume ST-4
+// separates from slot loss: a new stream from that position continues
+// where this one stopped.
+var ErrStreamEnded = errors.New("the server ended the replication stream")
+
 // protocolVersion is the pgoutput protocol the stream speaks: version 1,
 // which every supported server offers, without streaming of in-progress
 // transactions, so every change the stream yields has already committed.
@@ -32,9 +39,12 @@ const protocolVersion = "1"
 type Delivery struct {
 	// Change is the decoded row change; nil for a progress-only delivery.
 	Change *ChangeEvent
-	// Delivered is the stream's position after this delivery: every change
-	// at or below it has been yielded, so it is the ceiling of what the
-	// caller may confirm.
+	// Delivered is the stream's position after this delivery: every
+	// transaction that committed at or below it has been yielded in full,
+	// so it is the ceiling of what the caller may confirm. A change's own
+	// LSN can lie below it, since a transaction is sent when it commits,
+	// not when its rows were written. For a change delivery it equals
+	// Change.Delivered.
 	Delivered LSN
 }
 
@@ -43,17 +53,28 @@ type Delivery struct {
 // it has delivered to the caller, and what the caller has confirmed applied,
 // which is the only position it ever reports to the server (ST-4 — the
 // slot's confirmed position is the resume point, so it moves only on the
-// caller's word). A Stream is used from one goroutine, which must call Next
-// often enough to answer the server's keepalives within wal_sender_timeout.
+// caller's word). Both positions order transactions by their commit: a
+// transaction is sent whole when it commits, so a change's own LSN can lie
+// below either of them.
+//
+// A Stream is used from one goroutine, which must call Next often enough to
+// answer the server's keepalives within wal_sender_timeout. The server's
+// fast shutdown waits for the stream to confirm everything it was sent, so
+// the caller confirms Delivered whenever it holds nothing unapplied, and
+// closes a stream that can neither confirm nor make progress rather than
+// keep it open.
 type Stream struct {
 	conn     *pgconn.PgConn
 	slotName string
 	target   preflight.CopySwapTarget
-	// start is the position decoding began from; a transaction that
-	// committed above it may carry changes written below it.
+	// start is the position decoding was requested from; a transaction
+	// that committed above it may carry changes written below it.
 	start     LSN
 	delivered LSN
 	confirmed LSN
+	// serverWALEnd is the server's position as it last reported it, with
+	// a keepalive or alongside a change; it can run ahead of delivered.
+	serverWALEnd LSN
 	// relation is the target table as pgoutput last described it; nil
 	// until the first change arrives.
 	relation      *relation
@@ -119,24 +140,31 @@ func quoteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
-// Start is the position decoding began from.
+// Start is the position decoding was requested from. The server never
+// decodes from below the slot's confirmed position, so a request below it
+// is forwarded there; what the stream was actually sent first shows in the
+// first delivery's position.
 func (s *Stream) Start() LSN { return s.start }
 
-// Delivered is the position every yielded change lies at or below.
+// Delivered is the position every transaction yielded so far committed at
+// or below, and the ceiling of what the caller may confirm.
 func (s *Stream) Delivered() LSN { return s.delivered }
 
-// Confirmed is the position last reported to the server as applied; zero
-// before the first Confirm.
-func (s *Stream) Confirmed() LSN { return s.confirmed }
+// ServerWALEnd is the server's position as it last reported it: with a
+// keepalive, or alongside a change. It runs ahead of Delivered while a
+// transaction is being sent and by whatever the server has written that
+// the stream has not been sent, so Delivered subtracted from it is the
+// stream's lag as the server measures it. Zero until the server reports.
+func (s *Stream) ServerWALEnd() LSN { return s.serverWALEnd }
 
 // Next yields the next delivery: a decoded change, or a progress-only
 // delivery when a transaction commits or the server sends a keepalive. When
 // nothing arrives within wait it yields the current position with no
 // change, so a quiet table never blocks the caller for longer than wait. A
 // keepalive that asks for a reply is answered with the confirmed position,
-// never the server's own. An error from the server or a change the stream
-// cannot decode ends the stream: the error is returned now and from every
-// later call.
+// never the server's own. An error from the server, a change the stream
+// cannot decode, or the server ending replication (ErrStreamEnded) ends the
+// stream: the error is returned now and from every later call.
 func (s *Stream) Next(ctx context.Context, wait time.Duration) (Delivery, error) {
 	if s.failed != nil {
 		return Delivery{}, s.failed
@@ -151,24 +179,35 @@ func (s *Stream) Next(ctx context.Context, wait time.Duration) (Delivery, error)
 			}
 			return Delivery{}, s.fail(fmt.Errorf("receive from slot %s: %w", s.slotName, err))
 		}
-		switch msg := msg.(type) {
-		case *pgproto3.CopyData:
-			delivery, yielded, err := s.handleCopyData(ctx, msg.Data)
-			if err != nil {
-				return Delivery{}, s.fail(err)
-			}
-			if yielded {
-				return delivery, nil
-			}
-		case *pgproto3.ErrorResponse:
-			pgErr := pgconn.ErrorResponseToPgError(msg)
-			return Delivery{}, s.fail(fmt.Errorf("stream from slot %s: %w", s.slotName, pgErr))
-		case *pgproto3.NoticeResponse, *pgproto3.ParameterStatus:
-			// Asynchronous messages the connection has already recorded.
-		default:
-			return Delivery{}, s.fail(fmt.Errorf("%w: ST-4: stream from slot %s received %T outside of copy-both mode",
-				ErrInvariantViolation, s.slotName, msg))
+		delivery, yielded, err := s.handleMessage(ctx, msg)
+		if err != nil {
+			return Delivery{}, s.fail(err)
 		}
+		if yielded {
+			return delivery, nil
+		}
+	}
+}
+
+// handleMessage dispatches one message the connection received in copy-both
+// mode. yielded is true when the message produces a delivery.
+func (s *Stream) handleMessage(ctx context.Context, msg pgproto3.BackendMessage) (Delivery, bool, error) {
+	switch msg := msg.(type) {
+	case *pgproto3.CopyData:
+		return s.handleCopyData(ctx, msg.Data)
+	case *pgproto3.ErrorResponse:
+		pgErr := pgconn.ErrorResponseToPgError(msg)
+		return Delivery{}, false, fmt.Errorf("stream from slot %s: %w", s.slotName, pgErr)
+	case *pgproto3.CopyDone, *pgproto3.CommandComplete:
+		// The server leaves copy-both mode when it shuts down with the
+		// slot intact.
+		return Delivery{}, false, fmt.Errorf("%w: slot %s at %s", ErrStreamEnded, s.slotName, s.confirmed)
+	case *pgproto3.NoticeResponse, *pgproto3.ParameterStatus:
+		// Asynchronous messages the connection has already recorded.
+		return Delivery{}, false, nil
+	default:
+		return Delivery{}, false, fmt.Errorf("%w: ST-4: stream from slot %s received %T outside of copy-both mode",
+			ErrInvariantViolation, s.slotName, msg)
 	}
 }
 
@@ -205,18 +244,20 @@ func (s *Stream) handleCopyData(ctx context.Context, data []byte) (delivery Deli
 	}
 }
 
-// handleKeepalive records the server's position when it is safe to and
-// answers a reply request. Between transactions the keepalive position is
-// one the decoder has sent everything below, so it is delivered; inside a
-// transaction it is not, since the transaction's remaining changes lie below
-// it and have not been yielded.
+// handleKeepalive records the server's position, delivers it when it is
+// safe to, and answers a reply request. Between transactions the keepalive
+// position is one every transaction sent so far committed below, so it is
+// delivered; inside a transaction it is not, since the transaction being
+// sent commits above it and has not been yielded in full.
 func (s *Stream) handleKeepalive(ctx context.Context, keepalive pglogrepl.PrimaryKeepaliveMessage) (Delivery, bool, error) {
-	// INV: ST-4 — Delivered never names a position with an unyielded change below it.
+	s.serverWALEnd = LSN(keepalive.ServerWALEnd)
+	// INV: ST-4 — Delivered never names a position a transaction not yet
+	// yielded in full committed at or below.
 	if !s.inTransaction {
-		s.raiseDelivered(LSN(keepalive.ServerWALEnd))
+		s.raiseDelivered(s.serverWALEnd)
 	}
 	if keepalive.ReplyRequested {
-		if err := s.sendStatus(ctx); err != nil {
+		if err := s.sendStatus(ctx, s.confirmed); err != nil {
 			return Delivery{}, false, err
 		}
 	}
@@ -224,8 +265,10 @@ func (s *Stream) handleKeepalive(ctx context.Context, keepalive pglogrepl.Primar
 }
 
 // handleWALData decodes one pgoutput message. The carrying WAL position is
-// the change's LSN.
+// the change's LSN; the delivered position it arrives with is the stream's
+// at that moment, which lies below the transaction's commit.
 func (s *Stream) handleWALData(xld pglogrepl.XLogData) (Delivery, bool, error) {
+	s.serverWALEnd = LSN(xld.ServerWALEnd)
 	msg, err := pglogrepl.Parse(xld.WALData)
 	if err != nil {
 		return Delivery{}, false, fmt.Errorf("%w: stream from slot %s at %s: %w",
@@ -251,13 +294,13 @@ func (s *Stream) handleWALData(xld pglogrepl.XLogData) (Delivery, bool, error) {
 		return Delivery{}, false, s.recordRelation(msg)
 	case *pglogrepl.InsertMessage:
 		ev, err := s.decodeInsert(msg, LSN(xld.WALStart))
-		return Delivery{Change: ev, Delivered: s.delivered}, err == nil, err
+		return s.deliverChange(ev, err)
 	case *pglogrepl.UpdateMessage:
 		ev, err := s.decodeUpdate(msg, LSN(xld.WALStart))
-		return Delivery{Change: ev, Delivered: s.delivered}, err == nil, err
+		return s.deliverChange(ev, err)
 	case *pglogrepl.DeleteMessage:
 		ev, err := s.decodeDelete(msg, LSN(xld.WALStart))
-		return Delivery{Change: ev, Delivered: s.delivered}, err == nil, err
+		return s.deliverChange(ev, err)
 	case *pglogrepl.TruncateMessage:
 		return Delivery{}, false, fmt.Errorf("%w: TRUNCATE of %s.%s at %s",
 			ErrUnsupportedChange, s.target.Schema(), s.target.Table(), LSN(xld.WALStart))
@@ -267,6 +310,16 @@ func (s *Stream) handleWALData(xld pglogrepl.XLogData) (Delivery, bool, error) {
 		return Delivery{}, false, fmt.Errorf("%w: ST-4: stream from slot %s at %s: pgoutput message %T",
 			ErrInvariantViolation, s.slotName, LSN(xld.WALStart), msg)
 	}
+}
+
+// deliverChange stamps a decoded change with the delivered position it
+// arrives with and wraps it as a delivery; a decoding error yields nothing.
+func (s *Stream) deliverChange(ev *ChangeEvent, err error) (Delivery, bool, error) {
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	ev.Delivered = s.delivered
+	return Delivery{Change: ev, Delivered: s.delivered}, true, nil
 }
 
 // recordRelation checks a relation message against the target and against
@@ -360,46 +413,6 @@ func (s *Stream) decodeDelete(msg *pglogrepl.DeleteMessage, lsn LSN) (*ChangeEve
 		return nil, fmt.Errorf("delete at %s: %w", lsn, err)
 	}
 	return &ChangeEvent{Kind: Delete, LSN: lsn, Key: key}, nil
-}
-
-// Confirm reports to the server that every change at or below lsn has been
-// applied durably, which lets the slot release the WAL below it and makes
-// lsn the point a later stream resumes from. The position must not fall
-// below an earlier confirmation and must not exceed what the stream has
-// delivered: confirming further would let the server discard changes the
-// caller never saw. The server itself never moves the slot's position
-// backwards, so confirming a position below the slot's current one — which
-// a resumed stream can produce from a replayed transaction's early changes
-// — is accepted and has no effect on the server.
-func (s *Stream) Confirm(ctx context.Context, lsn LSN) error {
-	if s.failed != nil {
-		return s.failed
-	}
-	// INV: ST-4 — the slot's confirmed position moves only on the caller's
-	// word and never past what the caller could have applied.
-	if lsn < s.confirmed {
-		return fmt.Errorf("%w: ST-4: confirm %s below the %s already confirmed on slot %s",
-			ErrInvariantViolation, lsn, s.confirmed, s.slotName)
-	}
-	if lsn > s.delivered {
-		return fmt.Errorf("%w: ST-4: confirm %s beyond the %s delivered from slot %s",
-			ErrInvariantViolation, lsn, s.delivered, s.slotName)
-	}
-	s.confirmed = lsn
-	return s.sendStatus(ctx)
-}
-
-// sendStatus reports the confirmed position to the server. Before the first
-// Confirm every position is zero, which the server reads as no position: the
-// message still counts as the reply a keepalive asked for.
-func (s *Stream) sendStatus(ctx context.Context) error {
-	err := pglogrepl.SendStandbyStatusUpdate(ctx, s.conn, pglogrepl.StandbyStatusUpdate{
-		WALWritePosition: pglogrepl.LSN(s.confirmed),
-	})
-	if err != nil {
-		return fmt.Errorf("confirm %s on slot %s: %w", s.confirmed, s.slotName, err)
-	}
-	return nil
 }
 
 // raiseDelivered moves the delivered position forward; a position already

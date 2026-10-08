@@ -211,8 +211,10 @@ through an index the buffer keeps exact) and
 refuses with `ErrInvariantViolation` an event the source could not
 have produced given the buffer — an INSERT over a live image or with an omitted column (CO-8),
 an UPDATE over a marker, a move from a deleted key or onto a live one; `OldestPending` bounds
-the position a stream may confirm without losing a buffered entry on replay, and a drained
-`Batch.OldestFirstLSN` bounds it for the batch's own entries until their flush commits.
+the position a stream may confirm without losing a buffered entry on replay — it is the
+`Delivered` the earliest buffered event arrived with, never the event's own LSN, which can lie
+below a position already confirmed (ST-4) — and a drained `Batch.OldestFirstLSN` bounds it for
+the batch's own entries until their flush commits.
 *Source:* Spirit `pkg/change/subscription_buffered.go` (stated invariant), narrowed to
 the v1 key shape; the merge rule is this doc set's addition for pgoutput's partial images.
 
@@ -670,13 +672,22 @@ new slot, checksum-repair pass under the CO-3 self-heal policy — and is handle
 process crash (slot survives, clean resume). The engine detects writer-identity changes and slot
 disappearance rather than blindly continuing. The slot's confirmed position is the resume point
 a clean resume replays from, so it moves only on the consumer's word: never from a keepalive
-reply, never past a change the consumer has not been handed.
+reply, never past a transaction the consumer has not been handed in full. Positions order
+transactions by their commit: pgoutput sends a transaction whole when it commits, so a change's
+own LSN can lie below a position already delivered or confirmed, and the server replays by
+commit position — a resume must never skip a replayed change for lying below its checkpoint.
 *Enforced:* `pkg/decode` `Stream` — `Delivered` moves on a transaction's commit or on a keepalive
-between transactions and never names a position with an unyielded change below it; `Confirm` is
-the only standby-status report carrying a position and refuses a regression or a position beyond
-`Delivered`; a keepalive reply carries the confirmed position alone; a reopened stream replays
-every transaction that committed above the confirmed position (confirm-moves-the-slot,
-keepalive-replies-leave-it, refuse-beyond-delivered, reopen-replays-from-confirmed tests).
+between transactions and never names a position a transaction not yet yielded in full committed
+at or below; every `ChangeEvent` carries the `Delivered` it arrived with, the position a caller
+may confirm while that change is unapplied; `Confirm` is the only standby-status report carrying
+a position, sets write, flush, and apply to it explicitly, refuses a regression or a position
+beyond `Delivered`, and records nothing the server was not told; a keepalive reply carries the
+confirmed position alone; the server ending replication with the slot intact is `ErrStreamEnded`,
+distinct from a fail-closed violation, so a resume tells a clean restart from slot loss; a
+reopened stream replays every transaction that committed above the confirmed position
+(confirm-moves-the-slot, keepalive-replies-leave-it, refuse-beyond-delivered,
+reopen-replays-from-confirmed, interleaved-transaction-below-the-confirmed-position,
+confirm-refuses-after-stop, confirm-leaves-the-record-when-the-send-fails tests).
 The reconcile-mode transition itself is the checkpoint/resume state machine (Phase 8). *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 

@@ -41,16 +41,23 @@ func (f slotFixture) openStream(t *testing.T, from decode.LSN) *decode.Stream {
 // stream deadline.
 func nextChange(t *testing.T, stream *decode.Stream) decode.ChangeEvent {
 	t.Helper()
+	return *nextChangeDelivery(t, stream).Change
+}
+
+// nextChangeDelivery reads deliveries until one carries a change, within
+// the stream deadline, and returns the whole delivery.
+func nextChangeDelivery(t *testing.T, stream *decode.Stream) decode.Delivery {
+	t.Helper()
 	deadline := time.Now().Add(streamDeadline)
 	for time.Now().Before(deadline) {
 		d, err := stream.Next(t.Context(), streamWait)
 		require.NoError(t, err)
 		if d.Change != nil {
-			return *d.Change
+			return d
 		}
 	}
 	require.FailNow(t, "no change was delivered before the stream deadline")
-	return decode.ChangeEvent{}
+	return decode.Delivery{}
 }
 
 // nextChanges reads n changes in stream order.
@@ -61,6 +68,16 @@ func nextChanges(t *testing.T, stream *decode.Stream, n int) []decode.ChangeEven
 		changes = append(changes, nextChange(t, stream))
 	}
 	return changes
+}
+
+// assertSameChange asserts two streams decoded the same change. The
+// delivered position a change arrives with belongs to the stream that
+// delivered it — a keepalive between transactions raises it — so it is
+// left out of the comparison.
+func assertSameChange(t *testing.T, want, got decode.ChangeEvent) {
+	t.Helper()
+	want.Delivered, got.Delivered = 0, 0
+	assert.Equal(t, want, got)
 }
 
 // nextError reads deliveries until the stream fails, within the stream
@@ -118,6 +135,29 @@ func (f slotFixture) assertConfirmedFlushBecomes(t *testing.T, slot *decode.Slot
 	t.Helper()
 	assert.EventuallyWithT(t, func(collect *assert.CollectT) {
 		assert.Equal(collect, want, f.confirmedFlush(t, slot))
+	}, streamDeadline, 50*time.Millisecond)
+}
+
+// assertWALSenderFlushBecomes polls until the walsender holding the slot
+// records want as the position the client last reported flushed, which
+// proves the server has read a status update before the test asks what the
+// server did with it.
+func (f slotFixture) assertWALSenderFlushBecomes(t *testing.T, slot *decode.Slot, want decode.LSN) {
+	t.Helper()
+	assert.EventuallyWithT(t, func(collect *assert.CollectT) {
+		var text *string
+		err := f.pool.QueryRow(t.Context(), `
+			SELECT r.flush_lsn::text
+			FROM pg_catalog.pg_stat_replication AS r
+			JOIN pg_catalog.pg_replication_slots AS s ON s.active_pid = r.pid
+			WHERE s.slot_name = $1`, slot.Name()).Scan(&text)
+		if !assert.NoError(collect, err) || !assert.NotNil(collect, text, "the walsender has read no status update") {
+			return
+		}
+		got, err := decode.ParseLSN(*text)
+		if assert.NoError(collect, err) {
+			assert.Equal(collect, want, got)
+		}
 	}, streamDeadline, 50*time.Millisecond)
 }
 

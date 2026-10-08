@@ -120,12 +120,13 @@ func TestCheckCopySwapEnvironmentNamesTheRDSParameterWhereItExists(t *testing.T)
 	requireCopySwapEnvironmentCause(t, err, preflight.CopySwapCauseLogicalDecodingUnavailable, preflight.CopySwapSettingRDSLogicalReplication)
 }
 
-// A logical cluster with one free slot and one free WAL sender admits a
-// decoding run; once another consumer holds the last slot the same run is
-// refused for capacity, and dropping that slot admits it again.
+// A logical cluster with one free slot and the two free WAL senders the
+// route's replication connections need admits a decoding run; once another
+// consumer holds the last slot the same run is refused for capacity, and
+// dropping that slot admits it again.
 func TestCheckCopySwapEnvironmentRequiresAFreeReplicationSlot(t *testing.T) {
 	f := newCopySwapEnvironmentFixture(t, testutil.StartPostgresWithSettings(t,
-		"wal_level=logical", "max_replication_slots=1", "max_wal_senders=1"))
+		"wal_level=logical", "max_replication_slots=1", "max_wal_senders=2"))
 	decoding := preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: testutil.UnlimitedDisk}
 
 	require.NoError(t, f.check(t, decoding))
@@ -140,12 +141,14 @@ func TestCheckCopySwapEnvironmentRequiresAFreeReplicationSlot(t *testing.T) {
 	require.NoError(t, f.check(t, decoding))
 }
 
-// A logical cluster with a free slot but max_wal_senders = 0 cannot accept
-// the replication connection that would consume the slot, so capacity is
-// refused on the sender side alone.
+// A logical cluster with a free slot but max_wal_senders = 1 can accept the
+// replication connection that creates the slot and holds its snapshot, but
+// not the second one that decodes while the copy imports that snapshot, so
+// capacity is refused on the sender side alone — before anything is
+// created, rather than after the slot exists and the copy has begun.
 func TestCheckCopySwapEnvironmentRequiresAFreeWALSender(t *testing.T) {
 	f := newCopySwapEnvironmentFixture(t, testutil.StartPostgresWithSettings(t,
-		"wal_level=logical", "max_replication_slots=1", "max_wal_senders=0"))
+		"wal_level=logical", "max_replication_slots=1", "max_wal_senders=1"))
 
 	err := f.check(t, preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: testutil.UnlimitedDisk})
 	requireCopySwapEnvironmentCause(t, err, preflight.CopySwapCauseSlotHeadroom, preflight.CopySwapSettingMaxWALSenders)
@@ -240,12 +243,13 @@ func TestCheckCopySwapEnvironmentIgnoresTheSessionSearchPath(t *testing.T) {
 	requireCopySwapEnvironmentCause(t, err, preflight.CopySwapCauseLogicalDecodingUnavailable, preflight.CopySwapSettingWALLevel)
 }
 
-// WAL sender occupancy is the live count: a replication connection that
-// holds the cluster's only sender refuses the run while it is open and
-// admits it again once closed, with no slot ever created.
+// WAL sender occupancy is the live count: on a cluster with exactly the two
+// senders the route needs, a replication connection that holds one of them
+// refuses the run while it is open and admits it again once closed, with no
+// slot ever created.
 func TestCheckCopySwapEnvironmentCountsLiveWALSenders(t *testing.T) {
 	serverURL := testutil.StartPostgresWithSettings(t,
-		"wal_level=logical", "max_replication_slots=1", "max_wal_senders=1")
+		"wal_level=logical", "max_replication_slots=1", "max_wal_senders=2")
 	f := newCopySwapEnvironmentFixture(t, serverURL)
 	decoding := preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: testutil.UnlimitedDisk}
 	require.NoError(t, f.check(t, decoding))
