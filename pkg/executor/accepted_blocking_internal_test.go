@@ -26,6 +26,12 @@ func TestBlockingBudgetValidation(t *testing.T) {
 		{name: "zero statement", budget: BlockingBudget{LockTimeout: time.Second}},
 		{name: "negative statement", budget: BlockingBudget{LockTimeout: time.Second, StatementTimeout: -time.Second}},
 		{name: "statement over ceiling", budget: BlockingBudget{LockTimeout: time.Second, StatementTimeout: maxOverallBudget + time.Millisecond}},
+		// statement_timeout counts a lock wait too: a statement bound that
+		// is not longer than the lock bound would end every lock wait before
+		// lock_timeout could, so the lock budget could never apply.
+		{name: "statement equal to lock", budget: BlockingBudget{LockTimeout: time.Second, StatementTimeout: time.Second}},
+		{name: "statement shorter than lock", budget: BlockingBudget{LockTimeout: time.Second, StatementTimeout: time.Second - time.Millisecond}},
+		{name: "statement one millisecond longer than lock", budget: BlockingBudget{LockTimeout: time.Second, StatementTimeout: time.Second + time.Millisecond}, ok: true},
 		{name: "valid", budget: valid, ok: true},
 	}
 	for _, tt := range tests {

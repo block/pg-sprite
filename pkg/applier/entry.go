@@ -85,6 +85,27 @@ func (e *Entry) overlay(cols []decode.Column) {
 	}
 }
 
+// fill assigns every present column of cols that the image still carries as
+// a marker, or does not hold yet, and leaves a column the image already has
+// a value for alone: a value an event supplied after the completion was read
+// is newer than the completion.
+func (e *Entry) fill(cols []decode.Column) {
+	for _, c := range cols {
+		if !c.Present {
+			continue
+		}
+		i := e.index(c.Name)
+		if i >= 0 && e.Columns[i].Present {
+			continue
+		}
+		if i >= 0 {
+			e.Columns[i] = c
+			continue
+		}
+		e.Columns = append(e.Columns, c)
+	}
+}
+
 func (e Entry) index(name string) int {
 	for i, c := range e.Columns {
 		if c.Name == name {
