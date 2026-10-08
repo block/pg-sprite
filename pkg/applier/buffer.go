@@ -23,6 +23,11 @@ type Buffer struct {
 	// and remove so an event that lands a row on a key finds the images
 	// that left it without a scan.
 	movedFrom map[int64]map[int64]struct{}
+	// pending holds, by key, the completion a held image is waiting to take
+	// (see Hold and Release). A key's entry and its pending completion are
+	// written together by Hold and dropped together by any later write to
+	// the key.
+	pending map[int64]pendingCompletion
 	// oldest is the least FirstLSN among entries, kept as entries are
 	// written and recomputed by Drain, so OldestPending is read without a
 	// scan however often the stream owner asks; hasOldest is false when the
@@ -33,10 +38,15 @@ type Buffer struct {
 
 // NewBuffer returns an empty buffer.
 func NewBuffer() *Buffer {
-	return &Buffer{entries: make(map[int64]*Entry), movedFrom: make(map[int64]map[int64]struct{})}
+	return &Buffer{
+		entries:   make(map[int64]*Entry),
+		movedFrom: make(map[int64]map[int64]struct{}),
+		pending:   make(map[int64]pendingCompletion),
+	}
 }
 
-// Len reports how many keys are buffered, including entries a Drain deferred.
+// Len reports how many keys are buffered, including entries a Drain deferred
+// or held.
 func (b *Buffer) Len() int { return len(b.entries) }
 
 // OldestPending returns the earliest FirstLSN among buffered entries. A
@@ -160,22 +170,27 @@ func (b *Buffer) addDelete(ev decode.ChangeEvent) {
 
 // markOldKeyReused records that key now holds a row other than the one each
 // buffered image that left it carried, so those images' markers cannot be
-// completed from key's shadow row (D13). mover is the entry of the row now
+// completed from key's shadow row (D13), and a completion one of them is
+// holding may have read that other row. mover is the entry of the row now
 // landing on key, when the landing is a move: a row returning to the key it
 // started at is not a reuse of it.
 func (b *Buffer) markOldKeyReused(key int64, mover *Entry) {
 	for imageKey := range b.movedFrom[key] {
 		if e := b.entries[imageKey]; e != mover {
 			e.OldKeyReused = true
+			b.dropPending(imageKey)
 		}
 	}
 }
 
-// put stores the entry under its key, keeps movedFrom exact, and keeps the
-// oldest pending position current. An entry only ever replaces one with an
-// equal or later FirstLSN, so the minimum never rises on a write.
+// put stores the entry under its key, keeps movedFrom exact, drops any
+// completion pending under the key — the write is an event the completion
+// read may have seen — and keeps the oldest pending position current. An
+// entry only ever replaces one with an equal or later FirstLSN, so the
+// minimum never rises on a write.
 func (b *Buffer) put(e *Entry) {
 	b.unindex(b.entries[e.Key])
+	b.dropPending(e.Key)
 	b.entries[e.Key] = e
 	if e.OldKey != nil {
 		images := b.movedFrom[*e.OldKey]
@@ -188,9 +203,11 @@ func (b *Buffer) put(e *Entry) {
 	b.trackOldest(e.FirstLSN)
 }
 
-// remove drops the entry under key and keeps movedFrom exact.
+// remove drops the entry under key, with any completion pending for it, and
+// keeps movedFrom exact.
 func (b *Buffer) remove(key int64) {
 	b.unindex(b.entries[key])
+	b.dropPending(key)
 	delete(b.entries, key)
 }
 

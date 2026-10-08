@@ -10,7 +10,7 @@ import (
 // Batch is what one Drain decided: the entries to flush now, in ascending key
 // order, and how many buffered entries it discarded or left waiting. The
 // flush takes two passes over Entries: it completes every entry CompleteFirst
-// names, then writes. Key order does not express that dependency.
+// names, then writes the rest. Key order does not express that dependency.
 type Batch struct {
 	// Entries are the landed keys' entries, each a copy the buffer no longer
 	// holds; a later Add for the same key does not change it. They are in
@@ -25,6 +25,10 @@ type Batch struct {
 	// inside an in-flight chunk, or travel with one that is. This is the
 	// number a stalled catch-up is waiting on the copier for.
 	Deferred int
+	// Held counts the entries still buffered because a completion is
+	// pending for them (see Buffer.Hold): they wait for the stream to pass
+	// the completion's read position, not for the copier.
+	Held int
 }
 
 // OldestFirstLSN returns the earliest FirstLSN among the batch's entries, and
@@ -45,7 +49,7 @@ func (b Batch) OldestFirstLSN() (decode.LSN, bool) {
 	return oldest, found
 }
 
-// CompleteFirst returns the images whose write depends on a row the flush
+// CompleteFirst returns the images whose value depends on a row the flush
 // must read before it writes anything in the batch: the moved images still
 // carrying an unchanged-TOAST marker. For an image whose OldKey was not
 // reused, the value lives in the shadow row under OldKey (D13), and the delete
@@ -53,18 +57,19 @@ func (b Batch) OldestFirstLSN() (decode.LSN, bool) {
 // flush that wrote Entries in order could delete the row before reading it.
 // For an image whose OldKeyReused is set, the old key's shadow row is another
 // row's and the value is read from the source row under Key; it is named all
-// the same, since it has to be whole before the write. An image that did not
-// move is not named: its marker stands for the row under its own key, which
-// no other entry deletes — the primary path's upsert writes only present
-// columns and leaves that value in place, and the fallback, which needs every
-// image whole, completes it from that row before the fallback's own deletes.
-// The result points into Entries, in Entries' order, so a completion written
-// through it is what the flush then writes.
-func (b Batch) CompleteFirst() []*Entry {
-	var first []*Entry
-	for i := range b.Entries {
-		e := &b.Entries[i]
+// the same, since it has to be whole before it is written. An image that did
+// not move is not named: its marker stands for the row under its own key,
+// which no other entry deletes — the primary path's upsert writes only
+// present columns and leaves that value in place, and the fallback, which
+// needs every image whole, completes it from that row before the fallback's
+// own deletes. The result is in Entries' order and copies them: a completion
+// the flush reads comes back to the buffer through Buffer.Hold, not through
+// the batch.
+func (b Batch) CompleteFirst() []Entry {
+	var first []Entry
+	for _, e := range b.Entries {
 		if e.Kind == Image && e.OldKey != nil && e.HasMarker() {
+			e.Columns = cloneColumns(e.Columns)
 			first = append(first, e)
 		}
 	}
@@ -89,7 +94,9 @@ func (b Batch) CompleteFirst() []*Entry {
 // wait, otherwise both flush. The flush completes the image's unchanged-TOAST
 // markers before it deletes anything (D13), and that reading must not race the
 // deletion or copy of the old key's row; Batch.CompleteFirst names the images
-// it applies to.
+// it applies to. An image whose completion is pending (Buffer.Hold) stays
+// buffered whatever its key's state, until Release lets the completion in
+// or an event drops it.
 func (b *Buffer) Drain(pos copier.Position) Batch {
 	// INV: CO-4
 	state := make(map[int64]copier.KeyState, len(b.entries))
@@ -100,6 +107,11 @@ func (b *Buffer) Drain(pos copier.Position) Batch {
 	var batch Batch
 	b.hasOldest = false
 	for key, e := range b.entries {
+		if _, pending := b.pending[key]; pending {
+			batch.Held++
+			b.trackOldest(e.FirstLSN)
+			continue
+		}
 		switch state[key] {
 		case copier.KeyUncut:
 			b.remove(key)
