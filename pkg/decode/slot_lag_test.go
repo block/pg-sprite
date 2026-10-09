@@ -64,6 +64,23 @@ func TestWithinLagCeilingRefusesACeilingBelowOneByte(t *testing.T) {
 	require.NoError(t, within.WithinLagCeiling(1))
 }
 
+// The ceiling abort reads as an operator message: sizes in binary units
+// with the exact bytes beside them, the usual cause, and what lets the run
+// resume. A whole number of a unit renders without a decimal.
+func TestSlotLagExceededErrorRendersSizesForOperators(t *testing.T) {
+	exceeded := &decode.SlotLagExceededError{Slot: lagTestSlot, Retained: 1288490188, Ceiling: 1 << 30}
+	assert.Equal(t,
+		"slot pgsprite_0123abcd retains 1.2 GiB of WAL, over the 1 GiB ceiling (1288490188 > 1073741824 bytes); "+
+			"the usual cause is a long-open transaction on the source, and the run can resume once it ends",
+		exceeded.Error())
+
+	small := &decode.SlotLagExceededError{Slot: lagTestSlot, Retained: 1536, Ceiling: 1000}
+	assert.Equal(t,
+		"slot pgsprite_0123abcd retains 1.5 KiB of WAL, over the 1000 B ceiling (1536 > 1000 bytes); "+
+			"the usual cause is a long-open transaction on the source, and the run can resume once it ends",
+		small.Error())
+}
+
 // A slot that is gone is the lost state too, worded as absence.
 func TestSlotLostErrorDistinguishesAnAbsentSlot(t *testing.T) {
 	gone := &decode.SlotLostError{Slot: lagTestSlot}

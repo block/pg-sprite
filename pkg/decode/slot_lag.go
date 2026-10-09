@@ -3,6 +3,7 @@ package decode
 import (
 	"errors"
 	"fmt"
+	"math"
 )
 
 // DefaultSlotLagCeiling is the most WAL a slot may retain before the route
@@ -37,7 +38,30 @@ type SlotLagExceededError struct {
 }
 
 func (e *SlotLagExceededError) Error() string {
-	return fmt.Sprintf("slot %s retains %d bytes of WAL, over the ceiling of %d", e.Slot, e.Retained, e.Ceiling)
+	return fmt.Sprintf("slot %s retains %s of WAL, over the %s ceiling (%d > %d bytes); "+
+		"the usual cause is a long-open transaction on the source, and the run can resume once it ends",
+		e.Slot, humanBytes(e.Retained), humanBytes(e.Ceiling), e.Retained, e.Ceiling)
+}
+
+// humanBytes renders a byte count in binary units, the convention
+// PostgreSQL's own size settings use: exact when the count is a whole
+// number of the unit, else to one decimal.
+func humanBytes(n int64) string {
+	const unit = 1024
+	if n < unit {
+		return fmt.Sprintf("%d B", n)
+	}
+	units := []string{"KiB", "MiB", "GiB", "TiB", "PiB", "EiB"}
+	value := float64(n) / unit
+	i := 0
+	for value >= unit && i < len(units)-1 {
+		value /= unit
+		i++
+	}
+	if value == math.Trunc(value) {
+		return fmt.Sprintf("%.0f %s", value, units[i])
+	}
+	return fmt.Sprintf("%.1f %s", value, units[i])
 }
 
 // Unwrap makes every SlotLagExceededError match ErrSlotLagCeiling.

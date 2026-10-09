@@ -685,15 +685,24 @@ fail the read; `SlotStatus.WithinLagCeiling` judges a slot against a ceiling in 
 lost before any measure, unknown never read as nothing retained, over the ceiling a typed
 `SlotLagExceededError` — and refuses a ceiling below one byte) + `pkg/checkpoint`
 `Store.ReapOrphanSlots` (one pass over the logical, engine-prefixed slots of the store's own
-database, read in one statement with the checkpoint rows that own them: a slot no row in a
-non-terminal phase names and no process holds is dropped through `DropSlot`, publication and
-all; a slot a live row names, a slot a process holds, and a name wearing the prefix without
-the engine's shape are reported and left; a database whose checkpoint table does not exist
-is refused with `ErrTableMissing` rather than read as all orphans) + `pkg/applier` `Catchup`
-(every cycle ends by inspecting the stream's slot on the pool and judging it against
-`CatchupOptions.SlotLagCeiling`, default `decode.DefaultSlotLagCeiling`, which cannot be
-switched off; a slot that vanished is `SlotLostError`; crossing the ceiling ends `Run` with
-the table lock intact and the slot in place for the operator to read).
+database: the slots are listed first and the checkpoint rows that own them read in a later
+statement, so a row committed before its slot appears is seen whenever the slot is, and each
+slot's row is read again right before its drop so a run that claimed it since the pass began
+keeps it; a slot no row in a non-terminal phase names is dropped through `DropIdleSlot`,
+publication and all, which refuses a held slot instead of waiting for its holder — whether a
+slot is held is judged at the drop, since `pg_replication_slots` reads shared memory, not a
+snapshot; a slot a live row names, a slot a process holds, and a name wearing the prefix
+without the engine's shape are reported and left; a database whose checkpoint table does not
+exist is refused with `ErrTableMissing` rather than read as all orphans; two reapers over one
+database race each other at the drop, so run one per database at a time) + `pkg/applier`
+`Catchup` (every cycle ends by inspecting the stream's slot on the pool and judging it
+against `CatchupOptions.SlotLagCeiling`, default `decode.DefaultSlotLagCeiling`, which cannot
+be set below one byte; a slot that vanished is `SlotLostError`; crossing the ceiling ends
+`Run` with the table lock intact and the slot in place for the operator to read). *Open:* a
+ceiling abort leaves the slot in place under a row still in a non-terminal phase, which the
+reaper reads as live and leaves; whoever handles `ErrSlotLagCeiling` must move the row to a
+terminal phase — or resume and drain the slot — before the reaper can reclaim it, and that
+handler is the orchestrator's, not yet written.
 *Source:* risks-and-mitigations § logical-decoding risks.
 
 ### ST-4 — Slot loss is a modeled state transition, not a crash
@@ -715,13 +724,20 @@ a position, sets write, flush, and apply to it explicitly, refuses a regression 
 beyond `Delivered`, and records nothing the server was not told; a keepalive reply carries the
 confirmed position alone; a warning the server sends in copy-both mode — the walsender saying it
 will withhold changes, as from a publication it skipped loading — stops the stream fail-closed
-before a keepalive can deliver a position past them; the server ending replication with the slot intact is `ErrStreamEnded`,
+before a keepalive can deliver a position past them, and the replication connection asks for
+warnings itself — `SET client_min_messages = warning` on the open session, after every startup
+parameter and login event trigger, through any pooler — so no role, database, or server setting,
+login event trigger, URL parameter, or connection pooler can keep them from it; the server ending replication with the slot intact is `ErrStreamEnded`,
 distinct from a fail-closed violation, so a resume tells a clean restart from slot loss; a
 reopened stream replays every transaction that committed above the confirmed position
 (confirm-moves-the-slot, keepalive-replies-leave-it, refuse-beyond-delivered,
 reopen-replays-from-confirmed, interleaved-transaction-below-the-confirmed-position,
 confirm-refuses-after-stop, confirm-leaves-the-record-when-the-send-fails,
-stops-on-a-warning-from-the-server tests); `pkg/applier` `Catchup.confirm` is the consumer's
+stops-on-a-warning-from-the-server, stops-on-a-localized-warning,
+stops-on-the-warning-when-the-database-sends-only-errors,
+stops-on-the-warning-when-a-login-trigger-sends-only-errors,
+asks-for-warnings-over-the-database-setting, asks-for-warnings-over-the-url-in-any-case,
+asks-for-warnings-through-pgbouncer tests); `pkg/applier` `Catchup.confirm` is the consumer's
 half: it names the lesser of the stream's delivered position and the buffer's oldest pending
 position, read after a refused batch is requeued and completed images are held, so the slot
 never passes a change still buffered (confirm-bound unit test; the requeued-batch convergence

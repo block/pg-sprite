@@ -63,8 +63,8 @@ type CatchupOptions struct {
 	Tracker *progress.Tracker
 	// SlotLagCeiling is the most WAL, in bytes, the stream's slot may retain
 	// before Run ends with a *decode.SlotLagExceededError (D11, ST-3). Zero
-	// takes decode.DefaultSlotLagCeiling; there is no way to switch the
-	// ceiling off.
+	// takes decode.DefaultSlotLagCeiling; a value below one byte is
+	// refused, so the ceiling is always in force.
 	SlotLagCeiling int64
 }
 

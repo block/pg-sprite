@@ -54,6 +54,7 @@ const (
 	sqlstateDuplicateObject   = "42710"
 	sqlstateUndefinedObject   = "42704"
 	sqlstateInsufficientPrivs = "42501"
+	sqlstateObjectInUse       = "55006"
 )
 
 // Slot is a logical replication slot this package created, with the
