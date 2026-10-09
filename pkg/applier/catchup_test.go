@@ -21,19 +21,23 @@ func TestCatchupOptionsDefaults(t *testing.T) {
 	assert.Equal(t, DefaultCatchupInterval, opts.Interval)
 	assert.Equal(t, DefaultCatchupMaxChanges, opts.MaxChanges)
 	assert.Equal(t, progress.WallClock{}, opts.Clock)
+	assert.Equal(t, decode.DefaultSlotLagCeiling, opts.SlotLagCeiling)
 	require.NoError(t, opts.validate())
 
-	given := CatchupOptions{Interval: time.Second, MaxChanges: 5}.withDefaults()
+	given := CatchupOptions{Interval: time.Second, MaxChanges: 5, SlotLagCeiling: 1 << 20}.withDefaults()
 	assert.Equal(t, time.Second, given.Interval)
 	assert.Equal(t, 5, given.MaxChanges)
+	assert.Equal(t, int64(1<<20), given.SlotLagCeiling)
 }
 
-// An interval the clock cannot time or a change bound that would never let
-// a cycle end is refused rather than defaulted.
+// An interval the clock cannot time, a change bound that would never let
+// a cycle end, or a slot lag ceiling that would abort every slot is refused
+// rather than defaulted; the ceiling cannot be switched off.
 func TestCatchupOptionsRefuseUnboundedValues(t *testing.T) {
 	cases := map[string]CatchupOptions{
 		"interval below a millisecond": {Interval: 500 * time.Microsecond},
 		"negative max changes":         {MaxChanges: -1},
+		"negative slot lag ceiling":    {SlotLagCeiling: -1},
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -55,27 +55,37 @@ type SlotStatus struct {
 
 // RetainedWAL is the WAL a slot keeps on the volume. Known is false when
 // the server cannot measure it — the slot has no restart position, as
-// after the server removed the WAL it needed — so an unknown amount is
+// after the server removed the WAL it needed, or the server is in recovery
+// and has no write position to measure against — so an unknown amount is
 // never read as nothing retained.
 type RetainedWAL struct {
 	Bytes int64
 	Known bool
 }
 
+// inspectSlotSQL reads one slot. The retained measure needs the server's
+// write position, which a server in recovery refuses to report, so on a
+// standby — a demoted writer the reaper reads after a failover — it is
+// NULL and the rest of the row is still read.
+const inspectSlotSQL = `
+	SELECT s.database, s.slot_type = 'logical', s.active, s.active_pid, s.wal_status,
+	       s.restart_lsn::text, s.confirmed_flush_lsn::text,
+	       CASE WHEN pg_catalog.pg_is_in_recovery() THEN NULL
+	            ELSE pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), s.restart_lsn)::bigint
+	       END
+	FROM pg_catalog.pg_replication_slots s
+	WHERE s.slot_name = $1`
+
 // InspectSlot reads the named slot from pg_replication_slots on pool. found
 // is false when no slot of that name exists on the cluster; a slot of
 // another database is reported with its Database so the caller never
-// mistakes it for its own.
+// mistakes it for its own. On a server in recovery the slot's retained WAL
+// is unknown and the rest of the row is reported.
 func InspectSlot(ctx context.Context, pool *pgxpool.Pool, name string) (status SlotStatus, found bool, err error) {
 	var database, walStatus, restartLSN, confirmedFlushLSN *string
 	var activePID *int32
 	var retained *int64
-	err = pool.QueryRow(ctx, `
-		SELECT s.database, s.slot_type = 'logical', s.active, s.active_pid, s.wal_status,
-		       s.restart_lsn::text, s.confirmed_flush_lsn::text,
-		       pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), s.restart_lsn)::bigint
-		FROM pg_catalog.pg_replication_slots s
-		WHERE s.slot_name = $1`, name).
+	err = pool.QueryRow(ctx, inspectSlotSQL, name).
 		Scan(&database, &status.Logical, &status.Active, &activePID, &walStatus, &restartLSN, &confirmedFlushLSN, &retained)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SlotStatus{}, false, nil

@@ -38,6 +38,15 @@ func (e *SlotExistsError) Error() string {
 // anything but a bare identifier out of the command.
 var slotNamePattern = regexp.MustCompile(`^pgsprite_[0-9a-f]{8}$`)
 
+// SlotNamePrefix is what every engine slot name starts with; a reaper lists
+// candidates by it and then asks IsEngineSlotName about each.
+const SlotNamePrefix = "pgsprite_"
+
+// IsEngineSlotName reports whether name has the shape this package creates
+// and drops. A name that merely wears the prefix is not the engine's and is
+// never dropped.
+func IsEngineSlotName(name string) bool { return slotNamePattern.MatchString(name) }
+
 // outputPlugin is PostgreSQL's built-in logical-decoding output plugin.
 const outputPlugin = "pgoutput"
 
@@ -45,6 +54,7 @@ const (
 	sqlstateDuplicateObject   = "42710"
 	sqlstateUndefinedObject   = "42704"
 	sqlstateInsufficientPrivs = "42501"
+	sqlstateObjectInUse       = "55006"
 )
 
 // Slot is a logical replication slot this package created, with the

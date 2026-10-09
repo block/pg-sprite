@@ -114,7 +114,7 @@ seam inside the copy-and-swap executor is the same idea applied one level down.
         │                            │
    ┌────┴────────────────────────────┴──── cross-cutting ──────────────────────┐
    │  pkg/dbconn   pgx pool · TLS/RDS CA · pg_terminate_backend · retries      │
-   │  pkg/throttler   chunk-time target · slot-lag ceiling (replica lag later) │ planned
+   │  pkg/throttler   chunk-time target (slot-lag ceiling: decode + applier)   │ planned
    └────┬──────────────────────────────────────────────────────────────────────┘
         │
    ╭────▼─────────────────────────── PostgreSQL ───────────────────────────────╮
@@ -655,7 +655,7 @@ pkg/schemachange/     -> orchestrator + runner + cutover
 pkg/applier/          -> captured-change apply
 
 Planned:
-pkg/throttler/        -> chunk-time / slot-lag throttle (replica lag deferred, D12)
+pkg/throttler/        -> chunk-time throttle (slot-lag ceiling lives in decode + applier; replica lag deferred, D12)
 Executor              -> Plan/Execute/Status/Abort backend interface
 ```
 
