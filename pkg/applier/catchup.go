@@ -61,6 +61,11 @@ type CatchupOptions struct {
 	// copier's tracker would hide the copier's counters, as registering the
 	// copier on this one would hide the catch-up's.
 	Tracker *progress.Tracker
+	// SlotLagCeiling is the most WAL, in bytes, the stream's slot may retain
+	// before Run ends with a *decode.SlotLagExceededError (D11, ST-3). Zero
+	// takes decode.DefaultSlotLagCeiling; a value below one byte is
+	// refused, so the ceiling is always in force.
+	SlotLagCeiling int64
 }
 
 func (o CatchupOptions) withDefaults() CatchupOptions {
@@ -73,6 +78,9 @@ func (o CatchupOptions) withDefaults() CatchupOptions {
 	if o.Clock == nil {
 		o.Clock = progress.WallClock{}
 	}
+	if o.SlotLagCeiling == 0 {
+		o.SlotLagCeiling = decode.DefaultSlotLagCeiling
+	}
 	return o
 }
 
@@ -83,6 +91,9 @@ func (o CatchupOptions) validate() error {
 	}
 	if o.MaxChanges < 1 {
 		return fmt.Errorf("%w: max changes %d is below one", ErrInvalidCatchupOptions, o.MaxChanges)
+	}
+	if o.SlotLagCeiling < 1 {
+		return fmt.Errorf("%w: slot lag ceiling %d is below one byte; use zero for the default", ErrInvalidCatchupOptions, o.SlotLagCeiling)
 	}
 	return nil
 }
@@ -312,6 +323,28 @@ func (c *Catchup) cycle(ctx context.Context, pool *pgxpool.Pool) error {
 		return err
 	}
 	c.record(outcome, walEnd)
+	return c.checkSlot(ctx, pool)
+}
+
+// checkSlot reads the stream's slot from the catalog after the cycle has
+// confirmed and judges it against the ceiling: what the slot retains after
+// this cycle's confirmation is what the next cycle will have to live with.
+// A slot that is gone is reported as lost, since no stream can be reopened
+// on it.
+func (c *Catchup) checkSlot(ctx context.Context, pool *pgxpool.Pool) error {
+	status, found, err := decode.InspectSlot(ctx, pool, c.stream.Slot())
+	if err != nil {
+		return fmt.Errorf("catch-up on %s.%s: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
+	}
+	// INV: ST-4 — a vanished slot is the lost state, not a successful read.
+	if !found {
+		return fmt.Errorf("catch-up on %s.%s: %w", c.flusher.target.Schema(), c.flusher.target.Table(),
+			&decode.SlotLostError{Slot: c.stream.Slot()})
+	}
+	// INV: ST-3 — the ceiling is judged every cycle, fail closed.
+	if err := status.WithinLagCeiling(c.opts.SlotLagCeiling); err != nil {
+		return fmt.Errorf("catch-up on %s.%s: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
+	}
 	return nil
 }
 

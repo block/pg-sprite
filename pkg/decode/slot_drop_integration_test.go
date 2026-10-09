@@ -95,6 +95,35 @@ func TestDropSlotEndedByItsContextIsNotADrop(t *testing.T) {
 	release()
 }
 
+// A drop that must not wait is refused by the server while a walsender
+// holds the slot, as ErrSlotActive, and leaves the slot and its publication
+// in place; once nothing holds the slot the same drop takes both. The
+// verdict is the server's at the drop, so it needs no catalog read first.
+func TestDropIdleSlotRefusesAHeldSlotWithoutWaiting(t *testing.T) {
+	f := newSlotFixture(t)
+	slot := f.createSlot(t)
+	require.NoError(t, slot.Close(t.Context()))
+	release := f.holdSlot(t, slot)
+
+	const noWaitBudget = 10 * time.Second
+	dropCtx, cancel := context.WithTimeout(t.Context(), noWaitBudget)
+	defer cancel()
+	err := decode.DropIdleSlot(dropCtx, f.cfg, f.pool, slot.Name())
+	require.ErrorIs(t, err, decode.ErrSlotActive)
+	require.NoError(t, dropCtx.Err(), "the refusal is the server's, not the context running out")
+	_, found, err := decode.InspectSlot(t.Context(), f.pool, slot.Name())
+	require.NoError(t, err)
+	assert.True(t, found, "a held slot is left for its holder")
+	assert.True(t, f.publicationExists(t, slot.Name()), "the publication stays with the slot")
+
+	release()
+	require.NoError(t, decode.DropIdleSlot(t.Context(), f.cfg, f.pool, slot.Name()))
+	_, found, err = decode.InspectSlot(t.Context(), f.pool, slot.Name())
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.False(t, f.publicationExists(t, slot.Name()))
+}
+
 // A slot wearing the derived name that belongs to another database, or that
 // is physical, is never this route's to drop: the drop refuses and the slot
 // stays. Only the pool's own logical slot is dropped.
