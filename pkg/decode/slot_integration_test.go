@@ -19,19 +19,30 @@ import (
 )
 
 const (
-	sqlstateInvalidParameterValue = "22023"
-	sqlstateUndefinedObject       = "42704"
-	sqlstateInsufficientPrivilege = "42501"
+	sqlstateInvalidParameterValue        = "22023"
+	sqlstateUndefinedObject              = "42704"
+	sqlstateInsufficientPrivilege        = "42501"
+	sqlstateObjectNotInPrerequisiteState = "55000"
 )
 
 // requireSnapshotGone asserts that importing the snapshot failed because
-// the server no longer has it. Servers before 17 report that as an invalid
-// parameter value; 17 onwards as an undefined object.
+// the server no longer has a transaction to take it from. A missing export
+// file is an invalid parameter value before 17 and an undefined object from
+// 17 on. The exporting connection's exit clears its transaction from the
+// proc array before it unlinks the file, so an import that lands in that
+// window still finds the file and is refused instead because the source
+// transaction is not running (object not in prerequisite state); the
+// snapshot is equally unusable either way. The importing transaction is
+// REPEATABLE READ in the same database, so no other prerequisite is unmet.
 func requireSnapshotGone(t *testing.T, err error) {
 	t.Helper()
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr)
-	assert.Contains(t, []string{sqlstateInvalidParameterValue, sqlstateUndefinedObject}, pgErr.Code)
+	assert.Contains(t, []string{
+		sqlstateInvalidParameterValue,
+		sqlstateUndefinedObject,
+		sqlstateObjectNotInPrerequisiteState,
+	}, pgErr.Code)
 }
 
 // Creating the slot exports a snapshot another session can read from: rows
