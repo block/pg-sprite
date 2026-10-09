@@ -21,9 +21,17 @@ const (
 	streamDeadline = 15 * time.Second
 )
 
+// fixtureStream is a stream the fixture opened. It keeps the fixture so a
+// helper that gives up waiting on the stream can report what the server
+// side of it was doing (see walsenderReport).
+type fixtureStream struct {
+	*decode.Stream
+	f slotFixture
+}
+
 // openStream opens the route's stream from a position and arranges for it
 // to be closed after the test.
-func (f slotFixture) openStream(t *testing.T, from decode.LSN) *decode.Stream {
+func (f slotFixture) openStream(t *testing.T, from decode.LSN) fixtureStream {
 	t.Helper()
 	stream, err := decode.OpenStream(t.Context(), f.cfg, f.pool, f.target, from)
 	require.NoError(t, err)
@@ -34,19 +42,29 @@ func (f slotFixture) openStream(t *testing.T, from decode.LSN) *decode.Stream {
 			t.Logf("close stream: %v", err)
 		}
 	})
-	return stream
+	return fixtureStream{Stream: stream, f: f}
+}
+
+// failDeadline fails the test because the stream did not produce what the
+// caller waited for within the stream deadline, with the walsender's side
+// of the story attached: a stream that is quiet because the walsender is
+// asleep, is still starting, or has sent nothing but keepalives are
+// different failures the client cannot tell apart from the silence.
+func (s fixtureStream) failDeadline(t *testing.T, what string) {
+	t.Helper()
+	require.FailNow(t, what, s.f.walsenderReport(t, s.Stream))
 }
 
 // nextChange reads deliveries until one carries a change, within the
 // stream deadline.
-func nextChange(t *testing.T, stream *decode.Stream) decode.ChangeEvent {
+func nextChange(t *testing.T, stream fixtureStream) decode.ChangeEvent {
 	t.Helper()
 	return *nextChangeDelivery(t, stream).Change
 }
 
 // nextChangeDelivery reads deliveries until one carries a change, within
 // the stream deadline, and returns the whole delivery.
-func nextChangeDelivery(t *testing.T, stream *decode.Stream) decode.Delivery {
+func nextChangeDelivery(t *testing.T, stream fixtureStream) decode.Delivery {
 	t.Helper()
 	deadline := time.Now().Add(streamDeadline)
 	for time.Now().Before(deadline) {
@@ -56,12 +74,12 @@ func nextChangeDelivery(t *testing.T, stream *decode.Stream) decode.Delivery {
 			return d
 		}
 	}
-	require.FailNow(t, "no change was delivered before the stream deadline")
+	stream.failDeadline(t, "no change was delivered before the stream deadline")
 	return decode.Delivery{}
 }
 
 // nextChanges reads n changes in stream order.
-func nextChanges(t *testing.T, stream *decode.Stream, n int) []decode.ChangeEvent {
+func nextChanges(t *testing.T, stream fixtureStream, n int) []decode.ChangeEvent {
 	t.Helper()
 	changes := make([]decode.ChangeEvent, 0, n)
 	for range n {
@@ -82,7 +100,7 @@ func assertSameChange(t *testing.T, want, got decode.ChangeEvent) {
 
 // nextError reads deliveries until the stream fails, within the stream
 // deadline, and returns the error that ended it.
-func nextError(t *testing.T, stream *decode.Stream) error {
+func nextError(t *testing.T, stream fixtureStream) error {
 	t.Helper()
 	deadline := time.Now().Add(streamDeadline)
 	for time.Now().Before(deadline) {
@@ -90,14 +108,14 @@ func nextError(t *testing.T, stream *decode.Stream) error {
 			return err
 		}
 	}
-	require.FailNow(t, "the stream did not fail before the stream deadline")
+	stream.failDeadline(t, "the stream did not fail before the stream deadline")
 	return nil
 }
 
 // awaitDelivered reads progress until the stream has delivered at least the
 // position, within the stream deadline; a change arriving meanwhile fails
 // the test, since the caller expects a quiet table.
-func awaitDelivered(t *testing.T, stream *decode.Stream, atLeast decode.LSN) {
+func awaitDelivered(t *testing.T, stream fixtureStream, atLeast decode.LSN) {
 	t.Helper()
 	deadline := time.Now().Add(streamDeadline)
 	for time.Now().Before(deadline) {
@@ -108,8 +126,7 @@ func awaitDelivered(t *testing.T, stream *decode.Stream, atLeast decode.LSN) {
 			return
 		}
 	}
-	require.FailNow(t, "the stream did not deliver the position before the stream deadline",
-		"wanted at least %s, delivered %s", atLeast, stream.Delivered())
+	stream.failDeadline(t, fmt.Sprintf("the stream did not deliver %s before the stream deadline", atLeast))
 }
 
 // exec runs one statement on the fixture's pool.
