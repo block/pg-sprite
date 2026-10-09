@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -22,10 +23,14 @@ import (
 // target — taken before the test moves the catalog under them.
 //
 // pool is the engine's bounded session (every statement under its
-// lock_timeout); operator is an unbounded session standing in for an
-// operator moving the catalog beside the engine. A concurrent reindex
-// waits for every older snapshot in the database, so under the engine's
-// lock_timeout an unrelated session's open transaction would cancel it.
+// lock_timeout); operator stands in for an operator moving the catalog
+// beside the engine. A concurrent reindex waits for every older snapshot
+// in its database, so under the engine's lock_timeout an unrelated
+// session's open transaction would cancel it. The fixture therefore runs
+// in a database of its own, where only its sessions hold snapshots, and
+// the operator session follows the policy the engine sets for its own
+// concurrent builds (LK-2): no lock_timeout, one overall statement
+// deadline, so a wait is bounded without being cut short.
 type staleProofFixture struct {
 	pool     *pgxpool.Pool
 	operator *pgxpool.Pool
@@ -35,13 +40,23 @@ type staleProofFixture struct {
 	existing invalidIndex
 }
 
+// operatorStatementDeadline bounds every statement the fixture's operator
+// session runs; it stands in for the overall deadline a concurrent build
+// takes in place of a lock_timeout.
+const operatorStatementDeadline = 2 * time.Minute
+
 func newStaleProofFixture(t *testing.T) staleProofFixture {
 	t.Helper()
-	url := testutil.StartPostgres(t)
+	url := testutil.NewDatabase(t, testutil.StartPostgres(t))
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	operator, err := pgxpool.New(t.Context(), url)
+	operatorConfig, err := pgxpool.ParseConfig(url)
+	require.NoError(t, err)
+	// INV: LK-2 — no lock_timeout on a session that runs concurrent builds.
+	operatorConfig.ConnConfig.RuntimeParams["statement_timeout"] =
+		strconv.FormatInt(operatorStatementDeadline.Milliseconds(), 10)
+	operator, err := pgxpool.NewWithConfig(t.Context(), operatorConfig)
 	require.NoError(t, err)
 	t.Cleanup(operator.Close)
 	schema := testutil.NewSchema(t, operator)
