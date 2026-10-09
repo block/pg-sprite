@@ -17,8 +17,10 @@ import (
 //     the last cycle: changes waiting for an in-flight chunk or for a
 //     completion the stream has not yet passed.
 //   - lag_bytes is how far the confirmed position trails the server's
-//     write position, in WAL bytes, as of the last cycle; zero until the
-//     server has reported a position.
+//     write position, in WAL bytes, both as of the last cycle: the write
+//     position is pg_current_wal_lsn() read on the pool as the cycle
+//     ended, never the walsender's send position, which stays small
+//     while a backlog is undecoded. Zero until a cycle has run.
 func (c *Catchup) Work(context.Context) (progress.Work, error) {
 	s := c.Status()
 	return progress.Work{

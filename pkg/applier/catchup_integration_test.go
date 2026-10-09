@@ -204,14 +204,16 @@ func (r *catchupRun) awaitStatus(t *testing.T, what string, want func(applier.St
 // committed is in the shadow or was discarded as a change the copy itself
 // read. A buffered entry holds the confirmation below its position, so a
 // confirmation past the end also means the buffer holds nothing from the
-// workload.
+// workload. The catch-up's own measurement of the server's write position
+// reaches the same point, since it is read on the pool after the
+// confirmation, not taken from the walsender.
 func (r *catchupRun) quiesce(t *testing.T, load *testutil.LoadGenerator) testutil.Summary {
 	t.Helper()
 	summary, err := load.Stop()
 	require.NoError(t, err)
 	end := r.f.currentWALLSN(t)
-	r.awaitStatus(t, fmt.Sprintf("confirm past the workload's last commit at %s", end), func(s applier.Status) bool {
-		return s.Confirmed >= end
+	r.awaitStatus(t, fmt.Sprintf("confirm past the workload's last commit at %s and measure the server's write position", end), func(s applier.Status) bool {
+		return s.Confirmed >= end && s.WALEnd >= end
 	})
 	return summary
 }

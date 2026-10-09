@@ -92,9 +92,12 @@ type Status struct {
 	// Confirmed is the position last reported to the server as applied,
 	// which is where a restarted stream resumes from.
 	Confirmed decode.LSN
-	// ServerWALEnd is the server's write position as it last reported it;
-	// zero until it has.
-	ServerWALEnd decode.LSN
+	// WALEnd is the server's write position, pg_current_wal_lsn() read on
+	// the pool after the last cycle's confirmation; zero until a cycle has
+	// run. It is measured there rather than taken from the stream: a
+	// walsender's keepalive carries its send position, how far it has
+	// decoded, which stays small exactly while a backlog is undecoded.
+	WALEnd decode.LSN
 	// Buffered is the number of keys the buffer holds after the last cycle:
 	// entries deferred behind an in-flight chunk or held for a completion.
 	Buffered int
@@ -118,14 +121,14 @@ type Status struct {
 	BatchesDeferred uint64
 }
 
-// Lag is how far the confirmed position trails the server's write position,
-// in WAL bytes; zero until the server has reported a position, or once the
-// confirmation has caught it.
+// Lag is how far the confirmed position trails the server's write position
+// as the last cycle measured it, in WAL bytes; zero until a cycle has run,
+// or once the confirmation has caught it.
 func (s Status) Lag() uint64 {
-	if s.ServerWALEnd <= s.Confirmed {
+	if s.WALEnd <= s.Confirmed {
 		return 0
 	}
-	return uint64(s.ServerWALEnd - s.Confirmed)
+	return uint64(s.WALEnd - s.Confirmed)
 }
 
 // Catchup owns the stream's consumer loop: it reads the stream into a
@@ -169,7 +172,7 @@ func NewCatchup(stream *decode.Stream, flusher *Flusher, positions PositionSourc
 		positions: positions,
 		buffer:    NewBuffer(),
 		opts:      opts,
-		status:    Status{Delivered: stream.Delivered(), Confirmed: stream.Confirmed(), ServerWALEnd: stream.ServerWALEnd()},
+		status:    Status{Delivered: stream.Delivered(), Confirmed: stream.Confirmed()},
 	}, nil
 }
 
@@ -190,7 +193,9 @@ func (c *Catchup) Status() Status {
 // position and the buffer's oldest pending position: everything below it
 // is in the shadow or was discarded as uncut, so a stream reopened from
 // it misses nothing (ST-4). An empty cycle on a quiet table still confirms,
-// so the slot releases WAL while nothing changes.
+// so the slot releases WAL while nothing changes. The cycle ends by reading
+// the server's write position on pool, so Status.Lag measures the WAL the
+// catch-up has yet to work through, not how far the walsender has decoded.
 //
 // Run returns the cause ctx ended with, wrapped, once the stream reports
 // it: a stopped catch-up leaves the stream failed and the slot at the last
@@ -258,7 +263,10 @@ func (c *Catchup) cycle(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 		c.recordFlush(batch, result)
 	}
-	return c.confirm(ctx)
+	if err := c.confirm(ctx); err != nil {
+		return err
+	}
+	return c.measureWALEnd(ctx, pool)
 }
 
 // gather adds changes to the buffer until MaxChanges have been added or
@@ -346,7 +354,24 @@ func (c *Catchup) recordPositions() {
 	defer c.mu.Unlock()
 	c.status.Delivered = c.stream.Delivered()
 	c.status.Confirmed = c.stream.Confirmed()
-	c.status.ServerWALEnd = c.stream.ServerWALEnd()
+}
+
+// measureWALEnd reads the server's write position on pool and records it
+// as the far end of the lag. It runs after the cycle's confirmation, so the
+// position it records is never below the one it confirmed.
+func (c *Catchup) measureWALEnd(ctx context.Context, pool *pgxpool.Pool) error {
+	var text string
+	if err := pool.QueryRow(ctx, `SELECT pg_catalog.pg_current_wal_lsn()::text`).Scan(&text); err != nil {
+		return fmt.Errorf("catch-up on %s.%s: read the server's write position: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
+	}
+	walEnd, err := decode.ParseLSN(text)
+	if err != nil {
+		return fmt.Errorf("catch-up on %s.%s: read the server's write position: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.status.WALEnd = walEnd
+	return nil
 }
 
 func (c *Catchup) recordBufferLocked() {

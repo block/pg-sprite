@@ -72,19 +72,19 @@ func TestConfirmBoundIsDeliveredLoweredToTheOldestPending(t *testing.T) {
 }
 
 // Lag is the WAL between the confirmed position and the server's write
-// position, and zero before the server has reported one or once the
-// confirmation has reached it.
+// position as the last cycle measured it, and zero before a cycle has
+// measured one or once the confirmation has reached it.
 func TestStatusLag(t *testing.T) {
-	assert.Zero(t, Status{Confirmed: 50}.Lag(), "no server position yet")
-	assert.Zero(t, Status{Confirmed: 80, ServerWALEnd: 80}.Lag(), "caught up")
-	assert.Equal(t, uint64(30), Status{Confirmed: 50, ServerWALEnd: 80}.Lag())
+	assert.Zero(t, Status{Confirmed: 50}.Lag(), "no measurement yet")
+	assert.Zero(t, Status{Confirmed: 80, WALEnd: 80}.Lag(), "caught up")
+	assert.Equal(t, uint64(30), Status{Confirmed: 50, WALEnd: 80}.Lag())
 }
 
 // A catch-up's work is its status folded into the counters the tracker
 // publishes: buffered keys and lag at the end of the last cycle, applied
 // changes since Run began.
 func TestCatchupWorkMirrorsStatus(t *testing.T) {
-	c := &Catchup{status: Status{Applied: 12, Buffered: 3, Confirmed: 50, ServerWALEnd: 80}}
+	c := &Catchup{status: Status{Applied: 12, Buffered: 3, Confirmed: 50, WALEnd: 80}}
 	work, err := c.Work(t.Context())
 	require.NoError(t, err)
 	assert.Equal(t, progress.Work{ChangesApplied: 12, ChangesBuffered: 3, LagBytes: 30}, work)

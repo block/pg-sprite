@@ -148,14 +148,15 @@ last snapshot a poller happened to take.
 from the catch-up itself, which reads the decoded change stream into its buffer, drains the
 buffer against the copy's position, flushes each batch into the shadow, and confirms to the
 server what the shadow durably holds. They are read from the catch-up's memory as of the end
-of its last cycle — no catalog read, nothing for a poll to wait on. Native, `copy` and
-`checksum` operations report none of them.
+of its last cycle — no catalog read, nothing for a poll to wait on; the one database read
+behind them, the server's write position for `lag_bytes`, is the catch-up's own, taken as
+each cycle ends. Native, `copy` and `checksum` operations report none of them.
 
 | Counter | Meaning |
 | --- | --- |
 | `changes_applied` | Images and delete markers committed flushes have written to the shadow: exact and monotone. A change the drain discarded because its key was still uncut — the copy's own read of that chunk sees it — is not counted. |
 | `changes_buffered` | Keys the buffer held at the end of the last cycle: changes waiting for an in-flight chunk to land, for a batch a constraint refused to be judged again, or for the stream to pass a completion's read position. A figure that stays high while the copy has finished is a stalled catch-up. |
-| `lag_bytes` | How far the confirmed position trails the server's write position, in WAL bytes, as the server last reported it; `0` until the server has reported a position. Everything below the confirmed position is in the shadow or was discarded as uncut, so this is the WAL the catch-up still has to work through before the cutover can wait for it to reach zero. |
+| `lag_bytes` | How far the confirmed position trails the server's write position, in WAL bytes, both as of the end of the last cycle; `0` until a cycle has run. The write position is `pg_current_wal_lsn()` read on the catch-up's own connection as the cycle ends, not the position the walsender reports in its keepalives: that is how far the walsender has decoded, which stays small exactly while a backlog is undecoded, so a lag taken from it would read near zero when the catch-up is furthest behind. Everything below the confirmed position is in the shadow or was discarded as uncut, so this is the WAL the catch-up still has to work through before the cutover can wait for it to reach zero. |
 
 There is no completion figure for a catch-up: it runs until its owner decides the shadow is
 close enough to the source to cut over, which the owner judges from `lag_bytes` and
