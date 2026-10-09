@@ -79,11 +79,14 @@ func (s *Slot) Name() string { return s.name }
 func (s *Slot) ConsistentPoint() LSN { return s.consistentPoint }
 
 // SnapshotName is the exported snapshot's name, importable by another
-// session of the same database until Close.
+// session of the same database while the replication connection's walsender
+// runs.
 func (s *Slot) SnapshotName() string { return s.snapshotName }
 
-// Close ends the replication connection, and with it the exported snapshot.
-// The slot persists.
+// Close ends the replication connection. The server ends the exported
+// snapshot when the connection's walsender exits, which is after Close
+// returns: a caller that needs the snapshot gone waits for that backend to
+// leave pg_stat_activity. The slot persists.
 func (s *Slot) Close(ctx context.Context) error {
 	if err := s.conn.Close(ctx); err != nil {
 		return fmt.Errorf("close replication connection for slot %s: %w", s.name, err)

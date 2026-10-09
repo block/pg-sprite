@@ -25,19 +25,28 @@ const (
 )
 
 // requireSnapshotGone asserts that importing the snapshot failed because
-// the server no longer has it. Servers before 17 report that as an invalid
-// parameter value; 17 onwards as an undefined object.
-func requireSnapshotGone(t *testing.T, err error) {
+// the server no longer has its export file: an invalid parameter value
+// before PostgreSQL 17, an undefined object from 17 on. The assertion is
+// exact for the server under test, so a refusal for any other reason — the
+// exporting transaction still winding down, say — fails it rather than
+// passing as "gone".
+func requireSnapshotGone(t *testing.T, f slotFixture, err error) {
 	t.Helper()
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr)
-	assert.Contains(t, []string{sqlstateInvalidParameterValue, sqlstateUndefinedObject}, pgErr.Code)
+	const reportsAMissingSnapshotAsUndefinedSince = 170000
+	want := sqlstateInvalidParameterValue
+	if f.serverVersion(t) >= reportsAMissingSnapshotAsUndefinedSince {
+		want = sqlstateUndefinedObject
+	}
+	assert.Equal(t, want, pgErr.Code)
 }
 
 // Creating the slot exports a snapshot another session can read from: rows
 // written after the slot exists are invisible to it, and the consistent
 // point — where decoding on the slot begins — is a position the server had
-// already reached. The snapshot ends with the creating connection.
+// already reached. The snapshot ends when the creating connection's
+// walsender exits, which is after Close returns; the slot outlives both.
 func TestCreateSlotExportsASnapshotAtTheConsistentPoint(t *testing.T) {
 	f := newSlotFixture(t)
 	before := f.currentWALLSN(t)
@@ -64,9 +73,11 @@ func TestCreateSlotExportsASnapshotAtTheConsistentPoint(t *testing.T) {
 	assert.Equal(t, decode.WALStatusReserved, status.WALStatus)
 	assert.Equal(t, []string{f.schema + ".ledger"}, f.publishedTables(t, slot.Name()))
 
+	walsender := f.walsenderPID(t)
 	require.NoError(t, slot.Close(t.Context()))
+	f.waitForBackendExit(t, walsender)
 	_, err = f.importSnapshot(t, slot.SnapshotName())
-	requireSnapshotGone(t, err)
+	requireSnapshotGone(t, f, err)
 	_, found, err = decode.InspectSlot(t.Context(), f.pool, slot.Name())
 	require.NoError(t, err)
 	assert.True(t, found, "the slot outlives the connection that created it")
