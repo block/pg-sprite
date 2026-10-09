@@ -159,6 +159,45 @@ func (f slotFixture) publicationExists(t *testing.T, name string) bool {
 	return exists
 }
 
+// serverVersion is the server's version number, as server_version_num
+// reports it.
+func (f slotFixture) serverVersion(t *testing.T) int {
+	t.Helper()
+	var version int
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT current_setting('server_version_num')::int`).Scan(&version))
+	return version
+}
+
+// walsenderPID is the backend PID of the one walsender on the fixture's
+// database. The fixture holds a single replication connection at a time,
+// so the walsender is the slot's.
+func (f slotFixture) walsenderPID(t *testing.T) int32 {
+	t.Helper()
+	var pid int32
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT pid FROM pg_catalog.pg_stat_activity
+		WHERE backend_type = 'walsender' AND datname = pg_catalog.current_database()`).Scan(&pid))
+	return pid
+}
+
+// waitForBackendExit polls until the backend of the given PID has left
+// pg_stat_activity. A connection's Close returns when the client has sent
+// its terminate message; the backend's exit — and with it the end of any
+// transaction it held, such as a slot's exported snapshot — follows.
+func (f slotFixture) waitForBackendExit(t *testing.T, pid int32) {
+	t.Helper()
+	const backendExit = 10 * time.Second
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		var running bool
+		err := f.pool.QueryRow(t.Context(),
+			`SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_stat_activity WHERE pid = $1)`, pid).Scan(&running)
+		if !assert.NoError(collect, err) {
+			return
+		}
+		assert.False(collect, running, "the backend must have exited")
+	}, backendExit, 5*time.Millisecond)
+}
+
 // currentWALLSN is the server's write position.
 func (f slotFixture) currentWALLSN(t *testing.T) decode.LSN {
 	t.Helper()
