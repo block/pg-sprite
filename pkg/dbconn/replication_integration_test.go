@@ -2,6 +2,7 @@ package dbconn_test
 
 import (
 	"context"
+	"net/url"
 	"testing"
 	"time"
 
@@ -90,13 +91,56 @@ func TestConnectReplicationAsksForWarningsOverTheDatabaseSetting(t *testing.T) {
 	_, err = pool.Exec(t.Context(), `ALTER DATABASE `+pgx.Identifier{database}.Sanitize()+` SET client_min_messages = error`)
 	require.NoError(t, err)
 
+	assert.Equal(t, "warning", showClientMinMessages(t, databaseURL))
+}
+
+// A URL that names client_min_messages in another letter case is a second
+// runtime parameter to pgx, not the same one, and the two go to the server
+// in map order; the connection's own setting is applied after the
+// server has seen both, so the URL's never wins whichever order they
+// took. The connection is opened repeatedly because map order varies
+// per connection.
+func TestConnectReplicationAsksForWarningsOverTheURLInAnyCase(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	databaseURL := testutil.NewDatabase(t, serverURL)
+	parsed, err := url.Parse(databaseURL)
+	require.NoError(t, err)
+	q := parsed.Query()
+	q.Set("CLIENT_MIN_MESSAGES", "error")
+	parsed.RawQuery = q.Encode()
+
+	const connectionsToSample = 20
+	for range connectionsToSample {
+		assert.Equal(t, "warning", showClientMinMessages(t, parsed.String()))
+	}
+}
+
+// A pooler that does not forward client_min_messages as a startup
+// parameter — PgBouncer refuses an unknown one outright, and its documented
+// remedy drops it on the floor — still carries the SET the connection runs
+// once its session is open.
+func TestConnectReplicationAsksForWarningsThroughPgBouncer(t *testing.T) {
+	pooledURL := testutil.StartPostgresBehindPgBouncer(t, testutil.SessionPooling)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: pooledURL})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	_, err = pool.Exec(t.Context(), `ALTER DATABASE postgres SET client_min_messages = error`)
+	require.NoError(t, err)
+
+	assert.Equal(t, "warning", showClientMinMessages(t, pooledURL))
+}
+
+// showClientMinMessages opens a replication connection on databaseURL,
+// returns the client_min_messages its session reports, and closes it, so a
+// test may open as many as it likes under the server's max_wal_senders.
+func showClientMinMessages(t *testing.T, databaseURL string) string {
+	t.Helper()
 	conn, err := dbconn.ConnectReplication(t.Context(), dbconn.Config{URL: databaseURL})
 	require.NoError(t, err)
-	t.Cleanup(func() { assert.NoError(t, conn.Close(context.WithoutCancel(t.Context()))) })
-
 	results, err := conn.Exec(t.Context(), `SHOW client_min_messages`).ReadAll()
+	assert.NoError(t, conn.Close(t.Context()))
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	require.Len(t, results[0].Rows, 1)
-	assert.Equal(t, "warning", string(results[0].Rows[0][0]))
+	return string(results[0].Rows[0][0])
 }

@@ -123,6 +123,34 @@ func TestStreamStopsOnTheWarningWhenTheDatabaseSendsOnlyErrors(t *testing.T) {
 	f.requireDroppedPublicationStops(t, stream)
 }
 
+// A login event trigger runs after the session's startup parameters are
+// applied and can set client_min_messages over them; the replication
+// connection asks for warnings on the open session, after the trigger, so
+// a trigger that sends only errors still cannot hide a withheld change.
+// Login triggers exist from PostgreSQL 17.
+func TestStreamStopsOnTheWarningWhenALoginTriggerSendsOnlyErrors(t *testing.T) {
+	f := newSlotFixture(t)
+	var version int
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT current_setting('server_version_num')::int`).Scan(&version))
+	const loginTriggersSince = 170000
+	if version < loginTriggersSince {
+		t.Skipf("login event triggers exist from PostgreSQL 17; server reports %d", version)
+	}
+	slot := f.createSlot(t)
+	f.exec(t, `
+		CREATE FUNCTION %s.only_errors() RETURNS event_trigger
+		LANGUAGE plpgsql AS $$
+		BEGIN
+			SET client_min_messages = error;
+		END
+		$$`)
+	f.exec(t, `CREATE EVENT TRIGGER only_errors_on_login ON login EXECUTE FUNCTION %s.only_errors()`)
+	stream := f.openStream(t, slot.ConsistentPoint())
+
+	f.dropPublicationUnder(t, slot)
+	f.requireDroppedPublicationStops(t, stream)
+}
+
 // dropPublicationUnder drops the slot's publication under an open stream and
 // commits one change the walsender can no longer send.
 func (f slotFixture) dropPublicationUnder(t *testing.T, slot *decode.Slot) {
