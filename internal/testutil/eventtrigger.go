@@ -14,17 +14,22 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// DDLEvent is the point in a DDL command at which an event trigger fires.
-type DDLEvent string
+// TriggerEvent is the event an event trigger fires on: a point in a DDL
+// command, or a session's login.
+type TriggerEvent string
 
 const (
 	// DDLCommandStart fires before the command runs: the objects it will
 	// create do not exist yet, so a name can still be taken from under it.
-	DDLCommandStart DDLEvent = "ddl_command_start"
+	DDLCommandStart TriggerEvent = "ddl_command_start"
 	// DDLCommandEnd fires after the command has run but inside its
 	// transaction: the objects it created exist and can be altered before
 	// the caller sees the commit.
-	DDLCommandEnd DDLEvent = "ddl_command_end"
+	DDLCommandEnd TriggerEvent = "ddl_command_end"
+	// Login fires once a session has authenticated and its startup
+	// parameters have been applied, so what it does to the session
+	// outranks them. Login triggers exist from PostgreSQL 17.
+	Login TriggerEvent = "login"
 )
 
 // eventTriggerDrainTimeout bounds how long a trigger's drop waits for the
@@ -49,7 +54,7 @@ var errEventTriggerDrainTimedOut = errors.New("event trigger drain timed out")
 // that may still hold the trigger in its event-trigger cache has ended
 // (see dropEventTrigger), which an inline DROP EVENT TRIGGER followed by
 // the function's drop — or the schema's cascade — does not.
-func InstallEventTrigger(t *testing.T, pool *pgxpool.Pool, event DDLEvent, schema, name, body string) {
+func InstallEventTrigger(t *testing.T, pool *pgxpool.Pool, event TriggerEvent, schema, name, body string) {
 	t.Helper()
 	functionName := pgx.Identifier{schema, name}.Sanitize()
 	triggerName := pgx.Identifier{schema + "_" + name}.Sanitize()
@@ -83,7 +88,7 @@ func InstallEventTrigger(t *testing.T, pool *pgxpool.Pool, event DDLEvent, schem
 // made deterministic. The trigger is server-wide (event triggers are), so
 // the schema qualifier scopes it to the test's own objects; the trigger
 // and its function are dropped when the test ends.
-func RunDuringDDL(t *testing.T, pool *pgxpool.Pool, event DDLEvent, tag, schema, table, sql string) {
+func RunDuringDDL(t *testing.T, pool *pgxpool.Pool, event TriggerEvent, tag, schema, table, sql string) {
 	t.Helper()
 	// The command text carries the qualified name followed by a space
 	// (the column list or the next clause); the pattern escapes the
