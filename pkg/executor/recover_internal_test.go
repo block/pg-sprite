@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -20,24 +21,49 @@ import (
 // table with duplicate rows, the invalid leftover of a failed unique build
 // on it, the observation the recovery would act on, and the resolved
 // target — taken before the test moves the catalog under them.
+//
+// pool is the engine's bounded session (every statement under its
+// lock_timeout); operator stands in for an operator moving the catalog
+// beside the engine. A concurrent reindex waits for every older snapshot
+// in its database, so under the engine's lock_timeout an unrelated
+// session's open transaction would cancel it. The fixture therefore runs
+// in a database of its own, where only its sessions hold snapshots, and
+// the operator session follows the policy the engine sets for its own
+// concurrent builds (LK-2): no lock_timeout, one overall statement
+// deadline, so a wait is bounded without being cut short.
 type staleProofFixture struct {
 	pool     *pgxpool.Pool
+	operator *pgxpool.Pool
 	conn     *pgxpool.Conn
 	schema   string
 	target   indexTarget
 	existing invalidIndex
 }
 
+// operatorStatementDeadline bounds every statement the fixture's operator
+// session runs; it stands in for the overall deadline a concurrent build
+// takes in place of a lock_timeout.
+const operatorStatementDeadline = 2 * time.Minute
+
 func newStaleProofFixture(t *testing.T) staleProofFixture {
 	t.Helper()
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	url := testutil.NewDatabase(t, testutil.StartPostgres(t))
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-	schema := testutil.NewSchema(t, pool)
-	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+	operatorConfig, err := pgxpool.ParseConfig(url)
+	require.NoError(t, err)
+	// INV: LK-2 — no lock_timeout on a session that runs concurrent builds.
+	operatorConfig.ConnConfig.RuntimeParams["statement_timeout"] =
+		strconv.FormatInt(operatorStatementDeadline.Milliseconds(), 10)
+	operator, err := pgxpool.NewWithConfig(t.Context(), operatorConfig)
+	require.NoError(t, err)
+	t.Cleanup(operator.Close)
+	schema := testutil.NewSchema(t, operator)
+	_, err = operator.Exec(t.Context(), fmt.Sprintf(
 		"CREATE TABLE %[1]s.t (id int PRIMARY KEY, c int); INSERT INTO %[1]s.t VALUES (1, 7), (2, 7)", schema))
 	require.NoError(t, err)
-	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema))
+	_, err = operator.Exec(t.Context(), fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY idx_left ON %s.t (c)", schema))
 	require.Error(t, err, "a unique build over duplicates must fail")
 
 	conn, err := pool.Acquire(t.Context())
@@ -49,13 +75,14 @@ func newStaleProofFixture(t *testing.T) staleProofFixture {
 	existing, found, err := inspectInvalidIndex(t.Context(), conn, schema, "idx_left")
 	require.NoError(t, err)
 	require.True(t, found, "the failed build must leave an invalid entry to observe")
-	return staleProofFixture{pool: pool, conn: conn, schema: schema, target: target, existing: existing}
+	return staleProofFixture{pool: pool, operator: operator, conn: conn, schema: schema, target: target, existing: existing}
 }
 
-// exec runs one statement that moves the catalog after the observation.
+// exec runs one statement that moves the catalog after the observation, as
+// the operator.
 func (f staleProofFixture) exec(t *testing.T, format string, args ...any) {
 	t.Helper()
-	_, err := f.pool.Exec(t.Context(), fmt.Sprintf(format, args...))
+	_, err := f.operator.Exec(t.Context(), fmt.Sprintf(format, args...))
 	require.NoError(t, err)
 }
 

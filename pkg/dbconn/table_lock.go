@@ -32,6 +32,13 @@ const tableLockObjIDSQL = "hashtext(quote_ident($1) || '.' || quote_ident($2))"
 // ErrInvariantViolation is returned when a dbconn proof cannot be constructed safely.
 var ErrInvariantViolation = errors.New("invariant violation")
 
+// ErrTableLockLost reports that a table lock session lost its lock while
+// work it protected was running. An engine stage wraps it, alongside
+// ErrInvariantViolation, into the LK-1 error it returns for the loss, so a
+// caller can tell the loss — stop, reacquire, resume from the checkpoint —
+// from a breach that must fail closed, without reading the message.
+var ErrTableLockLost = errors.New("table lock lost")
+
 // TableLockKey is the (classid, objid) pair pg_locks reports for a table
 // lock, as PostgreSQL's two-argument advisory lock functions take it.
 type TableLockKey struct {

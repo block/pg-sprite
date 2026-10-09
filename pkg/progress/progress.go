@@ -49,7 +49,7 @@ const (
 // field semantics. Adding a phase or operation value is a contract change
 // and bumps this version, even when no field is added or renamed. Adding a
 // field also bumps this version so strict consumers can detect the new shape.
-const FormatVersion = 5
+const FormatVersion = 6
 
 // Operation is the current operation's execution class.
 type Operation string
@@ -73,6 +73,9 @@ const (
 	// source table with its shadow chunk by chunk, and repairing differing
 	// chunks when its policy says so.
 	OperationChecksum Operation = "checksum"
+	// OperationCatchUp is the copy-and-swap catch-up applying the changes
+	// decoded from the source table's WAL to its shadow.
+	OperationCatchUp Operation = "catch-up"
 )
 
 // Work reports observed work. It is present only when something measured
@@ -81,9 +84,10 @@ const (
 // counter marshals explicitly — a fresh build reports honest zeros, never an
 // empty object a consumer must guess at. Rows and bytes belong to the
 // copy-and-swap row copy; chunks compared, rows hashed, chunks mismatched,
-// chunks repaired and chunks reread to the checksum pass; blocks, tuples
-// and lockers to a concurrent index build. No operation fabricates
-// another's counters.
+// chunks repaired and chunks reread to the checksum pass; changes applied,
+// changes buffered and lag bytes to the catch-up; blocks, tuples and
+// lockers to a concurrent index build. No operation fabricates another's
+// counters.
 type Work struct {
 	RowsCopied       uint64 `json:"rows_copied"`
 	RowsTotal        uint64 `json:"rows_total"`
@@ -94,6 +98,9 @@ type Work struct {
 	ChunksMismatched uint64 `json:"chunks_mismatched"`
 	ChunksRepaired   uint64 `json:"chunks_repaired"`
 	ChunksReread     uint64 `json:"chunks_reread"`
+	ChangesApplied   uint64 `json:"changes_applied"`
+	ChangesBuffered  uint64 `json:"changes_buffered"`
+	LagBytes         uint64 `json:"lag_bytes"`
 	BlocksDone       uint64 `json:"blocks_done"`
 	BlocksTotal      uint64 `json:"blocks_total"`
 	TuplesDone       uint64 `json:"tuples_done"`
