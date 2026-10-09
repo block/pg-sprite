@@ -679,8 +679,21 @@ attempt to reuse — and drops a slot the server created but did not describe us
 sessions of one database on one cluster, by `IDENTIFY_SYSTEM` against `pg_control_system()`,
 before any slot command or `START_REPLICATION`; `DropSlot` waits for a holder under the
 caller's context alone, reports a cut-off wait as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
-drops only a publication of the shape `CreateSlot` makes, and is idempotent) + reaper +
-throttler ceiling (planned).
+drops only a publication of the shape `CreateSlot` makes, and is idempotent; `InspectSlot`
+reads retained WAL on a primary and reports it unknown on a server in recovery rather than
+fail the read; `SlotStatus.WithinLagCeiling` judges a slot against a ceiling in bytes —
+lost before any measure, unknown never read as nothing retained, over the ceiling a typed
+`SlotLagExceededError` — and refuses a ceiling below one byte) + `pkg/checkpoint`
+`Store.ReapOrphanSlots` (one pass over the logical, engine-prefixed slots of the store's own
+database, read in one statement with the checkpoint rows that own them: a slot no row in a
+non-terminal phase names and no process holds is dropped through `DropSlot`, publication and
+all; a slot a live row names, a slot a process holds, and a name wearing the prefix without
+the engine's shape are reported and left; a database whose checkpoint table does not exist
+is refused with `ErrTableMissing` rather than read as all orphans) + `pkg/applier` `Catchup`
+(every cycle ends by inspecting the stream's slot on the pool and judging it against
+`CatchupOptions.SlotLagCeiling`, default `decode.DefaultSlotLagCeiling`, which cannot be
+switched off; a slot that vanished is `SlotLostError`; crossing the ceiling ends `Run` with
+the table lock intact and the slot in place for the operator to read).
 *Source:* risks-and-mitigations § logical-decoding risks.
 
 ### ST-4 — Slot loss is a modeled state transition, not a crash
@@ -712,7 +725,11 @@ stops-on-a-warning-from-the-server tests); `pkg/applier` `Catchup.confirm` is th
 half: it names the lesser of the stream's delivered position and the buffer's oldest pending
 position, read after a refused batch is requeued and completed images are held, so the slot
 never passes a change still buffered (confirm-bound unit test; the requeued-batch convergence
-test holds the confirmation below a deferred change until its chunk lands).
+test holds the confirmation below a deferred change until its chunk lands); the lost state
+is typed — `decode.SlotLostError`, unwrapping to `ErrSlotLost`, telling a slot the server
+reports `wal_status = 'lost'` from one that no longer exists — and `Catchup` enters it from
+the catalog at the end of every cycle, so a slot the server gave up on or dropped ends `Run`
+with that error rather than with a stream failure to be told apart later.
 The reconcile-mode transition itself is the checkpoint/resume state machine (Phase 8). *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 

@@ -149,6 +149,10 @@ func quoteLiteral(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
+// Slot is the name of the slot the stream decodes, so a caller can inspect
+// the slot it is confirming to.
+func (s *Stream) Slot() string { return s.slotName }
+
 // Start is the position decoding was requested from. The server never
 // decodes from below the slot's confirmed position, so a request below it
 // is forwarded there; what the stream was actually sent first shows in the
