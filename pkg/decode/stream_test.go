@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pglogrepl"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -169,6 +170,48 @@ func TestStreamEndsWhenTheServerLeavesCopyBothMode(t *testing.T) {
 	_, _, err = s.handleMessage(t.Context(), &pgproto3.ReadyForQuery{})
 	require.ErrorIs(t, err, ErrInvariantViolation)
 	assert.NotErrorIs(t, err, ErrStreamEnded)
+}
+
+// A warning in copy-both mode is the walsender saying it will withhold
+// changes — a publication it skipped loading — so the stream stops with the
+// server's SQLSTATE reachable rather than letting a later keepalive deliver
+// a position past changes that never arrive; a notice below warning is
+// informational and leaves the stream running.
+func TestStreamStopsOnAWarningFromTheServer(t *testing.T) {
+	s := &Stream{delivered: 100, confirmed: 90}
+
+	_, yielded, err := s.handleMessage(t.Context(), &pgproto3.NoticeResponse{
+		Severity: "NOTICE", SeverityUnlocalized: "NOTICE", Code: "00000", Message: "informational",
+	})
+	require.NoError(t, err)
+	assert.False(t, yielded)
+
+	_, yielded, err = s.handleMessage(t.Context(), &pgproto3.NoticeResponse{
+		Severity: "WARNING", SeverityUnlocalized: "WARNING", Code: "55000", Message: "skipped loading publication",
+	})
+	require.ErrorIs(t, err, ErrInvariantViolation)
+	assert.False(t, yielded)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "55000", pgErr.Code)
+	assert.Equal(t, LSN(100), s.Delivered(), "the delivered position holds")
+}
+
+// A keepalive sent while a transaction is being replayed carries a position
+// above the changes the walsender has yet to send from it, so a change that
+// follows the keepalive leaves ServerWALEnd where the keepalive put it,
+// even while that position is still above Delivered.
+func TestServerWALEndKeepsAKeepaliveAboveALaterChange(t *testing.T) {
+	s := &Stream{delivered: 100, relation: keyOnlyRelation(7)}
+	_, _, err := s.handleWALData(walData(160, beginMessage(240)))
+	require.NoError(t, err)
+	_, _, err = s.handleKeepalive(t.Context(), pglogrepl.PrimaryKeepaliveMessage{ServerWALEnd: 230})
+	require.NoError(t, err)
+	require.Equal(t, LSN(100), s.Delivered(), "a keepalive inside a transaction is not delivered")
+
+	_, _, err = s.handleWALData(walData(210, insertMessage(7, "101")))
+	require.NoError(t, err)
+	assert.Equal(t, LSN(230), s.ServerWALEnd())
 }
 
 // Transaction boundaries must pair: a BEGIN inside a transaction or a

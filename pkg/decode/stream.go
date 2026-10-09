@@ -216,13 +216,35 @@ func (s *Stream) handleMessage(ctx context.Context, msg pgproto3.BackendMessage)
 		// The server leaves copy-both mode when it shuts down with the
 		// slot intact.
 		return Delivery{}, false, fmt.Errorf("%w: slot %s at %s", ErrStreamEnded, s.slotName, s.confirmed)
-	case *pgproto3.NoticeResponse, *pgproto3.ParameterStatus:
-		// Asynchronous messages the connection has already recorded.
+	case *pgproto3.NoticeResponse:
+		return s.handleNotice(msg)
+	case *pgproto3.ParameterStatus:
+		// An asynchronous message the connection has already recorded.
 		return Delivery{}, false, nil
 	default:
 		return Delivery{}, false, fmt.Errorf("%w: ST-4: stream from slot %s received %T outside of copy-both mode",
 			ErrInvariantViolation, s.slotName, msg)
 	}
+}
+
+// warningSeverity is the unlocalized severity of a notice the walsender
+// sends when it will not send something.
+const warningSeverity = "WARNING"
+
+// handleNotice takes one notice the server sent in copy-both mode. A notice
+// below warning is informational. A warning is the walsender saying it will
+// not send something — the changes under a publication it skipped loading —
+// and is the stream's one chance to stop before a keepalive moves Delivered
+// past them.
+func (s *Stream) handleNotice(msg *pgproto3.NoticeResponse) (Delivery, bool, error) {
+	if msg.SeverityUnlocalized != warningSeverity {
+		return Delivery{}, false, nil
+	}
+	// INV: ST-4 — a change the walsender withheld is never delivered, so a
+	// position past it must not be either.
+	pgErr := pgconn.ErrorResponseToPgError((*pgproto3.ErrorResponse)(msg))
+	return Delivery{}, false, fmt.Errorf("%w: ST-4: stream from slot %s: the server will withhold changes: %w",
+		ErrInvariantViolation, s.slotName, pgErr)
 }
 
 // waitElapsed reports whether a receive error is only the wait running out:

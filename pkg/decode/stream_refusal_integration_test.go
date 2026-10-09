@@ -46,6 +46,24 @@ func TestOpenStreamRefusesAReplicationConnectionOnAnotherServer(t *testing.T) {
 	assert.Nil(t, stream)
 }
 
+// The cluster proof ties the replication connection to the pool, not to the
+// target: a connection and a pool that agree on another database of the
+// same cluster are refused as the stream's own ST-3 violation, before the
+// server is asked for a slot that database does not hold.
+func TestOpenStreamRefusesAPoolOnAnotherDatabase(t *testing.T) {
+	f := newSlotFixture(t)
+	slot := f.createSlot(t)
+
+	other := dbconn.Config{URL: testutil.NewDatabase(t, f.serverURL)}
+	otherPool, err := dbconn.NewPool(t.Context(), other)
+	require.NoError(t, err)
+	t.Cleanup(otherPool.Close)
+
+	stream, err := decode.OpenStream(t.Context(), other, otherPool, f.target, slot.ConsistentPoint())
+	require.ErrorIs(t, err, decode.ErrInvariantViolation)
+	assert.Nil(t, stream)
+}
+
 // A source renamed under the stream is no longer the target: its next
 // change stops the stream rather than arriving under the old name.
 func TestStreamStopsWhenTheSourceIsRenamed(t *testing.T) {
@@ -72,9 +90,12 @@ func TestStreamStopsWhenTheKeyLeavesTheReplicaIdentity(t *testing.T) {
 	require.ErrorIs(t, nextError(t, stream), decode.ErrInvariantViolation)
 }
 
-// A publication dropped under the stream fails the decoder on the server;
-// the stream returns the server's error, with its SQLSTATE reachable,
-// rather than a protocol violation.
+// A publication dropped under the stream ends it with the server's
+// SQLSTATE reachable: before PostgreSQL 18 the decoder fails on the missing
+// publication (42704); from 18 it skips loading the publication with a
+// warning (55000) and sends nothing for the change, which the stream
+// refuses as an ST-4 violation rather than letting a keepalive step past
+// the change the slot will never resend.
 func TestStreamReturnsTheDecodersError(t *testing.T) {
 	f := newSlotFixture(t)
 	slot := f.createSlot(t)
@@ -83,7 +104,16 @@ func TestStreamReturnsTheDecodersError(t *testing.T) {
 	require.NoError(t, err)
 	f.exec(t, `INSERT INTO %s.ledger (id, note) VALUES (101, 'unpublished')`)
 
-	requireSQLState(t, nextError(t, stream), "42704")
+	var version int
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT current_setting('server_version_num')::int`).Scan(&version))
+	const skipsAMissingPublicationSince = 180000
+	err = nextError(t, stream)
+	if version >= skipsAMissingPublicationSince {
+		require.ErrorIs(t, err, decode.ErrInvariantViolation)
+		requireSQLState(t, err, "55000")
+		return
+	}
+	requireSQLState(t, err, "42704")
 }
 
 // The caller's own deadline ends the wait even when it falls inside it:
