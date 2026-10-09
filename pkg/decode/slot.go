@@ -123,7 +123,7 @@ func CreateSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, targ
 	// The pool was proven to be on the target's database when the
 	// publication was made; proving the connection is on the pool's cluster
 	// and database puts the slot where the name says.
-	if err := proveSameServer(ctx, conn, pool); err != nil {
+	if _, err := proveSameServer(ctx, conn, pool); err != nil {
 		return nil, errors.Join(fmt.Errorf("create slot %s: %w", name, err), conn.Close(ctx))
 	}
 

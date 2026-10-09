@@ -211,8 +211,10 @@ through an index the buffer keeps exact) and
 refuses with `ErrInvariantViolation` an event the source could not
 have produced given the buffer — an INSERT over a live image or with an omitted column (CO-8),
 an UPDATE over a marker, a move from a deleted key or onto a live one; `OldestPending` bounds
-the position a stream may confirm without losing a buffered entry on replay, and a drained
-`Batch.OldestFirstLSN` bounds it for the batch's own entries until their flush commits.
+the position a stream may confirm without losing a buffered entry on replay — it is the
+`Delivered` the earliest buffered event arrived with, never the event's own LSN, which can lie
+below a position already confirmed (ST-4) — and a drained `Batch.OldestFirstLSN` bounds it for
+the batch's own entries until their flush commits.
 *Source:* Spirit `pkg/change/subscription_buffered.go` (stated invariant), narrowed to
 the v1 key shape; the merge rule is this doc set's addition for pgoutput's partial images.
 
@@ -289,7 +291,9 @@ value in the new tuple as the unchanged-TOAST marker (type byte `u`) — the col
 column count is the full count, and there is no value; the marker means "leave the stored value
 unchanged", not NULL or an empty value. A full-row upsert that invents a value for that column
 would overwrite live shadow data and silently break convergence. *Enforced:* `pkg/decode`
-per-column presence on `ChangeEvent`; `pkg/applier` `Buffer` keeps the marker through every
+per-column presence on `ChangeEvent` — the `Stream` carries a text value or NULL as a present
+column and the marker as an absent one, and refuses a tuple whose column count does not match
+the relation rather than line columns up by guess; `pkg/applier` `Buffer` keeps the marker through every
 merge, and `Flusher` writes a marker-bearing image of a row that did not move as an `UPDATE` of
 only its present columns — zero rows updated is an `ErrInvariantViolation`, never an insert
 that invents the omitted value — and completes a marker before the whole-row fallback inserts
@@ -652,11 +656,11 @@ engine-prefixed slots (including one stranded on a demoted writer after failover
 slot-lag ceiling aborts the migration before an abandoned slot can fill the volume. No exit path
 leaves a slot behind silently. *Enforced:* `pkg/decode` slot lifecycle (`CreateSlot` makes the
 publication before the slot so a refusal leaves no slot — the publication stays for the next
-attempt to reuse — and drops a slot the server created but did not describe usably; both
-`CreateSlot` and `DropSlot` prove the replication connection and the pool are sessions of one
-database on one cluster, by `IDENTIFY_SYSTEM` against `pg_control_system()`, before any slot
-command; `DropSlot` waits for a holder under the caller's context alone, reports a cut-off wait
-as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
+attempt to reuse — and drops a slot the server created but did not describe usably;
+`CreateSlot`, `DropSlot`, and `OpenStream` prove the replication connection and the pool are
+sessions of one database on one cluster, by `IDENTIFY_SYSTEM` against `pg_control_system()`,
+before any slot command or `START_REPLICATION`; `DropSlot` waits for a holder under the
+caller's context alone, reports a cut-off wait as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
 drops only a publication of the shape `CreateSlot` makes, and is idempotent) + reaper +
 throttler ceiling (planned).
 *Source:* risks-and-mitigations § logical-decoding risks.
@@ -666,8 +670,28 @@ throttler ceiling (planned).
 Losing the slot (Aurora failover) enters **reconcile mode** — keep the shadow and copy watermark,
 new slot, checksum-repair pass under the CO-3 self-heal policy — and is handled distinctly from a
 process crash (slot survives, clean resume). The engine detects writer-identity changes and slot
-disappearance rather than blindly continuing.
-*Enforced:* checkpoint/resume state machine (Phase 8). *Source:*
+disappearance rather than blindly continuing. The slot's confirmed position is the resume point
+a clean resume replays from, so it moves only on the consumer's word: never from a keepalive
+reply, never past a transaction the consumer has not been handed in full. Positions order
+transactions by their commit: pgoutput sends a transaction whole when it commits, so a change's
+own LSN can lie below a position already delivered or confirmed, and the server replays by
+commit position — a resume must never skip a replayed change for lying below its checkpoint.
+*Enforced:* `pkg/decode` `Stream` — `Delivered` moves on a transaction's commit or on a keepalive
+between transactions and never names a position a transaction not yet yielded in full committed
+at or below; every `ChangeEvent` carries the `Delivered` it arrived with, the position a caller
+may confirm while that change is unapplied; `Confirm` is the only standby-status report carrying
+a position, sets write, flush, and apply to it explicitly, refuses a regression or a position
+beyond `Delivered`, and records nothing the server was not told; a keepalive reply carries the
+confirmed position alone; a warning the server sends in copy-both mode — the walsender saying it
+will withhold changes, as from a publication it skipped loading — stops the stream fail-closed
+before a keepalive can deliver a position past them; the server ending replication with the slot intact is `ErrStreamEnded`,
+distinct from a fail-closed violation, so a resume tells a clean restart from slot loss; a
+reopened stream replays every transaction that committed above the confirmed position
+(confirm-moves-the-slot, keepalive-replies-leave-it, refuse-beyond-delivered,
+reopen-replays-from-confirmed, interleaved-transaction-below-the-confirmed-position,
+confirm-refuses-after-stop, confirm-leaves-the-record-when-the-send-fails,
+stops-on-a-warning-from-the-server tests).
+The reconcile-mode transition itself is the checkpoint/resume state machine (Phase 8). *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum

@@ -17,19 +17,19 @@ func col(name string, value any) decode.Column {
 func marker(name string) decode.Column { return decode.Column{Name: name, Present: false} }
 
 func insert(lsn decode.LSN, key int64, cols ...decode.Column) decode.ChangeEvent {
-	return decode.ChangeEvent{Kind: decode.Insert, LSN: lsn, Key: key, Columns: cols}
+	return decode.ChangeEvent{Kind: decode.Insert, LSN: lsn, Delivered: lsn, Key: key, Columns: cols}
 }
 
 func update(lsn decode.LSN, key int64, cols ...decode.Column) decode.ChangeEvent {
-	return decode.ChangeEvent{Kind: decode.Update, LSN: lsn, Key: key, Columns: cols}
+	return decode.ChangeEvent{Kind: decode.Update, LSN: lsn, Delivered: lsn, Key: key, Columns: cols}
 }
 
 func keyMove(lsn decode.LSN, from, to int64, cols ...decode.Column) decode.ChangeEvent {
-	return decode.ChangeEvent{Kind: decode.Update, LSN: lsn, Key: to, OldKey: &from, Columns: cols}
+	return decode.ChangeEvent{Kind: decode.Update, LSN: lsn, Delivered: lsn, Key: to, OldKey: &from, Columns: cols}
 }
 
 func del(lsn decode.LSN, key int64) decode.ChangeEvent {
-	return decode.ChangeEvent{Kind: decode.Delete, LSN: lsn, Key: key}
+	return decode.ChangeEvent{Kind: decode.Delete, LSN: lsn, Delivered: lsn, Key: key}
 }
 
 func entry(t *testing.T, b *Buffer, key int64) Entry {
@@ -343,6 +343,50 @@ func TestBufferOldestPending(t *testing.T) {
 	oldest, ok := b.OldestPending()
 	require.True(t, ok)
 	assert.Equal(t, decode.LSN(10), oldest)
+}
+
+// The position an entry owes the stream is the delivered position its
+// event arrived with, not the event's own LSN: a change written before an
+// earlier transaction committed arrives with an LSN below what the caller
+// has already confirmed, and bounding the confirm by that LSN would ask the
+// stream to go backwards.
+func TestBufferOldestPendingIsTheDeliveredPositionNotTheChangesLSN(t *testing.T) {
+	b := NewBuffer()
+	writtenFirstCommittedLast := decode.ChangeEvent{
+		Kind: decode.Insert, LSN: 50, Delivered: 80, Key: 1, Columns: []decode.Column{col("label", "a")},
+	}
+	require.NoError(t, b.Add(writtenFirstCommittedLast))
+
+	oldest, ok := b.OldestPending()
+	require.True(t, ok)
+	assert.Equal(t, decode.LSN(80), oldest)
+	assert.Equal(t, decode.LSN(80), b.entries[1].FirstLSN)
+}
+
+// Every kind of event keys its entry on the delivered position it arrived
+// with, not on its own LSN: an UPDATE of a key the buffer does not hold, a
+// DELETE, and a key move, whose moved image and old-key marker both owe the
+// stream the same position.
+func TestBufferKeysEveryEventKindOnItsDeliveredPosition(t *testing.T) {
+	oldKey := int64(1)
+	for name, ev := range map[string]decode.ChangeEvent{
+		"update":   {Kind: decode.Update, LSN: 50, Delivered: 80, Key: 2, Columns: []decode.Column{col("label", "a")}},
+		"delete":   {Kind: decode.Delete, LSN: 50, Delivered: 80, Key: 2},
+		"key move": {Kind: decode.Update, LSN: 50, Delivered: 80, Key: 2, OldKey: &oldKey, Columns: []decode.Column{col("label", "a")}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			b := NewBuffer()
+			require.NoError(t, b.Add(ev))
+
+			oldest, ok := b.OldestPending()
+			require.True(t, ok)
+			assert.Equal(t, decode.LSN(80), oldest)
+			require.NotEmpty(t, b.entries)
+			for key, e := range b.entries {
+				assert.Equal(t, decode.LSN(80), e.FirstLSN, "entry for key %d", key)
+			}
+		})
+	}
 }
 
 func TestEntryKindStrings(t *testing.T) {

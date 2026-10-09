@@ -67,11 +67,21 @@ type Column struct {
 
 // ChangeEvent is one decoded row change. OldKey is non-nil only when an update moved the key.
 type ChangeEvent struct {
-	Kind    ChangeKind
-	LSN     LSN
-	Key     int64
-	OldKey  *int64
-	Columns []Column
+	Kind ChangeKind
+	// LSN is the WAL position the change was written at. The server sends
+	// a transaction when it commits, so LSN can lie below a position the
+	// stream has already delivered or the caller has already confirmed:
+	// it orders changes within their transaction, not against the stream.
+	LSN LSN
+	// Delivered is the stream's delivered position when the change
+	// arrived. It lies below the change's commit and never below anything
+	// already confirmed, so it is the position a caller may confirm while
+	// the change is unapplied: a stream reopened from it replays the
+	// change's transaction.
+	Delivered LSN
+	Key       int64
+	OldKey    *int64
+	Columns   []Column
 }
 
 // PresentColumns returns only values present in the decoded row image.

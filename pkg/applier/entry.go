@@ -54,8 +54,11 @@ type Entry struct {
 	// order; a column with Present=false is an unchanged-TOAST marker whose
 	// value no buffered event carried. It is nil for a DeleteMarker.
 	Columns []decode.Column
-	// FirstLSN is the position of the earliest event this entry still holds:
-	// a stream confirmed past it would lose the entry on replay.
+	// FirstLSN is the delivered position the earliest event this entry still
+	// holds arrived with (decode.ChangeEvent.Delivered): a stream confirmed
+	// past it could have discarded that event's transaction, so the entry
+	// would be lost on replay. It is not the event's own LSN, which can lie
+	// below a position already confirmed.
 	FirstLSN decode.LSN
 }
 

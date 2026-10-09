@@ -90,7 +90,7 @@ func dropReplicationSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.P
 	if err != nil {
 		return fmt.Errorf("drop slot %s: %w", name, err)
 	}
-	if err := proveSameServer(ctx, conn, pool); err != nil {
+	if _, err := proveSameServer(ctx, conn, pool); err != nil {
 		return errors.Join(fmt.Errorf("drop slot %s: %w", name, err), conn.Close(context.WithoutCancel(ctx)))
 	}
 	// INV: ST-3 — the wait is bounded by ctx alone; ending it is an error
