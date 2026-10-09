@@ -11,6 +11,10 @@ import (
 // errors.Is check covers a breach raised here or in the connection layer.
 var ErrInvariantViolation = dbconn.ErrInvariantViolation
 
+// ErrTableLockLost aliases dbconn's table lock loss: every LK-1 error the
+// applier returns for a lost lock wraps it, with ErrInvariantViolation.
+var ErrTableLockLost = dbconn.ErrTableLockLost
+
 // Buffer holds the latest knowledge of every primary key captured since the
 // last flush: one Entry per key, merged rather than replaced, so a flush
 // applies each key once with its newest image or deletion (CO-5). It is not

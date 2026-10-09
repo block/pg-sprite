@@ -74,7 +74,7 @@ func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 5,
+		"format_version": 6,
 		"phase": "running",
 		"step": 2,
 		"total_steps": 4,
@@ -94,6 +94,9 @@ func TestSnapshotJSONShapeForACopyStep(t *testing.T) {
 				"chunks_mismatched": 0,
 				"chunks_repaired": 0,
 				"chunks_reread": 0,
+				"changes_applied": 0,
+				"changes_buffered": 0,
+				"lag_bytes": 0,
 				"blocks_done": 0,
 				"blocks_total": 0,
 				"tuples_done": 0,
@@ -129,7 +132,7 @@ func TestSnapshotJSONShapeForAChecksumStep(t *testing.T) {
 	raw, err := json.Marshal(snapshot)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 5,
+		"format_version": 6,
 		"phase": "running",
 		"step": 3,
 		"total_steps": 4,
@@ -148,6 +151,65 @@ func TestSnapshotJSONShapeForAChecksumStep(t *testing.T) {
 				"chunks_mismatched": 2,
 				"chunks_repaired": 2,
 				"chunks_reread": 1,
+				"changes_applied": 0,
+				"changes_buffered": 0,
+				"lag_bytes": 0,
+				"blocks_done": 0,
+				"blocks_total": 0,
+				"tuples_done": 0,
+				"tuples_total": 0,
+				"lockers_total": 0,
+				"lockers_done": 0
+			}
+		}
+	}`, string(raw))
+}
+
+// catchupCounters are distinct per field so a swapped pair cannot pass: a
+// catch-up that has applied many changes, holds a few behind an in-flight
+// chunk, and trails the server by some WAL.
+var catchupCounters = progress.Work{ChangesApplied: 8200, ChangesBuffered: 37, LagBytes: 65536}
+
+// The catch-up step's JSON is the adapter-facing contract for the catch-up
+// operation: its operation value, and work carrying the engine's change and
+// lag counters with the copy, checksum and build counters at honest zero.
+func TestSnapshotJSONShapeForACatchUpStep(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(100, 0)}
+	tracker, err := progress.NewTracker(clock)
+	require.NoError(t, err)
+	tracker.Start(4, progress.OperationAdmitting)
+	clock.now = clock.now.Add(2 * time.Second)
+	tracker.StartStep(3, progress.OperationCatchUp, "")
+	tracker.SetWorkSource(fakeSource{work: func(context.Context) (progress.Work, error) { return catchupCounters, nil }})
+	clock.now = clock.now.Add(750 * time.Millisecond)
+
+	snapshot, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	raw, err := json.Marshal(snapshot)
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"format_version": 6,
+		"phase": "running",
+		"step": 3,
+		"total_steps": 4,
+		"elapsed_ns": 2750000000,
+		"step_elapsed_ns": 750000000,
+		"detail": {
+			"operation": "catch-up",
+			"active": true,
+			"work": {
+				"rows_copied": 0,
+				"rows_total": 0,
+				"bytes_copied": 0,
+				"bytes_total": 0,
+				"chunks_compared": 0,
+				"rows_hashed": 0,
+				"chunks_mismatched": 0,
+				"chunks_repaired": 0,
+				"chunks_reread": 0,
+				"changes_applied": 8200,
+				"changes_buffered": 37,
+				"lag_bytes": 65536,
 				"blocks_done": 0,
 				"blocks_total": 0,
 				"tuples_done": 0,

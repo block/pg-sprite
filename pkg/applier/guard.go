@@ -163,14 +163,15 @@ func confirmRelation(role, schema, table string, proven uint32, found *uint32) e
 }
 
 // lockLost reports the table lock's loss as the flusher's invariant
-// violation, or nil while the session still holds it.
+// violation wrapping ErrTableLockLost, or nil while the session still
+// holds it.
 func (f *Flusher) lockLost() error {
 	lost := f.lock.Err()
 	if lost == nil {
 		return nil
 	}
 	// INV: LK-1
-	return fmt.Errorf("%w (LK-1): table lock was lost during the flush: %w", ErrInvariantViolation, lost)
+	return fmt.Errorf("%w (LK-1): %w: %w", ErrInvariantViolation, ErrTableLockLost, lost)
 }
 
 // lostOr returns the lock's loss when the session has reported one — a
@@ -229,7 +230,7 @@ func requireTableLock(lock *dbconn.TableLockSession, target preflight.CopySwapTa
 		return fmt.Errorf("%w (LK-1): table lock is for %s.%s, proof is for %s.%s", ErrInvariantViolation, held.Schema(), held.Table(), target.Schema(), target.Table())
 	}
 	if err := lock.Err(); err != nil {
-		return fmt.Errorf("%w (LK-1): table lock was lost before the flush: %w", ErrInvariantViolation, err)
+		return fmt.Errorf("%w (LK-1): %w before the flush: %w", ErrInvariantViolation, ErrTableLockLost, err)
 	}
 	return nil
 }
