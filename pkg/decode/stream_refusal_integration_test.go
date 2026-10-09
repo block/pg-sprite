@@ -137,14 +137,8 @@ func TestStreamStopsOnTheWarningWhenALoginTriggerSendsOnlyErrors(t *testing.T) {
 		t.Skipf("login event triggers exist from PostgreSQL 17; server reports %d", version)
 	}
 	slot := f.createSlot(t)
-	f.exec(t, `
-		CREATE FUNCTION %s.only_errors() RETURNS event_trigger
-		LANGUAGE plpgsql AS $$
-		BEGIN
-			SET client_min_messages = error;
-		END
-		$$`)
-	f.exec(t, `CREATE EVENT TRIGGER only_errors_on_login ON login EXECUTE FUNCTION %s.only_errors()`)
+	testutil.InstallEventTrigger(t, f.pool, testutil.Login, f.schema, "only_errors",
+		`SET client_min_messages = error;`)
 	stream := f.openStream(t, slot.ConsistentPoint())
 
 	f.dropPublicationUnder(t, slot)
