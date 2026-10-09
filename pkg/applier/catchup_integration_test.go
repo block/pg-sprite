@@ -94,6 +94,7 @@ func (f catchupFixture) assertConverged(t *testing.T, shadow schemachange.BuiltS
 type catchupRun struct {
 	f       catchupFixture
 	shadow  schemachange.BuiltShadow
+	lock    *dbconn.TableLockSession
 	copier  *copier.Copier
 	catchup *applier.Catchup
 	cancel  context.CancelFunc
@@ -105,12 +106,38 @@ type catchupRun struct {
 // source's and the flush writes the columns the shadow kept.
 const schemaChange = `ALTER TABLE %s DROP COLUMN label`
 
+// catchupSetup is how a test wires its catch-up. The zero value is the
+// orchestrator's wiring under schemaChange: the catch-up judges keys
+// against the live copier, which the test runs with copy.
+type catchupSetup struct {
+	// change is the schema change the shadow is built for; empty means
+	// schemaChange.
+	change string
+	opts   applier.CatchupOptions
+	// lockOpts shape the table lock session the copier and the flusher share.
+	lockOpts []dbconn.TableLockOption
+	// positions, when set, replaces the copier as the catch-up's judge of
+	// keys. The copy then runs to completion before the catch-up starts, so
+	// the shadow holds every row, and the test moves the position by hand.
+	positions applier.PositionSource
+}
+
 func startCatchup(t *testing.T, f catchupFixture, opts applier.CatchupOptions) *catchupRun {
 	t.Helper()
-	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.table.Schema, f.table.Table)
+	return startCatchupWith(t, f, catchupSetup{opts: opts})
+}
+
+func startCatchupWith(t *testing.T, f catchupFixture, setup catchupSetup) *catchupRun {
+	t.Helper()
+	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.table.Schema, f.table.Table, setup.lockOpts...)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		assert.NoError(t, lock.Release(context.WithoutCancel(t.Context())))
+		err := lock.Release(context.WithoutCancel(t.Context()))
+		if lock.Err() != nil {
+			assert.Error(t, err, "releasing a session that lost its lock reports the loss")
+			return
+		}
+		assert.NoError(t, err)
 	})
 
 	slot, err := decode.CreateSlot(t.Context(), f.cfg, f.pool, f.target)
@@ -121,7 +148,11 @@ func startCatchup(t *testing.T, f catchupFixture, opts applier.CatchupOptions) *
 		assert.NoError(t, decode.DropSlot(ctx, f.cfg, f.pool, slot.Name()))
 	})
 
-	alter, err := statement.ParseOne(fmt.Sprintf(schemaChange, pgx.Identifier{f.table.Schema, f.table.Table}.Sanitize()))
+	change := setup.change
+	if change == "" {
+		change = schemaChange
+	}
+	alter, err := statement.ParseOne(fmt.Sprintf(change, pgx.Identifier{f.table.Schema, f.table.Table}.Sanitize()))
 	require.NoError(t, err)
 	shadow, err := schemachange.BuildShadow(t.Context(), f.pool, lock, f.target, alter, schemachange.Options{})
 	require.NoError(t, err)
@@ -142,11 +173,18 @@ func startCatchup(t *testing.T, f catchupFixture, opts applier.CatchupOptions) *
 		Chunker: copier.ChunkerOptions{InitialRows: 50, MaxRows: 50},
 	})
 	require.NoError(t, err)
-	catchup, err := applier.NewCatchup(stream, flusher, c, opts)
+	run := &catchupRun{f: f, shadow: shadow, lock: lock, copier: c, done: make(chan error, 1)}
+	positions := applier.PositionSource(c)
+	if setup.positions != nil {
+		run.copy(t)
+		positions = setup.positions
+	}
+	catchup, err := applier.NewCatchup(stream, flusher, positions, setup.opts)
 	require.NoError(t, err)
+	run.catchup = catchup
 
 	ctx, cancel := context.WithCancel(t.Context())
-	run := &catchupRun{f: f, shadow: shadow, copier: c, catchup: catchup, cancel: cancel, done: make(chan error, 1)}
+	run.cancel = cancel
 	go func() { run.done <- catchup.Run(ctx, f.pool) }()
 	t.Cleanup(func() {
 		// A test that stopped the run already has its result; this is the

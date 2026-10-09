@@ -55,7 +55,11 @@ type CatchupOptions struct {
 	// Tracker, when set, is told the catch-up's work for the lifetime of
 	// Run: the catch-up is its progress.WorkSource from before the first
 	// cycle until just before Run returns. The caller owns the tracker's
-	// steps; the catch-up only fills the current step's counters.
+	// steps; the catch-up only fills the current step's counters. A tracker
+	// polls one source at a time, so a catch-up that runs alongside the
+	// copy is given no tracker, or one of its own: registering it on the
+	// copier's tracker would hide the copier's counters, as registering the
+	// copier on this one would hide the catch-up's.
 	Tracker *progress.Tracker
 }
 
@@ -83,8 +87,9 @@ func (o CatchupOptions) validate() error {
 	return nil
 }
 
-// Status is one consistent snapshot of a catch-up: the stream's positions
-// and what the buffer and the flushes have done with the changes.
+// Status is one consistent snapshot of a catch-up as of the end of its last
+// completed cycle: the stream's positions and what the buffer and the
+// flushes have done with the changes, all recorded together.
 type Status struct {
 	// Delivered is the stream's delivered position: every transaction that
 	// committed at or below it has been added to the buffer or discarded.
@@ -176,7 +181,7 @@ func NewCatchup(stream *decode.Stream, flusher *Flusher, positions PositionSourc
 	}, nil
 }
 
-// Status returns the catch-up as of the end of its last cycle.
+// Status returns the catch-up as of the end of its last completed cycle.
 func (c *Catchup) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -197,17 +202,28 @@ func (c *Catchup) Status() Status {
 // the server's write position on pool, so Status.Lag measures the WAL the
 // catch-up has yet to work through, not how far the walsender has decoded.
 //
+// Run never returns nil: a catch-up has no end of its own, so its owner
+// stops it by ending ctx once the shadow is close enough to cut over, and
 // Run returns the cause ctx ended with, wrapped, once the stream reports
-// it: a stopped catch-up leaves the stream failed and the slot at the last
-// confirmed position, which is where the next stream resumes. Every flush
-// runs under the lock session's Bind context, so losing the table lock
-// cancels the flush in flight and Run reports the loss. While it runs the
-// catch-up is the tracker's work source (CatchupOptions.Tracker), and it
-// has stopped being one by the time Run returns.
+// it. A stopped catch-up leaves the stream failed and the slot at the last
+// confirmed position, which is where the next stream resumes. A cycle
+// error that is not the stop itself travels with the stop, so a caller
+// checks the failure sentinels — ErrInvariantViolation, ErrTableLockLost,
+// ErrBatchDeferred — before it reads the stop as clean. The whole run is
+// bound to the table lock session, so losing the lock ends the cycle in
+// flight, a flush or a quiet wait on the stream alike, and Run reports the
+// loss as ErrTableLockLost under LK-1. A batch the shadow refuses once the
+// copy has landed every key ends Run with ErrBatchDeferred: no chunk is
+// left to change the outcome, so the schema change cannot converge. While
+// it runs the catch-up is the tracker's work source (CatchupOptions.Tracker),
+// and it has stopped being one by the time Run returns.
 func (c *Catchup) Run(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := c.start(); err != nil {
 		return err
 	}
+	// INV: LK-1 — moving the confirmed position is work the lock protects.
+	ctx, unbind := c.flusher.lock.Bind(ctx)
+	defer unbind()
 	stopReporting := c.report()
 	defer stopReporting()
 	for {
@@ -228,51 +244,100 @@ func (c *Catchup) start() error {
 }
 
 // finish turns the error that ended a cycle into Run's result: a lost
-// table lock outranks whatever the cancelled flush reported, and a caller
-// that ended ctx is told so rather than handed the stream's receive error.
+// table lock outranks whatever the cancelled cycle reported, and a caller
+// that ended ctx is told so.
 func (c *Catchup) finish(ctx context.Context, err error) error {
 	if lost := c.flusher.lockLost(); lost != nil {
 		return lost
 	}
-	if ctx.Err() != nil {
-		return fmt.Errorf("catch-up on %s.%s stopped: %w", c.flusher.target.Schema(), c.flusher.target.Table(), context.Cause(ctx))
-	}
-	return err
+	return stopped(ctx, c.flusher.target.Schema(), c.flusher.target.Table(), err)
 }
 
-// cycle is one gather, drain, flush, and confirm.
+// stopped reports a cycle error on an ended ctx as the caller's stop. A
+// cycle error that is the stop itself — the stream's receive failing on
+// the ended context — is folded into it; any other error raised in the
+// same cycle travels with the stop, so a breach or a refusal that lands as
+// the caller cancels is never read as a clean stop. On a live ctx the
+// error is the cycle's own.
+func stopped(ctx context.Context, schema, table string, err error) error {
+	if ctx.Err() == nil {
+		return err
+	}
+	stop := fmt.Errorf("catch-up on %s.%s stopped: %w", schema, table, context.Cause(ctx))
+	if errors.Is(err, ctx.Err()) {
+		return stop
+	}
+	return fmt.Errorf("%w; the cycle it stopped in failed: %w", stop, err)
+}
+
+// cycle is one gather, drain, flush, and confirm. Its status is recorded
+// once, at the end, so a poll never pairs this cycle's counters with the
+// last cycle's positions.
 func (c *Catchup) cycle(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := c.gather(ctx); err != nil {
 		return err
 	}
 	c.buffer.Release(c.stream.Delivered())
 	// INV: CO-4 — the position is read after the last Add of this cycle.
-	batch := c.buffer.Drain(c.positions.Position())
+	pos := c.positions.Position()
+	batch := c.buffer.Drain(pos)
 	result, err := c.flusher.Flush(ctx, pool, batch)
+	outcome := cycleOutcome{batch: batch, result: result}
 	switch {
+	case errors.Is(err, ErrBatchDeferred) && copyLanded(pos):
+		// INV: CO-6 — with every key landed and nothing in flight, the
+		// shadow plus this batch is the source; a constraint that still
+		// refuses it is one the source does not have.
+		return fmt.Errorf("catch-up on %s.%s cannot converge, the copy has landed every key and no chunk is left to resolve the refusal: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
 	case errors.Is(err, ErrBatchDeferred):
 		if err := c.buffer.Requeue(batch); err != nil {
 			return err
 		}
-		c.recordDeferral(batch)
+		outcome.deferred = true
 	case err != nil:
 		return err
 	default:
 		if err := c.buffer.Hold(result.Held); err != nil {
 			return err
 		}
-		c.recordFlush(batch, result)
 	}
+	// The confirmation reads the buffer after Requeue or Hold has put the
+	// unapplied entries back; read before them, it would see an emptier
+	// buffer and confirm past entries about to return to it (ST-4).
 	if err := c.confirm(ctx); err != nil {
 		return err
 	}
-	return c.measureWALEnd(ctx, pool)
+	walEnd, err := c.measureWALEnd(ctx, pool)
+	if err != nil {
+		return err
+	}
+	c.record(outcome, walEnd)
+	return nil
+}
+
+// copyLanded reports a copier position with every key landed and nothing
+// in flight: the cut frontier is complete and no claimed chunk is unlanded.
+func copyLanded(pos copier.Position) bool {
+	return pos.Cut.Complete() && len(pos.InFlight) == 0
+}
+
+// cycleOutcome is what one cycle did with its drained batch, folded into
+// the status once the cycle has confirmed.
+type cycleOutcome struct {
+	batch  Batch
+	result Result
+	// deferred is set when the flush refused the batch and it was requeued;
+	// result is then empty.
+	deferred bool
 }
 
 // gather adds changes to the buffer until MaxChanges have been added or
 // Interval has passed since it started. A progress-only delivery counts
 // towards neither; it moves the stream's positions, which the cycle's
-// confirmation reads.
+// confirmation reads. Each change is buffered under the Delivered position
+// it arrived with (Change.Delivered), the position the stream had reached
+// before the change's own transaction: that is the position a confirmation
+// may name while the change is unapplied, and what OldestPending returns.
 func (c *Catchup) gather(ctx context.Context) error {
 	deadline := c.opts.Clock.Now().Add(c.opts.Interval)
 	for added := 0; added < c.opts.MaxChanges; {
@@ -303,13 +368,10 @@ func (c *Catchup) confirm(ctx context.Context) error {
 	// INV: ST-4
 	oldest, hasPending := c.buffer.OldestPending()
 	bound := confirmBound(c.stream.Delivered(), oldest, hasPending)
-	if bound > c.stream.Confirmed() {
-		if err := c.stream.Confirm(ctx, bound); err != nil {
-			return err
-		}
+	if bound <= c.stream.Confirmed() {
+		return nil
 	}
-	c.recordPositions()
-	return nil
+	return c.stream.Confirm(ctx, bound)
 }
 
 // confirmBound is the position a catch-up may confirm: delivered, lowered
@@ -323,58 +385,43 @@ func confirmBound(delivered decode.LSN, oldestPending decode.LSN, hasPending boo
 	return delivered
 }
 
-// recordFlush folds a committed flush into the status.
-func (c *Catchup) recordFlush(batch Batch, result Result) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.status.Applied += uint64(result.Images + result.Deletes)
-	c.status.Discarded += uint64(batch.Discarded)
-	c.status.Deferred = batch.Deferred
-	if result.Fallback {
-		c.status.Fallbacks++
-	}
-	c.recordBufferLocked()
-}
-
-// recordDeferral folds a refused and requeued batch into the status: its
-// entries are back in the buffer, waiting as the drain's deferred ones do.
-func (c *Catchup) recordDeferral(batch Batch) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.status.Discarded += uint64(batch.Discarded)
-	c.status.Deferred = batch.Deferred + len(batch.Entries)
-	c.status.BatchesDeferred++
-	c.recordBufferLocked()
-}
-
-// recordPositions snapshots the stream's positions after a cycle's
-// confirmation.
-func (c *Catchup) recordPositions() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.status.Delivered = c.stream.Delivered()
-	c.status.Confirmed = c.stream.Confirmed()
-}
-
-// measureWALEnd reads the server's write position on pool and records it
-// as the far end of the lag. It runs after the cycle's confirmation, so the
-// position it records is never below the one it confirmed.
-func (c *Catchup) measureWALEnd(ctx context.Context, pool *pgxpool.Pool) error {
+// measureWALEnd reads the server's write position on pool: the far end of
+// the lag. It runs after the cycle's confirmation, so the position it
+// returns is never below the one confirmed.
+func (c *Catchup) measureWALEnd(ctx context.Context, pool *pgxpool.Pool) (decode.LSN, error) {
 	var text string
 	if err := pool.QueryRow(ctx, `SELECT pg_catalog.pg_current_wal_lsn()::text`).Scan(&text); err != nil {
-		return fmt.Errorf("catch-up on %s.%s: read the server's write position: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
+		return 0, fmt.Errorf("catch-up on %s.%s: read the server's write position: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
 	}
 	walEnd, err := decode.ParseLSN(text)
 	if err != nil {
-		return fmt.Errorf("catch-up on %s.%s: read the server's write position: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
+		return 0, fmt.Errorf("catch-up on %s.%s: read the server's write position: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.status.WALEnd = walEnd
-	return nil
+	return walEnd, nil
 }
 
-func (c *Catchup) recordBufferLocked() {
+// record folds a completed cycle into the status under one lock: what the
+// flush did with the batch, what the buffer holds, and the positions the
+// cycle confirmed and measured. A requeued batch's entries are back in the
+// buffer, waiting as the drain's deferred ones do, so they count as
+// deferred; a committed flush's images and deletes count as applied.
+func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.status.Discarded += uint64(outcome.batch.Discarded)
+	if outcome.deferred {
+		c.status.Deferred = outcome.batch.Deferred + len(outcome.batch.Entries)
+		c.status.BatchesDeferred++
+	} else {
+		c.status.Deferred = outcome.batch.Deferred
+		c.status.Applied += uint64(outcome.result.Images + outcome.result.Deletes)
+		if outcome.result.Fallback {
+			c.status.Fallbacks++
+		}
+	}
 	c.status.Buffered = c.buffer.Len()
 	c.status.Held = c.buffer.Held()
+	c.status.Delivered = c.stream.Delivered()
+	c.status.Confirmed = c.stream.Confirmed()
+	c.status.WALEnd = walEnd
 }

@@ -177,11 +177,16 @@ race rather than locking it out: every drain judges the buffer against a copier 
 after the buffer's last `Add`, so a key the copier cuts in between is in flight and waits for its
 chunk, a deferred batch stays buffered until the next pass, and the confirmed position never
 passes a change still buffered, held, or deferred (convergence tests under mixed load, key
-moves, hot-row contention, unchanged-TOAST updates, and unique-key swaps). *Open:* a source
+moves, hot-row contention, unchanged-TOAST updates, and unique-key swaps; a refused batch
+requeued while its chunk is in flight and flushed once the chunk lands). *Open:* a source
 transaction whose commit the walsender has already sent while its backend is still in a
 synchronous-commit wait is not yet visible to a snapshot taken after the stream delivered it, so
 an uncut key's change can be discarded ahead of a chunk read that does not see it; the drain
-has no rule for that window yet. *Test obligation:* a
+has no rule for that window yet. Also open: a primary-key move or a unique-value swap that
+straddles a chunk the copier is reading collides, on the copier's own insert of the moved row,
+with the stale shadow row the flush has not yet deleted (SQLSTATE `23505`); the catch-up's half
+of the exchange is correct and the resolution is the copier's, so the convergence tests for key
+moves and unique-key swaps start their load after the copy has landed. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark
@@ -396,7 +401,13 @@ its `Bind` context, and calls `TableLockSession.Confirm` from each chunk's own c
 the insert (wrong-table, gone-session, rival-backend, and mid-copy-loss tests); `pkg/checksum`
 `Verifier` requires the same session, runs every read transaction under its `Bind` context, and
 confirms the lock from each transaction's own connection before the first read (wrong-table,
-gone-session, reported-loss, and mid-pass-loss tests); `pkg/schemachange` `GateCutover`,
+gone-session, reported-loss, and mid-pass-loss tests); `pkg/applier` `Flusher` requires the
+same session, runs every flush under its `Bind` context, and confirms the lock from the flush's
+own transaction before the first write, and `Catchup.Run` binds the whole consumer loop to the
+session, so a loss on a quiet table ends the run before another confirmation moves the slot;
+the loss is reported, as the copier reports its own, as `ErrInvariantViolation` wrapping
+`dbconn.ErrTableLockLost`, the typed form a caller resumes from rather than fails closed on
+(nil-session, wrong-table, gone-session, and quiet-table-loss tests); `pkg/schemachange` `GateCutover`,
 `Cutover`, `InspectSwapped`, and `DropOldTable` require the same session, run under its `Bind`
 context, and confirm from the swap's, the inspection's, and the drop's own transactions that the
 session's backend holds the lock before the first rename, the catalog read, or the drop
@@ -697,7 +708,11 @@ reopened stream replays every transaction that committed above the confirmed pos
 (confirm-moves-the-slot, keepalive-replies-leave-it, refuse-beyond-delivered,
 reopen-replays-from-confirmed, interleaved-transaction-below-the-confirmed-position,
 confirm-refuses-after-stop, confirm-leaves-the-record-when-the-send-fails,
-stops-on-a-warning-from-the-server tests).
+stops-on-a-warning-from-the-server tests); `pkg/applier` `Catchup.confirm` is the consumer's
+half: it names the lesser of the stream's delivered position and the buffer's oldest pending
+position, read after a refused batch is requeued and completed images are held, so the slot
+never passes a change still buffered (confirm-bound unit test; the requeued-batch convergence
+test holds the confirmation below a deferred change until its chunk lands).
 The reconcile-mode transition itself is the checkpoint/resume state machine (Phase 8). *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 

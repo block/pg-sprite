@@ -1,6 +1,10 @@
 package applier
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
 	"testing"
 	"time"
 
@@ -69,6 +73,41 @@ func TestConfirmBoundIsDeliveredLoweredToTheOldestPending(t *testing.T) {
 	assert.Equal(t, decode.LSN(40), confirmBound(100, 40, true), "a pending entry below delivered bounds the confirmation")
 	assert.Equal(t, decode.LSN(100), confirmBound(100, 100, true), "a pending entry at delivered leaves it")
 	assert.Equal(t, decode.LSN(100), confirmBound(100, 150, true), "a pending entry above delivered never raises it")
+}
+
+// A stop is the caller's once ctx has ended: the stream's receive failing
+// on the ended context is the stop itself and is folded into it, while a
+// breach raised in the same cycle travels with the stop so a caller still
+// sees it. On a live ctx the cycle's error is returned as it is.
+func TestStoppedKeepsACycleErrorThatIsNotTheStop(t *testing.T) {
+	live := t.Context()
+	breach := fmt.Errorf("%w (CO-8): image omits a column", ErrInvariantViolation)
+	assert.Same(t, breach, stopped(live, "s", "t", breach), "a live ctx leaves the cycle's error alone")
+
+	ctx, cancel := context.WithCancelCause(t.Context())
+	cause := errors.New("owner is ready to cut over")
+	cancel(cause)
+	receive := fmt.Errorf("receive from slot: %w", context.Canceled)
+	err := stopped(ctx, "s", "t", receive)
+	assert.ErrorIs(t, err, cause)
+	assert.EqualError(t, err, "catch-up on s.t stopped: owner is ready to cut over", "the receive error is the stop itself")
+
+	err = stopped(ctx, "s", "t", breach)
+	assert.ErrorIs(t, err, cause, "the stop is still reported")
+	assert.ErrorIs(t, err, ErrInvariantViolation, "the breach travels with it")
+	assert.ErrorIs(t, err, breach)
+}
+
+// The copy has landed when its cut frontier is complete and no claimed
+// chunk is unlanded; a complete frontier with a chunk in flight, or a
+// frontier short of the end, still has a chunk that can resolve a refusal.
+func TestCopyLanded(t *testing.T) {
+	chunk, err := copier.NewChunk(2, 2)
+	require.NoError(t, err)
+	assert.True(t, copyLanded(copier.Position{Cut: copier.NewWatermark(math.MaxInt64)}))
+	assert.False(t, copyLanded(copier.Position{Cut: copier.NewWatermark(math.MaxInt64), InFlight: []copier.Chunk{chunk}}), "a chunk in flight")
+	assert.False(t, copyLanded(copier.Position{Cut: copier.NewWatermark(500)}), "the frontier is short of the end")
+	assert.False(t, copyLanded(copier.Position{}), "nothing claimed")
 }
 
 // Lag is the WAL between the confirmed position and the server's write
