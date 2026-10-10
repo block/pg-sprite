@@ -252,6 +252,14 @@ var (
 	// stoppable: an operator whose role can see the backend cancels it
 	// directly, or the caller ends the context the build runs under.
 	ErrBuildUnobservable = errors.New("the server does not expose the concurrent index build backend's state")
+	// ErrCancelNotDispatched is returned by CancelBuild when the caller's
+	// context ended before the cancel signal was sent — including while
+	// CancelBuild waited for an in-flight progress poll or another cancel
+	// to release the reserved session. It is returned wrapped together
+	// with the caller's context error, so errors.Is matches both. A
+	// context error without it came back after the signal was sent, and
+	// the signal may have reached the build.
+	ErrCancelNotDispatched = errors.New("the cancel signal was not sent")
 )
 
 // cancelSignalTimeout bounds the cancel signal's round trip. The signal
@@ -298,6 +306,12 @@ const cancelBuildSQL = `SELECT state,
 // because the session it rides on is the one the build's verdict needs
 // intact.
 //
+// CancelBuild waits for an in-flight progress poll or another cancel to
+// release the reserved session before it reads the caller's ctx. A caller
+// whose ctx has ended by then gets ErrCancelNotDispatched wrapped with its
+// context error, and no signal was sent. Any other error, a context error
+// included, may have come back after the signal was sent.
+//
 // The reserved session's role must be allowed to signal the build's
 // backend: the same role, or a member of pg_signal_backend. Otherwise
 // pg_cancel_backend raises an error rather than returning false, and that
@@ -314,7 +328,7 @@ func (t *Tracker) CancelBuild(ctx context.Context) error {
 	}
 	if err := ctx.Err(); err != nil {
 		// A caller that has already given up sends nothing.
-		return fmt.Errorf("cancel concurrent index build backend %d: %w", pid, err)
+		return fmt.Errorf("cancel concurrent index build backend %d: %w: %w", pid, ErrCancelNotDispatched, err)
 	}
 	signalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cancelSignalTimeout)
 	defer cancel()

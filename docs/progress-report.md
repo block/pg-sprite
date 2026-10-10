@@ -214,7 +214,10 @@ while the build is active — the tracker never hands out the backend PID, so a 
 hold one past the build's return and cancel whatever the pool next runs on that backend. The
 signal itself runs under its own short deadline, detached from the caller's context: a caller
 deadline expiring mid-signal must not tear down the session the build's failure verdict needs.
-A caller whose context has already ended sends nothing and gets its context error back.
+A caller whose context has ended by the time `CancelBuild` holds the reserved session — it
+waits for an in-flight poll or another cancel first — sends nothing and gets
+`ErrCancelNotDispatched` wrapped with its context error, so it can tell "never sent" apart
+from a context error that came back after the signal was sent.
 
 A nil return means the cancel request was *sent* to a backend the server, in the same
 statement, had just reported active — not that the build has stopped, and not a guarantee
