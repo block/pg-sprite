@@ -19,6 +19,12 @@ const (
 	PhaseCopying Phase = iota + 1
 	// PhaseCatchingUp applies captured changes.
 	PhaseCatchingUp
+	// PhaseReconciling recovers from slot loss (ST-4): the shadow and the
+	// watermark are kept, the row's slot is not to be trusted, and a new
+	// slot and a repair pass over every landed chunk must both complete
+	// before change capture resumes. A resume that finds this phase
+	// reconciles again from the top, whatever the slot looks like.
+	PhaseReconciling
 	// PhaseVerifying verifies convergence.
 	PhaseVerifying
 	// PhaseCutover performs the swap.
@@ -40,6 +46,8 @@ func (p Phase) String() string {
 		return "copying"
 	case PhaseCatchingUp:
 		return "catching_up"
+	case PhaseReconciling:
+		return "reconciling"
 	case PhaseVerifying:
 		return "verifying"
 	case PhaseCutover:

@@ -745,8 +745,26 @@ test holds the confirmation below a deferred change until its chunk lands); the 
 is typed — `decode.SlotLostError`, unwrapping to `ErrSlotLost`, telling a slot the server
 reports `wal_status = 'lost'` from one that no longer exists — and `Catchup` enters it from
 the catalog at the end of every cycle, so a slot the server gave up on or dropped ends `Run`
-with that error rather than with a stream failure to be told apart later.
-The reconcile-mode transition itself is the checkpoint/resume state machine (Phase 8). *Source:*
+with that error rather than with a stream failure to be told apart later; `InspectSlot` reads
+the server's own account of why a slot was lost alongside — `invalidation_reason`,
+`conflicting`, and `inactive_since` where the server version carries them — so `SlotLostError`
+names the cause (`wal_removed`, `rows_removed`, `wal_level_insufficient`, `idle_timeout`) or
+says the server did not report one, and `SlotStatus.LostState` is the one reading of a status
+as lost. The transition itself is `pkg/schemachange`: `InspectResume` reads a non-terminal
+checkpoint row against the catalog and answers `ResumeClean` (the slot is present and the
+server still serves it) or `ResumeReconcile` (the row names no slot, the slot is gone, the
+server reports it lost, or the row is already in `reconciling`), refusing a row it cannot act
+on before any slot is touched — a terminal phase is `resume-row-terminal`, a row for another
+table or another slot name `resume-row-mismatch`; `Reconciler.Reconcile` is the reconcile
+mode: it writes the row to `checkpoint.PhaseReconciling` first, so a reconcile that dies
+restarts as a reconcile, drops whatever bears the derived slot name, creates a fresh slot, and
+— when the watermark says anything landed — runs one `checksum` pass at or below the watermark
+under the `repair` policy (D14), recopying only the chunks the gap touched, then writes the row
+back to `copying` or `catching_up` by the watermark with the new slot's consistent point as
+the applied position, from which the stream reopens; the shadow is never rebuilt and the
+watermark never moves (recovers-from-a-dropped-slot, restarts-from-an-interrupted-reconcile,
+with-nothing-landed-skips-the-pass, reads-an-intact-slot-as-clean,
+refuses-a-row-it-cannot-act-on, quiesced-target-has-no-reconcile-mode tests). *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum
