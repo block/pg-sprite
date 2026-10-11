@@ -104,11 +104,29 @@ const (
 	// a terminal phase (ST-4): the run it records is done or failed, so
 	// there is nothing to resume or reconcile.
 	CauseResumeTerminal RefusalCause = "resume-row-terminal"
+	// CauseResumeCutover means the checkpoint row handed to a resume is in
+	// the cutover phase (LK-4): a swap was attempted, and whether it
+	// committed is read from the catalog by InspectSwapped, never assumed.
+	// Neither a clean resume nor a reconcile acts on the row until the
+	// caller has that answer; a swap the catalog shows rolled back is a
+	// run back before its cutover, and the caller writes the row there.
+	CauseResumeCutover RefusalCause = "resume-row-cutover"
 	// CauseResumeRowMismatch means the checkpoint row handed to a resume
 	// does not describe the proven target and built shadow (ST-2): it is
 	// keyed on another table, names another shadow or slot, or carries the
 	// fingerprints of another statement.
 	CauseResumeRowMismatch RefusalCause = "resume-row-mismatch"
+	// CauseResumeSlotForeign means the slot wearing the row's derived name
+	// is not this route's (ST-3): it is a physical slot, or a logical slot
+	// of another database. It is neither decoded from nor replaced; an
+	// operator renames or drops it.
+	CauseResumeSlotForeign RefusalCause = "resume-slot-foreign"
+	// CauseResumeSlotHeld means the row's slot is intact but another
+	// backend holds it (ST-4), so no stream can be opened on it now. The
+	// holder is named; a walsender of this engine's earlier process lets go
+	// within wal_sender_timeout of losing its client, and the resume is
+	// inspected again after it.
+	CauseResumeSlotHeld RefusalCause = "resume-slot-held"
 )
 
 // RefusalCauses returns the closed set of shadow refusal causes, so
@@ -136,7 +154,10 @@ func RefusalCauses() []RefusalCause {
 		CauseSwapMismatch,
 		CauseOutcomeAmbiguous,
 		CauseResumeTerminal,
+		CauseResumeCutover,
 		CauseResumeRowMismatch,
+		CauseResumeSlotForeign,
+		CauseResumeSlotHeld,
 	}
 }
 
@@ -155,12 +176,14 @@ func (c RefusalCause) Invariant() string {
 		return "ST-5"
 	case CauseCutoverUnverified:
 		return "CO-1"
-	case CauseOutcomeAmbiguous:
+	case CauseOutcomeAmbiguous, CauseResumeCutover:
 		return "LK-4"
-	case CauseResumeTerminal:
+	case CauseResumeTerminal, CauseResumeSlotHeld:
 		return "ST-4"
 	case CauseResumeRowMismatch:
 		return "ST-2"
+	case CauseResumeSlotForeign:
+		return "ST-3"
 	default:
 		return ""
 	}

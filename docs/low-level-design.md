@@ -440,12 +440,13 @@ implicit in the implementation. The races to design against:
   the shadow regresses to the older image.
 - **Ghost-row resurrection.** The copier reads a row, the applier applies that row's `DELETE`,
   then the chunk insert lands — re-inserting a row that no longer exists on the source.
-- **Reconciliation is kept out of the race.** The checksum-repair pass after
+- **Reconciliation is kept out of the race.** The checksum recopy pass after
   [slot loss](#failover-during-migration-what-survives-and-what-doesnt) re-copies divergent
-  chunks by deleting and re-inserting their rows, which does overwrite; it runs before the new
-  slot's stream is applied, with no applier writing the shadow, and a source write that lands
-  inside the pass makes the repaired chunk read different again and fails the pass closed
-  rather than being repaired twice.
+  chunks by deleting and re-inserting their rows, which does overwrite; it runs after the new
+  slot exists and before its stream is applied, with no applier writing the shadow. A source
+  write that lands inside the pass is not reread and not recopied twice: the new slot captured
+  it, and the stream applies it once the pass is over, in order. The pass therefore mints no
+  proof; the next checksum pass does.
 
 The invariants that resolve them (Spirit's model, translated):
 
@@ -720,10 +721,12 @@ silently diverged from the source. So on slot loss the engine has three honest o
 of preference:
 
 1. **Reconcile, don't re-copy (preferred).** Keep the shadow and the durable copy watermark,
-   create a new slot at the current LSN, then run a **full checksum + repair pass** (re-sync only
-   the chunks that differ) before resuming CDC from the new slot. This salvages days of bulk-copy
-   work; the cost is one comparison sweep, bounded by *checksum* cost, not *copy* cost. The
-   planned mandatory checksum gate will also serve as a repair primitive.
+   create a new slot at the current LSN, then run **one checksum pass under the `recopy` policy**
+   at or below the watermark (re-sync only the chunks that differ, without rereading them, since
+   the new slot already carries any write that lands after the recopy) before resuming CDC from
+   the new slot. This salvages days of bulk-copy work; the cost is one comparison sweep, bounded
+   by *checksum* cost, not *copy* cost. The mandatory checksum gate that follows is the proof the
+   recopy pass does not mint. This is `pkg/schemachange` `Reconciler.Reconcile` (ST-4).
 2. **Restart from scratch.** New slot + new snapshot + full re-copy. Always correct, but throws
    away all progress; acceptable only for small tables.
 3. **Don't use logical decoding here.** Trigger capture is the documented future alternative for

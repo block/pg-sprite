@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"time"
 
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -55,7 +56,25 @@ const (
 	sqlstateUndefinedObject   = "42704"
 	sqlstateInsufficientPrivs = "42501"
 	sqlstateObjectInUse       = "55006"
+	sqlstateQueryCanceled     = "57014"
 )
+
+// slotCommandCancelGrace bounds how long a slot command whose context has
+// ended waits for the server to acknowledge the cancel request before its
+// connection is cut regardless.
+const slotCommandCancelGrace = 5 * time.Second
+
+// endedByContext puts the context's own error into the chain of a slot
+// command the server cancelled because that context ended, so the caller
+// that ended it finds context.Canceled or context.DeadlineExceeded with
+// errors.Is, as it would had the connection been cut instead; any other
+// error is returned as it is.
+func endedByContext(ctx context.Context, err error) error {
+	if ctx.Err() != nil && isSQLState(err, sqlstateQueryCanceled) {
+		return fmt.Errorf("%w: %w", ctx.Err(), err)
+	}
+	return err
+}
 
 // Slot is a logical replication slot this package created, with the
 // replication connection that created it still open. The connection is kept
@@ -108,8 +127,9 @@ func (s *Slot) Close(ctx context.Context) error {
 // the target's database is reported as a *SlotExistsError.
 //
 // No error leaves a slot behind: a refusal before the create makes none, a
-// create the caller's context cuts off is dropped by the server with its
-// walsender, and a slot the server created but did not describe usably is
+// create the caller's context ends is cancelled on the server — the slot
+// under construction goes with its walsender, and the error carries the
+// context's own error — and a slot the server created but did not describe usably is
 // dropped before the error is returned. The publication is left in place
 // between the two — it is the route's own and the next attempt reuses it.
 // The caller has committed the target's checkpoint row before calling: a
@@ -129,7 +149,7 @@ func CreateSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, targ
 		return nil, err
 	}
 
-	conn, err := dbconn.ConnectReplication(ctx, cfg)
+	conn, err := dbconn.ConnectReplication(ctx, cfg, dbconn.WithServerSideCancel(slotCommandCancelGrace))
 	if err != nil {
 		return nil, fmt.Errorf("create slot %s: %w", name, err)
 	}
@@ -145,11 +165,11 @@ func CreateSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, targ
 		SnapshotAction: "EXPORT_SNAPSHOT",
 	})
 	if err != nil {
-		closeErr := conn.Close(ctx)
+		closeErr := conn.Close(context.WithoutCancel(ctx))
 		if isSQLState(err, sqlstateDuplicateObject) {
 			return nil, errors.Join(&SlotExistsError{Name: name}, closeErr)
 		}
-		return nil, errors.Join(fmt.Errorf("create slot %s: %w", name, err), closeErr)
+		return nil, errors.Join(fmt.Errorf("create slot %s: %w", name, endedByContext(ctx, err)), closeErr)
 	}
 	consistentPoint, err := ParseLSN(result.ConsistentPoint)
 	if err != nil {

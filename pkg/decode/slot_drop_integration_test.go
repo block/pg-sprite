@@ -75,7 +75,9 @@ func TestDropSlotWaitsForTheWALSenderToReleaseTheSlot(t *testing.T) {
 
 // A wait the caller's context ends is reported as that context's error and
 // never as a drop: the slot and its publication are still there for the
-// next attempt.
+// next attempt. The wait is cancelled on the server, not only abandoned by
+// the client, so the walsender that was waiting does not go on to drop the
+// slot once the holder lets go.
 func TestDropSlotEndedByItsContextIsNotADrop(t *testing.T) {
 	f := newSlotFixture(t)
 	slot := f.createSlot(t)
@@ -92,7 +94,49 @@ func TestDropSlotEndedByItsContextIsNotADrop(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, found, "the slot is not dropped while its holder streams")
 	assert.True(t, f.publicationExists(t, slot.Name()))
+	f.awaitDropCancelled(t)
+
 	release()
+	f.awaitSlotReleased(t, slot.Name())
+	status, found, err := decode.InspectSlot(t.Context(), f.pool, slot.Name())
+	require.NoError(t, err)
+	require.True(t, found, "the cancelled drop did not complete once the holder let go")
+	assert.False(t, status.Active)
+	assert.True(t, f.publicationExists(t, slot.Name()))
+}
+
+// awaitSlotReleased polls until the catalog shows nothing holding the
+// slot, which is after the holder's walsender has exited.
+func (f slotFixture) awaitSlotReleased(t *testing.T, name string) {
+	t.Helper()
+	const slotReleased = 10 * time.Second
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		status, found, err := decode.InspectSlot(t.Context(), f.pool, name)
+		if !assert.NoError(collect, err) || !assert.True(collect, found) {
+			return
+		}
+		assert.False(collect, status.Active, "the holder's walsender must have let go")
+	}, slotReleased, 50*time.Millisecond)
+}
+
+// awaitDropCancelled polls until no walsender on the server is still
+// running a DROP_REPLICATION_SLOT while the holder still holds: the drop
+// whose client gave up was cancelled, not left waiting to complete.
+func (f slotFixture) awaitDropCancelled(t *testing.T) {
+	t.Helper()
+	const dropCancelled = 10 * time.Second
+	require.EventuallyWithT(t, func(collect *assert.CollectT) {
+		var waiting bool
+		err := f.pool.QueryRow(t.Context(), `
+			SELECT EXISTS (
+				SELECT 1 FROM pg_catalog.pg_stat_activity
+				WHERE backend_type = 'walsender' AND state = 'active' AND query LIKE 'DROP_REPLICATION_SLOT %'
+			)`).Scan(&waiting)
+		if !assert.NoError(collect, err) {
+			return
+		}
+		assert.False(collect, waiting, "the drop the client gave up on must not still be waiting on the server")
+	}, dropCancelled, 50*time.Millisecond)
 }
 
 // A drop that must not wait is refused by the server while a walsender
@@ -142,9 +186,11 @@ func TestDropSlotRefusesAForeignSlotOfTheName(t *testing.T) {
 	require.ErrorAs(t, err, &foreign)
 	assert.Equal(t, decode.ForeignObjectSlot, foreign.Object)
 	assert.Equal(t, name, foreign.Name)
-	_, found, err := decode.InspectSlot(t.Context(), f.pool, name)
+	status, found, err := decode.InspectSlot(t.Context(), f.pool, name)
 	require.NoError(t, err)
 	assert.True(t, found, "another database's slot is left alone")
+	assert.True(t, status.Logical)
+	assert.False(t, status.Own, "a logical slot of another database is not the route's")
 	_, err = other.Exec(t.Context(), `SELECT pg_drop_replication_slot($1)`, name)
 	require.NoError(t, err)
 
@@ -156,9 +202,11 @@ func TestDropSlotRefusesAForeignSlotOfTheName(t *testing.T) {
 	})
 	err = decode.DropSlot(t.Context(), f.cfg, f.pool, name)
 	require.ErrorIs(t, err, decode.ErrForeignDecodingState)
-	_, found, err = decode.InspectSlot(t.Context(), f.pool, name)
+	status, found, err = decode.InspectSlot(t.Context(), f.pool, name)
 	require.NoError(t, err)
 	assert.True(t, found, "a physical slot is left alone")
+	assert.False(t, status.Logical)
+	assert.False(t, status.Own, "a physical slot of the pool's own database is not the route's")
 }
 
 // The pool and the replication config are separate inputs. A drop whose

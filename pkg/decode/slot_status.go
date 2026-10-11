@@ -37,6 +37,11 @@ type SlotStatus struct {
 	// current database and only those are ever dropped or reaped.
 	Database string
 	Logical  bool
+	// Own is true for a logical slot of the pool's current database, the
+	// only kind this route creates, decodes from, drops, or replaces (ST-3).
+	// A physical slot or another database's logical slot of the name is
+	// foreign, whatever else the catalog says of it.
+	Own bool
 	// Active is true while a walsender or a backend holds the slot;
 	// ActivePID is that process, zero when inactive.
 	Active    bool
@@ -128,7 +133,9 @@ type RetainedWAL struct {
 // where naming the column would fail the statement, and whether the
 // server has the cause column at all is read alongside it.
 const inspectSlotSQL = `
-	SELECT s.database, s.slot_type = 'logical', s.active, s.active_pid, s.wal_status,
+	SELECT s.database, s.slot_type = 'logical',
+	       s.slot_type = 'logical' AND s.database = pg_catalog.current_database(),
+	       s.active, s.active_pid, s.wal_status,
 	       s.restart_lsn::text, s.confirmed_flush_lsn::text,
 	       CASE WHEN pg_catalog.pg_is_in_recovery() THEN NULL
 	            ELSE pg_catalog.pg_wal_lsn_diff(pg_catalog.pg_current_wal_lsn(), s.restart_lsn)::bigint
@@ -143,8 +150,9 @@ const inspectSlotSQL = `
 
 // InspectSlot reads the named slot from pg_replication_slots on pool. found
 // is false when no slot of that name exists on the cluster; a slot of
-// another database is reported with its Database so the caller never
-// mistakes it for its own. On a server in recovery the slot's retained WAL
+// another database, or a physical one, is reported with Own false and its
+// Database so the caller never mistakes it for its own. On a server in
+// recovery the slot's retained WAL
 // is unknown and the rest of the row is reported. The invalidation cause
 // is Reported only on a server that has the column.
 func InspectSlot(ctx context.Context, pool *pgxpool.Pool, name string) (status SlotStatus, found bool, err error) {
@@ -154,7 +162,7 @@ func InspectSlot(ctx context.Context, pool *pgxpool.Pool, name string) (status S
 	var conflicting *bool
 	var inactiveSince *time.Time
 	err = pool.QueryRow(ctx, inspectSlotSQL, name).
-		Scan(&database, &status.Logical, &status.Active, &activePID, &walStatus, &restartLSN, &confirmedFlushLSN, &retained,
+		Scan(&database, &status.Logical, &status.Own, &status.Active, &activePID, &walStatus, &restartLSN, &confirmedFlushLSN, &retained,
 			&conflicting, &status.Invalidation.Reported, &invalidation, &inactiveSince)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return SlotStatus{}, false, nil

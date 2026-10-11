@@ -35,17 +35,34 @@ import (
 // seeded workload table, its copy-and-swap proof, the checkpoint store, and
 // the table lock a run holds throughout.
 type reconcileFixture struct {
-	cfg    dbconn.Config
-	pool   *pgxpool.Pool
-	table  testutil.WorkloadTable
-	target preflight.CopySwapTarget
-	store  *checkpoint.Store
-	lock   *dbconn.TableLockSession
+	serverURL string
+	cfg       dbconn.Config
+	pool      *pgxpool.Pool
+	table     testutil.WorkloadTable
+	target    preflight.CopySwapTarget
+	store     *checkpoint.Store
+	lock      *dbconn.TableLockSession
 }
 
 func newReconcileFixture(t *testing.T, rows int) reconcileFixture {
 	t.Helper()
-	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=logical", "wal_sender_timeout=2s")
+	return newReconcileFixtureLocked(t, rows)
+}
+
+// newReconcileFixtureLocked is newReconcileFixture with the run's table
+// lock acquired under lockOpts. A test that loses the lock on purpose
+// passes a short keepalive; the cleanup then expects the release to report
+// the loss rather than succeed.
+func newReconcileFixtureLocked(t *testing.T, rows int, lockOpts ...dbconn.TableLockOption) reconcileFixture {
+	t.Helper()
+	return newReconcileFixtureOn(t, rows, nil, lockOpts...)
+}
+
+// newReconcileFixtureOn is newReconcileFixtureLocked on a server started
+// with extra settings after the fixture's own.
+func newReconcileFixtureOn(t *testing.T, rows int, settings []string, lockOpts ...dbconn.TableLockOption) reconcileFixture {
+	t.Helper()
+	serverURL := testutil.StartPostgresWithSettings(t, append([]string{"wal_level=logical", "wal_sender_timeout=2s"}, settings...)...)
 	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL), MaxConns: 16}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
@@ -61,10 +78,17 @@ func newReconcileFixture(t *testing.T, rows int) reconcileFixture {
 	require.NoError(t, err)
 	require.NoError(t, store.Ensure(t.Context()))
 
-	lock, err := dbconn.AcquireTableLock(t.Context(), cfg, table.Schema, table.Table)
+	lock, err := dbconn.AcquireTableLock(t.Context(), cfg, table.Schema, table.Table, lockOpts...)
 	require.NoError(t, err)
-	t.Cleanup(func() { assert.NoError(t, lock.Release(context.WithoutCancel(t.Context()))) })
-	return reconcileFixture{cfg: cfg, pool: pool, table: table, target: target, store: store, lock: lock}
+	t.Cleanup(func() {
+		released := lock.Release(context.WithoutCancel(t.Context()))
+		if lock.Err() != nil {
+			assert.Error(t, released, "a lost lock has no clean release")
+			return
+		}
+		assert.NoError(t, released)
+	})
+	return reconcileFixture{serverURL: serverURL, cfg: cfg, pool: pool, table: table, target: target, store: store, lock: lock}
 }
 
 // exec runs SQL with %s standing for the qualified workload table.

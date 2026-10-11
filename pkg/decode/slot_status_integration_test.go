@@ -22,6 +22,7 @@ func TestInspectSlotMeasuresTheWALTheSlotRetains(t *testing.T) {
 	fresh, found, err := decode.InspectSlot(t.Context(), f.pool, slot.Name())
 	require.NoError(t, err)
 	require.True(t, found)
+	assert.True(t, fresh.Own, "the route's own logical slot in the pool's database")
 	assert.False(t, fresh.Active)
 	assert.Zero(t, fresh.ActivePID)
 	assert.NotZero(t, fresh.RestartLSN)

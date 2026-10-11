@@ -80,7 +80,7 @@ the integration phase starts; they drift.)
 | `Plan` | run parse → declarative diff when applicable → classify → route — exported as `diffplan.Plan` in [`pkg/diffplan`](../pkg/diffplan/diffplan.go) (parse via `statement.ParseDesired`, connect via `dbconn.NewPool`, inputs named by `diffplan.Request{Schema, Desired}`); return a `PlanResult` whose `SchemaChange.TableChanges` are `engine.TableChange{Table, Operation (statement.StatementType), DDL, IsUnsafe, UnsafeReason, ExecutionMode, ModeReason}`; map a **not native-safe** refusal to `engine.ExecutionModeBlocked` with the refusal reason as `ModeReason` (see [execution-mode verdicts](#execution-mode-verdicts-and-direct-execution)) |
 | `Apply` | start the native executor asynchronously and return immediately — the synchronous core is exported as `migrate.Run` in [`pkg/migrate`](../pkg/migrate/migrate.go) (parse via `statement.ParseOne`, gate via `migrate.Gate` before dialing, connect via `dbconn.NewPool`, policy via `migrate.DefaultOptions` tuned per table): one statement in, one `verdict.Verdict` out, with a three-shape contract — refusal (verdict, nil error), execution failure (failed verdict carrying the stable code and the committed prefix, plus the operational error), or an error with a zero verdict (stopped before executing). `Run` re-resolves the routing decision at execution time, so the adapter never trusts the stored plan-time verdict (see [execution-mode verdicts](#execution-mode-verdicts-and-direct-execution)). For the declarative flow the adapter does not iterate the plan itself: `migrate.RunDesired` takes the parsed desired schema, re-derives the convergence plan, and runs every planned statement back through `Run` — returning per-statement verdicts with committed-prefix semantics ([execution-model.md](execution-model.md)) — so plan-vs-execute drift and per-statement re-gating stay inside the engine, and the adapter can pin the reviewed plan with `ExpectedFingerprint` |
 | `Progress` | per-table rows-copied / total / percent / ETA / checksum state |
-| `Stop` / `Start` | checkpoint and resume (slot + copy + applier watermark) |
+| `Stop` / `Start` | checkpoint and resume (slot + copy + applier watermark). `Start` reads the row back through `checkpoint.Store.Load`, hands a non-terminal row to `schemachange.InspectResume`, and on `ResumeReconcile` runs `schemachange.Reconciler.Reconcile` before any stream reopens; the slot a reconcile returns in `Reconciled.Slot` is open and the adapter closes it. A reconcile that fails leaves the row in `reconciling`, which `InspectResume` answers as reconcile again, so repeating it is safe. How to classify each refusal is in [the resume path's refusals](#routing-the-resume-paths-refusals) |
 | `Cutover` | the deferred, operator-gated atomic swap |
 | `Cancel` | abort and **guarantee logical-slot + shadow-table cleanup** |
 | `Volume` | map 1–11 onto chunk-time target / parallelism / throttle |
@@ -290,6 +290,29 @@ transaction, so the steps before the failure remain
 then refuses with `ErrRelationExists`, and the gate stays closed until the declarative
 front door re-diffs the live catalog and converges the remainder — the orchestrator never
 assumes the failed run left nothing behind.
+
+### Routing the resume path's refusals
+
+`Start` on a copy-and-swap target is two reads and, when the second says so, one write:
+`checkpoint.Store.Load` for the row, `schemachange.InspectResume` for the mode, and
+`schemachange.Reconciler.Reconcile` when the mode is `ResumeReconcile`. The row's phase is
+dispatched first — `Phase.Terminal()` has nothing to resume, `cutover` is `InspectSwapped`'s
+question — and only then is the slot read. Both `InspectResume` and `Reconcile` refuse with a
+`*RefusalError` keyed on `RefusalCause`; each cause means a different action, so route them:
+
+| Refusal | What it means | Orchestrator action |
+| --- | --- | --- |
+| `resume-row-terminal` | The row is `done` or `failed`; there is no run to resume | Report the recorded outcome; a new run needs `Store.Delete` of the row the caller was shown |
+| `resume-row-cutover` | The row says a swap began and nothing says how it ended; neither a clean resume nor a reconcile may touch the slot or the shadow until that is known | Call `InspectSwapped` first; a committed swap continues from `DropOldTable`, a rolled-back one may retry the cutover |
+| `resume-row-mismatch` | The row is for another table, names another slot, or (in `Reconcile`) carries another statement's shadow name or fingerprints | Configuration or operator action: the target and the row disagree; retrying cannot succeed |
+| `resume-slot-foreign` | The slot of the derived name is physical or another database's; the engine may neither decode from it nor drop it | Operator action on the slot; retrying cannot succeed while it is there |
+| `resume-slot-held` | The engine's own slot is held by another backend — a previous run still draining, or a tool reading it | Wait and inspect again; a holder that never lets go is an operator action |
+| `cutover-relation-replaced` (from `Reconcile`) | The source or the shadow is no longer the relation the build recorded, read before the reconcile wrote anything | Stop; the table under the names is not the one this run proved — operator action |
+
+A refusal from either read leaves the row and the slot as they were. A `Reconcile` that fails
+after its marker leaves the row in `reconciling`, and `InspectResume` answers that row as
+reconcile whatever the catalog shows under the slot name, so the adapter repeats `Start`
+rather than deciding anything itself.
 
 ## Invalid-index outcomes of a concurrent index build
 

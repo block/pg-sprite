@@ -10,7 +10,7 @@ import (
 // default and never inferred from what happens to be wired up (CO-3): in
 // the steady state a divergence is a defect and aborts; only a pass that
 // expects differences — reconciliation after a lost replication slot —
-// repairs them. The zero value names no policy and is refused.
+// recopies them. The zero value names no policy and is refused.
 type DivergencePolicy string
 
 const (
@@ -18,8 +18,15 @@ const (
 	// the caller refuses to cut over.
 	DivergenceAbort DivergencePolicy = "abort"
 	// DivergenceRepair recopies every differing chunk from the source and
-	// reads it again; the pass still mints no proof.
+	// reads it again, refusing a chunk that still differs; it is for a
+	// source that holds still through the pass. The pass mints no proof.
 	DivergenceRepair DivergencePolicy = "repair"
+	// DivergenceRecopy recopies every differing chunk from the source and
+	// reads none of them again; it is for a source that is written while
+	// the pass runs, when a stream opened before the pass carries every
+	// write that lands after a recopy, so a fresh read now would refuse a
+	// chunk the stream is about to settle. The pass mints no proof.
+	DivergenceRecopy DivergencePolicy = "recopy"
 )
 
 // ErrNoDivergencePolicy reports a pass asked to run without saying what a
@@ -37,16 +44,16 @@ func ParseDivergencePolicy(value string) (DivergencePolicy, error) {
 	return policy, nil
 }
 
-// validate refuses every value but the two named policies.
+// validate refuses every value but the named policies.
 func (p DivergencePolicy) validate() error {
 	// INV: CO-3
 	switch p {
-	case DivergenceAbort, DivergenceRepair:
+	case DivergenceAbort, DivergenceRepair, DivergenceRecopy:
 		return nil
 	case "":
-		return fmt.Errorf("%w: a pass must state %q or %q", ErrNoDivergencePolicy, DivergenceAbort, DivergenceRepair)
+		return fmt.Errorf("%w: a pass must state %q, %q, or %q", ErrNoDivergencePolicy, DivergenceAbort, DivergenceRepair, DivergenceRecopy)
 	default:
-		return fmt.Errorf("%w: %q is not %q or %q", ErrNoDivergencePolicy, string(p), DivergenceAbort, DivergenceRepair)
+		return fmt.Errorf("%w: %q is not %q, %q, or %q", ErrNoDivergencePolicy, string(p), DivergenceAbort, DivergenceRepair, DivergenceRecopy)
 	}
 }
 

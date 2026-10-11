@@ -11,24 +11,25 @@ import (
 	"github.com/block/pg-sprite/pkg/copier"
 )
 
-// A pass must state one of the two named policies; the zero value is no
+// A pass must state one of the named policies; the zero value is no
 // policy, and a string that happens to type-check is not one either (CO-3).
 func TestDivergencePolicyValidate(t *testing.T) {
 	require.NoError(t, DivergenceAbort.validate())
 	require.NoError(t, DivergenceRepair.validate())
+	require.NoError(t, DivergenceRecopy.validate())
 
 	err := DivergencePolicy("").validate()
 	require.ErrorIs(t, err, ErrNoDivergencePolicy)
-	assert.EqualError(t, err, `no divergence policy: a pass must state "abort" or "repair"`)
+	assert.EqualError(t, err, `no divergence policy: a pass must state "abort", "repair", or "recopy"`)
 
 	err = DivergencePolicy("Abort").validate()
 	require.ErrorIs(t, err, ErrNoDivergencePolicy, "policies are exact, not case-folded")
-	assert.EqualError(t, err, `no divergence policy: "Abort" is not "abort" or "repair"`)
+	assert.EqualError(t, err, `no divergence policy: "Abort" is not "abort", "repair", or "recopy"`)
 }
 
 // A caller loading the policy from configuration gets the typed value for
-// the two names and the same refusal Check would give for anything else,
-// so a wrong setting is refused before any copy runs.
+// the named policies and the same refusal Check would give for anything
+// else, so a wrong setting is refused before any copy runs.
 func TestParseDivergencePolicy(t *testing.T) {
 	policy, err := ParseDivergencePolicy("abort")
 	require.NoError(t, err)
@@ -36,6 +37,9 @@ func TestParseDivergencePolicy(t *testing.T) {
 	policy, err = ParseDivergencePolicy("repair")
 	require.NoError(t, err)
 	assert.Equal(t, DivergenceRepair, policy)
+	policy, err = ParseDivergencePolicy("recopy")
+	require.NoError(t, err)
+	assert.Equal(t, DivergenceRecopy, policy)
 
 	policy, err = ParseDivergencePolicy("")
 	require.ErrorIs(t, err, ErrNoDivergencePolicy)
