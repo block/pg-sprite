@@ -94,7 +94,8 @@ The short version — the full rules live in [docs/tcb-model.md](docs/tcb-model.
   caller's classification; the grammar is load-bearing expertise, not copyable mechanics),
   `pkg/progress` (the executors' progress-observation seam: they write state into a
   caller-owned tracker whose mutators take only a memory lock, and its polling reads ride
-  the reserved verdict session behind a separate poll lock — the executor's own state
+  the reserved verdict session behind a separate one-slot poll gate, which `CancelBuild`
+  alone waits on only as long as its caller's context lasts — the executor's own state
   updates never wait for a database read, but the handoffs that end a poll target's
   ownership *are* observer-gated: `StopConcurrentBuild` and `SetWorkSource` drain an
   in-flight poll before the executor reclaims the build's session, a wait bounded by the

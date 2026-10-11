@@ -82,7 +82,7 @@ the integration phase starts; they drift.)
 | `Progress` | per-table rows-copied / total / percent / ETA / checksum state |
 | `Stop` / `Start` | checkpoint and resume (slot + copy + applier watermark). `Start` reads the row back through `checkpoint.Store.Load`, hands a non-terminal row to `schemachange.InspectResume`, and on `ResumeReconcile` runs `schemachange.Reconciler.Reconcile` before any stream reopens; the slot a reconcile returns in `Reconciled.Slot` is open and the adapter closes it. A reconcile that fails leaves the row in `reconciling`, which `InspectResume` answers as reconcile again, so repeating it is safe. How to classify each refusal is in [the resume path's refusals](#routing-the-resume-paths-refusals) |
 | `Cutover` | the deferred, operator-gated atomic swap |
-| `Cancel` | abort and **guarantee logical-slot + shadow-table cleanup** |
+| `Cancel` | abort and **guarantee logical-slot + shadow-table cleanup**; for a running concurrent index build the stop path is `progress.Tracker.CancelBuild`, whose outcomes the adapter maps with the [cancel outcome table](progress-report.md#cancelling-a-concurrent-index-build) — test for `ErrCancelNotDispatched` before any context error, and record the operator's cancel as possibly delivered only when that sentinel is absent |
 | `Volume` | map 1–11 onto chunk-time target / parallelism / throttle |
 | `Revert` / `SkipRevert` | decline for the copy-and-swap path (like Spirit); only the expand/contract backend could honour them |
 

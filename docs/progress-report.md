@@ -208,13 +208,42 @@ honour the poll's context, because a poll that returns only when its observer gi
 would stall the engine behind an observer that never does. A `Work` that reads the catalog
 is a CO-9 read site — `pg_catalog`-qualified, tested under a shadowing `search_path`.
 
+### Cancelling a concurrent index build
+
 The tracker is also the operator's stop path for a running concurrent index build:
 `Tracker.CancelBuild` signals the build's backend over the same reserved session, and only
 while the build is active — the tracker never hands out the backend PID, so a caller cannot
 hold one past the build's return and cancel whatever the pool next runs on that backend. The
 signal itself runs under its own short deadline, detached from the caller's context: a caller
 deadline expiring mid-signal must not tear down the session the build's failure verdict needs.
-A caller whose context has already ended sends nothing and gets its context error back.
+`CancelBuild` waits for an in-flight poll or another cancel to release the reserved session,
+and that wait is bounded by the caller's context: a caller that gives up — while waiting, or
+in the instant the session comes free — sends nothing and gets `ErrCancelNotDispatched`
+wrapped with its context error, so it can tell "never sent" apart from a context error that
+came back after the signal was sent.
+
+The one question a consumer wiring a cancel verb has to answer is "may this cancel have
+reached the build?", and the answer falls into four classes:
+
+| `CancelBuild` result | Signal reached the server? | Safe to retry the cancel? |
+| --- | --- | --- |
+| `nil` | sent, to a backend the same statement read as active | not needed; wait for the build's own return |
+| `ErrCancelNotDispatched` (wrapped with the caller's context error) | no | yes |
+| `ErrNoActiveBuild`, `ErrBuildNotRunning`, `ErrBuildUnobservable` | no signal delivered | per each sentinel's own doc: nothing to signal, retry later, or signal by another route |
+| any other error — a session failure, or a context error *without* `ErrCancelNotDispatched` | unknown; the signal query had been issued | treat as possibly sent: a later `cancelled-externally` may be this cancel |
+
+Check order is part of the contract. The second row matches both the sentinel and the context
+error, so a consumer that already classifies `context.DeadlineExceeded` as "possibly sent"
+must test for the sentinel first, or it silently keeps today's over-recording:
+
+```go
+switch {
+case errors.Is(err, progress.ErrCancelNotDispatched):
+	// nothing was sent: retry, or report the cancel as not delivered
+case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+	// the signal query was issued: treat the cancel as possibly delivered
+}
+```
 
 A nil return means the cancel request was *sent* to a backend the server, in the same
 statement, had just reported active — not that the build has stopped, and not a guarantee

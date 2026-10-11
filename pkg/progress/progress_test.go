@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -393,8 +395,318 @@ func TestCancelBuildRunsTheSignalDetachedFromTheCaller(t *testing.T) {
 		cancel()
 		err := tracker.CancelBuild(ended)
 		require.ErrorIs(t, err, context.Canceled)
+		assert.ErrorIs(t, err, progress.ErrCancelNotDispatched)
 		assert.NotErrorIs(t, err, progress.ErrNoActiveBuild)
 	})
+}
+
+// cancelOutcomeDeadline bounds how long a test waits for a CancelBuild call
+// to return once nothing holds the reserved session any more.
+const cancelOutcomeDeadline = 5 * time.Second
+
+// awaitCancelOutcome returns the error a CancelBuild call delivered on
+// outcome, failing the test if it does not arrive in time.
+func awaitCancelOutcome(t *testing.T, outcome <-chan error) error {
+	t.Helper()
+	deadline := time.After(cancelOutcomeDeadline)
+	select {
+	case err := <-outcome:
+		return err
+	case <-deadline:
+		t.Fatal("CancelBuild did not return after the reserved session was released")
+		return nil
+	}
+}
+
+// blockingSession is a verdict session whose first query of each kind can
+// be held: the progress read parks until releasePoll is closed, and the
+// first cancel signal parks until releaseSignal is closed. Every cancel
+// signal that reaches the session is counted, so a test can prove that a
+// caller who gave up sent nothing.
+type blockingSession struct {
+	pollEntered   chan struct{}
+	releasePoll   chan struct{}
+	signalEntered chan struct{}
+	releaseSignal chan struct{}
+	signals       atomic.Int32
+}
+
+func newBlockingSession() *blockingSession {
+	return &blockingSession{
+		pollEntered:   make(chan struct{}),
+		releasePoll:   make(chan struct{}),
+		signalEntered: make(chan struct{}),
+		releaseSignal: make(chan struct{}),
+	}
+}
+
+func (s *blockingSession) session() fakeSession {
+	return fakeSession{query: func(_ context.Context, sql string, _ ...any) pgx.Row {
+		if !strings.Contains(sql, "pg_catalog.pg_cancel_backend") {
+			return fakeRow{scan: func(...any) error {
+				close(s.pollEntered)
+				<-s.releasePoll
+				return pgx.ErrNoRows
+			}}
+		}
+		if s.signals.Add(1) == 1 {
+			close(s.signalEntered)
+			<-s.releaseSignal
+		}
+		return fakeRow{scan: func(dest ...any) error {
+			active := "active"
+			*(dest[0].(**string)) = &active
+			*(dest[1].(*bool)) = true
+			return nil
+		}}
+	}}
+}
+
+// A caller that gives up while CancelBuild waits for the reserved session
+// — held by an in-flight progress poll or by an overlapping cancel — sends
+// nothing, and says so with ErrCancelNotDispatched alongside its own
+// context error, so a consumer can tell "never sent" from a context error
+// that came back after the signal was sent.
+func TestCancelBuildReportsNotDispatchedWhenTheCallerGivesUpWaitingForTheSession(t *testing.T) {
+	t.Run("cancelled behind an in-flight progress poll", func(t *testing.T) {
+		blocking := newBlockingSession()
+		close(blocking.releaseSignal)
+		tracker := runningTrackerWithBuild(t, blocking.session())
+
+		var workers sync.WaitGroup
+		defer workers.Wait()
+		workers.Go(func() {
+			_, err := tracker.Progress(t.Context())
+			assert.NoError(t, err)
+		})
+		<-blocking.pollEntered
+
+		callerCtx, giveUp := context.WithCancel(t.Context())
+		defer giveUp()
+		outcome := make(chan error, 1)
+		// The poll holds the session until releasePoll closes, so the caller
+		// gives up before CancelBuild can take it, whether or not CancelBuild
+		// has started waiting yet.
+		workers.Go(func() { outcome <- tracker.CancelBuild(callerCtx) })
+		giveUp()
+		close(blocking.releasePoll)
+
+		err := awaitCancelOutcome(t, outcome)
+		require.ErrorIs(t, err, progress.ErrCancelNotDispatched)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.NotErrorIs(t, err, progress.ErrNoActiveBuild)
+		assert.Equal(t, int32(0), blocking.signals.Load(), "a caller that gave up must send no signal")
+
+		// The build is still signallable by a caller that has not given up.
+		require.NoError(t, tracker.CancelBuild(t.Context()))
+		assert.Equal(t, int32(1), blocking.signals.Load())
+	})
+	t.Run("deadline passed behind an in-flight progress poll", func(t *testing.T) {
+		blocking := newBlockingSession()
+		close(blocking.releaseSignal)
+		tracker := runningTrackerWithBuild(t, blocking.session())
+
+		var workers sync.WaitGroup
+		defer workers.Wait()
+		workers.Go(func() {
+			_, err := tracker.Progress(t.Context())
+			assert.NoError(t, err)
+		})
+		<-blocking.pollEntered
+
+		expired, cancel := context.WithDeadline(t.Context(), time.Unix(0, 0))
+		defer cancel()
+		outcome := make(chan error, 1)
+		workers.Go(func() { outcome <- tracker.CancelBuild(expired) })
+		close(blocking.releasePoll)
+
+		err := awaitCancelOutcome(t, outcome)
+		require.ErrorIs(t, err, progress.ErrCancelNotDispatched)
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Equal(t, int32(0), blocking.signals.Load(), "a caller past its deadline must send no signal")
+	})
+	t.Run("cancelled behind an overlapping cancel signal", func(t *testing.T) {
+		blocking := newBlockingSession()
+		tracker := runningTrackerWithBuild(t, blocking.session())
+
+		var workers sync.WaitGroup
+		defer workers.Wait()
+		first := make(chan error, 1)
+		workers.Go(func() { first <- tracker.CancelBuild(t.Context()) })
+		<-blocking.signalEntered
+
+		callerCtx, giveUp := context.WithCancel(t.Context())
+		defer giveUp()
+		second := make(chan error, 1)
+		workers.Go(func() { second <- tracker.CancelBuild(callerCtx) })
+		giveUp()
+		close(blocking.releaseSignal)
+
+		require.NoError(t, awaitCancelOutcome(t, first), "the overlapping signal was sent and accepted")
+		err := awaitCancelOutcome(t, second)
+		require.ErrorIs(t, err, progress.ErrCancelNotDispatched)
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, int32(1), blocking.signals.Load(), "only the overlapping cancel may reach the session")
+	})
+}
+
+// A caller that gives up while a poll holds the reserved session gets its
+// answer then, not when the poll lets go: the wait for the session is
+// bounded by the caller's context, so an orchestrator's stop verb never
+// hangs behind an observer. The poll is deliberately never released until
+// the outcome is in hand; a wait that ignored the context would only return
+// at the outcome deadline.
+func TestCancelBuildReturnsWhenTheCallerGivesUpWhileWaiting(t *testing.T) {
+	blocking := newBlockingSession()
+	close(blocking.releaseSignal)
+	tracker := runningTrackerWithBuild(t, blocking.session())
+
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	workers.Go(func() {
+		_, err := tracker.Progress(t.Context())
+		assert.NoError(t, err)
+	})
+	<-blocking.pollEntered
+	defer close(blocking.releasePoll)
+
+	callerCtx, giveUp := context.WithCancel(t.Context())
+	defer giveUp()
+	outcome := make(chan error, 1)
+	workers.Go(func() { outcome <- tracker.CancelBuild(callerCtx) })
+	giveUp()
+
+	err := awaitCancelOutcome(t, outcome)
+	require.ErrorIs(t, err, progress.ErrCancelNotDispatched)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int32(0), blocking.signals.Load(), "a caller that gave up must send no signal")
+}
+
+// A caller that gives up while waiting for a build that ends during the
+// wait learns that the build is gone, not that its cancel went unsent: there
+// is nothing left to retry against.
+func TestCancelBuildReportsNoActiveBuildWhenTheBuildEndsWhileTheCallerWaits(t *testing.T) {
+	blocking := newBlockingSession()
+	tracker := runningTrackerWithBuild(t, blocking.session())
+
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	workers.Go(func() {
+		_, err := tracker.Progress(t.Context())
+		assert.NoError(t, err)
+	})
+	<-blocking.pollEntered
+	defer close(blocking.releasePoll)
+
+	// The executor's own resets clear the build under the state lock alone,
+	// so the build can end while the poll still holds the session.
+	tracker.Finish(nil)
+
+	callerCtx, giveUp := context.WithCancel(t.Context())
+	defer giveUp()
+	outcome := make(chan error, 1)
+	workers.Go(func() { outcome <- tracker.CancelBuild(callerCtx) })
+	giveUp()
+
+	err := awaitCancelOutcome(t, outcome)
+	require.ErrorIs(t, err, progress.ErrNoActiveBuild)
+	assert.NotErrorIs(t, err, progress.ErrCancelNotDispatched)
+	assert.Equal(t, int32(0), blocking.signals.Load())
+}
+
+// probeCtx is a caller context — no deadline, no values — that records how
+// CancelBuild consults it. Its Done channel never fires, and reports that
+// CancelBuild has started waiting on it; Err reports an ended context only
+// once the poll has released the session, and records whether it was read
+// before that.
+type probeCtx struct {
+	waiting   chan struct{}
+	waitOnce  sync.Once
+	released  atomic.Bool
+	readEarly atomic.Bool
+}
+
+func newProbeCtx() *probeCtx {
+	return &probeCtx{waiting: make(chan struct{})}
+}
+
+func (c *probeCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (c *probeCtx) Done() <-chan struct{} {
+	c.waitOnce.Do(func() { close(c.waiting) })
+	return nil
+}
+
+func (c *probeCtx) Err() error {
+	if !c.released.Load() {
+		c.readEarly.Store(true)
+		return nil
+	}
+	return context.Canceled
+}
+
+func (c *probeCtx) Value(any) any { return nil }
+
+// CancelBuild reads whether the caller has given up only once it holds the
+// reserved session, so a caller still live when the session comes free
+// sends its signal, and one that gave up in the meantime is told nothing
+// was sent. A check hoisted above the wait would find the context live,
+// then send after the caller had gone.
+func TestCancelBuildReadsTheCallersContextOnlyOnceItHoldsTheSession(t *testing.T) {
+	blocking := newBlockingSession()
+	close(blocking.releaseSignal)
+	tracker := runningTrackerWithBuild(t, blocking.session())
+
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	workers.Go(func() {
+		_, err := tracker.Progress(t.Context())
+		assert.NoError(t, err)
+	})
+	<-blocking.pollEntered
+	releasePoll := sync.OnceFunc(func() { close(blocking.releasePoll) })
+	defer releasePoll()
+
+	caller := newProbeCtx()
+	outcome := make(chan error, 1)
+	workers.Go(func() { outcome <- tracker.CancelBuild(caller) })
+
+	// CancelBuild is parked on the session; the context "ends" only now,
+	// as the poll lets go, so any earlier read of it was premature.
+	select {
+	case <-caller.waiting:
+	case <-time.After(cancelOutcomeDeadline):
+		t.Fatal("CancelBuild never waited on the caller's context while the poll held the session")
+	}
+	caller.released.Store(true)
+	releasePoll()
+
+	err := awaitCancelOutcome(t, outcome)
+	require.ErrorIs(t, err, progress.ErrCancelNotDispatched)
+	assert.False(t, caller.readEarly.Load(), "the caller's context must be read only once the session is held")
+	assert.Equal(t, int32(0), blocking.signals.Load())
+}
+
+// Once the signal is sent, a context error that comes back — the signal's
+// own deadline expiring while the caller has also given up — may follow a
+// signal the server acted on, so it is never reported as not dispatched.
+func TestCancelBuildDoesNotReportNotDispatchedOnceTheSignalIsSent(t *testing.T) {
+	callerCtx, giveUp := context.WithCancel(t.Context())
+	defer giveUp()
+	var signalled uint32
+	timedOut := fmt.Errorf("read cancel result: %w", context.DeadlineExceeded)
+	session := cancelSession(t, backendObservation{}, timedOut, &signalled)
+	inner := session.query
+	session.query = func(ctx context.Context, sql string, args ...any) pgx.Row {
+		giveUp()
+		return inner(ctx, sql, args...)
+	}
+	tracker := runningTrackerWithBuild(t, session)
+
+	err := tracker.CancelBuild(callerCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.NotErrorIs(t, err, progress.ErrCancelNotDispatched)
+	assert.Equal(t, uint32(4242), signalled, "the signal reached the session before the error came back")
 }
 
 // Only a backend the server positively reports active is signalled; an
@@ -453,6 +765,7 @@ func TestCancelBuildWrapsASessionFailure(t *testing.T) {
 	assert.NotErrorIs(t, err, progress.ErrBuildNotRunning)
 	assert.NotErrorIs(t, err, progress.ErrBuildUnobservable)
 	assert.NotErrorIs(t, err, progress.ErrNoActiveBuild)
+	assert.NotErrorIs(t, err, progress.ErrCancelNotDispatched)
 }
 
 // Every transition that ends a build's ownership of its backend also ends
