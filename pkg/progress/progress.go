@@ -141,28 +141,33 @@ type Snapshot struct {
 // build, or the one WorkSource call for an engine-measured step, making
 // polling lifetime identical to the caller's context.
 //
-// Two locks split the tracker's concerns: mu guards the state fields and is
-// held only for memory access, so the executor's own updates never wait for
-// a database read; pollMu serializes observers, so the reserved session —
-// a single pgx connection that is not safe for concurrent use — only ever
-// carries one progress query at a time, and a WorkSource sees one poll at a
-// time.
+// Two guards split the tracker's concerns: mu guards the state fields and
+// is held only for memory access, so the executor's own updates never wait
+// for a database read; the poll gate serializes observers, so the reserved
+// session — a single pgx connection that is not safe for concurrent use —
+// only ever carries one progress query at a time, and a WorkSource sees one
+// poll at a time. The gate is a one-slot channel rather than a mutex so
+// that CancelBuild, the one taker with a caller waiting on an answer, can
+// stop waiting when that caller's context ends.
 //
-// Four state changes take pollMu, because each ends a poll target's
+// Four state changes take the poll gate, because each ends a poll target's
 // ownership of the step's work and must not do so under a poll still in
 // flight: StopConcurrentBuild and SetWorkSource release the build's
 // session, which the executor calls before that session can return to the
 // pool, so an observation or cancel signal in flight completes against a
 // backend the build still owns; StopWorkSource and SetConcurrentBuild
 // release the source, which the engine calls before the state the source
-// reads goes away. Each takes pollMu before mu, the one order every taker
+// reads goes away. Each takes the gate before mu, the one order every taker
 // uses. Start, StartStep and Finish also clear those fields, but as resets
 // under mu alone — by the time they run the step has already passed through
 // its fence, and a reset that waited behind an observation would make
 // polling a gate on execution.
+//
+// A Tracker comes from NewTracker, which creates the gate; the zero value
+// has no gate and must not be used.
 type Tracker struct {
 	mu        sync.RWMutex
-	pollMu    sync.Mutex
+	pollGate  chan struct{}
 	clock     Clock
 	session   dbconn.RowQuerier
 	source    WorkSource
@@ -181,11 +186,36 @@ func NewTracker(clock Clock) (*Tracker, error) {
 	if clock == nil {
 		return nil, fmt.Errorf("progress clock is required")
 	}
-	return &Tracker{clock: clock, phase: PhasePending}, nil
+	return &Tracker{clock: clock, phase: PhasePending, pollGate: make(chan struct{}, 1)}, nil
 }
 
 // Now returns the tracker's injected time for executor duration accounting.
 func (t *Tracker) Now() time.Time { return t.clock.Now() }
+
+// takePollGate waits, without limit, for the poll gate. The observers and
+// the handoff fences take it this way: a poll is bounded by its own
+// context once it holds the gate, and a fence waits only for that poll.
+func (t *Tracker) takePollGate() {
+	t.pollGate <- struct{}{}
+}
+
+// takePollGateOrGiveUp waits for the poll gate until ctx ends, and reports
+// ctx's error — holding nothing — when the caller gives up first. When the
+// gate frees and ctx ends in the same instant either outcome may be
+// reported; both are honest, because nothing has been done yet.
+func (t *Tracker) takePollGateOrGiveUp(ctx context.Context) error {
+	select {
+	case t.pollGate <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// releasePollGate hands the gate to the next waiter.
+func (t *Tracker) releasePollGate() {
+	<-t.pollGate
+}
 
 // Start records the beginning of an execution. It resets all per-execution
 // state, so a reused tracker never leaks a prior run's step, terminal time,
@@ -224,8 +254,8 @@ func (t *Tracker) SetAttempt(attempt int) {
 // waiting, as StopWorkSource does, for a poll still reading it, so the
 // source's owner never finds its state observed after the handoff.
 func (t *Tracker) SetConcurrentBuild(session dbconn.RowQuerier, pid uint32) {
-	t.pollMu.Lock()
-	defer t.pollMu.Unlock()
+	t.takePollGate()
+	defer t.releasePollGate()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.session, t.buildPID = session, pid
@@ -253,12 +283,15 @@ var (
 	// directly, or the caller ends the context the build runs under.
 	ErrBuildUnobservable = errors.New("the server does not expose the concurrent index build backend's state")
 	// ErrCancelNotDispatched is returned by CancelBuild when the caller's
-	// context ended before the cancel signal was sent — including while
-	// CancelBuild waited for an in-flight progress poll or another cancel
-	// to release the reserved session. It is returned wrapped together
-	// with the caller's context error, so errors.Is matches both. A
-	// context error without it came back after the signal was sent, and
-	// the signal may have reached the build.
+	// context ended before the cancel signal was sent — while CancelBuild
+	// waited for an in-flight progress poll or another cancel to release
+	// the reserved session, or in the instant it took the session. It is
+	// returned wrapped together with the caller's context error, so
+	// errors.Is matches both; test for this sentinel before testing for
+	// the context error. A context error without it came back after the
+	// signal was sent, and the signal may have reached the build. The
+	// other sentinels CancelBuild returns also mean nothing was delivered;
+	// see CancelBuild for the full outcome table.
 	ErrCancelNotDispatched = errors.New("the cancel signal was not sent")
 )
 
@@ -307,10 +340,24 @@ const cancelBuildSQL = `SELECT state,
 // intact.
 //
 // CancelBuild waits for an in-flight progress poll or another cancel to
-// release the reserved session before it reads the caller's ctx. A caller
-// whose ctx has ended by then gets ErrCancelNotDispatched wrapped with its
-// context error, and no signal was sent. Any other error, a context error
-// included, may have come back after the signal was sent.
+// release the reserved session, for as long as the caller's ctx lasts. A
+// caller whose ctx ends first — during that wait, or by the time the
+// session is held — gets ErrCancelNotDispatched wrapped with its context
+// error, and no signal was sent. The outcomes sort into four classes:
+//
+//   - nil: the signal was sent and accepted.
+//   - ErrCancelNotDispatched, with the context error: nothing was sent;
+//     the caller may retry.
+//   - ErrNoActiveBuild, ErrBuildNotRunning, ErrBuildUnobservable: nothing
+//     was delivered to the build, for the reason each sentinel names.
+//   - any other error, a context error without ErrCancelNotDispatched
+//     included: it came back after the signal query was issued, and the
+//     signal may have reached the build.
+//
+// Because the second class matches both the sentinel and the context
+// error, a caller tests for ErrCancelNotDispatched before it tests for a
+// context error; the other order reads "nothing sent" as "may have been
+// sent".
 //
 // The reserved session's role must be allowed to signal the build's
 // backend: the same role, or a member of pg_signal_backend. Otherwise
@@ -318,16 +365,25 @@ const cancelBuildSQL = `SELECT state,
 // error is returned wrapped; it is a permanent condition of the role, not
 // one a retry clears.
 func (t *Tracker) CancelBuild(ctx context.Context) error {
-	t.pollMu.Lock()
-	defer t.pollMu.Unlock()
-	t.mu.RLock()
-	session, pid := t.session, t.buildPID
-	t.mu.RUnlock()
-	if pid == 0 || session == nil {
+	if err := t.takePollGateOrGiveUp(ctx); err != nil {
+		// The caller gave up while a poll or another cancel held the
+		// session; nothing was sent. A build that ended meanwhile is
+		// reported as such, not as a cancel left unsent.
+		_, pid, ok := t.activeBuild()
+		if !ok {
+			return ErrNoActiveBuild
+		}
+		return fmt.Errorf("cancel concurrent index build backend %d: %w: %w", pid, ErrCancelNotDispatched, err)
+	}
+	defer t.releasePollGate()
+	session, pid, ok := t.activeBuild()
+	if !ok {
 		return ErrNoActiveBuild
 	}
 	if err := ctx.Err(); err != nil {
-		// A caller that has already given up sends nothing.
+		// The caller gave up in the instant the session came free; the
+		// gate is held, so this is the last point at which nothing has
+		// been sent.
 		return fmt.Errorf("cancel concurrent index build backend %d: %w: %w", pid, ErrCancelNotDispatched, err)
 	}
 	signalCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cancelSignalTimeout)
@@ -355,6 +411,17 @@ func (t *Tracker) CancelBuild(ctx context.Context) error {
 		return fmt.Errorf("cancel concurrent index build backend %d reports state %s: %w",
 			pid, describeState(state), ErrBuildUnobservable)
 	}
+}
+
+// activeBuild reads the concurrent build the tracker is polling, if any:
+// its reserved session and backend PID, and whether there is one.
+func (t *Tracker) activeBuild() (dbconn.RowQuerier, uint32, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.buildPID == 0 || t.session == nil {
+		return nil, 0, false
+	}
+	return t.session, t.buildPID, true
 }
 
 // buildBackendVerdict is the classification of one pg_stat_activity state
@@ -409,8 +476,8 @@ func describeState(state *string) string {
 // so no signal that read the build's PID completes after that backend could
 // be running someone else's statement.
 func (t *Tracker) StopConcurrentBuild() {
-	t.pollMu.Lock()
-	defer t.pollMu.Unlock()
+	t.takePollGate()
+	defer t.releasePollGate()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.session, t.buildPID = nil, 0
@@ -440,8 +507,8 @@ func (t *Tracker) Finish(err error) {
 // serialize only against each other (and the four handoff fences), never
 // against the executor's own state updates.
 func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
-	t.pollMu.Lock()
-	defer t.pollMu.Unlock()
+	t.takePollGate()
+	defer t.releasePollGate()
 	t.mu.RLock()
 	now := t.clock.Now()
 	if !t.ended.IsZero() {

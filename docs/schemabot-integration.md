@@ -82,7 +82,7 @@ the integration phase starts; they drift.)
 | `Progress` | per-table rows-copied / total / percent / ETA / checksum state |
 | `Stop` / `Start` | checkpoint and resume (slot + copy + applier watermark) |
 | `Cutover` | the deferred, operator-gated atomic swap |
-| `Cancel` | abort and **guarantee logical-slot + shadow-table cleanup** |
+| `Cancel` | abort and **guarantee logical-slot + shadow-table cleanup**; for a running concurrent index build the stop path is `progress.Tracker.CancelBuild`, whose outcomes the adapter maps with the [cancel outcome table](progress-report.md#cancelling-a-concurrent-index-build) — test for `ErrCancelNotDispatched` before any context error, and record the operator's cancel as possibly delivered only when that sentinel is absent |
 | `Volume` | map 1–11 onto chunk-time target / parallelism / throttle |
 | `Revert` / `SkipRevert` | decline for the copy-and-swap path (like Spirit); only the expand/contract backend could honour them |
 

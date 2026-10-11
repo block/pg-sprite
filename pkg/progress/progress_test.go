@@ -550,6 +550,143 @@ func TestCancelBuildReportsNotDispatchedWhenTheCallerGivesUpWaitingForTheSession
 	})
 }
 
+// A caller that gives up while a poll holds the reserved session gets its
+// answer then, not when the poll lets go: the wait for the session is
+// bounded by the caller's context, so an orchestrator's stop verb never
+// hangs behind an observer. The poll is deliberately never released until
+// the outcome is in hand; a wait that ignored the context would only return
+// at the outcome deadline.
+func TestCancelBuildReturnsWhenTheCallerGivesUpWhileWaiting(t *testing.T) {
+	blocking := newBlockingSession()
+	close(blocking.releaseSignal)
+	tracker := runningTrackerWithBuild(t, blocking.session())
+
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	workers.Go(func() {
+		_, err := tracker.Progress(t.Context())
+		assert.NoError(t, err)
+	})
+	<-blocking.pollEntered
+	defer close(blocking.releasePoll)
+
+	callerCtx, giveUp := context.WithCancel(t.Context())
+	defer giveUp()
+	outcome := make(chan error, 1)
+	workers.Go(func() { outcome <- tracker.CancelBuild(callerCtx) })
+	giveUp()
+
+	err := awaitCancelOutcome(t, outcome)
+	require.ErrorIs(t, err, progress.ErrCancelNotDispatched)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, int32(0), blocking.signals.Load(), "a caller that gave up must send no signal")
+}
+
+// A caller that gives up while waiting for a build that ends during the
+// wait learns that the build is gone, not that its cancel went unsent: there
+// is nothing left to retry against.
+func TestCancelBuildReportsNoActiveBuildWhenTheBuildEndsWhileTheCallerWaits(t *testing.T) {
+	blocking := newBlockingSession()
+	tracker := runningTrackerWithBuild(t, blocking.session())
+
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	workers.Go(func() {
+		_, err := tracker.Progress(t.Context())
+		assert.NoError(t, err)
+	})
+	<-blocking.pollEntered
+	defer close(blocking.releasePoll)
+
+	// The executor's own resets clear the build under the state lock alone,
+	// so the build can end while the poll still holds the session.
+	tracker.Finish(nil)
+
+	callerCtx, giveUp := context.WithCancel(t.Context())
+	defer giveUp()
+	outcome := make(chan error, 1)
+	workers.Go(func() { outcome <- tracker.CancelBuild(callerCtx) })
+	giveUp()
+
+	err := awaitCancelOutcome(t, outcome)
+	require.ErrorIs(t, err, progress.ErrNoActiveBuild)
+	assert.NotErrorIs(t, err, progress.ErrCancelNotDispatched)
+	assert.Equal(t, int32(0), blocking.signals.Load())
+}
+
+// probeCtx is a caller context — no deadline, no values — that records how
+// CancelBuild consults it. Its Done channel never fires, and reports that
+// CancelBuild has started waiting on it; Err reports an ended context only
+// once the poll has released the session, and records whether it was read
+// before that.
+type probeCtx struct {
+	waiting   chan struct{}
+	waitOnce  sync.Once
+	released  atomic.Bool
+	readEarly atomic.Bool
+}
+
+func newProbeCtx() *probeCtx {
+	return &probeCtx{waiting: make(chan struct{})}
+}
+
+func (c *probeCtx) Deadline() (time.Time, bool) { return time.Time{}, false }
+
+func (c *probeCtx) Done() <-chan struct{} {
+	c.waitOnce.Do(func() { close(c.waiting) })
+	return nil
+}
+
+func (c *probeCtx) Err() error {
+	if !c.released.Load() {
+		c.readEarly.Store(true)
+		return nil
+	}
+	return context.Canceled
+}
+
+func (c *probeCtx) Value(any) any { return nil }
+
+// CancelBuild reads whether the caller has given up only once it holds the
+// reserved session, so a caller still live when the session comes free
+// sends its signal, and one that gave up in the meantime is told nothing
+// was sent. A check hoisted above the wait would find the context live,
+// then send after the caller had gone.
+func TestCancelBuildReadsTheCallersContextOnlyOnceItHoldsTheSession(t *testing.T) {
+	blocking := newBlockingSession()
+	close(blocking.releaseSignal)
+	tracker := runningTrackerWithBuild(t, blocking.session())
+
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	workers.Go(func() {
+		_, err := tracker.Progress(t.Context())
+		assert.NoError(t, err)
+	})
+	<-blocking.pollEntered
+	releasePoll := sync.OnceFunc(func() { close(blocking.releasePoll) })
+	defer releasePoll()
+
+	caller := newProbeCtx()
+	outcome := make(chan error, 1)
+	workers.Go(func() { outcome <- tracker.CancelBuild(caller) })
+
+	// CancelBuild is parked on the session; the context "ends" only now,
+	// as the poll lets go, so any earlier read of it was premature.
+	select {
+	case <-caller.waiting:
+	case <-time.After(cancelOutcomeDeadline):
+		t.Fatal("CancelBuild never waited on the caller's context while the poll held the session")
+	}
+	caller.released.Store(true)
+	releasePoll()
+
+	err := awaitCancelOutcome(t, outcome)
+	require.ErrorIs(t, err, progress.ErrCancelNotDispatched)
+	assert.False(t, caller.readEarly.Load(), "the caller's context must be read only once the session is held")
+	assert.Equal(t, int32(0), blocking.signals.Load())
+}
+
 // Once the signal is sent, a context error that comes back — the signal's
 // own deadline expiring while the caller has also given up — may follow a
 // signal the server acted on, so it is never reported as not dispatched.

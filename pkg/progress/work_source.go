@@ -43,8 +43,8 @@ type WorkSource interface {
 // before the engine lets the state behind it go. The engine calls
 // StopWorkSource before the source's state goes away.
 func (t *Tracker) SetWorkSource(source WorkSource) {
-	t.pollMu.Lock()
-	defer t.pollMu.Unlock()
+	t.takePollGate()
+	defer t.releasePollGate()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.source = source
@@ -57,8 +57,8 @@ func (t *Tracker) SetWorkSource(source WorkSource) {
 // no poll that began while the step ran completes against a source whose
 // owner has gone.
 func (t *Tracker) StopWorkSource() {
-	t.pollMu.Lock()
-	defer t.pollMu.Unlock()
+	t.takePollGate()
+	defer t.releasePollGate()
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.source = nil
