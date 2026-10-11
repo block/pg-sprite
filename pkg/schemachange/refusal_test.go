@@ -36,6 +36,8 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 		CauseCutoverUnverified: "CO-1",
 		CauseSwapMismatch:      "ST-6",
 		CauseOutcomeAmbiguous:  "LK-4",
+		CauseResumeTerminal:    "ST-4",
+		CauseResumeRowMismatch: "ST-2",
 	}
 	assert.Len(t, RefusalCauses(), len(want), "every registered cause has an expected invariant")
 	for _, cause := range RefusalCauses() {

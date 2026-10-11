@@ -100,6 +100,15 @@ const (
 	// the catalog cannot say whether the swap committed, so the engine
 	// stops rather than retry or report either outcome.
 	CauseOutcomeAmbiguous RefusalCause = "cutover-outcome-ambiguous"
+	// CauseResumeTerminal means the checkpoint row handed to a resume is in
+	// a terminal phase (ST-4): the run it records is done or failed, so
+	// there is nothing to resume or reconcile.
+	CauseResumeTerminal RefusalCause = "resume-row-terminal"
+	// CauseResumeRowMismatch means the checkpoint row handed to a resume
+	// does not describe the proven target and built shadow (ST-2): it is
+	// keyed on another table, names another shadow or slot, or carries the
+	// fingerprints of another statement.
+	CauseResumeRowMismatch RefusalCause = "resume-row-mismatch"
 )
 
 // RefusalCauses returns the closed set of shadow refusal causes, so
@@ -126,6 +135,8 @@ func RefusalCauses() []RefusalCause {
 		CauseNameTaken,
 		CauseSwapMismatch,
 		CauseOutcomeAmbiguous,
+		CauseResumeTerminal,
+		CauseResumeRowMismatch,
 	}
 }
 
@@ -146,6 +157,10 @@ func (c RefusalCause) Invariant() string {
 		return "CO-1"
 	case CauseOutcomeAmbiguous:
 		return "LK-4"
+	case CauseResumeTerminal:
+		return "ST-4"
+	case CauseResumeRowMismatch:
+		return "ST-2"
 	default:
 		return ""
 	}

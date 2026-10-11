@@ -87,5 +87,26 @@ func TestSlotLostErrorDistinguishesAnAbsentSlot(t *testing.T) {
 	assert.ErrorIs(t, gone, decode.ErrSlotLost)
 	assert.Equal(t, "slot pgsprite_0123abcd no longer exists", gone.Error())
 	lost := &decode.SlotLostError{Slot: lagTestSlot, Found: true, WALStatus: decode.WALStatusLost}
-	assert.Equal(t, `slot pgsprite_0123abcd is lost: the server reports wal_status "lost"`, lost.Error())
+	assert.Equal(t, `slot pgsprite_0123abcd is lost: the server reports wal_status "lost" (cause not reported by this server version)`, lost.Error())
+}
+
+// The server's cause rides on the lost state: its word when it has one,
+// and otherwise whether it has no cause column or reported no cause.
+func TestSlotLostErrorRendersTheServersCause(t *testing.T) {
+	removed := &decode.SlotLostError{Slot: lagTestSlot, Found: true, WALStatus: decode.WALStatusLost,
+		Invalidation: decode.SlotInvalidation{Reason: decode.InvalidationWALRemoved, Reported: true}}
+	assert.Equal(t, `slot pgsprite_0123abcd is lost: the server reports wal_status "lost" (wal_removed)`, removed.Error())
+	silent := &decode.SlotLostError{Slot: lagTestSlot, Found: true, WALStatus: decode.WALStatusLost,
+		Invalidation: decode.SlotInvalidation{Reported: true}}
+	assert.Equal(t, `slot pgsprite_0123abcd is lost: the server reports wal_status "lost" (no invalidation reported)`, silent.Error())
+}
+
+// LostState is the lost state only for a slot the server reports lost,
+// carrying the cause the status read; a readable slot has none.
+func TestLostStateCarriesTheCause(t *testing.T) {
+	lost := decode.SlotStatus{Name: lagTestSlot, WALStatus: decode.WALStatusLost,
+		Invalidation: decode.SlotInvalidation{Reason: decode.InvalidationWALRemoved, Reported: true}}
+	assert.Equal(t, &decode.SlotLostError{Slot: lagTestSlot, Found: true, WALStatus: decode.WALStatusLost,
+		Invalidation: lost.Invalidation}, lost.LostState())
+	assert.Nil(t, decode.SlotStatus{Name: lagTestSlot, WALStatus: decode.WALStatusReserved}.LostState())
 }

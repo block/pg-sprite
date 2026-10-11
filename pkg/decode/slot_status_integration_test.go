@@ -68,7 +68,19 @@ func TestInspectSlotReportsWALTheServerHasLost(t *testing.T) {
 	require.True(t, found)
 	assert.Equal(t, decode.WALStatusLost, status.WALStatus)
 	assert.False(t, status.Retained.Known, "a slot with no restart position retains an unknown amount, not zero")
+	if f.serverVersion(t) >= reportsInvalidationReasonSince {
+		assert.Equal(t, decode.SlotInvalidation{Reason: decode.InvalidationWALRemoved, Reported: true}, status.Invalidation,
+			"the server names removed WAL as the cause")
+	} else {
+		assert.Equal(t, decode.SlotInvalidation{}, status.Invalidation, "a server without the column reports no cause")
+	}
+	assert.Equal(t, &decode.SlotLostError{Slot: slot.Name(), Found: true, WALStatus: decode.WALStatusLost, Invalidation: status.Invalidation},
+		status.LostState())
 }
+
+// reportsInvalidationReasonSince is the first server_version_num whose
+// pg_replication_slots has invalidation_reason.
+const reportsInvalidationReasonSince = 170000
 
 // A name no slot wears is not an error; it is the answer "no slot".
 func TestInspectSlotReportsAnAbsentSlot(t *testing.T) {
