@@ -44,7 +44,7 @@ func TestConfirmMovesTheSlotToTheConfirmedPosition(t *testing.T) {
 
 	require.NoError(t, stream.Confirm(t.Context(), delivered))
 	assert.Equal(t, delivered, stream.Confirmed())
-	f.assertConfirmedFlushBecomes(t, slot, delivered)
+	stream.assertConfirmedFlushBecomes(t, slot, delivered)
 }
 
 // The stream answers the server's keepalives — the connection survives
@@ -76,7 +76,7 @@ func TestKeepaliveRepliesDoNotMoveTheSlot(t *testing.T) {
 	assert.Equal(t, initial, f.confirmedFlush(t, slot), "keepalive replies carry no position")
 
 	require.NoError(t, stream.Confirm(t.Context(), stream.Delivered()))
-	f.assertConfirmedFlushBecomes(t, slot, stream.Confirmed())
+	stream.assertConfirmedFlushBecomes(t, slot, stream.Confirmed())
 }
 
 // A position beyond what the stream has delivered is refused, since
@@ -121,7 +121,7 @@ func TestReopenedStreamReplaysFromTheConfirmedPosition(t *testing.T) {
 	require.GreaterOrEqual(t, third.LSN, afterSecond, "the third transaction starts where the second ended")
 
 	require.NoError(t, stream.Confirm(t.Context(), afterSecond))
-	f.assertConfirmedFlushBecomes(t, slot, afterSecond)
+	stream.assertConfirmedFlushBecomes(t, slot, afterSecond)
 	require.NoError(t, stream.Close(t.Context()))
 
 	resumed := f.openStream(t, afterSecond)
@@ -133,7 +133,7 @@ func TestReopenedStreamReplaysFromTheConfirmedPosition(t *testing.T) {
 
 	require.NoError(t, resumed.Confirm(t.Context(), slot.ConsistentPoint()))
 	assert.Equal(t, slot.ConsistentPoint(), resumed.Confirmed())
-	f.assertWALSenderFlushBecomes(t, slot, slot.ConsistentPoint())
+	resumed.assertWALSenderFlushBecomes(t, slot, slot.ConsistentPoint())
 	assert.Equal(t, afterSecond, f.confirmedFlush(t, slot), "the server never moves the slot backwards")
 	require.NoError(t, resumed.Close(t.Context()))
 
@@ -170,7 +170,7 @@ func TestStreamDeliversAnInterleavedTransactionBelowTheConfirmedPosition(t *test
 	awaitDelivered(t, stream, first.LSN+1)
 	confirmed := stream.Delivered()
 	require.NoError(t, stream.Confirm(t.Context(), confirmed))
-	f.assertConfirmedFlushBecomes(t, slot, confirmed)
+	stream.assertConfirmedFlushBecomes(t, slot, confirmed)
 
 	require.NoError(t, open.Commit(t.Context()))
 	late := nextChangeDelivery(t, stream)

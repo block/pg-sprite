@@ -147,23 +147,28 @@ func (f slotFixture) confirmedFlush(t *testing.T, slot *decode.Slot) decode.LSN 
 
 // assertConfirmedFlushBecomes polls until the server's recorded position
 // for the slot equals want; a status update is applied by the walsender
-// after it is received, not synchronously with the client's send.
-func (f slotFixture) assertConfirmedFlushBecomes(t *testing.T, slot *decode.Slot, want decode.LSN) {
+// after it is received, not synchronously with the client's send. The
+// stream is the one that confirmed, so a timeout reports its walsender.
+func (s fixtureStream) assertConfirmedFlushBecomes(t *testing.T, slot *decode.Slot, want decode.LSN) {
 	t.Helper()
-	assert.EventuallyWithT(t, func(collect *assert.CollectT) {
-		assert.Equal(collect, want, f.confirmedFlush(t, slot))
+	reached := assert.EventuallyWithT(t, func(collect *assert.CollectT) {
+		assert.Equal(collect, want, s.f.confirmedFlush(t, slot))
 	}, streamDeadline, 50*time.Millisecond)
+	if !reached {
+		s.failDeadline(t, fmt.Sprintf("the slot did not reach %s before the stream deadline", want))
+	}
 }
 
 // assertWALSenderFlushBecomes polls until the walsender holding the slot
 // records want as the position the client last reported flushed, which
 // proves the server has read a status update before the test asks what the
-// server did with it.
-func (f slotFixture) assertWALSenderFlushBecomes(t *testing.T, slot *decode.Slot, want decode.LSN) {
+// server did with it. The stream is the one that confirmed, so a timeout
+// reports its walsender.
+func (s fixtureStream) assertWALSenderFlushBecomes(t *testing.T, slot *decode.Slot, want decode.LSN) {
 	t.Helper()
-	assert.EventuallyWithT(t, func(collect *assert.CollectT) {
+	reached := assert.EventuallyWithT(t, func(collect *assert.CollectT) {
 		var text *string
-		err := f.pool.QueryRow(t.Context(), `
+		err := s.f.pool.QueryRow(t.Context(), `
 			SELECT r.flush_lsn::text
 			FROM pg_catalog.pg_stat_replication AS r
 			JOIN pg_catalog.pg_replication_slots AS s ON s.active_pid = r.pid
@@ -176,6 +181,9 @@ func (f slotFixture) assertWALSenderFlushBecomes(t *testing.T, slot *decode.Slot
 			assert.Equal(collect, want, got)
 		}
 	}, streamDeadline, 50*time.Millisecond)
+	if !reached {
+		s.failDeadline(t, fmt.Sprintf("the walsender did not record %s as flushed before the stream deadline", want))
+	}
 }
 
 // column is one present text column of a decoded change.
