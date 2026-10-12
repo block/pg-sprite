@@ -22,11 +22,12 @@ var ErrSlotActive = errors.New("replication slot is held by another process")
 // … WAIT on a fresh replication connection built from cfg, proven to be on
 // the pool's own cluster and database before the drop is issued, so a
 // walsender still holding the slot is waited for rather than failed on; ctx
-// is the only bound on that wait, and a wait that ctx ends is an error —
-// never a report that the slot is gone, though the server may still complete
-// the drop once the holder releases the slot, so a caller that needs to know
-// re-reads InspectSlot. A drop is reported only once the catalog no longer
-// shows the slot. A slot already absent is success, so the drop is
+// is the only bound on that wait, and a wait that ctx ends is cancelled on
+// the server and reported as an error carrying ctx's own — never as a drop,
+// and the slot stays for the holder to release and the next attempt to
+// drop. The cancel request travels on a connection of its own, so a caller
+// that must know what the server did re-reads InspectSlot. A drop is
+// reported only once the catalog no longer shows the slot. A slot already absent is success, so the drop is
 // idempotent.
 //
 // Only the engine's own state is dropped: a slot of the name that belongs to
@@ -109,7 +110,7 @@ func confirmSlotGone(ctx context.Context, pool *pgxpool.Pool, name string) error
 // the outcome. With wait the server waits for a holder; without it a held
 // slot is ErrSlotActive.
 func dropReplicationSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name string, wait bool) error {
-	conn, err := dbconn.ConnectReplication(ctx, cfg)
+	conn, err := dbconn.ConnectReplication(ctx, cfg, dbconn.WithServerSideCancel(slotCommandCancelGrace))
 	if err != nil {
 		return fmt.Errorf("drop slot %s: %w", name, err)
 	}
@@ -117,8 +118,9 @@ func dropReplicationSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.P
 		return errors.Join(fmt.Errorf("drop slot %s: %w", name, err), conn.Close(context.WithoutCancel(ctx)))
 	}
 	// INV: ST-3 — a wait for the holder is bounded by ctx alone; ending it
-	// is an error to the caller, not a dropped slot.
-	err = pglogrepl.DropReplicationSlot(ctx, conn, name, pglogrepl.DropReplicationSlotOptions{Wait: wait})
+	// cancels the drop on the server and is an error to the caller, not a
+	// dropped slot.
+	err = endedByContext(ctx, pglogrepl.DropReplicationSlot(ctx, conn, name, pglogrepl.DropReplicationSlotOptions{Wait: wait}))
 	var closeErr error
 	if err := conn.Close(context.WithoutCancel(ctx)); err != nil {
 		closeErr = fmt.Errorf("close replication connection for slot %s: %w", name, err)

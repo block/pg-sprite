@@ -22,7 +22,18 @@ const (
 	sqlstateInvalidParameterValue = "22023"
 	sqlstateUndefinedObject       = "42704"
 	sqlstateInsufficientPrivilege = "42501"
+	sqlstateQueryCanceled         = "57014"
 )
+
+// requireCancelledOnServer asserts that a slot command the caller's context
+// ended was cancelled by the server, whose query_canceled the error carries,
+// rather than cut off by the client with the server still running it.
+func requireCancelledOnServer(t *testing.T, err error) {
+	t.Helper()
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "the command was cancelled on the server, not cut by the client")
+	assert.Equal(t, sqlstateQueryCanceled, pgErr.Code)
+}
 
 // requireSnapshotGone asserts that importing the snapshot failed because
 // the server no longer has its export file: an invalid parameter value
@@ -176,10 +187,11 @@ func TestCreateSlotRefusesAReplicationConnectionOnAnotherServer(t *testing.T) {
 	assert.False(t, found, "nothing is created on the other cluster")
 }
 
-// A create the caller's context cuts off while the server still waits for a
-// consistent point leaves no slot behind: the server drops a slot it never
-// finished creating once its walsender goes away, and nothing completes the
-// create later when the point becomes reachable.
+// A create the caller's context ends while the server still waits for a
+// consistent point leaves no slot behind: the server cancels the create
+// before the call returns, dropping the slot it never finished creating as
+// it answers, so the caller's next catalog read already finds nothing and
+// nothing completes the create later when the point becomes reachable.
 func TestCreateSlotEndedByItsContextLeavesNoSlot(t *testing.T) {
 	f := newSlotFixture(t)
 	// An open write transaction keeps the server from reaching a consistent
@@ -199,16 +211,14 @@ func TestCreateSlotEndedByItsContextLeavesNoSlot(t *testing.T) {
 	defer cancel()
 	slot, err := decode.CreateSlot(ctx, f.cfg, f.pool, f.target)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+	requireCancelledOnServer(t, err)
 	assert.Nil(t, slot)
 
-	const slotGone = 10 * time.Second
-	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		_, found, err := decode.InspectSlot(t.Context(), f.pool, f.target.DecodingName())
-		assert.NoError(collect, err)
-		assert.False(collect, found, "the unfinished slot is dropped with its walsender")
-	}, slotGone, 50*time.Millisecond)
-	require.NoError(t, held.Rollback(t.Context()))
 	_, found, err := decode.InspectSlot(t.Context(), f.pool, f.target.DecodingName())
+	require.NoError(t, err)
+	assert.False(t, found, "the unfinished slot is dropped before the cancelled create is answered")
+	require.NoError(t, held.Rollback(t.Context()))
+	_, found, err = decode.InspectSlot(t.Context(), f.pool, f.target.DecodingName())
 	require.NoError(t, err)
 	assert.False(t, found, "nothing completes the create once the consistent point is reachable")
 	assert.True(t, f.publicationExists(t, f.target.DecodingName()), "the publication stays for the next attempt")
