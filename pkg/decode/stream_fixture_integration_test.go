@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
 )
 
@@ -33,7 +34,14 @@ type fixtureStream struct {
 // to be closed after the test.
 func (f slotFixture) openStream(t *testing.T, from decode.LSN) fixtureStream {
 	t.Helper()
-	stream, err := decode.OpenStream(t.Context(), f.cfg, f.pool, f.target, from)
+	return f.openStreamWith(t, f.cfg, from)
+}
+
+// openStreamWith is openStream on a connection built from cfg instead of
+// the fixture's own, for a test that needs a hook on the dial.
+func (f slotFixture) openStreamWith(t *testing.T, cfg dbconn.Config, from decode.LSN) fixtureStream {
+	t.Helper()
+	stream, err := decode.OpenStream(t.Context(), cfg, f.pool, f.target, from)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		// A test that already closed the stream leaves a closed connection
@@ -198,6 +206,40 @@ func (f slotFixture) slotWALSenderHasReply(t *testing.T, slot *decode.Slot) bool
 		JOIN pg_catalog.pg_replication_slots AS s ON s.active_pid = r.pid
 		WHERE s.slot_name = $1`, slot.Name()).Scan(&replied))
 	return replied
+}
+
+// walSenderReply is what the walsender holding a slot last heard from its
+// client: when the last status report arrived, and the flush position it
+// carried — absent until a report carries one, and again after a report
+// that carries none.
+type walSenderReply struct {
+	at    time.Time
+	flush *decode.LSN
+}
+
+// slotWALSenderReply reads the slot's walsender's record of the last status
+// report; a slot whose walsender has received none has a zero time.
+func (f slotFixture) slotWALSenderReply(t *testing.T, slot *decode.Slot) walSenderReply {
+	t.Helper()
+	var (
+		at    *time.Time
+		flush *string
+	)
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT r.reply_time, r.flush_lsn::text
+		FROM pg_catalog.pg_stat_replication AS r
+		JOIN pg_catalog.pg_replication_slots AS s ON s.active_pid = r.pid
+		WHERE s.slot_name = $1`, slot.Name()).Scan(&at, &flush))
+	reply := walSenderReply{}
+	if at != nil {
+		reply.at = *at
+	}
+	if flush != nil {
+		lsn, err := decode.ParseLSN(*flush)
+		require.NoError(t, err)
+		reply.flush = &lsn
+	}
+	return reply
 }
 
 // awaitWALSenderReply reads progress from a quiet table until the walsender

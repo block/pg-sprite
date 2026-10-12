@@ -20,6 +20,7 @@ as of **June 2026**; they drift, so re-check before relying on an exact bound.
 - [Aurora PostgreSQL supported majors](#aurora-postgresql-supported-majors)
 - [Native-idiom version floors](#native-idiom-version-floors)
 - [The version we pivot on](#the-version-we-pivot-on)
+- [Server behaviour the stream works around: the walsender's wake-up on 16 and later](#server-behaviour-the-stream-works-around-the-walsenders-wake-up-on-16-and-later)
 
 ## Tool support matrix
 
@@ -110,3 +111,23 @@ What this *excludes* and why it's fine:
 See [vision.md](vision.md) for why we reuse these tools as executors rather than replace
 them. The version floor feeds the later execution work summarized under the
 [current implementation status and next increment](low-level-design.md#next-step).
+
+## Server behaviour the stream works around: the walsender's wake-up on 16 and later
+
+A consumer built on `pkg/decode`'s `Stream` must keep calling `Next`. On PostgreSQL 16 and
+later the walsender waits for new WAL on a condition variable and registers as a waiter only
+after it has checked the flush position; a commit that lands between the check and the
+registration is not signalled, and the walsender then sleeps on committed, unsent WAL until
+something else wakes it — its own keepalive tick at half `wal_sender_timeout` (30 s at the
+default) or a message from its client. PostgreSQL 14 and 15 set every walsender's latch on each
+flush and have no such window. `Next` sends a standby status report each time its wait runs out
+with nothing received, so a consumer that keeps calling `Next` sees a change within one wait of
+its commit on every supported major; a consumer that stops calling `Next` — a paused loop, a
+long step between calls — is exposed to the full gap on 16 and later, and sees its changes
+arrive in a burst when the walsender's tick wakes it. The report costs one small message per
+wait that runs out, so `wait` is also the report interval on a quiet table.
+
+The cause is a reading of the server's walsender source, consistent with stalls seen under test
+on PostgreSQL 18 (the walsender in its wait with `sent_lsn` behind the flush position) and not
+reproduced on demand; the report is a client-side bound that holds whatever the cause, so the
+code does not branch on the server version.
