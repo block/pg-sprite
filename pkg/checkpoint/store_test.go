@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -36,7 +37,66 @@ func TestNewStoreOptions(t *testing.T) {
 func TestTableIdentMatchesPgxQuoting(t *testing.T) {
 	assert.Equal(t, pgx.Identifier{SchemaName, TableName}.Sanitize(), tableIdent)
 	assert.Equal(t, "CREATE SCHEMA "+pgx.Identifier{SchemaName}.Sanitize(), createSchemaSQL)
-	assert.True(t, strings.HasPrefix(createTableSQL, "CREATE TABLE "+tableIdent+" ("), createTableSQL)
+	assert.True(t, strings.HasPrefix(createTableSQL(), "CREATE TABLE "+tableIdent+" ("), createTableSQL())
+}
+
+// The column list is the one statement of the table's shape: the CREATE
+// TABLE names every column in it with its definition and nothing else, the
+// ADD COLUMN for a column spells it the same way, and the primary key is
+// the one-row-per-target key (ST-1).
+func TestCreateTableSQLRendersEveryColumn(t *testing.T) {
+	sql := createTableSQL()
+	assert.Equal(t, 1, strings.Count(sql, "PRIMARY KEY (schema_name, table_name)"))
+	body := strings.TrimSuffix(strings.TrimPrefix(sql, "CREATE TABLE "+tableIdent+" (\n"), "\n)")
+	lines := strings.Split(body, "\n")
+	columns := tableColumns()
+	require.Len(t, lines, len(columns)+1, "one line per column plus the constraint")
+	for i, c := range columns {
+		assert.Equal(t, "\t"+c.name+" "+c.definition+",", lines[i])
+		assert.Equal(t, "ALTER TABLE "+tableIdent+" ADD COLUMN "+c.name+" "+c.definition, addColumnSQL(c))
+	}
+	assert.Equal(t, "\t"+tableConstraintSQL, lines[len(columns)])
+}
+
+// Every column after the first shipped shape is nullable: Ensure adds it to
+// a table that may already hold rows, and ADD COLUMN … NOT NULL without a
+// default fails on one. The first shape is spelled out here so a column
+// quietly added to it, where Ensure would never add it, is caught too.
+func TestColumnsAddedToAnExistingTableAreNullable(t *testing.T) {
+	firstShape := []string{"schema_name", "table_name", "format_version", "shadow_table", "slot_name", "publication_name",
+		"watermark", "last_applied_lsn", "source_fingerprint", "target_fingerprint", "phase", "updated_at"}
+	columns := tableColumns()
+	require.GreaterOrEqual(t, len(columns), len(firstShape))
+	for i, name := range firstShape {
+		assert.Equal(t, name, columns[i].name, "the first shape is fixed")
+	}
+	for _, c := range columns[len(firstShape):] {
+		assert.NotContains(t, c.definition, "NOT NULL", "%s is added to tables that hold rows", c.name)
+	}
+}
+
+// The load statement reads back every column Save writes, so a column
+// added to the shape cannot be written and forgotten.
+func TestSaveAndLoadSQLNameEveryColumn(t *testing.T) {
+	inserted, _, found := strings.Cut(saveSQL, ") VALUES (")
+	require.True(t, found)
+	selected, _, found := strings.Cut(loadSQL, "\nFROM ")
+	require.True(t, found)
+	for _, c := range tableColumns() {
+		assert.Contains(t, inserted, c.name, "save writes %s", c.name)
+		if c.name == "schema_name" || c.name == "table_name" {
+			continue
+		}
+		assert.Contains(t, selected, c.name, "load reads %s", c.name)
+	}
+}
+
+// The proof is NULL when the run has none, and otherwise the JSON it holds,
+// whether the caller handed in a nil or an empty slice for none.
+func TestShadowProofColumn(t *testing.T) {
+	assert.Nil(t, shadowProofColumn(nil))
+	assert.Nil(t, shadowProofColumn(json.RawMessage{}))
+	assert.Equal(t, json.RawMessage(`{"a":1}`), shadowProofColumn(json.RawMessage(`{"a":1}`)))
 }
 
 // Delete's statement matches the whole row identity, so a row that another

@@ -663,7 +663,12 @@ a fresh start — and for (c) retries through transient errors (what `dbconn.Ret
 server ended from outside it, `57P01`/`57P02`/`57P03`, which only a read may safely repeat) under bounded attempts
 before returning an error that is neither `ErrNotFound` nor incompatible; `ErrNotFound` is
 returned only for a completed read that found no row, and a database where the checkpoint table
-was never created is the typed `ErrTableMissing`, never `ErrNotFound`. `Store.Save` applies the
+was never created is the typed `ErrTableMissing`, never `ErrNotFound`. `Store.Inspect` is the
+same read guarded on the row format alone, for the resume that must read the row's proof and
+phase before it knows which statement it is resuming; it widens only the read. `Store.Ensure`
+keeps the table readable across engine versions: it adds the columns a table an older engine
+created lacks, and refuses — with `ErrTableNewer` and no DDL — a table carrying columns this
+engine does not know, so an older engine never alters a newer one's table. `Store.Save` applies the
 same identity guard on the write path, so a run can never write its state over another
 statement's row; `Delete` is the explicit fresh start, and it removes only the row whose
 `Identity` the caller was shown (`IncompatibleError.Stored`), so a row another engine wrote in
@@ -678,6 +683,9 @@ written (refuses-a-row-of-another-source-shape test).
 `TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
+`TestInspectReturnsTheRowWhateverStatementWroteIt`,
+`TestInspectReportsNotFoundMissingTableAndAnotherFormat`,
+`TestEnsureAddsTheColumnsAnOlderTableLacks`, `TestEnsureRefusesATableANewerEngineShaped`,
 `TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestDeleteRefusesARowTheCallerWasNotShown`,
 `TestWritesAndReadsWithoutEnsureReportTheMissingTable`,
 `TestResumeFromCheckpointConvergesAfterAMidCopyKill`. *Source:* Spirit `checkpoint.IsIncompatible` +

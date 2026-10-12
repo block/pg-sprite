@@ -2,6 +2,7 @@ package checkpoint
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -19,7 +20,9 @@ const (
 	// FormatVersion is the row format Save writes and Load accepts. A row
 	// carrying another value was written by an engine whose columns mean
 	// something else, and is incompatible whatever its fingerprints say.
-	FormatVersion int32 = 1
+	// In this format a run that has built its shadow carries the shadow's
+	// proof in the row.
+	FormatVersion int32 = 2
 	// SchemaName is the engine-owned schema the checkpoint table lives in.
 	// It is the engine's, not the target's, so one table holds every
 	// target's row (D3) and no target schema is written to.
@@ -120,8 +123,8 @@ func NewStore(pool *pgxpool.Pool, opts Options) (*Store, error) {
 // into IncompatibleError (ST-1, ST-2).
 const saveSQL = "INSERT INTO " + tableIdent + ` (
 	schema_name, table_name, format_version, shadow_table, slot_name, publication_name,
-	watermark, last_applied_lsn, source_fingerprint, target_fingerprint, phase, updated_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::pg_lsn, $9, $10, $11, $12)
+	watermark, last_applied_lsn, source_fingerprint, target_fingerprint, phase, updated_at, shadow_proof
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::pg_lsn, $9, $10, $11, $12, $13)
 ON CONFLICT (schema_name, table_name) DO UPDATE SET
 	shadow_table = EXCLUDED.shadow_table,
 	slot_name = EXCLUDED.slot_name,
@@ -129,7 +132,8 @@ ON CONFLICT (schema_name, table_name) DO UPDATE SET
 	watermark = EXCLUDED.watermark,
 	last_applied_lsn = EXCLUDED.last_applied_lsn,
 	phase = EXCLUDED.phase,
-	updated_at = EXCLUDED.updated_at
+	updated_at = EXCLUDED.updated_at,
+	shadow_proof = EXCLUDED.shadow_proof
 WHERE ` + tableIdent + `.format_version = EXCLUDED.format_version
 	AND ` + tableIdent + `.source_fingerprint = EXCLUDED.source_fingerprint
 	AND ` + tableIdent + `.target_fingerprint = EXCLUDED.target_fingerprint`
@@ -167,7 +171,8 @@ func (s *Store) Save(ctx context.Context, lock *dbconn.TableLockSession, cp Chec
 	tag, err := tx.Exec(ctx, saveSQL,
 		cp.Schema, cp.Table, FormatVersion, cp.ShadowTable, cp.SlotName, cp.PublicationName,
 		watermarkColumn(cp.Watermark), cp.LastAppliedLSN.String(),
-		cp.SourceFingerprint, cp.TargetFingerprint, cp.Phase.String(), s.opts.Clock.Now())
+		cp.SourceFingerprint, cp.TargetFingerprint, cp.Phase.String(), s.opts.Clock.Now(),
+		shadowProofColumn(cp.ShadowProof))
 	if err != nil {
 		return fmt.Errorf("save checkpoint for %s.%s: %w", cp.Schema, cp.Table, missingTable(err))
 	}
@@ -195,6 +200,17 @@ func (s *Store) Save(ctx context.Context, lock *dbconn.TableLockSession, cp Chec
 // column: NULL when nothing has landed.
 func watermarkColumn(w copier.Watermark) pgtype.Int8 {
 	return pgtype.Int8{Int64: w.Value(), Valid: w.Valid()}
+}
+
+// shadowProofColumn maps the proof onto the nullable jsonb column: NULL
+// when the run has none. pgx writes a nil json.RawMessage as NULL and
+// anything else as the JSON text it holds, so an empty slice must become
+// nil rather than reach the server as an empty document.
+func shadowProofColumn(proof json.RawMessage) json.RawMessage {
+	if len(proof) == 0 {
+		return nil
+	}
+	return proof
 }
 
 // deleteSQL removes the target's row, but only the row the caller was

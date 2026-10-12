@@ -2,7 +2,9 @@ package checkpoint
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -167,6 +169,8 @@ func (r fakeRow) Scan(dest ...any) error {
 			*d = r.values[i].(pgtype.Int8)
 		case *time.Time:
 			*d = r.values[i].(time.Time)
+		case *[]byte:
+			*d = r.values[i].([]byte)
 		default:
 			return errors.New("fakeRow: unsupported destination")
 		}
@@ -197,7 +201,13 @@ func storedRow() fakeRow {
 	return fakeRow{values: []any{
 		FormatVersion, "_pgsprite_orders_new", "pgsprite_0a1b2c3d", "pgsprite_0a1b2c3d",
 		pgtype.Int8{Int64: 1000, Valid: true}, "16/B374D848", wantFP.Source, wantFP.Target, "copying", stampedAt,
+		[]byte(`{"shadow_table": "_pgsprite_orders_new"}`),
 	}}
+}
+
+// guardFor is the guard Load reads under: the whole identity for want.
+func guardFor(want Fingerprints) rowGuard {
+	return func(r row) *IncompatibleError { return r.incompatibility(want) }
 }
 
 func newTestStore(t *testing.T, sleep SleepFunc) *Store {
@@ -214,7 +224,7 @@ func TestLoadRetriesATerminatedBackendAndDecodesTheRow(t *testing.T) {
 		{err: &pgconn.PgError{Code: "08006"}},
 		storedRow(),
 	}}
-	cp, err := newTestStore(t, sleep.sleep).load(t.Context(), q, "app", "orders", wantFP)
+	cp, err := newTestStore(t, sleep.sleep).load(t.Context(), q, "app", "orders", guardFor(wantFP))
 	require.NoError(t, err)
 	assert.Equal(t, 3, q.calls)
 	assert.Len(t, sleep.waits, 2)
@@ -223,6 +233,7 @@ func TestLoadRetriesATerminatedBackendAndDecodesTheRow(t *testing.T) {
 		SlotName: "pgsprite_0a1b2c3d", PublicationName: "pgsprite_0a1b2c3d",
 		Watermark: copier.NewWatermark(1000), LastAppliedLSN: decode.LSN(0x00000016b374d848),
 		SourceFingerprint: "src-a", TargetFingerprint: "tgt-a", Phase: PhaseCopying, UpdatedAt: stampedAt,
+		ShadowProof: json.RawMessage(`{"shadow_table": "_pgsprite_orders_new"}`),
 	}, cp)
 }
 
@@ -235,7 +246,7 @@ func TestLoadExhaustedRetriesIsNeitherNotFoundNorIncompatible(t *testing.T) {
 		{err: &pgconn.PgError{Code: "57P01"}},
 		{err: &pgconn.PgError{Code: "57P01"}},
 	}}
-	_, err := newTestStore(t, sleep.sleep).load(t.Context(), q, "app", "orders", wantFP)
+	_, err := newTestStore(t, sleep.sleep).load(t.Context(), q, "app", "orders", guardFor(wantFP))
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, ErrNotFound)
 	var incompatible *IncompatibleError
@@ -249,7 +260,7 @@ func TestLoadExhaustedRetriesIsNeitherNotFoundNorIncompatible(t *testing.T) {
 func TestLoadReportsNoRowAsNotFound(t *testing.T) {
 	sleep := &recordingSleep{}
 	q := &fakeQuerier{rows: []fakeRow{{err: pgx.ErrNoRows}}}
-	_, err := newTestStore(t, sleep.sleep).load(t.Context(), q, "app", "orders", wantFP)
+	_, err := newTestStore(t, sleep.sleep).load(t.Context(), q, "app", "orders", guardFor(wantFP))
 	assert.ErrorIs(t, err, ErrNotFound)
 	assert.Equal(t, 1, q.calls)
 	assert.Empty(t, sleep.waits)
@@ -267,21 +278,21 @@ func TestRowIncompatibilityOrdersFormatThenSourceThenTarget(t *testing.T) {
 	other := base
 	other.formatVersion = FormatVersion + 1
 	other.sourceFingerprint = "src-b"
-	assert.Equal(t, &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchFormat, Have: "2", Want: "1",
-		Stored: Identity{FormatVersion: 2, Fingerprints: Fingerprints{Source: "src-b", Target: "tgt-a"}}},
+	assert.Equal(t, &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchFormat, Have: fmt.Sprint(FormatVersion + 1), Want: fmt.Sprint(FormatVersion),
+		Stored: Identity{FormatVersion: FormatVersion + 1, Fingerprints: Fingerprints{Source: "src-b", Target: "tgt-a"}}},
 		other.incompatibility(wantFP))
 
 	other = base
 	other.sourceFingerprint = "src-b"
 	other.targetFingerprint = "tgt-b"
 	assert.Equal(t, &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchSource, Have: "src-b", Want: "src-a",
-		Stored: Identity{FormatVersion: 1, Fingerprints: Fingerprints{Source: "src-b", Target: "tgt-b"}}},
+		Stored: Identity{FormatVersion: FormatVersion, Fingerprints: Fingerprints{Source: "src-b", Target: "tgt-b"}}},
 		other.incompatibility(wantFP))
 
 	other = base
 	other.targetFingerprint = "tgt-b"
 	assert.Equal(t, &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchTarget, Have: "tgt-b", Want: "tgt-a",
-		Stored: Identity{FormatVersion: 1, Fingerprints: Fingerprints{Source: "src-a", Target: "tgt-b"}}},
+		Stored: Identity{FormatVersion: FormatVersion, Fingerprints: Fingerprints{Source: "src-a", Target: "tgt-b"}}},
 		other.incompatibility(wantFP))
 }
 
@@ -304,11 +315,33 @@ func TestRowIncompatibleWithJudgesTheWholeIdentity(t *testing.T) {
 	assert.Equal(t, MismatchFormat, stored.incompatibleWith(shown).Mismatch)
 }
 
+// Inspect's guard judges the format alone: a row of any statement in this
+// format is admitted, and a row in another format is the same typed
+// mismatch Load reports, carrying the row's own identity for Delete.
+func TestRowFormatIncompatibilityIgnoresTheFingerprints(t *testing.T) {
+	stored := row{schema: "app", table: "orders", formatVersion: FormatVersion, sourceFingerprint: "src-other", targetFingerprint: "tgt-other"}
+	assert.Nil(t, stored.formatIncompatibility())
+
+	stored.formatVersion = FormatVersion + 1
+	assert.Equal(t, &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchFormat,
+		Have: fmt.Sprint(FormatVersion + 1), Want: fmt.Sprint(FormatVersion), Stored: stored.identity()},
+		stored.formatIncompatibility())
+}
+
+// A NULL shadow_proof decodes to an empty proof: the run has no shadow to
+// prove yet.
+func TestRowCheckpointDecodesNullShadowProofAsNone(t *testing.T) {
+	r := row{formatVersion: FormatVersion, lastAppliedLSN: "0/0", phase: "copying"}
+	cp, err := r.checkpoint()
+	require.NoError(t, err)
+	assert.Empty(t, cp.ShadowProof)
+}
+
 // Load judges compatibility on the row it read, so a different statement's
 // row surfaces as a typed IncompatibleError, not as a Checkpoint.
 func TestLoadReportsAnotherStatementsRowAsIncompatible(t *testing.T) {
 	q := &fakeQuerier{rows: []fakeRow{storedRow()}}
-	_, err := newTestStore(t, (&recordingSleep{}).sleep).load(t.Context(), q, "app", "orders", Fingerprints{Source: "src-a", Target: "tgt-other"})
+	_, err := newTestStore(t, (&recordingSleep{}).sleep).load(t.Context(), q, "app", "orders", guardFor(Fingerprints{Source: "src-a", Target: "tgt-other"}))
 	var incompatible *IncompatibleError
 	require.ErrorAs(t, err, &incompatible)
 	assert.Equal(t, MismatchTarget, incompatible.Mismatch)

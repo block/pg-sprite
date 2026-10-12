@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -44,10 +45,14 @@ func validCheckpoint() Checkpoint {
 
 // The key, the shadow, the fingerprints, and the phase are what resume keys
 // on, so a checkpoint missing any of them is refused before it reaches the
-// database; the slot and publication names may be empty because a quiesced
-// run has none.
+// database, as is a shadow proof the jsonb column could not hold; the slot
+// and publication names may be empty because a quiesced run has none, and
+// so may the proof.
 func TestCheckpointValidate(t *testing.T) {
 	require.NoError(t, validCheckpoint().validate())
+	withProof := validCheckpoint()
+	withProof.ShadowProof = json.RawMessage(`{"shadow_table": "_pgsprite_orders_new"}`)
+	require.NoError(t, withProof.validate())
 
 	cases := map[string]func(*Checkpoint){
 		"empty schema":             func(c *Checkpoint) { c.Schema = "" },
@@ -57,6 +62,7 @@ func TestCheckpointValidate(t *testing.T) {
 		"empty target fingerprint": func(c *Checkpoint) { c.TargetFingerprint = "" },
 		"zero phase":               func(c *Checkpoint) { c.Phase = 0 },
 		"unknown phase":            func(c *Checkpoint) { c.Phase = Phase(99) },
+		"shadow proof not JSON":    func(c *Checkpoint) { c.ShadowProof = json.RawMessage(`{"shadow_table": `) },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

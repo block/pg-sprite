@@ -2,6 +2,7 @@ package checkpoint_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"sync"
@@ -142,6 +143,11 @@ func ordersCheckpoint() checkpoint.Checkpoint {
 	}
 }
 
+// ordersProof is the proof a build of app.orders's shadow would render,
+// spaced as a builder's encoder might: the server stores jsonb by value, so
+// what Load returns is compared as JSON, not byte for byte.
+var ordersProof = json.RawMessage(`{"schema": "app", "source_table": "orders", "shadow_table": "_pgsprite_orders_new", "source_oid": 16401, "shadow_oid": 16407}`)
+
 // Ensure creates the engine schema and the table on first use and is a
 // no-op afterwards; nothing else is needed before the first Save.
 func TestEnsureCreatesTheTableOnceAndIsIdempotent(t *testing.T) {
@@ -263,6 +269,35 @@ func TestSaveThenLoadRoundTripsTheRecord(t *testing.T) {
 	got.UpdatedAt = time.Time{}
 	cp.UpdatedAt = time.Time{}
 	assert.Equal(t, cp, got)
+}
+
+// The shadow proof rides on the row: a Save with one reads it back as the
+// same JSON, a Save without one reads back none, and a later Save for the
+// same statement replaces it like every other non-identity column.
+func TestSaveThenLoadRoundTripsTheShadowProof(t *testing.T) {
+	f := newStoreFixture(t)
+	f.ensure(t)
+	lock := f.ordersLock(t)
+	cp := ordersCheckpoint()
+	require.NoError(t, f.store.Save(t.Context(), lock, cp))
+	got, err := f.store.Load(t.Context(), "app", "orders", cp.Fingerprints())
+	require.NoError(t, err)
+	assert.Empty(t, got.ShadowProof, "a run that has not built its shadow has no proof")
+
+	cp.ShadowProof = ordersProof
+	cp.Phase = checkpoint.PhaseVerifying
+	require.NoError(t, f.store.Save(t.Context(), lock, cp))
+	got, err = f.store.Load(t.Context(), "app", "orders", cp.Fingerprints())
+	require.NoError(t, err)
+	assert.JSONEq(t, string(ordersProof), string(got.ShadowProof))
+	assert.Equal(t, checkpoint.PhaseVerifying, got.Phase)
+
+	cp.ShadowProof = json.RawMessage(`{"schema": "app", "source_table": "orders", "shadow_table": "_pgsprite_orders_new2"}`)
+	require.NoError(t, f.store.Save(t.Context(), lock, cp))
+	got, err = f.store.Load(t.Context(), "app", "orders", cp.Fingerprints())
+	require.NoError(t, err)
+	assert.JSONEq(t, string(cp.ShadowProof), string(got.ShadowProof), "the later proof replaces the earlier one")
+	assert.Equal(t, int64(1), f.rowCount(t))
 }
 
 // A second Save for the same target replaces the one row rather than adding

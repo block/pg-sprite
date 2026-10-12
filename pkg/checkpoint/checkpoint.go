@@ -1,6 +1,7 @@
 package checkpoint
 
 import (
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -113,6 +114,13 @@ type Checkpoint struct {
 	Phase             Phase
 	// UpdatedAt is when the record was last saved, from the store's clock.
 	UpdatedAt time.Time
+	// ShadowProof is the JSON proof of the shadow the run built, as the
+	// builder rendered it, so a resume after the swap — when the shadow
+	// no longer bears its name and the catalog cannot re-mint the proof —
+	// still knows which relations the swap was to move. It is empty for a
+	// run that has no shadow to prove. It comes back as the server renders
+	// JSON, not byte for byte as it was saved.
+	ShadowProof json.RawMessage
 }
 
 // Fingerprints returns the statement identity the checkpoint carries.
@@ -129,8 +137,9 @@ func (c Checkpoint) Identity() Identity {
 
 // validate refuses a checkpoint the store must not persist: the key, the
 // fingerprints, and the phase are what resume keys on, so none may be empty
-// or unknown. The slot and publication names may be empty — a quiesced run
-// decodes no WAL and has neither.
+// or unknown, and a shadow proof, when there is one, must be JSON the
+// column can hold. The slot and publication names may be empty — a
+// quiesced run decodes no WAL and has neither.
 func (c Checkpoint) validate() error {
 	for _, field := range []struct{ name, value string }{
 		{"schema", c.Schema},
@@ -145,6 +154,9 @@ func (c Checkpoint) validate() error {
 	}
 	if _, err := parsePhase(c.Phase.String()); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidCheckpoint, err)
+	}
+	if len(c.ShadowProof) > 0 && !json.Valid(c.ShadowProof) {
+		return fmt.Errorf("%w: shadow proof is not JSON", ErrInvalidCheckpoint)
 	}
 	return nil
 }

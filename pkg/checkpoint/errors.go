@@ -26,8 +26,15 @@ var ErrTableMissing = errors.New("checkpoint: checkpoint table does not exist; E
 // a view — would run with the engine's privileges on every Save.
 var ErrForeignObject = errors.New("checkpoint: engine object exists but is not the engine's")
 
+// ErrTableNewer reports that the checkpoint table has columns this engine
+// does not know: a newer engine created or evolved it. Ensure refuses
+// rather than alter it, since this engine cannot preserve the meaning of
+// columns it has never heard of, and leaves the table as it found it.
+var ErrTableNewer = errors.New("checkpoint: checkpoint table was shaped by a newer engine")
+
 // ErrInvalidCheckpoint reports a Checkpoint the store refuses to persist:
-// a missing identifier, an empty fingerprint, or an unknown phase.
+// a missing identifier, an empty fingerprint, an unknown phase, or a shadow
+// proof that is not JSON.
 var ErrInvalidCheckpoint = errors.New("checkpoint: invalid checkpoint")
 
 // ErrInvalidOptions reports Options the store cannot run under.
