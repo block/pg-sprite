@@ -79,6 +79,25 @@ func TestKeepaliveRepliesDoNotMoveTheSlot(t *testing.T) {
 	stream.assertConfirmedFlushBecomes(t, slot, stream.Confirmed())
 }
 
+// A wait that runs out is reported to the server: on a quiet table the
+// walsender holding the slot receives a reply from the stream within a few
+// waits, long before its own keepalive would have asked for one at half
+// wal_sender_timeout. The report carries no position before the first
+// Confirm, so the slot does not move; what it does is wake a walsender that
+// missed the signal for committed WAL.
+func TestNextReportsToTheServerWhenTheWaitRunsOut(t *testing.T) {
+	f := newSlotFixture(t)
+	slot := f.createSlot(t)
+	stream := f.openStream(t, slot.ConsistentPoint())
+	initial := f.confirmedFlush(t, slot)
+	require.False(t, f.slotWALSenderHasReply(t, slot), "nothing has been reported before the first Next")
+
+	awaitWALSenderReply(t, stream, slot)
+
+	assert.Equal(t, decode.LSN(0), stream.Confirmed())
+	assert.Equal(t, initial, f.confirmedFlush(t, slot), "the report carries no position before the first Confirm")
+}
+
 // A position beyond what the stream has delivered is refused, since
 // confirming it would let the server drop changes the caller never saw,
 // and the slot is left where it was.

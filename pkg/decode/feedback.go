@@ -50,7 +50,8 @@ func (s *Stream) Confirm(ctx context.Context, lsn LSN) error {
 // and apply positions alike, so the report carries exactly that position
 // whatever a library default would fill in for one left zero. Before the
 // first Confirm every position is zero, which the server reads as no
-// position: the message still counts as the reply a keepalive asked for.
+// position: the message still counts as the reply a keepalive asked for,
+// and still wakes a walsender waiting for WAL it was not signalled about.
 func (s *Stream) sendStatus(ctx context.Context, confirmed LSN) error {
 	err := pglogrepl.SendStandbyStatusUpdate(ctx, s.conn, pglogrepl.StandbyStatusUpdate{
 		WALWritePosition: pglogrepl.LSN(confirmed),

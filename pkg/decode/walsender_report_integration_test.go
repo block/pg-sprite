@@ -35,9 +35,11 @@ const reportGuide = "see walsenderReport in pkg/decode/walsender_report_integrat
 //   - replication: unsent_bytes above zero while the walsender waits on
 //     WalSenderWaitForWAL (spelled WalSenderWaitForWal on newer majors): the
 //     server has flushed WAL the walsender has not sent. It was not woken
-//     for that WAL and sleeps until its wal_sender_timeout tick. The wait
-//     event alone says nothing — an idle, caught-up walsender waits there
-//     too; the flush-to-sent gap is the signal.
+//     for that WAL and sleeps until its wal_sender_timeout tick or the next
+//     message from its client. A stream's Next sends one each time its wait
+//     runs out, so this reading outlasting a wait means Next was not being
+//     called. The wait event alone says nothing — an idle, caught-up
+//     walsender waits there too; the flush-to-sent gap is the signal.
 //   - replication: no rows: no walsender holds the slot. A state other than
 //     streaming: the walsender is still starting or catching up and has
 //     decoded nothing for the client yet.

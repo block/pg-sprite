@@ -186,6 +186,40 @@ func (s fixtureStream) assertWALSenderFlushBecomes(t *testing.T, slot *decode.Sl
 	}
 }
 
+// slotWALSenderHasReply reports whether the walsender holding the slot has
+// received a status report from its client: reply_time is null until the
+// first one arrives. A slot no walsender holds has received none.
+func (f slotFixture) slotWALSenderHasReply(t *testing.T, slot *decode.Slot) bool {
+	t.Helper()
+	var replied bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT COALESCE(bool_or(r.reply_time IS NOT NULL), false)
+		FROM pg_catalog.pg_stat_replication AS r
+		JOIN pg_catalog.pg_replication_slots AS s ON s.active_pid = r.pid
+		WHERE s.slot_name = $1`, slot.Name()).Scan(&replied))
+	return replied
+}
+
+// awaitWALSenderReply reads progress from a quiet table until the walsender
+// holding the slot has received a status report from the stream, within
+// the stream deadline; a change arriving meanwhile fails the test. The
+// first Next calls can return the keepalive the walsender sends as it
+// starts streaming, so the wait is not guaranteed to run out on any one
+// of them.
+func awaitWALSenderReply(t *testing.T, stream fixtureStream, slot *decode.Slot) {
+	t.Helper()
+	deadline := time.Now().Add(streamDeadline)
+	for time.Now().Before(deadline) {
+		d, err := stream.Next(t.Context(), streamWait)
+		require.NoError(t, err)
+		require.Nil(t, d.Change, "the table is expected to be quiet")
+		if stream.f.slotWALSenderHasReply(t, slot) {
+			return
+		}
+	}
+	stream.failDeadline(t, "the walsender received no status report before the stream deadline")
+}
+
 // column is one present text column of a decoded change.
 func column(name, value string) decode.Column {
 	return decode.Column{Name: name, Value: value, Present: true}
