@@ -48,7 +48,17 @@ partial clean pass mints only the watermark (clean-complete, partial-watermark, 
 repairs-mint-nothing tests). `pkg/schemachange.GateCutover` accepts only a `VerifiedShadow`,
 and only one minted for the relations it is gating: the proof carries the source and shadow
 OIDs the pass compared, and a shadow dropped and rebuilt under the same derived name is a new
-relation the pass never read, so the gate refuses it (`cutover-unverified`).
+relation the pass never read, so the gate refuses it (`cutover-unverified`). `CheckLive` is the
+gate's pass while the source is written and the catch-up applies the stream: a chunk that
+differs is reread once the catch-up has confirmed past the server insert position the chunk's
+snapshot was taken at, and counts as clean only when the two sides then agree or the shadow
+holds exactly what the earlier read saw on the source — the stream being the shadow's only
+other writer, that is a shadow that has caught up to a known source state; a chunk that keeps
+changing or a catch-up that does not confirm in time is an `UnresolvedError`, never a clean
+chunk, and mints nothing (settles-a-lagging-chunk, hot-chunk-unresolved,
+lagging-catch-up-unresolved, confirmed-divergence-aborts tests). A row whose key moved across
+a chunk boundary between the two reads is the next pass's to catch; row-level settlement
+within a chunk is planned.
 *Source:* [design-principles](design-principles.md#correctness-and-safety),
 risks-and-mitigations; Spirit's "never skip it".
 
@@ -70,7 +80,11 @@ and no `CleanWatermark`, even though every repaired chunk was read again and fou
 proof comes only from the next pass, which reads every chunk fresh (repairs-mint-nothing test).
 A repaired chunk that still differs on the fresh read is a `RepairError`, not a second repair
 (repair-did-not-take test). A pass under `recopy` reads nothing again and mints no proof
-either, however many chunks it recopied. The checkpoint writer that persists the watermark is planned.
+either, however many chunks it recopied. A live repair (`CheckLive` under `repair`) recopies
+inside a `SHARE MODE` fence on the shadow so no flush interleaves with it, waits for the
+catch-up to confirm past the recopy, settles each repaired chunk as the sweep settles a
+differing one, and mints nothing even when every repaired chunk settles clean; the next live
+pass is the proof (live-repair-mints-nothing-then-next-pass-proves test). The checkpoint writer that persists the watermark is planned.
 *Source:* Spirit `pkg/migration/runner.go` + `pkg/move/runner.go` ("Safety invariant").
 
 ### CO-3 — Divergence policy is an explicit setting, never inferred

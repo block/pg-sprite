@@ -14,8 +14,16 @@
 // and reads each again, assuming nothing else writes the shadow and the
 // source rows it recopies hold still until the rereads; or recopy, the
 // same recopy with no reread, for a source written while the pass runs
-// whose later writes a stream opened before the pass carries. Only a pass
-// that found no difference and repaired nothing mints a CleanWatermark,
-// and a VerifiedShadow when its watermark is complete; the proofs'
-// constructors are private to this package.
+// whose later writes a stream opened before the pass carries. CheckLive is
+// the pass for a source written while the catch-up applies the stream to
+// the shadow: a chunk that differs in the sweep is read again once the
+// catch-up has confirmed past the position it was read at, and the two
+// reads are judged together — equal or the shadow at the earlier source
+// state is settled, movement on either side is another reread up to a
+// stated bound, stillness on both sides is the divergence; its repair
+// fences the stream's flushes out of the shadow while it recopies and
+// settles each repaired chunk the same way. Only a pass that found no
+// difference and repaired nothing mints a CleanWatermark, and a
+// VerifiedShadow when its watermark is complete; the proofs' constructors
+// are private to this package.
 package checksum

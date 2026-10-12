@@ -28,8 +28,15 @@ type Report struct {
 	// Rows is the number of source rows the pass hashed.
 	Rows int64
 	// Mismatches lists the chunks whose digests differed, in ascending key
-	// order. It is empty for a clean pass.
+	// order. It is empty for a clean pass. Under a live pass these are the
+	// confirmed divergences: chunks that still differed once the stream had
+	// delivered everything the sweep saw.
 	Mismatches []Mismatch
+	// Settled is the number of chunks a live pass found differing in its
+	// sweep and then read clean, or read with the shadow at exactly the
+	// state the sweep saw on the source, once the catch-up had confirmed
+	// past the sweep's read. A quiesced pass settles nothing.
+	Settled int
 }
 
 // Clean reports whether every compared chunk matched.

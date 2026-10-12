@@ -20,9 +20,13 @@ import (
 //   - chunks_repaired is the number of chunks whose recopy has committed.
 //     Every differing chunk is recopied in one transaction, so it moves from
 //     zero to chunks_mismatched at that commit.
-//   - chunks_reread is the number of repaired chunks digested again after
-//     the recopy; it climbs towards chunks_repaired, so the repair phase's
-//     remaining work is chunks_repaired − chunks_reread.
+//   - chunks_reread is the number of chunks digested again in a fresh
+//     snapshot after the comparison: under Check the repaired chunks reread
+//     after the recopy, so it climbs towards chunks_repaired and the repair
+//     phase's remaining work is chunks_repaired − chunks_reread; under
+//     CheckLive every settling reread of a differing or repaired chunk, so
+//     it can pass chunks_mismatched while the pass waits on a chunk that
+//     keeps changing.
 //
 // The counters are the pass's, not the step's: once the pass returns the
 // tracker no longer asks the verifier, and the pass's final figures are the
