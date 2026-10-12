@@ -50,7 +50,12 @@ func (s *Stream) Confirm(ctx context.Context, lsn LSN) error {
 // and apply positions alike, so the report carries exactly that position
 // whatever a library default would fill in for one left zero. Before the
 // first Confirm every position is zero, which the server reads as no
-// position: the message still counts as the reply a keepalive asked for.
+// position: the message still counts as the reply a keepalive asked for,
+// and still wakes a walsender waiting for WAL it was not signalled about.
+// The write is not bounded by ctx: the library ignores it, and the message
+// is one the socket's send buffer takes whole unless the server has stopped
+// reading. The error names the report, not the caller's operation, since a
+// Confirm, a keepalive reply, and a wait that ran out all send the same one.
 func (s *Stream) sendStatus(ctx context.Context, confirmed LSN) error {
 	err := pglogrepl.SendStandbyStatusUpdate(ctx, s.conn, pglogrepl.StandbyStatusUpdate{
 		WALWritePosition: pglogrepl.LSN(confirmed),
@@ -58,7 +63,7 @@ func (s *Stream) sendStatus(ctx context.Context, confirmed LSN) error {
 		WALApplyPosition: pglogrepl.LSN(confirmed),
 	})
 	if err != nil {
-		return fmt.Errorf("confirm %s on slot %s: %w", confirmed, s.slotName, err)
+		return fmt.Errorf("report %s to slot %s: %w", confirmed, s.slotName, err)
 	}
 	return nil
 }

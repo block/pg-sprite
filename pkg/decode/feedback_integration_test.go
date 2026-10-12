@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -77,6 +78,84 @@ func TestKeepaliveRepliesDoNotMoveTheSlot(t *testing.T) {
 
 	require.NoError(t, stream.Confirm(t.Context(), stream.Delivered()))
 	stream.assertConfirmedFlushBecomes(t, slot, stream.Confirmed())
+}
+
+// A wait that runs out is reported to the server: on a quiet table the
+// walsender holding the slot receives a reply from the stream within a few
+// waits, long before its own keepalive would have asked for one at half
+// wal_sender_timeout. The report carries no position before the first
+// Confirm, so the slot does not move; what it does is wake a walsender that
+// missed the signal for committed WAL.
+func TestNextReportsToTheServerWhenTheWaitRunsOut(t *testing.T) {
+	f := newSlotFixture(t)
+	slot := f.createSlot(t)
+	stream := f.openStream(t, slot.ConsistentPoint())
+	initial := f.confirmedFlush(t, slot)
+	require.False(t, f.slotWALSenderHasReply(t, slot), "nothing has been reported before the first Next")
+
+	awaitWALSenderReply(t, stream, slot)
+
+	assert.Equal(t, decode.LSN(0), stream.Confirmed())
+	assert.Equal(t, initial, f.confirmedFlush(t, slot), "the report carries no position before the first Confirm")
+}
+
+// After a Confirm, the report a wait that ran out sends still names the
+// confirmed position: the walsender's record of the stream's flush position
+// is the one the caller confirmed, not nothing, after reports the waits
+// sent. The walsender's record is read once the Confirm's own report has
+// landed, so a later reply time is one of the waits' reports.
+func TestNextReportKeepsTheConfirmedPosition(t *testing.T) {
+	f := newSlotFixture(t)
+	slot := f.createSlot(t)
+	stream := f.openStream(t, slot.ConsistentPoint())
+	f.exec(t, `INSERT INTO %s.ledger (id, note) VALUES (101, 'confirmed')`)
+	ev := nextChange(t, stream)
+	awaitDelivered(t, stream, ev.LSN+1)
+	require.NoError(t, stream.Confirm(t.Context(), stream.Delivered()))
+	confirmed := stream.Confirmed()
+	stream.assertConfirmedFlushBecomes(t, slot, confirmed)
+	confirmReply := f.slotWALSenderReply(t, slot)
+
+	deadline := time.Now().Add(streamDeadline)
+	for time.Now().Before(deadline) {
+		d, err := stream.Next(t.Context(), streamWait)
+		require.NoError(t, err)
+		require.Nil(t, d.Change, "the table is expected to be quiet")
+		reply := f.slotWALSenderReply(t, slot)
+		if reply.at.After(confirmReply.at) {
+			require.NotNil(t, reply.flush, "the wait's report carries a flush position")
+			assert.Equal(t, confirmed, *reply.flush)
+			assert.Equal(t, confirmed, f.confirmedFlush(t, slot), "the slot stays where the Confirm put it")
+			return
+		}
+	}
+	stream.failDeadline(t, "no wait's report reached the walsender before the stream deadline")
+}
+
+// A report the connection cannot carry ends the stream: a wait that runs
+// out on a connection whose writes fail returns the send's error, every
+// later call returns it again, and the record of what was confirmed is left
+// where it was, on the client and on the server.
+func TestNextStopsWhenTheReportCannotBeSent(t *testing.T) {
+	f := newSlotFixture(t)
+	slot := f.createSlot(t)
+	refuse := &atomic.Bool{}
+	stream := f.openStreamRefusingWrites(t, slot.ConsistentPoint(), refuse)
+	f.exec(t, `INSERT INTO %s.ledger (id, note) VALUES (101, 'confirmed')`)
+	ev := nextChange(t, stream)
+	awaitDelivered(t, stream, ev.LSN+1)
+	require.NoError(t, stream.Confirm(t.Context(), stream.Delivered()))
+	confirmed := stream.Confirmed()
+	stream.assertConfirmedFlushBecomes(t, slot, confirmed)
+
+	refuse.Store(true)
+	err := nextError(t, stream)
+
+	require.ErrorIs(t, err, errWriteRefused)
+	_, nextErr := stream.Next(t.Context(), streamWait)
+	assert.ErrorIs(t, nextErr, err, "the failed report stops the stream")
+	assert.Equal(t, confirmed, stream.Confirmed())
+	assert.Equal(t, confirmed, f.confirmedFlush(t, slot), "the slot is where the Confirm put it")
 }
 
 // A position beyond what the stream has delivered is refused, since

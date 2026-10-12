@@ -181,8 +181,25 @@ func (s *Stream) ServerWALEnd() LSN { return max(s.serverWALEnd, s.delivered) }
 // change, so a quiet table never blocks the caller for longer than wait. A
 // keepalive that asks for a reply is answered with the confirmed position,
 // never the server's own. An error from the server, a change the stream
-// cannot decode, or the server ending replication (ErrStreamEnded) ends the
-// stream: the error is returned now and from every later call.
+// cannot decode, a report the connection cannot carry, or the server ending
+// replication (ErrStreamEnded) ends the stream: the error is returned now
+// and from every later call.
+//
+// A wait that runs out is also reported to the server, with the confirmed
+// position, so the stream is never silent for longer than wait. Each wait
+// that runs out costs one report, so on a quiet table wait is also the
+// report interval: a caller that polls with a short wait sends a message
+// per call, and before the first Confirm each report draws a keepalive back.
+// The report is what wakes a walsender that missed the signal for committed
+// WAL: the walsender registers for that signal only after it has checked
+// the flush position, and a commit that lands in between is noticed only on
+// its next wake — a message from the client, or its own keepalive tick at
+// half wal_sender_timeout. Logical replication subscribers mask the same
+// gap by reporting their status on an interval; the stream reports on the
+// caller's wait instead, so the changes it is owed arrive within wait, not
+// within half wal_sender_timeout. The report's write is bounded by neither
+// wait nor ctx: a peer that has stopped reading can hold the call until the
+// socket's send buffer is full and then fails.
 func (s *Stream) Next(ctx context.Context, wait time.Duration) (Delivery, error) {
 	if s.failed != nil {
 		return Delivery{}, s.failed
@@ -193,6 +210,9 @@ func (s *Stream) Next(ctx context.Context, wait time.Duration) (Delivery, error)
 		msg, err := s.conn.ReceiveMessage(waitCtx)
 		if err != nil {
 			if waitElapsed(ctx, waitCtx, err) {
+				if err := s.sendStatus(ctx, s.confirmed); err != nil {
+					return Delivery{}, s.fail(err)
+				}
 				return s.progress(), nil
 			}
 			return Delivery{}, s.fail(fmt.Errorf("receive from slot %s: %w", s.slotName, err))
