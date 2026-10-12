@@ -799,7 +799,13 @@ refuses-a-row-whose-swap-committed, refuses-replaced-relations-before-its-marker
 leaves-the-slot-it-created-owned-by-the-row, resumes-in-copying-below-a-partial-watermark,
 refuses-a-row-of-another-source-shape, stops-when-the-lock-is-lost-while-the-drop-waits,
 refuses-a-foreign-slot-of-the-name, refuses-the-slot-while-another-backend-holds-it,
-reads-a-slot-the-server-reports-lost-as-reconcile tests). *Source:*
+reads-a-slot-the-server-reports-lost-as-reconcile tests). *Known limit:* the recopy pass
+compares a chunk and recopies it in separate statements against a live source, so a source
+that moves a unique or primary-key value from one row to another between the two can make the
+recopy fail with a unique violation; the pass ends in error with the row still in
+`reconciling` and the shadow unchanged, and the next attempt restarts the reconcile — closed,
+never a shadow with a row the source lacks (a retry that survives the move is a tracked
+follow-up). *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum

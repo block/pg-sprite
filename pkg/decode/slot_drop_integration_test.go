@@ -75,9 +75,11 @@ func TestDropSlotWaitsForTheWALSenderToReleaseTheSlot(t *testing.T) {
 
 // A wait the caller's context ends is reported as that context's error and
 // never as a drop: the slot and its publication are still there for the
-// next attempt. The wait is cancelled on the server, not only abandoned by
-// the client, so the walsender that was waiting does not go on to drop the
-// slot once the holder lets go.
+// next attempt. The wait is cancelled on the server before the call
+// returns, not only abandoned by the client: the error carries the
+// server's query_canceled, and the walsender that was waiting is no longer
+// in the drop by the time the caller reads the catalog, so it does not go
+// on to drop the slot once the holder lets go.
 func TestDropSlotEndedByItsContextIsNotADrop(t *testing.T) {
 	f := newSlotFixture(t)
 	slot := f.createSlot(t)
@@ -89,12 +91,13 @@ func TestDropSlotEndedByItsContextIsNotADrop(t *testing.T) {
 	defer cancel()
 	err := decode.DropSlot(dropCtx, f.cfg, f.pool, slot.Name())
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+	requireCancelledOnServer(t, err)
+	f.requireNoDropWaiting(t)
 
 	_, found, err := decode.InspectSlot(t.Context(), f.pool, slot.Name())
 	require.NoError(t, err)
 	assert.True(t, found, "the slot is not dropped while its holder streams")
 	assert.True(t, f.publicationExists(t, slot.Name()))
-	f.awaitDropCancelled(t)
 
 	release()
 	f.awaitSlotReleased(t, slot.Name())
@@ -119,24 +122,20 @@ func (f slotFixture) awaitSlotReleased(t *testing.T, name string) {
 	}, slotReleased, 50*time.Millisecond)
 }
 
-// awaitDropCancelled polls until no walsender on the server is still
-// running a DROP_REPLICATION_SLOT while the holder still holds: the drop
-// whose client gave up was cancelled, not left waiting to complete.
-func (f slotFixture) awaitDropCancelled(t *testing.T) {
+// requireNoDropWaiting asserts, in one catalog read taken as soon as the
+// cancelled drop has returned, that no walsender on the server is still
+// running a DROP_REPLICATION_SLOT: the server ends the command and reports
+// its backend idle before it answers the client, so a drop that is still
+// waiting here was abandoned by the client, not cancelled.
+func (f slotFixture) requireNoDropWaiting(t *testing.T) {
 	t.Helper()
-	const dropCancelled = 10 * time.Second
-	require.EventuallyWithT(t, func(collect *assert.CollectT) {
-		var waiting bool
-		err := f.pool.QueryRow(t.Context(), `
-			SELECT EXISTS (
-				SELECT 1 FROM pg_catalog.pg_stat_activity
-				WHERE backend_type = 'walsender' AND state = 'active' AND query LIKE 'DROP_REPLICATION_SLOT %'
-			)`).Scan(&waiting)
-		if !assert.NoError(collect, err) {
-			return
-		}
-		assert.False(collect, waiting, "the drop the client gave up on must not still be waiting on the server")
-	}, dropCancelled, 50*time.Millisecond)
+	var waiting bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT EXISTS (
+			SELECT 1 FROM pg_catalog.pg_stat_activity
+			WHERE backend_type = 'walsender' AND state = 'active' AND query LIKE 'DROP_REPLICATION_SLOT %'
+		)`).Scan(&waiting))
+	require.False(t, waiting, "the drop the caller was told ended must not still be waiting on the server")
 }
 
 // A drop that must not wait is refused by the server while a walsender

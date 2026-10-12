@@ -16,16 +16,19 @@ type ReplicationOption func(*pgconn.Config)
 // WithServerSideCancel makes a command whose context ends be cancelled on
 // the server before the client gives it up: a cancel request goes to the
 // walsender on a second connection, and the command's call returns once
-// the server has answered it, or after grace with the connection cut as
-// it would be without the option. PostgreSQL does not bound a replication
-// command by statement_timeout, and a walsender in a DROP_REPLICATION_SLOT
-// … WAIT or a CREATE_REPLICATION_SLOT notices a client that merely closed
-// its socket only when it next comes off its wait; a holder that lets go
-// first lets the drop or the create complete after the caller was told it
-// did not. A command the server cancels is reported as query_canceled; the
-// caller folds its context's error back in. Not for a streaming
-// connection: its reads are bounded by per-read contexts that end
-// routinely and must not end the stream.
+// the server has answered it, or after grace with the connection cut.
+// Without the option the client cuts the connection first and sends the
+// cancel request afterwards, in the background on a budget of its own, so
+// the call returns before the server has acted on it: a caller that reads
+// the catalog next, or releases a holder, can find the command it was told
+// ended still waiting or completing on the server — PostgreSQL does not
+// bound a replication command by statement_timeout, and a walsender in a
+// DROP_REPLICATION_SLOT … WAIT or a CREATE_REPLICATION_SLOT comes off its
+// wait only for the cancel or for the holder. With the option, when the
+// call returns the server has ended the command and reported it as
+// query_canceled, which the error carries; the caller folds its context's
+// error back in. Not for a streaming connection: its reads are bounded by
+// per-read contexts that end routinely and must not end the stream.
 func WithServerSideCancel(grace time.Duration) ReplicationOption {
 	return func(c *pgconn.Config) {
 		c.BuildContextWatcherHandler = func(conn *pgconn.PgConn) ctxwatch.Handler {

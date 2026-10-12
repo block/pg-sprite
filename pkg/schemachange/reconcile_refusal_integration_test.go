@@ -69,6 +69,54 @@ func TestReconcileRefusesARowWhoseSwapCommitted(t *testing.T) {
 	f.assertNoSlot(t)
 }
 
+// The cutover refusal is answered before the slot is read, so a cutover
+// row whose swap rolled back and whose slot was lost in the same window
+// has its way forward through the caller: InspectSwapped says the swap
+// did not happen, the caller writes the row back to catching_up, and the
+// resume read then sees the lost slot and reconciles the writes the gap
+// missed. The route the integration guide gives is this one.
+func TestCutoverRowNotSwappedWithALostSlotReconcilesOnceWrittenBack(t *testing.T) {
+	f := newReconcileFixture(t, 300)
+	shadow := f.buildShadow(t)
+	c := newCopier(t, f, shadow)
+	copyAll(t, f, c)
+	slot, err := decode.CreateSlot(t.Context(), f.cfg, f.pool, f.target)
+	require.NoError(t, err)
+	require.NoError(t, slot.Close(t.Context()))
+	require.NoError(t, f.store.Save(t.Context(), f.lock, f.row(shadow, checkpoint.PhaseCutover, c.Position().Watermark, slot.Name(), slot.ConsistentPoint())))
+	_, err = f.pool.Exec(t.Context(), `SELECT pg_catalog.pg_drop_replication_slot($1)`, slot.Name())
+	require.NoError(t, err)
+	f.exec(t, `UPDATE %s SET amount = 0 WHERE id BETWEEN 11 AND 20`)
+
+	saved := f.load(t, shadow)
+	_, err = schemachange.InspectResume(t.Context(), f.pool, f.target, saved)
+	assert.Equal(t, schemachange.CauseResumeCutover, schemachange.RefusalCauseOf(err), "the refusal says nothing of the slot")
+	_, err = schemachange.InspectSwapped(t.Context(), f.pool, f.lock, shadow.Proof(), schemachange.Options{})
+	require.ErrorIs(t, err, schemachange.ErrNotSwapped)
+
+	back := saved
+	back.Phase = checkpoint.PhaseCatchingUp
+	require.NoError(t, f.store.Save(t.Context(), f.lock, back))
+	resume, err := schemachange.InspectResume(t.Context(), f.pool, f.target, f.load(t, shadow))
+	require.NoError(t, err)
+	assert.Equal(t, schemachange.ResumeReconcile, resume.Mode)
+	assert.False(t, resume.Found, "the slot is gone")
+
+	reconciler, err := schemachange.NewReconciler(f.cfg, f.lock, f.store, f.target, shadow, checksum.Options{
+		Chunker: copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},
+	})
+	require.NoError(t, err)
+	reconciled, err := reconciler.Reconcile(t.Context(), f.pool, f.load(t, shadow))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		assert.NoError(t, reconciled.Slot.Close(ctx))
+		assert.NoError(t, decode.DropSlot(ctx, f.cfg, f.pool, reconciled.Slot.Name()))
+	})
+	assert.Len(t, reconciled.Outcome.Repairs, 1, "the one chunk the update landed in was recopied")
+	assert.Equal(t, checkpoint.PhaseCatchingUp, reconciled.Checkpoint.Phase)
+}
+
 // A row in any other phase whose tables have been replaced under their
 // names — here by a swap the row does not record — is refused as
 // relation-replaced before the marker is written: a recopy into the

@@ -35,13 +35,24 @@ var ErrNoDivergencePolicy = errors.New("no divergence policy")
 
 // ParseDivergencePolicy returns the policy a configuration value or flag
 // names, or ErrNoDivergencePolicy when it names neither, so a caller can
-// refuse a setting when it loads it rather than at its first pass.
+// refuse a setting when it loads it rather than at its first pass. Only
+// DivergenceAbort and DivergenceRepair can be named this way: a setting is
+// for the steady state, where a divergence is a defect and a pass that
+// heals one without reading it back would hide the defect. DivergenceRecopy
+// is selected by the reconcile mode alone, never by a setting.
 func ParseDivergencePolicy(value string) (DivergencePolicy, error) {
 	policy := DivergencePolicy(value)
-	if err := policy.validate(); err != nil {
-		return "", err
+	// INV: CO-3
+	switch policy {
+	case DivergenceAbort, DivergenceRepair:
+		return policy, nil
+	case DivergenceRecopy:
+		return "", fmt.Errorf("%w: %q is the reconcile mode's own policy; a setting names %q or %q", ErrNoDivergencePolicy, string(policy), DivergenceAbort, DivergenceRepair)
+	case "":
+		return "", fmt.Errorf("%w: a setting must name %q or %q", ErrNoDivergencePolicy, DivergenceAbort, DivergenceRepair)
+	default:
+		return "", fmt.Errorf("%w: %q is not %q or %q", ErrNoDivergencePolicy, string(policy), DivergenceAbort, DivergenceRepair)
 	}
-	return policy, nil
 }
 
 // validate refuses every value but the named policies.

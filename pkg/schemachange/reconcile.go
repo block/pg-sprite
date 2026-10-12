@@ -30,8 +30,8 @@ type Reconciler struct {
 }
 
 // Reconciled is what a completed reconcile hands back: the slot change
-// capture resumes from, the checkpoint row as it now stands, and the repair
-// pass's outcome — the zero Outcome when nothing had landed to repair.
+// capture resumes from, the checkpoint row as it now stands, and the recopy
+// pass's outcome — the zero Outcome when nothing had landed to recopy.
 type Reconciled struct {
 	// Slot is the new slot with its replication connection still open, as
 	// CreateSlot returns it; the caller opens its stream at
@@ -41,13 +41,13 @@ type Reconciled struct {
 	// implies, the new slot's name, and its consistent point as the last
 	// applied position.
 	Checkpoint checkpoint.Checkpoint
-	// Outcome is the repair pass's report and repairs.
+	// Outcome is the recopy pass's report and the chunks it recopied.
 	Outcome checksum.Outcome
 }
 
 // NewReconciler prepares reconcile mode for target and its built shadow,
 // under the table's lock session, writing the checkpoint row through
-// store. opts bound the repair pass as they bound any verification pass.
+// store. opts bound the recopy pass as they bound any verification pass.
 func NewReconciler(cfg dbconn.Config, lock *dbconn.TableLockSession, store *checkpoint.Store, target preflight.CopySwapTarget, shadow BuiltShadow, opts checksum.Options) (*Reconciler, error) {
 	if err := checkProof(target); err != nil {
 		return nil, err
@@ -211,8 +211,8 @@ func phaseAfterReconcile(cp checkpoint.Checkpoint) checkpoint.Phase {
 }
 
 // checkShadowRow refuses a row that records a run on another shadow than
-// the one this Reconciler was built for: the repair pass would then
-// recopy into a table the row does not describe.
+// the one this Reconciler was built for: the recopy pass would then
+// write into a table the row does not describe.
 func (r *Reconciler) checkShadowRow(cp checkpoint.Checkpoint) error {
 	if cp.ShadowTable != r.shadow.ShadowTable() {
 		return refuse(CauseResumeRowMismatch, nil, "checkpoint row for %s.%s names shadow %s, the built shadow is %s", cp.Schema, cp.Table, cp.ShadowTable, r.shadow.ShadowTable())

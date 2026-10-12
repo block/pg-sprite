@@ -28,8 +28,11 @@ func TestDivergencePolicyValidate(t *testing.T) {
 }
 
 // A caller loading the policy from configuration gets the typed value for
-// the named policies and the same refusal Check would give for anything
-// else, so a wrong setting is refused before any copy runs.
+// the two steady-state policies and a refusal for anything else, so a
+// wrong setting is refused before any copy runs. The reconcile mode's
+// recopy is a policy Check accepts but no setting may name (CO-3): a
+// configured pass that healed a divergence without reading it back would
+// hide the defect the steady state exists to catch.
 func TestParseDivergencePolicy(t *testing.T) {
 	policy, err := ParseDivergencePolicy("abort")
 	require.NoError(t, err)
@@ -37,9 +40,12 @@ func TestParseDivergencePolicy(t *testing.T) {
 	policy, err = ParseDivergencePolicy("repair")
 	require.NoError(t, err)
 	assert.Equal(t, DivergenceRepair, policy)
+
 	policy, err = ParseDivergencePolicy("recopy")
-	require.NoError(t, err)
-	assert.Equal(t, DivergenceRecopy, policy)
+	require.ErrorIs(t, err, ErrNoDivergencePolicy, "recopy is selected by the reconcile mode alone")
+	assert.Empty(t, policy)
+	assert.EqualError(t, err, `no divergence policy: "recopy" is the reconcile mode's own policy; a setting names "abort" or "repair"`)
+	require.NoError(t, DivergenceRecopy.validate(), "Check still accepts the policy from the reconcile mode")
 
 	policy, err = ParseDivergencePolicy("")
 	require.ErrorIs(t, err, ErrNoDivergencePolicy)
