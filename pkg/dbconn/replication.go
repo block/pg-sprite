@@ -4,9 +4,38 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgconn/ctxwatch"
 )
+
+// ReplicationOption adjusts how ConnectReplication opens its connection.
+type ReplicationOption func(*pgconn.Config)
+
+// WithServerSideCancel makes a command whose context ends be cancelled on
+// the server before the client gives it up: a cancel request goes to the
+// walsender on a second connection, and the command's call returns once
+// the server has answered it, or after grace with the connection cut.
+// Without the option the client cuts the connection first and sends the
+// cancel request afterwards, in the background on a budget of its own, so
+// the call returns before the server has acted on it: a caller that reads
+// the catalog next, or releases a holder, can find the command it was told
+// ended still waiting or completing on the server — PostgreSQL does not
+// bound a replication command by statement_timeout, and a walsender in a
+// DROP_REPLICATION_SLOT … WAIT or a CREATE_REPLICATION_SLOT comes off its
+// wait only for the cancel or for the holder. With the option, when the
+// call returns the server has ended the command and reported it as
+// query_canceled, which the error carries; the caller folds its context's
+// error back in. Not for a streaming connection: its reads are bounded by
+// per-read contexts that end routinely and must not end the stream.
+func WithServerSideCancel(grace time.Duration) ReplicationOption {
+	return func(c *pgconn.Config) {
+		c.BuildContextWatcherHandler = func(conn *pgconn.PgConn) ctxwatch.Handler {
+			return &pgconn.CancelRequestContextWatcherHandler{Conn: conn, DeadlineDelay: grace}
+		}
+	}
+}
 
 // ConnectReplication opens one dedicated connection in logical replication
 // mode (replication=database) on cfg's database, for the replication
@@ -30,8 +59,10 @@ import (
 // search_path repair) is not run on it. Neither matters here: a replication
 // connection issues replication commands, which PostgreSQL does not bound by
 // statement_timeout at all, and reads no catalog by name. The caller bounds
-// every command with ctx and closes the connection when it is done.
-func ConnectReplication(ctx context.Context, cfg Config) (*pgconn.PgConn, error) {
+// every command with ctx and closes the connection when it is done; a
+// command's context ending cuts the connection on the client's side only,
+// unless the caller asked for WithServerSideCancel.
+func ConnectReplication(ctx context.Context, cfg Config, opts ...ReplicationOption) (*pgconn.PgConn, error) {
 	pc, err := buildPoolConfig(cfg)
 	if err != nil {
 		return nil, err
@@ -43,6 +74,9 @@ func ConnectReplication(ctx context.Context, cfg Config) (*pgconn.PgConn, error)
 		}
 	}
 	connConfig.RuntimeParams["replication"] = "database"
+	for _, opt := range opts {
+		opt(&connConfig.Config)
+	}
 	conn, err := pgconn.ConnectConfig(ctx, &connConfig.Config)
 	if err != nil {
 		return nil, fmt.Errorf("connect replication session: %w", err)

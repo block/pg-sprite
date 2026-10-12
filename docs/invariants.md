@@ -69,7 +69,8 @@ only trailing chunks — silently neutralizing a deliberate divergence abort.
 and no `CleanWatermark`, even though every repaired chunk was read again and found equal; the
 proof comes only from the next pass, which reads every chunk fresh (repairs-mint-nothing test).
 A repaired chunk that still differs on the fresh read is a `RepairError`, not a second repair
-(repair-did-not-take test). The checkpoint writer that persists the watermark is planned.
+(repair-did-not-take test). A pass under `recopy` reads nothing again and mints no proof
+either, however many chunks it recopied. The checkpoint writer that persists the watermark is planned.
 *Source:* Spirit `pkg/migration/runner.go` + `pkg/move/runner.go` ("Safety invariant").
 
 ### CO-3 — Divergence policy is an explicit setting, never inferred
@@ -87,13 +88,16 @@ inferred from whether a recopier happens to be wired up:
 
 *Enforced:* checker configuration per lifecycle mode. *Enforced today:* `pkg/checksum`
 `Check` takes a `DivergencePolicy` on every call and refuses the zero value and any string
-that is not `abort` or `repair` with `ErrNoDivergencePolicy` before reading anything; under
-`abort` a difference is a `DivergenceError` carrying the report with the shadow untouched,
+that is not `abort`, `repair`, or `recopy` with `ErrNoDivergencePolicy` before reading anything;
+under `abort` a difference is a `DivergenceError` carrying the report with the shadow untouched,
 under `repair` every differing chunk is recopied with the copier's own statement inside one
 guarded transaction (delete every chunk's shadow rows, then the copy statement for every chunk)
-and read again, with the committed repairs reported alongside any refusal (no-policy,
-abort-leaves-shadow-alone, repairs-every-chunk, moved-unique-value, and
-later-repair-fails tests). *Source:* Spirit AGENTS.md
+and read again, with the committed repairs reported alongside any refusal, and under `recopy`
+the same recopy commits with no reread — the policy for a source that is written while the
+pass runs, where a fresh read would refuse a chunk the recopy itself made right; the stream
+carries that write, and the next pass, not this one, is the proof (no-policy,
+abort-leaves-shadow-alone, repairs-every-chunk, moved-unique-value,
+later-repair-fails, and recopy-tolerates-a-source-write-inside-the-pass tests). *Source:* Spirit AGENTS.md
 (block/spirit#994 policy) — maps directly onto our failover-reconcile design.
 
 ### CO-4 — The copy/apply ordering invariants
@@ -495,7 +499,11 @@ the source name: the shadow's OID is reported as the committed swap it was, its 
 re-derived from what
 the swap left behind, the source's OID as a rollback carrying the connection error, and any
 other state — no relation, or one the build never proved — is refused as
-`cutover-outcome-ambiguous`. Every attempt the
+`cutover-outcome-ambiguous`. The resume path honours the same rule from the other side: a
+checkpoint row in `cutover` is refused by `InspectResume` and `Reconciler.Reconcile` as
+`resume-row-cutover` before any slot is touched, since only `InspectSwapped` can say which
+table bears the source name, and a reconcile that dropped the slot or recopied the shadow
+behind a committed swap would be acting on a live table. Every attempt the
 catalog shows rolled back — a lock timeout, a drain error, a refusal inside the transaction, or
 a lost connection the inspection resolved — is reported wrapping `ErrCutoverRolledBack`, so a
 caller distinguishes "the source is still live, retry is safe" from an unresolved outcome
@@ -659,7 +667,15 @@ was never created is the typed `ErrTableMissing`, never `ErrNotFound`. `Store.Sa
 same identity guard on the write path, so a run can never write its state over another
 statement's row; `Delete` is the explicit fresh start, and it removes only the row whose
 `Identity` the caller was shown (`IncompatibleError.Stored`), so a row another engine wrote in
-between survives and surfaces as a new `IncompatibleError`. `TestLoadRetriesAcrossATerminatedBackend`,
+between survives and surfaces as a new `IncompatibleError`. `pkg/schemachange` applies the
+same guard on the resume path: `InspectResume` and `Reconciler.Reconcile` read the row through
+`checkResumeRow` — the row must name this table and the derived slot (`resume-row-mismatch`),
+be non-terminal (`resume-row-terminal`), and not be a row whose cutover already began
+(`resume-row-cutover`, whose answer is `InspectSwapped`) — and `Reconcile` goes on through
+`checkShadowRow`, which holds the row's shadow name and fingerprints against the `BuiltShadow`
+it was handed, so a row of another source shape is `resume-row-mismatch` before the marker is
+written (refuses-a-row-of-another-source-shape test).
+`TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
 `TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestDeleteRefusesARowTheCallerWasNotShown`,
@@ -708,9 +724,11 @@ handler is the orchestrator's, not yet written.
 ### ST-4 — Slot loss is a modeled state transition, not a crash
 
 Losing the slot (Aurora failover) enters **reconcile mode** — keep the shadow and copy watermark,
-new slot, checksum-repair pass under the CO-3 self-heal policy — and is handled distinctly from a
-process crash (slot survives, clean resume). The engine detects writer-identity changes and slot
-disappearance rather than blindly continuing. The slot's confirmed position is the resume point
+new slot, checksum recopy pass under the CO-3 self-heal policy — and is handled distinctly from a
+process crash (slot survives, clean resume). The engine detects slot disappearance and a slot
+the server reports lost rather than blindly continuing; it does not yet detect a writer-identity
+change behind an intact slot (a tracked follow-up), so a failover that keeps the slot resumes
+clean on the slot's own word. The slot's confirmed position is the resume point
 a clean resume replays from, so it moves only on the consumer's word: never from a keepalive
 reply, never past a transaction the consumer has not been handed in full. Positions order
 transactions by their commit: pgoutput sends a transaction whole when it commits, so a change's
@@ -749,8 +767,49 @@ test holds the confirmation below a deferred change until its chunk lands); the 
 is typed — `decode.SlotLostError`, unwrapping to `ErrSlotLost`, telling a slot the server
 reports `wal_status = 'lost'` from one that no longer exists — and `Catchup` enters it from
 the catalog at the end of every cycle, so a slot the server gave up on or dropped ends `Run`
-with that error rather than with a stream failure to be told apart later.
-The reconcile-mode transition itself is the checkpoint/resume state machine (Phase 8). *Source:*
+with that error rather than with a stream failure to be told apart later; `InspectSlot` reads
+the server's own account of why a slot was lost alongside — `invalidation_reason`,
+`conflicting`, and `inactive_since` where the server version carries them — so `SlotLostError`
+names the cause (`wal_removed`, `rows_removed`, `wal_level_insufficient`, `idle_timeout`) or
+says the server did not report one, and `SlotStatus.LostState` is the one reading of a status
+as lost. The transition itself is `pkg/schemachange`: `InspectResume` reads a non-terminal
+checkpoint row against the catalog and answers `ResumeClean` (the slot is present, the
+server still serves it, and nothing holds it) or `ResumeReconcile` (the row names no slot, the
+slot is gone, the server reports it lost, or the row is already in `reconciling`), refusing
+before any slot is touched a row it cannot act on — a terminal phase is `resume-row-terminal`,
+a row in `cutover` is `resume-row-cutover` (only `InspectSwapped` can say whether that swap
+committed), a row for another table or another slot name `resume-row-mismatch` — and a slot it
+may not read from — a slot of the derived name that is physical or another database's is
+`resume-slot-foreign` in every phase, and the engine's own slot while another backend holds
+it is `resume-slot-held` rather than clean; `Reconciler.Reconcile` is the reconcile
+mode, run whole under the lock session's `Bind` context so a lost lock cancels the slot
+command in flight, a drop still waiting out a holder included, and never drops or makes a slot
+a run holding the lock since may own: it applies the same row checks, confirms from a
+transaction of its own that the source and the shadow are still the relations the build
+recorded (`cutover-relation-replaced` otherwise, before anything is written), writes the row to
+`checkpoint.PhaseReconciling` naming the derived slot and publication — so a reconcile that
+dies restarts as a reconcile, and the slot it is about to make is owned by the row from the
+moment it exists (ST-3) — drops whatever bears the derived slot name, creates a fresh slot, and
+— when the watermark says anything landed — runs one `checksum` pass at or below the watermark
+under the `recopy` policy (D14), recopying only the chunks the gap touched without a reread,
+since the source is live and the new slot carries every write that lands after the recopy,
+then writes the row back to `copying` or `catching_up` by the watermark with the new slot's
+consistent point as the applied position, from which the stream reopens; the shadow is never
+rebuilt and the watermark never moves (recovers-from-a-dropped-slot,
+restarts-from-an-interrupted-reconcile, with-nothing-landed-skips-the-pass,
+reads-an-intact-slot-as-clean, refuses-a-row-it-cannot-act-on,
+quiesced-target-has-no-reconcile-mode, under-a-steady-insert-stream,
+refuses-a-row-whose-swap-committed, refuses-replaced-relations-before-its-marker,
+leaves-the-slot-it-created-owned-by-the-row, resumes-in-copying-below-a-partial-watermark,
+refuses-a-row-of-another-source-shape, stops-when-the-lock-is-lost-while-the-drop-waits,
+refuses-a-foreign-slot-of-the-name, refuses-the-slot-while-another-backend-holds-it,
+reads-a-slot-the-server-reports-lost-as-reconcile tests). *Known limit:* the recopy pass
+compares a chunk and recopies it in separate statements against a live source, so a source
+that moves a unique or primary-key value from one row to another between the two can make the
+recopy fail with a unique violation; the pass ends in error with the row still in
+`reconciling` and the shadow unchanged, and the next attempt restarts the reconcile — closed,
+never a shadow with a row the source lacks (a retry that survives the move is a tracked
+follow-up). *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum

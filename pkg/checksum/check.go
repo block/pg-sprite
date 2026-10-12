@@ -21,9 +21,9 @@ type Outcome struct {
 	// zero Report when no comparison ran.
 	Report Report
 	// Repairs lists the chunks the pass recopied and committed under
-	// DivergenceRepair, in ascending key order, whether or not every one
-	// then read equal. It is empty under DivergenceAbort and for a clean
-	// pass.
+	// DivergenceRepair or DivergenceRecopy, in ascending key order, whether
+	// or not every one then read equal. It is empty under DivergenceAbort
+	// and for a clean pass.
 	Repairs []Repair
 
 	clean    CleanWatermark
@@ -58,16 +58,20 @@ func (o Outcome) VerifiedShadow() (VerifiedShadow, bool) {
 // then read again in a fresh snapshot; a chunk still different after its
 // repair is returned as a *RepairError, with the Outcome listing every
 // repair that committed. A pass whose repairs all took returns a nil error
-// and no proof. The policy is stated for every pass; there is no default
-// (CO-3).
+// and no proof. Under DivergenceRecopy every differing chunk is recopied
+// the same way and none is read again: the pass returns the committed
+// repairs, a nil error, and no proof. The policy is stated for every pass;
+// there is no default (CO-3).
 //
-// A repair pass is a reconciliation: it assumes nothing else writes the
-// shadow and no source row in a differing chunk changes between the pass
-// and its rereads — the pass after slot loss runs before change capture
-// resumes, and the application's writes to the source are what the resumed
-// capture then carries. A write that lands inside the pass makes the
-// repaired chunk read different again, and the pass refuses it as a
-// RepairError rather than repair it twice.
+// A repair pass assumes nothing else writes the shadow and no source row in
+// a differing chunk changes between the pass and its rereads; a write that
+// lands inside it makes the repaired chunk read different again, and the
+// pass refuses it as a RepairError rather than repair it twice. A recopy
+// pass is the reconciliation after slot loss: the source is written while
+// it runs, and every write committed after the new slot's consistent point
+// replays when the stream reopens, so a recopied chunk a write lands in
+// afterwards converges under the applier as any copied chunk does, and a
+// fresh read now would refuse what the stream is about to settle.
 //
 // While it runs, through the repair phase as well, the verifier is the
 // tracker's work source (Options.Tracker). A Check that overlaps a pass
@@ -94,6 +98,12 @@ func (v *Verifier) Check(ctx context.Context, pool *pgxpool.Pool, through copier
 		return Outcome{Report: report}, v.verifyError(&DivergenceError{Report: report})
 	case DivergenceRepair:
 		repairs, err := v.repairAll(ctx, pool, report.Mismatches)
+		if err != nil {
+			return Outcome{Report: report, Repairs: repairs}, v.verifyError(err)
+		}
+		return Outcome{Report: report, Repairs: repairs}, nil
+	case DivergenceRecopy:
+		repairs, err := v.recopyAll(ctx, pool, report.Mismatches)
 		if err != nil {
 			return Outcome{Report: report, Repairs: repairs}, v.verifyError(err)
 		}

@@ -11,24 +11,28 @@ import (
 	"github.com/block/pg-sprite/pkg/copier"
 )
 
-// A pass must state one of the two named policies; the zero value is no
+// A pass must state one of the named policies; the zero value is no
 // policy, and a string that happens to type-check is not one either (CO-3).
 func TestDivergencePolicyValidate(t *testing.T) {
 	require.NoError(t, DivergenceAbort.validate())
 	require.NoError(t, DivergenceRepair.validate())
+	require.NoError(t, DivergenceRecopy.validate())
 
 	err := DivergencePolicy("").validate()
 	require.ErrorIs(t, err, ErrNoDivergencePolicy)
-	assert.EqualError(t, err, `no divergence policy: a pass must state "abort" or "repair"`)
+	assert.EqualError(t, err, `no divergence policy: a pass must state "abort", "repair", or "recopy"`)
 
 	err = DivergencePolicy("Abort").validate()
 	require.ErrorIs(t, err, ErrNoDivergencePolicy, "policies are exact, not case-folded")
-	assert.EqualError(t, err, `no divergence policy: "Abort" is not "abort" or "repair"`)
+	assert.EqualError(t, err, `no divergence policy: "Abort" is not "abort", "repair", or "recopy"`)
 }
 
 // A caller loading the policy from configuration gets the typed value for
-// the two names and the same refusal Check would give for anything else,
-// so a wrong setting is refused before any copy runs.
+// the two steady-state policies and a refusal for anything else, so a
+// wrong setting is refused before any copy runs. The reconcile mode's
+// recopy is a policy Check accepts but no setting may name (CO-3): a
+// configured pass that healed a divergence without reading it back would
+// hide the defect the steady state exists to catch.
 func TestParseDivergencePolicy(t *testing.T) {
 	policy, err := ParseDivergencePolicy("abort")
 	require.NoError(t, err)
@@ -36,6 +40,12 @@ func TestParseDivergencePolicy(t *testing.T) {
 	policy, err = ParseDivergencePolicy("repair")
 	require.NoError(t, err)
 	assert.Equal(t, DivergenceRepair, policy)
+
+	policy, err = ParseDivergencePolicy("recopy")
+	require.ErrorIs(t, err, ErrNoDivergencePolicy, "recopy is selected by the reconcile mode alone")
+	assert.Empty(t, policy)
+	assert.EqualError(t, err, `no divergence policy: "recopy" is the reconcile mode's own policy; a setting names "abort" or "repair"`)
+	require.NoError(t, DivergenceRecopy.validate(), "Check still accepts the policy from the reconcile mode")
 
 	policy, err = ParseDivergencePolicy("")
 	require.ErrorIs(t, err, ErrNoDivergencePolicy)

@@ -144,3 +144,33 @@ func TestCheckRepairRefusesASourceWriteInsideThePass(t *testing.T) {
 	assert.Equal(t, int64(1999), qty, "the shadow holds the row as the recopy read it, not the later write")
 	assertNoProofs(t, outcome)
 }
+
+// Under DivergenceRecopy the same source write inside the pass is not a
+// failure: the recopy commits, nothing is read again, and the pass returns
+// its repairs with no proof. The policy is for the reconciliation after
+// slot loss, where the source is live and the write that landed after the
+// recopy reaches the shadow through the stream the caller reopens, not
+// through this pass.
+func TestCheckRecopyToleratesASourceWriteInsideThePass(t *testing.T) {
+	f := newVerifierFixture(t)
+	target, lock, shadow := f.prepare(t)
+	f.exec(t, "UPDATE "+f.shadowName(shadow)+" SET qty = 0 WHERE id = 1500")
+	var once sync.Once
+	pool := f.hookedPool(t, func(_ context.Context, _ *pgx.Conn, sql string) {
+		if strings.HasPrefix(sql, "INSERT INTO") {
+			once.Do(func() { f.exec(t, "UPDATE %s.orders SET qty = qty + 1 WHERE id = 1999") })
+		}
+	})
+
+	outcome, err := f.check(t, pool, target, shadow, lock, copier.NewWatermark(math.MaxInt64), checksum.DivergenceRecopy)
+	require.NoError(t, err)
+	require.Len(t, outcome.Repairs, 1)
+	assert.Equal(t, chunk(t, 1001, 2000), outcome.Repairs[0].Mismatch.Chunk)
+	assert.Equal(t, int64(1000), outcome.Repairs[0].Removed)
+	assert.Equal(t, int64(1000), outcome.Repairs[0].Inserted)
+	qty, _ := f.shadowRow(t, shadow, 1500)
+	assert.Equal(t, int64(1500), qty, "the recopy committed")
+	qty, _ = f.shadowRow(t, shadow, 1999)
+	assert.Equal(t, int64(1999), qty, "the write after the recopy is the stream's to carry, not the pass's")
+	assertNoProofs(t, outcome)
+}

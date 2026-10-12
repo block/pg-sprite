@@ -204,7 +204,7 @@ different levels of commitment:
 | `pkg/checksum` | The mandatory correctness gate: the chunk verifier (single-snapshot per-chunk digests through the shadow's types, reporting the chunks that differ up to the landed watermark), `Check` under an explicit divergence policy (abort, or repair each differing chunk with the copier's statement and reread it), and the proof constructors (`VerifiedShadow`, `CleanWatermark`) minted only by a pass that found nothing and repaired nothing; the pass reports its chunks compared, rows hashed, mismatches, and repairs to the progress tracker as its `WorkSource`; continuous checker to follow | verifier, policy, repair, proofs, and progress counters exist; checker planned |
 | `pkg/decode` | Logical-decoding change capture, LSN accounting, slot lifecycle | Phase 6, 8 |
 | `pkg/applier` | Change apply onto the shadow (always wins), buffer/dedup, flush scheduling | Phase 6 |
-| `pkg/schemachange` | Orchestrator: lifecycle, cutover swap + fidelity gate, checkpoint/resume | Phase 7–8 |
+| `pkg/schemachange` | Orchestrator: lifecycle, cutover swap + fidelity gate, resume read and slot-loss reconcile (exist), checkpoint-driven resume | Phase 7–8 |
 | `pkg/checkpoint` | Durable resume state: one row per `(schema, table)` in the target database; the orphan-slot reaper, since the row is what makes a slot owned | Phase 8 |
 | `pkg/throttler` | Chunk-time targeting; replica-lag throttling deferred (the hard slot-lag ceiling is judged by `pkg/decode` and enforced by `pkg/applier`'s catch-up loop) | Phase 8 |
 

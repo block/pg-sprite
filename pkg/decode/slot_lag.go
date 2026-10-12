@@ -70,18 +70,20 @@ func (e *SlotLagExceededError) Unwrap() error { return ErrSlotLagCeiling }
 // SlotLostError is the typed state for a slot the route can no longer
 // decode from. Found is false when no slot of the name exists any more;
 // otherwise WALStatus is the server's verdict, "lost" when WAL the slot
-// needed has been removed. It unwraps to ErrSlotLost.
+// needed has been removed, and Invalidation is the server's cause for it
+// when the server reports one. It unwraps to ErrSlotLost.
 type SlotLostError struct {
-	Slot      string
-	Found     bool
-	WALStatus WALStatus
+	Slot         string
+	Found        bool
+	WALStatus    WALStatus
+	Invalidation SlotInvalidation
 }
 
 func (e *SlotLostError) Error() string {
 	if !e.Found {
 		return fmt.Sprintf("slot %s no longer exists", e.Slot)
 	}
-	return fmt.Sprintf("slot %s is lost: the server reports wal_status %q", e.Slot, e.WALStatus)
+	return fmt.Sprintf("slot %s is lost: the server reports wal_status %q (%s)", e.Slot, e.WALStatus, e.Invalidation)
 }
 
 // Unwrap makes every SlotLostError match ErrSlotLost.
@@ -90,6 +92,16 @@ func (e *SlotLostError) Unwrap() error { return ErrSlotLost }
 // Lost reports whether the server has given up on the slot: WAL it needs
 // has been removed, so no stream can ever read it again (ST-4).
 func (s SlotStatus) Lost() bool { return s.WALStatus == WALStatusLost }
+
+// LostState is the typed state for a slot the server reports lost, carrying
+// the server's verdict and its cause; it is nil while the slot is readable,
+// and a caller returns it as an error only after checking that.
+func (s SlotStatus) LostState() *SlotLostError {
+	if !s.Lost() {
+		return nil
+	}
+	return &SlotLostError{Slot: s.Name, Found: true, WALStatus: s.WALStatus, Invalidation: s.Invalidation}
+}
 
 // WithinLagCeiling judges the slot against a ceiling in WAL bytes. It is
 // nil while the slot retains at most ceiling bytes; a lost slot is a
@@ -104,8 +116,8 @@ func (s SlotStatus) WithinLagCeiling(ceiling int64) error {
 	}
 	// INV: ST-4 — lost is read from the server's verdict, never inferred
 	// from a measure.
-	if s.Lost() {
-		return &SlotLostError{Slot: s.Name, Found: true, WALStatus: s.WALStatus}
+	if lost := s.LostState(); lost != nil {
+		return lost
 	}
 	// INV: ST-3 — an unknown amount is never read as nothing retained.
 	if !s.Retained.Known {

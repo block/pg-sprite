@@ -149,8 +149,8 @@ classification is fixed here first so the route inherits it.
 ### Shadow operation refusals, keyed on `RefusalCause`
 
 The closed set is `schemachange.RefusalCauses()`, carried by the `*schemachange.RefusalError`
-that `BuildShadow`, `InspectShadow`, `DropShadow`, `GateCutover`, `Cutover`, `InspectSwapped`, and
-`DropOldTable` return; `schemachange.RefusalCauseOf`
+that `BuildShadow`, `InspectShadow`, `DropShadow`, `GateCutover`, `Cutover`, `InspectSwapped`,
+`DropOldTable`, `InspectResume`, and `Reconciler.Reconcile` return; `schemachange.RefusalCauseOf`
 reads it through wrapping. Every one of these refusals is fail-closed under
 `ErrInvariantViolation` ([SAFETY.md](../SAFETY.md#rules-inside-the-core)): the sentinel is the
 mechanism that stops the operation, and the cause is what tells the importer which way to
@@ -181,6 +181,11 @@ so the cutover route inherits it.
 | `cutover-name-taken` | A name cutover must assign is already worn: a derived `_old` name by a relation or statistics object in the schema, or a source dependent's name by a shadow constraint that is not the one being renamed to it ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | A leftover from an earlier run, or a constraint the gated statement named after a source index, occupies the name; an operator removes or renames it and gates again. |
 | `cutover-swap-mismatch` | The catalog re-read inside the swap transaction, after the renames and handoffs, does not show the shadow under the source's name, the source under its `_old` name, every paired dependent under its new name, or the live table's sequences and identity columns as the source had them; or, on a resume, the live or the old table is owned by a role other than the one the build recorded, or an identity column the swap recreated is missing from the live table, generated differently, or drawing from another sequence ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | The swap's own statements produced a catalog other than the one they were written to produce, so the transaction is rolled back and nothing is swapped; on a resume, the live table is not the one the swap left, and an operator reads the catalog before anything is dropped. |
 | `cutover-outcome-ambiguous` | After a failed swap attempt or on a resume, the source's name is borne by neither the source nor the shadow the build proved, or the attempt's backend did not exit within the attempt's own `lock_timeout` plus `statement_timeout` so the catalog could not yet be trusted to show the outcome ([LK-4](invariants.md#lk-4--an-ambiguous-cutover-outcome-is-resolved-by-inspection-never-assumed)) | `environmental` | Something other than the engine renamed or dropped a table under the run, or a `COMMIT` is still deciding on the server; an operator reads the catalog to learn which relation is live before anything is retried or dropped. |
+| `resume-row-terminal` | The checkpoint row handed to a resume is in a terminal phase — the run it records is done or failed — so there is nothing to resume or reconcile ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)) | `invariant-violation` | A caller asked to continue a run that has already ended; the row is read, not resumed, and a new run starts fresh. |
+| `resume-row-cutover` | The checkpoint row handed to a resume or a reconcile is in the `cutover` phase: a swap attempt was underway when the run stopped, and whether it committed is written in the catalog, not in the row ([LK-4](invariants.md#lk-4--an-ambiguous-cutover-outcome-is-resolved-by-inspection-never-assumed)) | `invariant-violation` | A caller asked to resume past a swap whose outcome it has not read; `InspectSwapped` answers it — the shadow bears the source's name and the change is complete, or `ErrNotSwapped` and the resume runs `Cutover` — and nothing is reconciled either way, since a recopy into the shadow's name after a committed swap would write over the live table. |
+| `resume-row-mismatch` | The checkpoint row handed to a resume does not describe the proven target and built shadow: it is keyed on another table, names another shadow or a slot other than the target's derived name, or carries the fingerprints of another statement ([ST-2](invariants.md#st-2--an-incompatible-checkpoint-is-distinguishable-from-a-transient-read-error)) | `invariant-violation` | A caller paired a row with a target or shadow it was not written for; no retry against the server changes that. |
+| `resume-slot-foreign` | The slot wearing the row's derived name is not this route's — a physical slot, or a logical slot of another database — so neither a clean resume nor a reconcile may decode from it or replace it, whatever its WAL status says ([ST-3](invariants.md#st-3--slot-cleanup-is-guaranteed-on-success-failure-and-crash)) | `environmental` | Something else took the engine's derived name after the row was written; an operator renames or drops that slot, and the resume is inspected again. The refusal also answers `errors.Is` for `decode.ErrForeignDecodingState`. |
+| `resume-slot-held` | The row's slot is intact and the server still serves it, but another backend holds it, so no stream can be opened on it now; the holder's PID is named ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)) | `environmental` | A walsender of this engine's earlier process that has not yet noticed its client is gone lets go within `wal_sender_timeout`; anything else streaming from the engine's slot is an operator's to end. The resume is inspected again once the slot is free; a row already in `reconciling` is not refused, since the reconcile's drop waits the holder out. |
 
 Not every error a shadow operation returns is a refusal. `BuildShadow` applies the gated
 statement to the empty shadow, and a statement the server itself rejects there — an index
@@ -195,6 +200,13 @@ name; no swap committed, so the resume runs `Cutover`) and `ErrOldTableNotFound`
 bears the source's name and the retained source's OID is gone from the catalog; the drop already
 committed, so the change is complete). Both are reached with `errors.Is`, and `RefusalCauseOf`
 returns the empty cause for them.
+
+The three `resume-row-*` causes are `invariant-violation` because they describe the caller's
+dispatch, not the database: a row's phase says which operation reads it. An importer that
+loads a row reads `Phase.Terminal()` first — `done` and `failed` rows are reported, never
+resumed — then hands a `cutover` row to `InspectSwapped`, and only a row in any other phase
+to `InspectResume`. A caller that dispatches in that order never sees `resume-row-terminal`
+or `resume-row-cutover`; one that does has a dispatch bug to fix, not a retry to make.
 
 The copier's own refusals — a lock the server does not confirm from the writing connection
 ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)), a source or shadow replaced

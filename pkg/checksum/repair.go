@@ -11,11 +11,12 @@ import (
 	"github.com/block/pg-sprite/pkg/preflight"
 )
 
-// Repair is one chunk a pass recopied under DivergenceRepair: the
-// difference it found, and what the recopy removed and put back. The recopy
-// has committed; whether the chunk then read equal is the pass's result,
-// not the Repair's — a chunk that did not is named by a RepairError
-// alongside the Repairs that committed with it.
+// Repair is one chunk a pass recopied under DivergenceRepair or
+// DivergenceRecopy: the difference it found, and what the recopy removed
+// and put back. The recopy has committed; whether the chunk then read equal
+// is the pass's result, not the Repair's — under DivergenceRepair a chunk
+// that did not is named by a RepairError alongside the Repairs that
+// committed with it, and under DivergenceRecopy no chunk is read again.
 type Repair struct {
 	// Mismatch is the difference the pass found before the repair.
 	Mismatch Mismatch
@@ -46,6 +47,25 @@ func (v *Verifier) repairAll(ctx context.Context, pool *pgxpool.Pool, mismatches
 		if err := v.reread(ctx, pool, sourceSQL, shadowSQL, repair); err != nil {
 			return repairs, v.lostOr(err)
 		}
+	}
+	if lost := v.lockLost(); lost != nil {
+		return repairs, lost
+	}
+	return repairs, nil
+}
+
+// recopyAll recopies every differing chunk in one transaction and reads
+// none of them again: the pass's caller has a stream that carries every
+// write landing after the recopy, so a fresh read would judge a chunk the
+// stream has not yet settled. The repairs it returns are the ones that
+// committed. The transaction runs under the lock session's Bind context,
+// as the pass did.
+func (v *Verifier) recopyAll(ctx context.Context, pool *pgxpool.Pool, mismatches []Mismatch) ([]Repair, error) {
+	ctx, unbind := v.lock.Bind(ctx)
+	defer unbind()
+	repairs, err := v.recopy(ctx, pool, mismatches)
+	if err != nil {
+		return nil, v.lostOr(err)
 	}
 	if lost := v.lockLost(); lost != nil {
 		return repairs, lost
