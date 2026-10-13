@@ -11,4 +11,9 @@
 // not, or when the change is being abandoned. Inspection costs one read
 // transaction; a drop destroys a shadow that may have been resumable and
 // buys a full rebuild and copy.
+//
+// Runner chains the operations for a quiesced table — one no writer
+// touches while the change runs — from table lock to old table drop,
+// writing the checkpoint row at every phase transition and dispatching on
+// the row it finds, so a run that stops anywhere resumes from the row.
 package schemachange

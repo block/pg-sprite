@@ -503,7 +503,10 @@ other state — no relation, or one the build never proved — is refused as
 checkpoint row in `cutover` is refused by `InspectResume` and `Reconciler.Reconcile` as
 `resume-row-cutover` before any slot is touched, since only `InspectSwapped` can say which
 table bears the source name, and a reconcile that dropped the slot or recopied the shadow
-behind a committed swap would be acting on a live table. Every attempt the
+behind a committed swap would be acting on a live table; the quiesced `Runner` writes the row
+to `cutover` before it calls `Cutover`, and on resume hands a `cutover` row to `InspectSwapped`
+first, continuing at `DropOldTable` on a committed swap and back through verify and gate on
+`ErrNotSwapped`. Every attempt the
 catalog shows rolled back — a lock timeout, a drain error, a refusal inside the transaction, or
 a lost connection the inspection resolved — is reported wrapping `ErrCutoverRolledBack`, so a
 caller distinguishes "the source is still live, retry is safe" from an unresolved outcome
@@ -679,7 +682,12 @@ be non-terminal (`resume-row-terminal`), and not be a row whose cutover already 
 (`resume-row-cutover`, whose answer is `InspectSwapped`) — and `Reconcile` goes on through
 `checkShadowRow`, which holds the row's shadow name and fingerprints against the `BuiltShadow`
 it was handed, so a row of another source shape is `resume-row-mismatch` before the marker is
-written (refuses-a-row-of-another-source-shape test).
+written (refuses-a-row-of-another-source-shape test). The quiesced `Runner` reads the row
+through `Store.Inspect` before it knows the statement, and holds a `copying` or `verifying`
+row against the shadow `InspectShadow` re-derives — shadow name, both fingerprints, and the
+JSON-encoded proof the row carries (`resume-row-mismatch` otherwise) — and refuses a relation
+under the shadow's name that no row records (`shadow-unrecorded`), since the row is the only
+record of which statement a shadow embodies.
 `TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
