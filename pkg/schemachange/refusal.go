@@ -66,6 +66,12 @@ const (
 	// shadow proof is empty, the two name different relations, or the
 	// verified watermark does not cover the whole key space.
 	CauseCutoverUnverified RefusalCause = "cutover-unverified"
+	// CauseCutoverUndrained means the cutover was handed a verified shadow
+	// proof a live pass minted — the shadow equal to the source as of a
+	// position the stream had reached, with every change since still in
+	// the stream — and no drain to apply those changes under the swap lock
+	// (CO-1).
+	CauseCutoverUndrained RefusalCause = "cutover-undrained"
 	// CauseRelationReplaced means the source or the shadow under its name
 	// is no longer the relation the build proved (ST-6): the OID moved, so
 	// the proof describes a table that no longer exists.
@@ -146,6 +152,7 @@ func RefusalCauses() []RefusalCause {
 		CauseGrantsDiffer,
 		CauseIdentityHandoff,
 		CauseCutoverUnverified,
+		CauseCutoverUndrained,
 		CauseRelationReplaced,
 		CauseSchemaDrift,
 		CauseFidelityDrift,
@@ -174,7 +181,7 @@ func (c RefusalCause) Invariant() string {
 	case CauseShadowOwner, CauseForeignRelation, CauseGrantsDiffer, CauseIdentityHandoff,
 		CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid, CauseNameTaken:
 		return "ST-5"
-	case CauseCutoverUnverified:
+	case CauseCutoverUnverified, CauseCutoverUndrained:
 		return "CO-1"
 	case CauseOutcomeAmbiguous, CauseResumeCutover:
 		return "LK-4"

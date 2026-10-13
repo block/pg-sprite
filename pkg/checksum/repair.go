@@ -96,6 +96,20 @@ func (v *Verifier) recopy(ctx context.Context, pool *pgxpool.Pool, mismatches []
 		// the transaction with its session either way.
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
+	repairs, err := v.recopyIn(ctx, tx, mismatches)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit repair of %d chunks of %s.%s: %w", len(repairs), v.target.Schema(), v.target.Table(), err)
+	}
+	v.countRepaired(len(repairs))
+	return repairs, nil
+}
+
+// recopyIn runs the recopy's statements in tx: every chunk's delete, then
+// every chunk's copy. It commits nothing; the caller does.
+func (v *Verifier) recopyIn(ctx context.Context, tx pgx.Tx, mismatches []Mismatch) ([]Repair, error) {
 	repairs := make([]Repair, 0, len(mismatches))
 	for _, mismatch := range mismatches {
 		chunk := mismatch.Chunk
@@ -113,10 +127,6 @@ func (v *Verifier) recopy(ctx context.Context, pool *pgxpool.Pool, mismatches []
 		}
 		repairs[i].Inserted = inserted.RowsAffected()
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return nil, fmt.Errorf("commit repair of %d chunks of %s.%s: %w", len(repairs), v.target.Schema(), v.target.Table(), err)
-	}
-	v.countRepaired(len(repairs))
 	return repairs, nil
 }
 

@@ -67,7 +67,8 @@ func TestOutcomeZeroValueMintsNothing(t *testing.T) {
 }
 
 // A clean pass through a partial watermark proves its prefix and nothing
-// more; only the complete watermark earns the whole-shadow proof (CO-1).
+// more; only the complete watermark earns the whole-shadow proof (CO-1),
+// and the proof says whether a quiesced or a live pass minted it.
 func TestProveMintsTheVerifiedShadowOnlyWhenComplete(t *testing.T) {
 	now := time.Date(2026, time.October, 1, 12, 0, 0, 0, time.UTC)
 	v := &Verifier{
@@ -75,14 +76,14 @@ func TestProveMintsTheVerifiedShadowOnlyWhenComplete(t *testing.T) {
 		opts:   Options{Clock: fixedClock(now)},
 	}
 
-	partial := v.prove(Report{Through: copier.NewWatermark(1500), Chunks: 2, Rows: 1500})
+	partial := v.prove(Report{Through: copier.NewWatermark(1500), Chunks: 2, Rows: 1500}, false)
 	clean, minted := partial.CleanWatermark()
 	require.True(t, minted)
 	assert.Equal(t, copier.NewWatermark(1500), clean.Watermark())
 	_, minted = partial.VerifiedShadow()
 	assert.False(t, minted, "keys above 1500 were not compared")
 
-	complete := v.prove(Report{Through: copier.NewWatermark(math.MaxInt64), Chunks: 3, Rows: 2500})
+	complete := v.prove(Report{Through: copier.NewWatermark(math.MaxInt64), Chunks: 3, Rows: 2500}, false)
 	verified, minted := complete.VerifiedShadow()
 	require.True(t, minted)
 	assert.Equal(t, "app", verified.Schema())
@@ -92,6 +93,12 @@ func TestProveMintsTheVerifiedShadowOnlyWhenComplete(t *testing.T) {
 	assert.Equal(t, uint32(2), verified.ShadowOID())
 	assert.Equal(t, copier.NewWatermark(math.MaxInt64), verified.Watermark())
 	assert.Equal(t, now, verified.VerifiedAt())
+	assert.False(t, verified.Live(), "a quiesced pass minted it")
+
+	live := v.prove(Report{Through: copier.NewWatermark(math.MaxInt64), Chunks: 3, Rows: 2500, Settled: 1}, true)
+	verified, minted = live.VerifiedShadow()
+	require.True(t, minted)
+	assert.True(t, verified.Live(), "a live pass minted it")
 }
 
 // The two divergence errors name the chunks and counts an operator needs
