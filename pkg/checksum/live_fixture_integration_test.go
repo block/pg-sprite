@@ -129,6 +129,17 @@ func (f *liveFixture) start(t *testing.T) {
 	})
 }
 
+// currentWALLSN reads the server's current write position; a marker a
+// pass has already written lies at or below it.
+func (f *liveFixture) currentWALLSN(t *testing.T) decode.LSN {
+	t.Helper()
+	var text string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT pg_current_wal_lsn()::text`).Scan(&text))
+	lsn, err := decode.ParseLSN(text)
+	require.NoError(t, err)
+	return lsn
+}
+
 // shadowName is the schema-qualified, quoted shadow table.
 func (f *liveFixture) shadowName() string {
 	return pgx.Identifier{f.table.Schema, f.shadow.ShadowTable()}.Sanitize()
@@ -211,15 +222,3 @@ func pollSleep(ctx context.Context, d time.Duration) error {
 type confirmedFunc func() decode.LSN
 
 func (fn confirmedFunc) Confirmed() decode.LSN { return fn() }
-
-// steppingClock advances by step on every reading, so a wait bounded by
-// the clock runs out without wall time passing.
-type steppingClock struct {
-	now  time.Time
-	step time.Duration
-}
-
-func (c *steppingClock) Now() time.Time {
-	c.now = c.now.Add(c.step)
-	return c.now
-}

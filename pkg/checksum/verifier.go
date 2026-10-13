@@ -276,9 +276,9 @@ func (v *Verifier) pass(ctx context.Context, pool *pgxpool.Pool, through copier.
 
 // sweep cuts and compares every chunk at or below through. A quiesced sweep
 // reports each differing chunk as a mismatch. A live sweep instead returns
-// each differing chunk as an observation carrying the insert position its
-// digests were read at, for the caller to settle; the report then has no
-// mismatches of its own. Both count a differing chunk as mismatched.
+// each differing chunk as an observation carrying the position of the
+// marker its transaction wrote, for the caller to settle; the report then
+// has no mismatches of its own. Both count a differing chunk as mismatched.
 func (v *Verifier) sweep(ctx context.Context, pool *pgxpool.Pool, sourceSQL, shadowSQL string, through copier.Watermark, live bool) (Report, []observation, error) {
 	chunker, err := copier.NewChunker(v.target, copier.Watermark{}, v.opts.Chunker)
 	if err != nil {
@@ -318,7 +318,7 @@ func (v *Verifier) sweep(ctx context.Context, pool *pgxpool.Pool, sourceSQL, sha
 // comparison is one chunk of a pass: the chunk the chunker cut, the closed
 // range the pass compared — that chunk capped at the pass's watermark — the
 // two digests of that range, and, for a differing chunk of a live sweep,
-// the server's insert position read in the same snapshot.
+// the position of the marker written in the same transaction.
 type comparison struct {
 	cut      copier.Chunk
 	compared copier.Chunk
@@ -360,9 +360,9 @@ func (v *Verifier) digestStatements(ctx context.Context, pool *pgxpool.Pool) (so
 // locked both relations, so a cut queued behind a strong lock on the source
 // ends at the verifier's lock timeout whatever the caller's pool carries
 // (LK-2). ok is false once the key space is covered. With live set, a chunk
-// whose digests differ also carries the server's insert position, read in
-// the same snapshot, so the caller knows what the catch-up must confirm
-// past before the chunk can be read again.
+// whose digests differ also carries the position of a marker written in the
+// same transaction, so the caller knows what the catch-up must confirm past
+// before the chunk can be read again.
 func (v *Verifier) compareNext(ctx context.Context, pool *pgxpool.Pool, chunker *copier.Chunker, sourceSQL, shadowSQL string, through copier.Watermark, live bool) (comparison, bool, error) {
 	tx, err := v.begin(ctx, pool, snapshotRead())
 	if err != nil {
@@ -395,7 +395,7 @@ func (v *Verifier) compareNext(ctx context.Context, pool *pgxpool.Pool, chunker 
 	}
 	var lsn decode.LSN
 	if live && source != shadow {
-		if lsn, err = v.insertPosition(ctx, tx); err != nil {
+		if lsn, err = v.markPosition(ctx, tx); err != nil {
 			return comparison{}, false, err
 		}
 	}

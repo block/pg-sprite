@@ -90,7 +90,7 @@ func (v *Verifier) Check(ctx context.Context, pool *pgxpool.Pool, through copier
 		return Outcome{}, err
 	}
 	if report.Clean() {
-		return v.prove(report), nil
+		return v.prove(report, false), nil
 	}
 	// INV: CO-3
 	switch policy {
@@ -119,12 +119,13 @@ func (v *Verifier) verifyError(err error) error {
 }
 
 // prove mints the proofs a clean pass earns: the clean watermark always,
-// and the verified shadow only when nothing lies beyond the watermark.
-func (v *Verifier) prove(report Report) Outcome {
+// and the verified shadow only when nothing lies beyond the watermark,
+// marked as a live pass's when the stream was writing the shadow.
+func (v *Verifier) prove(report Report, live bool) Outcome {
 	// INV: CO-1, CO-2
 	outcome := Outcome{Report: report, clean: newCleanWatermark(report.Through)}
 	if report.Through.Complete() {
-		outcome.verified = newVerifiedShadow(v.shadow, report.Through, v.opts.Clock.Now())
+		outcome.verified = newVerifiedShadow(v.shadow, report.Through, v.opts.Clock.Now(), live)
 	}
 	return outcome
 }

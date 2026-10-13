@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/copier"
@@ -12,10 +11,10 @@ import (
 )
 
 // observation is one two-sided read of a chunk under a live pass: the two
-// digests and the server's insert position read in the same snapshot.
-// Every transaction visible to the snapshot committed at or below that
-// position, so once the catch-up has confirmed past it, every source change
-// the read saw is in the shadow.
+// digests and the position of the marker written in the same transaction.
+// Every transaction visible to the snapshot committed before the marker, so
+// once the catch-up has confirmed past it, every source change the read saw
+// is in the shadow.
 type observation struct {
 	chunk  copier.Chunk
 	source Digest
@@ -62,14 +61,15 @@ func judge(prior, now observation) verdict {
 	return verdictDiverged
 }
 
-// settle decides a chunk the sweep found differing: wait for the catch-up
-// to confirm past the position the chunk was read at, read it again in a
-// fresh snapshot, and judge the two reads. A hot chunk is read again from
-// its latest read, up to live.Attempts rereads in all; a wait that runs out
-// or the attempts exhausted is an *UnresolvedError. The returned
-// observation is the last read.
-func (v *Verifier) settle(ctx context.Context, pool *pgxpool.Pool, sourceSQL, shadowSQL string, prior observation, live LiveOptions) (verdict, observation, error) {
-	for rereads := 0; ; {
+// settle decides a chunk found differing: wait for the catch-up to confirm
+// past the position the chunk was read at, read it again in a fresh
+// snapshot, and judge the two reads. A hot chunk is read again from its
+// latest read, up to live.Attempts rereads in all, counting the rereads the
+// caller already spent on the chunk; a wait that runs out or the attempts
+// exhausted is an *UnresolvedError. The returned observation is the last
+// read.
+func (v *Verifier) settle(ctx context.Context, pool *pgxpool.Pool, sourceSQL, shadowSQL string, prior observation, rereads int, live LiveOptions) (verdict, observation, error) {
+	for {
 		if err := v.awaitConfirmed(ctx, prior, rereads, live); err != nil {
 			return 0, prior, err
 		}
@@ -95,15 +95,17 @@ func (v *Verifier) settle(ctx context.Context, pool *pgxpool.Pool, sourceSQL, sh
 }
 
 // awaitConfirmed waits until the catch-up has confirmed past the position
-// prior was read at, polling at live.Poll for at most live.SettleWait.
+// prior was read at, sleeping live.Poll between reads of the confirmed
+// position for as many polls as fit in live.SettleWait. The bound is a
+// count of sleeps, not a clock reading, so the wait ends at the same poll
+// whatever sleep the caller injected.
 func (v *Verifier) awaitConfirmed(ctx context.Context, prior observation, rereads int, live LiveOptions) error {
-	deadline := v.opts.Clock.Now().Add(live.SettleWait)
-	for {
+	for polled := 0; ; polled++ {
 		confirmed := live.Confirmed.Confirmed()
 		if confirmed >= prior.lsn {
 			return nil
 		}
-		if !v.opts.Clock.Now().Before(deadline) {
+		if polled >= live.polls() {
 			return &UnresolvedError{
 				Chunk: prior.chunk, Cause: CauseLagging, Rereads: rereads,
 				Source: prior.source, Shadow: prior.shadow,
@@ -116,9 +118,9 @@ func (v *Verifier) awaitConfirmed(ctx context.Context, prior observation, reread
 	}
 }
 
-// observe reads both sides of chunk and the server's insert position in one
-// guarded snapshot of its own. It counts nothing: the caller knows what
-// the read is for.
+// observe reads both sides of chunk and marks the position in one guarded
+// snapshot of its own. It counts nothing: the caller knows what the read is
+// for.
 func (v *Verifier) observe(ctx context.Context, pool *pgxpool.Pool, sourceSQL, shadowSQL string, chunk copier.Chunk) (observation, error) {
 	tx, err := v.begin(ctx, pool, snapshotRead())
 	if err != nil {
@@ -134,7 +136,7 @@ func (v *Verifier) observe(ctx context.Context, pool *pgxpool.Pool, sourceSQL, s
 	if err != nil {
 		return observation{}, err
 	}
-	lsn, err := v.insertPosition(ctx, tx)
+	lsn, err := v.markPosition(ctx, tx)
 	if err != nil {
 		return observation{}, err
 	}
@@ -142,21 +144,4 @@ func (v *Verifier) observe(ctx context.Context, pool *pgxpool.Pool, sourceSQL, s
 		return observation{}, fmt.Errorf("commit reread of chunk [%d, %d] of %s.%s: %w", chunk.Lower(), chunk.Upper(), v.target.Schema(), v.target.Table(), err)
 	}
 	return observation{chunk: chunk, source: source, shadow: shadow, lsn: lsn}, nil
-}
-
-// insertPosition reads the server's insert position inside tx: every
-// transaction the snapshot sees committed at or below it. The insert
-// position, not the write position: under synchronous_commit = off a
-// commit is visible to a snapshot before its WAL is written, so only the
-// insert position bounds every commit the snapshot sees.
-func (v *Verifier) insertPosition(ctx context.Context, tx pgx.Tx) (decode.LSN, error) {
-	var text string
-	if err := tx.QueryRow(ctx, `SELECT pg_catalog.pg_current_wal_insert_lsn()::text`).Scan(&text); err != nil {
-		return 0, fmt.Errorf("read the server's insert position for %s.%s: %w", v.target.Schema(), v.target.Table(), err)
-	}
-	lsn, err := decode.ParseLSN(text)
-	if err != nil {
-		return 0, fmt.Errorf("read the server's insert position for %s.%s: %w", v.target.Schema(), v.target.Table(), err)
-	}
-	return lsn, nil
 }

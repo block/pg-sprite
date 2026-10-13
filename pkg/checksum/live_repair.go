@@ -40,12 +40,11 @@ func (v *Verifier) repairLive(ctx context.Context, pool *pgxpool.Pool, mismatche
 // recopy commits, so no flush interleaves with the delete and the copy; the
 // flushes that then land replay images the recopy has already put back, or
 // changes that committed after it, and the shadow converges on the source
-// as it does after any copy. The insert position is read after the copy and
-// before the commit: every source change the copy saw committed at or
-// below it, so once the catch-up confirms past it the shadow holds the
-// recopy and everything since. The wait for the lock is bounded by the
-// transaction's lock_timeout, and a flush queued behind the recopy by its
-// own.
+// as it does after any copy. The marker is written after the copy and
+// before the commit: every source change the copy saw committed before it,
+// so once the catch-up confirms past it the shadow holds the recopy and
+// everything since. The wait for the lock is bounded by the transaction's
+// lock_timeout, and a flush queued behind the recopy by its own.
 func (v *Verifier) recopyFenced(ctx context.Context, pool *pgxpool.Pool, mismatches []Mismatch) ([]Repair, decode.LSN, error) {
 	tx, err := v.begin(ctx, pool, pgx.TxOptions{AccessMode: pgx.ReadWrite})
 	if err != nil {
@@ -65,7 +64,7 @@ func (v *Verifier) recopyFenced(ctx context.Context, pool *pgxpool.Pool, mismatc
 	if err != nil {
 		return nil, 0, err
 	}
-	recopied, err := v.insertPosition(ctx, tx)
+	recopied, err := v.markPosition(ctx, tx)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -85,7 +84,8 @@ func (v *Verifier) settleRepair(ctx context.Context, pool *pgxpool.Pool, sourceS
 	chunk := repair.Mismatch.Chunk
 	// The recopy left no digest to compare the first reread with, so the
 	// wait is for the recopy's own position and the first reread stands on
-	// its own: equal is repaired, anything else is settled from there.
+	// its own: equal is repaired, anything else is settled from there, with
+	// that reread counted among the chunk's attempts.
 	prior := observation{chunk: chunk, lsn: recopied}
 	if err := v.awaitConfirmed(ctx, prior, 0, live); err != nil {
 		return err
@@ -95,10 +95,11 @@ func (v *Verifier) settleRepair(ctx context.Context, pool *pgxpool.Pool, sourceS
 		return err
 	}
 	v.countReread()
+	const rereads = 1
 	if now.source == now.shadow {
 		return nil
 	}
-	result, last, err := v.settle(ctx, pool, sourceSQL, shadowSQL, now, live)
+	result, last, err := v.settle(ctx, pool, sourceSQL, shadowSQL, now, rereads, live)
 	if err != nil {
 		return err
 	}

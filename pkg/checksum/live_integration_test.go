@@ -54,9 +54,58 @@ func TestCheckLiveSettlesAChunkTheStreamHadNotYetApplied(t *testing.T) {
 	assert.Positive(t, sleeps.Load(), "the pass waited for the catch-up before rereading")
 	_, minted := outcome.CleanWatermark()
 	assert.True(t, minted)
-	_, minted = outcome.VerifiedShadow()
+	verified, minted := outcome.VerifiedShadow()
 	assert.True(t, minted)
+	assert.True(t, verified.Live(), "the proof says a live pass minted it")
+	work, err := v.Work(t.Context())
+	require.NoError(t, err)
+	assert.Equal(t, uint64(1), work.ChunksMismatched, "the sweep found one chunk differing")
+	assert.Equal(t, uint64(1), work.ChunksReread, "settling the chunk took one reread")
 	f.assertConverged(t)
+}
+
+// A chunk whose shadow has reached exactly what the sweep saw on the
+// source, while the source has moved on again, is settled: the stream has
+// delivered what the first read saw, and the newer change is still in the
+// stream. The first change is held off the shadow for the sweep; the hold
+// is released from inside the pass's first wait, the change allowed to
+// land and the catch-up to confirm past the sweep's read, then the shadow
+// is held again and the source changed once more, so the reread finds the
+// shadow equal to the sweep's source and the source elsewhere. The
+// catch-up confirms no further than the position the stream had reached
+// before a change it has yet to apply, so the second change is made only
+// once the catch-up has confirmed past the read it must settle.
+func TestCheckLiveSettlesAChunkWhoseShadowReachedTheSweepsSource(t *testing.T) {
+	f := newLiveFixture(t)
+	release := f.holdShadow(t)
+	touch := "UPDATE " + f.table.Qualified() + " SET amount = amount + 1 WHERE id = 1500"
+	f.exec(t, touch)
+
+	var waits atomic.Int32
+	v := f.verifier(t, checksum.Options{})
+	outcome, err := f.checkLive(t, v, checksum.DivergenceAbort, checksum.LiveOptions{
+		Sleep: func(ctx context.Context, d time.Duration) error {
+			if waits.Add(1) > 1 {
+				return pollSleep(ctx, d)
+			}
+			release()
+			require.Eventually(t, func() bool {
+				var same bool
+				require.NoError(t, f.pool.QueryRow(ctx, "SELECT s.amount = t.amount FROM "+f.table.Qualified()+" s, "+f.shadowName()+" t WHERE s.id = 1500 AND t.id = 1500").Scan(&same))
+				return same
+			}, 10*time.Second, 20*time.Millisecond, "the first change landed on the shadow")
+			marked := f.currentWALLSN(t)
+			require.Eventually(t, func() bool { return f.catchup.Confirmed() >= marked },
+				10*time.Second, 20*time.Millisecond, "the catch-up confirmed past the sweep's read")
+			f.holdShadow(t)
+			f.exec(t, touch)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	assert.True(t, outcome.Clean())
+	assert.Equal(t, 1, outcome.Report.Settled, "the shadow reached the sweep's source while the source moved on")
+	assert.Empty(t, outcome.Report.Mismatches)
 }
 
 // A chunk whose source changes between every read cannot be judged: no
@@ -99,18 +148,24 @@ func TestCheckLiveReportsAChunkThatKeepsChangingAsUnresolved(t *testing.T) {
 // was read at within the settle wait leaves the chunk unsettled as
 // lagging: the pass cannot tell a slow stream from a divergence and says
 // so instead of guessing either way. The shadow is held so the catch-up
-// stays below the change, and the verifier's clock steps past the wait
-// without wall time passing.
+// stays below the change, and the pass's sleep returns at once, so the
+// wait runs through its polls without wall time passing.
 func TestCheckLiveReportsALaggingCatchupAsUnresolved(t *testing.T) {
 	f := newLiveFixture(t)
 	f.holdShadow(t)
 	f.exec(t, "UPDATE "+f.table.Qualified()+" SET amount = amount + 1 WHERE id = 1500")
 
-	v := f.verifier(t, checksum.Options{Clock: &steppingClock{now: time.Unix(0, 0), step: time.Second}})
+	var polls atomic.Int32
+	v := f.verifier(t, checksum.Options{})
 	outcome, err := f.checkLive(t, v, checksum.DivergenceAbort, checksum.LiveOptions{
 		SettleWait: time.Second,
-		Sleep:      func(context.Context, time.Duration) error { return nil },
+		Poll:       100 * time.Millisecond,
+		Sleep: func(context.Context, time.Duration) error {
+			polls.Add(1)
+			return nil
+		},
 	})
+	assert.Equal(t, int32(10), polls.Load(), "the wait is as many polls as fit in the settle wait")
 	require.ErrorIs(t, err, checksum.ErrVerificationUnresolved)
 	var unresolved *checksum.UnresolvedError
 	require.ErrorAs(t, err, &unresolved)
@@ -118,6 +173,62 @@ func TestCheckLiveReportsALaggingCatchupAsUnresolved(t *testing.T) {
 	assert.Zero(t, unresolved.Rereads, "the pass gave up before its first reread")
 	assert.Equal(t, chunk(t, 1001, 2000), unresolved.Chunk)
 	assert.Less(t, unresolved.Confirmed, unresolved.Captured, "the catch-up had not reached the read's position")
+	assertNoProofs(t, outcome)
+}
+
+// A session holding a transaction open after writing the source leaves
+// WAL behind its last record that nothing flushes, and the walsender
+// cannot read past the flushed position. The position a live pass marks
+// a read with is flushed regardless, so a stream that has delivered
+// everything confirms past the read and the pass reaches a verdict: here
+// a shadow row the stream will never fix is a divergence, not a lagging
+// catch-up.
+func TestCheckLiveConfirmsPastAnOpenWritersWAL(t *testing.T) {
+	f := newLiveFixture(t)
+	f.exec(t, "UPDATE "+f.shadowName()+" SET amount = 0 WHERE id = 1500")
+
+	writer, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Redundant safety closer: the test rolls the writer back itself.
+		_ = writer.Rollback(context.WithoutCancel(t.Context()))
+	})
+	_, err = writer.Exec(t.Context(), "UPDATE "+f.table.Qualified()+" SET amount = amount WHERE id = 5")
+	require.NoError(t, err)
+
+	v := f.verifier(t, checksum.Options{})
+	_, err = f.checkLive(t, v, checksum.DivergenceAbort, checksum.LiveOptions{SettleWait: 3 * time.Second})
+	var diverged *checksum.DivergenceError
+	require.ErrorAs(t, err, &diverged, "the stream is caught up, so the shadow row is a divergence, not a lagging catch-up")
+	require.Len(t, diverged.Report.Mismatches, 1)
+	assert.Equal(t, chunk(t, 1001, 2000), diverged.Report.Mismatches[0].Chunk)
+	require.NoError(t, writer.Rollback(t.Context()))
+}
+
+// A chunk that will not settle does not hide a divergence in another: the
+// pass settles every differing chunk before it decides. The second chunk
+// holds a shadow row the stream will never fix and the third is rewritten
+// on every poll so it stays hot; the pass reports the confirmed divergence
+// with the unsettled chunk counted beside it, and mints nothing.
+func TestCheckLiveReportsADivergenceAlongsideAnUnsettledChunk(t *testing.T) {
+	f := newLiveFixture(t)
+	f.exec(t, "UPDATE "+f.shadowName()+" SET amount = 0 WHERE id = 1500")
+	f.holdShadow(t)
+	touch := "UPDATE " + f.table.Qualified() + " SET amount = amount + 1 WHERE id = 2400"
+	f.exec(t, touch)
+	rewrite := confirmedFunc(func() decode.LSN {
+		f.exec(t, touch)
+		return math.MaxUint64
+	})
+
+	v := f.verifier(t, checksum.Options{})
+	outcome, err := f.checkLive(t, v, checksum.DivergenceAbort, checksum.LiveOptions{Confirmed: rewrite, Attempts: 2})
+	var diverged *checksum.DivergenceError
+	require.ErrorAs(t, err, &diverged)
+	require.Len(t, outcome.Report.Mismatches, 1, "the divergence in chunk [1001, 2000] is confirmed and reported")
+	assert.Equal(t, chunk(t, 1001, 2000), outcome.Report.Mismatches[0].Chunk)
+	assert.Equal(t, 1, outcome.Report.Unsettled, "the hot chunk [2001, max] is counted, not dropped")
+	assert.False(t, outcome.Clean())
 	assertNoProofs(t, outcome)
 }
 

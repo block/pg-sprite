@@ -41,6 +41,7 @@ func TestLiveOptionsRefuseUnboundedValues(t *testing.T) {
 		"negative attempts":               {Confirmed: confirmedAt(0), Attempts: -1},
 		"settle wait below a millisecond": {Confirmed: confirmedAt(0), SettleWait: time.Microsecond},
 		"poll below a millisecond":        {Confirmed: confirmedAt(0), Poll: time.Nanosecond},
+		"settle wait shorter than poll":   {Confirmed: confirmedAt(0), SettleWait: 10 * time.Millisecond, Poll: 20 * time.Millisecond},
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -84,17 +85,17 @@ func TestJudgeVerdicts(t *testing.T) {
 
 // An unsettled chunk unwraps to the sentinel and says why in words an
 // operator can act on: which position the catch-up was short of, or how
-// many rereads the chunk outran.
+// many rereads the chunk outran, and what to do next in either case.
 func TestUnresolvedErrorWording(t *testing.T) {
 	chunk, err := copier.NewChunk(1001, 2000)
 	require.NoError(t, err)
 	lagging := &UnresolvedError{Chunk: chunk, Cause: CauseLagging, Rereads: 1, Captured: 0x1000000, Confirmed: 0x800000}
 	require.ErrorIs(t, lagging, ErrVerificationUnresolved)
-	assert.EqualError(t, lagging, "chunk [1001, 2000] read at 0/1000000 is unsettled: the catch-up has confirmed only 0/800000 after 1 rereads")
+	assert.EqualError(t, lagging, "chunk [1001, 2000] read at 0/1000000 is unsettled: the catch-up has confirmed only 0/800000 after 1 reread; run the pass again once the catch-up has confirmed past the read")
 
 	hot := &UnresolvedError{Chunk: chunk, Cause: CauseHot, Rereads: 3, Source: Digest{Rows: 1000}, Shadow: Digest{Rows: 998}, Captured: 0x1000000}
 	require.ErrorIs(t, hot, ErrVerificationUnresolved)
-	assert.EqualError(t, hot, "chunk [1001, 2000] changed on every one of 3 rereads: source 1000 rows, shadow 998 rows at 0/1000000")
+	assert.EqualError(t, hot, "chunk [1001, 2000] changed on every one of 3 rereads: source 1000 rows, shadow 998 rows at 0/1000000; the source is changing faster than the pass can compare it, so run the pass again when it is quieter")
 }
 
 // The wall-clock sleep returns early, with the context's error, when the
