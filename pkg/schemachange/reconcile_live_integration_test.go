@@ -51,11 +51,11 @@ func (f reconcileFixture) startWriter(t *testing.T, seeded int, interval time.Du
 			case <-tick.C:
 			}
 			if _, err := f.pool.Exec(ctx, update, int64(i%seeded)+1); err != nil {
-				w.err = fmt.Errorf("live update: %w", err)
+				w.fail(ctx, "live update", err)
 				return
 			}
 			if _, err := f.pool.Exec(ctx, insert, 100001+i); err != nil {
-				w.err = fmt.Errorf("live insert: %w", err)
+				w.fail(ctx, "live insert", err)
 				return
 			}
 			w.writes++
@@ -63,6 +63,17 @@ func (f reconcileFixture) startWriter(t *testing.T, seeded int, interval time.Du
 	})
 	t.Cleanup(func() { cancel(); w.wg.Wait() })
 	return w
+}
+
+// fail records a statement's error unless the writer was stopped while the
+// statement ran: a stop cancels the context the statement is bound to, so
+// the statement ends with the stop's cancellation, which is the stop, not a
+// write that went wrong.
+func (w *sourceWriter) fail(ctx context.Context, what string, err error) {
+	if ctx.Err() != nil {
+		return
+	}
+	w.err = fmt.Errorf("%s: %w", what, err)
 }
 
 // stop ends the writer and returns how many ticks wrote both statements; a
