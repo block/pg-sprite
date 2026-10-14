@@ -171,6 +171,8 @@ func (r fakeRow) Scan(dest ...any) error {
 			*d = r.values[i].(time.Time)
 		case *[]byte:
 			*d = r.values[i].([]byte)
+		case *pgtype.Text:
+			*d = r.values[i].(pgtype.Text)
 		default:
 			return errors.New("fakeRow: unsupported destination")
 		}
@@ -202,6 +204,7 @@ func storedRow() fakeRow {
 		FormatVersion, "_pgsprite_orders_new", "pgsprite_0a1b2c3d", "pgsprite_0a1b2c3d",
 		pgtype.Int8{Int64: 1000, Valid: true}, "16/B374D848", wantFP.Source, wantFP.Target, "copying", stampedAt,
 		[]byte(`{"shadow_table": "_pgsprite_orders_new"}`),
+		pgtype.Text{String: "ALTER TABLE app.orders ALTER COLUMN id TYPE bigint", Valid: true},
 	}}
 }
 
@@ -234,6 +237,7 @@ func TestLoadRetriesATerminatedBackendAndDecodesTheRow(t *testing.T) {
 		Watermark: copier.NewWatermark(1000), LastAppliedLSN: decode.LSN(0x00000016b374d848),
 		SourceFingerprint: "src-a", TargetFingerprint: "tgt-a", Phase: PhaseCopying, UpdatedAt: stampedAt,
 		ShadowProof: json.RawMessage(`{"shadow_table": "_pgsprite_orders_new"}`),
+		Statement:   "ALTER TABLE app.orders ALTER COLUMN id TYPE bigint",
 	}, cp)
 }
 
@@ -329,12 +333,14 @@ func TestRowFormatIncompatibilityIgnoresTheFingerprints(t *testing.T) {
 }
 
 // A NULL shadow_proof decodes to an empty proof: the run has no shadow to
-// prove yet.
-func TestRowCheckpointDecodesNullShadowProofAsNone(t *testing.T) {
+// prove yet. A NULL statement decodes to none: the row was written by an
+// engine that did not record it.
+func TestRowCheckpointDecodesNullShadowProofAndStatementAsNone(t *testing.T) {
 	r := row{formatVersion: FormatVersion, lastAppliedLSN: "0/0", phase: "copying"}
 	cp, err := r.checkpoint()
 	require.NoError(t, err)
 	assert.Empty(t, cp.ShadowProof)
+	assert.Empty(t, cp.Statement)
 }
 
 // Load judges compatibility on the row it read, so a different statement's

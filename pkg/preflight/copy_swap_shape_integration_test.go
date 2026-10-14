@@ -283,6 +283,42 @@ func TestCheckCopySwapShapeRefusesTriggersAndRules(t *testing.T) {
 	requireCopySwapCause(t, err, preflight.CopySwapCauseTriggers)
 }
 
+// A trigger whose function lives in the engine's schema is the engine's
+// own and does not refuse the table, so a run that re-proves its table
+// while the engine's trigger is in place passes; a user trigger on the
+// same table still refuses it. The fixture gets its own database because
+// it creates the engine schema.
+func TestCheckCopySwapShapeSetsAsideTheEnginesOwnTrigger(t *testing.T) {
+	f := newCopySwapShapeFixtureInOwnDatabase(t)
+	_, err := f.pool.Exec(t.Context(), `CREATE SCHEMA `+preflight.EngineSchema)
+	require.NoError(t, err)
+	_, err = f.pool.Exec(t.Context(), `
+		CREATE FUNCTION `+preflight.EngineSchema+`.fence() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			RETURN NULL;
+		END $$`)
+	require.NoError(t, err)
+	f.exec(t, `
+		CREATE TABLE %s.fenced (
+			id bigint PRIMARY KEY,
+			updated_at timestamptz
+		)`)
+	f.exec(t, `CREATE TRIGGER engine_fence BEFORE INSERT ON %s.fenced FOR EACH STATEMENT EXECUTE FUNCTION `+preflight.EngineSchema+`.fence()`)
+
+	_, err = f.check(t, "fenced")
+	require.NoError(t, err)
+
+	f.exec(t, `
+		CREATE FUNCTION %s.touch() RETURNS trigger LANGUAGE plpgsql AS $$
+		BEGIN
+			NEW.updated_at := now();
+			RETURN NEW;
+		END $$`)
+	f.exec(t, `CREATE TRIGGER touch_row BEFORE UPDATE ON %s.fenced FOR EACH ROW EXECUTE FUNCTION %[1]s.touch()`)
+	_, err = f.check(t, "fenced")
+	requireCopySwapCause(t, err, preflight.CopySwapCauseTriggers)
+}
+
 // A partitioned parent, one of its partitions, and both ends of a classic
 // inheritance tree are all refused as partitioned.
 func TestCheckCopySwapShapeRefusesPartitioningAndInheritance(t *testing.T) {

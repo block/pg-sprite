@@ -339,6 +339,44 @@ func TestSaveWithoutAProofDoesNotEraseTheRowsProof(t *testing.T) {
 	assert.Equal(t, int64(1), f.rowCount(t))
 }
 
+// The statement is kept the way the proof is: a Save that carries one
+// writes it, a Save that carries none leaves it in place, a Save with the
+// same text lands, and a Save with another statement's text — one that
+// leaves the same fingerprints — is refused and changes nothing, because
+// another statement is a fresh start through Delete (ST-2).
+func TestSaveKeepsTheStatementOnceWritten(t *testing.T) {
+	f := newStoreFixture(t)
+	f.ensure(t)
+	lock := f.ordersLock(t)
+	cp := ordersCheckpoint()
+	cp.Statement = "ALTER TABLE app.orders ALTER COLUMN id TYPE bigint"
+	require.NoError(t, f.store.Save(t.Context(), lock, cp))
+
+	cp.Statement = ""
+	cp.Phase = checkpoint.PhaseVerifying
+	require.NoError(t, f.store.Save(t.Context(), lock, cp))
+	got, err := f.store.Load(t.Context(), "app", "orders", cp.Fingerprints())
+	require.NoError(t, err)
+	assert.Equal(t, "ALTER TABLE app.orders ALTER COLUMN id TYPE bigint", got.Statement, "a Save without a statement keeps the row's")
+	assert.Equal(t, checkpoint.PhaseVerifying, got.Phase)
+
+	cp.Statement = got.Statement
+	cp.Phase = checkpoint.PhaseCutover
+	require.NoError(t, f.store.Save(t.Context(), lock, cp), "the same statement lands")
+
+	cp.Statement = "ALTER TABLE app.orders ALTER COLUMN id TYPE bigint USING id * 2"
+	cp.Phase = checkpoint.PhaseDone
+	err = f.store.Save(t.Context(), lock, cp)
+	assert.ErrorIs(t, err, checkpoint.ErrInvariantViolation, "another statement is refused")
+	var incompatible *checkpoint.IncompatibleError
+	assert.False(t, errors.As(err, &incompatible), "the row is this statement's by fingerprint; the text is what differs")
+	got, err = f.store.Load(t.Context(), "app", "orders", cp.Fingerprints())
+	require.NoError(t, err)
+	assert.Equal(t, "ALTER TABLE app.orders ALTER COLUMN id TYPE bigint", got.Statement, "the refused Save left the statement as it was")
+	assert.Equal(t, checkpoint.PhaseCutover, got.Phase, "the refused Save wrote nothing else either")
+	assert.Equal(t, int64(1), f.rowCount(t))
+}
+
 // A second Save for the same target replaces the one row rather than adding
 // another (ST-1): the table still holds one row and Load returns the later
 // watermark, phase, and clock reading.

@@ -128,12 +128,14 @@ type row struct {
 	phase             string
 	updatedAt         time.Time
 	shadowProof       []byte
+	statement         pgtype.Text
 }
 
 // loadSQL reads the target's row. The LSN comes back in its text form; pgx
 // has no codec for pg_lsn and decode.ParseLSN is the one reader of it.
 const loadSQL = `SELECT format_version, shadow_table, slot_name, publication_name,
-	watermark, last_applied_lsn::text, source_fingerprint, target_fingerprint, phase, updated_at, shadow_proof
+	watermark, last_applied_lsn::text, source_fingerprint, target_fingerprint, phase, updated_at, shadow_proof,
+	statement
 FROM ` + tableIdent + ` WHERE schema_name = $1 AND table_name = $2`
 
 // readRow performs one read of the target's row and returns pgx.ErrNoRows
@@ -142,7 +144,8 @@ func readRow(ctx context.Context, q dbconn.RowQuerier, schema, table string) (ro
 	r := row{schema: schema, table: table}
 	err := q.QueryRow(ctx, loadSQL, schema, table).Scan(
 		&r.formatVersion, &r.shadowTable, &r.slotName, &r.publicationName,
-		&r.watermark, &r.lastAppliedLSN, &r.sourceFingerprint, &r.targetFingerprint, &r.phase, &r.updatedAt, &r.shadowProof)
+		&r.watermark, &r.lastAppliedLSN, &r.sourceFingerprint, &r.targetFingerprint, &r.phase, &r.updatedAt, &r.shadowProof,
+		&r.statement)
 	if err != nil {
 		return row{}, err
 	}
@@ -220,5 +223,6 @@ func (r row) checkpoint() (Checkpoint, error) {
 		Phase:             phase,
 		UpdatedAt:         r.updatedAt,
 		ShadowProof:       r.shadowProof,
+		Statement:         r.statement.String,
 	}, nil
 }

@@ -78,6 +78,30 @@ reading or writing its row at that moment waits or times out, and a timed-out `E
 committed nothing and is safe to run again. The window is the first start after an upgrade,
 not every start.
 
+### The write fence
+
+A quiesced copy-and-swap run (`pkg/schemachange.Runner`) does not take the caller's word that
+nothing writes the table: it installs a statement-level `BEFORE INSERT OR UPDATE OR DELETE OR
+TRUNCATE` trigger, `pgsprite_write_fence`, on the source before its first checkpoint save, and
+every write the trigger sees is refused with SQLSTATE `55006` (`object_in_use`) and a message
+naming the table. The trigger calls a function of the same name in the engine's own `pgsprite`
+schema, created once per database as the engine role and owned by it, so the table's owner
+needs no access to that schema for the fence to fire. The fence stays on a stopped run's source
+until the run is resumed or abandoned (`DropWriteFence`); a completed run carries it to the
+retained `_old` table with the swap, where it is dropped with the table or, under `KeepOld`,
+taken off so the retained table can be renamed back and take writes at once.
+
+What this needs: `CREATE TRIGGER` on a table requires the `TRIGGER` privilege on it or
+ownership, which the Tier 1 membership in the owning role already gives; the function needs
+`CREATE` on the `pgsprite` schema, which the engine owns. A pre-provisioned deployment that
+created the schema for the engine needs nothing further once the schema is owned by the engine
+role. The fence does not stop a superuser, nor a session running under
+`session_replication_role = replica`, which fires no ordinary triggers; a deployment whose
+writers can hold either has to quiesce the table by its own means, and a difference the
+verification pass then finds is reported, never repaired. Before `Run`, quiesce the table as far
+as the application allows — stop or pause its writers, or route them around it — so the fence
+refuses nothing in practice; the fence is the proof, not the plan.
+
 Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are checked by
 `preflight.CheckCopySwapEnvironment` once the privilege check has passed and the shape check
 has minted its `CopySwapShape`; the environment check is what mints the `CopySwapTarget`
