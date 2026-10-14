@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 )
@@ -26,8 +27,42 @@ var ErrTableMissing = errors.New("checkpoint: checkpoint table does not exist; E
 // a view — would run with the engine's privileges on every Save.
 var ErrForeignObject = errors.New("checkpoint: engine object exists but is not the engine's")
 
+// ErrTableNewer reports that the checkpoint table has columns this engine
+// does not know. Ensure refuses rather than alter it, since this engine
+// cannot preserve the meaning of columns it has never heard of, and leaves
+// the table as it found it. The error a caller receives is a
+// *TableNewerError naming the columns.
+var ErrTableNewer = errors.New("checkpoint: checkpoint table has columns this engine does not know")
+
+// ErrTableBehind reports that the checkpoint table lacks a column this
+// engine reads or writes: an older engine created it and Ensure has not
+// run since this engine was installed. The remedy is to run Ensure, which
+// adds the column, and read again; it still carries the server's error
+// for callers that want it.
+var ErrTableBehind = errors.New("checkpoint: checkpoint table lacks a column this engine uses; Ensure has not run since the engine was upgraded")
+
+// TableNewerError is the ErrTableNewer a caller receives: Unknown names the
+// columns this engine does not know, in the table's column order. A column
+// a newer engine added and a column an operator added by hand look the
+// same from here, and both are refused the same way, so the message names
+// both causes and what to do about each.
+type TableNewerError struct {
+	Unknown []string
+}
+
+// Error names the columns and the remedy for each cause.
+func (e *TableNewerError) Error() string {
+	return fmt.Sprintf("checkpoint: checkpoint table %s has columns this engine does not know: %s; run a pg-sprite release that knows them (upgrade, or roll forward after a rollback), or, if a column was added by hand and no schema change is in flight, drop it",
+		tableIdent, strings.Join(e.Unknown, ", "))
+}
+
+// Is matches ErrTableNewer, so errors.Is(err, ErrTableNewer) holds for a
+// *TableNewerError.
+func (e *TableNewerError) Is(target error) bool { return target == ErrTableNewer }
+
 // ErrInvalidCheckpoint reports a Checkpoint the store refuses to persist:
-// a missing identifier, an empty fingerprint, or an unknown phase.
+// a missing identifier, an empty fingerprint, an unknown phase, or a shadow
+// proof that is not a JSON object the jsonb column can hold.
 var ErrInvalidCheckpoint = errors.New("checkpoint: invalid checkpoint")
 
 // ErrInvalidOptions reports Options the store cannot run under.
@@ -88,17 +123,29 @@ func (e *IncompatibleError) Error() string {
 		e.Schema, e.Table, e.Mismatch, e.Have, e.Want)
 }
 
-// undefinedTable is the SQLSTATE the server reports when the checkpoint
-// table does not exist.
-const undefinedTable = "42P01"
+// SQLSTATEs the server reports against the checkpoint table: undefined_table
+// when it does not exist, undefined_column when it lacks a column the
+// statement names. The store's statements name only the engine's own
+// columns, so the second can only mean a table an older engine created.
+const (
+	undefinedTable  = "42P01"
+	undefinedColumn = "42703"
+)
 
-// missingTable turns the server's undefined_table into ErrTableMissing,
-// keeping the server's error reachable through errors.As; any other error
-// is returned as it came.
-func missingTable(err error) error {
+// tableUnusable turns the server's undefined_table into ErrTableMissing and
+// its undefined_column into ErrTableBehind, keeping the server's error
+// reachable through errors.As; any other error is returned as it came.
+func tableUnusable(err error) error {
 	var pgErr *pgconn.PgError
-	if errors.As(err, &pgErr) && pgErr.Code == undefinedTable {
+	if !errors.As(err, &pgErr) {
+		return err
+	}
+	switch pgErr.Code {
+	case undefinedTable:
 		return fmt.Errorf("%w: %w", ErrTableMissing, err)
+	case undefinedColumn:
+		// INV: ST-10
+		return fmt.Errorf("%w: %w", ErrTableBehind, err)
 	}
 	return err
 }

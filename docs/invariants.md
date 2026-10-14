@@ -672,9 +672,14 @@ a fresh start — and for (c) retries through transient errors (what `dbconn.Ret
 server ended from outside it, `57P01`/`57P02`/`57P03`, which only a read may safely repeat) under bounded attempts
 before returning an error that is neither `ErrNotFound` nor incompatible; `ErrNotFound` is
 returned only for a completed read that found no row, and a database where the checkpoint table
-was never created is the typed `ErrTableMissing`, never `ErrNotFound`. `Store.Save` applies the
+was never created is the typed `ErrTableMissing`, never `ErrNotFound`. `Store.Inspect` is the
+same read guarded on the row format alone, for the resume that must read the row's proof and
+phase before it knows which statement it is resuming; it widens only the read. `Store.Save` applies the
 same identity guard on the write path, so a run can never write its state over another
-statement's row; `Delete` is the explicit fresh start, and it removes only the row whose
+statement's row, and it treats the row's shadow proof as write-once: a save without a proof
+keeps the one the row holds, a save with the same proof is accepted, and a save with a
+different proof is `ErrInvariantViolation` and leaves the row unchanged, because a different
+shadow is a fresh start and a fresh start goes through `Delete`; `Delete` is the explicit fresh start, and it removes only the row whose
 `Identity` the caller was shown (`IncompatibleError.Stored`), so a row another engine wrote in
 between survives and surfaces as a new `IncompatibleError`. `pkg/schemachange` applies the
 same guard on the resume path: `InspectResume` and `Reconciler.Reconcile` read the row through
@@ -687,7 +692,11 @@ written (refuses-a-row-of-another-source-shape test).
 `TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
-`TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestDeleteRefusesARowTheCallerWasNotShown`,
+`TestInspectReturnsTheRowWhateverStatementWroteIt`,
+`TestInspectReportsNotFoundMissingTableAndAnotherFormat`,
+`TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestSaveThenLoadRoundTripsTheShadowProof`,
+`TestSaveWithoutAProofDoesNotEraseTheRowsProof`, `TestProofSurvivesTheCheckpointStore`,
+`TestDeleteRefusesARowTheCallerWasNotShown`,
 `TestWritesAndReadsWithoutEnsureReportTheMissingTable`,
 `TestResumeFromCheckpointConvergesAfterAMidCopyKill`. *Source:* Spirit `checkpoint.IsIncompatible` +
 "resume requires the identical ALTER".
@@ -914,6 +923,28 @@ lets the session `SET ROLE` to the owner, plus the owner's schema access), `pkg/
 (`ExecuteCreate` applies the role per step and verifies after commit). *Source:* adversarial
 review of the create-owner option.
 
+### ST-10 — The checkpoint table evolves additively; an older engine never alters a newer one's table
+
+The checkpoint table's shape is the set of columns the engine knows, and every column added
+after the first shape is nullable, so a row an older engine wrote survives the evolution. On
+first use the engine brings a table an older engine created up to its own shape by adding
+the columns it lacks, and it refuses — running no DDL — a table carrying a column it does not
+know, because that table belongs to a newer engine and only that engine may reshape it. A
+read or write that reaches an older table without `Ensure` having run does not fail as a
+missing row or a missing table: the server's undefined-column error is reported as the typed
+`ErrTableBehind`, whose remedy is to run `Ensure` and read again. The one `ALTER TABLE` the
+evolution issues takes `ACCESS EXCLUSIVE` on the engine's own table for the duration of the
+`ADD COLUMN`, bounded by the session's `lock_timeout`; a timed-out evolution has committed
+nothing and is safe to retry. *Enforced:* `pkg/checkpoint` (`Store.Ensure` → `evolveTable`
+adds the missing known columns and refuses an unknown one with `*TableNewerError`, which names
+the unknown columns and is `ErrTableNewer` to `errors.Is`; `tableUnusable` maps the server's
+`42703` to `ErrTableBehind` on every read and write). Tests:
+`TestEnsureAddsTheColumnsAnOlderTableLacks`, `TestEnsureRefusesATableANewerEngineShaped`,
+`TestEnsureRefusesACurrentTableWithAnUnknownColumn`, `TestEnsureIgnoresADroppedColumn`,
+`TestEnsureReadsOnlyTheEnginesOwnTable`,
+`TestReadsAndWritesAgainstAnOlderTableReportItBehind`. *Source:* adversarial review of the
+checkpoint table format.
+
 ## Refusals and preflight (RF)
 
 Each refusal is a preflight **error with a stated reason** — never a warning, never attempted.
@@ -1071,4 +1102,5 @@ about **how we write and review the code**.
 | ST-7 | 1 | target-mismatch refusal + single-statement-by-construction tests |
 | ST-8 | 2 (declarative model) | parse-time ordering + forged-proof refusal tests at every replay site |
 | ST-9 | 2 (declarative model) | every-relation-owned-by-owner, owner-mismatch fail-closed, unreadable-owner unverified, non-inheriting member admitted |
+| ST-10 | 8 | older-table evolve, newer-table refuse with no DDL, dropped-column and foreign-table shape reads, behind-table typed reads and writes |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

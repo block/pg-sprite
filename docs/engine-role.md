@@ -68,7 +68,15 @@ once, which creates the `pgsprite` schema and the `pgsprite.pgsprite_checkpoint`
 <engine>`. `Ensure` creates only what is absent, so it issues no `CREATE` against objects that
 already exist, and it refuses — rather than adopts — a schema or table that another role still
 owns, because anything that role hangs off them would run with the engine's privileges on every
-checkpoint write.
+checkpoint write. The one DDL `Ensure` does issue against an existing object is on its own
+table: after an engine upgrade that added a checkpoint column, the first `Ensure` runs
+`ALTER TABLE pgsprite.pgsprite_checkpoint ADD COLUMN …` for each column the table lacks, which
+is why the engine role must keep owning the table rather than merely writing to it. That
+`ALTER TABLE` takes `ACCESS EXCLUSIVE` on the checkpoint table — no other table — for the
+duration of the add, bounded by the session's `lock_timeout`; a run of another engine instance
+reading or writing its row at that moment waits or times out, and a timed-out `Ensure` has
+committed nothing and is safe to run again. The window is the first start after an upgrade,
+not every start.
 
 Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are checked by
 `preflight.CheckCopySwapEnvironment` once the privilege check has passed and the shape check

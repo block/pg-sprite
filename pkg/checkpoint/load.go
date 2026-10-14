@@ -28,10 +28,14 @@ import (
 // status reader can report "no checkpoint table" without resume mistaking
 // it for ErrNotFound.
 func (s *Store) Load(ctx context.Context, schema, table string, want Fingerprints) (Checkpoint, error) {
-	return s.load(ctx, s.pool, schema, table, want)
+	return s.load(ctx, s.pool, schema, table, func(r row) *IncompatibleError { return r.incompatibility(want) })
 }
 
-func (s *Store) load(ctx context.Context, q dbconn.RowQuerier, schema, table string, want Fingerprints) (Checkpoint, error) {
+// rowGuard judges a stored row against the run reading it; nil admits the
+// row. Load guards on the whole identity, Inspect on the format alone.
+type rowGuard func(row) *IncompatibleError
+
+func (s *Store) load(ctx context.Context, q dbconn.RowQuerier, schema, table string, guard rowGuard) (Checkpoint, error) {
 	// INV: ST-2
 	var stored row
 	read := func(ctx context.Context) error {
@@ -43,9 +47,9 @@ func (s *Store) load(ctx context.Context, q dbconn.RowQuerier, schema, table str
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Checkpoint{}, fmt.Errorf("%w: %s.%s", ErrNotFound, schema, table)
 		}
-		return Checkpoint{}, fmt.Errorf("load checkpoint for %s.%s: %w", schema, table, missingTable(err))
+		return Checkpoint{}, fmt.Errorf("load checkpoint for %s.%s: %w", schema, table, tableUnusable(err))
 	}
-	if incompatible := stored.incompatibility(want); incompatible != nil {
+	if incompatible := guard(stored); incompatible != nil {
 		return Checkpoint{}, incompatible
 	}
 	cp, err := stored.checkpoint()
@@ -123,12 +127,13 @@ type row struct {
 	targetFingerprint string
 	phase             string
 	updatedAt         time.Time
+	shadowProof       []byte
 }
 
 // loadSQL reads the target's row. The LSN comes back in its text form; pgx
 // has no codec for pg_lsn and decode.ParseLSN is the one reader of it.
 const loadSQL = `SELECT format_version, shadow_table, slot_name, publication_name,
-	watermark, last_applied_lsn::text, source_fingerprint, target_fingerprint, phase, updated_at
+	watermark, last_applied_lsn::text, source_fingerprint, target_fingerprint, phase, updated_at, shadow_proof
 FROM ` + tableIdent + ` WHERE schema_name = $1 AND table_name = $2`
 
 // readRow performs one read of the target's row and returns pgx.ErrNoRows
@@ -137,7 +142,7 @@ func readRow(ctx context.Context, q dbconn.RowQuerier, schema, table string) (ro
 	r := row{schema: schema, table: table}
 	err := q.QueryRow(ctx, loadSQL, schema, table).Scan(
 		&r.formatVersion, &r.shadowTable, &r.slotName, &r.publicationName,
-		&r.watermark, &r.lastAppliedLSN, &r.sourceFingerprint, &r.targetFingerprint, &r.phase, &r.updatedAt)
+		&r.watermark, &r.lastAppliedLSN, &r.sourceFingerprint, &r.targetFingerprint, &r.phase, &r.updatedAt, &r.shadowProof)
 	if err != nil {
 		return row{}, err
 	}
@@ -158,6 +163,14 @@ func (r row) identity() Identity {
 // nil for a row the run may resume from.
 func (r row) incompatibility(want Fingerprints) *IncompatibleError {
 	return r.incompatibleWith(Identity{FormatVersion: FormatVersion, Fingerprints: want})
+}
+
+// formatIncompatibility reports a row written in another row format and
+// nothing else: the row's own fingerprints are taken as wanted, so only the
+// format can disagree. It is nil for a row whose columns this engine reads
+// the same way the writer meant them.
+func (r row) formatIncompatibility() *IncompatibleError {
+	return r.incompatibleWith(Identity{FormatVersion: FormatVersion, Fingerprints: r.identity().Fingerprints})
 }
 
 // incompatibleWith reports the first field on which the stored row's
@@ -206,5 +219,6 @@ func (r row) checkpoint() (Checkpoint, error) {
 		TargetFingerprint: r.targetFingerprint,
 		Phase:             phase,
 		UpdatedAt:         r.updatedAt,
+		ShadowProof:       r.shadowProof,
 	}, nil
 }

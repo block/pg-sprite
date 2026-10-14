@@ -22,25 +22,6 @@ const tableIdent = `"` + SchemaName + `"."` + TableName + `"`
 // refuse an engine role that was deliberately never granted CREATE.
 const createSchemaSQL = `CREATE SCHEMA "` + SchemaName + `"`
 
-// createTableSQL creates the checkpoint table. watermark is NULL while
-// nothing has landed; phase holds the stable Phase name so an operator
-// reading the row during an incident sees "copying", not a number.
-const createTableSQL = "CREATE TABLE " + tableIdent + ` (
-	schema_name        text NOT NULL,
-	table_name         text NOT NULL,
-	format_version     integer NOT NULL,
-	shadow_table       text NOT NULL,
-	slot_name          text NOT NULL,
-	publication_name   text NOT NULL,
-	watermark          bigint,
-	last_applied_lsn   pg_lsn NOT NULL,
-	source_fingerprint text NOT NULL,
-	target_fingerprint text NOT NULL,
-	phase              text NOT NULL,
-	updated_at         timestamptz NOT NULL,
-	PRIMARY KEY (schema_name, table_name)
-)`
-
 // ensureLockSQL takes the engine's own advisory key for the checkpoint
 // table — the key pkg/dbconn's table lock would derive for it — for the
 // rest of the transaction, so two engines reaching the same database for
@@ -75,7 +56,15 @@ type engineObjects struct {
 // deployment that keeps database-level CREATE away from the engine role can
 // create them for it beforehand. A schema or table that exists under
 // another owner, or a relation under the table's name that is not a plain
-// table, is refused with ErrForeignObject rather than adopted.
+// table, is refused with ErrForeignObject rather than adopted. A table an
+// older engine created is brought up to this engine's shape by adding the
+// columns it lacks, so its rows stay readable: that ALTER TABLE takes
+// ACCESS EXCLUSIVE on the one table every target's row lives in, waits at
+// most the session's lock_timeout for the writes in flight to clear, and
+// is safe to call again after a lock timeout, which is returned as the
+// server reported it. A table with columns this engine does not know is
+// refused with a *TableNewerError (ErrTableNewer), untouched. Every read
+// and write before Ensure has evolved an older table reports ErrTableBehind.
 func (s *Store) Ensure(ctx context.Context) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -99,10 +88,12 @@ func (s *Store) Ensure(ctx context.Context) error {
 			return fmt.Errorf("create schema %q: %w", SchemaName, err)
 		}
 	}
-	if !found.tableExists {
-		if _, err := tx.Exec(ctx, createTableSQL); err != nil {
-			return fmt.Errorf("create %s: %w", tableIdent, err)
+	if found.tableExists {
+		if err := evolveTable(ctx, tx); err != nil {
+			return err
 		}
+	} else if _, err := tx.Exec(ctx, createTableSQL()); err != nil {
+		return fmt.Errorf("create %s: %w", tableIdent, err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit create of %s: %w", tableIdent, err)
