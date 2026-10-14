@@ -8,8 +8,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
 
@@ -21,7 +23,8 @@ import (
 func (f runnerFixture) leaveStoppedRun(t *testing.T, alter string, mutate func(*checkpoint.Checkpoint)) schemachange.BuiltShadow {
 	t.Helper()
 	lock := f.lock(t, "orders")
-	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, f.prove(t, "orders"), f.alter(t, alter), schemachange.Options{})
+	st := f.alter(t, alter)
+	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, f.prove(t, "orders"), st, schemachange.Options{})
 	require.NoError(t, err)
 	proof, err := json.Marshal(built)
 	require.NoError(t, err)
@@ -33,6 +36,7 @@ func (f runnerFixture) leaveStoppedRun(t *testing.T, alter string, mutate func(*
 		TargetFingerprint: built.TargetFingerprint(),
 		Phase:             checkpoint.PhaseCopying,
 		ShadowProof:       proof,
+		Statement:         st.SQL(),
 	}
 	mutate(&row)
 	require.NoError(t, f.store.Ensure(t.Context()))
@@ -164,4 +168,85 @@ func TestRunnerFailsACopyingRowWhoseShadowIsGone(t *testing.T) {
 	require.ErrorIs(t, err, schemachange.ErrShadowNotFound)
 	assert.Empty(t, schemachange.RefusalCauseOf(err), "a missing shadow is not a refusal class")
 	assert.Equal(t, checkpoint.PhaseCopying, f.inspectRow(t, "orders").Phase, "the row stands for the operator to delete")
+}
+
+// A row records the statement whose run it is, and a resume under another
+// statement is refused as resume-row-mismatch before anything is touched:
+// a resume completes the change the stopped run started, never the one
+// the caller changed its mind to. The shadow and the row stand, for the
+// first statement's run to resume or the operator to abandon.
+func TestRunnerRefusesAResumeUnderAnotherStatement(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	built := f.leaveStoppedRun(t, `ALTER TABLE %s.orders DROP COLUMN note`, func(*checkpoint.Checkpoint) {})
+
+	_, err := f.run(t, "orders", `ALTER TABLE %s.orders DROP COLUMN sku`, schemachange.RunOptions{})
+	require.Error(t, err)
+	assert.Equal(t, schemachange.CauseResumeRowMismatch, schemachange.RefusalCauseOf(err))
+	assert.True(t, f.relationExists(t, built.ShadowTable()), "the refused run drops nothing")
+	assert.Equal(t, checkpoint.PhaseCopying, f.inspectRow(t, "orders").Phase, "the refused run leaves the row as it found it")
+	assert.True(t, f.hasColumn(t, "orders", "sku"), "nothing was built for the second statement")
+}
+
+// The statements are compared as parsed, not as typed: a resume whose
+// statement differs from the row's only in case, whitespace, and whether
+// the table is qualified with the target's schema is the same change and
+// resumes.
+func TestRunnerResumesUnderTheSameStatementSpelledDifferently(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	built := f.leaveStoppedRun(t, `ALTER TABLE %s.orders DROP COLUMN note`, func(*checkpoint.Checkpoint) {})
+
+	result := f.assertResumedToDone(t, `alter table   orders
+		drop column note`, schemachange.RunOptions{})
+	assert.Equal(t, built.ShadowOID(), result.Swapped.LiveOID, "the resumed run continued on the shadow the first built")
+}
+
+// A row that records no statement cannot prove which change it is a run
+// of, and is refused as resume-row-mismatch for the operator to delete.
+func TestRunnerRefusesARowWithoutAStatement(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	f.leaveStoppedRun(t, alter, func(row *checkpoint.Checkpoint) {
+		row.Statement = ""
+	})
+
+	_, err := f.run(t, "orders", alter, schemachange.RunOptions{})
+	require.Error(t, err)
+	assert.Equal(t, schemachange.CauseResumeRowMismatch, schemachange.RefusalCauseOf(err))
+}
+
+// A statement that names another table than the proven one is refused as
+// shadow-statement-target on resume as it is on a fresh build, before the
+// row's statement is compared with it.
+func TestRunnerRefusesAResumeWhoseStatementNamesAnotherTable(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	f.leaveStoppedRun(t, `ALTER TABLE %s.orders DROP COLUMN note`, func(*checkpoint.Checkpoint) {})
+
+	_, err := f.run(t, "orders", `ALTER TABLE %s.invoices DROP COLUMN note`, schemachange.RunOptions{})
+	require.Error(t, err)
+	assert.Equal(t, schemachange.CauseStatementTarget, schemachange.RefusalCauseOf(err))
+}
+
+// A target proven for a run that decodes WAL is refused as an invariant
+// violation before the lock is taken: the quiesced runner decodes none,
+// and a target whose environment was verified for a slot and a
+// publication would run without either. Nothing is built and no row is
+// written.
+func TestRunnerRefusesATargetProvenForDecodingWAL(t *testing.T) {
+	logical := newRunnerFixtureOn(t, testutil.StartPostgresWithSettings(t, "wal_level=logical"))
+	logical.createOrders(t)
+	target, err := preflight.CheckCopySwap(t.Context(), logical.pool, logical.schema, "orders",
+		preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: testutil.UnlimitedDisk})
+	require.NoError(t, err)
+	require.True(t, target.DecodesWAL())
+
+	_, err = logical.runner(t, schemachange.RunOptions{}).Run(t.Context(), logical.pool, target, logical.alter(t, `ALTER TABLE %s.orders DROP COLUMN note`))
+	require.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.False(t, logical.relationExists(t, schemachange.ShadowName(logical.schema, "orders")), "nothing was built")
+	assert.False(t, logical.hasFence(t, "orders"), "the source was not fenced")
+	_, err = logical.store.Inspect(t.Context(), logical.schema, "orders")
+	assert.ErrorIs(t, err, checkpoint.ErrTableMissing, "the run never reached the store")
 }

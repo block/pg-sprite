@@ -54,7 +54,12 @@ provably delivered what the pass's read saw on the source; anything it cannot pr
 unsettled, never clean, and mints nothing. The proof such a pass mints says so
 (`VerifiedShadow.Live`), and the swap refuses it without a drain to apply the stream's changes
 since under the swap lock (`cutover-undrained`); the mechanism is in
-[copy-and-swap-design.md](copy-and-swap-design.md#live-verification).
+[copy-and-swap-design.md](copy-and-swap-design.md#live-verification). The quiesced `Runner`
+makes the quiescence its pass relies on true rather than assumed: it fences the source with a
+statement-level `BEFORE` trigger (`pgsprite_write_fence`, SQLSTATE `55006`) before its first
+save and keeps it through every stop until the swap carries it to the retained table, so the
+copy and one quiesced pass are the whole proof (fences-the-source, leaves-the-fence-on-a-
+stopped-run, unfences-the-old-table-it-keeps, stops-on-a-shadow-that-differs tests).
 *Source:* [design-principles](design-principles.md#correctness-and-safety),
 risks-and-mitigations; Spirit's "never skip it".
 
@@ -744,7 +749,12 @@ be set below one byte; a slot that vanished is `SlotLostError`; crossing the cei
 ceiling abort leaves the slot in place under a row still in a non-terminal phase, which the
 reaper reads as live and leaves; whoever handles `ErrSlotLagCeiling` must move the row to a
 terminal phase — or resume and drain the slot — before the reaper can reclaim it, and that
-handler is the orchestrator's, not yet written.
+handler is the orchestrator's, not yet written. The quiesced `pkg/schemachange.Runner` never
+creates a slot and refuses to continue a row that has one: a row naming a slot or publication,
+or standing in `catching_up` or `reconciling`, is `resume-row-decoding`, since a run without
+the slot would leave it behind as nobody's, and a `CopySwapTarget` proven for decoding is
+refused before the lock is taken (refuses-a-row-that-names-a-slot,
+refuses-a-target-proven-for-decoding-WAL tests).
 *Source:* risks-and-mitigations § logical-decoding risks.
 
 ### ST-4 — Slot loss is a modeled state transition, not a crash

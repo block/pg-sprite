@@ -49,8 +49,12 @@ func (r *Runner) copy(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tabl
 	}
 	// The copier has returned, so its position is final: save what landed
 	// even when the copy stopped, so the resume starts from there. The
-	// save outlives the caller's context since the row records work done.
-	if err := saver.saveIfMoved(context.WithoutCancel(ctx), c); err != nil {
+	// save outlives the caller's context since the row records work done,
+	// but is bounded so a cancelled run against a server that has stopped
+	// answering still returns.
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dbconn.DefaultConnectTimeout)
+	defer cancel()
+	if err := saver.saveIfMoved(saveCtx, c); err != nil {
 		return errors.Join(runErr, err)
 	}
 	if runErr != nil {
@@ -74,21 +78,29 @@ type watermarkSaver struct {
 }
 
 // loop saves the watermark every checkpoint interval until ctx ends. The
-// context ending is how the copy's end is signalled, so it is not an error.
+// context ending is how the copy's end is signalled, so it is not an
+// error, whether it ends the sleep or a save in flight: the save after
+// the copier returns records what that save did not.
 func (s *watermarkSaver) loop(ctx context.Context, c *copier.Copier) error {
 	interval := s.runner.opts.checkpointInterval()
 	sleep := s.runner.opts.sleep()
 	for {
 		if err := sleep(ctx, interval); err != nil {
-			if ctx.Err() != nil {
-				return nil
-			}
-			return err
+			return s.unlessEnded(ctx, err)
 		}
 		if err := s.saveIfMoved(ctx, c); err != nil {
-			return err
+			return s.unlessEnded(ctx, err)
 		}
 	}
+}
+
+// unlessEnded returns err unless ctx has ended, which is the copy's end
+// and not a failure of the saver's own.
+func (s *watermarkSaver) unlessEnded(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
 }
 
 // saveIfMoved writes the row in PhaseCopying with the copier's landed

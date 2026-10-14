@@ -159,6 +159,7 @@ func TestRunnerResumesFromCutoverAfterTheSwapCommitted(t *testing.T) {
 		TargetFingerprint: s.built.TargetFingerprint(),
 		Phase:             checkpoint.PhaseCutover,
 		ShadowProof:       proof,
+		Statement:         f.alter(t, alter).SQL(),
 	}))
 	_, err = f.cutover(t, s, schemachange.CutoverOptions{})
 	require.NoError(t, err)
@@ -199,6 +200,7 @@ func TestRunnerResumesFromCutoverAfterTheOldTableWasDropped(t *testing.T) {
 		TargetFingerprint: s.built.TargetFingerprint(),
 		Phase:             checkpoint.PhaseCutover,
 		ShadowProof:       proof,
+		Statement:         f.alter(t, alter).SQL(),
 	}))
 	swapped, err := f.cutover(t, s, schemachange.CutoverOptions{})
 	require.NoError(t, err)
@@ -331,24 +333,128 @@ func TestRunnerResumesMidCopyFromThePeriodicSave(t *testing.T) {
 		defer mu.Unlock()
 		return stoppedAt.Valid()
 	}, stopDeadline, 20*time.Millisecond, "a periodic save should record the watermark below the pinned chunk")
+	// The failed save cancels the copy, so the run returns as soon as the
+	// pinned chunk's wait is interrupted — well inside the chunk's own
+	// lock timeout, which is the only other thing that would end it.
+	const stopPropagation = 5 * time.Second
 	select {
 	case err := <-results:
 		require.ErrorIs(t, err, errStopHere)
-	case <-time.After(stopDeadline):
-		t.Fatalf("run did not stop within %s of the failed save", stopDeadline)
+	case <-time.After(stopPropagation):
+		t.Fatalf("run did not stop within %s of the failed save; the copy was not cancelled with it", stopPropagation)
 	}
 	row := f.inspectRow(t, "orders")
 	assert.Equal(t, checkpoint.PhaseCopying, row.Phase)
 	assert.Equal(t, copier.NewWatermark(belowPin), row.Watermark, "the row carries the last save")
 	release()
 
-	// While nothing runs, the source moves above the watermark; the
-	// resumed copy clears the shadow above it and carries the change.
-	f.exec(t, "UPDATE %s.orders SET qty = 999 WHERE id = 1500")
+	// While nothing runs the source stays fenced: a writer that reaches it
+	// is refused, so no change can slip in between the stop and the
+	// resume. A stray row in the shadow above the watermark — the chunk
+	// that was in flight at the stop — is cleared by the resumed copy
+	// before it lands that key space again.
+	f.assertWriteFenced(t, "orders")
+	shadow := pgx.Identifier{f.schema, row.ShadowTable}.Sanitize()
+	f.exec(t, "INSERT INTO "+shadow+" (id, qty) VALUES (1500, 999)")
 
 	second := &stopAfter{}
 	f.assertResumedToDone(t, alter, schemachange.RunOptions{AfterCheckpoint: second.hook})
+	var qty int
+	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT qty FROM "+pgx.Identifier{f.schema, "orders"}.Sanitize()+" WHERE id = 1500").Scan(&qty))
+	assert.Equal(t, 1500, qty, "the live table carries the source's row, not the stray shadow row")
 	// The resumed copy's one copying save is the finished copy recording
 	// its complete watermark before the verifying save.
 	assert.Equal(t, []checkpoint.Phase{checkpoint.PhaseCopying, checkpoint.PhaseVerifying, checkpoint.PhaseCutover, checkpoint.PhaseDone}, second.seen(), "the resumed run finished the copy and went on through verification")
+}
+
+// A run cancelled in the middle of its copy records what the copy landed:
+// the save after the copier returns outlives the cancelled context, so the
+// row carries the watermark the chunks that committed reached, and the
+// resumed run copies from there. The last chunk is pinned so the copy
+// cannot finish, and the run is cancelled once every other chunk is in.
+func TestRunnerRecordsTheWorkACancelledCopyLanded(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	clock, release := f.pinShadowKey(t, 2450)
+	const landedBelowPin = 2400
+
+	const pinnedChunkWait = time.Minute
+	opts := schemachange.RunOptions{
+		Copier: copier.Options{
+			Workers:     2,
+			LockTimeout: pinnedChunkWait,
+			Clock:       clock,
+			Chunker:     copier.ChunkerOptions{InitialRows: 100, MinRows: 100, MaxRows: 100},
+		},
+		Checksum:           checksum.Options{Chunker: gateChunks},
+		CheckpointInterval: time.Hour,
+	}
+	r, err := schemachange.NewRunner(f.cfg, f.store, opts)
+	require.NoError(t, err)
+	target := f.prove(t, "orders")
+	st := f.alter(t, alter)
+	shadow := schemachange.ShadowName(f.schema, "orders")
+
+	runCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	results := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		_, err := r.Run(runCtx, f.pool, target, st)
+		results <- err
+	})
+	t.Cleanup(wg.Wait)
+
+	const landDeadline = 30 * time.Second
+	require.Eventually(t, func() bool {
+		return f.relationExists(t, shadow) && f.rowCount(t, shadow) == landedBelowPin
+	}, landDeadline, 20*time.Millisecond, "every chunk below the pinned one should land")
+	cancel()
+	const cancelPropagation = 5 * time.Second
+	select {
+	case err := <-results:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(cancelPropagation):
+		t.Fatalf("run did not return within %s of being cancelled", cancelPropagation)
+	}
+
+	row := f.inspectRow(t, "orders")
+	assert.Equal(t, checkpoint.PhaseCopying, row.Phase)
+	assert.Equal(t, copier.NewWatermark(landedBelowPin), row.Watermark, "the row records the watermark the committed chunks reached")
+	release()
+
+	second := &stopAfter{}
+	f.assertResumedToDone(t, alter, schemachange.RunOptions{AfterCheckpoint: second.hook})
+	assert.Equal(t, []checkpoint.Phase{checkpoint.PhaseCopying, checkpoint.PhaseVerifying, checkpoint.PhaseCutover, checkpoint.PhaseDone}, second.seen(), "the resumed run finished the copy from the recorded watermark")
+}
+
+// A quiesced run has no writer to explain a difference between source and
+// shadow, so the verification pass runs under DivergenceAbort (CO-3): a
+// shadow row changed under a stopped run stops the resumed run with the
+// pass's report, the row stays in verifying, and nothing is swapped. The
+// operator drops the shadow, takes the fence off, and deletes the row to
+// start over.
+func TestRunnerStopsOnAShadowThatDiffersFromTheSource(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	sourceOID := f.relationOID(t, "orders")
+	stop := &stopAfter{phase: checkpoint.PhaseVerifying}
+
+	_, err := f.run(t, "orders", alter, schemachange.RunOptions{AfterCheckpoint: stop.hook})
+	require.ErrorIs(t, err, errStopHere)
+	row := f.inspectRow(t, "orders")
+	shadow := pgx.Identifier{f.schema, row.ShadowTable}.Sanitize()
+	f.exec(t, "UPDATE "+shadow+" SET qty = 0 WHERE id = 5")
+
+	result, err := f.run(t, "orders", alter, schemachange.RunOptions{})
+	var divergence *checksum.DivergenceError
+	require.ErrorAs(t, err, &divergence)
+	assert.Len(t, divergence.Report.Mismatches, 1, "one chunk differs")
+	assert.Equal(t, 3, divergence.Report.Chunks, "the pass read the whole key space")
+	assert.Zero(t, result, "a run that stopped hands back no result")
+	assert.Equal(t, checkpoint.PhaseVerifying, f.inspectRow(t, "orders").Phase, "the row stays where the pass found the difference")
+	assert.Equal(t, sourceOID, f.relationOID(t, "orders"), "nothing was swapped")
+	assert.True(t, f.hasFence(t, "orders"), "the source stays fenced for the operator to abandon the run")
 }

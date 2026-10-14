@@ -12,8 +12,14 @@
 // transaction; a drop destroys a shadow that may have been resumable and
 // buys a full rebuild and copy.
 //
-// Runner chains the operations for a quiesced table — one no writer
-// touches while the change runs — from table lock to old table drop,
-// writing the checkpoint row at every phase transition and dispatching on
-// the row it finds, so a run that stops anywhere resumes from the row.
+// Runner chains the operations for a quiesced table from table lock to old
+// table drop, writing the checkpoint row at every phase transition and
+// dispatching on the row it finds, so a run that stops anywhere resumes
+// from the row. The quiescence is enforced, not assumed: the run fences
+// the source with a statement trigger that refuses every write until the
+// swap, and the fence stays on a stopped run's source until it is resumed
+// or abandoned with DropWriteFence. The one exception to "a shadow is only
+// dropped on abandonment" is a first save whose row does not land: the
+// run drops the shadow it just built, since a shadow no row records would
+// refuse the next run as ErrShadowExists.
 package schemachange

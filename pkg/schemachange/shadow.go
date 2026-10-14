@@ -370,17 +370,27 @@ func setBuildSession(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTa
 // takes both from the copy-and-swap proof, the cutover gate from the built
 // shadow's snapshot.
 func setSession(ctx context.Context, tx pgx.Tx, schema, owner string, opts Options) error {
-	// INV: LK-2
-	budgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(opts.lockTimeout().Milliseconds(), 10) +
-		"; SET LOCAL statement_timeout = " + strconv.FormatInt(opts.statementTimeout().Milliseconds(), 10)
-	if _, err := tx.Exec(ctx, budgets); err != nil {
-		return fmt.Errorf("set shadow build budgets: %w", err)
+	if err := setBudgets(ctx, tx, opts); err != nil {
+		return err
 	}
 	if err := setSearchPath(ctx, tx, schema); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{owner}.Sanitize()); err != nil {
 		return fmt.Errorf("set owner role %s: %w", owner, err)
+	}
+	return nil
+}
+
+// setBudgets bounds the transaction's lock and statement waits from opts.
+// SET LOCAL cannot take bind parameters; the timeouts are integer
+// milliseconds.
+func setBudgets(ctx context.Context, tx pgx.Tx, opts Options) error {
+	// INV: LK-2
+	budgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(opts.lockTimeout().Milliseconds(), 10) +
+		"; SET LOCAL statement_timeout = " + strconv.FormatInt(opts.statementTimeout().Milliseconds(), 10)
+	if _, err := tx.Exec(ctx, budgets); err != nil {
+		return fmt.Errorf("set shadow build budgets: %w", err)
 	}
 	return nil
 }

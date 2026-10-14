@@ -54,8 +54,8 @@ ORDER BY a.attnum`, checkpoint.SchemaName, checkpoint.TableName)
 	return names
 }
 
-// A table the first engine created lacks shadow_proof. Ensure adds it in
-// place, so the table keeps the row that engine wrote — which Inspect then
+// A table the first engine created lacks shadow_proof and statement. Ensure
+// adds them in place, so the table keeps the row that engine wrote — which Inspect then
 // reports as a row in another format, with its identity, for the explicit
 // fresh start — and a Save in today's format lands with its proof.
 func TestEnsureAddsTheColumnsAnOlderTableLacks(t *testing.T) {
@@ -67,7 +67,7 @@ func TestEnsureAddsTheColumnsAnOlderTableLacks(t *testing.T) {
 	require.NotContains(t, before, "shadow_proof", "the first shape has no proof column")
 
 	require.NoError(t, f.store.Ensure(t.Context()))
-	assert.Equal(t, append(before, "shadow_proof"), f.columnNames(t), "the missing column is added last; nothing else moves")
+	assert.Equal(t, append(before, "shadow_proof", "statement"), f.columnNames(t), "the missing columns are added last, in shape order; nothing else moves")
 	assert.Equal(t, int64(1), f.rowCount(t), "the older engine's row survives the evolution")
 	require.NoError(t, f.store.Ensure(t.Context()), "a second Ensure finds nothing to add")
 
@@ -138,7 +138,7 @@ func TestEnsureIgnoresADroppedColumn(t *testing.T) {
 	require.NotContains(t, before, "watermark")
 
 	require.NoError(t, f.store.Ensure(t.Context()), "a dropped unknown column does not mark the table as a newer engine's")
-	assert.Equal(t, append(before, "watermark", "shadow_proof"), f.columnNames(t), "every known column the table lacks is added, in shape order")
+	assert.Equal(t, append(before, "watermark", "shadow_proof", "statement"), f.columnNames(t), "every known column the table lacks is added, in shape order")
 }
 
 // Ensure judges the engine's own table and no other: a table of the same
@@ -175,7 +175,7 @@ func TestEnsureRefusesATableANewerEngineShaped(t *testing.T) {
 	var newer *checkpoint.TableNewerError
 	require.ErrorAs(t, err, &newer)
 	assert.Equal(t, []string{"swap_proof"}, newer.Unknown)
-	assert.Equal(t, before, f.columnNames(t), "a refused table is left exactly as found: shadow_proof is not added")
+	assert.Equal(t, before, f.columnNames(t), "a refused table is left exactly as found: no column is added")
 }
 
 // A table of today's shape with one column more is refused the same way,

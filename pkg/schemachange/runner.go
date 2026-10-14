@@ -35,7 +35,10 @@ type RunOptions struct {
 	Cutover CutoverOptions
 	// KeepOld leaves the retained source under its derived _old name after
 	// the swap (D9), for a rollback window the caller manages; the run
-	// still reaches PhaseDone. False drops it before the row is done.
+	// still reaches PhaseDone, with the write fence taken off the old
+	// table so it can be renamed back and written. False drops it before
+	// the row is done. The caller ends the window with InspectSwapped on
+	// the done row's proof and DropOldTable, under the table's lock.
 	KeepOld bool
 	// CheckpointInterval is how often the copy in progress saves its
 	// landed watermark, so a run that stops mid-copy resumes from the last
@@ -45,9 +48,14 @@ type RunOptions struct {
 	// Tests inject one to drive the saves without real time passing.
 	Sleep func(ctx context.Context, d time.Duration) error
 	// AfterCheckpoint, when set, is called after every successful save of
-	// the checkpoint row with the row as saved. An error it returns stops
-	// the run there, with the row as the last save left it, so a test can
-	// stop a run at any transition and resume it (TM-3 fault hook).
+	// the checkpoint row with the row as saved, and is the run's one
+	// progress signal: the phase saves call it on the caller's goroutine,
+	// the periodic watermark saves on the copy's saving goroutine, so it
+	// must be safe to call from either, and the periodic calls arrive at
+	// CheckpointInterval, not as the copy lands rows. An error it returns
+	// stops the run there, with the row as the last save left it, so a
+	// test can stop a run at any transition and resume it (TM-3 fault
+	// hook).
 	AfterCheckpoint func(ctx context.Context, cp checkpoint.Checkpoint) error
 }
 
@@ -88,8 +96,13 @@ func (o RunOptions) sleep() func(context.Context, time.Duration) error {
 // stops anywhere resumes from the row (TM-3). Quiesced means no writer
 // touches the source while the run is in progress: the Runner decodes no
 // WAL and applies no captured change, so the copy and the verification
-// pass are the whole proof of data equality (CO-1). A target proven for
-// a run that decodes WAL is refused; that path has its own orchestration.
+// pass are the whole proof of data equality (CO-1). The Runner enforces
+// that itself with a write fence on the source — a statement trigger that
+// refuses INSERT, UPDATE, DELETE, and TRUNCATE with SQLSTATE
+// WriteFenceSQLState — installed before the copy starts and in place until
+// the swap, across any stop and resume in between; a writer that reaches
+// the table gets an error, never a silent loss. A target proven for a run
+// that decodes WAL is refused; that path has its own orchestration.
 type Runner struct {
 	cfg   dbconn.Config
 	store *checkpoint.Store
@@ -98,7 +111,10 @@ type Runner struct {
 
 // Result is what a completed run hands back.
 type Result struct {
-	// Checkpoint is the row as the run left it, in PhaseDone.
+	// Checkpoint is the row as the run saved it last, in PhaseDone. It is
+	// the row as written, not as read back: UpdatedAt, which the store
+	// stamps from its own clock at the write, is zero here and is read
+	// with Store.Inspect.
 	Checkpoint checkpoint.Checkpoint
 	// Shadow is the proof of the shadow the run built or resumed on.
 	Shadow Proof
@@ -120,7 +136,12 @@ type Result struct {
 
 // NewRunner prepares runs over the database cfg names, writing the
 // checkpoint row through store. It refuses a nil store and options a run
-// could not honour.
+// could not honour. cfg opens the dedicated connection the table lock
+// session holds for the run; every other statement runs on the pool
+// handed to Run, and store writes through its own pool. All three must
+// name one database: each working transaction confirms the table lock
+// from the pool it runs on, and a pool that reaches another database sees
+// no lock and refuses as shadow-lock-unconfirmed before writing anything.
 func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Runner, error) {
 	if store == nil {
 		return nil, fmt.Errorf("%w: a run requires a checkpoint store", ErrInvariantViolation)
@@ -137,30 +158,44 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 // (LK-1), makes sure the checkpoint table exists, reads the target's row,
 // and dispatches on what it finds:
 //
-//   - No row: the shadow is built from st and the row saved in
-//     PhaseCopying. A relation already under the shadow's name is refused
-//     as shadow-unrecorded, since no row says what built it (ST-2).
+//   - No row: the shadow is built from st, the write fence put on the
+//     source, and the row saved in PhaseCopying, with st's text. A
+//     relation already under the shadow's name is refused as
+//     shadow-unrecorded, since no row says what built it (ST-2). A first
+//     save whose row does not land drops the shadow and the fence again,
+//     so the next Run starts fresh rather than meeting that refusal.
+//   - Any other row records a run of the statement it carries, and st
+//     must be that statement — the same operations on the same table,
+//     compared as parsed — or the row is refused as resume-row-mismatch
+//     before anything is touched: a resume completes the change the row
+//     records, never the one the caller changed its mind to.
 //   - A row in PhaseCopying or PhaseVerifying: the shadow under the row's
 //     name is inspected and its proof must equal the one the row carries,
 //     or the row is refused as resume-row-mismatch; the run continues
-//     from the row's phase and watermark. st is not read: the row's
-//     fingerprints identify the statement, and the shadow already embodies it.
+//     from the row's phase and watermark.
 //   - A row in PhaseCutover: whether the swap committed is read from the
 //     catalog (LK-4) — a committed swap continues at the old table drop,
 //     a swap that rolled back is verified and gated again and swapped.
 //   - A terminal row is refused as resume-row-terminal: the run it
-//     records has ended, and a caller that means to start over deletes it.
+//     records has ended, and a caller that means to run the table again
+//     deletes it first with Store.Delete, under the table's lock.
 //   - A row naming a slot, or in a phase only a run that decodes WAL
 //     enters, is refused as resume-row-decoding.
 //
-// The phases then run in order — copy, saving the landed watermark every
-// CheckpointInterval and when the copy ends; one verification pass through
-// the complete watermark under checksum.DivergenceAbort; the cutover gate;
-// the row saved in PhaseCutover; the swap; the old table drop unless
-// KeepOld; the row saved in PhaseDone. The row is never written to
-// PhaseFailed: a run that stops leaves the row where its last save put
-// it, and the next Run resumes from there. Every error is returned as the
-// step returned it, with a lost table lock reported as shadow-lock-lost.
+// The phases then run in order — the write fence on the source, installed
+// over the one a stopped run left; copy, saving the landed watermark every
+// CheckpointInterval and when the copy ends; one verification pass through the complete watermark under
+// checksum.DivergenceAbort; the cutover gate; the row saved in
+// PhaseCutover; the swap; the old table drop, or under KeepOld the fence
+// taken off the old table; the row saved in PhaseDone. The row is never
+// written to PhaseFailed: a run that stops leaves the row where its last
+// save put it, with the fence in place, and the next Run resumes from
+// there. A run that stopped under a verification difference is wedged in
+// PhaseVerifying until the operator finds the writer, drops the shadow
+// with DropShadow, takes the fence off with DropWriteFence, and deletes
+// the row; no Run goes back to the copy on its own. Every error is
+// returned as the step returned it, with a lost table lock reported as
+// shadow-lock-lost.
 func (r *Runner) Run(ctx context.Context, pool *pgxpool.Pool, target preflight.CopySwapTarget, st statement.Statement) (result Result, err error) {
 	if err := checkProof(target); err != nil {
 		return Result{}, err
@@ -174,9 +209,14 @@ func (r *Runner) Run(ctx context.Context, pool *pgxpool.Pool, target preflight.C
 	}
 	defer func() {
 		// A session that lost the lock closes itself; releasing it would
-		// only report that the lock was not held.
+		// only report that the lock was not held. The release outlives the
+		// caller's context, since the lock is held for the run and not for
+		// the call, but is bounded so a cancelled run against a server that
+		// has stopped answering still returns.
 		if lock.Err() == nil {
-			err = errors.Join(err, lock.Release(context.WithoutCancel(ctx)))
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dbconn.DefaultConnectTimeout)
+			defer cancel()
+			err = errors.Join(err, lock.Release(releaseCtx))
 		}
 	}()
 	result, err = r.run(ctx, pool, lock, target, st)
@@ -228,23 +268,35 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 		// SwappedTable to report; Result.Swapped stays zero.
 		result.Swapped = state.swappedTable.Proof()
 	}
-	if !state.oldTableGone && !r.opts.KeepOld {
-		err := DropOldTable(ctx, pool, lock, state.swappedTable, r.opts.Shadow)
-		if err != nil && !errors.Is(err, ErrOldTableNotFound) {
+	if !state.oldTableGone {
+		if err := r.settleOldTable(ctx, pool, lock, &state); err != nil {
 			return Result{}, err
 		}
-		state.oldTableGone = true
 	}
 	result.OldTableDropped = state.oldTableGone
 	if err := r.save(ctx, lock, &state, checkpoint.PhaseDone); err != nil {
 		return Result{}, err
 	}
-	final, err := r.store.Load(ctx, state.cp.Schema, state.cp.Table, state.cp.Fingerprints())
-	if err != nil {
-		return Result{}, err
-	}
-	result.Checkpoint = final
+	// The row as saved is the row the run leaves; reading it back could
+	// only fail a change that is complete and recorded.
+	result.Checkpoint = state.cp
 	return result, nil
+}
+
+// settleOldTable finishes with the retained source after the swap: drops
+// it, or under KeepOld takes the write fence off it, since the fence rode
+// the rename and a table kept for a rollback window has to take writes
+// the moment it is renamed back.
+func (r *Runner) settleOldTable(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, state *runState) error {
+	if r.opts.KeepOld {
+		return dropWriteFenceFromOld(ctx, pool, lock, state.swappedTable, r.opts.Shadow)
+	}
+	err := DropOldTable(ctx, pool, lock, state.swappedTable, r.opts.Shadow)
+	if err != nil && !errors.Is(err, ErrOldTableNotFound) {
+		return err
+	}
+	state.oldTableGone = true
+	return nil
 }
 
 // verify runs the one verification pass through the row's complete

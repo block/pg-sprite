@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/copier"
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
 
@@ -22,7 +23,18 @@ type runnerFixture struct {
 
 func newRunnerFixture(t *testing.T) runnerFixture {
 	t.Helper()
-	f := newShadowFixture(t)
+	return newRunnerFixtureOn(t, testutil.StartPostgres(t))
+}
+
+// newRunnerFixtureOn is newRunnerFixture over a server the test started
+// itself, for a test that needs the server configured.
+func newRunnerFixtureOn(t *testing.T, url string) runnerFixture {
+	t.Helper()
+	cfg := dbconn.Config{URL: url}
+	pool, err := dbconn.NewPool(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	f := shadowFixture{cfg: cfg, pool: pool, schema: testutil.NewSchema(t, pool)}
 	store, err := checkpoint.NewStore(f.pool, checkpoint.Options{})
 	require.NoError(t, err)
 	return runnerFixture{shadowFixture: f, store: store}

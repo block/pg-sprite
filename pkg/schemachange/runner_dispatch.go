@@ -45,14 +45,20 @@ func (r *Runner) dispatch(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 	if err != nil {
 		return runState{}, err
 	}
-	return r.resume(ctx, pool, lock, target, cp)
+	return r.resume(ctx, pool, lock, target, cp, st)
 }
 
-// startFresh builds the shadow and writes the row that records it, in
-// PhaseCopying with nothing landed. A relation already under the shadow's
-// name with no row to say what built it is refused: the row is the only
-// record of which statement a shadow embodies, so without one the shadow
-// is dropped and the run started over.
+// startFresh builds the shadow, fences the source, and writes the row
+// that records the shadow, in PhaseCopying with nothing landed. The fence
+// goes on before the row so that a run stopped at its first save leaves
+// the source fenced, as every later stop does. A relation already under
+// the shadow's name with no row to say what built it is refused: the row
+// is the only record of which statement a shadow embodies, so without one
+// the shadow is dropped and the run started over. For the same reason a
+// first save whose row does not land drops the shadow and the fence this
+// run just put there: leaving them would make the next Run meet that
+// refusal for a shadow nothing records. A row that landed stays, with the
+// shadow and the fence it records, whatever AfterCheckpoint then returns.
 func (r *Runner) startFresh(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, st statement.Statement) (runState, error) {
 	built, err := BuildShadow(ctx, pool, lock, target, st, r.opts.Shadow)
 	if errors.Is(err, ErrShadowExists) {
@@ -62,18 +68,39 @@ func (r *Runner) startFresh(ctx context.Context, pool *pgxpool.Pool, lock *dbcon
 	if err != nil {
 		return runState{}, err
 	}
-	state, err := newRunState(built)
+	state, err := newRunState(built, st)
 	if err != nil {
 		return runState{}, err
 	}
-	if err := r.save(ctx, lock, &state, checkpoint.PhaseCopying); err != nil {
+	// INV: CO-1 — the source takes no write from here to the swap.
+	if err := installWriteFence(ctx, pool, lock, target, r.opts.Shadow); err != nil {
+		return runState{}, errors.Join(err, r.unbuild(ctx, pool, lock, target))
+	}
+	state.cp.Phase = checkpoint.PhaseCopying
+	if err := r.store.Save(ctx, lock, state.cp); err != nil {
+		return runState{}, errors.Join(err, r.unbuild(ctx, pool, lock, target))
+	}
+	if err := r.afterCheckpoint(ctx, state.cp); err != nil {
 		return runState{}, err
 	}
 	return state, nil
 }
 
-// newRunState is the state of a run that has just built its shadow.
-func newRunState(built BuiltShadow) (runState, error) {
+// unbuild takes back what startFresh did before its row landed: the fence
+// comes off the source and the shadow is dropped. It outlives the
+// caller's context, since a cancelled run is the usual way here, but is
+// bounded so it returns against a server that has stopped answering.
+func (r *Runner) unbuild(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget) error {
+	undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dbconn.DefaultConnectTimeout)
+	defer cancel()
+	return errors.Join(
+		DropWriteFence(undoCtx, pool, lock, target, r.opts.Shadow),
+		DropShadow(undoCtx, pool, lock, target, r.opts.Shadow),
+	)
+}
+
+// newRunState is the state of a run that has just built its shadow from st.
+func newRunState(built BuiltShadow, st statement.Statement) (runState, error) {
 	proofJSON, err := json.Marshal(built)
 	if err != nil {
 		return runState{}, fmt.Errorf("encode shadow proof for %s.%s: %w", built.Schema(), built.SourceTable(), err)
@@ -86,6 +113,7 @@ func newRunState(built BuiltShadow) (runState, error) {
 			SourceFingerprint: built.SourceFingerprint(),
 			TargetFingerprint: built.TargetFingerprint(),
 			ShadowProof:       proofJSON,
+			Statement:         st.SQL(),
 		},
 		built: built,
 		proof: built.Proof(),
@@ -93,10 +121,14 @@ func newRunState(built BuiltShadow) (runState, error) {
 }
 
 // resume continues the run cp records. The row's phase says which
-// operation reads it; a row this runner cannot act on is refused before
-// anything is written.
-func (r *Runner) resume(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, cp checkpoint.Checkpoint) (runState, error) {
+// operation reads it; a row this runner cannot act on, or one that
+// records another statement than st, is refused before anything is
+// written.
+func (r *Runner) resume(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, cp checkpoint.Checkpoint, st statement.Statement) (runState, error) {
 	if err := checkQuiescedRow(target, cp); err != nil {
+		return runState{}, err
+	}
+	if err := checkRowStatement(target, cp, st); err != nil {
 		return runState{}, err
 	}
 	proof, err := rowProof(cp)
@@ -128,6 +160,12 @@ func (r *Runner) resume(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Ta
 	if err := checkRowDescribes(cp, proof, built); err != nil {
 		return runState{}, err
 	}
+	// INV: CO-1 — the resumed run installs over the fence the stopped run
+	// left, so the source takes no write from here to the swap and the
+	// copy and the verification pass are the whole proof.
+	if err := installWriteFence(ctx, pool, lock, target, r.opts.Shadow); err != nil {
+		return runState{}, err
+	}
 	return runState{cp: cp, built: built, proof: proof}, nil
 }
 
@@ -149,6 +187,28 @@ func checkQuiescedRow(target preflight.CopySwapTarget, cp checkpoint.Checkpoint)
 	}
 	if cp.Schema != target.Schema() || cp.Table != target.Table() {
 		return refuse(CauseResumeRowMismatch, nil, "checkpoint row is for %s.%s, target is %s.%s", cp.Schema, cp.Table, target.Schema(), target.Table())
+	}
+	return nil
+}
+
+// checkRowStatement refuses a resume under a statement other than the one
+// the row records: a resume completes the change a stopped run started,
+// and a caller that means another change on the table deletes the row
+// first. The two are compared as parsed — the same operations on the
+// same table — so a statement that only differs in its spelling, or in
+// whether it qualifies the table with the target's schema, resumes. A row
+// without a statement cannot prove what it records and is refused the
+// same way.
+func checkRowStatement(target preflight.CopySwapTarget, cp checkpoint.Checkpoint, st statement.Statement) error {
+	if cp.Statement == "" {
+		return refuse(CauseResumeRowMismatch, nil, "checkpoint row for %s.%s records no statement; delete the row to start over", cp.Schema, cp.Table)
+	}
+	if !namesTarget(st, target.Schema(), target.Table()) {
+		return refuse(CauseStatementTarget, nil, "statement names %s.%s, the proven table is %s.%s", st.Schema(), st.Table(), target.Schema(), target.Table())
+	}
+	if err := statement.SameOpsExceptTarget(cp.Statement, st.SQL()); err != nil {
+		// INV: ST-2
+		return refuse(CauseResumeRowMismatch, []error{err}, "checkpoint row for %s.%s records a run of another statement; delete the row to run this one", cp.Schema, cp.Table)
 	}
 	return nil
 }
