@@ -48,7 +48,13 @@ partial clean pass mints only the watermark (clean-complete, partial-watermark, 
 repairs-mint-nothing tests). `pkg/schemachange.GateCutover` accepts only a `VerifiedShadow`,
 and only one minted for the relations it is gating: the proof carries the source and shadow
 OIDs the pass compared, and a shadow dropped and rebuilt under the same derived name is a new
-relation the pass never read, so the gate refuses it (`cutover-unverified`).
+relation the pass never read, so the gate refuses it (`cutover-unverified`). A pass that runs
+while the stream writes the shadow (`CheckLive`) counts a chunk clean only when the stream has
+provably delivered what the pass's read saw on the source; anything it cannot prove is
+unsettled, never clean, and mints nothing. The proof such a pass mints says so
+(`VerifiedShadow.Live`), and the swap refuses it without a drain to apply the stream's changes
+since under the swap lock (`cutover-undrained`); the mechanism is in
+[copy-and-swap-design.md](copy-and-swap-design.md#live-verification).
 *Source:* [design-principles](design-principles.md#correctness-and-safety),
 risks-and-mitigations; Spirit's "never skip it".
 
@@ -70,7 +76,10 @@ and no `CleanWatermark`, even though every repaired chunk was read again and fou
 proof comes only from the next pass, which reads every chunk fresh (repairs-mint-nothing test).
 A repaired chunk that still differs on the fresh read is a `RepairError`, not a second repair
 (repair-did-not-take test). A pass under `recopy` reads nothing again and mints no proof
-either, however many chunks it recopied. The checkpoint writer that persists the watermark is planned.
+either, however many chunks it recopied. A repair under the stream (`CheckLive` under
+`repair`) reads each repaired chunk again once the stream has delivered the recopy and mints
+nothing even when every one settles clean; the next pass is the proof. The checkpoint writer
+that persists the watermark is planned.
 *Source:* Spirit `pkg/migration/runner.go` + `pkg/move/runner.go` ("Safety invariant").
 
 ### CO-3 — Divergence policy is an explicit setting, never inferred

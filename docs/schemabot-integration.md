@@ -14,6 +14,7 @@ points here.
 - [Overview](#overview)
 - [Verb mapping (conceptual)](#verb-mapping-conceptual)
 - [The proposed SchemaBot-side contract](#the-proposed-schemabot-side-contract)
+- [Outcomes of a checksum pass under the stream](#outcomes-of-a-checksum-pass-under-the-stream)
 - [Invalid-index outcomes of a concurrent index build](#invalid-index-outcomes-of-a-concurrent-index-build)
 - [Execution-mode verdicts and direct execution](#execution-mode-verdicts-and-direct-execution)
 - [Design constraints the integration imposes](#design-constraints-the-integration-imposes)
@@ -334,6 +335,28 @@ installation, not the run, and each means a different action:
 logs the chain sees both the engine's classification and the server's words. `ErrTableNewer`
 comes from `Ensure`'s read of the table's shape, before any statement could fail, so it
 carries no server error; the `*TableNewerError` names the columns instead.
+
+### Outcomes of a checksum pass under the stream
+
+In the catch-up stage the orchestrator runs the checksum with `checksum.Verifier.CheckLive`
+while the source is written and `applier.Catchup` applies the stream, handing it the
+catch-up as the `ConfirmedSource` and the policy its setting names (`abort` or `repair`;
+`recopy` is refused). A pass returns one of five outcomes, each a typed error or a proof, and
+each asks for a different action. Whether the pass wrote the shadow is part of the outcome:
+
+| Outcome | What it means | Orchestrator action | Shadow written? |
+| --- | --- | --- | --- |
+| `Outcome` with `VerifiedShadow` minted (`Live()` true) | Every chunk was equal or settled against the catch-up's confirmed position; the shadow equals the source as of those positions and every change since is in the stream | Hand the proof to `GateCutover`; `Cutover` requires a `DrainFunc` that applies the stream through the final position under the swap lock, and refuses the proof without one (`cutover-undrained`) | No |
+| `*UnresolvedError`, no repairs | A chunk could not be settled: the catch-up did not confirm past the read within the wait (`lagging`), or the chunk changed on every reread (`hot`). Not a finding about the data | Run the pass again — after the catch-up has confirmed further, or when the source is quieter; `Outcome.Report.Unsettled` counts the chunks that did not settle | No |
+| `*DivergenceError` (policy `abort`) | At least one chunk held still on both sides across a confirmed position and still differed; the stream delivered everything and the shadow does not match. `Report.Unsettled` may also be non-zero | Stop and report; a divergence under the stream is a defect, not a retry | No |
+| `*UnresolvedError` with `Outcome.Repairs` listed (policy `repair`) | Every confirmed divergence was recopied and read back clean, but another chunk did not settle | The repairs are committed; run the pass again as above. No proof was minted (CO-2) | Yes — the listed repairs |
+| `*RepairError` (policy `repair`) | A repaired chunk was a confirmed divergence again after its recopy | Stop and report; the recopy committed and is listed in `Outcome.Repairs`, and something other than the stream is writing the shadow | Yes — the listed repairs |
+
+A pass that returns a context error, `ErrTableLockLost`, or `ErrPassRunning` decided nothing
+about the data and wrote nothing beyond any repairs it lists. Progress during a pass is the
+tracker's: `chunks_mismatched` counts the chunks the sweep found differing, which under the
+stream are chunks being re-checked rather than confirmed divergences, and `chunks_reread`
+every settling reread; the pass's final figures are the `Report` it returns.
 
 ## Invalid-index outcomes of a concurrent index build
 
