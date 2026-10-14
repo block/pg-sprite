@@ -25,23 +25,44 @@ import (
 
 // sourceWriter writes the workload table on a fixed interval until stopped:
 // each tick updates one seeded row, cycling through every chunk, and
-// inserts one row beyond the seeded keys.
+// inserts one row beyond the seeded keys. A stop is observed between ticks,
+// never inside a statement: each statement runs detached from the writer's
+// context under its own bound, so the tick in flight when the stop lands
+// finishes both its statements and its writes are committed, or counted
+// as a failure, before stop returns. Nothing the writer did is left
+// undecided on the server once it has stopped.
 type sourceWriter struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	done   chan struct{} // closed when the writer's goroutine has exited
 	err    error
 	writes int
 }
+
+// writerStatementBound is the time one of the writer's statements may take;
+// a statement blocked for longer is a failure the writer records, so a stop
+// is never held behind a lock indefinitely.
+const writerStatementBound = 2 * time.Second
 
 // startWriter runs a sourceWriter over rows seeded keys. The caller stops it
 // with stop; the fixture's cleanup stops it too.
 func (f reconcileFixture) startWriter(t *testing.T, seeded int, interval time.Duration) *sourceWriter {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
-	w := &sourceWriter{cancel: cancel}
+	w := &sourceWriter{cancel: cancel, done: make(chan struct{})}
 	update := fmt.Sprintf(`UPDATE %s SET amount = amount + 1 WHERE id = $1`, f.table.Qualified())
 	insert := fmt.Sprintf(`INSERT INTO %s (uniq, amount, label, blob) VALUES ($1, 1, 'live', 'x')`, f.table.Qualified())
+	exec := func(what, sql string, arg any) bool {
+		stmtCtx, done := context.WithTimeout(context.WithoutCancel(ctx), writerStatementBound)
+		defer done()
+		if _, err := f.pool.Exec(stmtCtx, sql, arg); err != nil {
+			w.err = fmt.Errorf("%s: %w", what, err)
+			return false
+		}
+		return true
+	}
 	w.wg.Go(func() {
+		defer close(w.done)
 		tick := time.NewTicker(interval)
 		defer tick.Stop()
 		for i := 0; ; i++ {
@@ -50,12 +71,12 @@ func (f reconcileFixture) startWriter(t *testing.T, seeded int, interval time.Du
 				return
 			case <-tick.C:
 			}
-			if _, err := f.pool.Exec(ctx, update, int64(i%seeded)+1); err != nil {
-				w.fail(ctx, "live update", err)
+			// A tick that was pending while a statement waited does not
+			// outrank a stop that landed in the same window.
+			if ctx.Err() != nil {
 				return
 			}
-			if _, err := f.pool.Exec(ctx, insert, 100001+i); err != nil {
-				w.fail(ctx, "live insert", err)
+			if !exec("live update", update, int64(i%seeded)+1) || !exec("live insert", insert, 100001+i) {
 				return
 			}
 			w.writes++
@@ -65,25 +86,113 @@ func (f reconcileFixture) startWriter(t *testing.T, seeded int, interval time.Du
 	return w
 }
 
-// fail records a statement's error unless the writer was stopped while the
-// statement ran: a stop cancels the context the statement is bound to, so
-// the statement ends with the stop's cancellation, which is the stop, not a
-// write that went wrong.
-func (w *sourceWriter) fail(ctx context.Context, what string, err error) {
-	if ctx.Err() != nil {
-		return
-	}
-	w.err = fmt.Errorf("%s: %w", what, err)
-}
-
-// stop ends the writer and returns how many ticks wrote both statements; a
-// writer that failed before being stopped fails the test.
+// stop ends the writer, waits for the tick in flight to finish, and returns
+// how many ticks wrote both statements; a writer that failed fails the test.
 func (w *sourceWriter) stop(t *testing.T) int {
 	t.Helper()
 	w.cancel()
 	w.wg.Wait()
 	require.NoError(t, w.err)
 	return w.writes
+}
+
+// awaitBlocked waits until a session in the fixture's database is waiting
+// on a lock, which is how a test knows the writer's statement is in flight
+// and held rather than merely not started yet.
+func (f reconcileFixture) awaitBlocked(t *testing.T) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var n int
+		require.NoError(t, f.pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM pg_catalog.pg_stat_activity WHERE wait_event_type = 'Lock' AND datname = current_database()`).Scan(&n))
+		return n > 0
+	}, 20*time.Second, 20*time.Millisecond, "the writer never blocked on the held lock")
+}
+
+// liveRows counts the rows the writer inserted.
+func (f reconcileFixture) liveRows(t *testing.T) int {
+	t.Helper()
+	var n int
+	require.NoError(t, f.pool.QueryRow(t.Context(), fmt.Sprintf(`SELECT count(*) FROM %s WHERE label = 'live'`, f.table.Qualified())).Scan(&n))
+	return n
+}
+
+// holdLock opens a transaction that holds the workload table in ACCESS
+// EXCLUSIVE mode until the returned release is called, so the writer's next
+// statement is guaranteed to be in flight and waiting.
+func (f reconcileFixture) holdLock(t *testing.T) (release func()) {
+	t.Helper()
+	tx, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	_, err = tx.Exec(t.Context(), fmt.Sprintf(`LOCK TABLE %s IN ACCESS EXCLUSIVE MODE`, f.table.Qualified()))
+	require.NoError(t, err)
+	var once sync.Once
+	release = func() { once.Do(func() { assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context()))) }) }
+	t.Cleanup(release)
+	return release
+}
+
+// A stop that lands while a statement is blocked is not a failure: the
+// statement is not cancelled with the writer, it waits for the lock, and
+// once the lock is released the tick completes and its writes are
+// committed before stop returns.
+func TestWriterStoppedInsideABlockedUpdateFinishesTheTick(t *testing.T) {
+	const seeded = 50
+	f := newReconcileFixture(t, seeded)
+	release := f.holdLock(t)
+	w := f.startWriter(t, seeded, 5*time.Millisecond)
+	f.awaitBlocked(t)
+	w.cancel()
+	release()
+	assert.Equal(t, 1, w.stop(t), "the tick in flight at the stop completed")
+	assert.Equal(t, 1, f.liveRows(t), "the blocked tick's insert is committed, not left undecided")
+}
+
+// The same for a stop that lands while the insert half of a tick is blocked
+// on an uncommitted row with its unique key.
+func TestWriterStoppedInsideABlockedInsertFinishesTheTick(t *testing.T) {
+	const seeded = 50
+	f := newReconcileFixture(t, seeded)
+	tx, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = tx.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s (uniq, amount, label, blob) VALUES (100001, 1, 'held', 'x')`, f.table.Qualified()))
+	require.NoError(t, err)
+	w := f.startWriter(t, seeded, 5*time.Millisecond)
+	f.awaitBlocked(t)
+	w.cancel()
+	require.NoError(t, tx.Rollback(t.Context()))
+	assert.Equal(t, 1, w.stop(t), "the tick in flight at the stop completed")
+	assert.Equal(t, 1, f.liveRows(t), "the writer's insert, not the rolled-back one, is the committed row")
+}
+
+// A statement held past its bound is a failure the writer records, so a
+// stop is never left waiting behind a lock that is not going to be
+// released; and a write that fails before any stop is recorded as the
+// failure it is.
+func TestWriterRecordsAStatementHeldPastItsBoundAndAFailedWrite(t *testing.T) {
+	const seeded = 50
+	f := newReconcileFixture(t, seeded)
+
+	release := f.holdLock(t)
+	w := f.startWriter(t, seeded, 5*time.Millisecond)
+	f.awaitBlocked(t)
+	select {
+	case <-w.done:
+	case <-time.After(3 * writerStatementBound):
+		t.Fatal("the writer waited on the held lock past its statement bound")
+	}
+	require.ErrorIs(t, w.err, context.DeadlineExceeded)
+	assert.ErrorContains(t, w.err, "live update")
+	release()
+	assert.Zero(t, f.liveRows(t), "the tick that ran out of time committed nothing")
+
+	f.exec(t, `INSERT INTO %s (uniq, amount, label, blob) VALUES (100001, 1, 'clash', 'x')`)
+	w = f.startWriter(t, seeded, 5*time.Millisecond)
+	w.wg.Wait()
+	require.Error(t, w.err)
+	assert.ErrorContains(t, w.err, "live insert")
+	assert.ErrorContains(t, w.err, "duplicate key")
 }
 
 // A reconcile under a steady write stream succeeds: the writer keeps

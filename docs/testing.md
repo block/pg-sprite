@@ -109,6 +109,14 @@ single read-only `REPEATABLE READ` snapshot, so both directions and both row cou
 describe the same instant. It can ignore columns that a test deliberately excludes,
 except the primary key, which every comparison projects so rows stay distinct.
 
+A background writer in a test runs each statement detached from its own stop context
+under a short bound (`context.WithTimeout(context.WithoutCancel(ctx), …)`), and observes
+the stop only between statements. A stop then never cancels a statement mid-flight, so
+every write the writer made is decided on the server, committed or failed, before the
+stop returns, and a statement held past its bound is a recorded failure rather than a
+hang. The load generator in `internal/testutil` and the per-package writers follow this
+one convention.
+
 Every declarative-diff test proves, against two real databases: the derived
 plan applies cleanly; re-introspect + re-diff yields **empty**; a second
 derivation emits nothing (idempotency). Comparison is **semantic catalog
