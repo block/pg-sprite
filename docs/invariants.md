@@ -48,7 +48,13 @@ partial clean pass mints only the watermark (clean-complete, partial-watermark, 
 repairs-mint-nothing tests). `pkg/schemachange.GateCutover` accepts only a `VerifiedShadow`,
 and only one minted for the relations it is gating: the proof carries the source and shadow
 OIDs the pass compared, and a shadow dropped and rebuilt under the same derived name is a new
-relation the pass never read, so the gate refuses it (`cutover-unverified`).
+relation the pass never read, so the gate refuses it (`cutover-unverified`). A pass that runs
+while the stream writes the shadow (`CheckLive`) counts a chunk clean only when the stream has
+provably delivered what the pass's read saw on the source; anything it cannot prove is
+unsettled, never clean, and mints nothing. The proof such a pass mints says so
+(`VerifiedShadow.Live`), and the swap refuses it without a drain to apply the stream's changes
+since under the swap lock (`cutover-undrained`); the mechanism is in
+[copy-and-swap-design.md](copy-and-swap-design.md#live-verification).
 *Source:* [design-principles](design-principles.md#correctness-and-safety),
 risks-and-mitigations; Spirit's "never skip it".
 
@@ -70,7 +76,10 @@ and no `CleanWatermark`, even though every repaired chunk was read again and fou
 proof comes only from the next pass, which reads every chunk fresh (repairs-mint-nothing test).
 A repaired chunk that still differs on the fresh read is a `RepairError`, not a second repair
 (repair-did-not-take test). A pass under `recopy` reads nothing again and mints no proof
-either, however many chunks it recopied. The checkpoint writer that persists the watermark is planned.
+either, however many chunks it recopied. A repair under the stream (`CheckLive` under
+`repair`) reads each repaired chunk again once the stream has delivered the recopy and mints
+nothing even when every one settles clean; the next pass is the proof. The checkpoint writer
+that persists the watermark is planned.
 *Source:* Spirit `pkg/migration/runner.go` + `pkg/move/runner.go` ("Safety invariant").
 
 ### CO-3 — Divergence policy is an explicit setting, never inferred
@@ -668,12 +677,12 @@ before returning an error that is neither `ErrNotFound` nor incompatible; `ErrNo
 returned only for a completed read that found no row, and a database where the checkpoint table
 was never created is the typed `ErrTableMissing`, never `ErrNotFound`. `Store.Inspect` is the
 same read guarded on the row format alone, for the resume that must read the row's proof and
-phase before it knows which statement it is resuming; it widens only the read. `Store.Ensure`
-keeps the table readable across engine versions: it adds the columns a table an older engine
-created lacks, and refuses — with `ErrTableNewer` and no DDL — a table carrying columns this
-engine does not know, so an older engine never alters a newer one's table. `Store.Save` applies the
+phase before it knows which statement it is resuming; it widens only the read. `Store.Save` applies the
 same identity guard on the write path, so a run can never write its state over another
-statement's row; `Delete` is the explicit fresh start, and it removes only the row whose
+statement's row, and it treats the row's shadow proof as write-once: a save without a proof
+keeps the one the row holds, a save with the same proof is accepted, and a save with a
+different proof is `ErrInvariantViolation` and leaves the row unchanged, because a different
+shadow is a fresh start and a fresh start goes through `Delete`; `Delete` is the explicit fresh start, and it removes only the row whose
 `Identity` the caller was shown (`IncompatibleError.Stored`), so a row another engine wrote in
 between survives and surfaces as a new `IncompatibleError`. `pkg/schemachange` applies the
 same guard on the resume path: `InspectResume` and `Reconciler.Reconcile` read the row through
@@ -693,8 +702,9 @@ record of which statement a shadow embodies.
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
 `TestInspectReturnsTheRowWhateverStatementWroteIt`,
 `TestInspectReportsNotFoundMissingTableAndAnotherFormat`,
-`TestEnsureAddsTheColumnsAnOlderTableLacks`, `TestEnsureRefusesATableANewerEngineShaped`,
-`TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestDeleteRefusesARowTheCallerWasNotShown`,
+`TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestSaveThenLoadRoundTripsTheShadowProof`,
+`TestSaveWithoutAProofDoesNotEraseTheRowsProof`, `TestProofSurvivesTheCheckpointStore`,
+`TestDeleteRefusesARowTheCallerWasNotShown`,
 `TestWritesAndReadsWithoutEnsureReportTheMissingTable`,
 `TestResumeFromCheckpointConvergesAfterAMidCopyKill`. *Source:* Spirit `checkpoint.IsIncompatible` +
 "resume requires the identical ALTER".
@@ -921,6 +931,28 @@ lets the session `SET ROLE` to the owner, plus the owner's schema access), `pkg/
 (`ExecuteCreate` applies the role per step and verifies after commit). *Source:* adversarial
 review of the create-owner option.
 
+### ST-10 — The checkpoint table evolves additively; an older engine never alters a newer one's table
+
+The checkpoint table's shape is the set of columns the engine knows, and every column added
+after the first shape is nullable, so a row an older engine wrote survives the evolution. On
+first use the engine brings a table an older engine created up to its own shape by adding
+the columns it lacks, and it refuses — running no DDL — a table carrying a column it does not
+know, because that table belongs to a newer engine and only that engine may reshape it. A
+read or write that reaches an older table without `Ensure` having run does not fail as a
+missing row or a missing table: the server's undefined-column error is reported as the typed
+`ErrTableBehind`, whose remedy is to run `Ensure` and read again. The one `ALTER TABLE` the
+evolution issues takes `ACCESS EXCLUSIVE` on the engine's own table for the duration of the
+`ADD COLUMN`, bounded by the session's `lock_timeout`; a timed-out evolution has committed
+nothing and is safe to retry. *Enforced:* `pkg/checkpoint` (`Store.Ensure` → `evolveTable`
+adds the missing known columns and refuses an unknown one with `*TableNewerError`, which names
+the unknown columns and is `ErrTableNewer` to `errors.Is`; `tableUnusable` maps the server's
+`42703` to `ErrTableBehind` on every read and write). Tests:
+`TestEnsureAddsTheColumnsAnOlderTableLacks`, `TestEnsureRefusesATableANewerEngineShaped`,
+`TestEnsureRefusesACurrentTableWithAnUnknownColumn`, `TestEnsureIgnoresADroppedColumn`,
+`TestEnsureReadsOnlyTheEnginesOwnTable`,
+`TestReadsAndWritesAgainstAnOlderTableReportItBehind`. *Source:* adversarial review of the
+checkpoint table format.
+
 ## Refusals and preflight (RF)
 
 Each refusal is a preflight **error with a stated reason** — never a warning, never attempted.
@@ -1078,4 +1110,5 @@ about **how we write and review the code**.
 | ST-7 | 1 | target-mismatch refusal + single-statement-by-construction tests |
 | ST-8 | 2 (declarative model) | parse-time ordering + forged-proof refusal tests at every replay site |
 | ST-9 | 2 (declarative model) | every-relation-owned-by-owner, owner-mismatch fail-closed, unreadable-owner unverified, non-inheriting member admitted |
+| ST-10 | 8 | older-table evolve, newer-table refuse with no DDL, dropped-column and foreign-table shape reads, behind-table typed reads and writes |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

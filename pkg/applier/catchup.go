@@ -199,6 +199,13 @@ func (c *Catchup) Status() Status {
 	return c.status
 }
 
+// Confirmed is the position the catch-up last confirmed to the server:
+// every change to a landed key that committed at or below it is in the
+// shadow. It is the checksum's ConfirmedSource for a live pass.
+func (c *Catchup) Confirmed() decode.LSN {
+	return c.Status().Confirmed
+}
+
 // Run consumes the stream in cycles until ctx ends or the stream, the
 // buffer, or a flush fails. Each cycle gathers changes until MaxChanges
 // are buffered or Interval has passed, reads the copier's Position after

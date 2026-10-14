@@ -28,9 +28,24 @@ type Report struct {
 	// Rows is the number of source rows the pass hashed.
 	Rows int64
 	// Mismatches lists the chunks whose digests differed, in ascending key
-	// order. It is empty for a clean pass.
+	// order. It is empty for a clean pass. Under a live pass these are the
+	// confirmed divergences: chunks that still differed once the stream had
+	// delivered everything the sweep saw.
 	Mismatches []Mismatch
+	// Settled is the number of chunks a live pass found differing in its
+	// sweep and then read clean, or read with the shadow at exactly the
+	// state the sweep saw on the source, once the catch-up had confirmed
+	// past the sweep's read. A quiesced pass settles nothing.
+	Settled int
+	// Unsettled is the number of chunks a live pass found differing in its
+	// sweep and could settle neither way within its bounds: the catch-up
+	// did not confirm past the read in time, or the chunk changed on every
+	// reread. They are not in Mismatches, since nothing was confirmed about
+	// them, and a report that counts any is not clean. A quiesced pass
+	// leaves nothing unsettled.
+	Unsettled int
 }
 
-// Clean reports whether every compared chunk matched.
-func (r Report) Clean() bool { return len(r.Mismatches) == 0 }
+// Clean reports whether every compared chunk matched or settled, with none
+// left unsettled.
+func (r Report) Clean() bool { return len(r.Mismatches) == 0 && r.Unsettled == 0 }

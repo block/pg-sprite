@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -88,10 +89,80 @@ func TestEnsureAddsTheColumnsAnOlderTableLacks(t *testing.T) {
 	assert.Equal(t, copier.NewWatermark(1000), got.Watermark)
 }
 
+// Until Ensure has evolved an older table, every read and write that names
+// the missing column reports the typed ErrTableBehind — still carrying the
+// server's undefined_column — and never ErrNotFound, so resume cannot start
+// fresh over a table that merely needs Ensure; after Ensure the same calls
+// go through.
+func TestReadsAndWritesAgainstAnOlderTableReportItBehind(t *testing.T) {
+	f := newStoreFixture(t)
+	f.exec(t, `CREATE SCHEMA "pgsprite"`)
+	f.exec(t, firstShapeTableSQL)
+	lock := f.ordersLock(t)
+	cp := ordersCheckpoint()
+
+	_, inspectErr := f.store.Inspect(t.Context(), "app", "orders")
+	_, loadErr := f.store.Load(t.Context(), "app", "orders", cp.Fingerprints())
+	for name, err := range map[string]error{
+		"inspect": inspectErr,
+		"load":    loadErr,
+		"save":    f.store.Save(t.Context(), lock, cp),
+	} {
+		assert.ErrorIs(t, err, checkpoint.ErrTableBehind, name)
+		assert.NotErrorIs(t, err, checkpoint.ErrNotFound, name)
+		assert.NotErrorIs(t, err, checkpoint.ErrTableMissing, name)
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, err, &pgErr, name)
+		assert.Equal(t, "42703", pgErr.Code, name)
+	}
+	assert.Equal(t, int64(0), f.rowCount(t), "the refused Save wrote nothing")
+
+	require.NoError(t, f.store.Ensure(t.Context()))
+	require.NoError(t, f.store.Save(t.Context(), lock, cp))
+	_, err := f.store.Load(t.Context(), "app", "orders", cp.Fingerprints())
+	assert.NoError(t, err)
+}
+
+// A column that was dropped from the table is not a column: Ensure neither
+// counts it as unknown nor as present, so a table whose only trace of a
+// foreign column is its dropped attribute is evolved like any other, and a
+// known column that was dropped is added back.
+func TestEnsureIgnoresADroppedColumn(t *testing.T) {
+	f := newStoreFixture(t)
+	f.exec(t, `CREATE SCHEMA "pgsprite"`)
+	f.exec(t, firstShapeTableSQL)
+	f.exec(t, `ALTER TABLE "pgsprite"."pgsprite_checkpoint" ADD COLUMN swap_proof jsonb`)
+	f.exec(t, `ALTER TABLE "pgsprite"."pgsprite_checkpoint" DROP COLUMN swap_proof`)
+	f.exec(t, `ALTER TABLE "pgsprite"."pgsprite_checkpoint" DROP COLUMN watermark`)
+	before := f.columnNames(t)
+	require.NotContains(t, before, "watermark")
+
+	require.NoError(t, f.store.Ensure(t.Context()), "a dropped unknown column does not mark the table as a newer engine's")
+	assert.Equal(t, append(before, "watermark", "shadow_proof"), f.columnNames(t), "every known column the table lacks is added, in shape order")
+}
+
+// Ensure judges the engine's own table and no other: a table of the same
+// name in another schema, with columns this engine does not know, is not
+// the checkpoint table and does not make Ensure refuse.
+func TestEnsureReadsOnlyTheEnginesOwnTable(t *testing.T) {
+	f := newStoreFixture(t)
+	f.exec(t, `CREATE SCHEMA "app"`)
+	f.exec(t, `CREATE TABLE "app"."pgsprite_checkpoint" (
+	schema_name text NOT NULL,
+	table_name  text NOT NULL,
+	swap_proof  jsonb,
+	PRIMARY KEY (schema_name, table_name)
+)`)
+
+	f.ensure(t)
+	assert.NotContains(t, f.columnNames(t), "swap_proof", "the engine's table has the engine's shape")
+	require.NoError(t, f.store.Ensure(t.Context()), "the other schema's table is never read")
+}
+
 // A table with a column this engine does not know was shaped by a newer
-// engine. Ensure refuses it, typed, and runs no DDL — not even to add a
-// column the table also lacks — so the newer engine finds its table as it
-// left it.
+// engine. Ensure refuses it, typed, naming the column, and runs no DDL —
+// not even to add a column the table also lacks — so the newer engine finds
+// its table as it left it.
 func TestEnsureRefusesATableANewerEngineShaped(t *testing.T) {
 	f := newStoreFixture(t)
 	f.exec(t, `CREATE SCHEMA "pgsprite"`)
@@ -101,13 +172,16 @@ func TestEnsureRefusesATableANewerEngineShaped(t *testing.T) {
 
 	err := f.store.Ensure(t.Context())
 	assert.ErrorIs(t, err, checkpoint.ErrTableNewer)
-	assert.ErrorContains(t, err, "swap_proof")
+	var newer *checkpoint.TableNewerError
+	require.ErrorAs(t, err, &newer)
+	assert.Equal(t, []string{"swap_proof"}, newer.Unknown)
 	assert.Equal(t, before, f.columnNames(t), "a refused table is left exactly as found: shadow_proof is not added")
 }
 
 // A table of today's shape with one column more is refused the same way,
 // even though nothing is missing: the extra column is what marks it as a
-// newer engine's.
+// newer engine's — or as one an operator added by hand, which Ensure
+// cannot tell apart and refuses the same way.
 func TestEnsureRefusesACurrentTableWithAnUnknownColumn(t *testing.T) {
 	f := newStoreFixture(t)
 	f.ensure(t)
@@ -115,5 +189,7 @@ func TestEnsureRefusesACurrentTableWithAnUnknownColumn(t *testing.T) {
 
 	err := f.store.Ensure(t.Context())
 	assert.ErrorIs(t, err, checkpoint.ErrTableNewer)
-	assert.ErrorContains(t, err, "operator_note")
+	var newer *checkpoint.TableNewerError
+	require.ErrorAs(t, err, &newer)
+	assert.Equal(t, []string{"operator_note"}, newer.Unknown)
 }

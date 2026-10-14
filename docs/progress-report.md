@@ -118,16 +118,20 @@ the copy's stop path open.
 chunks and digests each one on both tables inside one snapshot. The counters cover a whole
 `Check`: the comparison that finds differing chunks and, under the `repair` policy, the recopy
 and the reread that follow it, so a pass that spends most of its time repairing still shows
-movement. They are read from the pass's memory — no catalog read, nothing for a poll to wait
-on — and reset to zero when a pass starts. Native and `copy` operations report none of them.
+movement. They cover a whole `CheckLive` the same way — the pass that runs while the source is
+written and the catch-up applies the stream to the shadow — where a chunk the comparison found
+differing is read again once the catch-up has confirmed past the position it was read at, and
+again for as long as it keeps changing, up to a stated bound. They are read from the pass's
+memory — no catalog read, nothing for a poll to wait on — and reset to zero when a pass starts.
+Native and `copy` operations report none of them.
 
 | Counter | Meaning |
 | --- | --- |
 | `chunks_compared` | Chunks the comparison has digested on both sides; a digest counts when its transaction commits. The rereads of the repair phase are not in this count. |
 | `rows_hashed` | Source rows those comparison digests covered. |
-| `chunks_mismatched` | Chunks the comparison found differing. Under `abort` this is the finding the pass returns with; under `repair` it is the number of chunks the recopy covers. |
+| `chunks_mismatched` | Chunks the comparison found differing. Under `abort` this is the finding the pass returns with; under `repair` it is the number of chunks the recopy covers. In a live pass it counts the chunks the sweep found differing before any settled, so it is an upper bound on the divergences the pass will confirm: a chunk the stream had simply not reached yet is counted here and then settles clean. |
 | `chunks_repaired` | Chunks whose recopy from the source has committed. Every differing chunk is recopied in one transaction, so this moves from `0` to `chunks_mismatched` at that commit. A chunk still differing at its reread stops the pass; it stays counted here because its recopy did commit. |
-| `chunks_reread` | Repaired chunks digested again after the recopy, in a fresh snapshot. It climbs from `0` towards `chunks_repaired` as the rereads commit, so `chunks_repaired − chunks_reread` is the repair phase's remaining work; a chunk that still differs at its reread is counted here before the pass stops on it. |
+| `chunks_reread` | Chunks digested again in a fresh snapshot after the comparison. Under `Check` these are the repaired chunks reread after the recopy: it climbs from `0` towards `chunks_repaired` as the rereads commit, so `chunks_repaired − chunks_reread` is the repair phase's remaining work; a chunk that still differs at its reread is counted here before the pass stops on it. In a live pass every settling reread counts — of a chunk the sweep found differing, and of a repaired chunk after its recopy — so the figure can exceed `chunks_mismatched` while the pass rereads a chunk that keeps changing, and a pass that is still climbing here is waiting on the catch-up or on the source to hold still. |
 
 There is no completion figure for the comparison. A pass sizes its chunks from the time each
 one takes, so the chunk count is known only when the pass ends, and no row total describes the
@@ -135,8 +139,9 @@ comparison either: the copy step's `rows_total` is `reltuples` at the copy's sta
 table `ANALYZE` has never visited and short on a source that kept growing, so `rows_hashed`
 over it is an estimate dressed as a ratio, not a measure. As with the copy, completion is the
 step ending, and a rate comes from two snapshots of `rows_hashed` and `step_elapsed_ns`. The
-repair phase does have a measure: once `chunks_repaired` has moved, `chunks_reread` /
-`chunks_repaired` is the share of the rereads done.
+repair phase of a `Check` does have a measure: once `chunks_repaired` has moved, `chunks_reread` /
+`chunks_repaired` is the share of the rereads done. A live pass has none for its settling: how
+many rereads a chunk needs depends on the source, not the pass.
 
 The counters are the pass's, not the step's. Once the pass returns, `work` leaves the snapshot
 with it: a terminal snapshot carries no `work`, and a poll that lands after the pass returned

@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/dbconn"
 )
 
@@ -51,7 +52,10 @@ const (
 // on the source has excluded every writer, so no row can change after the
 // drain and before the rename. The transaction is bounded by the swap's
 // options and runs as the table's owner. A nil DrainFunc drains nothing: a
-// quiesced table, or a caller that has already applied the final position.
+// quiesced table, or a caller that has already applied the final position
+// and verified the shadow with a quiesced pass since. A proof a live pass
+// minted (checksum.VerifiedShadow.Live) is refused without a drain, since
+// the stream still carries the changes the proof does not cover.
 //
 // The drain runs once per attempt. An attempt can still fail after the
 // drain — a lock wait later in the transaction times out, say — and that
@@ -160,6 +164,9 @@ func Cutover(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSess
 	if err := checkCutoverProofs(ready.built, ready.verified); err != nil {
 		return SwappedTable{}, err
 	}
+	if err := checkDrain(ready.verified, drain); err != nil {
+		return SwappedTable{}, err
+	}
 	if err := requireTableLock(lock, ready.built.Schema(), ready.built.SourceTable()); err != nil {
 		return SwappedTable{}, err
 	}
@@ -170,6 +177,21 @@ func Cutover(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSess
 		return SwappedTable{}, lockLossCause(lock, err)
 	}
 	return swapped, nil
+}
+
+// checkDrain refuses a live proof with no drain to finish it: a pass that
+// ran while the stream wrote the shadow proved the shadow equal to the
+// source only as of the position it settled against, and the changes since
+// are applied by the drain under the swap's ACCESS EXCLUSIVE lock, after
+// which no row can change before the rename. A quiesced proof needs no
+// drain, and a drain with a quiesced proof applies nothing.
+func checkDrain(verified checksum.VerifiedShadow, drain DrainFunc) error {
+	// INV: CO-1
+	if verified.Live() && drain == nil {
+		return refuse(CauseCutoverUndrained, nil, "verified shadow proof for %s.%s was minted by a live pass, and no drain was supplied to apply the stream's changes since under the swap lock",
+			verified.Schema(), verified.Table())
+	}
+	return nil
 }
 
 // cutoverWithRetry is the LK-2 loop around one swap attempt. A lock
