@@ -19,7 +19,9 @@ const (
 	// FormatVersion is the row format Save writes and Load accepts. A row
 	// carrying another value was written by an engine whose columns mean
 	// something else, and is incompatible whatever its fingerprints say.
-	FormatVersion int32 = 1
+	// In this format a run that has built its shadow carries the shadow's
+	// proof in the row.
+	FormatVersion int32 = 2
 	// SchemaName is the engine-owned schema the checkpoint table lives in.
 	// It is the engine's, not the target's, so one table holds every
 	// target's row (D3) and no target schema is written to.
@@ -118,10 +120,17 @@ func NewStore(pool *pgxpool.Pool, opts Options) (*Store, error) {
 // run's format version and fingerprints. A row that carries another's is
 // left untouched and the statement reports zero rows, which Save turns
 // into IncompatibleError (ST-1, ST-2).
+//
+// The shadow proof is write-once: a Save that carries none keeps the
+// row's (COALESCE), and a Save that carries a proof other than the row's
+// is refused by the guard like a foreign row, so a proof already written
+// is never cleared or replaced by a later Save (ST-2). jsonb compares by
+// value, so a proof re-rendered with other spacing or key order is the
+// same proof to the guard.
 const saveSQL = "INSERT INTO " + tableIdent + ` (
 	schema_name, table_name, format_version, shadow_table, slot_name, publication_name,
-	watermark, last_applied_lsn, source_fingerprint, target_fingerprint, phase, updated_at
-) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::pg_lsn, $9, $10, $11, $12)
+	watermark, last_applied_lsn, source_fingerprint, target_fingerprint, phase, updated_at, shadow_proof
+) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::pg_lsn, $9, $10, $11, $12, $13)
 ON CONFLICT (schema_name, table_name) DO UPDATE SET
 	shadow_table = EXCLUDED.shadow_table,
 	slot_name = EXCLUDED.slot_name,
@@ -129,20 +138,28 @@ ON CONFLICT (schema_name, table_name) DO UPDATE SET
 	watermark = EXCLUDED.watermark,
 	last_applied_lsn = EXCLUDED.last_applied_lsn,
 	phase = EXCLUDED.phase,
-	updated_at = EXCLUDED.updated_at
+	updated_at = EXCLUDED.updated_at,
+	shadow_proof = COALESCE(EXCLUDED.shadow_proof, ` + tableIdent + `.shadow_proof)
 WHERE ` + tableIdent + `.format_version = EXCLUDED.format_version
 	AND ` + tableIdent + `.source_fingerprint = EXCLUDED.source_fingerprint
-	AND ` + tableIdent + `.target_fingerprint = EXCLUDED.target_fingerprint`
+	AND ` + tableIdent + `.target_fingerprint = EXCLUDED.target_fingerprint
+	AND (EXCLUDED.shadow_proof IS NULL
+		OR ` + tableIdent + `.shadow_proof IS NULL
+		OR ` + tableIdent + `.shadow_proof = EXCLUDED.shadow_proof)`
 
 // Save writes cp as the target's one row, atomically: a reader sees the
 // previous record or this one, never a mix (ST-1). It refuses, with
 // IncompatibleError, to write over a row that another statement or another
 // row format owns; a run that means to start fresh calls Delete first
-// (ST-2). The write runs under the target's table lock session and
-// confirms, from its own transaction, that the session still holds the
-// table (LK-1): a run whose lock went to another engine cannot stamp its
-// stale state over the newer engine's row. UpdatedAt is taken from the
-// store's clock, not from cp.
+// (ST-2). The row's shadow proof is written once and then kept: a cp that
+// carries no proof leaves the row's in place, and a cp that carries a
+// different proof is refused with ErrInvariantViolation, because a
+// different shadow is a fresh start, which goes through Delete (ST-2).
+// The write runs under the target's table lock session and confirms, from
+// its own transaction, that the session still holds the table (LK-1): a
+// run whose lock went to another engine cannot stamp its stale state over
+// the newer engine's row. UpdatedAt is taken from the store's clock, not
+// from cp.
 func (s *Store) Save(ctx context.Context, lock *dbconn.TableLockSession, cp Checkpoint) error {
 	// INV: ST-1
 	if err := cp.validate(); err != nil {
@@ -167,9 +184,10 @@ func (s *Store) Save(ctx context.Context, lock *dbconn.TableLockSession, cp Chec
 	tag, err := tx.Exec(ctx, saveSQL,
 		cp.Schema, cp.Table, FormatVersion, cp.ShadowTable, cp.SlotName, cp.PublicationName,
 		watermarkColumn(cp.Watermark), cp.LastAppliedLSN.String(),
-		cp.SourceFingerprint, cp.TargetFingerprint, cp.Phase.String(), s.opts.Clock.Now())
+		cp.SourceFingerprint, cp.TargetFingerprint, cp.Phase.String(), s.opts.Clock.Now(),
+		shadowProofColumn(cp.ShadowProof))
 	if err != nil {
-		return fmt.Errorf("save checkpoint for %s.%s: %w", cp.Schema, cp.Table, missingTable(err))
+		return fmt.Errorf("save checkpoint for %s.%s: %w", cp.Schema, cp.Table, tableUnusable(err))
 	}
 	if tag.RowsAffected() == 0 {
 		// INV: ST-2
@@ -182,6 +200,13 @@ func (s *Store) Save(ctx context.Context, lock *dbconn.TableLockSession, cp Chec
 		}
 		if incompatible := stored.incompatibility(cp.Fingerprints()); incompatible != nil {
 			return incompatible
+		}
+		replaces, err := replacesProof(stored, cp)
+		if err != nil {
+			return fmt.Errorf("save checkpoint for %s.%s: %w", cp.Schema, cp.Table, err)
+		}
+		if replaces {
+			return fmt.Errorf("%w: save of checkpoint for %s.%s carries a shadow proof other than the one the row holds; a different shadow is a fresh start, which goes through Delete", ErrInvariantViolation, cp.Schema, cp.Table)
 		}
 		return fmt.Errorf("%w: save of checkpoint for %s.%s updated no row although the existing row is compatible", ErrInvariantViolation, cp.Schema, cp.Table)
 	}
@@ -231,7 +256,7 @@ func (s *Store) Delete(ctx context.Context, lock *dbconn.TableLockSession, schem
 	}
 	tag, err := tx.Exec(ctx, deleteSQL, schema, table, stored.FormatVersion, stored.Fingerprints.Source, stored.Fingerprints.Target)
 	if err != nil {
-		return fmt.Errorf("delete checkpoint for %s.%s: %w", schema, table, missingTable(err))
+		return fmt.Errorf("delete checkpoint for %s.%s: %w", schema, table, tableUnusable(err))
 	}
 	if tag.RowsAffected() == 0 {
 		// INV: ST-2

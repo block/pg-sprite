@@ -3,6 +3,7 @@ package checkpoint_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -54,8 +55,8 @@ func TestLoadReportsAnotherFormatVersionAsIncompatible(t *testing.T) {
 	var incompatible *checkpoint.IncompatibleError
 	require.ErrorAs(t, err, &incompatible)
 	assert.Equal(t, checkpoint.MismatchFormat, incompatible.Mismatch)
-	assert.Equal(t, "2", incompatible.Have)
-	assert.Equal(t, "1", incompatible.Want)
+	assert.Equal(t, fmt.Sprint(checkpoint.FormatVersion+1), incompatible.Have)
+	assert.Equal(t, fmt.Sprint(checkpoint.FormatVersion), incompatible.Want)
 }
 
 // A backend terminated from outside the session — what a failover looks

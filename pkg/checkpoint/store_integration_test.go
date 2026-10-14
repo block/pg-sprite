@@ -2,6 +2,7 @@ package checkpoint_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/url"
 	"sync"
@@ -142,6 +143,11 @@ func ordersCheckpoint() checkpoint.Checkpoint {
 	}
 }
 
+// ordersProof is the proof a build of app.orders's shadow would render,
+// spaced as a builder's encoder might: the server stores jsonb by value, so
+// what Load returns is compared as JSON, not byte for byte.
+var ordersProof = json.RawMessage(`{"schema": "app", "source_table": "orders", "shadow_table": "_pgsprite_orders_new", "source_oid": 16401, "shadow_oid": 16407}`)
+
 // Ensure creates the engine schema and the table on first use and is a
 // no-op afterwards; nothing else is needed before the first Save.
 func TestEnsureCreatesTheTableOnceAndIsIdempotent(t *testing.T) {
@@ -263,6 +269,74 @@ func TestSaveThenLoadRoundTripsTheRecord(t *testing.T) {
 	got.UpdatedAt = time.Time{}
 	cp.UpdatedAt = time.Time{}
 	assert.Equal(t, cp, got)
+}
+
+// The shadow proof rides on the row: a Save with one reads it back as the
+// same JSON, a Save without one reads back none, a later Save carrying the
+// same proof in another rendering is accepted, and a later Save for the
+// same statement carrying a different proof is refused and leaves the row
+// as it was — a different shadow is a fresh start through Delete (ST-2).
+func TestSaveThenLoadRoundTripsTheShadowProof(t *testing.T) {
+	f := newStoreFixture(t)
+	f.ensure(t)
+	lock := f.ordersLock(t)
+	cp := ordersCheckpoint()
+	require.NoError(t, f.store.Save(t.Context(), lock, cp))
+	got, err := f.store.Load(t.Context(), "app", "orders", cp.Fingerprints())
+	require.NoError(t, err)
+	assert.Empty(t, got.ShadowProof, "a run that has not built its shadow has no proof")
+
+	cp.ShadowProof = ordersProof
+	cp.Phase = checkpoint.PhaseVerifying
+	require.NoError(t, f.store.Save(t.Context(), lock, cp))
+	got, err = f.store.Load(t.Context(), "app", "orders", cp.Fingerprints())
+	require.NoError(t, err)
+	assert.JSONEq(t, string(ordersProof), string(got.ShadowProof))
+	assert.Equal(t, checkpoint.PhaseVerifying, got.Phase)
+
+	cp.ShadowProof = got.ShadowProof
+	cp.Phase = checkpoint.PhaseCutover
+	require.NoError(t, f.store.Save(t.Context(), lock, cp), "the proof as the server renders it is the same proof")
+	got, err = f.store.Load(t.Context(), "app", "orders", cp.Fingerprints())
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.PhaseCutover, got.Phase)
+
+	cp.ShadowProof = json.RawMessage(`{"schema": "app", "source_table": "orders", "shadow_table": "_pgsprite_orders_new2"}`)
+	cp.Phase = checkpoint.PhaseDone
+	err = f.store.Save(t.Context(), lock, cp)
+	assert.ErrorIs(t, err, checkpoint.ErrInvariantViolation, "a different proof is refused")
+	var incompatible *checkpoint.IncompatibleError
+	assert.False(t, errors.As(err, &incompatible), "the row is this statement's; a different proof is not an identity mismatch")
+	got, err = f.store.Load(t.Context(), "app", "orders", cp.Fingerprints())
+	require.NoError(t, err)
+	assert.JSONEq(t, string(ordersProof), string(got.ShadowProof), "the refused Save left the proof as it was")
+	assert.Equal(t, checkpoint.PhaseCutover, got.Phase, "the refused Save wrote nothing else either")
+	assert.Equal(t, int64(1), f.rowCount(t))
+}
+
+// A Save that carries no proof keeps the one the row already holds: the
+// runner may save progress without re-rendering the proof, and the store
+// never clears a proof once written (ST-2).
+func TestSaveWithoutAProofDoesNotEraseTheRowsProof(t *testing.T) {
+	f := newStoreFixture(t)
+	f.ensure(t)
+	lock := f.ordersLock(t)
+	cp := ordersCheckpoint()
+	cp.ShadowProof = ordersProof
+	cp.Phase = checkpoint.PhaseVerifying
+	require.NoError(t, f.store.Save(t.Context(), lock, cp))
+
+	cp.ShadowProof = nil
+	cp.Phase = checkpoint.PhaseCutover
+	cp.LastAppliedLSN = decode.LSN(0x00000016b374ffff)
+	require.NoError(t, f.store.Save(t.Context(), lock, cp))
+
+	got, err := f.store.Load(t.Context(), "app", "orders", cp.Fingerprints())
+	require.NoError(t, err)
+	assert.JSONEq(t, string(ordersProof), string(got.ShadowProof), "the proof survives a Save that did not carry it")
+	assert.Equal(t, checkpoint.PhaseCutover, got.Phase, "the rest of the Save landed")
+	assert.Equal(t, decode.LSN(0x00000016b374ffff), got.LastAppliedLSN)
+	assert.Equal(t, int64(1), f.rowCount(t))
 }
 
 // A second Save for the same target replaces the one row rather than adding

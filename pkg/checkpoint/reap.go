@@ -162,11 +162,11 @@ func (s *Store) candidateSlots(ctx context.Context) ([]candidateSlot, error) {
 func (s *Store) liveRowSlots(ctx context.Context, names []string) (map[string]bool, error) {
 	rows, err := s.pool.Query(ctx, liveRowSlotsSQL, names, PhaseDone.String(), PhaseFailed.String())
 	if err != nil {
-		return nil, fmt.Errorf("read slot owners: %w", missingTable(err))
+		return nil, fmt.Errorf("read slot owners: %w", tableUnusable(err))
 	}
 	owned, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
-		return nil, fmt.Errorf("read slot owners: %w", missingTable(err))
+		return nil, fmt.Errorf("read slot owners: %w", tableUnusable(err))
 	}
 	live := make(map[string]bool, len(owned))
 	for _, name := range owned {
