@@ -75,6 +75,11 @@ func ParseDesired(sql string) (DesiredSchema, error) {
 	if err != nil {
 		return DesiredSchema{}, fmt.Errorf("parse desired schema: %w", err)
 	}
+	return parseDesiredTree(tree)
+}
+
+// parseDesiredTree applies ParseDesired's admission rules to a parsed file.
+func parseDesiredTree(tree *pganalyze.ParseResult) (DesiredSchema, error) {
 	if len(tree.GetStmts()) == 0 {
 		return DesiredSchema{}, ErrEmptyDesired
 	}

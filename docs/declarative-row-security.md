@@ -162,6 +162,8 @@ function bodies, and authentication configuration are outside this comparison.
 Library callers use `RenderWithRowSecurity`, `ParseDesiredWithRowSecurity`, and
 `diffplan.PlanWithRowSecurity`. The parser returns a separate declaration type. Only the dedicated atomic RLS
 executor accepts it for live execution; generic native and create executors do not.
+A caller that handles both kinds of desired file uses `ParseDesiredFile`, which picks
+the front door from the file's statements and returns whichever declaration it admitted.
 
 ## Review a difference
 

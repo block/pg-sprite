@@ -27,15 +27,16 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read desired schema: %w", err)
 	}
-	ds, err := statement.ParseDesired(string(raw))
-	if err != nil {
-		carriesRLS, detectErr := statement.HasRowSecurityDeclaration(string(raw))
-		if detectErr == nil && carriesRLS {
-			return c.runRowSecurityDiff(ctx, out, string(raw))
-		}
-	}
+	file, err := statement.ParseDesiredFile(string(raw))
 	if err != nil {
 		return err
+	}
+	if rowSecurity, ok := file.RowSecurity(); ok {
+		return c.runRowSecurityDiff(ctx, out, rowSecurity)
+	}
+	ds, ok := file.Schema()
+	if !ok {
+		return fmt.Errorf("desired schema %s admitted no planner input", c.Desired)
 	}
 	logger.Debug("desired schema parsed", "table", ds.Table(), "statements", len(ds.Statements()))
 

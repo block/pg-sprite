@@ -46,6 +46,12 @@ func ParseDesiredWithRowSecurity(sql string) (DesiredWithRowSecurity, error) {
 	if err != nil {
 		return DesiredWithRowSecurity{}, fmt.Errorf("parse desired row security: %w", err)
 	}
+	return parseDesiredWithRowSecurityTree(tree)
+}
+
+// parseDesiredWithRowSecurityTree applies ParseDesiredWithRowSecurity's
+// admission rules to a parsed file.
+func parseDesiredWithRowSecurityTree(tree *pganalyze.ParseResult) (DesiredWithRowSecurity, error) {
 	var tableSQL strings.Builder
 	var security []*pganalyze.Node
 	hasTable := false
@@ -196,14 +202,20 @@ func HasRowSecurityDeclaration(sql string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("parse desired schema: %w", err)
 	}
+	return hasRowSecurity(tree), nil
+}
+
+// hasRowSecurity reports whether a parsed file declares row security: a
+// policy, a policy comment, or a row-security setting on a table.
+func hasRowSecurity(tree *pganalyze.ParseResult) bool {
 	for _, raw := range tree.GetStmts() {
 		node := raw.GetStmt()
 		if node.GetCreatePolicyStmt() != nil {
-			return true, nil
+			return true
 		}
 		if c := node.GetCommentStmt(); c != nil {
 			if c.GetObjtype() == pganalyze.ObjectType_OBJECT_POLICY {
-				return true, nil
+				return true
 			}
 		}
 		if a := node.GetAlterTableStmt(); a != nil {
@@ -211,10 +223,10 @@ func HasRowSecurityDeclaration(sql string) (bool, error) {
 				switch cmd.GetAlterTableCmd().GetSubtype() {
 				case pganalyze.AlterTableType_AT_EnableRowSecurity, pganalyze.AlterTableType_AT_DisableRowSecurity,
 					pganalyze.AlterTableType_AT_ForceRowSecurity, pganalyze.AlterTableType_AT_NoForceRowSecurity:
-					return true, nil
+					return true
 				}
 			}
 		}
 	}
-	return false, nil
+	return false
 }

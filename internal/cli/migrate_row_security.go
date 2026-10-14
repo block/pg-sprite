@@ -12,14 +12,10 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, sql string) error {
+func (c *MigrateCmd) runDesiredRowSecurity(ctx context.Context, out io.Writer, desired statement.DesiredWithRowSecurity) error {
 	if c.DryRun {
 		diff := DiffCmd{DBFlags: c.DBFlags, OutputFlags: c.OutputFlags, Schema: c.Schema, JSON: c.JSON}
-		return diff.runRowSecurityDiff(ctx, out, sql)
-	}
-	desired, err := statement.ParseDesiredWithRowSecurity(sql)
-	if err != nil {
-		return err
+		return diff.runRowSecurityDiff(ctx, out, desired)
 	}
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {
