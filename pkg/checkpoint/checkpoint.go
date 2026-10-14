@@ -120,6 +120,18 @@ type Checkpoint struct {
 	// still knows which relations the swap was to move. It is empty for a
 	// run that has no shadow to prove. It comes back as the server renders
 	// JSON, not byte for byte as it was saved.
+	//
+	// Its lifecycle is the runner's, not the store's. The runner writes it
+	// on the first Save after the build and decodes it on resume
+	// (schemachange.Proof); it must be a JSON object, with no NUL character
+	// in any string, or Save refuses it (ErrInvalidCheckpoint). The store
+	// keeps it write-once: a later Save that carries no proof leaves the
+	// row's in place, a later Save that carries the same proof is a no-op
+	// on this column, and a later Save that carries a different proof is
+	// refused (ErrInvariantViolation) — a different shadow is a fresh
+	// start, which goes through Delete. Whether a row that should carry a
+	// proof does, and whether the proof still describes the shadow, is the
+	// runner's check, not the store's.
 	ShadowProof json.RawMessage
 }
 
@@ -137,8 +149,8 @@ func (c Checkpoint) Identity() Identity {
 
 // validate refuses a checkpoint the store must not persist: the key, the
 // fingerprints, and the phase are what resume keys on, so none may be empty
-// or unknown, and a shadow proof, when there is one, must be JSON the
-// column can hold. The slot and publication names may be empty — a
+// or unknown, and a shadow proof, when there is one, must be a JSON
+// object the column can hold. The slot and publication names may be empty — a
 // quiesced run decodes no WAL and has neither.
 func (c Checkpoint) validate() error {
 	for _, field := range []struct{ name, value string }{
@@ -155,8 +167,5 @@ func (c Checkpoint) validate() error {
 	if _, err := parsePhase(c.Phase.String()); err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidCheckpoint, err)
 	}
-	if len(c.ShadowProof) > 0 && !json.Valid(c.ShadowProof) {
-		return fmt.Errorf("%w: shadow proof is not JSON", ErrInvalidCheckpoint)
-	}
-	return nil
+	return validateShadowProof(c.ShadowProof)
 }

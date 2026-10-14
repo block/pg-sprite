@@ -47,7 +47,7 @@ func (s *Store) load(ctx context.Context, q dbconn.RowQuerier, schema, table str
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Checkpoint{}, fmt.Errorf("%w: %s.%s", ErrNotFound, schema, table)
 		}
-		return Checkpoint{}, fmt.Errorf("load checkpoint for %s.%s: %w", schema, table, missingTable(err))
+		return Checkpoint{}, fmt.Errorf("load checkpoint for %s.%s: %w", schema, table, tableUnusable(err))
 	}
 	if incompatible := guard(stored); incompatible != nil {
 		return Checkpoint{}, incompatible

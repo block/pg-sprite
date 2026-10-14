@@ -109,18 +109,23 @@ func inspectTableShape(ctx context.Context, tx pgx.Tx) (tableShape, error) {
 
 // evolveTable brings an existing checkpoint table up to this engine's
 // shape, additively: each known column the table lacks is added. A table
-// with columns this engine does not know was created by a newer engine,
-// whose columns this one cannot preserve the meaning of; it is refused
-// with ErrTableNewer and no DDL runs, so the newer engine's table is left
-// exactly as it was. It runs inside Ensure's locked transaction, so two
-// engines evolving one table serialize.
+// with columns this engine does not know — a newer engine's, or one an
+// operator added by hand — is refused with a *TableNewerError and no DDL
+// runs, since this engine cannot preserve the meaning of a column it has
+// never heard of; the table is left exactly as it was. It runs inside
+// Ensure's locked transaction, so two engines evolving one table
+// serialize. Each ADD COLUMN takes ACCESS EXCLUSIVE on the table and waits
+// at most the session's lock_timeout for the other engines' writes to
+// clear; a lock timeout is returned as the server reported it, the
+// transaction rolls back, and Ensure is safe to call again.
 func evolveTable(ctx context.Context, tx pgx.Tx) error {
+	// INV: ST-10
 	shape, err := inspectTableShape(ctx, tx)
 	if err != nil {
 		return err
 	}
 	if len(shape.unknown) > 0 {
-		return fmt.Errorf("%w: %s has columns this engine does not know: %s", ErrTableNewer, tableIdent, strings.Join(shape.unknown, ", "))
+		return &TableNewerError{Unknown: shape.unknown}
 	}
 	for _, c := range shape.missing {
 		if _, err := tx.Exec(ctx, addColumnSQL(c)); err != nil {

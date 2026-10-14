@@ -58,9 +58,13 @@ type engineObjects struct {
 // another owner, or a relation under the table's name that is not a plain
 // table, is refused with ErrForeignObject rather than adopted. A table an
 // older engine created is brought up to this engine's shape by adding the
-// columns it lacks, so its rows stay readable; a table with columns this
-// engine does not know belongs to a newer engine and is refused with
-// ErrTableNewer, untouched.
+// columns it lacks, so its rows stay readable: that ALTER TABLE takes
+// ACCESS EXCLUSIVE on the one table every target's row lives in, waits at
+// most the session's lock_timeout for the writes in flight to clear, and
+// is safe to call again after a lock timeout, which is returned as the
+// server reported it. A table with columns this engine does not know is
+// refused with a *TableNewerError (ErrTableNewer), untouched. Every read
+// and write before Ensure has evolved an older table reports ErrTableBehind.
 func (s *Store) Ensure(ctx context.Context) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

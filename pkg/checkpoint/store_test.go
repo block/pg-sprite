@@ -1,7 +1,6 @@
 package checkpoint
 
 import (
-	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -91,14 +90,6 @@ func TestSaveAndLoadSQLNameEveryColumn(t *testing.T) {
 	}
 }
 
-// The proof is NULL when the run has none, and otherwise the JSON it holds,
-// whether the caller handed in a nil or an empty slice for none.
-func TestShadowProofColumn(t *testing.T) {
-	assert.Nil(t, shadowProofColumn(nil))
-	assert.Nil(t, shadowProofColumn(json.RawMessage{}))
-	assert.Equal(t, json.RawMessage(`{"a":1}`), shadowProofColumn(json.RawMessage(`{"a":1}`)))
-}
-
 // Delete's statement matches the whole row identity, so a row that another
 // statement wrote after the caller read its IncompatibleError is never the
 // one removed (ST-2).
@@ -134,4 +125,18 @@ func TestSaveSQLGuardsTheRowIdentity(t *testing.T) {
 	for _, column := range []string{"format_version", "source_fingerprint", "target_fingerprint"} {
 		assert.NotContains(t, update, column+" = EXCLUDED."+column, "identity columns are never updated")
 	}
+}
+
+// Save's statement keeps a proof once written: the update falls back to
+// the row's proof when the Save carries none, and the guard admits a Save
+// only when one side has no proof or both hold the same one, so no later
+// Save clears or replaces it (ST-2).
+func TestSaveSQLKeepsTheShadowProofOnceWritten(t *testing.T) {
+	update, guard, found := strings.Cut(saveSQL, "\nWHERE ")
+	require.True(t, found, "the upsert has a conflict guard")
+	assert.Contains(t, update, `shadow_proof = COALESCE(EXCLUDED.shadow_proof, "pgsprite"."pgsprite_checkpoint".shadow_proof)`)
+	assert.NotContains(t, update, "shadow_proof = EXCLUDED.shadow_proof", "a missing proof never overwrites the row's")
+	assert.Contains(t, guard, "EXCLUDED.shadow_proof IS NULL")
+	assert.Contains(t, guard, `"pgsprite"."pgsprite_checkpoint".shadow_proof IS NULL`)
+	assert.Contains(t, guard, `"pgsprite"."pgsprite_checkpoint".shadow_proof = EXCLUDED.shadow_proof`)
 }

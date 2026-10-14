@@ -314,6 +314,27 @@ after its marker leaves the row in `reconciling`, and `InspectResume` answers th
 reconcile whatever the catalog shows under the slot name, so the adapter repeats `Start`
 rather than deciding anything itself.
 
+### Routing the checkpoint store's own refusals
+
+Before `Load` can be guarded on the statement's fingerprints, the resume reads the row with
+`checkpoint.Store.Inspect`, guarded on the row format alone, because the row's phase and
+shadow proof are what tell it which statement it is resuming. `Inspect`, `Load`, and `Save`
+share a set of typed errors about the table and the row format that are about the engine
+installation, not the run, and each means a different action:
+
+| Error | What it means | Orchestrator action |
+| --- | --- | --- |
+| `ErrTableMissing` | The `pgsprite.pgsprite_checkpoint` table does not exist in this database; `Ensure` has never run here | Run `Store.Ensure` (the engine role needs database-level `CREATE`, or the table is [pre-provisioned](engine-role.md)) and read again |
+| `ErrTableBehind` | The table exists but lacks a column this engine uses: the engine was upgraded and `Ensure` has not run since | Run `Store.Ensure`, which adds the missing columns, and read again; a retry without `Ensure` reproduces it |
+| `ErrTableNewer` (`*checkpoint.TableNewerError`, `Unknown` naming the columns) | The table carries columns this engine does not know: a newer engine shaped it, or an operator added a column by hand. `Ensure` ran no DDL | Operator action — run the newer engine, roll the table back to this engine's shape, or drop the hand-added column; retrying this engine cannot succeed while the columns are there |
+| `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion < checkpoint.FormatVersion` | The row was written by an older engine whose row format this engine does not read | Operator action: finish or abandon the old run. When no run is in flight, `Store.Delete(Stored)` is the fresh start; the row is never silently rewritten |
+| `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion > checkpoint.FormatVersion` | The row was written by a newer engine | Upgrade the engine; this one must not touch the row |
+
+`ErrTableBehind` wraps the server's own `42703` undefined-column error, so an adapter that
+logs the chain sees both the engine's classification and the server's words. `ErrTableNewer`
+comes from `Ensure`'s read of the table's shape, before any statement could fail, so it
+carries no server error; the `*TableNewerError` names the columns instead.
+
 ## Invalid-index outcomes of a concurrent index build
 
 `BuildIndexConcurrently` never drops an index. When an invalid index occupies the requested
