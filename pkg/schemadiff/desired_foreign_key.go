@@ -33,7 +33,14 @@ const sqlstateUndefinedTable = "42P01"
 // the stand-in has the referenced table's name and the scratch schema leads
 // the search_path, the server prints the constraint definition unqualified,
 // exactly as live introspection prints the live constraint.
+//
+// LIKE names each copied index after the stand-in table, not after the live
+// index, so a copied name such as users_pkey could be one the desired file
+// creates. Each stand-in index is renamed to an internal name before the
+// desired statements run; a foreign key's printed definition names only the
+// referenced table and columns, so the rename never changes it.
 func createReferencedStandIns(ctx context.Context, tx pgx.Tx, scratch, schema string, tables []string) error {
+	renamed := 0
 	for _, table := range tables {
 		sql := "CREATE TABLE " + pgx.Identifier{scratch, table}.Sanitize() +
 			" (LIKE " + pgx.Identifier{schema, table}.Sanitize() + " INCLUDING INDEXES)"
@@ -44,8 +51,47 @@ func createReferencedStandIns(ctx context.Context, tx pgx.Tx, scratch, schema st
 			}
 			return fmt.Errorf("create scratch stand-in for referenced table %s.%s: %w", schema, table, err)
 		}
+		n, err := renameStandInIndexes(ctx, tx, scratch, table, renamed)
+		if err != nil {
+			return err
+		}
+		renamed += n
 	}
 	return nil
+}
+
+// standInIndexPrefix begins every stand-in index name. A desired file that
+// creates a relation with one of these names fails its scratch replay with a
+// duplicate-relation error rather than planning against a stand-in.
+const standInIndexPrefix = "pgsprite_standin_index_"
+
+// renameStandInIndexes renames the stand-in table's indexes to
+// standInIndexPrefix names numbered from next, and returns how many it
+// renamed. Renaming a constraint's index renames the constraint with it.
+func renameStandInIndexes(ctx context.Context, tx pgx.Tx, scratch, table string, next int) (int, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT idx.relname
+		FROM pg_index i
+		JOIN pg_class idx ON idx.oid = i.indexrelid
+		JOIN pg_class rel ON rel.oid = i.indrelid
+		JOIN pg_namespace n ON n.oid = rel.relnamespace
+		WHERE n.nspname = $1 AND rel.relname = $2
+		ORDER BY idx.relname`, scratch, table)
+	if err != nil {
+		return 0, fmt.Errorf("read scratch stand-in indexes of %s: %w", table, err)
+	}
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return 0, fmt.Errorf("read scratch stand-in indexes of %s: %w", table, err)
+	}
+	for i, name := range names {
+		sql := "ALTER INDEX " + pgx.Identifier{scratch, name}.Sanitize() +
+			" RENAME TO " + pgx.Identifier{fmt.Sprintf("%s%d", standInIndexPrefix, next+i)}.Sanitize()
+		if _, err := tx.Exec(ctx, sql); err != nil {
+			return 0, fmt.Errorf("rename scratch stand-in index %s of %s: %w", name, table, err)
+		}
+	}
+	return len(names), nil
 }
 
 // confirmForeignKeysBindScratch fails closed unless every foreign key the

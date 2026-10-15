@@ -265,3 +265,33 @@ CREATE TABLE orders (
 	requireForeignKeyRefusal(t, kinds[schemadiff.ChangeAddForeignKey])
 	assert.Equal(t, router.DispositionRefuse, report.Disposition)
 }
+
+// A stand-in's indexes never take a name the desired file uses. LIKE ...
+// INCLUDING INDEXES names the copied indexes after the stand-in table, so
+// a live users table whose primary key is users_pk gets a stand-in index
+// named users_pkey; the desired orders file owns an index by that name, and
+// the unchanged schema still plans no change.
+func TestPlanForeignKeyStandInIndexNamesNeverCollide(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.users (
+			id bigint CONSTRAINT users_pk PRIMARY KEY
+		);
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			user_id bigint NOT NULL REFERENCES %[1]s.users (id)
+		);
+		CREATE INDEX users_pkey ON %[1]s.orders (user_id)`, schema))
+	require.NoError(t, err)
+
+	report := planOrders(t, t.Context(), pool, schema, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id)
+);
+CREATE INDEX users_pkey ON orders (user_id);`)
+	assert.Empty(t, report.Statements)
+}
