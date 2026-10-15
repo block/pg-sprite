@@ -7,6 +7,7 @@ import (
 	"go/token"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -19,16 +20,35 @@ import (
 // refusal cause; these tests keep its cause table honest.
 const refusalClassesDoc = "../../docs/refusal-classes.md"
 
-// Every shadow refusal cause has a row in the refusal-class map: a cause
-// added to the code without a classification fails here.
+// refusalClassesShadowSection heads the table that classifies the shadow
+// causes. The copier table in the same file lists some of the same names
+// under its own meaning, so the rows are looked for in this section alone.
+const refusalClassesShadowSection = "### Shadow operation refusals, keyed on `RefusalCause`"
+
+// Every shadow refusal cause has a row in the shadow table of the
+// refusal-class map: a cause added to the code without a classification
+// fails here.
 func TestRefusalClassesDocListsEveryShadowCause(t *testing.T) {
 	raw, err := os.ReadFile(refusalClassesDoc)
 	require.NoError(t, err)
-	doc := string(raw)
+	table := sectionOf(t, string(raw), refusalClassesShadowSection)
 	for _, cause := range schemachange.RefusalCauses() {
-		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", cause),
-			"docs/refusal-classes.md has no class row for shadow refusal cause %q", cause)
+		assert.Contains(t, table, fmt.Sprintf("| `%s` |", cause),
+			"docs/refusal-classes.md has no shadow class row for shadow refusal cause %q", cause)
 	}
+}
+
+// sectionOf returns the text of doc under heading, up to the next heading
+// of the same level.
+func sectionOf(t *testing.T, doc, heading string) string {
+	t.Helper()
+	start := strings.Index(doc, heading)
+	require.NotEqual(t, -1, start, "docs/refusal-classes.md has the section %q", heading)
+	section := doc[start+len(heading):]
+	if end := strings.Index(section, "\n### "); end != -1 {
+		section = section[:end]
+	}
+	return section
 }
 
 // The closed set is complete: every RefusalCause constant declared in

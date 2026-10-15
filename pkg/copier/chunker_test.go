@@ -17,7 +17,8 @@ import (
 func TestNewChunkerRejectsEmptyProof(t *testing.T) {
 	_, err := NewChunker(preflight.CopySwapTarget{}, Watermark{}, ChunkerOptions{})
 	require.ErrorIs(t, err, ErrInvariantViolation)
-	assert.EqualError(t, err, "invariant violation (ST-6): copy-and-swap target proof is empty")
+	assert.Equal(t, CauseProofEmpty, RefusalCauseOf(err))
+	assert.EqualError(t, err, "invariant violation: ST-6 (copy-proof-empty): copy-and-swap target proof is empty")
 }
 
 func TestChunkerOptionsDefaults(t *testing.T) {
@@ -187,7 +188,8 @@ func TestChunkerFeedbackSizesFromTheTimedChunk(t *testing.T) {
 	require.NoError(t, err)
 	err = c.Feedback(foreign, DefaultTargetChunkTime)
 	require.ErrorIs(t, err, ErrInvariantViolation)
-	assert.EqualError(t, err, "invariant violation (ST-6): feedback for chunk [1, 1000] that no chunker cut")
+	assert.Equal(t, CauseChunkUnknown, RefusalCauseOf(err))
+	assert.EqualError(t, err, "invariant violation: ST-6 (copy-chunk-unknown): feedback for chunk [1, 1000] that no chunker cut")
 	assert.Equal(t, int64(500), c.Rows())
 }
 

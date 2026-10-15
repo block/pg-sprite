@@ -156,8 +156,8 @@ the copier will still read (coverage, resume-from-watermark, empty-table, fronti
 and cross-type key tests); `pkg/copier` `Copier` — every chunk runs one frozen
 `INSERT … SELECT … WHERE pk BETWEEN $1 AND $2 ON CONFLICT (pk) DO NOTHING` in its own bounded
 transaction; chunks are cut and registered under one lock, and the ledger refuses a chunk that
-does not start just above the frontier, so the frontier never runs ahead of an unregistered
-chunk; a chunk is registered in flight before its transaction begins and leaves the in-flight set
+does not start just above the frontier (`copy-frontier-broken`, a typed `copier.RefusalCause`),
+so the frontier never runs ahead of an unregistered chunk; a chunk is registered in flight before its transaction begins and leaves the in-flight set
 only when it commits — a chunk whose transaction did not commit stays in flight, so its keys
 never read as landed; a resumed copy first deletes every shadow row above W in bounded batches,
 each in its own guarded transaction, before its first chunk is cut — the whole shadow when
@@ -483,7 +483,9 @@ today (client side):* `pkg/copier` `Copier.Run` returns only after every worker 
 copier holds no chunk transaction and a caller that then checkpoints `Position().Watermark`
 records only committed work; a chunk whose transaction did not commit stays in `InFlight`, so its
 keys never read as landed (cancellation and lock-loss tests pin one chunk mid-insert and assert
-the pinned chunk, and only it, remains in flight). The server side is bounded separately: a
+the pinned chunk, and only it, remains in flight), and a `Run` that ends without error with chunks
+still in flight, or a worker landing a chunk the ledger had not in flight, refuses as
+`copy-chunks-in-flight`, a typed `copier.RefusalCause`. The server side is bounded separately: a
 cancelled chunk's statement keeps running on the server until it finishes or hits the
 transaction's `statement_timeout` (LK-2), and only then is its transaction rolled back, so Run's
 return does not mean the server has finished with the chunk. *Planned enforcement:* applier

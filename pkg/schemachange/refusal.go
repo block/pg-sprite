@@ -144,6 +144,27 @@ const (
 	// within wal_sender_timeout of losing its client, and the resume is
 	// inspected again after it.
 	CauseResumeSlotHeld RefusalCause = "resume-slot-held"
+	// CauseCopyShadowMismatch means the shadow the Runner handed its copier
+	// does not describe a copy into the proven target's shadow (ST-6): the
+	// built-shadow proof is empty, names another table or the source
+	// itself, lacks the relation OIDs, or its copy columns do not carry the
+	// primary key. It re-mints the copier's copy-shadow-mismatch.
+	CauseCopyShadowMismatch RefusalCause = "copy-shadow-mismatch"
+	// CauseCopyFrontierBroken means the copier's own accounting of the key
+	// space broke (CO-4): a chunk was cut or claimed out of order, or the
+	// copy returned without error at a watermark short of the key space.
+	// It re-mints the copier's copy-frontier-broken.
+	CauseCopyFrontierBroken RefusalCause = "copy-frontier-broken"
+	// CauseCopyChunksInFlight means the copier's ledger and its workers
+	// disagreed about what landed (LK-3): a worker landed a chunk the
+	// ledger had not in flight, or the copy stopped without error with
+	// chunks still in flight. It re-mints the copier's
+	// copy-chunks-in-flight.
+	CauseCopyChunksInFlight RefusalCause = "copy-chunks-in-flight"
+	// CauseCopyChunkUnknown means a chunk no chunker cut was fed back to
+	// the copier's chunker as if it had been copied (ST-6). It re-mints the
+	// copier's copy-chunk-unknown.
+	CauseCopyChunkUnknown RefusalCause = "copy-chunk-unknown"
 )
 
 // RefusalCauses returns the closed set of shadow refusal causes, so
@@ -178,6 +199,10 @@ func RefusalCauses() []RefusalCause {
 		CauseShadowUnrecorded,
 		CauseResumeSlotForeign,
 		CauseResumeSlotHeld,
+		CauseCopyShadowMismatch,
+		CauseCopyFrontierBroken,
+		CauseCopyChunksInFlight,
+		CauseCopyChunkUnknown,
 	}
 }
 
@@ -187,8 +212,13 @@ func (c RefusalCause) Invariant() string {
 	switch c {
 	case CauseLockUnproven, CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed:
 		return "LK-1"
-	case CauseProofEmpty, CauseSourceShape, CauseRelationReplaced, CauseSwapMismatch:
+	case CauseProofEmpty, CauseSourceShape, CauseRelationReplaced, CauseSwapMismatch,
+		CauseCopyShadowMismatch, CauseCopyChunkUnknown:
 		return "ST-6"
+	case CauseCopyFrontierBroken:
+		return "CO-4"
+	case CauseCopyChunksInFlight:
+		return "LK-3"
 	case CauseStatementTarget:
 		return "ST-7"
 	case CauseShadowOwner, CauseForeignRelation, CauseGrantsDiffer, CauseIdentityHandoff,

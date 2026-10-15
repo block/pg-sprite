@@ -42,7 +42,8 @@ func TestCopierRefusesAShadowReplacedAfterTheClaim(t *testing.T) {
 	err = c.Run(t.Context(), f.pool)
 	require.NoError(t, replaceErr, "the impostor was put in place between the claim and the chunk transaction")
 	require.ErrorIs(t, err, copier.ErrInvariantViolation)
-	assert.Contains(t, err.Error(), "(ST-6): shadow")
+	assert.Equal(t, copier.CauseRelationReplaced, copier.RefusalCauseOf(err))
+	assert.Contains(t, err.Error(), "shadow "+f.schema+"."+shadow.ShadowTable()+" is relation")
 
 	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "true"), "the impostor receives nothing")
 	pos := c.Position()

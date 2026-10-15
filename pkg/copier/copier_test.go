@@ -1,6 +1,8 @@
 package copier
 
 import (
+	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -15,7 +17,36 @@ import (
 func TestNewCopierRejectsEmptyProof(t *testing.T) {
 	_, err := NewCopier(preflight.CopySwapTarget{}, nil, nil, Watermark{}, Options{})
 	require.ErrorIs(t, err, ErrInvariantViolation)
-	assert.EqualError(t, err, "invariant violation (ST-6): copy-and-swap target proof is empty")
+	assert.Equal(t, CauseProofEmpty, RefusalCauseOf(err))
+	assert.EqualError(t, err, "invariant violation: ST-6 (copy-proof-empty): copy-and-swap target proof is empty")
+}
+
+// The ledger faults the copier refuses on each carry their own cause: a
+// chunk landed that was never in flight and a clean stop with a chunk
+// still in flight are the ledger and its workers disagreeing (LK-3); a
+// clean stop short of the key space is the frontier broken (CO-4).
+func TestCopierLedgerFaultsCarryTheirOwnCause(t *testing.T) {
+	newCopier := func() *Copier {
+		return &Copier{lock: &dbconn.TableLockSession{}, ledger: newLedger(Watermark{})}
+	}
+	chunk := mustChunk(t, math.MinInt64, 1000)
+
+	err := newCopier().land(chunk, 10)
+	require.ErrorIs(t, err, ErrInvariantViolation)
+	assert.Equal(t, CauseChunksInFlight, RefusalCauseOf(err), "a landed chunk the ledger never had in flight")
+
+	c := newCopier()
+	require.True(t, c.ledger.claim(chunk))
+	err = c.finish(nil)
+	require.ErrorIs(t, err, ErrInvariantViolation)
+	assert.Equal(t, CauseChunksInFlight, RefusalCauseOf(err), "a clean stop with a chunk still in flight")
+
+	err = newCopier().finish(nil)
+	require.ErrorIs(t, err, ErrInvariantViolation)
+	assert.Equal(t, CauseFrontierBroken, RefusalCauseOf(err), "a clean stop short of the key space")
+
+	stopped := errors.New("stopped by the caller")
+	assert.Same(t, stopped, newCopier().finish(stopped), "a stop with a reason is that reason, not a ledger fault")
 }
 
 func TestCopierOptionsDefaults(t *testing.T) {

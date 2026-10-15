@@ -163,7 +163,7 @@ type Chunker struct {
 func NewChunker(target preflight.CopySwapTarget, from Watermark, opts ChunkerOptions) (*Chunker, error) {
 	// INV: ST-6
 	if target.Table() == "" {
-		return nil, fmt.Errorf("%w (ST-6): copy-and-swap target proof is empty", ErrInvariantViolation)
+		return nil, refuse(CauseProofEmpty, nil, "copy-and-swap target proof is empty")
 	}
 	opts = opts.withDefaults()
 	if err := opts.validate(); err != nil {
@@ -234,7 +234,7 @@ func (c *Chunker) Next(ctx context.Context, db dbconn.RowQuerier) (chunk Chunk, 
 	}
 	chunk, err = NewChunk(lower, upper)
 	if err != nil {
-		return Chunk{}, false, fmt.Errorf("%w (CO-4): chunk boundary: %w", ErrInvariantViolation, err)
+		return Chunk{}, false, refuse(CauseFrontierBroken, []error{err}, "chunk boundary on %s.%s", c.target.Schema(), c.target.Table())
 	}
 	chunk.rows = rows
 	c.advance(upper)
@@ -280,7 +280,7 @@ func (c *Chunker) boundary(ctx context.Context, db dbconn.RowQuerier, lower, row
 		// INV: ST-6
 		// The key column is a primary key and can never be NULL; a NULL here is
 		// a table that is not the one the proof described.
-		return 0, fmt.Errorf("%w (ST-6): chunk boundary on %s.%s from %d is NULL", ErrInvariantViolation, c.target.Schema(), c.target.Table(), lower)
+		return 0, refuse(CauseRelationReplaced, nil, "chunk boundary on %s.%s from %d is NULL", c.target.Schema(), c.target.Table(), lower)
 	}
 	return *upper, nil
 }
@@ -315,7 +315,7 @@ func boundarySQL(target preflight.CopySwapTarget) string {
 func (c *Chunker) Feedback(chunk Chunk, elapsed time.Duration) error {
 	// INV: ST-6
 	if chunk.rows <= 0 {
-		return fmt.Errorf("%w (ST-6): feedback for chunk [%d, %d] that no chunker cut", ErrInvariantViolation, chunk.Lower(), chunk.Upper())
+		return refuse(CauseChunkUnknown, nil, "feedback for chunk [%d, %d] that no chunker cut", chunk.Lower(), chunk.Upper())
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()

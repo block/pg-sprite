@@ -51,6 +51,7 @@ func TestConfirmLockReportsOnlyADeniedLockAsAViolation(t *testing.T) {
 	err = c.confirmLock(t.Context(), erringHolder{err: reset})
 	require.ErrorIs(t, err, reset, "the connection's error is the cause")
 	assert.NotErrorIs(t, err, ErrInvariantViolation, "no server answer is not a denied lock")
+	assert.Empty(t, RefusalCauseOf(err))
 
 	require.NoError(t, lock.Release(t.Context()))
 	conn, err := f.pool.Acquire(t.Context())
@@ -58,6 +59,6 @@ func TestConfirmLockReportsOnlyADeniedLockAsAViolation(t *testing.T) {
 	t.Cleanup(conn.Release)
 	err = c.confirmLock(t.Context(), conn)
 	require.ErrorIs(t, err, ErrInvariantViolation, "the server saw no holder")
+	assert.Equal(t, CauseLockUnconfirmed, RefusalCauseOf(err))
 	assert.ErrorIs(t, err, dbconn.ErrTableLockNotHeld)
-	assert.Contains(t, err.Error(), "(LK-1)")
 }

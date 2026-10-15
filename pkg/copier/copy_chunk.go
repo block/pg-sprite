@@ -104,29 +104,22 @@ func setBudgets(ctx context.Context, tx pgx.Tx, opts Options) error {
 // confirmLock asks the server, on the connection about to write, whether the
 // lock session's own backend holds the table. A server that answers "no one"
 // or "another backend" has contradicted the session the copier trusts, and
-// that is the copier's invariant violation; a lookup that got no answer is
-// the connection's error, reported as such.
+// each answer is its own refusal cause; a lookup that got no answer is the
+// connection's error, reported as such.
 func (c *Copier) confirmLock(ctx context.Context, conn dbconn.AdvisoryLockHolder) error {
 	err := c.lock.Confirm(ctx, conn)
 	if err == nil {
 		return nil
 	}
-	if lockDenied(err) {
-		// INV: LK-1
-		return fmt.Errorf("%w (LK-1): %w", ErrInvariantViolation, err)
-	}
-	return fmt.Errorf("confirm the table lock from the copy transaction: %w", err)
-}
-
-// lockDenied reports whether a Confirm error is the server's word that the
-// session does not hold the table, in either of the two forms dbconn gives
-// it.
-func lockDenied(err error) bool {
+	// INV: LK-1
 	if errors.Is(err, dbconn.ErrTableLockNotHeld) {
-		return true
+		return refuse(CauseLockUnconfirmed, []error{err}, "confirming the table lock from the copy transaction")
 	}
 	var heldElsewhere *dbconn.TableLockHeldError
-	return errors.As(err, &heldElsewhere)
+	if errors.As(err, &heldElsewhere) {
+		return refuse(CauseLockHeldElsewhere, []error{err}, "the copy transaction sees the table lock held by another backend, not the lock session's backend %d", c.lock.BackendPID())
+	}
+	return fmt.Errorf("confirm the table lock from the copy transaction: %w", err)
 }
 
 // holdRelations takes the weakest table lock on the source and the shadow
@@ -145,7 +138,7 @@ func (c *Copier) holdRelations(ctx context.Context, tx pgx.Tx) error {
 	var pgErr *pgconn.PgError
 	if errors.As(err, &pgErr) && pgErr.Code == sqlstateUndefinedTable {
 		// INV: ST-6
-		return fmt.Errorf("%w (ST-6): %s or its shadow %s no longer exists: %w", ErrInvariantViolation, source, shadow, err)
+		return refuse(CauseRelationReplaced, []error{err}, "%s or its shadow %s no longer exists", source, shadow)
 	}
 	return fmt.Errorf("lock %s and %s for the copy: %w", source, shadow, err)
 }
@@ -185,10 +178,10 @@ const relationOIDsSQL = `
 
 func confirmRelation(role, schema, table string, proven uint32, found *uint32) error {
 	if found == nil {
-		return fmt.Errorf("%w (ST-6): %s %s.%s no longer exists", ErrInvariantViolation, role, schema, table)
+		return refuse(CauseRelationReplaced, nil, "%s %s.%s no longer exists", role, schema, table)
 	}
 	if *found != proven {
-		return fmt.Errorf("%w (ST-6): %s %s.%s is relation %d, proof was minted for relation %d", ErrInvariantViolation, role, schema, table, *found, proven)
+		return refuse(CauseRelationReplaced, nil, "%s %s.%s is relation %d, proof was minted for relation %d", role, schema, table, *found, proven)
 	}
 	return nil
 }

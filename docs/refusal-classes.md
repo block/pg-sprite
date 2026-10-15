@@ -189,6 +189,10 @@ so the cutover route inherits it.
 | `shadow-unrecorded` | A relation already bears the target's derived shadow name while no checkpoint row records a run for the target, so nothing says which statement the shadow embodies ([ST-2](invariants.md#st-2--an-incompatible-checkpoint-is-distinguishable-from-a-transient-read-error)) | `environmental` | A leftover from a run whose row was deleted, or a relation someone else named; `DropShadow` removes the engine's own leftover and the run starts over. The wrapped `ErrShadowExists` is reachable with `errors.Is`. |
 | `resume-slot-foreign` | The slot wearing the row's derived name is not this route's — a physical slot, or a logical slot of another database — so neither a clean resume nor a reconcile may decode from it or replace it, whatever its WAL status says ([ST-3](invariants.md#st-3--slot-cleanup-is-guaranteed-on-success-failure-and-crash)) | `environmental` | Something else took the engine's derived name after the row was written; an operator renames or drops that slot, and the resume is inspected again. The refusal also answers `errors.Is` for `decode.ErrForeignDecodingState`. |
 | `resume-slot-held` | The row's slot is intact and the server still serves it, but another backend holds it, so no stream can be opened on it now; the holder's PID is named ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)) | `environmental` | A walsender of this engine's earlier process that has not yet noticed its client is gone lets go within `wal_sender_timeout`; anything else streaming from the engine's slot is an operator's to end. The resume is inspected again once the slot is free; a row already in `reconciling` is not refused, since the reconcile's drop waits the holder out. |
+| `copy-shadow-mismatch` | The `Runner`'s re-mint of the copier cause of the same name ([ST-6](invariants.md#st-6--preflight-before-the-first-write)); the copier table below says what it means | `invariant-violation` | The copier table below. |
+| `copy-frontier-broken` | The `Runner`'s re-mint of the copier cause of the same name ([CO-4](invariants.md#co-4--the-copyapply-ordering-invariants)), and the `Runner`'s own refusal of a copy that returned without error at a watermark short of the key space; the copier table below says what it means | `invariant-violation` | The copier table below. |
+| `copy-chunks-in-flight` | The `Runner`'s re-mint of the copier cause of the same name ([LK-3](invariants.md#lk-3--pending-work-is-claimed-exactly-once-and-wait-means-finished)); the copier table below says what it means | `invariant-violation` | The copier table below. |
+| `copy-chunk-unknown` | The `Runner`'s re-mint of the copier cause of the same name ([ST-6](invariants.md#st-6--preflight-before-the-first-write)); the copier table below says what it means | `invariant-violation` | The copier table below. |
 
 Not every error a shadow operation returns is a refusal. `BuildShadow` applies the gated
 statement to the empty shadow, and a statement the server itself rejects there — an index
@@ -214,15 +218,56 @@ quiesced `Runner` does that dispatch itself, so from it only `resume-row-termina
 `resume-row-mismatch`, and `resume-row-decoding` can surface: a caller that hands it a
 `done` row, a row written for another shadow, or a row that a run decoding WAL made.
 
-The copier's own refusals — a lock the server does not confirm from the writing connection
-([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)), a source or shadow replaced
-since its proof was minted ([ST-6](invariants.md#st-6--preflight-before-the-first-write)), a
-copy that stopped with chunks in flight or short of the key space
-([CO-4](invariants.md#co-4--the-copyapply-ordering-invariants), LK-3) — are fail-closed
-`ErrInvariantViolation` values tagged with the invariant in prose. They join this table with a
-typed cause when the orchestrator that runs the copy is wired: that orchestrator is the first
-importer that routes on the cause, and a cause classified before any importer exists would be
-classified against a guess.
+The four `copy-*` causes are the shadow-cause face of the copier's refusals: the `Runner`
+re-mints every `copier.RefusalCause` as a shadow cause (the table in the next section maps
+them) so a caller of `Runner.Run` reads one vocabulary whether the refusal came from a shadow
+operation or from the copy. The copier's lock, proof, and relation refusals map onto the
+`shadow-lock-*`, `shadow-proof-empty`, and `cutover-relation-replaced` rows above; the four
+`copy-*` rows name the ledger and frontier faults that have no shadow-operation counterpart,
+and are described once, in the copier table. The same literal in both vocabularies means the
+same fault, so a log line that carries only the string is unambiguous.
+
+Only the copier, the shadow operations, and the `Runner` carry typed causes today. The
+applier's and the checksum pass's refusals — the same lock, proof, shadow, and relation
+checks, made before a catch-up or a verification pass writes or reads — are fail-closed
+under `ErrInvariantViolation` with the invariant tagged in the prose (`(LK-1)`, `(ST-6)`)
+and no cause, so `RefusalCauseOf` returns the empty cause for them; an importer routes those
+on the sentinel alone.
+
+### Copier refusals, keyed on `copier.RefusalCause`
+
+The closed set is `copier.RefusalCauses()`, carried by the `*copier.RefusalError` that
+`NewCopier`, `Copier.Run`, and the chunker return; `copier.RefusalCauseOf` reads it through
+wrapping. Every one of these refusals is fail-closed under `copier.ErrInvariantViolation`, the
+same sentinel the shadow operations use. The `Runner` re-mints each as the shadow cause in the
+last column, wrapping the copier's refusal so both `RefusalCauseOf` readers answer and
+`errors.Is` still reaches whatever the copier wrapped — the lock session's loss, the server's
+error. A refusal from `Runner.Run` therefore carries both causes; an importer that calls the
+copier directly reads the copier's. A lock or relation fault during the copy phase surfaces
+from `Runner.Run` under the shadow-operation name — `shadow-lock-lost`,
+`cutover-relation-replaced` — by design: the fault is the same one a shadow operation would
+refuse on, and the reaction is the same, whichever phase noticed it first.
+
+| `copier.RefusalCause` | What the refusal says | `class` | Why | Re-minted by `Runner` as |
+| --- | --- | --- | --- | --- |
+| `copy-proof-empty` | The copy-and-swap target proof is the zero value ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | Only the preflight checks mint a populated proof; a zero one was constructed, not earned. | `shadow-proof-empty` |
+| `copy-shadow-mismatch` | The shadow handed to the copier does not describe a copy into the proven target's shadow: it is nil or empty, built for another table, the source itself by name or by OID, missing the relation OIDs the per-chunk check compares against, or its copy columns do not carry the primary key ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | The caller paired a target with a shadow built for something else; no retry against the server changes that. | `copy-shadow-mismatch` |
+| `copy-lock-unproven` | The copier was handed no table lock session, or one whose proof is empty or names a different table ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `invariant-violation` | A caller passed a lock that cannot cover this table; refused before any connection opens. | `shadow-lock-unproven` |
+| `copy-lock-lost` | The table lock session reported that it lost the lock, before the copy began or while a chunk was in flight ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | The interrupted chunk's transaction is rolled back and the landed watermark stands; re-acquire the lock and resume from it. The refusal also answers `errors.Is` for `dbconn.ErrTableLockLost`. | `shadow-lock-lost` |
+| `copy-lock-held-elsewhere` | `pg_locks`, read from the connection about to write a chunk, shows the table lock granted to a backend other than the lock session's own ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | Another engine instance holds the table; this copy yields and the operator decides which run continues. | `shadow-lock-held-elsewhere` |
+| `copy-lock-unconfirmed` | `pg_locks`, read from the connection about to write a chunk, shows no session holding the table lock, although the lock session has not reported loss ([LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table)) | `environmental` | The lock is gone from the server's point of view before the session noticed; re-acquire and resume. The refusal also answers `errors.Is` for `dbconn.ErrTableLockNotHeld`. | `shadow-lock-unconfirmed` |
+| `copy-relation-replaced` | The source or the shadow is no longer the relation its proof was minted for: the name no longer resolves, resolves to another OID, or the key column the proof says is a primary key answered a boundary query with `NULL` ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `environmental` | The proof describes a table that no longer exists; drop the shadow and start the change over from preflight. | `cutover-relation-replaced` |
+| `copy-frontier-broken` | The copier's own accounting of the key space broke: a chunk was cut with its lower bound above its upper, a claimed chunk does not start at the cut frontier, or the copy returned without error at a watermark short of the key space ([CO-4](invariants.md#co-4--the-copyapply-ordering-invariants)) | `invariant-violation` | The chunker produced a sequence it cannot have produced; report it, since the watermark it would have saved cannot be trusted. | `copy-frontier-broken` |
+| `copy-chunks-in-flight` | The copy's ledger and its workers disagree about what landed: a worker landed a chunk the ledger had not in flight, or the copy stopped without error with chunks still in flight ([LK-3](invariants.md#lk-3--pending-work-is-claimed-exactly-once-and-wait-means-finished)) | `invariant-violation` | The ledger is the only record of what the watermark covers; a disagreement means the watermark cannot be trusted either way. | `copy-chunks-in-flight` |
+| `copy-chunk-unknown` | A chunk no chunker cut — a zero `Chunk`, or one built with `NewChunk` — was fed back to the chunker as if it had been copied ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | The caller marked work the chunker never handed out; the chunker's frontier is the only authority on what was cut. | `copy-chunk-unknown` |
+
+Not every error the copier returns is a refusal. A chunk `INSERT` the shadow itself rejects —
+a `CHECK` the gated statement added that the source's rows violate (SQLSTATE `23514`), a value
+the retyped column cannot hold (class `22`) — surfaces as the server's `*pgconn.PgError`,
+wrapped with the chunk's bounds and reachable with `errors.As`; `RefusalCauseOf` returns the
+empty cause for it, and the `Runner` passes it through unchanged. That is the copy-time face of
+the same rule `BuildShadow` follows above: a change the server rejects against the data is the
+server's answer, routed by SQLSTATE, not a fault in the engine's state.
 
 ### `unsupported-statement` on the create path, keyed on `CreateShapeCause`
 
@@ -344,9 +389,10 @@ same reason: do not maintain a test-only shadow list that can drift from product
 not let the derivation's own failure look like success.
 
 The map in this document is pinned: the `docs_test.go` guards
-in `pkg/verdict`, `pkg/executor`, `pkg/preflight`, and `pkg/schemachange` fail when a `Reason`,
-`CreateShapeCause`, `PartitionRefusalCause`, `CopySwapRefusalCause`, or `RefusalCause` exists
-in the code without a row here, so a new discriminator value cannot land unclassified.
+in `pkg/verdict`, `pkg/executor`, `pkg/preflight`, `pkg/schemachange`, and `pkg/copier` fail
+when a `Reason`, `CreateShapeCause`, `PartitionRefusalCause`, `CopySwapRefusalCause`, or either
+package's `RefusalCause` exists in the code without a row here, so a new discriminator value
+cannot land unclassified.
 
 ## Shared vocabulary with the capabilities matrix
 

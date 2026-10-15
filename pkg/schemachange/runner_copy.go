@@ -3,7 +3,6 @@ package schemachange
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -27,7 +26,7 @@ import (
 func (r *Runner) copy(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, state *runState) error {
 	c, err := copier.NewCopier(target, state.built, lock, state.cp.Watermark, r.opts.Copier)
 	if err != nil {
-		return err
+		return copyRefusal(err, state.cp.Schema, state.cp.Table)
 	}
 	runCtx, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
@@ -45,7 +44,7 @@ func (r *Runner) copy(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tabl
 	wg.Wait()
 
 	if saver.err != nil {
-		return saver.err
+		return copyStopped(runErr, saver.err, state.cp.Schema, state.cp.Table)
 	}
 	// The copier has returned, so its position is final: save what landed
 	// even when the copy stopped, so the resume starts from there. The
@@ -55,14 +54,14 @@ func (r *Runner) copy(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tabl
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dbconn.DefaultConnectTimeout)
 	defer cancel()
 	if err := saver.saveIfMoved(saveCtx, c); err != nil {
-		return errors.Join(runErr, err)
+		return errors.Join(copyRefusal(runErr, state.cp.Schema, state.cp.Table), err)
 	}
 	if runErr != nil {
-		return runErr
+		return copyRefusal(runErr, state.cp.Schema, state.cp.Table)
 	}
 	if !state.cp.Watermark.Complete() {
 		// INV: CO-4
-		return fmt.Errorf("%w (CO-4): copy of %s.%s returned without error at watermark short of the key space", ErrInvariantViolation, state.cp.Schema, state.cp.Table)
+		return refuse(CauseCopyFrontierBroken, nil, "copy of %s.%s returned without error at watermark short of the key space", state.cp.Schema, state.cp.Table)
 	}
 	return r.save(ctx, lock, state, checkpoint.PhaseVerifying)
 }
