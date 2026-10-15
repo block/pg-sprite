@@ -36,13 +36,16 @@ func (c *MigrateCmd) runDesired(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read desired schema: %w", err)
 	}
-	desired, err := statement.ParseDesired(string(raw))
+	file, err := statement.ParseDesiredFile(string(raw))
 	if err != nil {
-		carriesRLS, detectErr := statement.HasRowSecurityDeclaration(string(raw))
-		if detectErr == nil && carriesRLS {
-			return c.runDesiredRowSecurity(ctx, out, string(raw))
-		}
 		return err
+	}
+	if rowSecurity, ok := file.RowSecurity(); ok {
+		return c.runDesiredRowSecurity(ctx, out, rowSecurity)
+	}
+	desired, ok := file.Schema()
+	if !ok {
+		return fmt.Errorf("desired schema %s admitted no planner input", c.Desired)
 	}
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {

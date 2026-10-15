@@ -27,15 +27,16 @@ func (c *DiffCmd) run(ctx context.Context, out io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("read desired schema: %w", err)
 	}
-	ds, err := statement.ParseDesired(string(raw))
-	if err != nil {
-		carriesRLS, detectErr := statement.HasRowSecurityDeclaration(string(raw))
-		if detectErr == nil && carriesRLS {
-			return c.runRowSecurityDiff(ctx, out, string(raw))
-		}
-	}
+	file, err := statement.ParseDesiredFile(string(raw))
 	if err != nil {
 		return err
+	}
+	if rowSecurity, ok := file.RowSecurity(); ok {
+		return c.runRowSecurityDiff(ctx, out, rowSecurity)
+	}
+	ds, ok := file.Schema()
+	if !ok {
+		return fmt.Errorf("desired schema %s admitted no planner input", c.Desired)
 	}
 	logger.Debug("desired schema parsed", "table", ds.Table(), "statements", len(ds.Statements()))
 
@@ -195,8 +196,11 @@ func annotate(ps plan.Statement) string {
 }
 
 // runFmt canonicalizes a desired-state schema file: every statement is
-// parsed through the PostgreSQL grammar, admitted by the same rules as diff,
+// parsed through the PostgreSQL grammar, admitted by ParseDesired's rules,
 // and printed back in the deparser's canonical form. Offline — no database.
+// A file that declares row security is refused here even though diff and
+// migrate --desired accept it, because fmt has no canonical form for
+// row-security statements yet.
 // Commented input is refused (statement.ErrCommentLoss): the parser drops
 // comments, and a formatter must never silently discard content.
 func (c *FmtCmd) runFmt(in io.Reader, out io.Writer) error {
