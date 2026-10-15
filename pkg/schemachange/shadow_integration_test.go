@@ -627,13 +627,17 @@ func TestBuildShadowRefusesStatementOutsideProof(t *testing.T) {
 // keys that convert to one would collide into the copy's never-overwriting
 // insert without an error — and an expression the deparser cannot prove it
 // rendered faithfully, whose sentinel the refusal still answers errors.Is
-// for. A retype of the key without USING is not a conversion the copy
-// carries, so it builds.
+// for — and an expression that reaches past the column it retypes, which
+// the copy could run over the whole source row but the stream's catch-up,
+// converting one column value at a time, could not. A retype of the key
+// without USING is not a conversion the copy carries, so it builds.
 func TestBuildShadowRefusesAConversionTheCopyCannotCarry(t *testing.T) {
 	f := newShadowFixture(t)
 	f.exec(t, `
 		CREATE TABLE %s.orders (
 			id integer PRIMARY KEY,
+			qty text NOT NULL,
+			unit_price integer NOT NULL,
 			tags text[] NOT NULL
 		)`)
 	target := f.prove(t, "orders")
@@ -651,6 +655,14 @@ func TestBuildShadowRefusesAConversionTheCopyCannotCarry(t *testing.T) {
 	require.ErrorIs(t, err, schemachange.ErrInvariantViolation, "an expression that does not round-trip through the deparser")
 	assert.Equal(t, schemachange.CauseStatementConversion, schemachange.RefusalCauseOf(err))
 	assert.ErrorIs(t, err, statement.ErrConversionRendering, "the statement's sentinel is still reachable")
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "nothing was created")
+
+	_, err = schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, `
+		ALTER TABLE %s.orders
+			ALTER COLUMN qty TYPE integer USING qty::integer * unit_price`), schemachange.Options{})
+	require.ErrorIs(t, err, schemachange.ErrInvariantViolation, "an expression that reads a neighbouring column")
+	assert.Equal(t, schemachange.CauseStatementConversion, schemachange.RefusalCauseOf(err))
+	assert.ErrorIs(t, err, statement.ErrConversionForeignColumn, "the statement's sentinel is still reachable")
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "nothing was created")
 
 	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, `

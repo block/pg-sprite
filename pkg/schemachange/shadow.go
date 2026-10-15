@@ -325,9 +325,10 @@ func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, s
 // check the retarget makes: an expression taken from a statement about
 // another table would convert this one's columns. An expression the copy
 // cannot carry as the statement wrote it is refused before any shadow
-// exists: one the deparser cannot prove it rendered faithfully, a column
-// retyped twice, or a conversion of the primary key, whose values every
-// chunk range, watermark, and resume clear of the copy are expressed in.
+// exists: one the deparser cannot prove it rendered faithfully, one that
+// reads any column but the one it retypes, a column retyped twice, or a
+// conversion of the primary key, whose values every chunk range,
+// watermark, and resume clear of the copy are expressed in.
 func columnConversions(st statement.Statement, target preflight.CopySwapTarget) (map[string]string, error) {
 	// INV: ST-7
 	if st.Kind() != statement.KindAlterTable {

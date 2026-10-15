@@ -47,6 +47,7 @@ const (
 	// CauseStatementConversion means the gated statement retypes a column
 	// with a USING expression the copy cannot carry as written (ST-7): the
 	// deparser cannot prove it rendered the expression faithfully, the
+	// expression reads a column other than the one it retypes, the
 	// statement retypes the same column twice, or the expression converts
 	// the primary key, whose values the copy's chunk ranges, watermark, and
 	// resume clear are expressed in. The statement's own sentinel, when

@@ -12,6 +12,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/internal/chunksql"
 	"github.com/block/pg-sprite/pkg/preflight"
 )
 
@@ -111,9 +112,12 @@ type Result struct {
 // copier's chunk inserts are, that applies every entry of the batch once:
 // a delete marker as a DELETE, an image as an upsert of its present columns
 // (CO-5, CO-8), with the batch-wide fallback D13 decides when a unique
-// index refuses the upserts (CO-6). A Flusher keeps no state between
-// flushes; the stream owner calls Flush from one goroutine, after Drain and
-// before the next Add.
+// index refuses the upserts (CO-6). A column the gated statement retyped
+// with USING is written through that expression, as the copier copies it
+// (D7), so the shadow holds the value the statement would have produced
+// whichever path put it there. A Flusher keeps no state between flushes;
+// the stream owner calls Flush from one goroutine, after Drain and before
+// the next Add.
 type Flusher struct {
 	target preflight.CopySwapTarget
 	shadow copier.Shadow
@@ -123,6 +127,11 @@ type Flusher struct {
 	// source order: the columns an image may write. A decoded column the
 	// shadow does not hold is ignored; the key is taken from Entry.Key.
 	columns []string
+	// searchPath is the transaction-local path every flush runs under: the
+	// catalog alone when the shadow proof carries no conversions, else the
+	// path the shadow build set, so the conversion expressions resolve as
+	// they did when the gated statement ran (CO-9).
+	searchPath string
 }
 
 // NewFlusher prepares flushes into shadow for the proven target. It refuses
@@ -151,7 +160,8 @@ func NewFlusher(target preflight.CopySwapTarget, shadow copier.Shadow, lock *dbc
 			columns = append(columns, c)
 		}
 	}
-	return &Flusher{target: target, shadow: shadow, lock: lock, opts: opts, columns: columns}, nil
+	searchPath := chunksql.SearchPath(shadow.Schema(), len(shadow.Conversions()) > 0)
+	return &Flusher{target: target, shadow: shadow, lock: lock, opts: opts, columns: columns, searchPath: searchPath}, nil
 }
 
 // Flush applies one drained batch to the shadow in one transaction, or
@@ -204,18 +214,22 @@ func (f *Flusher) flush(ctx context.Context, pool *pgxpool.Pool, batch Batch) (R
 		// the transaction with its session either way.
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
+	conv, err := readConversions(ctx, tx, f.shadow)
+	if err != nil {
+		return Result{}, err
+	}
 	var result Result
 	entries, err := f.completeMoved(ctx, tx, batch, &result)
 	if err != nil {
 		return Result{}, err
 	}
 	// INV: CO-5, CO-6, CO-8
-	if err := f.applyColumnWise(ctx, tx, entries, &result); err != nil {
+	if err := f.applyColumnWise(ctx, tx, entries, conv, &result); err != nil {
 		if !constraintCollision(err) {
 			return Result{}, err
 		}
 		result = Result{Held: result.Held, Skipped: result.Skipped, Fallback: true}
-		if err := f.applyWholeRows(ctx, tx, entries, &result); err != nil {
+		if err := f.applyWholeRows(ctx, tx, entries, conv, &result); err != nil {
 			if constraintCollision(err) {
 				return Result{}, fmt.Errorf("%w: %s.%s: %w", ErrBatchDeferred, f.shadow.Schema(), f.shadow.ShadowTable(), err)
 			}
@@ -275,7 +289,7 @@ func (f *Flusher) completeMoved(ctx context.Context, tx pgx.Tx, batch Batch, res
 // Key, and reports false when neither holds a row.
 func (f *Flusher) completeOne(ctx context.Context, tx pgx.Tx, e *Entry) (HeldImage, bool, error) {
 	if !e.OldKeyReused {
-		c, found, err := f.completeFrom(ctx, tx, f.shadowRowSQL(e), *e.OldKey, e)
+		c, found, err := f.completeFrom(ctx, tx, f.shadowRowSQL(e), *e.OldKey, e, fromShadow)
 		if err != nil {
 			return HeldImage{}, false, err
 		}
@@ -283,7 +297,7 @@ func (f *Flusher) completeOne(ctx context.Context, tx pgx.Tx, e *Entry) (HeldIma
 			return HeldImage{Entry: *e, Completed: c.columns, ReadLSN: c.readLSN}, true, nil
 		}
 	}
-	c, found, err := f.completeFrom(ctx, tx, f.sourceRowSQL(e), e.Key, e)
+	c, found, err := f.completeFrom(ctx, tx, f.sourceRowSQL(e), e.Key, e, fromSource)
 	if err != nil {
 		return HeldImage{}, false, err
 	}
@@ -300,7 +314,7 @@ func (f *Flusher) completeOne(ctx context.Context, tx pgx.Tx, e *Entry) (HeldIma
 // row gone before its upsert, which is always sound: no key holds both an
 // image and a delete marker. A savepoint inside a pgx transaction is what
 // Begin on it makes.
-func (f *Flusher) applyColumnWise(ctx context.Context, tx pgx.Tx, entries []Entry, result *Result) error {
+func (f *Flusher) applyColumnWise(ctx context.Context, tx pgx.Tx, entries []Entry, conv conversions, result *Result) error {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("save point before the column-wise flush: %w", err)
@@ -312,7 +326,7 @@ func (f *Flusher) applyColumnWise(ctx context.Context, tx pgx.Tx, entries []Entr
 			return f.deleteRow(ctx, sp, e.Key)
 		case Image:
 			result.Images++
-			return f.writeImage(ctx, sp, e)
+			return f.writeImage(ctx, sp, e, conv)
 		default:
 			return fmt.Errorf("%w (CO-5): flush key %d: unknown entry kind %s", ErrInvariantViolation, e.Key, e.Kind)
 		}
@@ -343,12 +357,12 @@ func (f *Flusher) applyColumnWise(ctx context.Context, tx pgx.Tx, entries []Entr
 // the image's own key — a moved image was completed before this — so that
 // row must exist, and an update that finds no row is the protocol error D13
 // names, not a row to invent (CO-8).
-func (f *Flusher) writeImage(ctx context.Context, tx pgx.Tx, e *Entry) error {
+func (f *Flusher) writeImage(ctx context.Context, tx pgx.Tx, e *Entry, conv conversions) error {
 	present, markers := f.split(e)
 	if len(markers) == 0 {
-		return f.upsertRow(ctx, tx, e.Key, present)
+		return f.upsertRow(ctx, tx, e.Key, present, conv)
 	}
-	found, err := f.updateRow(ctx, tx, e.Key, present)
+	found, err := f.updateRow(ctx, tx, e.Key, present, conv)
 	if err != nil {
 		return err
 	}
@@ -365,9 +379,11 @@ func (f *Flusher) writeImage(ctx context.Context, tx pgx.Tx, e *Entry) error {
 // so an absent row is a protocol error — then delete every key in the batch
 // and insert every image whole, so no row the batch names is left to
 // collide with the inserts (D13). The deletes come after every completion
-// read, and the reads lock their rows. The entries are the flush's own
-// copies, so completing them in place changes nothing the batch keeps.
-func (f *Flusher) applyWholeRows(ctx context.Context, tx pgx.Tx, entries []Entry, result *Result) error {
+// read, and the reads lock their rows. A completion read from the shadow is
+// already in the shadow's form and is inserted bare, not converted again.
+// The entries are the flush's own copies, so completing them in place
+// changes nothing the batch keeps.
+func (f *Flusher) applyWholeRows(ctx context.Context, tx pgx.Tx, entries []Entry, conv conversions, result *Result) error {
 	// INV: CO-6, CO-8
 	keys := make([]int64, 0, len(entries))
 	for i := range entries {
@@ -376,7 +392,7 @@ func (f *Flusher) applyWholeRows(ctx context.Context, tx pgx.Tx, entries []Entry
 		if e.Kind != Image || !e.HasMarker() {
 			continue
 		}
-		c, found, err := f.completeFrom(ctx, tx, f.shadowRowSQL(e), e.Key, e)
+		c, found, err := f.completeFrom(ctx, tx, f.shadowRowSQL(e), e.Key, e, fromShadow)
 		if err != nil {
 			return err
 		}
@@ -400,7 +416,7 @@ func (f *Flusher) applyWholeRows(ctx context.Context, tx pgx.Tx, entries []Entry
 			if len(markers) != 0 {
 				return fmt.Errorf("%w (CO-8): flush key %d: image omits %v after completion", ErrInvariantViolation, e.Key, markers)
 			}
-			if err := f.insertRow(ctx, tx, e.Key, present); err != nil {
+			if err := f.insertRow(ctx, tx, e.Key, present, conv); err != nil {
 				return err
 			}
 			result.Images++

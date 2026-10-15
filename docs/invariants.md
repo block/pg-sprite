@@ -365,17 +365,18 @@ transaction, and the verifier's cut runs inside its guarded transaction under th
 (decoy bigint `>=` operator test in both packages: under the session path every cut returns the
 same key and the second cut fails CO-4). The one widening is the copy statement of a shadow
 whose proof carries conversions — the `USING` expressions of an `ALTER COLUMN TYPE` — which
-the copier's chunk transaction and every guarded transaction of the verifier's pass run under
-the shadow build's own path (`pg_catalog`, then the source schema, then `public`, built by
+the copier's chunk transaction, every guarded transaction of the verifier's pass, and every
+flush transaction of the applier's catch-up run under the shadow build's own path (`pg_catalog`, then the source schema, then `public`, built by
 `LocalSearchPath` so the catalog stays first): the expression ran under that path when the
-statement built the shadow, and an unqualified name in it must resolve in the copy and the
-recopy as it did then, while the digest's `pg_catalog.` qualification keeps its functions
-pinned whatever follows the catalog. That path is resolved afresh in every chunk, so the
+statement built the shadow, and an unqualified name in it must resolve in the copy, the
+recopy, the digest's source side, and the flush's converted write as it did then, while the
+digest's and the flush's `pg_catalog.` qualification keeps their own functions pinned whatever
+follows the catalog. That path is resolved afresh in every chunk and every flush, so the
 widened copy trusts the source schema and `public` not to gain, during the run, a function or
 operator that fits an unqualified name in the expression better than the one the build
 resolved; nothing records what the build resolved, and a copy a concurrent `CREATE FUNCTION`
 redirected reads as divergence at verification, not before. The copier's cuts and
-measurements, and every conversion-free copy and pass, keep the catalog alone. *Test obligation:* a shadowing `search_path` (`<schema>,
+measurements, and every conversion-free copy, pass, and flush, keep the catalog alone. *Test obligation:* a shadowing `search_path` (`<schema>,
 pg_catalog` with decoy catalog relations and functions in the schema) yields the same answer as
 the default path, per read site and per pooled session.
 

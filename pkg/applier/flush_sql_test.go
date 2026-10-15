@@ -27,7 +27,7 @@ func cols(names ...string) []decode.Column {
 func TestUpsertSQLAssignsOnlyThePresentColumns(t *testing.T) {
 	assert.Equal(t,
 		`INSERT INTO "app"."orders_shadow" ("id", "qty", "paid at") VALUES ($1, $2, $3) ON CONFLICT ("id") DO UPDATE SET "qty" = EXCLUDED."qty", "paid at" = EXCLUDED."paid at"`,
-		upsertSQL(testRelation, testPK, cols("qty", "paid at")))
+		upsertSQL(testRelation, testPK, cols("qty", "paid at"), nil))
 }
 
 // An image with no column but the key still has to land the key: the
@@ -35,7 +35,7 @@ func TestUpsertSQLAssignsOnlyThePresentColumns(t *testing.T) {
 func TestUpsertSQLWithOnlyTheKey(t *testing.T) {
 	assert.Equal(t,
 		`INSERT INTO "app"."orders_shadow" ("id") VALUES ($1) ON CONFLICT ("id") DO UPDATE SET "id" = EXCLUDED."id"`,
-		upsertSQL(testRelation, testPK, nil))
+		upsertSQL(testRelation, testPK, nil, nil))
 }
 
 // The update for a marker-bearing image assigns the present columns by
@@ -43,10 +43,10 @@ func TestUpsertSQLWithOnlyTheKey(t *testing.T) {
 func TestUpdateSQLAssignsThePresentColumnsByPosition(t *testing.T) {
 	assert.Equal(t,
 		`UPDATE "app"."orders_shadow" SET "qty" = $2, "note" = $3 WHERE "id" = $1`,
-		updateSQL(testRelation, testPK, cols("qty", "note")))
+		updateSQL(testRelation, testPK, cols("qty", "note"), nil))
 	assert.Equal(t,
 		`UPDATE "app"."orders_shadow" SET "id" = $1 WHERE "id" = $1`,
-		updateSQL(testRelation, testPK, nil), "an image of nothing but markers still probes the row")
+		updateSQL(testRelation, testPK, nil, nil), "an image of nothing but markers still probes the row")
 }
 
 // The fallback's insert is a whole row with no conflict clause: every key
@@ -54,7 +54,42 @@ func TestUpdateSQLAssignsThePresentColumnsByPosition(t *testing.T) {
 func TestInsertSQLIsAWholeRowWithoutAConflictClause(t *testing.T) {
 	assert.Equal(t,
 		`INSERT INTO "app"."orders_shadow" ("id", "qty", "note") VALUES ($1, $2, $3)`,
-		insertSQL(testRelation, testPK, cols("qty", "note")))
+		insertSQL(testRelation, testPK, cols("qty", "note"), nil))
+}
+
+// A column the gated statement retyped with USING is written through that
+// expression: the parameter is bound as the source's type, under the
+// column's own name — the one name the expression may refer to — and the
+// expression's result is what the shadow column takes. Every other column
+// is still a bare parameter, in the same position.
+func TestWritesConvertAColumnThroughItsExpression(t *testing.T) {
+	conv := conversions{"qty": {expr: "(qty::numeric * 100)::integer", sourceType: "text"}}
+	converted := `(SELECT (qty::numeric * 100)::integer FROM (SELECT $2::text AS "qty") AS "source")`
+	assert.Equal(t,
+		`INSERT INTO "app"."orders_shadow" ("id", "qty", "note") VALUES ($1, `+converted+`, $3) ON CONFLICT ("id") DO UPDATE SET "qty" = EXCLUDED."qty", "note" = EXCLUDED."note"`,
+		upsertSQL(testRelation, testPK, cols("qty", "note"), conv))
+	assert.Equal(t,
+		`UPDATE "app"."orders_shadow" SET "qty" = `+converted+`, "note" = $3 WHERE "id" = $1`,
+		updateSQL(testRelation, testPK, cols("qty", "note"), conv))
+	assert.Equal(t,
+		`INSERT INTO "app"."orders_shadow" ("id", "qty", "note") VALUES ($1, `+converted+`, $3)`,
+		insertSQL(testRelation, testPK, cols("qty", "note"), conv))
+}
+
+// A converted column whose value was read back from the shadow is already
+// the converted value, so the write binds it bare: converting it again
+// would apply the expression to its own output.
+func TestWritesBindAShadowFormValueBare(t *testing.T) {
+	conv := conversions{"qty": {expr: "(qty::numeric * 100)::integer", sourceType: "text"}}
+	completed := []decode.Column{{Name: "qty", Value: shadowForm{value: "250"}, Present: true}}
+	assert.Equal(t,
+		`INSERT INTO "app"."orders_shadow" ("id", "qty") VALUES ($1, $2)`,
+		insertSQL(testRelation, testPK, completed, conv))
+	assert.Equal(t, []any{int64(7), "250"}, args(7, completed), "the bind is the wrapped value")
+
+	null := []decode.Column{{Name: "qty", Value: shadowForm{}, Present: true}}
+	assert.Equal(t, `INSERT INTO "app"."orders_shadow" ("id", "qty") VALUES ($1, $2)`, insertSQL(testRelation, testPK, null, conv))
+	assert.Equal(t, []any{int64(7), nil}, args(7, null), "a shadow NULL stays NULL and is not converted")
 }
 
 func TestDeleteSQL(t *testing.T) {
