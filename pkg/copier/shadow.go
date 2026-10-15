@@ -27,15 +27,21 @@ type Shadow interface {
 	ShadowOID() uint32
 	// CopyColumns are the columns present in both tables, in source order.
 	CopyColumns() []string
+	// Conversions are the USING expressions the gated statement retyped
+	// copy columns with, keyed by column, each the SQL text the copy
+	// selects in the column's place; a column absent from the map is
+	// copied bare. The map is empty when the statement carried no USING.
+	Conversions() map[string]string
 }
 
 // checkShadow refuses a shadow proof that does not describe a copy into the
 // proven target's shadow: a nil or empty value, a shadow built for another
 // table, a shadow that is the source itself by name or by relation, a proof
 // without the OIDs the per-chunk relation check compares against, or a
-// column list that cannot carry the primary key. The source and the shadow
-// must be two relations because the copy reads one and the resume clear
-// deletes from the other.
+// column list that cannot carry the primary key, or a conversion for a
+// column the copy does not carry or with no expression to select. The
+// source and the shadow must be two relations because the copy reads one
+// and the resume clear deletes from the other.
 func checkShadow(target preflight.CopySwapTarget, shadow Shadow) error {
 	// INV: ST-6
 	if shadow == nil {
@@ -58,6 +64,14 @@ func checkShadow(target preflight.CopySwapTarget, shadow Shadow) error {
 	}
 	if !slices.Contains(shadow.CopyColumns(), target.PKColumn()) {
 		return refuse(CauseShadowMismatch, nil, "shadow copy columns for %s.%s do not include the primary key %s", target.Schema(), target.Table(), target.PKColumn())
+	}
+	for column, expr := range shadow.Conversions() {
+		if !slices.Contains(shadow.CopyColumns(), column) {
+			return refuse(CauseShadowMismatch, nil, "shadow proof for %s.%s converts column %s, which the copy does not carry", target.Schema(), target.Table(), column)
+		}
+		if expr == "" {
+			return refuse(CauseShadowMismatch, nil, "shadow proof for %s.%s converts column %s with an empty expression", target.Schema(), target.Table(), column)
+		}
 	}
 	return nil
 }

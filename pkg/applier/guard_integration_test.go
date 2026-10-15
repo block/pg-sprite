@@ -20,14 +20,16 @@ type fakeShadow struct {
 	schema, source, shadow string
 	sourceOID, shadowOID   uint32
 	columns                []string
+	conversions            map[string]string
 }
 
-func (s fakeShadow) Schema() string        { return s.schema }
-func (s fakeShadow) SourceTable() string   { return s.source }
-func (s fakeShadow) ShadowTable() string   { return s.shadow }
-func (s fakeShadow) SourceOID() uint32     { return s.sourceOID }
-func (s fakeShadow) ShadowOID() uint32     { return s.shadowOID }
-func (s fakeShadow) CopyColumns() []string { return s.columns }
+func (s fakeShadow) Schema() string                 { return s.schema }
+func (s fakeShadow) SourceTable() string            { return s.source }
+func (s fakeShadow) ShadowTable() string            { return s.shadow }
+func (s fakeShadow) SourceOID() uint32              { return s.sourceOID }
+func (s fakeShadow) ShadowOID() uint32              { return s.shadowOID }
+func (s fakeShadow) CopyColumns() []string          { return s.columns }
+func (s fakeShadow) Conversions() map[string]string { return s.conversions }
 
 // Every way a shadow proof can fail to describe the proven target is
 // refused before a connection is opened (ST-6), and a good shadow still

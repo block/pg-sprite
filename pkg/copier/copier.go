@@ -96,8 +96,10 @@ type Copier struct {
 	chunker *Chunker
 	opts    Options
 	// sql is the one insert statement every chunk runs, frozen at
-	// construction so no worker builds SQL.
-	sql string
+	// construction so no worker builds SQL, and searchPath the SET LOCAL
+	// its transaction runs first so the statement resolves as it should.
+	sql        string
+	searchPath string
 	// clearSQL removes one batch of shadow rows above the resume watermark.
 	clearSQL string
 	// fenceSQL makes the first clear batch wait for the earlier run's
@@ -144,15 +146,16 @@ func NewCopier(target preflight.CopySwapTarget, shadow Shadow, lock *dbconn.Tabl
 		return nil, err
 	}
 	return &Copier{
-		target:   target,
-		shadow:   shadow,
-		lock:     lock,
-		chunker:  chunker,
-		opts:     opts,
-		sql:      copySQL(target, shadow),
-		clearSQL: clearAboveSQL(target, shadow),
-		fenceSQL: fenceStragglersSQL(shadow),
-		ledger:   newLedger(from),
+		target:     target,
+		shadow:     shadow,
+		lock:       lock,
+		chunker:    chunker,
+		opts:       opts,
+		sql:        copySQL(target, shadow),
+		searchPath: copySearchPath(shadow),
+		clearSQL:   clearAboveSQL(target, shadow),
+		fenceSQL:   fenceStragglersSQL(shadow),
+		ledger:     newLedger(from),
 	}, nil
 }
 

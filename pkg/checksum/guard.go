@@ -42,15 +42,15 @@ func (v *Verifier) begin(ctx context.Context, pool *pgxpool.Pool, options pgx.Tx
 }
 
 // guard prepares the transaction every read and every repair runs in: it
-// bounds it, puts the catalog alone on its search_path, puts it under the
-// source owner's role, locks both relations by name, and then confirms from
+// bounds it, sets the search_path the copy statement runs under, puts it
+// under the source owner's role, locks both relations by name, and then confirms from
 // this connection that the lock session's backend still holds the table and
 // that the source and shadow are still the relations the proofs describe.
 // Holding even ACCESS SHARE keeps a DROP or rename from completing until the
 // transaction ends, so the identity check stays true for every statement
 // after it.
 func (v *Verifier) guard(ctx context.Context, tx pgx.Tx) error {
-	if err := setVerifySession(ctx, tx, v.target.OwnerRole(), v.opts); err != nil {
+	if err := setVerifySession(ctx, tx, v.target.OwnerRole(), v.searchPath, v.opts); err != nil {
 		return err
 	}
 	if err := v.holdRelations(ctx, tx); err != nil {
@@ -63,9 +63,13 @@ func (v *Verifier) guard(ctx context.Context, tx pgx.Tx) error {
 }
 
 // setVerifySession bounds the transaction, pins the one output setting that
-// can merge two distinct values, restricts its search_path to the catalog
-// so every unqualified operator, cast, and type name resolves there (CO-9),
-// and puts it in the owner's shoes. The digest hashes each row's text
+// can merge two distinct values, sets the search_path, and puts it in the
+// owner's shoes. The search_path is the one chunksql chose for the copy
+// statement: the catalog alone when the copy carries no conversions, so
+// every unqualified operator, cast, and type name resolves there (CO-9);
+// the build's path when it does, so a recopy's conversion expressions and
+// the digests' type names resolve as the gated statement's did, with
+// pg_catalog still ahead of both. The digest hashes each row's text
 // rendering, and for float4, float8, and the geometric types that
 // rendering follows extra_float_digits: at zero or below the server rounds
 // to fifteen significant digits, so two floats that differ in their last
@@ -75,12 +79,12 @@ func (v *Verifier) guard(ctx context.Context, tx pgx.Tx) error {
 // spelling of a value but never make two values spell the same, and both
 // sides share the session. SET LOCAL cannot take bind parameters; the
 // timeouts are integer milliseconds.
-func setVerifySession(ctx context.Context, tx pgx.Tx, owner string, opts Options) error {
+func setVerifySession(ctx context.Context, tx pgx.Tx, owner, searchPath string, opts Options) error {
 	// INV: LK-2
 	budgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(opts.LockTimeout.Milliseconds(), 10) +
 		"; SET LOCAL statement_timeout = " + strconv.FormatInt(opts.StatementTimeout.Milliseconds(), 10) +
 		"; SET LOCAL extra_float_digits = 3" +
-		"; " + dbconn.LocalSearchPath("pg_catalog")
+		"; " + searchPath
 	if _, err := tx.Exec(ctx, budgets); err != nil {
 		return fmt.Errorf("set verification budgets: %w", err)
 	}

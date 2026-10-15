@@ -54,14 +54,16 @@ type fakeShadow struct {
 	schema, source, shadow string
 	sourceOID, shadowOID   uint32
 	columns                []string
+	conversions            map[string]string
 }
 
-func (s fakeShadow) Schema() string        { return s.schema }
-func (s fakeShadow) SourceTable() string   { return s.source }
-func (s fakeShadow) ShadowTable() string   { return s.shadow }
-func (s fakeShadow) SourceOID() uint32     { return s.sourceOID }
-func (s fakeShadow) ShadowOID() uint32     { return s.shadowOID }
-func (s fakeShadow) CopyColumns() []string { return s.columns }
+func (s fakeShadow) Schema() string                 { return s.schema }
+func (s fakeShadow) SourceTable() string            { return s.source }
+func (s fakeShadow) ShadowTable() string            { return s.shadow }
+func (s fakeShadow) SourceOID() uint32              { return s.sourceOID }
+func (s fakeShadow) ShadowOID() uint32              { return s.shadowOID }
+func (s fakeShadow) CopyColumns() []string          { return s.columns }
+func (s fakeShadow) Conversions() map[string]string { return s.conversions }
 
 // The digest statement is the D7 contract in one string: every copy column
 // cast to the shadow's type inside a record, SHA-256-hashed per row from
@@ -155,6 +157,8 @@ func TestNewVerifierRefusesAShadowThatIsNotTheTargets(t *testing.T) {
 		"shadow is the source by relation": {withOIDs(good, 7, 7), "shadow proof for " + f.schema + ".orders names relation 7 as both source and shadow"},
 		"no columns":                       {withColumns(good), "shadow copy columns for " + f.schema + ".orders do not include the primary key id"},
 		"no primary key":                   {withColumns(good, "qty"), "shadow copy columns for " + f.schema + ".orders do not include the primary key id"},
+		"conversion of an uncopied column": {withConversions(good, "note", "note::text"), "shadow proof for " + f.schema + ".orders converts column note, which the copy does not carry"},
+		"conversion with no expression":    {withConversions(good, "qty", ""), "shadow proof for " + f.schema + ".orders converts column qty with an empty expression"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -180,3 +184,7 @@ func withOIDs(s fakeShadow, source, shadow uint32) fakeShadow {
 	return s
 }
 func withColumns(s fakeShadow, columns ...string) fakeShadow { s.columns = columns; return s }
+func withConversions(s fakeShadow, column, expr string) fakeShadow {
+	s.conversions = map[string]string{column: expr}
+	return s
+}

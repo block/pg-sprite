@@ -47,15 +47,15 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 }
 
 // guard prepares the transaction every write into the shadow runs in: it
-// bounds it, puts the catalog alone on its search_path, puts it under the
-// source owner's role, and confirms from this connection that the lock
+// bounds it, sets the search_path the copy statement needs, puts it under
+// the source owner's role, and confirms from this connection that the lock
 // session's backend still holds the table and that the source and shadow
 // are still the relations the proofs describe. Both relations are locked by
 // name before their identity is checked, so nothing can replace either one
 // between the check and the statements that follow it in the same
 // transaction.
 func (c *Copier) guard(ctx context.Context, tx pgx.Tx) error {
-	if err := setCopySession(ctx, tx, c.target, c.opts); err != nil {
+	if err := setCopySession(ctx, tx, c.target, c.searchPath, c.opts); err != nil {
 		return err
 	}
 	if err := c.confirmLock(ctx, tx); err != nil {
@@ -67,18 +67,20 @@ func (c *Copier) guard(ctx context.Context, tx pgx.Tx) error {
 	return c.confirmRelations(ctx, tx)
 }
 
-// setCopySession bounds the transaction, restricts its search_path to the
-// catalog, and puts it in the owner's shoes. Every relation the copy names
-// is schema-qualified, but the key range's BETWEEN resolves its operators
-// through the search_path, and a shadow default or trigger fires under it
-// too; pinning the catalog keeps a schema ahead of it on the caller's pool
-// from answering either (CO-9), and gives the verifier's repair, which runs
-// the same statement under the same pin, the same session as the copy.
-func setCopySession(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, opts Options) error {
+// setCopySession bounds the transaction, sets its search_path, and puts it
+// in the owner's shoes. The search_path is the one chunksql chose for the
+// statement: the catalog alone for a copy without conversions, since every
+// relation the copy names is schema-qualified and pinning the catalog keeps
+// a schema ahead of it on the caller's pool from answering the key range's
+// operators or a shadow default or trigger (CO-9); the build's path for a
+// copy whose conversion expressions must resolve as the gated statement
+// did. The verifier's repair runs the same statement under the same path,
+// so a repair has the same session as the copy.
+func setCopySession(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, searchPath string, opts Options) error {
 	if err := setBudgets(ctx, tx, opts); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath("pg_catalog")); err != nil {
+	if _, err := tx.Exec(ctx, searchPath); err != nil {
 		return fmt.Errorf("set copy search_path: %w", err)
 	}
 	if _, err := tx.Exec(ctx, "SET LOCAL ROLE "+pgx.Identifier{target.OwnerRole()}.Sanitize()); err != nil {
@@ -189,5 +191,11 @@ func confirmRelation(role, schema, table string, proven uint32, found *uint32) e
 // copySQL is the one statement every chunk runs, the chunk insert shared
 // with the verifier's repair, built for this target and shadow.
 func copySQL(target preflight.CopySwapTarget, shadow Shadow) string {
-	return chunksql.Insert(shadow.Schema(), shadow.SourceTable(), shadow.ShadowTable(), target.PKColumn(), shadow.CopyColumns())
+	return chunksql.Insert(shadow.Schema(), shadow.SourceTable(), shadow.ShadowTable(), target.PKColumn(), shadow.CopyColumns(), shadow.Conversions())
+}
+
+// copySearchPath is the search_path every chunk transaction runs under,
+// chosen by whether the copy statement carries conversion expressions.
+func copySearchPath(shadow Shadow) string {
+	return chunksql.SearchPath(shadow.Schema(), len(shadow.Conversions()) > 0)
 }

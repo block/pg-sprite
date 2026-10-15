@@ -38,7 +38,7 @@ func TestShadowOperationsRequireATableLock(t *testing.T) {
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "drop")
 	assert.Equal(t, schemachange.CauseLockUnproven, schemachange.RefusalCauseOf(err), "drop")
 
-	_, err = schemachange.InspectShadow(t.Context(), f.pool, nil, target, schemachange.Options{})
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, nil, target, alter, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
 	assert.Equal(t, schemachange.CauseLockUnproven, schemachange.RefusalCauseOf(err), "inspect")
 }
@@ -69,7 +69,7 @@ func TestShadowOperationsRefuseALockForAnotherTable(t *testing.T) {
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "drop")
 	assert.Equal(t, schemachange.CauseLockUnproven, schemachange.RefusalCauseOf(err), "drop")
 
-	_, err = schemachange.InspectShadow(t.Context(), f.pool, otherLock, target, schemachange.Options{})
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, otherLock, target, alter, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
 	assert.Equal(t, schemachange.CauseLockUnproven, schemachange.RefusalCauseOf(err), "inspect")
 }
@@ -100,7 +100,7 @@ func TestShadowOperationsReportACallerCancellationAsTheCallersOwn(t *testing.T) 
 	assert.NotErrorIs(t, err, schemachange.ErrInvariantViolation, "drop")
 	assert.Empty(t, schemachange.RefusalCauseOf(err), "drop")
 
-	_, err = schemachange.InspectShadow(ctx, f.pool, lock, target, schemachange.Options{})
+	_, err = schemachange.InspectShadow(ctx, f.pool, lock, target, alter, schemachange.Options{})
 	assert.ErrorIs(t, err, context.Canceled, "inspect")
 	assert.NotErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
 	assert.Empty(t, schemachange.RefusalCauseOf(err), "inspect")
@@ -142,7 +142,8 @@ func TestDropAndInspectShadowRefuseWhenTheLockSessionIsGone(t *testing.T) {
 	target := f.prove(t, "widgets")
 	buildLock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, "widgets")
 	require.NoError(t, err)
-	_, err = schemachange.BuildShadow(t.Context(), f.pool, buildLock, target, f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	alter := f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`)
+	_, err = schemachange.BuildShadow(t.Context(), f.pool, buildLock, target, alter, schemachange.Options{})
 	require.NoError(t, err)
 	require.NoError(t, buildLock.Release(t.Context()))
 	shadow := schemachange.ShadowName(f.schema, "widgets")
@@ -153,7 +154,7 @@ func TestDropAndInspectShadowRefuseWhenTheLockSessionIsGone(t *testing.T) {
 	assert.Equal(t, schemachange.CauseLockUnconfirmed, schemachange.RefusalCauseOf(err), "drop")
 	assert.True(t, f.relationExists(t, shadow), "a refused drop removes nothing")
 
-	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
 	assert.Equal(t, schemachange.CauseLockUnconfirmed, schemachange.RefusalCauseOf(err), "inspect")
 }
@@ -173,7 +174,8 @@ func TestShadowOperationsRefuseALockHeldByAnotherBackend(t *testing.T) {
 	target := f.prove(t, "widgets")
 	buildLock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, "widgets")
 	require.NoError(t, err)
-	_, err = schemachange.BuildShadow(t.Context(), f.pool, buildLock, target, f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	alter := f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`)
+	_, err = schemachange.BuildShadow(t.Context(), f.pool, buildLock, target, alter, schemachange.Options{})
 	require.NoError(t, err)
 	require.NoError(t, buildLock.Release(t.Context()))
 	shadow := schemachange.ShadowName(f.schema, "widgets")
@@ -187,11 +189,11 @@ func TestShadowOperationsRefuseALockHeldByAnotherBackend(t *testing.T) {
 	assert.Equal(t, schemachange.CauseLockHeldElsewhere, schemachange.RefusalCauseOf(err), "drop")
 	assert.True(t, f.relationExists(t, shadow), "a refused drop removes nothing")
 
-	_, err = schemachange.InspectShadow(t.Context(), f.pool, stale, target, schemachange.Options{})
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, stale, target, alter, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "inspect")
 	assert.Equal(t, schemachange.CauseLockHeldElsewhere, schemachange.RefusalCauseOf(err), "inspect")
 
-	_, err = schemachange.BuildShadow(t.Context(), f.pool, stale, target, f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	_, err = schemachange.BuildShadow(t.Context(), f.pool, stale, target, alter, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation, "build")
 	assert.Equal(t, schemachange.CauseLockHeldElsewhere, schemachange.RefusalCauseOf(err), "build")
 	assert.NoError(t, rival.Err(), "the rival's lock is untouched")
@@ -226,7 +228,7 @@ func TestShadowOperationsRefuseALockSessionThatReportedLoss(t *testing.T) {
 	err = schemachange.DropShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
 	assertRefusedBeforeAnyStatement(t, err, lock, "drop")
 
-	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	assertRefusedBeforeAnyStatement(t, err, lock, "inspect")
 }
 
@@ -255,7 +257,8 @@ func TestDropShadowAbortsWhenTheLockIsLostMidDrop(t *testing.T) {
 	target := f.prove(t, "widgets")
 	buildLock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.schema, "widgets")
 	require.NoError(t, err)
-	_, err = schemachange.BuildShadow(t.Context(), f.pool, buildLock, target, f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	alter := f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`)
+	_, err = schemachange.BuildShadow(t.Context(), f.pool, buildLock, target, alter, schemachange.Options{})
 	require.NoError(t, err)
 	require.NoError(t, buildLock.Release(t.Context()))
 	shadow := schemachange.ShadowName(f.schema, "widgets")

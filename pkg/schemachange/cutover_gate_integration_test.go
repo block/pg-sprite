@@ -13,6 +13,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
+	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // gateChunks sizes the copy and the checksum pass to fixed thousand-row
@@ -24,6 +25,7 @@ var gateChunks = copier.ChunkerOptions{InitialRows: 1000, MinRows: 1000, MaxRows
 type staged struct {
 	target   preflight.CopySwapTarget
 	lock     *dbconn.TableLockSession
+	alter    statement.Statement
 	built    schemachange.BuiltShadow
 	verified checksum.VerifiedShadow
 }
@@ -60,7 +62,8 @@ func (f shadowFixture) stage(t *testing.T, table, alter string) staged {
 func (f shadowFixture) stageUnder(t *testing.T, lock *dbconn.TableLockSession, table, alter string) staged {
 	t.Helper()
 	target := f.prove(t, table)
-	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, alter), schemachange.Options{})
+	st := f.alter(t, alter)
+	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, st, schemachange.Options{})
 	require.NoError(t, err)
 	c, err := copier.NewCopier(target, built, lock, copier.Watermark{}, copier.Options{Workers: 2, Chunker: gateChunks})
 	require.NoError(t, err)
@@ -71,7 +74,7 @@ func (f shadowFixture) stageUnder(t *testing.T, lock *dbconn.TableLockSession, t
 	require.NoError(t, err)
 	verified, minted := outcome.VerifiedShadow()
 	require.True(t, minted, "a clean complete pass mints the verified shadow")
-	return staged{target: target, lock: lock, built: built, verified: verified}
+	return staged{target: target, lock: lock, alter: st, built: built, verified: verified}
 }
 
 // gate runs the cutover gate over a staged table.
@@ -339,7 +342,7 @@ func TestGateCutoverAfterInspectionRefusesASourceRevoke(t *testing.T) {
 	s := f.stage(t, "orders", `ALTER TABLE %s.orders DROP COLUMN note`)
 	f.exec(t, `REVOKE SELECT ON %s.orders FROM PUBLIC`)
 
-	inspected, err := schemachange.InspectShadow(t.Context(), f.pool, s.lock, s.target, schemachange.Options{})
+	inspected, err := schemachange.InspectShadow(t.Context(), f.pool, s.lock, s.target, s.alter, schemachange.Options{})
 	require.NoError(t, err)
 	require.Equal(t, s.built.SourceFingerprint(), inspected.SourceFingerprint())
 	require.Equal(t, s.built.TargetFingerprint(), inspected.TargetFingerprint())

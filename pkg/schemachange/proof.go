@@ -34,6 +34,9 @@ type Proof struct {
 	ShadowFidelity FidelitySnapshot `json:"shadow_fidelity"`
 	// CopyColumns are the columns the copier moves.
 	CopyColumns []string `json:"copy_columns"`
+	// Conversions are the USING expressions the copier converts retyped
+	// copy columns with, by column; absent when the change retypes none.
+	Conversions map[string]string `json:"conversions,omitempty"`
 }
 
 // Proof returns the plain view of the built shadow: each field is what the
@@ -51,6 +54,7 @@ func (b BuiltShadow) Proof() Proof {
 		Fidelity:          b.fidelity,
 		ShadowFidelity:    b.shadowFidelity,
 		CopyColumns:       b.CopyColumns(),
+		Conversions:       b.Conversions(),
 	}
 }
 

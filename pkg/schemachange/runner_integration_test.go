@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -131,6 +132,33 @@ func TestRunnerRetypesTheKeyOfAQuiescedTable(t *testing.T) {
 	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
 	assert.Equal(t, f.schema+".orders_id_seq", f.serialSequence(t, "orders", "id"), "the key's sequence is the source's, re-owned")
 	assert.True(t, result.OldTableDropped)
+}
+
+// A retype that names its conversion runs the same path: the copy converts
+// each row with the statement's USING expression, and the live table holds
+// the converted values. integer to boolean has no assignment cast, so the
+// statement needs USING and so does the copy: a copy that inserted the
+// source's integers as they are would be refused by the server. The
+// expression is an explicit cast of the column itself, which the verifier's
+// own cast of the source agrees with, so the whole key space verifies clean.
+func TestRunnerRetypesAColumnThroughTheStatementsUsing(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	f.exec(t, `ALTER TABLE %s.orders ADD COLUMN paid integer`)
+	f.exec(t, `UPDATE %s.orders SET paid = qty % 2`)
+	f.exec(t, `ALTER TABLE %s.orders ALTER COLUMN paid SET NOT NULL`)
+
+	result, err := f.run(t, "orders", `ALTER TABLE %s.orders ALTER COLUMN paid TYPE boolean USING paid::boolean`, schemachange.RunOptions{})
+	require.NoError(t, err)
+
+	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
+	assert.Equal(t, map[string]string{"paid": "paid::boolean"}, result.Shadow.Conversions)
+	assert.Equal(t, "boolean", f.columnType(t, "orders", "paid"))
+	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
+	assert.True(t, result.Verification.Clean())
+	var paid int64
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT count(*) FROM `+pgx.Identifier{f.schema, "orders"}.Sanitize()+` WHERE paid`).Scan(&paid))
+	assert.EqualValues(t, 1250, paid, "the odd quantities converted to true, the even ones to false")
 }
 
 // KeepOld leaves the retained source under its derived old name for the
