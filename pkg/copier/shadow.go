@@ -65,6 +65,12 @@ func checkShadow(target preflight.CopySwapTarget, shadow Shadow) error {
 	if !slices.Contains(shadow.CopyColumns(), target.PKColumn()) {
 		return refuse(CauseShadowMismatch, nil, "shadow copy columns for %s.%s do not include the primary key %s", target.Schema(), target.Table(), target.PKColumn())
 	}
+	// The chunk ranges, the watermark, the resume clear, and the conflict
+	// target all speak the source's key values, so a converted key would
+	// land rows under keys those ranges do not describe.
+	if _, converted := shadow.Conversions()[target.PKColumn()]; converted {
+		return refuse(CauseShadowMismatch, nil, "shadow proof for %s.%s converts the primary key %s", target.Schema(), target.Table(), target.PKColumn())
+	}
 	for column, expr := range shadow.Conversions() {
 		if !slices.Contains(shadow.CopyColumns(), column) {
 			return refuse(CauseShadowMismatch, nil, "shadow proof for %s.%s converts column %s, which the copy does not carry", target.Schema(), target.Table(), column)

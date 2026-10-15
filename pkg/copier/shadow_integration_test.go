@@ -79,6 +79,7 @@ func TestNewCopierRefusesAShadowThatIsNotTheTargets(t *testing.T) {
 		"shadow is the source by relation": {withOIDs(good, 7, 7), "shadow proof for " + f.schema + ".orders names relation 7 as both source and shadow"},
 		"no columns":                       {withColumns(good), "shadow copy columns for " + f.schema + ".orders do not include the primary key id"},
 		"no primary key":                   {withColumns(good, "qty"), "shadow copy columns for " + f.schema + ".orders do not include the primary key id"},
+		"conversion of the primary key":    {withConversions(good, "id", "id % 100"), "shadow proof for " + f.schema + ".orders converts the primary key id"},
 		"conversion of an uncopied column": {withConversions(good, "notes", "notes::text"), "shadow proof for " + f.schema + ".orders converts column notes, which the copy does not carry"},
 		"conversion with no expression":    {withConversions(good, "qty", ""), "shadow proof for " + f.schema + ".orders converts column qty with an empty expression"},
 	}

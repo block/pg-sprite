@@ -182,6 +182,44 @@ func TestInspectShadowRefusesAShadowWithAnotherOwner(t *testing.T) {
 	assert.Equal(t, schemachange.CauseForeignRelation, schemachange.RefusalCauseOf(err))
 }
 
+// Inspection reads the conversions out of the statement it is handed, so
+// the statement must be the one the build ran: an ALTER TABLE about another
+// table, or a statement that is not an ALTER TABLE at all, is refused under
+// the same cause the build raises, before the catalog is consulted. A
+// resume handed the wrong row's statement cannot copy this table's columns
+// through another table's USING expressions.
+func TestInspectShadowRefusesAStatementThatIsNotAboutTheTarget(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.orders (
+			id bigint PRIMARY KEY,
+			qty text NOT NULL
+		)`)
+	f.exec(t, `
+		CREATE TABLE %s.invoices (
+			id bigint PRIMARY KEY,
+			total text NOT NULL
+		)`)
+	lock := f.lock(t, "orders")
+	target := f.prove(t, "orders")
+	alter := f.alter(t, `
+		ALTER TABLE %s.orders
+			ALTER COLUMN qty TYPE integer USING qty::integer`)
+	_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
+	require.NoError(t, err)
+
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, f.alter(t, `
+		ALTER TABLE %s.invoices
+			ALTER COLUMN total TYPE integer USING total::integer`), schemachange.Options{})
+	require.ErrorIs(t, err, schemachange.ErrInvariantViolation, "an ALTER TABLE about another table")
+	assert.Equal(t, schemachange.CauseStatementTarget, schemachange.RefusalCauseOf(err))
+
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, f.alter(t, `
+		CREATE INDEX orders_qty_idx ON %s.orders (qty)`), schemachange.Options{})
+	require.ErrorIs(t, err, schemachange.ErrInvariantViolation, "a statement that is not an ALTER TABLE")
+	assert.Equal(t, schemachange.CauseStatementTarget, schemachange.RefusalCauseOf(err))
+}
+
 // The source must still have the shape the proof was minted for: a trigger
 // added after the build is the same refusal the build itself would raise.
 func TestInspectShadowRefusesASourceThatChangedShapeSinceTheProof(t *testing.T) {

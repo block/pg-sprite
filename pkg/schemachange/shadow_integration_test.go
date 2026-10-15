@@ -620,6 +620,46 @@ func TestBuildShadowRefusesStatementOutsideProof(t *testing.T) {
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")))
 }
 
+// A USING expression the copy cannot carry as the statement wrote it is
+// refused before the shadow exists, under one cause an importer routes on:
+// a conversion of the primary key, whose values every chunk range,
+// watermark, and resume clear of the copy are expressed in — two source
+// keys that convert to one would collide into the copy's never-overwriting
+// insert without an error — and an expression the deparser cannot prove it
+// rendered faithfully, whose sentinel the refusal still answers errors.Is
+// for. A retype of the key without USING is not a conversion the copy
+// carries, so it builds.
+func TestBuildShadowRefusesAConversionTheCopyCannotCarry(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.orders (
+			id integer PRIMARY KEY,
+			tags text[] NOT NULL
+		)`)
+	target := f.prove(t, "orders")
+	lock := f.lock(t, "orders")
+
+	_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, `
+		ALTER TABLE %s.orders
+			ALTER COLUMN id TYPE bigint USING id % 100`), schemachange.Options{})
+	require.ErrorIs(t, err, schemachange.ErrInvariantViolation, "a conversion of the primary key")
+	assert.Equal(t, schemachange.CauseStatementConversion, schemachange.RefusalCauseOf(err))
+
+	_, err = schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, `
+		ALTER TABLE %s.orders
+			ALTER COLUMN tags TYPE text USING (ARRAY[tags[1], tags[2]])[1]`), schemachange.Options{})
+	require.ErrorIs(t, err, schemachange.ErrInvariantViolation, "an expression that does not round-trip through the deparser")
+	assert.Equal(t, schemachange.CauseStatementConversion, schemachange.RefusalCauseOf(err))
+	assert.ErrorIs(t, err, statement.ErrConversionRendering, "the statement's sentinel is still reachable")
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "nothing was created")
+
+	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, `
+		ALTER TABLE %s.orders
+			ALTER COLUMN id TYPE bigint`), schemachange.Options{})
+	require.NoError(t, err, "a retype of the key without USING takes the server's assignment cast")
+	assert.Empty(t, built.Conversions())
+}
+
 // A schema change the server rejects rolls the whole build back: the shadow
 // does not survive a failed ALTER, so a retry starts from a clean schema.
 func TestBuildShadowLeavesNothingWhenAlterFails(t *testing.T) {

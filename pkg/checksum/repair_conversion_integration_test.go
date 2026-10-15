@@ -1,6 +1,7 @@
 package checksum_test
 
 import (
+	"fmt"
 	"math"
 	"testing"
 
@@ -46,4 +47,39 @@ func TestCheckRepairsAConvertedChunkThroughTheStatementsUsing(t *testing.T) {
 	again, err := f.check(t, f.pool, target, shadow, lock, copier.NewWatermark(math.MaxInt64), checksum.DivergenceRepair)
 	require.NoError(t, err)
 	assert.True(t, again.Clean(), "the fresh pass finds the shadow equal to the source")
+}
+
+// A repair recopies through the statement's USING expression, not through
+// the server's assignment cast. PostgreSQL has no assignment cast from text
+// to integer, so a recopy that selected the column bare would fail on its
+// first chunk; the expression is the only thing that lands it. The digest's
+// explicit cast of the source reproduces this expression, so the pass sees
+// the tampered chunk differ and the repaired one agree.
+func TestCheckRepairRecopiesThroughTheUsingNotTheAssignmentCast(t *testing.T) {
+	f := newVerifierFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.ledger (
+			id bigint PRIMARY KEY,
+			amount text NOT NULL
+		)`)
+	f.exec(t, fmt.Sprintf(`
+		INSERT INTO %%s.ledger (id, amount)
+		SELECT n, n::text FROM generate_series(1, %d) AS n`, rows))
+	target := f.prove(t, "ledger")
+	lock := f.lock(t, "ledger")
+	shadow := f.build(t, lock, target, `
+		ALTER TABLE %s
+			ALTER COLUMN amount TYPE integer USING amount::integer`)
+	require.Equal(t, map[string]string{"amount": "amount::int"}, shadow.Conversions())
+	f.copy(t, target, shadow, lock)
+	f.exec(t, "UPDATE "+f.shadowName(shadow)+" SET amount = 0 WHERE id = 1500")
+
+	outcome, err := f.check(t, f.pool, target, shadow, lock, copier.NewWatermark(math.MaxInt64), checksum.DivergenceRepair)
+	require.NoError(t, err)
+	require.Len(t, outcome.Repairs, 1)
+	assert.Equal(t, chunk(t, 1001, 2000), outcome.Repairs[0].Mismatch.Chunk)
+	assert.Equal(t, int64(1000), outcome.Repairs[0].Inserted, "the recopy converted and landed the whole chunk")
+	var amount int64
+	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT amount FROM "+f.shadowName(shadow)+" WHERE id = 1500").Scan(&amount))
+	assert.Equal(t, int64(1500), amount, "the tampered row holds the converted source value again")
 }

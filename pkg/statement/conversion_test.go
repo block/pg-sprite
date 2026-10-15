@@ -84,6 +84,18 @@ func TestColumnConversionsRefusesOtherShapes(t *testing.T) {
 	require.ErrorIs(t, err, statement.ErrConversionRepeated)
 }
 
+// An expression the deparser renders in a form that does not parse back
+// is refused rather than handed to the copy: the deparser drops the
+// parentheses around an array constructor that is then subscripted, so the
+// rendering cannot be proven to be the user's expression. The sentinel
+// lets the shadow builder type the refusal without reading the message.
+func TestColumnConversionsRefusesAnExpressionThatDoesNotRoundTrip(t *testing.T) {
+	_, err := statement.ColumnConversions(`
+		ALTER TABLE t
+			ALTER COLUMN a TYPE text USING (ARRAY[a, b])[1]`)
+	require.ErrorIs(t, err, statement.ErrConversionRendering)
+}
+
 // The rendering the copy carries is the gated statement's expression as
 // the retargeted statement carries it too: retargeting changes the
 // relation and nothing else, so both yield the same conversions.

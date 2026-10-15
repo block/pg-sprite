@@ -155,9 +155,11 @@ reads it through wrapping. Every one of these refusals is fail-closed under
 `ErrInvariantViolation` ([SAFETY.md](../SAFETY.md#rules-inside-the-core)): the sentinel is the
 mechanism that stops the operation, and the cause is what tells the importer which way to
 react. Only the causes that mean the caller handed the engine an incoherent input, or that the
-engine's own write did not take, are `invariant-violation`; the rest describe a lock, a proof,
-or a relation whose state moved under the operation, and the importer retries, re-plans, or
-cleans up. No verdict reason carries these causes yet; the classification is fixed here first
+engine's own write did not take, are `invariant-violation`; one, `shadow-statement-conversion`,
+is a `capability-boundary`, since it describes a statement the engine declines to carry rather
+than a fault; the rest describe a lock, a proof, or a relation whose state moved under the
+operation, and the importer retries, re-plans, or cleans up. No verdict reason carries these
+causes yet; the classification is fixed here first
 so the cutover route inherits it.
 
 | `RefusalCause` | What the refusal says | `class` | Why |
@@ -169,6 +171,7 @@ so the cutover route inherits it.
 | `shadow-proof-empty` | The copy-and-swap target proof is the zero value ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | Only the shape check mints a populated proof; a zero one was constructed, not earned. |
 | `shadow-source-shape` | The source's catalog is outside the shape the proof admits: an identity column without an internally owned sequence, or a replica identity other than `DEFAULT` or `FULL` ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `environmental` | The catalog changed after preflight admitted the table; re-run preflight against the table as it is now. |
 | `shadow-statement-target` | The gated statement is not an `ALTER TABLE` on the proven table, or its retargeted form does not name the shadow with the same operations ([ST-7](invariants.md#st-7--the-executor-runs-exactly-the-statement-that-was-gated)) | `invariant-violation` | The caller gated one statement and handed the build another; the pairing is the caller's, not the server's. |
+| `shadow-statement-conversion` | The gated statement retypes a column with a `USING` expression the copy cannot carry as written: the deparser cannot prove it rendered the expression faithfully, the statement retypes the same column twice, or the expression converts the primary key, whose values the copy's chunk ranges, watermark, and resume clear are expressed in ([ST-7](invariants.md#st-7--the-executor-runs-exactly-the-statement-that-was-gated)) | `capability-boundary` | The engine has no proof it would reproduce the conversion, so it refuses before any shadow exists; rewrite the expression, or retype the key without `USING` so the server's assignment cast converts it. The statement's `statement.ErrConversionRendering` or `ErrConversionRepeated` sentinel is wrapped for `errors.Is`; the expression's text is in that message, not in the cause. |
 | `shadow-owner-mismatch` | The shadow the build created is not owned by the source's owner ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | The owner the proof carries is no longer the owner the catalog reports; the shadow is dropped and preflight re-run. |
 | `shadow-foreign-relation` | The relation wearing the shadow's name is not a plain table owned by the source's owner ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | The engine did not build it and will not touch it; an operator removes or renames the relation. |
 | `shadow-grants-differ` | The shadow's grants still differ from the source's after the build synchronised them ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `invariant-violation` | The build wrote the grants under the table lock and read back something else; that is the engine's write, not the environment. |

@@ -183,6 +183,12 @@ func checkShadow(target preflight.CopySwapTarget, shadow copier.Shadow) error {
 	if !slices.Contains(shadow.CopyColumns(), target.PKColumn()) {
 		return fmt.Errorf("%w (ST-6): shadow copy columns for %s.%s do not include the primary key %s", ErrInvariantViolation, target.Schema(), target.Table(), target.PKColumn())
 	}
+	// The pass's chunks, its repair's delete and recopy, and the watermark
+	// all speak the source's key values, so a converted key would compare
+	// and recopy rows under keys those ranges do not describe.
+	if _, converted := shadow.Conversions()[target.PKColumn()]; converted {
+		return fmt.Errorf("%w (ST-6): shadow proof for %s.%s converts the primary key %s", ErrInvariantViolation, target.Schema(), target.Table(), target.PKColumn())
+	}
 	for column, expr := range shadow.Conversions() {
 		if !slices.Contains(shadow.CopyColumns(), column) {
 			return fmt.Errorf("%w (ST-6): shadow proof for %s.%s converts column %s, which the copy does not carry", ErrInvariantViolation, target.Schema(), target.Table(), column)

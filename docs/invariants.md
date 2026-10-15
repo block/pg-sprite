@@ -370,8 +370,12 @@ the shadow build's own path (`pg_catalog`, then the source schema, then `public`
 `LocalSearchPath` so the catalog stays first): the expression ran under that path when the
 statement built the shadow, and an unqualified name in it must resolve in the copy and the
 recopy as it did then, while the digest's `pg_catalog.` qualification keeps its functions
-pinned whatever follows the catalog. The copier's cuts and measurements, and every
-conversion-free copy and pass, keep the catalog alone. *Test obligation:* a shadowing `search_path` (`<schema>,
+pinned whatever follows the catalog. That path is resolved afresh in every chunk, so the
+widened copy trusts the source schema and `public` not to gain, during the run, a function or
+operator that fits an unqualified name in the expression better than the one the build
+resolved; nothing records what the build resolved, and a copy a concurrent `CREATE FUNCTION`
+redirected reads as divergence at verification, not before. The copier's cuts and
+measurements, and every conversion-free copy and pass, keep the catalog alone. *Test obligation:* a shadowing `search_path` (`<schema>,
 pg_catalog` with decoy catalog relations and functions in the schema) yields the same answer as
 the default path, per read site and per pooled session.
 
