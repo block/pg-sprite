@@ -189,10 +189,10 @@ so the cutover route inherits it.
 | `shadow-unrecorded` | A relation already bears the target's derived shadow name while no checkpoint row records a run for the target, so nothing says which statement the shadow embodies ([ST-2](invariants.md#st-2--an-incompatible-checkpoint-is-distinguishable-from-a-transient-read-error)) | `environmental` | A leftover from a run whose row was deleted, or a relation someone else named; `DropShadow` removes the engine's own leftover and the run starts over. The wrapped `ErrShadowExists` is reachable with `errors.Is`. |
 | `resume-slot-foreign` | The slot wearing the row's derived name is not this route's — a physical slot, or a logical slot of another database — so neither a clean resume nor a reconcile may decode from it or replace it, whatever its WAL status says ([ST-3](invariants.md#st-3--slot-cleanup-is-guaranteed-on-success-failure-and-crash)) | `environmental` | Something else took the engine's derived name after the row was written; an operator renames or drops that slot, and the resume is inspected again. The refusal also answers `errors.Is` for `decode.ErrForeignDecodingState`. |
 | `resume-slot-held` | The row's slot is intact and the server still serves it, but another backend holds it, so no stream can be opened on it now; the holder's PID is named ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)) | `environmental` | A walsender of this engine's earlier process that has not yet noticed its client is gone lets go within `wal_sender_timeout`; anything else streaming from the engine's slot is an operator's to end. The resume is inspected again once the slot is free; a row already in `reconciling` is not refused, since the reconcile's drop waits the holder out. |
-| `copy-shadow-mismatch` | The shadow the `Runner` handed its copier does not describe a copy into the proven target's shadow ([ST-6](invariants.md#st-6--preflight-before-the-first-write)); re-minted from the copier's cause of the same name | `invariant-violation` | The caller paired a target with a shadow built for something else; no retry against the server changes that. |
-| `copy-frontier-broken` | The copier's accounting of the key space broke, or the copy returned without error at a watermark short of the key space ([CO-4](invariants.md#co-4--the-copyapply-ordering-invariants)); re-minted from the copier's cause of the same name | `invariant-violation` | The watermark the run would save cannot be trusted; report it. |
-| `copy-chunks-in-flight` | The copier's ledger and its workers disagreed about what landed ([LK-3](invariants.md#lk-3--pending-work-is-claimed-exactly-once-and-wait-means-finished)); re-minted from the copier's cause of the same name | `invariant-violation` | The ledger is the only record of what the watermark covers; a disagreement means it cannot be trusted either way. |
-| `copy-chunk-unknown` | A chunk no chunker cut was fed back to the copier's chunker as copied ([ST-6](invariants.md#st-6--preflight-before-the-first-write)); re-minted from the copier's cause of the same name | `invariant-violation` | The caller marked work the chunker never handed out. |
+| `copy-shadow-mismatch` | The `Runner`'s re-mint of the copier cause of the same name ([ST-6](invariants.md#st-6--preflight-before-the-first-write)); the copier table below says what it means | `invariant-violation` | The copier table below. |
+| `copy-frontier-broken` | The `Runner`'s re-mint of the copier cause of the same name ([CO-4](invariants.md#co-4--the-copyapply-ordering-invariants)), and the `Runner`'s own refusal of a copy that returned without error at a watermark short of the key space; the copier table below says what it means | `invariant-violation` | The copier table below. |
+| `copy-chunks-in-flight` | The `Runner`'s re-mint of the copier cause of the same name ([LK-3](invariants.md#lk-3--pending-work-is-claimed-exactly-once-and-wait-means-finished)); the copier table below says what it means | `invariant-violation` | The copier table below. |
+| `copy-chunk-unknown` | The `Runner`'s re-mint of the copier cause of the same name ([ST-6](invariants.md#st-6--preflight-before-the-first-write)); the copier table below says what it means | `invariant-violation` | The copier table below. |
 
 Not every error a shadow operation returns is a refusal. `BuildShadow` applies the gated
 statement to the empty shadow, and a statement the server itself rejects there — an index
@@ -223,7 +223,16 @@ re-mints every `copier.RefusalCause` as a shadow cause (the table in the next se
 them) so a caller of `Runner.Run` reads one vocabulary whether the refusal came from a shadow
 operation or from the copy. The copier's lock, proof, and relation refusals map onto the
 `shadow-lock-*`, `shadow-proof-empty`, and `cutover-relation-replaced` rows above; the four
-`copy-*` rows name the ledger and frontier faults that have no shadow-operation counterpart.
+`copy-*` rows name the ledger and frontier faults that have no shadow-operation counterpart,
+and are described once, in the copier table. The same literal in both vocabularies means the
+same fault, so a log line that carries only the string is unambiguous.
+
+Only the copier, the shadow operations, and the `Runner` carry typed causes today. The
+applier's and the checksum pass's refusals — the same lock, proof, shadow, and relation
+checks, made before a catch-up or a verification pass writes or reads — are fail-closed
+under `ErrInvariantViolation` with the invariant tagged in the prose (`(LK-1)`, `(ST-6)`)
+and no cause, so `RefusalCauseOf` returns the empty cause for them; an importer routes those
+on the sentinel alone.
 
 ### Copier refusals, keyed on `copier.RefusalCause`
 
@@ -234,7 +243,10 @@ same sentinel the shadow operations use. The `Runner` re-mints each as the shado
 last column, wrapping the copier's refusal so both `RefusalCauseOf` readers answer and
 `errors.Is` still reaches whatever the copier wrapped — the lock session's loss, the server's
 error. A refusal from `Runner.Run` therefore carries both causes; an importer that calls the
-copier directly reads the copier's.
+copier directly reads the copier's. A lock or relation fault during the copy phase surfaces
+from `Runner.Run` under the shadow-operation name — `shadow-lock-lost`,
+`cutover-relation-replaced` — by design: the fault is the same one a shadow operation would
+refuse on, and the reaction is the same, whichever phase noticed it first.
 
 | `copier.RefusalCause` | What the refusal says | `class` | Why | Re-minted by `Runner` as |
 | --- | --- | --- | --- | --- |

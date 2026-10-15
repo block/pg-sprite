@@ -44,7 +44,7 @@ func (r *Runner) copy(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tabl
 	wg.Wait()
 
 	if saver.err != nil {
-		return saver.err
+		return copyStopped(runErr, saver.err, state.cp.Schema, state.cp.Table)
 	}
 	// The copier has returned, so its position is final: save what landed
 	// even when the copy stopped, so the resume starts from there. The

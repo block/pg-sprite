@@ -420,6 +420,7 @@ func TestCopierAbortsWhenTheLockIsLostMidCopy(t *testing.T) {
 		assert.ErrorIs(t, err, copier.ErrInvariantViolation)
 		assert.Equal(t, copier.CauseLockLost, copier.RefusalCauseOf(err))
 		assert.ErrorIs(t, err, lock.Err(), "the loss the session reported is the cause")
+		assert.ErrorIs(t, err, dbconn.ErrTableLockLost)
 	case <-time.After(lockLossDeadline):
 		t.Fatalf("copy did not abort within %s of lock loss", lockLossDeadline)
 	}
@@ -529,6 +530,7 @@ func TestCopierRefusesAnUnconfirmedLock(t *testing.T) {
 	require.ErrorIs(t, err, copier.ErrInvariantViolation, "a session that already reported loss")
 	assert.Equal(t, copier.CauseLockLost, copier.RefusalCauseOf(err))
 	assert.ErrorIs(t, err, lost.Err(), "the refusal names what the session saw")
+	assert.ErrorIs(t, err, dbconn.ErrTableLockLost)
 }
 
 // lostLock acquires the table lock with a short keepalive, terminates the

@@ -1,6 +1,8 @@
 package schemachange
 
 import (
+	"errors"
+
 	"github.com/block/pg-sprite/pkg/copier"
 )
 
@@ -49,4 +51,18 @@ func copyRefusal(err error, schema, table string) error {
 		return err
 	}
 	return refuse(cause, []error{err}, "copy of %s.%s refused", schema, table)
+}
+
+// copyStopped is the error of a copy whose periodic save failed. The save's
+// failure is always part of it, since the run has nothing to resume from
+// past the last save; a refusal the copier reached on its own is re-minted
+// and joined in front of it, so a caller reads the copy's cause whichever
+// side noticed the fault first — a lock lost mid-copy fails the save in
+// flight and the chunks in flight at once. A copier that merely stopped on
+// the save's cancellation carries that same failure and adds nothing.
+func copyStopped(runErr, saveErr error, schema, table string) error {
+	if copier.RefusalCauseOf(runErr) == "" {
+		return saveErr
+	}
+	return errors.Join(copyRefusal(runErr, schema, table), saveErr)
 }
