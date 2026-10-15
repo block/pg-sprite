@@ -447,7 +447,7 @@ func planRefusal(report plan.Report) (verdict.Refusal, string) {
 			r, err := verdict.NewRefusal(ps.Class, ps.Reason, ps.Owner)
 			if err == nil && r.Reason() == verdict.ReasonDeclarativeForeignKey {
 				return r, detail("changes a foreign key, which desired-state execution does not run yet — " +
-					"run ADD FOREIGN KEY through the imperative front door, which validates it online")
+					"to apply it, run the statement through the imperative front door (migrate --alter), which validates it online")
 			}
 			if err == nil {
 				return r, detail("has no safe path")

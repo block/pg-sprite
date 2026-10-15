@@ -300,7 +300,8 @@ func verdictText(r verdict.Reason) string {
 	case verdict.ReasonUnsupportedPartitionedParent:
 		return "the target is a partitioned table and this operation is not supported on partitioned parents"
 	case verdict.ReasonDeclarativeForeignKey:
-		return "foreign keys are not supported for desired-state apply yet; this change is shown for review only — run it with pg-sprite migrate instead"
+		return "foreign keys are not supported for desired-state apply yet; this change is shown for review only — " +
+			"to apply it, run the statement with pg-sprite migrate --alter"
 	default:
 		return string(r)
 	}
@@ -315,7 +316,7 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 		// The statement front door refuses CREATE TABLE, so a new table
 		// is created without the foreign key and gains it afterwards.
 		return "foreign keys are not supported for desired-state apply yet; this change is shown for review only — " +
-			"create the table without the foreign key, then add it with pg-sprite migrate"
+			"create the table without the foreign key, then add it with pg-sprite migrate --alter"
 	}
 	if r != verdict.ReasonUnsupportedStatement {
 		return verdictText(r)

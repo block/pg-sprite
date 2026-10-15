@@ -421,7 +421,7 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 	// The renderer wraps prose; compare with whitespace collapsed.
 	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
 	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — foreign keys are not supported for desired-state apply yet; "+
-		"this change is shown for review only — run it with pg-sprite migrate instead")
+		"this change is shown for review only — to apply it, run the statement with pg-sprite migrate --alter")
 
 	created := report
 	created.Statements = []plan.Statement{{
@@ -434,5 +434,5 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 	}}
 	out.Reset()
 	require.NoError(t, writeDryRunText(&out, palette{}, created))
-	assert.Contains(t, flat(out.String()), "create the table without the foreign key, then add it with pg-sprite migrate")
+	assert.Contains(t, flat(out.String()), "create the table without the foreign key, then add it with pg-sprite migrate --alter")
 }

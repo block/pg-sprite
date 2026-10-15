@@ -544,10 +544,11 @@ cannot route.
 
 The desired file adds or drops a foreign key, or creates a table that
 declares one. `diff` shows the statement so the change is reviewable, but
-desired-state execution does not apply foreign-key changes yet. Run the
-statement with `pg-sprite migrate` instead: an `ADD FOREIGN KEY` runs as
-`NOT VALID` followed by `VALIDATE CONSTRAINT`, so writes keep flowing during
-the scan.
+desired-state execution (`migrate --desired`) does not apply foreign-key
+changes yet. To apply one, run the statement with `pg-sprite migrate --alter`:
+an `ADD FOREIGN KEY` runs as `NOT VALID` followed by `VALIDATE CONSTRAINT`, so
+writes keep flowing during the scan. For a new table, create it without the
+foreign key first.
 
 ### `table-not-found`
 

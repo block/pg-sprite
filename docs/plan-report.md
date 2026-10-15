@@ -135,7 +135,7 @@ treat the statement and report as refused.
 |---|---|
 | `unsupported-statement` | The planner knows no safe path for the statement (planner-level refusal), or — on a greenfield plan, where the table does not exist — the create path refuses the statement's shape, in which case `cause` names which shape (see Causes). The same token the run path's refusal verdict carries, so a dry-run report and a run receipt for the same statement match on the typed field alone. |
 | `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. |
-| `declarative-foreign-key` | The statement adds or drops a foreign key, or creates a table that declares one, and desired-state execution does not run foreign-key changes yet. The plan still shows the statement so the diff is reviewable; the imperative front door runs `ADD FOREIGN KEY` online. |
+| `declarative-foreign-key` | The statement adds or drops a foreign key, or creates a table that declares one, and desired-state execution does not run foreign-key changes yet. The plan still shows the statement so the diff is reviewable; `migrate --alter` runs `ADD FOREIGN KEY` online. |
 
 On the apply path, refusal checks have deterministic precedence: table size, then partition
 support, then privileges.
