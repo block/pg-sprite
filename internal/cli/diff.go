@@ -196,8 +196,11 @@ func annotate(ps plan.Statement) string {
 }
 
 // runFmt canonicalizes a desired-state schema file: every statement is
-// parsed through the PostgreSQL grammar, admitted by the same rules as diff,
+// parsed through the PostgreSQL grammar, admitted by ParseDesired's rules,
 // and printed back in the deparser's canonical form. Offline — no database.
+// A file that declares row security is refused here even though diff and
+// migrate --desired accept it, because fmt has no canonical form for
+// row-security statements yet.
 // Commented input is refused (statement.ErrCommentLoss): the parser drops
 // comments, and a formatter must never silently discard content.
 func (c *FmtCmd) runFmt(in io.Reader, out io.Writer) error {

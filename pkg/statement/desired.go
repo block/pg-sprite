@@ -12,6 +12,10 @@ import (
 // Typed refusals for desired-state schema files. Each names one rule of the
 // declarative front door; the caller branches with errors.Is, never on text.
 var (
+	// ErrParseDesired is returned when the input is not valid PostgreSQL
+	// syntax, before any admission rule runs. It separates a syntax error
+	// from an admission refusal; the parser's own message is joined to it.
+	ErrParseDesired = errors.New("parse desired schema")
 	// ErrEmptyDesired is returned when the input contains no statements.
 	ErrEmptyDesired = errors.New("desired schema contains no statements")
 	// ErrNoCreateTable is returned when the input has no CREATE TABLE.
@@ -73,7 +77,7 @@ func (ds DesiredSchema) Statements() []Statement { return slices.Clone(ds.statem
 func ParseDesired(sql string) (DesiredSchema, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
-		return DesiredSchema{}, fmt.Errorf("parse desired schema: %w", err)
+		return DesiredSchema{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
 	}
 	return parseDesiredTree(tree)
 }

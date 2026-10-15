@@ -12,6 +12,10 @@ import (
 // The choice is made once, by [ParseDesiredFile], so a consumer never
 // re-derives which planner owns a file. Only ParseDesiredFile constructs a
 // non-zero value, and exactly one of Schema and RowSecurity reports ok.
+//
+// DesiredFile is a router over those two proof types, not a proof type itself:
+// no planner or executor accepts it. Hand the value Schema or RowSecurity
+// returns to the matching planner.
 type DesiredFile struct {
 	schema      DesiredSchema
 	rowSecurity DesiredWithRowSecurity
@@ -22,11 +26,12 @@ type DesiredFile struct {
 // statements select. A file that declares row security (a policy, a policy
 // comment, or ENABLE, DISABLE, FORCE or NO FORCE ROW LEVEL SECURITY) must pass
 // ParseDesiredWithRowSecurity's rules; any other file must pass ParseDesired's.
-// Refusals are those front doors' typed errors, unchanged.
+// Refusals are those front doors' typed errors, unchanged; input that is not
+// valid SQL is refused with [ErrParseDesired].
 func ParseDesiredFile(sql string) (DesiredFile, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
-		return DesiredFile{}, fmt.Errorf("parse desired schema: %w", err)
+		return DesiredFile{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
 	}
 	if hasRowSecurity(tree) {
 		rowSecurity, err := parseDesiredWithRowSecurityTree(tree)
@@ -51,9 +56,21 @@ func (f DesiredFile) Table() string {
 	return f.schema.Table()
 }
 
+// Statements returns the admitted statements in the order the admitted
+// value's Statements reports them. The slice is a copy.
+func (f DesiredFile) Statements() []Statement {
+	if f.hasRLS {
+		return f.rowSecurity.Statements()
+	}
+	return f.schema.Statements()
+}
+
 // Schema returns the ordinary planner input when the file declares no row
 // security. The zero DesiredFile admitted nothing, so it reports neither.
 func (f DesiredFile) Schema() (DesiredSchema, bool) {
+	// The table check alone suffices for values ParseDesiredFile builds, which
+	// leave schema zero on the row-security branch; !hasRLS keeps the
+	// "exactly one reports ok" guarantee local to this type.
 	return f.schema, !f.hasRLS && f.schema.Table() != ""
 }
 

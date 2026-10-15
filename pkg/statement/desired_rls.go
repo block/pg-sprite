@@ -44,7 +44,7 @@ func (d DesiredWithRowSecurity) Statements() []Statement { return slices.Clone(d
 func ParseDesiredWithRowSecurity(sql string) (DesiredWithRowSecurity, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
-		return DesiredWithRowSecurity{}, fmt.Errorf("parse desired row security: %w", err)
+		return DesiredWithRowSecurity{}, fmt.Errorf("%w: %w", ErrParseDesired, err)
 	}
 	return parseDesiredWithRowSecurityTree(tree)
 }
@@ -195,12 +195,17 @@ func messageReadsRelation(msg protoreflect.Message) bool {
 	return found
 }
 
-// HasRowSecurityDeclaration detects RLS syntax without admitting the file for
-// execution. Callers must still use ParseDesiredWithRowSecurity for validation.
+// HasRowSecurityDeclaration reports whether sql declares row security without
+// admitting it. Use it to ask that question alone, for example to skip input
+// that declares no row security, or to inspect a single statement rather than
+// a desired file. To route a desired file to its planner, use
+// [ParseDesiredFile], which makes this check and applies the matching front
+// door in one parse. The result is not an admission: execution still needs a
+// value from ParseDesiredWithRowSecurity or ParseDesiredFile.
 func HasRowSecurityDeclaration(sql string) (bool, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
-		return false, fmt.Errorf("parse desired schema: %w", err)
+		return false, fmt.Errorf("%w: %w", ErrParseDesired, err)
 	}
 	return hasRowSecurity(tree), nil
 }
