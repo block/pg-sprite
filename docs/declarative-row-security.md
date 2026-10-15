@@ -159,9 +159,15 @@ the normal plan format. `--sql` writes the refusal as a SQL comment.
 Equal definitions do not prove equal access: grants, role membership, helper
 function bodies, and authentication configuration are outside this comparison.
 
-Library callers use `RenderWithRowSecurity`, `ParseDesiredWithRowSecurity`, and
-`diffplan.PlanWithRowSecurity`. The parser returns a separate declaration type. Only the dedicated atomic RLS
+Library callers that handle both kinds of desired file use `ParseDesiredFile`. It
+picks the front door from the file's statements, returns whichever declaration it
+admitted, and refuses with that front door's typed errors. A caller that only
+handles row-security files uses `ParseDesiredWithRowSecurity` directly; both feed
+`diffplan.PlanWithRowSecurity`, and `RenderWithRowSecurity` writes a file back out.
+The row-security declaration is a separate type. Only the dedicated atomic RLS
 executor accepts it for live execution; generic native and create executors do not.
+`HasRowSecurityDeclaration` stays for callers that only need to know whether SQL
+declares row security, without admitting it.
 
 ## Review a difference
 

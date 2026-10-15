@@ -16,11 +16,7 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-func (c *DiffCmd) runRowSecurityDiff(ctx context.Context, out io.Writer, sql string) error {
-	desired, err := statement.ParseDesiredWithRowSecurity(sql)
-	if err != nil {
-		return err
-	}
+func (c *DiffCmd) runRowSecurityDiff(ctx context.Context, out io.Writer, desired statement.DesiredWithRowSecurity) error {
 	pool, err := dbconn.NewPool(ctx, c.Config())
 	if err != nil {
 		return err
