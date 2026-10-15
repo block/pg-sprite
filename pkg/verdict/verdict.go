@@ -109,6 +109,11 @@ const (
 	// the plan against the live catalog rather than assuming the
 	// occupant's shape.
 	ReasonCreateCollision Reason = "create-collision"
+	// ReasonDeclarativeForeignKey: the desired-state plan adds a foreign
+	// key, or creates a table that declares one, and desired-state
+	// execution does not run foreign-key changes yet. The plan still shows
+	// the change; the imperative front door runs ADD FOREIGN KEY online.
+	ReasonDeclarativeForeignKey Reason = "declarative-foreign-key"
 )
 
 // Reasons returns the closed set of non-zero Reason values. It is part of
@@ -128,6 +133,7 @@ func Reasons() []Reason {
 		ReasonDestructiveChange,
 		ReasonPlanFingerprintMismatch,
 		ReasonCreateCollision,
+		ReasonDeclarativeForeignKey,
 	}
 }
 

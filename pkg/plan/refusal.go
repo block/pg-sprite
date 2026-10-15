@@ -27,6 +27,10 @@ func CreateShapeRefusal(cause executor.CreateShapeCause) (verdict.Refusal, bool)
 		executor.CreateShapeUnsupportedKind:
 		// Shapes outside the absence proof the engine could mint later.
 		return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
+	case executor.CreateShapeForeignKey:
+		// The same planned capability as a foreign key added to a live
+		// table, so it carries the same reason.
+		return ForeignKeyChangeRefusal(), true
 	case executor.CreateShapeIfNotExists,
 		executor.CreateShapeDuplicateName,
 		executor.CreateShapeConcurrently:
@@ -77,6 +81,13 @@ func PartitionRefusal(cause preflight.PartitionRefusalCause) (verdict.Refusal, b
 // for: an admitted ALTER TABLE operation with no route. The key is the site.
 func RouteRefusal() verdict.Refusal {
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement)
+}
+
+// ForeignKeyChangeRefusal classifies a desired-state foreign-key change:
+// declarative foreign-key execution is a planned capability. The plan keeps
+// the statement, so the diff stays visible while execution refuses it.
+func ForeignKeyChangeRefusal() verdict.Refusal {
+	return verdict.CapabilityBoundary(verdict.ReasonDeclarativeForeignKey)
 }
 
 // DestructiveChangeRefusal classifies desired-state admission of a plan that

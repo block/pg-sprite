@@ -125,6 +125,10 @@ type Op struct {
 	// to an existing composite type — resolved via search_path when
 	// unqualified.
 	OfType bool
+	// ForeignKey is true for a CREATE TABLE that declares a foreign key, in
+	// either the column or the table-constraint form; creating it locks
+	// each referenced table in SHARE ROW EXCLUSIVE mode.
+	ForeignKey bool
 	// Default is the DEFAULT shape for OpAddColumn.
 	Default DefaultKind
 	// NewType is the target type for OpAlterColumnType and the column type
@@ -274,6 +278,7 @@ func ParseOps(sql string) ([]Op, error) {
 			Inherits:    create.GetPartbound() == nil && len(create.GetInhRelations()) > 0,
 			Like:        hasLikeClause(create),
 			OfType:      create.GetOfTypename() != nil,
+			ForeignKey:  len(foreignKeyConstraints(create)) > 0,
 			IfNotExists: create.GetIfNotExists(),
 		}}, nil
 	case node.GetIndexStmt() != nil:

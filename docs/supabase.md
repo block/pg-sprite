@@ -256,9 +256,9 @@ outcome; they do not assume every unsuccessful change rolls back completely.
   uses a separate workspace with its own search path. In policy expressions,
   qualify external types and functions even in `public`, such as
   `public.doc_status`; the policy workspace does not search `public`
-- Desired schema files do not yet model foreign keys, including references
-  to `auth.users`. Use the supported statement workflow where available;
-  see [capabilities.md](capabilities.md)
+- Desired schema files plan foreign keys but do not apply them, and refuse
+  a reference to another schema such as `auth.users`. Use the supported
+  statement workflow where available; see [capabilities.md](capabilities.md)
 - Work on tables your app owns. Leave Supabase-managed schemas such as
   `auth` and `storage` to Supabase
 - Realtime coverage is limited to INSERT/UPDATE subscriptions during the tested

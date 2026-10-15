@@ -88,7 +88,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		return plan.Report{}, err
 	default:
 		facts = planner.FactsFrom(live)
-		desired, err := schemadiff.IntrospectDesired(ctx, pool, ds)
+		desired, err := schemadiff.IntrospectDesired(ctx, pool, req.Schema, ds)
 		if err != nil {
 			return plan.Report{}, err
 		}
@@ -100,6 +100,7 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
 		return plan.Report{}, err
 	}
+	plan.RefuseForeignKeyChanges(&report)
 	if !tableExists {
 		// Shape refusals are stamped first so the disclosure below only
 		// describes the statements that remain executable.

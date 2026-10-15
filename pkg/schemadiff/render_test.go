@@ -5,8 +5,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // Rendered SQL is the product artifact a pull produces, so its exact text
@@ -160,18 +158,19 @@ func TestRenderRefusesCollatedColumn(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnrenderableCollation)
 }
 
-// The renderer proves its own output admissible through ParseDesired, so a
-// model carrying what a desired file refuses surfaces that gate's typed
-// error — a foreign key is the canonical case.
+// A table that owns a foreign key refuses to render: desired-state execution
+// refuses every foreign-key change, so a baseline carrying one could never be
+// applied.
 func TestRenderRefusesForeignKey(t *testing.T) {
 	m := base()
 	m.Constraints = append(m.Constraints, Constraint{
-		Name: "events_user_fk",
-		Def:  "FOREIGN KEY (user_id) REFERENCES users(id)",
+		Name:       "events_user_fk",
+		Def:        "FOREIGN KEY (user_id) REFERENCES users(id)",
+		ForeignKey: true,
 	})
 
 	_, err := Render(m)
-	require.ErrorIs(t, err, statement.ErrForeignKey)
+	require.ErrorIs(t, err, ErrUnrenderableForeignKey)
 }
 
 // A table referenced by other tables' foreign keys refuses to render: the

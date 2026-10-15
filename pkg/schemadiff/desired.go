@@ -21,21 +21,34 @@ import (
 // the desired file defines ever persists, no CREATEDB privilege is needed,
 // and server-version and extension parity with the live table hold by
 // construction because it runs on the same database.
-func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, desired statement.DesiredSchema) (Model, error) {
-	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements())
+//
+// schema is the target schema the desired table lives in. A table the
+// desired foreign keys reference is read from it: the scratch schema holds an
+// empty copy of each one, so no foreign key ever binds to, or locks, a live
+// table (see createReferencedStandIns).
+func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, schema string, desired statement.DesiredSchema) (Model, error) {
+	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{schema: schema, tables: desired.ReferencedTables()})
 }
 
-func introspectDesiredStatements(ctx context.Context, db *pgxpool.Pool, table string, statements []statement.Statement) (Model, error) {
+// referencedFrom names the live tables the scratch schema copies before the
+// desired statements run, and the schema they are read from. The zero value
+// copies nothing.
+type referencedFrom struct {
+	schema string
+	tables []string
+}
+
+func introspectDesiredStatements(ctx context.Context, db *pgxpool.Pool, table string, statements []statement.Statement, refs referencedFrom) (Model, error) {
 	tx, err := db.Begin(ctx)
 	if err != nil {
 		return Model{}, fmt.Errorf("begin scratch transaction: %w", err)
 	}
-	return introspectDesiredTransaction(ctx, tx, table, statements)
+	return introspectDesiredTransaction(ctx, tx, table, statements, refs)
 }
 
 // introspectDesiredTransaction owns tx, which may be a savepoint. Every exit
 // rolls it back, leaving its parent's live target and settings untouched.
-func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, statements []statement.Statement) (Model, error) {
+func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, statements []statement.Statement, refs referencedFrom) (Model, error) {
 	// The scratch transaction is never committed: rollback is the cleanup
 	// path for success and failure alike, so the redundant-closer exception
 	// does not apply — this rollback is load-bearing and its error is
@@ -60,6 +73,9 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(scratch, "public")); err != nil {
 		return Model{}, fmt.Errorf("set scratch search_path: %w", err)
 	}
+	if err := createReferencedStandIns(ctx, tx, scratch, refs.schema, refs.tables); err != nil {
+		return Model{}, err
+	}
 	// Statements arrive in execution order — the CREATE TABLE first — so
 	// an index never replays before the table it targets exists.
 	policyPath := false
@@ -76,6 +92,9 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 		if _, err := tx.Exec(ctx, st.SQL()); err != nil {
 			return Model{}, fmt.Errorf("execute desired statement on scratch schema: %w", err)
 		}
+	}
+	if err := confirmForeignKeysBindScratch(ctx, tx, scratch, table); err != nil {
+		return Model{}, err
 	}
 	m, err := introspectInTx(ctx, tx, scratch, table)
 	if err != nil {

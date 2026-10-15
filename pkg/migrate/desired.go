@@ -445,6 +445,10 @@ func planRefusal(report plan.Report) (verdict.Refusal, string) {
 				return planIncoherentRefusal(), detail(fmt.Sprintf("is refused by the create path with a cause this build does not classify (%q)", ps.Cause))
 			}
 			r, err := verdict.NewRefusal(ps.Class, ps.Reason, ps.Owner)
+			if err == nil && r.Reason() == verdict.ReasonDeclarativeForeignKey {
+				return r, detail("changes a foreign key, which desired-state execution does not run yet — " +
+					"run ADD FOREIGN KEY through the imperative front door, which validates it online")
+			}
 			if err == nil {
 				return r, detail("has no safe path")
 			}

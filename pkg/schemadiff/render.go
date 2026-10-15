@@ -31,13 +31,13 @@ var ErrUnrenderablePartition = errors.New("partitioned tables cannot be rendered
 // inheritance edges, so rendering would flatten a child or omit its children.
 var ErrUnrenderableInheritance = errors.New("table inheritance cannot be rendered as a desired schema")
 
-// ErrUnrenderableForeignKey is returned when other tables reference this
-// one with foreign keys. A desired file cannot declare foreign keys, so
-// the single-table model carries no incoming foreign-key topology — a
-// rendered baseline would look complete while silently dropping the
-// table's relationships. The renderer refuses instead. Outgoing foreign
-// keys are refused separately by the desired-file grammar
-// (statement.ErrForeignKey).
+// ErrUnrenderableForeignKey is returned when the table owns foreign keys or
+// other tables reference it with foreign keys. The single-table model carries
+// no incoming foreign-key topology, so a rendered baseline would look
+// complete while silently dropping the table's relationships. Desired files
+// may declare outgoing foreign keys for planning, but desired-state
+// execution refuses every foreign-key change, so a baseline carrying one
+// could never be applied; the renderer refuses both directions instead.
 var ErrUnrenderableForeignKey = errors.New("tables referenced by foreign keys cannot be rendered as a desired schema")
 
 // ErrUnrenderableUnlogged is returned for an unlogged table. The
@@ -55,8 +55,8 @@ var ErrUnrenderableCollation = errors.New("columns with an explicit collation ca
 // Render renders the canonical model into a desired-state schema file: one
 // CREATE TABLE followed by the model's CREATE INDEX statements. The output
 // is proven admissible by parsing it through statement.ParseDesired before
-// it is returned, so anything a desired file refuses (a foreign key, for
-// example) surfaces here as that gate's typed error. Materializing the
+// it is returned, so anything a desired file refuses (a schema-qualified
+// name, for example) surfaces here as that gate's typed error. Materializing the
 // output with IntrospectDesired reproduces the model's names and
 // definitions, so diffing it against the table it came from yields no
 // changes — the round-trip contract the integration tests enforce.
@@ -79,6 +79,9 @@ func Render(m Model) (string, error) {
 	}
 	if len(m.InheritanceChildren) != 0 {
 		return "", fmt.Errorf("render table %q: has inheritance children %s: %w", m.Table, strings.Join(m.InheritanceChildren, ", "), ErrUnrenderableInheritance)
+	}
+	if fks := ownForeignKeys(m); len(fks) != 0 {
+		return "", fmt.Errorf("render table %q: owns foreign keys (%s): %w", m.Table, strings.Join(fks, ", "), ErrUnrenderableForeignKey)
 	}
 	if len(m.ReferencedBy) != 0 {
 		return "", fmt.Errorf("render table %q: referenced by foreign keys (%s): %w", m.Table, strings.Join(m.ReferencedBy, ", "), ErrUnrenderableForeignKey)
@@ -159,4 +162,16 @@ func serialType(table string, c Column) (string, bool) {
 		return "", false
 	}
 	return base, true
+}
+
+// ownForeignKeys returns the names of the foreign keys the table itself
+// carries, in model order.
+func ownForeignKeys(m Model) []string {
+	var names []string
+	for _, con := range m.Constraints {
+		if con.ForeignKey {
+			names = append(names, con.Name)
+		}
+	}
+	return names
 }

@@ -21,6 +21,11 @@ var ErrRowSecurityTableDefinitionRequired = errors.New("desired row security req
 // desired-state materialization can preserve their dependency identities.
 var ErrPolicyRelationDependency = errors.New("policy relation dependencies are not supported in desired row security")
 
+// ErrRowSecurityForeignKey refuses a foreign key in a row-security desired
+// file. The row-security scratch build creates no stand-in for a referenced
+// table, so a foreign key there would bind to the live table and lock it.
+var ErrRowSecurityForeignKey = errors.New("foreign keys are not supported in desired row security")
+
 // DesiredWithRowSecurity proves declaration syntax for scratch inspection and
 // the dedicated atomic RLS executor. It is distinct from DesiredSchema; generic
 // native and create executors cannot accept it. Live safety needs executor checks.
@@ -76,6 +81,9 @@ func parseDesiredWithRowSecurityTree(tree *pganalyze.ParseResult) (DesiredWithRo
 	table, err := ParseDesired(tableSQL.String())
 	if err != nil {
 		return DesiredWithRowSecurity{}, err
+	}
+	if table.HasForeignKeys() {
+		return DesiredWithRowSecurity{}, fmt.Errorf("%w: table %q", ErrRowSecurityForeignKey, table.Table())
 	}
 	d := DesiredWithRowSecurity{table: table.Table(), statements: table.Statements()}
 	enabled, forced := 0, 0

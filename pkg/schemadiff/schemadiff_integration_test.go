@@ -55,7 +55,7 @@ func TestIntrospectDesiredMatchesLiveIntrospection(t *testing.T) {
 
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "events")
 	require.NoError(t, err)
-	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 
 	assert.Equal(t, live, desired,
@@ -79,7 +79,7 @@ func TestDiffRefusesSerialAdoption(t *testing.T) {
 	require.NoError(t, err)
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
 	require.NoError(t, err)
-	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 
 	_, err = schemadiff.Diff(schema, live, desired)
@@ -103,7 +103,7 @@ func TestDiffSerialTableConverges(t *testing.T) {
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
 	require.NoError(t, err)
 	assert.True(t, live.Columns[0].SequenceDefault, "serial column default must be marked sequence-backed")
-	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 
 	changes, err := schemadiff.Diff(schema, live, desired)
@@ -140,7 +140,7 @@ func TestIntrospectDesiredLeavesNoFootprint(t *testing.T) {
 
 	ds, err := statement.ParseDesired(desiredSQL)
 	require.NoError(t, err)
-	_, err = schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	_, err = schemadiff.IntrospectDesired(t.Context(), pool, "public", ds)
 	require.NoError(t, err)
 
 	var leftover int
@@ -183,7 +183,7 @@ func TestIntrospectDesiredSurfacesSemanticErrors(t *testing.T) {
 
 	ds, err := statement.ParseDesired("CREATE TABLE t (id no_such_type)")
 	require.NoError(t, err, "the grammar accepts unknown type names; only the server can refuse them")
-	_, err = schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	_, err = schemadiff.IntrospectDesired(t.Context(), pool, "public", ds)
 	require.Error(t, err)
 }
 
@@ -216,7 +216,7 @@ func TestDiffConverges(t *testing.T) {
 
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "events")
 	require.NoError(t, err)
-	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 	changes, err := schemadiff.Diff(schema, live, desired)
 	require.NoError(t, err)
@@ -266,7 +266,7 @@ CREATE UNIQUE INDEX events_name_key ON events (name);
 	require.NoError(t, err)
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "events")
 	require.NoError(t, err)
-	want, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	want, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 
 	require.Len(t, live.Indexes, 1, "the failed build leaves its catalog entry")
@@ -288,7 +288,7 @@ CREATE UNIQUE INDEX events_name_key ON events (name);
 	require.NoError(t, err)
 	baselineDS, err := statement.ParseDesired(rendered)
 	require.NoError(t, err)
-	baseline, err := schemadiff.IntrospectDesired(t.Context(), pool, baselineDS)
+	baseline, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, baselineDS)
 	require.NoError(t, err)
 	roundTrip, err := schemadiff.Diff(schema, live, baseline)
 	require.NoError(t, err)
@@ -354,7 +354,7 @@ CREATE INDEX events_name_key ON events (name);
 	require.NoError(t, err)
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "events")
 	require.NoError(t, err)
-	want, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	want, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 
 	require.Len(t, live.Indexes, 1, "the failed build leaves its catalog entry")
@@ -468,7 +468,7 @@ CREATE TABLE events (
 
 	wantDS, err := statement.ParseDesired(withIndex)
 	require.NoError(t, err)
-	want, err := schemadiff.IntrospectDesired(t.Context(), pool, wantDS)
+	want, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, wantDS)
 	require.NoError(t, err)
 	changes, err := schemadiff.Diff(schema, live, want)
 	require.NoError(t, err)
@@ -478,7 +478,7 @@ CREATE TABLE events (
 
 	withoutDS, err := statement.ParseDesired(withoutIndex)
 	require.NoError(t, err)
-	without, err := schemadiff.IntrospectDesired(t.Context(), pool, withoutDS)
+	without, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, withoutDS)
 	require.NoError(t, err)
 	changes, err = schemadiff.Diff(schema, live, without)
 	require.NoError(t, err)
