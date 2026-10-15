@@ -150,7 +150,7 @@ func (r *Runner) resume(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Ta
 			return runState{}, err
 		}
 	}
-	built, err := InspectShadow(ctx, pool, lock, target, r.opts.Shadow)
+	built, err := InspectShadow(ctx, pool, lock, target, st, r.opts.Shadow)
 	if errors.Is(err, ErrShadowNotFound) {
 		return runState{}, fmt.Errorf("checkpoint row for %s.%s is in phase %s but %w; delete the row to start over", cp.Schema, cp.Table, cp.Phase, err)
 	}

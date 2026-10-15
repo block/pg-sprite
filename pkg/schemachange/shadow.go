@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"strconv"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/internal/chunksql"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -96,6 +98,7 @@ type BuiltShadow struct {
 	fidelity               FidelitySnapshot
 	shadowFidelity         FidelitySnapshot
 	copyColumns            []string
+	conversions            map[string]string
 }
 
 // Schema is the schema holding both the source and the shadow.
@@ -146,6 +149,14 @@ func (b BuiltShadow) ShadowFidelity() FidelitySnapshot { return b.shadowFidelity
 // put it.
 func (b BuiltShadow) CopyColumns() []string { return append([]string(nil), b.copyColumns...) }
 
+// Conversions maps each copy column the gated statement retyped with a
+// USING clause to that clause's expression, rendered by pkg/statement; the
+// copier selects the column as the expression so every value is converted
+// the way the statement declared. The catalog keeps no record of a USING
+// clause, so the proof carries it from the statement; a column the change
+// retyped and then dropped has no entry, since the copy does not carry it.
+func (b BuiltShadow) Conversions() map[string]string { return maps.Clone(b.conversions) }
+
 // BuildShadow creates the copy-and-swap shadow for the proven target and
 // applies the gated ALTER TABLE to it, all in one bounded transaction under
 // SET LOCAL ROLE owner: CREATE TABLE … LIKE INCLUDING ALL EXCLUDING IDENTITY, the
@@ -171,20 +182,28 @@ func BuildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 		return BuiltShadow{}, err
 	}
 	shadow := ShadowName(target.Schema(), target.Table())
+	// The conversions are read before the retarget: both deparse the
+	// statement, and a USING the deparser cannot render faithfully should
+	// be refused as the conversion it is, not as a retarget that failed to
+	// re-parse.
+	conversions, err := columnConversions(st, target)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
 	retargeted, err := retargetOntoShadow(st, target, shadow)
 	if err != nil {
 		return BuiltShadow{}, err
 	}
 	ctx, stop := lock.Bind(ctx)
 	defer stop()
-	built, err := buildShadow(ctx, pool, lock, target, shadow, retargeted, opts)
+	built, err := buildShadow(ctx, pool, lock, target, shadow, retargeted, conversions, opts)
 	if err != nil {
 		return BuiltShadow{}, lockLossCause(lock, err)
 	}
 	return built, nil
 }
 
-func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, shadow, retargeted string, opts Options) (BuiltShadow, error) {
+func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, shadow, retargeted string, conversions map[string]string, opts Options) (BuiltShadow, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return BuiltShadow{}, fmt.Errorf("begin shadow build: %w", err)
@@ -265,14 +284,16 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err := tx.Commit(ctx); err != nil {
 		return BuiltShadow{}, fmt.Errorf("commit shadow build: %w", err)
 	}
-	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity, shadowFidelity)
+	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity, shadowFidelity, conversions)
 }
 
 // newBuiltShadow assembles the proof from what a build or an inspection read
-// inside its transaction; the fingerprints, copy columns, and identity
-// handoffs are derived from the two models so the same catalog state always
-// yields the same proof.
-func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, shadowOID uint32, sourceModel, targetModel schemadiff.Model, identities []IdentityColumn, fidelity, shadowFidelity FidelitySnapshot) (BuiltShadow, error) {
+// inside its transaction and from the gated statement; the fingerprints,
+// copy columns, and identity handoffs are derived from the two models so
+// the same catalog state always yields the same proof, and the conversions
+// are kept for the copy columns only, so the same statement over the same
+// catalog state does too.
+func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, shadowOID uint32, sourceModel, targetModel schemadiff.Model, identities []IdentityColumn, fidelity, shadowFidelity FidelitySnapshot, conversions map[string]string) (BuiltShadow, error) {
 	sourceFingerprint, err := fingerprint(sourceModel)
 	if err != nil {
 		return BuiltShadow{}, err
@@ -281,6 +302,7 @@ func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, s
 	if err != nil {
 		return BuiltShadow{}, err
 	}
+	columns := copyColumns(sourceModel, targetModel)
 	return BuiltShadow{
 		target:            target,
 		schema:            target.Schema(),
@@ -293,8 +315,35 @@ func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, s
 		identities:        handoffIdentities(identities, targetModel),
 		fidelity:          fidelity,
 		shadowFidelity:    shadowFidelity,
-		copyColumns:       copyColumns(sourceModel, targetModel),
+		copyColumns:       columns,
+		conversions:       copyConversions(conversions, columns),
 	}, nil
+}
+
+// columnConversions reads the USING expressions out of the gated statement
+// after checking it is an ALTER TABLE naming the proven table, the same
+// check the retarget makes: an expression taken from a statement about
+// another table would convert this one's columns. An expression the copy
+// cannot carry as the statement wrote it is refused before any shadow
+// exists: one the deparser cannot prove it rendered faithfully, a column
+// retyped twice, or a conversion of the primary key, whose values every
+// chunk range, watermark, and resume clear of the copy are expressed in.
+func columnConversions(st statement.Statement, target preflight.CopySwapTarget) (map[string]string, error) {
+	// INV: ST-7
+	if st.Kind() != statement.KindAlterTable {
+		return nil, refuse(CauseStatementTarget, nil, "shadow builder accepts only ALTER TABLE, got %s", st.Kind())
+	}
+	if !namesTarget(st, target.Schema(), target.Table()) {
+		return nil, refuse(CauseStatementTarget, nil, "statement targets %s, proof is for %s.%s", st.Table(), target.Schema(), target.Table())
+	}
+	conversions, err := statement.ColumnConversions(st.SQL())
+	if err != nil {
+		return nil, refuse(CauseStatementConversion, []error{err}, "the copy cannot carry a USING expression of the statement for %s.%s", target.Schema(), target.Table())
+	}
+	if _, converted := conversions[target.PKColumn()]; converted {
+		return nil, refuse(CauseStatementConversion, nil, "the statement for %s.%s converts the primary key %s with USING", target.Schema(), target.Table(), target.PKColumn())
+	}
+	return conversions, nil
 }
 
 // checkProof refuses the zero CopySwapTarget: only the copy-and-swap shape
@@ -397,10 +446,12 @@ func setBudgets(ctx context.Context, tx pgx.Tx, opts Options) error {
 
 // setSearchPath puts the target schema first on the transaction-local
 // search_path, catalog-first (CO-9), so the gated statement's unqualified
-// names resolve to the proven table's schema.
+// names resolve to the proven table's schema. It is the path chunksql
+// chooses for a converted copy, so a USING expression resolves its names
+// in the copy exactly as it did when the statement ran on the shadow.
 func setSearchPath(ctx context.Context, tx pgx.Tx, schema string) error {
 	// INV: CO-9
-	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(schema, "public")); err != nil {
+	if _, err := tx.Exec(ctx, chunksql.SearchPath(schema, true)); err != nil {
 		return fmt.Errorf("set shadow build search_path: %w", err)
 	}
 	return nil
@@ -478,6 +529,25 @@ func fingerprint(m schemadiff.Model) (string, error) {
 	}
 	sum := sha256.Sum256(encoded)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
+}
+
+// copyConversions keeps the conversions of the columns the copy carries: a
+// column the change retyped and then dropped has no place on the shadow
+// for its converted values. No conversions is a nil map, which is what the
+// proof's JSON form decodes to when the field is absent, so a proof built
+// from a statement without USING equals its checkpointed copy field for
+// field.
+func copyConversions(conversions map[string]string, columns []string) map[string]string {
+	var kept map[string]string
+	for _, column := range columns {
+		if expr, ok := conversions[column]; ok {
+			if kept == nil {
+				kept = make(map[string]string, len(conversions))
+			}
+			kept[column] = expr
+		}
+	}
+	return kept
 }
 
 // copyColumns lists the non-generated source columns that exist on the

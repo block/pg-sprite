@@ -31,9 +31,11 @@ type columnType struct {
 
 // shadowColumnTypesSQL reads the type of every copy column as the shadow
 // ($1) declares it. Every catalog name is pg_catalog-qualified so the
-// session's search_path plays no part (CO-9), and the session's search_path
-// is pg_catalog alone while it runs, so format_type qualifies every type
-// that is not built in.
+// session's search_path plays no part (CO-9). format_type qualifies every
+// type the transaction's search_path does not reach, and the digest's casts
+// resolve the rest on that same path, which the guard set before either
+// ran: the catalog alone for a pass without conversions, the build's path
+// for one with them.
 const shadowColumnTypesSQL = `
 	SELECT a.attname, pg_catalog.format_type(a.atttypid, a.atttypmod)
 	FROM pg_catalog.pg_attribute a
@@ -99,9 +101,10 @@ func shadowColumnTypes(ctx context.Context, tx pgx.Tx, shadow copier.Shadow) ([]
 // hash per row. The bounds are declared bigint whatever the key's integer
 // type, as the chunker's boundary query declares them, so the primary-key
 // index serves the range scan. Every function is pg_catalog-qualified, and
-// the guarded session's search_path is pg_catalog alone for the operators
-// and casts that cannot be, so the session's own search_path plays no part
-// (CO-9); COALESCE is syntax, not a function, and takes no qualifier.
+// the guarded session's search_path keeps the catalog ahead of everything
+// for the operators and casts that cannot be, so the session's own
+// search_path plays no part (CO-9); COALESCE is syntax, not a function, and
+// takes no qualifier.
 func digestSQL(target preflight.CopySwapTarget, schema, table string, types []columnType) string {
 	cast := make([]string, 0, len(types))
 	for _, c := range types {

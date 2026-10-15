@@ -30,14 +30,50 @@ func TestInspectShadowRederivesTheBuiltProof(t *testing.T) {
 	f.exec(t, `CREATE INDEX orders_note_idx ON %s.orders (note)`)
 	lock := f.lock(t, "orders")
 	target := f.prove(t, "orders")
-	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, `ALTER TABLE %s.orders ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	alter := f.alter(t, `ALTER TABLE %s.orders ALTER COLUMN qty TYPE bigint`)
+	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	require.NoError(t, err)
 
-	inspected, err := schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
+	inspected, err := schemachange.InspectShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	require.NoError(t, err)
 
 	assert.Equal(t, built, inspected)
 	assert.NotEqual(t, inspected.SourceFingerprint(), inspected.TargetFingerprint(), "the inspected proof still shows the change")
+}
+
+// A retype with USING leaves no trace in the catalog: the shadow's column
+// has its new type and nothing records how the old values become it. The
+// proof carries the USING expression per copy column, read from the
+// statement, and inspection re-derives the same proof from the same
+// statement; a retyped column with no USING carries none.
+func TestInspectShadowRederivesTheConversionsOfTheStatement(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.orders (
+			id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+			price text NOT NULL,
+			qty integer NOT NULL,
+			note varchar(20)
+		)`)
+	lock := f.lock(t, "orders")
+	target := f.prove(t, "orders")
+	alter := f.alter(t, `
+		ALTER TABLE %s.orders
+			ALTER COLUMN price TYPE integer USING (price::numeric * 100)::integer,
+			ALTER COLUMN qty TYPE bigint USING qty::bigint,
+			ALTER COLUMN note TYPE text`)
+	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{
+		"price": "(price::numeric * 100)::int",
+		"qty":   "qty::bigint",
+	}, built.Conversions(), "each retyped copy column carries the statement's USING as the deparser renders it")
+	assert.Equal(t, built.Conversions(), built.Proof().Conversions)
+
+	inspected, err := schemachange.InspectShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
+	require.NoError(t, err)
+
+	assert.Equal(t, built, inspected)
 }
 
 // A change that drops one of the source's identity columns leaves the
@@ -55,13 +91,14 @@ func TestInspectShadowAcceptsAShadowWhoseIdentityColumnTheChangeDropped(t *testi
 		)`)
 	lock := f.lock(t, "widgets")
 	target := f.prove(t, "widgets")
-	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, `ALTER TABLE %s.widgets DROP COLUMN seqno`), schemachange.Options{})
+	alter := f.alter(t, `ALTER TABLE %s.widgets DROP COLUMN seqno`)
+	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	require.NoError(t, err)
 	require.Len(t, built.IdentityColumns(), 1, "only the kept identity column is handed over")
 	assert.Equal(t, "id", built.IdentityColumns()[0].Column)
 	assert.Equal(t, []string{"id", "qty"}, built.CopyColumns())
 
-	inspected, err := schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
+	inspected, err := schemachange.InspectShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	require.NoError(t, err)
 
 	assert.Equal(t, built, inspected)
@@ -75,7 +112,8 @@ func TestInspectShadowReportsAMissingShadow(t *testing.T) {
 		CREATE TABLE %s.widgets (
 			id bigint PRIMARY KEY
 		)`)
-	_, err := schemachange.InspectShadow(t.Context(), f.pool, f.lock(t, "widgets"), f.prove(t, "widgets"), schemachange.Options{})
+	alter := f.alter(t, `ALTER TABLE %s.widgets ADD COLUMN qty integer`)
+	_, err := schemachange.InspectShadow(t.Context(), f.pool, f.lock(t, "widgets"), f.prove(t, "widgets"), alter, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrShadowNotFound)
 }
 
@@ -91,12 +129,13 @@ func TestInspectShadowRefusesAShadowWhoseIdentityDefaultWasStripped(t *testing.T
 		)`)
 	lock := f.lock(t, "orders")
 	target := f.prove(t, "orders")
-	_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, `ALTER TABLE %s.orders ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	alter := f.alter(t, `ALTER TABLE %s.orders ALTER COLUMN qty TYPE bigint`)
+	_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	require.NoError(t, err)
 	shadow := schemachange.ShadowName(f.schema, "orders")
 	f.exec(t, fmt.Sprintf(`ALTER TABLE %%s.%s ALTER COLUMN id DROP DEFAULT`, pgx.Identifier{shadow}.Sanitize()))
 
-	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
 	assert.Equal(t, schemachange.CauseIdentityHandoff, schemachange.RefusalCauseOf(err))
 }
@@ -113,13 +152,14 @@ func TestInspectShadowRefusesAShadowDefaultingToAnotherSequence(t *testing.T) {
 		)`)
 	lock := f.lock(t, "orders")
 	target := f.prove(t, "orders")
-	_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, `ALTER TABLE %s.orders ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	alter := f.alter(t, `ALTER TABLE %s.orders ALTER COLUMN qty TYPE bigint`)
+	_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	require.NoError(t, err)
 	shadow := schemachange.ShadowName(f.schema, "orders")
 	f.exec(t, `CREATE SEQUENCE %s.other_seq`)
 	f.exec(t, fmt.Sprintf(`ALTER TABLE %%s.%s ALTER COLUMN id SET DEFAULT nextval('%%s.other_seq')`, pgx.Identifier{shadow}.Sanitize()))
 
-	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
 	assert.Equal(t, schemachange.CauseIdentityHandoff, schemachange.RefusalCauseOf(err))
 }
@@ -136,9 +176,48 @@ func TestInspectShadowRefusesAShadowWithAnotherOwner(t *testing.T) {
 	f.exec(t, fmt.Sprintf(`CREATE TABLE %%s.%s (id bigint)`, pgx.Identifier{shadow}.Sanitize()))
 	f.exec(t, fmt.Sprintf(`ALTER TABLE %%s.%s OWNER TO %s`, pgx.Identifier{shadow}.Sanitize(), pgx.Identifier{other}.Sanitize()))
 
-	_, err := schemachange.InspectShadow(t.Context(), f.pool, f.lock(t, "widgets"), f.prove(t, "widgets"), schemachange.Options{})
+	alter := f.alter(t, `ALTER TABLE %s.widgets ADD COLUMN qty integer`)
+	_, err := schemachange.InspectShadow(t.Context(), f.pool, f.lock(t, "widgets"), f.prove(t, "widgets"), alter, schemachange.Options{})
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
 	assert.Equal(t, schemachange.CauseForeignRelation, schemachange.RefusalCauseOf(err))
+}
+
+// Inspection reads the conversions out of the statement it is handed, so
+// the statement must be the one the build ran: an ALTER TABLE about another
+// table, or a statement that is not an ALTER TABLE at all, is refused under
+// the same cause the build raises, before the catalog is consulted. A
+// resume handed the wrong row's statement cannot copy this table's columns
+// through another table's USING expressions.
+func TestInspectShadowRefusesAStatementThatIsNotAboutTheTarget(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.orders (
+			id bigint PRIMARY KEY,
+			qty text NOT NULL
+		)`)
+	f.exec(t, `
+		CREATE TABLE %s.invoices (
+			id bigint PRIMARY KEY,
+			total text NOT NULL
+		)`)
+	lock := f.lock(t, "orders")
+	target := f.prove(t, "orders")
+	alter := f.alter(t, `
+		ALTER TABLE %s.orders
+			ALTER COLUMN qty TYPE integer USING qty::integer`)
+	_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
+	require.NoError(t, err)
+
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, f.alter(t, `
+		ALTER TABLE %s.invoices
+			ALTER COLUMN total TYPE integer USING total::integer`), schemachange.Options{})
+	require.ErrorIs(t, err, schemachange.ErrInvariantViolation, "an ALTER TABLE about another table")
+	assert.Equal(t, schemachange.CauseStatementTarget, schemachange.RefusalCauseOf(err))
+
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, f.alter(t, `
+		CREATE INDEX orders_qty_idx ON %s.orders (qty)`), schemachange.Options{})
+	require.ErrorIs(t, err, schemachange.ErrInvariantViolation, "a statement that is not an ALTER TABLE")
+	assert.Equal(t, schemachange.CauseStatementTarget, schemachange.RefusalCauseOf(err))
 }
 
 // The source must still have the shape the proof was minted for: a trigger
@@ -152,13 +231,14 @@ func TestInspectShadowRefusesASourceThatChangedShapeSinceTheProof(t *testing.T) 
 		)`)
 	lock := f.lock(t, "widgets")
 	target := f.prove(t, "widgets")
-	_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	alter := f.alter(t, `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`)
+	_, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	require.NoError(t, err)
 	f.exec(t, `
 		CREATE FUNCTION %s.noop() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$`)
 	f.exec(t, `CREATE TRIGGER widgets_noop BEFORE INSERT ON %s.widgets FOR EACH ROW EXECUTE FUNCTION %s.noop()`)
 
-	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
+	_, err = schemachange.InspectShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	var shape *preflight.UnsupportedCopySwapShapeError
 	assert.ErrorAs(t, err, &shape)
 }

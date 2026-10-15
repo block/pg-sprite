@@ -140,7 +140,8 @@ func TestBuiltShadowJSONRoundTripsAsTheProofInspectionRederives(t *testing.T) {
 
 	lock := f.lock(t, "orders")
 	target := f.prove(t, "orders")
-	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, `ALTER TABLE %s.orders ALTER COLUMN qty TYPE bigint`), schemachange.Options{})
+	alter := f.alter(t, `ALTER TABLE %s.orders ALTER COLUMN qty TYPE bigint`)
+	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	require.NoError(t, err)
 
 	proof := built.Proof()
@@ -178,7 +179,7 @@ func TestBuiltShadowJSONRoundTripsAsTheProofInspectionRederives(t *testing.T) {
 	require.NoError(t, json.Unmarshal(encoded, &decoded))
 	assert.Equal(t, proof, decoded, "the checkpoint decodes to the proof the build returned")
 
-	inspected, err := schemachange.InspectShadow(t.Context(), f.pool, lock, target, schemachange.Options{})
+	inspected, err := schemachange.InspectShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
 	require.NoError(t, err)
 	assert.Equal(t, inspected.Proof(), decoded, "the resume comparison: inspection re-derives the checkpointed proof")
 

@@ -5,7 +5,11 @@
 // chunks with several workers — one guarded, never-overwriting insert per
 // chunk — first clearing the shadow above the watermark when it resumes, and
 // reports a Position whose Classify is the applier's rule for a captured key:
-// uncut, in flight, or landed. Every refusal is a *RefusalError carrying a
+// uncut, in flight, or landed. A column the Shadow proof names in
+// Conversions is copied through that USING expression; the copier does not
+// decide whether the statement behind the proof may run — the router's
+// availability check is that gate, and a caller that drives the copier
+// directly is trusted to have consulted it. Every refusal is a *RefusalError carrying a
 // RefusalCause from the closed set RefusalCauses, fail-closed under
 // ErrInvariantViolation; RefusalCauseOf reads it through wrapping.
 package copier

@@ -106,10 +106,14 @@ type Verifier struct {
 	// puts the source's rows back, the chunk insert the copier runs, and
 	// fenceSQL holds the stream's flushes off the shadow while a live
 	// repair runs; all three are frozen at construction so no pass builds
-	// SQL.
-	repairSQL string
-	copySQL   string
-	fenceSQL  string
+	// SQL. searchPath is the SET LOCAL every transaction of the pass runs
+	// first: the one the copier's chunks run under, so a recopy resolves
+	// the copy statement as the copy did and the digests' casts resolve
+	// their type names the same way.
+	repairSQL  string
+	copySQL    string
+	fenceSQL   string
+	searchPath string
 
 	// mu guards work, the counters Work reports for the pass in progress,
 	// and running, which is set from report until its stop runs.
@@ -145,9 +149,10 @@ func NewVerifier(target preflight.CopySwapTarget, shadow copier.Shadow, lock *db
 	}
 	return &Verifier{
 		target: target, shadow: shadow, lock: lock, opts: opts,
-		repairSQL: repairSQL(target, shadow),
-		copySQL:   chunksql.Insert(shadow.Schema(), shadow.SourceTable(), shadow.ShadowTable(), target.PKColumn(), shadow.CopyColumns()),
-		fenceSQL:  fenceSQL(shadow),
+		repairSQL:  repairSQL(target, shadow),
+		copySQL:    chunksql.Insert(shadow.Schema(), shadow.SourceTable(), shadow.ShadowTable(), target.PKColumn(), shadow.CopyColumns(), shadow.Conversions()),
+		fenceSQL:   fenceSQL(shadow),
+		searchPath: chunksql.SearchPath(shadow.Schema(), len(shadow.Conversions()) > 0),
 	}, nil
 }
 
@@ -177,6 +182,20 @@ func checkShadow(target preflight.CopySwapTarget, shadow copier.Shadow) error {
 	}
 	if !slices.Contains(shadow.CopyColumns(), target.PKColumn()) {
 		return fmt.Errorf("%w (ST-6): shadow copy columns for %s.%s do not include the primary key %s", ErrInvariantViolation, target.Schema(), target.Table(), target.PKColumn())
+	}
+	// The pass's chunks, its repair's delete and recopy, and the watermark
+	// all speak the source's key values, so a converted key would compare
+	// and recopy rows under keys those ranges do not describe.
+	if _, converted := shadow.Conversions()[target.PKColumn()]; converted {
+		return fmt.Errorf("%w (ST-6): shadow proof for %s.%s converts the primary key %s", ErrInvariantViolation, target.Schema(), target.Table(), target.PKColumn())
+	}
+	for column, expr := range shadow.Conversions() {
+		if !slices.Contains(shadow.CopyColumns(), column) {
+			return fmt.Errorf("%w (ST-6): shadow proof for %s.%s converts column %s, which the copy does not carry", ErrInvariantViolation, target.Schema(), target.Table(), column)
+		}
+		if expr == "" {
+			return fmt.Errorf("%w (ST-6): shadow proof for %s.%s converts column %s with an empty expression", ErrInvariantViolation, target.Schema(), target.Table(), column)
+		}
 	}
 	return nil
 }

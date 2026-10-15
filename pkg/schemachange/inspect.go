@@ -11,6 +11,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // ErrShadowNotFound reports that no relation wears the shadow's name in the
@@ -18,20 +19,24 @@ import (
 var ErrShadowNotFound = errors.New("shadow table not found")
 
 // InspectShadow re-derives the BuiltShadow proof for a shadow an earlier
-// build left behind, from the catalog alone, in one bounded read
-// transaction under SET LOCAL ROLE owner. It is the resume path: the caller
-// compares the returned proof's whole Proof — fingerprints and both
-// fidelity snapshots — with its checkpoint before trusting the shadow,
-// since the gated statement is not recoverable from the catalog and a
-// snapshot re-read from the catalog records the table as it is now, not as
-// the build left it.
+// build left behind, from the catalog and the gated statement st, in one
+// bounded read transaction under SET LOCAL ROLE owner. It is the resume
+// path: the caller compares the returned proof's whole Proof —
+// fingerprints, both fidelity snapshots, and conversions — with its
+// checkpoint before trusting the shadow, since the gated statement is not
+// recoverable from the catalog and a snapshot re-read from the catalog
+// records the table as it is now, not as the build left it. The statement
+// is needed for the same reason: the catalog records a retyped column's
+// new type, not the USING expression that made it, and the copy of that
+// column must carry the expression; the caller proves st is the row's
+// statement before passing it.
 // What the catalog can prove, it proves here: the source still has the
 // proven shape (ST-6), the shadow is a table owned by the source's owner
 // (ST-5), and every source identity column the change kept on the shadow
 // still draws its default from the source sequence there (D5) — a shadow
 // whose default was stripped would silently insert nulls into its key. A
 // missing shadow is ErrShadowNotFound.
-func InspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, opts Options) (BuiltShadow, error) {
+func InspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, st statement.Statement, opts Options) (BuiltShadow, error) {
 	if err := opts.validate(); err != nil {
 		return BuiltShadow{}, err
 	}
@@ -41,16 +46,20 @@ func InspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 	if err := requireTableLock(lock, target.Schema(), target.Table()); err != nil {
 		return BuiltShadow{}, err
 	}
+	conversions, err := columnConversions(st, target)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
 	ctx, stop := lock.Bind(ctx)
 	defer stop()
-	built, err := inspectShadow(ctx, pool, lock, target, opts)
+	built, err := inspectShadow(ctx, pool, lock, target, conversions, opts)
 	if err != nil {
 		return BuiltShadow{}, lockLossCause(lock, err)
 	}
 	return built, nil
 }
 
-func inspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, opts Options) (BuiltShadow, error) {
+func inspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, conversions map[string]string, opts Options) (BuiltShadow, error) {
 	shadow := ShadowName(target.Schema(), target.Table())
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -113,7 +122,7 @@ func inspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 	if err := tx.Commit(ctx); err != nil {
 		return BuiltShadow{}, fmt.Errorf("commit shadow inspection: %w", err)
 	}
-	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity, shadowFidelity)
+	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity, shadowFidelity, conversions)
 }
 
 // resolveShadow returns the OID of the relation wearing the shadow's name,

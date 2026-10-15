@@ -44,6 +44,14 @@ const (
 	// on the proven table, or its retargeted form does not match it in
 	// every operation and name the shadow (ST-7).
 	CauseStatementTarget RefusalCause = "shadow-statement-target"
+	// CauseStatementConversion means the gated statement retypes a column
+	// with a USING expression the copy cannot carry as written (ST-7): the
+	// deparser cannot prove it rendered the expression faithfully, the
+	// statement retypes the same column twice, or the expression converts
+	// the primary key, whose values the copy's chunk ranges, watermark, and
+	// resume clear are expressed in. The statement's own sentinel, when
+	// there is one, is wrapped for errors.Is.
+	CauseStatementConversion RefusalCause = "shadow-statement-conversion"
 	// CauseShadowOwner means the shadow the build just created is not owned
 	// by the source's owner (ST-5): the role the proof carries is no longer
 	// the owner the catalog reports, so the proof is stale.
@@ -179,6 +187,7 @@ func RefusalCauses() []RefusalCause {
 		CauseProofEmpty,
 		CauseSourceShape,
 		CauseStatementTarget,
+		CauseStatementConversion,
 		CauseShadowOwner,
 		CauseForeignRelation,
 		CauseGrantsDiffer,
@@ -219,7 +228,7 @@ func (c RefusalCause) Invariant() string {
 		return "CO-4"
 	case CauseCopyChunksInFlight:
 		return "LK-3"
-	case CauseStatementTarget:
+	case CauseStatementTarget, CauseStatementConversion:
 		return "ST-7"
 	case CauseShadowOwner, CauseForeignRelation, CauseGrantsDiffer, CauseIdentityHandoff,
 		CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid, CauseNameTaken:
