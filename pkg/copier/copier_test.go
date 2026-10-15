@@ -15,7 +15,8 @@ import (
 func TestNewCopierRejectsEmptyProof(t *testing.T) {
 	_, err := NewCopier(preflight.CopySwapTarget{}, nil, nil, Watermark{}, Options{})
 	require.ErrorIs(t, err, ErrInvariantViolation)
-	assert.EqualError(t, err, "invariant violation (ST-6): copy-and-swap target proof is empty")
+	assert.Equal(t, CauseProofEmpty, RefusalCauseOf(err))
+	assert.EqualError(t, err, "invariant violation: ST-6 (copy-proof-empty): copy-and-swap target proof is empty")
 }
 
 func TestCopierOptionsDefaults(t *testing.T) {

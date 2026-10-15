@@ -418,6 +418,7 @@ func TestCopierAbortsWhenTheLockIsLostMidCopy(t *testing.T) {
 	select {
 	case err := <-results:
 		assert.ErrorIs(t, err, copier.ErrInvariantViolation)
+		assert.Equal(t, copier.CauseLockLost, copier.RefusalCauseOf(err))
 		assert.ErrorIs(t, err, lock.Err(), "the loss the session reported is the cause")
 	case <-time.After(lockLossDeadline):
 		t.Fatalf("copy did not abort within %s of lock loss", lockLossDeadline)
@@ -443,7 +444,8 @@ func TestCopierRefusesReplacedRelations(t *testing.T) {
 		require.NoError(t, err)
 		err = c.Run(t.Context(), f.pool)
 		require.ErrorIs(t, err, copier.ErrInvariantViolation)
-		assert.Contains(t, err.Error(), "(ST-6): shadow")
+		assert.Equal(t, copier.CauseRelationReplaced, copier.RefusalCauseOf(err))
+		assert.Contains(t, err.Error(), "shadow "+f.schema+"."+shadow.ShadowTable()+" is relation")
 		assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "true"), "the impostor receives nothing")
 	})
 	t.Run("source replaced", func(t *testing.T) {
@@ -457,7 +459,8 @@ func TestCopierRefusesReplacedRelations(t *testing.T) {
 		require.NoError(t, err)
 		err = c.Run(t.Context(), f.pool)
 		require.ErrorIs(t, err, copier.ErrInvariantViolation)
-		assert.Contains(t, err.Error(), "(ST-6): source")
+		assert.Equal(t, copier.CauseRelationReplaced, copier.RefusalCauseOf(err))
+		assert.Contains(t, err.Error(), "source "+f.schema+".orders is relation")
 		assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "true"), "nothing is copied from a table nobody proved")
 	})
 	// A relation that is gone fails the write transaction's own lock on it
@@ -476,7 +479,7 @@ func TestCopierRefusesReplacedRelations(t *testing.T) {
 		var pgErr *pgconn.PgError
 		require.ErrorAs(t, err, &pgErr, "the server's refusal to lock a missing relation is the cause")
 		assert.Equal(t, "42P01", pgErr.Code, "undefined_table")
-		assert.Contains(t, err.Error(), "(ST-6)")
+		assert.Equal(t, copier.CauseRelationReplaced, copier.RefusalCauseOf(err))
 		assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "true"))
 	})
 }
@@ -497,12 +500,14 @@ func TestCopierRefusesAnUnconfirmedLock(t *testing.T) {
 	f.exec(t, `CREATE TABLE %s.other (id bigint PRIMARY KEY)`)
 	_, err := copier.NewCopier(target, shadow, f.lock(t, "other"), copier.Watermark{}, copier.Options{})
 	require.ErrorIs(t, err, copier.ErrInvariantViolation, "a lock for another table")
+	assert.Equal(t, copier.CauseLockUnproven, copier.RefusalCauseOf(err))
 
 	stale := f.goneLock(t, "orders")
 	c, err := copier.NewCopier(target, shadow, stale, copier.Watermark{}, copier.Options{Workers: 1})
 	require.NoError(t, err)
 	err = c.Run(t.Context(), f.pool)
 	require.ErrorIs(t, err, copier.ErrInvariantViolation, "a gone lock session")
+	assert.Equal(t, copier.CauseLockUnconfirmed, copier.RefusalCauseOf(err))
 	assert.ErrorIs(t, err, dbconn.ErrTableLockNotHeld)
 	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "true"))
 
@@ -511,6 +516,7 @@ func TestCopierRefusesAnUnconfirmedLock(t *testing.T) {
 	require.NoError(t, err)
 	err = c.Run(t.Context(), f.pool)
 	require.ErrorIs(t, err, copier.ErrInvariantViolation, "a lock held by another backend")
+	assert.Equal(t, copier.CauseLockHeldElsewhere, copier.RefusalCauseOf(err))
 	var heldErr *dbconn.TableLockHeldError
 	require.ErrorAs(t, err, &heldErr)
 	assert.Equal(t, rival.BackendPID(), heldErr.Holder.PID)
@@ -521,8 +527,8 @@ func TestCopierRefusesAnUnconfirmedLock(t *testing.T) {
 	lost := f.lostLock(t, "orders")
 	_, err = copier.NewCopier(target, shadow, lost, copier.Watermark{}, copier.Options{})
 	require.ErrorIs(t, err, copier.ErrInvariantViolation, "a session that already reported loss")
+	assert.Equal(t, copier.CauseLockLost, copier.RefusalCauseOf(err))
 	assert.ErrorIs(t, err, lost.Err(), "the refusal names what the session saw")
-	assert.Contains(t, err.Error(), "(LK-1)")
 }
 
 // lostLock acquires the table lock with a short keepalive, terminates the

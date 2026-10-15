@@ -127,7 +127,7 @@ type Copier struct {
 func NewCopier(target preflight.CopySwapTarget, shadow Shadow, lock *dbconn.TableLockSession, from Watermark, opts Options) (*Copier, error) {
 	// INV: ST-6
 	if target.Table() == "" {
-		return nil, fmt.Errorf("%w (ST-6): copy-and-swap target proof is empty", ErrInvariantViolation)
+		return nil, refuse(CauseProofEmpty, nil, "copy-and-swap target proof is empty")
 	}
 	if err := checkShadow(target, shadow); err != nil {
 		return nil, err
@@ -162,17 +162,17 @@ func NewCopier(target preflight.CopySwapTarget, shadow Shadow, lock *dbconn.Tabl
 func requireTableLock(lock *dbconn.TableLockSession, target preflight.CopySwapTarget) error {
 	// INV: LK-1
 	if lock == nil {
-		return fmt.Errorf("%w (LK-1): copy requires a table lock session", ErrInvariantViolation)
+		return refuse(CauseLockUnproven, nil, "copy requires a table lock session")
 	}
 	held := lock.Lock()
 	if held.Table() == "" {
-		return fmt.Errorf("%w (LK-1): table lock proof is empty", ErrInvariantViolation)
+		return refuse(CauseLockUnproven, nil, "table lock proof is empty")
 	}
 	if held.Schema() != target.Schema() || held.Table() != target.Table() {
-		return fmt.Errorf("%w (LK-1): table lock is for %s.%s, proof is for %s.%s", ErrInvariantViolation, held.Schema(), held.Table(), target.Schema(), target.Table())
+		return refuse(CauseLockUnproven, nil, "table lock is for %s.%s, proof is for %s.%s", held.Schema(), held.Table(), target.Schema(), target.Table())
 	}
 	if err := lock.Err(); err != nil {
-		return fmt.Errorf("%w (LK-1): %w before the copy: %w", ErrInvariantViolation, dbconn.ErrTableLockLost, err)
+		return refuse(CauseLockLost, []error{dbconn.ErrTableLockLost, err}, "table lock was lost before the copy")
 	}
 	return nil
 }
@@ -256,7 +256,7 @@ func (c *Copier) start() error {
 func (c *Copier) finish(cause error) error {
 	if lost := c.lock.Err(); lost != nil {
 		// INV: LK-1
-		return fmt.Errorf("%w (LK-1): %w during the copy: %w", ErrInvariantViolation, dbconn.ErrTableLockLost, lost)
+		return refuse(CauseLockLost, []error{dbconn.ErrTableLockLost, lost}, "table lock was lost during the copy")
 	}
 	if cause != nil {
 		return cause
@@ -264,11 +264,11 @@ func (c *Copier) finish(cause error) error {
 	pos := c.Position()
 	// INV: LK-3
 	if len(pos.InFlight) != 0 {
-		return fmt.Errorf("%w (LK-3): copy of %s.%s stopped with %d chunks in flight", ErrInvariantViolation, c.target.Schema(), c.target.Table(), len(pos.InFlight))
+		return refuse(CauseChunksInFlight, nil, "copy of %s.%s stopped with %d chunks in flight", c.target.Schema(), c.target.Table(), len(pos.InFlight))
 	}
 	// INV: CO-4
 	if !pos.Watermark.Valid() || pos.Watermark.Value() != math.MaxInt64 {
-		return fmt.Errorf("%w (CO-4): copy of %s.%s stopped without covering the key space", ErrInvariantViolation, c.target.Schema(), c.target.Table())
+		return refuse(CauseFrontierBroken, nil, "copy of %s.%s stopped without covering the key space", c.target.Schema(), c.target.Table())
 	}
 	return nil
 }
@@ -320,7 +320,7 @@ func (c *Copier) claim(ctx context.Context, pool *pgxpool.Pool) (Chunk, bool, er
 	defer c.mu.Unlock()
 	// INV: CO-4
 	if !c.ledger.claim(chunk) {
-		return Chunk{}, false, fmt.Errorf("%w (CO-4): claimed chunk [%d, %d] does not start at the cut frontier", ErrInvariantViolation, chunk.Lower(), chunk.Upper())
+		return Chunk{}, false, refuse(CauseFrontierBroken, nil, "claimed chunk [%d, %d] does not start at the cut frontier", chunk.Lower(), chunk.Upper())
 	}
 	return chunk, true, nil
 }
@@ -328,9 +328,9 @@ func (c *Copier) claim(ctx context.Context, pool *pgxpool.Pool) (Chunk, bool, er
 func (c *Copier) land(chunk Chunk, inserted int64) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// INV: CO-4
+	// INV: LK-3
 	if !c.ledger.land(chunk, inserted) {
-		return fmt.Errorf("%w (LK-3): landed chunk [%d, %d] was not in flight", ErrInvariantViolation, chunk.Lower(), chunk.Upper())
+		return refuse(CauseChunksInFlight, nil, "landed chunk [%d, %d] was not in flight", chunk.Lower(), chunk.Upper())
 	}
 	return nil
 }

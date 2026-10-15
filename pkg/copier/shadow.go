@@ -1,7 +1,6 @@
 package copier
 
 import (
-	"fmt"
 	"slices"
 
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -40,25 +39,25 @@ type Shadow interface {
 func checkShadow(target preflight.CopySwapTarget, shadow Shadow) error {
 	// INV: ST-6
 	if shadow == nil {
-		return fmt.Errorf("%w (ST-6): copy requires a built shadow", ErrInvariantViolation)
+		return refuse(CauseShadowMismatch, nil, "copy requires a built shadow")
 	}
 	if shadow.ShadowTable() == "" {
-		return fmt.Errorf("%w (ST-6): shadow proof is empty", ErrInvariantViolation)
+		return refuse(CauseShadowMismatch, nil, "shadow proof is empty")
 	}
 	if shadow.Schema() != target.Schema() || shadow.SourceTable() != target.Table() {
-		return fmt.Errorf("%w (ST-6): shadow is for %s.%s, proof is for %s.%s", ErrInvariantViolation, shadow.Schema(), shadow.SourceTable(), target.Schema(), target.Table())
+		return refuse(CauseShadowMismatch, nil, "shadow is for %s.%s, proof is for %s.%s", shadow.Schema(), shadow.SourceTable(), target.Schema(), target.Table())
 	}
 	if shadow.ShadowTable() == shadow.SourceTable() {
-		return fmt.Errorf("%w (ST-6): shadow of %s.%s is the source table itself", ErrInvariantViolation, target.Schema(), target.Table())
+		return refuse(CauseShadowMismatch, nil, "shadow of %s.%s is the source table itself", target.Schema(), target.Table())
 	}
 	if shadow.SourceOID() == 0 || shadow.ShadowOID() == 0 {
-		return fmt.Errorf("%w (ST-6): shadow proof for %s.%s carries no relation OIDs", ErrInvariantViolation, target.Schema(), target.Table())
+		return refuse(CauseShadowMismatch, nil, "shadow proof for %s.%s carries no relation OIDs", target.Schema(), target.Table())
 	}
 	if shadow.SourceOID() == shadow.ShadowOID() {
-		return fmt.Errorf("%w (ST-6): shadow proof for %s.%s names relation %d as both source and shadow", ErrInvariantViolation, target.Schema(), target.Table(), shadow.SourceOID())
+		return refuse(CauseShadowMismatch, nil, "shadow proof for %s.%s names relation %d as both source and shadow", target.Schema(), target.Table(), shadow.SourceOID())
 	}
 	if !slices.Contains(shadow.CopyColumns(), target.PKColumn()) {
-		return fmt.Errorf("%w (ST-6): shadow copy columns for %s.%s do not include the primary key %s", ErrInvariantViolation, target.Schema(), target.Table(), target.PKColumn())
+		return refuse(CauseShadowMismatch, nil, "shadow copy columns for %s.%s do not include the primary key %s", target.Schema(), target.Table(), target.PKColumn())
 	}
 	return nil
 }

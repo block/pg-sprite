@@ -5,5 +5,7 @@
 // chunks with several workers — one guarded, never-overwriting insert per
 // chunk — first clearing the shadow above the watermark when it resumes, and
 // reports a Position whose Classify is the applier's rule for a captured key:
-// uncut, in flight, or landed.
+// uncut, in flight, or landed. Every refusal is a *RefusalError carrying a
+// RefusalCause from the closed set RefusalCauses, fail-closed under
+// ErrInvariantViolation; RefusalCauseOf reads it through wrapping.
 package copier

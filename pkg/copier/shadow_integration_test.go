@@ -82,13 +82,15 @@ func TestNewCopierRefusesAShadowThatIsNotTheTargets(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			_, err := NewCopier(target, tc.shadow, nil, Watermark{}, Options{})
 			require.ErrorIs(t, err, ErrInvariantViolation)
-			assert.EqualError(t, err, "invariant violation (ST-6): "+tc.detail)
+			assert.Equal(t, CauseShadowMismatch, RefusalCauseOf(err))
+			assert.EqualError(t, err, "invariant violation: ST-6 (copy-shadow-mismatch): "+tc.detail)
 		})
 	}
 
 	_, err := NewCopier(target, good, nil, Watermark{}, Options{})
 	require.ErrorIs(t, err, ErrInvariantViolation, "a good shadow still needs a lock session")
-	assert.EqualError(t, err, "invariant violation (LK-1): copy requires a table lock session")
+	assert.Equal(t, CauseLockUnproven, RefusalCauseOf(err))
+	assert.EqualError(t, err, "invariant violation: LK-1 (copy-lock-unproven): copy requires a table lock session")
 }
 
 func withSchema(s fakeShadow, schema string) fakeShadow { s.schema = schema; return s }
