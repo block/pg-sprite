@@ -231,7 +231,7 @@ func TestPlanForeignKeyToUnreadableTableFails(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	schema := testutil.NewSchema(t, pool)
-	role := testutil.NewRole(t, pool, "NOLOGIN")
+	role := testutil.NewRole(t, pool, "LOGIN PASSWORD '"+plannerPassword+"'")
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
 		CREATE TABLE %[1]s.users (
 			id bigint PRIMARY KEY
@@ -249,9 +249,12 @@ func TestPlanForeignKeyToUnreadableTableFails(t *testing.T) {
 		pgx.Identifier{db}.Sanitize(), pgx.Identifier{role}.Sanitize()))
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		// Revoke the role's grants, the database one included, so its own
-		// cleanup can drop it.
-		_, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP OWNED BY "+pgx.Identifier{role}.Sanitize())
+		// Revoke every grant so the role's own cleanup can drop it.
+		_, err := pool.Exec(context.WithoutCancel(t.Context()), fmt.Sprintf(`
+			REVOKE ALL ON %[1]s.orders FROM %[2]s;
+			REVOKE ALL ON SCHEMA %[1]s FROM %[2]s;
+			REVOKE CREATE ON DATABASE %[3]s FROM %[2]s`,
+			schema, pgx.Identifier{role}.Sanitize(), pgx.Identifier{db}.Sanitize()))
 		assert.NoError(t, err)
 	})
 
@@ -268,15 +271,16 @@ CREATE TABLE orders (
 	assert.ErrorContains(t, err, schema+".users")
 }
 
-// urlAsRole returns serverURL with every session started under role, which
-// the connecting superuser is a member of.
+// plannerPassword is the password the throwaway planning role logs in with.
+const plannerPassword = "diffplan-test-password"
+
+// urlAsRole returns serverURL with role, logging in with plannerPassword, as
+// the user.
 func urlAsRole(t *testing.T, serverURL, role string) string {
 	t.Helper()
 	u, err := neturl.Parse(serverURL)
 	require.NoError(t, err)
-	q := u.Query()
-	q.Set("options", "-c role="+role)
-	u.RawQuery = q.Encode()
+	u.User = neturl.UserPassword(role, plannerPassword)
 	return u.String()
 }
 
