@@ -122,6 +122,17 @@ const (
 	// keyed on another table, names another shadow or slot, or carries the
 	// fingerprints of another statement.
 	CauseResumeRowMismatch RefusalCause = "resume-row-mismatch"
+	// CauseResumeRowDecoding means the checkpoint row handed to the
+	// quiesced runner belongs to a run that decodes WAL (ST-3): it names a
+	// slot or publication, or is in a phase only such a run enters.
+	// Continuing it without its slot would leave the slot as nobody's and
+	// the changes it carried unapplied, so the row is refused.
+	CauseResumeRowDecoding RefusalCause = "resume-row-decoding"
+	// CauseShadowUnrecorded means a relation already bears the target's
+	// derived shadow name while no checkpoint row records a run for the
+	// target (ST-2). The row is the only record of which statement a shadow
+	// embodies; without one the shadow is dropped and the run started over.
+	CauseShadowUnrecorded RefusalCause = "shadow-unrecorded"
 	// CauseResumeSlotForeign means the slot wearing the row's derived name
 	// is not this route's (ST-3): it is a physical slot, or a logical slot
 	// of another database. It is neither decoded from nor replaced; an
@@ -163,6 +174,8 @@ func RefusalCauses() []RefusalCause {
 		CauseResumeTerminal,
 		CauseResumeCutover,
 		CauseResumeRowMismatch,
+		CauseResumeRowDecoding,
+		CauseShadowUnrecorded,
 		CauseResumeSlotForeign,
 		CauseResumeSlotHeld,
 	}
@@ -187,9 +200,9 @@ func (c RefusalCause) Invariant() string {
 		return "LK-4"
 	case CauseResumeTerminal, CauseResumeSlotHeld:
 		return "ST-4"
-	case CauseResumeRowMismatch:
+	case CauseResumeRowMismatch, CauseShadowUnrecorded:
 		return "ST-2"
-	case CauseResumeSlotForeign:
+	case CauseResumeSlotForeign, CauseResumeRowDecoding:
 		return "ST-3"
 	default:
 		return ""

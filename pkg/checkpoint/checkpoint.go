@@ -133,6 +133,20 @@ type Checkpoint struct {
 	// proof does, and whether the proof still describes the shadow, is the
 	// runner's check, not the store's.
 	ShadowProof json.RawMessage
+	// Statement is the SQL text of the schema change the run is carrying
+	// out, as the runner was given it, so a resume can refuse a statement
+	// other than the one the row was written for even when the two leave
+	// the same fingerprints — the fingerprints describe the shape the
+	// change arrives at, not the operation that gets there. It is empty in
+	// a row an engine that did not record the statement wrote.
+	//
+	// Its lifecycle is the runner's, like ShadowProof's: the runner sets it
+	// on every Save and compares it on resume, and the store keeps it
+	// write-once — a Save without one leaves the row's in place, a Save
+	// with the same text is a no-op on this column, and a Save with other
+	// text is refused (ErrInvariantViolation), because another statement is
+	// a fresh start, which goes through Delete.
+	Statement string
 }
 
 // Fingerprints returns the statement identity the checkpoint carries.

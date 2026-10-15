@@ -11,6 +11,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// EngineSchema is the schema the engine owns in every target database: the
+// checkpoint table lives in it, and so does every function the engine
+// installs for a run. A trigger on the target whose function lives in this
+// schema is the engine's own, not a user trigger, and the shape check sets
+// it aside the way it sets aside the engine's own publication.
+const EngineSchema = "pgsprite"
+
 // CopySwapRefusalCause identifies which table shape put a target outside the
 // copy-and-swap route's v1 scope. The zero value means the shape is supported.
 type CopySwapRefusalCause string
@@ -287,7 +294,10 @@ func refuseCopySwapShape(f copySwapShapeFacts) (CopySwapRefusalCause, string) {
 // primary-key facts come from the table's PRIMARY KEY constraint; a table
 // without one reports zero key columns. Internal triggers (the ones a
 // foreign key installs) are excluded from the trigger count because the
-// foreign-key cause already accounts for them. Dependent views are the
+// foreign-key cause already accounts for them, and so is a trigger whose
+// function lives in EngineSchema: that is the engine's own, installed for a
+// run and removed with the retained old table, and a run that re-proves its
+// table while it is in place must not refuse the table on it. Dependent views are the
 // distinct views and materialized views whose rewrite rules pg_depend
 // records against the table; the table's own rules are counted as rules.
 // Publications are read from pg_publication_tables, which expands FOR ALL
@@ -319,7 +329,12 @@ func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table 
 		       COALESCE((SELECT k.condeferrable FROM pg_catalog.pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'p'), false),
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'f'),
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k WHERE k.confrelid = c.oid AND k.contype = 'f'),
-		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t WHERE t.tgrelid = c.oid AND NOT t.tgisinternal),
+		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t
+		         WHERE t.tgrelid = c.oid
+		           AND NOT t.tgisinternal
+		           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p
+		                             JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
+		                            WHERE p.oid = t.tgfoid AND pn.nspname = $3)),
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid),
 		       (SELECT pg_catalog.count(DISTINCT v.oid)
 		          FROM pg_catalog.pg_depend d
@@ -352,7 +367,7 @@ func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table 
 			     ELSE pg_catalog.quote_ident($1) || '.' || pg_catalog.quote_ident($2) END)`
 	var f copySwapShapeFacts
 	var publications []string
-	err := db.QueryRow(ctx, q, schema, table).Scan(
+	err := db.QueryRow(ctx, q, schema, table, EngineSchema).Scan(
 		&f.database, &f.schema, &f.oid, &f.relkind, &f.relpersistence, &f.forceRLS, &f.isPartition, &f.hasSubclass, &f.inheritsParents, &f.replicaIdentity,
 		&f.pkColumns, &f.pkColumn, &f.pkType, &f.pkDeferrable, &f.foreignKeysOut, &f.foreignKeysIn, &f.triggers, &f.rules, &f.dependentViews,
 		&publications, &f.subscriptions, &f.dependents)

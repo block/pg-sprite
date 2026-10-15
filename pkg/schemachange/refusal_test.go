@@ -41,6 +41,8 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 		CauseResumeTerminal:    "ST-4",
 		CauseResumeCutover:     "LK-4",
 		CauseResumeRowMismatch: "ST-2",
+		CauseResumeRowDecoding: "ST-3",
+		CauseShadowUnrecorded:  "ST-2",
 		CauseResumeSlotForeign: "ST-3",
 		CauseResumeSlotHeld:    "ST-4",
 	}

@@ -38,6 +38,7 @@ func tableColumns() []column {
 		{"phase", "text NOT NULL"},
 		{"updated_at", "timestamptz NOT NULL"},
 		{"shadow_proof", "jsonb"},
+		{"statement", "text"},
 	}
 }
 
@@ -47,7 +48,9 @@ const tableConstraintSQL = "PRIMARY KEY (schema_name, table_name)"
 // createTableSQL renders the CREATE TABLE for the whole shape. watermark is
 // NULL while nothing has landed; phase holds the stable Phase name so an
 // operator reading the row during an incident sees "copying", not a
-// number; shadow_proof is NULL until the run has a shadow to prove.
+// number; shadow_proof is NULL until the run has a shadow to prove;
+// statement is NULL in a row an engine that did not record the statement
+// wrote.
 func createTableSQL() string {
 	var b strings.Builder
 	b.WriteString("CREATE TABLE " + tableIdent + " (\n")
