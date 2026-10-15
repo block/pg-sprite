@@ -17,7 +17,9 @@ import (
 // desired file that adds a foreign key, next to an otherwise executable
 // column add, is refused whole with the declarative foreign-key reason, and
 // the live table keeps its shape. A desired file that drops a live foreign
-// key is refused as destructive before the foreign-key check is reached.
+// key is refused as destructive before the foreign-key check is reached. A
+// declared foreign key that matches the live one plans no change, so the
+// rest of the table's convergence runs.
 func TestRunDesiredRefusesForeignKeyChanges(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -115,5 +117,40 @@ CREATE TABLE orders (
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
 		assert.Empty(t, res.Plan.Statements)
 		assert.Equal(t, 1, liveForeignKeys(t, schema))
+	})
+
+	t.Run("runs a column add beside an unchanged foreign key", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %[1]s.users (
+				id bigint PRIMARY KEY
+			);
+			CREATE TABLE %[1]s.orders (
+				id bigint PRIMARY KEY,
+				user_id bigint NOT NULL REFERENCES %[1]s.users (id)
+			)`, schema))
+		require.NoError(t, err)
+
+		res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id),
+    note text
+);`)}, runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+		require.Len(t, res.Plan.Statements, 1)
+		assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders ADD COLUMN note text", schema), res.Plan.Statements[0].SQL)
+		require.Len(t, res.Verdicts, 1)
+		assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
+
+		var noteExists bool
+		require.NoError(t, pool.QueryRow(t.Context(), `
+			SELECT EXISTS (
+				SELECT 1 FROM information_schema.columns
+				WHERE table_schema = $1 AND table_name = 'orders' AND column_name = 'note'
+			)`, schema).Scan(&noteExists))
+		assert.True(t, noteExists, "the column add ran")
+		assert.Equal(t, 1, liveForeignKeys(t, schema), "the live foreign key is untouched")
 	})
 }

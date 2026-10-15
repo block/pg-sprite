@@ -344,7 +344,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: declarative-foreign-key
-    reason_notes: "Planned but not executed. A desired file may declare a foreign key to an unqualified table that exists in the target schema; `diff` shows a matching foreign key as no change and an added or dropped one as an `add-foreign-key` or `drop-foreign-key` statement refused with `declarative-foreign-key`, and `migrate --desired` refuses the whole plan. Planning binds each reference to an empty scratch copy of the live table, so it never locks the live referenced table. Export still refuses both sides — an incoming FK cannot be expressed in the table's own desired file. Declarative FK execution (composite keys as the primary case, two-phase `NOT VALID` → `VALIDATE` execution) is planned"
+    reason_notes: "Planned but not executed. A desired file may declare a foreign key to an unqualified table that exists in the target schema; `diff` shows a matching foreign key as no change and an added or dropped one as an `add-foreign-key` or `drop-foreign-key` statement refused with `declarative-foreign-key`, and `migrate --desired` refuses the whole plan. Planning binds each reference to an empty scratch copy of the live table, so planning takes only `ACCESS SHARE` on the live referenced table, the lock a plain `SELECT` takes, and never blocks its writes. Export still refuses both sides — an incoming FK cannot be expressed in the table's own desired file. Declarative FK execution (composite keys as the primary case, two-phase `NOT VALID` → `VALIDATE` execution) is planned"
   - id: unlogged-tables
     area: "declarative_model"
     operation: "Unlogged tables"

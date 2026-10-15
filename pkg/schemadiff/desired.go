@@ -24,8 +24,9 @@ import (
 //
 // schema is the target schema the desired table lives in. A table the
 // desired foreign keys reference is read from it: the scratch schema holds an
-// empty copy of each one, so no foreign key ever binds to, or locks, a live
-// table (see createReferencedStandIns).
+// empty copy of each one, so no foreign key ever binds to a live table, and
+// planning takes only the ACCESS SHARE lock a plain SELECT takes on it (see
+// createReferencedStandIns).
 func IntrospectDesired(ctx context.Context, db *pgxpool.Pool, schema string, desired statement.DesiredSchema) (Model, error) {
 	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{schema: schema, tables: desired.ReferencedTables()})
 }

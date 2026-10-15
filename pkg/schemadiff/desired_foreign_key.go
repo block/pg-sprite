@@ -36,9 +36,10 @@ const sqlstateUndefinedTable = "42P01"
 //
 // LIKE names each copied index after the stand-in table, not after the live
 // index, so a copied name such as users_pkey could be one the desired file
-// creates. Each stand-in index is renamed to an internal name before the
-// desired statements run; a foreign key's printed definition names only the
-// referenced table and columns, so the rename never changes it.
+// creates. Each stand-in index is renamed before the desired statements run
+// to a name built from the scratch schema's random name, which a desired
+// file cannot know in advance; a foreign key's printed definition names only
+// the referenced table and columns, so the rename never changes it.
 func createReferencedStandIns(ctx context.Context, tx pgx.Tx, scratch, schema string, tables []string) error {
 	renamed := 0
 	for _, table := range tables {
@@ -60,14 +61,10 @@ func createReferencedStandIns(ctx context.Context, tx pgx.Tx, scratch, schema st
 	return nil
 }
 
-// standInIndexPrefix begins every stand-in index name. A desired file that
-// creates a relation with one of these names fails its scratch replay with a
-// duplicate-relation error rather than planning against a stand-in.
-const standInIndexPrefix = "pgsprite_standin_index_"
-
-// renameStandInIndexes renames the stand-in table's indexes to
-// standInIndexPrefix names numbered from next, and returns how many it
-// renamed. Renaming a constraint's index renames the constraint with it.
+// renameStandInIndexes renames the stand-in table's indexes to names that
+// begin with the scratch schema's name and are numbered from next, and
+// returns how many it renamed. Renaming a constraint's index renames the
+// constraint with it.
 func renameStandInIndexes(ctx context.Context, tx pgx.Tx, scratch, table string, next int) (int, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT idx.relname
@@ -86,7 +83,7 @@ func renameStandInIndexes(ctx context.Context, tx pgx.Tx, scratch, table string,
 	}
 	for i, name := range names {
 		sql := "ALTER INDEX " + pgx.Identifier{scratch, name}.Sanitize() +
-			" RENAME TO " + pgx.Identifier{fmt.Sprintf("%s%d", standInIndexPrefix, next+i)}.Sanitize()
+			" RENAME TO " + pgx.Identifier{fmt.Sprintf("%s_index_%d", scratch, next+i)}.Sanitize()
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			return 0, fmt.Errorf("rename scratch stand-in index %s of %s: %w", name, table, err)
 		}
