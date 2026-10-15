@@ -17,9 +17,18 @@ import (
 // table, so the referenced table must already exist.
 var ErrReferencedTableNotFound = errors.New("foreign key references a table that does not exist in the target schema")
 
-// sqlstateUndefinedTable is undefined_table, raised by LIKE when its source
-// table does not exist.
-const sqlstateUndefinedTable = "42P01"
+// ErrReferencedTableNotReadable is returned when the planning role lacks
+// SELECT on a table a desired file's foreign key references. The scratch
+// build copies the referenced table's shape with LIKE, which PostgreSQL
+// allows only to a role that can read the source table.
+var ErrReferencedTableNotReadable = errors.New("planning role lacks SELECT on a table a foreign key references")
+
+// LIKE raises undefined_table when its source table does not exist, and
+// insufficient_privilege when the role cannot read it.
+const (
+	sqlstateUndefinedTable        = "42P01"
+	sqlstateInsufficientPrivilege = "42501"
+)
 
 // createReferencedStandIns creates, in the scratch schema, an empty copy of
 // each live table the desired foreign keys reference, before the desired
@@ -47,8 +56,13 @@ func createReferencedStandIns(ctx context.Context, tx pgx.Tx, scratch, schema st
 			" (LIKE " + pgx.Identifier{schema, table}.Sanitize() + " INCLUDING INDEXES)"
 		if _, err := tx.Exec(ctx, sql); err != nil {
 			var pgErr *pgconn.PgError
-			if errors.As(err, &pgErr) && pgErr.Code == sqlstateUndefinedTable {
-				return fmt.Errorf("%w: %s.%s", ErrReferencedTableNotFound, schema, table)
+			if errors.As(err, &pgErr) {
+				switch pgErr.Code {
+				case sqlstateUndefinedTable:
+					return fmt.Errorf("%w: %s.%s", ErrReferencedTableNotFound, schema, table)
+				case sqlstateInsufficientPrivilege:
+					return fmt.Errorf("%w: %s.%s: %w", ErrReferencedTableNotReadable, schema, table, err)
+				}
 			}
 			return fmt.Errorf("create scratch stand-in for referenced table %s.%s: %w", schema, table, err)
 		}

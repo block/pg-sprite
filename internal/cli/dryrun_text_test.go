@@ -434,5 +434,5 @@ func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T
 	}}
 	out.Reset()
 	require.NoError(t, writeDryRunText(&out, palette{}, created))
-	assert.Contains(t, flat(out.String()), "create the table without the foreign key, then add it with pg-sprite migrate --alter")
+	assert.Contains(t, flat(out.String()), "create the table without the foreign key, then add it with pg-sprite migrate --alter, naming the referenced table with its schema")
 }

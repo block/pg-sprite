@@ -316,7 +316,8 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 		// The statement front door refuses CREATE TABLE, so a new table
 		// is created without the foreign key and gains it afterwards.
 		return "foreign keys are not supported for desired-state apply yet; this change is shown for review only — " +
-			"create the table without the foreign key, then add it with pg-sprite migrate --alter"
+			"create the table without the foreign key, then add it with pg-sprite migrate --alter, " +
+			"naming the referenced table with its schema"
 	}
 	if r != verdict.ReasonUnsupportedStatement {
 		return verdictText(r)

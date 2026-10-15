@@ -228,10 +228,15 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	for _, con := range desired.Constraints {
 		had, ok := liveCons[con.Name]
 		if !ok || had.Def != con.Def {
-			changes = append(changes, Change{
-				SQL:  "ALTER TABLE " + table + " ADD CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize() + " " + con.Def,
-				Kind: addConstraintKind(con),
-			})
+			sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize() + " " + con.Def
+			if con.ForeignKey {
+				qualified, err := statement.QualifyForeignKeyReferences(sql, schema)
+				if err != nil {
+					return nil, fmt.Errorf("qualify foreign key %s: %w", con.Name, err)
+				}
+				sql = qualified
+			}
+			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con)})
 		}
 	}
 
@@ -346,7 +351,6 @@ func columnsByName(cols []Column) map[string]Column {
 	return m
 }
 
-// constraintsByName indexes constraints for lookup during the diff.
 // dropConstraintKind classifies a constraint drop, keeping foreign keys in
 // their own kind so desired-state execution can refuse them.
 func dropConstraintKind(con Constraint) ChangeKind {
@@ -364,6 +368,7 @@ func addConstraintKind(con Constraint) ChangeKind {
 	return ChangeAddConstraint
 }
 
+// constraintsByName indexes constraints for lookup during the diff.
 func constraintsByName(cons []Constraint) map[string]Constraint {
 	m := make(map[string]Constraint, len(cons))
 	for _, c := range cons {

@@ -15,10 +15,6 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 )
 
-// sqlstateInsufficientPrivilege is the SQLSTATE the server raises when the
-// session's role may not perform the statement.
-const sqlstateInsufficientPrivilege = "42501"
-
 func TestListManagedTables(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)

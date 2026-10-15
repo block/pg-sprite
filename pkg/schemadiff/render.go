@@ -38,7 +38,7 @@ var ErrUnrenderableInheritance = errors.New("table inheritance cannot be rendere
 // may declare outgoing foreign keys for planning, but desired-state
 // execution refuses every foreign-key change, so a baseline carrying one
 // could never be applied; the renderer refuses both directions instead.
-var ErrUnrenderableForeignKey = errors.New("tables referenced by foreign keys cannot be rendered as a desired schema")
+var ErrUnrenderableForeignKey = errors.New("tables that own or are referenced by foreign keys cannot be rendered as a desired schema")
 
 // ErrUnrenderableUnlogged is returned for an unlogged table. The
 // declarative model does not manage persistence, so a rendered plain

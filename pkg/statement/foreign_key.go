@@ -5,6 +5,7 @@ import (
 	"slices"
 
 	pganalyze "github.com/pganalyze/pg_query_go/v6"
+	pgquery "github.com/wasilibs/go-pgquery"
 )
 
 // foreignKeyConstraints returns the CREATE TABLE's foreign-key constraints in
@@ -48,4 +49,41 @@ func referencedTables(create *pganalyze.CreateStmt) ([]string, error) {
 	}
 	slices.Sort(names)
 	return names, nil
+}
+
+// QualifyForeignKeyReferences returns an ALTER TABLE statement with every
+// unqualified table its added foreign keys reference qualified by schema. A
+// planned foreign-key add names its referenced table as the desired file
+// does, unqualified, which resolves through the search_path of whatever
+// session runs it; the referenced table lives in the target schema, so the
+// plan names it there and the statement binds the same table wherever it
+// runs. An already-qualified reference is left as written. Like Qualify,
+// this touches qualification only.
+func QualifyForeignKeyReferences(sql, schema string) (string, error) {
+	tree, err := pgquery.Parse(sql)
+	if err != nil {
+		return "", fmt.Errorf("parse statement to qualify foreign-key references: %w", err)
+	}
+	if n := len(tree.GetStmts()); n != 1 {
+		return "", fmt.Errorf("%w: got %d", ErrNotOneStatement, n)
+	}
+	node := tree.GetStmts()[0].GetStmt()
+	alter := node.GetAlterTableStmt()
+	if alter == nil {
+		return "", ErrDisallowedStatement
+	}
+	for _, c := range alter.GetCmds() {
+		cmd := c.GetAlterTableCmd()
+		if cmd.GetSubtype() != pganalyze.AlterTableType_AT_AddConstraint {
+			continue
+		}
+		con := cmd.GetDef().GetConstraint()
+		if con.GetContype() != pganalyze.ConstrType_CONSTR_FOREIGN || con.GetPktable() == nil {
+			continue
+		}
+		if con.GetPktable().GetSchemaname() == "" {
+			con.GetPktable().Schemaname = schema
+		}
+	}
+	return deparseOne(node)
 }

@@ -17,11 +17,12 @@ func TestDiffClassifiesForeignKeyChanges(t *testing.T) {
 		ForeignKey: true,
 	})
 
-	added, err := Diff("public", base(), withFK)
+	added, err := Diff("app", base(), withFK)
 	require.NoError(t, err)
 	require.Len(t, added, 1)
 	assert.Equal(t, ChangeAddForeignKey, added[0].Kind)
-	assert.Equal(t, `ALTER TABLE "public"."events" ADD CONSTRAINT "events_user_fk" FOREIGN KEY (user_id) REFERENCES users(id)`, added[0].SQL)
+	assert.Equal(t, `ALTER TABLE app.events ADD CONSTRAINT events_user_fk FOREIGN KEY (user_id) REFERENCES app.users (id)`, added[0].SQL,
+		"the referenced table is named in the target schema, so the statement binds it whatever search_path runs it")
 
 	dropped, err := Diff("public", withFK, base())
 	require.NoError(t, err)

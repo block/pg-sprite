@@ -171,6 +171,7 @@ func TestRenderRefusesForeignKey(t *testing.T) {
 
 	_, err := Render(m)
 	require.ErrorIs(t, err, ErrUnrenderableForeignKey)
+	assert.Equal(t, `render table "events": owns foreign keys (events_user_fk): tables that own or are referenced by foreign keys cannot be rendered as a desired schema`, err.Error())
 }
 
 // A table referenced by other tables' foreign keys refuses to render: the
@@ -182,4 +183,5 @@ func TestRenderRefusesIncomingForeignKey(t *testing.T) {
 
 	_, err := Render(m)
 	require.ErrorIs(t, err, ErrUnrenderableForeignKey)
+	assert.Equal(t, `render table "events": referenced by foreign keys (orders.orders_user_id_fkey): tables that own or are referenced by foreign keys cannot be rendered as a desired schema`, err.Error())
 }

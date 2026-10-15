@@ -93,3 +93,39 @@ func TestParseOpsMarksCreateTableForeignKey(t *testing.T) {
 	require.Len(t, ops, 1)
 	assert.False(t, ops[0].ForeignKey)
 }
+
+// A planned foreign-key add names its referenced table in the target schema,
+// so the statement binds the same table whatever search_path runs it. A
+// reference the statement already qualifies is kept, and a constraint that
+// is not a foreign key is untouched.
+func TestQualifyForeignKeyReferences(t *testing.T) {
+	cases := []struct {
+		name, sql, want string
+	}{
+		{
+			"unqualified reference takes the target schema",
+			`ALTER TABLE app.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id)`,
+			`ALTER TABLE app.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES app.users (id)`,
+		},
+		{
+			"qualified reference is kept",
+			`ALTER TABLE app.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES other.users(id)`,
+			`ALTER TABLE app.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES other.users (id)`,
+		},
+		{
+			"check constraint is untouched",
+			`ALTER TABLE app.orders ADD CONSTRAINT orders_qty_check CHECK (qty > 0)`,
+			`ALTER TABLE app.orders ADD CONSTRAINT orders_qty_check CHECK (qty > 0)`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := QualifyForeignKeyReferences(tc.sql, "app")
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+
+	_, err := QualifyForeignKeyReferences(`CREATE INDEX i ON t (a)`, "app")
+	require.ErrorIs(t, err, ErrDisallowedStatement)
+}

@@ -3,9 +3,11 @@ package diffplan_test
 import (
 	"context"
 	"fmt"
+	neturl "net/url"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -123,7 +125,7 @@ func TestPlanAddForeignKeyIsShownAndRefused(t *testing.T) {
 	st := report.Statements[0]
 	assert.Equal(t, schemadiff.ChangeAddForeignKey, st.Kind)
 	assert.Equal(t, fmt.Sprintf(
-		"ALTER TABLE %s.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES users (id)", schema),
+		"ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES %[1]s.users (id)", schema),
 		st.SQL)
 	assert.False(t, st.Destructive)
 	requireForeignKeyRefusal(t, st)
@@ -218,6 +220,64 @@ CREATE TABLE orders (
 );`)})
 	require.ErrorIs(t, err, schemadiff.ErrReferencedTableNotFound)
 	assert.ErrorContains(t, err, schema+".customers")
+}
+
+// A planning role that cannot read a referenced table cannot plan its
+// foreign key: the scratch build copies the table's shape with LIKE, which
+// needs SELECT on it. The plan fails with a typed error naming the table.
+func TestPlanForeignKeyToUnreadableTableFails(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	role := testutil.NewRole(t, pool, "NOLOGIN")
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.users (
+			id bigint PRIMARY KEY
+		);
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			user_id bigint NOT NULL
+		);
+		GRANT USAGE, CREATE ON SCHEMA %[1]s TO %[2]s;
+		GRANT SELECT ON %[1]s.orders TO %[2]s`, schema, pgx.Identifier{role}.Sanitize()))
+	require.NoError(t, err)
+	var db string
+	require.NoError(t, pool.QueryRow(t.Context(), "SELECT current_database()").Scan(&db))
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("GRANT CREATE ON DATABASE %s TO %s",
+		pgx.Identifier{db}.Sanitize(), pgx.Identifier{role}.Sanitize()))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Revoke the role's grants, the database one included, so its own
+		// cleanup can drop it.
+		_, err := pool.Exec(context.WithoutCancel(t.Context()), "DROP OWNED BY "+pgx.Identifier{role}.Sanitize())
+		assert.NoError(t, err)
+	})
+
+	planner, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: urlAsRole(t, url, role)})
+	require.NoError(t, err)
+	t.Cleanup(planner.Close)
+
+	_, err = diffplan.Plan(t.Context(), planner, diffplan.Request{Schema: schema, Desired: parseDesired(t, `
+CREATE TABLE orders (
+    id bigint PRIMARY KEY,
+    user_id bigint NOT NULL REFERENCES users (id)
+);`)})
+	require.ErrorIs(t, err, schemadiff.ErrReferencedTableNotReadable)
+	assert.ErrorContains(t, err, schema+".users")
+}
+
+// urlAsRole returns serverURL with every session started under role, which
+// the connecting superuser is a member of.
+func urlAsRole(t *testing.T, serverURL, role string) string {
+	t.Helper()
+	u, err := neturl.Parse(serverURL)
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("options", "-c role="+role)
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // A new table that declares a foreign key is planned, and its CREATE TABLE is
