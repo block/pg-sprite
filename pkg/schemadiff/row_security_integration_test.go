@@ -228,7 +228,7 @@ func TestRowSecurityOmittedFromDesiredFileDoesNotDerivePolicyChanges(t *testing.
 	require.NoError(t, err)
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
-	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 	changes, err := schemadiff.Diff(schema, live, desired)
 	require.NoError(t, err)

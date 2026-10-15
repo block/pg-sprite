@@ -93,6 +93,7 @@ func siteRefusals() []siteRefusal {
 		{"destructive-change", destructiveChangeRefusal()},
 		{"plan-fingerprint-mismatch", fingerprintMismatchRefusal()},
 		{"create-collision", createCollisionRefusal()},
+		{"declarative-foreign-key", plan.ForeignKeyChangeRefusal()},
 		{"plan-incoherent", planIncoherentRefusal()},
 		{"row-security-unsupported", rowSecurityUnsupportedRefusal()},
 		{"row-security-missing-table", plan.RowSecurityMissingTableRefusal()},

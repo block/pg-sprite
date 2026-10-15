@@ -26,7 +26,7 @@ func roundTrip(t *testing.T, pool *pgxpool.Pool, schema, table string) (live, de
 	require.NoError(t, err)
 	ds, err := statement.ParseDesired(rendered)
 	require.NoError(t, err, "rendered output must parse as a desired schema:\n%s", rendered)
-	desired, err = schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	desired, err = schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err, "rendered output must materialize on the scratch schema:\n%s", rendered)
 	changes, err = schemadiff.Diff(schema, live, desired)
 	require.NoError(t, err)
@@ -151,7 +151,7 @@ func TestRenderRefusesLivePartitionedTables(t *testing.T) {
 	require.NoError(t, err)
 	livePlain, err := schemadiff.Introspect(t.Context(), pool, schema, "plain")
 	require.NoError(t, err)
-	desiredPartitioned, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	desiredPartitioned, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 	_, err = schemadiff.Diff(schema, livePlain, desiredPartitioned)
 	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
@@ -183,9 +183,9 @@ func TestRenderRefusesLiveClassicInheritanceOnBothSides(t *testing.T) {
 	require.ErrorIs(t, err, schemadiff.ErrUnrenderableInheritance)
 }
 
-// A live table with a foreign key cannot be rendered: the desired-file
-// grammar refuses foreign keys, and the renderer surfaces that gate's typed
-// error rather than emitting a file the front door would reject.
+// A live table with a foreign key cannot be rendered: desired-state
+// execution refuses every foreign-key change, so a baseline carrying one
+// could never be applied.
 func TestRenderRefusesLiveForeignKey(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -203,7 +203,7 @@ func TestRenderRefusesLiveForeignKey(t *testing.T) {
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "orders")
 	require.NoError(t, err)
 	_, err = schemadiff.Render(live)
-	require.ErrorIs(t, err, statement.ErrForeignKey)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)
 
 	// The referenced side refuses too: incoming foreign keys are not part
 	// of this table's own definition, so a rendered baseline of it would
@@ -245,8 +245,8 @@ func TestIntrospectReferencedByCollapsesPartitionClones(t *testing.T) {
 // A self-referential foreign key is the table's own constraint, not an
 // incoming reference — ReferencedBy excludes it whether the table is plain
 // or partitioned (where every partition carries a clone of the root
-// constraint). Rendering still refuses, but on the outgoing foreign key in
-// the table's own definition, not on a phantom incoming one.
+// constraint). Rendering still refuses, on the outgoing foreign key the
+// table's own definition carries.
 func TestIntrospectReferencedByExcludesSelfReference(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -269,9 +269,13 @@ func TestIntrospectReferencedByExcludesSelfReference(t *testing.T) {
 	emp, err := schemadiff.Introspect(t.Context(), pool, schema, "emp")
 	require.NoError(t, err)
 	assert.Empty(t, emp.ReferencedBy)
+	assert.Contains(t, emp.Constraints, schemadiff.Constraint{
+		Name:       "emp_parent_id_fkey",
+		Def:        "FOREIGN KEY (parent_id) REFERENCES emp(id)",
+		ForeignKey: true,
+	})
 	_, err = schemadiff.Render(emp)
-	require.ErrorIs(t, err, statement.ErrForeignKey)
-	require.NotErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderableForeignKey)
 
 	spt, err := schemadiff.Introspect(t.Context(), pool, schema, "spt")
 	require.NoError(t, err)
@@ -342,7 +346,7 @@ func TestRenderRefusesUnloggedLiveTable(t *testing.T) {
 	require.NoError(t, err)
 	ds, err := statement.ParseDesired("CREATE UNLOGGED TABLE plainbuf (id bigint NOT NULL, name text)")
 	require.NoError(t, err)
-	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 	assert.True(t, desired.Unlogged)
 	livePlain, err := schemadiff.Introspect(t.Context(), pool, schema, "plainbuf")
@@ -371,7 +375,7 @@ func TestRenderRefusesCollatedLiveColumn(t *testing.T) {
 
 	ds, err := statement.ParseDesired(`CREATE TABLE words (id bigint NOT NULL, word text)`)
 	require.NoError(t, err)
-	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, ds)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 	_, err = schemadiff.Diff(schema, live, desired)
 	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)

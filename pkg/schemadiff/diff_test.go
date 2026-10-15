@@ -421,6 +421,7 @@ func TestChangeKindsVocabularyPinned(t *testing.T) {
 		ChangeCreateTable,
 		ChangeDropIndex,
 		ChangeDropConstraint,
+		ChangeDropForeignKey,
 		ChangeDropColumn,
 		ChangeAddColumn,
 		ChangeAlterType,
@@ -429,6 +430,7 @@ func TestChangeKindsVocabularyPinned(t *testing.T) {
 		ChangeSetNotNull,
 		ChangeDropNotNull,
 		ChangeAddConstraint,
+		ChangeAddForeignKey,
 		ChangeCreateIndex,
 	}, ChangeKinds())
 }

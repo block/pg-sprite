@@ -32,8 +32,12 @@ const (
 	ChangeCreateTable ChangeKind = "create-table"
 	// ChangeDropIndex drops an index.
 	ChangeDropIndex ChangeKind = "drop-index"
-	// ChangeDropConstraint drops a table constraint.
+	// ChangeDropConstraint drops a table constraint other than a foreign
+	// key.
 	ChangeDropConstraint ChangeKind = "drop-constraint"
+	// ChangeDropForeignKey drops a foreign-key constraint. Desired-state
+	// execution refuses it: foreign-key changes are planned, not run.
+	ChangeDropForeignKey ChangeKind = "drop-foreign-key"
 	// ChangeDropColumn drops a column.
 	ChangeDropColumn ChangeKind = "drop-column"
 	// ChangeAddColumn adds a column.
@@ -48,8 +52,11 @@ const (
 	ChangeSetNotNull ChangeKind = "set-not-null"
 	// ChangeDropNotNull removes the NOT NULL attribute.
 	ChangeDropNotNull ChangeKind = "drop-not-null"
-	// ChangeAddConstraint adds a table constraint.
+	// ChangeAddConstraint adds a table constraint other than a foreign key.
 	ChangeAddConstraint ChangeKind = "add-constraint"
+	// ChangeAddForeignKey adds a foreign-key constraint. Desired-state
+	// execution refuses it: foreign-key changes are planned, not run.
+	ChangeAddForeignKey ChangeKind = "add-foreign-key"
 	// ChangeCreateIndex creates an index.
 	ChangeCreateIndex ChangeKind = "create-index"
 )
@@ -63,6 +70,7 @@ func ChangeKinds() []ChangeKind {
 		ChangeCreateTable,
 		ChangeDropIndex,
 		ChangeDropConstraint,
+		ChangeDropForeignKey,
 		ChangeDropColumn,
 		ChangeAddColumn,
 		ChangeAlterType,
@@ -71,8 +79,14 @@ func ChangeKinds() []ChangeKind {
 		ChangeSetNotNull,
 		ChangeDropNotNull,
 		ChangeAddConstraint,
+		ChangeAddForeignKey,
 		ChangeCreateIndex,
 	}
+}
+
+// IsForeignKey reports whether the kind adds or drops a foreign key.
+func (k ChangeKind) IsForeignKey() bool {
+	return k == ChangeAddForeignKey || k == ChangeDropForeignKey
 }
 
 // Change is one derived statement of the ordered plan.
@@ -157,7 +171,7 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		if !ok || want.Def != con.Def {
 			changes = append(changes, Change{
 				SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
-				Kind:        ChangeDropConstraint,
+				Kind:        dropConstraintKind(con),
 				Destructive: true,
 			})
 		}
@@ -214,10 +228,15 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	for _, con := range desired.Constraints {
 		had, ok := liveCons[con.Name]
 		if !ok || had.Def != con.Def {
-			changes = append(changes, Change{
-				SQL:  "ALTER TABLE " + table + " ADD CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize() + " " + con.Def,
-				Kind: ChangeAddConstraint,
-			})
+			sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize() + " " + con.Def
+			if con.ForeignKey {
+				qualified, err := statement.QualifyForeignKeyReferences(sql, schema)
+				if err != nil {
+					return nil, fmt.Errorf("qualify foreign key %s: %w", con.Name, err)
+				}
+				sql = qualified
+			}
+			changes = append(changes, Change{SQL: sql, Kind: addConstraintKind(con)})
 		}
 	}
 
@@ -330,6 +349,23 @@ func columnsByName(cols []Column) map[string]Column {
 		m[c.Name] = c
 	}
 	return m
+}
+
+// dropConstraintKind classifies a constraint drop, keeping foreign keys in
+// their own kind so desired-state execution can refuse them.
+func dropConstraintKind(con Constraint) ChangeKind {
+	if con.ForeignKey {
+		return ChangeDropForeignKey
+	}
+	return ChangeDropConstraint
+}
+
+// addConstraintKind classifies a constraint add the same way.
+func addConstraintKind(con Constraint) ChangeKind {
+	if con.ForeignKey {
+		return ChangeAddForeignKey
+	}
+	return ChangeAddConstraint
 }
 
 // constraintsByName indexes constraints for lookup during the diff.

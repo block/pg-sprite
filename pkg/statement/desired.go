@@ -34,14 +34,6 @@ var (
 	// ErrConcurrentIndex is returned for CREATE INDEX CONCURRENTLY, which
 	// cannot run inside the scratch transaction.
 	ErrConcurrentIndex = errors.New("CONCURRENTLY cannot be used in a desired schema")
-	// ErrForeignKey is returned when the CREATE TABLE carries a REFERENCES
-	// clause. The scratch transaction cannot faithfully execute a foreign
-	// key: an unqualified reference resolves against the scratch
-	// search_path, not the target schema, so it either fails or silently
-	// binds to the wrong table. Foreign-key support needs its own design
-	// (cross-file ordering, lock behavior, qualification policy); until
-	// then the admission gate refuses it.
-	ErrForeignKey = errors.New("foreign keys are not supported in a desired schema")
 	// ErrWrongIndexTarget is returned when an index targets a table other
 	// than the desired CREATE TABLE.
 	ErrWrongIndexTarget = errors.New("index must target the desired table")
@@ -49,19 +41,31 @@ var (
 
 // DesiredSchema proves a desired-state schema file passed the set-level
 // admission rules: exactly one unqualified CREATE TABLE plus any number of
-// CREATE INDEX statements on that table, none of them CONCURRENTLY. Only
-// [ParseDesired] produces a non-zero value.
+// CREATE INDEX statements on that table, none of them CONCURRENTLY, and every
+// table a foreign key references named unqualified. Only [ParseDesired]
+// produces a non-zero value.
 //
 // Statement SQL is canonical (parsed and deparsed through the PostgreSQL
 // grammar), one statement per entry, held in execution order: the CREATE
 // TABLE first, the indexes in input order after it.
 type DesiredSchema struct {
-	table      string
-	statements []Statement
+	table       string
+	foreignKeys bool
+	referenced  []string
+	statements  []Statement
 }
 
 // Table returns the unqualified name of the single CREATE TABLE target.
 func (ds DesiredSchema) Table() string { return ds.table }
+
+// HasForeignKeys reports whether the CREATE TABLE declares a foreign key,
+// a self-reference included.
+func (ds DesiredSchema) HasForeignKeys() bool { return ds.foreignKeys }
+
+// ReferencedTables returns the unqualified names of the other tables the
+// CREATE TABLE's foreign keys reference, sorted and distinct; a
+// self-reference is not listed. The slice is a copy.
+func (ds DesiredSchema) ReferencedTables() []string { return slices.Clone(ds.referenced) }
 
 // Statements returns the admitted statements in execution order: the
 // CREATE TABLE first, the indexes in input order after it — an index
@@ -73,7 +77,9 @@ func (ds DesiredSchema) Statements() []Statement { return slices.Clone(ds.statem
 // ParseDesired parses a desired-state schema file and admits only what the
 // declarative front door can execute on a scratch schema: one unqualified
 // CREATE TABLE and unqualified, non-concurrent CREATE INDEX statements on
-// it. Anything else is refused with a typed error.
+// it. Foreign keys are admitted for planning when the table they reference
+// is unqualified; desired-state execution refuses every foreign-key change
+// (see docs/limitations.md). Anything else is refused with a typed error.
 func ParseDesired(sql string) (DesiredSchema, error) {
 	tree, err := pgquery.Parse(sql)
 	if err != nil {
@@ -95,6 +101,10 @@ func parseDesiredTree(tree *pganalyze.ParseResult) (DesiredSchema, error) {
 		}
 		if st.kind == KindCreateTable {
 			ds.table = st.table
+			ds.foreignKeys = len(foreignKeyConstraints(raw.GetStmt().GetCreateStmt())) > 0
+			if ds.referenced, err = referencedTables(raw.GetStmt().GetCreateStmt()); err != nil {
+				return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
+			}
 		}
 		if st.sql, err = deparseOne(raw.GetStmt()); err != nil {
 			return DesiredSchema{}, fmt.Errorf("statement %d: %w", i+1, err)
@@ -148,9 +158,6 @@ func admitDesiredStatement(node *pganalyze.Node, seenTable string) (Statement, e
 		if seenTable != "" {
 			return Statement{}, ErrMultipleCreateTables
 		}
-		if err := refuseForeignKeys(create); err != nil {
-			return Statement{}, err
-		}
 		return Statement{kind: KindCreateTable, table: rel.GetRelname()}, nil
 	case node.GetIndexStmt() != nil:
 		idx := node.GetIndexStmt()
@@ -165,27 +172,6 @@ func admitDesiredStatement(node *pganalyze.Node, seenTable string) (Statement, e
 	default:
 		return Statement{}, ErrDisallowedStatement
 	}
-}
-
-// refuseForeignKeys returns ErrForeignKey when the CREATE TABLE carries a
-// REFERENCES clause, in either its column-constraint or table-constraint
-// form. This inspects constraint kinds only — no semantics are derived.
-func refuseForeignKeys(create *pganalyze.CreateStmt) error {
-	for _, elt := range create.GetTableElts() {
-		if con := elt.GetConstraint(); con != nil && con.GetContype() == pganalyze.ConstrType_CONSTR_FOREIGN {
-			return fmt.Errorf("%w: table constraint on %q", ErrForeignKey, create.GetRelation().GetRelname())
-		}
-		col := elt.GetColumnDef()
-		if col == nil {
-			continue
-		}
-		for _, c := range col.GetConstraints() {
-			if con := c.GetConstraint(); con != nil && con.GetContype() == pganalyze.ConstrType_CONSTR_FOREIGN {
-				return fmt.Errorf("%w: column %q", ErrForeignKey, col.GetColname())
-			}
-		}
-	}
-	return nil
 }
 
 // Qualify returns sql with its target relation qualified by schema; an

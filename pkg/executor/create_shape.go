@@ -31,6 +31,10 @@ const (
 	// CreateShapeOfType refuses binding to an existing composite type because
 	// the absence proof does not cover it.
 	CreateShapeOfType CreateShapeCause = "of-type"
+	// CreateShapeForeignKey refuses a CREATE TABLE that declares a foreign
+	// key: creating it locks each referenced live table, and desired-state
+	// execution does not run foreign-key DDL yet.
+	CreateShapeForeignKey CreateShapeCause = "foreign-key"
 	// CreateShapeIfNotExists refuses a name-only no-op because it cannot prove
 	// the existing relation has the requested shape or is valid.
 	CreateShapeIfNotExists CreateShapeCause = "if-not-exists"
@@ -56,6 +60,7 @@ func CreateShapeCauses() []CreateShapeCause {
 		CreateShapeInherits,
 		CreateShapeLike,
 		CreateShapeOfType,
+		CreateShapeForeignKey,
 		CreateShapeIfNotExists,
 		CreateShapeConcurrently,
 		CreateShapeDuplicateName,
@@ -75,6 +80,8 @@ func (c CreateShapeCause) Description() string {
 		return "LIKE reads an existing source table the absence proof does not cover"
 	case CreateShapeOfType:
 		return "OF binds to an existing composite type the absence proof does not cover"
+	case CreateShapeForeignKey:
+		return "a foreign key locks each referenced table, and desired-state execution does not run foreign-key changes yet"
 	case CreateShapeIfNotExists:
 		return "IF NOT EXISTS is a name-only no-op that cannot prove the existing relation is the requested one, or even valid"
 	case CreateShapeConcurrently:
@@ -114,7 +121,7 @@ func (e *CreateShapeError) Unwrap() error {
 		return ErrIfNotExistsUnsupported
 	case CreateShapeDuplicateName:
 		return ErrDuplicateCreateName
-	case CreateShapeInherits, CreateShapeLike, CreateShapeOfType, CreateShapeConcurrently,
+	case CreateShapeInherits, CreateShapeLike, CreateShapeOfType, CreateShapeForeignKey, CreateShapeConcurrently,
 		CreateShapeMultipleOperations, CreateShapeUnsupportedKind:
 		return ErrUnsupportedCreateStep
 	default:

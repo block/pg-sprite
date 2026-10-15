@@ -337,6 +337,7 @@ to branch on, never prose.
 | `inherits` | `INHERITS` binds to an existing parent the absence proof does not cover |
 | `like` | `LIKE` reads an existing source table the absence proof does not cover |
 | `of-type` | `OF` binds to an existing composite type the absence proof does not cover |
+| `foreign-key` | A foreign key locks each referenced table, and desired-state execution does not run foreign-key changes yet |
 | `if-not-exists` | A name-only no-op cannot prove the existing relation has the requested shape or is valid |
 | `concurrently` | A table born this run needs no concurrent index build |
 | `duplicate-name` | The desired set claims the same relation name twice |
