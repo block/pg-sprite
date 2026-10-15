@@ -536,6 +536,19 @@ path report this refusal under the same code, and both name the refused
 operation when the classifier recognized which part of the statement it
 cannot route.
 
+### `declarative-foreign-key`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The desired file adds or drops a foreign key, or creates a table that
+declares one. `diff` shows the statement so the change is reviewable, but
+desired-state execution does not apply foreign-key changes yet. Run the
+statement with `pg-sprite migrate` instead: an `ADD FOREIGN KEY` runs as
+`NOT VALID` followed by `VALIDATE CONSTRAINT`, so writes keep flowing during
+the scan.
+
 ### `table-not-found`
 
 | Verdict | Lock | Scan / rewrite | Dry-run exit |

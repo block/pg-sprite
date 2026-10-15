@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
@@ -295,10 +296,14 @@ func impactText(r planner.Reason) string {
 // An unknown reason renders as itself: the typed value is the contract,
 // the prose is display only.
 func verdictText(r verdict.Reason) string {
-	if r == verdict.ReasonUnsupportedPartitionedParent {
+	switch r {
+	case verdict.ReasonUnsupportedPartitionedParent:
 		return "the target is a partitioned table and this operation is not supported on partitioned parents"
+	case verdict.ReasonDeclarativeForeignKey:
+		return "foreign keys are not supported for desired-state apply yet; this change is shown for review only — run it with pg-sprite migrate instead"
+	default:
+		return string(r)
 	}
-	return string(r)
 }
 
 // refuseText renders a refusal's cause. A planner-level refusal
@@ -306,6 +311,12 @@ func verdictText(r verdict.Reason) string {
 // carry one, mirroring the run path's refusal verdict detail; target-fact
 // refusals render their verdictText.
 func refuseText(ps plan.Statement, r verdict.Reason) string {
+	if r == verdict.ReasonDeclarativeForeignKey && ps.Cause == executor.CreateShapeForeignKey {
+		// The statement front door refuses CREATE TABLE, so a new table
+		// is created without the foreign key and gains it afterwards.
+		return "foreign keys are not supported for desired-state apply yet; this change is shown for review only — " +
+			"create the table without the foreign key, then add it with pg-sprite migrate"
+	}
 	if r != verdict.ReasonUnsupportedStatement {
 		return verdictText(r)
 	}
