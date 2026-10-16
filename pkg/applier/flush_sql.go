@@ -3,7 +3,6 @@ package applier
 import (
 	"context"
 	"fmt"
-	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -29,17 +28,18 @@ func (f *Flusher) split(e *Entry) (present []decode.Column, markers []string) {
 
 // upsertSQL writes the key and the given columns into relation, replacing
 // the row's values for exactly those columns when the key is already held.
-// The key is $1; the columns follow in order. A row with no column but the
-// key is written by assigning the key to itself, which PostgreSQL accepts
-// as an update that changes nothing.
-func upsertSQL(relation, pk string, cols []decode.Column) string {
+// The key is $1; the columns follow in order, each rendered by valueSQL so
+// a converted column is written through its expression. A row with no
+// column but the key is written by assigning the key to itself, which
+// PostgreSQL accepts as an update that changes nothing.
+func upsertSQL(relation, pk string, cols []decode.Column, conv conversions) string {
 	var b strings.Builder
 	b.WriteString("INSERT INTO ")
 	b.WriteString(relation)
 	b.WriteString(" (")
 	b.WriteString(columnList(pk, cols))
 	b.WriteString(") VALUES (")
-	b.WriteString(placeholders(1 + len(cols)))
+	b.WriteString(valueList(cols, conv))
 	b.WriteString(") ON CONFLICT (")
 	b.WriteString(pk)
 	b.WriteString(") DO UPDATE SET ")
@@ -61,11 +61,11 @@ func upsertSQL(relation, pk string, cols []decode.Column) string {
 }
 
 // updateSQL assigns the given columns on relation's row under key $1 and
-// nothing else; the columns follow the key in order. It is the write for an
-// image that still carries a marker, so the row has to exist (CO-8); with
-// no column to assign it assigns the key to itself, so the row count still
-// reports whether the row is there.
-func updateSQL(relation, pk string, cols []decode.Column) string {
+// nothing else; the columns follow the key in order, each rendered by
+// valueSQL. It is the write for an image that still carries a marker, so
+// the row has to exist (CO-8); with no column to assign it assigns the key
+// to itself, so the row count still reports whether the row is there.
+func updateSQL(relation, pk string, cols []decode.Column, conv conversions) string {
 	var b strings.Builder
 	b.WriteString("UPDATE ")
 	b.WriteString(relation)
@@ -79,8 +79,8 @@ func updateSQL(relation, pk string, cols []decode.Column) string {
 			b.WriteString(", ")
 		}
 		b.WriteString(pgx.Identifier{c.Name}.Sanitize())
-		b.WriteString(" = $")
-		b.WriteString(strconv.Itoa(i + 2))
+		b.WriteString(" = ")
+		b.WriteString(valueSQL(i+2, c, conv))
 	}
 	b.WriteString(" WHERE ")
 	b.WriteString(pk)
@@ -89,11 +89,11 @@ func updateSQL(relation, pk string, cols []decode.Column) string {
 }
 
 // insertSQL writes a whole row into relation: the key is $1 and every
-// writable column follows in order. It is the fallback's write, and it
-// carries no conflict clause because every key in the batch was deleted
-// first (D13).
-func insertSQL(relation, pk string, cols []decode.Column) string {
-	return "INSERT INTO " + relation + " (" + columnList(pk, cols) + ") VALUES (" + placeholders(1+len(cols)) + ")"
+// writable column follows in order, each rendered by valueSQL. It is the
+// fallback's write, and it carries no conflict clause because every key in
+// the batch was deleted first (D13).
+func insertSQL(relation, pk string, cols []decode.Column, conv conversions) string {
+	return "INSERT INTO " + relation + " (" + columnList(pk, cols) + ") VALUES (" + valueList(cols, conv) + ")"
 }
 
 // deleteSQL removes relation's row under key $1.
@@ -121,8 +121,8 @@ func rowSQL(relation, pk string, names []string) string {
 	return "SELECT " + strings.Join(cols, ", ") + " FROM " + relation + " WHERE " + pk + " = $1"
 }
 
-func (f *Flusher) upsertRow(ctx context.Context, tx pgx.Tx, key int64, cols []decode.Column) error {
-	if _, err := tx.Exec(ctx, upsertSQL(f.shadowRelation(), f.pk(), cols), args(key, cols)...); err != nil {
+func (f *Flusher) upsertRow(ctx context.Context, tx pgx.Tx, key int64, cols []decode.Column, conv conversions) error {
+	if _, err := tx.Exec(ctx, upsertSQL(f.shadowRelation(), f.pk(), cols, conv), args(key, cols)...); err != nil {
 		return fmt.Errorf("upsert key %d into %s: %w", key, f.shadowRelation(), err)
 	}
 	return nil
@@ -130,16 +130,16 @@ func (f *Flusher) upsertRow(ctx context.Context, tx pgx.Tx, key int64, cols []de
 
 // updateRow writes the columns onto the row under key and reports whether a
 // row was there to take them.
-func (f *Flusher) updateRow(ctx context.Context, tx pgx.Tx, key int64, cols []decode.Column) (bool, error) {
-	tag, err := tx.Exec(ctx, updateSQL(f.shadowRelation(), f.pk(), cols), args(key, cols)...)
+func (f *Flusher) updateRow(ctx context.Context, tx pgx.Tx, key int64, cols []decode.Column, conv conversions) (bool, error) {
+	tag, err := tx.Exec(ctx, updateSQL(f.shadowRelation(), f.pk(), cols, conv), args(key, cols)...)
 	if err != nil {
 		return false, fmt.Errorf("update key %d in %s: %w", key, f.shadowRelation(), err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
 
-func (f *Flusher) insertRow(ctx context.Context, tx pgx.Tx, key int64, cols []decode.Column) error {
-	if _, err := tx.Exec(ctx, insertSQL(f.shadowRelation(), f.pk(), cols), args(key, cols)...); err != nil {
+func (f *Flusher) insertRow(ctx context.Context, tx pgx.Tx, key int64, cols []decode.Column, conv conversions) error {
+	if _, err := tx.Exec(ctx, insertSQL(f.shadowRelation(), f.pk(), cols, conv), args(key, cols)...); err != nil {
 		return fmt.Errorf("insert key %d into %s: %w", key, f.shadowRelation(), err)
 	}
 	return nil
@@ -160,12 +160,13 @@ func (f *Flusher) deleteRows(ctx context.Context, tx pgx.Tx, keys []int64) error
 }
 
 // args lays out a statement's parameters: the key first, then each
-// column's value in order, so every builder above binds the same way.
+// column's value in order, so every builder above binds the same way. A
+// value read from the shadow is bound as the value it wraps.
 func args(key int64, cols []decode.Column) []any {
 	out := make([]any, 0, 1+len(cols))
 	out = append(out, key)
 	for _, c := range cols {
-		out = append(out, c.Value)
+		out = append(out, bindValue(c))
 	}
 	return out
 }
@@ -193,11 +194,13 @@ func columnList(pk string, cols []decode.Column) string {
 	return strings.Join(names, ", ")
 }
 
-// placeholders renders $1 … $n.
-func placeholders(n int) string {
-	parts := make([]string, n)
-	for i := range parts {
-		parts[i] = "$" + strconv.Itoa(i+1)
+// valueList renders the key's parameter $1 followed by each column's value
+// at $2 … $n+1, as valueSQL renders it.
+func valueList(cols []decode.Column, conv conversions) string {
+	parts := make([]string, 0, 1+len(cols))
+	parts = append(parts, "$1")
+	for i, c := range cols {
+		parts = append(parts, valueSQL(i+2, c, conv))
 	}
 	return strings.Join(parts, ", ")
 }

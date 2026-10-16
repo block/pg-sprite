@@ -264,6 +264,12 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err := carryExtendedStatisticsTargets(ctx, tx, target.Schema(), oid, shadowOID, fidelity.ExtendedStatisticsTargets); err != nil {
 		return BuiltShadow{}, err
 	}
+	// The probe runs on the shadow the statement is about to run on, under
+	// the same search_path and role, so it resolves every name the way the
+	// statement will; a refusal rolls the whole build back with the shadow.
+	if err := probeConversions(ctx, tx, target, shadow, sourceModel, conversions); err != nil {
+		return BuiltShadow{}, err
+	}
 	if _, err := tx.Exec(ctx, retargeted); err != nil {
 		return BuiltShadow{}, fmt.Errorf("apply schema change to shadow %s.%s: %w", target.Schema(), shadow, err)
 	}
@@ -325,9 +331,10 @@ func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, s
 // check the retarget makes: an expression taken from a statement about
 // another table would convert this one's columns. An expression the copy
 // cannot carry as the statement wrote it is refused before any shadow
-// exists: one the deparser cannot prove it rendered faithfully, a column
-// retyped twice, or a conversion of the primary key, whose values every
-// chunk range, watermark, and resume clear of the copy are expressed in.
+// exists: one the deparser cannot prove it rendered faithfully, one that
+// reads any column but the one it retypes, a column retyped twice, or a
+// conversion of the primary key, whose values every chunk range,
+// watermark, and resume clear of the copy are expressed in.
 func columnConversions(st statement.Statement, target preflight.CopySwapTarget) (map[string]string, error) {
 	// INV: ST-7
 	if st.Kind() != statement.KindAlterTable {

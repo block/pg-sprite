@@ -70,7 +70,8 @@ func (s fakeShadow) Conversions() map[string]string { return s.conversions }
 // its UTF-8 bytes, aggregated as bytes in key order and hashed again, hex
 // only at the end, over a closed bigint-typed key range, with every
 // function pg_catalog-qualified. Only the table differs between the two
-// sides.
+// sides — until a column is retyped with USING, when the source side
+// hashes that expression cast to the shadow's type in the column's place.
 // Quoting goes through pgx.Identifier, so a column named like a keyword
 // survives, while the type spelling is format_type's and is not quoted.
 func TestDigestSQLIsFrozen(t *testing.T) {
@@ -91,9 +92,14 @@ func TestDigestSQLIsFrozen(t *testing.T) {
 		` pg_catalog.encode(pg_catalog.sha256(COALESCE(pg_catalog.string_agg(pg_catalog.sha256(pg_catalog.convert_to(ROW("id"::bigint, "select"::character varying(20), "qty"::numeric(10,2))::text, pg_catalog.getdatabaseencoding())), ''::bytea ORDER BY "id"), ''::bytea)), 'hex')` +
 		` FROM "` + f.schema + `"."_pgsprite_orders_new"` +
 		` WHERE "id" BETWEEN $1::bigint AND $2::bigint`
-	assert.Equal(t, want, digestSQL(target, f.schema, "_pgsprite_orders_new", types))
-	assert.Equal(t, strings.Replace(want, `"_pgsprite_orders_new"`, `"orders"`, 1), digestSQL(target, f.schema, "orders", types),
+	assert.Equal(t, want, digestSQL(target, f.schema, "_pgsprite_orders_new", types, nil))
+	assert.Equal(t, strings.Replace(want, `"_pgsprite_orders_new"`, `"orders"`, 1), digestSQL(target, f.schema, "orders", types, nil),
 		"the source side is the same statement over the source table")
+
+	conversions := map[string]string{"qty": "(NULLIF(TRIM (BOTH  FROM qty), ''))::numeric"}
+	converted := strings.Replace(want, `"qty"::numeric(10,2)`, `((NULLIF(TRIM (BOTH  FROM qty), ''))::numeric)::numeric(10,2)`, 1)
+	assert.Equal(t, strings.Replace(converted, `"_pgsprite_orders_new"`, `"orders"`, 1), digestSQL(target, f.schema, "orders", types, conversions),
+		"a converted column hashes as its USING expression, cast to the shadow's type, on the source side")
 }
 
 // A SQL_ASCII database stores whatever bytes a client sends, including
@@ -116,7 +122,7 @@ func TestDigestHashesARowThatIsNotValidUTF8(t *testing.T) {
 	sql := digestSQL(target, f.schema, "orders", []columnType{
 		{name: "id", typeName: "bigint"},
 		{name: "note", typeName: "text"},
-	})
+	}, nil)
 
 	tx, err := pool.Begin(t.Context())
 	require.NoError(t, err)

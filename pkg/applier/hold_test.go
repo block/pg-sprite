@@ -55,8 +55,8 @@ func TestHoldKeepsTheImageUntilTheStreamPassesTheRead(t *testing.T) {
 	assert.Equal(t, 0, batch.Held)
 	assert.Equal(t, []decode.Column{
 		{Name: "label", Value: "a", Present: true},
-		{Name: "blob", Value: "from the row", Present: true},
-	}, batch.Entries[0].Columns)
+		{Name: "blob", Value: shadowForm{value: "from the row"}, Present: true},
+	}, batch.Entries[0].Columns, "the completion is kept as read from the shadow row")
 	assert.Empty(t, batch.CompleteFirst(), "the image is whole; nothing to read before writing")
 }
 
@@ -122,7 +122,7 @@ func TestReleaseFillsOnlyTheMarkersAnUpdateLeft(t *testing.T) {
 	assert.Equal(t, []decode.Column{
 		{Name: "label", Value: "b", Present: true},
 		{Name: "blob", Value: "newer blob", Present: true},
-		{Name: "doc", Value: "read doc", Present: true},
+		{Name: "doc", Value: shadowForm{value: "read doc"}, Present: true},
 	}, entry(t, b, 8).Columns)
 }
 
@@ -195,7 +195,7 @@ func TestHoldCopiesTheImageAndItsCompletion(t *testing.T) {
 
 	assert.Equal(t, []decode.Column{
 		{Name: "label", Value: "a", Present: true},
-		{Name: "blob", Value: "from the row", Present: true},
+		{Name: "blob", Value: shadowForm{value: "from the row"}, Present: true},
 	}, entry(t, b, 8).Columns)
 }
 
@@ -205,4 +205,25 @@ func TestHoldOfNothingIsANoOp(t *testing.T) {
 	assert.Equal(t, 0, b.Len())
 	assert.Equal(t, 0, b.Held())
 	assert.Equal(t, 0, b.Release(decode.LSN(1)))
+}
+
+// The row a completion was read from decides the form it is kept in: a
+// shadow row's value is kept in the shadow's form, to be bound bare, and a
+// source row's as it is, to be converted like a value from the stream.
+func TestHoldKeepsACompletionInTheFormOfTheRowItWasReadFrom(t *testing.T) {
+	b := NewBuffer()
+	require.NoError(t, b.Add(keyMove(10, 1, 2, marker("blob"))))
+	require.NoError(t, b.Add(keyMove(20, 3, 4, marker("blob"))))
+	batch := b.Drain(position(t, 100))
+	first := batch.CompleteFirst()
+	require.Len(t, first, 2)
+	require.NoError(t, b.Hold([]HeldImage{
+		{Entry: first[0], Completed: []decode.Column{col("blob", "from the shadow")}, ReadLSN: 300},
+		{Entry: first[1], Completed: []decode.Column{col("blob", "from the source")}, FromSource: true, ReadLSN: 300},
+	}))
+
+	require.Equal(t, 2, b.Release(300))
+
+	assert.Equal(t, []decode.Column{{Name: "blob", Value: shadowForm{value: "from the shadow"}, Present: true}}, entry(t, b, 2).Columns)
+	assert.Equal(t, []decode.Column{{Name: "blob", Value: "from the source", Present: true}}, entry(t, b, 4).Columns)
 }
