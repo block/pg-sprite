@@ -356,7 +356,9 @@ carries no server error; the `*TableNewerError` names the columns instead.
 
 In the catch-up stage the orchestrator runs the checksum with `checksum.Verifier.CheckLive`
 while the source is written and `applier.Catchup` applies the stream, handing it the
-catch-up as the `ConfirmedSource` and the policy its setting names (`abort` or `repair`;
+catch-up as the `ConfirmedSource` and, under `repair`, as the `FlushGate` that holds its
+flushes off the shadow while a repair recopies (`LiveOptions.Flushes`, required under
+`repair` and unused under `abort`), and the policy its setting names (`abort` or `repair`;
 `recopy` is refused). A pass returns one of five outcomes, each a typed error or a proof, and
 each asks for a different action. Whether the pass wrote the shadow is part of the outcome:
 

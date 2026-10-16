@@ -11,8 +11,9 @@ import (
 	"github.com/block/pg-sprite/pkg/decode"
 )
 
-// repairLive recopies every confirmed divergence in one fenced transaction,
-// waits for the catch-up to confirm past the recopy, and settles each
+// repairLive recopies every confirmed divergence in one transaction with
+// the catch-up's flushes held, resumes them, waits for the catch-up to
+// confirm past the recopy, and settles each
 // repaired chunk again, in key order, stopping at the first that does not
 // settle clean. The repairs it returns are the ones that committed: none
 // when the recopy failed, all of them with any error the settling raises.
@@ -21,7 +22,7 @@ func (v *Verifier) repairLive(ctx context.Context, pool *pgxpool.Pool, mismatche
 	if err != nil {
 		return nil, err
 	}
-	repairs, recopied, err := v.recopyFenced(ctx, pool, mismatches)
+	repairs, recopied, err := v.recopyFenced(ctx, pool, mismatches, live.Flushes)
 	if err != nil {
 		return nil, err
 	}
@@ -35,17 +36,28 @@ func (v *Verifier) repairLive(ctx context.Context, pool *pgxpool.Pool, mismatche
 
 // recopyFenced is the recopy for a shadow the stream is writing: the same
 // delete-every-chunk-then-copy-every-chunk transaction, with the stream's
-// flushes held off the shadow while it runs. SHARE MODE on the shadow waits
-// behind a flush that is mid-write and keeps the next one waiting until the
-// recopy commits, so no flush interleaves with the delete and the copy; the
-// flushes that then land replay images the recopy has already put back, or
-// changes that committed after it, and the shadow converges on the source
-// as it does after any copy. The marker is written after the copy and
-// before the commit: every source change the copy saw committed before it,
-// so once the catch-up confirms past it the shadow holds the recopy and
-// everything since. The wait for the lock is bounded by the transaction's
-// lock_timeout, and a flush queued behind the recopy by its own.
-func (v *Verifier) recopyFenced(ctx context.Context, pool *pgxpool.Pool, mismatches []Mismatch) ([]Repair, decode.LSN, error) {
+// flushes held off the shadow while it runs. The hold is the catch-up's
+// own: flushes.Pause returns once no flush is in flight and none starts
+// until the resume, while the catch-up goes on reading and confirming the
+// stream, so a recopy of any length neither waits behind a flush nor
+// holds one past its lock_timeout. The flushes are resumed once the recopy
+// has committed, before the catch-up is waited on, since confirming past
+// the recopy needs them; the flushes that then land replay images the
+// recopy has already put back, or changes that committed after it, and
+// the shadow converges on the source as it does after any copy. SHARE
+// MODE on the shadow is kept under the hold as the guarantee against every
+// other writer: it conflicts with the ROW EXCLUSIVE a write holds, so
+// nothing interleaves with the delete and the copy, and the wait for it is
+// bounded by the transaction's lock_timeout. The marker is written after
+// the copy and before the commit: every source change the copy saw
+// committed before it, so once the catch-up confirms past it the shadow
+// holds the recopy and everything since.
+func (v *Verifier) recopyFenced(ctx context.Context, pool *pgxpool.Pool, mismatches []Mismatch, flushes FlushGate) ([]Repair, decode.LSN, error) {
+	resume, err := flushes.Pause(ctx)
+	if err != nil {
+		return nil, 0, fmt.Errorf("hold the catch-up's flushes off shadow %s.%s for repair: %w", v.shadow.Schema(), v.shadow.ShadowTable(), err)
+	}
+	defer resume()
 	tx, err := v.begin(ctx, pool, pgx.TxOptions{AccessMode: pgx.ReadWrite})
 	if err != nil {
 		return nil, 0, err
@@ -58,7 +70,7 @@ func (v *Verifier) recopyFenced(ctx context.Context, pool *pgxpool.Pool, mismatc
 	}()
 	// INV: LK-2
 	if _, err := tx.Exec(ctx, v.fenceSQL); err != nil {
-		return nil, 0, fmt.Errorf("fence the stream's flushes out of shadow %s.%s for repair: %w", v.shadow.Schema(), v.shadow.ShadowTable(), err)
+		return nil, 0, fmt.Errorf("fence every other writer out of shadow %s.%s for repair: %w", v.shadow.Schema(), v.shadow.ShadowTable(), err)
 	}
 	repairs, err := v.recopyIn(ctx, tx, mismatches)
 	if err != nil {
@@ -115,8 +127,10 @@ func (v *Verifier) settleRepair(ctx context.Context, pool *pgxpool.Pool, sourceS
 }
 
 // fenceSQL is the one statement a live repair runs before its deletes: a
-// SHARE MODE lock on the shadow, which conflicts with the ROW EXCLUSIVE a
-// flush holds while it writes and blocks none of the ACCESS SHARE readers.
+// SHARE MODE lock on the shadow, which conflicts with the ROW EXCLUSIVE
+// any writer holds while it writes — a flush the gate did not hold, or a
+// writer that is not the stream's — and blocks none of the ACCESS SHARE
+// readers.
 func fenceSQL(shadow copier.Shadow) string {
 	return "LOCK TABLE " + pgx.Identifier{shadow.Schema(), shadow.ShadowTable()}.Sanitize() + " IN SHARE MODE"
 }

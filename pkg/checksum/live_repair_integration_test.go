@@ -9,14 +9,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/applier"
 	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/decode"
 )
 
 // The live repairs below exercise what a recopy under the stream has to
 // get right beyond the recopy itself: that the repaired chunk is read
-// again and judged, and that the stream's flushes are fenced out of the
-// shadow while the recopy runs.
+// again and judged, that the catch-up's flushes are held off the shadow
+// in Go for as long as the recopy runs, and that every other writer is
+// fenced out of it with SHARE MODE.
 
 // A repair whose chunk is a confirmed divergence again after the recopy is
 // a RepairError (CO-2), not a clean pass: the recopy committed, so it is
@@ -89,5 +91,112 @@ func TestCheckLiveRepairWaitsBehindAWriterOnTheShadow(t *testing.T) {
 	case <-time.After(passDeadline):
 		t.Fatalf("the live pass did not return within %s of the writer rolling back", passDeadline)
 	}
+	f.assertConverged(t)
+}
+
+// writingGate is the fixture's catch-up as a FlushGate that writes the
+// source once the flushes are held, so a change the stream carries arrives
+// while the repair's recopy is open, and counts the holds and resumes.
+type writingGate struct {
+	f       *liveFixture
+	write   string
+	paused  atomic.Int32
+	resumed atomic.Int32
+}
+
+func (g *writingGate) Pause(ctx context.Context) (func(), error) {
+	resume, err := g.f.catchup.Pause(ctx)
+	if err != nil {
+		return nil, err
+	}
+	g.paused.Add(1)
+	if _, err := g.f.pool.Exec(ctx, g.write); err != nil {
+		resume()
+		return nil, err
+	}
+	return func() {
+		g.resumed.Add(1)
+		resume()
+	}, nil
+}
+
+// A live repair holds the catch-up's flushes in Go for as long as its
+// recopy runs, so a flush never waits behind the recopy's lock on the
+// shadow, however long the recopy takes. The flusher's lock wait is one
+// millisecond: a flush that reached the shadow while the recopy held it
+// would be refused and end the catch-up. A transaction holds a row lock on
+// a row in the divergent chunk, so the recopy's delete waits behind it
+// with the recopy open; a source write committed under the hold is
+// buffered and not applied while the recopy waits; the row lock is
+// released, the recopy commits, the flushes resume and apply the write,
+// and the pass settles the chunk clean with the catch-up still running.
+func TestCheckLiveRepairHoldsTheCatchupsFlushesForTheRecopy(t *testing.T) {
+	f := newLiveFixtureWith(t, liveSetup{flushLockTimeout: time.Millisecond})
+	f.exec(t, "UPDATE "+f.shadowName()+" SET amount = 0 WHERE id = 1400")
+
+	rowLock, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Redundant safety closer: the test rolls the row lock back itself.
+		_ = rowLock.Rollback(context.WithoutCancel(t.Context()))
+	})
+	_, err = rowLock.Exec(t.Context(), "SELECT id FROM "+f.shadowName()+" WHERE id = 1500 FOR UPDATE")
+	require.NoError(t, err)
+
+	gate := &writingGate{f: f, write: "UPDATE " + f.table.Qualified() + " SET amount = amount + 1 WHERE id = 5"}
+	v := f.verifier(t, checksum.Options{LockTimeout: heldFlushLockTimeout})
+	type passResult struct {
+		outcome checksum.Outcome
+		err     error
+	}
+	done := make(chan passResult, 1)
+	go func() {
+		outcome, err := f.checkLive(t, v, checksum.DivergenceRepair, checksum.LiveOptions{Flushes: gate})
+		done <- passResult{outcome, err}
+	}()
+
+	// A tuple lock on the shadow exists only while a transaction waits for
+	// one of its rows: the recopy's delete, behind the row lock.
+	const recopyWaitDeadline = 10 * time.Second
+	var held applier.Status
+	require.Eventually(t, func() bool {
+		var recopyWaiting bool
+		require.NoError(t, f.pool.QueryRow(t.Context(),
+			"SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'tuple' AND relation = $1::regclass)",
+			f.shadowName()).Scan(&recopyWaiting))
+		held = f.catchup.Status()
+		return recopyWaiting && held.Buffered >= 1
+	}, recopyWaitDeadline, 20*time.Millisecond, "the recopy waits behind the row lock with the source write buffered")
+	assert.Zero(t, held.Applied, "the buffered write is not flushed while the recopy is open")
+	assert.Equal(t, int32(1), gate.paused.Load(), "the pass held the flushes once, before the recopy")
+	assert.Zero(t, gate.resumed.Load(), "the flushes stay held while the recopy is open")
+	select {
+	case err := <-f.done:
+		t.Fatalf("the catch-up ended while the recopy was open: %v", err)
+	default:
+	}
+
+	require.NoError(t, rowLock.Rollback(t.Context()))
+	const passDeadline = 30 * time.Second
+	var pass passResult
+	select {
+	case pass = <-done:
+	case <-time.After(passDeadline):
+		t.Fatalf("the live pass did not return within %s of the row lock being released", passDeadline)
+	}
+	require.NoError(t, pass.err, "the recopy ran once the row lock let go and the chunk settled clean")
+	require.Len(t, pass.outcome.Repairs, 1)
+	assert.Equal(t, chunk(t, 1001, 2000), pass.outcome.Repairs[0].Mismatch.Chunk)
+	assert.Equal(t, int32(1), gate.resumed.Load(), "the pass resumed the flushes once the recopy committed")
+	after := f.catchup.Status()
+	assert.GreaterOrEqual(t, after.Applied, uint64(1), "the write buffered under the hold was flushed after the resume")
+
+	// The catch-up outlived the pass: a write after it is applied too.
+	f.exec(t, "UPDATE "+f.table.Qualified()+" SET amount = amount + 1 WHERE id = 7")
+	end := f.currentWALLSN(t)
+	const confirmDeadline = 10 * time.Second
+	require.Eventually(t, func() bool {
+		return f.catchup.Status().Confirmed >= end
+	}, confirmDeadline, 20*time.Millisecond, "the catch-up confirmed past a write after the pass")
 	f.assertConverged(t)
 }
