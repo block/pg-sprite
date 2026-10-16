@@ -79,7 +79,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: backend-unavailable
-    reason_notes: "Table rewrite; copy-and-swap route, refused today"
+    reason_notes: "Table rewrite; copy-and-swap route, refused today. A `USING` expression will be admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (see limitations)"
   - id: set-default-drop-default-drop-not-null
     area: "column_changes"
     operation: "`SET DEFAULT` / `DROP DEFAULT` / `DROP NOT NULL`"

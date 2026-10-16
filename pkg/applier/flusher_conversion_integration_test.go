@@ -142,7 +142,10 @@ func TestFlushResolvesConversionNamesOnTheBuildsSearchPath(t *testing.T) {
 // createPricedSeats creates the CO-6 table with a converted document: a
 // unique slot whose values tests exchange, a price in text, and a document
 // always stored out of line — so an UPDATE leaving it unchanged decodes it
-// as a marker — that the change retypes to bytea through convert_to.
+// as a marker — that the change retypes to bytea through decode. The
+// document is hex text, so decode in escape format yields its bytes as
+// written; decode is immutable, which the shadow build requires of a USING
+// expression the copy is to reproduce.
 func (f flushFixture) createPricedSeats(t *testing.T, rows int64) {
 	t.Helper()
 	f.exec(t, `
@@ -170,7 +173,7 @@ func (f flushFixture) preparePricedSeats(t *testing.T) prepared {
 	shadow := f.build(t, lock, target, `
 		ALTER TABLE %s
 			ALTER COLUMN price TYPE integer USING `+priceInCents+`,
-			ALTER COLUMN doc TYPE bytea USING convert_to(doc, 'UTF8')`)
+			ALTER COLUMN doc TYPE bytea USING decode(doc, 'escape')`)
 	f.copy(t, target, shadow, lock)
 	flush, err := applier.NewFlusher(target, shadow, lock, applier.Options{})
 	require.NoError(t, err)
@@ -178,7 +181,7 @@ func (f flushFixture) preparePricedSeats(t *testing.T) prepared {
 }
 
 // assertSeatsConverted checks every shadow seat holds its source price in
-// cents and its source document as the bytes convert_to produces.
+// cents and its source document as the bytes decode produces.
 func (f flushFixture) assertSeatsConverted(t *testing.T, shadow schemachange.BuiltShadow) {
 	t.Helper()
 	var mismatched int64
@@ -187,7 +190,7 @@ func (f flushFixture) assertSeatsConverted(t *testing.T, shadow schemachange.Bui
 		FROM `+pgx.Identifier{f.schema, shadow.SourceTable()}.Sanitize()+` s
 		FULL JOIN `+pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()+` d USING (id)
 		WHERE d.price IS DISTINCT FROM (coalesce(s.price, '0')::numeric * 100)::integer
-		   OR d.doc IS DISTINCT FROM convert_to(s.doc, 'UTF8')`).Scan(&mismatched))
+		   OR d.doc IS DISTINCT FROM decode(s.doc, 'escape')`).Scan(&mismatched))
 	assert.Zero(t, mismatched, "every shadow seat holds its converted price and document")
 	testutil.AssertConverged(t, f.pool,
 		testutil.RelationRef{Schema: f.schema, Table: shadow.SourceTable()},
@@ -198,7 +201,7 @@ func (f flushFixture) assertSeatsConverted(t *testing.T, shadow schemachange.Bui
 // The CO-6 fallback completes a marker from the shadow row under the
 // image's own key, and the shadow holds the converted document, not the
 // source's text. The whole-row insert writes that completion bare: putting
-// it through convert_to again would convert the bytes' text rendering, not
+// it through decode again would decode the bytes' text rendering, not
 // the document (D13, D7).
 func TestFlushFallbackInsertsAShadowCompletionOfAConvertedColumnBare(t *testing.T) {
 	f := newFlushFixture(t)
