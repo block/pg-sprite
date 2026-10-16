@@ -227,7 +227,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**. `migrate` refuses the plain form and names the idiom; a single-index `DROP INDEX` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0)"
+    reason_notes: "Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**. `migrate` refuses the plain form and names the idiom; a single-index `DROP INDEX` without `CASCADE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0)"
   - id: reindex
     area: "indexes"
     operation: "`REINDEX`"

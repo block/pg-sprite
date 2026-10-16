@@ -218,8 +218,8 @@ const (
 	// RefusalSiteIndexSingleRelation is the plain one-relation DROP INDEX,
 	// REINDEX INDEX, or REINDEX TABLE gate site.
 	RefusalSiteIndexSingleRelation RefusalSite = "index-statement-single-relation"
-	// RefusalSiteIndexOther is a multi-relation DROP INDEX or a REINDEX scope
-	// that does not identify one relation.
+	// RefusalSiteIndexOther is a multi-relation DROP INDEX, a DROP INDEX with
+	// CASCADE, or a REINDEX scope that does not identify one relation.
 	RefusalSiteIndexOther RefusalSite = "index-statement-other"
 )
 

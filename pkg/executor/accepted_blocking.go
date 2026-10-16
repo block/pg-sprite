@@ -169,6 +169,9 @@ func acceptedBlockingShape(st statement.Statement) bool {
 	case statement.KindCreateIndex:
 		return true
 	case statement.KindDropIndex, statement.KindReindex:
+		// INV: AB-3 — only a statement whose whole scope is the one
+		// acknowledged table runs here; a DROP INDEX ... CASCADE also drops
+		// dependent objects on other tables and parses as another target.
 		return st.IndexTarget() == statement.IndexTargetSingleRelation
 	default:
 		return false

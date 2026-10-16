@@ -86,6 +86,37 @@ func TestExecuteAcceptedBlockingRefusesReindexOnPartitionedRelation(t *testing.T
 	assert.True(t, valid)
 }
 
+// DROP INDEX ... CASCADE drops the objects that depend on the index. Here the
+// foreign key on u references the unique index on t, so the cascade would
+// lock and change u, which the lock on t does not cover. The executor
+// refuses the shape before it opens a transaction, so the index and the
+// foreign key both stay.
+func TestExecuteAcceptedBlockingRefusesCascadeDrop(t *testing.T) {
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (id int NOT NULL);
+		CREATE UNIQUE INDEX i ON %[1]s.t (id);
+		CREATE TABLE %[1]s.u (
+			t_id int REFERENCES %[1]s.t (id)
+		)`, schema))
+	require.NoError(t, err)
+	b := executor.BlockingBudget{LockTimeout: time.Second, StatementTimeout: 10 * time.Second}
+
+	_, err = executor.ExecuteAcceptedBlocking(t.Context(), pool,
+		fmt.Sprintf("DROP INDEX %s.i CASCADE", schema), pgx.Identifier{schema, "t"}, b)
+	require.ErrorIs(t, err, executor.ErrUnsupportedAcceptedBlocking)
+	assert.True(t, executor.OutcomeCode(err).Permanent())
+
+	exists, valid := indexState(t, pool, schema, "i")
+	assert.True(t, exists)
+	assert.True(t, valid)
+	var foreignKeys int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND conrelid = to_regclass($1)`,
+		schema+".u").Scan(&foreignKeys))
+	assert.Equal(t, 1, foreignKeys, "the foreign key on u must still exist")
+}
+
 func TestExecuteAcceptedBlockingAppliesBothBoundsOnExecutingSession(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf(`

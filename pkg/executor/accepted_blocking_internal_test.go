@@ -94,6 +94,11 @@ func TestAcceptedBlockingAdmission(t *testing.T) {
 		{sql: "REINDEX INDEX app.i", want: true},
 		{sql: "REINDEX TABLE app.t", want: true},
 		{sql: "CREATE INDEX i ON app.t (id)", want: true},
+		{sql: "DROP INDEX app.i RESTRICT", want: true},
+		// CASCADE drops the objects that depend on the index — a foreign key
+		// on another table, for one — which the one acknowledged table's lock
+		// does not cover.
+		{sql: "DROP INDEX app.i CASCADE"},
 		{sql: "DROP INDEX CONCURRENTLY app.i"},
 		{sql: "DROP INDEX app.i, app.j"},
 		{sql: "REINDEX SCHEMA app"},

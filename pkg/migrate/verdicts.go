@@ -48,6 +48,11 @@ func indexAdvice(st statement.Statement) (detail, saferIdiom string) {
 	if st.Concurrent() {
 		return "this is already the safe concurrent idiom; pg-sprite does not drive this maintenance form yet — run it directly against the database", ""
 	}
+	if st.Cascades() {
+		return "DROP INDEX ... CASCADE also drops the objects that depend on the index, which can lock and change " +
+			"tables other than the index's own; DROP INDEX CONCURRENTLY does not accept CASCADE — " +
+			"drop each dependent object explicitly, then the index", ""
+	}
 	switch st.Kind() {
 	case statement.KindDropIndex:
 		return "a plain DROP INDEX takes ACCESS EXCLUSIVE on the table; the concurrent drop does not", "DROP INDEX CONCURRENTLY"

@@ -41,6 +41,17 @@ func TestGate(t *testing.T) {
 		assert.Equal(t, "DROP INDEX CONCURRENTLY", v.SaferIdiom)
 	})
 
+	t.Run("a cascading drop is refused at the ineligible site with no concurrent idiom", func(t *testing.T) {
+		v, refused := Gate(parse(t, "DROP INDEX billing.i CASCADE"))
+		require.True(t, refused)
+		assert.Equal(t, verdict.ReasonIndexStatement, v.Reason)
+		proof, err := v.Refusal()
+		require.NoError(t, err)
+		assert.Equal(t, verdict.RefusalSiteIndexOther, proof.Site())
+		assert.Empty(t, v.SaferIdiom,
+			"DROP INDEX CONCURRENTLY does not accept CASCADE, so it is not an equivalent to suggest")
+	})
+
 	t.Run("already-concurrent maintenance carries no safer idiom", func(t *testing.T) {
 		v, refused := Gate(parse(t, "DROP INDEX CONCURRENTLY billing.i"))
 		require.True(t, refused)

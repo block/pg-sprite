@@ -113,6 +113,9 @@ func gateRefusal(kind statement.Kind, concurrent bool, target statement.IndexTar
 		if concurrent {
 			return verdict.NoOnlineSafetyProblem(verdict.ReasonIndexStatement, verdict.OwnerDirectOperator), true
 		}
+		// INV: AB-4 — only a statement whose whole scope is one relation is
+		// at the eligible site; a cascading drop is not, so the
+		// acknowledgement cannot reach it.
 		site := verdict.RefusalSiteIndexOther
 		if target == statement.IndexTargetSingleRelation {
 			site = verdict.RefusalSiteIndexSingleRelation

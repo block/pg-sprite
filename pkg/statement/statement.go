@@ -91,6 +91,7 @@ type Statement struct {
 	concurrent    bool
 	indexTarget   IndexTarget
 	indexRelation IndexRelation
+	cascades      bool
 	buildsIndex   bool
 }
 
@@ -102,10 +103,13 @@ type IndexTarget int
 const (
 	// IndexTargetNone is carried by statements outside index maintenance.
 	IndexTargetNone IndexTarget = iota
-	// IndexTargetSingleRelation covers one DROP INDEX and REINDEX INDEX or TABLE.
+	// IndexTargetSingleRelation covers one DROP INDEX (without CASCADE) and
+	// REINDEX INDEX or TABLE.
 	IndexTargetSingleRelation
-	// IndexTargetOther covers multi-index DROP and REINDEX scopes that do not
-	// name one relation: SCHEMA, DATABASE, and SYSTEM.
+	// IndexTargetOther covers the DROP and REINDEX scopes that do not stay
+	// within one relation: several indexes in one DROP INDEX, DROP INDEX with
+	// CASCADE (which also drops dependent objects), and REINDEX SCHEMA,
+	// DATABASE, and SYSTEM.
 	IndexTargetOther
 )
 
@@ -181,6 +185,10 @@ func (s Statement) IndexTarget() IndexTarget { return s.indexTarget }
 // IndexRelation returns the relation a single-relation index-maintenance
 // statement names; the zero value for every other statement.
 func (s Statement) IndexRelation() IndexRelation { return s.indexRelation }
+
+// Cascades reports whether a DROP INDEX used CASCADE, which also drops the
+// objects that depend on the index. It is always false for other statements.
+func (s Statement) Cascades() bool { return s.cascades }
 
 // BuildsIndex reports whether executing the statement creates a new index:
 // every CREATE INDEX, and the ALTER TABLE shapes that build one as a side
@@ -288,8 +296,11 @@ func ParseOne(sql string) (Statement, error) {
 		if node.GetDropStmt().GetRemoveType() == pganalyze.ObjectType_OBJECT_INDEX {
 			st.kind = KindDropIndex
 			st.concurrent = node.GetDropStmt().GetConcurrent()
+			st.cascades = node.GetDropStmt().GetBehavior() == pganalyze.DropBehavior_DROP_CASCADE
 			objects := node.GetDropStmt().GetObjects()
-			if len(objects) == 1 {
+			// CASCADE also drops the objects that depend on the named index,
+			// so its scope is wider than the one relation it names.
+			if len(objects) == 1 && !st.cascades {
 				st.indexTarget = IndexTargetSingleRelation
 				st.indexRelation = droppedIndex(objects[0])
 			} else {
