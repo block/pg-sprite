@@ -760,7 +760,7 @@ database: the slots are listed first and the checkpoint rows that own them read 
 statement, which sorts the slots a live row plainly names out of the pass, and each slot's row
 is read again right before its drop — the read that decides — under the engine's advisory lock
 on the slot's name (`Store.WithSlotLock`, transaction-scoped on a connection dialled outside
-the store's pool, so the holder's own work on the pool never waits on the seat the lock sits
+the store's pool and proven to be on its cluster and database, so the holder's own work on the pool never waits on the seat the lock sits
 in) that a run claiming the slot holds while it makes the slot and commits the row that names
 it, so a run that claimed it since the pass began keeps it and one claiming it now waits for
 the drop and creates afresh; a slot no row in a non-terminal phase

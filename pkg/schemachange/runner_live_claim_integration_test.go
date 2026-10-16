@@ -8,12 +8,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/checksum"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -21,9 +24,10 @@ import (
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
-// The tests here cover how a live run claims its slot and what it does
-// when the slot's name is taken or the capture it opened on the slot
-// ends: the lock on the slot's name (ST-3), a slot the run did not make,
+// The tests here cover how a live run, or the reconcile of one, claims its
+// slot and what it does when the slot's name is taken, its first save
+// fails, or the capture it opened on the slot ends: the lock on the slot's
+// name (ST-3), a slot the run did and did not make,
 // the connections a claim holds, and a stream that dies under the fill.
 
 // claimWait bounds a run's wait on the slot's lock and its finish once the
@@ -98,6 +102,103 @@ func TestFreshRunLeavesAnOrphanSlotItMet(t *testing.T) {
 	assert.True(t, published, "the publication the run did not make is still there")
 	_, err = f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
 	assert.ErrorIs(t, err, checkpoint.ErrNotFound, "no row records a run that never claimed its slot")
+}
+
+// A reconcile claiming its slot waits for the engine's lock on the slot's
+// name too (ST-3): while another holder has it, the row still reads in its
+// old phase and no slot exists, so a reaper judging the name under the
+// lock never sees the marker half written. Once the lock is let go the
+// reconcile writes the marker, makes the slot, and finishes.
+func TestReconcileWaitsForTheSlotLockBeforeClaimingItsSlot(t *testing.T) {
+	f := newReconcileFixture(t, 100)
+	shadow := f.buildShadow(t)
+	// The run saved its row before creating a slot and died there.
+	require.NoError(t, f.store.Save(t.Context(), f.lock, f.row(shadow, checkpoint.PhaseCopying, copier.Watermark{}, "", 0)))
+	saved := f.load(t, shadow)
+	reconciler, err := schemachange.NewReconciler(f.cfg, f.lock, f.store, f.target, shadow, checksum.Options{})
+	require.NoError(t, err)
+	name := f.target.DecodingName()
+	done := make(chan reconcileOutcome, 1)
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+
+	var waited, slotMade bool
+	var held checkpoint.Checkpoint
+	err = f.store.WithSlotLock(t.Context(), f.cfg, name, func(ctx context.Context) error {
+		wg.Go(func() {
+			reconciled, err := reconciler.Reconcile(t.Context(), f.pool, saved)
+			done <- reconcileOutcome{reconciled, err}
+		})
+		waited = assert.Eventually(t, func() bool {
+			var waiting bool
+			err := f.pool.QueryRow(ctx, `
+				SELECT EXISTS (
+					SELECT 1 FROM pg_catalog.pg_stat_activity
+					WHERE datname = pg_catalog.current_database()
+					  AND wait_event_type = 'Lock' AND wait_event = 'advisory')`).Scan(&waiting)
+			return err == nil && waiting
+		}, claimWait, 20*time.Millisecond, "the reconcile waits for the slot's lock")
+		held = f.load(t, shadow)
+		_, slotMade, err = decode.InspectSlot(ctx, f.pool, name)
+		return err
+	})
+	require.NoError(t, err)
+
+	assert.True(t, waited, "the reconcile waited for the slot's lock")
+	assert.Equal(t, checkpoint.PhaseCopying, held.Phase, "no marker is written while another holder has the lock")
+	assert.False(t, slotMade, "no slot is made while another holder has the lock")
+	var got reconcileOutcome
+	select {
+	case got = <-done:
+	case <-time.After(claimWait):
+		t.Fatal("the reconcile did not finish once the lock was let go")
+	}
+	require.NoError(t, got.err, "the reconcile finishes once the lock is let go")
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		assert.NoError(t, got.reconciled.Slot.Close(ctx))
+		assert.NoError(t, decode.DropSlot(ctx, f.cfg, f.pool, got.reconciled.Slot.Name()))
+	})
+	assert.Equal(t, name, got.reconciled.Checkpoint.SlotName)
+}
+
+// A fresh run whose first save does not land drops the slot and the
+// publication it made with the shadow: nothing records them, and a slot
+// left there would make the next run meet it as a *decode.SlotExistsError
+// it did not make. The next Run finds no row, no slot, and no shadow.
+func TestFreshRunDropsTheSlotItMadeWhenItsFirstSaveFails(t *testing.T) {
+	f := newDecodingFixture(t, 100)
+	name := f.target.DecodingName()
+
+	// The store's clock is read once per save, while the row is being
+	// written; a clock that cancels the run there fails that save, after
+	// the slot is made.
+	runCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	store, err := checkpoint.NewStore(f.pool, checkpoint.Options{Clock: &cancelClock{cancel: cancel}})
+	require.NoError(t, err)
+	runner, err := schemachange.NewRunner(f.cfg, store, liveRunOptions(schemachange.RunOptions{}))
+	require.NoError(t, err)
+
+	_, err = runner.Run(runCtx, f.pool, f.target, f.liveStatement(t))
+
+	require.ErrorIs(t, err, context.Canceled)
+	_, found, err := decode.InspectSlot(t.Context(), f.pool, name)
+	require.NoError(t, err)
+	assert.False(t, found, "the slot the failed save could not record is dropped")
+	var published, shadowed bool
+	require.NoError(t, f.pool.QueryRow(t.Context(),
+		`SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_publication WHERE pubname = $1)`, name).Scan(&published))
+	assert.False(t, published, "the publication made with the slot is dropped with it")
+	require.NoError(t, f.pool.QueryRow(t.Context(),
+		`SELECT pg_catalog.to_regclass($1) IS NOT NULL`,
+		pgx.Identifier{f.table.Schema, schemachange.ShadowName(f.table.Schema, f.table.Table)}.Sanitize()).Scan(&shadowed))
+	assert.False(t, shadowed, "the shadow is dropped")
+	_, err = f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
+	assert.ErrorIs(t, err, checkpoint.ErrNotFound, "no row was written")
+
+	_, err = f.runLive(t, schemachange.RunOptions{})
+	require.NoError(t, err, "the next run starts fresh and reaches done")
 }
 
 // As many live tables as the pool has connections, started together
