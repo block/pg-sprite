@@ -3,6 +3,7 @@ package checkpoint_test
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,7 +39,14 @@ func newReapServer(t *testing.T) string {
 
 func newReapDatabase(t *testing.T, serverURL string) reapDatabase {
 	t.Helper()
-	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL)}
+	return newReapDatabaseWaiting(t, serverURL, 0)
+}
+
+// newReapDatabaseWaiting is newReapDatabase with the pool's lock_timeout
+// set, for a test that makes the reaper wait on a slot's lock.
+func newReapDatabaseWaiting(t *testing.T, serverURL string, lockTimeout time.Duration) reapDatabase {
+	t.Helper()
+	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL), LockTimeout: lockTimeout}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
@@ -194,4 +202,64 @@ func TestReapOrphanSlotsRefusesWithoutTheCheckpointTable(t *testing.T) {
 	_, err := d.store.ReapOrphanSlots(t.Context(), d.cfg)
 	require.ErrorIs(t, err, checkpoint.ErrTableMissing)
 	assert.True(t, slotExists(t, d.pool, orphan.Name()), "a refused pass drops nothing")
+}
+
+// reapOutcome is what a reaper pass run in the background came back with.
+type reapOutcome struct {
+	reaped checkpoint.Reaped
+	err    error
+}
+
+// A run claims its slot under the engine's lock on the slot's name: it
+// commits the row that names the slot and creates the slot before it lets
+// go. A reaper that reaches the name meanwhile waits at the drop instead of
+// dropping a slot the row is about to own, and once it gets its turn it
+// reads the row and keeps the slot (ST-3).
+func TestReapOrphanSlotsWaitsForARunClaimingTheSlot(t *testing.T) {
+	const claimTimeout = 30 * time.Second
+	d := newReapDatabaseWaiting(t, newReapServer(t), claimTimeout)
+	require.NoError(t, d.store.Ensure(t.Context()))
+	_, slot := d.slotFor(t, "orders")
+
+	outcomes := make(chan reapOutcome, 1)
+	var wg sync.WaitGroup
+	t.Cleanup(wg.Wait)
+	err := d.store.WithSlotLock(t.Context(), slot.Name(), func(ctx context.Context) error {
+		wg.Go(func() {
+			reaped, err := d.store.ReapOrphanSlots(ctx, d.cfg)
+			outcomes <- reapOutcome{reaped: reaped, err: err}
+		})
+		const waitDeadline = 10 * time.Second
+		const waitPoll = 20 * time.Millisecond
+		require.Eventually(t, func() bool { return waitingOnAnAdvisoryLock(t, d.pool) },
+			waitDeadline, waitPoll, "the reaper should wait at the drop for the slot's lock")
+		require.True(t, slotExists(t, d.pool, slot.Name()), "nothing is dropped while the run holds the lock")
+		d.claim(t, "orders", slot.Name(), checkpoint.PhaseCopying)
+		return nil
+	})
+	require.NoError(t, err)
+
+	select {
+	case outcome := <-outcomes:
+		require.NoError(t, outcome.err)
+		assert.Equal(t, checkpoint.Reaped{Live: []string{slot.Name()}}, outcome.reaped)
+	case <-time.After(claimTimeout):
+		t.Fatal("the reaper did not finish once the lock was let go")
+	}
+	assert.True(t, slotExists(t, d.pool, slot.Name()), "the slot the row claimed is kept")
+}
+
+// waitingOnAnAdvisoryLock reports whether any backend of the pool's database
+// is waiting for an advisory lock right now.
+func waitingOnAnAdvisoryLock(t *testing.T, pool *pgxpool.Pool) bool {
+	t.Helper()
+	var waiting bool
+	require.NoError(t, pool.QueryRow(t.Context(), `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_catalog.pg_stat_activity
+			WHERE datname = pg_catalog.current_database()
+			  AND wait_event_type = 'Lock'
+			  AND wait_event = 'advisory')`).Scan(&waiting))
+	return waiting
 }

@@ -80,6 +80,12 @@ const (
 	// the stream — and no drain to apply those changes under the swap lock
 	// (CO-1).
 	CauseCutoverUndrained RefusalCause = "cutover-undrained"
+	// CauseDrainDeferred means the shadow refused a batch the swap's drain
+	// had to apply under the swap lock (CO-6): a unique-key move the
+	// changes since the live pass cannot be ordered into the shadow. No
+	// copy is left to change the outcome, so the schema change cannot
+	// converge and the swap is rolled back.
+	CauseDrainDeferred RefusalCause = "cutover-drain-deferred"
 	// CauseRelationReplaced means the source or the shadow under its name
 	// is no longer the relation the build proved (ST-6): the OID moved, so
 	// the proof describes a table that no longer exists.
@@ -130,11 +136,14 @@ const (
 	// keyed on another table, names another shadow or slot, or carries the
 	// fingerprints of another statement.
 	CauseResumeRowMismatch RefusalCause = "resume-row-mismatch"
-	// CauseResumeRowDecoding means the checkpoint row handed to the
-	// quiesced runner belongs to a run that decodes WAL (ST-3): it names a
-	// slot or publication, or is in a phase only such a run enters.
-	// Continuing it without its slot would leave the slot as nobody's and
-	// the changes it carried unapplied, so the row is refused.
+	// CauseResumeRowDecoding means the checkpoint row handed to a resume
+	// was written by the other kind of run (ST-3): the quiesced runner was
+	// handed a row that names a slot or publication, or is in a phase only
+	// a run that decodes WAL enters; or the live runner was handed a row
+	// that names no slot. Continuing a decoding row without its slot would
+	// leave the slot as nobody's and the changes it carried unapplied, and
+	// a quiesced row names no position a stream could start from, so the
+	// row is refused either way.
 	CauseResumeRowDecoding RefusalCause = "resume-row-decoding"
 	// CauseShadowUnrecorded means a relation already bears the target's
 	// derived shadow name while no checkpoint row records a run for the
@@ -194,6 +203,7 @@ func RefusalCauses() []RefusalCause {
 		CauseIdentityHandoff,
 		CauseCutoverUnverified,
 		CauseCutoverUndrained,
+		CauseDrainDeferred,
 		CauseRelationReplaced,
 		CauseSchemaDrift,
 		CauseFidelityDrift,
@@ -235,6 +245,8 @@ func (c RefusalCause) Invariant() string {
 		return "ST-5"
 	case CauseCutoverUnverified, CauseCutoverUndrained:
 		return "CO-1"
+	case CauseDrainDeferred:
+		return "CO-6"
 	case CauseOutcomeAmbiguous, CauseResumeCutover:
 		return "LK-4"
 	case CauseResumeTerminal, CauseResumeSlotHeld:
