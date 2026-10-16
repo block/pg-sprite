@@ -117,6 +117,18 @@ func (f shadowFixture) columnType(t *testing.T, table, column string) string {
 	return typ
 }
 
+// columnExists reports whether table has a live column of that name.
+func (f shadowFixture) columnExists(t *testing.T, table, column string) bool {
+	t.Helper()
+	var exists bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT EXISTS (
+			SELECT 1
+			FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+			WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3 AND NOT a.attisdropped)`, f.schema, table, column).Scan(&exists))
+	return exists
+}
+
 // columnDefault reads a column's default expression and identity code.
 func (f shadowFixture) columnDefault(t *testing.T, table, column string) (def, identity string) {
 	t.Helper()

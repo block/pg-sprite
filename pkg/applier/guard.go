@@ -13,6 +13,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/internal/chunksql"
 	"github.com/block/pg-sprite/pkg/preflight"
 )
 
@@ -56,23 +57,27 @@ func (f *Flusher) guard(ctx context.Context, tx pgx.Tx) error {
 	return f.confirmRelations(ctx, tx)
 }
 
-// setFlushSession bounds the transaction, pins the one output setting that
-// can merge two distinct values, sets the search_path the flush's
-// statements resolve on — the catalog alone unless the shadow proof carries
-// conversions, whose expressions must resolve as they did on the shadow
-// build (CO-9) — and puts it in the owner's shoes. A marker is completed by
-// reading a value as text and binding that text back, and for float4,
-// float8, and the geometric types that rendering follows
+// setFlushSession bounds the transaction, pins the output settings under
+// which one value has more than one text rendering, sets the search_path
+// the flush's statements resolve on — the catalog alone unless the shadow
+// proof carries conversions, whose expressions must resolve as they did on
+// the shadow build (CO-9) — and puts it in the owner's shoes. A marker is
+// completed by reading a value as text and binding that text back, and for
+// float4, float8, and the geometric types that rendering follows
 // extra_float_digits: at zero or below the server rounds to fifteen
 // significant digits, so a completed float could differ in its last digits
-// from the one it stood for. The maximum of 3 renders every float exactly
-// whatever the database or role configures. SET LOCAL cannot take bind
-// parameters; the timeouts are integer milliseconds.
+// from the one it stood for. A conversion that renders a float or a bytea
+// to text follows extra_float_digits or bytea_output in the same way, and
+// the chunk copy that wrote the rest of the shadow ran in another session;
+// chunksql.Rendering is the pin the copy, the recopy, and this flush share,
+// so the same source value lands as the same text from all three whatever
+// the database or role configures. SET LOCAL cannot take bind parameters;
+// the timeouts are integer milliseconds.
 func setFlushSession(ctx context.Context, tx pgx.Tx, owner, searchPath string, opts Options) error {
 	// INV: LK-2, CO-9
 	budgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(opts.LockTimeout.Milliseconds(), 10) +
 		"; SET LOCAL statement_timeout = " + strconv.FormatInt(opts.StatementTimeout.Milliseconds(), 10) +
-		"; SET LOCAL extra_float_digits = 3" +
+		"; " + chunksql.Rendering +
 		"; " + searchPath
 	if _, err := tx.Exec(ctx, budgets); err != nil {
 		return fmt.Errorf("set flush budgets: %w", err)

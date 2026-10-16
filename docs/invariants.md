@@ -927,7 +927,11 @@ every desired statement's target against the absence proof the same way), `pkg/s
 `statement.Statement` naming the proven table, retargets it onto the shadow through the
 deparser, and refuses before executing unless the retargeted form re-parses to the same
 operations with the shadow as its sole target —
-[copy-and-swap D1](copy-and-swap-design.md#d1--no-durable-scratch-database)).
+[copy-and-swap D1](copy-and-swap-design.md#d1--no-durable-scratch-database); it also refuses,
+inside the build's transaction and before the statement runs, a `USING` expression the server
+does not classify as immutable, tried as a stored generated column's expression on the empty
+shadow and rolled back, since the copy, the recopy, and the catch-up evaluate the expression
+again and must get the same answer).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
