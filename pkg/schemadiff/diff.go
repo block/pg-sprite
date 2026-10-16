@@ -529,16 +529,16 @@ func columnsByName(cols []Column) map[string]Column {
 // uniqueness guarantee and without the index for as long as the rebuild
 // runs. A live index qualifies when it has the constraint's name and is
 // exactly the index the constraint would build, so adopting it leaves the
-// table as building the constraint fresh would. A deferrable constraint,
-// an unfinished build, and a partitioned parent, where the server refuses
-// USING INDEX, keep the drop and rebuild.
+// table as building the constraint fresh would. An unfinished build keeps
+// the drop and rebuild, and so does a partitioned parent, where the server
+// refuses USING INDEX.
 func adoptableIndexes(partitioned bool, liveCons map[string]Constraint, liveIdx map[string]Index, desired []Constraint) map[string]struct{} {
 	adopted := make(map[string]struct{})
 	if partitioned {
 		return adopted
 	}
 	for _, con := range desired {
-		if con.IndexDef == "" || con.Deferrable {
+		if con.IndexDef == "" {
 			continue
 		}
 		if _, ok := liveCons[con.Name]; ok {
@@ -554,14 +554,23 @@ func adoptableIndexes(partitioned bool, liveCons map[string]Constraint, liveIdx 
 }
 
 // adoptIndexSQL is the statement that makes a primary key or unique
-// constraint take over the live index of its own name.
+// constraint take over the live index of its own name, with the
+// constraint's declared deferrability: the server marks the index
+// deferred as it attaches it.
 func adoptIndexSQL(table string, con Constraint) string {
 	key := "UNIQUE"
 	if con.Primary {
 		key = "PRIMARY KEY"
 	}
 	name := pgx.Identifier{con.Name}.Sanitize()
-	return "ALTER TABLE " + table + " ADD CONSTRAINT " + name + " " + key + " USING INDEX " + name
+	sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + name + " " + key + " USING INDEX " + name
+	if con.Deferrable {
+		sql += " DEFERRABLE"
+	}
+	if con.InitiallyDeferred {
+		sql += " INITIALLY DEFERRED"
+	}
+	return sql
 }
 
 // dropConstraintKind classifies a constraint drop, keeping foreign keys in

@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
-	"github.com/block/pg-sprite/internal/testutil/modeltest"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -59,11 +58,11 @@ func TestIntrospectDesiredMatchesLiveIntrospection(t *testing.T) {
 	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 
-	assert.Equal(t, live, modeltest.Comparable(desired),
+	assert.Equal(t, live, desired,
 		"live introspection and scratch execute-and-introspect must agree on the canonical model")
 
-	// The key's index definition is read on the scratch side only, where no
-	// other session can hold the table.
+	// A key constraint carries the definition of the index it owns, and no
+	// other constraint carries one.
 	keyIndexDefs := func(m schemadiff.Model) map[string]string {
 		defs := make(map[string]string)
 		for _, con := range m.Constraints {
@@ -71,7 +70,6 @@ func TestIntrospectDesiredMatchesLiveIntrospection(t *testing.T) {
 		}
 		return defs
 	}
-	assert.Empty(t, keyIndexDefs(live)["events_pkey"])
 	assert.Equal(t, "CREATE UNIQUE INDEX events_pkey ON events USING btree (id)", keyIndexDefs(desired)["events_pkey"])
 	assert.Empty(t, keyIndexDefs(desired)["name_not_empty"])
 }
@@ -79,9 +77,9 @@ func TestIntrospectDesiredMatchesLiveIntrospection(t *testing.T) {
 // A key constraint declared over a live unique index of its name is
 // introspected from the desired file with the index definition the live
 // side prints, so the diff takes the index over in place. Declared
-// DEFERRABLE, the constraint reads back as deferrable and keeps the drop and
-// rebuild: the server will not adopt an index for a deferrable constraint.
-func TestDiffAdoptsALiveIndexUnlessTheKeyIsDeferrable(t *testing.T) {
+// DEFERRABLE, the constraint reads back as deferrable and takes the index
+// over with the same deferrability.
+func TestDiffAdoptsALiveIndexForAKeyOfEitherDeferrability(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
 	defer pool.Close()
@@ -128,15 +126,19 @@ func TestDiffAdoptsALiveIndexUnlessTheKeyIsDeferrable(t *testing.T) {
 	t.Run("deferrable", func(t *testing.T) {
 		key, changes := diff(t, "CREATE TABLE t (id bigint PRIMARY KEY, email text NOT NULL, CONSTRAINT t_email_key UNIQUE (email) DEFERRABLE)")
 		assert.True(t, key.Deferrable)
-		assert.Equal(t, indexDef, key.IndexDef, "the index alone matches; deferrability is what keeps it from being adopted")
-		require.Len(t, changes, 2)
-		assert.Equal(t, fmt.Sprintf(`DROP INDEX %q.%q`, schema, "t_email_key"), changes[0].SQL)
-		assert.True(t, changes[0].Destructive)
-		assert.Equal(t, fmt.Sprintf(`ALTER TABLE %q.%q ADD CONSTRAINT "t_email_key" UNIQUE (email) DEFERRABLE`, schema, "t"), changes[1].SQL)
-		for _, ch := range changes {
-			assert.Nil(t, ch.Adopts, ch.SQL)
-			assert.NotContains(t, ch.SQL, "USING INDEX")
-		}
+		assert.False(t, key.InitiallyDeferred)
+		assert.Equal(t, indexDef, key.IndexDef, "deferrability does not show in the index definition")
+		require.Len(t, changes, 1)
+		assert.Equal(t, fmt.Sprintf(`ALTER TABLE %q.%q ADD CONSTRAINT "t_email_key" UNIQUE USING INDEX "t_email_key" DEFERRABLE`, schema, "t"), changes[0].SQL)
+		assert.Equal(t, &schemadiff.IndexAdoption{Index: "t_email_key", Def: indexDef}, changes[0].Adopts)
+	})
+
+	t.Run("initially deferred", func(t *testing.T) {
+		key, changes := diff(t, "CREATE TABLE t (id bigint PRIMARY KEY, email text NOT NULL, CONSTRAINT t_email_key UNIQUE (email) DEFERRABLE INITIALLY DEFERRED)")
+		assert.True(t, key.Deferrable)
+		assert.True(t, key.InitiallyDeferred)
+		require.Len(t, changes, 1)
+		assert.Equal(t, fmt.Sprintf(`ALTER TABLE %q.%q ADD CONSTRAINT "t_email_key" UNIQUE USING INDEX "t_email_key" DEFERRABLE INITIALLY DEFERRED`, schema, "t"), changes[0].SQL)
 	})
 }
 

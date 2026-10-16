@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
-	"github.com/block/pg-sprite/internal/testutil/modeltest"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -181,7 +180,7 @@ func verifyPulledRowSecurity(t *testing.T, securitySQL string) {
 	require.NoError(t, err)
 	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
 	require.NoError(t, err)
-	assert.Equal(t, live, modeltest.Comparable(model))
+	assert.Equal(t, live, model)
 	out.Reset()
 	diff := &DiffCmd{DBFlags: DBFlags{URL: url}, Schema: schema, Desired: file, JSON: true}
 	require.NoError(t, diff.run(t.Context(), &out))

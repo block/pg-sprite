@@ -83,3 +83,33 @@ func TestRunSequenceAdoptingRefusesASequenceThatAdoptsNothing(t *testing.T) {
 	require.ErrorIs(t, err, executor.ErrInvariantViolation)
 	assert.Equal(t, "text", columnType(t, pool, schema, "t", "note"), "nothing ran")
 }
+
+// A unique index left invalid by a failed concurrent build keeps its name
+// and its definition, so the plan's definition still matches it. The step
+// reads the index's validity under the lock as well, and refuses with the
+// permanent adopted-index-drift code instead of attaching it.
+func TestRunSequenceAdoptingRefusesAnInvalidIndex(t *testing.T) {
+	pool, schema := newPool(t)
+	for _, ddl := range []string{
+		"CREATE TABLE %[1]s.t (id bigint, email text NOT NULL)",
+		"INSERT INTO %[1]s.t VALUES (1, 'a'), (2, 'a')",
+	} {
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(ddl, schema))
+		require.NoError(t, err, ddl)
+	}
+	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY t_email_key ON %s.t (email)", schema))
+	require.Error(t, err, "the duplicate values fail the build")
+	var valid bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		"SELECT indisvalid FROM pg_index WHERE indexrelid = $1::regclass", schema+".t_email_key").Scan(&valid))
+	require.False(t, valid, "the failed build leaves the index behind, invalid")
+
+	pt := mustPreflight(t, pool, schema, "t")
+	_, err = executor.RunSequenceAdopting(t.Context(), pool, pt,
+		[]string{fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT t_email_key UNIQUE USING INDEX t_email_key", schema)},
+		runBudget, executor.DefaultRetryPolicy(),
+		schemadiff.IndexAdoption{Index: "t_email_key", Def: "CREATE UNIQUE INDEX t_email_key ON t USING btree (email)"})
+	require.ErrorIs(t, err, executor.ErrAdoptedIndexDrift)
+	assert.Equal(t, executor.CodeAdoptedIndexDrift, executor.OutcomeCode(err))
+	assert.Contains(t, err.Error(), "is invalid")
+}

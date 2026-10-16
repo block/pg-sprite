@@ -384,13 +384,22 @@ func TestDiffKeyConstraintAdoptsTheLiveIndex(t *testing.T) {
 		deferrable.Deferrable = true
 		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef}), desired(deferrable))
 		require.NoError(t, err)
-		assert.Equal(t, []string{
-			rebuild[0],
-			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE (name) DEFERRABLE`,
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE USING INDEX "events_name_key" DEFERRABLE`,
 		}, sqls(changes))
-		for _, ch := range changes {
-			assert.Nil(t, ch.Adopts, ch.SQL)
-		}
+		assert.Equal(t, &IndexAdoption{Index: "events_name_key", Def: indexDef}, changes[0].Adopts)
+	})
+
+	t.Run("an initially deferred constraint", func(t *testing.T) {
+		deferred := unique
+		deferred.Def = "UNIQUE (name) DEFERRABLE INITIALLY DEFERRED"
+		deferred.Deferrable, deferred.InitiallyDeferred = true, true
+		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef}), desired(deferred))
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE USING INDEX "events_name_key" DEFERRABLE INITIALLY DEFERRED`,
+		}, sqls(changes))
+		assert.Equal(t, &IndexAdoption{Index: "events_name_key", Def: indexDef}, changes[0].Adopts)
 	})
 
 	t.Run("a partitioned parent", func(t *testing.T) {

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/block/pg-sprite/internal/testutil/modeltest"
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -33,7 +32,7 @@ func TestRowSecurityRoundTripWithSupabaseAuth(t *testing.T) {
 	require.NoError(t, err)
 	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, "public", desired)
 	require.NoError(t, err)
-	assert.Equal(t, live, modeltest.Comparable(model))
+	assert.Equal(t, live, model)
 	require.Len(t, model.RowSecurity.Policies, 2)
 	assert.Equal(t, []string{"authenticated"}, model.RowSecurity.Policies[0].Roles)
 	assert.Nil(t, model.RowSecurity.Policies[0].WithCheck)

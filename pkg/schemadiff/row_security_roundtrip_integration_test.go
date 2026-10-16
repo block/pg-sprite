@@ -13,7 +13,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/block/pg-sprite/internal/testutil/modeltest"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
@@ -28,7 +27,7 @@ func roundTripRowSecurity(t *testing.T, pool *pgxpool.Pool, schema string) {
 	require.NoError(t, err, sql)
 	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
 	require.NoError(t, err, sql)
-	assert.Equal(t, live, modeltest.Comparable(model), "complete catalog state must round-trip")
+	assert.Equal(t, live, model, "complete catalog state must round-trip")
 	changes, err := schemadiff.DiffWithRowSecurity(schema, live, model)
 	require.NoError(t, err)
 	assert.Empty(t, changes)

@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
-	"github.com/block/pg-sprite/internal/testutil/modeltest"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -63,7 +62,7 @@ func TestRenderRoundTripsLiveTable(t *testing.T) {
 	}
 
 	live, desired, changes := roundTrip(t, pool, schema, "events")
-	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
+	assert.Equal(t, live, desired, "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
 }
 
@@ -80,7 +79,7 @@ func TestRenderRoundTripsSerialTable(t *testing.T) {
 	require.NoError(t, err)
 
 	live, desired, changes := roundTrip(t, pool, schema, "t")
-	assert.Equal(t, live, modeltest.Comparable(desired))
+	assert.Equal(t, live, desired)
 	assert.Empty(t, changes)
 }
 
@@ -108,7 +107,7 @@ func TestRenderRoundTripsQuotedIdentifiers(t *testing.T) {
 	}
 
 	live, desired, changes := roundTrip(t, pool, schema, "Order Items")
-	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
+	assert.Equal(t, live, desired, "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
 }
 
@@ -434,7 +433,7 @@ func TestRenderRoundTripsStorageParameters(t *testing.T) {
 
 	live, desired, changes := roundTrip(t, pool, schema, "tuned")
 	assert.Equal(t, []string{"autovacuum_vacuum_scale_factor=0.05", "fillfactor=70", "toast.autovacuum_enabled=false"}, live.Options)
-	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
+	assert.Equal(t, live, desired, "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes)
 
 	rendered, err := schemadiff.Render(live)
@@ -593,7 +592,7 @@ func TestRenderRoundTripsIdentitySequenceOptions(t *testing.T) {
 	live, desired, changes := roundTrip(t, pool, schema, "tickets")
 	assert.Equal(t, &schemadiff.SequenceOptions{Type: "bigint", Start: 1000, Increment: 10, Min: 1, Max: 900000, Cache: 20}, live.Columns[0].Sequence)
 	assert.Nil(t, live.Columns[1].Sequence, "a sequence declared at the defaults records nothing")
-	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
+	assert.Equal(t, live, desired, "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes)
 
 	rendered, err := schemadiff.Render(live)
