@@ -355,6 +355,46 @@ func TestClassifyNoFactsIsConservative(t *testing.T) {
 		"without live column facts every type change is a rewrite")
 }
 
+// An added column classifies by what the server proved about the rewrite
+// before the statement's shape: a constant default on a constrained domain
+// still rewrites, and a default the catalog stores runs in place however it
+// is written. A column without a proof keeps the shape rules.
+func TestClassifyAddColumnByTheProvenRewrite(t *testing.T) {
+	proven := planner.Facts{AddColumnRewrites: map[string]bool{
+		"code":    true,
+		"strict":  true,
+		"id":      true,
+		"created": false,
+		"checked": false,
+		"age":     false,
+	}}
+	cases := []struct {
+		name   string
+		sql    string
+		route  planner.Route
+		reason planner.Reason
+	}{
+		{"constrained domain with a constant default", "ALTER TABLE t ADD COLUMN code positive_int DEFAULT 1", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite},
+		{"constrained domain without a default", "ALTER TABLE t ADD COLUMN strict positive_int", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite},
+		{"volatile default", "ALTER TABLE t ADD COLUMN id uuid DEFAULT gen_random_uuid()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault},
+		{"stable default stored in the catalog", "ALTER TABLE t ADD COLUMN created timestamptz NOT NULL DEFAULT now()", planner.RouteNative, planner.ReasonFastDefault},
+		{"stored default with an inline check", "ALTER TABLE t ADD COLUMN checked timestamptz DEFAULT now() CHECK (checked > '2000-01-01')", planner.RouteNative, planner.ReasonSaferIdiom},
+		{"plain column", "ALTER TABLE t ADD COLUMN age int", planner.RouteNative, planner.ReasonMetadataOnly},
+		{"unproven expression default", "ALTER TABLE t ADD COLUMN other timestamptz DEFAULT now()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault},
+		{"unproven constant default", "ALTER TABLE t ADD COLUMN other int DEFAULT 0", planner.RouteNative, planner.ReasonFastDefault},
+		{"generated stored whatever the proof says", "ALTER TABLE t ADD COLUMN age int GENERATED ALWAYS AS (1) STORED", planner.RouteCopyAndSwap, planner.ReasonGeneratedStored},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := planner.Classify(tc.sql, proven)
+			require.NoError(t, err)
+			require.Len(t, plan.Decisions, 1)
+			assert.Equal(t, tc.route, plan.Decisions[0].Route)
+			assert.Equal(t, tc.reason, plan.Decisions[0].Reason)
+		})
+	}
+}
+
 func TestClassifyParseErrorSurfaces(t *testing.T) {
 	_, err := planner.Classify("ALTER TABLE", planner.Facts{})
 	assert.Error(t, err)

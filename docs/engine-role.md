@@ -41,6 +41,15 @@ applies):
 Each tier includes everything above it. A schema change is admitted at the tier its plan
 requires — nothing higher.
 
+Before it classifies an `ADD COLUMN`, the engine adds each column to an empty temporary table
+with no columns (`CREATE TEMPORARY TABLE ... ()`) inside a transaction it always rolls back, to
+learn from the server whether the addition rewrites the table. Whether it does depends only on
+the added column's type and default, so the probe never opens the live table: it takes no lock
+on it and needs no privilege on it. It does need `TEMPORARY` on the database and a server that
+accepts writes, so an `ADD COLUMN` cannot be planned on a hot standby or by a role whose
+`TEMPORARY` was revoked from `PUBLIC` and not granted back; the plan fails with the server's
+error rather than guessing.
+
 The per-table session lock uses `pg_try_advisory_lock`, which is available to every role and
 requires no additional grant in any tier. Naming the holder of a contended lock reads
 `pg_stat_activity`; a role that cannot see other sessions still gets the holder's backend PID.
@@ -48,7 +57,7 @@ requires no additional grant in any tier. Naming the holder of a contended lock 
 | Tier | Capability | Required access | Preflight check |
 | --- | --- | --- | --- |
 | 0 | Connect and resolve the target | `LOGIN`; `CONNECT` on the database; `USAGE` on the target schema (directly or via membership) | `has_database_privilege`, `has_schema_privilege(..., 'USAGE')` |
-| 1 | In-place `ALTER TABLE` (the instant and fast native paths) | Inheritable **membership in the owning role** — sufficient on its own | `pg_has_role(current_user, <owner>, 'USAGE')` |
+| 1 | In-place `ALTER TABLE` (the instant and fast native paths) | Inheritable **membership in the owning role**; an `ADD COLUMN` also needs `TEMPORARY` on the database, which PostgreSQL grants to `PUBLIC` by default | `pg_has_role(current_user, <owner>, 'USAGE')` |
 | 2 | Index builds: `CREATE INDEX [CONCURRENTLY]`, and the `ALTER TABLE` shapes that build one — `ADD CONSTRAINT UNIQUE` / `PRIMARY KEY` / `EXCLUDE` without `USING INDEX`, or `ADD COLUMN` with an inline `UNIQUE` / `PRIMARY KEY` | Tier 1 + **`CREATE` on the target schema** — table ownership alone is refused with `permission denied for schema` | `has_schema_privilege(..., 'CREATE')` |
 | 3 | Copy-and-swap | Tier 2 + membership usable with `SET ROLE` (for owner-correct shadow objects); for logical-decoding CDC: `rds_replication` membership (Aurora/RDS) or the `REPLICATION` attribute (self-managed) | `pg_has_role(..., 'SET')` (16+; on 14–15 the Tier 1 `USAGE` check already proves `SET ROLE` access — membership options arrive in 16); `pg_has_role(current_user, 'rds_replication', 'MEMBER')` |
 

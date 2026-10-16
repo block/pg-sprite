@@ -3,6 +3,8 @@ package migrate
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -32,7 +34,9 @@ type Facts struct {
 	TableExists *bool
 }
 
-// LiveFacts introspects the statement's target table for classifier facts.
+// LiveFacts introspects the statement's target table for classifier facts,
+// and for an ALTER TABLE that adds columns, has the server prove whether
+// each one rewrites the table (preflight.AddColumnRewrites).
 func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	st statement.Statement) (Facts, error) {
 	if st.Table() == "" {
@@ -50,9 +54,19 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	if err != nil {
 		return Facts{}, err
 	}
+	classifier := planner.FactsFrom(live)
+	adds, err := addsColumn(st)
+	if err != nil {
+		return Facts{}, err
+	}
+	if adds {
+		if classifier.AddColumnRewrites, err = preflight.AddColumnRewrites(ctx, pool, ResolvedSchema(st), st.Table(), st.SQL()); err != nil {
+			return Facts{}, err
+		}
+	}
 	exists := true
 	return Facts{
-		Classifier:  planner.FactsFrom(live),
+		Classifier:  classifier,
 		Target:      targetFacts,
 		TableExists: &exists,
 	}, nil
@@ -68,4 +82,17 @@ func ResolvedSchema(st statement.Statement) string {
 		return "public"
 	}
 	return st.Schema()
+}
+
+// addsColumn reports whether st is an ALTER TABLE with an ADD COLUMN, the
+// only statement whose classification the server's rewrite proof decides.
+func addsColumn(st statement.Statement) (bool, error) {
+	if st.Kind() != statement.KindAlterTable {
+		return false, nil
+	}
+	ops, err := statement.ParseOps(st.SQL())
+	if err != nil {
+		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
+	}
+	return slices.ContainsFunc(ops, func(op statement.Op) bool { return op.Kind == statement.OpAddColumn }), nil
 }

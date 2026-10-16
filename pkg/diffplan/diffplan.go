@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -95,6 +96,9 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if changes, err = schemadiff.Diff(req.Schema, live, desired); err != nil {
 			return plan.Report{}, err
 		}
+		if facts.AddColumnRewrites, err = addColumnRewrites(ctx, pool, req.Schema, ds.Table(), changes); err != nil {
+			return plan.Report{}, err
+		}
 	}
 	report.TableExists = &tableExists
 	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
@@ -133,6 +137,26 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	}
 	report.Fingerprint = plan.Fingerprint(report.Statements)
 	return report, nil
+}
+
+// addColumnRewrites has the server prove, for every column the changes
+// add to the live table, whether adding it rewrites the table.
+func addColumnRewrites(ctx context.Context, pool *pgxpool.Pool, schema, table string, changes []schemadiff.Change) (map[string]bool, error) {
+	var rewrites map[string]bool
+	for _, ch := range changes {
+		if ch.Kind != schemadiff.ChangeAddColumn {
+			continue
+		}
+		proven, err := preflight.AddColumnRewrites(ctx, pool, schema, table, ch.SQL)
+		if err != nil {
+			return nil, err
+		}
+		if rewrites == nil {
+			rewrites = make(map[string]bool, len(proven))
+		}
+		maps.Copy(rewrites, proven)
+	}
+	return rewrites, nil
 }
 
 // classifyChanges routes every derived change through the shared
