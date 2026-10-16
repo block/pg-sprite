@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 // Every cause upholds the one invariant docs/invariants.md files it under —
@@ -32,6 +34,32 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 		assert.Equal(t, want[cause], cause.Invariant(), "cause %q", cause)
 	}
 	assert.Empty(t, RefusalCause("not-a-cause").Invariant())
+}
+
+// Every cause routes to the class docs/refusal-classes.md decides for it:
+// the three lock faults the server or the session reported and a relation
+// that moved are environmental, since re-acquiring or re-running preflight
+// may admit the same copy; every proof, shadow, chunk, and ledger cause is
+// an invariant violation, since no retry changes a caller's bad input or
+// the copier's own broken accounting. An unknown cause has no class.
+func TestEveryRefusalCauseNamesItsClass(t *testing.T) {
+	want := map[RefusalCause]refusal.Class{
+		CauseProofEmpty:        refusal.ClassInvariantViolation,
+		CauseShadowMismatch:    refusal.ClassInvariantViolation,
+		CauseLockUnproven:      refusal.ClassInvariantViolation,
+		CauseLockLost:          refusal.ClassEnvironmental,
+		CauseLockHeldElsewhere: refusal.ClassEnvironmental,
+		CauseLockUnconfirmed:   refusal.ClassEnvironmental,
+		CauseRelationReplaced:  refusal.ClassEnvironmental,
+		CauseFrontierBroken:    refusal.ClassInvariantViolation,
+		CauseChunksInFlight:    refusal.ClassInvariantViolation,
+		CauseChunkUnknown:      refusal.ClassInvariantViolation,
+	}
+	assert.Len(t, RefusalCauses(), len(want), "every registered cause has an expected class")
+	for _, cause := range RefusalCauses() {
+		assert.Equal(t, want[cause], cause.Class(), "cause %q", cause)
+	}
+	assert.Empty(t, RefusalCause("not-a-cause").Class())
 }
 
 // A refusal answers errors.Is for the sentinel and for every error behind

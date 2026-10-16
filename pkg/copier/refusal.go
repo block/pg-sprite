@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 // RefusalCause identifies why the copier refused to copy, or refused to
@@ -93,6 +95,27 @@ func (c RefusalCause) Invariant() string {
 		return "CO-4"
 	case CauseChunksInFlight:
 		return "LK-3"
+	default:
+		return ""
+	}
+}
+
+// Class is the routing class of the cause, from docs/refusal-classes.md:
+// what an importer does about the refusal. A lock the session lost or that
+// the server shows held elsewhere or by nobody, and a relation that is no
+// longer the one proved, are environmental — re-acquire or start the change
+// over from preflight and the same copy may succeed. Every other cause is
+// an invariant violation: a proof, shadow, or chunk the caller handed in
+// that cannot have come from this engine, or a ledger that disagrees with
+// its workers; nothing on the server changes that, so the importer reports
+// it. An unknown cause has no class.
+func (c RefusalCause) Class() refusal.Class {
+	switch c {
+	case CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed, CauseRelationReplaced:
+		return refusal.ClassEnvironmental
+	case CauseProofEmpty, CauseShadowMismatch, CauseLockUnproven, CauseFrontierBroken,
+		CauseChunksInFlight, CauseChunkUnknown:
+		return refusal.ClassInvariantViolation
 	default:
 		return ""
 	}

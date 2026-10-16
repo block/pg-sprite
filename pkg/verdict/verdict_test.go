@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 func TestNewRefusalEnforcesRF7(t *testing.T) {
@@ -129,6 +131,18 @@ func TestClassConstructorsAgreeWithNewRefusal(t *testing.T) {
 	assert.Equal(t, ClassByDesign, ByDesign(ReasonDestructiveChange).Class())
 	assert.Equal(t, ClassEnvironmental, Environmental(ReasonTableTooLarge).Class())
 	assert.Equal(t, ClassInvariantViolation, InvariantViolation(ReasonUnsupportedStatement).Class())
+}
+
+// Every class the core's refusal causes can name is a class of the verdict
+// contract under the same token, so an adapter turning a cause's Class()
+// into a refusal verdict converts the string and loses nothing: a core
+// class the contract does not know, or spelled differently, fails here.
+func TestCoreRefusalClassesAreVerdictClasses(t *testing.T) {
+	for _, class := range refusal.Classes() {
+		parsed, err := ParseClass(string(class))
+		require.NoError(t, err, "core refusal class %q is not a verdict class", class)
+		assert.Equal(t, Class(class), parsed)
+	}
 }
 
 func TestWithRefusalStampsOutcomeReasonClassOwner(t *testing.T) {

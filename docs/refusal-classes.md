@@ -159,9 +159,12 @@ react. Only the causes that mean the caller handed the engine an incoherent inpu
 engine's own write did not take, are `invariant-violation`; one, `shadow-statement-conversion`,
 is a `capability-boundary`, since it describes a statement the engine declines to carry rather
 than a fault; the rest describe a lock, a proof, or a relation whose state moved under the
-operation, and the importer retries, re-plans, or cleans up. No verdict reason carries these
-causes yet; the classification is fixed here first
-so the cutover route inherits it.
+operation, and the importer retries, re-plans, or cleans up. `RefusalCause.Class()` answers
+the `class` column below as a `refusal.Class` (`pkg/refusal`, the core's copy of the three
+classes these causes take), so an importer routes on the class without reading the cause's
+text, and a periphery adapter converts it to `verdict.Class` by token. No verdict reason
+carries these causes yet; the classification is fixed here first so the cutover route
+inherits it.
 
 | `RefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
@@ -252,6 +255,9 @@ copier directly reads the copier's. A lock or relation fault during the copy pha
 from `Runner.Run` under the shadow-operation name — `shadow-lock-lost`,
 `cutover-relation-replaced` — by design: the fault is the same one a shadow operation would
 refuse on, and the reaction is the same, whichever phase noticed it first.
+`copier.RefusalCause.Class()` answers the `class` column below as a `refusal.Class`, and every
+re-mint keeps the copier cause's class, so an importer reading either vocabulary routes the
+same way.
 
 | `copier.RefusalCause` | What the refusal says | `class` | Why | Re-minted by `Runner` as |
 | --- | --- | --- | --- | --- |
@@ -398,7 +404,10 @@ The map in this document is pinned: the `docs_test.go` guards
 in `pkg/verdict`, `pkg/executor`, `pkg/preflight`, `pkg/schemachange`, and `pkg/copier` fail
 when a `Reason`, `CreateShapeCause`, `PartitionRefusalCause`, `CopySwapRefusalCause`, or either
 package's `RefusalCause` exists in the code without a row here, so a new discriminator value
-cannot land unclassified.
+cannot land unclassified. The shadow and copier guards go one step further and compare each
+cause's `Class()` to its row's `class` cell, so the two cannot disagree; `pkg/refusal`'s guard
+holds its three classes to the vocabulary table above, and `pkg/verdict`'s holds every one of
+them to be a `verdict.Class` under the same token.
 
 ## Shared vocabulary with the capabilities matrix
 

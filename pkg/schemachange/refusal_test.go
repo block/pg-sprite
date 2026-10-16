@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 // Every cause upholds the one invariant docs/invariants.md files it under —
@@ -57,6 +59,56 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 		assert.Equal(t, want[cause], cause.Invariant(), "cause %q", cause)
 	}
 	assert.Empty(t, RefusalCause("not-a-cause").Invariant())
+}
+
+// Every cause routes to the class docs/refusal-classes.md decides for it.
+// Lock, shape, ownership, drift, name, slot, and ambiguous-outcome causes
+// are environmental, since the state they describe moved under the run and
+// may not next time; the one statement the engine declines to carry is a
+// capability boundary; a proof, row, statement pairing, or catalog the
+// caller or the engine's own write got wrong is an invariant violation,
+// since no retry changes it. An unknown cause has no class.
+func TestEveryRefusalCauseNamesItsClass(t *testing.T) {
+	want := map[RefusalCause]refusal.Class{
+		CauseLockUnproven:        refusal.ClassInvariantViolation,
+		CauseLockLost:            refusal.ClassEnvironmental,
+		CauseLockHeldElsewhere:   refusal.ClassEnvironmental,
+		CauseLockUnconfirmed:     refusal.ClassEnvironmental,
+		CauseProofEmpty:          refusal.ClassInvariantViolation,
+		CauseSourceShape:         refusal.ClassEnvironmental,
+		CauseStatementTarget:     refusal.ClassInvariantViolation,
+		CauseStatementConversion: refusal.ClassCapabilityBoundary,
+		CauseShadowOwner:         refusal.ClassEnvironmental,
+		CauseForeignRelation:     refusal.ClassEnvironmental,
+		CauseGrantsDiffer:        refusal.ClassInvariantViolation,
+		CauseIdentityHandoff:     refusal.ClassEnvironmental,
+		CauseCutoverUnverified:   refusal.ClassInvariantViolation,
+		CauseCutoverUndrained:    refusal.ClassInvariantViolation,
+		CauseDrainDeferred:       refusal.ClassEnvironmental,
+		CauseRelationReplaced:    refusal.ClassEnvironmental,
+		CauseSchemaDrift:         refusal.ClassEnvironmental,
+		CauseFidelityDrift:       refusal.ClassEnvironmental,
+		CauseIndexInvalid:        refusal.ClassEnvironmental,
+		CauseNameTaken:           refusal.ClassEnvironmental,
+		CauseSwapMismatch:        refusal.ClassInvariantViolation,
+		CauseOutcomeAmbiguous:    refusal.ClassEnvironmental,
+		CauseResumeTerminal:      refusal.ClassInvariantViolation,
+		CauseResumeCutover:       refusal.ClassInvariantViolation,
+		CauseResumeRowMismatch:   refusal.ClassInvariantViolation,
+		CauseResumeRowDecoding:   refusal.ClassInvariantViolation,
+		CauseShadowUnrecorded:    refusal.ClassEnvironmental,
+		CauseResumeSlotForeign:   refusal.ClassEnvironmental,
+		CauseResumeSlotHeld:      refusal.ClassEnvironmental,
+		CauseCopyShadowMismatch:  refusal.ClassInvariantViolation,
+		CauseCopyFrontierBroken:  refusal.ClassInvariantViolation,
+		CauseCopyChunksInFlight:  refusal.ClassInvariantViolation,
+		CauseCopyChunkUnknown:    refusal.ClassInvariantViolation,
+	}
+	assert.Len(t, RefusalCauses(), len(want), "every registered cause has an expected class")
+	for _, cause := range RefusalCauses() {
+		assert.Equal(t, want[cause], cause.Class(), "cause %q", cause)
+	}
+	assert.Empty(t, RefusalCause("not-a-cause").Class())
 }
 
 // A refusal answers errors.Is for the sentinel and for every error behind
