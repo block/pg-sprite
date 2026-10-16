@@ -264,7 +264,9 @@ type Facts struct {
 	// server proved that adding it rewrites the table
 	// (preflight.AddColumnRewrites). A column absent from the map is
 	// unproven and classifies by the statement's shape alone, which
-	// assumes the worst of any default it cannot read as a constant.
+	// assumes the worst of any default it cannot read as a constant; the
+	// proof leaves out only an ADD COLUMN IF NOT EXISTS for a column the
+	// table already has, which the server skips.
 	AddColumnRewrites map[string]bool
 }
 

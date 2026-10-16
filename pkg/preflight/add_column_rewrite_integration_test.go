@@ -115,3 +115,59 @@ func TestAddColumnRewritesSurfacesARejectedProbe(t *testing.T) {
 	assert.Contains(t, err.Error(), `add column "c" of `)
 	assert.Contains(t, err.Error(), `to the probe table`)
 }
+
+// A default, or a domain check, that calls a function reading the live
+// table is evaluated by the probe the way the real ALTER evaluates it, so
+// it needs a lock another session may hold. The probe never waits for it:
+// the column is reported as rewriting, which keeps the change off the
+// native path, and the proof returns at once. An identity's SEQUENCE NAME
+// in a permanent schema is left out of the probe, so no sequence is
+// created there, and an IF NOT EXISTS for a column the table already has
+// is skipped by the server and gets no proof.
+func TestAddColumnRewritesNeverWaitsOnALock(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	for _, ddl := range []string{
+		"CREATE TABLE %[1]s.t (id bigint PRIMARY KEY, note text)",
+		"CREATE FUNCTION %[1]s.max_id() RETURNS bigint STABLE LANGUAGE sql AS 'SELECT coalesce(max(id), 0) FROM %[1]s.t'",
+		"CREATE FUNCTION %[1]s.below_max(v bigint) RETURNS boolean STABLE LANGUAGE sql AS 'SELECT v <= (SELECT coalesce(max(id), 0) + 10 FROM %[1]s.t)'",
+		"CREATE DOMAIN %[1]s.bounded AS bigint CHECK (%[1]s.below_max(VALUE))",
+	} {
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(ddl, schema))
+		require.NoError(t, err, ddl)
+	}
+
+	holder, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Rollback(context.WithoutCancel(t.Context())) })
+	_, err = holder.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.t IN ACCESS EXCLUSIVE MODE", schema))
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	start := time.Now()
+	rewrites, err := preflight.AddColumnRewrites(ctx, pool, schema, "t", fmt.Sprintf(
+		"ALTER TABLE %[1]s.t "+
+			"ADD COLUMN high bigint DEFAULT %[1]s.max_id(), "+
+			"ADD COLUMN capped %[1]s.bounded DEFAULT 5, "+
+			"ADD COLUMN ident bigint GENERATED ALWAYS AS IDENTITY (SEQUENCE NAME %[1]s.ident_seq), "+
+			"ADD COLUMN IF NOT EXISTS note text DEFAULT 'x', "+
+			"ADD COLUMN IF NOT EXISTS fresh text DEFAULT 'x'", schema))
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 5*time.Second, "a probe waited on the held lock")
+	assert.Equal(t, map[string]bool{
+		"high":   true,
+		"capped": true,
+		"ident":  true,
+		"fresh":  false,
+	}, rewrites)
+	require.NoError(t, holder.Rollback(t.Context()))
+
+	var sequences int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		"SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind = 'S'",
+		schema).Scan(&sequences))
+	assert.Zero(t, sequences, "the probe created a sequence in the live schema")
+}

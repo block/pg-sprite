@@ -44,8 +44,12 @@ requires — nothing higher.
 Before it classifies an `ADD COLUMN`, the engine adds each column to an empty temporary table
 with no columns (`CREATE TEMPORARY TABLE ... ()`) inside a transaction it always rolls back, to
 learn from the server whether the addition rewrites the table. Whether it does depends only on
-the added column's type and default, so the probe never opens the live table: it takes no lock
-on it and needs no privilege on it. It does need `TEMPORARY` on the database and a server that
+the added column's type and default, so the probe itself never opens the live table: it takes
+no lock on it and needs no privilege on it. Adding the column does evaluate its default and its
+domain's checks once, as the real `ALTER TABLE` would, and a function either one calls may read
+a table another session has locked; the probe never waits for such a lock, and treats the
+column as rewriting instead. An `ADD COLUMN IF NOT EXISTS` for a column the table already has is
+read from the catalog and not probed, since the server skips it. The probe does need `TEMPORARY` on the database and a server that
 accepts writes, so an `ADD COLUMN` cannot be planned on a hot standby or by a role whose
 `TEMPORARY` was revoked from `PUBLIC` and not granted back; the plan fails with the server's
 error rather than guessing.

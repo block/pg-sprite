@@ -17,7 +17,9 @@ import (
 // Adding a column runs in place only when the server proves PostgreSQL
 // stores it in the catalog. A constant default on a domain with a CHECK
 // would rewrite every row under ACCESS EXCLUSIVE, so it is never executed
-// in place; a NOT NULL DEFAULT now() is stored like a constant and is.
+// in place; a NOT NULL DEFAULT now() is stored like a constant and is. An
+// ADD COLUMN IF NOT EXISTS for a column the table already has does nothing,
+// whatever it declares, and completes as the no-op it is.
 func TestRunAddColumnFollowsTheProvenRewrite(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -47,6 +49,21 @@ func TestRunAddColumnFollowsTheProvenRewrite(t *testing.T) {
 		assert.Equal(t, verdict.ReasonBackendUnavailable, v.Reason)
 		assert.Equal(t, before, filenode(t, pool, schema+".t"))
 		assert.False(t, hasColumn(t, pool, schema, "score"), "the refused change must not touch the schema")
+	})
+
+	t.Run("an IF NOT EXISTS for a column the table has is a no-op", func(t *testing.T) {
+		schema := newTable(t)
+		before := filenode(t, pool, schema+".t")
+
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %[1]s.t ADD COLUMN IF NOT EXISTS id %[1]s.positive_int DEFAULT 1", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		assert.Equal(t, before, filenode(t, pool, schema+".t"))
+		var idType string
+		require.NoError(t, pool.QueryRow(t.Context(), "SELECT format_type(atttypid, atttypmod) FROM pg_attribute WHERE attrelid = $1::regclass AND attname = 'id'",
+			schema+".t").Scan(&idType))
+		assert.Equal(t, "integer", idType, "the existing column keeps its type")
 	})
 
 	t.Run("a stored now() default is added in place", func(t *testing.T) {
