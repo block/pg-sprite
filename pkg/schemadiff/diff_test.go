@@ -73,6 +73,21 @@ func TestDiffRefusesPersistenceMismatch(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupportedChange)
 }
 
+// Storage parameters are not converged: matching parameters diff to
+// nothing, and any difference is a typed refusal, never a silent zero diff.
+func TestDiffStorageParameters(t *testing.T) {
+	tuned := base()
+	tuned.Options = []string{"fillfactor=70"}
+	changes, err := Diff("public", tuned, tuned)
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+
+	_, err = Diff("public", base(), tuned)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	_, err = Diff("public", tuned, base())
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+}
+
 // A collation delta on an existing column rewrites the column, and an
 // added column's COLLATE clause is not carried by the emitted ADD COLUMN —
 // both are typed refusals, never a silent zero diff or a silently dropped

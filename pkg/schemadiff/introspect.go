@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -91,6 +93,14 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 	}
 
 	m := Model{Table: table, PartitionKey: partitionKey, IsPartition: isPartition, Unlogged: persistence == "u"}
+	if m.Options, err = introspectOptions(ctx, tx, oid); err != nil {
+		return Model{}, fmt.Errorf("introspect storage parameters of %s.%s: %w", schema, table, err)
+	}
+	if hasToastOptions(m.Options) {
+		if m.ToastMayNotRebuild, err = introspectToastMayNotRebuild(ctx, tx, oid); err != nil {
+			return Model{}, fmt.Errorf("introspect TOAST table of %s.%s: %w", schema, table, err)
+		}
+	}
 	if m.InheritsParents, m.InheritanceChildren, err = introspectInheritance(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect inheritance of %s.%s: %w", schema, table, err)
 	}
@@ -110,6 +120,46 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 		return Model{}, fmt.Errorf("introspect row security of %s.%s: %w", schema, table, err)
 	}
 	return m, nil
+}
+
+// introspectOptions reads the table's storage parameters and its TOAST
+// table's, the latter prefixed "toast." the way CREATE TABLE ... WITH
+// spells them, sorted. A table with none returns nil.
+func introspectOptions(ctx context.Context, tx pgx.Tx, oid uint32) ([]string, error) {
+	var opts []string
+	err := tx.QueryRow(ctx, `
+		SELECT array_agg(opt ORDER BY opt)
+		FROM (
+			SELECT unnest(c.reloptions) AS opt
+			FROM pg_class c
+			WHERE c.oid = $1
+			UNION ALL
+			SELECT 'toast.' || unnest(toast.reloptions)
+			FROM pg_class c
+			JOIN pg_class toast ON toast.oid = c.reltoastrelid
+			WHERE c.oid = $1
+		) options`, oid).Scan(&opts)
+	if err != nil {
+		return nil, fmt.Errorf("query storage parameters: %w", err)
+	}
+	return opts, nil
+}
+
+// hasToastOptions reports whether opts sets a parameter on the TOAST table.
+func hasToastOptions(opts []string) bool {
+	return slices.ContainsFunc(opts, func(opt string) bool { return strings.HasPrefix(opt, "toast.") })
+}
+
+// introspectToastMayNotRebuild reports whether the table has a dropped
+// column (see Model.ToastMayNotRebuild).
+func introspectToastMayNotRebuild(ctx context.Context, tx pgx.Tx, oid uint32) (bool, error) {
+	var dropped bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = $1 AND attnum > 0 AND attisdropped)`, oid).Scan(&dropped)
+	if err != nil {
+		return false, fmt.Errorf("query dropped columns: %w", err)
+	}
+	return dropped, nil
 }
 
 // introspectInheritance reads classic PostgreSQL inheritance in both

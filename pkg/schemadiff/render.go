@@ -3,6 +3,7 @@ package schemadiff
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -57,8 +58,16 @@ var ErrUnrenderableCollation = errors.New("columns with an explicit collation ca
 // as STORED or as a plain default would silently change what it is.
 var ErrUnrenderableVirtual = errors.New("virtual generated columns cannot be rendered as a desired schema")
 
+// ErrUnrenderableToastOptions is returned for TOAST storage parameters on a
+// table whose TOAST table a fresh CREATE TABLE might not build (see
+// Model.ToastMayNotRebuild). The server would discard the parameters when
+// it builds the rendered file, so the baseline would plan them again on
+// every diff against the table it came from.
+var ErrUnrenderableToastOptions = errors.New("TOAST storage parameters on a table with a dropped column cannot be rendered as a desired schema")
+
 // Render renders the canonical model into a desired-state schema file: one
-// CREATE TABLE followed by the model's CREATE INDEX statements. The output
+// CREATE TABLE, with a WITH clause carrying the table's storage parameters,
+// followed by the model's CREATE INDEX statements. The output
 // is proven admissible by parsing it through statement.ParseDesired before
 // it is returned, so anything a desired file refuses (a schema-qualified
 // name, for example) surfaces here as that gate's typed error. Materializing the
@@ -112,7 +121,18 @@ func Render(m Model) (string, error) {
 	if len(defs) != 0 {
 		b.WriteString("\n" + strings.Join(defs, ",\n") + "\n")
 	}
-	b.WriteString(");\n")
+	b.WriteString(")")
+	if m.ToastMayNotRebuild {
+		return "", fmt.Errorf("render table %q: %w", m.Table, ErrUnrenderableToastOptions)
+	}
+	if len(m.Options) != 0 {
+		opts, err := renderOptions(m.Options)
+		if err != nil {
+			return "", fmt.Errorf("render table %q: %w", m.Table, err)
+		}
+		b.WriteString(" WITH (" + opts + ")")
+	}
+	b.WriteString(";\n")
 	for _, ix := range m.Indexes {
 		b.WriteString("\n" + ix.Def + ";\n")
 	}
@@ -122,6 +142,26 @@ func Render(m Model) (string, error) {
 		return "", fmt.Errorf("render table %q: output not admissible as a desired schema: %w", m.Table, err)
 	}
 	return out, nil
+}
+
+// optionName matches a storage parameter name as the server stores it,
+// optionally in the toast namespace.
+var optionName = regexp.MustCompile(`^(toast\.)?[a-z_][a-z0-9_]*$`)
+
+// renderOptions renders storage parameters for a WITH clause, each value as
+// a quoted literal the way pg_dump writes them, so a value is never parsed
+// as anything but the parameter's text. A name outside the server's own
+// spelling is refused rather than interpolated.
+func renderOptions(opts []string) (string, error) {
+	rendered := make([]string, 0, len(opts))
+	for _, opt := range opts {
+		name, value, ok := strings.Cut(opt, "=")
+		if !ok || !optionName.MatchString(name) {
+			return "", fmt.Errorf("storage parameter %q is not in name=value form", opt)
+		}
+		rendered = append(rendered, name+"='"+strings.ReplaceAll(value, "'", "''")+"'")
+	}
+	return strings.Join(rendered, ", "), nil
 }
 
 // renderColumnDef renders one column for CREATE TABLE. A serial column is
