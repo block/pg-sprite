@@ -99,6 +99,12 @@ type Options struct {
 	// partially configured policy is rejected by the executor.
 	Retry executor.RetryPolicy
 
+	// CopySwap is the policy for a statement the router assigns to the
+	// copy-and-swap backend. A statement the router keeps on the native
+	// backend never reads it; a statement routed to copy-and-swap cannot
+	// run without CopySwap.Connection.
+	CopySwap CopySwapOptions
+
 	// Logger receives decision diagnostics (routing, preflight, execution
 	// transitions); nil discards them.
 	Logger *slog.Logger
@@ -189,7 +195,11 @@ func (o Options) retry() executor.RetryPolicy {
 // executed. A fourth outcome exists only under Options.AcceptBlocking: an
 // eligible gate refusal the operator acknowledged commits as
 // [verdict.OutcomeExecutedWithoutOnlineSafety] with a nil error, and the
-// caller maps it to its own exit path — never the online-safe one.
+// caller maps it to its own exit path — never the online-safe one. A
+// statement the router assigns to the copy-and-swap backend runs through
+// the shadow table under Options.CopySwap and commits as
+// [verdict.OutcomeExecutedViaCopyAndSwap]; a failure on that path leaves a
+// checkpoint row the next Run over the same statement resumes from.
 //
 // Run does not close the pool; one pool serves any number of calls.
 func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options) (verdict.Verdict, error) {
@@ -235,6 +245,16 @@ func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 
 	switch rs.Disposition {
 	case router.DispositionExecute:
+		if rs.Backend == router.BackendCopyAndSwap {
+			if opts.Force == "" {
+				return copyAndSwap(ctx, pool, st, opts, logger)
+			}
+			// The acknowledged override keeps its one meaning: the
+			// submitted form runs natively as a blind bounded attempt
+			// instead of through the shadow table.
+			auditForce(opts.audit(), st, rs)
+			return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, logger)
+		}
 		execSQL := rs.ExecSQL
 		substituted := len(execSQL) != 1 || execSQL[0] != rs.Statement
 		forced := substituted && opts.Force != ""

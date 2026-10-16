@@ -88,6 +88,12 @@ func (c *MigrateCmd) options(logger *slog.Logger) migrate.Options {
 		Retry:  c.retryPolicy(),
 		Logger: logger,
 		Audit:  c.audit(),
+		CopySwap: migrate.CopySwapOptions{
+			Connection:    c.Config(),
+			FreeDiskBytes: int64(c.FreeDisk),
+			KeepOld:       c.KeepOld,
+			Quiesced:      c.Quiesced,
+		},
 	}
 }
 

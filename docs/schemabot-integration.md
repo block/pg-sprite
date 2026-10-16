@@ -116,7 +116,7 @@ implementation time):
   makes for the copy-and-swap route: it folds the privilege, shape, and environment checks
   and returns the `CopySwapTarget` every writing step requires; how to classify each of its
   refusals is in
-  [refusal-classes.md](refusal-classes.md#copy-and-swap-preflight-refusals-keyed-on-copyswaprefusalcause).
+  [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause).
 - **Fan-out is per table.** A `DesiredSchema` is one `CREATE TABLE` plus its indexes, while
   SchemaBot's declarative roots are directories of many tables: the adapter loops `Plan` per
   table and merges into one `PlanResult`. One pool serves the whole fan-out (`Plan` does not
@@ -355,6 +355,36 @@ installation, not the run, and each means a different action:
 logs the chain sees both the engine's classification and the server's words. `ErrTableNewer`
 comes from `Ensure`'s read of the table's shape, before any statement could fail, so it
 carries no server error; the `*TableNewerError` names the columns instead.
+
+### Verdicts of a statement routed to copy-and-swap
+
+The tables above are the engine's own vocabulary — `Runner.Run`'s errors and refusals — for
+an adapter that drives the copy-and-swap packages directly. The imperative front door,
+`migrate.Run`, folds that vocabulary into the same one-verdict contract every other route
+reports through, so an adapter that already consumes `verdict.Verdict` reads a copy-and-swap
+run without a second error taxonomy. A statement the router assigns to the copy-and-swap
+backend ends in exactly one of three verdicts:
+
+| Verdict | What it means | Orchestrator action |
+| --- | --- | --- |
+| `outcome: executed-via-copy-and-swap` | The shadow was built, filled, verified, and swapped in under the source's name; `detail` says how many rows and chunks the verification pass covered, whether the retained source was dropped or kept under its `_old` name, and whether the run first reconciled a lost slot. The error is nil | Done. Exit 0 at the CLI; the outcome token is distinct from `executed-natively` so an adapter can tell the two paths apart in its record |
+| `outcome: refused`, `reason: copy-and-swap-refused` | The route's own gates declined: the preflight found a table shape or an environment it will not run against, or a shadow operation refused mid-run to keep an invariant. `cause` is the route's token unchanged — a `copy-and-swap-…` cause from the preflight, a `shadow-…`, `cutover-…`, `resume-…`, or `copy-…` cause from the shadow operations — and `class` is its routing class. The error is nil | Route on `cause` with the two tables above and [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause); a mid-run refusal leaves the checkpoint row and the shadow where the engine tables say they are. A missing privilege is not this reason: it is the same `insufficient-privileges` refusal the native route reports, with the exact `GRANT` in `detail` |
+| `outcome: failed`, with `code` | The run stopped on an error that is not a refusal; the error is returned alongside the verdict. `code` is `cancelled-by-caller` when the caller's context ended, `invariant-violation` when the engine caught a breach of its own contract, and `execution-failed` for everything else — a divergence, an unsettled chunk, a rolled-back swap, a lost lock session, exhausted lock retries, a slot past its lag ceiling | The checkpoint row remains at its last save, so running the same statement again resumes from it; the `Run` outcome table above says which of those outcomes a plain retry can clear and which need the run abandoned first. Match the wrapped error with `errors.Is`/`errors.As` for the finer routing — the verdict's `code` is the coarse class |
+
+The adapter supplies the route's policy on `migrate.Options.CopySwap`: the connection the
+pool was dialed with (the route opens dedicated sessions — the table lock, the copy workers,
+the replication stream — so the pool alone does not suffice), the free space on the table's
+volume for the preflight's disk-headroom check, whether to keep the retained source under
+its `_old` name, and whether the table is quiesced for the run — the fenced path that needs
+no logical decoding — or live. A statement routed to copy-and-swap and run with `--force`
+does not take this route at all: `--force` keeps its one meaning, the submitted form run
+natively as a bounded blind attempt, and the audit record says so.
+
+Divergence policy is not a knob on this seam: the front door runs the verification pass under
+`DivergenceAbort` (CO-3), and a divergence is a `failed` verdict whose remedy is the
+`Run`-outcome table's — abandon and rerun — never an in-place repair. Stopping a run from
+another process is likewise not a verb here: a run stops when its context ends, and the next
+`migrate.Run` over the same statement resumes it.
 
 ### Outcomes of a checksum pass under the stream
 

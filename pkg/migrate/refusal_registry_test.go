@@ -9,6 +9,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 	"github.com/stretchr/testify/assert"
@@ -25,7 +26,8 @@ type classifiedKey struct {
 }
 
 // deriveRefusalKeys walks every closed set the registry is keyed on —
-// executor.CreateShapeCauses(), preflight.PartitionRefusalCauses(), the two
+// executor.CreateShapeCauses(), preflight.PartitionRefusalCauses(),
+// preflight.CopySwapRefusalCauses(), schemachange.RefusalCauses(), the two
 // admission sentinel sets, statement.Kinds() (with and without CONCURRENTLY),
 // and the site walk — and classifies each key through the production
 // registry. Admitted statement kinds are returned with ok false and are the
@@ -38,6 +40,14 @@ func deriveRefusalKeys() (keys []classifiedKey, admitted []string) {
 	for _, c := range preflight.PartitionRefusalCauses() {
 		r, ok := partitionRefusal(c)
 		keys = append(keys, classifiedKey{"partition:" + string(c), r, ok})
+	}
+	for _, c := range preflight.CopySwapRefusalCauses() {
+		r, ok := copySwapPreflightRefusal(c)
+		keys = append(keys, classifiedKey{"copy-swap-preflight:" + string(c), r, ok})
+	}
+	for _, c := range schemachange.RefusalCauses() {
+		r, ok := shadowRefusal(c)
+		keys = append(keys, classifiedKey{"shadow:" + string(c), r, ok})
 	}
 	for _, err := range admissionSentinels() {
 		r, ok := admissionRefusal(fmt.Errorf("wrapped: %w", err))
@@ -88,6 +98,8 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 	// constructed cannot make it pass on an empty walk.
 	require.NotEmpty(t, executor.CreateShapeCauses())
 	require.NotEmpty(t, preflight.PartitionRefusalCauses())
+	require.NotEmpty(t, preflight.CopySwapRefusalCauses())
+	require.NotEmpty(t, schemachange.RefusalCauses())
 	require.NotEmpty(t, admissionSentinels())
 	require.NotEmpty(t, createAdmissionSentinels())
 	require.NotEmpty(t, siteRefusals())
@@ -99,6 +111,8 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 	for _, sentinel := range []string{
 		"create-shape:" + string(executor.CreateShapeIfNotExists),
 		"partition:" + string(preflight.PartitionCauseIndexAdoption),
+		"copy-swap-preflight:" + string(preflight.CopySwapCauseDiskHeadroom),
+		"shadow:" + string(schemachange.CauseStatementConversion),
 		"admission:" + executor.ErrIfNotExistsUnsupported.Error(),
 		"create-admission:" + executor.ErrDuplicateCreateName.Error(),
 		"gate:" + statement.KindOther.String() + "/concurrent=false",

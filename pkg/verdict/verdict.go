@@ -47,6 +47,11 @@ const (
 	// OutcomeExecutedWithoutOnlineSafety means the operator accepted a typed
 	// blocking refusal and the statement committed under explicit budgets.
 	OutcomeExecutedWithoutOnlineSafety Outcome = "executed-without-online-safety"
+	// OutcomeExecutedViaCopyAndSwap means the change committed through the
+	// copy-and-swap route: a shadow table built under the changed shape,
+	// filled and verified against the source, then swapped into the
+	// source's name. The source table was never rewritten in place.
+	OutcomeExecutedViaCopyAndSwap Outcome = "executed-via-copy-and-swap"
 	// OutcomeRefused means the change was not executed; Reason says why.
 	OutcomeRefused Outcome = "refused"
 	// OutcomeFailed means execution was attempted and failed: an
@@ -114,6 +119,12 @@ const (
 	// execution does not run foreign-key changes yet. The plan still shows
 	// the change; the imperative front door runs ADD FOREIGN KEY online.
 	ReasonDeclarativeForeignKey Reason = "declarative-foreign-key"
+	// ReasonCopyAndSwapRefused: the change routes to copy-and-swap and the
+	// route's own gates declined it — the preflight found a table shape or
+	// an environment it cannot run against, or the engine refused mid-run
+	// to keep an invariant. Cause carries the route's own refusal token
+	// (see docs/refusal-classes.md), Class its routing class.
+	ReasonCopyAndSwapRefused Reason = "copy-and-swap-refused"
 )
 
 // Reasons returns the closed set of non-zero Reason values. It is part of
@@ -134,6 +145,7 @@ func Reasons() []Reason {
 		ReasonPlanFingerprintMismatch,
 		ReasonCreateCollision,
 		ReasonDeclarativeForeignKey,
+		ReasonCopyAndSwapRefused,
 	}
 }
 
@@ -545,6 +557,8 @@ func (v Verdict) String() string {
 		b.WriteString("executed natively")
 	case OutcomeExecutedWithoutOnlineSafety:
 		b.WriteString("executed without online safety (accepted blocking refusal)")
+	case OutcomeExecutedViaCopyAndSwap:
+		b.WriteString("executed via copy-and-swap")
 	case OutcomeRefused:
 		fmt.Fprintf(&b, "refused (%s)", v.Reason)
 	case OutcomeFailed:

@@ -97,6 +97,47 @@ func TestAcceptBlockingFlagGrammar(t *testing.T) {
 	})
 }
 
+// The copy-and-swap policy flags govern a run the planner routes to that
+// backend: the connection the route's dedicated sessions dial from, the
+// free space the preflight sizes the shadow against, and the two operator
+// choices. They reach the engine policy as typed values — a size in bytes,
+// not the flag's spelling — and they are refused on a dry run, which
+// executes nothing for them to govern.
+func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
+	t.Run("wires connection, free space, and choices", func(t *testing.T) {
+		c := parseMigrate(t, "--free-disk", "20GiB", "--keep-old", "--quiesced")
+		got := c.options(nil).CopySwap
+		assert.Equal(t, c.Config(), got.Connection)
+		assert.Equal(t, int64(20<<30), got.FreeDiskBytes)
+		assert.True(t, got.KeepOld)
+		assert.True(t, got.Quiesced)
+	})
+
+	t.Run("defaults to no free space and the live path", func(t *testing.T) {
+		got := parseMigrate(t).options(nil).CopySwap
+		assert.Zero(t, got.FreeDiskBytes)
+		assert.False(t, got.KeepOld)
+		assert.False(t, got.Quiesced)
+	})
+
+	for _, flag := range []string{"--free-disk=1GiB", "--keep-old", "--quiesced"} {
+		t.Run("rejects "+flag+" with --dry-run", func(t *testing.T) {
+			c := New("test")
+			k, err := kong.New(c, kong.Vars{"version": "test"})
+			require.NoError(t, err)
+			_, err = k.Parse([]string{
+				"migrate",
+				"--url", "postgres://user@localhost:5432/app",
+				"--alter", "ALTER TABLE t ALTER COLUMN c TYPE bigint",
+				"--dry-run",
+				flag,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cannot be combined with --dry-run")
+		})
+	}
+}
+
 func TestRetryFlagsWireIntoRetryPolicy(t *testing.T) {
 	c := parseMigrate(t,
 		"--lock-attempts", "5",
@@ -139,6 +180,7 @@ func TestEmitReturnsTheSentinelForEachOutcome(t *testing.T) {
 		want    error
 	}{
 		{outcome: verdict.OutcomeExecuted, want: nil},
+		{outcome: verdict.OutcomeExecutedViaCopyAndSwap, want: nil},
 		{outcome: verdict.OutcomeExecutedWithoutOnlineSafety, want: verdict.ErrAcceptedBlocking},
 		{outcome: verdict.OutcomeRefused, want: verdict.ErrRefused},
 		{outcome: verdict.OutcomeFailed, want: nil},
