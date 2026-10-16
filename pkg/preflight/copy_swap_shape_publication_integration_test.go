@@ -53,9 +53,11 @@ func TestRecheckCopySwapShapeSurvivesAnotherTablesPublicationDroppedMeanwhile(t 
 // The re-check still refuses the table's own membership in a publication
 // the snapshot shows, so reading the catalogs directly loses no refusal:
 // a FOR TABLE publication of the table and a FOR ALL TABLES publication
-// each refuse it.
+// each refuse it. The fixture is its own database: a FOR ALL TABLES
+// publication publishes every table in the database, so on the shared one
+// it would refuse every other test's table.
 func TestRecheckCopySwapShapeRefusesAPublicationOfTheTable(t *testing.T) {
-	f := newCopySwapShapeFixture(t)
+	f := newCopySwapShapeFixtureInOwnDatabase(t)
 	f.exec(t, `
 		CREATE TABLE %s.orders (
 			id bigint PRIMARY KEY
