@@ -30,8 +30,9 @@ import (
 // 5 added blocking_passthrough_eligible to refused statements. Version 6
 // added the add-foreign-key and drop-foreign-key change kinds and the
 // foreign-key create-shape cause. Version 7 added the
-// set-generated-expression change kind.
-const FormatVersion = 7
+// set-generated-expression change kind. Version 8 added the replica-identity
+// planner reason.
+const FormatVersion = 8
 
 // Source identifies which front door derived the plan.
 type Source string

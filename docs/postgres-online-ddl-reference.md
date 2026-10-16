@@ -53,7 +53,8 @@ The remaining reasons are first-bucket by cost but carry a warning the cost alon
 `partition-parent-lock` (a new partition takes a brief `ACCESS EXCLUSIVE` on the parent, so
 the lock queue below applies to every query on the parent) and `app-breaking-rename` (the
 catalog change is instant; the running application code that still uses the old name is
-what breaks). `unsupported-operation` means the planner does not recognize the operation or
+what breaks). `replica-identity` is a refusal: the operation would drop what the table's
+replica identity index keys on. `unsupported-operation` means the planner does not recognize the operation or
 knows no safe path for it. The exclusion-constraint carve-out above is a known full-scan cost
 with no online path, not an operation with no cost bucket.
 
@@ -466,6 +467,21 @@ copy-and-swap backend.
 
 The operation takes a brief exclusive lock on a partitioned parent, briefly
 blocking access to every partition. Flagged so it is scheduled deliberately.
+
+### `replica-identity`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation drops what the table's `REPLICA IDENTITY USING INDEX` keys on: the
+index itself, the constraint that owns it, or one of its key columns, which takes
+the index with it. PostgreSQL keeps the setting and leaves the table with no usable
+identity, so every `UPDATE` and `DELETE` on it fails while a publication publishes
+them. Move the identity first (`ALTER TABLE … REPLICA IDENTITY USING INDEX` another
+unique index, or `REPLICA IDENTITY DEFAULT` when a primary key remains), then re-plan.
+The planner judges this from live facts, so the linter, which has none, never
+reports it.
 
 ### `unsupported-operation`
 

@@ -68,7 +68,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only; flagged **destructive** in the plan report"
+    reason_notes: "Metadata-only; flagged **destructive** in the plan report. Refused with `replica-identity` when a replica identity index the drop reaches keys on the column: the table's own, or one on a partition or inheritance child below it unless the statement says `ONLY`"
   - id: alter-column-type-binary-coercible-proven-against-live-column-facts
     area: "column_changes"
     operation: "`ALTER COLUMN TYPE`, binary-coercible (proven against live column facts)"
@@ -205,7 +205,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only; flagged **destructive**"
+    reason_notes: "Metadata-only; flagged **destructive**. Refused with `replica-identity` when the constraint owns the table's replica identity index, or the index a partition's is attached under"
   - id: create-unique-index-on-a-plain-table-including-partial-expression-covering-include-gin-gist-brin
     area: "indexes"
     operation: "`CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN"
@@ -227,7 +227,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**. `migrate` refuses the plain form and names the idiom; a single-index `DROP INDEX` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0)"
+    reason_notes: "Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**. `migrate` refuses the plain form and names the idiom; a single-index `DROP INDEX` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `diff` refuses dropping the table's replica identity index, or one a partition's is attached under, with `replica-identity`. `migrate` refuses every plain `DROP INDEX` before it reads the table, so its dry-run names the concurrent idiom; `--accept-blocking` checks the replica identity under the table's lock and refuses the drop as `unsupported-statement`, naming the identity index. pg-sprite never runs the concurrent drop itself"
   - id: reindex
     area: "indexes"
     operation: "`REINDEX`"
