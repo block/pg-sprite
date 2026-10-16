@@ -124,10 +124,16 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 		Detail:    "the planner knows no safe path for this statement",
 	}.WithRefusal(plan.RouteRefusal())
 	for _, d := range rs.Decisions {
-		if d.Route == planner.RouteRefuse {
-			v.Detail = fmt.Sprintf("the planner knows no safe path for %s", d.Operation)
-			break
+		if d.Route != planner.RouteRefuse {
+			continue
 		}
+		v.Detail = fmt.Sprintf("the planner knows no safe path for %s", d.Operation)
+		if d.Reason == planner.ReasonReplicaIdentity {
+			v.Detail = fmt.Sprintf("%s drops what the table's replica identity index keys on, "+
+				"which makes UPDATE and DELETE fail while a publication publishes them; "+
+				"point REPLICA IDENTITY at another unique index first (or DEFAULT, if a usable primary key remains after the drop), then re-plan", d.Operation)
+		}
+		break
 	}
 	return v
 }

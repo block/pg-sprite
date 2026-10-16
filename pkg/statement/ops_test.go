@@ -233,12 +233,12 @@ func TestParseOpsShapes(t *testing.T) {
 		{
 			name: "drop index",
 			sql:  "DROP INDEX i",
-			want: statement.Op{Kind: statement.OpDropIndex, Name: "i"},
+			want: statement.Op{Kind: statement.OpDropIndex, Name: "i", Indexes: []string{"i"}},
 		},
 		{
 			name: "drop index concurrently",
 			sql:  "DROP INDEX CONCURRENTLY i",
-			want: statement.Op{Kind: statement.OpDropIndex, Name: "i", Concurrent: true},
+			want: statement.Op{Kind: statement.OpDropIndex, Name: "i", Indexes: []string{"i"}, Concurrent: true},
 		},
 		{
 			name: "reindex",
@@ -387,11 +387,13 @@ func TestParseOpsDropIndexCapturesName(t *testing.T) {
 	assert.Equal(t, statement.OpDropIndex, ops[0].Kind)
 	assert.Equal(t, "app.orders_legacy_idx", ops[0].Name)
 	assert.Equal(t, "DROP INDEX app.orders_legacy_idx", ops[0].Describe())
+	assert.Equal(t, []string{"orders_legacy_idx"}, ops[0].Indexes, "Indexes carries each name unqualified")
 
 	multi, err := statement.ParseOps("DROP INDEX a_idx, b_idx")
 	require.NoError(t, err)
 	require.Len(t, multi, 1)
 	assert.Equal(t, "a_idx, b_idx", multi[0].Name)
+	assert.Equal(t, []string{"a_idx", "b_idx"}, multi[0].Indexes)
 }
 
 // An unnamed CREATE INDEX labels cleanly, without a dangling space.

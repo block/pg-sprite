@@ -101,6 +101,9 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 			return Model{}, fmt.Errorf("introspect TOAST table of %s.%s: %w", schema, table, err)
 		}
 	}
+	if m.ReplicaIdentity, err = ReadReplicaIdentity(ctx, tx, oid); err != nil {
+		return Model{}, fmt.Errorf("introspect replica identity of %s.%s: %w", schema, table, err)
+	}
 	if m.InheritsParents, m.InheritanceChildren, err = introspectInheritance(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect inheritance of %s.%s: %w", schema, table, err)
 	}
@@ -196,6 +199,69 @@ func introspectToastMayNotRebuild(ctx context.Context, tx pgx.Tx, oid uint32) (b
 		return false, fmt.Errorf("query whether the columns rebuild a TOAST table: %w", err)
 	}
 	return mayNotRebuild, nil
+}
+
+// ReadReplicaIdentity reads, inside tx, what the replica identity indexes
+// of the table with the given oid and of every table below it are built
+// on. Introspection reads it into Model.ReplicaIdentity, and the executor
+// reads it again under the table's lock, so the answer a drop is checked
+// against cannot change before the drop runs. The tree follows
+// pg_inherits, so it holds partitions and classic inheritance children
+// alike: a DROP COLUMN here recurses into both. An identity index is one
+// pg_index marks indisreplident on a table whose relreplident is 'i'. Each
+// is traced up its attachment chain to the index on this table that a DROP
+// INDEX or DROP CONSTRAINT here would cascade from; an identity index on a
+// child that is attached under nothing on this table contributes only its
+// columns, which a DROP COLUMN here still cascades to. Every column the
+// index covers counts, INCLUDE columns too, since dropping any of them
+// drops the index. Only a primary key or unique constraint owns its index;
+// a foreign key that references one does not. The partition functions list
+// nothing for an index outside a partition tree, so each identity index is
+// counted on its own as well.
+func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIdentityKeys, error) {
+	var keys ReplicaIdentityKeys
+	err := tx.QueryRow(ctx, `
+		WITH RECURSIVE tree AS (
+		    SELECT $1::oid AS relid
+		    UNION
+		    SELECT inh.inhrelid FROM pg_inherits inh JOIN tree ON inh.inhparent = tree.relid
+		), identity AS (
+		    SELECT i.indexrelid, i.indrelid, i.indkey
+		    FROM tree
+		    JOIN pg_class c ON c.oid = tree.relid AND c.relreplident = 'i'
+		    JOIN pg_index i ON i.indrelid = c.oid AND i.indisreplident
+		), chain AS (
+		    SELECT indexrelid AS relid FROM identity
+		    UNION
+		    SELECT ancestor.relid
+		    FROM identity
+		    CROSS JOIN LATERAL pg_partition_ancestors(identity.indexrelid) ancestor
+		), here AS (
+		    SELECT chain.relid AS indexrelid
+		    FROM chain
+		    JOIN pg_index ai ON ai.indexrelid = chain.relid AND ai.indrelid = $1
+		)
+		SELECT
+		    ARRAY(SELECT ic.relname::text FROM here JOIN pg_class ic ON ic.oid = here.indexrelid ORDER BY 1),
+		    ARRAY(SELECT con.conname::text FROM here JOIN pg_constraint con
+		          ON con.conindid = here.indexrelid AND con.conrelid = $1 AND con.contype IN ('p', 'u') ORDER BY 1),
+		    ARRAY(SELECT DISTINCT a.attname::text FROM identity
+		          CROSS JOIN LATERAL unnest(identity.indkey::int2[]) AS k(attnum)
+		          JOIN pg_attribute a ON a.attrelid = identity.indrelid AND a.attnum = k.attnum
+		          ORDER BY 1)`, oid).Scan(&keys.Indexes, &keys.Constraints, &keys.Columns)
+	if err != nil {
+		return ReplicaIdentityKeys{}, fmt.Errorf("query replica identity indexes: %w", err)
+	}
+	if len(keys.Indexes) == 0 {
+		keys.Indexes = nil
+	}
+	if len(keys.Constraints) == 0 {
+		keys.Constraints = nil
+	}
+	if len(keys.Columns) == 0 {
+		keys.Columns = nil
+	}
+	return keys, nil
 }
 
 // introspectInheritance reads classic PostgreSQL inheritance in both

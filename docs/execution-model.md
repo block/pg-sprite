@@ -334,6 +334,7 @@ concurrently is.
 | `partition-of-unsupported` | yes | `CREATE TABLE PARTITION OF` locks the partitioned parent, which the absence proof does not cover |
 | `unsupported-create-step` | yes | A desired statement is not a shape the create path can run |
 | `pool-too-small` | yes | The pool cannot hold every session the operation needs at once: a build's session and verdict connection, or a recovery's own session beside those |
+| `replica-identity-drop` | yes | A native drop would remove what a replica identity index is built on, read again under the table's lock after planning; nothing was dropped. Point `REPLICA IDENTITY` at another unique index first, or `DEFAULT` if a usable primary key remains after the drop, then re-plan |
 | `table-not-found` | yes | The statement's qualified table does not exist |
 | `invariant-violation` | yes | A breach of the invariant registry; never a retry candidate |
 | `execution-failed` | no | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |
