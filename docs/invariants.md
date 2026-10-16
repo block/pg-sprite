@@ -64,7 +64,11 @@ stops-on-a-shadow-that-differs tests). On a decoding target it runs `CheckLive` 
 `DivergenceAbort` once the catch-up has passed a marker written after the copy, with the
 capture's own `Catchup` as the pass's confirmed source, and hands the swap a drain that
 reopens the stream from the position the capture confirmed and applies it under the swap's
-lock (carries-a-live-table-from-no-row-to-done test).
+lock (carries-a-live-table-from-no-row-to-done test). The live path reaches the `Runner`
+through `pkg/router`, which marks a `type-rewrite` plan executable only because the
+copy-and-swap engine carries that operation (`copyAndSwapCarriesReason`); every other
+copy-and-swap reason stays unavailable, so no rewrite reaches an executor without the gate
+(`migrate --alter` type-rewrite-runs-via-copy-and-swap and refuses-without-free-disk tests).
 *Source:* [design-principles](design-principles.md#correctness-and-safety),
 risks-and-mitigations; Spirit's "never skip it".
 

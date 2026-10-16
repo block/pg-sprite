@@ -75,7 +75,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 10, "the doc publishes ten captured --json outputs")
+	require.Len(t, blocks, 12, "the doc publishes twelve captured --json outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
@@ -101,7 +101,18 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	require.NoError(t, err)
 	rewriteRequired := alterReport(t, "ALTER TABLE users ADD COLUMN nickname text UNIQUE",
 		"public", "users", usersFacts())
-	backendUnavailable := alterReport(t, "ALTER TABLE users ALTER COLUMN id TYPE text",
+	copyAndSwapRouted := alterReport(t, "ALTER TABLE users ALTER COLUMN id TYPE text",
+		"public", "users", usersFacts())
+	// The executed verdict is captured from a run; its detail is the
+	// verdict's own rendering of the verification pass and the retained
+	// source's fate, which the migrate package's tests pin.
+	executedViaCopyAndSwap := verdict.Verdict{
+		Outcome:   verdict.OutcomeExecutedViaCopyAndSwap,
+		Statement: "ALTER TABLE users ALTER COLUMN id TYPE text",
+		Table:     "public.users",
+		Detail:    "verified 1000 rows in 2 chunks; the retained source is dropped",
+	}
+	backendUnavailable := alterReport(t, "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()",
 		"public", "users", usersFacts())
 
 	partitioned := alterReport(t, "CREATE INDEX events_created_idx ON events (created)",
@@ -141,7 +152,8 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	diff.Fingerprint = plan.Fingerprint(diff.Statements)
 
 	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, rewriteRequired,
-		backendUnavailable, partitioned, destructive, lintReport, diff}
+		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitioned, destructive,
+		lintReport, diff}
 	for i, w := range want {
 		marshaled, err := json.Marshal(w)
 		require.NoError(t, err)

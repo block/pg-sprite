@@ -422,7 +422,7 @@ rename is coordinated with application deploys.
 
 | Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
-| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 until the backend lands (refused `backend-unavailable`) |
+| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 — the engine does not carry this operation yet (refused `backend-unavailable`) |
 
 `ADD COLUMN ... DEFAULT <volatile>` (for example `now()`, `gen_random_uuid()`)
 must compute the default per row: a full table rewrite under `ACCESS EXCLUSIVE`
@@ -432,7 +432,7 @@ that blocks reads and writes. Routed to the copy-and-swap backend.
 
 | Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
-| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 until the backend lands (refused `backend-unavailable`) |
+| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 — the engine does not carry this operation yet (refused `backend-unavailable`) |
 
 Adding a `GENERATED ... STORED` column computes and stores the value for every
 row: a full table rewrite under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap
@@ -442,17 +442,22 @@ backend.
 
 | Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
-| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 until the backend lands (refused `backend-unavailable`) |
+| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 0 (plan disposition `execute`) |
 
 The column type change is not binary-coercible (for example `int` → `bigint`,
-`text` → `jsonb`), so PostgreSQL rewrites the whole table under
-`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend.
+`text` → `jsonb`), or carries a `USING` expression, so PostgreSQL would rewrite
+the whole table under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend,
+which executes it: the changed shape is built as a shadow table, filled in
+chunks while writes stream through a replication slot, verified, and swapped in
+under the source's name. The route's own preflight can still refuse the run
+(`copy-and-swap-refused`) for a table shape or environment it cannot run
+against — see [limitations.md](limitations.md).
 
 ### `relocation`
 
 | Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
-| routed to the copy-and-swap backend | exclusive lock for the whole move | rewrite-scale I/O | 2 until the backend lands (refused `backend-unavailable`) |
+| routed to the copy-and-swap backend | exclusive lock for the whole move | rewrite-scale I/O | 2 — the engine does not carry this operation yet (refused `backend-unavailable`) |
 
 The operation physically moves the table's storage (for example
 `SET TABLESPACE`): rewrite-scale I/O under an exclusive lock. Routed to the
@@ -507,9 +512,10 @@ online steps and dry-run each one.
 |---|---|---|---|
 | refused — nothing executes | — | — | 2 |
 
-The plan routes to a backend — an online shadow-table copy with a cutover —
-that this build does not implement yet. Refused; nothing executes. The
-copy-and-swap backend is on the roadmap; until it lands these changes need a
+The plan routes to the copy-and-swap backend for an operation the engine does
+not carry yet — a volatile column default, a stored generated column, a
+relocation. Refused; nothing executes. A general type change (`type-rewrite`)
+is the operation the backend carries today; until the others land they need a
 manual online plan.
 
 ### `unsupported-partitioned-parent`

@@ -88,16 +88,76 @@ func TestRouteInlineConstraintAddColumnFailsClosed(t *testing.T) {
 		"an inline constraint builds its index under ACCESS EXCLUSIVE; the submitted form must not run")
 }
 
-func TestRouteCopyAndSwapIsUnavailable(t *testing.T) {
+func TestRouteTypeRewriteExecutesViaCopyAndSwap(t *testing.T) {
+	// A type conversion PostgreSQL cannot relabel is the change the
+	// shadow-table engine carries: the gated ALTER retypes the empty shadow
+	// and the copy converts each row through the statement's own
+	// conversion.
 	plan := classify(t, "ALTER TABLE t ALTER COLUMN id TYPE bigint")
 	require.Equal(t, planner.RouteCopyAndSwap, plan.Route)
 
 	routed := router.Route([]planner.Plan{plan})
 	st := routed.Statements[0]
 	assert.Equal(t, router.BackendCopyAndSwap, st.Backend)
-	assert.Equal(t, router.DispositionUnavailable, st.Disposition)
-	assert.Empty(t, st.ExecSQL, "no literal SQL for a backend that is not implemented")
-	assert.Equal(t, router.DispositionUnavailable, routed.Disposition)
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+	assert.Empty(t, st.ExecSQL, "the copy-and-swap backend runs the statement itself, not literal native SQL")
+	assert.Equal(t, router.DispositionExecute, routed.Disposition)
+}
+
+func TestRouteTypeRewriteWithNativeSiblingExecutesViaCopyAndSwap(t *testing.T) {
+	// A native-routed operation in the same statement rides along: it runs
+	// inside the one gated ALTER on the shadow, so the engine carries the
+	// whole statement.
+	plan := classify(t, "ALTER TABLE t ALTER COLUMN id TYPE bigint, DROP COLUMN notes")
+	require.Equal(t, planner.RouteCopyAndSwap, plan.Route)
+	require.Len(t, plan.Decisions, 2)
+	require.Equal(t, planner.RouteNative, plan.Decisions[1].Route)
+
+	routed := router.Route([]planner.Plan{plan})
+	st := routed.Statements[0]
+	assert.Equal(t, router.BackendCopyAndSwap, st.Backend)
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+}
+
+func TestRouteCopyAndSwapReasonsTheEngineDoesNotCarryAreUnavailable(t *testing.T) {
+	// Each of these rewrites routes to copy-and-swap, but the engine has no
+	// carrying path for it yet; the router marks the statement unavailable
+	// so execution refuses it instead of running a change it cannot prove.
+	for _, tc := range []struct {
+		name   string
+		sql    string
+		reason planner.Reason
+	}{
+		{"volatile default", "ALTER TABLE t ADD COLUMN joined timestamptz DEFAULT now()", planner.ReasonVolatileDefault},
+		{"stored generated column", "ALTER TABLE t ADD COLUMN total numeric GENERATED ALWAYS AS (qty * price) STORED", planner.ReasonGeneratedStored},
+		{"relocation", "ALTER TABLE t SET TABLESPACE pg_default", planner.ReasonRelocation},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := classify(t, tc.sql)
+			require.Equal(t, planner.RouteCopyAndSwap, plan.Route)
+			require.Len(t, plan.Decisions, 1)
+			require.Equal(t, tc.reason, plan.Decisions[0].Reason)
+
+			routed := router.Route([]planner.Plan{plan})
+			st := routed.Statements[0]
+			assert.Equal(t, router.BackendCopyAndSwap, st.Backend)
+			assert.Equal(t, router.DispositionUnavailable, st.Disposition)
+			assert.Empty(t, st.ExecSQL, "no literal SQL for a change the backend cannot carry")
+			assert.Equal(t, router.DispositionUnavailable, routed.Disposition)
+		})
+	}
+}
+
+func TestRouteTypeRewriteWithUncarriedSiblingIsUnavailable(t *testing.T) {
+	// One operation the engine does not carry makes the whole statement
+	// unavailable: the gated ALTER runs as one statement, so the carried
+	// type rewrite cannot be split from the sibling.
+	plan := classify(t, "ALTER TABLE t ALTER COLUMN id TYPE bigint, ADD COLUMN joined timestamptz DEFAULT now()")
+	require.Equal(t, planner.RouteCopyAndSwap, plan.Route)
+	require.Len(t, plan.Decisions, 2)
+
+	routed := router.Route([]planner.Plan{plan})
+	assert.Equal(t, router.DispositionUnavailable, routed.Statements[0].Disposition)
 }
 
 func TestRouteRefusedStatementHasNoBackend(t *testing.T) {
@@ -116,7 +176,7 @@ func TestRouteAggregateIsWorstDisposition(t *testing.T) {
 	plans := []planner.Plan{
 		classify(t, "ALTER TABLE t ADD COLUMN age int"),
 		classify(t, "ALTER TABLE t ATTACH PARTITION p FOR VALUES FROM (1) TO (10)"),
-		classify(t, "ALTER TABLE t ALTER COLUMN id TYPE bigint"),
+		classify(t, "ALTER TABLE t ADD COLUMN joined timestamptz DEFAULT now()"),
 		classify(t, "ALTER TABLE t ADD CONSTRAINT ex EXCLUDE USING gist (room WITH =)"),
 	}
 	routed := router.Route(plans)

@@ -34,12 +34,51 @@ func Backends() []Backend {
 	return []Backend{BackendNative, BackendCopyAndSwap}
 }
 
-// available reports whether the backend is implemented in this build. This
-// is the routing policy for backends: copy-and-swap is a known strategy the
-// planner routes to, but until its executor exists the router marks the
-// statement unavailable rather than pretending it could run.
-func available(b Backend) bool {
-	return b == BackendNative
+// available reports whether the assigned backend can run the classified
+// statement in this build. This is the routing policy for backends: the
+// native backend runs every statement the planner routes to it; the
+// copy-and-swap backend runs a statement only when every operation the
+// planner sent its way is a change the shadow-table engine carries. A
+// reason the engine does not carry yet marks the statement unavailable
+// rather than pretending it could run.
+func available(b Backend, p planner.Plan) bool {
+	switch b {
+	case BackendNative:
+		return true
+	case BackendCopyAndSwap:
+		return copyAndSwapCarries(p)
+	default:
+		return false
+	}
+}
+
+// copyAndSwapCarries reports whether the copy-and-swap engine carries every
+// copy-and-swap-routed operation in the plan. Operations the planner routes
+// natively ride along: they run inside the same gated ALTER on the shadow.
+func copyAndSwapCarries(p planner.Plan) bool {
+	for _, d := range p.Decisions {
+		if d.Route != planner.RouteCopyAndSwap {
+			continue
+		}
+		if !copyAndSwapCarriesReason(d.Reason) {
+			return false
+		}
+	}
+	return true
+}
+
+// copyAndSwapCarriesReason names the planner reasons the copy-and-swap
+// engine carries: the shadow is built by running the gated ALTER on an
+// empty LIKE clone and the copy converts each row through the statement's
+// own conversion, which is exactly what a type rewrite needs. The other
+// copy-and-swap reasons still name real rewrites PostgreSQL would do under
+// ACCESS EXCLUSIVE, but the engine has no carrying path for them yet: a
+// volatile default would be evaluated chunk by chunk as the copy runs
+// rather than once for the table, a stored generated column's recompute has
+// no checksum that proves it, and a relocation is undone by the fidelity
+// step that carries the source's tablespace to the shadow.
+func copyAndSwapCarriesReason(r planner.Reason) bool {
+	return r == planner.ReasonTypeRewrite
 }
 
 // Disposition is what would happen to one statement if the routed plan were
@@ -57,8 +96,9 @@ const (
 	// cannot build). The statement will be refused at execution rather
 	// than run in its blocking form.
 	DispositionRewriteRequired Disposition = "rewrite-required"
-	// DispositionUnavailable: the change needs a backend this build does
-	// not implement; the statement would be refused at execution.
+	// DispositionUnavailable: the change needs a carrying path its backend
+	// does not implement in this build; the statement would be refused at
+	// execution.
 	DispositionUnavailable Disposition = "unavailable"
 	// DispositionRefuse: the planner refused the statement; no backend is
 	// assigned.
@@ -153,7 +193,7 @@ func routeStatement(p planner.Plan) Statement {
 		st.Disposition = DispositionRefuse
 		return st
 	}
-	if !available(st.Backend) {
+	if !available(st.Backend, p) {
 		st.Disposition = DispositionUnavailable
 		return st
 	}

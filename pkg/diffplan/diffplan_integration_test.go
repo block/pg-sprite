@@ -119,8 +119,8 @@ func TestPlanRefusesPartitionedParentIndexChange(t *testing.T) {
 }
 
 // A desired state that needs a table rewrite routes to the copy-and-swap
-// backend, and the routed plan says that backend is unavailable in this
-// build — a library caller sees the same honest refusal the CLI prints.
+// backend, and the routed plan says execution would run it there — a
+// library caller sees the same routing the CLI prints.
 func TestPlanRoutesRewriteToCopyAndSwap(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -137,12 +137,13 @@ func TestPlanRoutesRewriteToCopyAndSwap(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 	require.Len(t, report.Statements, 1)
 	ch := report.Statements[0]
 	assert.Equal(t, planner.RouteCopyAndSwap, ch.Route)
 	assert.Equal(t, router.BackendCopyAndSwap, ch.Backend)
-	assert.Equal(t, router.DispositionUnavailable, ch.Disposition)
+	assert.Equal(t, router.DispositionExecute, ch.Disposition)
+	assert.Empty(t, ch.ExecSQL, "the copy-and-swap backend lists no native SQL")
 	require.Len(t, ch.Decisions, 1)
 	assert.Equal(t, planner.ReasonTypeRewrite, ch.Decisions[0].Reason)
 }

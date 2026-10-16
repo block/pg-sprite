@@ -159,9 +159,9 @@ and privilege checks because it needs no connection.
 
 | Value | Meaning |
 |---|---|
-| `execute` | The engine would run it now. |
+| `execute` | The engine would run it now — natively, or through the copy-and-swap backend when that is the statement's `backend`. |
 | `rewrite-required` | Native but blocking as submitted, and no safer sequence could be constructed — resubmit in the online form. |
-| `unavailable` | Routed to a backend that is not yet implemented. |
+| `unavailable` | Routed to copy-and-swap for an operation the engine does not carry yet; nothing executes. |
 | `refuse` | The planner refused the statement; no backend is assigned. |
 
 ### Guidance (`guidance`, rewrite-required statements only)

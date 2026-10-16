@@ -82,7 +82,7 @@ routed to provisioning and never to the data change runner.
 | `insufficient-privileges` | The connected role lacks a required grant | `environmental` | — |
 | `not-native-safe-budget-exceeded` | The lock or statement budget cancels an attempt | `environmental` | — |
 | `not-native-safe-rewrite-required` | The planner cannot construct the required safer sequence | `capability-boundary` | — |
-| `backend-unavailable` | The plan routes to an execution backend this build lacks | `capability-boundary` | — |
+| `backend-unavailable` | The plan routes to copy-and-swap for an operation the engine does not carry yet | `capability-boundary` | — |
 | `destructive-change` | Desired-state execution will not infer permission to discard live structure | `by-design` | — |
 | `plan-fingerprint-mismatch` | The recomputed plan is not the reviewed plan | `environmental` | — |
 | `create-collision` | A target or claimed name is occupied at apply time by a relation or a standalone type | `environmental` | — |
