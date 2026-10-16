@@ -121,6 +121,20 @@ CREATE INDEX t_email_idx ON t (email);`
 		assert.Equal(t, []string{"ALTER TABLE t ADD COLUMN note text"}, plannedSQL(t, res))
 	})
 
+	t.Run("adds a column to a table with a declared identity sequence", func(t *testing.T) {
+		// The declaration is stated on both sides, so the plan is the
+		// column alone; the oracle proves the sequence keeps it.
+		live := `CREATE TABLE t (
+    id bigint GENERATED ALWAYS AS IDENTITY (START WITH 1000 MAXVALUE 900000) PRIMARY KEY
+);`
+		desired := `CREATE TABLE t (
+    id bigint GENERATED ALWAYS AS IDENTITY (START WITH 1000 MAXVALUE 900000) PRIMARY KEY,
+    note text
+);`
+		res := assertRoundTrip(t, pool, live, desired)
+		assert.Equal(t, []string{"ALTER TABLE t ADD COLUMN note text"}, plannedSQL(t, res))
+	})
+
 	t.Run("adds a column with quoted, mixed-case names", func(t *testing.T) {
 		// Quoting has to survive every step: the planned SQL, the scratch
 		// build, and execution. An unquoted name would fold to lower case

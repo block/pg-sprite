@@ -81,6 +81,11 @@ refusal — never a silently wrong or incomplete result:
   `unsupported-statement`, since it recomputes every row under an exclusive
   lock. Virtual generated columns (PostgreSQL 18+) are not modeled: export
   refuses them and a desired file that redeclares one fails the diff.
+- **Identity and serial sequence declarations** are modeled but not
+  converged: an identity's declared options export and compare, and a
+  difference is a typed `diff` refusal; change the declaration with owner
+  tooling, then state it in the file. A serial cannot state one, so export
+  refuses a serial whose sequence was declared otherwise.
 - **Partitioned tables** support in-place statement changes, but cannot be
   expressed in or exported to desired files.
 - **Unlogged tables and explicit column collations** are outside the

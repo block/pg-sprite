@@ -97,12 +97,12 @@ const (
 	CauseRelationReplaced RefusalCause = "cutover-relation-replaced"
 	// CauseSchemaDrift means the source's or the shadow's introspected model
 	// no longer matches the fingerprint the build recorded (ST-5): a
-	// column, constraint, index, or storage parameter was added, dropped,
-	// or changed since.
+	// column, constraint, index, storage parameter, or column-owned
+	// sequence declaration was added, dropped, or changed since.
 	CauseSchemaDrift RefusalCause = "cutover-schema-drift"
 	// CauseFidelityDrift means the source's or the shadow's metadata — owner,
 	// grants, policies, comment, replica identity, statistics targets,
-	// unvalidated checks, or identity sequence options —
+	// unvalidated checks, or identity columns and their sequences —
 	// no longer matches the snapshot the build recorded (ST-5).
 	CauseFidelityDrift RefusalCause = "cutover-fidelity-drift"
 	// CauseIndexInvalid means a shadow index has pg_index.indisvalid false

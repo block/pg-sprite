@@ -354,11 +354,12 @@ func TestGateCutoverAfterInspectionRefusesASourceRevoke(t *testing.T) {
 // The checklist holds the shadow to its own build-time record as well as
 // the source: a shadow replaced under its name, reshaped, or given metadata
 // after the build is refused, and so is a source identity whose sequence
-// options changed (ST-5, ST-6). A table or TOAST storage parameter set on
-// either side after the build is part of the table's shape, so it refuses
-// as schema drift, which is environmental: re-plan against the table as it
-// is now. Metadata the gated statement itself set on the shadow is what
-// the record expects, and passes.
+// options changed, which the source's fingerprint records as part of its
+// shape (ST-5, ST-6). A table or TOAST storage parameter set on either side
+// after the build is part of the table's shape too, so it refuses as schema
+// drift, which is environmental: re-plan against the table as it is now.
+// Metadata the gated statement itself set on the shadow is what the record
+// expects, and passes.
 func TestGateCutoverHoldsTheShadowAndTheIdentitiesToTheBuildRecord(t *testing.T) {
 	createAccounts := func(t *testing.T, f shadowFixture) {
 		f.exec(t, `
@@ -386,7 +387,7 @@ func TestGateCutoverHoldsTheShadowAndTheIdentitiesToTheBuildRecord(t *testing.T)
 		}, schemachange.CauseFidelityDrift},
 		{"source identity options", func(t *testing.T, f shadowFixture, s staged) {
 			f.exec(t, `ALTER TABLE %s.accounts ALTER COLUMN id SET INCREMENT BY 5`)
-		}, schemachange.CauseFidelityDrift},
+		}, schemachange.CauseSchemaDrift},
 		{"source storage parameter", func(t *testing.T, f shadowFixture, s staged) {
 			f.exec(t, `ALTER TABLE %s.accounts SET (fillfactor = 70)`)
 		}, schemachange.CauseSchemaDrift},

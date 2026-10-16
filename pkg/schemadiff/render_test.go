@@ -213,3 +213,24 @@ func TestRenderStorageParameters(t *testing.T) {
 		assert.Contains(t, err.Error(), "is not in name=value form", opt)
 	}
 }
+
+// A serial whose sequence is declared away from the defaults refuses: the
+// serial shorthand cannot state the declaration. So does an identity whose
+// sequence type differs from its column's, which no options clause states.
+func TestRenderRefusesUnstatableSequence(t *testing.T) {
+	m := base()
+	m.Columns[0] = Column{
+		Name: "id", Type: "bigint", NotNull: true,
+		Default: "nextval('events_id_seq'::regclass)", SequenceDefault: true, SequenceOwned: true,
+		Sequence: &SequenceOptions{Type: "bigint", Start: 1, Increment: 1, Min: 1, Max: 5000, Cache: 1},
+	}
+	_, err := Render(m)
+	require.ErrorIs(t, err, ErrUnrenderableSequenceOptions)
+
+	m.Columns[0] = Column{
+		Name: "id", Type: "bigint", NotNull: true, Identity: IdentityAlways,
+		Sequence: &SequenceOptions{Type: "integer", Start: 1, Increment: 1, Min: 1, Max: 2147483647, Cache: 1},
+	}
+	_, err = Render(m)
+	require.ErrorIs(t, err, ErrUnrenderableSequenceOptions)
+}

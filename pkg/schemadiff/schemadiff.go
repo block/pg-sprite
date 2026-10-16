@@ -12,6 +12,8 @@
 // and the core executors re-verify their own preconditions.
 package schemadiff
 
+import "math"
+
 // Identity is a column's identity kind, as pg_attribute.attidentity spells
 // it.
 type Identity string
@@ -70,6 +72,67 @@ type Column struct {
 	// when false, so a model without virtual columns digests the same as it
 	// did before the field existed.
 	Virtual bool `json:",omitempty"`
+	// Sequence is the declaration of the sequence the column owns, an
+	// identity's or a serial's, when it differs from what declaring the
+	// column fresh would create; nil when it does not, or when the column
+	// owns no sequence. Omitted from JSON when nil, so a model whose
+	// sequences are all declared at their defaults digests the same as one
+	// without the field; a declared sequence changes the digest, which is
+	// why the checkpoint format moved with it.
+	Sequence *SequenceOptions `json:",omitempty"`
+	// MultipleOwnedSequences reports that the column's default calls more
+	// than one sequence the column owns. The model carries one sequence
+	// per column, so Sequence is nil for such a column and the renderer
+	// refuses it (ErrMultipleOwnedSequences) rather than export one of
+	// them. Not part of the table's shape, so it never reaches a digest.
+	MultipleOwnedSequences bool `json:"-"`
+}
+
+// SequenceOptions are the declared parameters of a column-owned sequence
+// (pg_sequence). The counter's position is not among them: it is data,
+// not schema.
+type SequenceOptions struct {
+	// Type is the sequence's data type (format_type), e.g. "bigint".
+	Type string
+	// Start is START WITH.
+	Start int64
+	// Increment is INCREMENT BY.
+	Increment int64
+	// Min is MINVALUE.
+	Min int64
+	// Max is MAXVALUE.
+	Max int64
+	// Cache is CACHE.
+	Cache int64
+	// Cycle reports CYCLE.
+	Cycle bool
+}
+
+// defaultSequenceOptions returns what declaring a column of the given
+// integer type as an identity or serial creates: an ascending sequence of
+// the column's type from 1 to the type's maximum, uncached, not cycling.
+// The second result is false for a type no sequence can back.
+func defaultSequenceOptions(columnType string) (SequenceOptions, bool) {
+	maxValue, ok := map[string]int64{
+		"smallint": math.MaxInt16,
+		"integer":  math.MaxInt32,
+		"bigint":   math.MaxInt64,
+	}[columnType]
+	if !ok {
+		return SequenceOptions{}, false
+	}
+	return SequenceOptions{Type: columnType, Start: 1, Increment: 1, Min: 1, Max: maxValue, Cache: 1}, true
+}
+
+// declaredSequence returns the options worth recording for a column-owned
+// sequence: nil when they are exactly what declaring the column fresh
+// creates, so the model records only a declaration a file would have to
+// state.
+func declaredSequence(columnType string, opts SequenceOptions) *SequenceOptions {
+	if def, ok := defaultSequenceOptions(columnType); ok && def == opts {
+		return nil
+	}
+	return &opts
 }
 
 // IsGenerated reports a generated column of either kind: its Default is the
