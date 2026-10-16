@@ -208,8 +208,9 @@ where `row_hash` is `sha256(convert_to(row::text, getdatabaseencoding()))`; only
 as hex. Every compared source value is cast to the shadow column's type before its row hash is
 formed; a column the statement retyped with `USING` is compared as that expression, cast to
 the shadow column's type, so the source side hashes the value the copy put in the shadow rather
-than what an explicit cast of the source column would make of it. SHA-256 rather than `md5`: PostgreSQL built against OpenSSL routes `md5()` through it,
-and an OpenSSL in FIPS mode refuses MD5, which would fail every pass on such a host; the digest
+than what an explicit cast of the source column would make of it. SHA-256 rather than `md5`:
+PostgreSQL built against OpenSSL routes `md5()` through it, and an OpenSSL in FIPS mode
+refuses MD5, which would fail every pass on such a host; the digest
 never leaves the process, so the hash has no compatibility surface.
 Generated columns are absent from the copy list but included after the shadow recomputes them;
 dropped columns are absent from the comparison.

@@ -289,7 +289,7 @@ func (f *Flusher) completeMoved(ctx context.Context, tx pgx.Tx, batch Batch, res
 // Key, and reports false when neither holds a row.
 func (f *Flusher) completeOne(ctx context.Context, tx pgx.Tx, e *Entry) (HeldImage, bool, error) {
 	if !e.OldKeyReused {
-		c, found, err := f.completeFrom(ctx, tx, f.shadowRowSQL(e), *e.OldKey, e, fromShadow)
+		c, found, err := f.completeFrom(ctx, tx, f.shadowRowSQL(e), *e.OldKey, e)
 		if err != nil {
 			return HeldImage{}, false, err
 		}
@@ -297,7 +297,7 @@ func (f *Flusher) completeOne(ctx context.Context, tx pgx.Tx, e *Entry) (HeldIma
 			return HeldImage{Entry: *e, Completed: c.columns, ReadLSN: c.readLSN}, true, nil
 		}
 	}
-	c, found, err := f.completeFrom(ctx, tx, f.sourceRowSQL(e), e.Key, e, fromSource)
+	c, found, err := f.completeFrom(ctx, tx, f.sourceRowSQL(e), e.Key, e)
 	if err != nil {
 		return HeldImage{}, false, err
 	}
@@ -392,7 +392,7 @@ func (f *Flusher) applyWholeRows(ctx context.Context, tx pgx.Tx, entries []Entry
 		if e.Kind != Image || !e.HasMarker() {
 			continue
 		}
-		c, found, err := f.completeFrom(ctx, tx, f.shadowRowSQL(e), e.Key, e, fromShadow)
+		c, found, err := f.completeFrom(ctx, tx, f.shadowRowSQL(e), e.Key, e)
 		if err != nil {
 			return err
 		}
@@ -400,7 +400,7 @@ func (f *Flusher) applyWholeRows(ctx context.Context, tx pgx.Tx, entries []Entry
 			_, markers := f.split(e)
 			return fmt.Errorf("%w (CO-8): flush key %d: image omits %v and the shadow holds no row to complete them from", ErrInvariantViolation, e.Key, markers)
 		}
-		e.overlay(c.columns)
+		e.overlay(inShadowForm(c.columns))
 		result.Completed++
 	}
 	if err := f.deleteRows(ctx, tx, keys); err != nil {

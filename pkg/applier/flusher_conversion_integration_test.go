@@ -266,3 +266,78 @@ func TestFlushConvertsACompletionReadFromTheSource(t *testing.T) {
 	assert.Equal(t, applier.Result{Images: 1}, result)
 	f.assertSeatsConverted(t, p.shadow)
 }
+
+// createWords creates a table whose word column collates as "C", not as
+// the database does, so a comparison in a USING expression orders the
+// words by their bytes: every upper-case letter sorts before every
+// lower-case one, where the database's own collation would sort them by
+// letter.
+func (f flushFixture) createWords(t *testing.T, rows int64) {
+	t.Helper()
+	f.exec(t, `
+		CREATE TABLE %s.words (
+			id bigint PRIMARY KEY,
+			w text COLLATE "C",
+			note text
+		)`)
+	f.exec(t, fmt.Sprintf(`
+		INSERT INTO %%s.words (id, w, note)
+		SELECT n, chr(96 + n::integer), 'word ' || n
+		FROM generate_series(1, %d) AS n`, rows))
+}
+
+// A USING expression that compares the converted value sees it under the
+// source column's own collation, not the database's: the flush binds the
+// value as the column declares it, so the expression orders a value from
+// the stream the way it ordered the column's values in the copy (D7). The
+// test needs the database's collation to disagree with "C" on the case
+// it checks, which the server's default locale does.
+func TestFlushConvertsUnderTheSourceColumnsCollation(t *testing.T) {
+	f := newFlushFixture(t)
+	var databaseSortsUpperFirst bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT 'Z' < 'm'`).Scan(&databaseSortsUpperFirst))
+	require.False(t, databaseSortsUpperFirst, "the database's collation must order 'Z' after 'm' for the column's \"C\" collation to make a difference")
+	f.createWords(t, 5)
+	target := f.prove(t, "words")
+	lock := f.lock(t, "words")
+	shadow := f.build(t, lock, target, `
+		ALTER TABLE %s
+			ALTER COLUMN w TYPE integer USING CASE WHEN w < 'm' THEN 1 ELSE 2 END`)
+	f.copy(t, target, shadow, lock)
+	flush, err := applier.NewFlusher(target, shadow, lock, applier.Options{})
+	require.NoError(t, err)
+	f.exec(t, `UPDATE %s.words SET w = 'Z' WHERE id = 3`)
+
+	result, err := flush.Flush(t.Context(), f.pool, batch(
+		image(3, col("w", "Z"), col("note", "word 3")),
+	))
+
+	require.NoError(t, err)
+	assert.Equal(t, applier.Result{Images: 1}, result)
+	w3, _ := f.text(t, shadow.ShadowTable(), "w", 3)
+	assert.Equal(t, "1", *w3, `under "C" the upper-case Z sorts before m; under the database's collation it would not`)
+	testutil.AssertConverged(t, f.pool,
+		testutil.RelationRef{Schema: f.schema, Table: shadow.SourceTable()},
+		testutil.RelationRef{Schema: f.schema, Table: shadow.ShadowTable()},
+		testutil.ConvergeOptions{IgnoreColumns: []string{"w"}})
+}
+
+// A source that no longer has a column the shadow proof converts is not
+// the source the proof describes: the flush refuses before it writes
+// anything, naming the column, rather than convert values for a column
+// the stream no longer carries (ST-6).
+func TestFlushRefusesWhenTheSourceNoLongerHasAConvertedColumn(t *testing.T) {
+	f := newFlushFixture(t)
+	f.createPricedOrders(t, 5)
+	p := f.preparePriced(t, priceInCents)
+	f.exec(t, `ALTER TABLE %s.orders DROP COLUMN price`)
+
+	_, err := p.flush.Flush(t.Context(), f.pool, batch(
+		image(1, col("note", "order 1 again")),
+	))
+
+	require.ErrorIs(t, err, applier.ErrInvariantViolation)
+	assert.ErrorContains(t, err, "price")
+	note1, _ := f.text(t, p.shadow.ShadowTable(), "note", 1)
+	assert.Equal(t, "order 1", *note1, "nothing was written")
+}

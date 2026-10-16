@@ -73,7 +73,7 @@ func ColumnConversions(sql string) (map[string]string, error) {
 			return nil, fmt.Errorf("%w: %s", ErrConversionRepeated, cmd.GetName())
 		}
 		if foreign, ok := foreignColumnReference(using, cmd.GetName()); ok {
-			return nil, fmt.Errorf("%w: USING of column %s refers to %s", ErrConversionForeignColumn, cmd.GetName(), foreign)
+			return nil, fmt.Errorf("%w: USING of column %s refers to %s; the expression may name only %s, unqualified", ErrConversionForeignColumn, cmd.GetName(), foreign, cmd.GetName())
 		}
 		expr, err := renderExpression(using)
 		if err != nil {

@@ -92,6 +92,27 @@ func TestWritesBindAShadowFormValueBare(t *testing.T) {
 	assert.Equal(t, []any{int64(7), nil}, args(7, null), "a shadow NULL stays NULL and is not converted")
 }
 
+// A source column that collates differently from its type's default is
+// bound under that collation, so an expression that compares or orders the
+// value sees what it saw over the source column; a column with its type's
+// default collation is bound as the type alone.
+func TestWritesBindAConvertedValueUnderTheSourceColumnsCollation(t *testing.T) {
+	conv := conversions{"w": {expr: "CASE WHEN w < 'm' THEN 1 ELSE 2 END", sourceType: "text", collation: `pg_catalog."C"`}}
+	assert.Equal(t,
+		`UPDATE "app"."orders_shadow" SET "w" = (SELECT CASE WHEN w < 'm' THEN 1 ELSE 2 END FROM (SELECT $2::text COLLATE pg_catalog."C" AS "w") AS "source") WHERE "id" = $1`,
+		updateSQL(testRelation, testPK, cols("w"), conv))
+}
+
+// A value in the shadow's form is bound bare whether or not the statement
+// converts its column: the form marks where the value was read, and a
+// column with no conversion is never converted.
+func TestWritesBindAnUnconvertedShadowFormValueBare(t *testing.T) {
+	conv := conversions{"qty": {expr: "(qty::numeric * 100)::integer", sourceType: "text"}}
+	completed := []decode.Column{{Name: "note", Value: shadowForm{value: "as read"}, Present: true}}
+	assert.Equal(t, `UPDATE "app"."orders_shadow" SET "note" = $2 WHERE "id" = $1`, updateSQL(testRelation, testPK, completed, conv))
+	assert.Equal(t, []any{int64(7), "as read"}, args(7, completed))
+}
+
 func TestDeleteSQL(t *testing.T) {
 	assert.Equal(t, `DELETE FROM "app"."orders_shadow" WHERE "id" = $1`, deleteSQL(testRelation, testPK))
 	assert.Equal(t, `DELETE FROM "app"."orders_shadow" WHERE "id" = ANY($1::bigint[])`, deleteAllSQL(testRelation, testPK))

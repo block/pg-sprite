@@ -100,44 +100,50 @@ func TestColumnConversionsRefusesAnExpressionThatDoesNotRoundTrip(t *testing.T) 
 // the catch-up converts a column value on its own, with no neighbouring
 // column, table alias, or whole row to resolve anything else against. The
 // refusal names the reference as the user spelled it, wherever it sits in
-// the expression.
+// the expression, and says what the expression may name instead.
 func TestColumnConversionsRefuseAReferenceBeyondTheRetypedColumn(t *testing.T) {
 	cases := []struct {
-		name string
-		sql  string
-		ref  string
+		name   string
+		sql    string
+		column string
+		ref    string
 	}{
 		{
-			name: "another column as an operand",
-			sql:  `ALTER TABLE t ALTER COLUMN total TYPE numeric USING qty * price`,
-			ref:  "qty",
+			name:   "another column as an operand",
+			sql:    `ALTER TABLE t ALTER COLUMN total TYPE numeric USING qty * price`,
+			column: "total",
+			ref:    "qty",
 		},
 		{
-			name: "another column nested in a CASE",
-			sql:  `ALTER TABLE t ALTER COLUMN ts TYPE timestamptz USING CASE WHEN ts IS NULL THEN created_at ELSE ts::timestamptz END`,
-			ref:  "created_at",
+			name:   "another column nested in a CASE",
+			sql:    `ALTER TABLE t ALTER COLUMN ts TYPE timestamptz USING CASE WHEN ts IS NULL THEN created_at ELSE ts::timestamptz END`,
+			column: "ts",
+			ref:    "created_at",
 		},
 		{
-			name: "another column inside a function call",
-			sql:  `ALTER TABLE t ALTER COLUMN qty TYPE integer USING coalesce(qty, fallback)::integer`,
-			ref:  "fallback",
+			name:   "another column inside a function call",
+			sql:    `ALTER TABLE t ALTER COLUMN qty TYPE integer USING coalesce(qty, fallback)::integer`,
+			column: "qty",
+			ref:    "fallback",
 		},
 		{
-			name: "the retyped column qualified by the table",
-			sql:  `ALTER TABLE t ALTER COLUMN qty TYPE integer USING t.qty::integer`,
-			ref:  "t.qty",
+			name:   "the retyped column qualified by the table",
+			sql:    `ALTER TABLE t ALTER COLUMN qty TYPE integer USING t.qty::integer`,
+			column: "qty",
+			ref:    "t.qty",
 		},
 		{
-			name: "a whole-row reference",
-			sql:  `ALTER TABLE t ALTER COLUMN doc TYPE jsonb USING to_jsonb(t.*)`,
-			ref:  "t.*",
+			name:   "a whole-row reference",
+			sql:    `ALTER TABLE t ALTER COLUMN doc TYPE jsonb USING to_jsonb(t.*)`,
+			column: "doc",
+			ref:    "t.*",
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			_, err := statement.ColumnConversions(tc.sql)
 			require.ErrorIs(t, err, statement.ErrConversionForeignColumn)
-			assert.ErrorContains(t, err, "refers to "+tc.ref)
+			assert.ErrorContains(t, err, "refers to "+tc.ref+"; the expression may name only "+tc.column+", unqualified")
 		})
 	}
 }

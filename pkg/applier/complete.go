@@ -35,29 +35,19 @@ type completion struct {
 	// columns carries a present value for every marker column, each as the
 	// text the server rendered — which the write binds back as text for the
 	// server to read with the column's own input function, so a value of
-	// any type makes the round trip — and NULL as NULL. A converted column
-	// read from the shadow is wrapped as shadowForm, since the shadow holds
-	// the converted value and the write must not convert it again; read
-	// from the source it is the source's value, converted at the write
-	// like a value from the stream.
+	// any type makes the round trip — and NULL as NULL. The value is in the
+	// form of the row it was read from: a shadow row holds a converted
+	// column's converted value, a source row the source's, and the held
+	// image says which row the read was of.
 	columns []decode.Column
 	// readLSN is the WAL insert position at the read. Every change the read
 	// saw had committed below it.
 	readLSN decode.LSN
 }
 
-// rowSource names the relation a completion read comes from, which decides
-// the form a converted column's value is in.
-type rowSource bool
-
-const (
-	fromShadow rowSource = true
-	fromSource rowSource = false
-)
-
 // completeFrom runs a row read for the image's markers and returns what it
 // found. It reports false when the row is absent.
-func (f *Flusher) completeFrom(ctx context.Context, tx pgx.Tx, sql string, key int64, e *Entry, from rowSource) (completion, bool, error) {
+func (f *Flusher) completeFrom(ctx context.Context, tx pgx.Tx, sql string, key int64, e *Entry) (completion, bool, error) {
 	_, markers := f.split(e)
 	values := make([]*string, len(markers))
 	dest := make([]any, 0, len(markers)+1)
@@ -82,9 +72,6 @@ func (f *Flusher) completeFrom(ctx context.Context, tx pgx.Tx, sql string, key i
 		c.columns[i] = decode.Column{Name: name, Present: true}
 		if values[i] != nil {
 			c.columns[i].Value = *values[i]
-		}
-		if _, converted := f.shadow.Conversions()[name]; converted && from == fromShadow {
-			c.columns[i].Value = shadowForm{value: c.columns[i].Value}
 		}
 	}
 	return c, true, nil

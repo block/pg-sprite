@@ -36,9 +36,10 @@ func (f *Flusher) begin(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error)
 }
 
 // guard prepares the transaction every flush runs in: it bounds it, sets
-// its search_path, puts it under the source owner's role, locks both relations by name, and then confirms from this
-// connection that the lock session's backend still holds the table and that
-// the source and shadow are still the relations the proofs describe.
+// its search_path, puts it under the source owner's role, locks both
+// relations by name, and then confirms from this connection that the lock
+// session's backend still holds the table and that the source and shadow
+// are still the relations the proofs describe.
 // Holding even ACCESS SHARE keeps a DROP or rename from completing until
 // the transaction ends, so the identity check stays true for every
 // statement after it.
@@ -59,14 +60,14 @@ func (f *Flusher) guard(ctx context.Context, tx pgx.Tx) error {
 // can merge two distinct values, sets the search_path the flush's
 // statements resolve on — the catalog alone unless the shadow proof carries
 // conversions, whose expressions must resolve as they did on the shadow
-// build (CO-9) — and puts it in the owner's shoes. A marker is completed by reading a
-// value as text and binding that text back, and for float4, float8, and the
-// geometric types that rendering follows extra_float_digits: at zero or
-// below the server rounds to fifteen significant digits, so a completed
-// float could differ in its last digits from the one it stood for. The
-// maximum of 3 renders every float exactly whatever the database or role
-// configures. SET LOCAL cannot take bind parameters; the timeouts are
-// integer milliseconds.
+// build (CO-9) — and puts it in the owner's shoes. A marker is completed by
+// reading a value as text and binding that text back, and for float4,
+// float8, and the geometric types that rendering follows
+// extra_float_digits: at zero or below the server rounds to fifteen
+// significant digits, so a completed float could differ in its last digits
+// from the one it stood for. The maximum of 3 renders every float exactly
+// whatever the database or role configures. SET LOCAL cannot take bind
+// parameters; the timeouts are integer milliseconds.
 func setFlushSession(ctx context.Context, tx pgx.Tx, owner, searchPath string, opts Options) error {
 	// INV: LK-2, CO-9
 	budgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(opts.LockTimeout.Milliseconds(), 10) +
