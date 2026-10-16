@@ -39,7 +39,9 @@ const slotLockSQL = "SELECT pg_catalog.pg_advisory_xact_lock($1, pg_catalog.hash
 // The lock is let go however fn ends — a return, a panic the caller
 // recovers, or the goroutine exiting — since the connection is closed on
 // the way out. The lock is on the name, in the store's database: the same
-// name in another database is another key, as D11 requires. fn's error is
+// name in another database is another key, as D11 requires, so a cfg that
+// dials another database or cluster than the store's pool is refused as
+// ErrInvariantViolation before the lock is taken and fn runs. fn's error is
 // returned as it is; a failure to take or let go of the lock is reported
 // alongside.
 func (s *Store) WithSlotLock(ctx context.Context, cfg dbconn.Config, name string, fn func(ctx context.Context) error) (err error) {
@@ -54,10 +56,41 @@ func (s *Store) WithSlotLock(ctx context.Context, cfg dbconn.Config, name string
 	if err != nil {
 		return fmt.Errorf("begin the lock on slot %s: %w", name, err)
 	}
+	if err := s.proveSameDatabase(ctx, tx, name); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, slotLockSQL, slotLockClassID, name); err != nil {
 		return fmt.Errorf("lock slot %s: %w", name, err)
 	}
 	return fn(ctx)
+}
+
+// databaseIdentitySQL names the cluster and the database a session is on.
+const databaseIdentitySQL = `
+	SELECT s.system_identifier::text, pg_catalog.current_database()
+	FROM pg_catalog.pg_control_system() s`
+
+// proveSameDatabase refuses a lock connection that is not on the store's
+// cluster and database: the advisory key is per database, so a lock taken
+// anywhere else would not exclude a claim or a reap judged through the
+// store (ST-3, D11).
+func (s *Store) proveSameDatabase(ctx context.Context, lock pgx.Tx, name string) error {
+	var lockSystem, lockDatabase, storeSystem, storeDatabase string
+	if err := lock.QueryRow(ctx, databaseIdentitySQL).Scan(&lockSystem, &lockDatabase); err != nil {
+		return fmt.Errorf("identify the lock connection for slot %s: %w", name, err)
+	}
+	if err := s.pool.QueryRow(ctx, databaseIdentitySQL).Scan(&storeSystem, &storeDatabase); err != nil {
+		return fmt.Errorf("identify the store's database for the lock on slot %s: %w", name, err)
+	}
+	if lockSystem != storeSystem {
+		return fmt.Errorf("%w: ST-3: the lock on slot %s is on cluster %s, the store on cluster %s",
+			ErrInvariantViolation, name, lockSystem, storeSystem)
+	}
+	if lockDatabase != storeDatabase {
+		return fmt.Errorf("%w: ST-3: the lock on slot %s is on database %q, the store on %q",
+			ErrInvariantViolation, name, lockDatabase, storeDatabase)
+	}
+	return nil
 }
 
 // releaseSlotLock closes the connection whose transaction holds the lock,

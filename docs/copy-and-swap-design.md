@@ -309,7 +309,7 @@ engine's publication aside from the publication refusal by this exact derived na
 publication that merely wears the `pgsprite_` prefix is treated as somebody else's. The
 slot is created and the checkpoint row that names it committed under the engine's advisory
 lock on the slot's name (`checkpoint.Store.WithSlotLock`, transaction-scoped on a connection
-dialled outside the pool, so the claim's own work on the pool never waits on the seat the lock
+dialled outside the pool and proven to be on the pool's cluster and database, so the claim's own work on the pool never waits on the seat the lock
 sits in), which the reaper holds from its last read of the row to its drop, so a slot with no
 row is an orphan and never a slot mid-claim. Preflight checks for a free slot under
 `max_replication_slots` and two free senders under `max_wal_senders`, since the slot's connection
