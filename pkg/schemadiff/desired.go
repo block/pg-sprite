@@ -22,6 +22,13 @@ import (
 // rolls back, so the file is refused before anything runs.
 var ErrDesiredPartitionOf = errors.New("a desired CREATE TABLE ... PARTITION OF cannot be planned: building it would lock the live partitioned parent")
 
+// ErrDesiredInherits is returned for a desired file whose CREATE TABLE
+// INHERITS from a parent. Classic inheritance is not planned, and the
+// scratch build would bind the parent to the live table of that name, lock
+// it, and add an inheritance edge to it until the scratch transaction rolls
+// back, so the file is refused before anything runs.
+var ErrDesiredInherits = errors.New("a desired CREATE TABLE ... INHERITS cannot be planned: building it would lock the live parent and add an inheritance edge to it")
+
 // IntrospectDesired materializes a desired-state schema on a scratch schema
 // and introspects it into the canonical model: execute-and-introspect, the
 // decided way the engine understands DDL semantics. The scratch schema is
@@ -68,7 +75,7 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 		_ = tx.Rollback(cleanup)
 	}()
 
-	if err := refusePartitionOf(statements); err != nil {
+	if err := refuseLiveParent(statements); err != nil {
 		return Model{}, err
 	}
 
@@ -122,9 +129,11 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	return m, nil
 }
 
-// refusePartitionOf refuses a desired CREATE TABLE ... PARTITION OF before
-// the scratch build runs it (see ErrDesiredPartitionOf).
-func refusePartitionOf(statements []statement.Statement) error {
+// refuseLiveParent refuses a desired CREATE TABLE that names a parent,
+// PARTITION OF or INHERITS, before the scratch build runs it: the parent
+// would resolve to a live table (see ErrDesiredPartitionOf and
+// ErrDesiredInherits).
+func refuseLiveParent(statements []statement.Statement) error {
 	for _, st := range statements {
 		if st.Kind() != statement.KindCreateTable {
 			continue
@@ -136,6 +145,9 @@ func refusePartitionOf(statements []statement.Statement) error {
 		for _, op := range ops {
 			if op.PartitionOf {
 				return fmt.Errorf("desired table %q: %w", st.Table(), ErrDesiredPartitionOf)
+			}
+			if op.Inherits {
+				return fmt.Errorf("desired table %q: %w", st.Table(), ErrDesiredInherits)
 			}
 		}
 	}
