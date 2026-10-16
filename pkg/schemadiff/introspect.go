@@ -224,6 +224,7 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 		}
 		c.Identity = Identity(identity)
 		c.Generated = generated == "s"
+		c.Virtual = generated == "v"
 		cols = append(cols, c)
 	}
 	if err := rows.Err(); err != nil {

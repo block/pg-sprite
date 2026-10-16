@@ -63,6 +63,19 @@ type Column struct {
 	Identity Identity
 	// Generated reports GENERATED ALWAYS AS (...) STORED.
 	Generated bool
+	// Virtual reports GENERATED ALWAYS AS (...) VIRTUAL, which exists from
+	// PostgreSQL 18. The desired-file grammar predates it, so only a live
+	// table carries one, and the model records it only to refuse: export
+	// cannot write it back and a diff cannot converge it. Omitted from JSON
+	// when false, so a model without virtual columns digests the same as it
+	// did before the field existed.
+	Virtual bool `json:",omitempty"`
+}
+
+// IsGenerated reports a generated column of either kind: its Default is the
+// generation expression, never a column default.
+func (c Column) IsGenerated() bool {
+	return c.Generated || c.Virtual
 }
 
 // Constraint is one table constraint: its name plus the server-decompiled

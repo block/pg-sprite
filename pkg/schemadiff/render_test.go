@@ -158,6 +158,16 @@ func TestRenderRefusesCollatedColumn(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnrenderableCollation)
 }
 
+// A virtual generated column refuses to render: no desired file can
+// declare one, and rendering it as STORED or as a default would silently
+// change what the column is.
+func TestRenderRefusesVirtualColumn(t *testing.T) {
+	m := base()
+	m.Columns = append(m.Columns, Column{Name: "doubled", Type: "integer", Virtual: true, Default: "(id * 2)"})
+	_, err := Render(m)
+	require.ErrorIs(t, err, ErrUnrenderableVirtual)
+}
+
 // A table that owns a foreign key refuses to render: desired-state execution
 // refuses every foreign-key change, so a baseline carrying one could never be
 // applied.
