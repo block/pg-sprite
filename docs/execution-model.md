@@ -335,6 +335,7 @@ concurrently is.
 | `unsupported-create-step` | yes | A desired statement is not a shape the create path can run |
 | `pool-too-small` | yes | The pool cannot hold every session the operation needs at once: a build's session and verdict connection, or a recovery's own session beside those |
 | `replica-identity-drop` | yes | A native drop would remove what a replica identity index is built on, read again under the table's lock after planning; nothing was dropped. Point `REPLICA IDENTITY` at another unique index first, or `DEFAULT` if a usable primary key remains after the drop, then re-plan |
+| `adopted-index-drift` | yes | The index a planned `ADD CONSTRAINT ... USING INDEX` takes over was dropped, replaced under the same name, or left invalid after planning, read again under the table's lock; nothing was attached. Re-plan against the index as it stands |
 | `table-not-found` | yes | The statement's qualified table does not exist |
 | `invariant-violation` | yes | A breach of the invariant registry; never a retry candidate |
 | `execution-failed` | no | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |

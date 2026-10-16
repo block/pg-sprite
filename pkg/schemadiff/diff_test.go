@@ -313,6 +313,97 @@ func TestDiffIndexChangeDropsAndRecreatesQualified(t *testing.T) {
 	}, sqls(changes))
 }
 
+// A new unique constraint whose name and index match a live unique index
+// takes the index over in place rather than dropping it and building its
+// own, which would leave the table without the guarantee and without the
+// index while the build runs. Every shape the server would not adopt, or
+// that would not come out the same as a fresh constraint, keeps the drop
+// and rebuild.
+func TestDiffKeyConstraintAdoptsTheLiveIndex(t *testing.T) {
+	const indexDef = "CREATE UNIQUE INDEX events_name_key ON events USING btree (name)"
+	live := func(ix Index) Model {
+		m := base()
+		m.Indexes = []Index{ix}
+		return m
+	}
+	desired := func(con Constraint) Model {
+		m := base()
+		m.Indexes = nil
+		m.Constraints = append(m.Constraints, con)
+		return m
+	}
+	unique := Constraint{Name: "events_name_key", Def: "UNIQUE (name)", IndexDef: indexDef}
+	rebuild := []string{
+		`DROP INDEX "public"."events_name_key"`,
+		`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE (name)`,
+	}
+
+	t.Run("a unique constraint", func(t *testing.T) {
+		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef}), desired(unique))
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE USING INDEX "events_name_key"`,
+		}, sqls(changes))
+		assert.False(t, changes[0].Destructive)
+		assert.Equal(t, ChangeAddConstraint, changes[0].Kind)
+		assert.Equal(t, &IndexAdoption{Index: "events_name_key", Def: indexDef}, changes[0].Adopts,
+			"execution checks the index against the definition the diff matched")
+	})
+
+	t.Run("a primary key", func(t *testing.T) {
+		const pkDef = "CREATE UNIQUE INDEX events_pkey ON events USING btree (id)"
+		l := base()
+		l.Constraints = nil
+		l.Indexes = []Index{{Name: "events_pkey", Def: pkDef}}
+		d := base()
+		d.Indexes = nil
+		d.Constraints = []Constraint{{Name: "events_pkey", Def: "PRIMARY KEY (id)", Primary: true, IndexDef: pkDef}}
+		changes, err := Diff("public", l, d)
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_pkey" PRIMARY KEY USING INDEX "events_pkey"`,
+		}, sqls(changes))
+	})
+
+	t.Run("an index of another definition", func(t *testing.T) {
+		other := Index{Name: "events_name_key", Def: "CREATE UNIQUE INDEX events_name_key ON events USING btree (name) WHERE (id > 0)"}
+		changes, err := Diff("public", live(other), desired(unique))
+		require.NoError(t, err)
+		assert.Equal(t, rebuild, sqls(changes))
+	})
+
+	t.Run("an unfinished build", func(t *testing.T) {
+		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef, Invalid: true}), desired(unique))
+		require.NoError(t, err)
+		assert.Equal(t, rebuild[1:], sqls(changes), "the unfinished build is never dropped here, and never adopted")
+	})
+
+	t.Run("a deferrable constraint", func(t *testing.T) {
+		deferrable := unique
+		deferrable.Def = "UNIQUE (name) DEFERRABLE"
+		deferrable.Deferrable = true
+		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef}), desired(deferrable))
+		require.NoError(t, err)
+		assert.Equal(t, []string{
+			rebuild[0],
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE (name) DEFERRABLE`,
+		}, sqls(changes))
+		for _, ch := range changes {
+			assert.Nil(t, ch.Adopts, ch.SQL)
+		}
+	})
+
+	t.Run("a partitioned parent", func(t *testing.T) {
+		l := live(Index{Name: "events_name_key", Def: indexDef})
+		l.PartitionKey = "RANGE (id)"
+		d := desired(unique)
+		d.PartitionKey = "RANGE (id)"
+		changes, err := Diff("public", l, d)
+		require.NoError(t, err)
+		assert.Equal(t, rebuild, sqls(changes))
+	})
+}
+
 // A live index that matches the desired definition but is invalid is an
 // unfinished concurrent build: it does not deliver the desired index, so
 // the diff emits the create — and only the create, never a blocking DROP
