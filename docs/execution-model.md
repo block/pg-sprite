@@ -144,8 +144,8 @@ failed (budget-lock-exceeded)
   detail:    sequence step 3 of 4 failed; the 2 committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes
   failed at: step 3: ALTER TABLE "public"."users" ALTER COLUMN "email" SET NOT NULL
   committed before the failure (their state remains):
-    1. ALTER TABLE "public"."users" ADD CONSTRAINT "users_email_not_null" CHECK ("email" IS NOT NULL) NOT VALID
-    2. ALTER TABLE "public"."users" VALIDATE CONSTRAINT "users_email_not_null"
+    1. ALTER TABLE "public"."users" ADD CONSTRAINT "users_email_not_null_check" CHECK ("email" IS NOT NULL) NOT VALID
+    2. ALTER TABLE "public"."users" VALIDATE CONSTRAINT "users_email_not_null_check"
 ```
 
 With `--json`, the same verdict is the machine-readable twin — `executed_sql`
@@ -162,8 +162,8 @@ everything after was never attempted:
   "table": "public.users",
   "detail": "sequence step 3 of 4 failed; the 2 committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes",
   "executed_sql": [
-    "ALTER TABLE \"public\".\"users\" ADD CONSTRAINT \"users_email_not_null\" CHECK (\"email\" IS NOT NULL) NOT VALID",
-    "ALTER TABLE \"public\".\"users\" VALIDATE CONSTRAINT \"users_email_not_null\""
+    "ALTER TABLE \"public\".\"users\" ADD CONSTRAINT \"users_email_not_null_check\" CHECK (\"email\" IS NOT NULL) NOT VALID",
+    "ALTER TABLE \"public\".\"users\" VALIDATE CONSTRAINT \"users_email_not_null_check\""
   ]
 }
 ```
@@ -240,7 +240,7 @@ needed):
 
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN email SET NOT NULL' --force public.users
-$ pg-sprite migrate --alter 'ALTER TABLE users DROP CONSTRAINT users_email_not_null'
+$ pg-sprite migrate --alter 'ALTER TABLE users DROP CONSTRAINT users_email_not_null_check'
 ```
 
 Re-issuing the original statement *without* `--force` fails loudly at step 1
