@@ -353,14 +353,15 @@ explicitly, in which case a user schema listed ahead of it shadows the catalog: 
 `app.pg_index` turns a fail-closed proof into a false clean, and a decoy `pg_cancel_backend`
 returns true and signals nothing. Two layers uphold the invariant. At the connection layer,
 every pooled session drops a `pg_catalog` entry that another schema precedes (`pkg/dbconn`
-`unshadowCatalog`), and every transaction-local path is built by `dbconn.LocalSearchPath`, which
-applies the same rewrite. At the query layer, reads that run under a path pg-sprite did not set
+`unshadowCatalog`), and every path pg-sprite sets is built in `pkg/dbconn`, which applies the
+same rewrite: `LocalSearchPath` for a transaction, and `SessionSearchPath` with
+`RestoreSessionSearchPath` for a session-level statement such as a concurrent build. At the query layer, reads that run under a path pg-sprite did not set
 — the session's own — qualify every relation, function, operator, and type with `pg_catalog`.
 The connection-layer guarantee is per session: it rewrites an explicit `pg_catalog` entry only,
 not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary objects), and a
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
-*Enforced:* `pkg/dbconn` (session hook, `LocalSearchPath`, and the test that keeps it the only
-`search_path` writer under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
+*Enforced:* `pkg/dbconn` (session hook, the path builders, and the test that keeps them the only
+`search_path` writers under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
 `pkg/progress`, `pkg/schemadiff`, and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local

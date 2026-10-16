@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -13,6 +14,13 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/statement"
 )
+
+// ErrDesiredPartitionOf is returned for a desired file whose CREATE TABLE
+// is PARTITION OF a parent. The scratch build would attach the scratch
+// table to the live partitioned parent, which takes ACCESS EXCLUSIVE on the
+// parent and blocks its reads and writes until the scratch transaction
+// rolls back, so the file is refused before anything runs.
+var ErrDesiredPartitionOf = errors.New("a desired CREATE TABLE ... PARTITION OF cannot be planned: building it would lock the live partitioned parent")
 
 // IntrospectDesired materializes a desired-state schema on a scratch schema
 // and introspects it into the canonical model: execute-and-introspect, the
@@ -60,6 +68,10 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 		_ = tx.Rollback(cleanup)
 	}()
 
+	if err := refusePartitionOf(statements); err != nil {
+		return Model{}, err
+	}
+
 	scratch, err := scratchSchemaName()
 	if err != nil {
 		return Model{}, err
@@ -69,9 +81,12 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 		return Model{}, fmt.Errorf("create scratch schema: %w", err)
 	}
 	// Unqualified desired statements must land on the scratch schema, while
-	// extension types installed in public stay resolvable. The path is
-	// built by dbconn so it upholds CO-9 like the session's.
-	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(scratch, "public")); err != nil {
+	// the target schema's own types and functions, and extension types
+	// installed in public, stay resolvable by the names the live table's
+	// definitions print with. The path is built by dbconn so it upholds
+	// CO-9 like the session's.
+	path := scratchSearchPath(scratch, refs.schema)
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(path...)); err != nil {
 		return Model{}, fmt.Errorf("set scratch search_path: %w", err)
 	}
 	if err := createReferencedStandIns(ctx, tx, scratch, refs.schema, refs.tables); err != nil {
@@ -97,7 +112,7 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	if err := confirmForeignKeysBindScratch(ctx, tx, scratch, table); err != nil {
 		return Model{}, err
 	}
-	m, err := introspectInTx(ctx, tx, scratch, table)
+	m, err := introspectOnPath(ctx, tx, scratch, table, path)
 	if err != nil {
 		return Model{}, fmt.Errorf("introspect desired state: %w", err)
 	}
@@ -105,6 +120,40 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 		return Model{}, fmt.Errorf("roll back scratch schema: %w", err)
 	}
 	return m, nil
+}
+
+// refusePartitionOf refuses a desired CREATE TABLE ... PARTITION OF before
+// the scratch build runs it (see ErrDesiredPartitionOf).
+func refusePartitionOf(statements []statement.Statement) error {
+	for _, st := range statements {
+		if st.Kind() != statement.KindCreateTable {
+			continue
+		}
+		ops, err := statement.ParseOps(st.SQL())
+		if err != nil {
+			return fmt.Errorf("parse desired CREATE TABLE: %w", err)
+		}
+		for _, op := range ops {
+			if op.PartitionOf {
+				return fmt.Errorf("desired table %q: %w", st.Table(), ErrDesiredPartitionOf)
+			}
+		}
+	}
+	return nil
+}
+
+// scratchSearchPath is the search_path a scratch build runs and is
+// introspected under: the scratch schema first, so every unqualified object
+// the desired file creates lands there, then the path the live table is
+// introspected under. A type or function the target schema defines then
+// resolves from the file by its bare name, as it does for the live table,
+// and both sides print it unqualified, so the two models compare equal. An
+// empty target leaves only public behind the scratch schema.
+func scratchSearchPath(scratch, target string) []string {
+	if target == "" {
+		return []string{scratch, "public"}
+	}
+	return append([]string{scratch}, searchPathFor(target)...)
 }
 
 // scratchSchemaName returns a collision-resistant scratch schema name. The
