@@ -96,7 +96,7 @@ Two consequences follow, and they explain most of this page:
 
 | Tier | Meaning | What you see today |
 | --- | --- | --- |
-| **T1 — supported today** | The engine executes the change through an online-safe pattern | Execution (or the safer rewritten sequence), exit 0; where `migrate` refuses a plain index-maintenance form and names its `CONCURRENTLY` idiom, `--accept-blocking` runs the plain form under budgets and exits 3 |
+| **T1 — supported today** | The engine executes the change through an online-safe pattern | Execution (or the safer rewritten sequence), exit 0 |
 | **T2 — planned** | A known online pattern exists (or requires the copy-and-swap engine); building it is on the roadmap | A **typed refusal** naming the reason, exit 2 — never a silent fallback to a blocking form |
 | **T3 — out of scope by design** | No online-safety problem to solve, solving it belongs to a different tool class, or PostgreSQL offers no online mechanism to build on | A typed refusal or a parse-level rejection, with the reason stating *why it is not planned* |
 
@@ -113,8 +113,11 @@ them is a limitation:
   tool (data-change runners, provisioning/IaC, convergence planners, expand/contract
   frameworks). The row's "Online-safety problem?" column names the class to look for.
 - **❌ no online mechanism exists** — PostgreSQL itself provides no online pattern to
-  build on, so pg-sprite refuses rather than silently run the blocking form. These are
-  the only rows where "unsupported" is the honest reading.
+  build on, so pg-sprite refuses rather than silently run the blocking form. The one
+  exception is index maintenance (`DROP INDEX`, `REINDEX`): the online form is a plain
+  `CONCURRENTLY` statement, which `migrate` refuses to wrap and names so you run it
+  directly; for a single-relation plain form, `--accept-blocking` runs it under budgets
+  and exits 3.
 
 Every matrix table carries an **"Online-safety problem?"** column: "Yes" means there is a
 readers-and-writers problem for an online engine to solve (pg-sprite solves it, plans to,
@@ -182,8 +185,8 @@ are the canonical example.
 > `make gen-capabilities`; do not edit the generated regions below by hand.
 
 <!-- capabilities:begin summary -->
-**56 operations: 19 supported today, 21 planned behind a typed refusal, 14 out of scope
-by design, and 2 with no online mechanism in PostgreSQL to build on.**
+**56 operations: 15 supported today, 23 planned behind a typed refusal, 14 out of scope
+by design, and 4 with no online mechanism for pg-sprite to build on.**
 <!-- capabilities:end summary -->
 
 Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today) ·
@@ -230,8 +233,8 @@ review the object warrants) ·
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | `CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN | ✅ | native, safer sequence | Yes | Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification, typed invalid-index outcomes, and a proven recovery for abandoned leftovers (`RebuildAbandonedIndex`, or `DropAbandonedIndex` to remove the leftover without rebuilding; both library-only; [runbook](invalid-index-recovery.md)) |
-| `DROP INDEX` | ✅ | native, safer sequence | Yes | Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**. `migrate` refuses the plain form and names the idiom; a single-index `DROP INDEX` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0) |
-| `REINDEX` | ✅ | native, safer sequence | Yes | Rewritten to `REINDEX ... CONCURRENTLY`. `migrate` refuses the plain form and names the idiom; a plain `REINDEX INDEX` or `REINDEX TABLE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM` stay refused |
+| `DROP INDEX` | ❌ | — | Yes — the online form is a direct `CONCURRENTLY` statement that `migrate` does not drive | `migrate` never runs this statement: the plain form is refused and names `DROP INDEX CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. A single-index plain `DROP INDEX` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `diff` reports an index to remove as a **destructive** statement |
+| `REINDEX` | ❌ | — | Yes — the online form is a direct `CONCURRENTLY` statement that `migrate` does not drive | `migrate` never runs this statement: the plain form is refused and names `REINDEX ... CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. A plain `REINDEX INDEX` or `REINDEX TABLE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM` stay refused. A desired schema cannot express a reindex, so `diff` never produces one |
 | Index build on a **partitioned parent** | 🟡 | native, planned flow | Yes | PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it, and `--accept-blocking` does not reach it yet). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned |
 | `ADD CONSTRAINT ... USING INDEX` on a partitioned parent | ❌ | — | Yes — unsolvable today | PostgreSQL does not support adopting an index on a partitioned parent in any supported version; refused before execution |
 <!-- capabilities:end indexes -->
@@ -242,8 +245,8 @@ review the object warrants) ·
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | `CREATE TABLE ... PARTITION OF` | 🟡 | native, planned flow | Yes | Typed refusal at both doors: the imperative door does not take `CREATE TABLE`, and the declarative create path refuses the form at plan time and re-checks it at apply — attaching a partition takes a brief `ACCESS EXCLUSIVE` on the **parent**, which the greenfield absence proof does not cover. The partition-aware flow is planned |
-| `ATTACH PARTITION` | ✅ | native, as-is | Yes | Executed; the safer idiom (pre-prove the bound with a validated `CHECK` so the attach skips its scan) is surfaced as guidance. A classify-first flow that constructs the proof itself is planned |
-| `DETACH PARTITION [CONCURRENTLY]` | ✅ | native, safer sequence | Yes | `CONCURRENTLY` is the idiom; the blocking form is rewritten to it |
+| `ATTACH PARTITION` | 🟡 | native, planned flow | Yes | Typed refusal, nothing executed: the attach scans the partition to validate its bound unless a validated `CHECK` already proves it, and the engine does not yet construct that proof. The safer idiom (pre-prove the bound with a validated `CHECK` so the attach skips its scan) is surfaced as guidance. The classify-first flow that constructs the proof itself is planned. A desired schema cannot express an attach, so `diff` never produces one |
+| `DETACH PARTITION [CONCURRENTLY]` | 🟡 | native, planned flow | Yes | `CONCURRENTLY` is the idiom and the blocking form is rewritten to it (`--dry-run` and `suggest` show the rewrite), but `migrate` refuses both forms before anything executes: a cancelled concurrent detach leaves a detach-pending partition state the executor does not yet own recovering. A desired schema cannot express a detach, so `diff` never produces one |
 | Partitioned parents in the **declarative model** | 🟡 | native, planned flow | Yes | Typed refusal: the model does not yet carry partition keys, and rendering a partitioned parent as a plain `CREATE TABLE` would be silently wrong |
 | Partitioned tables in **copy-and-swap** | 🟡 | copy-and-swap | Yes | Root-vs-leaf publication semantics and per-partition swap; sequenced after the copy engine core |
 <!-- capabilities:end partitioned_tables -->
@@ -426,8 +429,8 @@ Three related jobs stay with humans on purpose:
   the recovery handles, and what the rest license a human to do is
   [invalid-index-recovery.md](invalid-index-recovery.md).
 - **Index maintenance (`REINDEX` automation, bloat-driven rebuild scheduling).** The
-  engine executes `REINDEX CONCURRENTLY` when asked (see matrix); *deciding* when an
-  index needs rebuilding is monitoring-and-operations territory. Automating it is
+  engine does not drive `REINDEX` at all (see matrix) — run `REINDEX ... CONCURRENTLY`
+  directly; *deciding* when an index needs rebuilding is monitoring-and-operations territory. Automating it is
   considered but on hold for the same ownership reasons as above.
 
 ---

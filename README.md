@@ -82,7 +82,10 @@ refusal — never a silently wrong or incomplete result:
   lock. Virtual generated columns (PostgreSQL 18+) are not modeled: export
   refuses them and a desired file that redeclares one fails the diff.
 - **Partitioned tables** support in-place statement changes, but cannot be
-  expressed in or exported to desired files.
+  expressed in or exported to desired files, and `migrate` refuses
+  `ATTACH PARTITION` and `DETACH PARTITION`.
+- **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
+  `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.
