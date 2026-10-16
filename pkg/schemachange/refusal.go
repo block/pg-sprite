@@ -47,10 +47,13 @@ const (
 	// CauseStatementConversion means the gated statement retypes a column
 	// with a USING expression the copy cannot carry as written (ST-7): the
 	// deparser cannot prove it rendered the expression faithfully, the
-	// statement retypes the same column twice, or the expression converts
+	// expression reads a column other than the one it retypes, the
+	// statement retypes the same column twice, the expression converts
 	// the primary key, whose values the copy's chunk ranges, watermark, and
-	// resume clear are expressed in. The statement's own sentinel, when
-	// there is one, is wrapped for errors.Is.
+	// resume clear are expressed in, or the server does not classify the
+	// expression as immutable, so its evaluations in the copy, the recopy,
+	// and the catch-up need not agree. The statement's own sentinel, or
+	// ErrConversionNotImmutable, is wrapped for errors.Is.
 	CauseStatementConversion RefusalCause = "shadow-statement-conversion"
 	// CauseShadowOwner means the shadow the build just created is not owned
 	// by the source's owner (ST-5): the role the proof carries is no longer

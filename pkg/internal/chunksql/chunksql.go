@@ -1,10 +1,11 @@
 // Package chunksql holds the one statement that puts a chunk of source rows
-// into the shadow, and the search_path it runs under. The copier runs the
-// statement for every chunk it lands and the verifier runs it for every
-// chunk it repairs; one text in one place is what makes a repair put back
-// exactly what a copy would have, and keeps the statement off the public
-// API, where a caller could run it outside the guard both packages wrap
-// around it.
+// into the shadow, and the search_path and output settings it runs under.
+// The copier runs the statement for every chunk it lands and the verifier
+// runs it for every chunk it repairs; one text in one place is what makes
+// a repair put back exactly what a copy would have, and keeps the statement
+// off the public API, where a caller could run it outside the guard both
+// packages wrap around it. The applier's flush shares the path and the
+// settings, since it evaluates the same conversion expressions.
 package chunksql
 
 import (
@@ -53,6 +54,23 @@ func Insert(schema, source, shadow, key string, columns []string, conversions ma
 		" WHERE " + pk + " BETWEEN $1::bigint AND $2::bigint" +
 		" ON CONFLICT (" + pk + ") DO NOTHING"
 }
+
+// Rendering pins, for the rest of the transaction, the two output settings
+// under which one value has more than one text rendering: extra_float_digits
+// at its maximum, so float4, float8, and the geometric types render every
+// digit rather than rounding to fifteen at zero or below, and bytea_output
+// at hex rather than escape. The server classifies a float or bytea cast
+// to text as immutable, so a conversion such as `value::text` passes the
+// shadow build's probe although its result follows these settings; the
+// chunk copy, the verifier's recopy and digest, and the catch-up's flush
+// each evaluate it in a session of their own, and a database or role
+// configured differently from the copier's pool would otherwise land one
+// rendering from the copy and another from the flush, which the digest then
+// reads as divergence and the repair recopies forever. The flush's marker
+// completions read a value as text and bind it back, so they need the same
+// pin whether or not the proof carries conversions. SET LOCAL cannot take
+// bind parameters; both values are constants.
+const Rendering = "SET LOCAL extra_float_digits = 3; SET LOCAL bytea_output = 'hex'"
 
 // SearchPath is the transaction-local path statement, built by dbconn, for
 // a transaction that runs Insert. Without conversions the statement names nothing the path

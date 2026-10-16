@@ -57,6 +57,9 @@ func TestNewFlusherRefusesAShadowThatIsNotTheTargets(t *testing.T) {
 		"shadow is the source by relation": {withOIDs(good, 7, 7), "shadow proof for " + f.schema + ".orders names relation 7 as both source and shadow"},
 		"no columns":                       {withColumns(good), "shadow copy columns for " + f.schema + ".orders do not include the primary key id"},
 		"no primary key":                   {withColumns(good, "qty"), "shadow copy columns for " + f.schema + ".orders do not include the primary key id"},
+		"converted primary key":            {withConversions(good, "id", "id::bigint"), "shadow proof for " + f.schema + ".orders converts the primary key id"},
+		"converted column not copied":      {withConversions(good, "note", "note::text"), "shadow proof for " + f.schema + ".orders converts column note, which the copy does not carry"},
+		"empty conversion":                 {withConversions(good, "qty", ""), "shadow proof for " + f.schema + ".orders converts column qty with an empty expression"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -87,6 +90,10 @@ func withOIDs(s fakeShadow, source, shadow uint32) fakeShadow {
 	return s
 }
 func withColumns(s fakeShadow, columns ...string) fakeShadow { s.columns = columns; return s }
+func withConversions(s fakeShadow, column, expr string) fakeShadow {
+	s.conversions = map[string]string{column: expr}
+	return s
+}
 
 // The flush resolves every unqualified operator in the catalog, whatever
 // the session's search_path says (CO-9): a schema-local `=` that never

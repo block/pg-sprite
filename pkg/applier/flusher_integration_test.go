@@ -393,3 +393,18 @@ func (f flushFixture) goneLock(t *testing.T, table string) *dbconn.TableLockSess
 	require.NoError(t, lock.Err(), "the keepalive has not yet noticed the loss; the in-transaction check must")
 	return lock
 }
+
+// poolWithRuntimeParam is a pool on the fixture's server whose every
+// session starts with the named setting at value, as a connection
+// parameter: the setting reaches no other pool and nothing is left behind
+// on the server.
+func (f flushFixture) poolWithRuntimeParam(t *testing.T, name, value string) *pgxpool.Pool {
+	t.Helper()
+	pc, err := pgxpool.ParseConfig(f.cfg.URL)
+	require.NoError(t, err)
+	pc.ConnConfig.RuntimeParams[name] = value
+	pool, err := pgxpool.NewWithConfig(t.Context(), pc)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	return pool
+}
