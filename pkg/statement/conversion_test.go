@@ -92,8 +92,71 @@ func TestColumnConversionsRefusesOtherShapes(t *testing.T) {
 func TestColumnConversionsRefusesAnExpressionThatDoesNotRoundTrip(t *testing.T) {
 	_, err := statement.ColumnConversions(`
 		ALTER TABLE t
-			ALTER COLUMN a TYPE text USING (ARRAY[a, b])[1]`)
+			ALTER COLUMN a TYPE text USING (ARRAY[a, a])[1]`)
 	require.ErrorIs(t, err, statement.ErrConversionRendering)
+}
+
+// A USING expression may name only the column it retypes, and only bare:
+// the catch-up converts a column value on its own, with no neighbouring
+// column, table alias, or whole row to resolve anything else against. The
+// refusal names the reference as the user spelled it, wherever it sits in
+// the expression, and says what the expression may name instead.
+func TestColumnConversionsRefuseAReferenceBeyondTheRetypedColumn(t *testing.T) {
+	cases := []struct {
+		name   string
+		sql    string
+		column string
+		ref    string
+	}{
+		{
+			name:   "another column as an operand",
+			sql:    `ALTER TABLE t ALTER COLUMN total TYPE numeric USING qty * price`,
+			column: "total",
+			ref:    "qty",
+		},
+		{
+			name:   "another column nested in a CASE",
+			sql:    `ALTER TABLE t ALTER COLUMN ts TYPE timestamptz USING CASE WHEN ts IS NULL THEN created_at ELSE ts::timestamptz END`,
+			column: "ts",
+			ref:    "created_at",
+		},
+		{
+			name:   "another column inside a function call",
+			sql:    `ALTER TABLE t ALTER COLUMN qty TYPE integer USING coalesce(qty, fallback)::integer`,
+			column: "qty",
+			ref:    "fallback",
+		},
+		{
+			name:   "the retyped column qualified by the table",
+			sql:    `ALTER TABLE t ALTER COLUMN qty TYPE integer USING t.qty::integer`,
+			column: "qty",
+			ref:    "t.qty",
+		},
+		{
+			name:   "a whole-row reference",
+			sql:    `ALTER TABLE t ALTER COLUMN doc TYPE jsonb USING to_jsonb(t.*)`,
+			column: "doc",
+			ref:    "t.*",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := statement.ColumnConversions(tc.sql)
+			require.ErrorIs(t, err, statement.ErrConversionForeignColumn)
+			assert.ErrorContains(t, err, "refers to "+tc.ref+"; the expression may name only "+tc.column+", unqualified")
+		})
+	}
+}
+
+// A constant expression and one that names the retyped column several
+// times both pass: neither reaches past the column.
+func TestColumnConversionsAllowTheRetypedColumnAlone(t *testing.T) {
+	got, err := statement.ColumnConversions(`ALTER TABLE t ALTER COLUMN qty TYPE integer USING CASE WHEN qty ~ '^[0-9]+$' THEN qty::integer ELSE 0 END`)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"qty": "CASE WHEN qty ~ '^[0-9]+$' THEN qty::int ELSE 0 END"}, got)
+	got, err = statement.ColumnConversions(`ALTER TABLE t ALTER COLUMN flag TYPE boolean USING true`)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]string{"flag": "true"}, got)
 }
 
 // The rendering the copy carries is the gated statement's expression as
