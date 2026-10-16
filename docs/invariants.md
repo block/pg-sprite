@@ -757,11 +757,13 @@ lost before any measure, unknown never read as nothing retained, over the ceilin
 `SlotLagExceededError` — and refuses a ceiling below one byte) + `pkg/checkpoint`
 `Store.ReapOrphanSlots` (one pass over the logical, engine-prefixed slots of the store's own
 database: the slots are listed first and the checkpoint rows that own them read in a later
-statement, so a row committed before its slot appears is seen whenever the slot is, and each
-slot's row is read again right before its drop, under the engine's advisory lock on the slot's
-name (`Store.WithSlotLock`) that a run claiming the slot holds while it makes the slot and
-commits the row that names it, so a run that claimed it since the pass began keeps it and one
-claiming it now waits for the drop and creates afresh; a slot no row in a non-terminal phase
+statement, which sorts the slots a live row plainly names out of the pass, and each slot's row
+is read again right before its drop — the read that decides — under the engine's advisory lock
+on the slot's name (`Store.WithSlotLock`, transaction-scoped on a connection dialled outside
+the store's pool, so the holder's own work on the pool never waits on the seat the lock sits
+in) that a run claiming the slot holds while it makes the slot and commits the row that names
+it, so a run that claimed it since the pass began keeps it and one claiming it now waits for
+the drop and creates afresh; a slot no row in a non-terminal phase
 names is dropped through `DropIdleSlot`,
 publication and all, which refuses a held slot instead of waiting for its holder — whether a
 slot is held is judged at the drop, since `pg_replication_slots` reads shared memory, not a
@@ -775,7 +777,9 @@ be set below one byte; a slot that vanished is `SlotLostError`; crossing the cei
 `Run` with the table lock intact and the slot in place for the operator to read) +
 `pkg/schemachange.Runner` (on a decoding target it creates the slot under the store's lock on
 the slot's name, in the same step as the row that names it, so the reaper never meets the slot
-before its row; a first save whose row does not land drops the slot and the shadow again; a
+before its row; a first save whose row does not land drops the slot and the shadow again, while
+a slot of the derived name the run did not make is reported as the `*decode.SlotExistsError`
+it is and left as found; a
 stopped run leaves the slot under its row, and the next `Run` reopens the stream from the
 row's position — a ceiling abort included, so the backlog is drained by resuming — or the
 operator abandons the run with `DropShadow`, `decode.DropSlot`, and `Store.Delete`; the slot
