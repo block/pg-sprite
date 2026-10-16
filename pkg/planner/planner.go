@@ -619,6 +619,13 @@ func tableIdent(st statement.Statement) string {
 // the invariant online with a NOT VALID CHECK, flip the column, drop the
 // scaffold.
 //
+// The scaffold is named <table>_<column>_not_null_check, never
+// <table>_<column>_not_null: from PostgreSQL 18, SET NOT NULL records a
+// NOT NULL constraint under that second name, and while the scaffold held
+// it the server would pick the next free one instead. The converged table
+// would then carry a different constraint name from the same table built
+// directly from its definition.
+//
 // Partial-failure contract: step 1 leaves a NOT VALID CHECK under the
 // generated scaffold name, and re-running step 1 then fails with SQLSTATE
 // 42710 (duplicate_object) — a retry resumes at step 2. A failed VALIDATE
@@ -627,7 +634,7 @@ func tableIdent(st statement.Statement) string {
 // running step 4 alone.
 func setNotNullSequence(st statement.Statement, column string) []string {
 	table := tableIdent(st)
-	conName := fitIdentifier(fmt.Sprintf("%s_%s_not_null", st.Table(), column))
+	conName := fitIdentifier(fmt.Sprintf("%s_%s_not_null_check", st.Table(), column))
 	con := pgx.Identifier{conName}.Sanitize()
 	col := pgx.Identifier{column}.Sanitize()
 	return []string{
