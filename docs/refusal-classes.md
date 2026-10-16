@@ -159,9 +159,16 @@ react. Only the causes that mean the caller handed the engine an incoherent inpu
 engine's own write did not take, are `invariant-violation`; one, `shadow-statement-conversion`,
 is a `capability-boundary`, since it describes a statement the engine declines to carry rather
 than a fault; the rest describe a lock, a proof, or a relation whose state moved under the
-operation, and the importer retries, re-plans, or cleans up. No verdict reason carries these
-causes yet; the classification is fixed here first
-so the cutover route inherits it.
+operation, and the importer retries, re-plans, or cleans up. `RefusalCause.Class()` answers
+the `class` column below as a `refusal.Class` (`pkg/refusal`, the core's declaration of the
+classes the cause tables in this document use), so an importer triages on the class without
+reading the cause's text, and a periphery adapter converts it to `verdict.Class` with a plain
+conversion, since the verdict declares its tokens from the same constants. The class is
+triage, not the action: an `environmental` cause such as `cutover-outcome-ambiguous` or
+`shadow-foreign-relation` is resolved by an operator reading the catalog, as its *Why* says,
+and no class licenses an automatic retry on its own. No verdict reason
+carries these causes yet; the classification is fixed here first so the cutover route
+inherits it.
 
 | `RefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
@@ -252,6 +259,9 @@ copier directly reads the copier's. A lock or relation fault during the copy pha
 from `Runner.Run` under the shadow-operation name — `shadow-lock-lost`,
 `cutover-relation-replaced` — by design: the fault is the same one a shadow operation would
 refuse on, and the reaction is the same, whichever phase noticed it first.
+`copier.RefusalCause.Class()` answers the `class` column below as a `refusal.Class`, and every
+re-mint keeps the copier cause's class, so an importer reading either vocabulary routes the
+same way.
 
 | `copier.RefusalCause` | What the refusal says | `class` | Why | Re-minted by `Runner` as |
 | --- | --- | --- | --- | --- |
@@ -398,7 +408,15 @@ The map in this document is pinned: the `docs_test.go` guards
 in `pkg/verdict`, `pkg/executor`, `pkg/preflight`, `pkg/schemachange`, and `pkg/copier` fail
 when a `Reason`, `CreateShapeCause`, `PartitionRefusalCause`, `CopySwapRefusalCause`, or either
 package's `RefusalCause` exists in the code without a row here, so a new discriminator value
-cannot land unclassified.
+cannot land unclassified. The shadow and copier guards go one step further and compare each
+cause's `Class()` to its row's `class` cell, so the two cannot disagree, and each asserts that
+every class a cause answers is a member of `refusal.Classes()`; `pkg/refusal`'s guards hold
+its classes to the vocabulary table above and every `class` cell of every cause table in this
+document to its closed set, so a cause table cannot classify a cause under a class the engine
+cannot name; and `pkg/verdict`'s holds every one of them to be a `verdict.Class`, the
+verdict adding only `no-online-safety-problem`. `preflight.PartitionRefusalCause`,
+`preflight.CopySwapRefusalCause`, and `executor.CreateShapeCause` have a class cell but no
+`Class()` yet; their rows are already held to the closed set.
 
 ## Shared vocabulary with the capabilities matrix
 

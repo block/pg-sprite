@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 // RefusalCause identifies why a shadow operation refused to proceed. Every
@@ -263,6 +265,42 @@ func (c RefusalCause) Invariant() string {
 	}
 }
 
+// Class is the routing class of the cause, from docs/refusal-classes.md:
+// what kind of boundary the importer is looking at. A cause that describes
+// a lock, a proof, a relation, a slot, or a row whose state moved under the
+// operation is environmental — state outside the engine stopped a
+// supportable change. A statement the engine declines to carry as written
+// is a capability boundary. Every other cause is an invariant violation: an
+// input the caller handed in that cannot have come from this engine, or a
+// write of the engine's own that the catalog does not show; nothing on the
+// server changes that, so the importer reports it. The class is a triage
+// decision; the cause's row in the document decides what the importer does
+// next — re-acquire, re-run preflight, drop and rebuild, or hand the
+// catalog to an operator — and no class licenses an automatic retry on its
+// own: an ambiguous cutover outcome is environmental and is resolved by
+// inspection, never by running the swap again. An unknown cause has no
+// class.
+func (c RefusalCause) Class() refusal.Class {
+	switch c {
+	case CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed, CauseSourceShape,
+		CauseShadowOwner, CauseForeignRelation, CauseIdentityHandoff, CauseDrainDeferred,
+		CauseRelationReplaced, CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid,
+		CauseNameTaken, CauseOutcomeAmbiguous, CauseShadowUnrecorded, CauseResumeSlotForeign,
+		CauseResumeSlotHeld:
+		return refusal.ClassEnvironmental
+	case CauseStatementConversion:
+		return refusal.ClassCapabilityBoundary
+	case CauseLockUnproven, CauseProofEmpty, CauseStatementTarget, CauseGrantsDiffer,
+		CauseCutoverUnverified, CauseCutoverUndrained, CauseSwapMismatch, CauseResumeTerminal,
+		CauseResumeCutover, CauseResumeRowMismatch, CauseResumeRowDecoding,
+		CauseCopyShadowMismatch, CauseCopyFrontierBroken, CauseCopyChunksInFlight,
+		CauseCopyChunkUnknown:
+		return refusal.ClassInvariantViolation
+	default:
+		return ""
+	}
+}
+
 // RefusalError is a shadow operation's fail-closed refusal. It wraps
 // ErrInvariantViolation, so errors.Is against that sentinel keeps working,
 // and any error behind the refusal — the lock session's loss, the statement
@@ -303,7 +341,11 @@ func refuse(cause RefusalCause, wrapped []error, detail string, args ...any) err
 
 // RefusalCauseOf returns the shadow refusal cause carried by err, or the
 // empty cause when err is nil or carries no shadow refusal. Wrappers are
-// read through.
+// read through, so a copier refusal the Runner re-minted answers its shadow
+// cause here and its copier cause to copier.RefusalCauseOf.
+// RefusalCauseOf(err).Class() is therefore the refusal's class, and the
+// empty class for an error that is not a shadow refusal — a server error
+// the importer routes by SQLSTATE, or the bare sentinel.
 func RefusalCauseOf(err error) RefusalCause {
 	var refusal *RefusalError
 	if errors.As(err, &refusal) {
