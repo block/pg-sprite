@@ -76,6 +76,11 @@ refusal — never a silently wrong or incomplete result:
   the plan. Export refuses both a table that carries foreign keys and a
   table that other tables reference. FK DDL still works through
   `migrate --alter` (`NOT VALID` + `VALIDATE`).
+- **Changed stored generated expressions** are planned but not executed:
+  `diff` shows one `SET EXPRESSION` statement (PostgreSQL 17+) refused with
+  `unsupported-statement`, since it recomputes every row under an exclusive
+  lock. Virtual generated columns (PostgreSQL 18+) are not modeled: export
+  refuses them and a desired file that redeclares one fails the diff.
 - **Partitioned tables** support in-place statement changes, but cannot be
   expressed in or exported to desired files.
 - **Unlogged tables and explicit column collations** are outside the

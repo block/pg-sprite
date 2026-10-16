@@ -295,6 +295,35 @@ func TestDryRunTextPlannerRefusalNamesOperation(t *testing.T) {
 	assert.NotContains(t, text, "error[refuse]")
 }
 
+// A refused generated-expression change says why it cannot run, rather
+// than the generic no-safe-path sentence, so the reader knows the drift is
+// real and what applying it would cost.
+func TestDryRunTextGeneratedExpressionRefusal(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "public", "events", "17.6"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         `ALTER TABLE "public"."events" ALTER COLUMN "name_upper" SET EXPRESSION AS (lower((name)::text))`,
+		Kind:        schemadiff.ChangeSetGeneratedExpression,
+		Route:       planner.RouteRefuse,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement,
+		Class:       verdict.ClassCapabilityBoundary,
+		Decisions: []planner.Decision{{
+			Operation: "unrecognized operation",
+			Route:     planner.RouteRefuse,
+			Reason:    planner.ReasonUnsupportedOperation,
+		}},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := out.String()
+	assert.Contains(t, text, "error[unsupported-statement]:\n  refused — changing a stored generated column's expression recomputes\n  every row under an exclusive lock")
+	assert.Contains(t, text, "no online path for it, so this change is shown for review only. SET\n  EXPRESSION needs PostgreSQL 17 or later; before that, the only path is\n  to drop and re-add the column, which also drops its indexes\n")
+	assert.NotContains(t, text, "the planner knows no safe path")
+}
+
 // A refusal that names an owner renders class and owner on one note, so
 // the human reading the text sees who the work is handed to; a statement
 // the report leaves unclassified renders no class note at all rather than

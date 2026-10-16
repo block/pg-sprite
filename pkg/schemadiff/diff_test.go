@@ -378,15 +378,6 @@ func TestDiffRefusesIdentityAndGeneratedChanges(t *testing.T) {
 	}
 }
 
-func TestDiffRefusesGenerationExpressionChange(t *testing.T) {
-	live := base()
-	live.Columns[0] = Column{Name: "id", Type: "bigint", Generated: true, Default: "(1)"}
-	desired := base()
-	desired.Columns[0] = Column{Name: "id", Type: "bigint", Generated: true, Default: "(2)"}
-	_, err := Diff("public", live, desired)
-	require.ErrorIs(t, err, ErrUnsupportedChange)
-}
-
 func TestDiffIdentityColumnAddRendersIdentity(t *testing.T) {
 	desired := base()
 	desired.Columns = append(desired.Columns,
@@ -413,6 +404,62 @@ func TestDiffGeneratedColumnAddRendersGenerationExpression(t *testing.T) {
 	}, sqls(changes))
 }
 
+// A stored generated column whose expression changed is planned as one SET
+// EXPRESSION statement carrying the desired expression, so the drift shows in
+// the plan instead of failing it. A type change on a generated column still
+// fails the diff.
+func TestDiffGeneratedColumnExpressionChange(t *testing.T) {
+	live := base()
+	live.Columns = append(live.Columns, Column{
+		Name: "name_upper", Type: "text", Generated: true, Default: "upper((name)::text)",
+	})
+	desired := base()
+	desired.Columns = append(desired.Columns, Column{
+		Name: "name_upper", Type: "text", Generated: true, Default: "lower((name)::text)",
+	})
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []Change{{
+		SQL:  `ALTER TABLE "public"."events" ALTER COLUMN "name_upper" SET EXPRESSION AS (lower((name)::text))`,
+		Kind: ChangeSetGeneratedExpression,
+	}}, changes)
+
+	desired.Columns[len(desired.Columns)-1].Type = "character varying"
+	_, err = Diff("public", live, desired)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	assert.Contains(t, err.Error(), `column "name_upper" generated column type change`)
+}
+
+// A live virtual generated column that the desired file declares any other
+// way fails the diff instead of converging the expression as a default. Two
+// virtual models whose expression differs plan the same refused SET
+// EXPRESSION a stored column does.
+func TestDiffVirtualGeneratedColumn(t *testing.T) {
+	live := base()
+	live.Columns = append(live.Columns, Column{Name: "doubled", Type: "integer", Virtual: true, Default: "(id * 2)"})
+
+	stored := base()
+	stored.Columns = append(stored.Columns, Column{Name: "doubled", Type: "integer", Generated: true, Default: "(id * 2)"})
+	_, err := Diff("public", live, stored)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	assert.Contains(t, err.Error(), `column "doubled" generated change`)
+
+	plain := base()
+	plain.Columns = append(plain.Columns, Column{Name: "doubled", Type: "integer", Default: "3"})
+	_, err = Diff("public", live, plain)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	assert.Contains(t, err.Error(), `column "doubled" virtual generated change`)
+
+	virtual := base()
+	virtual.Columns = append(virtual.Columns, Column{Name: "doubled", Type: "integer", Virtual: true, Default: "(id * 3)"})
+	changes, err := Diff("public", live, virtual)
+	require.NoError(t, err)
+	require.Equal(t, []Change{{
+		SQL:  `ALTER TABLE "public"."events" ALTER COLUMN "doubled" SET EXPRESSION AS ((id * 3))`,
+		Kind: ChangeSetGeneratedExpression,
+	}}, changes)
+}
+
 // The change-kind vocabulary is a closed set a consumer branches on; it is
 // pinned to plan-report format_version 1 (docs/plan-report.md). A new value
 // here without a format_version bump is a contract break.
@@ -425,6 +472,7 @@ func TestChangeKindsVocabularyPinned(t *testing.T) {
 		ChangeDropColumn,
 		ChangeAddColumn,
 		ChangeAlterType,
+		ChangeSetGeneratedExpression,
 		ChangeSetDefault,
 		ChangeDropDefault,
 		ChangeSetNotNull,

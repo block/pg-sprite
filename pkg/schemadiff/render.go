@@ -52,6 +52,11 @@ var ErrUnrenderableUnlogged = errors.New("unlogged tables cannot be rendered as 
 // order and index semantics — the renderer refuses instead.
 var ErrUnrenderableCollation = errors.New("columns with an explicit collation cannot be rendered as a desired schema")
 
+// ErrUnrenderableVirtual is returned when a column is generated VIRTUAL.
+// The desired-file grammar cannot parse VIRTUAL, and rendering the column
+// as STORED or as a plain default would silently change what it is.
+var ErrUnrenderableVirtual = errors.New("virtual generated columns cannot be rendered as a desired schema")
+
 // Render renders the canonical model into a desired-state schema file: one
 // CREATE TABLE followed by the model's CREATE INDEX statements. The output
 // is proven admissible by parsing it through statement.ParseDesired before
@@ -124,10 +129,14 @@ func Render(m Model) (string, error) {
 // sequence on the scratch schema; every other sequence-backed default is
 // refused because the sequence it references cannot exist there. An
 // explicit column collation is refused: the model carries it only to keep
-// the baseline from silently dropping it.
+// the baseline from silently dropping it. A virtual generated column is
+// refused because no desired file can declare one.
 func renderColumnDef(table string, c Column) (string, error) {
 	if c.Collation != "" {
 		return "", fmt.Errorf("column %q collation %s: %w", c.Name, c.Collation, ErrUnrenderableCollation)
+	}
+	if c.Virtual {
+		return "", fmt.Errorf("column %q: %w", c.Name, ErrUnrenderableVirtual)
 	}
 	if c.SequenceDefault {
 		st, ok := serialType(table, c)
