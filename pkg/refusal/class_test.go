@@ -39,33 +39,54 @@ func TestEveryClassIsInTheDecidedVocabulary(t *testing.T) {
 	}
 }
 
-// causeTableHeading marks a section of docs/refusal-classes.md whose table
-// is keyed on a typed cause, as against the table keyed on the refusal
-// site; only the typed causes are the engine's, so only their class cells
-// have to be classes the engine can name.
-const causeTableHeading = "keyed on `"
+// causeTableKeys are the typed causes docs/refusal-classes.md keys a cause
+// table on, each named in its section heading as "keyed on `<type>`"; the
+// table keyed on the refusal site is not among them, since only the typed
+// causes are the engine's and only their class cells have to be classes
+// the engine can name. The list is explicit so a section whose heading no
+// longer names its key fails the guard instead of leaving it.
+var causeTableKeys = []string{
+	"PartitionRefusalCause",
+	"CopySwapRefusalCause",
+	"RefusalCause",
+	"copier.RefusalCause",
+	"CreateShapeCause",
+}
 
 // Every class cell of every cause table in the document is a class the
 // engine can name: a cause table that classifies a cause outside Classes()
 // — a class the verdict contract knows but no engine cause takes — fails
 // here, so the closed set stays the set the document uses, whichever
-// package's cause the row belongs to.
+// package's cause the row belongs to. Every listed cause table has to be
+// found, and no unlisted one may exist, so the guard covers the tables the
+// document has rather than the tables it happens to find.
 func TestEveryCauseTableClassIsACoreClass(t *testing.T) {
 	raw, err := os.ReadFile(refusalClassesDoc)
 	require.NoError(t, err)
-	tables := 0
+	found := make(map[string]string)
 	for _, section := range strings.Split(string(raw), "\n### ")[1:] {
 		heading, body, _ := strings.Cut(section, "\n")
-		if !strings.Contains(heading, causeTableHeading) {
+		_, key, keyed := strings.Cut(heading, "keyed on `")
+		if !keyed {
 			continue
 		}
-		tables++
+		key, _, _ = strings.Cut(key, "`")
+		_, dup := found[key]
+		require.False(t, dup, "docs/refusal-classes.md keys two cause tables on %q", key)
+		found[key] = body
+	}
+	for _, key := range causeTableKeys {
+		body, ok := found[key]
+		if !assert.True(t, ok, "docs/refusal-classes.md has a cause table keyed on %q", key) {
+			continue
+		}
 		for cause, class := range classCells(t, body) {
 			assert.True(t, class.Valid(),
 				"docs/refusal-classes.md classifies %q under %q, which refusal.Classes() does not list", cause, class)
 		}
+		delete(found, key)
 	}
-	assert.Positive(t, tables, "docs/refusal-classes.md has cause tables")
+	assert.Empty(t, found, "every cause table the document keys on a type is listed in causeTableKeys")
 }
 
 // classCells returns the first cell and the class cell of every row of every
