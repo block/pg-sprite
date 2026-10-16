@@ -104,7 +104,8 @@ without losing meaning. Current refusals include:
 - either side of a foreign-key relationship;
 - policies that directly query tables (qualified scalar helpers such as `auth.uid()` are supported);
 - unlogged tables and columns with explicit collations; and
-- sequence-backed defaults that cannot be rendered as an owned `serial` form.
+- sequence-backed defaults that cannot be rendered as an owned `serial` form,
+  including a serial whose sequence is declared away from the defaults.
 
 Extension-owned tables are excluded from enumeration. Storage parameters are
 exported as a `WITH (...)` clause on the `CREATE TABLE`. Table/column comments and

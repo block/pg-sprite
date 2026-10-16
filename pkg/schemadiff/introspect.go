@@ -22,6 +22,11 @@ var ErrTableNotFound = errors.New("table not found")
 // partitioned table (e.g. a view or foreign table).
 var ErrNotTable = errors.New("not an ordinary or partitioned table")
 
+// ErrMultipleOwnedSequences is returned when a column's default uses more
+// than one sequence the column owns. The model carries one sequence per
+// column, so such a table is refused rather than modeled with one of them.
+var ErrMultipleOwnedSequences = errors.New("column default uses more than one sequence the column owns")
+
 // Introspect reads the live table schema.table into the canonical model. It
 // runs inside a read-only transaction whose search_path is set to the target
 // schema (then public), so the server's decompilers print definitions
@@ -252,7 +257,10 @@ func introspectInheritance(ctx context.Context, tx pgx.Tx, oid uint32) ([]string
 // the sequence is owned by this exact column (the OWNED BY edge, deptype
 // 'a') — the discriminator between a serial column and a hand-written
 // nextval on a standalone or shared sequence. An explicit column collation
-// is read only when it differs from the type's default collation.
+// is read only when it differs from the type's default collation. The
+// declaration of the sequence the column owns — its identity sequence, or
+// the owned sequence its serial default calls — rides along, recorded only
+// where it differs from what declaring the column fresh creates.
 func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT a.attname,
@@ -292,9 +300,29 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 		             AND a.attcollation <> t.typcollation
 		       ), ''),
 		       a.attidentity::text,
-		       a.attgenerated::text
+		       a.attgenerated::text,
+		       seq.seqtype, seq.seqstart, seq.seqincrement, seq.seqmin, seq.seqmax, seq.seqcache, seq.seqcycle
 		FROM pg_attribute a
 		LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+		LEFT JOIN LATERAL (
+		    SELECT format_type(q.seqtypid, NULL) AS seqtype,
+		           q.seqstart, q.seqincrement, q.seqmin, q.seqmax, q.seqcache, q.seqcycle
+		    FROM pg_depend own
+		    JOIN pg_class s ON s.oid = own.objid AND s.relkind = 'S'
+		    JOIN pg_sequence q ON q.seqrelid = s.oid
+		    WHERE own.classid = 'pg_class'::regclass
+		      AND own.refclassid = 'pg_class'::regclass
+		      AND own.refobjid = a.attrelid
+		      AND own.refobjsubid = a.attnum
+		      AND (own.deptype = 'i'
+		           OR (own.deptype = 'a' AND EXISTS (
+		               SELECT 1
+		               FROM pg_depend dep
+		               WHERE dep.classid = 'pg_attrdef'::regclass
+		                 AND dep.objid = d.oid
+		                 AND dep.refclassid = 'pg_class'::regclass
+		                 AND dep.refobjid = s.oid)))
+		) seq ON true
 		WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
 		ORDER BY a.attnum`, oid)
 	if err != nil {
@@ -305,12 +333,29 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 	for rows.Next() {
 		var c Column
 		var identity, generated string
-		if err := rows.Scan(&c.Name, &c.Type, &c.NotNull, &c.Default, &c.SequenceDefault, &c.SequenceOwned, &c.Collation, &identity, &generated); err != nil {
+		var seqType *string
+		var seq SequenceOptions
+		var seqStart, seqIncrement, seqMin, seqMax, seqCache *int64
+		var seqCycle *bool
+		if err := rows.Scan(&c.Name, &c.Type, &c.NotNull, &c.Default, &c.SequenceDefault, &c.SequenceOwned, &c.Collation, &identity, &generated,
+			&seqType, &seqStart, &seqIncrement, &seqMin, &seqMax, &seqCache, &seqCycle); err != nil {
 			return nil, fmt.Errorf("scan column: %w", err)
 		}
 		c.Identity = Identity(identity)
 		c.Generated = generated == "s"
 		c.Virtual = generated == "v"
+		if seqType != nil {
+			if seqStart == nil || seqIncrement == nil || seqMin == nil || seqMax == nil || seqCache == nil || seqCycle == nil {
+				return nil, fmt.Errorf("column %q: owned sequence row is incomplete", c.Name)
+			}
+			seq = SequenceOptions{Type: *seqType, Start: *seqStart, Increment: *seqIncrement, Min: *seqMin, Max: *seqMax, Cache: *seqCache, Cycle: *seqCycle}
+			c.Sequence = declaredSequence(c.Type, seq)
+		}
+		// Rows arrive in attribute order, so a column the sequence join
+		// matched more than once is the previous row again.
+		if n := len(cols); n > 0 && cols[n-1].Name == c.Name {
+			return nil, fmt.Errorf("column %q: %w", c.Name, ErrMultipleOwnedSequences)
+		}
 		cols = append(cols, c)
 	}
 	if err := rows.Err(); err != nil {
