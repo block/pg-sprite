@@ -445,7 +445,9 @@ func TestRenderRoundTripsStorageParameters(t *testing.T) {
 // toastable column is dropped, though a fresh CREATE TABLE of the columns
 // left would build none. Building the rendered file would discard the
 // parameters, so export refuses TOAST parameters on a table with a dropped
-// column. The table's own parameters beside a dropped column still render.
+// column unless a remaining column, such as a text one, guarantees the
+// rebuild a TOAST table; a bounded varchar guarantees nothing and still
+// refuses. The table's own parameters beside a dropped column render.
 func TestRenderRefusesToastParametersAFreshTableMightDiscard(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -456,6 +458,10 @@ func TestRenderRefusesToastParametersAFreshTableMightDiscard(t *testing.T) {
 		refused     bool
 	}{
 		{"a dropped column", `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY, body text) WITH (toast.autovacuum_enabled = false);
+			ALTER TABLE %[1]s.t DROP COLUMN body`, true},
+		{"a dropped column beside a remaining text column", `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY, body text, legacy int) WITH (toast.autovacuum_enabled = false);
+			ALTER TABLE %[1]s.t DROP COLUMN legacy`, false},
+		{"a dropped column beside only a bounded varchar", `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY, code varchar(10), body text) WITH (toast.autovacuum_enabled = false);
 			ALTER TABLE %[1]s.t DROP COLUMN body`, true},
 		{"a dropped column without TOAST parameters", `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY, body text, extra text) WITH (fillfactor = 70);
 			ALTER TABLE %[1]s.t DROP COLUMN extra`, false},
@@ -537,4 +543,32 @@ func TestDiffRefusesStorageParameterMismatch(t *testing.T) {
 			assert.Contains(t, err.Error(), tc.message)
 		})
 	}
+}
+
+// The server stores a storage parameter's value as written, so a boolean
+// set as off live and declared as false in the file, or in any other
+// spelling the server reads as the same boolean, still matches: the diff
+// compares what the parameters mean, not how they were typed. A number is
+// left as written.
+func TestDiffMatchesBooleanStorageParameterSpellings(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.tuned (id bigint PRIMARY KEY, body text)
+		WITH (autovacuum_enabled = off, toast.autovacuum_enabled = 'No', autovacuum_vacuum_threshold = 0)`, schema))
+	require.NoError(t, err)
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "tuned")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"autovacuum_enabled=false", "autovacuum_vacuum_threshold=0", "toast.autovacuum_enabled=false"}, live.Options)
+
+	ds, err := statement.ParseDesired(`CREATE TABLE tuned (id bigint PRIMARY KEY, body text)
+		WITH (autovacuum_enabled = false, toast.autovacuum_enabled = FALSE, autovacuum_vacuum_threshold = 0)`)
+	require.NoError(t, err)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+	require.NoError(t, err)
+	changes, err := schemadiff.Diff(schema, live, desired)
+	require.NoError(t, err)
+	assert.Empty(t, changes)
 }

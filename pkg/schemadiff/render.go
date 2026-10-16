@@ -63,7 +63,7 @@ var ErrUnrenderableVirtual = errors.New("virtual generated columns cannot be ren
 // Model.ToastMayNotRebuild). The server would discard the parameters when
 // it builds the rendered file, so the baseline would plan them again on
 // every diff against the table it came from.
-var ErrUnrenderableToastOptions = errors.New("TOAST storage parameters on a table with a dropped column cannot be rendered as a desired schema")
+var ErrUnrenderableToastOptions = errors.New("TOAST storage parameters on a table whose remaining columns may not build a TOAST table cannot be rendered as a desired schema")
 
 // Render renders the canonical model into a desired-state schema file: one
 // CREATE TABLE, with a WITH clause carrying the table's storage parameters,

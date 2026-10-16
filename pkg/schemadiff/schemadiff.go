@@ -156,15 +156,18 @@ type Model struct {
 	// model without storage parameters digests the same as it did before
 	// the field existed.
 	Options []string `json:",omitempty"`
-	// ToastMayNotRebuild reports that Options carries TOAST parameters on
-	// a table with a dropped column, whose TOAST table a fresh CREATE TABLE
-	// of its columns might not build. The server builds a TOAST table at
-	// CREATE TABLE only when the columns need one and silently discards
-	// toast.* parameters otherwise, and no catalog function reports that
-	// decision. A dropped column is the one change that can leave a TOAST
-	// table the remaining columns do not need: adding or retyping a column
-	// builds one when the columns come to need it, and a rewrite builds it
-	// afresh. The renderer refuses such a table rather than write a
+	// ToastMayNotRebuild reports that the table has a dropped column and no
+	// remaining column that guarantees a TOAST table, so a fresh CREATE
+	// TABLE of its columns might build none. The server builds a TOAST
+	// table at CREATE TABLE only when the columns need one and silently
+	// discards toast.* parameters otherwise. A dropped column is the one
+	// change that can leave a TOAST table the remaining columns do not
+	// need: adding or retyping a column builds one when the columns come
+	// to need it, and a rewrite builds it afresh. A remaining column of an
+	// unbounded variable-length type, stored other than PLAIN, settles it,
+	// since the server always builds a TOAST table for one. When Options
+	// carries TOAST parameters the renderer refuses such a table rather
+	// than write a
 	// baseline that would plan the parameters again on every diff. Read
 	// only alongside TOAST parameters, and not part of the table's shape,
 	// so it never reaches a digest.

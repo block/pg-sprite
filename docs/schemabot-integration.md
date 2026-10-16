@@ -372,6 +372,11 @@ installation, not the run, and each means a different action:
 | `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion < checkpoint.FormatVersion` | The row was written by an older engine whose row format this engine does not read | Operator action: finish or abandon the old run. When no run is in flight, `Store.Delete(Stored)` is the fresh start; the row is never silently rewritten |
 | `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion > checkpoint.FormatVersion` | The row was written by a newer engine | Upgrade the engine; this one must not touch the row |
 
+Releases through v0.3.3 write format 2, whose model fingerprints leave out the table's
+storage parameters. A copy-and-swap run in flight across the upgrade to format 3 surfaces as
+`MismatchFormat` with `Stored.FormatVersion == 2`: finish it with the release that started
+it, or, once no run is in flight, `Store.Delete(Stored)` and start over.
+
 `ErrTableBehind` wraps the server's own `42703` undefined-column error, so an adapter that
 logs the chain sees both the engine's classification and the server's words. `ErrTableNewer`
 comes from `Ensure`'s read of the table's shape, before any statement could fail, so it
