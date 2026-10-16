@@ -44,6 +44,11 @@ const (
 	ChangeAddColumn ChangeKind = "add-column"
 	// ChangeAlterType changes a column's type.
 	ChangeAlterType ChangeKind = "alter-type"
+	// ChangeSetGeneratedExpression replaces a stored generated column's
+	// expression, which recomputes every row under an exclusive lock. The
+	// planner has no online path for it, so the statement is always
+	// refused: the plan shows the drift and nothing runs it.
+	ChangeSetGeneratedExpression ChangeKind = "set-generated-expression"
 	// ChangeSetDefault sets or replaces a column default.
 	ChangeSetDefault ChangeKind = "set-default"
 	// ChangeDropDefault drops a column default.
@@ -74,6 +79,7 @@ func ChangeKinds() []ChangeKind {
 		ChangeDropColumn,
 		ChangeAddColumn,
 		ChangeAlterType,
+		ChangeSetGeneratedExpression,
 		ChangeSetDefault,
 		ChangeDropDefault,
 		ChangeSetNotNull,
@@ -259,7 +265,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 
 // alterColumnChanges derives the in-place column alterations between two
 // versions of the same column. Identity and generation cannot be altered in
-// place, so a delta there is refused as unsupported.
+// place, so a delta there is refused as unsupported. A stored generated
+// column whose expression alone differs is planned as SET EXPRESSION, the
+// one statement that states the change: it keeps the column's indexes,
+// where a drop and re-add would silently take them with it. The planner
+// refuses that statement, so the drift is reviewable and never executes.
 func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	if live.Identity != desired.Identity {
 		return nil, fmt.Errorf("%w: column %q identity change", ErrUnsupportedChange, live.Name)
@@ -273,11 +283,17 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	if live.Collation != desired.Collation {
 		return nil, fmt.Errorf("%w: column %q collation change (%q vs %q)", ErrUnsupportedChange, live.Name, live.Collation, desired.Collation)
 	}
-	if desired.Generated && (live.Type != desired.Type || live.Default != desired.Default) {
-		return nil, fmt.Errorf("%w: column %q generation expression or type change", ErrUnsupportedChange, live.Name)
+	if desired.Generated && live.Type != desired.Type {
+		return nil, fmt.Errorf("%w: column %q generated column type change", ErrUnsupportedChange, live.Name)
 	}
 	col := pgx.Identifier{live.Name}.Sanitize()
 	var changes []Change
+	if desired.Generated && live.Default != desired.Default {
+		changes = append(changes, Change{
+			SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " SET EXPRESSION AS (" + desired.Default + ")",
+			Kind: ChangeSetGeneratedExpression,
+		})
+	}
 	if live.Type != desired.Type {
 		changes = append(changes, Change{
 			SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " TYPE " + desired.Type,
