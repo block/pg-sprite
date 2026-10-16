@@ -417,3 +417,158 @@ func TestRenderRefusesCollatedLiveColumn(t *testing.T) {
 	_, err = schemadiff.Diff(schema, live, desired)
 	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
 }
+
+// Storage parameters, the table's own and its TOAST table's, are part of
+// the model: export writes them back as a WITH clause that materializes to
+// the same parameters, so the baseline keeps a tuned table's settings.
+func TestRenderRoundTripsStorageParameters(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.tuned (id bigint PRIMARY KEY, body text)
+		WITH (fillfactor = 70, autovacuum_vacuum_scale_factor = 0.05, toast.autovacuum_enabled = false)`, schema))
+	require.NoError(t, err)
+
+	live, desired, changes := roundTrip(t, pool, schema, "tuned")
+	assert.Equal(t, []string{"autovacuum_vacuum_scale_factor=0.05", "fillfactor=70", "toast.autovacuum_enabled=false"}, live.Options)
+	assert.Equal(t, live, desired, "rendered output must introspect back to the identical model")
+	assert.Empty(t, changes)
+
+	rendered, err := schemadiff.Render(live)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, `) WITH (autovacuum_vacuum_scale_factor='0.05', fillfactor='70', toast.autovacuum_enabled='false');`)
+}
+
+// A table keeps its TOAST table, and parameters set on it, after its last
+// toastable column is dropped, though a fresh CREATE TABLE of the columns
+// left would build none. Building the rendered file would discard the
+// parameters, so export refuses TOAST parameters on a table with a dropped
+// column unless a remaining column, such as a text one, guarantees the
+// rebuild a TOAST table; a bounded varchar guarantees nothing and still
+// refuses. The table's own parameters beside a dropped column render.
+func TestRenderRefusesToastParametersAFreshTableMightDiscard(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	for _, tc := range []struct {
+		name, setup string
+		refused     bool
+	}{
+		{"a dropped column", `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY, body text) WITH (toast.autovacuum_enabled = false);
+			ALTER TABLE %[1]s.t DROP COLUMN body`, true},
+		{"a dropped column beside a remaining text column", `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY, body text, legacy int) WITH (toast.autovacuum_enabled = false);
+			ALTER TABLE %[1]s.t DROP COLUMN legacy`, false},
+		{"a dropped column beside only a bounded varchar", `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY, code varchar(10), body text) WITH (toast.autovacuum_enabled = false);
+			ALTER TABLE %[1]s.t DROP COLUMN body`, true},
+		{"a dropped column without TOAST parameters", `CREATE TABLE %[1]s.t (id bigint PRIMARY KEY, body text, extra text) WITH (fillfactor = 70);
+			ALTER TABLE %[1]s.t DROP COLUMN extra`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := testutil.NewSchema(t, pool)
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(tc.setup, schema))
+			require.NoError(t, err)
+			live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+			require.NoError(t, err)
+			_, err = schemadiff.Render(live)
+			if tc.refused {
+				require.ErrorIs(t, err, schemadiff.ErrUnrenderableToastOptions)
+				return
+			}
+			require.NoError(t, err)
+			_, _, changes := roundTrip(t, pool, schema, "t")
+			assert.Empty(t, changes)
+		})
+	}
+}
+
+// The diff does not converge storage parameters, so a difference in either
+// direction is a typed refusal: a parameter the file declares is never
+// reported as applied, and a tuned live parameter the file omits is never
+// reported as matching.
+func TestDiffRefusesStorageParameterMismatch(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.plain (id bigint PRIMARY KEY)`, schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.tuned (id bigint PRIMARY KEY) WITH (fillfactor = 70)`, schema))
+	require.NoError(t, err)
+
+	for _, tc := range []struct {
+		name, table, desired, message string
+	}{
+		{
+			name:    "the file declares a parameter the live table lacks",
+			table:   "plain",
+			desired: `CREATE TABLE plain (id bigint PRIMARY KEY) WITH (fillfactor = 70)`,
+			message: "live (none) and desired (fillfactor=70)",
+		},
+		{
+			name:    "the file omits a parameter the live table has",
+			table:   "tuned",
+			desired: `CREATE TABLE tuned (id bigint PRIMARY KEY)`,
+			message: "live (fillfactor=70) and desired (none)",
+		},
+		{
+			name:    "the file declares a different value",
+			table:   "tuned",
+			desired: `CREATE TABLE tuned (id bigint PRIMARY KEY) WITH (fillfactor = 80)`,
+			message: "live (fillfactor=70) and desired (fillfactor=80)",
+		},
+		{
+			// A table with no column that needs a TOAST table has none,
+			// and the server discards toast parameters set on it. The file
+			// adds such a column, so its scratch table keeps the parameter
+			// the live table never held: the plan could not deliver it.
+			name:    "the file's toast parameter has no TOAST table to land on live",
+			table:   "plain",
+			desired: `CREATE TABLE plain (id bigint PRIMARY KEY, body text) WITH (toast.autovacuum_enabled = false)`,
+			message: "live (none) and desired (toast.autovacuum_enabled=false)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live, err := schemadiff.Introspect(t.Context(), pool, schema, tc.table)
+			require.NoError(t, err)
+			ds, err := statement.ParseDesired(tc.desired)
+			require.NoError(t, err)
+			desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+			require.NoError(t, err)
+			_, err = schemadiff.Diff(schema, live, desired)
+			require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+			assert.Contains(t, err.Error(), tc.message)
+		})
+	}
+}
+
+// The server stores a storage parameter's value as written, so a boolean
+// set as off live and declared as false in the file, or in any other
+// spelling the server reads as the same boolean, still matches: the diff
+// compares what the parameters mean, not how they were typed. A number is
+// left as written.
+func TestDiffMatchesBooleanStorageParameterSpellings(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.tuned (id bigint PRIMARY KEY, body text)
+		WITH (autovacuum_enabled = off, toast.autovacuum_enabled = 'No', autovacuum_vacuum_threshold = 0)`, schema))
+	require.NoError(t, err)
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "tuned")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"autovacuum_enabled=false", "autovacuum_vacuum_threshold=0", "toast.autovacuum_enabled=false"}, live.Options)
+
+	ds, err := statement.ParseDesired(`CREATE TABLE tuned (id bigint PRIMARY KEY, body text)
+		WITH (autovacuum_enabled = false, toast.autovacuum_enabled = FALSE, autovacuum_vacuum_threshold = 0)`)
+	require.NoError(t, err)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+	require.NoError(t, err)
+	changes, err := schemadiff.Diff(schema, live, desired)
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+}

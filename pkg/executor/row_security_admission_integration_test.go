@@ -150,3 +150,40 @@ func TestExecuteRowSecurityAcceptsInheritedOwnership(t *testing.T) {
 	assert.False(t, actual.RowSecurity.Enabled)
 	assert.Empty(t, actual.RowSecurity.Policies)
 }
+
+// A policy change builds nothing from the table's rendering, so TOAST
+// parameters beside a dropped column, which export refuses to write, do
+// not stop a row-security apply whose file declares the live WITH clause.
+// That holds whether a remaining text column guarantees a rebuilt table its
+// TOAST table or only wide bounded columns, which export cannot rely on, do.
+func TestExecuteRowSecurityAcceptsToastParametersBesideADroppedColumn(t *testing.T) {
+	for _, tc := range []struct{ name, columns string }{
+		{"a remaining text column", "body text"},
+		{"only bounded columns", "title varchar(3000), summary varchar(3000)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, schema := rlsFixture(t)
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(`DROP TABLE %[1]s.documents;
+ CREATE TABLE %[1]s.documents (id bigint PRIMARY KEY, owner_id bigint NOT NULL, %[2]s, legacy text)
+     WITH (toast.autovacuum_enabled = false);
+ ALTER TABLE %[1]s.documents DROP COLUMN legacy;
+ ALTER TABLE %[1]s.documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON %[1]s.documents FOR SELECT USING (owner_id = 7);`, schema, tc.columns))
+			require.NoError(t, err)
+
+			_, err = applyRLS(t, pool, schema, fmt.Sprintf(`CREATE TABLE documents (
+     id bigint PRIMARY KEY,
+     owner_id bigint NOT NULL,
+     %s
+ ) WITH (toast.autovacuum_enabled = false);
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (owner_id = 9);`, tc.columns))
+			require.NoError(t, err)
+			var qual string
+			require.NoError(t, pool.QueryRow(t.Context(),
+				"SELECT pg_get_expr(polqual, polrelid) FROM pg_policy WHERE polrelid = $1::regclass AND polname = 'readers'",
+				schema+".documents").Scan(&qual))
+			assert.Equal(t, "(owner_id = 9)", qual)
+		})
+	}
+}

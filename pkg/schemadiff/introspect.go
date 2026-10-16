@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -91,6 +93,14 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 	}
 
 	m := Model{Table: table, PartitionKey: partitionKey, IsPartition: isPartition, Unlogged: persistence == "u"}
+	if m.Options, err = introspectOptions(ctx, tx, oid); err != nil {
+		return Model{}, fmt.Errorf("introspect storage parameters of %s.%s: %w", schema, table, err)
+	}
+	if hasToastOptions(m.Options) {
+		if m.ToastMayNotRebuild, err = introspectToastMayNotRebuild(ctx, tx, oid); err != nil {
+			return Model{}, fmt.Errorf("introspect TOAST table of %s.%s: %w", schema, table, err)
+		}
+	}
 	if m.InheritsParents, m.InheritanceChildren, err = introspectInheritance(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect inheritance of %s.%s: %w", schema, table, err)
 	}
@@ -110,6 +120,82 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 		return Model{}, fmt.Errorf("introspect row security of %s.%s: %w", schema, table, err)
 	}
 	return m, nil
+}
+
+// introspectOptions reads the table's storage parameters and its TOAST
+// table's, the latter prefixed "toast." the way CREATE TABLE ... WITH
+// spells them, sorted, with each boolean value in one spelling
+// (normalizeOption). A table with none returns nil.
+func introspectOptions(ctx context.Context, tx pgx.Tx, oid uint32) ([]string, error) {
+	var opts []string
+	err := tx.QueryRow(ctx, `
+		SELECT array_agg(opt ORDER BY opt)
+		FROM (
+			SELECT unnest(c.reloptions) AS opt
+			FROM pg_class c
+			WHERE c.oid = $1
+			UNION ALL
+			SELECT 'toast.' || unnest(toast.reloptions)
+			FROM pg_class c
+			JOIN pg_class toast ON toast.oid = c.reltoastrelid
+			WHERE c.oid = $1
+		) options`, oid).Scan(&opts)
+	if err != nil {
+		return nil, fmt.Errorf("query storage parameters: %w", err)
+	}
+	for i, opt := range opts {
+		opts[i] = normalizeOption(opt)
+	}
+	return opts, nil
+}
+
+// normalizeOption spells a boolean storage parameter value the one way, so
+// autovacuum_enabled=off and autovacuum_enabled=false, which the server
+// stores as written and reads alike, compare equal. Only the words the
+// server reads as a boolean are rewritten: a number such as 0 or 1 is left
+// alone, since a numeric parameter takes it as a number.
+func normalizeOption(opt string) string {
+	name, value, ok := strings.Cut(opt, "=")
+	if !ok {
+		return opt
+	}
+	switch strings.ToLower(value) {
+	case "on", "true", "yes":
+		return name + "=true"
+	case "off", "false", "no":
+		return name + "=false"
+	}
+	return opt
+}
+
+// hasToastOptions reports whether opts sets a parameter on the TOAST table.
+func hasToastOptions(opts []string) bool {
+	return slices.ContainsFunc(opts, func(opt string) bool { return strings.HasPrefix(opt, "toast.") })
+}
+
+// introspectToastMayNotRebuild reports whether the table has a dropped
+// column and no remaining column that makes the server build a TOAST table
+// (see Model.ToastMayNotRebuild). A column guarantees one when it is a
+// variable-length type of no bounded size, stored other than PLAIN both
+// live and by its type's default, which is how the server's own decision
+// at CREATE TABLE reads it: such a column can never fit the tuple size it
+// checks against. A bounded type such as varchar(10) guarantees nothing,
+// so a table whose only remaining varlena columns are bounded is still
+// reported, failing closed.
+func introspectToastMayNotRebuild(ctx context.Context, tx pgx.Tx, oid uint32) (bool, error) {
+	var mayNotRebuild bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = $1 AND attnum > 0 AND attisdropped)
+		   AND NOT EXISTS (
+		       SELECT 1 FROM pg_attribute a
+		       JOIN pg_type ty ON ty.oid = a.atttypid
+		       WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
+		         AND a.attlen = -1 AND a.atttypmod < 0
+		         AND a.attstorage <> 'p' AND ty.typstorage <> 'p')`, oid).Scan(&mayNotRebuild)
+	if err != nil {
+		return false, fmt.Errorf("query whether the columns rebuild a TOAST table: %w", err)
+	}
+	return mayNotRebuild, nil
 }
 
 // introspectInheritance reads classic PostgreSQL inheritance in both

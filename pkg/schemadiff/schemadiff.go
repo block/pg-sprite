@@ -144,6 +144,34 @@ type Model struct {
 	// change its crash-safety and replication behavior, and a persistence
 	// mismatch fails the diff closed instead of diffing to silence.
 	Unlogged bool
+	// Options are the table's storage parameters (pg_class.reloptions),
+	// with its TOAST table's parameters prefixed "toast.", each as the
+	// server stores it ("fillfactor=70"), sorted so the order a file lists
+	// them in carries no meaning. A desired file declares them with
+	// CREATE TABLE ... WITH (...), and the renderer writes them back the
+	// same way. The diff does not converge them, so a mismatch fails
+	// closed instead of diffing to silence: a parameter declared in the
+	// file but never applied, or a tuned live parameter the file drops,
+	// would otherwise plan as no change. Omitted from JSON when empty, so a
+	// model without storage parameters digests the same as it did before
+	// the field existed.
+	Options []string `json:",omitempty"`
+	// ToastMayNotRebuild reports that the table has a dropped column and no
+	// remaining column that guarantees a TOAST table, so a fresh CREATE
+	// TABLE of its columns might build none. The server builds a TOAST
+	// table at CREATE TABLE only when the columns need one and silently
+	// discards toast.* parameters otherwise. A dropped column is the one
+	// change that can leave a TOAST table the remaining columns do not
+	// need: adding or retyping a column builds one when the columns come
+	// to need it, and a rewrite builds it afresh. A remaining column of an
+	// unbounded variable-length type, stored other than PLAIN, settles it,
+	// since the server always builds a TOAST table for one. When Options
+	// carries TOAST parameters the renderer refuses such a table rather
+	// than write a
+	// baseline that would plan the parameters again on every diff. Read
+	// only alongside TOAST parameters, and not part of the table's shape,
+	// so it never reaches a digest.
+	ToastMayNotRebuild bool `json:"-"`
 	// ReferencedBy lists the incoming foreign keys — constraints on other
 	// tables that reference this one — as "table.constraint" strings, in
 	// that order. Incoming foreign keys are not part of this table's own

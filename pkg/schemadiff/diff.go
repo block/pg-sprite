@@ -3,6 +3,8 @@ package schemadiff
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -11,8 +13,8 @@ import (
 
 // ErrUnsupportedChange is returned when converging live onto desired would
 // need a change the engine does not derive: identity, generation, or
-// collation changes on an existing column, a persistence (unlogged)
-// difference, or a partitioning difference (partition key or partition
+// collation changes on an existing column, a persistence (unlogged) or
+// storage-parameter difference, or a partitioning difference (partition key or partition
 // attachment) — table identity that no ALTER converges. The caller
 // surfaces it; nothing is guessed.
 var ErrUnsupportedChange = errors.New("unsupported schema change")
@@ -141,6 +143,13 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// closed instead of diffing to silence.
 	if live.Unlogged != desired.Unlogged {
 		return nil, fmt.Errorf("table persistence (unlogged) differs between live and desired: %w", ErrUnsupportedChange)
+	}
+	// Storage parameters are not converged: a mismatch fails closed, so a
+	// parameter the file declares is never reported as applied and a tuned
+	// live parameter the file omits is never reported as matching.
+	if !slices.Equal(live.Options, desired.Options) {
+		return nil, fmt.Errorf("table storage parameters differ between live (%s) and desired (%s); declare the live parameters in the desired file: %w",
+			formatOptions(live.Options), formatOptions(desired.Options), ErrUnsupportedChange)
 	}
 	table := pgx.Identifier{schema, live.Table}.Sanitize()
 
@@ -361,6 +370,15 @@ func columnDef(c Column) string {
 		def += " NOT NULL"
 	}
 	return def
+}
+
+// formatOptions lists storage parameters for an error message, "none" when
+// there are none.
+func formatOptions(opts []string) string {
+	if len(opts) == 0 {
+		return "none"
+	}
+	return strings.Join(opts, ", ")
 }
 
 // columnsByName indexes columns for lookup during the diff.

@@ -223,8 +223,12 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 
 func admitRowSecurityTable(schema string, live, wanted schemadiff.Model) error {
 	// Render refuses unsupported shapes even when two models happen to match.
+	// A policy change builds nothing from the rendering, so the hazard of
+	// rebuilding the table without its TOAST table, which only an export
+	// faces, does not apply.
 	table := live
 	table.RowSecurity = schemadiff.RowSecurity{}
+	table.ToastMayNotRebuild = false
 	if _, err := schemadiff.Render(table); err != nil {
 		return fmt.Errorf("row security target: %w", err)
 	}
