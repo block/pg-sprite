@@ -150,6 +150,13 @@ const (
 	// target (ST-2). The row is the only record of which statement a shadow
 	// embodies; without one the shadow is dropped and the run started over.
 	CauseShadowUnrecorded RefusalCause = "shadow-unrecorded"
+	// CauseResumeShadowGone means the checkpoint row handed to a resume
+	// records a shadow under which no relation stands (ST-2): the row is
+	// before its cutover, so the shadow it names should be there, and the
+	// run can neither continue on it nor start over while the row stands.
+	// The row is left for the operator to delete; ErrShadowNotFound is
+	// wrapped for errors.Is.
+	CauseResumeShadowGone RefusalCause = "resume-shadow-gone"
 	// CauseResumeSlotForeign means the slot wearing the row's derived name
 	// is not this route's (ST-3): it is a physical slot, or a logical slot
 	// of another database. It is neither decoded from nor replaced; an
@@ -216,6 +223,7 @@ func RefusalCauses() []RefusalCause {
 		CauseResumeRowMismatch,
 		CauseResumeRowDecoding,
 		CauseShadowUnrecorded,
+		CauseResumeShadowGone,
 		CauseResumeSlotForeign,
 		CauseResumeSlotHeld,
 		CauseCopyShadowMismatch,
@@ -251,7 +259,7 @@ func (c RefusalCause) Invariant() string {
 		return "LK-4"
 	case CauseResumeTerminal, CauseResumeSlotHeld:
 		return "ST-4"
-	case CauseResumeRowMismatch, CauseShadowUnrecorded:
+	case CauseResumeRowMismatch, CauseShadowUnrecorded, CauseResumeShadowGone:
 		return "ST-2"
 	case CauseResumeSlotForeign, CauseResumeRowDecoding:
 		return "ST-3"

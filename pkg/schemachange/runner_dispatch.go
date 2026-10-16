@@ -185,7 +185,8 @@ func (r *Runner) resumeOnRow(ctx context.Context, pool *pgxpool.Pool, lock *dbco
 	}
 	built, err := InspectShadow(ctx, pool, lock, target, st, r.opts.Shadow)
 	if errors.Is(err, ErrShadowNotFound) {
-		return runState{}, fmt.Errorf("checkpoint row for %s.%s is in phase %s but %w; delete the row to start over", cp.Schema, cp.Table, cp.Phase, err)
+		// INV: ST-2
+		return runState{}, refuse(CauseResumeShadowGone, []error{err}, "checkpoint row for %s.%s is in phase %s but no relation bears its shadow name %s; delete the row to start over", cp.Schema, cp.Table, cp.Phase, cp.ShadowTable)
 	}
 	if err != nil {
 		return runState{}, err

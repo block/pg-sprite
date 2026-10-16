@@ -165,7 +165,14 @@ type Result struct {
 	// SwapProof when the run resumed after the retained source was already
 	// dropped: the renames the swap performed cannot be read back once
 	// one side of them is gone, and Shadow still names the live table.
+	// SwapProven says which of the two Swapped is.
 	Swapped SwapProof
+	// SwapProven reports whether Swapped is a proof this run made or
+	// re-derived. It is false only when the run resumed after the retained
+	// source was already dropped, so a reader does not compare Swapped
+	// against the zero value to learn that; the swap itself committed in
+	// every run that returns.
+	SwapProven bool
 	// Verification is the report of the verification pass this run made,
 	// or the zero Report when the run resumed after the swap had already
 	// committed and so made none.
@@ -322,8 +329,10 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 	}
 	if !state.oldTableGone {
 		// A swap found with its retained source already dropped has no
-		// SwappedTable to report; Result.Swapped stays zero.
+		// SwappedTable to report; Result.Swapped stays zero and SwapProven
+		// says so.
 		result.Swapped = state.swappedTable.Proof()
+		result.SwapProven = true
 	}
 	if !state.oldTableGone {
 		if err := r.settleOldTable(ctx, pool, lock, &state); err != nil {

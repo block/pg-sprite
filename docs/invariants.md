@@ -722,7 +722,9 @@ through `Store.Inspect` before it knows the statement, and holds a `copying`, `c
 `reconciling`, or `verifying` row against the shadow `InspectShadow` re-derives — shadow name, both fingerprints, and the
 JSON-encoded proof the row carries (`resume-row-mismatch` otherwise) — and refuses a relation
 under the shadow's name that no row records (`shadow-unrecorded`), since the row is the only
-record of which statement a shadow embodies.
+record of which statement a shadow embodies, and a row before its cutover whose shadow no
+relation bears (`resume-shadow-gone`), since the run can neither continue on it nor start over
+while the row stands.
 `TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
