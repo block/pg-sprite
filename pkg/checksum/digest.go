@@ -94,9 +94,13 @@ func shadowColumnTypes(ctx context.Context, tx pgx.Tx, shadow copier.Shadow) ([]
 // The per-row hashes are aggregated as bytes and only the chunk's hash is
 // rendered as hex.
 // The source side is where the casts do work: a column whose type the
-// schema change widens or narrows hashes as the value the shadow holds,
-// and both sides run the identical expression so nothing but the data can
-// differ. The record rendering tells NULL from the empty string, and
+// schema change widens or narrows hashes as the value the shadow holds. A
+// column the statement retyped with USING hashes, on the source side, as
+// that expression cast to the shadow's type — the value the copy put in
+// the shadow — and bare on the shadow side; conversions carries the
+// expressions for the side being rendered, so the shadow side passes none.
+// Apart from those expressions both sides run the identical statement, so
+// nothing but the data can differ. The record rendering tells NULL from the empty string, and
 // hashing per row before aggregating bounds the aggregate's input to one
 // hash per row. The bounds are declared bigint whatever the key's integer
 // type, as the chunker's boundary query declares them, so the primary-key
@@ -105,9 +109,13 @@ func shadowColumnTypes(ctx context.Context, tx pgx.Tx, shadow copier.Shadow) ([]
 // for the operators and casts that cannot be, so the session's own
 // search_path plays no part (CO-9); COALESCE is syntax, not a function, and
 // takes no qualifier.
-func digestSQL(target preflight.CopySwapTarget, schema, table string, types []columnType) string {
+func digestSQL(target preflight.CopySwapTarget, schema, table string, types []columnType, conversions map[string]string) string {
 	cast := make([]string, 0, len(types))
 	for _, c := range types {
+		if expr, ok := conversions[c.name]; ok {
+			cast = append(cast, "("+expr+")::"+c.typeName)
+			continue
+		}
 		cast = append(cast, pgx.Identifier{c.name}.Sanitize()+"::"+c.typeName)
 	}
 	key := pgx.Identifier{target.PKColumn()}.Sanitize()

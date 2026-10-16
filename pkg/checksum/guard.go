@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/internal/chunksql"
 )
 
 // sqlstateUndefinedTable is the SQLSTATE the server raises when a statement
@@ -62,28 +63,31 @@ func (v *Verifier) guard(ctx context.Context, tx pgx.Tx) error {
 	return v.confirmRelations(ctx, tx)
 }
 
-// setVerifySession bounds the transaction, pins the one output setting that
-// can merge two distinct values, sets the search_path, and puts it in the
-// owner's shoes. The search_path is the one chunksql chose for the copy
-// statement: the catalog alone when the copy carries no conversions, so
-// every unqualified operator, cast, and type name resolves there (CO-9);
-// the build's path when it does, so a recopy's conversion expressions and
-// the digests' type names resolve as the gated statement's did, with
-// pg_catalog still ahead of both. The digest hashes each row's text
-// rendering, and for float4, float8, and the geometric types that
+// setVerifySession bounds the transaction, pins the output settings under
+// which one value has more than one text rendering, sets the search_path,
+// and puts it in the owner's shoes. The search_path is the one chunksql
+// chose for the copy statement: the catalog alone when the copy carries no
+// conversions, so every unqualified operator, cast, and type name resolves
+// there (CO-9); the build's path when it does, so a recopy's conversion
+// expressions and the digests' type names resolve as the gated statement's
+// did, with pg_catalog still ahead of both. The digest hashes each row's
+// text rendering, and for float4, float8, and the geometric types that
 // rendering follows extra_float_digits: at zero or below the server rounds
 // to fifteen significant digits, so two floats that differ in their last
-// digits would render, and hash, the same. The maximum of 3 renders every
-// float exactly whatever the database or role configures. The other output
-// settings (DateStyle, IntervalStyle, TimeZone, bytea_output) change the
-// spelling of a value but never make two values spell the same, and both
-// sides share the session. SET LOCAL cannot take bind parameters; the
+// digits would render, and hash, the same. The digest's two sides share the
+// session, so a setting that only changes a value's spelling (DateStyle,
+// IntervalStyle, TimeZone) cannot part them; a conversion that renders a
+// float or a bytea to text is different, because the chunk copy evaluated
+// it in a session of its own and the shadow holds that session's text.
+// chunksql.Rendering is the pin the copy, this pass's digest and recopy,
+// and the flush share, so the source side of the digest renders the
+// conversion as the copy did. SET LOCAL cannot take bind parameters; the
 // timeouts are integer milliseconds.
 func setVerifySession(ctx context.Context, tx pgx.Tx, owner, searchPath string, opts Options) error {
 	// INV: LK-2
 	budgets := "SET LOCAL lock_timeout = " + strconv.FormatInt(opts.LockTimeout.Milliseconds(), 10) +
 		"; SET LOCAL statement_timeout = " + strconv.FormatInt(opts.StatementTimeout.Milliseconds(), 10) +
-		"; SET LOCAL extra_float_digits = 3" +
+		"; " + chunksql.Rendering +
 		"; " + searchPath
 	if _, err := tx.Exec(ctx, budgets); err != nil {
 		return fmt.Errorf("set verification budgets: %w", err)

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	pganalyze "github.com/pganalyze/pg_query_go/v6"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 var (
@@ -18,6 +19,14 @@ var (
 	// same column with USING more than once; the copy can carry only one
 	// expression per column, and the server itself refuses the statement.
 	ErrConversionRepeated = errors.New("column is retyped with USING more than once")
+	// ErrConversionForeignColumn is returned when a USING expression refers
+	// to anything but the bare name of the column it retypes: another
+	// column, a qualified name, or a whole-row reference. The copy runs the
+	// expression over the source row, where every column is in reach, but
+	// the stream's catch-up writes one column value at a time, and a value
+	// that depends on a neighbouring column cannot be converted from the
+	// column alone.
+	ErrConversionForeignColumn = errors.New("USING expression refers to a column other than the one it retypes")
 )
 
 // ColumnConversions returns, for each column that sql's ALTER TABLE retypes
@@ -33,8 +42,12 @@ var (
 // tree's node is rendered as the single target of a SELECT and the SELECT
 // keyword removed, and the result is proven by parsing it back as a SELECT
 // target and rendering it again to the same text. Nothing is derived from
-// the expression's meaning. A statement that is not a single ALTER TABLE
-// is ErrNotAlterTable.
+// the expression's meaning, but one thing is read off its shape: every
+// column reference in it must be the bare name of the column it retypes,
+// because the catch-up that follows the copy converts one column value at
+// a time and has no neighbouring column to hand the expression
+// (ErrConversionForeignColumn). A statement that is not a single ALTER
+// TABLE is ErrNotAlterTable.
 func ColumnConversions(sql string) (map[string]string, error) {
 	node, err := parseSingle(sql)
 	if err != nil {
@@ -58,6 +71,9 @@ func ColumnConversions(sql string) (map[string]string, error) {
 		}
 		if _, seen := conversions[cmd.GetName()]; seen {
 			return nil, fmt.Errorf("%w: %s", ErrConversionRepeated, cmd.GetName())
+		}
+		if foreign, ok := foreignColumnReference(using, cmd.GetName()); ok {
+			return nil, fmt.Errorf("%w: USING of column %s refers to %s; the expression may name only %s, unqualified", ErrConversionForeignColumn, cmd.GetName(), foreign, cmd.GetName())
 		}
 		expr, err := renderExpression(using)
 		if err != nil {
@@ -105,4 +121,66 @@ func selectOf(expr *pganalyze.Node) *pganalyze.Node {
 		TargetList: []*pganalyze.Node{{Node: &pganalyze.Node_ResTarget{ResTarget: &pganalyze.ResTarget{Val: expr}}}},
 		Op:         pganalyze.SetOperation_SETOP_NONE,
 	}}}
+}
+
+// foreignColumnReference walks a USING expression's parse tree for the
+// first column reference that is not the bare name of column, and returns
+// how that reference was spelled: another column's name, a qualified name
+// such as t.qty, or a whole-row star. The walk is over the tree's shape
+// only — every message field, list, and map — so a reference nested in a
+// CASE, a function call, or an operator's operand is found the same way as
+// one at the top.
+func foreignColumnReference(expr *pganalyze.Node, column string) (string, bool) {
+	return messageForeignColumnReference(expr.ProtoReflect(), column)
+}
+
+func messageForeignColumnReference(msg protoreflect.Message, column string) (string, bool) {
+	if ref, ok := msg.Interface().(*pganalyze.ColumnRef); ok {
+		return columnRefSpelling(ref, column)
+	}
+	var foreign string
+	found := false
+	msg.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		if field.Kind() != protoreflect.MessageKind {
+			return true
+		}
+		switch {
+		case field.IsMap():
+			if field.MapValue().Kind() == protoreflect.MessageKind {
+				value.Map().Range(func(_ protoreflect.MapKey, item protoreflect.Value) bool {
+					foreign, found = messageForeignColumnReference(item.Message(), column)
+					return !found
+				})
+			}
+		case field.IsList():
+			list := value.List()
+			for i := 0; i < list.Len(); i++ {
+				if foreign, found = messageForeignColumnReference(list.Get(i).Message(), column); found {
+					break
+				}
+			}
+		default:
+			foreign, found = messageForeignColumnReference(value.Message(), column)
+		}
+		return !found
+	})
+	return foreign, found
+}
+
+// columnRefSpelling reports a column reference that is anything but the
+// bare name of column, spelled as the reference was written.
+func columnRefSpelling(ref *pganalyze.ColumnRef, column string) (string, bool) {
+	fields := ref.GetFields()
+	parts := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f.GetAStar() != nil {
+			parts = append(parts, "*")
+			continue
+		}
+		parts = append(parts, f.GetString_().GetSval())
+	}
+	if len(parts) == 1 && parts[0] == column {
+		return "", false
+	}
+	return strings.Join(parts, "."), true
 }
