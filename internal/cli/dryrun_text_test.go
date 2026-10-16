@@ -8,9 +8,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -254,6 +256,7 @@ func TestDryRunCodesHaveDocAnchors(t *testing.T) {
 		"table-not-found",
 		string(verdict.ReasonUnsupportedStatement),
 		string(verdict.ReasonUnsupportedPartitionedParent),
+		string(verdict.ReasonDeclarativeForeignKey),
 	}
 	for _, r := range planner.Reasons() {
 		codes = append(codes, string(r))
@@ -395,4 +398,41 @@ func TestDryRunTextTrimsServerVersionBanner(t *testing.T) {
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	assert.Contains(t, out.String(), "public.users (PostgreSQL 16.14) —")
 	assert.NotContains(t, out.String(), "Debian")
+}
+
+// A foreign-key change in a desired-state plan says in words that foreign
+// keys are not applied declaratively, so the reader of the diff knows the
+// change is shown for review only.
+func TestDryRunTextDeclarativeForeignKeyRefusalDisclosesUnsupported(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "public", "orders", "16.10"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         "ALTER TABLE public.orders ADD CONSTRAINT orders_user_id_fkey FOREIGN KEY (user_id) REFERENCES users (id)",
+		Kind:        schemadiff.ChangeAddForeignKey,
+		Route:       planner.RouteNative,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonDeclarativeForeignKey,
+		Class:       verdict.ClassCapabilityBoundary,
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	// The renderer wraps prose; compare with whitespace collapsed.
+	flat := func(s string) string { return strings.Join(strings.Fields(s), " ") }
+	assert.Contains(t, flat(out.String()), "error[declarative-foreign-key]: refused — foreign keys are not supported for desired-state apply yet; "+
+		"this change is shown for review only — to apply it, run the statement with pg-sprite migrate --alter")
+
+	created := report
+	created.Statements = []plan.Statement{{
+		SQL:         "CREATE TABLE public.shipments (id bigint PRIMARY KEY, order_id bigint NOT NULL REFERENCES orders (id))",
+		Kind:        schemadiff.ChangeCreateTable,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonDeclarativeForeignKey,
+		Class:       verdict.ClassCapabilityBoundary,
+		Cause:       executor.CreateShapeForeignKey,
+	}}
+	out.Reset()
+	require.NoError(t, writeDryRunText(&out, palette{}, created))
+	assert.Contains(t, flat(out.String()), "create the table without the foreign key, then add it with pg-sprite migrate --alter, naming the referenced table with its schema")
 }

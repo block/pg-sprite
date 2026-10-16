@@ -27,8 +27,10 @@ import (
 // statements. Version 3 added the cause field on greenfield statements the
 // create path refuses by shape. Version 4 added the class and owner fields on
 // the report and on refused statements, and closed their vocabularies. Version
-// 5 added blocking_passthrough_eligible to refused statements.
-const FormatVersion = 5
+// 5 added blocking_passthrough_eligible to refused statements. Version 6
+// added the add-foreign-key and drop-foreign-key change kinds and the
+// foreign-key create-shape cause.
+const FormatVersion = 6
 
 // Source identifies which front door derived the plan.
 type Source string

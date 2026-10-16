@@ -32,7 +32,8 @@ func AcceptedBlockingDecision(r Refusal) (eligible, decided bool) {
 		}
 	case ReasonUnsupportedStatement, ReasonTableTooLarge, ReasonInsufficientPrivileges,
 		ReasonBudgetExceeded, ReasonRewriteRequired, ReasonBackendUnavailable,
-		ReasonDestructiveChange, ReasonPlanFingerprintMismatch, ReasonCreateCollision:
+		ReasonDestructiveChange, ReasonPlanFingerprintMismatch, ReasonCreateCollision,
+		ReasonDeclarativeForeignKey:
 		return false, true
 	default:
 		return false, false

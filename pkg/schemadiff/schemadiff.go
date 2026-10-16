@@ -72,6 +72,10 @@ type Constraint struct {
 	Name string
 	// Def is the canonical definition text.
 	Def string
+	// ForeignKey reports a FOREIGN KEY constraint (contype 'f'). Omitted
+	// from JSON when false, so a model without foreign keys digests the
+	// same as it did before the field existed.
+	ForeignKey bool `json:",omitempty"`
 }
 
 // Index is one non-constraint index: its name plus the server-decompiled

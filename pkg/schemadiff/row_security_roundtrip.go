@@ -19,7 +19,7 @@ func IntrospectDesiredWithRowSecurity(ctx context.Context, db *pgxpool.Pool, des
 	if desired.Table() == "" {
 		return Model{}, statement.ErrRowSecurityDeclaration
 	}
-	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements())
+	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{})
 }
 
 // IntrospectDesiredWithRowSecurityTx materializes the declaration in a nested
@@ -32,7 +32,7 @@ func IntrospectDesiredWithRowSecurityTx(ctx context.Context, tx pgx.Tx, desired 
 	if err != nil {
 		return Model{}, fmt.Errorf("begin desired row security savepoint: %w", err)
 	}
-	return introspectDesiredTransaction(ctx, scratch, desired.Table(), desired.Statements())
+	return introspectDesiredTransaction(ctx, scratch, desired.Table(), desired.Statements(), referencedFrom{})
 }
 
 // RenderWithRowSecurity exports the complete table-local RLS definition,

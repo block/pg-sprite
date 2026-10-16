@@ -70,10 +70,12 @@ refusal — never a silently wrong or incomplete result:
   through `migrate --desired` or the Go API. Only the Go API supports binding execution to
   an ordered SQL review; mixed table/policy changes remain unsupported. See the workflow and roadmap in
   [declarative-row-security.md](docs/declarative-row-security.md).
-- **Foreign keys** are out of the declarative model in either direction:
-  desired files cannot declare them, and export refuses both a table that
-  carries foreign keys and a table that other tables reference. FK DDL
-  still works through the statement front door (`NOT VALID` + `VALIDATE`).
+- **Foreign keys** are planned but not executed declaratively: a desired
+  file may declare them, `diff` shows an added or dropped foreign key with
+  the `declarative-foreign-key` refusal, and `migrate --desired` refuses
+  the plan. Export refuses both a table that carries foreign keys and a
+  table that other tables reference. FK DDL still works through
+  `migrate --alter` (`NOT VALID` + `VALIDATE`).
 - **Partitioned tables** support in-place statement changes, but cannot be
   expressed in or exported to desired files.
 - **Unlogged tables and explicit column collations** are outside the

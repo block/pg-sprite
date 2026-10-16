@@ -17,7 +17,8 @@ kinds, guidance, causes, classes, owners) and the fingerprint serialization are 
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **5**: version 5 added `blocking_passthrough_eligible` to every refused
+The current version is **6**: version 6 added the `add-foreign-key` and `drop-foreign-key`
+kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
 and on refused statements, each drawn from a closed vocabulary (see Classes and Owners);
 version 3 added the statement-level `cause` field on greenfield statements the create path
@@ -68,8 +69,8 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `route` | string | always | The planner's aggregate route for the statement (see Routes). |
 | `backend` | string | except refusals | The assigned execution strategy (see Backends); absent for refusals. |
 | `disposition` | string | always | What execution would do with this statement now (see Dispositions). |
-| `reason` | string | refusals only | Typed refusal cause for this statement: `unsupported-statement` for a planner-level refusal or, on a greenfield plan, a create shape the create path refuses (`cause` names which); `unsupported-partitioned-parent` when target facts refuse it. An unknown value must be treated as refused. |
-| `cause` | string | greenfield create-shape refusals only | The create path's typed shape refusal (see Causes): why a table born in the run cannot carry this statement. Present exactly when the create path refused the statement — on a `diff`-source report with `table_exists: false`, that is every statement whose `disposition` is `refuse` and `reason` is `unsupported-statement`. Absent for every other refusal, including an `alter`-source refusal against a table that does not exist. Explanatory: excluded from the fingerprint. |
+| `reason` | string | refusals only | Typed refusal cause for this statement: `unsupported-statement` for a planner-level refusal or, on a greenfield plan, a create shape the create path refuses (`cause` names which); `declarative-foreign-key` for a foreign-key change; `unsupported-partitioned-parent` when target facts refuse it. An unknown value must be treated as refused. |
+| `cause` | string | greenfield create-shape refusals only | The create path's typed shape refusal (see Causes): why a table born in the run cannot carry this statement. Present exactly when the create path refused the statement — on a `diff`-source report with `table_exists: false`, that is every statement whose `disposition` is `refuse` and `reason` is `unsupported-statement`, plus a `CREATE TABLE` that declares a foreign key (`reason` `declarative-foreign-key`, `cause` `foreign-key`). Absent for every other refusal, including an `alter`-source refusal against a table that does not exist. Explanatory: excluded from the fingerprint. |
 | `class` | string | refusals only | This statement's refusal class (see Classes): how a consumer routes it — wait for a capability, hand to an owner, use a safer idiom, fix the environment, or report a bug. Present exactly when `disposition` is `refuse`. Explanatory: excluded from the fingerprint. |
 | `owner` | string | `no-online-safety-problem` refusals only | Who owns the work (see Owners). Present exactly when `class` is `no-online-safety-problem`. Explanatory: excluded from the fingerprint. |
 | `blocking_passthrough_eligible` | bool | refusals only | Whether this typed refusal is in the closed accepted-blocking registry. Independent of flags and catalog lookups; explanatory and excluded from the fingerprint. |
@@ -134,6 +135,7 @@ treat the statement and report as refused.
 |---|---|
 | `unsupported-statement` | The planner knows no safe path for the statement (planner-level refusal), or — on a greenfield plan, where the table does not exist — the create path refuses the statement's shape, in which case `cause` names which shape (see Causes). The same token the run path's refusal verdict carries, so a dry-run report and a run receipt for the same statement match on the typed field alone. |
 | `unsupported-partitioned-parent` | Target facts show that the statement cannot run safely on a partitioned parent. |
+| `declarative-foreign-key` | The statement adds or drops a foreign key, or creates a table that declares one, and desired-state execution does not run foreign-key changes yet. The plan still shows the statement so the diff is reviewable; `migrate --alter` runs `ADD FOREIGN KEY` online. |
 
 On the apply path, refusal checks have deterministic precedence: table size, then partition
 support, then privileges.
@@ -193,6 +195,7 @@ detail and the text diff both read this field.
 | `inherits` | `INHERITS` binds to an existing parent the absence proof does not cover. |
 | `like` | `LIKE` reads an existing source table the absence proof does not cover. |
 | `of-type` | `OF` binds to an existing composite type the absence proof does not cover. |
+| `foreign-key` | A foreign key locks each referenced table, and desired-state execution does not run foreign-key changes yet. |
 | `if-not-exists` | A name-only no-op cannot prove the existing relation has the requested shape or is valid. |
 | `concurrently` | A table born this run needs no concurrent index build. |
 | `duplicate-name` | The desired set claims the same relation name twice. |
@@ -237,7 +240,8 @@ bumps `format_version`. Present exactly when `class` is `no-online-safety-proble
 |---|---|
 | `create-table` | Creates the table (missing-table plans only). |
 | `drop-index` | Drops an index. |
-| `drop-constraint` | Drops a table constraint. |
+| `drop-constraint` | Drops a table constraint other than a foreign key. |
+| `drop-foreign-key` | Drops a foreign-key constraint. Always refused for execution (`declarative-foreign-key`). |
 | `drop-column` | Drops a column. |
 | `add-column` | Adds a column. |
 | `alter-type` | Changes a column's type. |
@@ -245,7 +249,8 @@ bumps `format_version`. Present exactly when `class` is `no-online-safety-proble
 | `drop-default` | Drops a column default. |
 | `set-not-null` | Adds the NOT NULL attribute. |
 | `drop-not-null` | Removes the NOT NULL attribute. |
-| `add-constraint` | Adds a table constraint. |
+| `add-constraint` | Adds a table constraint other than a foreign key. |
+| `add-foreign-key` | Adds a foreign-key constraint. Always refused for execution (`declarative-foreign-key`). |
 | `create-index` | Creates an index. |
 
 ## Fingerprint
@@ -292,7 +297,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 5,
+  "format_version": 6,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -335,7 +340,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 5,
+  "format_version": 6,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -402,7 +407,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 5,
+  "format_version": 6,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",
