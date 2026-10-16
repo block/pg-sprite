@@ -8,10 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/copier"
-	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
 
@@ -228,25 +226,4 @@ func TestRunnerRefusesAResumeWhoseStatementNamesAnotherTable(t *testing.T) {
 	_, err := f.run(t, "orders", `ALTER TABLE %s.invoices DROP COLUMN note`, schemachange.RunOptions{})
 	require.Error(t, err)
 	assert.Equal(t, schemachange.CauseStatementTarget, schemachange.RefusalCauseOf(err))
-}
-
-// A target proven for a run that decodes WAL is refused as an invariant
-// violation before the lock is taken: the quiesced runner decodes none,
-// and a target whose environment was verified for a slot and a
-// publication would run without either. Nothing is built and no row is
-// written.
-func TestRunnerRefusesATargetProvenForDecodingWAL(t *testing.T) {
-	logical := newRunnerFixtureOn(t, testutil.StartPostgresWithSettings(t, "wal_level=logical"))
-	logical.createOrders(t)
-	target, err := preflight.CheckCopySwap(t.Context(), logical.pool, logical.schema, "orders",
-		preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: testutil.UnlimitedDisk})
-	require.NoError(t, err)
-	require.True(t, target.DecodesWAL())
-
-	_, err = logical.runner(t, schemachange.RunOptions{}).Run(t.Context(), logical.pool, target, logical.alter(t, `ALTER TABLE %s.orders DROP COLUMN note`))
-	require.ErrorIs(t, err, schemachange.ErrInvariantViolation)
-	assert.False(t, logical.relationExists(t, schemachange.ShadowName(logical.schema, "orders")), "nothing was built")
-	assert.False(t, logical.hasFence(t, "orders"), "the source was not fenced")
-	_, err = logical.store.Inspect(t.Context(), logical.schema, "orders")
-	assert.ErrorIs(t, err, checkpoint.ErrTableMissing, "the run never reached the store")
 }

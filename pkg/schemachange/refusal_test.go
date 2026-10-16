@@ -37,6 +37,7 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 		CauseNameTaken:           "ST-5",
 		CauseCutoverUnverified:   "CO-1",
 		CauseCutoverUndrained:    "CO-1",
+		CauseDrainDeferred:       "CO-6",
 		CauseSwapMismatch:        "ST-6",
 		CauseOutcomeAmbiguous:    "LK-4",
 		CauseResumeTerminal:      "ST-4",

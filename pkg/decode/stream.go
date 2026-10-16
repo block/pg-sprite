@@ -10,7 +10,6 @@ import (
 	"github.com/jackc/pglogrepl"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -90,16 +89,19 @@ type Stream struct {
 
 // OpenStream starts decoding the target's slot from a position, on a fresh
 // replication connection built from cfg and proven to be a session of the
-// pool's cluster on the target's database — a database of the target's
-// name on another cluster holds a slot of the same derived name, whose rows
-// would otherwise arrive as this target's changes. The position is the
+// catalog session's cluster on the target's database — a database of the
+// target's name on another cluster holds a slot of the same derived name,
+// whose rows would otherwise arrive as this target's changes. catalog is
+// the pool, or one connection of the caller's for a caller that holds a
+// pool connection open while it opens the stream and must not wait on
+// the pool for a second. The position is the
 // slot's consistent point for a first run or
 // the checkpointed applied position for a resume; the server replays every
 // transaction that committed above the slot's confirmed position, so a
 // resume sees again what it applied but never confirmed. The exported
 // snapshot of a Slot is unaffected, since the slot's own connection is not
 // used.
-func OpenStream(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, target preflight.CopySwapTarget, from LSN) (*Stream, error) {
+func OpenStream(ctx context.Context, cfg dbconn.Config, catalog dbconn.RowQuerier, target preflight.CopySwapTarget, from LSN) (*Stream, error) {
 	if target.Table() == "" {
 		return nil, fmt.Errorf("%w: ST-3: zero copy-and-swap target", ErrInvariantViolation)
 	}
@@ -118,10 +120,10 @@ func OpenStream(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, targ
 	if err != nil {
 		return nil, fmt.Errorf("open stream from slot %s: %w", name, err)
 	}
-	// INV: ST-3 — the slot is named for the target's database on the pool's
-	// cluster; a connection anywhere else would decode another database's
-	// slot of the same name.
-	identity, err := proveSameServer(ctx, conn, pool)
+	// INV: ST-3 — the slot is named for the target's database on the
+	// catalog session's cluster; a connection anywhere else would decode
+	// another database's slot of the same name.
+	identity, err := proveSameServer(ctx, conn, catalog)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("open stream from slot %s: %w", name, err), conn.Close(ctx))
 	}

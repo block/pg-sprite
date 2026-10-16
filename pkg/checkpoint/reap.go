@@ -62,24 +62,27 @@ type candidateSlot struct {
 // ReapOrphanSlots drops the engine's orphan replication slots in the store's
 // database (ST-3). An orphan is a logical slot of the engine's name shape
 // that no checkpoint row in a non-terminal phase names and that no process
-// holds: a run writes and commits its row before it creates its slot, so a
-// slot with no row was left by a run that ended without dropping it, and a
-// slot named by a done or failed row by one whose cleanup did not finish.
+// holds: a run makes its slot and commits the row that names it under the
+// engine's lock on the slot's name, so a slot with no row was left by a run
+// that ended without dropping it, and a slot named by a done or failed row
+// by one whose cleanup did not finish.
 //
 // Ownership is judged twice. The slots are listed first and the rows that
-// own them read in a later statement, so a row committed before its slot
-// appears is seen whenever the slot is; then, right before each drop, the
-// row is read again, so a run that claimed the slot since the pass began
-// keeps it. Whether a slot is held is judged at the drop: each orphan goes
-// through decode.DropIdleSlot on a replication connection built from cfg,
-// which refuses a held slot instead of waiting for its holder and takes an
-// idle slot's publication with it. Slots a live row names or a process
-// holds, and names that wear the prefix without the shape, are reported
-// and left as found. The drops stop at the first failure, reporting what
-// was dropped before it.
-//
-// Two reapers over one database race each other at the drop; until a lock
-// coordinates them, run one reaper per database at a time.
+// own them read in a later statement, which sorts the slots a live row
+// plainly names out of the pass; then, under the engine's lock on the
+// slot's name (WithSlotLock), the row is read again and the slot dropped,
+// and that read is the one that decides: a run claims its slot and its row
+// under the same lock, so a run that claimed the slot since the pass began
+// keeps it, and a run claiming it now waits for the drop and creates
+// afresh. Whether
+// a slot is held is judged at the drop: each orphan goes through
+// decode.DropIdleSlot on a replication connection built from cfg, which
+// refuses a held slot instead of waiting for its holder and takes an idle
+// slot's publication with it. Slots a live row names or a process holds,
+// and names that wear the prefix without the shape, are reported and left
+// as found. The drops stop at the first failure, reporting what was dropped
+// before it. Two reapers over one database take turns at each slot; the
+// one that waited finds the slot gone and reports the drop as its own too.
 //
 // A database where Ensure has never run has no rows to speak for its
 // slots, so the pass is refused with ErrTableMissing rather than read every
@@ -114,28 +117,32 @@ func (s *Store) ReapOrphanSlots(ctx context.Context, cfg dbconn.Config) (Reaped,
 }
 
 // dropIfStillOrphan re-reads the slot's row and then drops the slot without
-// waiting for a holder, filing the slot under the list the outcome names.
+// waiting for a holder, both under the engine's lock on the slot's name,
+// filing the slot under the list the outcome names.
 func (s *Store) dropIfStillOrphan(ctx context.Context, cfg dbconn.Config, name string, reaped *Reaped) error {
-	live, err := s.liveRowSlots(ctx, []string{name})
-	if err != nil {
-		return err
-	}
-	if live[name] {
-		// INV: ST-3 — the row is read right before the drop so a run that
-		// claimed the slot since the pass began keeps it.
-		reaped.Live = append(reaped.Live, name)
+	return s.WithSlotLock(ctx, cfg, name, func(ctx context.Context) error {
+		live, err := s.liveRowSlots(ctx, []string{name})
+		if err != nil {
+			return err
+		}
+		if live[name] {
+			// INV: ST-3 — the row is read under the slot's lock right before
+			// the drop, so a run that claimed the slot since the pass began
+			// keeps it, and one claiming it now waits for the drop.
+			reaped.Live = append(reaped.Live, name)
+			return nil
+		}
+		err = decode.DropIdleSlot(ctx, cfg, s.pool, name)
+		if errors.Is(err, decode.ErrSlotActive) {
+			reaped.Active = append(reaped.Active, name)
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("reap orphan slot %s: %w", name, err)
+		}
+		reaped.Dropped = append(reaped.Dropped, name)
 		return nil
-	}
-	err = decode.DropIdleSlot(ctx, cfg, s.pool, name)
-	if errors.Is(err, decode.ErrSlotActive) {
-		reaped.Active = append(reaped.Active, name)
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("reap orphan slot %s: %w", name, err)
-	}
-	reaped.Dropped = append(reaped.Dropped, name)
-	return nil
+	})
 }
 
 // candidateSlots reads the engine-prefixed slots of the store's database.
