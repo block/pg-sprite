@@ -185,8 +185,10 @@ func (r *Runner) resumeOnRow(ctx context.Context, pool *pgxpool.Pool, lock *dbco
 	}
 	built, err := InspectShadow(ctx, pool, lock, target, st, r.opts.Shadow)
 	if errors.Is(err, ErrShadowNotFound) {
-		// INV: ST-2
-		return runState{}, refuse(CauseResumeShadowGone, []error{err}, "checkpoint row for %s.%s is in phase %s but no relation bears its shadow name %s; delete the row to start over", cp.Schema, cp.Table, cp.Phase, cp.ShadowTable)
+		// INV: ST-2 — the refusal writes nothing: a live row's slot stays
+		// with the row for the operator to drop, as it does for every
+		// other resume refusal.
+		return runState{}, refuse(CauseResumeShadowGone, []error{err}, "checkpoint row for %s.%s is in phase %s but no relation bears its shadow name %s; %s", cp.Schema, cp.Table, cp.Phase, cp.ShadowTable, shadowGoneRemedy(cp))
 	}
 	if err != nil {
 		return runState{}, err
@@ -195,6 +197,16 @@ func (r *Runner) resumeOnRow(ctx context.Context, pool *pgxpool.Pool, lock *dbco
 		return runState{}, err
 	}
 	return runState{cp: cp, built: built, proof: proof}, nil
+}
+
+// shadowGoneRemedy says how to start over from a row whose shadow is gone.
+// A live row also names a slot, which retains WAL while it stands and
+// which a fresh run would meet when it creates its own.
+func shadowGoneRemedy(cp checkpoint.Checkpoint) string {
+	if cp.SlotName == "" {
+		return "delete the row to start over"
+	}
+	return fmt.Sprintf("drop its slot %s and delete the row to start over", cp.SlotName)
 }
 
 // checkQuiescedRow refuses a row the quiesced runner cannot act on: one in
