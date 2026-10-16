@@ -83,3 +83,26 @@ func TestSlotLockIsExclusivePerName(t *testing.T) {
 	err = store.WithSlotLock(t.Context(), cfg, name, func(context.Context) error { return nil })
 	assert.NoError(t, err, "the lock is free once its holder has let go")
 }
+
+// A cfg that dials another database than the store's pool is refused
+// before the lock is taken: the advisory key is per database, so a lock
+// there would not exclude a claim or a reap judged through the store
+// (ST-3). The callback never runs.
+func TestSlotLockRefusesAConnectionOnAnotherDatabase(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.NewDatabase(t, serverURL)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
+	require.NoError(t, err)
+	elsewhere := dbconn.Config{URL: testutil.NewDatabase(t, serverURL)}
+
+	ran := false
+	err = store.WithSlotLock(t.Context(), elsewhere, "pgsprite_0badf00d", func(context.Context) error {
+		ran = true
+		return nil
+	})
+
+	require.ErrorIs(t, err, checkpoint.ErrInvariantViolation)
+	assert.False(t, ran, "nothing runs under a lock in another database")
+}

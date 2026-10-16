@@ -204,10 +204,10 @@ func TestClassifyReferenceRows(t *testing.T) {
 func TestClassifySetNotNullSequence(t *testing.T) {
 	d := classifyOne(t, "ALTER TABLE s.t ALTER COLUMN age SET NOT NULL")
 	assert.Equal(t, []string{
-		`ALTER TABLE "s"."t" ADD CONSTRAINT "t_age_not_null" CHECK ("age" IS NOT NULL) NOT VALID`,
-		`ALTER TABLE "s"."t" VALIDATE CONSTRAINT "t_age_not_null"`,
+		`ALTER TABLE "s"."t" ADD CONSTRAINT "t_age_not_null_check" CHECK ("age" IS NOT NULL) NOT VALID`,
+		`ALTER TABLE "s"."t" VALIDATE CONSTRAINT "t_age_not_null_check"`,
 		`ALTER TABLE "s"."t" ALTER COLUMN "age" SET NOT NULL`,
-		`ALTER TABLE "s"."t" DROP CONSTRAINT "t_age_not_null"`,
+		`ALTER TABLE "s"."t" DROP CONSTRAINT "t_age_not_null_check"`,
 	}, d.SaferSQL)
 }
 

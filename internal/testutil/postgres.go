@@ -198,6 +198,20 @@ func NewSchema(t *testing.T, pool *pgxpool.Pool) string {
 	return name
 }
 
+// ExecInSchema runs sql with search_path set to schema, so unqualified
+// fixture SQL lands there.
+func ExecInSchema(t *testing.T, pool *pgxpool.Pool, schema, sql string) {
+	t.Helper()
+	err := pgx.BeginTxFunc(t.Context(), pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
+		if _, err := tx.Exec(t.Context(), "SET LOCAL search_path = "+pgx.Identifier{schema}.Sanitize()); err != nil {
+			return err
+		}
+		_, err := tx.Exec(t.Context(), sql)
+		return err
+	})
+	require.NoError(t, err, sql)
+}
+
 // NewRole creates a throwaway cluster-level role with the given options and
 // registers its drop. Roles are cluster-scoped, so names are unique per
 // process the same way throwaway schemas are.
