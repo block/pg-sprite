@@ -99,21 +99,23 @@ A quiesced copy-and-swap run (`pkg/schemachange.Runner`) does not take the calle
 nothing writes the table: it installs a statement-level `BEFORE INSERT OR UPDATE OR DELETE OR
 TRUNCATE` trigger, `pgsprite_write_fence`, on the source before its first checkpoint save, and
 every write the trigger sees is refused with SQLSTATE `55006` (`object_in_use`) and a message
-naming the table. The trigger calls a function of the same name in the engine's own `pgsprite`
+naming the table. The trigger is enabled `ALWAYS`, so it fires for a session running under
+`session_replication_role = replica` as well. The trigger calls a function of the same name in the engine's own `pgsprite`
 schema, created once per database as the engine role and owned by it, so the table's owner
 needs no access to that schema for the fence to fire. The fence stays on a stopped run's source
 until the run is resumed or abandoned (`DropWriteFence`); a completed run carries it to the
 retained `_old` table with the swap, where it is dropped with the table or, under `KeepOld`,
 taken off so the retained table can be renamed back and take writes at once.
 
-What this needs: `CREATE TRIGGER` on a table requires the `TRIGGER` privilege on it or
+What this needs: `CREATE TRIGGER` and `ALTER TABLE … ENABLE ALWAYS TRIGGER` on a table require
 ownership, which the Tier 1 membership in the owning role already gives; the function needs
 `CREATE` on the `pgsprite` schema, which the engine owns. A pre-provisioned deployment that
 created the schema for the engine needs nothing further once the schema is owned by the engine
-role. The fence does not stop a superuser, nor a session running under
-`session_replication_role = replica`, which fires no ordinary triggers; a deployment whose
-writers can hold either has to quiesce the table by its own means, and a difference the
-verification pass then finds is reported, never repaired. Before `Run`, quiesce the table as far
+role. The fence does not stop a role that owns the table, which can disable or drop it; the
+swap refuses (`cutover-unfenced`) a fence found disabled or gone under its lock, but a role that
+disables the fence, writes, and restores it between the verification pass and the swap is not
+seen. A deployment whose writers can hold table ownership has to quiesce the table by its own
+means, and a difference the verification pass finds is reported, never repaired. Before `Run`, quiesce the table as far
 as the application allows — stop or pause its writers, or route them around it — so the fence
 refuses nothing in practice; the fence is the proof, not the plan.
 
