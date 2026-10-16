@@ -931,7 +931,11 @@ operations with the shadow as its sole target —
 inside the build's transaction and before the statement runs, a `USING` expression the server
 does not classify as immutable, tried as a stored generated column's expression on the empty
 shadow and rolled back, since the copy, the recopy, and the catch-up evaluate the expression
-again and must get the same answer).
+again and must get the same answer; and it names a column in the copy only when it is the same
+column on the shadow after the statement — the source's live position equals the shadow
+column's attribute number — so a column the statement dropped and added again under one name
+takes its own default instead of the dropped column's values, the same list on a resume's
+`InspectShadow`).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof

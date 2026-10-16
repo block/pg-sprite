@@ -143,10 +143,11 @@ func (b BuiltShadow) Fidelity() FidelitySnapshot { return b.fidelity }
 func (b BuiltShadow) ShadowFidelity() FidelitySnapshot { return b.shadowFidelity }
 
 // CopyColumns are the columns the copier moves: every non-generated source
-// column that still exists on the shadow after the schema change. Generated
-// columns are excluded because the server computes them on insert; a
-// column the change dropped is excluded because the shadow has nowhere to
-// put it.
+// column that is still the same column on the shadow after the schema change.
+// Generated columns are excluded because the server computes them on insert;
+// a column the change dropped is excluded because the shadow has nowhere to
+// put it, and so is one the change dropped and added again under the same
+// name, which is a new column holding its own default.
 func (b BuiltShadow) CopyColumns() []string { return append([]string(nil), b.copyColumns...) }
 
 // Conversions maps each copy column the gated statement retyped with a
@@ -277,6 +278,14 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err != nil {
 		return BuiltShadow{}, fmt.Errorf("introspect shadow %s.%s: %w", target.Schema(), shadow, err)
 	}
+	sourcePositions, err := readColumnPositions(ctx, tx, oid)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
+	shadowPositions, err := readColumnPositions(ctx, tx, shadowOID)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
 	// The handoff is proven on the shadow the statement left, not the one
 	// the defaults were applied to: the proof records exactly what an
 	// inspection of this shadow would accept.
@@ -290,7 +299,7 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err := tx.Commit(ctx); err != nil {
 		return BuiltShadow{}, fmt.Errorf("commit shadow build: %w", err)
 	}
-	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity, shadowFidelity, conversions)
+	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, sourcePositions, shadowPositions, identities, fidelity, shadowFidelity, conversions)
 }
 
 // newBuiltShadow assembles the proof from what a build or an inspection read
@@ -299,7 +308,7 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 // the same catalog state always yields the same proof, and the conversions
 // are kept for the copy columns only, so the same statement over the same
 // catalog state does too.
-func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, shadowOID uint32, sourceModel, targetModel schemadiff.Model, identities []IdentityColumn, fidelity, shadowFidelity FidelitySnapshot, conversions map[string]string) (BuiltShadow, error) {
+func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, shadowOID uint32, sourceModel, targetModel schemadiff.Model, sourcePositions, shadowPositions []columnPosition, identities []IdentityColumn, fidelity, shadowFidelity FidelitySnapshot, conversions map[string]string) (BuiltShadow, error) {
 	sourceFingerprint, err := fingerprint(sourceModel)
 	if err != nil {
 		return BuiltShadow{}, err
@@ -308,7 +317,7 @@ func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, s
 	if err != nil {
 		return BuiltShadow{}, err
 	}
-	columns := copyColumns(sourceModel, targetModel)
+	columns := copyColumns(sourceModel, sameColumns(sourcePositions, shadowPositions))
 	return BuiltShadow{
 		target:            target,
 		schema:            target.Schema(),
@@ -557,16 +566,16 @@ func copyConversions(conversions map[string]string, columns []string) map[string
 	return kept
 }
 
-// copyColumns lists the non-generated source columns that exist on the
-// shadow after the schema change, in source order.
-func copyColumns(source, target schemadiff.Model) []string {
-	onShadow := make(map[string]bool, len(target.Columns))
-	for _, c := range target.Columns {
-		onShadow[c.Name] = true
-	}
+// copyColumns lists the non-generated source columns that are still the same
+// column on the shadow after the schema change, in source order. A column the
+// change dropped has nowhere to go, and one it dropped and added again under
+// the same name is a new column that takes its own default, not the dropped
+// column's values.
+func copyColumns(source schemadiff.Model, same map[string]bool) []string {
 	columns := make([]string, 0, len(source.Columns))
 	for _, c := range source.Columns {
-		if c.IsGenerated() || !onShadow[c.Name] {
+		// INV: ST-7
+		if c.IsGenerated() || !same[c.Name] {
 			continue
 		}
 		columns = append(columns, c.Name)

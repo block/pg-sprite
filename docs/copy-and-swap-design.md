@@ -213,7 +213,14 @@ PostgreSQL built against OpenSSL routes `md5()` through it, and an OpenSSL in FI
 refuses MD5, which would fail every pass on such a host; the digest
 never leaves the process, so the hash has no compatibility surface.
 Generated columns are absent from the copy list but included after the shadow recomputes them;
-dropped columns are absent from the comparison.
+dropped columns are absent from the comparison. So is a column the statement dropped and added
+again under the same name: it is a new column that takes its own default (or NULL) on the shadow,
+and the copy list names a column only when it is the same column on both sides, not merely the
+same name. The shadow is cloned with its columns numbered 1..n in the source's live column order,
+a retype keeps a column's attribute number, and an added column is numbered past n, so a source
+column at live position `i` is the same column exactly when the shadow's column of that name has
+attribute number `i`; the build and the resume's inspection both read the numbers from the
+catalog, so they derive the same list.
 
 **Why.** One comparison shape proves the stored post-change representation for widening,
 narrowing, and precision changes instead of comparing unlike textual representations.
