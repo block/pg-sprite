@@ -163,26 +163,13 @@ func AcquireTableLock(ctx context.Context, cfg Config, schema, table string, opt
 		}
 	}
 
-	pc, err := buildPoolConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-	connConfig := pc.ConnConfig.Copy()
-	if cfg.BeforeConnect != nil {
-		if err := cfg.BeforeConnect(ctx, connConfig); err != nil {
-			return nil, fmt.Errorf("before connect for table lock: %w", err)
-		}
-	}
 	// INV: LK-1 — a bare dedicated connection has no pool lifetime or idle
-	// recycler that can silently replace the session carrying the lock.
-	conn, err := pgx.ConnectConfig(ctx, connConfig)
+	// recycler that can silently replace the session carrying the lock. It
+	// is prepared exactly like a pooled one, with session bounds and a
+	// catalog-first search_path.
+	conn, pc, err := connectDedicated(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("connect dedicated table lock session: %w", err)
-	}
-	// The dedicated session is prepared exactly like a pooled one — with
-	// session bounds and a catalog-first search_path.
-	if err := pc.AfterConnect(ctx, conn); err != nil {
-		return nil, errors.Join(fmt.Errorf("prepare dedicated table lock session: %w", err), conn.Close(ctx))
+		return nil, fmt.Errorf("table lock session: %w", err)
 	}
 	// INV: LK-1 — a session-scoped lock is exclusive only on a connection
 	// that keeps one server session. The proof runs before the lock is

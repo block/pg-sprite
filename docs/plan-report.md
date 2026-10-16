@@ -17,7 +17,7 @@ kinds, guidance, causes, classes, owners) and the fingerprint serialization are 
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **6**: version 6 added the `add-foreign-key` and `drop-foreign-key`
+The current version is **7**: version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
 and on refused statements, each drawn from a closed vocabulary (see Classes and Owners);
@@ -245,6 +245,7 @@ bumps `format_version`. Present exactly when `class` is `no-online-safety-proble
 | `drop-column` | Drops a column. |
 | `add-column` | Adds a column. |
 | `alter-type` | Changes a column's type. |
+| `set-generated-expression` | Replaces a stored generated column's expression. Always refused for execution (`unsupported-statement`): it recomputes every row under an exclusive lock, and no online path exists. The statement needs PostgreSQL 17 or later. |
 | `set-default` | Sets or replaces a column default. |
 | `drop-default` | Drops a column default. |
 | `set-not-null` | Adds the NOT NULL attribute. |
@@ -297,7 +298,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 6,
+  "format_version": 7,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -340,7 +341,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 6,
+  "format_version": 7,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -407,7 +408,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 6,
+  "format_version": 7,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

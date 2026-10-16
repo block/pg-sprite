@@ -118,6 +118,42 @@ func TestPlanRefusesPartitionedParentIndexChange(t *testing.T) {
 	}
 }
 
+// A stored generated column whose desired expression differs from the live
+// one plans a single refused SET EXPRESSION statement. The plan shows the
+// drift instead of failing, and the index built on the column is left alone:
+// nothing drops and re-adds the column.
+func TestPlanRefusesGeneratedExpressionChange(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.notes (id bigint PRIMARY KEY, kind int NOT NULL, body text NOT NULL, "+
+			"search tsvector GENERATED ALWAYS AS (CASE WHEN kind = 1 THEN NULL::tsvector ELSE to_tsvector('simple', body) END) STORED); "+
+			"CREATE INDEX notes_search_idx ON %s.notes USING gin (search)", schema, schema))
+	require.NoError(t, err)
+
+	ds := parseDesired(t,
+		"CREATE TABLE notes (id bigint PRIMARY KEY, kind int NOT NULL, body text NOT NULL, "+
+			"search tsvector GENERATED ALWAYS AS (CASE WHEN kind IN (1, 2) THEN NULL::tsvector ELSE to_tsvector('simple', body) END) STORED);\n"+
+			"CREATE INDEX notes_search_idx ON notes USING gin (search);")
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: schema, Desired: ds})
+	require.NoError(t, err)
+
+	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	ch := report.Statements[0]
+	assert.Equal(t, schemadiff.ChangeSetGeneratedExpression, ch.Kind)
+	assert.Contains(t, ch.SQL, `ALTER COLUMN search SET EXPRESSION AS (`)
+	assert.Contains(t, ch.SQL, `ARRAY[1, 2]`)
+	assert.Equal(t, planner.RouteRefuse, ch.Route)
+	assert.Equal(t, router.DispositionRefuse, ch.Disposition)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, ch.Reason)
+	assert.Equal(t, verdict.ClassCapabilityBoundary, ch.Class)
+	assert.Empty(t, ch.ExecSQL)
+}
+
 // A desired state that needs a table rewrite routes to the copy-and-swap
 // backend, and the routed plan says that backend is unavailable in this
 // build — a library caller sees the same honest refusal the CLI prints.

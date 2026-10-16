@@ -70,7 +70,7 @@ func (r *Runner) swapLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.
 	if err := r.save(ctx, lock, state, checkpoint.PhaseCutover); err != nil {
 		return report, err
 	}
-	drain := r.drain(pool, target, state.built, flusher, state.cp.Watermark, state.cp.LastAppliedLSN)
+	drain := r.drain(target, state.built, flusher, state.cp.Watermark, state.cp.LastAppliedLSN)
 	swapped, err := Cutover(ctx, pool, lock, ready, drain, r.opts.Cutover)
 	if err != nil {
 		return report, err

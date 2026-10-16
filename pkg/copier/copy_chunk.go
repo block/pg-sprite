@@ -67,18 +67,26 @@ func (c *Copier) guard(ctx context.Context, tx pgx.Tx) error {
 	return c.confirmRelations(ctx, tx)
 }
 
-// setCopySession bounds the transaction, sets its search_path, and puts it
-// in the owner's shoes. The search_path is the one chunksql chose for the
+// setCopySession bounds the transaction, pins the output settings a
+// conversion's text may follow, sets its search_path, and puts it in the
+// owner's shoes. The search_path is the one chunksql chose for the
 // statement: the catalog alone for a copy without conversions, since every
 // relation the copy names is schema-qualified and pinning the catalog keeps
 // a schema ahead of it on the caller's pool from answering the key range's
 // operators or a shadow default or trigger (CO-9); the build's path for a
 // copy whose conversion expressions must resolve as the gated statement
-// did. The verifier's repair runs the same statement under the same path,
-// so a repair has the same session as the copy.
+// did. The output settings are chunksql.Rendering, the same pin the
+// verifier and the flush set, so a float or bytea a conversion renders to
+// text lands from the copy as the same text the flush and the recopy
+// write; a copy without conversions renders nothing as text, and the pin
+// costs it nothing. The verifier's repair runs the same statement under the
+// same path and pin, so a repair has the same session as the copy.
 func setCopySession(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, searchPath string, opts Options) error {
 	if err := setBudgets(ctx, tx, opts); err != nil {
 		return err
+	}
+	if _, err := tx.Exec(ctx, chunksql.Rendering); err != nil {
+		return fmt.Errorf("set copy output settings: %w", err)
 	}
 	if _, err := tx.Exec(ctx, searchPath); err != nil {
 		return fmt.Errorf("set copy search_path: %w", err)

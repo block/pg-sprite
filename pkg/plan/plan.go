@@ -29,8 +29,9 @@ import (
 // the report and on refused statements, and closed their vocabularies. Version
 // 5 added blocking_passthrough_eligible to refused statements. Version 6
 // added the add-foreign-key and drop-foreign-key change kinds and the
-// foreign-key create-shape cause.
-const FormatVersion = 6
+// foreign-key create-shape cause. Version 7 added the
+// set-generated-expression change kind.
+const FormatVersion = 7
 
 // Source identifies which front door derived the plan.
 type Source string

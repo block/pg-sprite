@@ -224,16 +224,19 @@ func TestReapOrphanSlotsWaitsForARunClaimingTheSlot(t *testing.T) {
 	outcomes := make(chan reapOutcome, 1)
 	var wg sync.WaitGroup
 	t.Cleanup(wg.Wait)
-	err := d.store.WithSlotLock(t.Context(), slot.Name(), func(ctx context.Context) error {
+	err := d.store.WithSlotLock(t.Context(), d.cfg, slot.Name(), func(ctx context.Context) error {
 		wg.Go(func() {
 			reaped, err := d.store.ReapOrphanSlots(ctx, d.cfg)
 			outcomes <- reapOutcome{reaped: reaped, err: err}
 		})
+		// The callback asserts rather than requires: a failed step is
+		// reported and the lock let go, so the reaper's outcome below is
+		// still read instead of the test stopping inside the lock.
 		const waitDeadline = 10 * time.Second
 		const waitPoll = 20 * time.Millisecond
-		require.Eventually(t, func() bool { return waitingOnAnAdvisoryLock(t, d.pool) },
+		assert.Eventually(t, func() bool { return waitingOnAnAdvisoryLock(t, d.pool) },
 			waitDeadline, waitPoll, "the reaper should wait at the drop for the slot's lock")
-		require.True(t, slotExists(t, d.pool, slot.Name()), "nothing is dropped while the run holds the lock")
+		assert.True(t, slotExists(t, d.pool, slot.Name()), "nothing is dropped while the run holds the lock")
 		d.claim(t, "orders", slot.Name(), checkpoint.PhaseCopying)
 		return nil
 	})
