@@ -133,16 +133,20 @@ func TestClassConstructorsAgreeWithNewRefusal(t *testing.T) {
 	assert.Equal(t, ClassInvariantViolation, InvariantViolation(ReasonUnsupportedStatement).Class())
 }
 
-// Every class the core's refusal causes can name is a class of the verdict
-// contract under the same token, so an adapter turning a cause's Class()
-// into a refusal verdict converts the string and loses nothing: a core
-// class the contract does not know, or spelled differently, fails here.
+// Every class the core's refusal causes can name is in the verdict
+// contract's closed set, so an adapter turning a cause's Class() into a
+// refusal verdict converts the value and ParseClass accepts the result: a
+// core class added without a place in Classes() fails here. The verdict
+// keeps exactly one class of its own, for a statement that never reached
+// the engine.
 func TestCoreRefusalClassesAreVerdictClasses(t *testing.T) {
 	for _, class := range refusal.Classes() {
 		parsed, err := ParseClass(string(class))
 		require.NoError(t, err, "core refusal class %q is not a verdict class", class)
 		assert.Equal(t, Class(class), parsed)
 	}
+	assert.Len(t, Classes(), len(refusal.Classes())+1, "the verdict adds only no-online-safety-problem to the core classes")
+	assert.Contains(t, Classes(), ClassNoOnlineSafetyProblem)
 }
 
 func TestWithRefusalStampsOutcomeReasonClassOwner(t *testing.T) {

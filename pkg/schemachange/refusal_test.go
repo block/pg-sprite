@@ -67,7 +67,9 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 // may not next time; the one statement the engine declines to carry is a
 // capability boundary; a proof, row, statement pairing, or catalog the
 // caller or the engine's own write got wrong is an invariant violation,
-// since no retry changes it. An unknown cause has no class.
+// since no retry changes it; every answer is a member of refusal.Classes(),
+// so the closed set lists what the causes hand out. An unknown cause has no
+// class.
 func TestEveryRefusalCauseNamesItsClass(t *testing.T) {
 	want := map[RefusalCause]refusal.Class{
 		CauseLockUnproven:        refusal.ClassInvariantViolation,
@@ -107,6 +109,7 @@ func TestEveryRefusalCauseNamesItsClass(t *testing.T) {
 	assert.Len(t, RefusalCauses(), len(want), "every registered cause has an expected class")
 	for _, cause := range RefusalCauses() {
 		assert.Equal(t, want[cause], cause.Class(), "cause %q", cause)
+		assert.Contains(t, refusal.Classes(), cause.Class(), "cause %q answers a class refusal.Classes() does not list", cause)
 	}
 	assert.Empty(t, RefusalCause("not-a-cause").Class())
 }

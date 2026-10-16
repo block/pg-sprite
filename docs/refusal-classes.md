@@ -160,9 +160,13 @@ engine's own write did not take, are `invariant-violation`; one, `shadow-stateme
 is a `capability-boundary`, since it describes a statement the engine declines to carry rather
 than a fault; the rest describe a lock, a proof, or a relation whose state moved under the
 operation, and the importer retries, re-plans, or cleans up. `RefusalCause.Class()` answers
-the `class` column below as a `refusal.Class` (`pkg/refusal`, the core's copy of the three
-classes these causes take), so an importer routes on the class without reading the cause's
-text, and a periphery adapter converts it to `verdict.Class` by token. No verdict reason
+the `class` column below as a `refusal.Class` (`pkg/refusal`, the core's declaration of the
+classes the cause tables in this document use), so an importer triages on the class without
+reading the cause's text, and a periphery adapter converts it to `verdict.Class` with a plain
+conversion, since the verdict declares its tokens from the same constants. The class is
+triage, not the action: an `environmental` cause such as `cutover-outcome-ambiguous` or
+`shadow-foreign-relation` is resolved by an operator reading the catalog, as its *Why* says,
+and no class licenses an automatic retry on its own. No verdict reason
 carries these causes yet; the classification is fixed here first so the cutover route
 inherits it.
 
@@ -405,9 +409,14 @@ in `pkg/verdict`, `pkg/executor`, `pkg/preflight`, `pkg/schemachange`, and `pkg/
 when a `Reason`, `CreateShapeCause`, `PartitionRefusalCause`, `CopySwapRefusalCause`, or either
 package's `RefusalCause` exists in the code without a row here, so a new discriminator value
 cannot land unclassified. The shadow and copier guards go one step further and compare each
-cause's `Class()` to its row's `class` cell, so the two cannot disagree; `pkg/refusal`'s guard
-holds its three classes to the vocabulary table above, and `pkg/verdict`'s holds every one of
-them to be a `verdict.Class` under the same token.
+cause's `Class()` to its row's `class` cell, so the two cannot disagree, and each asserts that
+every class a cause answers is a member of `refusal.Classes()`; `pkg/refusal`'s guards hold
+its classes to the vocabulary table above and every `class` cell of every cause table in this
+document to its closed set, so a cause table cannot classify a cause under a class the engine
+cannot name; and `pkg/verdict`'s holds every one of them to be a `verdict.Class`, the
+verdict adding only `no-online-safety-problem`. `preflight.PartitionRefusalCause`,
+`preflight.CopySwapRefusalCause`, and `executor.CreateShapeCause` have a class cell but no
+`Class()` yet; their rows are already held to the closed set.
 
 ## Shared vocabulary with the capabilities matrix
 

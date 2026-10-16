@@ -266,15 +266,20 @@ func (c RefusalCause) Invariant() string {
 }
 
 // Class is the routing class of the cause, from docs/refusal-classes.md:
-// what an importer does about the refusal. A cause that describes a lock, a
-// proof, a relation, a slot, or a row whose state moved under the operation
-// is environmental — re-acquire, re-run preflight, drop and rebuild, or
-// inspect the catalog, and the same change may go through. A statement the
-// engine declines to carry as written is a capability boundary. Every other
-// cause is an invariant violation: an input the caller handed in that
-// cannot have come from this engine, or a write of the engine's own that
-// the catalog does not show; nothing on the server changes that, so the
-// importer reports it. An unknown cause has no class.
+// what kind of boundary the importer is looking at. A cause that describes
+// a lock, a proof, a relation, a slot, or a row whose state moved under the
+// operation is environmental — state outside the engine stopped a
+// supportable change. A statement the engine declines to carry as written
+// is a capability boundary. Every other cause is an invariant violation: an
+// input the caller handed in that cannot have come from this engine, or a
+// write of the engine's own that the catalog does not show; nothing on the
+// server changes that, so the importer reports it. The class is a triage
+// decision; the cause's row in the document decides what the importer does
+// next — re-acquire, re-run preflight, drop and rebuild, or hand the
+// catalog to an operator — and no class licenses an automatic retry on its
+// own: an ambiguous cutover outcome is environmental and is resolved by
+// inspection, never by running the swap again. An unknown cause has no
+// class.
 func (c RefusalCause) Class() refusal.Class {
 	switch c {
 	case CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed, CauseSourceShape,
@@ -336,7 +341,11 @@ func refuse(cause RefusalCause, wrapped []error, detail string, args ...any) err
 
 // RefusalCauseOf returns the shadow refusal cause carried by err, or the
 // empty cause when err is nil or carries no shadow refusal. Wrappers are
-// read through.
+// read through, so a copier refusal the Runner re-minted answers its shadow
+// cause here and its copier cause to copier.RefusalCauseOf.
+// RefusalCauseOf(err).Class() is therefore the refusal's class, and the
+// empty class for an error that is not a shadow refusal — a server error
+// the importer routes by SQLSTATE, or the bare sentinel.
 func RefusalCauseOf(err error) RefusalCause {
 	var refusal *RefusalError
 	if errors.As(err, &refusal) {
