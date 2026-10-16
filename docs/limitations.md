@@ -14,8 +14,39 @@ not escape hatches:
 | `ADD CONSTRAINT ... USING INDEX` on a partitioned parent | PostgreSQL does not support adopting an existing index on a partitioned parent in any supported version. pg-sprite refuses before execution. |
 | `ADD FOREIGN KEY ... NOT VALID` on a partitioned parent | PostgreSQL does not support this before version 18, so pg-sprite refuses it on versions 14–17. It is supported on version 18 and later. |
 | Copy-and-swap | The copy-and-swap backend is not yet available. Statements that require it route to `refuse`; pg-sprite never falls through to a blocking rewrite. |
-| `ALTER COLUMN TYPE ... USING <expr>` the copy cannot reproduce | The copy-and-swap route is still closed (above); when it opens, the shadow builder admits a `USING` expression only when it can evaluate it again, identically, in the chunk copy, the verifier's recopy, and every change the catch-up flushes. Three rules, each refused as `shadow-statement-conversion` before any shadow is committed: the expression must be **immutable** by the server's own classification (no `now()`, `random()`, `current_setting()`, session-dependent casts such as `text` to `timestamptz`, or functions declared `STABLE` or `VOLATILE`; checked by trying it as a stored generated column's expression on the empty shadow inside the build's transaction, then rolling that attempt back), it must **name only the column it retypes**, bare and unqualified (no neighbouring column, no `t.col`, no whole-row `t.*`), and it must not retype the **primary key**, whose values every chunk range, watermark, and resume clear are expressed in. The expression is also refused when the deparser cannot prove it rendered the text faithfully. Rewrite the expression in terms of the retyped column alone and of `IMMUTABLE` functions, or retype without `USING` so the server's assignment cast converts the value. |
+| `ALTER COLUMN TYPE ... USING <expr>` the copy cannot reproduce | The copy-and-swap route is still closed (above); when it opens, the shadow builder admits a `USING` expression only when it can evaluate it again, identically, in the chunk copy, the verifier's recopy, and every change the catch-up flushes. Three rules, each refused as `shadow-statement-conversion` before any shadow is committed: the expression must be **immutable** by the server's own classification (no `now()`, `random()`, `current_setting()`, session-dependent casts such as `text` to `timestamptz`, or functions declared `STABLE` or `VOLATILE`; checked by trying it as a stored generated column's expression on the empty shadow inside the build's transaction, then rolling that attempt back), it must **name only the column it retypes**, bare and unqualified (no neighbouring column, no `t.col`, no whole-row `t.*`), and it must not retype the **primary key**, whose values every chunk range, watermark, and resume clear are expressed in. The expression is also refused when the deparser cannot prove it rendered the text faithfully. Rewrite the expression in terms of the retyped column alone and of `IMMUTABLE` functions, or retype without `USING` so the server's assignment cast converts the value; the refusal names the column, the expression, and that rewrite. The spellings most often refused, and what to write instead, are in [`USING` expressions the copy reproduces](#using-expressions-the-copy-reproduces) below. |
 | A concurrent index build whose name is occupied by an invalid index, or whose table carries quarantined debris | The build refuses before running and never drops the occupant: an invalid entry is either abandoned debris or someone's build still in progress, and a drop by name cannot tell them apart. The refusal is typed by proof (`invalid-index-abandoned`, `invalid-index-build-in-flight`, `invalid-index-other-table`, `invalid-index-not-droppable`, `invalid-index-builder-unobservable`), and a table carrying an entry a previous recovery quarantined (`pgsprite_abandoned_<oid>`) but did not drop is refused the same way, so debris never goes quiet. The proven removal — `executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` to remove the leftover without running the build; both library-only today, no CLI verb — takes a bounded `SHARE UPDATE EXCLUSIVE` lock on the table (which any running concurrent index command holds), re-verifies the entry by OID, renames it to an identity-derived name and drops that, all within one shared budget; it refuses a visible in-flight build, another table's entry, or an entry the server will not drop concurrently (a partitioned table's index, an index partition, a constraint's index), and reports a lock budget rather than wait behind a build it cannot see. From the CLI, the [runbook](invalid-index-recovery.md) applies. |
+
+## `USING` expressions the copy reproduces
+
+The bar is the server's own classification, read by trying the expression as a stored
+generated column's expression: `IMMUTABLE`, not `STABLE`. `STABLE` promises one answer
+within a statement, not across the hours a copy takes or the sessions the catch-up opens.
+Many conversions people write for a retype are refused not because they read the clock
+but because the builtin behind them is `STABLE` — any cast whose text form depends on
+`DateStyle`, `TimeZone`, or the enum's catalog entry is. The refusal arrives at the shadow
+build, inside the run, after the plan has been reviewed: the plan cannot read volatility
+off the statement's text, so a plan that reads clean can still stop at this gate.
+
+| Refused spelling | Why the server refuses it | What to write |
+| --- | --- | --- |
+| `enum_col::text` | `enum_out` is `STABLE`: the label comes from the catalog | Retype to `text` without `USING`; the assignment cast converts the label |
+| `date_col::text`, `timestamp_col::text`, `timestamptz_col::text` | `date_out` and friends are `STABLE`: the text follows `DateStyle` (and `TimeZone`) | An `IMMUTABLE` wrapper of your own that fixes the format, e.g. `to_char(d, 'YYYY-MM-DD')` inside a function declared `IMMUTABLE` — `to_char` itself is `STABLE` |
+| `text_col::date`, `text_col::timestamp`, `text_col::timestamptz` | The input functions are `STABLE`: parsing follows `DateStyle` and `TimeZone` | A wrapper declared `IMMUTABLE` that parses one fixed format |
+| `to_char(...)`, `to_date(...)`, `to_timestamp(text, text)` | Declared `STABLE`: they read `lc_time` and the session's style settings (`to_timestamp(double precision)` is `IMMUTABLE` and admitted) | A wrapper declared `IMMUTABLE` around the one format you use |
+| `convert_to(text_col, 'UTF8')` | Declared `STABLE`: the result depends on the database encoding | A wrapper declared `IMMUTABLE` around the one encoding you use; `decode(text_col, 'escape')` is **not** a general substitute — it interprets backslash sequences, so it equals `convert_to` only for text that contains none |
+| `now()::text`, `random()`, `current_setting(...)`, `nextval(...)`, a subquery | `VOLATILE`, or not an expression a generated column may hold | No rewrite reproduces these; the value is not a function of the source row |
+
+A wrapper function is your assertion, not the server's: declaring it `IMMUTABLE` is what
+admits it, and the server never checks the body. It must exist, in the source schema or
+`public`, before the shadow build, since the expression resolves on that path in the build,
+the copy, the recopy, and every flush ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)).
+
+Two casts the server does call immutable still have more than one text rendering: a
+`float4` or `float8` to `text` follows `extra_float_digits`, and a `bytea` to `text`
+follows `bytea_output`. The copy, the verifier, and the catch-up each pin both settings
+(`3` and `hex`) in their own sessions, so such a conversion lands the same text from all
+three whatever the database or role is configured with.
 
 ## Declarative model boundaries
 

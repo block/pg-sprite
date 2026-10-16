@@ -10,6 +10,7 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/applier"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
@@ -343,4 +344,79 @@ func TestFlushRefusesWhenTheSourceNoLongerHasAConvertedColumn(t *testing.T) {
 	assert.ErrorContains(t, err, "price")
 	note1, _ := f.text(t, p.shadow.ShadowTable(), "note", 1)
 	assert.Equal(t, "order 1", *note1, "nothing was written")
+}
+
+// A float converted to text lands the same text whether the chunk copy or
+// the catch-up flush writes it, whatever extra_float_digits the engine's
+// pool is configured with. The server calls float8 to text immutable, so
+// the conversion passes the shadow build's probe, yet its rendering follows
+// the session: at extra_float_digits <= 0 the server rounds 0.1 + 0.2 to
+// 0.3, at 3 it renders 0.30000000000000004. Copy and flush run in sessions
+// of their own, so each must pin the setting, or the verifier reads the two
+// renderings as divergence and the repair recopies the rounded one forever.
+func TestConversionOfAFloatToTextAgreesAcrossCopyAndFlush(t *testing.T) {
+	f := newFlushFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.readings (
+			id bigint PRIMARY KEY,
+			value float8,
+			note text
+		)`)
+	f.exec(t, `INSERT INTO %s.readings VALUES (1, 0.1::float8 + 0.2::float8, 'n'), (2, 0.1::float8 + 0.2::float8, 'n')`)
+	target := f.prove(t, "readings")
+	lock := f.lock(t, "readings")
+	shadow := f.build(t, lock, target, `ALTER TABLE %s ALTER COLUMN value TYPE text USING value::text`)
+	require.Equal(t, map[string]string{"value": "value::text"}, shadow.Conversions())
+	rounding := f.poolWithRuntimeParam(t, "extra_float_digits", "0")
+
+	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{Workers: 1})
+	require.NoError(t, err)
+	require.NoError(t, c.Run(t.Context(), rounding))
+	copied, _ := f.text(t, shadow.ShadowTable(), "value", 1)
+
+	flush, err := applier.NewFlusher(target, shadow, lock, applier.Options{})
+	require.NoError(t, err)
+	_, err = flush.Flush(t.Context(), rounding, batch(image(2, col("value", "0.30000000000000004"), col("note", "n"))))
+	require.NoError(t, err)
+	flushed, _ := f.text(t, shadow.ShadowTable(), "value", 2)
+
+	require.NotNil(t, copied)
+	assert.Equal(t, "0.30000000000000004", *copied, "the copy renders every digit whatever its pool rounds to")
+	assert.Equal(t, copied, flushed, "the same source value converted by the copy and by the flush")
+}
+
+// A bytea converted to text lands the same text from the copy and from the
+// flush whatever bytea_output the engine's pool is configured with: the
+// server calls bytea to text immutable, yet it renders the bytes as \x41ff
+// under hex and as A\377 under escape, and copy and flush run in sessions
+// of their own.
+func TestConversionOfAByteaToTextAgreesAcrossCopyAndFlush(t *testing.T) {
+	f := newFlushFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.blobs (
+			id bigint PRIMARY KEY,
+			body bytea,
+			note text
+		)`)
+	f.exec(t, `INSERT INTO %s.blobs VALUES (1, '\x41ff'::bytea, 'n'), (2, '\x41ff'::bytea, 'n')`)
+	target := f.prove(t, "blobs")
+	lock := f.lock(t, "blobs")
+	shadow := f.build(t, lock, target, `ALTER TABLE %s ALTER COLUMN body TYPE text USING body::text`)
+	require.Equal(t, map[string]string{"body": "body::text"}, shadow.Conversions())
+	escaping := f.poolWithRuntimeParam(t, "bytea_output", "escape")
+
+	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{Workers: 1})
+	require.NoError(t, err)
+	require.NoError(t, c.Run(t.Context(), escaping))
+	copied, _ := f.text(t, shadow.ShadowTable(), "body", 1)
+
+	flush, err := applier.NewFlusher(target, shadow, lock, applier.Options{})
+	require.NoError(t, err)
+	_, err = flush.Flush(t.Context(), escaping, batch(image(2, col("body", `\x41ff`), col("note", "n"))))
+	require.NoError(t, err)
+	flushed, _ := f.text(t, shadow.ShadowTable(), "body", 2)
+
+	require.NotNil(t, copied)
+	assert.Equal(t, `\x41ff`, *copied, "the copy renders hex whatever its pool is configured with")
+	assert.Equal(t, copied, flushed, "the same source value converted by the copy and by the flush")
 }

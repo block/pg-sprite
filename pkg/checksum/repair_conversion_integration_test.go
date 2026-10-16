@@ -122,3 +122,40 @@ func TestCheckDigestsAConvertedColumnThroughTheStatementsUsing(t *testing.T) {
 	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT amount FROM "+f.shadowName(shadow)+" WHERE id = 1500").Scan(&amount))
 	assert.Equal(t, int64(150025), amount, "the repair put the converted value back")
 }
+
+// A bytea converted to text digests clean against the copy whatever
+// bytea_output the pool the pass reads on is configured with: the server
+// calls bytea to text immutable, yet renders the bytes as \x41ff under hex
+// and as A\377 under escape, so the digest's source side must render the
+// conversion as the copy's session did or every chunk reads as divergence
+// and the repair, in the same session, recopies it the same way forever.
+// The pass pins the setting itself, as the copy does.
+func TestCheckDigestsAByteaConvertedToTextAsTheCopyRenderedIt(t *testing.T) {
+	f := newVerifierFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.blobs (
+			id bigint PRIMARY KEY,
+			body bytea NOT NULL,
+			note text
+		)`)
+	f.exec(t, fmt.Sprintf(`
+		INSERT INTO %%s.blobs (id, body, note)
+		SELECT n, ('\x41ff' || lpad(to_hex(n), 8, '0'))::bytea, 'blob ' || n FROM generate_series(1, %d) AS n`, rows))
+	target := f.prove(t, "blobs")
+	lock := f.lock(t, "blobs")
+	shadow := f.build(t, lock, target, `
+		ALTER TABLE %s
+			DROP COLUMN note,
+			ALTER COLUMN body TYPE text USING body::text`)
+	require.Equal(t, map[string]string{"body": "body::text"}, shadow.Conversions())
+	f.copy(t, target, shadow, lock)
+	escaping := f.poolWithRuntimeParam(t, "bytea_output", "escape")
+	var rendered string
+	require.NoError(t, escaping.QueryRow(t.Context(), `SELECT '\x41ff'::bytea::text`).Scan(&rendered))
+	require.Equal(t, `A\377`, rendered, "the connection renders bytea in escape form on its own")
+
+	outcome, err := f.check(t, escaping, target, shadow, lock, copier.NewWatermark(math.MaxInt64), checksum.DivergenceRepair)
+	require.NoError(t, err)
+	assert.Empty(t, outcome.Repairs, "the copy's hex text digests equal to the source rendered under the pass's pin")
+	assert.True(t, outcome.Report.Clean(), "mismatches: %+v", outcome.Report.Mismatches)
+}

@@ -28,10 +28,10 @@ var ErrConversionNotImmutable = errors.New("USING expression is not immutable")
 // stored generated column's expression is not immutable.
 const codeInvalidObjectDefinition = "42P17"
 
-// probeColumn is the name of the throwaway generated column the
+// probeColumnPrefix begins the name of the throwaway generated column the
 // immutability probe adds inside a save point. It is rolled back before
 // the gated statement runs, so no shadow ever carries it.
-const probeColumn = "_pgsprite_using_probe"
+const probeColumnPrefix = "_pgsprite_using_probe"
 
 // probeConversions asks the server whether every USING expression of the
 // gated statement is immutable, before the statement runs. A stored
@@ -61,23 +61,40 @@ func probeConversions(ctx context.Context, tx pgx.Tx, target preflight.CopySwapT
 	// Map order is random; the first refusal reported is the same on
 	// every run.
 	sort.Strings(columns)
+	probe := probeColumn(source)
 	for _, column := range columns {
-		if err := probeConversion(ctx, tx, target, shadow, column, conversions[column]); err != nil {
+		if err := probeConversion(ctx, tx, target, shadow, probe, column, conversions[column]); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// probeColumn names the throwaway column the probe adds: the prefix,
+// lengthened until no column of the source carries the name, since the
+// empty shadow has the source's columns and a name already taken would
+// fail the probe for a reason that is not the expression's.
+func probeColumn(source schemadiff.Model) string {
+	taken := make(map[string]bool, len(source.Columns))
+	for _, c := range source.Columns {
+		taken[c.Name] = true
+	}
+	name := probeColumnPrefix
+	for taken[name] {
+		name += "_"
+	}
+	return name
+}
+
 // probeConversion tries one USING expression as a stored generated
 // column's expression inside a save point that is always rolled back.
-func probeConversion(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, shadow, column, expr string) error {
+func probeConversion(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, shadow, probeName, column, expr string) error {
 	sp, err := tx.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("save point before probing the USING expression of %s: %w", column, err)
 	}
 	table := pgx.Identifier{target.Schema(), shadow}.Sanitize()
-	probe := pgx.Identifier{probeColumn}.Sanitize()
+	probe := pgx.Identifier{probeName}.Sanitize()
 	// IS NOT NULL makes the probe's type boolean whatever the expression
 	// yields, so the probe reads only the expression's volatility, never
 	// whether its result type can be stored.
@@ -91,7 +108,9 @@ func probeConversion(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTa
 	var pgErr *pgconn.PgError
 	if errors.As(execErr, &pgErr) && pgErr.Code == codeInvalidObjectDefinition {
 		// INV: ST-7
-		return refuse(CauseStatementConversion, []error{ErrConversionNotImmutable, execErr}, "the copy cannot reproduce the USING expression of %s in the statement for %s.%s: %s", column, target.Schema(), target.Table(), pgErr.Message)
+		return refuse(CauseStatementConversion, []error{ErrConversionNotImmutable, execErr},
+			"the copy cannot reproduce the USING expression of %s in the statement for %s.%s, %s: the server does not classify it as IMMUTABLE, so the chunk copy, the recopy, and the catch-up flush could each give a different answer for the same value; rewrite it with IMMUTABLE functions of %s alone, or retype without USING so the assignment cast converts the value",
+			column, target.Schema(), target.Table(), expr, column)
 	}
 	return fmt.Errorf("probe the USING expression of %s in the statement for %s.%s: %w", column, target.Schema(), target.Table(), execErr)
 }
