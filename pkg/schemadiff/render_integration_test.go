@@ -355,6 +355,43 @@ func TestRenderRefusesUnloggedLiveTable(t *testing.T) {
 	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
 }
 
+// A live virtual generated column (PostgreSQL 18+) is introspected as
+// virtual, never as a column default. Export refuses it, and a desired file,
+// which cannot declare VIRTUAL, fails the diff rather than converging the
+// expression as a default.
+func TestRefusesVirtualGeneratedLiveColumn(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	var version int
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT current_setting('server_version_num')::int`).Scan(&version))
+	const virtualColumnsSince = 180000
+	if version < virtualColumnsSince {
+		t.Skipf("virtual generated columns exist from PostgreSQL 18; server reports %d", version)
+	}
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		`CREATE TABLE %s.gen (id bigint NOT NULL, n int NOT NULL, doubled int GENERATED ALWAYS AS (n * 2) VIRTUAL)`, schema))
+	require.NoError(t, err)
+
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "gen")
+	require.NoError(t, err)
+	require.Len(t, live.Columns, 3)
+	assert.True(t, live.Columns[2].Virtual)
+	assert.False(t, live.Columns[2].Generated)
+	assert.Equal(t, "(n * 2)", live.Columns[2].Default)
+	_, err = schemadiff.Render(live)
+	require.ErrorIs(t, err, schemadiff.ErrUnrenderableVirtual)
+
+	ds, err := statement.ParseDesired(`CREATE TABLE gen (id bigint NOT NULL, n int NOT NULL, doubled int GENERATED ALWAYS AS (n * 3) STORED)`)
+	require.NoError(t, err)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+	require.NoError(t, err)
+	_, err = schemadiff.Diff(schema, live, desired)
+	require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+}
+
 // A column with an explicit collation refuses to render, and a collation
 // delta between live and desired is a typed diff refusal — never a
 // baseline that silently drops the COLLATE clause or a silent zero diff.

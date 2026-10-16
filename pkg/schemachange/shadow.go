@@ -559,7 +559,7 @@ func copyColumns(source, target schemadiff.Model) []string {
 	}
 	columns := make([]string, 0, len(source.Columns))
 	for _, c := range source.Columns {
-		if c.Generated || !onShadow[c.Name] {
+		if c.IsGenerated() || !onShadow[c.Name] {
 			continue
 		}
 		columns = append(columns, c.Name)

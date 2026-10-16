@@ -34,6 +34,18 @@ rows:
       diff: refused
     refusal_reason: backend-unavailable
     reason_notes: "Table rewrite; copy-and-swap route. The copy engine must **recompute, never copy,** generated columns on the shadow table"
+  - id: alter-column-set-expression
+    area: "column_changes"
+    operation: "`ALTER COLUMN ... SET EXPRESSION` (changed stored generated expression)"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "copy_and_swap"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Planned but not executed. `diff` shows a changed stored generated expression as one `SET EXPRESSION` statement of kind `set-generated-expression`, refused with `unsupported-statement`, rather than a drop and re-add that would also drop the column's indexes. It recomputes every row under `ACCESS EXCLUSIVE`, and the statement needs PostgreSQL 17 or later"
   - id: add-column-with-inline-unique-primary-key-references-check
     area: "column_changes"
     operation: "`ADD COLUMN` with inline `UNIQUE`/`PRIMARY KEY`/`REFERENCES`/`CHECK`"
@@ -369,6 +381,18 @@ rows:
       diff: refused
     refusal_reason: unsupported-statement
     reason_notes: "Typed refusal: dropping a `COLLATE` clause from a rendered baseline silently changes sort order and index semantics; a collation delta cannot converge without a rewrite"
+  - id: virtual-generated-columns
+    area: "declarative_model"
+    operation: "Virtual generated columns (PostgreSQL 18+)"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Typed refusal: the desired-file grammar cannot declare `VIRTUAL`, export refuses a live virtual column, and a desired file that declares it any other way fails the diff, so a virtual expression is never converged as a column default"
   - id: columns-whose-default-uses-a-sequence-the-column-does-not-own
     area: "declarative_model"
     operation: "Columns whose default uses a sequence the column does not own"

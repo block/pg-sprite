@@ -277,18 +277,21 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	if live.Generated != desired.Generated {
 		return nil, fmt.Errorf("%w: column %q generated change", ErrUnsupportedChange, live.Name)
 	}
+	if live.Virtual != desired.Virtual {
+		return nil, fmt.Errorf("%w: column %q virtual generated change", ErrUnsupportedChange, live.Name)
+	}
 	// A collation change rewrites the column and rebuilds its indexes —
 	// the engine does not derive it, so a delta fails closed instead of
 	// diffing to silence.
 	if live.Collation != desired.Collation {
 		return nil, fmt.Errorf("%w: column %q collation change (%q vs %q)", ErrUnsupportedChange, live.Name, live.Collation, desired.Collation)
 	}
-	if desired.Generated && live.Type != desired.Type {
+	if desired.IsGenerated() && live.Type != desired.Type {
 		return nil, fmt.Errorf("%w: column %q generated column type change", ErrUnsupportedChange, live.Name)
 	}
 	col := pgx.Identifier{live.Name}.Sanitize()
 	var changes []Change
-	if desired.Generated && live.Default != desired.Default {
+	if desired.IsGenerated() && live.Default != desired.Default {
 		changes = append(changes, Change{
 			SQL:  "ALTER TABLE " + table + " ALTER COLUMN " + col + " SET EXPRESSION AS (" + desired.Default + ")",
 			Kind: ChangeSetGeneratedExpression,
@@ -300,7 +303,7 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 			Kind: ChangeAlterType,
 		})
 	}
-	if !desired.Generated && desired.Identity == IdentityNone && live.Default != desired.Default {
+	if !desired.IsGenerated() && desired.Identity == IdentityNone && live.Default != desired.Default {
 		// A sequence-backed desired default (serial adoption) is refused:
 		// the sequence existed only inside the rolled-back scratch
 		// transaction, so the emitted SET DEFAULT would reference a
@@ -345,6 +348,8 @@ func columnDef(c Column) string {
 	switch {
 	case c.Generated:
 		def += " GENERATED ALWAYS AS (" + c.Default + ") STORED"
+	case c.Virtual:
+		def += " GENERATED ALWAYS AS (" + c.Default + ") VIRTUAL"
 	case c.Identity == IdentityAlways:
 		def += " GENERATED ALWAYS AS IDENTITY"
 	case c.Identity == IdentityByDefault:

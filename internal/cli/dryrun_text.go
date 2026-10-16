@@ -325,7 +325,9 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 	}
 	if ps.Kind == schemadiff.ChangeSetGeneratedExpression {
 		return "changing a stored generated column's expression recomputes every row under an exclusive lock " +
-			"that blocks reads and writes; there is no online path for it, so this change is shown for review only"
+			"that blocks reads and writes; there is no online path for it, so this change is shown for review only. " +
+			"SET EXPRESSION needs PostgreSQL 17 or later; before that, the only path is to drop and re-add the column, " +
+			"which also drops its indexes"
 	}
 	if op := refusedOperation(ps); op != "" {
 		return "the planner knows no safe path for " + op

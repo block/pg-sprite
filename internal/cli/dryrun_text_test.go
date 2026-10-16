@@ -320,7 +320,7 @@ func TestDryRunTextGeneratedExpressionRefusal(t *testing.T) {
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "error[unsupported-statement]:\n  refused — changing a stored generated column's expression recomputes\n  every row under an exclusive lock")
-	assert.Contains(t, text, "no online path for it, so this change is shown for review only\n")
+	assert.Contains(t, text, "no online path for it, so this change is shown for review only. SET\n  EXPRESSION needs PostgreSQL 17 or later; before that, the only path is\n  to drop and re-add the column, which also drops its indexes\n")
 	assert.NotContains(t, text, "the planner knows no safe path")
 }
 

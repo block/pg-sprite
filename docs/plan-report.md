@@ -245,7 +245,7 @@ bumps `format_version`. Present exactly when `class` is `no-online-safety-proble
 | `drop-column` | Drops a column. |
 | `add-column` | Adds a column. |
 | `alter-type` | Changes a column's type. |
-| `set-generated-expression` | Replaces a stored generated column's expression. Always refused for execution (`unsupported-statement`): it recomputes every row under an exclusive lock, and no online path exists. |
+| `set-generated-expression` | Replaces a stored generated column's expression. Always refused for execution (`unsupported-statement`): it recomputes every row under an exclusive lock, and no online path exists. The statement needs PostgreSQL 17 or later. |
 | `set-default` | Sets or replaces a column default. |
 | `drop-default` | Drops a column default. |
 | `set-not-null` | Adds the NOT NULL attribute. |
