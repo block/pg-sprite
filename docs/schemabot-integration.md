@@ -373,7 +373,7 @@ installation, not the run, and each means a different action:
 | `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion > checkpoint.FormatVersion` | The row was written by a newer engine | Upgrade the engine; this one must not touch the row |
 
 Releases through v0.3.3 write format 2, whose model fingerprints leave out the table's
-storage parameters. A copy-and-swap run in flight across the upgrade to format 3 surfaces as
+storage parameters and its columns' sequence declarations. A copy-and-swap run in flight across the upgrade to format 3 surfaces as
 `MismatchFormat` with `Stored.FormatVersion == 2`: finish it with the release that started
 it, or, once no run is in flight, `Store.Delete(Stored)` and start over.
 

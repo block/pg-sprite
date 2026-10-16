@@ -637,14 +637,32 @@ func TestRenderRefusesSerialWithDeclaredSequence(t *testing.T) {
 }
 
 // A column whose default draws on two sequences it owns cannot be carried
-// as one sequence declaration, so introspection refuses the table instead
-// of reporting the column twice or keeping one of the sequences.
-func TestIntrospectRefusesColumnWithTwoOwnedSequences(t *testing.T) {
+// as one sequence declaration. Introspection still reads the table, so a
+// plan for any other statement on it works, and records the column once
+// with no sequence; export refuses it rather than write one of the
+// sequences, or neither, into the baseline.
+func TestRenderRefusesColumnWithTwoOwnedSequences(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
 	defer pool.Close()
 	schema := testutil.NewSchema(t, pool)
+	createTwoOwnedSequenceTable(t, pool, schema)
 
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+	require.NoError(t, err)
+	require.Len(t, live.Columns, 2)
+	assert.Equal(t, "id", live.Columns[0].Name)
+	assert.True(t, live.Columns[0].MultipleOwnedSequences)
+	assert.Nil(t, live.Columns[0].Sequence)
+	assert.False(t, live.Columns[1].MultipleOwnedSequences)
+
+	_, err = schemadiff.Render(live)
+	require.ErrorIs(t, err, schemadiff.ErrMultipleOwnedSequences)
+	assert.Contains(t, err.Error(), `column "id"`)
+}
+
+func createTwoOwnedSequenceTable(t *testing.T, pool *pgxpool.Pool, schema string) {
+	t.Helper()
 	for _, ddl := range []string{
 		`CREATE SEQUENCE %[1]s.first_seq`,
 		`CREATE SEQUENCE %[1]s.second_seq`,
@@ -655,10 +673,6 @@ func TestIntrospectRefusesColumnWithTwoOwnedSequences(t *testing.T) {
 		_, err := pool.Exec(t.Context(), fmt.Sprintf(ddl, schema))
 		require.NoError(t, err, ddl)
 	}
-
-	_, err = schemadiff.Introspect(t.Context(), pool, schema, "t")
-	require.ErrorIs(t, err, schemadiff.ErrMultipleOwnedSequences)
-	assert.Contains(t, err.Error(), `column "id"`)
 }
 
 // The diff does not converge an identity's sequence declaration, so a
@@ -702,6 +716,58 @@ func TestDiffRefusesIdentitySequenceMismatch(t *testing.T) {
 			_, err = schemadiff.Diff(schema, live, desired)
 			require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
 			assert.Contains(t, err.Error(), tc.message)
+		})
+	}
+}
+
+// Widening an identity column retypes its sequence with it: a bound at the
+// old type's limit follows the new type, and a declared one stays. So a
+// file that widens the column and states the live declaration plans the
+// type change, and applying it leaves the table matching the file. A file
+// that also drops a declared bound still refuses, since the type change
+// keeps that bound as written.
+func TestDiffWidensAnIdentityWithADeclaredSequence(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	for _, tc := range []struct {
+		name, options, desired string
+		refused                bool
+	}{
+		{"a declared start", "START WITH 1000", "START WITH 1000", false},
+		{"a declared maximum", "MAXVALUE 5000", "MAXVALUE 5000", false},
+		{"a declared maximum the file drops", "MAXVALUE 5000", "START WITH 1", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			schema := testutil.NewSchema(t, pool)
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.t (id integer GENERATED ALWAYS AS IDENTITY (%s) PRIMARY KEY)`, schema, tc.options))
+			require.NoError(t, err)
+			ds, err := statement.ParseDesired(fmt.Sprintf(`CREATE TABLE t (id bigint GENERATED ALWAYS AS IDENTITY (%s) PRIMARY KEY)`, tc.desired))
+			require.NoError(t, err)
+			desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+			require.NoError(t, err)
+			live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+			require.NoError(t, err)
+
+			changes, err := schemadiff.Diff(schema, live, desired)
+			if tc.refused {
+				require.ErrorIs(t, err, schemadiff.ErrUnsupportedChange)
+				assert.Contains(t, err.Error(), "MAXVALUE 5000")
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, changes, 1)
+			assert.Contains(t, changes[0].SQL, "TYPE bigint")
+			_, err = pool.Exec(t.Context(), changes[0].SQL)
+			require.NoError(t, err)
+
+			converged, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+			require.NoError(t, err)
+			after, err := schemadiff.Diff(schema, converged, desired)
+			require.NoError(t, err)
+			assert.Empty(t, after)
+			assert.Equal(t, desired.Columns[0].Sequence, converged.Columns[0].Sequence)
 		})
 	}
 }

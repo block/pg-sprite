@@ -76,9 +76,16 @@ type Column struct {
 	// identity's or a serial's, when it differs from what declaring the
 	// column fresh would create; nil when it does not, or when the column
 	// owns no sequence. Omitted from JSON when nil, so a model whose
-	// sequences are all declared at their defaults digests the same as it
-	// did before the field existed.
+	// sequences are all declared at their defaults digests the same as one
+	// without the field; a declared sequence changes the digest, which is
+	// why the checkpoint format moved with it.
 	Sequence *SequenceOptions `json:",omitempty"`
+	// MultipleOwnedSequences reports that the column's default calls more
+	// than one sequence the column owns. The model carries one sequence
+	// per column, so Sequence is nil for such a column and the renderer
+	// refuses it (ErrMultipleOwnedSequences) rather than export one of
+	// them. Not part of the table's shape, so it never reaches a digest.
+	MultipleOwnedSequences bool `json:"-"`
 }
 
 // SequenceOptions are the declared parameters of a column-owned sequence

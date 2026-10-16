@@ -65,6 +65,12 @@ var ErrUnrenderableVirtual = errors.New("virtual generated columns cannot be ren
 // every diff against the table it came from.
 var ErrUnrenderableToastOptions = errors.New("TOAST storage parameters on a table whose remaining columns may not build a TOAST table cannot be rendered as a desired schema")
 
+// ErrMultipleOwnedSequences is returned for a column whose default uses
+// more than one sequence the column owns (Column.MultipleOwnedSequences):
+// the serial shorthand declares one, and exporting the default as written
+// would leave both sequences out of the file.
+var ErrMultipleOwnedSequences = errors.New("column default uses more than one sequence the column owns")
+
 // ErrUnrenderableSequenceOptions is returned when a column owns a
 // sequence declared differently from what declaring the column fresh
 // creates and a desired file cannot state the declaration: a serial
@@ -186,6 +192,9 @@ func renderColumnDef(table string, c Column) (string, error) {
 	}
 	if c.Virtual {
 		return "", fmt.Errorf("column %q: %w", c.Name, ErrUnrenderableVirtual)
+	}
+	if c.MultipleOwnedSequences {
+		return "", fmt.Errorf("column %q: %w", c.Name, ErrMultipleOwnedSequences)
 	}
 	if c.SequenceDefault {
 		st, ok := serialType(table, c)

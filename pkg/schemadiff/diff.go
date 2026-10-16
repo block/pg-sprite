@@ -3,6 +3,7 @@ package schemadiff
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -298,9 +299,13 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	// serial's is not compared: the serial shorthand cannot state one, so
 	// the desired side always carries the defaults and export refuses a
 	// live serial declared otherwise.
-	if desired.Identity != IdentityNone && !sameSequence(live.Sequence, desired.Sequence) {
-		return nil, fmt.Errorf("%w: column %q identity sequence differs between live (%s) and desired (%s)",
-			ErrUnsupportedChange, live.Name, formatSequence(live.Sequence), formatSequence(desired.Sequence))
+	// A type change on the column retypes its identity sequence too, so
+	// live is compared as the type change would leave it.
+	if desired.Identity != IdentityNone {
+		if after := identitySequenceAfterRetype(live, desired.Type); !sameSequence(after, desired.Sequence) {
+			return nil, fmt.Errorf("%w: column %q identity sequence differs between live (%s) and desired (%s)",
+				ErrUnsupportedChange, live.Name, formatSequence(after), formatSequence(desired.Sequence))
+		}
 	}
 	// A collation change rewrites the column and rebuilds its indexes —
 	// the engine does not derive it, so a delta fails closed instead of
@@ -404,6 +409,52 @@ func sequenceClause(seq SequenceOptions) string {
 	}
 	return fmt.Sprintf("START WITH %d INCREMENT BY %d MINVALUE %d MAXVALUE %d CACHE %d %s",
 		seq.Start, seq.Increment, seq.Min, seq.Max, seq.Cache, cycle)
+}
+
+// identitySequenceAfterRetype returns the declaration live's identity
+// sequence carries once ALTER COLUMN ... TYPE gives the column type to. The
+// server retypes the identity sequence with its column, and a bound equal
+// to the sequence's old type's own limit was never chosen by anyone, so it
+// follows the new type; a declared bound stays as written. That is the
+// same rule the copy-and-swap cutover applies to the sequences it hands
+// over. A column keeping its type, or a type that is not an integer type,
+// leaves the declaration as it is.
+func identitySequenceAfterRetype(live Column, to string) *SequenceOptions {
+	if live.Type == to {
+		return live.Sequence
+	}
+	opts, ok := defaultSequenceOptions(live.Type)
+	if live.Sequence != nil {
+		opts, ok = *live.Sequence, true
+	}
+	fromMin, fromMax, fromOK := integerTypeRange(opts.Type)
+	toMin, toMax, toOK := integerTypeRange(to)
+	if !ok || !fromOK || !toOK {
+		return live.Sequence
+	}
+	opts.Type = to
+	if opts.Min == fromMin {
+		opts.Min = toMin
+	}
+	if opts.Max == fromMax {
+		opts.Max = toMax
+	}
+	return declaredSequence(to, opts)
+}
+
+// integerTypeRange returns the smallest and largest value of an integer
+// type a sequence can have, and false for any other type.
+func integerTypeRange(typ string) (minValue, maxValue int64, ok bool) {
+	switch typ {
+	case "smallint":
+		return math.MinInt16, math.MaxInt16, true
+	case "integer":
+		return math.MinInt32, math.MaxInt32, true
+	case "bigint":
+		return math.MinInt64, math.MaxInt64, true
+	default:
+		return 0, 0, false
+	}
 }
 
 // sameSequence reports whether two recorded sequence declarations match;

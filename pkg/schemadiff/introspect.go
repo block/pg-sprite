@@ -22,11 +22,6 @@ var ErrTableNotFound = errors.New("table not found")
 // partitioned table (e.g. a view or foreign table).
 var ErrNotTable = errors.New("not an ordinary or partitioned table")
 
-// ErrMultipleOwnedSequences is returned when a column's default uses more
-// than one sequence the column owns. The model carries one sequence per
-// column, so such a table is refused rather than modeled with one of them.
-var ErrMultipleOwnedSequences = errors.New("column default uses more than one sequence the column owns")
-
 // Introspect reads the live table schema.table into the canonical model. It
 // runs inside a read-only transaction whose search_path is set to the target
 // schema (then public), so the server's decompilers print definitions
@@ -345,16 +340,21 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 		c.Generated = generated == "s"
 		c.Virtual = generated == "v"
 		if seqType != nil {
-			if seqStart == nil || seqIncrement == nil || seqMin == nil || seqMax == nil || seqCache == nil || seqCycle == nil {
+			if !sequenceRowComplete(seqStart, seqIncrement, seqMin, seqMax, seqCache, seqCycle) {
 				return nil, fmt.Errorf("column %q: owned sequence row is incomplete", c.Name)
 			}
 			seq = SequenceOptions{Type: *seqType, Start: *seqStart, Increment: *seqIncrement, Min: *seqMin, Max: *seqMax, Cache: *seqCache, Cycle: *seqCycle}
 			c.Sequence = declaredSequence(c.Type, seq)
 		}
 		// Rows arrive in attribute order, so a column the sequence join
-		// matched more than once is the previous row again.
+		// matched more than once is the previous row again. The model
+		// carries one sequence per column, so such a column keeps none of
+		// them and is marked for the renderer to refuse; nothing else reads
+		// the declaration of a sequence a serial-style default calls.
 		if n := len(cols); n > 0 && cols[n-1].Name == c.Name {
-			return nil, fmt.Errorf("column %q: %w", c.Name, ErrMultipleOwnedSequences)
+			cols[n-1].Sequence = nil
+			cols[n-1].MultipleOwnedSequences = true
+			continue
 		}
 		cols = append(cols, c)
 	}
@@ -362,6 +362,13 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 		return nil, fmt.Errorf("read columns: %w", err)
 	}
 	return cols, nil
+}
+
+// sequenceRowComplete reports whether every pg_sequence column of a matched
+// owned sequence was read; the LEFT JOIN leaves them all NULL only when no
+// sequence matched.
+func sequenceRowComplete(start, increment, minValue, maxValue, cache *int64, cycle *bool) bool {
+	return start != nil && increment != nil && minValue != nil && maxValue != nil && cache != nil && cycle != nil
 }
 
 // introspectConstraints reads the table's own constraints (primary key,
