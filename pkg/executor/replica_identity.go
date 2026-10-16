@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -39,24 +40,33 @@ func replicaIdentityDrops(st statement.Statement) ([]statement.Op, error) {
 	return drops, nil
 }
 
-// refuseReplicaIdentityLoss locks st's table and every table below it in
-// ACCESS EXCLUSIVE, the lock the drop takes on each of them anyway and the
-// one ALTER TABLE ... REPLICA IDENTITY needs, then reads what their replica
-// identity indexes are built on and refuses any of drops that would remove
-// it. Holding the lock until the drop commits means the identity cannot
-// move between this read and the drop. A lock that is not granted within
-// the attempt's lock_timeout fails like the drop itself would.
+// refuseReplicaIdentityLoss locks what drops lock anyway, in ACCESS
+// EXCLUSIVE, the lock ALTER TABLE ... REPLICA IDENTITY needs: st's table,
+// and the tables below it when a drop reaches them. It then reads what
+// their replica identity indexes are built on and refuses any of drops
+// that would remove it. Holding the lock until the drop commits means the
+// identity cannot move between this read and the drop, and the check
+// never waits on a table the drop itself would not. A lock that is not
+// granted within the attempt's lock_timeout fails like the drop itself
+// would.
 func refuseReplicaIdentityLoss(ctx context.Context, tx pgx.Tx, st statement.Statement, drops []statement.Op) error {
 	target := pgx.Identifier{st.Table()}
 	if st.Schema() != "" {
 		target = pgx.Identifier{st.Schema(), st.Table()}
 	}
-	if _, err := tx.Exec(ctx, "LOCK TABLE "+target.Sanitize()+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+	if _, err := tx.Exec(ctx, "LOCK TABLE ONLY "+target.Sanitize()+" IN ACCESS EXCLUSIVE MODE"); err != nil {
 		return fmt.Errorf("lock %s to check its replica identity: %w", target.Sanitize(), err)
 	}
 	var oid uint32
-	if err := tx.QueryRow(ctx, "SELECT $1::regclass::oid", target.Sanitize()).Scan(&oid); err != nil {
+	var partitioned bool
+	if err := tx.QueryRow(ctx, "SELECT oid, relkind = 'p' FROM pg_class WHERE oid = $1::regclass",
+		target.Sanitize()).Scan(&oid, &partitioned); err != nil {
 		return fmt.Errorf("resolve %s to check its replica identity: %w", target.Sanitize(), err)
+	}
+	if dropsReachTablesBelow(drops, partitioned) {
+		if _, err := tx.Exec(ctx, "LOCK TABLE "+target.Sanitize()+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+			return fmt.Errorf("lock the tables below %s to check their replica identity: %w", target.Sanitize(), err)
+		}
 	}
 	keys, err := schemadiff.ReadReplicaIdentity(ctx, tx, oid)
 	if err != nil {
@@ -71,4 +81,20 @@ func refuseReplicaIdentityLoss(ctx context.Context, tx pgx.Tx, st statement.Stat
 		}
 	}
 	return nil
+}
+
+// dropsReachTablesBelow reports whether any of drops recurses into the
+// tables below its table, and so locks them and can remove what their
+// replica identity indexes are built on. Under ONLY none does. A DROP
+// COLUMN recurses into partitions and inheritance children alike. A DROP
+// CONSTRAINT recurses only on a partitioned table, whose partitions'
+// indexes are attached under the parent's; an inheritance child never
+// inherits a primary key or unique constraint.
+func dropsReachTablesBelow(drops []statement.Op, partitioned bool) bool {
+	return slices.ContainsFunc(drops, func(op statement.Op) bool {
+		if op.Only {
+			return false
+		}
+		return op.Kind == statement.OpDropColumn || partitioned
+	})
 }

@@ -254,8 +254,9 @@ func failureVerdict(st statement.Statement, err error,
 
 // execRefusal maps an execution failure to its refusal verdict, when the
 // failure belongs to the refusal contract rather than the operational-error
-// exit: a static admission refusal (decided before anything executed), or a
-// budget cancellation of a non-substituted attempt. An *InvalidIndexError
+// exit: a static admission refusal (decided before anything executed), a
+// replica identity re-check that stopped a drop before anything committed,
+// or a budget cancellation of a non-substituted attempt. An *InvalidIndexError
 // is never a refusal, even when a budget cancellation is buried inside it —
 // invalid-index debris is the one outcome that needs an operator, and its
 // typed error carries the recovery guidance a budget verdict would conceal.
@@ -266,6 +267,9 @@ func execRefusal(st statement.Statement, err error,
 	}
 	if r, ok := admissionRefusal(err); ok {
 		return admissionRefusalVerdict(st, err, r, forced), true
+	}
+	if replicaIdentityRecheckRefused(err) {
+		return admissionRefusalVerdict(st, err, verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), forced), true
 	}
 	var invalidErr *executor.InvalidIndexError
 	if errors.As(err, &invalidErr) {
@@ -280,6 +284,23 @@ func execRefusal(st statement.Statement, err error,
 		return budgetVerdict(st, budgetErr, forced, online), true
 	}
 	return verdict.Verdict{}, false
+}
+
+// replicaIdentityRecheckRefused reports whether the executor's replica
+// identity re-check, read again under the table's lock, stopped a native
+// drop before anything of the run committed: the drop never ran, so the
+// run is refused like the same drop caught at plan time. Past a
+// sequence's first step the earlier steps have committed, and the failure
+// verdict reports them.
+func replicaIdentityRecheckRefused(err error) bool {
+	if !errors.Is(err, executor.ErrReplicaIdentityDrop) {
+		return false
+	}
+	var stepErr *executor.SequenceStepError
+	if !errors.As(err, &stepErr) {
+		return true
+	}
+	return stepErr.Step == 1
 }
 
 // onlineIdiomPlan reports whether the plan proved every operation an online

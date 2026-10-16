@@ -403,3 +403,18 @@ func TestDescribeUnnamedCreateIndexHasNoTrailingSpace(t *testing.T) {
 	require.Len(t, ops, 1)
 	assert.Equal(t, "CREATE INDEX", ops[0].Describe())
 }
+
+// ALTER TABLE ONLY stops at the named table, so every operation of the
+// statement carries Only; without it the operations recurse.
+func TestParseOpsRecordsOnly(t *testing.T) {
+	ops, err := statement.ParseOps("ALTER TABLE ONLY t DROP COLUMN a, DROP CONSTRAINT t_b_key")
+	require.NoError(t, err)
+	require.Len(t, ops, 2)
+	assert.True(t, ops[0].Only)
+	assert.True(t, ops[1].Only)
+
+	ops, err = statement.ParseOps("ALTER TABLE t DROP COLUMN a")
+	require.NoError(t, err)
+	require.Len(t, ops, 1)
+	assert.False(t, ops[0].Only)
+}

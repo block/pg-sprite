@@ -248,7 +248,12 @@ func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIde
 		    ARRAY(SELECT DISTINCT a.attname::text FROM identity
 		          CROSS JOIN LATERAL unnest(identity.indkey::int2[]) AS k(attnum)
 		          JOIN pg_attribute a ON a.attrelid = identity.indrelid AND a.attnum = k.attnum
-		          ORDER BY 1)`, oid).Scan(&keys.Indexes, &keys.Constraints, &keys.Columns)
+		          ORDER BY 1),
+		    ARRAY(SELECT DISTINCT a.attname::text FROM identity
+		          CROSS JOIN LATERAL unnest(identity.indkey::int2[]) AS k(attnum)
+		          JOIN pg_attribute a ON a.attrelid = identity.indrelid AND a.attnum = k.attnum
+		          WHERE identity.indrelid = $1
+		          ORDER BY 1)`, oid).Scan(&keys.Indexes, &keys.Constraints, &keys.Columns, &keys.OwnColumns)
 	if err != nil {
 		return ReplicaIdentityKeys{}, fmt.Errorf("query replica identity indexes: %w", err)
 	}
@@ -260,6 +265,9 @@ func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIde
 	}
 	if len(keys.Columns) == 0 {
 		keys.Columns = nil
+	}
+	if len(keys.OwnColumns) == 0 {
+		keys.OwnColumns = nil
 	}
 	return keys, nil
 }

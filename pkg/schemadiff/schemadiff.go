@@ -196,13 +196,18 @@ type ReplicaIdentityKeys struct {
 	// Columns are the columns every replica identity index in the tree
 	// covers, INCLUDE columns too. Dropping one drops each index built on
 	// it, those of the tables below included. Name-sorted.
-	Columns []string
+	Columns []string // OwnColumns are the columns this table's own replica identity index
+	// covers, INCLUDE columns too: what a DROP COLUMN under ALTER TABLE
+	// ONLY can take, since it leaves the column in the tables below.
+	// Name-sorted.
+	OwnColumns []string
 }
 
 // DroppedBy reports whether op drops a replica identity index of the table
 // or of a table below it: an index it is, or is attached under, the
 // constraint that owns one, or a column one is built on, which takes the
-// index with it. The planner refuses such an operation, and the executor
+// index with it. A column dropped under ONLY stays in the tables below, so
+// only the table's own identity index counts for it. The planner refuses such an operation, and the executor
 // asks again under the table's lock before a native drop runs.
 func (k ReplicaIdentityKeys) DroppedBy(op statement.Op) bool {
 	switch op.Kind {
@@ -211,6 +216,9 @@ func (k ReplicaIdentityKeys) DroppedBy(op statement.Op) bool {
 	case statement.OpDropConstraint:
 		return slices.Contains(k.Constraints, op.Name)
 	case statement.OpDropColumn:
+		if op.Only {
+			return slices.Contains(k.OwnColumns, op.Column)
+		}
 		return slices.Contains(k.Columns, op.Column)
 	default:
 		return false

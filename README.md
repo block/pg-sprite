@@ -91,6 +91,9 @@ refusal — never a silently wrong or incomplete result:
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.
+- **Dropping what a replica identity index is built on is refused** — the
+  index, the constraint that owns it, or a column it covers; move
+  `REPLICA IDENTITY` first, then re-plan.
 - **Destructive desired-state plans are refused as a whole** — `migrate --desired`
   creates missing tables and converges supported changes, but never infers permission
   to discard live structure.

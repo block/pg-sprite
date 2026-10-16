@@ -17,7 +17,8 @@ import (
 // every table below it, partitions and inheritance children alike, are
 // built on: the index on the table whose drop would remove one, the primary
 // key or unique constraint that owns it, and every column it covers,
-// INCLUDE columns too. A table
+// INCLUDE columns too, and apart from those the columns of the table's own
+// identity index. A table
 // whose identity is not an index reports nothing, and the facts stay out of
 // the model's JSON, so no digest of the model moves with them.
 func TestIntrospectReplicaIdentity(t *testing.T) {
@@ -49,8 +50,9 @@ func TestIntrospectReplicaIdentity(t *testing.T) {
 				ALTER TABLE %[1]s.t REPLICA IDENTITY USING INDEX t_ref_idx`,
 			table: "t",
 			want: schemadiff.ReplicaIdentityKeys{
-				Indexes: []string{"t_ref_idx"},
-				Columns: []string{"ref", "tenant"},
+				Indexes:    []string{"t_ref_idx"},
+				Columns:    []string{"ref", "tenant"},
+				OwnColumns: []string{"ref", "tenant"},
 			},
 		},
 		{
@@ -62,6 +64,7 @@ func TestIntrospectReplicaIdentity(t *testing.T) {
 				Indexes:     []string{"t_pk"},
 				Constraints: []string{"t_pk"},
 				Columns:     []string{"id", "tenant"},
+				OwnColumns:  []string{"id", "tenant"},
 			},
 		},
 		{
@@ -71,8 +74,9 @@ func TestIntrospectReplicaIdentity(t *testing.T) {
 				ALTER TABLE %[1]s.t REPLICA IDENTITY USING INDEX t_ref_idx`,
 			table: "t",
 			want: schemadiff.ReplicaIdentityKeys{
-				Indexes: []string{"t_ref_idx"},
-				Columns: []string{"note", "ref"},
+				Indexes:    []string{"t_ref_idx"},
+				Columns:    []string{"note", "ref"},
+				OwnColumns: []string{"note", "ref"},
 			},
 		},
 		{
@@ -84,6 +88,7 @@ func TestIntrospectReplicaIdentity(t *testing.T) {
 				Indexes:     []string{"t_pkey"},
 				Constraints: []string{"t_pkey"},
 				Columns:     []string{"id"},
+				OwnColumns:  []string{"id"},
 			},
 		},
 		{

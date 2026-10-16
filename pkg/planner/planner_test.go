@@ -97,6 +97,30 @@ func TestClassifyRefusesDroppingTheReplicaIdentity(t *testing.T) {
 	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
 }
 
+// A column dropped under ONLY stays in the tables below, so only the
+// table's own identity index counts: a column only a child's identity uses
+// classifies as an ordinary drop, while one the table's own identity uses
+// is refused either way.
+func TestClassifyJudgesAnOnlyDropByTheTablesOwnIdentity(t *testing.T) {
+	facts := planner.Facts{
+		ColumnTypes: map[string]string{"ref": "text", "code": "text"},
+		ReplicaIdentity: schemadiff.ReplicaIdentityKeys{
+			Columns:    []string{"code", "ref"},
+			OwnColumns: []string{"code"},
+		},
+	}
+	for sql, reason := range map[string]planner.Reason{
+		"ALTER TABLE ONLY parent DROP COLUMN ref":  planner.ReasonMetadataOnly,
+		"ALTER TABLE parent DROP COLUMN ref":       planner.ReasonReplicaIdentity,
+		"ALTER TABLE ONLY parent DROP COLUMN code": planner.ReasonReplicaIdentity,
+	} {
+		plan, err := planner.Classify(sql, facts)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, reason, plan.Decisions[0].Reason, sql)
+	}
+}
+
 // facts mirrors a live table whose column types exercise both sides of the
 // binary-coercible rules.
 var facts = planner.Facts{ColumnTypes: map[string]string{

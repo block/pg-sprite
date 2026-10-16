@@ -85,6 +85,10 @@ type Op struct {
 	// Name is the constraint or index name where the operation has one,
 	// or the new name for renames.
 	Name string
+	// Only reports that an ALTER TABLE names its table with ONLY, so the
+	// operation stops at the table and does not recurse into the tables
+	// below it.
+	Only bool
 	// Indexes are the unqualified names of the indexes an OpDropIndex
 	// drops, in statement order, so a classifier can match each one
 	// without parsing Name's display form.
@@ -285,7 +289,9 @@ func ParseOps(sql string) ([]Op, error) {
 		}
 		ops := make([]Op, 0, len(alter.GetCmds()))
 		for _, cmd := range alter.GetCmds() {
-			ops = append(ops, alterTableOp(cmd.GetAlterTableCmd()))
+			op := alterTableOp(cmd.GetAlterTableCmd())
+			op.Only = !alter.GetRelation().GetInh()
+			ops = append(ops, op)
 		}
 		return ops, nil
 	case node.GetCreateStmt() != nil:
