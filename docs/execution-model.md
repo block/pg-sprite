@@ -247,6 +247,20 @@ Re-issuing the original statement *without* `--force` fails loudly at step 1
 with `duplicate_object` instead of silently double-applying: that SQLSTATE
 is the guard against repeating committed work, not a resume mechanism.
 
+That guard only matches a scaffold of the current name. Releases through
+v0.3.3 named it `<table>_<column>_not_null`, the name PostgreSQL 18 gives
+the NOT NULL constraint itself, so a scaffold such a release left behind is
+not caught by step 1: a re-issue adds a second scaffold, drops only that
+one, and on PostgreSQL 18 records the NOT NULL constraint as
+`<table>_<column>_not_null1`. Before finishing a partial failure an older
+release left, drop the old scaffold first, after confirming it is the CHECK
+and not the server's own NOT NULL constraint (`contype = 'c'` in
+`pg_constraint`):
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users DROP CONSTRAINT users_email_not_null'
+```
+
 The same semantics scale up one level: anything that executes more than one
 statement around the engine — an orchestrator converging a table onto its
 desired state — must report the statements already committed, the one that

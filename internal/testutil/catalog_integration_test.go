@@ -3,7 +3,6 @@ package testutil
 import (
 	"testing"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -39,8 +38,8 @@ func TestReadTableCatalog(t *testing.T) {
 
 	left := NewSchema(t, pool)
 	right := NewSchema(t, pool)
-	execInSchema(t, pool, left, catalogFixture)
-	execInSchema(t, pool, right, catalogFixture)
+	ExecInSchema(t, pool, left, catalogFixture)
+	ExecInSchema(t, pool, right, catalogFixture)
 
 	want, err := ReadTableCatalog(t.Context(), pool, left, "t")
 	require.NoError(t, err)
@@ -52,6 +51,8 @@ func TestReadTableCatalog(t *testing.T) {
 	for _, c := range want.Columns {
 		columnNames = append(columnNames, c.Name)
 	}
+	assert.Equal(t, "heap", want.AccessMethod)
+	assert.Empty(t, want.Tablespace, "the database default tablespace")
 	require.Equal(t, []string{"id", "ref", "Label", "amount"}, columnNames, "one record per column")
 	assert.Equal(t, "nextval('t_id_seq'::regclass)", want.Columns[0].Default,
 		"the default is decompiled without its schema")
@@ -73,56 +74,50 @@ func TestReadTableCatalog(t *testing.T) {
 	}, want.Indexes)
 
 	t.Run("replica identity", func(t *testing.T) {
-		execInSchema(t, pool, right, `ALTER TABLE t REPLICA IDENTITY FULL`)
+		ExecInSchema(t, pool, right, `ALTER TABLE t REPLICA IDENTITY FULL`)
 		got := readCatalog(t, pool, right)
 		assert.Equal(t, "d", want.ReplicaIdentity)
 		assert.Equal(t, "f", got.ReplicaIdentity)
-		execInSchema(t, pool, right, `ALTER TABLE t REPLICA IDENTITY DEFAULT`)
+		ExecInSchema(t, pool, right, `ALTER TABLE t REPLICA IDENTITY DEFAULT`)
 	})
 
 	t.Run("storage parameter", func(t *testing.T) {
-		execInSchema(t, pool, right, `ALTER TABLE t SET (fillfactor = 70)`)
+		ExecInSchema(t, pool, right, `ALTER TABLE t SET (fillfactor = 70)`)
 		got := readCatalog(t, pool, right)
 		assert.Empty(t, want.Options)
 		assert.Equal(t, []string{"fillfactor=70"}, got.Options)
-		execInSchema(t, pool, right, `ALTER TABLE t RESET (fillfactor)`)
+		ExecInSchema(t, pool, right, `ALTER TABLE t RESET (fillfactor)`)
 	})
 
 	t.Run("identity sequence parameter", func(t *testing.T) {
-		execInSchema(t, pool, right, `ALTER TABLE t ALTER COLUMN ref SET MAXVALUE 9000`)
+		ExecInSchema(t, pool, right, `ALTER TABLE t ALTER COLUMN ref SET MAXVALUE 9000`)
 		got := readCatalog(t, pool, right)
 		require.NotNil(t, got.Columns[1].Sequence)
 		assert.Equal(t, int64(9000), got.Columns[1].Sequence.Max)
-		execInSchema(t, pool, right, `ALTER TABLE t ALTER COLUMN ref SET MAXVALUE 5000`)
+		ExecInSchema(t, pool, right, `ALTER TABLE t ALTER COLUMN ref SET MAXVALUE 5000`)
 	})
 
 	t.Run("constraint validation", func(t *testing.T) {
-		execInSchema(t, pool, right, `ALTER TABLE t VALIDATE CONSTRAINT t_amount_check`)
+		ExecInSchema(t, pool, right, `ALTER TABLE t VALIDATE CONSTRAINT t_amount_check`)
 		got := readCatalog(t, pool, right)
 		assert.Equal(t, CatalogConstraint{Name: "t_amount_check", Type: "c", Def: "CHECK ((amount >= (0)::numeric))", Validated: true},
 			withoutNotNullConstraints(got.Constraints)[0])
 	})
 
+	t.Run("column option", func(t *testing.T) {
+		ExecInSchema(t, pool, right, `ALTER TABLE t ALTER COLUMN amount SET (n_distinct = 100)`)
+		got := readCatalog(t, pool, right)
+		assert.Empty(t, want.Columns[3].Options)
+		assert.Equal(t, []string{"n_distinct=100"}, got.Columns[3].Options)
+		ExecInSchema(t, pool, right, `ALTER TABLE t ALTER COLUMN amount RESET (n_distinct)`)
+	})
+
 	t.Run("statistics target", func(t *testing.T) {
-		execInSchema(t, pool, right, `ALTER TABLE t ALTER COLUMN amount SET STATISTICS 500`)
+		ExecInSchema(t, pool, right, `ALTER TABLE t ALTER COLUMN amount SET STATISTICS 500`)
 		got := readCatalog(t, pool, right)
 		assert.Equal(t, -1, want.Columns[3].StatisticsTarget)
 		assert.Equal(t, 500, got.Columns[3].StatisticsTarget)
 	})
-}
-
-// execInSchema runs sql with search_path set to schema, so unqualified
-// fixture SQL lands there.
-func execInSchema(t *testing.T, pool *pgxpool.Pool, schema, sql string) {
-	t.Helper()
-	err := pgx.BeginTxFunc(t.Context(), pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(t.Context(), "SET LOCAL search_path = "+pgx.Identifier{schema}.Sanitize()); err != nil {
-			return err
-		}
-		_, err := tx.Exec(t.Context(), sql)
-		return err
-	})
-	require.NoError(t, err, sql)
 }
 
 func readCatalog(t *testing.T, pool *pgxpool.Pool, schema string) TableCatalog {

@@ -3,7 +3,6 @@ package migrate_test
 import (
 	"testing"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -141,8 +140,8 @@ func assertRoundTripTable(t *testing.T, pool *pgxpool.Pool, table, liveSQL, desi
 	t.Helper()
 	liveSchema := testutil.NewSchema(t, pool)
 	referenceSchema := testutil.NewSchema(t, pool)
-	execInSchema(t, pool, liveSchema, liveSQL)
-	execInSchema(t, pool, referenceSchema, desiredSQL)
+	testutil.ExecInSchema(t, pool, liveSchema, liveSQL)
+	testutil.ExecInSchema(t, pool, referenceSchema, desiredSQL)
 
 	req := migrate.DesiredRequest{Schema: liveSchema, Desired: parseDesired(t, desiredSQL)}
 	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
@@ -162,20 +161,6 @@ func assertRoundTripTable(t *testing.T, pool *pgxpool.Pool, table, liveSQL, desi
 	assert.Equal(t, verdict.OutcomeExecuted, again.Outcome)
 	assert.Empty(t, plannedSQL(t, again), "the converged table must plan no statements")
 	return res
-}
-
-// execInSchema runs sql with search_path set to schema, so the unqualified
-// fixture SQL lands there.
-func execInSchema(t *testing.T, pool *pgxpool.Pool, schema, sql string) {
-	t.Helper()
-	err := pgx.BeginTxFunc(t.Context(), pool, pgx.TxOptions{}, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(t.Context(), "SET LOCAL search_path = "+pgx.Identifier{schema}.Sanitize()); err != nil {
-			return err
-		}
-		_, err := tx.Exec(t.Context(), sql)
-		return err
-	})
-	require.NoError(t, err, sql)
 }
 
 // plannedSQL lists the plan's statements with the target schema stripped,

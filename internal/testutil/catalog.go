@@ -24,6 +24,12 @@ import (
 type TableCatalog struct {
 	// Persistence is pg_class.relpersistence: 'p' permanent, 'u' unlogged.
 	Persistence string
+	// AccessMethod is the table access method (pg_class.relam), "heap"
+	// for an ordinary table and empty when it has none.
+	AccessMethod string
+	// Tablespace is the table's tablespace, empty for the database
+	// default.
+	Tablespace string
 	// ReplicaIdentity is pg_class.relreplident: 'd' default, 'n' nothing,
 	// 'f' full, 'i' index.
 	ReplicaIdentity string
@@ -68,6 +74,9 @@ type CatalogColumn struct {
 	// StatisticsTarget is the per-column statistics target, -1 for the
 	// default.
 	StatisticsTarget int
+	// Options are the column's attribute options (pg_attribute.attoptions),
+	// e.g. "n_distinct=100", in the order the server stores them.
+	Options []string
 	// Sequence is the sequence the column owns — a serial's or an identity
 	// column's — and nil when it owns none.
 	Sequence *CatalogSequence
@@ -117,12 +126,16 @@ func ReadTableCatalog(ctx context.Context, pool *pgxpool.Pool, schema, table str
 			return fmt.Errorf("set search_path to %s: %w", schema, err)
 		}
 		rel := pgx.Identifier{table}.Sanitize()
-		if err := tx.QueryRow(ctx, `SELECT c.relpersistence::text, c.relreplident::text,
+		if err := tx.QueryRow(ctx, `SELECT c.relpersistence::text, coalesce(am.amname::text, ''),
+       coalesce(ts.spcname::text, ''), c.relreplident::text,
        coalesce(c.reloptions, '{}'),
        coalesce(pg_get_partkeydef(c.oid), ''),
        c.relrowsecurity, c.relforcerowsecurity
 FROM pg_class c
-WHERE c.oid = $1::regclass`, rel).Scan(&tc.Persistence, &tc.ReplicaIdentity, &tc.Options, &tc.PartitionKey, &tc.RowSecurity, &tc.ForceRowSecurity); err != nil {
+LEFT JOIN pg_am am ON am.oid = c.relam
+LEFT JOIN pg_tablespace ts ON ts.oid = c.reltablespace
+WHERE c.oid = $1::regclass`, rel).Scan(&tc.Persistence, &tc.AccessMethod, &tc.Tablespace, &tc.ReplicaIdentity,
+			&tc.Options, &tc.PartitionKey, &tc.RowSecurity, &tc.ForceRowSecurity); err != nil {
 			return fmt.Errorf("read table %s.%s: %w", schema, table, err)
 		}
 		columns, err := readCatalogColumns(ctx, tx, rel)
@@ -157,6 +170,7 @@ func readCatalogColumns(ctx context.Context, tx pgx.Tx, rel string) ([]CatalogCo
        CASE WHEN a.attcollation <> t.typcollation THEN a.attcollation::regcollation::text ELSE '' END,
        a.attstorage::text, a.attcompression::text,
        coalesce(a.attstattarget::int, -1),
+       coalesce(a.attoptions, '{}'),
        s.seqtypid IS NOT NULL,
        coalesce(format_type(s.seqtypid, NULL), ''),
        coalesce(s.seqstart, 0), coalesce(s.seqincrement, 0),
@@ -183,7 +197,7 @@ ORDER BY a.attnum`, rel)
 		var hasSequence bool
 		var seq CatalogSequence
 		if err := rows.Scan(&c.Name, &c.Type, &c.NotNull, &c.Default, &c.Identity, &c.Generated,
-			&c.Collation, &c.Storage, &c.Compression, &c.StatisticsTarget,
+			&c.Collation, &c.Storage, &c.Compression, &c.StatisticsTarget, &c.Options,
 			&hasSequence, &seq.Type, &seq.Start, &seq.Increment, &seq.Min, &seq.Max, &seq.Cache, &seq.Cycle); err != nil {
 			return nil, err
 		}

@@ -125,8 +125,9 @@ print the residual diff and the original plan. *Binds:* Phase 2 declarative diff
 *Source:* pg-delta `tests/integration/roundtrip.ts`.
 
 `testutil.ReadTableCatalog` is the catalog-state side. It reads a table's
-columns, owned sequences, constraints, indexes, and table settings with direct
-catalog queries, never through `pkg/schemadiff`, so a property the diff model
+columns (attribute options included), owned sequences, constraints, indexes,
+and table settings (persistence, access method, tablespace, storage
+parameters, replica identity, row security) with direct catalog queries, never through `pkg/schemadiff`, so a property the diff model
 ignores on both sides still fails the comparison. A re-diff alone would come
 back empty for that property. `TestRunDesiredRoundTrip` in `pkg/migrate` holds
 `RunDesired` to it: each case converges a live table to a desired file and
