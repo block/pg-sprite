@@ -180,7 +180,32 @@ func TestParseOpsShapes(t *testing.T) {
 			sql:  "ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (a) INCLUDE (b) WITH (fillfactor = 70) USING INDEX TABLESPACE fast DEFERRABLE INITIALLY DEFERRED",
 			want: statement.Op{Kind: statement.OpAddConstraint, Name: "k", Constraint: statement.ConstraintUnique, Columns: []string{"a"},
 				IncludeColumns: []string{"b"}, NullsNotDistinct: true, Deferrable: true, InitiallyDeferred: true,
-				IndexTablespace: "fast", IndexOptions: true},
+				IndexTablespace: "fast", IndexStorageParams: []statement.StorageParam{{Name: "fillfactor", Value: "70", HasValue: true}}},
+		},
+		{
+			name: "add unique with storage parameters spelled every way",
+			sql:  "ALTER TABLE t ADD CONSTRAINT k UNIQUE (a) WITH (fillfactor = 70, deduplicate_items = off, x = 'it''s', y = 1.5, z = true, bare)",
+			want: statement.Op{Kind: statement.OpAddConstraint, Name: "k", Constraint: statement.ConstraintUnique, Columns: []string{"a"},
+				IndexStorageParams: []statement.StorageParam{
+					{Name: "fillfactor", Value: "70", HasValue: true},
+					{Name: "deduplicate_items", Value: "off", HasValue: true},
+					{Name: "x", Value: "it's", HasValue: true},
+					{Name: "y", Value: "1.5", HasValue: true},
+					{Name: "z", Value: "true", HasValue: true},
+					{Name: "bare"},
+				}},
+		},
+		{
+			name: "add unique with a storage parameter whose value is a qualified name",
+			sql:  "ALTER TABLE t ADD CONSTRAINT k UNIQUE (a) WITH (x = s.y)",
+			want: statement.Op{Kind: statement.OpAddConstraint, Name: "k", Constraint: statement.ConstraintUnique, Columns: []string{"a"},
+				IndexOptionsUnrenderable: true},
+		},
+		{
+			name: "add unique with a backslash in a storage parameter",
+			sql:  `ALTER TABLE t ADD CONSTRAINT k UNIQUE (a) WITH (x = 'a\b')`,
+			want: statement.Op{Kind: statement.OpAddConstraint, Name: "k", Constraint: statement.ConstraintUnique, Columns: []string{"a"},
+				IndexOptionsUnrenderable: true},
 		},
 		{
 			name: "add unique using index",

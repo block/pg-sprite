@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -91,16 +92,35 @@ func partitionedParentVerdict(st statement.Statement, partitionErr *preflight.Un
 
 // rewriteRequiredVerdict is the refusal for a statement whose submitted
 // form blocks but for which the planner could not construct the safer
-// native sequence — a multi-operation statement, or a pattern it cannot
-// build. Running the submitted form would falsify the plan's own reason.
-func rewriteRequiredVerdict(st statement.Statement) verdict.Verdict {
+// native sequence. Running the submitted form would falsify the plan's own
+// reason. The detail names the manual path the plan report's guidance
+// names, so the two surfaces give the same advice.
+func rewriteRequiredVerdict(st statement.Statement, rs router.Statement) (verdict.Verdict, error) {
+	guidance, err := plan.RewriteRequiredGuidance(rs)
+	if err != nil {
+		return verdict.Verdict{}, fmt.Errorf("derive the manual path for rewrite-required %s: %w", qualified(st), err)
+	}
 	return verdict.Verdict{
 		Statement: st.SQL(),
 		Table:     qualified(st),
-		Detail: "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not " +
-			"construct one for this statement; submit each operation as its own single-operation statement " +
-			"so the engine can build its safer form (a dry-run classification shows each operation's route)",
-	}.WithRefusal(rewriteRequiredRefusal())
+		Detail:    "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not construct one for this statement; " + manualPath(guidance),
+	}.WithRefusal(rewriteRequiredRefusal()), nil
+}
+
+// manualPath states the steps a rewrite-required statement's guidance
+// names, ending in the guidance code an operator can look up.
+func manualPath(g suggest.Guidance) string {
+	switch g {
+	case suggest.GuidanceSplitStatement:
+		return "submit each operation as its own single-operation statement so the engine can build its safer form " +
+			"(a dry-run classification shows each operation's route)"
+	case suggest.GuidanceUniqueIndexThenConstraint:
+		return "build the index first with CREATE UNIQUE INDEX CONCURRENTLY on the same columns, with the statement's " +
+			"INCLUDE, NULLS NOT DISTINCT, WITH (...), and TABLESPACE, then attach it with ADD CONSTRAINT ... USING INDEX, " +
+			"keeping any DEFERRABLE and INITIALLY DEFERRED (guidance " + string(g) + ")"
+	default:
+		return "run the manual path its guidance names (guidance " + string(g) + ")"
+	}
 }
 
 // backendUnavailableVerdict is the refusal for a change that routes to an

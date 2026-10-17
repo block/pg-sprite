@@ -115,9 +115,14 @@ type Op struct {
 	// IndexTablespace is the USING INDEX TABLESPACE of an ADD PRIMARY KEY
 	// / UNIQUE: where its index is built.
 	IndexTablespace string
-	// IndexOptions is true when an ADD PRIMARY KEY / UNIQUE sets its
-	// index's storage parameters with WITH (...).
-	IndexOptions bool
+	// IndexStorageParams are the WITH (...) storage parameters of an ADD
+	// PRIMARY KEY / UNIQUE's index, in statement order.
+	IndexStorageParams []StorageParam
+	// IndexOptionsUnrenderable is true when an ADD PRIMARY KEY / UNIQUE's
+	// WITH (...) carries a parameter IndexStorageParams cannot hold
+	// faithfully: one whose value is not a plain word, number, or string,
+	// or holds a backslash.
+	IndexOptionsUnrenderable bool
 	// Constraint is the constraint family for OpAddConstraint.
 	Constraint ConstraintKind
 	// NotValid is true for ADD CONSTRAINT ... NOT VALID.
@@ -509,7 +514,69 @@ func keyIndexAttributes(op *Op, con *pganalyze.Constraint) {
 	op.Deferrable = con.GetDeferrable()
 	op.InitiallyDeferred = con.GetInitdeferred()
 	op.IndexTablespace = con.GetIndexspace()
-	op.IndexOptions = len(con.GetOptions()) > 0
+	for _, o := range con.GetOptions() {
+		param, ok := storageParam(o.GetDefElem())
+		if !ok {
+			op.IndexOptionsUnrenderable = true
+			continue
+		}
+		op.IndexStorageParams = append(op.IndexStorageParams, param)
+	}
+}
+
+// StorageParam is one WITH (...) storage parameter. The server reads every
+// parameter's value as text, so Value holds that text whatever literal
+// spelled it; HasValue is false for a bare name, which the server reads as
+// true.
+type StorageParam struct {
+	Name     string
+	Value    string
+	HasValue bool
+}
+
+// plainWord returns the word a type name spells when it is one unqualified
+// name with no modifiers or array bounds, and "" otherwise.
+func plainWord(tn *pganalyze.TypeName) string {
+	if tn == nil || len(tn.GetNames()) != 1 || len(tn.GetTypmods()) > 0 || len(tn.GetArrayBounds()) > 0 ||
+		tn.GetSetof() || tn.GetPctType() {
+		return ""
+	}
+	return tn.GetNames()[0].GetString_().GetSval()
+}
+
+// storageParam reads one WITH (...) element, reporting false for one a
+// StorageParam cannot hold faithfully.
+func storageParam(de *pganalyze.DefElem) (StorageParam, bool) {
+	if de == nil {
+		return StorageParam{}, false
+	}
+	param := StorageParam{Name: de.GetDefname()}
+	arg := de.GetArg()
+	switch {
+	case arg == nil:
+		return param, true
+	case arg.GetString_() != nil:
+		param.Value = arg.GetString_().GetSval()
+	case arg.GetInteger() != nil:
+		param.Value = strconv.FormatInt(int64(arg.GetInteger().GetIval()), 10)
+	case arg.GetFloat() != nil:
+		param.Value = arg.GetFloat().GetFval()
+	case arg.GetBoolean() != nil:
+		param.Value = strconv.FormatBool(arg.GetBoolean().GetBoolval())
+	case plainWord(arg.GetTypeName()) != "":
+		// The grammar parses an unreserved bare word such as off as a
+		// type name; the server reads it back as the word.
+		param.Value = plainWord(arg.GetTypeName())
+	default:
+		return StorageParam{}, false
+	}
+	if strings.Contains(param.Value, `\`) {
+		// A backslash reads differently under standard_conforming_strings
+		// off, and no storage parameter takes one.
+		return StorageParam{}, false
+	}
+	param.HasValue = true
+	return param, true
 }
 
 // renameOp maps a RENAME statement (column, table, or index — the grammar

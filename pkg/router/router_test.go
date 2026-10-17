@@ -63,11 +63,22 @@ func TestRouteSaferIdiomWithoutRewriteFailsClosed(t *testing.T) {
 	assert.Equal(t, router.DispositionRewriteRequired, routed.Disposition)
 }
 
-func TestRouteKeyWithStorageParametersFailsClosed(t *testing.T) {
-	// The online sequence does not render WITH (...) storage parameters,
-	// so the planner builds none: the key must be refused, never built by
-	// its blocking form or by a sequence that leaves the parameters out.
+func TestRouteKeyWithStorageParametersRunsTheSequence(t *testing.T) {
 	plan := classify(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = 70)")
+	routed := router.Route([]planner.Plan{plan})
+	st := routed.Statements[0]
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+	assert.Equal(t, []string{
+		`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") WITH ("fillfactor" = '70')`,
+		`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+	}, st.ExecSQL)
+}
+
+func TestRouteKeyWithUnrenderableStorageParameterFailsClosed(t *testing.T) {
+	// A storage parameter the online sequence cannot carry faithfully gets
+	// no sequence: the key must be refused, never built by its blocking
+	// form or by a sequence that leaves the parameter out.
+	plan := classify(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = s.seventy)")
 	require.Equal(t, planner.RouteNative, plan.Route)
 	require.Len(t, plan.Decisions, 1)
 	require.Empty(t, plan.Decisions[0].SaferSQL)

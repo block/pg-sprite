@@ -121,6 +121,47 @@ func TestRunDispatch(t *testing.T) {
 		assert.Equal(t, "integer", typ, "the refused change must not touch the schema")
 	})
 
+	t.Run("builds a key with storage parameters online and keeps them", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, email text)", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(
+			"ALTER TABLE %s.t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = 70)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		require.Len(t, v.ExecutedSQL, 2)
+		assert.Contains(t, v.ExecutedSQL[0], "CREATE UNIQUE INDEX CONCURRENTLY")
+
+		var def string
+		require.NoError(t, pool.QueryRow(t.Context(),
+			"SELECT pg_get_indexdef(conindid) FROM pg_constraint WHERE conrelid = $1::regclass AND conname = 'k'",
+			schema+".t").Scan(&def))
+		assert.Contains(t, def, "WITH (fillfactor='70')")
+	})
+
+	t.Run("refuses a key whose storage parameter it cannot carry, naming the manual sequence", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, email text)", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(
+			"ALTER TABLE %s.t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = s.seventy)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+		assert.Contains(t, v.Detail, "CREATE UNIQUE INDEX CONCURRENTLY")
+		assert.Contains(t, v.Detail, "ADD CONSTRAINT ... USING INDEX")
+		assert.Contains(t, v.Detail, "unique-index-then-constraint")
+		assert.NotContains(t, v.Detail, "single-operation statement", "the statement already is one")
+
+		var exists bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			"SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = $1::regclass AND conname = 'k')",
+			schema+".t").Scan(&exists))
+		assert.False(t, exists, "the refused change must not touch the schema")
+	})
+
 	t.Run("refuses an unconstructible rewrite as rewrite-required", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))

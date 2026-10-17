@@ -19,7 +19,7 @@ import (
 // then compares the two through the server's catalogs: a sequence that
 // drops NULLS NOT DISTINCT accepts a second NULL key, one that drops
 // DEFERRABLE checks every row at the statement instead of at commit, and
-// one that drops INCLUDE builds a different index.
+// one that drops INCLUDE or a storage parameter builds a different index.
 //
 // CREATE INDEX CONCURRENTLY waits out every older transaction in its
 // database, so the test runs in a database of its own rather than beside
@@ -44,10 +44,14 @@ func TestUsingIndexSequenceDeclaresTheSameConstraint(t *testing.T) {
 		{"plain primary key", "PRIMARY KEY (id)", 0},
 		{"include columns", "UNIQUE (email) INCLUDE (name, id)", 0},
 		{"nulls not distinct", "UNIQUE NULLS NOT DISTINCT (email)", 150000},
+		{"storage parameter", "UNIQUE (email) WITH (fillfactor = 70)", 0},
+		{"storage parameter set to a bare word", "UNIQUE (email) WITH (deduplicate_items = off)", 0},
+		{"storage parameters spelled as a bare name and a string", "UNIQUE (email) WITH (deduplicate_items, fillfactor = '80')", 0},
+		{"primary key storage parameter", "PRIMARY KEY (id) WITH (fillfactor = 90)", 0},
 		{"deferrable", "UNIQUE (email) DEFERRABLE", 0},
 		{"deferrable initially deferred", "UNIQUE (email) DEFERRABLE INITIALLY DEFERRED", 0},
 		{"deferrable primary key", "PRIMARY KEY (id) DEFERRABLE INITIALLY DEFERRED", 0},
-		{"every attribute at once", "UNIQUE NULLS NOT DISTINCT (email, name) INCLUDE (id) DEFERRABLE INITIALLY DEFERRED", 150000},
+		{"every attribute at once", "UNIQUE NULLS NOT DISTINCT (email, name) INCLUDE (id) WITH (fillfactor = 70) DEFERRABLE INITIALLY DEFERRED", 150000},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

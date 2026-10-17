@@ -368,7 +368,7 @@ func FromRouted(rs router.Statement) (Statement, error) {
 		}
 	}
 	if rs.Disposition == router.DispositionRewriteRequired {
-		guidance, err := rewriteRequiredGuidance(rs)
+		guidance, err := RewriteRequiredGuidance(rs)
 		if err != nil {
 			return Statement{}, err
 		}
@@ -377,8 +377,9 @@ func FromRouted(rs router.Statement) (Statement, error) {
 	return st, nil
 }
 
-// rewriteRequiredGuidance derives the typed manual path for a statement
-// the router marked rewrite-required: the first safer-idiom decision names
+// RewriteRequiredGuidance derives the typed manual path for a statement
+// the router marked rewrite-required, for the plan report and the run
+// verdict alike: the first safer-idiom decision names
 // the operation the manual path is for. A multi-operation statement always
 // advises splitting first (ManualGuidance's contract), which covers the
 // case where the rewrite exists but could not be applied to a compound
@@ -386,7 +387,7 @@ func FromRouted(rs router.Statement) (Statement, error) {
 // planner's contract (one decision per operation, in order); a mismatch,
 // or a rewrite-required statement with no safer-idiom decision, is a
 // contract violation and fails closed.
-func rewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
+func RewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 	ops, err := statement.ParseOps(rs.Statement)
 	if err != nil {
 		return "", fmt.Errorf("parse rewrite-required statement: %w", err)

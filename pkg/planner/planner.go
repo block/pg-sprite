@@ -487,10 +487,10 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, 
 		// Direct ADD PK/UNIQUE builds its index under ACCESS EXCLUSIVE;
 		// the safer sequence builds it concurrently and attaches it.
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
-		if single && len(op.Columns) > 0 && !op.IndexOptions {
-			// WITH (...) storage parameters are not rendered into the
-			// sequence; without one, the decision carries manual guidance
-			// instead of SQL that would build the index without them.
+		if single && len(op.Columns) > 0 && !op.IndexOptionsUnrenderable {
+			// A storage parameter the sequence cannot carry faithfully
+			// gets no sequence: one that left it out would build a
+			// different index than the statement declares.
 			d.SaferSQL = usingIndexSequence(st, op)
 		}
 
@@ -746,6 +746,16 @@ func usingIndexSequence(st statement.Statement, op statement.Op) []string {
 	}
 	if op.NullsNotDistinct {
 		create += " NULLS NOT DISTINCT"
+	}
+	if len(op.IndexStorageParams) > 0 {
+		params := make([]string, len(op.IndexStorageParams))
+		for i, p := range op.IndexStorageParams {
+			params[i] = pgx.Identifier{p.Name}.Sanitize()
+			if p.HasValue {
+				params[i] += " = '" + strings.ReplaceAll(p.Value, "'", "''") + "'"
+			}
+		}
+		create += " WITH (" + strings.Join(params, ", ") + ")"
 	}
 	if op.IndexTablespace != "" {
 		create += " TABLESPACE " + pgx.Identifier{op.IndexTablespace}.Sanitize()

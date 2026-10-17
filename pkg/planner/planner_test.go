@@ -350,6 +350,14 @@ func TestClassifyAddKeySequenceCarriesEveryAttribute(t *testing.T) {
 			},
 		},
 		{
+			"storage parameters",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) INCLUDE (id) WITH (fillfactor = 70, deduplicate_items = off) USING INDEX TABLESPACE fast",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") INCLUDE ("id") WITH ("fillfactor" = '70', "deduplicate_items" = 'off') TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
 			"deferrable initially deferred",
 			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) DEFERRABLE INITIALLY DEFERRED",
 			[]string{
@@ -380,10 +388,10 @@ func TestClassifyAddKeySequenceCarriesEveryAttribute(t *testing.T) {
 		})
 	}
 
-	d := classifyOne(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = 70)")
+	d := classifyOne(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = s.seventy)")
 	assert.Equal(t, planner.RouteNative, d.Route)
 	assert.Equal(t, planner.ReasonSaferIdiom, d.Reason)
-	assert.Empty(t, d.SaferSQL, "a sequence would build the index without its storage parameters")
+	assert.Empty(t, d.SaferSQL, "a sequence would build the index without the parameter it cannot carry")
 }
 
 func TestClassifyAddCheckSequenceValidates(t *testing.T) {
