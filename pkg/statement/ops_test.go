@@ -356,6 +356,14 @@ func TestParseOpsMultipleSubcommands(t *testing.T) {
 	assert.Equal(t, statement.OpDropColumn, ops[1].Kind)
 }
 
+// A constraint's WITH list takes plain option names only: the grammar
+// rejects a namespaced one such as toast.fillfactor, which only a table's
+// reloptions accept, so no namespace reaches the storage parameters.
+func TestParseOpsRejectsANamespacedConstraintOption(t *testing.T) {
+	_, err := statement.ParseOps("ALTER TABLE t ADD CONSTRAINT k UNIQUE (a) WITH (toast.fillfactor = 70)")
+	require.ErrorContains(t, err, `syntax error at or near "."`)
+}
+
 func TestParseOpsRejectsMultipleStatements(t *testing.T) {
 	_, err := statement.ParseOps("SELECT 1; SELECT 2")
 	assert.ErrorIs(t, err, statement.ErrNotOneStatement)

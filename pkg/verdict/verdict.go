@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/block/pg-sprite/pkg/refusal"
+	"github.com/block/pg-sprite/pkg/suggest"
 )
 
 const (
@@ -528,6 +529,12 @@ type Verdict struct {
 	// SaferIdiom is a native alternative to the refused statement, when one
 	// exists (e.g. CREATE INDEX CONCURRENTLY, ADD CONSTRAINT ... NOT VALID).
 	SaferIdiom string `json:"safer_idiom,omitempty"`
+	// Guidance is the typed manual path for a rewrite-required refusal,
+	// drawn from the suggest contract's Guidance vocabulary
+	// (docs/suggest-report.md), the same value the plan report's statement
+	// carries. Detail states the steps for a human; Guidance is the key an
+	// automated caller branches on. Empty for every other verdict.
+	Guidance suggest.Guidance `json:"guidance,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what

@@ -550,6 +550,11 @@ func storageParam(de *pganalyze.DefElem) (StorageParam, bool) {
 	if de == nil {
 		return StorageParam{}, false
 	}
+	if de.GetDefnamespace() != "" {
+		// A StorageParam has no namespace to carry, and rendering the bare
+		// name would set a different option than the one written.
+		return StorageParam{}, false
+	}
 	param := StorageParam{Name: de.GetDefname()}
 	arg := de.GetArg()
 	switch {

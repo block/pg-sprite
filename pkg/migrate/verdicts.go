@@ -93,8 +93,9 @@ func partitionedParentVerdict(st statement.Statement, partitionErr *preflight.Un
 // rewriteRequiredVerdict is the refusal for a statement whose submitted
 // form blocks but for which the planner could not construct the safer
 // native sequence. Running the submitted form would falsify the plan's own
-// reason. The detail names the manual path the plan report's guidance
-// names, so the two surfaces give the same advice.
+// reason. The verdict carries the plan report's guidance, and its detail
+// states the steps that guidance names, so the two surfaces give the same
+// advice.
 func rewriteRequiredVerdict(st statement.Statement, rs router.Statement) (verdict.Verdict, error) {
 	guidance, err := plan.RewriteRequiredGuidance(rs)
 	if err != nil {
@@ -104,6 +105,7 @@ func rewriteRequiredVerdict(st statement.Statement, rs router.Statement) (verdic
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Detail:    "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not construct one for this statement; " + manualPath(guidance),
+		Guidance:  guidance,
 	}.WithRefusal(rewriteRequiredRefusal()), nil
 }
 

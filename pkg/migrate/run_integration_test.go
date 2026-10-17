@@ -13,6 +13,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -150,10 +151,8 @@ func TestRunDispatch(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
-		assert.Contains(t, v.Detail, "CREATE UNIQUE INDEX CONCURRENTLY")
-		assert.Contains(t, v.Detail, "ADD CONSTRAINT ... USING INDEX")
-		assert.Contains(t, v.Detail, "unique-index-then-constraint")
-		assert.NotContains(t, v.Detail, "single-operation statement", "the statement already is one")
+		assert.Equal(t, suggest.GuidanceUniqueIndexThenConstraint, v.Guidance,
+			"the statement already is one operation, so the manual path builds the key, not a split")
 
 		var exists bool
 		require.NoError(t, pool.QueryRow(t.Context(),
@@ -172,6 +171,7 @@ func TestRunDispatch(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+		assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, v.Guidance)
 
 		var exists bool
 		require.NoError(t, pool.QueryRow(t.Context(),
