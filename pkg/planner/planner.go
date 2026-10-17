@@ -268,6 +268,12 @@ type Facts struct {
 	// constant; the proof leaves out only an ADD COLUMN IF NOT EXISTS for a
 	// column the table already has, which the server skips.
 	AddColumnProofs map[string]statement.AddColumnProof
+	// ConstraintNames are the names of the constraints already in the
+	// table's schema, which the server passes over when it names an
+	// unnamed CHECK or FOREIGN KEY. Without them the safer sequence states
+	// the server's first choice, and if the table already uses that name
+	// its NOT VALID step fails before anything is added.
+	ConstraintNames map[string]bool
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
@@ -412,7 +418,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		d.Route, d.Reason = RouteCopyAndSwap, ReasonRelocation
 
 	case statement.OpAddConstraint:
-		d = classifyAddConstraint(op, st, sql, single)
+		d = classifyAddConstraint(op, st, facts, sql, single)
 
 	case statement.OpValidateConstraint:
 		d.Route, d.Reason = RouteNative, ReasonOnlineIdiom
@@ -475,7 +481,7 @@ func concurrentlyDecision(d Decision, concurrent bool, sql string, single bool) 
 }
 
 // classifyAddConstraint routes ADD CONSTRAINT per constraint family.
-func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, single bool) Decision {
+func classifyAddConstraint(op statement.Op, st statement.Statement, facts Facts, sql string, single bool) Decision {
 	d := Decision{Operation: op.Describe()}
 	switch {
 	case op.UsingIndex, op.NotValid:
@@ -497,7 +503,7 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, 
 		// sequence is NOT VALID plus an online VALIDATE.
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
 		if single {
-			if notValid, name, err := statement.AddNotValid(sql); err == nil {
+			if notValid, name, err := statement.AddNotValid(sql, constraintNaming(facts)); err == nil {
 				d.SaferSQL = []string{
 					notValid,
 					"ALTER TABLE " + tableIdent(st) + " VALIDATE CONSTRAINT " + pgx.Identifier{name}.Sanitize(),
@@ -513,6 +519,19 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, 
 		d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
 	}
 	return d
+}
+
+// constraintNaming is what facts tell the rewrite about naming an unnamed
+// constraint: the live columns, and the names the schema already uses.
+func constraintNaming(facts Facts) statement.ConstraintNaming {
+	naming := statement.ConstraintNaming{Taken: facts.ConstraintNames}
+	if facts.ColumnTypes != nil {
+		naming.Columns = make(map[string]bool, len(facts.ColumnTypes))
+		for column := range facts.ColumnTypes {
+			naming.Columns[column] = true
+		}
+	}
+	return naming
 }
 
 // classifyTypeChange routes ALTER COLUMN TYPE: binary-coercible changes are

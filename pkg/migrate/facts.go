@@ -36,7 +36,10 @@ type Facts struct {
 
 // LiveFacts introspects the statement's target table for classifier facts,
 // and for an ALTER TABLE that adds columns, has the server prove whether
-// each one rewrites the table (preflight.AddColumnRewrites).
+// each one rewrites the table (preflight.AddColumnRewrites). For one that
+// adds an unnamed CHECK or FOREIGN KEY it also reads the constraint names
+// the schema already uses, so the safer sequence names the constraint as
+// the server would.
 func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	st statement.Statement) (Facts, error) {
 	if st.Table() == "" {
@@ -61,6 +64,15 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	}
 	if adds {
 		if classifier.AddColumnProofs, err = preflight.AddColumnRewrites(ctx, pool, ResolvedSchema(st), st.Table(), st.SQL()); err != nil {
+			return Facts{}, err
+		}
+	}
+	names, err := addsUnnamedValidatableConstraint(st)
+	if err != nil {
+		return Facts{}, err
+	}
+	if names {
+		if classifier.ConstraintNames, err = preflight.SchemaConstraintNames(ctx, pool, ResolvedSchema(st)); err != nil {
 			return Facts{}, err
 		}
 	}
@@ -95,4 +107,20 @@ func addsColumn(st statement.Statement) (bool, error) {
 		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
 	}
 	return slices.ContainsFunc(ops, func(op statement.Op) bool { return op.Kind == statement.OpAddColumn }), nil
+}
+
+// addsUnnamedValidatableConstraint reports whether st is an ALTER TABLE
+// adding a CHECK or FOREIGN KEY it does not name.
+func addsUnnamedValidatableConstraint(st statement.Statement) (bool, error) {
+	if st.Kind() != statement.KindAlterTable {
+		return false, nil
+	}
+	ops, err := statement.ParseOps(st.SQL())
+	if err != nil {
+		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
+	}
+	return slices.ContainsFunc(ops, func(op statement.Op) bool {
+		validatable := op.Constraint == statement.ConstraintCheck || op.Constraint == statement.ConstraintForeignKey
+		return op.Kind == statement.OpAddConstraint && validatable && op.Name == ""
+	}), nil
 }

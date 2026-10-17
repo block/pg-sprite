@@ -421,7 +421,7 @@ func TestConcurrentlyRefusesOtherStatements(t *testing.T) {
 }
 
 func TestAddNotValidRewritesNamedCheck(t *testing.T) {
-	safer, name, err := statement.AddNotValid("ALTER TABLE t ADD CONSTRAINT c CHECK (age > 0)")
+	safer, name, err := statement.AddNotValid("ALTER TABLE t ADD CONSTRAINT c CHECK (age > 0)", statement.ConstraintNaming{})
 	require.NoError(t, err)
 	assert.Equal(t, "c", name)
 	op := parseOneOp(t, safer)
@@ -439,7 +439,7 @@ func TestAddNotValidRefusals(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := statement.AddNotValid(tc.sql)
+			_, _, err := statement.AddNotValid(tc.sql, statement.ConstraintNaming{})
 			assert.ErrorIs(t, err, statement.ErrNotValidNotApplicable)
 		})
 	}

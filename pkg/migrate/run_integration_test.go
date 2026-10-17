@@ -111,6 +111,29 @@ func TestRunDispatch(t *testing.T) {
 		assert.True(t, validated)
 	})
 
+	// When the table already holds the server's first choice, the unnamed
+	// CHECK runs under the numbered name the server would move on to, so
+	// the NOT VALID step does not collide with the existing constraint.
+	t.Run("names an unnamed check past a name the table holds", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		for _, ddl := range []string{
+			"CREATE TABLE %s.t (id int PRIMARY KEY, qty int)",
+			"ALTER TABLE %s.t ADD CONSTRAINT t_qty_check CHECK (qty < 1000)",
+		} {
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(ddl, schema))
+			require.NoError(t, err, ddl)
+		}
+
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ADD CHECK (qty > 0)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		assert.Equal(t, []string{
+			fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT t_qty_check1 CHECK (qty > 0) NOT VALID", schema),
+			fmt.Sprintf(`ALTER TABLE "%s"."t" VALIDATE CONSTRAINT "t_qty_check1"`, schema),
+		}, v.ExecutedSQL)
+	})
+
 	t.Run("re-checks the gate for callers that skipped it", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
