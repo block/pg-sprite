@@ -497,3 +497,20 @@ func TestStateMutatorsDoNotWaitForInFlightWorkSourcePoll(t *testing.T) {
 		t.Fatal("a state mutator waited behind an in-flight work source poll")
 	}
 }
+
+// A WorkSource is the engine's own read, not the reserved session, so it is
+// read under the observer's context: an observer that gives up must not keep
+// a source poll, and the poll gate with it, alive for the source's whole read.
+func TestProgressReadsTheWorkSourceUnderTheObserversContext(t *testing.T) {
+	observer, giveUp := context.WithCancel(t.Context())
+	var sawEndedContext atomic.Bool
+	tracker := runningTrackerWithSource(t, fakeSource{work: func(ctx context.Context) (progress.Work, error) {
+		giveUp()
+		sawEndedContext.Store(ctx.Err() != nil)
+		return progress.Work{}, nil
+	}})
+
+	_, err := tracker.Progress(observer)
+	require.NoError(t, err)
+	assert.True(t, sawEndedContext.Load(), "the work source must be read under the observer's context")
+}
