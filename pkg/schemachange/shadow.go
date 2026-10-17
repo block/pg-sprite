@@ -574,7 +574,7 @@ func copyConversions(conversions map[string]string, columns []string) map[string
 func copyColumns(source schemadiff.Model, same map[string]bool) []string {
 	columns := make([]string, 0, len(source.Columns))
 	for _, c := range source.Columns {
-		// INV: ST-7
+		// INV: ST-11
 		if c.IsGenerated() || !same[c.Name] {
 			continue
 		}

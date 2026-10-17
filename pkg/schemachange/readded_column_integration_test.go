@@ -1,12 +1,16 @@
 package schemachange_test
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/schemachange"
+	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // One ALTER TABLE drops "note" and adds a new column of the same name. The
@@ -38,6 +42,61 @@ func TestRunnerGivesAReaddedColumnItsDefaultNotTheDroppedValues(t *testing.T) {
 	assert.EqualValues(t, 2500, fresh, "every row holds the new column's default")
 	assert.EqualValues(t, 0, oldValues, "no value of the dropped column survives")
 	assert.EqualValues(t, 3126250, qtySum, "the retyped column kept its values")
+}
+
+// The same drop and re-add on a live run: the stream and the swap's drain
+// decode the dropped column's values on every change they carry, including
+// an update that touches only that column and an insert drained under the
+// swap's lock. None of them reaches the new column, which holds its default
+// on every live row. The old-versus-live convergence check is left out on
+// purpose: the two tables differ in the re-added column by design.
+func TestRunnerLiveRunGivesAReaddedColumnItsDefault(t *testing.T) {
+	const seeded = 2500
+	f := newDecodingFixture(t, seeded)
+	w := f.startWriter(t, seeded, liveWriterInterval)
+
+	drained := func(ctx context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase != checkpoint.PhaseCutover {
+			return nil
+		}
+		for _, sql := range []string{
+			`UPDATE %s SET label = 'label-only' WHERE id = 3`,
+			`INSERT INTO %s (uniq, amount, label, blob) VALUES (900001, 9, 'drained', 'x')`,
+			`UPDATE %s SET amount = 777, label = 'both' WHERE id = 1`,
+		} {
+			if _, err := f.pool.Exec(ctx, fmt.Sprintf(sql, f.table.Qualified())); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	st, err := statement.ParseOne(fmt.Sprintf(`
+		ALTER TABLE %s
+			DROP COLUMN label,
+			ADD COLUMN label text DEFAULT 'fresh',
+			ALTER COLUMN amount TYPE numeric(14,2)`, f.table.Qualified()))
+	require.NoError(t, err)
+	var writes int
+	r, err := schemachange.NewRunner(f.cfg, f.store, liveRunOptions(schemachange.RunOptions{
+		AfterCheckpoint: untilVerifying(t, w, &writes, drained)}))
+	require.NoError(t, err)
+
+	result, err := r.Run(t.Context(), f.pool, f.target, st)
+	require.NoError(t, err)
+
+	assert.True(t, result.Verification.Clean())
+	assert.Positive(t, writes, "the source was written while the run was in progress")
+	assert.NotContains(t, result.Shadow.CopyColumns, "label", "the re-added column is not a copy column")
+	var notFresh, drainedRows int
+	var amount string
+	require.NoError(t, f.pool.QueryRow(t.Context(), fmt.Sprintf(`
+		SELECT count(*) FILTER (WHERE label IS DISTINCT FROM 'fresh'),
+		       count(*) FILTER (WHERE uniq = 900001),
+		       max(amount::text) FILTER (WHERE id = 1)
+		FROM %s`, f.table.Qualified())).Scan(&notFresh, &drainedRows, &amount))
+	assert.Zero(t, notFresh, "every live row, including the streamed and drained ones, holds the new column's default")
+	assert.Equal(t, 1, drainedRows, "the drained insert is live")
+	assert.Equal(t, "777.00", amount, "the drained update's retyped column was carried")
 }
 
 // A re-added column with no default holds NULL on every row, and the copy

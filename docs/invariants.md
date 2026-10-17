@@ -965,11 +965,7 @@ operations with the shadow as its sole target —
 inside the build's transaction and before the statement runs, a `USING` expression the server
 does not classify as immutable, tried as a stored generated column's expression on the empty
 shadow and rolled back, since the copy, the recopy, and the catch-up evaluate the expression
-again and must get the same answer; and it names a column in the copy only when it is the same
-column on the shadow after the statement — the source's live position equals the shadow
-column's attribute number — so a column the statement dropped and added again under one name
-takes its own default instead of the dropped column's values, the same list on a resume's
-`InspectShadow`).
+again and must get the same answer).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
@@ -1021,6 +1017,29 @@ the unknown columns and is `ErrTableNewer` to `errors.Is`; `tableUnusable` maps 
 `TestEnsureReadsOnlyTheEnginesOwnTable`,
 `TestReadsAndWritesAgainstAnOlderTableReportItBehind`. *Source:* adversarial review of the
 checkpoint table format.
+
+### ST-11 — The shadow takes a column's values only from the same source column
+
+The copy list names a source column only when the shadow's column of that name is the same
+column after the gated statement, not merely the same name: the shadow is cloned with its
+columns numbered 1..n in the source's live order, a retype keeps a column's number, and an added
+column is numbered past n, so a source column at live position `i` is the same column exactly
+when the shadow's column of that name has attribute number `i`. A column the statement dropped
+and added again under one name therefore takes its own default (or NULL), never the dropped
+column's values. No later gate can catch a wrong list: CO-1's digest compares the same list on
+both sides, so a name-matched list verifies clean, and the list itself is the guard. The copier,
+the checksum digest and its repair, and the live flusher all take their columns from
+`BuiltShadow.CopyColumns()`, and a resume re-derives the list from the catalog and compares it
+field for field against the checkpointed proof. *Enforced:* `pkg/schemachange`
+(`readColumnPositions` reads both relations' live attribute numbers inside the build's and the
+inspection's transaction; `sameColumns` keeps a column only when its live position equals its
+shadow attribute number; `copyColumns` takes only those). Tests:
+`TestSameColumnsComparesLivePositionToShadowNumber`,
+`TestBuildShadowLeavesAReaddedColumnOutOfTheCopyWhenTheSourceHasADroppedColumn`,
+`TestBuildShadowCopiesEveryColumnTheChangeKeeps`,
+`TestRunnerGivesAReaddedColumnItsDefaultNotTheDroppedValues`,
+`TestRunnerLiveRunGivesAReaddedColumnItsDefault`. *Source:* adversarial review of the
+re-added-column copy fix.
 
 ## Refusals and preflight (RF)
 
@@ -1190,4 +1209,5 @@ about **how we write and review the code**.
 | ST-8 | 2 (declarative model) | parse-time ordering + forged-proof refusal tests at every replay site |
 | ST-9 | 2 (declarative model) | every-relation-owned-by-owner, owner-mismatch fail-closed, unreadable-owner unverified, non-inheriting member admitted |
 | ST-10 | 8 | older-table evolve, newer-table refuse with no DDL, dropped-column and foreign-table shape reads, behind-table typed reads and writes |
+| ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |
