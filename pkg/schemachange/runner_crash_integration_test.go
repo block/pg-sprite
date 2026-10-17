@@ -234,7 +234,9 @@ func (c *hookedClock) Now() time.Time {
 // pinShadowKey inserts key into the shadow in a transaction left open at
 // the copier's first clock reading, so the chunk holding key waits on the
 // primary key and every other chunk lands around it. The returned func
-// rolls the pin back.
+// waits for the pin and rolls it back. The cleanup first disarms the
+// hook, so a test that fails before the copier reads its clock ends with
+// no pin to roll back instead of waiting on a reading that never comes.
 func (f runnerFixture) pinShadowKey(t *testing.T, key int64) (clock *hookedClock, release func()) {
 	t.Helper()
 	pinned := make(chan struct{})
@@ -247,17 +249,28 @@ func (f runnerFixture) pinShadowKey(t *testing.T, key int64) (clock *hookedClock
 		if pinErr != nil {
 			return
 		}
-		_, pinErr = tx.Exec(t.Context(), "INSERT INTO "+shadow+" (id, qty) VALUES ($1, 0)", key)
+		if _, pinErr = tx.Exec(t.Context(), "INSERT INTO "+shadow+" (id, qty) VALUES ($1, 0)", key); pinErr != nil {
+			// A failed insert leaves the transaction holding its pooled
+			// connection, and the package's pool.Close waits on it, so it
+			// is rolled back here, before release reports pinErr.
+			_ = tx.Rollback(context.WithoutCancel(t.Context()))
+			tx = nil
+		}
 	}}
 	var once sync.Once
 	release = func() {
 		once.Do(func() {
 			<-pinned
 			require.NoError(t, pinErr)
-			assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
+			if tx != nil {
+				assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
+			}
 		})
 	}
-	t.Cleanup(release)
+	t.Cleanup(func() {
+		clock.once.Do(func() { close(pinned) })
+		release()
+	})
 	return clock, release
 }
 
