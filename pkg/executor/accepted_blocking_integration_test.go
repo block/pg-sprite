@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -84,6 +85,82 @@ func TestExecuteAcceptedBlockingRefusesReindexOnPartitionedRelation(t *testing.T
 	exists, valid := indexState(t, pool, schema, "parent_i")
 	assert.True(t, exists)
 	assert.True(t, valid)
+}
+
+// DROP INDEX ... CASCADE drops the objects that depend on the index. Here the
+// foreign key on u references the unique index on t, so the cascade would
+// lock and change u, which the lock on t does not cover. The executor
+// refuses the shape before it opens a transaction, so the index and the
+// foreign key both stay.
+func TestExecuteAcceptedBlockingRefusesCascadeDrop(t *testing.T) {
+	pool, schema := newReferencedIndexFixture(t)
+	b := executor.BlockingBudget{LockTimeout: time.Second, StatementTimeout: 10 * time.Second}
+
+	_, err := executor.ExecuteAcceptedBlocking(t.Context(), pool,
+		fmt.Sprintf("DROP INDEX %s.i CASCADE", schema), pgx.Identifier{schema, "t"}, b)
+	require.ErrorIs(t, err, executor.ErrUnsupportedAcceptedBlocking)
+	assert.True(t, executor.OutcomeCode(err).Permanent())
+	assertReferencedIndexKept(t, pool, schema)
+}
+
+// A plain DROP INDEX is eligible for the accepted-blocking path, and it is
+// safe there because PostgreSQL defaults to RESTRICT: the foreign key on u
+// depends on the unique index on t, so the server refuses the drop with
+// dependent_objects_still_exist and changes nothing on either table.
+func TestExecuteAcceptedBlockingPlainDropOfReferencedIndexIsRefusedByServer(t *testing.T) {
+	pool, schema := newReferencedIndexFixture(t)
+	b := executor.BlockingBudget{LockTimeout: time.Second, StatementTimeout: 10 * time.Second}
+
+	_, err := executor.ExecuteAcceptedBlocking(t.Context(), pool,
+		fmt.Sprintf("DROP INDEX %s.i", schema), pgx.Identifier{schema, "t"}, b)
+	assertDependentObjectsRefusal(t, err)
+	assertReferencedIndexKept(t, pool, schema)
+}
+
+// An explicit RESTRICT is the same eligible drop spelled out: the server
+// refuses it while the foreign key on u depends on the index.
+func TestExecuteAcceptedBlockingRestrictDropOfReferencedIndexIsRefusedByServer(t *testing.T) {
+	pool, schema := newReferencedIndexFixture(t)
+	b := executor.BlockingBudget{LockTimeout: time.Second, StatementTimeout: 10 * time.Second}
+
+	_, err := executor.ExecuteAcceptedBlocking(t.Context(), pool,
+		fmt.Sprintf("DROP INDEX %s.i RESTRICT", schema), pgx.Identifier{schema, "t"}, b)
+	assertDependentObjectsRefusal(t, err)
+	assertReferencedIndexKept(t, pool, schema)
+}
+
+// newReferencedIndexFixture creates a unique index on t that the foreign key
+// on u depends on.
+func newReferencedIndexFixture(t *testing.T) (*pgxpool.Pool, string) {
+	t.Helper()
+	pool, schema := newPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (id int NOT NULL);
+		CREATE UNIQUE INDEX i ON %[1]s.t (id);
+		CREATE TABLE %[1]s.u (
+			t_id int REFERENCES %[1]s.t (id)
+		)`, schema))
+	require.NoError(t, err)
+	return pool, schema
+}
+
+func assertDependentObjectsRefusal(t *testing.T, err error) {
+	t.Helper()
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "2BP01", pgErr.Code, "dependent_objects_still_exist: the drop was not CASCADE")
+}
+
+func assertReferencedIndexKept(t *testing.T, pool *pgxpool.Pool, schema string) {
+	t.Helper()
+	exists, valid := indexState(t, pool, schema, "i")
+	assert.True(t, exists)
+	assert.True(t, valid)
+	var foreignKeys int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_constraint WHERE contype = 'f' AND conrelid = to_regclass($1)`,
+		schema+".u").Scan(&foreignKeys))
+	assert.Equal(t, 1, foreignKeys, "the foreign key on u must still exist")
 }
 
 func TestExecuteAcceptedBlockingAppliesBothBoundsOnExecutingSession(t *testing.T) {

@@ -177,11 +177,13 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		Table:               "public.t",
 		Detail:              "every field populated for the renderer parity lock",
 		SaferIdiom:          "DROP INDEX CONCURRENTLY",
+		Guidance:            suggest.GuidanceUniqueIndexThenConstraint,
 		ExecutedSQL:         []string{`ALTER TABLE "t" ADD CONSTRAINT "c" CHECK (x > 0) NOT VALID`},
 		Forced:              true,
 		BlockingPassthrough: true,
 		LockTimeout:         "3s",
 		StatementTimeout:    "10m",
+		StatisticsRefresh:   &verdict.StatisticsRefresh{Columns: []string{"c"}, Pending: `ANALYZE "t"`},
 	}
 	rv := reflect.ValueOf(v)
 	for i := range rv.NumField() {
