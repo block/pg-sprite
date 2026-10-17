@@ -180,6 +180,11 @@ type Op struct {
 	// NewTypeArray is true when the target type is an array of NewType
 	// (varchar(50)[], text ARRAY).
 	NewTypeArray bool
+	// NewTypeCollated is true when the target carries a COLLATE clause,
+	// which changes the column's collation and rebuilds every index on it:
+	// a consumer comparing NewType to a live type must not read the change
+	// as a relabel.
+	NewTypeCollated bool
 	// HasUsing is true for ALTER COLUMN TYPE ... USING <expr>, which always
 	// means a conversion, never a binary-coercible relabel.
 	HasUsing bool
@@ -394,12 +399,13 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 		name, mods := typeRef(def.GetTypeName())
 		schema, array := typeQualifiers(def.GetTypeName())
 		return Op{
-			Kind:          OpAlterColumnType,
-			Column:        cmd.GetName(),
-			NewType:       name,
-			NewTypeMods:   mods,
-			NewTypeSchema: schema,
-			NewTypeArray:  array,
+			Kind:            OpAlterColumnType,
+			Column:          cmd.GetName(),
+			NewType:         name,
+			NewTypeMods:     mods,
+			NewTypeSchema:   schema,
+			NewTypeArray:    array,
+			NewTypeCollated: def.GetCollClause() != nil,
 			// For ALTER COLUMN TYPE the grammar carries the USING
 			// expression in the column definition's raw default slot.
 			HasUsing: def.GetRawDefault() != nil,

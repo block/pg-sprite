@@ -546,13 +546,14 @@ type typeShape struct {
 
 // targetTypeShape reads the statement's target type into the shape
 // parseTypeText gives the live one. A type qualified with a schema other
-// than pg_catalog is a user type that only shares a built-in's name, so it
-// gets no shape and matches no rule. The name is taken as the parser left
+// than pg_catalog is a user type that only shares a built-in's name, and a
+// COLLATE clause changes the collation every index on the column is built
+// with, so neither gets a shape and neither matches a rule. The name is taken as the parser left
 // it: the grammar already spells every built-in the rules know by its
 // catalog name (varchar, numeric, timestamptz), so a target named
 // "decimal" or "character varying" was quoted and names a user type.
 func targetTypeShape(op statement.Op) typeShape {
-	if op.NewTypeSchema != "" {
+	if op.NewTypeSchema != "" || op.NewTypeCollated {
 		return typeShape{}
 	}
 	return typeShape{name: strings.TrimSpace(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}

@@ -141,6 +141,21 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "doc", NewType: "jsonb", HasUsing: true},
 		},
 		{
+			name: "alter type pg_catalog qualified stays bare",
+			sql:  "ALTER TABLE t ALTER COLUMN name TYPE pg_catalog.varchar(100)",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "varchar", NewTypeMods: []int32{100}},
+		},
+		{
+			name: "alter type SQL-standard spelling stays bare",
+			sql:  "ALTER TABLE t ALTER COLUMN name TYPE character varying(100)",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "varchar", NewTypeMods: []int32{100}},
+		},
+		{
+			name: "alter type with a collation",
+			sql:  `ALTER TABLE t ALTER COLUMN name TYPE text COLLATE "C"`,
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "text", NewTypeCollated: true},
+		},
+		{
 			name: "set default",
 			sql:  "ALTER TABLE t ALTER COLUMN age SET DEFAULT 1",
 			want: statement.Op{Kind: statement.OpSetDefault, Column: "age"},
