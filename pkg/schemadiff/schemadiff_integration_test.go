@@ -111,6 +111,33 @@ func TestDiffSerialTableConverges(t *testing.T) {
 	assert.Empty(t, changes)
 }
 
+// A serial's sequence declaration is not compared: the serial shorthand
+// cannot state one, so a file that writes it plans no change against a live
+// serial whose sequence was tuned, and the tuning is left as it is.
+func TestDiffLeavesATunedSerialAsItIs(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %[1]s.t (id bigserial PRIMARY KEY, v text);
+ ALTER SEQUENCE %[1]s.t_id_seq MAXVALUE 5000`, schema))
+	require.NoError(t, err)
+
+	ds, err := statement.ParseDesired("CREATE TABLE t (id bigserial PRIMARY KEY, v text)")
+	require.NoError(t, err)
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "t")
+	require.NoError(t, err)
+	require.NotNil(t, live.Columns[0].Sequence, "the tuned sequence must be modeled")
+	assert.Equal(t, int64(5000), live.Columns[0].Sequence.Max)
+	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
+	require.NoError(t, err)
+
+	changes, err := schemadiff.Diff(schema, live, desired)
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+}
+
 // Cosmetically different spellings of the same schema must introspect to the
 // same canonical model: the server's decompilers are the canonicalizer.
 func TestIntrospectCanonicalizesTypeAliases(t *testing.T) {

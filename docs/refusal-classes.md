@@ -159,9 +159,16 @@ react. Only the causes that mean the caller handed the engine an incoherent inpu
 engine's own write did not take, are `invariant-violation`; one, `shadow-statement-conversion`,
 is a `capability-boundary`, since it describes a statement the engine declines to carry rather
 than a fault; the rest describe a lock, a proof, or a relation whose state moved under the
-operation, and the importer retries, re-plans, or cleans up. No verdict reason carries these
-causes yet; the classification is fixed here first
-so the cutover route inherits it.
+operation, and the importer retries, re-plans, or cleans up. `RefusalCause.Class()` answers
+the `class` column below as a `refusal.Class` (`pkg/refusal`, the core's declaration of the
+classes the cause tables in this document use), so an importer triages on the class without
+reading the cause's text, and a periphery adapter converts it to `verdict.Class` with a plain
+conversion, since the verdict declares its tokens from the same constants. The class is
+triage, not the action: an `environmental` cause such as `cutover-outcome-ambiguous` or
+`shadow-foreign-relation` is resolved by an operator reading the catalog, as its *Why* says,
+and no class licenses an automatic retry on its own. No verdict reason
+carries these causes yet; the classification is fixed here first so the cutover route
+inherits it.
 
 | `RefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
@@ -181,8 +188,8 @@ so the cutover route inherits it.
 | `cutover-undrained` | The cutover was handed a verified-shadow proof a live pass minted — the shadow equal to the source as of a position the stream had reached, with every change since still in the stream — and no drain to apply those changes under the swap lock ([CO-1](invariants.md#co-1--the-checksum-gate-is-non-skippable)) | `invariant-violation` | Pass a `DrainFunc` that applies the stream through the final position under the swap lock, or stop the stream and re-verify with a quiesced `Check`; the proof is sound, the hand-off to the swap is not. |
 | `cutover-drain-deferred` | The shadow refused a batch the swap's drain had to apply under the swap lock: a unique-key move among the changes committed since the live verification pass that cannot be ordered into the shadow, with no copy left to change the outcome ([CO-6](invariants.md#co-6--unique-secondary-key-moves-must-converge-postgresql-specific-gap)) | `environmental` | The swap transaction is rolled back and the source stays live; the row is left in `cutover` with the position the drain reopened from, so a resume drains the same changes again once the rows the move touched have settled. A move the shadow cannot ever order is re-planned. |
 | `cutover-relation-replaced` | The source or the shadow under its name is no longer the relation the build proved: its OID moved; or, after the swap, the derived `_old` name is borne by a relation other than the source the swap retained, or by nothing while the retained source still exists under another name ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `environmental` | The proof describes a table that no longer exists; before the swap, drop the shadow and start the change over from preflight; after it, an operator reads the catalog to learn what took the `_old` name, or where the retained source went, before anything is dropped. |
-| `cutover-schema-drift` | The source's or the shadow's introspected model no longer matches the fingerprint the build recorded: a column, constraint, or index changed since ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | Someone changed a table under the run; the shadow no longer embodies the gated statement against this source, so it is dropped and the change re-planned. |
-| `cutover-fidelity-drift` | The source's or the shadow's owner, grants, policies, comment, storage parameters, replica identity, per-column or extended statistics targets, unvalidated checks, or identity sequence options no longer match the snapshot the build recorded, or the source's grants no longer match the shadow's ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | The metadata the swap would carry forward moved after it was copied; re-synchronising it under the lock is a planned capability, and until then the shadow is rebuilt. |
+| `cutover-schema-drift` | The source's or the shadow's introspected model no longer matches the fingerprint the build recorded: a column, constraint, index, storage parameter, or column-owned sequence declaration changed since ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | Someone changed a table under the run; the shadow no longer embodies the gated statement against this source, so it is dropped and the change re-planned. |
+| `cutover-fidelity-drift` | The source's or the shadow's owner, grants, policies, comment, replica identity, per-column or extended statistics targets, unvalidated checks, or identity columns and their sequences no longer match the snapshot the build recorded, or the source's grants no longer match the shadow's ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | The metadata the swap would carry forward moved after it was copied; re-synchronising it under the lock is a planned capability, and until then the shadow is rebuilt. |
 | `cutover-index-invalid` | A shadow index is marked invalid in `pg_index`, so the swap would put an index the planner never uses under the user's name ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | A concurrent build on the shadow failed or was cancelled; reindex or rebuild the index and gate again. |
 | `cutover-name-taken` | A name cutover must assign is already worn: a derived `_old` name by a relation or statistics object in the schema, or a source dependent's name by a shadow constraint that is not the one being renamed to it ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | A leftover from an earlier run, or a constraint the gated statement named after a source index, occupies the name; an operator removes or renames it and gates again. |
 | `cutover-swap-mismatch` | The catalog re-read inside the swap transaction, after the renames and handoffs, does not show the shadow under the source's name, the source under its `_old` name, every paired dependent under its new name, or the live table's sequences and identity columns as the source had them; or, on a resume, the live or the old table is owned by a role other than the one the build recorded, or an identity column the swap recreated is missing from the live table, generated differently, or drawing from another sequence ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | The swap's own statements produced a catalog other than the one they were written to produce, so the transaction is rolled back and nothing is swapped; on a resume, the live table is not the one the swap left, and an operator reads the catalog before anything is dropped. |
@@ -253,6 +260,9 @@ copier directly reads the copier's. A lock or relation fault during the copy pha
 from `Runner.Run` under the shadow-operation name — `shadow-lock-lost`,
 `cutover-relation-replaced` — by design: the fault is the same one a shadow operation would
 refuse on, and the reaction is the same, whichever phase noticed it first.
+`copier.RefusalCause.Class()` answers the `class` column below as a `refusal.Class`, and every
+re-mint keeps the copier cause's class, so an importer reading either vocabulary routes the
+same way.
 
 | `copier.RefusalCause` | What the refusal says | `class` | Why | Re-minted by `Runner` as |
 | --- | --- | --- | --- | --- |
@@ -399,7 +409,15 @@ The map in this document is pinned: the `docs_test.go` guards
 in `pkg/verdict`, `pkg/executor`, `pkg/preflight`, `pkg/schemachange`, and `pkg/copier` fail
 when a `Reason`, `CreateShapeCause`, `PartitionRefusalCause`, `CopySwapRefusalCause`, or either
 package's `RefusalCause` exists in the code without a row here, so a new discriminator value
-cannot land unclassified.
+cannot land unclassified. The shadow and copier guards go one step further and compare each
+cause's `Class()` to its row's `class` cell, so the two cannot disagree, and each asserts that
+every class a cause answers is a member of `refusal.Classes()`; `pkg/refusal`'s guards hold
+its classes to the vocabulary table above and every `class` cell of every cause table in this
+document to its closed set, so a cause table cannot classify a cause under a class the engine
+cannot name; and `pkg/verdict`'s holds every one of them to be a `verdict.Class`, the
+verdict adding only `no-online-safety-problem`. `preflight.PartitionRefusalCause`,
+`preflight.CopySwapRefusalCause`, and `executor.CreateShapeCause` have a class cell but no
+`Class()` yet; their rows are already held to the closed set.
 
 ## Shared vocabulary with the capabilities matrix
 

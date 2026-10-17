@@ -14,6 +14,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 const (
@@ -137,20 +139,25 @@ func Reasons() []Reason {
 	}
 }
 
-// Class identifies the routing category of a refusal.
+// Class identifies the routing category of a refusal. The classes an
+// engine cause can take are declared once, in the core's pkg/refusal, and
+// carried here under the same token, so an adapter converts a cause's
+// refusal.Class to a verdict Class with a plain conversion and nothing can
+// spell the two apart; no-online-safety-problem is the verdict's own,
+// since it describes a statement that never reached the engine.
 type Class string
 
 const (
 	// ClassCapabilityBoundary means the engine has no implemented safe route.
-	ClassCapabilityBoundary Class = "capability-boundary"
+	ClassCapabilityBoundary = Class(refusal.ClassCapabilityBoundary)
 	// ClassNoOnlineSafetyProblem means another owner should run the work.
 	ClassNoOnlineSafetyProblem Class = "no-online-safety-problem"
 	// ClassByDesign means pg-sprite permanently refuses the form.
-	ClassByDesign Class = "by-design"
+	ClassByDesign = Class(refusal.ClassByDesign)
 	// ClassEnvironmental means the current run environment blocked the work.
-	ClassEnvironmental Class = "environmental"
+	ClassEnvironmental = Class(refusal.ClassEnvironmental)
 	// ClassInvariantViolation reports incoherent engine state.
-	ClassInvariantViolation Class = "invariant-violation"
+	ClassInvariantViolation = Class(refusal.ClassInvariantViolation)
 )
 
 // Classes returns the closed set of refusal classes.

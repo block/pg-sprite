@@ -226,8 +226,21 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	// under the session default), so the statement's unqualified secondary
 	// names — a column's type, an expression's function — resolve in the
 	// target schema whether the run creates the table or alters it.
+	// A native drop is checked against the replica identity again inside
+	// its own transaction, under the lock it runs with: the plan's facts
+	// were read before the transaction began.
+	drops, err := replicaIdentityDrops(st)
+	if err != nil {
+		return err
+	}
+	var before func(context.Context, pgx.Tx) error
+	if len(drops) > 0 {
+		before = func(ctx context.Context, tx pgx.Tx) error {
+			return refuseReplicaIdentityLoss(ctx, tx, st, drops)
+		}
+	}
 	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
-		return executeBoundedAttempt(ctx, pool, st, b, pt.Schema())
+		return executeBoundedAttemptAs(ctx, pool, st, b, pt.Schema(), "", before)
 	}, sleepContext, func(attempt int) {
 		if tracker != nil {
 			tracker.SetAttempt(attempt)
@@ -235,18 +248,19 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	})
 }
 
-// executeBoundedAttempt is the shared transactional attempt behind the
+// executeBoundedAttemptAs is the shared transactional attempt behind the
 // optimistic and create paths. When searchPathSchema is set, the
 // transaction's search_path is pinned to that schema then public — the
 // same policy the introspection read path sets — so a statement's
 // unqualified references (a column's type, an expression's function)
 // resolve exactly as the diff resolved them, never via the session's
 // ambient search_path.
-func executeBoundedAttempt(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPathSchema string) error {
-	return executeBoundedAttemptAs(ctx, pool, st, b, searchPathSchema, "")
-}
-
-func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPathSchema, role string) error {
+//
+// It runs as role when one is set, and runs before, when set, inside the
+// attempt's transaction under its budgets and ahead of the statement. An
+// error from before ends the attempt with nothing submitted; a lock it waits on past lock_timeout is a lock budget
+// failure like the statement's own.
+func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPathSchema, role string, before func(context.Context, pgx.Tx) error) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin optimistic attempt: %w", err)
@@ -278,6 +292,14 @@ func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st stateme
 		}
 	}
 
+	if before != nil {
+		if err := before(ctx, tx); err != nil {
+			if budgetErr := asBudgetError(err, b); budgetErr != nil {
+				return budgetErr
+			}
+			return err
+		}
+	}
 	if _, err := tx.Exec(ctx, st.SQL()); err != nil {
 		if budgetErr := asBudgetError(err, b); budgetErr != nil {
 			return budgetErr

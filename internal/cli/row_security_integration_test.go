@@ -178,7 +178,7 @@ func verifyPulledRowSecurity(t *testing.T, securitySQL string) {
 	require.NoError(t, err)
 	desired, err := statement.ParseDesiredWithRowSecurity(string(raw))
 	require.NoError(t, err)
-	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, desired)
+	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
 	require.NoError(t, err)
 	assert.Equal(t, live, model)
 	out.Reset()

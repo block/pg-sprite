@@ -73,6 +73,51 @@ func TestDiffRefusesPersistenceMismatch(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupportedChange)
 }
 
+// Storage parameters are not converged: matching parameters diff to
+// nothing, and any difference is a typed refusal, never a silent zero diff.
+func TestDiffStorageParameters(t *testing.T) {
+	tuned := base()
+	tuned.Options = []string{"fillfactor=70"}
+	changes, err := Diff("public", tuned, tuned)
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+
+	_, err = Diff("public", base(), tuned)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	_, err = Diff("public", tuned, base())
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+}
+
+// An identity's sequence declaration is not converged, so a difference is
+// a typed refusal; an added identity column carries its declaration in
+// the emitted ADD COLUMN, so the column lands declared as the file says.
+func TestDiffIdentitySequenceOptions(t *testing.T) {
+	seq := &SequenceOptions{Type: "bigint", Start: 1000, Increment: 1, Min: 1, Max: 5000, Cache: 1}
+	identity := func(s *SequenceOptions) Model {
+		m := base()
+		m.Columns = append(m.Columns, Column{Name: "ref", Type: "bigint", NotNull: true, Identity: IdentityAlways, Sequence: s})
+		return m
+	}
+
+	_, err := Diff("public", identity(nil), identity(seq))
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	_, err = Diff("public", identity(seq), identity(nil))
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	changes, err := Diff("public", identity(seq), identity(&SequenceOptions{Type: "bigint", Start: 1000, Increment: 1, Min: 1, Max: 5000, Cache: 1}))
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+
+	changes, err = Diff("public", base(), identity(seq))
+	require.NoError(t, err)
+	require.Len(t, changes, 1)
+	assert.Equal(t, `ALTER TABLE "public"."events" ADD COLUMN "ref" bigint GENERATED ALWAYS AS IDENTITY (START WITH 1000 INCREMENT BY 1 MINVALUE 1 MAXVALUE 5000 CACHE 1 NO CYCLE) NOT NULL`, changes[0].SQL)
+
+	mistyped := identity(&SequenceOptions{Type: "integer", Start: 1, Increment: 1, Min: 1, Max: 5000, Cache: 1})
+	_, err = Diff("public", base(), mistyped)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	require.ErrorIs(t, err, ErrUnrenderableSequenceOptions)
+}
+
 // A collation delta on an existing column rewrites the column, and an
 // added column's COLLATE clause is not carried by the emitted ADD COLUMN —
 // both are typed refusals, never a silent zero diff or a silently dropped

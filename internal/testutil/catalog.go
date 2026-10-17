@@ -36,6 +36,9 @@ type TableCatalog struct {
 	// Options are the storage parameters (pg_class.reloptions), e.g.
 	// "fillfactor=70", in the order the server stores them.
 	Options []string
+	// ToastOptions are the storage parameters of the table's TOAST table,
+	// set with the "toast." prefix, in the order the server stores them.
+	ToastOptions []string
 	// PartitionKey is pg_get_partkeydef, empty for a plain table.
 	PartitionKey string
 	// RowSecurity and ForceRowSecurity are the ENABLE / FORCE ROW LEVEL
@@ -129,13 +132,15 @@ func ReadTableCatalog(ctx context.Context, pool *pgxpool.Pool, schema, table str
 		if err := tx.QueryRow(ctx, `SELECT c.relpersistence::text, coalesce(am.amname::text, ''),
        coalesce(ts.spcname::text, ''), c.relreplident::text,
        coalesce(c.reloptions, '{}'),
+       coalesce(toast.reloptions, '{}'),
        coalesce(pg_get_partkeydef(c.oid), ''),
        c.relrowsecurity, c.relforcerowsecurity
 FROM pg_class c
 LEFT JOIN pg_am am ON am.oid = c.relam
 LEFT JOIN pg_tablespace ts ON ts.oid = c.reltablespace
+LEFT JOIN pg_class toast ON toast.oid = c.reltoastrelid
 WHERE c.oid = $1::regclass`, rel).Scan(&tc.Persistence, &tc.AccessMethod, &tc.Tablespace, &tc.ReplicaIdentity,
-			&tc.Options, &tc.PartitionKey, &tc.RowSecurity, &tc.ForceRowSecurity); err != nil {
+			&tc.Options, &tc.ToastOptions, &tc.PartitionKey, &tc.RowSecurity, &tc.ForceRowSecurity); err != nil {
 			return fmt.Errorf("read table %s.%s: %w", schema, table, err)
 		}
 		columns, err := readCatalogColumns(ctx, tx, rel)
