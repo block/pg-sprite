@@ -498,7 +498,7 @@ func refreshRetypedStatistics(ctx context.Context, pool *pgxpool.Pool, pt prefli
 	if err != nil {
 		logger.Warn("column statistics not refreshed: the committed statement did not parse back",
 			"table", qualified(st), "error", err)
-		return "; the statistics of any column whose type changed were not refreshed: run ANALYZE on " + qualified(st)
+		return "; the statistics of any column whose type changed were not refreshed: run " + executor.AnalyzeSQL(pt, nil)
 	}
 	if len(columns) == 0 {
 		return ""
@@ -506,8 +506,8 @@ func refreshRetypedStatistics(ctx context.Context, pool *pgxpool.Pool, pt prefli
 	if err := executor.RefreshColumnStatistics(ctx, pool, pt, columns, b); err != nil {
 		logger.Warn("column statistics not refreshed after a type change",
 			"table", qualified(st), "columns", columns, "error", err)
-		return fmt.Sprintf("; the statistics of %s were not refreshed after the type change (%v): run ANALYZE %s (%s)",
-			strings.Join(columns, ", "), err, qualified(st), strings.Join(columns, ", "))
+		return fmt.Sprintf("; the statistics of %s were not refreshed after the type change (%v): run %s",
+			strings.Join(columns, ", "), err, executor.AnalyzeSQL(pt, columns))
 	}
 	logger.Debug("column statistics refreshed after a type change",
 		"table", qualified(st), "columns", columns)

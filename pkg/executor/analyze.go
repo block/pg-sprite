@@ -31,15 +31,7 @@ func RefreshColumnStatistics(ctx context.Context, pool *pgxpool.Pool, pt preflig
 	if err := b.validate(); err != nil {
 		return fmt.Errorf("refresh column statistics: %w", err)
 	}
-	cols := make([]string, len(columns))
-	for i, c := range columns {
-		cols[i] = pgx.Identifier{c}.Sanitize()
-	}
-	table := pgx.Identifier{pt.Table()}.Sanitize()
-	if pt.Schema() != "" {
-		table = pgx.Identifier{pt.Schema(), pt.Table()}.Sanitize()
-	}
-	analyze := "ANALYZE " + table + " (" + strings.Join(cols, ", ") + ")"
+	analyze := AnalyzeSQL(pt, columns)
 
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -68,4 +60,23 @@ func RefreshColumnStatistics(ctx context.Context, pool *pgxpool.Pool, pt preflig
 		return fmt.Errorf("commit statistics refresh: %w", err)
 	}
 	return nil
+}
+
+// AnalyzeSQL renders the ANALYZE that refreshes the named columns of the
+// preflighted table, every identifier quoted, or the whole table when no
+// column is named. It is the statement RefreshColumnStatistics runs and the
+// one an operator is told to run when the refresh could not.
+func AnalyzeSQL(pt preflight.PreflightedTable, columns []string) string {
+	table := pgx.Identifier{pt.Table()}.Sanitize()
+	if pt.Schema() != "" {
+		table = pgx.Identifier{pt.Schema(), pt.Table()}.Sanitize()
+	}
+	if len(columns) == 0 {
+		return "ANALYZE " + table
+	}
+	cols := make([]string, len(columns))
+	for i, c := range columns {
+		cols[i] = pgx.Identifier{c}.Sanitize()
+	}
+	return "ANALYZE " + table + " (" + strings.Join(cols, ", ") + ")"
 }
