@@ -132,11 +132,13 @@ func inspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 func resolveShadow(ctx context.Context, tx pgx.Tx, schema, shadow, owner string) (uint32, error) {
 	var oid uint32
 	var relkind, relOwner string
+	// INV: CO-9 — every catalog name is qualified, so a planted overload in a
+	// searched schema cannot answer this read.
 	err := tx.QueryRow(ctx, `
-		SELECT c.oid, c.relkind::text, pg_get_userbyid(c.relowner)
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2`, schema, shadow).Scan(&oid, &relkind, &relOwner)
+		SELECT c.oid, c.relkind::pg_catalog.text, pg_catalog.pg_get_userbyid(c.relowner)
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`, schema, shadow).Scan(&oid, &relkind, &relOwner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, fmt.Errorf("%w: %s.%s", ErrShadowNotFound, schema, shadow)
 	}
