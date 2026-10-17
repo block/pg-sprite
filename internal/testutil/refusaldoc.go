@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -18,7 +17,7 @@ import (
 const RefusalClassesDoc = "docs/refusal-classes.md"
 
 // RefusalCauseTable returns the text of the section of RefusalClassesDoc
-// under heading, up to the next heading of the same level: one package's
+// under heading, up to the next heading of any level: one package's
 // cause table, read from the repository checkout the test runs in. Two
 // tables in the document list some of the same cause names under their own
 // meanings, so a guard looks rows up in its own section alone.
@@ -30,7 +29,7 @@ func RefusalCauseTable(t *testing.T, heading string) string {
 	start := strings.Index(doc, heading)
 	require.NotEqual(t, -1, start, "%s has the section %q", RefusalClassesDoc, heading)
 	section := doc[start+len(heading):]
-	if end := strings.Index(section, "\n### "); end != -1 {
+	if end := strings.Index(section, "\n#"); end != -1 {
 		section = section[:end]
 	}
 	return section
@@ -60,11 +59,20 @@ func RefusalClassCell(t *testing.T, table, cause string) string {
 	return ""
 }
 
-// repositoryRoot is the checkout this file belongs to, so a reader works
-// from any package's test directory.
+// repositoryRoot is the module root above the test's working directory, so a
+// reader works from any package's test directory. It walks up to go.mod rather
+// than reading this file's source path, which -trimpath rewrites to the module
+// path.
 func repositoryRoot(t *testing.T) string {
 	t.Helper()
-	_, file, _, ok := runtime.Caller(0)
-	require.True(t, ok, "the caller's source path is known")
-	return filepath.Dir(filepath.Dir(filepath.Dir(file)))
+	dir, err := os.Getwd()
+	require.NoError(t, err)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, "go.mod")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		require.NotEqual(t, dir, parent, "no go.mod above the test's working directory")
+		dir = parent
+	}
 }
