@@ -136,7 +136,8 @@ type Report struct {
 }
 
 // Check lints a DDL script: every statement is parsed with the PostgreSQL
-// grammar and classified with zero live facts. A parse failure is an
+// grammar and classified with zero live facts beyond the constraint names
+// the script's earlier statements claim (planner.ScriptClassifier). A parse failure is an
 // error; an unsupported operation is not — it is an error-severity
 // finding, so one bad statement never hides the rest of the report.
 func Check(sql string) (Report, error) {
@@ -150,8 +151,9 @@ func Check(sql string) (Report, error) {
 		Findings:         []Finding{},
 	}
 	inBlock := false
+	var classifier planner.ScriptClassifier
 	for i, stmt := range stmts {
-		findings, err := checkStatement(i+1, stmt, inBlock)
+		findings, err := checkStatement(&classifier, i+1, stmt, inBlock)
 		if err != nil {
 			return Report{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
@@ -185,8 +187,8 @@ func Check(sql string) (Report, error) {
 // it adds is about the script rather than the statement: a CONCURRENTLY
 // operation inside an explicit transaction block, which PostgreSQL refuses
 // whatever the classifier makes of the operation.
-func checkStatement(index int, stmt statement.SourceStatement, inBlock bool) ([]Finding, error) {
-	classified, err := planner.Classify(stmt.SQL, planner.Facts{})
+func checkStatement(classifier *planner.ScriptClassifier, index int, stmt statement.SourceStatement, inBlock bool) ([]Finding, error) {
+	classified, err := classifier.Classify(stmt.SQL)
 	if err != nil {
 		return nil, err
 	}

@@ -168,6 +168,14 @@ and the site distinguishes the single-relation forms — one `DROP INDEX`, `REIN
 `REINDEX TABLE` — from the forms that name several relations or none: `DROP INDEX a, b`,
 `REINDEX SCHEMA`, `REINDEX DATABASE`, and `REINDEX SYSTEM`. Those multi-relation forms are
 ineligible in v1 because one flag value cannot acknowledge several tables' locks.
+`DROP INDEX ... CASCADE` is on the ineligible side too, although it names one index: it also
+drops the objects that depend on the index — a foreign key on another table that references a
+unique index, for one — which locks and changes tables the acknowledgement never named. The
+parse boundary classifies it as a statement whose scope is wider than one relation, so the
+registry refuses it, and the executor's shape check refuses it again for a library caller
+that reaches `ExecuteAcceptedBlocking` directly. A plain drop or an explicit `RESTRICT` (the
+default behavior) stays eligible, and is the safe retry: if anything still depends on the
+index, PostgreSQL refuses the drop with SQLSTATE `2BP01` and changes nothing.
 
 Execution is exposed only by the imperative `migrate` front door. Declarative `diff` still
 classifies and reports eligibility, but it cannot accept the flag or execute this path. A
@@ -195,7 +203,7 @@ The v1 set is:
 
 | Class | Typed refusal shape | v1 | Rationale |
 | --- | --- | --- | --- |
-| `by-design` | `index-statement` at the plain single-relation `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` site, with the concurrent safer idiom | eligible | This is the core maintenance-window case: the submitted form is understood, the safer idiom is known, one table's lock is being accepted, and bounding `ACCESS EXCLUSIVE` acquisition prevents lock-queue pile-up. The multi-relation sites (`DROP INDEX a, b`, `REINDEX SCHEMA`, `DATABASE`, `SYSTEM`) stay ineligible. `REINDEX` on a partitioned table or index is eligible by shape but cannot run inside the engine-owned transaction; the executor reports it as `unsupported-accepted-blocking` (see [Engine-owned session and budgets](#engine-owned-session-and-budgets)). |
+| `by-design` | `index-statement` at the plain single-relation `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` site, with the concurrent safer idiom | eligible | This is the core maintenance-window case: the submitted form is understood, the safer idiom is known, one table's lock is being accepted, and bounding `ACCESS EXCLUSIVE` acquisition prevents lock-queue pile-up. The multi-relation sites (`DROP INDEX a, b`, `REINDEX SCHEMA`, `DATABASE`, `SYSTEM`) and `DROP INDEX ... CASCADE`, whose dependent drops reach tables beyond the acknowledged one, stay ineligible. `REINDEX` on a partitioned table or index is eligible by shape but cannot run inside the engine-owned transaction; the executor reports it as `unsupported-accepted-blocking` (see [Engine-owned session and budgets](#engine-owned-session-and-budgets)). |
 | `capability-boundary` | `unsupported-partitioned-parent` with cause `parent-blocking-index-build` | eligible | The missing partition-aware flow does not make the plain PostgreSQL statement unknown. Its principal pre-execution hazard is acquiring the parent lock, which `lock_timeout` bounds. |
 | `capability-boundary` | `not-native-safe-rewrite-required` | ineligible | A rewrite holds its strong lock for the full rewrite. Bounding acquisition alone does not bound the outage, and v1 must not imply otherwise. |
 | `capability-boundary` | `backend-unavailable` and all other missing routes or backends | ineligible | A missing execution backend is not permission to substitute an unrelated blocking implementation. |

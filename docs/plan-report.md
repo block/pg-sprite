@@ -48,7 +48,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 |---|---|---|---|
 | `format_version` | int | always | Contract version; reject unknown versions. |
 | `source` | string | always | Front door that derived the plan (see Sources). |
-| `schema` | string | when resolved | Target schema. The **resolved** name the engine planned against — an unqualified alter reports the schema the engine introspected (`public`), never an empty echo of the submitted text. Absent only when the statement has no single table target. |
+| `schema` | string | when resolved | Target schema. The **resolved** name the engine planned against — an unqualified alter reports the schema the session `search_path` resolves its table to, the one execution acts on (`public` when the `search_path` shows no such table), never an empty echo of the submitted text. Absent only when the statement has no single table target. |
 | `table` | string | when targeted | Target table; absent for statements with no single table target (index maintenance). |
 | `server_version` | string | when connected | The PostgreSQL `server_version` the plan was derived against. Classification is version-sensitive; a stored or forwarded report names the server whose rules produced it. |
 | `table_exists` | bool | when introspected | Whether the live table was found. Set by both sources that introspect the target (diff, and the alter dry run); absent means the plan has no single table target to introspect. For diff, `false` means the plan is the full desired schema; for an alter dry run, `false` means the plan was classified from zero facts, executing it would fail, and the dry run exits with the refusal code. |
@@ -221,7 +221,7 @@ statement of each class and its consumer action; this table is a copy of its row
 |---|---|
 | `capability-boundary` | The engine cannot do this yet, or has no implemented safe route. Wait for the capability or escalate. |
 | `no-online-safety-problem` | There is nothing for an online schema-change engine to make safe; another tool class owns the work, or the operator runs it directly. Hand the statement to the named `owner`. |
-| `by-design` | pg-sprite permanently refuses this form — PostgreSQL offers no online mechanism in any supported version, or a safer idiom exists and the verdict names it. Use the safer idiom; for a single-relation plain `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE`, `migrate --accept-blocking SCHEMA.TABLE` runs the blocking form under bounded budgets and exits 3; otherwise run it outside pg-sprite in a maintenance window. |
+| `by-design` | pg-sprite permanently refuses this form — PostgreSQL offers no online mechanism in any supported version, or a safer idiom exists and the verdict names it. Use the safer idiom; for a single-relation plain `DROP INDEX` (not `CASCADE`), `REINDEX INDEX`, or `REINDEX TABLE`, `migrate --accept-blocking SCHEMA.TABLE` runs the blocking form under bounded budgets and exits 3; otherwise run it outside pg-sprite in a maintenance window. |
 | `environmental` | The change is supportable, but not here, now, or as this role: a size policy, exhausted budget, privilege, server version, stale plan, or catalog collision stopped it. Retry, provision, upgrade, re-plan, or escalate. |
 | `invariant-violation` | pg-sprite refused because its own input or state is incoherent — a report this build cannot have produced. Report it with the verdict; do not retry, wait, or route elsewhere. |
 

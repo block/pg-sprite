@@ -87,7 +87,10 @@ refusal — never a silently wrong or incomplete result:
   tooling, then state it in the file. A serial cannot state one, so export
   refuses a serial whose sequence was declared otherwise.
 - **Partitioned tables** support in-place statement changes, but cannot be
-  expressed in or exported to desired files.
+  expressed in or exported to desired files, and `migrate` refuses
+  `ATTACH PARTITION` and `DETACH PARTITION`.
+- **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
+  `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.
@@ -117,10 +120,11 @@ refusal — never a silently wrong or incomplete result:
   [runbook](docs/invalid-index-recovery.md) applies.
 - **The accepted-blocking passthrough covers index maintenance only** —
   `migrate --accept-blocking SCHEMA.TABLE` runs an otherwise-refused plain
-  `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` deliberately under the
-  engine's bounded lock and statement budgets, with the verdict marked
-  `executed-without-online-safety` (exit 3). Every other refusal — including
-  a blocking index build on a partitioned parent — still exits 2. Design:
+  `DROP INDEX` (not `CASCADE`), `REINDEX INDEX`, or `REINDEX TABLE`
+  deliberately under the engine's bounded lock and statement budgets, with
+  the verdict marked `executed-without-online-safety` (exit 3). Every other
+  refusal — including a blocking index build on a partitioned parent — still
+  exits 2. Design:
   [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,

@@ -115,8 +115,8 @@ func executeAcceptedBlocking(ctx context.Context, pool *pgxpool.Pool, sql string
 	if err != nil {
 		return rep, fmt.Errorf("%w: %w", ErrUnsupportedAcceptedBlocking, err)
 	}
-	if !acceptedBlockingShape(st) {
-		return rep, ErrUnsupportedAcceptedBlocking
+	if reason := acceptedBlockingIneligibility(st); reason != "" {
+		return rep, fmt.Errorf("%w: %s", ErrUnsupportedAcceptedBlocking, reason)
 	}
 	rep = BlockingReport{SQL: sql, LockTimeout: b.LockTimeout, StatementTimeout: b.StatementTimeout}
 	start := clock.Now()
@@ -203,18 +203,39 @@ func refuseReplicaIdentityDrop(ctx context.Context, tx pgx.Tx, rel statement.Ind
 	return nil
 }
 
-func acceptedBlockingShape(st statement.Statement) bool {
+// acceptedBlockingIneligibility returns why a statement is outside the
+// accepted-blocking shape, or "" when it is eligible.
+func acceptedBlockingIneligibility(st statement.Statement) string {
 	if st.Concurrent() {
-		return false
+		return "the concurrent form cannot run inside the engine-owned transaction; run it directly against the database"
 	}
 	switch st.Kind() {
 	case statement.KindCreateIndex:
-		return true
+		return ""
 	case statement.KindDropIndex, statement.KindReindex:
-		return st.IndexTarget() == statement.IndexTargetSingleRelation
+		// INV: AB-3 — only a statement whose whole scope is the one
+		// acknowledged table runs here; a DROP INDEX ... CASCADE also drops
+		// dependent objects on other tables and parses as another target.
+		return indexScopeIneligibility(st)
 	default:
-		return false
+		return "it is not an index statement"
 	}
+}
+
+// indexScopeIneligibility names why a DROP INDEX or REINDEX statement's scope
+// is wider than the one acknowledged table, or returns "" when it is not.
+func indexScopeIneligibility(st statement.Statement) string {
+	if st.IndexTarget() == statement.IndexTargetSingleRelation {
+		return ""
+	}
+	if st.Cascades() {
+		return "a cascading drop also drops the objects that depend on the index, which the acknowledged table's lock does not cover; " +
+			"resubmit without CASCADE, and PostgreSQL then refuses the drop if anything depends on the index"
+	}
+	if st.Kind() == statement.KindDropIndex {
+		return "it names several indexes; submit one DROP INDEX per index"
+	}
+	return "its scope is wider than one relation; name one index or table"
 }
 
 // acceptedBlockingLockError maps a failed table-lock request. The DDL has
