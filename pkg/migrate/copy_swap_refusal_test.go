@@ -63,13 +63,13 @@ func TestShadowRefusalFollowsTheCausesOwnClass(t *testing.T) {
 // engine, has no core counterpart and is never minted from a core cause.
 func TestRefusalOfClassConvertsByToken(t *testing.T) {
 	for _, class := range refusal.Classes() {
-		r, ok := refusalOfClass(class, verdict.ReasonCopyAndSwapRefused)
+		r, ok := refusalOfClass(class)
 		require.True(t, ok, class)
 		assert.Equal(t, string(class), string(r.Class()))
 		_, err := verdict.ParseClass(string(r.Class()))
 		assert.NoError(t, err)
 	}
-	_, ok := refusalOfClass("", verdict.ReasonCopyAndSwapRefused)
+	_, ok := refusalOfClass("")
 	assert.False(t, ok)
 }
 

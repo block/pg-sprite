@@ -1048,12 +1048,17 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   *Enforced:* `verdict.NewRefusal` and the per-class constructors are the only way to build a
   `verdict.Refusal`; `Verdict.WithRefusal` is the only way a verdict acquires its refusal
   fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`,
-  `pkg/migrate/copy_swap_refusal.go`) is checked for completeness against the production closed sets by
-  `TestRefusalRegistryIsComplete`. Inside the core, `copier.RefusalCause.Class()` and
-  `schemachange.RefusalCause.Class()` answer one class from `refusal.Classes()`, held to each
-  cause's row by `TestRefusalCauseClassMatchesDocClassColumn` in both packages, every cause
-  table's `class` cell held to the closed set by `TestEveryCauseTableClassIsACoreClass`, and
-  the core's tokens held to the verdict's by `TestCoreRefusalClassesAreVerdictClasses`.
+  `pkg/migrate/copy_swap_refusal.go`) is checked for completeness against the production closed
+  sets by `TestRefusalRegistryIsComplete`. Inside the core, `copier.RefusalCause.Class()`,
+  `schemachange.RefusalCause.Class()`, `preflight.PartitionRefusalCause.Class()`,
+  `preflight.CopySwapRefusalCause.Class()`, and `executor.CreateShapeCause.Class()` answer one
+  class from `refusal.Classes()`, each held to its cause's row by a
+  `Test*ClassMatchesDocClassColumn` guard in its own package, every cause table's `class`
+  cell held to the closed set by `TestEveryCauseTableClassIsACoreClass`, the core's tokens
+  held to the verdict's by `TestCoreRefusalClassesAreVerdictClasses`, and the plan-side
+  registry's class for every create-shape and partition cause held to that cause's `Class()`
+  by `TestCreateShapeRefusalClassMatchesCauseClass` and
+  `TestPartitionRefusalClassMatchesCauseClass`.
   *Source:* [refusal classes](refusal-classes.md).
 - **RF-8** — An in-process refused verdict retains its full typed refusal proof, and
   `Verdict.Refusal` hands that proof out only when it validates under RF-7 and still matches
