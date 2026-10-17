@@ -214,6 +214,24 @@ func (f *Flusher) flush(ctx context.Context, pool *pgxpool.Pool, batch Batch) (R
 		// the transaction with its session either way.
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
+	result, err := f.apply(ctx, tx, batch)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Result{}, fmt.Errorf("commit flush into %s.%s: %w", f.shadow.Schema(), f.shadow.ShadowTable(), err)
+	}
+	return result, nil
+}
+
+// apply writes the batch inside tx, which the caller has guarded, and
+// leaves it open for the caller to commit or roll back: the shadow's
+// conversions read from the catalog, then the column-wise writes in their
+// own savepoint, and the whole-row fallback when a constraint refuses them
+// (CO-6). A constraint that refuses the fallback too is ErrBatchDeferred;
+// the server has then aborted tx, and the caller rolls it back with
+// nothing committed.
+func (f *Flusher) apply(ctx context.Context, tx pgx.Tx, batch Batch) (Result, error) {
 	conv, err := readConversions(ctx, tx, f.shadow)
 	if err != nil {
 		return Result{}, err
@@ -235,9 +253,6 @@ func (f *Flusher) flush(ctx context.Context, pool *pgxpool.Pool, batch Batch) (R
 			}
 			return Result{}, err
 		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return Result{}, fmt.Errorf("commit flush into %s.%s: %w", f.shadow.Schema(), f.shadow.ShadowTable(), err)
 	}
 	return result, nil
 }

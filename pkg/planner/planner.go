@@ -82,6 +82,7 @@ func Reasons() []Reason {
 		ReasonTypeRewrite,
 		ReasonRelocation,
 		ReasonPartitionParentLock,
+		ReasonReplicaIdentity,
 		ReasonUnsupportedOperation,
 	}
 }
@@ -107,8 +108,9 @@ const (
 	// ReasonOnlineIdiom: already the safe native form (CONCURRENTLY,
 	// NOT VALID, VALIDATE, USING INDEX).
 	ReasonOnlineIdiom Reason = "online-idiom"
-	// ReasonFastDefault: ADD COLUMN with a constant default — the catalog
-	// stores the default, no rewrite (PG 11+).
+	// ReasonFastDefault: ADD COLUMN with a default the catalog stores, so
+	// no row is rewritten (PG 11+): a constant, or any default the server
+	// proved does not rewrite (a non-volatile expression such as now()).
 	ReasonFastDefault Reason = "fast-default"
 	// ReasonBinaryCoercible: a type change PostgreSQL relabels without a
 	// rewrite (widen varchar, varchar to text, widen numeric precision).
@@ -125,14 +127,17 @@ const (
 	// its own reviewed change. For a table, coordinate the rename with
 	// the application deploy that adopts the new name.
 	ReasonAppBreakingRename Reason = "app-breaking-rename"
-	// ReasonVolatileDefault: ADD COLUMN whose default the planner cannot
-	// prove constant — PostgreSQL rewrites the table.
+	// ReasonVolatileDefault: ADD COLUMN whose default PostgreSQL computes
+	// for every row, rewriting the table — proven by the server, or assumed
+	// (Unverified) when the default is not a constant and nothing proved
+	// it.
 	ReasonVolatileDefault Reason = "volatile-default"
 	// ReasonGeneratedStored: adding a stored generated column computes
 	// every row — a full rewrite.
 	ReasonGeneratedStored Reason = "generated-stored"
-	// ReasonTypeRewrite: a type conversion PostgreSQL cannot relabel —
-	// rewrite plus reindex.
+	// ReasonTypeRewrite: a type PostgreSQL must check or convert row by
+	// row — a type conversion it cannot relabel (rewrite plus reindex), or
+	// an added column of a domain type with constraints.
 	ReasonTypeRewrite Reason = "type-rewrite"
 	// ReasonRelocation: SET TABLESPACE moves the heap — a rewrite-scale
 	// copy.
@@ -141,6 +146,14 @@ const (
 	// EXCLUSIVE on the partitioned parent — no scan, but it queues behind
 	// and then blocks every query on the parent while held.
 	ReasonPartitionParentLock Reason = "partition-parent-lock"
+	// ReasonReplicaIdentity: the operation drops what the table's
+	// REPLICA IDENTITY USING INDEX keys on — the index itself, the
+	// constraint that owns it, or one of its columns. The setting outlives
+	// the index, so the table is left with no usable identity, and every
+	// UPDATE and DELETE on it fails while a publication publishes them.
+	// Move the identity first (ALTER TABLE ... REPLICA IDENTITY), then
+	// re-plan.
+	ReasonReplicaIdentity Reason = "replica-identity"
 	// ReasonUnsupportedOperation: the planner does not recognize the
 	// operation or knows no safe path for it.
 	ReasonUnsupportedOperation Reason = "unsupported-operation"
@@ -245,18 +258,45 @@ type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
 	ColumnTypes map[string]string
+	// ReplicaIdentity is what the replica identity indexes of the table and
+	// its partitions key on; the zero value when none selects an index.
+	ReplicaIdentity schemadiff.ReplicaIdentityKeys
+	// AddColumnProofs maps a column the change adds to what the server
+	// proved about adding it (preflight.AddColumnRewrites). A column absent
+	// from the map is unproven and classifies by the statement's shape
+	// alone, which assumes the worst of any default it cannot read as a
+	// constant; the proof leaves out only an ADD COLUMN IF NOT EXISTS for a
+	// column the table already has, which the server skips.
+	AddColumnProofs map[string]statement.AddColumnProof
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
-// canonical type of every live column. Every front door — the declarative
-// diff and the imperative dry-run — extracts facts through this one
-// function so equivalent changes classify identically.
+// canonical type of every live column and what the table's replica
+// identity keys on. Every front door — the declarative diff and the
+// imperative dry-run — extracts facts through this one function so
+// equivalent changes classify identically.
 func FactsFrom(live schemadiff.Model) Facts {
 	types := make(map[string]string, len(live.Columns))
 	for _, col := range live.Columns {
 		types[col.Name] = col.Type
 	}
-	return Facts{ColumnTypes: types}
+	return Facts{ColumnTypes: types, ReplicaIdentity: live.ReplicaIdentity}
+}
+
+// addColumnProof returns what the server proved about adding op's
+// column, or "" when no proof was run.
+func addColumnProof(op statement.Op, facts Facts) statement.AddColumnProof {
+	return facts.AddColumnProofs[op.Column]
+}
+
+// unprovenRewriteReason names the only cause the statement's shape leaves
+// for a rewrite nothing proved: an expression default may be computed for
+// every row, and without one only the column's type can rewrite.
+func unprovenRewriteReason(op statement.Op) Reason {
+	if op.Default == statement.DefaultExpression {
+		return ReasonVolatileDefault
+	}
+	return ReasonTypeRewrite
 }
 
 // Classify parses one statement and routes each of its operations. A parse
@@ -292,6 +332,10 @@ func Classify(sql string, facts Facts) (Plan, error) {
 // classifyOp routes one operation per the reference table.
 func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string, single bool) Decision {
 	d := Decision{Operation: op.Describe(), Destructive: destructiveOp(op.Kind)}
+	if facts.ReplicaIdentity.DroppedBy(op) {
+		d.Route, d.Reason = RouteRefuse, ReasonReplicaIdentity
+		return d
+	}
 	switch op.Kind {
 	case statement.OpCreateTable:
 		if op.PartitionOf {
@@ -311,8 +355,16 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
 		case op.GeneratedStored:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonGeneratedStored
-		case op.Default == statement.DefaultExpression:
+		case addColumnProof(op, facts) == statement.AddColumnDefaultRewrites:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonVolatileDefault
+		case addColumnProof(op, facts) == statement.AddColumnTypeRewrites:
+			d.Route, d.Reason = RouteCopyAndSwap, ReasonTypeRewrite
+		case addColumnProof(op, facts) == statement.AddColumnUnproven:
+			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, unprovenRewriteReason(op), true
+		case op.Default == statement.DefaultExpression && addColumnProof(op, facts) != statement.AddColumnInPlace:
+			// No proof was run, as in an offline lint: the default may be
+			// computed for every row.
+			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, ReasonVolatileDefault, true
 		case len(op.InlineConstraints) > 0:
 			// An inline UNIQUE / PRIMARY KEY / FOREIGN KEY / CHECK does the
 			// same index build or validation as its ADD CONSTRAINT form,
@@ -321,7 +373,9 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			// the planner does not construct multi-statement splits, so the
 			// decision carries no rewrite and routing fails closed.
 			d.Route, d.Reason = RouteNative, ReasonSaferIdiom
-		case op.Default == statement.DefaultConstant:
+		case op.Default != statement.DefaultNone:
+			// A constant, or an expression the server proved it stores
+			// in the catalog.
 			d.Route, d.Reason = RouteNative, ReasonFastDefault
 		default:
 			d.Route, d.Reason = RouteNative, ReasonMetadataOnly
@@ -619,6 +673,13 @@ func tableIdent(st statement.Statement) string {
 // the invariant online with a NOT VALID CHECK, flip the column, drop the
 // scaffold.
 //
+// The scaffold is named <table>_<column>_not_null_check, never
+// <table>_<column>_not_null: from PostgreSQL 18, SET NOT NULL records a
+// NOT NULL constraint under that second name, and while the scaffold held
+// it the server would pick the next free one instead. The converged table
+// would then carry a different constraint name from the same table built
+// directly from its definition.
+//
 // Partial-failure contract: step 1 leaves a NOT VALID CHECK under the
 // generated scaffold name, and re-running step 1 then fails with SQLSTATE
 // 42710 (duplicate_object) — a retry resumes at step 2. A failed VALIDATE
@@ -627,7 +688,7 @@ func tableIdent(st statement.Statement) string {
 // running step 4 alone.
 func setNotNullSequence(st statement.Statement, column string) []string {
 	table := tableIdent(st)
-	conName := fitIdentifier(fmt.Sprintf("%s_%s_not_null", st.Table(), column))
+	conName := fitIdentifier(fmt.Sprintf("%s_%s_not_null_check", st.Table(), column))
 	con := pgx.Identifier{conName}.Sanitize()
 	col := pgx.Identifier{column}.Sanitize()
 	return []string{

@@ -8,10 +8,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/copier"
-	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
 
@@ -154,20 +152,44 @@ func TestRunnerRefusesARowWithoutAShadowProof(t *testing.T) {
 	assert.Equal(t, schemachange.CauseResumeRowMismatch, schemachange.RefusalCauseOf(err))
 }
 
-// A row in copying whose shadow has been dropped is an error, not a
-// refusal class of its own: the run cannot continue and cannot start over
-// while the row stands, and the error says to delete the row.
-func TestRunnerFailsACopyingRowWhoseShadowIsGone(t *testing.T) {
-	f := newRunnerFixture(t)
-	f.createOrders(t)
-	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
-	built := f.leaveStoppedRun(t, alter, func(*checkpoint.Checkpoint) {})
-	f.exec(t, `DROP TABLE %s.`+built.ShadowTable())
+// A row whose swap has not committed and whose shadow has been dropped is
+// refused as resume-shadow-gone in every phase it can stand in: copying,
+// verifying, and a cutover whose swap never ran, which InspectSwapped
+// answers as not swapped and so sends back to the shadow. The run cannot
+// continue on a shadow that is not there and cannot start over while the
+// row stands, so the row is left for the operator to delete. The refusal
+// still answers for ErrShadowNotFound, and the fence the stopped run put
+// on the source stays until the next run swaps or the operator drops it.
+// Each run is stopped through the Runner, not assembled by hand, because
+// it is the Runner that fences the source.
+func TestRunnerRefusesARowWhoseShadowIsGone(t *testing.T) {
+	for _, phase := range []checkpoint.Phase{
+		checkpoint.PhaseCopying,
+		checkpoint.PhaseVerifying,
+		checkpoint.PhaseCutover,
+	} {
+		t.Run(phase.String(), func(t *testing.T) {
+			f := newRunnerFixture(t)
+			f.createOrders(t)
+			const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+			sourceOID := f.relationOID(t, "orders")
+			stop := &stopAfter{phase: phase}
+			_, err := f.run(t, "orders", alter, schemachange.RunOptions{AfterCheckpoint: stop.hook})
+			require.ErrorIs(t, err, errStopHere)
+			require.True(t, f.hasFence(t, "orders"), "the stopped run fenced the source")
+			require.Equal(t, sourceOID, f.relationOID(t, "orders"), "no swap ran")
+			f.exec(t, `DROP TABLE %s.`+f.inspectRow(t, "orders").ShadowTable)
 
-	_, err := f.run(t, "orders", alter, schemachange.RunOptions{})
-	require.ErrorIs(t, err, schemachange.ErrShadowNotFound)
-	assert.Empty(t, schemachange.RefusalCauseOf(err), "a missing shadow is not a refusal class")
-	assert.Equal(t, checkpoint.PhaseCopying, f.inspectRow(t, "orders").Phase, "the row stands for the operator to delete")
+			_, err = f.run(t, "orders", alter, schemachange.RunOptions{})
+			var refusal *schemachange.RefusalError
+			require.ErrorAs(t, err, &refusal)
+			assert.Equal(t, schemachange.CauseResumeShadowGone, refusal.Cause)
+			assert.ErrorIs(t, err, schemachange.ErrShadowNotFound, "the sentinel is reachable through the refusal")
+			assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+			assert.Equal(t, phase, f.inspectRow(t, "orders").Phase, "the row stands, in its phase, for the operator to delete")
+			assert.True(t, f.hasFence(t, "orders"), "the source stays fenced until the next run swaps or the operator unfences it")
+		})
+	}
 }
 
 // A row records the statement whose run it is, and a resume under another
@@ -228,25 +250,4 @@ func TestRunnerRefusesAResumeWhoseStatementNamesAnotherTable(t *testing.T) {
 	_, err := f.run(t, "orders", `ALTER TABLE %s.invoices DROP COLUMN note`, schemachange.RunOptions{})
 	require.Error(t, err)
 	assert.Equal(t, schemachange.CauseStatementTarget, schemachange.RefusalCauseOf(err))
-}
-
-// A target proven for a run that decodes WAL is refused as an invariant
-// violation before the lock is taken: the quiesced runner decodes none,
-// and a target whose environment was verified for a slot and a
-// publication would run without either. Nothing is built and no row is
-// written.
-func TestRunnerRefusesATargetProvenForDecodingWAL(t *testing.T) {
-	logical := newRunnerFixtureOn(t, testutil.StartPostgresWithSettings(t, "wal_level=logical"))
-	logical.createOrders(t)
-	target, err := preflight.CheckCopySwap(t.Context(), logical.pool, logical.schema, "orders",
-		preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: testutil.UnlimitedDisk})
-	require.NoError(t, err)
-	require.True(t, target.DecodesWAL())
-
-	_, err = logical.runner(t, schemachange.RunOptions{}).Run(t.Context(), logical.pool, target, logical.alter(t, `ALTER TABLE %s.orders DROP COLUMN note`))
-	require.ErrorIs(t, err, schemachange.ErrInvariantViolation)
-	assert.False(t, logical.relationExists(t, schemachange.ShadowName(logical.schema, "orders")), "nothing was built")
-	assert.False(t, logical.hasFence(t, "orders"), "the source was not fenced")
-	_, err = logical.store.Inspect(t.Context(), logical.schema, "orders")
-	assert.ErrorIs(t, err, checkpoint.ErrTableMissing, "the run never reached the store")
 }

@@ -21,9 +21,10 @@ var (
 	// the lock bound it is meant to outlast.
 	ErrInvalidBlockingBudget = errors.New("invalid accepted-blocking budget")
 	// ErrUnsupportedAcceptedBlocking means the statement is not one of the
-	// single-relation blocking index forms this executor admits, or the
-	// server will not run it inside the engine-owned transaction. Retrying
-	// the same statement reproduces it; the outcome is permanent.
+	// single-relation blocking index forms this executor admits, the server
+	// will not run it inside the engine-owned transaction, or it drops a
+	// replica identity index. Retrying the same statement reproduces it;
+	// the outcome is permanent.
 	ErrUnsupportedAcceptedBlocking = errors.New("statement is not an accepted blocking index statement")
 )
 
@@ -149,6 +150,12 @@ func executeAcceptedBlocking(ctx context.Context, pool *pgxpool.Pool, sql string
 			return rep, acceptedBlockingLockError(ctx, err, b)
 		}
 	}
+	if st.Kind() == statement.KindDropIndex {
+		if err := refuseReplicaIdentityDrop(ctx, tx, st.IndexRelation()); err != nil {
+			rep.Duration = clock.Now().Sub(start)
+			return rep, err
+		}
+	}
 	if _, err := tx.Exec(ctx, sql); err != nil {
 		rep.Duration = clock.Now().Sub(start)
 		return rep, acceptedBlockingStatementError(ctx, err, b)
@@ -159,6 +166,41 @@ func executeAcceptedBlocking(ctx context.Context, pool *pgxpool.Pool, sql string
 	}
 	rep.Duration = clock.Now().Sub(start)
 	return rep, nil
+}
+
+// refuseReplicaIdentityDrop refuses a DROP INDEX that would drop a replica
+// identity index: the named index itself, or one attached under it on a
+// partition. PostgreSQL keeps REPLICA IDENTITY USING INDEX when the index
+// goes, so the table is left with no usable identity and every UPDATE and
+// DELETE on it fails while a publication publishes them. It runs under the
+// table's ACCESS EXCLUSIVE lock, which ALTER TABLE ... REPLICA IDENTITY also
+// needs, so the answer cannot change before the DROP runs. The index is
+// counted on its own as well as through pg_partition_tree, which lists
+// nothing for an index outside a partition tree. A name that resolves to
+// nothing has no identity to protect; the DROP reports it.
+func refuseReplicaIdentityDrop(ctx context.Context, tx pgx.Tx, rel statement.IndexRelation) error {
+	name := pgx.Identifier{rel.Name}
+	if rel.Schema != "" {
+		name = pgx.Identifier{rel.Schema, rel.Name}
+	}
+	var identity string
+	err := tx.QueryRow(ctx, `
+		SELECT COALESCE(string_agg(format('%s on %s', i.indexrelid::regclass, i.indrelid::regclass), ', '
+		                           ORDER BY i.indexrelid::regclass::text), '')
+		FROM (SELECT to_regclass($1)::oid AS relid
+		      UNION
+		      SELECT relid FROM pg_partition_tree(to_regclass($1))) tree
+		JOIN pg_index i ON i.indexrelid = tree.relid AND i.indisreplident
+		JOIN pg_class c ON c.oid = i.indrelid AND c.relreplident = 'i'`, name.Sanitize()).Scan(&identity)
+	if err != nil {
+		return fmt.Errorf("check whether %s is a replica identity index: %w", name.Sanitize(), err)
+	}
+	if identity != "" {
+		return fmt.Errorf("%w: dropping %s drops the replica identity index %s, which makes UPDATE and DELETE fail "+
+			"while a publication publishes them; point REPLICA IDENTITY at another unique index first (or DEFAULT, if a usable primary key remains after the drop)",
+			ErrUnsupportedAcceptedBlocking, name.Sanitize(), identity)
+	}
+	return nil
 }
 
 func acceptedBlockingShape(st statement.Statement) bool {

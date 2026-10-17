@@ -17,7 +17,7 @@ kinds, guidance, causes, classes, owners) and the fingerprint serialization are 
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **7**: version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
+The current version is **8**: version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
 and on refused statements, each drawn from a closed vocabulary (see Classes and Owners);
@@ -114,15 +114,16 @@ consumer rendering either into a shared surface must clamp and escape them.
 |---|---|
 | `metadata-only` | A brief ACCESS EXCLUSIVE catalog change, no scan and no rewrite. Also the classification of every executable build on a table that does not exist yet (a `diff` greenfield plan): each create step commits in its own transaction under the brief `lock_timeout` / `statement_timeout` budget, so `CREATE TABLE` is visible before its indexes build and a concurrent writer that already knows the name makes the step fail fast rather than block. The classification is `metadata-only` because the cost is bounded by that budget on a table born in the run; a `safer-idiom` decision is reclassified here and `exec_sql` is the statement as written. |
 | `online-idiom` | Already the safe native form (CONCURRENTLY, NOT VALID, VALIDATE, USING INDEX). |
-| `fast-default` | ADD COLUMN with a constant default — the catalog stores the default, no rewrite. |
+| `fast-default` | ADD COLUMN whose default the catalog stores, so no row is rewritten: a constant, or an expression the server proved it stores, such as `now()`. |
 | `binary-coercible` | A type change PostgreSQL relabels without a rewrite (widen varchar, varchar to text, widen numeric precision). |
 | `safer-idiom` | Native, but the submitted form blocks; `safer_sql` carries the online rewrite when one can be constructed. Never appears on an executable statement of a greenfield plan — see `metadata-only`. |
 | `app-breaking-rename` | A column or table rename — metadata-only for PostgreSQL, but running application code still referencing the old name breaks the instant it commits. For a column the safe sequence is expand/contract: add the new column, dual-write and backfill, switch reads, then drop the old column as its own reviewed change. For a table, coordinate the rename with the application deploy that adopts the new name. Index renames stay `metadata-only` — SQL never references an index by name. |
-| `volatile-default` | ADD COLUMN whose default the planner cannot prove constant — PostgreSQL rewrites the table. |
+| `volatile-default` | ADD COLUMN whose default PostgreSQL computes for every row, rewriting the table. Proven by the server, or, with `unverified`, assumed for an expression default nothing proved. |
 | `generated-stored` | Adding a stored generated column computes every row — a full rewrite. |
-| `type-rewrite` | A type conversion PostgreSQL cannot relabel — rewrite plus reindex. |
+| `type-rewrite` | A type PostgreSQL must convert or check row by row: a type change it cannot relabel (rewrite plus reindex), or an added column of a domain with constraints. With `unverified`, assumed for an added column the server could not prove. |
 | `relocation` | SET TABLESPACE moves the heap — a rewrite-scale copy. |
 | `partition-parent-lock` | Creating a partition (`CREATE TABLE … PARTITION OF`): a brief `ACCESS EXCLUSIVE` on the parent, no scan. |
+| `replica-identity` | The operation drops what a `REPLICA IDENTITY USING INDEX` of the table, or of a partition or inheritance child below it, is built on: the index, the constraint that owns it, or one of its columns, `INCLUDE` columns too. The setting outlives the index, so every `UPDATE` and `DELETE` on the table fails while a publication publishes them. Refused; move the identity first (`ALTER TABLE … REPLICA IDENTITY`), then re-plan. |
 | `unsupported-operation` | The planner does not recognize the operation or knows no safe path for it. |
 
 ### Target-dependent refusal reasons (`reason`, `statements[].reason`)
@@ -298,7 +299,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 7,
+  "format_version": 8,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -341,7 +342,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 7,
+  "format_version": 8,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -408,7 +409,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 7,
+  "format_version": 8,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

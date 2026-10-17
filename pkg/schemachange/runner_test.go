@@ -7,7 +7,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/applier"
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
@@ -21,13 +23,15 @@ func TestNewRunnerRefusesANilStore(t *testing.T) {
 
 // The options every phase shares are validated at construction, so a run
 // cannot build a shadow and then stop at its first save or its swap over
-// a value it could have refused up front.
+// a value it could have refused up front. The live pass reads the run's
+// own catch-up, so a confirmed source handed in is refused too.
 func TestNewRunnerRefusesOptionsARunCouldNotHonour(t *testing.T) {
 	store := &checkpoint.Store{}
 	for name, opts := range map[string]schemachange.RunOptions{
 		"negative checkpoint interval":            {CheckpointInterval: -time.Second},
 		"shadow lock timeout below a millisecond": {Shadow: schemachange.Options{LockTimeout: time.Microsecond}},
 		"negative cutover lock attempts":          {Cutover: schemachange.CutoverOptions{LockAttempts: -1}},
+		"a confirmed source for the live pass":    {Live: checksum.LiveOptions{Confirmed: (*applier.Catchup)(nil)}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := schemachange.NewRunner(dbconn.Config{}, store, opts)

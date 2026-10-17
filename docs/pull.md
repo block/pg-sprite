@@ -104,10 +104,12 @@ without losing meaning. Current refusals include:
 - either side of a foreign-key relationship;
 - policies that directly query tables (qualified scalar helpers such as `auth.uid()` are supported);
 - unlogged tables and columns with explicit collations; and
-- sequence-backed defaults that cannot be rendered as an owned `serial` form.
+- sequence-backed defaults that cannot be rendered as an owned `serial` form,
+  including a serial whose sequence is declared away from the defaults.
 
-Extension-owned tables are excluded from enumeration. Table/column comments, storage
-parameters, and non-table objects are outside the declarative model and are not
-exported; manage them separately. See the complete
+Extension-owned tables are excluded from enumeration. Storage parameters are
+exported as a `WITH (...)` clause on the `CREATE TABLE`. Table/column comments and
+non-table objects are outside the declarative model and are not exported; manage
+them separately. See the complete
 [declarative model boundaries](limitations.md#declarative-model-boundaries)
 and [support matrix](capabilities.md#the-declarative-model-desired-files-diff-pull).
