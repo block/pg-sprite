@@ -373,9 +373,12 @@ statement rolls back; the time and lock are spent regardless).
   calls `RemoveStatistics` for the column because the stored histogram and most-common
   values are of the old type. Nothing puts them back until autovacuum's analyze threshold
   trips, which on a table that changes slowly can take days, and until then the planner
-  estimates every predicate on the column from built-in defaults. `ANALYZE <table>
-  (<column>)` restores them by sampling, under `SHARE UPDATE EXCLUSIVE`, which blocks
-  neither reads nor writes.
+  estimates every predicate on the column from built-in defaults. An expression index over
+  the column is rebuilt and an extended statistics object that covers it is recreated, so
+  theirs go too. `ANALYZE <table>` restores all of them by sampling, under `SHARE UPDATE
+  EXCLUSIVE`, which blocks neither reads nor writes; the column-list form `ANALYZE <table>
+  (<column>)` does not rebuild expression-index statistics, nor an extended statistics
+  object unless every column it covers is listed.
 
 ## Checking before you run it
 
@@ -454,11 +457,17 @@ Because the decision needs the column's current type, the classifier takes the i
 catalog shape as input. Without it, no type change can be proven free, and the planner
 routes the statement to the rewrite path rather than gamble.
 
-Once a native type change commits, pg-sprite runs `ANALYZE` on exactly the columns the
-statement retyped, under the same lock and statement budgets as the change, and the
-verdict's detail says whether it did. The change is already committed by then, so a refresh
-that cannot get its lock in budget, because a `VACUUM` or another `ANALYZE` holds the table,
-does not fail the run; the detail names the `ANALYZE` still to run instead.
+Once a native type change commits, pg-sprite runs a whole-table `ANALYZE` under the same
+lock and statement budgets as the change. A type change on an inheritance parent recurses
+into its children and deletes their statistics too, and `ANALYZE` on the parent does not
+analyze them, so the refresh names every child; a partitioned table needs no such list,
+since `ANALYZE` on it recurses into its partitions. The verdict's `statistics_refresh`
+field reports the retyped columns and whether the refresh ran. The change is already
+committed by then, so a refresh that cannot run does not fail the run: it stays executed,
+and `statistics_refresh.pending` names the `ANALYZE` still to run. That happens when a
+`VACUUM` or another `ANALYZE` holds a table past the lock budget, when the role cannot act
+as the owner of every table covered (the server would skip the others with only a warning),
+or when a child is a foreign table, whose wrapper may not be able to sample it.
 
 ## Source pointers
 

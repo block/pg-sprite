@@ -3,7 +3,6 @@ package migrate
 import (
 	"fmt"
 	"log/slog"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,12 +15,14 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/verdict"
 )
 
 // The type change is committed before its statistics are refreshed, so a
-// refresh that cannot run does not fail the run: the verdict's detail names
-// the ANALYZE the operator still has to run, with every identifier quoted,
-// and that command runs as written once the lock is free. Another session's
+// refresh that cannot run does not fail the run: the verdict reports the
+// refresh as still owed and names the ANALYZE the operator has to run, with
+// every identifier quoted, and that command runs as written once the lock
+// is free. Another session's
 // VACUUM or ANALYZE holds the same lock the refresh needs; here a
 // transaction holding SHARE UPDATE EXCLUSIVE stands in for it.
 func TestRefreshRetypedStatisticsNamesTheAnalyzeItCouldNotRun(t *testing.T) {
@@ -36,8 +37,8 @@ func TestRefreshRetypedStatisticsNamesTheAnalyzeItCouldNotRun(t *testing.T) {
 		// want is the recovery command, with %s standing for the schema.
 		want string
 	}{
-		{"plain names", "t", "code", `run ANALYZE "%s"."t" ("code")`},
-		{"names that need quoting", "Order Items", "Status Code", `run ANALYZE "%s"."Order Items" ("Status Code")`},
+		{"plain names", "t", "code", `ANALYZE "%s"."t"`},
+		{"names that need quoting", "Order Items", "Status Code", `ANALYZE "%s"."Order Items"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -62,14 +63,26 @@ func TestRefreshRetypedStatisticsNamesTheAnalyzeItCouldNotRun(t *testing.T) {
 			require.NoError(t, err)
 
 			budget := executor.Budget{LockTimeout: 100 * time.Millisecond, StatementTimeout: 5 * time.Second}
-			detail := refreshRetypedStatistics(t.Context(), pool, pt, st, budget, slog.New(slog.DiscardHandler))
+			refresh := refreshRetypedStatistics(t.Context(), pool, pt, st, budget, slog.New(slog.DiscardHandler))
 			require.NoError(t, holder.Rollback(t.Context()))
 
-			assert.Contains(t, detail, fmt.Sprintf("the statistics of %s were not refreshed after the type change", tc.column))
 			want := fmt.Sprintf(tc.want, schema)
-			require.True(t, strings.HasSuffix(detail, want), "detail %q ends with %q", detail, want)
-			_, err = pool.Exec(t.Context(), strings.TrimPrefix(want, "run "))
+			require.NotNil(t, refresh)
+			assert.Equal(t, verdict.StatisticsRefresh{Columns: []string{tc.column}, Pending: want}, *refresh)
+			_, err = pool.Exec(t.Context(), refresh.Pending)
 			require.NoError(t, err, "the recovery command runs as written")
 		})
 	}
+}
+
+// The detail sentence is rendered from the typed refresh, so the two
+// cannot disagree.
+func TestStatisticsDetailRendersTheTypedRefresh(t *testing.T) {
+	assert.Empty(t, statisticsDetail(nil))
+	assert.Equal(t, "; the statistics of code, label were refreshed after the type change",
+		statisticsDetail(&verdict.StatisticsRefresh{Columns: []string{"code", "label"}, Refreshed: true}))
+	assert.Equal(t, `; the statistics of code were not refreshed after the type change: run ANALYZE "s"."t"`,
+		statisticsDetail(&verdict.StatisticsRefresh{Columns: []string{"code"}, Pending: `ANALYZE "s"."t"`}))
+	assert.Equal(t, "; the statistics of any column whose type changed were refreshed after the type change",
+		statisticsDetail(&verdict.StatisticsRefresh{Refreshed: true}))
 }
