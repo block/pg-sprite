@@ -437,9 +437,12 @@ writes. Routed to the copy-and-swap backend. Before classifying, the engine adds
 each column to an empty temporary table inside a rolled-back transaction and
 checks whether that table's storage was replaced, so the server, not the
 statement's shape, decides: a non-volatile default such as `now()` is stored in
-the catalog and runs natively as `fast-default`. A column the engine could not
-prove is classified by shape, and any default that is not a constant is assumed
-volatile.
+the catalog and runs natively as `fast-default`. A column that rewrites is added
+again with its type alone, and carries this reason only when the type adds in
+place: when the type rewrites too, the reason is `type-rewrite`. A column the
+engine could not prove, because the probe needed a lock another session held, or
+for which no proof ran, as in `lint`, is classified by shape as `unverified`: any
+default that is not a constant is assumed volatile.
 
 ### `generated-stored`
 
@@ -462,7 +465,9 @@ The column type change is not binary-coercible (for example `int` → `bigint`,
 `ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. An `ADD COLUMN` of a
 domain type with a `CHECK` or `NOT NULL` carries the same reason: PostgreSQL
 rewrites the table to check every row against the domain, even when the default
-is a constant.
+is a constant or one the catalog would store. An added column with a constant
+default the engine could not prove carries it too, as `unverified`, since only
+its type could rewrite.
 
 ### `relocation`
 

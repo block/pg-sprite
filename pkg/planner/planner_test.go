@@ -358,31 +358,42 @@ func TestClassifyNoFactsIsConservative(t *testing.T) {
 // An added column classifies by what the server proved about the rewrite
 // before the statement's shape: a constant default on a constrained domain
 // still rewrites, and a default the catalog stores runs in place however it
-// is written. A column without a proof keeps the shape rules.
+// is written. A proven rewrite takes its reason from what the server found
+// rewrites, the type or the default, never from how the default is
+// written. A column the server could not prove, or that no proof was run
+// for, keeps the shape rules, and an expression default there fails closed
+// as unverified.
 func TestClassifyAddColumnByTheProvenRewrite(t *testing.T) {
-	proven := planner.Facts{AddColumnRewrites: map[string]bool{
-		"code":    true,
-		"strict":  true,
-		"id":      true,
-		"created": false,
-		"checked": false,
-		"age":     false,
+	proven := planner.Facts{AddColumnProofs: map[string]statement.AddColumnProof{
+		"code":    statement.AddColumnTypeRewrites,
+		"strict":  statement.AddColumnTypeRewrites,
+		"scored":  statement.AddColumnTypeRewrites,
+		"id":      statement.AddColumnDefaultRewrites,
+		"created": statement.AddColumnInPlace,
+		"checked": statement.AddColumnInPlace,
+		"age":     statement.AddColumnInPlace,
+		"high":    statement.AddColumnUnproven,
+		"capped":  statement.AddColumnUnproven,
 	}}
 	cases := []struct {
-		name   string
-		sql    string
-		route  planner.Route
-		reason planner.Reason
+		name       string
+		sql        string
+		route      planner.Route
+		reason     planner.Reason
+		unverified bool
 	}{
-		{"constrained domain with a constant default", "ALTER TABLE t ADD COLUMN code positive_int DEFAULT 1", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite},
-		{"constrained domain without a default", "ALTER TABLE t ADD COLUMN strict positive_int", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite},
-		{"volatile default", "ALTER TABLE t ADD COLUMN id uuid DEFAULT gen_random_uuid()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault},
-		{"stable default stored in the catalog", "ALTER TABLE t ADD COLUMN created timestamptz NOT NULL DEFAULT now()", planner.RouteNative, planner.ReasonFastDefault},
-		{"stored default with an inline check", "ALTER TABLE t ADD COLUMN checked timestamptz DEFAULT now() CHECK (checked > '2000-01-01')", planner.RouteNative, planner.ReasonSaferIdiom},
-		{"plain column", "ALTER TABLE t ADD COLUMN age int", planner.RouteNative, planner.ReasonMetadataOnly},
-		{"unproven expression default", "ALTER TABLE t ADD COLUMN other timestamptz DEFAULT now()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault},
-		{"unproven constant default", "ALTER TABLE t ADD COLUMN other int DEFAULT 0", planner.RouteNative, planner.ReasonFastDefault},
-		{"generated stored whatever the proof says", "ALTER TABLE t ADD COLUMN age int GENERATED ALWAYS AS (1) STORED", planner.RouteCopyAndSwap, planner.ReasonGeneratedStored},
+		{"constrained domain with a constant default", "ALTER TABLE t ADD COLUMN code positive_int DEFAULT 1", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, false},
+		{"constrained domain without a default", "ALTER TABLE t ADD COLUMN strict positive_int", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, false},
+		{"constrained domain with a stable default", "ALTER TABLE t ADD COLUMN scored positive_int DEFAULT next_score()", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, false},
+		{"volatile default", "ALTER TABLE t ADD COLUMN id uuid DEFAULT gen_random_uuid()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, false},
+		{"stable default stored in the catalog", "ALTER TABLE t ADD COLUMN created timestamptz NOT NULL DEFAULT now()", planner.RouteNative, planner.ReasonFastDefault, false},
+		{"stored default with an inline check", "ALTER TABLE t ADD COLUMN checked timestamptz DEFAULT now() CHECK (checked > '2000-01-01')", planner.RouteNative, planner.ReasonSaferIdiom, false},
+		{"plain column", "ALTER TABLE t ADD COLUMN age int", planner.RouteNative, planner.ReasonMetadataOnly, false},
+		{"expression default the server could not prove", "ALTER TABLE t ADD COLUMN high bigint DEFAULT max_id()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, true},
+		{"constant default the server could not prove", "ALTER TABLE t ADD COLUMN capped bounded DEFAULT 5", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, true},
+		{"expression default with no proof run", "ALTER TABLE t ADD COLUMN other timestamptz DEFAULT now()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, true},
+		{"constant default with no proof run", "ALTER TABLE t ADD COLUMN other int DEFAULT 0", planner.RouteNative, planner.ReasonFastDefault, false},
+		{"generated stored whatever the proof says", "ALTER TABLE t ADD COLUMN age int GENERATED ALWAYS AS (1) STORED", planner.RouteCopyAndSwap, planner.ReasonGeneratedStored, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -391,6 +402,7 @@ func TestClassifyAddColumnByTheProvenRewrite(t *testing.T) {
 			require.Len(t, plan.Decisions, 1)
 			assert.Equal(t, tc.route, plan.Decisions[0].Route)
 			assert.Equal(t, tc.reason, plan.Decisions[0].Reason)
+			assert.Equal(t, tc.unverified, plan.Decisions[0].Unverified)
 		})
 	}
 }

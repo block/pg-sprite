@@ -60,7 +60,7 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 		return Facts{}, err
 	}
 	if adds {
-		if classifier.AddColumnRewrites, err = preflight.AddColumnRewrites(ctx, pool, ResolvedSchema(st), st.Table(), st.SQL()); err != nil {
+		if classifier.AddColumnProofs, err = preflight.AddColumnRewrites(ctx, pool, ResolvedSchema(st), st.Table(), st.SQL()); err != nil {
 			return Facts{}, err
 		}
 	}

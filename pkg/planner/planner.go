@@ -127,9 +127,10 @@ const (
 	// its own reviewed change. For a table, coordinate the rename with
 	// the application deploy that adopts the new name.
 	ReasonAppBreakingRename Reason = "app-breaking-rename"
-	// ReasonVolatileDefault: ADD COLUMN whose default PostgreSQL evaluates
-	// per row, rewriting the table — proven by the server, or assumed when
-	// the default is not a constant and no proof was run.
+	// ReasonVolatileDefault: ADD COLUMN whose default PostgreSQL computes
+	// for every row, rewriting the table — proven by the server, or assumed
+	// (Unverified) when the default is not a constant and nothing proved
+	// it.
 	ReasonVolatileDefault Reason = "volatile-default"
 	// ReasonGeneratedStored: adding a stored generated column computes
 	// every row — a full rewrite.
@@ -260,14 +261,13 @@ type Facts struct {
 	// ReplicaIdentity is what the replica identity indexes of the table and
 	// its partitions key on; the zero value when none selects an index.
 	ReplicaIdentity schemadiff.ReplicaIdentityKeys
-	// AddColumnRewrites maps a column the change adds to whether the
-	// server proved that adding it rewrites the table
-	// (preflight.AddColumnRewrites). A column absent from the map is
-	// unproven and classifies by the statement's shape alone, which
-	// assumes the worst of any default it cannot read as a constant; the
-	// proof leaves out only an ADD COLUMN IF NOT EXISTS for a column the
-	// table already has, which the server skips.
-	AddColumnRewrites map[string]bool
+	// AddColumnProofs maps a column the change adds to what the server
+	// proved about adding it (preflight.AddColumnRewrites). A column absent
+	// from the map is unproven and classifies by the statement's shape
+	// alone, which assumes the worst of any default it cannot read as a
+	// constant; the proof leaves out only an ADD COLUMN IF NOT EXISTS for a
+	// column the table already has, which the server skips.
+	AddColumnProofs map[string]statement.AddColumnProof
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
@@ -283,19 +283,20 @@ func FactsFrom(live schemadiff.Model) Facts {
 	return Facts{ColumnTypes: types, ReplicaIdentity: live.ReplicaIdentity}
 }
 
-// provenAddColumnRewrite reports whether the server proved that adding
-// op's column rewrites the table.
-func provenAddColumnRewrite(op statement.Op, facts Facts) bool {
-	rewrites, proven := facts.AddColumnRewrites[op.Column]
-	return proven && rewrites
+// addColumnProof returns what the server proved about adding op's
+// column, or "" when no proof was run.
+func addColumnProof(op statement.Op, facts Facts) statement.AddColumnProof {
+	return facts.AddColumnProofs[op.Column]
 }
 
-// provenAddColumnInPlace reports whether the server proved that adding
-// op's column leaves the table's storage in place: its default, whatever
-// its shape, is stored in the catalog rather than written to every row.
-func provenAddColumnInPlace(op statement.Op, facts Facts) bool {
-	rewrites, proven := facts.AddColumnRewrites[op.Column]
-	return proven && !rewrites
+// unprovenRewriteReason names the only cause the statement's shape leaves
+// for a rewrite nothing proved: an expression default may be computed for
+// every row, and without one only the column's type can rewrite.
+func unprovenRewriteReason(op statement.Op) Reason {
+	if op.Default == statement.DefaultExpression {
+		return ReasonVolatileDefault
+	}
+	return ReasonTypeRewrite
 }
 
 // Classify parses one statement and routes each of its operations. A parse
@@ -354,15 +355,16 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
 		case op.GeneratedStored:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonGeneratedStored
-		case provenAddColumnRewrite(op, facts) && op.Default == statement.DefaultExpression:
+		case addColumnProof(op, facts) == statement.AddColumnDefaultRewrites:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonVolatileDefault
-		case provenAddColumnRewrite(op, facts):
-			// The default is a constant or absent, so the type is what
-			// rewrites: a domain carrying constraints is checked against
-			// every row.
+		case addColumnProof(op, facts) == statement.AddColumnTypeRewrites:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonTypeRewrite
-		case op.Default == statement.DefaultExpression && !provenAddColumnInPlace(op, facts):
-			d.Route, d.Reason = RouteCopyAndSwap, ReasonVolatileDefault
+		case addColumnProof(op, facts) == statement.AddColumnUnproven:
+			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, unprovenRewriteReason(op), true
+		case op.Default == statement.DefaultExpression && addColumnProof(op, facts) != statement.AddColumnInPlace:
+			// No proof was run, as in an offline lint: the default may be
+			// computed for every row.
+			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, ReasonVolatileDefault, true
 		case len(op.InlineConstraints) > 0:
 			// An inline UNIQUE / PRIMARY KEY / FOREIGN KEY / CHECK does the
 			// same index build or validation as its ADD CONSTRAINT form,

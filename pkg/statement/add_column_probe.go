@@ -20,6 +20,27 @@ type AddColumnProbe struct {
 	IfNotExists bool
 }
 
+// AddColumnProof is what the server proved about adding one column to a
+// table by its probe: whether the table is rewritten, and if so what
+// rewrites it.
+type AddColumnProof string
+
+const (
+	// AddColumnInPlace means the column is added without rewriting the table;
+	// any default it has is stored in the catalog.
+	AddColumnInPlace AddColumnProof = "in-place"
+	// AddColumnDefaultRewrites means the table is rewritten to compute the
+	// column's default for every row; the column's type alone adds in
+	// place.
+	AddColumnDefaultRewrites AddColumnProof = "default-rewrites"
+	// AddColumnTypeRewrites means the column's type alone rewrites the table,
+	// because a domain with constraints is checked against every row.
+	AddColumnTypeRewrites AddColumnProof = "type-rewrites"
+	// AddColumnUnproven means the proof needed a lock another session held, so
+	// the server answered neither way.
+	AddColumnUnproven AddColumnProof = "unproven"
+)
+
 // AddColumnProbes returns, for each ADD COLUMN of an ALTER TABLE, a
 // single-command ALTER TABLE that adds the same column to schema.table,
 // keyed by column name. A probe keeps everything that decides whether the

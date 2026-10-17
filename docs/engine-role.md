@@ -47,12 +47,14 @@ learn from the server whether the addition rewrites the table. Whether it does d
 the added column's type and default, so the probe itself never opens the live table: it takes
 no lock on it and needs no privilege on it. Adding the column does evaluate its default and its
 domain's checks once, as the real `ALTER TABLE` would, and a function either one calls may read
-a table another session has locked; the probe never waits for such a lock, and treats the
-column as rewriting instead. An `ADD COLUMN IF NOT EXISTS` for a column the table already has is
+a table another session has locked; the probe never waits for such a lock, and plans the
+column as an `unverified` rewrite instead. A column that rewrites is added again with its type
+alone, which tells whether its type or its default is what rewrites, and the plan's reason names
+that cause. An `ADD COLUMN IF NOT EXISTS` for a column the table already has is
 read from the catalog and not probed, since the server skips it. The probe does need `TEMPORARY` on the database and a server that
 accepts writes, so an `ADD COLUMN` cannot be planned on a hot standby or by a role whose
-`TEMPORARY` was revoked from `PUBLIC` and not granted back; the plan fails with the server's
-error rather than guessing.
+`TEMPORARY` was revoked from `PUBLIC` and not granted back. The plan fails with
+`preflight.ErrAddColumnProbeUnavailable` rather than guessing, naming which of the two to fix.
 
 The per-table session lock uses `pg_try_advisory_lock`, which is available to every role and
 requires no additional grant in any tier. Naming the holder of a contended lock reads
