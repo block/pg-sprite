@@ -238,8 +238,8 @@ const (
 	// RefusalSiteIndexSingleRelation is the plain one-relation DROP INDEX,
 	// REINDEX INDEX, or REINDEX TABLE gate site.
 	RefusalSiteIndexSingleRelation RefusalSite = "index-statement-single-relation"
-	// RefusalSiteIndexOther is a multi-relation DROP INDEX or a REINDEX scope
-	// that does not identify one relation.
+	// RefusalSiteIndexOther is a multi-relation DROP INDEX, a DROP INDEX with
+	// CASCADE, or a REINDEX scope that does not identify one relation.
 	RefusalSiteIndexOther RefusalSite = "index-statement-other"
 )
 
@@ -552,6 +552,23 @@ type Verdict struct {
 	LockTimeout string `json:"lock_timeout,omitempty"`
 	// StatementTimeout is the explicit statement execution budget.
 	StatementTimeout string `json:"statement_timeout,omitempty"`
+	// StatisticsRefresh reports the ANALYZE a committed type change owes
+	// the planner; nil when the statement retyped no column.
+	StatisticsRefresh *StatisticsRefresh `json:"statistics_refresh,omitempty"`
+}
+
+// StatisticsRefresh is the outcome of re-analyzing a table after a
+// committed type change, which deletes the retyped columns' planner
+// statistics. The change stays committed whether or not the refresh ran,
+// so a refresh still owed leaves the verdict executed and names the
+// ANALYZE to run.
+type StatisticsRefresh struct {
+	// Columns are the columns the statement retyped, in statement order.
+	Columns []string `json:"columns"`
+	// Refreshed reports that the ANALYZE committed.
+	Refreshed bool `json:"refreshed"`
+	// Pending is the ANALYZE still to run; empty when Refreshed.
+	Pending string `json:"pending,omitempty"`
 }
 
 // JSON renders the verdict as a single JSON object.

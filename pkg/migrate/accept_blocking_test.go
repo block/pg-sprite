@@ -26,9 +26,10 @@ func TestAcceptedRefusal(t *testing.T) {
 	}
 
 	for name, sql := range map[string]string{
-		"drop index":    "DROP INDEX app.orders_created_idx",
-		"reindex index": "REINDEX INDEX app.orders_created_idx",
-		"reindex table": "REINDEX TABLE app.orders",
+		"drop index":          "DROP INDEX app.orders_created_idx",
+		"drop index restrict": "DROP INDEX app.orders_created_idx RESTRICT",
+		"reindex index":       "REINDEX INDEX app.orders_created_idx",
+		"reindex table":       "REINDEX TABLE app.orders",
 	} {
 		t.Run("accepts "+name, func(t *testing.T) {
 			proof, ok := AcceptedRefusal("app.orders", gate(t, sql))
@@ -42,6 +43,7 @@ func TestAcceptedRefusal(t *testing.T) {
 		"drop index concurrently":    "DROP INDEX CONCURRENTLY app.orders_created_idx",
 		"reindex table concurrently": "REINDEX TABLE CONCURRENTLY app.orders",
 		"drop of several indexes":    "DROP INDEX app.a, app.b",
+		"drop index cascade":         "DROP INDEX app.orders_created_idx CASCADE",
 		"reindex schema":             "REINDEX SCHEMA app",
 		"create table":               "CREATE TABLE app.orders (id int)",
 		"drop table":                 "DROP TABLE app.orders",

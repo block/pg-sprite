@@ -519,7 +519,8 @@ marker to the WAL: `pg_logical_emit_message(false, 'pgsprite', '')`, a non-trans
 logical message with an empty payload, and keeps the position the server returns for it.
 Every transaction the snapshot saw committed before the marker, so once the catch-up has
 confirmed past the marker's position (`ConfirmedSource.Confirmed`, which `applier.Catchup`
-satisfies), every source change the read saw is in the shadow. The marker is used rather than
+satisfies, as it does `FlushGate`, the hold a live repair takes on its flushes), every source
+change the read saw is in the shadow. The marker is used rather than
 `pg_current_wal_insert_lsn()` because the walsender decodes only flushed WAL, and the insert
 position can sit in a tail that nothing flushes while another session holds a transaction
 open after its last write; a catch-up cannot confirm what the walsender cannot read, and the
@@ -552,18 +553,34 @@ still in the stream. A pass with unsettled chunks and no divergence returns the 
 caller to run the pass again once the catch-up has confirmed further or the source is quieter.
 Under `abort` a confirmed divergence is a `*DivergenceError` with the shadow untouched, whether
 or not other chunks were unsettled. Under `repair` every confirmed divergence is recopied in
-one guarded transaction that first takes `SHARE MODE` on the shadow, so a flush mid-write
-finishes and the next waits until the recopy commits and no flush interleaves with the delete
-and the copy (the flushes that then land replay images the recopy already holds, or changes
-committed after it); the pass marks the WAL after the copy and before the commit, waits for
-the catch-up to confirm past the marker, and settles each repaired chunk the same way — a
+one guarded transaction with the catch-up's flushes held off the shadow for as long as it
+runs: the pass first takes the hold in Go (`LiveOptions.Flushes`, a `FlushGate`;
+`applier.Catchup.Pause` returns once no flush is in flight and lets none start until its
+resume), so no flush interleaves with the delete and the copy, no flush waits behind the
+recopy's lock and runs out its `lock_timeout` however long the recopy takes, and the
+catch-up keeps reading and confirming the stream under the hold — answering the
+walsender's keepalives, buffering what the source writes, and confirming no further than
+the oldest buffered change (ST-4) — so the first cycle after the resume flushes what the
+hold buffered. The recopy transaction still takes `SHARE MODE` on the shadow, as the
+guarantee against every other writer: a flush the gate does not hold, or a writer that is
+not the stream's, waits until the recopy commits (the flushes that then land replay images
+the recopy already holds, or changes committed after it); the pass marks the WAL after the
+copy and before the commit, resumes the flushes once the recopy has committed, waits for the
+catch-up to confirm past the marker, and settles each repaired chunk the same way — a
 confirmed divergence after its repair is a `*RepairError` (CO-2), and a pass whose repairs
 all took but which left other chunks unsettled returns the first of them as an
 `*UnresolvedError` with the repairs committed and listed. A pass with repairs mints no proof.
 `recopy` is refused for a live pass, since it reads nothing again and a live pass settles what
-it recopies (CO-3). The fence holds for the whole recopy, so a divergence that spans many
-chunks holds the stream's flushes for as long as the copy takes; bounding one fenced recopy
-is a tracked follow-up.
+it recopies (CO-3). The hold lasts for the whole recopy, so a divergence that spans many
+chunks buffers the stream's changes for as long as the copy takes, one buffer entry per
+changed key, holding its full column values; no flush's `lock_timeout` ends the hold, and the
+slot retains the WAL below the oldest buffered change until the resume lets it flush. Every
+cycle under the hold still checks the slot, so a hold whose retained WAL outgrows the slot's
+WAL ceiling ends the catch-up with `SlotLagExceededError` (ST-3, fail closed) and the pass
+then reports the chunk `lagging`: under heavy writes that ceiling is the bound that fires
+first. `applier.Status.FlushesHeld` reports the hold while it lasts, so a caller watching
+`Lag` grow and `Applied` stand still can tell a repair holding the flushes from a stalled
+catch-up.
 
 **At the swap.** `GateCutover` accepts a live proof like a quiesced one. `Cutover` refuses a
 live proof handed to it with no `DrainFunc` (`cutover-undrained`, CO-1): the proof covers the
