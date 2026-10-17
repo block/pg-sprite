@@ -186,12 +186,17 @@ prose, which is free to change. Reading the three surfaces:
   state remains: execution exceeded its lock budget (3s) after 3 bounded
   attempts`.
 - **An empty `executed_sql`** on a failed verdict means no *earlier* step
-  committed — not that nothing was left behind: `code` names the outcome
+  is known to have committed — not that nothing was left behind: `code` names the outcome
   and any state the failed step itself left (a concurrent index build that
   fails at step 1 leaves an INVALID index with an empty committed prefix).
   `failed_step` is the discriminator: `1` means a sequence stopped at its
   first step; absent means no sequence ran at all — a single bounded
-  attempt failed, and a started bounded attempt rolls back. A greenfield
+  attempt failed, and a started bounded attempt that fails before its
+  `COMMIT` rolls back. The exception is `commit-outcome-unknown`: the
+  `COMMIT` itself did not return success and may have landed, so the failed
+  step (or the single statement) is neither committed nor rolled back as far
+  as the client can tell — `executed_sql` lists only the steps before it, the
+  verdict says the outcome is unknown, and the catalog decides. A greenfield
   create that fails at step 1 with `create-name-mismatch` or
   `create-names-unverified` is the other case of a failed first step
   leaving state: its `CREATE TABLE` committed and stays — the code names
@@ -307,6 +312,7 @@ concurrently is.
 | `row-security-refused` | yes | Change the declaration, unsupported target shape, or privileges before retrying |
 | `row-security-outcome-unknown` | no | The atomic RLS commit response is uncertain; inspect the catalog before retrying |
 | `blocking-outcome-unknown` | no | The accepted blocking transaction reached an ambiguous client boundary; inspect the catalog before retrying |
+| `commit-outcome-unknown` | no | A bounded attempt's `COMMIT` did not return success — a dropped connection, a failover, or the caller's context ending mid-commit — so the change may have landed; inspect the catalog before retrying, and on a sequence do not assume a retry resumes from the failed step |
 | `invalid-blocking-budget` | yes | An accepted blocking bound is disabled, cannot be represented by PostgreSQL, or the statement bound is not longer than the lock bound |
 | `unsupported-accepted-blocking` | yes | The statement is outside the accepted blocking executor's narrow index-maintenance set, or the server will not run it inside the engine-owned transaction (`REINDEX` on a partitioned relation, SQLSTATE `25001`) |
 | `cancelled-by-caller` | no | The caller's own context ended while the statement ran — or, on the accepted blocking path, while the engine's table lock request was still waiting, so nothing was submitted — and the budget had not elapsed; in caller-owned mode this is the build's ordinary exit |

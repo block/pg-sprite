@@ -561,7 +561,17 @@ a lost connection the inspection resolved — is reported wrapping `ErrCutoverRo
 caller distinguishes "the source is still live, retry is safe" from an unresolved outcome
 without reading the catalog itself (terminated-backend test; commit-the-client-never-heard-of
 test; context-ends-during-commit test; backend-still-running test; three-catalog-state
-inspection test). *Source:* Spirit's cutover
+inspection test). The native bounded attempt — the optimistic run, every brief and
+`VALIDATE CONSTRAINT` sequence step, and each greenfield create step — does not inspect, but it
+honours the same rule from the reporting side: a `COMMIT` that did not return success (a lost
+connection, a failover, the caller's context ending mid-commit) is returned as
+`executor.CommitOutcomeUnknownError`, code `commit-outcome-unknown`, never as a rolled-back
+failure, and the validate step's cancellation corroboration leaves it untouched. The failed
+verdict then lists only the steps before it as committed, says the outcome is unknown, and names
+the table to inspect (`TestExecuteNativeTypesALostCommitAsOutcomeUnknown`,
+`TestRunSequenceTypesALostCommitMidSequenceAsOutcomeUnknown`,
+`TestRunReportsALostCommitAsAnUnknownOutcome`, `TestFailureVerdict`,
+`TestCorroborateValidateCancel`). *Source:* Spirit's cutover
 (`information_schema` inspection on dropped connection,
 [Spirit README](https://github.com/block/spirit#cut-over-and-cleanup)).
 

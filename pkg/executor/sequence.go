@@ -408,6 +408,13 @@ func sequenceHasConcurrentBuild(steps []sequenceStep) bool {
 // message, not the chain — the whole point is that neither failure is a
 // *BudgetError.
 func corroborateValidateCancel(ctx context.Context, err error, b ValidateBudget, elapsed time.Duration) error {
+	// INV: LK-4 — a COMMIT that ended with the caller's context may have
+	// landed, so it stays an unknown outcome rather than a cancellation the
+	// client can call clean.
+	var commitUnknown *CommitOutcomeUnknownError
+	if errors.As(err, &commitUnknown) {
+		return err
+	}
 	var budgetErr *BudgetError
 	serverCancelled := errors.As(err, &budgetErr) && budgetErr.Cause == CauseStatement
 	if serverCancelled && elapsed >= b.Overall {
