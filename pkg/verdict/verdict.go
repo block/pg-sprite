@@ -602,6 +602,9 @@ func (v Verdict) String() string {
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  safer:     %s", v.SaferIdiom)
 	}
+	if v.Guidance != "" {
+		fmt.Fprintf(&b, "\n  guidance:  %s", v.Guidance)
+	}
 	if v.Outcome == OutcomeExecutedWithoutOnlineSafety {
 		fmt.Fprintf(&b, "\n  budgets:   lock %s, statement %s", v.LockTimeout, v.StatementTimeout)
 	}
