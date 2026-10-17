@@ -183,6 +183,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		BlockingPassthrough: true,
 		LockTimeout:         "3s",
 		StatementTimeout:    "10m",
+		StatisticsRefresh:   &verdict.StatisticsRefresh{Columns: []string{"c"}, Pending: `ANALYZE "t"`},
 	}
 	rv := reflect.ValueOf(v)
 	for i := range rv.NumField() {
