@@ -1,11 +1,13 @@
 package executor_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -62,4 +64,51 @@ func TestRefreshColumnStatistics(t *testing.T) {
 	var budgetErr *executor.BudgetError
 	require.True(t, errors.As(err, &budgetErr), "want a *BudgetError, got %v", err)
 	assert.Contains(t, err.Error(), fmt.Sprintf(`ANALYZE "%s"."t" ("note")`, schema))
+}
+
+// A role that cannot act as the table's owner gets only a warning from
+// ANALYZE, which skips the table, so the refresh checks ownership first and
+// refuses with ErrAnalyzeNotPermitted instead of reporting statistics it
+// never refreshed. The table's statistics stay as they were.
+func TestRefreshColumnStatisticsRefusesARoleThatCannotActAsTheOwner(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	superuser, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	t.Cleanup(superuser.Close)
+	schema := testutil.NewSchema(t, superuser)
+	role := "reader_" + schema
+	_, err = superuser.Exec(t.Context(), fmt.Sprintf(`
+		CREATE ROLE %[1]s LOGIN PASSWORD 'reader';
+		GRANT USAGE ON SCHEMA %[2]s TO %[1]s;
+		CREATE TABLE %[2]s.t (id int PRIMARY KEY, code text);
+		INSERT INTO %[2]s.t SELECT g, 'c' || g FROM generate_series(1, 100) g;
+		GRANT SELECT, INSERT, UPDATE, DELETE ON %[2]s.t TO %[1]s`, role, schema))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx := context.WithoutCancel(t.Context())
+		if _, err := superuser.Exec(ctx, fmt.Sprintf("DROP OWNED BY %[1]s; DROP ROLE %[1]s", role)); err != nil {
+			t.Logf("drop role %s: %v", role, err)
+		}
+	})
+	reader, err := dbconn.NewPool(t.Context(), dbconn.Config{
+		URL: url,
+		BeforeConnect: func(_ context.Context, cc *pgx.ConnConfig) error {
+			cc.User = role
+			cc.Password = "reader"
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(reader.Close)
+	pt, err := preflight.CheckTable(t.Context(), reader, schema, "t", preflight.NoSizeLimit)
+	require.NoError(t, err)
+
+	err = executor.RefreshColumnStatistics(t.Context(), reader, pt, []string{"code"},
+		executor.Budget{LockTimeout: time.Second, StatementTimeout: 5 * time.Second})
+	require.ErrorIs(t, err, executor.ErrAnalyzeNotPermitted)
+	assert.Contains(t, err.Error(), fmt.Sprintf(`"%s"."t"`, schema))
+	var analyzed int
+	require.NoError(t, superuser.QueryRow(t.Context(),
+		"SELECT count(*) FROM pg_stats WHERE schemaname = $1 AND tablename = 't'", schema).Scan(&analyzed))
+	assert.Zero(t, analyzed, "nothing was analyzed")
 }

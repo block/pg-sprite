@@ -13,6 +13,11 @@ import (
 	"github.com/block/pg-sprite/pkg/preflight"
 )
 
+// ErrAnalyzeNotPermitted means the connected role cannot act as the table's
+// owner, so ANALYZE would skip the table with only a warning and leave the
+// statistics as they were. Nothing was analyzed.
+var ErrAnalyzeNotPermitted = errors.New("the role cannot act as the table's owner, so ANALYZE would skip it")
+
 // RefreshColumnStatistics runs ANALYZE on the named columns of the
 // preflighted table, in one transaction under transaction-local budgets.
 //
@@ -24,6 +29,14 @@ import (
 // SHARE UPDATE EXCLUSIVE lock blocks neither reads nor writes; it waits only
 // behind another ANALYZE, VACUUM, or DDL on the table, which the lock budget
 // bounds.
+//
+// The server skips a table whose owner the role cannot act as with only a
+// warning, so a refresh that completed proves nothing on its own. The
+// refresh checks ownership first, in the same transaction, and returns
+// ErrAnalyzeNotPermitted rather than report statistics it never refreshed.
+// Ownership is the privilege every native step on the table needs anyway;
+// a role ANALYZE admits on other grounds is refused here, which costs a
+// manual ANALYZE and never a false report.
 func RefreshColumnStatistics(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, columns []string, b Budget) error {
 	if len(columns) == 0 {
 		return errors.New("refresh column statistics: no columns named")
@@ -50,6 +63,9 @@ func RefreshColumnStatistics(ctx context.Context, pool *pgxpool.Pool, pt preflig
 	if _, err := tx.Exec(ctx, setBudgets); err != nil {
 		return fmt.Errorf("set statistics refresh budgets: %w", err)
 	}
+	if err := checkAnalyzePermitted(ctx, tx, pt); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, analyze); err != nil {
 		if budgetErr := asBudgetError(err, b); budgetErr != nil {
 			return fmt.Errorf("%s: %w", analyze, budgetErr)
@@ -67,10 +83,7 @@ func RefreshColumnStatistics(ctx context.Context, pool *pgxpool.Pool, pt preflig
 // column is named. It is the statement RefreshColumnStatistics runs and the
 // one an operator is told to run when the refresh could not.
 func AnalyzeSQL(pt preflight.PreflightedTable, columns []string) string {
-	table := pgx.Identifier{pt.Table()}.Sanitize()
-	if pt.Schema() != "" {
-		table = pgx.Identifier{pt.Schema(), pt.Table()}.Sanitize()
-	}
+	table := quotedTable(pt)
 	if len(columns) == 0 {
 		return "ANALYZE " + table
 	}
@@ -79,4 +92,30 @@ func AnalyzeSQL(pt preflight.PreflightedTable, columns []string) string {
 		cols[i] = pgx.Identifier{c}.Sanitize()
 	}
 	return "ANALYZE " + table + " (" + strings.Join(cols, ", ") + ")"
+}
+
+// checkAnalyzePermitted refuses unless the connected role has the
+// privileges of the preflighted table's owner, which a superuser always
+// has.
+func checkAnalyzePermitted(ctx context.Context, tx pgx.Tx, pt preflight.PreflightedTable) error {
+	table := quotedTable(pt)
+	var owner bool
+	err := tx.QueryRow(ctx, `SELECT pg_catalog.pg_has_role(current_user, c.relowner, 'USAGE')
+		FROM pg_catalog.pg_class c WHERE c.oid = $1::regclass`, table).Scan(&owner)
+	if err != nil {
+		return fmt.Errorf("check the owner of %s before ANALYZE: %w", table, err)
+	}
+	if !owner {
+		return fmt.Errorf("refresh the statistics of %s: %w", table, ErrAnalyzeNotPermitted)
+	}
+	return nil
+}
+
+// quotedTable is the preflighted table's name, schema-qualified when the
+// proof carries a schema, every identifier quoted.
+func quotedTable(pt preflight.PreflightedTable) string {
+	if pt.Schema() != "" {
+		return pgx.Identifier{pt.Schema(), pt.Table()}.Sanitize()
+	}
+	return pgx.Identifier{pt.Table()}.Sanitize()
 }
