@@ -37,6 +37,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -480,7 +482,52 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 		v.Detail = fmt.Sprintf("forced: the submitted form ran as-is under budgets (lock %s, statement %s), overriding the engine's routing",
 			opts.Budget.Brief.LockTimeout, opts.Budget.Brief.StatementTimeout)
 	}
+	v.Detail += refreshRetypedStatistics(ctx, pool, pt, st, opts.Budget.Brief, logger)
 	return v, nil
+}
+
+// refreshRetypedStatistics re-analyzes the columns a committed statement
+// changed the type of, since ALTER COLUMN TYPE deletes their statistics,
+// and returns the sentence the verdict's detail gains. The schema change is
+// already committed, so a refresh that fails does not fail the run: the
+// detail names the ANALYZE the operator still has to run, and the failure
+// is logged with its cause.
+func refreshRetypedStatistics(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable,
+	st statement.Statement, b executor.Budget, logger *slog.Logger) string {
+	columns, err := retypedColumns(st)
+	if err != nil {
+		logger.Warn("column statistics not refreshed: the committed statement did not parse back",
+			"table", qualified(st), "error", err)
+		return "; the statistics of any column whose type changed were not refreshed: run ANALYZE on " + qualified(st)
+	}
+	if len(columns) == 0 {
+		return ""
+	}
+	if err := executor.RefreshColumnStatistics(ctx, pool, pt, columns, b); err != nil {
+		logger.Warn("column statistics not refreshed after a type change",
+			"table", qualified(st), "columns", columns, "error", err)
+		return fmt.Sprintf("; the statistics of %s were not refreshed after the type change (%v): run ANALYZE %s (%s)",
+			strings.Join(columns, ", "), err, qualified(st), strings.Join(columns, ", "))
+	}
+	logger.Debug("column statistics refreshed after a type change",
+		"table", qualified(st), "columns", columns)
+	return fmt.Sprintf("; the statistics of %s were refreshed after the type change", strings.Join(columns, ", "))
+}
+
+// retypedColumns returns the columns a statement's ALTER COLUMN TYPE
+// subcommands retype, each once, in statement order.
+func retypedColumns(st statement.Statement) ([]string, error) {
+	ops, err := statement.ParseOps(st.SQL())
+	if err != nil {
+		return nil, fmt.Errorf("parse %s for its type changes: %w", qualified(st), err)
+	}
+	var columns []string
+	for _, op := range ops {
+		if op.Kind == statement.OpAlterColumnType && !slices.Contains(columns, op.Column) {
+			columns = append(columns, op.Column)
+		}
+	}
+	return columns, nil
 }
 
 // qualified renders the statement's target table for the verdict, empty when

@@ -369,6 +369,13 @@ statement rolls back; the time and lock are spent regardless).
   relabel. `RememberAllDependentForRebuilding` refuses rather than re-plans the generation
   expression. The generated column has to be dropped before the change and re-added after
   it — and re-adding a `STORED` generated column is itself a full rewrite.
+- **The column's planner statistics are deleted**, even for a relabel: `ATExecAlterColumnType`
+  calls `RemoveStatistics` for the column because the stored histogram and most-common
+  values are of the old type. Nothing puts them back until autovacuum's analyze threshold
+  trips, which on a table that changes slowly can take days, and until then the planner
+  estimates every predicate on the column from built-in defaults. `ANALYZE <table>
+  (<column>)` restores them by sampling, under `SHARE UPDATE EXCLUSIVE`, which blocks
+  neither reads nor writes.
 
 ## Checking before you run it
 
@@ -446,6 +453,12 @@ table in [postgres-online-ddl-reference.md](postgres-online-ddl-reference.md).
 Because the decision needs the column's current type, the classifier takes the introspected
 catalog shape as input. Without it, no type change can be proven free, and the planner
 routes the statement to the rewrite path rather than gamble.
+
+Once a native type change commits, pg-sprite runs `ANALYZE` on exactly the columns the
+statement retyped, under the same lock and statement budgets as the change, and the
+verdict's detail says whether it did. The change is already committed by then, so a refresh
+that cannot get its lock in budget, because a `VACUUM` or another `ANALYZE` holds the table,
+does not fail the run; the detail names the `ANALYZE` still to run instead.
 
 ## Source pointers
 
