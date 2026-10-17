@@ -162,22 +162,27 @@ func (r row) identity() Identity {
 
 // incompatibility reports the first identity field on which the stored row
 // disagrees with the run, format version first: a row in another format
-// cannot be trusted to carry fingerprints that mean the same thing. It is
-// nil for a row the run may resume from.
+// cannot be trusted to carry fingerprints that mean the same thing. A row
+// in a phase this engine does not know is judged last, once the identity
+// agrees. It is nil for a row the run may resume from.
 func (r row) incompatibility(want Fingerprints) *IncompatibleError {
 	return r.incompatibleWith(Identity{FormatVersion: FormatVersion, Fingerprints: want})
 }
 
-// formatIncompatibility reports a row written in another row format and
-// nothing else: the row's own fingerprints are taken as wanted, so only the
-// format can disagree. It is nil for a row whose columns this engine reads
-// the same way the writer meant them.
+// formatIncompatibility reports a row written in another row format, or
+// left in a phase this engine does not know, and nothing else: the row's
+// own fingerprints are taken as wanted, so only the format and the phase
+// can disagree. It is nil for a row whose columns this engine reads the
+// same way the writer meant them.
 func (r row) formatIncompatibility() *IncompatibleError {
 	return r.incompatibleWith(Identity{FormatVersion: FormatVersion, Fingerprints: r.identity().Fingerprints})
 }
 
 // incompatibleWith reports the first field on which the stored row's
-// identity differs from want, in the same order; nil when they agree.
+// identity differs from want, in the same order, and then a phase this
+// engine does not know; nil when the identity agrees and the phase is
+// known. The phase is judged after the identity so that a row in another
+// format is reported as such whatever phase name it carries.
 func (r row) incompatibleWith(want Identity) *IncompatibleError {
 	// INV: ST-2
 	mismatch := &IncompatibleError{Schema: r.schema, Table: r.table, Stored: r.identity()}
@@ -188,15 +193,25 @@ func (r row) incompatibleWith(want Identity) *IncompatibleError {
 		mismatch.Mismatch, mismatch.Have, mismatch.Want = MismatchSource, r.sourceFingerprint, want.Fingerprints.Source
 	case r.targetFingerprint != want.Fingerprints.Target:
 		mismatch.Mismatch, mismatch.Have, mismatch.Want = MismatchTarget, r.targetFingerprint, want.Fingerprints.Target
+	case !r.phaseKnown():
+		mismatch.Mismatch, mismatch.Have, mismatch.Want = MismatchPhase, r.phase, knownPhaseNames()
 	default:
 		return nil
 	}
 	return mismatch
 }
 
+// phaseKnown reports whether the stored phase name is one this engine has a
+// Phase for.
+func (r row) phaseKnown() bool {
+	_, err := parsePhase(r.phase)
+	return err == nil
+}
+
 // checkpoint decodes a compatible row. A value Save could not have written
-// — an LSN that does not parse, a phase name String never produces — is an
-// invariant violation, not a resume point.
+// — an LSN that does not parse, a phase name String never produces once
+// the guard has admitted the row — is an invariant violation, not a
+// resume point.
 func (r row) checkpoint() (Checkpoint, error) {
 	lsn, err := decode.ParseLSN(r.lastAppliedLSN)
 	if err != nil {

@@ -705,8 +705,12 @@ a fresh start — and for (c) retries through transient errors (what `dbconn.Ret
 server ended from outside it, `57P01`/`57P02`/`57P03`, which only a read may safely repeat) under bounded attempts
 before returning an error that is neither `ErrNotFound` nor incompatible; `ErrNotFound` is
 returned only for a completed read that found no row, and a database where the checkpoint table
-was never created is the typed `ErrTableMissing`, never `ErrNotFound`. `Store.Inspect` is the
-same read guarded on the row format alone, for the resume that must read the row's proof and
+was never created is the typed `ErrTableMissing`, never `ErrNotFound`. The phase set grows within
+a row format without a `FormatVersion` bump, so a row a newer engine of the same format left in a
+phase this one does not know is the same typed `IncompatibleError`, on `MismatchPhase`, judged after
+the identity and carrying it for `Delete` — never `ErrInvariantViolation`, which is kept for a row
+no `Save` could have written. `Store.Inspect` is the
+same read guarded on the row format and the phase alone, for the resume that must read the row's proof and
 phase before it knows which statement it is resuming; it widens only the read. `Store.Save` applies the
 same identity guard on the write path, so a run can never write its state over another
 statement's row, and it treats the row's shadow proof as write-once: a save without a proof
@@ -733,6 +737,7 @@ refusal writes nothing, so a live row's slot stays with it for the operator to d
 `TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
+`TestLoadReportsAnUnknownPhaseAsIncompatible`,
 `TestInspectReturnsTheRowWhateverStatementWroteIt`,
 `TestInspectReportsNotFoundMissingTableAndAnotherFormat`,
 `TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestSaveThenLoadRoundTripsTheShadowProof`,

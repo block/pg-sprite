@@ -10,5 +10,8 @@
 // ErrTableBehind. The row's format is a separate question from the table's
 // shape: a row an engine of another FormatVersion wrote surfaces from
 // Inspect and Load as an *IncompatibleError on MismatchFormat carrying the
-// row's Identity, which Delete takes for the explicit fresh start.
+// row's Identity, which Delete takes for the explicit fresh start. The
+// phase set grows within a format without a bump, so a row a newer engine
+// of the same format left in a phase this one does not know surfaces the
+// same way, on MismatchPhase.
 package checkpoint
