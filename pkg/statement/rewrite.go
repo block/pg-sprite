@@ -112,15 +112,19 @@ func defaultConstraintName(table string, con *pganalyze.Constraint) string {
 		return makeObjectName(table, strings.Join(columns, "_"), "fkey")
 	}
 	var column string
-	if refs := columnRefNames(con.GetRawExpr().ProtoReflect(), nil); len(refs) == 1 && refs[0] != "*" {
+	if refs := columnRefNames(con.GetRawExpr().ProtoReflect(), nil); len(refs) == 1 && refs[0] != wholeRowRef {
 		column = refs[0]
 	}
 	return makeObjectName(table, column, "check")
 }
 
+// wholeRowRef stands for a `t.*` reference among column names. No column
+// can be named the empty string, so a column quoted as "*" stays distinct.
+const wholeRowRef = ""
+
 // columnRefNames appends to names the distinct columns msg's parse tree
 // references, each by its last name part (`t.qty` is `qty`) and a
-// whole-row reference as `*`. The walk covers every message field, list,
+// whole-row reference as wholeRowRef. The walk covers every message field, list,
 // and map, so a reference inside a function call, CASE, or operand counts
 // like one at the top.
 func columnRefNames(msg protoreflect.Message, names []string) []string {
@@ -129,7 +133,7 @@ func columnRefNames(msg protoreflect.Message, names []string) []string {
 		if len(fields) == 0 {
 			return names
 		}
-		name := "*"
+		name := wholeRowRef
 		if last := fields[len(fields)-1]; last.GetAStar() == nil {
 			name = last.GetString_().GetSval()
 		}

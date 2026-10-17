@@ -74,6 +74,18 @@ func TestAddNotValidNamesAnUnnamedConstraintAsTheServerDoes(t *testing.T) {
 			alter:  "ALTER TABLE %[1]s.t ADD CHECK (t.qty > 0)",
 		},
 		{
+			name:   "check on a column quoted as a star",
+			table:  "t",
+			create: `CREATE TABLE %[1]s.t ("*" int)`,
+			alter:  `ALTER TABLE %[1]s.t ADD CHECK ("*" > 0)`,
+		},
+		{
+			name:   "check on the whole row",
+			table:  "t",
+			create: "CREATE TABLE %[1]s.t (qty int)",
+			alter:  "ALTER TABLE %[1]s.t ADD CHECK (t.* IS NOT NULL)",
+		},
+		{
 			name:   "check on a quoted mixed-case table and column",
 			table:  "Orders",
 			create: `CREATE TABLE %[1]s."Orders" ("Qty" int)`,
