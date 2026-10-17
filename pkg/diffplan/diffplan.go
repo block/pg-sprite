@@ -162,6 +162,7 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 			return nil, "", fmt.Errorf("plan derived statement %q: %w", routed.Statements[i].Statement, err)
 		}
 		ps.Kind = ch.Kind
+		ps.Adopts = ch.Adopts
 		planned = append(planned, ps)
 	}
 	return planned, routed.Disposition, nil

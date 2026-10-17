@@ -96,7 +96,10 @@ refusal — never a silently wrong or incomplete result:
   `REPLICA IDENTITY` first, then re-plan.
 - **Destructive desired-state plans are refused as a whole** — `migrate --desired`
   creates missing tables and converges supported changes, but never infers permission
-  to discard live structure.
+  to discard live structure. A new primary key or unique constraint over a live
+  unique index of its name is not destructive: it takes the index over with
+  `ADD CONSTRAINT ... USING INDEX`, and refuses with `adopted-index-drift` if the
+  index changed after planning.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
   build's leftover is reported with a typed state, and the proven removal
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
