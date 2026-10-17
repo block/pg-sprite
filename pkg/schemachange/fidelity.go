@@ -159,15 +159,18 @@ func policyCommand(code string) (string, bool) {
 func readFidelity(ctx context.Context, tx pgx.Tx, oid uint32) (FidelitySnapshot, error) {
 	var s FidelitySnapshot
 	var toastOptions []string
+	// INV: CO-9
 	err := tx.QueryRow(ctx, `
-		SELECT pg_get_userbyid(c.relowner), c.relreplident::text,
+		SELECT pg_catalog.pg_get_userbyid(c.relowner), c.relreplident::pg_catalog.text,
 		       c.relrowsecurity, c.relforcerowsecurity,
-		       COALESCE(obj_description(c.oid, 'pg_class'), ''),
-		       COALESCE((SELECT t.spcname FROM pg_tablespace t WHERE t.oid = c.reltablespace), ''),
+		       COALESCE(pg_catalog.obj_description(c.oid, 'pg_class'), ''),
+		       COALESCE((SELECT t.spcname FROM pg_catalog.pg_tablespace t
+		                  WHERE t.oid OPERATOR(pg_catalog.=) c.reltablespace), ''),
 		       COALESCE(c.reloptions, '{}'),
-		       COALESCE((SELECT t.reloptions FROM pg_class t WHERE t.oid = c.reltoastrelid), '{}')
-		FROM pg_class c
-		WHERE c.oid = $1`, oid).
+		       COALESCE((SELECT t.reloptions FROM pg_catalog.pg_class t
+		                  WHERE t.oid OPERATOR(pg_catalog.=) c.reltoastrelid), '{}')
+		FROM pg_catalog.pg_class c
+		WHERE c.oid OPERATOR(pg_catalog.=) $1`, oid).
 		Scan(&s.Owner, &s.ReplicaIdentity, &s.RLSEnabled, &s.RLSForced, &s.Comment, &s.Tablespace, &s.RelOptions, &toastOptions)
 	if err != nil {
 		return FidelitySnapshot{}, fmt.Errorf("read table metadata: %w", err)
@@ -227,14 +230,17 @@ func aclDefaultKind(object aclObject) string {
 // any grantor made them so. The PUBLIC pseudo-role is recognised by its OID,
 // never by a name the catalog can also print for a real role.
 func readACL(ctx context.Context, tx pgx.Tx, oid uint32, object aclObject) ([]Grant, error) {
+	// INV: CO-9
 	rows, err := tx.Query(ctx, `
 		SELECT a.privilege_type,
-		       CASE WHEN a.grantee = 0 THEN '' ELSE pg_get_userbyid(a.grantee) END,
-		       a.grantee = 0,
-		       bool_or(a.is_grantable)
-		FROM pg_class c
-		CROSS JOIN LATERAL aclexplode(COALESCE(c.relacl, acldefault($2, c.relowner))) a
-		WHERE c.oid = $1
+		       CASE WHEN a.grantee OPERATOR(pg_catalog.=) 0
+		            THEN '' ELSE pg_catalog.pg_get_userbyid(a.grantee) END,
+		       a.grantee OPERATOR(pg_catalog.=) 0,
+		       pg_catalog.bool_or(a.is_grantable)
+		FROM pg_catalog.pg_class c
+		CROSS JOIN LATERAL pg_catalog.aclexplode(
+		       COALESCE(c.relacl, pg_catalog.acldefault($2, c.relowner))) a
+		WHERE c.oid OPERATOR(pg_catalog.=) $1
 		GROUP BY 1, 2, 3
 		ORDER BY 3, 2, 1`, oid, aclDefaultKind(object))
 	if err != nil {
@@ -254,14 +260,18 @@ func readACL(ctx context.Context, tx pgx.Tx, oid uint32, object aclObject) ([]Gr
 // readColumnGrants reads the effective per-column ACLs, folded per column,
 // privilege, and grantee like readGrants.
 func readColumnGrants(ctx context.Context, tx pgx.Tx, oid uint32) ([]ColumnGrant, error) {
+	// INV: CO-9
 	rows, err := tx.Query(ctx, `
 		SELECT col.attname, acl.privilege_type,
-		       CASE WHEN acl.grantee = 0 THEN '' ELSE pg_get_userbyid(acl.grantee) END,
-		       acl.grantee = 0,
-		       bool_or(acl.is_grantable)
-		FROM pg_attribute col
-		CROSS JOIN LATERAL aclexplode(col.attacl) acl
-		WHERE col.attrelid = $1 AND col.attnum > 0 AND NOT col.attisdropped
+		       CASE WHEN acl.grantee OPERATOR(pg_catalog.=) 0
+		            THEN '' ELSE pg_catalog.pg_get_userbyid(acl.grantee) END,
+		       acl.grantee OPERATOR(pg_catalog.=) 0,
+		       pg_catalog.bool_or(acl.is_grantable)
+		FROM pg_catalog.pg_attribute col
+		CROSS JOIN LATERAL pg_catalog.aclexplode(col.attacl) acl
+		WHERE col.attrelid OPERATOR(pg_catalog.=) $1
+		  AND col.attnum OPERATOR(pg_catalog.>) 0
+		  AND NOT col.attisdropped
 		GROUP BY col.attnum, 1, 2, 3, 4
 		ORDER BY col.attnum, 4, 3, 2`, oid)
 	if err != nil {
@@ -287,14 +297,17 @@ func readColumnGrants(ctx context.Context, tx pgx.Tx, oid uint32) ([]ColumnGrant
 // the single pseudo-role OID 0, which is reported as AppliesToPublic and
 // kept out of Roles.
 func readPolicies(ctx context.Context, tx pgx.Tx, oid uint32) ([]Policy, error) {
+	// INV: CO-9
 	rows, err := tx.Query(ctx, `
-		SELECT p.polname, p.polpermissive, p.polcmd::text,
-		       ARRAY(SELECT pg_get_userbyid(r)::text FROM unnest(p.polroles) r WHERE r <> 0),
-		       0 = ANY (p.polroles),
-		       COALESCE(pg_get_expr(p.polqual, p.polrelid), ''),
-		       COALESCE(pg_get_expr(p.polwithcheck, p.polrelid), '')
-		FROM pg_policy p
-		WHERE p.polrelid = $1
+		SELECT p.polname, p.polpermissive, p.polcmd::pg_catalog.text,
+		       ARRAY(SELECT pg_catalog.pg_get_userbyid(r)::pg_catalog.text
+		               FROM pg_catalog.unnest(p.polroles) r
+		              WHERE r OPERATOR(pg_catalog.<>) 0),
+		       0 OPERATOR(pg_catalog.=) ANY (p.polroles),
+		       COALESCE(pg_catalog.pg_get_expr(p.polqual, p.polrelid), ''),
+		       COALESCE(pg_catalog.pg_get_expr(p.polwithcheck, p.polrelid), '')
+		FROM pg_catalog.pg_policy p
+		WHERE p.polrelid OPERATOR(pg_catalog.=) $1
 		ORDER BY p.polname`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("read row-level-security policies: %w", err)
@@ -316,10 +329,13 @@ func readPolicies(ctx context.Context, tx pgx.Tx, oid uint32) ([]Policy, error) 
 }
 
 func readUnvalidatedChecks(ctx context.Context, tx pgx.Tx, oid uint32) ([]UnvalidatedConstraint, error) {
+	// INV: CO-9
 	rows, err := tx.Query(ctx, `
-		SELECT conname, pg_get_constraintdef(oid)
-		FROM pg_constraint
-		WHERE conrelid = $1 AND contype = 'c' AND NOT convalidated
+		SELECT conname, pg_catalog.pg_get_constraintdef(oid)
+		FROM pg_catalog.pg_constraint
+		WHERE conrelid OPERATOR(pg_catalog.=) $1
+		  AND contype OPERATOR(pg_catalog.=) 'c'
+		  AND NOT convalidated
 		ORDER BY conname`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("read unvalidated check constraints: %w", err)
@@ -474,7 +490,8 @@ func granteeLabel(g Grant) string {
 // literal values (%L) are quoted by PostgreSQL itself rather than by hand.
 func formatSQL(ctx context.Context, tx pgx.Tx, template string, args ...string) (string, error) {
 	var sql string
-	if err := tx.QueryRow(ctx, `SELECT format($1, VARIADIC $2::text[])`, template, args).Scan(&sql); err != nil {
+	// INV: CO-9
+	if err := tx.QueryRow(ctx, `SELECT pg_catalog.format($1, VARIADIC $2::pg_catalog.text[])`, template, args).Scan(&sql); err != nil {
 		return "", fmt.Errorf("format statement %q: %w", template, err)
 	}
 	return sql, nil
