@@ -121,6 +121,91 @@ func TestClassifyJudgesAnOnlyDropByTheTablesOwnIdentity(t *testing.T) {
 	}
 }
 
+// PostgreSQL refuses to retype or drop a column a view reads, so either
+// change on such a column is refused with the views named, even a type
+// change that would otherwise relabel in place. A rename, which the view
+// follows, and changes to columns no view reads classify as usual.
+func TestClassifyRefusesChangingAColumnAViewReads(t *testing.T) {
+	views := planner.Facts{
+		ColumnTypes: map[string]string{"email": "character varying(50)", "note": "text"},
+		DependentViews: map[string][]string{
+			"email": {`"app"."active_users"`, `"reports"."emails"`},
+		},
+		OwnDependentViews: map[string][]string{
+			"email": {`"app"."active_users"`, `"reports"."emails"`},
+		},
+	}
+	for _, sql := range []string{
+		"ALTER TABLE t ALTER COLUMN email TYPE varchar(100)",
+		"ALTER TABLE t ALTER COLUMN email TYPE text",
+		"ALTER TABLE t ALTER COLUMN email TYPE bigint USING email::bigint",
+		"ALTER TABLE t DROP COLUMN email",
+		"ALTER TABLE ONLY t DROP COLUMN email",
+	} {
+		plan, err := planner.Classify(sql, views)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		d := plan.Decisions[0]
+		assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+		assert.Equal(t, planner.ReasonDependentView, d.Reason, sql)
+		assert.Equal(t, []string{`"app"."active_users"`, `"reports"."emails"`}, d.DependentViews, sql)
+		assert.Equal(t, planner.RouteRefuse, plan.Route, sql)
+	}
+
+	for sql, reason := range map[string]planner.Reason{
+		"ALTER TABLE t RENAME COLUMN email TO mail":       planner.ReasonAppBreakingRename,
+		"ALTER TABLE t ALTER COLUMN email SET DEFAULT ''": planner.ReasonMetadataOnly,
+		"ALTER TABLE t DROP COLUMN note":                  planner.ReasonMetadataOnly,
+		"ALTER TABLE t ALTER COLUMN note TYPE text":       planner.ReasonBinaryCoercible,
+	} {
+		plan, err := planner.Classify(sql, views)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, reason, plan.Decisions[0].Reason, sql)
+		assert.Empty(t, plan.Decisions[0].DependentViews, sql)
+	}
+
+	plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN email TYPE varchar(100)",
+		planner.Facts{ColumnTypes: views.ColumnTypes})
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonBinaryCoercible, plan.Decisions[0].Reason)
+}
+
+// A DROP COLUMN ... CASCADE drops the views with the column, which the
+// server accepts, so it is not refused; it stays destructive. A view on a
+// table below counts against a recursive change and not against one under
+// ONLY, which stops at the table.
+func TestClassifyJudgesDependentViewsByWhatTheChangeReaches(t *testing.T) {
+	facts := planner.Facts{
+		ColumnTypes:       map[string]string{"email": "character varying(50)", "code": "text"},
+		DependentViews:    map[string][]string{"email": {`"app"."active_users"`}, "code": {`"app"."child_codes"`}},
+		OwnDependentViews: map[string][]string{"email": {`"app"."active_users"`}},
+	}
+	plan, err := planner.Classify("ALTER TABLE t DROP COLUMN email CASCADE", facts)
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 1)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+	assert.True(t, plan.Decisions[0].Destructive)
+	assert.Empty(t, plan.Decisions[0].DependentViews)
+
+	for sql, want := range map[string][]string{
+		"ALTER TABLE t DROP COLUMN email RESTRICT":         {`"app"."active_users"`},
+		"ALTER TABLE ONLY t DROP COLUMN email":             {`"app"."active_users"`},
+		"ALTER TABLE t DROP COLUMN code":                   {`"app"."child_codes"`},
+		"ALTER TABLE t ALTER COLUMN code TYPE varchar(10)": {`"app"."child_codes"`},
+	} {
+		plan, err := planner.Classify(sql, facts)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, planner.ReasonDependentView, plan.Decisions[0].Reason, sql)
+		assert.Equal(t, want, plan.Decisions[0].DependentViews, sql)
+	}
+
+	plan, err = planner.Classify("ALTER TABLE ONLY t DROP COLUMN code", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+}
+
 // facts mirrors a live table whose column types exercise both sides of the
 // binary-coercible rules.
 var facts = planner.Facts{ColumnTypes: map[string]string{
@@ -594,6 +679,7 @@ func TestReasonsVocabularyPinned(t *testing.T) {
 		planner.ReasonRelocation,
 		planner.ReasonPartitionParentLock,
 		planner.ReasonReplicaIdentity,
+		planner.ReasonDependentView,
 		planner.ReasonUnsupportedOperation,
 	}, planner.Reasons())
 }

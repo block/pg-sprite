@@ -34,9 +34,11 @@ type Facts struct {
 	TableExists *bool
 }
 
-// LiveFacts introspects the statement's target table for classifier facts,
-// and for an ALTER TABLE that adds columns, has the server prove whether
-// each one rewrites the table (preflight.AddColumnRewrites).
+// LiveFacts introspects the statement's target table for classifier facts.
+// For an ALTER TABLE it reads which views depend on each column
+// (preflight.ColumnDependentViews), and for one that adds columns, has the
+// server prove whether each one rewrites the table
+// (preflight.AddColumnRewrites).
 func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	st statement.Statement) (Facts, error) {
 	if st.Table() == "" {
@@ -58,6 +60,13 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	adds, err := addsColumn(st)
 	if err != nil {
 		return Facts{}, err
+	}
+	if st.Kind() == statement.KindAlterTable {
+		views, err := preflight.ColumnDependentViews(ctx, pool, ResolvedSchema(st), st.Table())
+		if err != nil {
+			return Facts{}, err
+		}
+		classifier.DependentViews, classifier.OwnDependentViews = views.Tree, views.Own
 	}
 	if adds {
 		if classifier.AddColumnProofs, err = preflight.AddColumnRewrites(ctx, pool, ResolvedSchema(st), st.Table(), st.SQL()); err != nil {

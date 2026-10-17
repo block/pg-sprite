@@ -94,6 +94,10 @@ type Op struct {
 	// operation stops at the table and does not recurse into the tables
 	// below it.
 	Only bool
+	// Cascade reports a DROP COLUMN ... CASCADE, which also drops the
+	// objects that depend on the column, views among them, where the
+	// default RESTRICT refuses while any exist.
+	Cascade bool
 	// Indexes are the unqualified names of the indexes an OpDropIndex
 	// drops, in statement order, so a classifier can match each one
 	// without parsing Name's display form, or the one index an
@@ -388,7 +392,7 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 	case pganalyze.AlterTableType_AT_AddColumn:
 		return addColumnOp(cmd.GetDef().GetColumnDef())
 	case pganalyze.AlterTableType_AT_DropColumn:
-		return Op{Kind: OpDropColumn, Column: cmd.GetName()}
+		return Op{Kind: OpDropColumn, Column: cmd.GetName(), Cascade: cmd.GetBehavior() == pganalyze.DropBehavior_DROP_CASCADE}
 	case pganalyze.AlterTableType_AT_AlterColumnType:
 		def := cmd.GetDef().GetColumnDef()
 		name, mods := typeRef(def.GetTypeName())

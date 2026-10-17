@@ -99,6 +99,11 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if facts.AddColumnProofs, err = addColumnProofs(ctx, pool, req.Schema, ds.Table(), changes); err != nil {
 			return plan.Report{}, err
 		}
+		views, err := preflight.ColumnDependentViews(ctx, pool, req.Schema, ds.Table())
+		if err != nil {
+			return plan.Report{}, err
+		}
+		facts.DependentViews, facts.OwnDependentViews = views.Tree, views.Own
 	}
 	report.TableExists = &tableExists
 	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {

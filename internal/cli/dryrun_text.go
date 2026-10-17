@@ -77,6 +77,9 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		w.diag(decisionSeverity(ps, d), string(d.Reason),
 			fmt.Sprintf("%s — %s", d.Operation, impactText(d.Reason)))
 		codes = appendCode(codes, string(d.Reason))
+		if len(d.DependentViews) > 0 {
+			w.diag("help", "", "drop or redefine those views first, then re-plan")
+		}
 	}
 	if ps.Destructive {
 		w.diag("warning", "destructive", "this change discards live data or structure")
@@ -290,6 +293,8 @@ func impactText(r planner.Reason) string {
 		return "takes a brief exclusive lock on the partitioned parent, briefly blocking access to every partition"
 	case planner.ReasonReplicaIdentity:
 		return "drops what the table's replica identity keys on; UPDATE and DELETE on the table fail while a publication publishes them"
+	case planner.ReasonDependentView:
+		return "changes a column a view reads; PostgreSQL refuses this until the view is dropped or redefined"
 	case planner.ReasonUnsupportedOperation:
 		return "pg-sprite does not recognize this operation and will not run it"
 	}
@@ -332,10 +337,26 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 			"SET EXPRESSION needs PostgreSQL 17 or later; before that, the only path is to drop and re-add the column, " +
 			"which also drops its indexes"
 	}
+	if d, ok := dependentViewRefusal(ps); ok {
+		return d.Operation + " changes a column read by " + strings.Join(d.DependentViews, ", ") +
+			", and PostgreSQL refuses to retype or drop a column while a view reads it"
+	}
 	if op := refusedOperation(ps); op != "" {
 		return "the planner knows no safe path for " + op
 	}
 	return "the planner knows no safe path for this statement"
+}
+
+// dependentViewRefusal returns the decision that refused the statement
+// because views read the column it changes, the one refusal whose views
+// the text names.
+func dependentViewRefusal(ps plan.Statement) (planner.Decision, bool) {
+	for _, d := range ps.Decisions {
+		if d.Route == planner.RouteRefuse && d.Reason == planner.ReasonDependentView {
+			return d, true
+		}
+	}
+	return planner.Decision{}, false
 }
 
 // refusedOperation names the first operation the planner refused — the

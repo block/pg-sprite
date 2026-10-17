@@ -18,8 +18,9 @@ import (
 // report whose version it does not understand instead of guessing at the
 // field semantics. Version 2 added the replica-identity planner reason to
 // the embedded Reasons vocabulary; version 3 added the
-// concurrent-in-transaction code.
-const FormatVersion = 3
+// concurrent-in-transaction code; version 4 added the dependent-view
+// planner reason to the embedded Reasons vocabulary.
+const FormatVersion = 4
 
 // Severity ranks a finding by what the engine would do with it.
 type Severity string
