@@ -492,17 +492,30 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 		// would prove.
 		return RouteCopyAndSwap, ReasonTypeRewrite, true
 	}
-	if binaryCoercible(parseTypeText(oldType), typeShape{name: normalizeTypeName(op.NewType), mods: op.NewTypeMods}) {
+	if binaryCoercible(parseTypeText(oldType), targetTypeShape(op)) {
 		return RouteNative, ReasonBinaryCoercible, false
 	}
 	return RouteCopyAndSwap, ReasonTypeRewrite, false
 }
 
-// typeShape is a normalized type family plus its modifiers, comparable
-// across the grammar's spelling and format_type's rendering.
+// typeShape is a normalized type family plus its modifiers and whether it
+// is an array of that family, comparable across the grammar's spelling and
+// format_type's rendering.
 type typeShape struct {
-	name string
-	mods []int32
+	name  string
+	mods  []int32
+	array bool
+}
+
+// targetTypeShape reads the statement's target type the way parseTypeText
+// reads the live one. A type qualified with a schema other than pg_catalog
+// is a user type that only shares a built-in's name, so it gets no shape
+// and matches no rule.
+func targetTypeShape(op statement.Op) typeShape {
+	if op.NewTypeSchema != "" {
+		return typeShape{}
+	}
+	return typeShape{name: normalizeTypeName(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}
 }
 
 // binaryCoercible reports whether changing old to new is a relabel
@@ -510,12 +523,23 @@ type typeShape struct {
 // reference table's rows, deliberately narrow: widening varchar, varchar to
 // text, and widening numeric precision at the same scale. Anything not
 // provably on this list is not coercible.
+//
+// The widening rules hold for scalar columns only. An array column's
+// elements are converted one by one, and PostgreSQL rewrites the table for
+// any element change, widenings included; only an unchanged element type
+// is a relabel.
 func binaryCoercible(old, next typeShape) bool {
 	if old.name == "" || next.name == "" {
 		return false
 	}
+	if old.array != next.array {
+		return false
+	}
 	if old.name == next.name && int32sEqual(old.mods, next.mods) {
 		return true // no-op relabel
+	}
+	if old.array {
+		return false
 	}
 	switch old.name {
 	case "varchar":
@@ -573,11 +597,14 @@ func normalizeTypeName(name string) string {
 }
 
 // parseTypeText splits a format_type rendering ("character varying(50)",
-// "numeric(10,2)", "text") into its normalized shape. This reads catalog
-// output, not SQL — format_type's rendering is stable.
+// "numeric(10,2)", "text", "character varying(50)[]") into its normalized
+// shape. This reads catalog output, not SQL — format_type's rendering is
+// stable, and it marks every array with one trailing "[]" whatever the
+// declared dimensions.
 func parseTypeText(s string) typeShape {
+	s, array := strings.CutSuffix(strings.TrimSpace(s), "[]")
 	name, rest, found := strings.Cut(s, "(")
-	shape := typeShape{name: normalizeTypeName(name)}
+	shape := typeShape{name: normalizeTypeName(name), array: array}
 	if !found {
 		return shape
 	}
