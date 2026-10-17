@@ -118,6 +118,34 @@ func TestMigrateDryRunUsesLiveFacts(t *testing.T) {
 	assert.Equal(t, 20, maxLen, "dry-run must not execute the change")
 }
 
+// timestamptz(3) -> timestamp(3) rewrites the table under ACCESS EXCLUSIVE,
+// so the dry-run must route it to copy-and-swap and never call it a
+// relabel. The live type is the real server's format_type rendering
+// ("timestamp(3) with time zone"), whose text after the modifiers is the only
+// thing that tells it apart from timestamp(3).
+func TestMigrateDryRunRoutesTimestamptzToTimestampAsRewrite(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.t (
+		id int PRIMARY KEY,
+		ts timestamptz(3)
+	)`, schema))
+	require.NoError(t, err)
+
+	report := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN ts TYPE timestamp(3)", schema))
+	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	st := report.Statements[0]
+	assert.Equal(t, planner.RouteCopyAndSwap, st.Route)
+	assert.Equal(t, router.BackendCopyAndSwap, st.Backend)
+	assert.Empty(t, st.ExecSQL)
+	require.Len(t, st.Decisions, 1)
+	assert.Equal(t, planner.ReasonTypeRewrite, st.Decisions[0].Reason)
+}
+
 // The dry-run advisory covers statements the execute gate refuses: a plain
 // CREATE INDEX comes back native with its concurrent rewrite, not created.
 func TestMigrateDryRunSuggestsConcurrentIndex(t *testing.T) {

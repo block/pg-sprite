@@ -152,6 +152,12 @@ type Op struct {
 	// NewTypeMods are the target type's modifiers (e.g. 50 in varchar(50),
 	// 12 and 2 in numeric(12,2)); empty when unconstrained.
 	NewTypeMods []int32
+	// NewTypeOpaque is true for OpAlterColumnType when the target names
+	// something NewType and NewTypeMods do not capture: array bounds
+	// (varchar(100)[]), a schema qualifier other than pg_catalog
+	// (myschema.text), or a COLLATE clause. A consumer comparing NewType to
+	// a live type must treat such a target as unverifiable.
+	NewTypeOpaque bool
 	// HasUsing is true for ALTER COLUMN TYPE ... USING <expr>, which always
 	// means a conversion, never a binary-coercible relabel.
 	HasUsing bool
@@ -357,10 +363,11 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 		def := cmd.GetDef().GetColumnDef()
 		name, mods := typeRef(def.GetTypeName())
 		return Op{
-			Kind:        OpAlterColumnType,
-			Column:      cmd.GetName(),
-			NewType:     name,
-			NewTypeMods: mods,
+			Kind:          OpAlterColumnType,
+			Column:        cmd.GetName(),
+			NewType:       name,
+			NewTypeMods:   mods,
+			NewTypeOpaque: typeBeyondNameAndMods(def),
 			// For ALTER COLUMN TYPE the grammar carries the USING
 			// expression in the column definition's raw default slot.
 			HasUsing: def.GetRawDefault() != nil,
@@ -518,6 +525,25 @@ func typeRef(tn *pganalyze.TypeName) (string, []int32) {
 		mods = append(mods, int32(m.GetAConst().GetIval().GetIval()))
 	}
 	return name, mods
+}
+
+// typeBeyondNameAndMods reports whether an ALTER COLUMN TYPE definition
+// carries type information typeRef drops: array bounds, a schema qualifier
+// other than pg_catalog, or a COLLATE clause.
+func typeBeyondNameAndMods(def *pganalyze.ColumnDef) bool {
+	tn := def.GetTypeName()
+	if len(tn.GetArrayBounds()) > 0 || def.GetCollClause() != nil {
+		return true
+	}
+	names := tn.GetNames()
+	switch len(names) {
+	case 0, 1:
+		return false
+	case 2:
+		return names[0].GetString_().GetSval() != "pg_catalog"
+	default:
+		return true
+	}
 }
 
 // isSerialType reports whether the grammar type name is one of the serial

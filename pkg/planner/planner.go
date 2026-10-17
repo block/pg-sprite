@@ -529,6 +529,9 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 		// would prove.
 		return RouteCopyAndSwap, ReasonTypeRewrite, true
 	}
+	if op.NewTypeOpaque {
+		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	}
 	if binaryCoercible(parseTypeText(oldType), typeShape{name: normalizeTypeName(op.NewType), mods: op.NewTypeMods}) {
 		return RouteNative, ReasonBinaryCoercible, false
 	}
@@ -611,15 +614,21 @@ func normalizeTypeName(name string) string {
 
 // parseTypeText splits a format_type rendering ("character varying(50)",
 // "numeric(10,2)", "text") into its normalized shape. This reads catalog
-// output, not SQL — format_type's rendering is stable.
+// output, not SQL — format_type's rendering is stable. Any rendering it does
+// not fully understand — an array suffix, text after the closing
+// parenthesis ("timestamp(3) with time zone"), unparseable modifiers —
+// yields the empty shape, which binaryCoercible never accepts.
 func parseTypeText(s string) typeShape {
+	if strings.Contains(s, "[") {
+		return typeShape{}
+	}
 	name, rest, found := strings.Cut(s, "(")
 	shape := typeShape{name: normalizeTypeName(name)}
 	if !found {
 		return shape
 	}
-	rest, _, found = strings.Cut(rest, ")")
-	if !found {
+	rest, trailing, found := strings.Cut(rest, ")")
+	if !found || trailing != "" {
 		return typeShape{}
 	}
 	for part := range strings.SplitSeq(rest, ",") {
