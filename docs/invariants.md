@@ -1047,8 +1047,8 @@ Every planned statement committing is not proof the table reached the desired sc
 concurrent session, an event trigger, or a planner gap can leave it still differing. On an
 existing table the run derives the plan again after its last commit and reports executed only
 when that plan is empty; otherwise the result is failed with `ErrNotConverged`, every
-statement it ran keeps its executed verdict, and the error names the statements a rerun would
-plan. A greenfield create proves its outcome through the names it claimed instead (ST-9 and
+statement it ran keeps its executed verdict, and the result's typed convergence status carries
+the plan a rerun would execute. A greenfield create proves its outcome through the names it claimed instead (ST-9 and
 the create-name checks), because deriving a plan needs `CREATE` on the database.
 *Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`). Tests:
 `TestRunDesired`, `TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,

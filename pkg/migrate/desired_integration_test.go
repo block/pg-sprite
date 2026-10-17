@@ -136,7 +136,7 @@ CREATE INDEX t_v_idx ON t (v);`
 		res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
-		assert.Equal(t, "converged: all 2 planned statements committed and a fresh plan is empty", res.Detail)
+		assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceVerified}, res.Convergence)
 		require.Len(t, res.Verdicts, len(res.Plan.Statements),
 			"every planned statement carries a verdict")
 		for _, v := range res.Verdicts {
@@ -161,6 +161,7 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
 		assert.Empty(t, res.Plan.Statements, "the converged table plans no statements")
 		assert.Empty(t, res.Verdicts)
+		assert.Nil(t, res.Convergence, "a run with nothing to execute has no convergence to check")
 	})
 
 	t.Run("creates the greenfield table and re-runs as a no-op", func(t *testing.T) {
@@ -682,8 +683,8 @@ CREATE INDEX t_v_idx ON t (v);`
 // commit is empty. Here an event trigger stands in for another session:
 // whenever the table is altered, it adds a column the desired file does
 // not declare, so every planned statement commits and the table still
-// differs. The run fails with ErrNotConverged, names what a rerun would
-// plan, and reports every statement it ran as executed, so the caller
+// differs. The run fails with ErrNotConverged, carries the plan a rerun
+// would execute as data, and reports every statement it ran as executed, so the caller
 // reads the failure as unproven convergence and not as a rollback.
 func TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
@@ -702,9 +703,12 @@ func TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit(t *testing.T)
 	req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, "CREATE TABLE t (id int PRIMARY KEY, v text);")}
 	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
 	require.ErrorIs(t, err, migrate.ErrNotConverged)
-	assert.Contains(t, err.Error(), "the table still differs from the desired schema; a rerun would plan: ALTER TABLE "+schema+".t DROP extra")
 	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
-	assert.Contains(t, res.Detail, "all 1 planned statements committed and remain in effect, but convergence is unproven")
+	require.NotNil(t, res.Convergence)
+	assert.Equal(t, migrate.ConvergenceRemaining, res.Convergence.Status)
+	require.NotNil(t, res.Convergence.Remaining)
+	require.Len(t, res.Convergence.Remaining.Statements, 1)
+	assert.Equal(t, "ALTER TABLE "+schema+".t DROP extra", res.Convergence.Remaining.Statements[0].SQL)
 	require.Len(t, res.Verdicts, 1)
 	assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
 	assert.True(t, hasColumn(t, pool, schema, "v"), "the planned statement stays committed")
@@ -714,8 +718,8 @@ func TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit(t *testing.T)
 // cannot prove convergence either way. Here an event trigger fails the
 // re-plan's scratch build once the run's ADD COLUMN has committed, so only
 // that second derivation fails. The run fails with the derivation's own
-// error rather than ErrNotConverged, and reports the committed statement
-// as executed and still in effect.
+// error rather than ErrNotConverged, reports convergence as unverifiable,
+// and reports the committed statement as executed and still in effect.
 func TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -742,9 +746,8 @@ func TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt(t *testing.T) {
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr)
 	assert.Equal(t, "injected re-plan failure", pgErr.Message)
-	assert.Contains(t, err.Error(), "derive the plan again to verify convergence")
 	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
-	assert.Contains(t, res.Detail, "all 1 planned statements committed and remain in effect, but convergence is unproven")
+	assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceUnverifiable}, res.Convergence)
 	require.Len(t, res.Verdicts, 1)
 	assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
 	assert.True(t, hasColumn(t, pool, schema, "v"), "the planned statement stays committed")

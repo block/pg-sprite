@@ -96,6 +96,37 @@ type DesiredResult struct {
 	// Detail is the human explanation: why refused, what committed, or
 	// that there was nothing to do.
 	Detail string `json:"detail,omitempty"`
+	// Convergence is what the plan derived again after the last commit
+	// found; present exactly when every planned statement for an existing
+	// table committed, so a failed result carrying it committed everything
+	// and a converged one proved it.
+	Convergence *Convergence `json:"convergence,omitempty"`
+}
+
+// ConvergenceStatus is what the plan derived again after a desired-state
+// run's last commit found.
+type ConvergenceStatus string
+
+const (
+	// ConvergenceVerified means the fresh plan is empty: the table matches
+	// the desired schema.
+	ConvergenceVerified ConvergenceStatus = "converged"
+	// ConvergenceRemaining means the fresh plan is not empty: the table
+	// still differs, and Convergence.Remaining is what a rerun would run.
+	ConvergenceRemaining ConvergenceStatus = "not-converged"
+	// ConvergenceUnverifiable means the fresh plan could not be derived, so
+	// the run can prove neither outcome.
+	ConvergenceUnverifiable ConvergenceStatus = "unverifiable"
+)
+
+// Convergence is the outcome of deriving the plan again after every
+// planned statement committed.
+type Convergence struct {
+	// Status is what the fresh plan found.
+	Status ConvergenceStatus `json:"status"`
+	// Remaining is the fresh plan, what a rerun would execute; present
+	// exactly when Status is not-converged.
+	Remaining *plan.Report `json:"remaining,omitempty"`
 }
 
 // refused returns r as a refused result carrying the classified refusal and
@@ -237,7 +268,11 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 			return result.refused(ref, committedPrefixDetail(i, len(report.Statements), "was refused at execution time")), nil
 		}
 	}
-	if err := verifyConverged(ctx, pool, req); err != nil {
+	// INV: ST-12 — executed only when a plan derived after the last commit
+	// is empty.
+	convergence, err := verifyConverged(ctx, pool, req)
+	result.Convergence = &convergence
+	if err != nil {
 		return result.unproven(len(report.Statements), err)
 	}
 	result.Outcome = verdict.OutcomeExecuted
@@ -246,25 +281,28 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 }
 
 // verifyConverged derives the plan again from the live table and returns
-// nil only when it is empty. Every statement committing is not proof the
-// table matches the desired schema: a statement can commit and leave the
-// table short of what the plan modeled, and another session can change the
-// table between the last commit and the end of the run. The fresh plan is
-// the same comparison the next run would make, so a run reports converged
-// only when its rerun would plan nothing.
-func verifyConverged(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest) error {
+// a nil error only when it is empty. Every statement committing is not
+// proof the table matches the desired schema: a statement can commit and
+// leave the table short of what the plan modeled, and another session can
+// change the table between the last commit and the end of the run. The
+// fresh plan is the same comparison the next run would make, so a run
+// reports converged only when its rerun would plan nothing. The returned
+// Convergence states the outcome either way.
+func verifyConverged(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest) (Convergence, error) {
+	// INV: ST-12 — the fresh plan is the convergence proof.
 	again, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
 	if err != nil {
-		return fmt.Errorf("derive the plan again to verify convergence: %w", err)
+		return Convergence{Status: ConvergenceUnverifiable}, fmt.Errorf("derive the plan again to verify convergence: %w", err)
 	}
 	if len(again.Statements) == 0 {
-		return nil
+		return Convergence{Status: ConvergenceVerified}, nil
 	}
 	remaining := make([]string, len(again.Statements))
 	for i, ps := range again.Statements {
 		remaining[i] = ps.SQL
 	}
-	return fmt.Errorf("%w; a rerun would plan: %s", ErrNotConverged, strings.Join(remaining, "; "))
+	return Convergence{Status: ConvergenceRemaining, Remaining: &again},
+		fmt.Errorf("%w; a rerun would plan: %s", ErrNotConverged, strings.Join(remaining, "; "))
 }
 
 // unproven returns r as the failed result of a run whose n planned
