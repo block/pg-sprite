@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -83,14 +84,30 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 		return verdict.Verdict{}, err
 	}
 	result, err := runner.Run(ctx, pool, target, st)
+	return copySwapOutcome(st, opts.CopySwap.Quiesced, result, err)
+}
+
+// copySwapOutcome folds what the Runner returned into Run's contract. A
+// run whose row reached done is executed, whatever error rides alongside:
+// the Runner returns its Result with an error only when the change is
+// complete and recorded and the release of its lock session failed, and
+// a session left behind is a cleanup fault, not a failed change, so the
+// verdict says what the engine tables say and names the session in its
+// detail for the operator to find. Any other error is folded by
+// copySwapRunVerdict.
+func copySwapOutcome(st statement.Statement, quiesced bool, result schemachange.Result, err error) (verdict.Verdict, error) {
+	if err != nil && result.Checkpoint.Phase != checkpoint.PhaseDone {
+		return copySwapRunVerdict(st, quiesced, err)
+	}
+	detail := copySwapDetail(result, quiesced)
 	if err != nil {
-		return copySwapRunVerdict(st, err)
+		detail += "; the run's lock session was not released: " + err.Error()
 	}
 	return verdict.Verdict{
 		Outcome:   verdict.OutcomeExecutedViaCopyAndSwap,
 		Statement: st.SQL(),
 		Table:     qualified(st),
-		Detail:    copySwapDetail(result),
+		Detail:    detail,
 	}, nil
 }
 
@@ -118,9 +135,10 @@ func copySwapPreflightVerdict(st statement.Statement, err error) (verdict.Verdic
 // A shadow refusal is a refused verdict carrying the shadow's own cause: the
 // run never started, or stopped at a fact about the table that a retry
 // cannot change. Every other error is a failure with the error alongside;
-// the checkpoint row stays at its last save, and the next run over the same
-// statement resumes it.
-func copySwapRunVerdict(st statement.Statement, err error) (verdict.Verdict, error) {
+// the checkpoint row stays at its last save, and the detail says what a
+// rerun does with it, which depends on the error and on which hold the
+// run keeps on the source while it is stopped.
+func copySwapRunVerdict(st statement.Statement, quiesced bool, err error) (verdict.Verdict, error) {
 	if cause := schemachange.RefusalCauseOf(err); cause != "" {
 		r, ok := shadowRefusal(cause)
 		if !ok {
@@ -134,9 +152,32 @@ func copySwapRunVerdict(st statement.Statement, err error) (verdict.Verdict, err
 		Code:      string(copySwapFailureCode(err)),
 		Statement: st.SQL(),
 		Table:     qualified(st),
-		Detail: "the copy-and-swap run stopped: " + err.Error() +
-			"; its checkpoint row remains, and running the same statement again resumes from it",
+		Detail:    "the copy-and-swap run stopped: " + err.Error() + "; " + copySwapStoppedRemedy(quiesced, err),
 	}, err
+}
+
+// copySwapStoppedRemedy says what the operator does with a stopped run. A
+// divergence is the one stop a rerun cannot clear: the row stands in
+// verifying, so the next run verifies the same copy against the same
+// source and diverges again; the run has to be abandoned first. Every
+// other stop is resumed by running the statement again. Either way the
+// detail names the hold the stopped run keeps on the source, since that
+// is what the operator is paying for in the meantime: the write fence of a
+// quiesced run, or the replication slot of a live run, which pins WAL on
+// the server until it is dropped.
+func copySwapStoppedRemedy(quiesced bool, err error) string {
+	hold := "its replication slot stays and pins WAL on the server"
+	release := "drop the replication slot"
+	if quiesced {
+		hold = "the source stays fenced against writes"
+		release = "take the write fence off the source"
+	}
+	var divergence *checksum.DivergenceError
+	if errors.As(err, &divergence) {
+		return "the shadow did not match the source, so running the same statement again would verify the same copy and stop here again; " +
+			"abandon the run — drop the shadow, " + release + ", and delete the checkpoint row — then run the statement again"
+	}
+	return "any checkpoint row it saved remains and " + hold + " until the same statement is run again, which resumes from the row"
 }
 
 // copySwapFailureCode names the executor outcome code for an error out of
@@ -166,8 +207,10 @@ func refusedVerdict(st statement.Statement, r verdict.Refusal, detail string) ve
 
 // copySwapDetail renders what the run proved, for the human reading the
 // verdict: how much the verification pass covered, whether the retained
-// source is gone, and whether the run had to reconcile a lost slot first.
-func copySwapDetail(result schemachange.Result) string {
+// source is gone, whether the run had to reconcile a lost slot first, and
+// — since the outcome's exit code stands for online-safe execution — that
+// a quiesced run fenced the source's writes for its length.
+func copySwapDetail(result schemachange.Result, quiesced bool) string {
 	s := fmt.Sprintf("verified %d rows in %d chunks", result.Verification.Rows, result.Verification.Chunks)
 	if result.Verification.Settled > 0 {
 		s += fmt.Sprintf(" (%d settled against the stream)", result.Verification.Settled)
@@ -179,6 +222,9 @@ func copySwapDetail(result schemachange.Result) string {
 	}
 	if result.Reconciled {
 		s += "; the run reconciled a lost replication slot before catching up"
+	}
+	if quiesced {
+		s += "; the table was quiesced: writes were fenced for the length of the run"
 	}
 	return s
 }

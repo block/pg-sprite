@@ -12,6 +12,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -136,6 +137,38 @@ func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
 			assert.Contains(t, err.Error(), "cannot be combined with --dry-run")
 		})
 	}
+}
+
+// The disk-headroom refusal names the flag that supplies the measurement
+// only when no measurement was supplied: the library's wording says the
+// space was not measured, and this front door owns the spelling of how to
+// measure it. A refusal against a size the operator did pass, and every
+// other refusal, pass through untouched.
+func TestDiskHeadroomRefusalNamesTheFlagWhenNoneWasPassed(t *testing.T) {
+	refused := verdict.Verdict{
+		Outcome: verdict.OutcomeRefused,
+		Reason:  verdict.ReasonCopyAndSwapRefused,
+		Cause:   verdict.Cause(preflight.CopySwapCauseDiskHeadroom),
+		Detail:  "free disk space was not measured (0 bytes reported)",
+	}
+
+	t.Run("no --free-disk appends the flag", func(t *testing.T) {
+		got := parseMigrate(t).cliDiskHeadroomIdiom(refused)
+		assert.Equal(t, refused.Detail+"; pass --free-disk SIZE with the free space on the volume the table lives on", got.Detail)
+		assert.Equal(t, refused.Cause, got.Cause, "only the detail changes")
+	})
+
+	t.Run("a passed --free-disk leaves the refusal as the library put it", func(t *testing.T) {
+		got := parseMigrate(t, "--free-disk", "1GiB").cliDiskHeadroomIdiom(refused)
+		assert.Equal(t, refused, got)
+	})
+
+	t.Run("another cause passes through", func(t *testing.T) {
+		other := refused
+		other.Cause = verdict.Cause(preflight.CopySwapCauseUnlogged)
+		got := parseMigrate(t).cliDiskHeadroomIdiom(other)
+		assert.Equal(t, other, got)
+	})
 }
 
 func TestRetryFlagsWireIntoRetryPolicy(t *testing.T) {
