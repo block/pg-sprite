@@ -120,6 +120,9 @@ refusal — never a silently wrong or incomplete result:
   `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a relation name the desired
   set claims twice — refuse at plan time, and the same rules re-check at
   apply.
+- **A desired file that names a live parent** with `PARTITION OF` or
+  `INHERITS` refuses before planning builds anything, since the scratch
+  build would lock that parent.
 
 The codebase is partitioned into a small safety-critical core and a
 periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the

@@ -67,7 +67,24 @@ func IntrospectTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model, 
 // runs under the caller's session search_path (ListManagedTables) qualifies
 // everything instead.
 func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model, error) {
-	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(schema, "public")); err != nil {
+	return introspectOnPath(ctx, tx, schema, table, searchPathFor(schema))
+}
+
+// searchPathFor is the search_path a table in schema is introspected under:
+// the schema itself, then public, where extension types live.
+func searchPathFor(schema string) []string {
+	if schema == "public" {
+		return []string{schema}
+	}
+	return []string{schema, "public"}
+}
+
+// introspectOnPath introspects schema.table with the transaction-local
+// search_path set to path, which must start with schema. A scratch build
+// passes its own path so it deparses a reference to the target schema the
+// way the live introspection does: unqualified.
+func introspectOnPath(ctx context.Context, tx pgx.Tx, schema, table string, path []string) (Model, error) {
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(path...)); err != nil {
 		return Model{}, fmt.Errorf("set introspection search_path: %w", err)
 	}
 
