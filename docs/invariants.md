@@ -362,7 +362,9 @@ not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary ob
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
 *Enforced:* `pkg/dbconn` (session hook, the path builders, and the test that keeps them the only
 `search_path` writers under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
-`pkg/progress`, `pkg/schemadiff`, and `pkg/checksum` (the column-type read, the relation check,
+`pkg/progress`, `pkg/schemadiff`, `pkg/schemachange` (every catalog read, and the write fence
+function's `format`, which runs in the writer's session under the writer's own `search_path`;
+decoy `pg_backend_pid`, `pg_stat_activity`, and `format` tests), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,

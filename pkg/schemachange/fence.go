@@ -32,13 +32,16 @@ var ErrSourceNotFound = errors.New("source table not found")
 // function refuses every statement that calls it, naming the table from
 // the trigger context so the same function serves every fenced table.
 // It is created once per database, as the engine role, and owned by it.
+// The body runs in the writer's session under whatever search_path the
+// writer has, so every name in it is qualified with pg_catalog.
+// INV: CO-9
 const writeFenceFunctionSQL = `
 CREATE OR REPLACE FUNCTION ` + preflight.EngineSchema + `.` + WriteFenceTrigger + `() RETURNS trigger
 LANGUAGE plpgsql AS $pgsprite$
 BEGIN
 	RAISE EXCEPTION USING
 		ERRCODE = '` + WriteFenceSQLState + `',
-		MESSAGE = format('%I.%I is quiesced for a copy-and-swap schema change; the write is refused', TG_TABLE_SCHEMA, TG_TABLE_NAME),
+		MESSAGE = pg_catalog.format('%I.%I is quiesced for a copy-and-swap schema change; the write is refused', TG_TABLE_SCHEMA, TG_TABLE_NAME),
 		HINT = 'Wait for the schema change to complete, or stop it and drop its write fence.';
 END
 $pgsprite$`

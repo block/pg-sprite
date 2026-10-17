@@ -24,11 +24,12 @@ type ColumnStatisticsTarget struct {
 // servers whose catalog made the column nullable; both read as "default"
 // and are left out.
 func readColumnStatisticsTargets(ctx context.Context, tx pgx.Tx, oid uint32) ([]ColumnStatisticsTarget, error) {
+	// INV: CO-9
 	rows, err := tx.Query(ctx, `
 		SELECT a.attname, a.attstattarget::int
-		FROM pg_attribute a
-		WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
-		  AND COALESCE(a.attstattarget, -1) <> -1
+		FROM pg_catalog.pg_attribute a
+		WHERE a.attrelid OPERATOR(pg_catalog.=) $1 AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped
+		  AND COALESCE(a.attstattarget, -1) OPERATOR(pg_catalog.<>) -1
 		ORDER BY a.attnum`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("read column statistics targets: %w", err)
