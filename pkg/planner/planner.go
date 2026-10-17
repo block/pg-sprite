@@ -544,15 +544,18 @@ type typeShape struct {
 	array bool
 }
 
-// targetTypeShape reads the statement's target type the way parseTypeText
-// reads the live one. A type qualified with a schema other than pg_catalog
-// is a user type that only shares a built-in's name, so it gets no shape
-// and matches no rule.
+// targetTypeShape reads the statement's target type into the shape
+// parseTypeText gives the live one. A type qualified with a schema other
+// than pg_catalog is a user type that only shares a built-in's name, so it
+// gets no shape and matches no rule. The name is taken as the parser left
+// it: the grammar already spells every built-in the rules know by its
+// catalog name (varchar, numeric, timestamptz), so a target named
+// "decimal" or "character varying" was quoted and names a user type.
 func targetTypeShape(op statement.Op) typeShape {
 	if op.NewTypeSchema != "" {
 		return typeShape{}
 	}
-	return typeShape{name: normalizeTypeName(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}
+	return typeShape{name: strings.TrimSpace(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}
 }
 
 // binaryCoercible reports whether changing old to new is a relabel
@@ -617,43 +620,51 @@ func int32sEqual(a, b []int32) bool {
 	return true
 }
 
-// normalizeTypeName maps spelling variants of the families binaryCoercible
-// knows onto one name. Unknown names pass through unchanged (and will never
-// match a rule).
+// catalogTypeName maps format_type's SQL-standard spelling of a built-in
+// onto the catalog name the grammar gives the same type, so a live type and
+// a target type compare by name. Unknown names pass through unchanged (and
+// will never match a rule).
 //
-// The match is case-sensitive on purpose. Both inputs are already in the
-// server's case: the parser folds an unquoted identifier to lower case, and
-// format_type renders the catalog's name. A name that still carries upper
-// case was quoted, so "TEXT" names a user type, not the built-in text, and
-// folding it would let that type pass as the built-in.
-func normalizeTypeName(name string) string {
+// The match is case-sensitive on purpose. format_type renders the catalog's
+// name, and a name that still carries upper case was quoted, so "TEXT"
+// names a user type, not the built-in text, and folding it would let that
+// type pass as the built-in.
+func catalogTypeName(name string) string {
 	switch name = strings.TrimSpace(name); name {
-	case "varchar", "character varying":
+	case "character varying":
 		return "varchar"
-	case "numeric", "decimal":
-		return "numeric"
+	case "timestamp without time zone":
+		return "timestamp"
+	case "timestamp with time zone":
+		return "timestamptz"
+	case "time without time zone":
+		return "time"
+	case "time with time zone":
+		return "timetz"
 	default:
 		return name
 	}
 }
 
 // parseTypeText splits a format_type rendering ("character varying(50)",
-// "numeric(10,2)", "text", "character varying(50)[]") into its normalized
-// shape. This reads catalog output, not SQL — format_type's rendering is
-// stable, and it marks every array with one trailing "[]" whatever the
-// declared dimensions.
+// "numeric(10,2)", "text", "character varying(50)[]",
+// "timestamp(3) with time zone") into its normalized shape. This reads
+// catalog output, not SQL — format_type's rendering is stable, and it marks
+// every array with one trailing "[]" whatever the declared dimensions. The
+// modifiers can sit inside the name, so whatever follows them is part of
+// the name: "timestamp(3) with time zone" is timestamptz, not timestamp.
 func parseTypeText(s string) typeShape {
 	s, array := strings.CutSuffix(strings.TrimSpace(s), "[]")
 	name, rest, found := strings.Cut(s, "(")
-	shape := typeShape{name: normalizeTypeName(name), array: array}
 	if !found {
-		return shape
+		return typeShape{name: catalogTypeName(name), array: array}
 	}
-	rest, _, found = strings.Cut(rest, ")")
+	mods, suffix, found := strings.Cut(rest, ")")
 	if !found {
 		return typeShape{}
 	}
-	for part := range strings.SplitSeq(rest, ",") {
+	shape := typeShape{name: catalogTypeName(name + suffix), array: array}
+	for part := range strings.SplitSeq(mods, ",") {
 		n, err := strconv.ParseInt(strings.TrimSpace(part), 10, 32)
 		if err != nil {
 			return typeShape{}

@@ -29,12 +29,17 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	schema := testutil.NewSchema(t, pool)
-	// User types that share the built-in text's name, one in lower case
-	// and one quoted in upper case, each checking every value, so
-	// converting to either rewrites the table.
-	for _, domain := range []string{"text", `"TEXT"`} {
-		_, err = pool.Exec(t.Context(), fmt.Sprintf(
-			"CREATE DOMAIN %s.%s AS pg_catalog.text CHECK (VALUE <> '')", schema, domain))
+	// User types that share a built-in's name, each checking every value,
+	// so converting to any of them rewrites the table: text in lower case
+	// and quoted in upper case, and the quoted SQL-standard spellings of
+	// numeric and varchar, which the grammar never emits for the built-ins.
+	for _, domain := range []string{
+		"CREATE DOMAIN %s.text AS pg_catalog.text CHECK (VALUE <> '')",
+		`CREATE DOMAIN %s."TEXT" AS pg_catalog.text CHECK (VALUE <> '')`,
+		`CREATE DOMAIN %s."decimal" AS pg_catalog.numeric CHECK (VALUE > 0)`,
+		`CREATE DOMAIN %s."character varying" AS pg_catalog.varchar CHECK (VALUE <> '')`,
+	} {
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(domain, schema))
 		require.NoError(t, err)
 	}
 	// The statements run with the schema on the search path, so an
@@ -44,6 +49,10 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(conn.Release)
 	_, err = conn.Exec(t.Context(), "SET search_path = "+schema)
+	require.NoError(t, err)
+	// Converting timestamptz to timestamp rewrites the table only when the
+	// session's time zone is not UTC.
+	_, err = conn.Exec(t.Context(), "SET TimeZone = 'America/New_York'")
 	require.NoError(t, err)
 
 	// Each case names its table as %[1]s and, where a type is qualified by
@@ -154,6 +163,53 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 			name:   "unchanged varchar array with more dimensions",
 			create: "CREATE TABLE %[1]s (c varchar(50)[])",
 			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE varchar(50)[][]",
+			route:  planner.RouteNative,
+		},
+		{
+			name:     "numeric to a visible user type quoted as decimal",
+			create:   "CREATE TABLE %[1]s (c numeric(10,2))",
+			alter:    `ALTER TABLE %[1]s ALTER COLUMN c TYPE "decimal"`,
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "varchar to a visible user type quoted as character varying",
+			create:   "CREATE TABLE %[1]s (c varchar(50))",
+			alter:    `ALTER TABLE %[1]s ALTER COLUMN c TYPE "character varying"`,
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "timestamptz with precision to timestamp",
+			create:   "CREATE TABLE %[1]s (c timestamptz(3))",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamp(3)",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "timestamptz array with precision to a timestamp array",
+			create:   "CREATE TABLE %[1]s (c timestamptz(3)[])",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamp(3)[]",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "timetz with precision to time",
+			create:   "CREATE TABLE %[1]s (c timetz(3))",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE time(3)",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:   "unchanged timestamptz with precision",
+			create: "CREATE TABLE %[1]s (c timestamptz(3))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamptz(3)",
+			route:  planner.RouteNative,
+		},
+		{
+			name:   "unchanged timestamp with precision",
+			create: "CREATE TABLE %[1]s (c timestamp(3))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE timestamp(3)",
 			route:  planner.RouteNative,
 		},
 		{
