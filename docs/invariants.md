@@ -116,7 +116,15 @@ the same recopy commits with no reread — the policy for a source that is writt
 pass runs, where a fresh read would refuse a chunk the recopy itself made right; the stream
 carries that write, and the next pass, not this one, is the proof (no-policy,
 abort-leaves-shadow-alone, repairs-every-chunk, moved-unique-value,
-later-repair-fails, and recopy-tolerates-a-source-write-inside-the-pass tests). *Source:* Spirit AGENTS.md
+later-repair-fails, and recopy-tolerates-a-source-write-inside-the-pass tests). Under the
+stream (`CheckLive` under `repair`) the one recopy transaction is kept apart from the stream's
+own writes: the pass holds the catch-up's flushes off the shadow in Go before the transaction
+asks for `SHARE MODE` and gives them back only after it commits, on every path
+(`checksum.LiveOptions.Flushes`, a `FlushGate`, required under `repair`; `applier.Catchup.Pause`
+is the hold), so no flush interleaves with the delete and the copy
+(`TestCheckLiveRepairHoldsTheCatchupsFlushesForTheRecopy`,
+`TestCheckLiveRepairHoldBracketsTheRecopyTransaction`,
+`TestCheckLiveRepairResumesTheFlushesWhenTheRecopyFails`). *Source:* Spirit AGENTS.md
 (block/spirit#994 policy) — maps directly onto our failover-reconcile design.
 
 ### CO-4 — The copy/apply ordering invariants

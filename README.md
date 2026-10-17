@@ -87,7 +87,10 @@ refusal — never a silently wrong or incomplete result:
   tooling, then state it in the file. A serial cannot state one, so export
   refuses a serial whose sequence was declared otherwise.
 - **Partitioned tables** support in-place statement changes, but cannot be
-  expressed in or exported to desired files.
+  expressed in or exported to desired files, and `migrate` refuses
+  `ATTACH PARTITION` and `DETACH PARTITION`.
+- **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
+  `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.

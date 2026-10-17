@@ -21,7 +21,8 @@
 // reads are judged together — equal or the shadow at the earlier source
 // state is settled, movement on either side is another reread up to a
 // stated bound, stillness on both sides is the divergence; its repair
-// fences the stream's flushes out of the shadow while it recopies and
+// holds the catch-up's flushes off the shadow through the catch-up's own
+// gate while it recopies, with SHARE MODE against any other writer, and
 // settles each repaired chunk the same way. Only a pass that found no
 // difference and repaired nothing mints a CleanWatermark, and a
 // VerifiedShadow when its watermark is complete; the proofs' constructors
