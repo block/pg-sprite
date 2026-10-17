@@ -54,8 +54,8 @@ func TestHoldKeepsTheImageUntilTheStreamPassesTheRead(t *testing.T) {
 	require.Equal(t, []int64{8}, keys(batch.Entries))
 	assert.Equal(t, 0, batch.Held)
 	assert.Equal(t, []decode.Column{
-		{Name: "label", Value: "a", Present: true},
-		{Name: "blob", Value: shadowForm{value: "from the row"}, Present: true},
+		decode.PresentColumn("label", "a"),
+		decode.PresentColumn("blob", shadowForm{value: "from the row"}),
 	}, batch.Entries[0].Columns, "the completion is kept as read from the shadow row")
 	assert.Empty(t, batch.CompleteFirst(), "the image is whole; nothing to read before writing")
 }
@@ -100,7 +100,7 @@ func TestHoldRefusesAKeyTheBufferHolds(t *testing.T) {
 	assert.Contains(t, err.Error(), "(CO-5): hold key 8")
 	assert.Equal(t, 1, b.Len())
 	assert.Equal(t, 0, b.Held())
-	assert.Equal(t, []decode.Column{{Name: "label", Value: "newer", Present: true}}, entry(t, b, 8).Columns)
+	assert.Equal(t, []decode.Column{decode.PresentColumn("label", "newer")}, entry(t, b, 8).Columns)
 }
 
 // A plain UPDATE of the held key keeps the completion pending and its own
@@ -120,9 +120,9 @@ func TestReleaseFillsOnlyTheMarkersAnUpdateLeft(t *testing.T) {
 	assert.Equal(t, 1, b.Held(), "an update of the key keeps the completion pending")
 	assert.Equal(t, 1, b.Release(500))
 	assert.Equal(t, []decode.Column{
-		{Name: "label", Value: "b", Present: true},
-		{Name: "blob", Value: "newer blob", Present: true},
-		{Name: "doc", Value: shadowForm{value: "read doc"}, Present: true},
+		decode.PresentColumn("label", "b"),
+		decode.PresentColumn("blob", "newer blob"),
+		decode.PresentColumn("doc", shadowForm{value: "read doc"}),
 	}, entry(t, b, 8).Columns)
 }
 
@@ -189,13 +189,13 @@ func TestHoldCopiesTheImageAndItsCompletion(t *testing.T) {
 	h := held(t, b, 500, "from the row")
 	require.NoError(t, b.Hold([]HeldImage{h}))
 
-	h.Entry.Columns[0].Value = "changed by the caller"
-	h.Completed[0].Value = "changed by the caller"
+	h.Entry.Columns[0] = col("label", "changed by the caller")
+	h.Completed[0] = col("blob", "changed by the caller")
 	require.Equal(t, 1, b.Release(500))
 
 	assert.Equal(t, []decode.Column{
-		{Name: "label", Value: "a", Present: true},
-		{Name: "blob", Value: shadowForm{value: "from the row"}, Present: true},
+		decode.PresentColumn("label", "a"),
+		decode.PresentColumn("blob", shadowForm{value: "from the row"}),
 	}, entry(t, b, 8).Columns)
 }
 
@@ -224,6 +224,6 @@ func TestHoldKeepsACompletionInTheFormOfTheRowItWasReadFrom(t *testing.T) {
 
 	require.Equal(t, 2, b.Release(300))
 
-	assert.Equal(t, []decode.Column{{Name: "blob", Value: shadowForm{value: "from the shadow"}, Present: true}}, entry(t, b, 2).Columns)
-	assert.Equal(t, []decode.Column{{Name: "blob", Value: "from the source", Present: true}}, entry(t, b, 4).Columns)
+	assert.Equal(t, []decode.Column{decode.PresentColumn("blob", shadowForm{value: "from the shadow"})}, entry(t, b, 2).Columns)
+	assert.Equal(t, []decode.Column{decode.PresentColumn("blob", "from the source")}, entry(t, b, 4).Columns)
 }
