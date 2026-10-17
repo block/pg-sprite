@@ -382,7 +382,12 @@ widened copy trusts the source schema and `public` not to gain, during the run, 
 operator that fits an unqualified name in the expression better than the one the build
 resolved; nothing records what the build resolved, and a copy a concurrent `CREATE FUNCTION`
 redirected reads as divergence at verification, not before. The copier's cuts and
-measurements, and every conversion-free copy, pass, and flush, keep the catalog alone. *Test
+measurements, and every conversion-free copy, pass, and flush, keep the catalog alone.
+`pkg/migrate` qualifies both catalog reads it makes on the caller's session — the unqualified-target
+resolve and the accept-blocking acknowledgement's locked-table lookup — with `pg_catalog.` on every
+function, relation, type, and operator (a planted `oid = regclass` operator on a path that lists the
+catalog implicitly does not change either answer); `to_regclass` still resolves the bare name on
+the session's path, which is the caller's intent. *Test
 obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with decoy catalog relations
 and functions in the schema) yields the same answer as
 the default path, per read site and per pooled session.
