@@ -12,6 +12,13 @@
 // and the core executors re-verify their own preconditions.
 package schemadiff
 
+import (
+	"math"
+	"slices"
+
+	"github.com/block/pg-sprite/pkg/statement"
+)
+
 // Identity is a column's identity kind, as pg_attribute.attidentity spells
 // it.
 type Identity string
@@ -63,6 +70,80 @@ type Column struct {
 	Identity Identity
 	// Generated reports GENERATED ALWAYS AS (...) STORED.
 	Generated bool
+	// Virtual reports GENERATED ALWAYS AS (...) VIRTUAL, which exists from
+	// PostgreSQL 18. The desired-file grammar predates it, so only a live
+	// table carries one, and the model records it only to refuse: export
+	// cannot write it back and a diff cannot converge it. Omitted from JSON
+	// when false, so a model without virtual columns digests the same as it
+	// did before the field existed.
+	Virtual bool `json:",omitempty"`
+	// Sequence is the declaration of the sequence the column owns, an
+	// identity's or a serial's, when it differs from what declaring the
+	// column fresh would create; nil when it does not, or when the column
+	// owns no sequence. Omitted from JSON when nil, so a model whose
+	// sequences are all declared at their defaults digests the same as one
+	// without the field; a declared sequence changes the digest, which is
+	// why the checkpoint format moved with it.
+	Sequence *SequenceOptions `json:",omitempty"`
+	// MultipleOwnedSequences reports that the column's default calls more
+	// than one sequence the column owns. The model carries one sequence
+	// per column, so Sequence is nil for such a column and the renderer
+	// refuses it (ErrMultipleOwnedSequences) rather than export one of
+	// them. Not part of the table's shape, so it never reaches a digest.
+	MultipleOwnedSequences bool `json:"-"`
+}
+
+// SequenceOptions are the declared parameters of a column-owned sequence
+// (pg_sequence). The counter's position is not among them: it is data,
+// not schema.
+type SequenceOptions struct {
+	// Type is the sequence's data type (format_type), e.g. "bigint".
+	Type string
+	// Start is START WITH.
+	Start int64
+	// Increment is INCREMENT BY.
+	Increment int64
+	// Min is MINVALUE.
+	Min int64
+	// Max is MAXVALUE.
+	Max int64
+	// Cache is CACHE.
+	Cache int64
+	// Cycle reports CYCLE.
+	Cycle bool
+}
+
+// defaultSequenceOptions returns what declaring a column of the given
+// integer type as an identity or serial creates: an ascending sequence of
+// the column's type from 1 to the type's maximum, uncached, not cycling.
+// The second result is false for a type no sequence can back.
+func defaultSequenceOptions(columnType string) (SequenceOptions, bool) {
+	maxValue, ok := map[string]int64{
+		"smallint": math.MaxInt16,
+		"integer":  math.MaxInt32,
+		"bigint":   math.MaxInt64,
+	}[columnType]
+	if !ok {
+		return SequenceOptions{}, false
+	}
+	return SequenceOptions{Type: columnType, Start: 1, Increment: 1, Min: 1, Max: maxValue, Cache: 1}, true
+}
+
+// declaredSequence returns the options worth recording for a column-owned
+// sequence: nil when they are exactly what declaring the column fresh
+// creates, so the model records only a declaration a file would have to
+// state.
+func declaredSequence(columnType string, opts SequenceOptions) *SequenceOptions {
+	if def, ok := defaultSequenceOptions(columnType); ok && def == opts {
+		return nil
+	}
+	return &opts
+}
+
+// IsGenerated reports a generated column of either kind: its Default is the
+// generation expression, never a column default.
+func (c Column) IsGenerated() bool {
+	return c.Generated || c.Virtual
 }
 
 // Constraint is one table constraint: its name plus the server-decompiled
@@ -76,6 +157,19 @@ type Constraint struct {
 	// from JSON when false, so a model without foreign keys digests the
 	// same as it did before the field existed.
 	ForeignKey bool `json:",omitempty"`
+	// Primary reports a PRIMARY KEY constraint (contype 'p').
+	Primary bool `json:"-"`
+	// IndexDef is the CREATE UNIQUE INDEX statement of the index a primary
+	// key or unique constraint owns, unqualified like Index.Def, and empty
+	// for every other constraint. Only a desired model carries it: the diff
+	// compares a desired key's with a live index of the constraint's name to
+	// adopt that index instead of rebuilding it.
+	IndexDef string `json:"-"`
+	// Deferrable reports a constraint declared DEFERRABLE.
+	Deferrable bool `json:"-"`
+	// InitiallyDeferred reports a deferrable constraint declared INITIALLY
+	// DEFERRED.
+	InitiallyDeferred bool `json:"-"`
 }
 
 // Index is one non-constraint index: its name plus the server-decompiled
@@ -95,6 +189,53 @@ type Index struct {
 	// desired-side index, materialized on the scratch schema, is never
 	// invalid, so the zero value is the delivered state.
 	Invalid bool
+}
+
+// ReplicaIdentityKeys is what a table's REPLICA IDENTITY USING INDEX
+// is built on, across the table and every table below it, partitions and
+// inheritance children alike. Logical decoding
+// keys UPDATE and DELETE on that index, and PostgreSQL keeps the setting
+// when the index is dropped, so the table is left with no usable identity
+// and every UPDATE and DELETE on it fails while a publication publishes
+// them. The zero value means no table in the tree selects an index.
+type ReplicaIdentityKeys struct {
+	// Indexes are the indexes on this table whose drop removes a replica
+	// identity index: the table's own, or a partitioned index that a
+	// partition's identity index is attached under. Name-sorted.
+	Indexes []string
+	// Constraints are the primary key or unique constraints on this table
+	// that own one of Indexes. Name-sorted.
+	Constraints []string
+	// Columns are the columns every replica identity index in the tree
+	// covers, INCLUDE columns too. Dropping one drops each index built on
+	// it, those of the tables below included. Name-sorted.
+	Columns []string // OwnColumns are the columns this table's own replica identity index
+	// covers, INCLUDE columns too: what a DROP COLUMN under ALTER TABLE
+	// ONLY can take, since it leaves the column in the tables below.
+	// Name-sorted.
+	OwnColumns []string
+}
+
+// DroppedBy reports whether op drops a replica identity index of the table
+// or of a table below it: an index it is, or is attached under, the
+// constraint that owns one, or a column one is built on, which takes the
+// index with it. A column dropped under ONLY stays in the tables below, so
+// only the table's own identity index counts for it. The planner refuses such an operation, and the executor
+// asks again under the table's lock before a native drop runs.
+func (k ReplicaIdentityKeys) DroppedBy(op statement.Op) bool {
+	switch op.Kind {
+	case statement.OpDropIndex:
+		return slices.ContainsFunc(op.Indexes, func(name string) bool { return slices.Contains(k.Indexes, name) })
+	case statement.OpDropConstraint:
+		return slices.Contains(k.Constraints, op.Name)
+	case statement.OpDropColumn:
+		if op.Only {
+			return slices.Contains(k.OwnColumns, op.Column)
+		}
+		return slices.Contains(k.Columns, op.Column)
+	default:
+		return false
+	}
 }
 
 // Model is the canonical, comparison-ready description of one table. It
@@ -131,6 +272,39 @@ type Model struct {
 	// change its crash-safety and replication behavior, and a persistence
 	// mismatch fails the diff closed instead of diffing to silence.
 	Unlogged bool
+	// Options are the table's storage parameters (pg_class.reloptions),
+	// with its TOAST table's parameters prefixed "toast.", each as the
+	// server stores it ("fillfactor=70"), sorted so the order a file lists
+	// them in carries no meaning. A desired file declares them with
+	// CREATE TABLE ... WITH (...), and the renderer writes them back the
+	// same way. The diff does not converge them, so a mismatch fails
+	// closed instead of diffing to silence: a parameter declared in the
+	// file but never applied, or a tuned live parameter the file drops,
+	// would otherwise plan as no change. Omitted from JSON when empty, so a
+	// model without storage parameters digests the same as it did before
+	// the field existed.
+	Options []string `json:",omitempty"`
+	// ToastMayNotRebuild reports that the table has a dropped column and no
+	// remaining column that guarantees a TOAST table, so a fresh CREATE
+	// TABLE of its columns might build none. The server builds a TOAST
+	// table at CREATE TABLE only when the columns need one and silently
+	// discards toast.* parameters otherwise. A dropped column is the one
+	// change that can leave a TOAST table the remaining columns do not
+	// need: adding or retyping a column builds one when the columns come
+	// to need it, and a rewrite builds it afresh. A remaining column of an
+	// unbounded variable-length type, stored other than PLAIN, settles it,
+	// since the server always builds a TOAST table for one. When Options
+	// carries TOAST parameters the renderer refuses such a table rather
+	// than write a
+	// baseline that would plan the parameters again on every diff. Read
+	// only alongside TOAST parameters, and not part of the table's shape,
+	// so it never reaches a digest.
+	ToastMayNotRebuild bool `json:"-"`
+	// ReplicaIdentity is what the replica identity indexes of the table
+	// and of every table below it are built on. It is a live fact for the
+	// planner, not part of the table's declared shape, so it is left out of
+	// the model's JSON and every digest of it.
+	ReplicaIdentity ReplicaIdentityKeys `json:"-"`
 	// ReferencedBy lists the incoming foreign keys — constraints on other
 	// tables that reference this one — as "table.constraint" strings, in
 	// that order. Incoming foreign keys are not part of this table's own

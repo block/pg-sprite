@@ -27,6 +27,100 @@ func TestFactsFromExtractsColumnTypes(t *testing.T) {
 	}}, planner.FactsFrom(live))
 }
 
+// FactsFrom carries what the live table's replica identity keys on, so a
+// drop of it is judged from the same facts on every front door.
+func TestFactsFromExtractsReplicaIdentity(t *testing.T) {
+	keys := schemadiff.ReplicaIdentityKeys{
+		Indexes:     []string{"t_ref_key"},
+		Constraints: []string{"t_ref_key"},
+		Columns:     []string{"ref", "tenant"},
+	}
+	live := schemadiff.Model{
+		Columns:         []schemadiff.Column{{Name: "id", Type: "bigint"}},
+		ReplicaIdentity: keys,
+	}
+	assert.Equal(t, keys, planner.FactsFrom(live).ReplicaIdentity)
+}
+
+// Dropping what REPLICA IDENTITY USING INDEX keys on leaves the table with
+// no usable identity, so UPDATE and DELETE fail under a publication. The
+// planner refuses the index drop in every form, the drop of the constraint
+// that owns the index, and the drop of any key column, which takes the
+// index with it. Everything else on the table classifies as before, and a
+// table whose identity is not an index has nothing to protect.
+func TestClassifyRefusesDroppingTheReplicaIdentity(t *testing.T) {
+	identity := planner.Facts{
+		ColumnTypes: map[string]string{"tenant": "bigint", "ref": "text", "note": "text"},
+		ReplicaIdentity: schemadiff.ReplicaIdentityKeys{
+			Indexes:     []string{"t_ref_key"},
+			Constraints: []string{"t_ref_key"},
+			Columns:     []string{"ref", "tenant"},
+		},
+	}
+	refused := []string{
+		"DROP INDEX t_ref_key",
+		"DROP INDEX CONCURRENTLY t_ref_key",
+		"DROP INDEX IF EXISTS public.t_ref_key",
+		"DROP INDEX t_other_idx, t_ref_key",
+		"ALTER TABLE t DROP CONSTRAINT t_ref_key",
+		"ALTER TABLE t DROP COLUMN ref",
+		"ALTER TABLE t DROP COLUMN tenant CASCADE",
+	}
+	for _, sql := range refused {
+		plan, err := planner.Classify(sql, identity)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		d := plan.Decisions[0]
+		assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+		assert.Equal(t, planner.ReasonReplicaIdentity, d.Reason, sql)
+		assert.True(t, d.Destructive, sql)
+		assert.Equal(t, planner.RouteRefuse, plan.Route, sql)
+	}
+
+	allowed := map[string]planner.Reason{
+		"DROP INDEX CONCURRENTLY t_other_idx":        planner.ReasonOnlineIdiom,
+		"ALTER TABLE t DROP CONSTRAINT t_note_check": planner.ReasonMetadataOnly,
+		"ALTER TABLE t DROP COLUMN note":             planner.ReasonMetadataOnly,
+		"ALTER TABLE t ADD COLUMN extra int":         planner.ReasonMetadataOnly,
+	}
+	for sql, reason := range allowed {
+		plan, err := planner.Classify(sql, identity)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, reason, plan.Decisions[0].Reason, sql)
+	}
+
+	noIndexIdentity := identity
+	noIndexIdentity.ReplicaIdentity = schemadiff.ReplicaIdentityKeys{}
+	plan, err := planner.Classify("ALTER TABLE t DROP COLUMN ref", noIndexIdentity)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+}
+
+// A column dropped under ONLY stays in the tables below, so only the
+// table's own identity index counts: a column only a child's identity uses
+// classifies as an ordinary drop, while one the table's own identity uses
+// is refused either way.
+func TestClassifyJudgesAnOnlyDropByTheTablesOwnIdentity(t *testing.T) {
+	facts := planner.Facts{
+		ColumnTypes: map[string]string{"ref": "text", "code": "text"},
+		ReplicaIdentity: schemadiff.ReplicaIdentityKeys{
+			Columns:    []string{"code", "ref"},
+			OwnColumns: []string{"code"},
+		},
+	}
+	for sql, reason := range map[string]planner.Reason{
+		"ALTER TABLE ONLY parent DROP COLUMN ref":  planner.ReasonMetadataOnly,
+		"ALTER TABLE parent DROP COLUMN ref":       planner.ReasonReplicaIdentity,
+		"ALTER TABLE ONLY parent DROP COLUMN code": planner.ReasonReplicaIdentity,
+	} {
+		plan, err := planner.Classify(sql, facts)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, reason, plan.Decisions[0].Reason, sql)
+	}
+}
+
 // facts mirrors a live table whose column types exercise both sides of the
 // binary-coercible rules.
 var facts = planner.Facts{ColumnTypes: map[string]string{
@@ -204,10 +298,10 @@ func TestClassifyReferenceRows(t *testing.T) {
 func TestClassifySetNotNullSequence(t *testing.T) {
 	d := classifyOne(t, "ALTER TABLE s.t ALTER COLUMN age SET NOT NULL")
 	assert.Equal(t, []string{
-		`ALTER TABLE "s"."t" ADD CONSTRAINT "t_age_not_null" CHECK ("age" IS NOT NULL) NOT VALID`,
-		`ALTER TABLE "s"."t" VALIDATE CONSTRAINT "t_age_not_null"`,
+		`ALTER TABLE "s"."t" ADD CONSTRAINT "t_age_not_null_check" CHECK ("age" IS NOT NULL) NOT VALID`,
+		`ALTER TABLE "s"."t" VALIDATE CONSTRAINT "t_age_not_null_check"`,
 		`ALTER TABLE "s"."t" ALTER COLUMN "age" SET NOT NULL`,
-		`ALTER TABLE "s"."t" DROP CONSTRAINT "t_age_not_null"`,
+		`ALTER TABLE "s"."t" DROP CONSTRAINT "t_age_not_null_check"`,
 	}, d.SaferSQL)
 }
 
@@ -327,6 +421,7 @@ func TestReasonsVocabularyPinned(t *testing.T) {
 		planner.ReasonTypeRewrite,
 		planner.ReasonRelocation,
 		planner.ReasonPartitionParentLock,
+		planner.ReasonReplicaIdentity,
 		planner.ReasonUnsupportedOperation,
 	}, planner.Reasons())
 }

@@ -53,6 +53,10 @@ func deriveRefusalKeys() (keys []classifiedKey, admitted []string) {
 		r, ok := admissionRefusal(fmt.Errorf("wrapped: %w", err))
 		keys = append(keys, classifiedKey{"admission:" + err.Error(), r, ok})
 	}
+	for _, err := range desiredShapeSentinels() {
+		r, ok := desiredShapeRefusal(fmt.Errorf("wrapped: %w", err))
+		keys = append(keys, classifiedKey{"desired-shape:" + err.Error(), r, ok})
+	}
 	for _, err := range createAdmissionSentinels() {
 		r, ok := createAdmissionRefusal(fmt.Errorf("wrapped: %w", err))
 		keys = append(keys, classifiedKey{"create-admission:" + err.Error(), r, ok})
@@ -102,6 +106,7 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 	require.NotEmpty(t, schemachange.RefusalCauses())
 	require.NotEmpty(t, admissionSentinels())
 	require.NotEmpty(t, createAdmissionSentinels())
+	require.NotEmpty(t, desiredShapeSentinels())
 	require.NotEmpty(t, siteRefusals())
 	require.Greater(t, len(keys), 20, "the walk covers causes, sentinels, kinds, and sites")
 	require.ElementsMatch(t, []string{

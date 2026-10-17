@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -88,7 +89,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 
 	t.Run("a shadow refusal is refused with its cause under the class it declares", func(t *testing.T) {
 		refusal := &schemachange.RefusalError{Cause: schemachange.CauseNameTaken, Detail: "a relation wears the shadow's name"}
-		v, err := copySwapRunVerdict(st, fmt.Errorf("run billing.orders: %w", refusal))
+		v, err := copySwapRunVerdict(st, false, fmt.Errorf("run billing.orders: %w", refusal))
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonCopyAndSwapRefused, v.Reason)
@@ -97,47 +98,118 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Empty(t, v.Code, "a refusal is not a failure")
 	})
 
-	t.Run("a divergence is a failure returned with its error", func(t *testing.T) {
+	t.Run("a divergence is a failure whose remedy is to abandon the run", func(t *testing.T) {
 		divergence := &checksum.DivergenceError{Report: checksum.Report{Chunks: 3, Mismatches: []checksum.Mismatch{{}}}}
 		runErr := fmt.Errorf("run billing.orders: %w", divergence)
-		v, err := copySwapRunVerdict(st, runErr)
+		v, err := copySwapRunVerdict(st, false, runErr)
 		assert.ErrorIs(t, err, runErr)
 		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
 		assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
 		assert.Equal(t, "billing.orders", v.Table)
-		assert.Contains(t, v.Detail, "checkpoint row remains")
+		assert.Contains(t, v.Detail, "abandon the run")
+		assert.Contains(t, v.Detail, "drop the replication slot", "a live run's hold is its slot")
+		assert.NotContains(t, v.Detail, "resumes")
+	})
+
+	t.Run("a quiesced divergence names the fence as the hold to release", func(t *testing.T) {
+		divergence := &checksum.DivergenceError{Report: checksum.Report{Chunks: 1, Mismatches: []checksum.Mismatch{{}}}}
+		v, _ := copySwapRunVerdict(st, true, divergence)
+		assert.Contains(t, v.Detail, "take the write fence off the source")
+		assert.NotContains(t, v.Detail, "replication slot")
+	})
+
+	t.Run("a stop a rerun clears says the slot stays until it resumes", func(t *testing.T) {
+		v, err := copySwapRunVerdict(st, false, fmt.Errorf("copy: %w", context.Canceled))
+		require.Error(t, err)
+		assert.Contains(t, v.Detail, "replication slot stays")
+		assert.Contains(t, v.Detail, "resumes from the row")
+		assert.NotContains(t, v.Detail, "abandon")
+	})
+
+	t.Run("a quiesced stop a rerun clears says the fence stays until it resumes", func(t *testing.T) {
+		v, _ := copySwapRunVerdict(st, true, fmt.Errorf("copy: %w", context.Canceled))
+		assert.Contains(t, v.Detail, "fenced against writes")
+		assert.Contains(t, v.Detail, "resumes from the row")
 	})
 
 	t.Run("a cancelled run is coded as cancelled by the caller", func(t *testing.T) {
-		v, _ := copySwapRunVerdict(st, fmt.Errorf("copy: %w", context.Canceled))
+		v, _ := copySwapRunVerdict(st, false, fmt.Errorf("copy: %w", context.Canceled))
 		assert.Equal(t, string(executor.CodeCancelledByCaller), v.Code)
 	})
 
 	t.Run("a breach of the shadow's invariants is coded as an invariant violation", func(t *testing.T) {
-		v, _ := copySwapRunVerdict(st, fmt.Errorf("gate: %w", schemachange.ErrInvariantViolation))
+		v, _ := copySwapRunVerdict(st, false, fmt.Errorf("gate: %w", schemachange.ErrInvariantViolation))
 		assert.Equal(t, string(executor.CodeInvariantViolation), v.Code)
 	})
 
 	t.Run("a rolled-back swap is an execution failure", func(t *testing.T) {
-		v, _ := copySwapRunVerdict(st, schemachange.ErrCutoverRolledBack)
+		v, _ := copySwapRunVerdict(st, false, schemachange.ErrCutoverRolledBack)
 		assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
 	})
 }
 
+// The Runner returns its Result together with an error in exactly one
+// case: the change is complete and its done row saved, and the release of
+// the lock session failed afterwards. That is an executed change with a
+// cleanup fault, not a failed run, so the fold reports the outcome and
+// names the fault in the detail; an error with a row short of done is the
+// failure it looks like.
+func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
+	st := parseCopySwapStatement(t)
+	releaseErr := errors.New("release table lock: connection closed")
+
+	t.Run("a done row with a release error is executed", func(t *testing.T) {
+		done := schemachange.Result{
+			Checkpoint:      checkpoint.Checkpoint{Phase: checkpoint.PhaseDone},
+			Verification:    checksum.Report{Rows: 7, Chunks: 1},
+			OldTableDropped: true,
+		}
+		v, err := copySwapOutcome(st, false, done, releaseErr)
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+		assert.Empty(t, v.Code)
+		assert.Contains(t, v.Detail, "verified 7 rows in 1 chunks")
+		assert.Contains(t, v.Detail, "lock session was not released: release table lock: connection closed")
+	})
+
+	t.Run("a done row without an error carries no release wording", func(t *testing.T) {
+		done := schemachange.Result{Checkpoint: checkpoint.Checkpoint{Phase: checkpoint.PhaseDone}}
+		v, err := copySwapOutcome(st, false, done, nil)
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+		assert.NotContains(t, v.Detail, "lock session")
+	})
+
+	t.Run("an error with the zero result is a failure", func(t *testing.T) {
+		v, err := copySwapOutcome(st, false, schemachange.Result{}, releaseErr)
+		assert.ErrorIs(t, err, releaseErr)
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+	})
+}
+
 // The detail names what the run proved; the kept-old wording and the
-// dropped wording are never both present.
+// dropped wording are never both present, and the quiesced wording appears
+// exactly when the run fenced the source's writes, since the outcome's
+// exit code otherwise reads as online-safe.
 func TestCopySwapDetail(t *testing.T) {
 	dropped := copySwapDetail(schemachange.Result{
 		Verification:    checksum.Report{Rows: 2500, Chunks: 3},
 		OldTableDropped: true,
-	})
+	}, false)
 	assert.Equal(t, "verified 2500 rows in 3 chunks; the retained source is dropped", dropped)
 
 	kept := copySwapDetail(schemachange.Result{
 		Verification: checksum.Report{Rows: 10, Chunks: 1, Settled: 1},
 		Reconciled:   true,
-	})
+	}, false)
 	assert.Equal(t, "verified 10 rows in 1 chunks (1 settled against the stream); "+
 		"the retained source is kept under its _old name; "+
 		"the run reconciled a lost replication slot before catching up", kept)
+
+	quiesced := copySwapDetail(schemachange.Result{
+		Verification:    checksum.Report{Rows: 4, Chunks: 1},
+		OldTableDropped: true,
+	}, true)
+	assert.Equal(t, "verified 4 rows in 1 chunks; the retained source is dropped; "+
+		"the table was quiesced: writes were fenced for the length of the run", quiesced)
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -65,7 +67,26 @@ func IntrospectTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model, 
 // runs under the caller's session search_path (ListManagedTables) qualifies
 // everything instead.
 func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model, error) {
-	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(schema, "public")); err != nil {
+	return introspectOnPath(ctx, tx, schema, table, searchPathFor(schema), false)
+}
+
+// searchPathFor is the search_path a table in schema is introspected under:
+// the schema itself, then public, where extension types live.
+func searchPathFor(schema string) []string {
+	if schema == "public" {
+		return []string{schema}
+	}
+	return []string{schema, "public"}
+}
+
+// introspectOnPath introspects schema.table with the transaction-local
+// search_path set to path, which must start with schema. A scratch build
+// passes its own path so it deparses a reference to the target schema the
+// way the live introspection does: unqualified. keyIndexDefs reads the
+// definition of the index each key constraint owns (Constraint.IndexDef),
+// which only the desired side needs.
+func introspectOnPath(ctx context.Context, tx pgx.Tx, schema, table string, path []string, keyIndexDefs bool) (Model, error) {
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(path...)); err != nil {
 		return Model{}, fmt.Errorf("set introspection search_path: %w", err)
 	}
 
@@ -91,13 +112,24 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 	}
 
 	m := Model{Table: table, PartitionKey: partitionKey, IsPartition: isPartition, Unlogged: persistence == "u"}
+	if m.Options, err = introspectOptions(ctx, tx, oid); err != nil {
+		return Model{}, fmt.Errorf("introspect storage parameters of %s.%s: %w", schema, table, err)
+	}
+	if hasToastOptions(m.Options) {
+		if m.ToastMayNotRebuild, err = introspectToastMayNotRebuild(ctx, tx, oid); err != nil {
+			return Model{}, fmt.Errorf("introspect TOAST table of %s.%s: %w", schema, table, err)
+		}
+	}
+	if m.ReplicaIdentity, err = ReadReplicaIdentity(ctx, tx, oid); err != nil {
+		return Model{}, fmt.Errorf("introspect replica identity of %s.%s: %w", schema, table, err)
+	}
 	if m.InheritsParents, m.InheritanceChildren, err = introspectInheritance(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect inheritance of %s.%s: %w", schema, table, err)
 	}
 	if m.Columns, err = introspectColumns(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect columns of %s.%s: %w", schema, table, err)
 	}
-	if m.Constraints, err = introspectConstraints(ctx, tx, oid); err != nil {
+	if m.Constraints, err = introspectConstraints(ctx, tx, oid, keyIndexDefs); err != nil {
 		return Model{}, fmt.Errorf("introspect constraints of %s.%s: %w", schema, table, err)
 	}
 	if m.Indexes, err = introspectIndexes(ctx, tx, oid); err != nil {
@@ -110,6 +142,153 @@ func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model
 		return Model{}, fmt.Errorf("introspect row security of %s.%s: %w", schema, table, err)
 	}
 	return m, nil
+}
+
+// introspectOptions reads the table's storage parameters and its TOAST
+// table's, the latter prefixed "toast." the way CREATE TABLE ... WITH
+// spells them, sorted, with each boolean value in one spelling
+// (normalizeOption). A table with none returns nil.
+func introspectOptions(ctx context.Context, tx pgx.Tx, oid uint32) ([]string, error) {
+	var opts []string
+	err := tx.QueryRow(ctx, `
+		SELECT array_agg(opt ORDER BY opt)
+		FROM (
+			SELECT unnest(c.reloptions) AS opt
+			FROM pg_class c
+			WHERE c.oid = $1
+			UNION ALL
+			SELECT 'toast.' || unnest(toast.reloptions)
+			FROM pg_class c
+			JOIN pg_class toast ON toast.oid = c.reltoastrelid
+			WHERE c.oid = $1
+		) options`, oid).Scan(&opts)
+	if err != nil {
+		return nil, fmt.Errorf("query storage parameters: %w", err)
+	}
+	for i, opt := range opts {
+		opts[i] = normalizeOption(opt)
+	}
+	return opts, nil
+}
+
+// normalizeOption spells a boolean storage parameter value the one way, so
+// autovacuum_enabled=off and autovacuum_enabled=false, which the server
+// stores as written and reads alike, compare equal. Only the words the
+// server reads as a boolean are rewritten: a number such as 0 or 1 is left
+// alone, since a numeric parameter takes it as a number.
+func normalizeOption(opt string) string {
+	name, value, ok := strings.Cut(opt, "=")
+	if !ok {
+		return opt
+	}
+	switch strings.ToLower(value) {
+	case "on", "true", "yes":
+		return name + "=true"
+	case "off", "false", "no":
+		return name + "=false"
+	}
+	return opt
+}
+
+// hasToastOptions reports whether opts sets a parameter on the TOAST table.
+func hasToastOptions(opts []string) bool {
+	return slices.ContainsFunc(opts, func(opt string) bool { return strings.HasPrefix(opt, "toast.") })
+}
+
+// introspectToastMayNotRebuild reports whether the table has a dropped
+// column and no remaining column that makes the server build a TOAST table
+// (see Model.ToastMayNotRebuild). A column guarantees one when it is a
+// variable-length type of no bounded size, stored other than PLAIN both
+// live and by its type's default, which is how the server's own decision
+// at CREATE TABLE reads it: such a column can never fit the tuple size it
+// checks against. A bounded type such as varchar(10) guarantees nothing,
+// so a table whose only remaining varlena columns are bounded is still
+// reported, failing closed.
+func introspectToastMayNotRebuild(ctx context.Context, tx pgx.Tx, oid uint32) (bool, error) {
+	var mayNotRebuild bool
+	err := tx.QueryRow(ctx, `
+		SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = $1 AND attnum > 0 AND attisdropped)
+		   AND NOT EXISTS (
+		       SELECT 1 FROM pg_attribute a
+		       JOIN pg_type ty ON ty.oid = a.atttypid
+		       WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
+		         AND a.attlen = -1 AND a.atttypmod < 0
+		         AND a.attstorage <> 'p' AND ty.typstorage <> 'p')`, oid).Scan(&mayNotRebuild)
+	if err != nil {
+		return false, fmt.Errorf("query whether the columns rebuild a TOAST table: %w", err)
+	}
+	return mayNotRebuild, nil
+}
+
+// ReadReplicaIdentity reads, inside tx, what the replica identity indexes
+// of the table with the given oid and of every table below it are built
+// on. Introspection reads it into Model.ReplicaIdentity, and the executor
+// reads it again under the table's lock, so the answer a drop is checked
+// against cannot change before the drop runs. The tree follows
+// pg_inherits, so it holds partitions and classic inheritance children
+// alike: a DROP COLUMN here recurses into both. An identity index is one
+// pg_index marks indisreplident on a table whose relreplident is 'i'. Each
+// is traced up its attachment chain to the index on this table that a DROP
+// INDEX or DROP CONSTRAINT here would cascade from; an identity index on a
+// child that is attached under nothing on this table contributes only its
+// columns, which a DROP COLUMN here still cascades to. Every column the
+// index covers counts, INCLUDE columns too, since dropping any of them
+// drops the index. Only a primary key or unique constraint owns its index;
+// a foreign key that references one does not. The partition functions list
+// nothing for an index outside a partition tree, so each identity index is
+// counted on its own as well.
+func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIdentityKeys, error) {
+	var keys ReplicaIdentityKeys
+	err := tx.QueryRow(ctx, `
+		WITH RECURSIVE tree AS (
+		    SELECT $1::oid AS relid
+		    UNION
+		    SELECT inh.inhrelid FROM pg_inherits inh JOIN tree ON inh.inhparent = tree.relid
+		), identity AS (
+		    SELECT i.indexrelid, i.indrelid, i.indkey
+		    FROM tree
+		    JOIN pg_class c ON c.oid = tree.relid AND c.relreplident = 'i'
+		    JOIN pg_index i ON i.indrelid = c.oid AND i.indisreplident
+		), chain AS (
+		    SELECT indexrelid AS relid FROM identity
+		    UNION
+		    SELECT ancestor.relid
+		    FROM identity
+		    CROSS JOIN LATERAL pg_partition_ancestors(identity.indexrelid) ancestor
+		), here AS (
+		    SELECT chain.relid AS indexrelid
+		    FROM chain
+		    JOIN pg_index ai ON ai.indexrelid = chain.relid AND ai.indrelid = $1
+		)
+		SELECT
+		    ARRAY(SELECT ic.relname::text FROM here JOIN pg_class ic ON ic.oid = here.indexrelid ORDER BY 1),
+		    ARRAY(SELECT con.conname::text FROM here JOIN pg_constraint con
+		          ON con.conindid = here.indexrelid AND con.conrelid = $1 AND con.contype IN ('p', 'u') ORDER BY 1),
+		    ARRAY(SELECT DISTINCT a.attname::text FROM identity
+		          CROSS JOIN LATERAL unnest(identity.indkey::int2[]) AS k(attnum)
+		          JOIN pg_attribute a ON a.attrelid = identity.indrelid AND a.attnum = k.attnum
+		          ORDER BY 1),
+		    ARRAY(SELECT DISTINCT a.attname::text FROM identity
+		          CROSS JOIN LATERAL unnest(identity.indkey::int2[]) AS k(attnum)
+		          JOIN pg_attribute a ON a.attrelid = identity.indrelid AND a.attnum = k.attnum
+		          WHERE identity.indrelid = $1
+		          ORDER BY 1)`, oid).Scan(&keys.Indexes, &keys.Constraints, &keys.Columns, &keys.OwnColumns)
+	if err != nil {
+		return ReplicaIdentityKeys{}, fmt.Errorf("query replica identity indexes: %w", err)
+	}
+	if len(keys.Indexes) == 0 {
+		keys.Indexes = nil
+	}
+	if len(keys.Constraints) == 0 {
+		keys.Constraints = nil
+	}
+	if len(keys.Columns) == 0 {
+		keys.Columns = nil
+	}
+	if len(keys.OwnColumns) == 0 {
+		keys.OwnColumns = nil
+	}
+	return keys, nil
 }
 
 // introspectInheritance reads classic PostgreSQL inheritance in both
@@ -166,7 +345,10 @@ func introspectInheritance(ctx context.Context, tx pgx.Tx, oid uint32) ([]string
 // the sequence is owned by this exact column (the OWNED BY edge, deptype
 // 'a') — the discriminator between a serial column and a hand-written
 // nextval on a standalone or shared sequence. An explicit column collation
-// is read only when it differs from the type's default collation.
+// is read only when it differs from the type's default collation. The
+// declaration of the sequence the column owns — its identity sequence, or
+// the owned sequence its serial default calls — rides along, recorded only
+// where it differs from what declaring the column fresh creates.
 func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, error) {
 	rows, err := tx.Query(ctx, `
 		SELECT a.attname,
@@ -206,9 +388,29 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 		             AND a.attcollation <> t.typcollation
 		       ), ''),
 		       a.attidentity::text,
-		       a.attgenerated::text
+		       a.attgenerated::text,
+		       seq.seqtype, seq.seqstart, seq.seqincrement, seq.seqmin, seq.seqmax, seq.seqcache, seq.seqcycle
 		FROM pg_attribute a
 		LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+		LEFT JOIN LATERAL (
+		    SELECT format_type(q.seqtypid, NULL) AS seqtype,
+		           q.seqstart, q.seqincrement, q.seqmin, q.seqmax, q.seqcache, q.seqcycle
+		    FROM pg_depend own
+		    JOIN pg_class s ON s.oid = own.objid AND s.relkind = 'S'
+		    JOIN pg_sequence q ON q.seqrelid = s.oid
+		    WHERE own.classid = 'pg_class'::regclass
+		      AND own.refclassid = 'pg_class'::regclass
+		      AND own.refobjid = a.attrelid
+		      AND own.refobjsubid = a.attnum
+		      AND (own.deptype = 'i'
+		           OR (own.deptype = 'a' AND EXISTS (
+		               SELECT 1
+		               FROM pg_depend dep
+		               WHERE dep.classid = 'pg_attrdef'::regclass
+		                 AND dep.objid = d.oid
+		                 AND dep.refclassid = 'pg_class'::regclass
+		                 AND dep.refobjid = s.oid)))
+		) seq ON true
 		WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
 		ORDER BY a.attnum`, oid)
 	if err != nil {
@@ -219,11 +421,34 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 	for rows.Next() {
 		var c Column
 		var identity, generated string
-		if err := rows.Scan(&c.Name, &c.Type, &c.NotNull, &c.Default, &c.SequenceDefault, &c.SequenceOwned, &c.Collation, &identity, &generated); err != nil {
+		var seqType *string
+		var seq SequenceOptions
+		var seqStart, seqIncrement, seqMin, seqMax, seqCache *int64
+		var seqCycle *bool
+		if err := rows.Scan(&c.Name, &c.Type, &c.NotNull, &c.Default, &c.SequenceDefault, &c.SequenceOwned, &c.Collation, &identity, &generated,
+			&seqType, &seqStart, &seqIncrement, &seqMin, &seqMax, &seqCache, &seqCycle); err != nil {
 			return nil, fmt.Errorf("scan column: %w", err)
 		}
 		c.Identity = Identity(identity)
 		c.Generated = generated == "s"
+		c.Virtual = generated == "v"
+		if seqType != nil {
+			if !sequenceRowComplete(seqStart, seqIncrement, seqMin, seqMax, seqCache, seqCycle) {
+				return nil, fmt.Errorf("column %q: owned sequence row is incomplete", c.Name)
+			}
+			seq = SequenceOptions{Type: *seqType, Start: *seqStart, Increment: *seqIncrement, Min: *seqMin, Max: *seqMax, Cache: *seqCache, Cycle: *seqCycle}
+			c.Sequence = declaredSequence(c.Type, seq)
+		}
+		// Rows arrive in attribute order, so a column the sequence join
+		// matched more than once is the previous row again. The model
+		// carries one sequence per column, so such a column keeps none of
+		// them and is marked for the renderer to refuse; nothing else reads
+		// the declaration of a sequence a serial-style default calls.
+		if n := len(cols); n > 0 && cols[n-1].Name == c.Name {
+			cols[n-1].Sequence = nil
+			cols[n-1].MultipleOwnedSequences = true
+			continue
+		}
 		cols = append(cols, c)
 	}
 	if err := rows.Err(); err != nil {
@@ -232,17 +457,30 @@ func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, er
 	return cols, nil
 }
 
+// sequenceRowComplete reports whether every pg_sequence column of a matched
+// owned sequence was read; the LEFT JOIN leaves them all NULL only when no
+// sequence matched.
+func sequenceRowComplete(start, increment, minValue, maxValue, cache *int64, cycle *bool) bool {
+	return start != nil && increment != nil && minValue != nil && maxValue != nil && cache != nil && cycle != nil
+}
+
 // introspectConstraints reads the table's own constraints (primary key,
 // unique, check, foreign key, exclusion) as server-decompiled definitions.
 // NOT NULL is modeled on the column (pg_attribute.attnotnull), so the PG 18
 // pg_constraint rows for NOT NULL are deliberately excluded to keep the
-// model identical across supported majors.
-func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32) ([]Constraint, error) {
+// model identical across supported majors. keyIndexDefs reads the
+// definition of the index each primary key and unique constraint owns;
+// pg_get_indexdef waits behind any lock that conflicts with ACCESS SHARE on
+// the table, so it is read only for a scratch table, which no other session
+// can hold.
+func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32, keyIndexDefs bool) ([]Constraint, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT conname, pg_get_constraintdef(oid), contype = 'f'
+		SELECT conname, pg_get_constraintdef(oid), contype = 'f', contype = 'p',
+		       CASE WHEN $2 AND contype IN ('p','u') THEN pg_get_indexdef(conindid) ELSE '' END,
+		       condeferrable, condeferred
 		FROM pg_constraint
 		WHERE conrelid = $1 AND contype IN ('p','u','c','f','x') AND conislocal
-		ORDER BY conname`, oid)
+		ORDER BY conname`, oid, keyIndexDefs)
 	if err != nil {
 		return nil, fmt.Errorf("query constraints: %w", err)
 	}
@@ -250,8 +488,13 @@ func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32) ([]Constr
 	var cons []Constraint
 	for rows.Next() {
 		var c Constraint
-		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey); err != nil {
+		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey, &c.Primary, &c.IndexDef, &c.Deferrable, &c.InitiallyDeferred); err != nil {
 			return nil, fmt.Errorf("scan constraint: %w", err)
+		}
+		if c.IndexDef != "" {
+			if c.IndexDef, err = statement.Qualify(c.IndexDef, ""); err != nil {
+				return nil, fmt.Errorf("unqualify the index of constraint %s: %w", c.Name, err)
+			}
 		}
 		cons = append(cons, c)
 	}

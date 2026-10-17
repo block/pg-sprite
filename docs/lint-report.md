@@ -15,6 +15,10 @@ and the closed vocabularies below (codes, severities, and the embedded planner r
 adding a value to any of them is a contract change and bumps `format_version`, even if no
 field is added or renamed.
 
+The current version is **2**: version 2 added the `replica-identity` reason to the embedded
+Reasons vocabulary. The linter itself never reports it, because the reason is judged from live
+replica identity facts the linter does not have.
+
 ### Relationship to the plan report
 
 The lint report and the [plan report](plan-report.md) are **versioned independently** — each

@@ -73,6 +73,51 @@ func TestDiffRefusesPersistenceMismatch(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupportedChange)
 }
 
+// Storage parameters are not converged: matching parameters diff to
+// nothing, and any difference is a typed refusal, never a silent zero diff.
+func TestDiffStorageParameters(t *testing.T) {
+	tuned := base()
+	tuned.Options = []string{"fillfactor=70"}
+	changes, err := Diff("public", tuned, tuned)
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+
+	_, err = Diff("public", base(), tuned)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	_, err = Diff("public", tuned, base())
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+}
+
+// An identity's sequence declaration is not converged, so a difference is
+// a typed refusal; an added identity column carries its declaration in
+// the emitted ADD COLUMN, so the column lands declared as the file says.
+func TestDiffIdentitySequenceOptions(t *testing.T) {
+	seq := &SequenceOptions{Type: "bigint", Start: 1000, Increment: 1, Min: 1, Max: 5000, Cache: 1}
+	identity := func(s *SequenceOptions) Model {
+		m := base()
+		m.Columns = append(m.Columns, Column{Name: "ref", Type: "bigint", NotNull: true, Identity: IdentityAlways, Sequence: s})
+		return m
+	}
+
+	_, err := Diff("public", identity(nil), identity(seq))
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	_, err = Diff("public", identity(seq), identity(nil))
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	changes, err := Diff("public", identity(seq), identity(&SequenceOptions{Type: "bigint", Start: 1000, Increment: 1, Min: 1, Max: 5000, Cache: 1}))
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+
+	changes, err = Diff("public", base(), identity(seq))
+	require.NoError(t, err)
+	require.Len(t, changes, 1)
+	assert.Equal(t, `ALTER TABLE "public"."events" ADD COLUMN "ref" bigint GENERATED ALWAYS AS IDENTITY (START WITH 1000 INCREMENT BY 1 MINVALUE 1 MAXVALUE 5000 CACHE 1 NO CYCLE) NOT NULL`, changes[0].SQL)
+
+	mistyped := identity(&SequenceOptions{Type: "integer", Start: 1, Increment: 1, Min: 1, Max: 5000, Cache: 1})
+	_, err = Diff("public", base(), mistyped)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	require.ErrorIs(t, err, ErrUnrenderableSequenceOptions)
+}
+
 // A collation delta on an existing column rewrites the column, and an
 // added column's COLLATE clause is not carried by the emitted ADD COLUMN —
 // both are typed refusals, never a silent zero diff or a silently dropped
@@ -268,6 +313,106 @@ func TestDiffIndexChangeDropsAndRecreatesQualified(t *testing.T) {
 	}, sqls(changes))
 }
 
+// A new unique constraint whose name and index match a live unique index
+// takes the index over in place rather than dropping it and building its
+// own, which would leave the table without the guarantee and without the
+// index while the build runs. Every shape the server would not adopt, or
+// that would not come out the same as a fresh constraint, keeps the drop
+// and rebuild.
+func TestDiffKeyConstraintAdoptsTheLiveIndex(t *testing.T) {
+	const indexDef = "CREATE UNIQUE INDEX events_name_key ON events USING btree (name)"
+	live := func(ix Index) Model {
+		m := base()
+		m.Indexes = []Index{ix}
+		return m
+	}
+	desired := func(con Constraint) Model {
+		m := base()
+		m.Indexes = nil
+		m.Constraints = append(m.Constraints, con)
+		return m
+	}
+	unique := Constraint{Name: "events_name_key", Def: "UNIQUE (name)", IndexDef: indexDef}
+	rebuild := []string{
+		`DROP INDEX "public"."events_name_key"`,
+		`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE (name)`,
+	}
+
+	t.Run("a unique constraint", func(t *testing.T) {
+		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef}), desired(unique))
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE USING INDEX "events_name_key"`,
+		}, sqls(changes))
+		assert.False(t, changes[0].Destructive)
+		assert.Equal(t, ChangeAddConstraint, changes[0].Kind)
+		assert.Equal(t, &IndexAdoption{Index: "events_name_key", Def: indexDef}, changes[0].Adopts,
+			"execution checks the index against the definition the diff matched")
+	})
+
+	t.Run("a primary key", func(t *testing.T) {
+		const pkDef = "CREATE UNIQUE INDEX events_pkey ON events USING btree (id)"
+		l := base()
+		l.Constraints = nil
+		l.Indexes = []Index{{Name: "events_pkey", Def: pkDef}}
+		d := base()
+		d.Indexes = nil
+		d.Constraints = []Constraint{{Name: "events_pkey", Def: "PRIMARY KEY (id)", Primary: true, IndexDef: pkDef}}
+		changes, err := Diff("public", l, d)
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_pkey" PRIMARY KEY USING INDEX "events_pkey"`,
+		}, sqls(changes))
+	})
+
+	t.Run("an index of another definition", func(t *testing.T) {
+		other := Index{Name: "events_name_key", Def: "CREATE UNIQUE INDEX events_name_key ON events USING btree (name) WHERE (id > 0)"}
+		changes, err := Diff("public", live(other), desired(unique))
+		require.NoError(t, err)
+		assert.Equal(t, rebuild, sqls(changes))
+	})
+
+	t.Run("an unfinished build", func(t *testing.T) {
+		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef, Invalid: true}), desired(unique))
+		require.NoError(t, err)
+		assert.Equal(t, rebuild[1:], sqls(changes), "the unfinished build is never dropped here, and never adopted")
+	})
+
+	t.Run("a deferrable constraint", func(t *testing.T) {
+		deferrable := unique
+		deferrable.Def = "UNIQUE (name) DEFERRABLE"
+		deferrable.Deferrable = true
+		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef}), desired(deferrable))
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE USING INDEX "events_name_key" DEFERRABLE`,
+		}, sqls(changes))
+		assert.Equal(t, &IndexAdoption{Index: "events_name_key", Def: indexDef}, changes[0].Adopts)
+	})
+
+	t.Run("an initially deferred constraint", func(t *testing.T) {
+		deferred := unique
+		deferred.Def = "UNIQUE (name) DEFERRABLE INITIALLY DEFERRED"
+		deferred.Deferrable, deferred.InitiallyDeferred = true, true
+		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef}), desired(deferred))
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE USING INDEX "events_name_key" DEFERRABLE INITIALLY DEFERRED`,
+		}, sqls(changes))
+		assert.Equal(t, &IndexAdoption{Index: "events_name_key", Def: indexDef}, changes[0].Adopts)
+	})
+
+	t.Run("a partitioned parent", func(t *testing.T) {
+		l := live(Index{Name: "events_name_key", Def: indexDef})
+		l.PartitionKey = "RANGE (id)"
+		d := desired(unique)
+		d.PartitionKey = "RANGE (id)"
+		changes, err := Diff("public", l, d)
+		require.NoError(t, err)
+		assert.Equal(t, rebuild, sqls(changes))
+	})
+}
+
 // A live index that matches the desired definition but is invalid is an
 // unfinished concurrent build: it does not deliver the desired index, so
 // the diff emits the create — and only the create, never a blocking DROP
@@ -378,15 +523,6 @@ func TestDiffRefusesIdentityAndGeneratedChanges(t *testing.T) {
 	}
 }
 
-func TestDiffRefusesGenerationExpressionChange(t *testing.T) {
-	live := base()
-	live.Columns[0] = Column{Name: "id", Type: "bigint", Generated: true, Default: "(1)"}
-	desired := base()
-	desired.Columns[0] = Column{Name: "id", Type: "bigint", Generated: true, Default: "(2)"}
-	_, err := Diff("public", live, desired)
-	require.ErrorIs(t, err, ErrUnsupportedChange)
-}
-
 func TestDiffIdentityColumnAddRendersIdentity(t *testing.T) {
 	desired := base()
 	desired.Columns = append(desired.Columns,
@@ -413,6 +549,62 @@ func TestDiffGeneratedColumnAddRendersGenerationExpression(t *testing.T) {
 	}, sqls(changes))
 }
 
+// A stored generated column whose expression changed is planned as one SET
+// EXPRESSION statement carrying the desired expression, so the drift shows in
+// the plan instead of failing it. A type change on a generated column still
+// fails the diff.
+func TestDiffGeneratedColumnExpressionChange(t *testing.T) {
+	live := base()
+	live.Columns = append(live.Columns, Column{
+		Name: "name_upper", Type: "text", Generated: true, Default: "upper((name)::text)",
+	})
+	desired := base()
+	desired.Columns = append(desired.Columns, Column{
+		Name: "name_upper", Type: "text", Generated: true, Default: "lower((name)::text)",
+	})
+	changes, err := Diff("public", live, desired)
+	require.NoError(t, err)
+	require.Equal(t, []Change{{
+		SQL:  `ALTER TABLE "public"."events" ALTER COLUMN "name_upper" SET EXPRESSION AS (lower((name)::text))`,
+		Kind: ChangeSetGeneratedExpression,
+	}}, changes)
+
+	desired.Columns[len(desired.Columns)-1].Type = "character varying"
+	_, err = Diff("public", live, desired)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	assert.Contains(t, err.Error(), `column "name_upper" generated column type change`)
+}
+
+// A live virtual generated column that the desired file declares any other
+// way fails the diff instead of converging the expression as a default. Two
+// virtual models whose expression differs plan the same refused SET
+// EXPRESSION a stored column does.
+func TestDiffVirtualGeneratedColumn(t *testing.T) {
+	live := base()
+	live.Columns = append(live.Columns, Column{Name: "doubled", Type: "integer", Virtual: true, Default: "(id * 2)"})
+
+	stored := base()
+	stored.Columns = append(stored.Columns, Column{Name: "doubled", Type: "integer", Generated: true, Default: "(id * 2)"})
+	_, err := Diff("public", live, stored)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	assert.Contains(t, err.Error(), `column "doubled" generated change`)
+
+	plain := base()
+	plain.Columns = append(plain.Columns, Column{Name: "doubled", Type: "integer", Default: "3"})
+	_, err = Diff("public", live, plain)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	assert.Contains(t, err.Error(), `column "doubled" virtual generated change`)
+
+	virtual := base()
+	virtual.Columns = append(virtual.Columns, Column{Name: "doubled", Type: "integer", Virtual: true, Default: "(id * 3)"})
+	changes, err := Diff("public", live, virtual)
+	require.NoError(t, err)
+	require.Equal(t, []Change{{
+		SQL:  `ALTER TABLE "public"."events" ALTER COLUMN "doubled" SET EXPRESSION AS ((id * 3))`,
+		Kind: ChangeSetGeneratedExpression,
+	}}, changes)
+}
+
 // The change-kind vocabulary is a closed set a consumer branches on; it is
 // pinned to plan-report format_version 1 (docs/plan-report.md). A new value
 // here without a format_version bump is a contract break.
@@ -425,6 +617,7 @@ func TestChangeKindsVocabularyPinned(t *testing.T) {
 		ChangeDropColumn,
 		ChangeAddColumn,
 		ChangeAlterType,
+		ChangeSetGeneratedExpression,
 		ChangeSetDefault,
 		ChangeDropDefault,
 		ChangeSetNotNull,

@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/applier"
 	"github.com/block/pg-sprite/pkg/copier"
@@ -37,22 +36,37 @@ const drainWait = 100 * time.Millisecond
 // tx. The stream is never confirmed, so a swap attempt that rolls back
 // leaves the slot where it was and the next attempt gathers the same
 // changes again (DrainFunc).
-func (r *Runner) drain(pool *pgxpool.Pool, target preflight.CopySwapTarget, built BuiltShadow, flusher *applier.Flusher, watermark copier.Watermark, from decode.LSN) DrainFunc {
+//
+// The drain draws nothing from the pool: tx holds a pool connection for
+// the whole swap, and a drain that waited on the pool for a second one
+// would wait on every other run's swap doing the same, so as many swaps
+// at once as the pool has connections would each wait on the others. The
+// marker, the stream's proof of its server, and the wait for the slot to
+// go idle all run on one connection dialled from cfg for the attempt and
+// closed with it.
+func (r *Runner) drain(target preflight.CopySwapTarget, built BuiltShadow, flusher *applier.Flusher, watermark copier.Watermark, from decode.LSN) DrainFunc {
 	return func(ctx context.Context, tx pgx.Tx) error {
-		if err := r.drainInto(ctx, pool, tx, target, built, flusher, watermark, from); err != nil {
+		if err := r.drainInto(ctx, tx, target, built, flusher, watermark, from); err != nil {
 			return fmt.Errorf("drain %s.%s: %w", target.Schema(), target.Table(), err)
 		}
 		return nil
 	}
 }
 
-func (r *Runner) drainInto(ctx context.Context, pool *pgxpool.Pool, tx pgx.Tx, target preflight.CopySwapTarget, built BuiltShadow, flusher *applier.Flusher, watermark copier.Watermark, from decode.LSN) error {
-	marker, err := markWAL(ctx, pool)
+func (r *Runner) drainInto(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget, built BuiltShadow, flusher *applier.Flusher, watermark copier.Watermark, from decode.LSN) (err error) {
+	conn, err := dbconn.ConnectSession(ctx, r.cfg)
+	if err != nil {
+		return fmt.Errorf("connect for the drain: %w", err)
+	}
+	defer func() {
+		err = errors.Join(err, closeDrainSession(ctx, conn))
+	}()
+	marker, err := markWAL(ctx, conn)
 	if err != nil {
 		return err
 	}
 	buffer := applier.NewBuffer()
-	if err := r.gatherThrough(ctx, pool, target, from, marker, buffer); err != nil {
+	if err := r.gatherThrough(ctx, conn, target, from, marker, buffer); err != nil {
 		return err
 	}
 	if err := flushAll(ctx, tx, flusher, buffer, watermark); err != nil {
@@ -63,12 +77,18 @@ func (r *Runner) drainInto(ctx context.Context, pool *pgxpool.Pool, tx pgx.Tx, t
 	return setSearchPath(ctx, tx, built.Schema())
 }
 
-// markWAL writes a marker to the WAL in a transaction of its own on pool
-// and returns the position just past it. The marker's transaction commits
-// on a connection outside the swap transaction, so its position lies
-// above every write the lock excluded.
-func markWAL(ctx context.Context, pool *pgxpool.Pool) (decode.LSN, error) {
-	tx, err := pool.Begin(ctx)
+// txBeginner opens a transaction: a pool, or one connection of the
+// caller's.
+type txBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// markWAL writes a marker to the WAL in a transaction of its own on db and
+// returns the position just past it. The marker's transaction commits on
+// a connection outside the swap transaction, so its position lies above
+// every write the lock excluded.
+func markWAL(ctx context.Context, db txBeginner) (decode.LSN, error) {
+	tx, err := db.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("mark the WAL position: %w", err)
 	}
@@ -96,13 +116,13 @@ func rollback(ctx context.Context, tx pgx.Tx) error {
 // gatherThrough opens a stream on the target's slot at from, adds every
 // change it delivers to buffer until the stream has delivered through
 // marker, then closes the stream and waits for its backend to let the
-// slot go. The gather is bounded by the swap's statement budget: a
-// stream that cannot reach the marker within it fails the attempt, as a
-// statement that ran that long would.
-func (r *Runner) gatherThrough(ctx context.Context, pool *pgxpool.Pool, target preflight.CopySwapTarget, from, marker decode.LSN, buffer *applier.Buffer) error {
+// slot go, reading the slot on conn. The gather is bounded by the swap's
+// statement budget: a stream that cannot reach the marker within it fails
+// the attempt, as a statement that ran that long would.
+func (r *Runner) gatherThrough(ctx context.Context, conn *pgx.Conn, target preflight.CopySwapTarget, from, marker decode.LSN, buffer *applier.Buffer) error {
 	readCtx, cancel := context.WithTimeout(ctx, r.opts.Cutover.statementTimeout())
 	defer cancel()
-	stream, err := decode.OpenStream(readCtx, r.cfg, pool, target, from)
+	stream, err := decode.OpenStream(readCtx, r.cfg, conn, target, from)
 	if err != nil {
 		return err
 	}
@@ -115,7 +135,16 @@ func (r *Runner) gatherThrough(ctx context.Context, pool *pgxpool.Pool, target p
 	if gathered != nil {
 		return gathered
 	}
-	return awaitSlotIdle(endCtx, pool, stream.Slot(), r.opts.sleep())
+	return awaitSlotIdle(endCtx, conn, stream.Slot(), r.opts.sleep())
+}
+
+// closeDrainSession closes the drain's connection, even when ctx has
+// ended: a cancelled swap attempt ends its drain too.
+func closeDrainSession(ctx context.Context, conn *pgx.Conn) error {
+	if err := conn.Close(context.WithoutCancel(ctx)); err != nil {
+		return fmt.Errorf("close the drain's connection: %w", err)
+	}
+	return nil
 }
 
 // gather reads stream into buffer until it has delivered through marker.

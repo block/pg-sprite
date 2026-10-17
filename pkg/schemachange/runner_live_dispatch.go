@@ -22,8 +22,12 @@ import (
 // whose row does not land drops the slot and the shadow this run just
 // made, as the quiesced start drops its shadow and fence: nothing records
 // them, so the next Run would refuse the shadow as shadow-unrecorded and
-// the reaper would drop the slot. A row that landed stays, with both,
-// whatever AfterCheckpoint then returns.
+// the reaper would drop the slot. Only what this run made is taken back:
+// a slot of the derived name that was there before the run — an orphan
+// of a run that ended without its row, or another tool's — is reported
+// as the *decode.SlotExistsError it is and left as found, for the reaper
+// or the operator. A row that landed stays, with both, whatever
+// AfterCheckpoint then returns.
 func (r *Runner) startFreshLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, st statement.Statement) (runState, error) {
 	built, err := BuildShadow(ctx, pool, lock, target, st, r.opts.Shadow)
 	if errors.Is(err, ErrShadowExists) {
@@ -41,18 +45,22 @@ func (r *Runner) startFreshLive(ctx context.Context, pool *pgxpool.Pool, lock *d
 	state.cp.Phase = checkpoint.PhaseCopying
 	state.cp.SlotName = name
 	state.cp.PublicationName = name
-	err = r.store.WithSlotLock(ctx, name, func(ctx context.Context) error {
+	// CreateSlot leaves no slot behind an error, so the slot is this
+	// run's to drop only once it has returned one.
+	slotMade := false
+	err = r.store.WithSlotLock(ctx, r.cfg, name, func(ctx context.Context) error {
 		slot, err := decode.CreateSlot(ctx, r.cfg, pool, target)
 		if err != nil {
 			return err
 		}
+		slotMade = true
 		// INV: ST-4 — the row carries the position decoding resumes from
 		// before any change is captured.
 		state.cp.LastAppliedLSN = slot.ConsistentPoint()
 		return errors.Join(r.store.Save(ctx, lock, state.cp), slot.Close(context.WithoutCancel(ctx)))
 	})
 	if err != nil {
-		return runState{}, errors.Join(err, r.unbuildLive(ctx, pool, lock, target))
+		return runState{}, errors.Join(err, r.unbuildLive(ctx, pool, lock, target, slotMade))
 	}
 	if err := r.afterCheckpoint(ctx, state.cp); err != nil {
 		return runState{}, err
@@ -61,17 +69,19 @@ func (r *Runner) startFreshLive(ctx context.Context, pool *pgxpool.Pool, lock *d
 }
 
 // unbuildLive takes back what startFreshLive did before its row landed:
-// the slot is dropped, if the attempt got as far as making it, and the
-// shadow with it. It outlives the caller's context, since a cancelled run
-// is the usual way here, but is bounded so it returns against a server
-// that has stopped answering.
-func (r *Runner) unbuildLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget) error {
+// the slot, when dropSlot says the attempt made one, and the shadow. A
+// slot the attempt did not make is not this run's to drop (ST-3). It
+// outlives the caller's context, since a cancelled run is the usual way
+// here, but is bounded so it returns against a server that has stopped
+// answering.
+func (r *Runner) unbuildLive(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, dropSlot bool) error {
 	undoCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), dbconn.DefaultConnectTimeout)
 	defer cancel()
-	return errors.Join(
-		decode.DropSlot(undoCtx, r.cfg, pool, target.DecodingName()),
-		DropShadow(undoCtx, pool, lock, target, r.opts.Shadow),
-	)
+	var slotErr error
+	if dropSlot {
+		slotErr = decode.DropSlot(undoCtx, r.cfg, pool, target.DecodingName())
+	}
+	return errors.Join(slotErr, DropShadow(undoCtx, pool, lock, target, r.opts.Shadow))
 }
 
 // resumeLive continues the live run cp records. The row's slot is not

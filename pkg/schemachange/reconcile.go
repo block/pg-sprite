@@ -163,7 +163,7 @@ func (r *Reconciler) reconcile(ctx context.Context, pool *pgxpool.Pool, cp check
 // caller's to close.
 func (r *Reconciler) claimSlot(ctx context.Context, pool *pgxpool.Pool, marked checkpoint.Checkpoint) (*decode.Slot, error) {
 	var slot *decode.Slot
-	err := r.store.WithSlotLock(ctx, marked.SlotName, func(ctx context.Context) error {
+	err := r.store.WithSlotLock(ctx, r.cfg, marked.SlotName, func(ctx context.Context) error {
 		if err := r.store.Save(ctx, r.lock, marked); err != nil {
 			return err
 		}

@@ -17,7 +17,11 @@ import (
 type HeldImage struct {
 	// Entry is the image as the batch carried it, markers intact.
 	Entry Entry
-	// Completed carries the value the read found for each marker column.
+	// Completed carries the value the read found for each marker column, as
+	// the text the server rendered it, or nil for NULL. The values are in
+	// the form of the row FromSource names: a shadow row holds a converted
+	// column's converted value, a source row the source's, and Hold reads
+	// FromSource to tell the flush which it has.
 	Completed []decode.Column
 	// FromSource reports a read of the source row under Key; false is a read
 	// of the shadow row under the old key.
@@ -39,9 +43,13 @@ type pendingCompletion struct {
 // carried it, with its completion pending: Drain keeps the image until
 // Release lets the completion in, and an event that replaces the key's
 // entry or reuses its old key drops the completion instead, since the read
-// may have seen that event's row. Like Requeue, Hold runs before any Add
-// after the Drain; a key the buffer already holds is ErrInvariantViolation,
-// and the buffer is left as it was.
+// may have seen that event's row. A completion read from the shadow row is
+// kept in the shadow's form, so the flush that writes it binds it bare
+// instead of converting the shadow's own value again; one read from the
+// source row is kept as it is, to be converted like a value from the
+// stream. Like Requeue, Hold runs before any Add after the Drain; a key the
+// buffer already holds is ErrInvariantViolation, and the buffer is left as
+// it was.
 func (b *Buffer) Hold(held []HeldImage) error {
 	// INV: CO-5, CO-8
 	for _, h := range held {
@@ -53,7 +61,11 @@ func (b *Buffer) Hold(held []HeldImage) error {
 		e := h.Entry
 		e.Columns = cloneColumns(e.Columns)
 		b.put(&e)
-		b.pending[e.Key] = pendingCompletion{completed: cloneColumns(h.Completed), readLSN: h.ReadLSN}
+		completed := cloneColumns(h.Completed)
+		if !h.FromSource {
+			completed = inShadowForm(completed)
+		}
+		b.pending[e.Key] = pendingCompletion{completed: completed, readLSN: h.ReadLSN}
 	}
 	return nil
 }
