@@ -26,6 +26,21 @@ type ConfirmedSource interface {
 	Confirmed() decode.LSN
 }
 
+// FlushGate holds the catch-up's flushes off the shadow for as long as a
+// live repair recopies it. The applier's Catchup is one. Pause returns
+// once no flush is in flight, with none starting until resume is called,
+// or with ctx's cause once ctx ends first; the catch-up goes on reading
+// and confirming the stream under the hold, so what the source writes
+// meanwhile is buffered and flushed after the resume. An implementation
+// of its own must make the same promise: nothing the stream carries
+// writes the shadow between Pause's return and the resume. The caller
+// calls resume exactly once on every path after Pause returns a nil
+// error, including when its own work fails, so an implementation need
+// not tolerate a second call or a missing one.
+type FlushGate interface {
+	Pause(ctx context.Context) (resume func(), err error)
+}
+
 // ErrVerificationUnresolved is the sentinel an UnresolvedError unwraps to:
 // a live pass could not decide whether a differing chunk is a divergence
 // or a chunk the stream has not yet settled.
@@ -109,13 +124,19 @@ const (
 
 // LiveOptions bounds how a live pass settles a chunk that differed while
 // the source is written and the catch-up applies the stream. Zero values
-// take the defaults; Confirmed has none and is required. Attempts and
-// SettleWait bound each chunk, not the pass: a pass over many differing
-// chunks can spend them on every one, so a caller with a deadline of its
-// own passes it on the context.
+// take the defaults; Confirmed has none and is required, and so is
+// Flushes under DivergenceRepair. Attempts and SettleWait bound each
+// chunk, not the pass: a pass over many differing chunks can spend them on
+// every one, so a caller with a deadline of its own passes it on the
+// context.
 type LiveOptions struct {
 	// Confirmed is the catch-up applying the stream to the shadow.
 	Confirmed ConfirmedSource
+	// Flushes holds that catch-up's flushes off the shadow while a repair
+	// recopies it. A pass under DivergenceRepair requires it; a pass under
+	// DivergenceAbort recopies nothing and leaves it unused. The applier's
+	// Catchup serves as both Confirmed and Flushes.
+	Flushes FlushGate
 	// Attempts is how many fresh rereads a chunk that keeps changing gets
 	// before the pass reports it unsettled.
 	Attempts int
@@ -153,10 +174,14 @@ func (o LiveOptions) withDefaults() LiveOptions {
 	return o
 }
 
-// validate runs after withDefaults, so every field is set.
-func (o LiveOptions) validate() error {
+// validate runs after withDefaults, so every field is set, and for the
+// policy the pass runs under, since only a repair needs the flush gate.
+func (o LiveOptions) validate(policy DivergencePolicy) error {
 	if o.Confirmed == nil {
 		return fmt.Errorf("%w: a live pass needs the catch-up's confirmed position", ErrInvalidOptions)
+	}
+	if policy == DivergenceRepair && o.Flushes == nil {
+		return fmt.Errorf("%w: a live pass under %q needs the catch-up's flush gate (LiveOptions.Flushes) to hold its flushes while a repair recopies", ErrInvalidOptions, DivergenceRepair)
 	}
 	if o.Attempts < 1 {
 		return fmt.Errorf("%w: settle attempts %d is below one; use zero for the default", ErrInvalidOptions, o.Attempts)
@@ -214,10 +239,12 @@ func sleepContext(ctx context.Context, d time.Duration) error {
 // found it, and the caller runs the pass again. Under DivergenceAbort a
 // divergence is returned as a *DivergenceError with the shadow untouched,
 // whether or not other chunks were unsettled. Under DivergenceRepair every
-// divergent chunk is recopied from the source in one transaction that
-// fences the stream's flushes out of the shadow while it runs, the pass
-// waits for the catch-up to confirm past the recopy, and the chunk is
-// settled again; a chunk divergent after its repair is a *RepairError, and
+// divergent chunk is recopied from the source in one transaction, with
+// the catch-up's flushes held off the shadow through LiveOptions.Flushes
+// for as long as it runs and SHARE MODE on the shadow against any other
+// writer; the pass resumes the flushes, waits for the catch-up to confirm
+// past the recopy, and settles the chunk again; a chunk divergent after
+// its repair is a *RepairError, and
 // a pass whose repairs all took but which left other chunks unsettled
 // returns the first of them as an *UnresolvedError with the repairs
 // committed and listed in the Outcome. A pass with repairs mints no proof
@@ -238,7 +265,7 @@ func (v *Verifier) CheckLive(ctx context.Context, pool *pgxpool.Pool, through co
 		return Outcome{}, v.verifyError(fmt.Errorf("%w: %q reads nothing again; a live pass settles every chunk it recopies, so it takes %q or %q", ErrNoDivergencePolicy, DivergenceRecopy, DivergenceAbort, DivergenceRepair))
 	}
 	live = live.withDefaults()
-	if err := live.validate(); err != nil {
+	if err := live.validate(policy); err != nil {
 		return Outcome{}, v.verifyError(err)
 	}
 	stop, err := v.report()

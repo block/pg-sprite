@@ -24,7 +24,7 @@ func TestLiveOptionsDefaults(t *testing.T) {
 	assert.Equal(t, DefaultSettleWait, opts.SettleWait)
 	assert.Equal(t, DefaultSettlePoll, opts.Poll)
 	assert.NotNil(t, opts.Sleep)
-	require.NoError(t, opts.validate())
+	require.NoError(t, opts.validate(DivergenceAbort))
 
 	given := LiveOptions{Confirmed: confirmedAt(0), Attempts: 5, SettleWait: time.Minute, Poll: time.Second}.withDefaults()
 	assert.Equal(t, 5, given.Attempts)
@@ -45,9 +45,28 @@ func TestLiveOptionsRefuseUnboundedValues(t *testing.T) {
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {
-			assert.ErrorIs(t, opts.withDefaults().validate(), ErrInvalidOptions)
+			assert.ErrorIs(t, opts.withDefaults().validate(DivergenceAbort), ErrInvalidOptions)
 		})
 	}
+}
+
+// pauseNever is a FlushGate whose hold is a no-op, for options tests that
+// only need the field set.
+type pauseNever struct{}
+
+func (pauseNever) Pause(context.Context) (func(), error) { return func() {}, nil }
+
+// Only a repair recopies the shadow, so only a pass under repair needs the
+// gate that holds the catch-up's flushes off it; a pass under abort with no
+// gate is valid, and one under repair with no gate is refused before it
+// reads anything.
+func TestLiveOptionsRequireTheFlushGateOnlyForRepair(t *testing.T) {
+	without := LiveOptions{Confirmed: confirmedAt(0)}.withDefaults()
+	require.NoError(t, without.validate(DivergenceAbort))
+	assert.ErrorIs(t, without.validate(DivergenceRepair), ErrInvalidOptions)
+
+	with := LiveOptions{Confirmed: confirmedAt(0), Flushes: pauseNever{}}.withDefaults()
+	require.NoError(t, with.validate(DivergenceRepair))
 }
 
 // Two reads of a differing chunk, the second taken after the catch-up
