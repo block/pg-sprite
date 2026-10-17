@@ -22,7 +22,7 @@ import (
 func TestRunRefreshesTheStatisticsOfRetypedColumns(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	schema := testutil.NewSchema(t, pool)
 	for _, ddl := range []string{
 		"CREATE TABLE %[1]s.t (id int PRIMARY KEY, code varchar(50), label varchar(50), note text)",
@@ -50,7 +50,7 @@ func TestRunRefreshesTheStatisticsOfRetypedColumns(t *testing.T) {
 func TestRunLeavesStatisticsAloneWithoutATypeChange(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	schema := testutil.NewSchema(t, pool)
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, code varchar(50))", schema))
 	require.NoError(t, err)

@@ -22,7 +22,7 @@ import (
 func TestRefreshColumnStatistics(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	schema := testutil.NewSchema(t, pool)
 	for _, ddl := range []string{
 		"CREATE TABLE %[1]s.t (id int PRIMARY KEY, code text, note text)",

@@ -24,7 +24,7 @@ import (
 func TestRefreshRetypedStatisticsNamesTheAnalyzeItCouldNotRun(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	schema := testutil.NewSchema(t, pool)
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, code varchar(100))", schema))
 	require.NoError(t, err)
