@@ -3,6 +3,9 @@ package schemadiff
 import (
 	"errors"
 	"fmt"
+	"math"
+	"slices"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 
@@ -11,8 +14,8 @@ import (
 
 // ErrUnsupportedChange is returned when converging live onto desired would
 // need a change the engine does not derive: identity, generation, or
-// collation changes on an existing column, a persistence (unlogged)
-// difference, or a partitioning difference (partition key or partition
+// collation changes on an existing column, a persistence (unlogged) or
+// storage-parameter difference, or a partitioning difference (partition key or partition
 // attachment) — table identity that no ALTER converges. The caller
 // surfaces it; nothing is guessed.
 var ErrUnsupportedChange = errors.New("unsupported schema change")
@@ -107,6 +110,21 @@ type Change struct {
 	// Destructive changes are gated by the caller, never executed
 	// silently.
 	Destructive bool `json:"destructive,omitempty"`
+	// Adopts is set on an ADD CONSTRAINT ... USING INDEX: the live index
+	// the constraint takes over, with the definition the diff matched it
+	// against. The statement names only the index, so execution checks
+	// the definition again under the table's lock before attaching it.
+	// The SQL already identifies the change, so it stays out of the JSON.
+	Adopts *IndexAdoption `json:"-"`
+}
+
+// IndexAdoption is an index a new primary key or unique constraint takes
+// over, and the definition, as introspection reads it (pg_get_indexdef with
+// the schema qualification removed), that the index must still have when
+// it does.
+type IndexAdoption struct {
+	Index string
+	Def   string
 }
 
 // Diff derives the ordered statement list that converges live onto desired.
@@ -142,6 +160,13 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	if live.Unlogged != desired.Unlogged {
 		return nil, fmt.Errorf("table persistence (unlogged) differs between live and desired: %w", ErrUnsupportedChange)
 	}
+	// Storage parameters are not converged: a mismatch fails closed, so a
+	// parameter the file declares is never reported as applied and a tuned
+	// live parameter the file omits is never reported as matching.
+	if !slices.Equal(live.Options, desired.Options) {
+		return nil, fmt.Errorf("table storage parameters differ between live (%s) and desired (%s); declare the live parameters in the desired file: %w",
+			formatOptions(live.Options), formatOptions(desired.Options), ErrUnsupportedChange)
+	}
 	table := pgx.Identifier{schema, live.Table}.Sanitize()
 
 	liveCols := columnsByName(live.Columns)
@@ -159,9 +184,15 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// alone. Only a plain table's invalid entry is an unfinished build.
 	partitioned := live.PartitionKey != ""
 
+	adopted := adoptableIndexes(partitioned, liveCons, liveIdx, desired.Constraints)
+
 	// Indexes to drop: gone from desired, or changed (dropped here,
-	// recreated in the create bucket below).
+	// recreated in the create bucket below). An index a new key constraint
+	// adopts stays: the constraint takes it over below.
 	for _, ix := range live.Indexes {
+		if _, ok := adopted[ix.Name]; ok {
+			continue
+		}
 		if indexNeedsDrop(partitioned, ix, desiredIdx) {
 			changes = append(changes, Change{
 				SQL:         "DROP INDEX " + pgx.Identifier{schema, ix.Name}.Sanitize(),
@@ -210,6 +241,9 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			if col.Collation != "" {
 				return nil, fmt.Errorf("%w: column %q has an explicit collation (%s); the plan cannot carry it", ErrUnsupportedChange, col.Name, col.Collation)
 			}
+			if err := identityExpressible(col); err != nil {
+				return nil, fmt.Errorf("%w: %w", ErrUnsupportedChange, err)
+			}
 			changes = append(changes, Change{
 				SQL:  "ALTER TABLE " + table + " ADD COLUMN " + columnDef(col),
 				Kind: ChangeAddColumn,
@@ -232,6 +266,14 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 
 	// Constraints to add: new, or re-added after a definition change.
 	for _, con := range desired.Constraints {
+		if _, ok := adopted[con.Name]; ok {
+			changes = append(changes, Change{
+				SQL:    adoptIndexSQL(table, con),
+				Kind:   ChangeAddConstraint,
+				Adopts: &IndexAdoption{Index: con.Name, Def: con.IndexDef},
+			})
+			continue
+		}
 		had, ok := liveCons[con.Name]
 		if !ok || had.Def != con.Def {
 			sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize() + " " + con.Def
@@ -265,7 +307,8 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 
 // alterColumnChanges derives the in-place column alterations between two
 // versions of the same column. Identity and generation cannot be altered in
-// place, so a delta there is refused as unsupported. A stored generated
+// place, so a delta there is refused as unsupported, and so is a delta in
+// an identity's sequence declaration. A stored generated
 // column whose expression alone differs is planned as SET EXPRESSION, the
 // one statement that states the change: it keeps the column's indexes,
 // where a drop and re-add would silently take them with it. The planner
@@ -279,6 +322,19 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	}
 	if live.Virtual != desired.Virtual {
 		return nil, fmt.Errorf("%w: column %q virtual generated change", ErrUnsupportedChange, live.Name)
+	}
+	// An identity's sequence declaration is part of what the file states,
+	// and the diff does not converge it, so a difference fails closed. A
+	// serial's is not compared: the serial shorthand cannot state one, so
+	// the desired side always carries the defaults and export refuses a
+	// live serial declared otherwise.
+	// A type change on the column retypes its identity sequence too, so
+	// live is compared as the type change would leave it.
+	if desired.Identity != IdentityNone {
+		if after := identitySequenceAfterRetype(live, desired.Type); !sameSequence(after, desired.Sequence) {
+			return nil, fmt.Errorf("%w: column %q identity sequence differs between live (%s) and desired (%s)",
+				ErrUnsupportedChange, live.Name, formatSequence(after), formatSequence(desired.Sequence))
+		}
 	}
 	// A collation change rewrites the column and rebuilds its indexes —
 	// the engine does not derive it, so a delta fails closed instead of
@@ -351,9 +407,9 @@ func columnDef(c Column) string {
 	case c.Virtual:
 		def += " GENERATED ALWAYS AS (" + c.Default + ") VIRTUAL"
 	case c.Identity == IdentityAlways:
-		def += " GENERATED ALWAYS AS IDENTITY"
+		def += " GENERATED ALWAYS AS IDENTITY" + identityOptions(c.Sequence)
 	case c.Identity == IdentityByDefault:
-		def += " GENERATED BY DEFAULT AS IDENTITY"
+		def += " GENERATED BY DEFAULT AS IDENTITY" + identityOptions(c.Sequence)
 	case c.Default != "":
 		def += " DEFAULT " + c.Default
 	}
@@ -363,6 +419,100 @@ func columnDef(c Column) string {
 	return def
 }
 
+// identityOptions renders an identity's sequence options clause, empty
+// when the sequence is declared at the defaults. The sequence's type is
+// not stated: it is always the column's, which identityExpressible checks.
+func identityOptions(seq *SequenceOptions) string {
+	if seq == nil {
+		return ""
+	}
+	return " (" + sequenceClause(*seq) + ")"
+}
+
+// sequenceClause spells every declared option, so the declaration does not
+// depend on which defaults the server would fill in.
+func sequenceClause(seq SequenceOptions) string {
+	cycle := "NO CYCLE"
+	if seq.Cycle {
+		cycle = "CYCLE"
+	}
+	return fmt.Sprintf("START WITH %d INCREMENT BY %d MINVALUE %d MAXVALUE %d CACHE %d %s",
+		seq.Start, seq.Increment, seq.Min, seq.Max, seq.Cache, cycle)
+}
+
+// identitySequenceAfterRetype returns the declaration live's identity
+// sequence carries once ALTER COLUMN ... TYPE gives the column type to. The
+// server retypes the identity sequence with its column, and a bound equal
+// to the sequence's old type's own limit was never chosen by anyone, so it
+// follows the new type; a declared bound stays as written. That is the
+// same rule the copy-and-swap cutover applies to the sequences it hands
+// over. A column keeping its type, or a type that is not an integer type,
+// leaves the declaration as it is.
+func identitySequenceAfterRetype(live Column, to string) *SequenceOptions {
+	if live.Type == to {
+		return live.Sequence
+	}
+	opts, ok := defaultSequenceOptions(live.Type)
+	if live.Sequence != nil {
+		opts, ok = *live.Sequence, true
+	}
+	fromMin, fromMax, fromOK := integerTypeRange(opts.Type)
+	toMin, toMax, toOK := integerTypeRange(to)
+	if !ok || !fromOK || !toOK {
+		return live.Sequence
+	}
+	opts.Type = to
+	if opts.Min == fromMin {
+		opts.Min = toMin
+	}
+	if opts.Max == fromMax {
+		opts.Max = toMax
+	}
+	return declaredSequence(to, opts)
+}
+
+// integerTypeRange returns the smallest and largest value of an integer
+// type a sequence can have, and false for any other type.
+func integerTypeRange(typ string) (minValue, maxValue int64, ok bool) {
+	switch typ {
+	case "smallint":
+		return math.MinInt16, math.MaxInt16, true
+	case "integer":
+		return math.MinInt32, math.MaxInt32, true
+	case "bigint":
+		return math.MinInt64, math.MaxInt64, true
+	default:
+		return 0, 0, false
+	}
+}
+
+// sameSequence reports whether two recorded sequence declarations match;
+// nil is the default declaration on both sides.
+func sameSequence(a, b *SequenceOptions) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// formatSequence describes a recorded sequence declaration for an error
+// message.
+func formatSequence(seq *SequenceOptions) string {
+	if seq == nil {
+		return "the defaults"
+	}
+	return seq.Type + " " + sequenceClause(*seq)
+}
+
+// formatOptions lists storage parameters for an error message, "none" when
+// there are none.
+func formatOptions(opts []string) string {
+	if len(opts) == 0 {
+		return "none"
+	}
+	return strings.Join(opts, ", ")
+}
+
 // columnsByName indexes columns for lookup during the diff.
 func columnsByName(cols []Column) map[string]Column {
 	m := make(map[string]Column, len(cols))
@@ -370,6 +520,57 @@ func columnsByName(cols []Column) map[string]Column {
 		m[c.Name] = c
 	}
 	return m
+}
+
+// adoptableIndexes names the live indexes a new primary key or unique
+// constraint can take over with ADD CONSTRAINT ... USING INDEX, keyed by
+// index name, which is also the constraint's. Dropping such an index and
+// letting the constraint build its own would leave the table without the
+// uniqueness guarantee and without the index for as long as the rebuild
+// runs. A live index qualifies when it has the constraint's name and is
+// exactly the index the constraint would build, so adopting it leaves the
+// table as building the constraint fresh would. An unfinished build keeps
+// the drop and rebuild, and so does a partitioned parent, where the server
+// refuses USING INDEX.
+func adoptableIndexes(partitioned bool, liveCons map[string]Constraint, liveIdx map[string]Index, desired []Constraint) map[string]struct{} {
+	adopted := make(map[string]struct{})
+	if partitioned {
+		return adopted
+	}
+	for _, con := range desired {
+		if con.IndexDef == "" {
+			continue
+		}
+		if _, ok := liveCons[con.Name]; ok {
+			continue
+		}
+		ix, ok := liveIdx[con.Name]
+		if !ok || ix.Invalid || ix.Def != con.IndexDef {
+			continue
+		}
+		adopted[con.Name] = struct{}{}
+	}
+	return adopted
+}
+
+// adoptIndexSQL is the statement that makes a primary key or unique
+// constraint take over the live index of its own name, with the
+// constraint's declared deferrability: the server marks the index
+// deferred as it attaches it.
+func adoptIndexSQL(table string, con Constraint) string {
+	key := "UNIQUE"
+	if con.Primary {
+		key = "PRIMARY KEY"
+	}
+	name := pgx.Identifier{con.Name}.Sanitize()
+	sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + name + " " + key + " USING INDEX " + name
+	if con.Deferrable {
+		sql += " DEFERRABLE"
+	}
+	if con.InitiallyDeferred {
+		sql += " INITIALLY DEFERRED"
+	}
+	return sql
 }
 
 // dropConstraintKind classifies a constraint drop, keeping foreign keys in

@@ -12,14 +12,20 @@
 // transaction; a drop destroys a shadow that may have been resumable and
 // buys a full rebuild and copy.
 //
-// Runner chains the operations for a quiesced table from table lock to old
-// table drop, writing the checkpoint row at every phase transition and
-// dispatching on the row it finds, so a run that stops anywhere resumes
-// from the row. The quiescence is enforced, not assumed: the run fences
-// the source with a statement trigger that refuses every write until the
-// swap, and the fence stays on a stopped run's source until it is resumed
-// or abandoned with DropWriteFence. The one exception to "a shadow is only
-// dropped on abandonment" is a first save whose row does not land: the
-// run drops the shadow it just built, since a shadow no row records would
-// refuse the next run as ErrShadowExists.
+// Runner chains the operations from table lock to old table drop, writing
+// the checkpoint row at every phase transition and dispatching on the row
+// it finds, so a run that stops anywhere resumes from the row. The target's
+// proof chooses the route. A quiesced table's quiescence is enforced, not
+// assumed: the run fences the source with a statement trigger that refuses
+// every write until the swap, and the fence stays on a stopped run's
+// source until it is resumed or abandoned with DropWriteFence. A table
+// under writes is captured instead: the run creates the slot with the row
+// that owns it, applies the stream to the shadow beside the copy, catches
+// up to a marker past every change committed so far, verifies live, and
+// drains the stream under the swap's lock before it renames; a stopped
+// run's slot stays until it is resumed or abandoned with decode.DropSlot.
+// The one exception to "a shadow is only dropped on abandonment" is a
+// first save whose row does not land: the run drops the shadow it just
+// built, and the slot with it, since a shadow no row records would refuse
+// the next run as ErrShadowExists.
 package schemachange

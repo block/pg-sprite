@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 // EngineSchema is the schema the engine owns in every target database: the
@@ -100,6 +102,41 @@ func CopySwapRefusalCauses() []CopySwapRefusalCause {
 		CopySwapCauseSlotCollision,
 		CopySwapCauseSlotHeadroom,
 		CopySwapCauseDiskHeadroom,
+	}
+}
+
+// Class is the routing class of the cause, from docs/refusal-classes.md:
+// what kind of boundary the consumer is looking at. A replica identity the
+// operator can set, and every cluster and volume cause — a server setting,
+// a foreign slot, exhausted slot or sender headroom, a short or unmeasured
+// volume — are environmental: the same table is admitted once state outside
+// the engine changes, and no engine release is waited on. Every other shape
+// cause is a capability boundary: a wider key family, an OID-bound dependent
+// re-pointed at cutover, a persistence or row-security path the engine has
+// not built. The class is a triage decision; the cause's row in the document
+// decides what the consumer does next. The zero cause, and an unknown one,
+// have no class.
+func (c CopySwapRefusalCause) Class() refusal.Class {
+	switch c {
+	case CopySwapCauseReplicaIdentity,
+		CopySwapCauseLogicalDecodingUnavailable,
+		CopySwapCauseSlotCollision,
+		CopySwapCauseSlotHeadroom,
+		CopySwapCauseDiskHeadroom:
+		return refusal.ClassEnvironmental
+	case CopySwapCausePKUnsupported,
+		CopySwapCauseForeignKeys,
+		CopySwapCauseTriggers,
+		CopySwapCausePartitioned,
+		CopySwapCauseUnlogged,
+		CopySwapCauseForceRLS,
+		CopySwapCauseDependentViews,
+		CopySwapCausePublicationMember,
+		CopySwapCauseSubscriptionTarget,
+		CopySwapCauseDependents:
+		return refusal.ClassCapabilityBoundary
+	default:
+		return ""
 	}
 }
 
@@ -300,10 +337,14 @@ func refuseCopySwapShape(f copySwapShapeFacts) (CopySwapRefusalCause, string) {
 // table while it is in place must not refuse the table on it. Dependent views are the
 // distinct views and materialized views whose rewrite rules pg_depend
 // records against the table; the table's own rules are counted as rules.
-// Publications are read from pg_publication_tables, which expands FOR ALL
-// TABLES and FOR TABLES IN SCHEMA publications to the tables they publish,
-// and the engine's own publication for this table is set aside by its
-// exact derived name. Dependents are the distinct pg_depend normal
+// Publications are read in a second statement straight from the catalog —
+// FOR ALL TABLES publications, FOR TABLE memberships, and FOR TABLES IN
+// SCHEMA memberships of the table's schema — rather than through
+// pg_publication_tables, whose set-returning function looks each
+// publication it has listed up again by name and fails the whole read when
+// another session has dropped one in between, as a concurrent run's drop of
+// its own publication does; the engine's own publication for this table is
+// set aside by its exact derived name. Dependents are the distinct pg_depend normal
 // dependents of the table's OID or its row type, less the objects that are
 // the table's own (an auto or internal edge back to it: indexes,
 // constraints, owned sequences, triggers, policies, defaults); foreign
@@ -345,10 +386,8 @@ func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table 
 		           AND d.refobjid = c.oid
 		           AND v.oid <> c.oid
 		           AND v.relkind IN ('v', 'm')),
-		       (SELECT COALESCE(pg_catalog.array_agg(pt.pubname::text ORDER BY pt.pubname), '{}')
-		          FROM pg_catalog.pg_publication_tables pt
-		         WHERE pt.schemaname = n.nspname
-		           AND pt.tablename = c.relname),
+		       c.relnamespace,
+		       pg_catalog.current_setting('server_version_num')::int,
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_subscription_rel sr WHERE sr.srrelid = c.oid),
 		       (SELECT COALESCE(pg_catalog.array_agg(dep.description ORDER BY dep.description), '{}')
 		          FROM (SELECT DISTINCT pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid) AS description
@@ -366,11 +405,12 @@ func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table 
 			CASE WHEN $1 = '' THEN pg_catalog.quote_ident($2)
 			     ELSE pg_catalog.quote_ident($1) || '.' || pg_catalog.quote_ident($2) END)`
 	var f copySwapShapeFacts
-	var publications []string
+	var namespaceOID uint32
+	var version int
 	err := db.QueryRow(ctx, q, schema, table, EngineSchema).Scan(
 		&f.database, &f.schema, &f.oid, &f.relkind, &f.relpersistence, &f.forceRLS, &f.isPartition, &f.hasSubclass, &f.inheritsParents, &f.replicaIdentity,
 		&f.pkColumns, &f.pkColumn, &f.pkType, &f.pkDeferrable, &f.foreignKeysOut, &f.foreignKeysIn, &f.triggers, &f.rules, &f.dependentViews,
-		&publications, &f.subscriptions, &f.dependents)
+		&namespaceOID, &version, &f.subscriptions, &f.dependents)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return copySwapShapeFacts{}, unresolvedTargetCause(ctx, db, schema, table)
 	}
@@ -384,8 +424,45 @@ func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table 
 	if f.relkind != "r" && f.relkind != "p" {
 		return copySwapShapeFacts{}, fmt.Errorf("%w: %s has relkind %q", ErrNotTable, qualifiedName(schema, table), f.relkind)
 	}
+	publications, err := publicationsOf(ctx, db, f.oid, namespaceOID, version)
+	if err != nil {
+		return copySwapShapeFacts{}, fmt.Errorf("gather copy-and-swap shape facts for %s: %w", qualifiedName(schema, table), err)
+	}
 	f.publications = publicationsOtherThanEngine(publications, CopySwapDecodingName(f.database, f.schema, table))
 	return f, nil
+}
+
+// schemaPublicationsSince is the server_version_num from which a
+// publication can publish a whole schema (FOR TABLES IN SCHEMA), and from
+// which the catalog that records those memberships exists.
+const schemaPublicationsSince = 150000
+
+// publicationsOf names every publication that publishes the table with
+// the given OID, in the schema with the given OID, reading the catalogs
+// that record membership directly: pg_publication for FOR ALL TABLES,
+// pg_publication_rel for a FOR TABLE membership, and, on a server that
+// has it, pg_publication_namespace for a FOR TABLES IN SCHEMA membership.
+// The caller has already settled that the relation is a plain table, so
+// the publications a partition would inherit from a published parent do
+// not arise.
+func publicationsOf(ctx context.Context, db rowQuerier, tableOID, namespaceOID uint32, version int) ([]string, error) {
+	inSchema := `false`
+	args := []any{tableOID}
+	if version >= schemaPublicationsSince {
+		inSchema = `EXISTS (SELECT 1 FROM pg_catalog.pg_publication_namespace pn WHERE pn.pnpubid = p.oid AND pn.pnnspid = $2)`
+		args = append(args, namespaceOID)
+	}
+	var publications []string
+	err := db.QueryRow(ctx, `
+		SELECT COALESCE(pg_catalog.array_agg(p.pubname::text ORDER BY p.pubname), '{}')
+		FROM pg_catalog.pg_publication p
+		WHERE p.puballtables
+		   OR EXISTS (SELECT 1 FROM pg_catalog.pg_publication_rel r WHERE r.prpubid = p.oid AND r.prrelid = $1)
+		   OR `+inSchema, args...).Scan(&publications)
+	if err != nil {
+		return nil, fmt.Errorf("read publications: %w", err)
+	}
+	return publications, nil
 }
 
 // publicationsOtherThanEngine drops the engine's own publication for the

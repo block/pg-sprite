@@ -1,24 +1,18 @@
 package copier_test
 
 import (
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/copier"
 )
-
-// refusalClassesDoc is the routing contract that classifies every copier
-// refusal cause; these tests keep its cause table honest.
-const refusalClassesDoc = "../../docs/refusal-classes.md"
 
 // refusalClassesCopierSection heads the table that classifies the copier
 // causes. The shadow table in the same file lists some of the same names
@@ -29,26 +23,22 @@ const refusalClassesCopierSection = "### Copier refusals, keyed on `copier.Refus
 // refusal-class map: a cause added to the code without a classification
 // fails here.
 func TestRefusalClassesDocListsEveryCopierCause(t *testing.T) {
-	raw, err := os.ReadFile(refusalClassesDoc)
-	require.NoError(t, err)
-	table := sectionOf(t, string(raw), refusalClassesCopierSection)
+	table := testutil.RefusalCauseTable(t, refusalClassesCopierSection)
 	for _, cause := range copier.RefusalCauses() {
-		assert.Contains(t, table, fmt.Sprintf("| `%s` |", cause),
+		assert.Contains(t, table, testutil.RefusalCauseRow(string(cause)),
 			"docs/refusal-classes.md has no copier class row for copier refusal cause %q", cause)
 	}
 }
 
-// sectionOf returns the text of doc under heading, up to the next heading
-// of the same level.
-func sectionOf(t *testing.T, doc, heading string) string {
-	t.Helper()
-	start := strings.Index(doc, heading)
-	require.NotEqual(t, -1, start, "docs/refusal-classes.md has the section %q", heading)
-	section := doc[start+len(heading):]
-	if end := strings.Index(section, "\n### "); end != -1 {
-		section = section[:end]
+// Every copier refusal cause's Class() is the class its row in the copier
+// table records: the document decides the class, and the code's answer is
+// held to it, so neither can be changed without the other.
+func TestRefusalCauseClassMatchesDocClassColumn(t *testing.T) {
+	table := testutil.RefusalCauseTable(t, refusalClassesCopierSection)
+	for _, cause := range copier.RefusalCauses() {
+		assert.Equal(t, testutil.RefusalClassCell(t, table, string(cause)), string(cause.Class()),
+			"docs/refusal-classes.md classifies copier refusal cause %q differently from Class()", cause)
 	}
-	return section
 }
 
 // The closed set is complete: every RefusalCause constant declared in
