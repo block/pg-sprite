@@ -116,7 +116,15 @@ the same recopy commits with no reread — the policy for a source that is writt
 pass runs, where a fresh read would refuse a chunk the recopy itself made right; the stream
 carries that write, and the next pass, not this one, is the proof (no-policy,
 abort-leaves-shadow-alone, repairs-every-chunk, moved-unique-value,
-later-repair-fails, and recopy-tolerates-a-source-write-inside-the-pass tests). *Source:* Spirit AGENTS.md
+later-repair-fails, and recopy-tolerates-a-source-write-inside-the-pass tests). Under the
+stream (`CheckLive` under `repair`) the one recopy transaction is kept apart from the stream's
+own writes: the pass holds the catch-up's flushes off the shadow in Go before the transaction
+asks for `SHARE MODE` and gives them back only after it commits, on every path
+(`checksum.LiveOptions.Flushes`, a `FlushGate`, required under `repair`; `applier.Catchup.Pause`
+is the hold), so no flush interleaves with the delete and the copy
+(`TestCheckLiveRepairHoldsTheCatchupsFlushesForTheRecopy`,
+`TestCheckLiveRepairHoldBracketsTheRecopyTransaction`,
+`TestCheckLiveRepairResumesTheFlushesWhenTheRecopyFails`). *Source:* Spirit AGENTS.md
 (block/spirit#994 policy) — maps directly onto our failover-reconcile design.
 
 ### CO-4 — The copy/apply ordering invariants
@@ -499,6 +507,15 @@ pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repa
 transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so a pool
 built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued behind
 `ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
+The concurrent build's failure verdict runs on a reserved session that observers must not
+disturb: `Tracker.Progress` reads the build's progress on that session detached from the
+observer's context and under its own deadline, set above `pkg/dbconn`'s default
+`statement_timeout` so a slow read ends server-side with the session intact, because a context
+that ends mid-query closes the connection; `Tracker.CancelBuild` signals the same way.
+*Enforced:* `pkg/progress` (`Tracker.Progress`, `progressReadTimeout`;
+`TestProgressRunsTheBuildReadDetachedFromTheObserver`,
+`TestProgressBuildReadDeadlineOutlastsTheServerStatementTimeout`, and
+`TestProgressReadCancelledMidQueryLeavesTheVerdictSessionUsable` in `pkg/executor`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -638,10 +655,19 @@ relation (a table where the statement needs an index, or the reverse) is a usage
 no verdict — each its own typed error — and nothing executes. The acknowledgement is never
 inferred from the statement text. The resolution and the execution are separate statements
 on the pool, so a concurrent re-pointing of the index name between them is outside what this
-invariant guarantees; the design records the window. *Enforced:* `pkg/migrate`
+invariant guarantees; the design records the window. The statement's scope must also be
+exactly that table: a `DROP INDEX ... CASCADE` also drops the objects that depend on the index,
+such as a foreign key on another table, so it is not a single-relation statement and the
+executor refuses it (`ErrUnsupportedAcceptedBlocking`) before opening a transaction.
+*Enforced:* `pkg/migrate`
 (`acceptBlocking`, `lockedTable`; `ErrAcceptBlockingMismatch`,
 `ErrAcceptBlockingRelationNotFound`, `ErrAcceptBlockingWrongRelationKind`),
-`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`.
+`pkg/executor` (`acceptedBlockingIneligibility`), `pkg/statement` (`ParseOne` classifies a
+cascading drop as `IndexTargetOther`),
+`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`,
+`TestAcceptedBlockingAdmission`, `TestExecuteAcceptedBlockingRefusesCascadeDrop`,
+`TestExecuteAcceptedBlockingPlainDropOfReferencedIndexIsRefusedByServer`,
+`TestExecuteAcceptedBlockingRestrictDropOfReferencedIndexIsRefusedByServer`.
 *Source:* [lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door).
 
 ### AB-4 — Acceptance applies only to an eligible in-process refusal, and to nothing else
@@ -649,13 +675,16 @@ invariant guarantees; the design records the window. *Enforced:* `pkg/migrate`
 The acknowledgement changes the outcome of exactly one thing: a gate refusal whose in-process
 proof the eligibility registry marks eligible (RF-8). Every other refusal — an ineligible
 gate refusal, a planner refusal, a size-guard or preflight refusal — stands exactly as it
-would without the flag, and a statement the gate admits runs its normal path. The
+would without the flag — including a `DROP INDEX ... CASCADE`, whose refusal site is the
+ineligible one because its scope exceeds the acknowledged table — and a statement the gate
+admits runs its normal path. The
 acknowledgement is not `--force`: the two cannot be combined, and a dry run reports the
 refusal as it stands rather than the accepted execution. The front door requires the
 statement budget to be stated on the same command line, because the accepted outage bound is
 a decision, not a default. *Enforced:* `migrate.AcceptedRefusal`, `MigrateCmd.Validate`,
-`TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
-`TestMigrateAcceptBlockingLeavesIneligibleRefusalsAlone`. *Source:*
+`migrate.gateRefusal` (the refusal site), `TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
+`TestMigrateAcceptBlockingLeavesIneligibleRefusalsAlone`,
+`TestMigrateAcceptBlockingRefusesCascadeAndKeepsDependentForeignKey`. *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door).
 
 ### AB-5 — The accepted outcome is distinguishable from online-safe execution at every surface
@@ -1041,6 +1070,20 @@ shadow attribute number; `copyColumns` takes only those). Tests:
 `TestRunnerLiveRunGivesAReaddedColumnItsDefault`. *Source:* adversarial review of the
 re-added-column copy fix.
 
+### ST-12 — A desired-state run reports executed only when a fresh plan is empty
+
+Every planned statement committing is not proof the table reached the desired schema: a
+concurrent session, an event trigger, or a planner gap can leave it still differing. On an
+existing table the run derives the plan again after its last commit and reports executed only
+when that plan is empty; otherwise the result is failed with `ErrNotConverged`, every
+statement it ran keeps its executed verdict, and the result's typed convergence status carries
+the plan a rerun would execute. A greenfield create proves its outcome through the names it claimed instead (ST-9 and
+the create-name checks), because deriving a plan needs `CREATE` on the database.
+*Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`). Tests:
+`TestRunDesired`, `TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,
+`TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt`.
+*Source:* review of desired-state outcome reporting.
+
 ## Refusals and preflight (RF)
 
 Each refusal is a preflight **error with a stated reason** — never a warning, never attempted.
@@ -1210,4 +1253,5 @@ about **how we write and review the code**.
 | ST-9 | 2 (declarative model) | every-relation-owned-by-owner, owner-mismatch fail-closed, unreadable-owner unverified, non-inheriting member admitted |
 | ST-10 | 8 | older-table evolve, newer-table refuse with no DDL, dropped-column and foreign-table shape reads, behind-table typed reads and writes |
 | ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
+| ST-12 | 2 (declarative model) | a table altered behind the run after its last commit fails as not converged with every verdict executed |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

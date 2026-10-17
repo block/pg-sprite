@@ -293,3 +293,20 @@ func TestCheckConcurrentInTransactionNamesTheOperation(t *testing.T) {
 	assert.Equal(t, "CREATE INDEX CONCURRENTLY t_c_idx ON t (c)", found.SQL)
 	assert.Equal(t, "CREATE INDEX t_c_idx", found.Operation)
 }
+
+// Two unnamed CHECKs on one column in one script: the second finding's
+// suggestion names its constraint past the first's, as the server would.
+func TestCheckUnnamedChecksInOneScriptSuggestDistinctNames(t *testing.T) {
+	report, err := lint.Check("ALTER TABLE t ADD CHECK (qty > 0); ALTER TABLE t ADD CHECK (qty < 100);")
+	require.NoError(t, err)
+	var suggested []string
+	for _, f := range report.Findings {
+		if len(f.Suggestion) > 0 {
+			suggested = append(suggested, f.Suggestion[0])
+		}
+	}
+	assert.Equal(t, []string{
+		"ALTER TABLE t ADD CONSTRAINT t_qty_check CHECK (qty > 0) NOT VALID",
+		"ALTER TABLE t ADD CONSTRAINT t_qty_check1 CHECK (qty < 100) NOT VALID",
+	}, suggested)
+}
