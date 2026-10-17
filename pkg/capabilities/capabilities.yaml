@@ -68,7 +68,7 @@ rows:
     front_doors:
       migrate: refused
       diff: refused
-    refusal_reason: unsupported-statement
+    refusal_reason: not-native-safe-rewrite-required
     reason_notes: "The inline constraint does its index build or validation scan under the `ADD COLUMN`'s `ACCESS EXCLUSIVE` lock; refused with guidance to add the column first, then build the constraint online"
   - id: drop-column
     area: "column_changes"
@@ -159,7 +159,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`. In a desired file, a new key whose name and index match a valid live unique index takes that index over with `ADD CONSTRAINT ... USING INDEX` at the key's declared deferrability, instead of a destructive drop and rebuild. Execution reads the index again under the table's lock and refuses with the permanent `adopted-index-drift` code, attaching nothing, if it was dropped, replaced, or left invalid since planning"
+    reason_notes: "Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`. The sequence carries the key's `INCLUDE` columns, `NULLS NOT DISTINCT`, `WITH (...)` storage parameters, and index tablespace onto the index, and `DEFERRABLE` / `INITIALLY DEFERRED` onto the attach. A storage parameter the sequence cannot render faithfully (a value that is not a plain word, number, or string, a value containing a backslash, or a namespaced parameter name) gets no rewrite and is refused as `rewrite-required` with the `unique-index-then-constraint` guidance: build the index with it, then attach it. In a desired file, a new key whose name and index match a valid live unique index takes that index over with `ADD CONSTRAINT ... USING INDEX` at the key's declared deferrability, instead of a destructive drop and rebuild. Execution reads the index again under the table's lock and refuses with the permanent `adopted-index-drift` code, attaching nothing, if it was dropped, replaced, or left invalid since planning"
   - id: add-check-add-foreign-key-imperative
     area: "constraints"
     operation: "`ADD CHECK` / `ADD FOREIGN KEY` (imperative)"
@@ -232,25 +232,29 @@ rows:
   - id: drop-index
     area: "indexes"
     operation: "`DROP INDEX`"
-    tier: "t1"
-    status_mark: "✅"
-    engine_path: "native_safer_sequence"
+    tier: "t3"
+    status_mark: "❌"
+    engine_path: "none"
     online_safety_problem: true
+    online_safety_detail: "the online form is a direct `CONCURRENTLY` statement that `migrate` does not drive"
     front_doors:
-      migrate: supported
+      migrate: refused
       diff: supported
-    reason_notes: "Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**. `migrate` refuses the plain form and names the idiom; a single-index `DROP INDEX` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `diff` refuses dropping the table's replica identity index, or one a partition's is attached under, with `replica-identity`. `migrate` refuses every plain `DROP INDEX` before it reads the table, so its dry-run names the concurrent idiom; `--accept-blocking` checks the replica identity under the table's lock and refuses the drop as `unsupported-statement`, naming the identity index. pg-sprite never runs the concurrent drop itself"
+    refusal_reason: index-statement
+    reason_notes: "`migrate` never runs this statement online-safely: the plain form is refused and names `DROP INDEX CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. A single-index plain `DROP INDEX` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0); `--accept-blocking` checks the replica identity under the table's lock and refuses the drop as `unsupported-statement`, naming the identity index. `diff` reports an index to remove as a **destructive** `DROP INDEX` and hints to run it through `migrate --alter`, which ends in this `index-statement` refusal — run `DROP INDEX CONCURRENTLY` directly instead. `diff` refuses dropping the table's replica identity index, or one a partition's is attached under, with `replica-identity`"
   - id: reindex
     area: "indexes"
     operation: "`REINDEX`"
-    tier: "t1"
-    status_mark: "✅"
-    engine_path: "native_safer_sequence"
+    tier: "t3"
+    status_mark: "❌"
+    engine_path: "none"
     online_safety_problem: true
+    online_safety_detail: "the online form is a direct `CONCURRENTLY` statement that `migrate` does not drive"
     front_doors:
-      migrate: supported
-      diff: supported
-    reason_notes: "Rewritten to `REINDEX ... CONCURRENTLY`. `migrate` refuses the plain form and names the idiom; a plain `REINDEX INDEX` or `REINDEX TABLE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM` stay refused"
+      migrate: refused
+      diff: not_applicable
+    refusal_reason: index-statement
+    reason_notes: "`migrate` never runs this statement online-safely: the plain form is refused and names `REINDEX ... CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. A plain `REINDEX INDEX` or `REINDEX TABLE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM` stay refused. A desired schema cannot express a reindex, so `diff` never produces one"
   - id: index-build-on-a-partitioned-parent
     area: "indexes"
     operation: "Index build on a **partitioned parent**"
@@ -291,25 +295,27 @@ rows:
   - id: attach-partition
     area: "partitioned_tables"
     operation: "`ATTACH PARTITION`"
-    tier: "t1"
-    status_mark: "✅"
-    engine_path: "native_as_is"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
     online_safety_problem: true
     front_doors:
-      migrate: supported
-      diff: supported
-    reason_notes: "Executed; the safer idiom (pre-prove the bound with a validated `CHECK` so the attach skips its scan) is surfaced as guidance. A classify-first flow that constructs the proof itself is planned"
+      migrate: refused
+      diff: not_applicable
+    refusal_reason: not-native-safe-rewrite-required
+    reason_notes: "Without `--force`, a typed refusal with nothing executed: the attach scans the partition to validate its bound unless a validated `CHECK` already proves it, and the engine does not yet construct that proof. The safer idiom (pre-prove the bound with a validated `CHECK` so the attach skips its scan) is surfaced as guidance. `--force SCHEMA.TABLE` runs the blocking `ATTACH PARTITION` as submitted under bounded budgets, taking the blocking lock, and records the override. The classify-first flow that constructs the proof itself is planned. A desired schema cannot express an attach, so `diff` never produces one"
   - id: detach-partition-concurrently
     area: "partitioned_tables"
     operation: "`DETACH PARTITION [CONCURRENTLY]`"
-    tier: "t1"
-    status_mark: "✅"
-    engine_path: "native_safer_sequence"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
     online_safety_problem: true
     front_doors:
-      migrate: supported
-      diff: supported
-    reason_notes: "`CONCURRENTLY` is the idiom; the blocking form is rewritten to it"
+      migrate: refused
+      diff: not_applicable
+    refusal_reason: unsupported-statement
+    reason_notes: "`CONCURRENTLY` is the idiom and the blocking form is rewritten to it (`--dry-run` and `suggest` show the rewrite), but without `--force` `migrate` refuses both forms before anything executes: a cancelled concurrent detach leaves a detach-pending partition state the executor does not yet own recovering. `--force SCHEMA.TABLE` runs a plain `DETACH PARTITION` as submitted under bounded budgets, taking the blocking lock; `DETACH ... CONCURRENTLY` stays refused under `--force`. `migrate --dry-run` of either form reports the rewrite as a safer sequence to run and exits 0 while the real run refuses and exits 2, so the dry-run exit code is not a submit gate for a detach. A desired schema cannot express a detach, so `diff` never produces one"
   - id: partitioned-parents-in-the-declarative-model
     area: "partitioned_tables"
     operation: "Partitioned parents in the **declarative model**"
@@ -498,8 +504,8 @@ rows:
     front_doors:
       migrate: refused
       diff: refused
-    refusal_reason: backend-unavailable
-    reason_notes: "PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite — routes to a typed refusal toward copy-and-swap"
+    refusal_reason: unsupported-statement
+    reason_notes: "PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite, planned on copy-and-swap. Today the imperative door refuses `ALTER TYPE ... RENAME VALUE` as `unsupported-statement`, since it takes only `ALTER TABLE` and `CREATE INDEX`, and `DROP VALUE` does not parse"
   - id: enum-domain-type-creation-and-drop
     area: "types_and_non_table_objects"
     operation: "Enum/domain type creation and drop"
