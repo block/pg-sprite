@@ -584,7 +584,7 @@ $ pg-sprite capabilities --json | head
     {
       "id": "add-column-no-default-or-constant-default",
       "area": "column_changes",
-      "operation": "`ADD COLUMN` (no default, or constant default)",
+      "operation": "`ADD COLUMN` (no default, a constant default, or a non-volatile default such as `now()`)",
       "tier": "t1",
       "status_mark": "✅",
       "engine_path": "native_as_is",
