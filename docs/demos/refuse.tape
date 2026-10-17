@@ -1,5 +1,5 @@
 # Refuse with typed help and the CI exit-code contract:
-# error[rewrite-required] + note[safer-idiom] + help[name-constraint-then-validate],
+# error[rewrite-required] + note[safer-idiom] + help[add-column-then-constraint],
 # doc anchors, and echo $? showing 2.
 # Render from this directory: vhs refuse.tape (or `make demos` at the repo root).
 # Needs: make build && make db-up first. Hidden setup reseeds the users table.
@@ -13,6 +13,9 @@ Set Padding 16
 Set TypingSpeed 30ms
 Set Theme "Dracula"
 
+# The seed names public explicitly: the compose role is named pgsprite, like
+# the engine's own schema, so an unqualified name would land there once a
+# copy-swap run has created it.
 Hide
 Type `export PATH="$(git rev-parse --show-toplevel)/bin:$PATH"` Enter
 # The rendering machine's environment leaks into the recorded shell: strip
@@ -20,7 +23,7 @@ Type `export PATH="$(git rev-parse --show-toplevel)/bin:$PATH"` Enter
 # terminal and the GIF shows the diagnostic colors deterministically.
 Type "unset NO_COLOR && export TERM=xterm-256color" Enter
 Type "export PGSPRITE_URL='postgres://pgsprite:pgsprite@localhost:5432/pgsprite?sslmode=disable'" Enter
-Type `docker exec compose-postgres-1 psql -U pgsprite -d pgsprite -c 'DROP TABLE IF EXISTS users' -c 'CREATE TABLE users (id bigint PRIMARY KEY, email text)' -c "INSERT INTO users SELECT g, 'u'||g||'@x.com' FROM generate_series(1,1000) g" >/dev/null` Enter
+Type `docker exec compose-postgres-1 psql -U pgsprite -d pgsprite -c 'DROP TABLE IF EXISTS public.users' -c 'CREATE TABLE public.users (id bigint PRIMARY KEY, email text)' -c "INSERT INTO public.users SELECT g, 'u'||g||'@x.com' FROM generate_series(1,1000) g" >/dev/null` Enter
 # Prompt: directory cyan, branch magenta; typed input bright white. The DEBUG
 # trap resets the color before each command runs, so output renders in the
 # tool's own colors (the diagnostic labels) rather than the input style.
@@ -30,7 +33,7 @@ Type "clear" Enter
 Sleep 1.5s
 Show
 
-Type "pg-sprite migrate --alter 'ALTER TABLE users ADD CHECK (id > 0)' --dry-run"
+Type "pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN code text UNIQUE' --dry-run"
 Sleep 500ms
 Enter
 Sleep 8s
