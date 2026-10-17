@@ -82,6 +82,7 @@ func Reasons() []Reason {
 		ReasonTypeRewrite,
 		ReasonRelocation,
 		ReasonPartitionParentLock,
+		ReasonReplicaIdentity,
 		ReasonUnsupportedOperation,
 	}
 }
@@ -141,6 +142,14 @@ const (
 	// EXCLUSIVE on the partitioned parent — no scan, but it queues behind
 	// and then blocks every query on the parent while held.
 	ReasonPartitionParentLock Reason = "partition-parent-lock"
+	// ReasonReplicaIdentity: the operation drops what the table's
+	// REPLICA IDENTITY USING INDEX keys on — the index itself, the
+	// constraint that owns it, or one of its columns. The setting outlives
+	// the index, so the table is left with no usable identity, and every
+	// UPDATE and DELETE on it fails while a publication publishes them.
+	// Move the identity first (ALTER TABLE ... REPLICA IDENTITY), then
+	// re-plan.
+	ReasonReplicaIdentity Reason = "replica-identity"
 	// ReasonUnsupportedOperation: the planner does not recognize the
 	// operation or knows no safe path for it.
 	ReasonUnsupportedOperation Reason = "unsupported-operation"
@@ -245,18 +254,22 @@ type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
 	ColumnTypes map[string]string
+	// ReplicaIdentity is what the replica identity indexes of the table and
+	// its partitions key on; the zero value when none selects an index.
+	ReplicaIdentity schemadiff.ReplicaIdentityKeys
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
-// canonical type of every live column. Every front door — the declarative
-// diff and the imperative dry-run — extracts facts through this one
-// function so equivalent changes classify identically.
+// canonical type of every live column and what the table's replica
+// identity keys on. Every front door — the declarative diff and the
+// imperative dry-run — extracts facts through this one function so
+// equivalent changes classify identically.
 func FactsFrom(live schemadiff.Model) Facts {
 	types := make(map[string]string, len(live.Columns))
 	for _, col := range live.Columns {
 		types[col.Name] = col.Type
 	}
-	return Facts{ColumnTypes: types}
+	return Facts{ColumnTypes: types, ReplicaIdentity: live.ReplicaIdentity}
 }
 
 // Classify parses one statement and routes each of its operations. A parse
@@ -292,6 +305,10 @@ func Classify(sql string, facts Facts) (Plan, error) {
 // classifyOp routes one operation per the reference table.
 func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string, single bool) Decision {
 	d := Decision{Operation: op.Describe(), Destructive: destructiveOp(op.Kind)}
+	if facts.ReplicaIdentity.DroppedBy(op) {
+		d.Route, d.Reason = RouteRefuse, ReasonReplicaIdentity
+		return d
+	}
 	switch op.Kind {
 	case statement.OpCreateTable:
 		if op.PartitionOf {
@@ -619,6 +636,13 @@ func tableIdent(st statement.Statement) string {
 // the invariant online with a NOT VALID CHECK, flip the column, drop the
 // scaffold.
 //
+// The scaffold is named <table>_<column>_not_null_check, never
+// <table>_<column>_not_null: from PostgreSQL 18, SET NOT NULL records a
+// NOT NULL constraint under that second name, and while the scaffold held
+// it the server would pick the next free one instead. The converged table
+// would then carry a different constraint name from the same table built
+// directly from its definition.
+//
 // Partial-failure contract: step 1 leaves a NOT VALID CHECK under the
 // generated scaffold name, and re-running step 1 then fails with SQLSTATE
 // 42710 (duplicate_object) — a retry resumes at step 2. A failed VALIDATE
@@ -627,7 +651,7 @@ func tableIdent(st statement.Statement) string {
 // running step 4 alone.
 func setNotNullSequence(st statement.Statement, column string) []string {
 	table := tableIdent(st)
-	conName := fitIdentifier(fmt.Sprintf("%s_%s_not_null", st.Table(), column))
+	conName := fitIdentifier(fmt.Sprintf("%s_%s_not_null_check", st.Table(), column))
 	con := pgx.Identifier{conName}.Sanitize()
 	col := pgx.Identifier{column}.Sanitize()
 	return []string{

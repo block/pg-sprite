@@ -41,7 +41,9 @@ type reconcileFixture struct {
 	table     testutil.WorkloadTable
 	target    preflight.CopySwapTarget
 	store     *checkpoint.Store
-	lock      *dbconn.TableLockSession
+	// lock is the run's table lock; nil in a fixture that leaves the lock
+	// for a Runner to take.
+	lock *dbconn.TableLockSession
 }
 
 func newReconcileFixture(t *testing.T, rows int) reconcileFixture {
@@ -62,6 +64,34 @@ func newReconcileFixtureLocked(t *testing.T, rows int, lockOpts ...dbconn.TableL
 // with extra settings after the fixture's own.
 func newReconcileFixtureOn(t *testing.T, rows int, settings []string, lockOpts ...dbconn.TableLockOption) reconcileFixture {
 	t.Helper()
+	f := newDecodingFixtureOn(t, rows, settings)
+	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.table.Schema, f.table.Table, lockOpts...)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		released := lock.Release(context.WithoutCancel(t.Context()))
+		if lock.Err() != nil {
+			assert.Error(t, released, "a lost lock has no clean release")
+			return
+		}
+		assert.NoError(t, released)
+	})
+	f.lock = lock
+	return f
+}
+
+// newDecodingFixture is the fixture of a test that drives a Runner over a
+// target proven to decode WAL: the workload table seeded with rows on a
+// server with logical decoding, and the table's lock left for the Runner
+// to take.
+func newDecodingFixture(t *testing.T, rows int) reconcileFixture {
+	t.Helper()
+	return newDecodingFixtureOn(t, rows, nil)
+}
+
+// newDecodingFixtureOn is newDecodingFixture on a server started with extra
+// settings after the fixture's own.
+func newDecodingFixtureOn(t *testing.T, rows int, settings []string) reconcileFixture {
+	t.Helper()
 	serverURL := testutil.StartPostgresWithSettings(t, append([]string{"wal_level=logical", "wal_sender_timeout=2s"}, settings...)...)
 	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL), MaxConns: 16}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
@@ -77,18 +107,7 @@ func newReconcileFixtureOn(t *testing.T, rows int, settings []string, lockOpts .
 	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
 	require.NoError(t, err)
 	require.NoError(t, store.Ensure(t.Context()))
-
-	lock, err := dbconn.AcquireTableLock(t.Context(), cfg, table.Schema, table.Table, lockOpts...)
-	require.NoError(t, err)
-	t.Cleanup(func() {
-		released := lock.Release(context.WithoutCancel(t.Context()))
-		if lock.Err() != nil {
-			assert.Error(t, released, "a lost lock has no clean release")
-			return
-		}
-		assert.NoError(t, released)
-	})
-	return reconcileFixture{serverURL: serverURL, cfg: cfg, pool: pool, table: table, target: target, store: store, lock: lock}
+	return reconcileFixture{serverURL: serverURL, cfg: cfg, pool: pool, table: table, target: target, store: store}
 }
 
 // exec runs SQL with %s standing for the qualified workload table.

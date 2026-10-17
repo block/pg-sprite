@@ -132,8 +132,10 @@ func (s *Slot) Close(ctx context.Context) error {
 // context's own error — and a slot the server created but did not describe usably is
 // dropped before the error is returned. The publication is left in place
 // between the two — it is the route's own and the next attempt reuses it.
-// The caller has committed the target's checkpoint row before calling: a
-// slot with no row is an orphan for the reaper, never a slot mid-creation.
+// A run calls it under the engine's lock on the slot's name
+// (checkpoint.Store.WithSlotLock), the same lock the reaper holds while it
+// judges a slot, so a slot with no row is one the reaper may drop only once
+// the run's claim has ended: an orphan, never a slot mid-claim.
 func CreateSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, target preflight.CopySwapTarget) (*Slot, error) {
 	if target.Table() == "" {
 		return nil, fmt.Errorf("%w: ST-3: zero copy-and-swap target", ErrInvariantViolation)

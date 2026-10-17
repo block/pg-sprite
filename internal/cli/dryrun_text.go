@@ -287,6 +287,8 @@ func impactText(r planner.Reason) string {
 		return "physically moves the table's storage: rewrite-scale I/O under an exclusive lock that blocks reads and writes"
 	case planner.ReasonPartitionParentLock:
 		return "takes a brief exclusive lock on the partitioned parent, briefly blocking access to every partition"
+	case planner.ReasonReplicaIdentity:
+		return "drops what the table's replica identity keys on; UPDATE and DELETE on the table fail while a publication publishes them"
 	case planner.ReasonUnsupportedOperation:
 		return "pg-sprite does not recognize this operation and will not run it"
 	}

@@ -300,36 +300,84 @@ assumes the failed run left nothing behind.
 `schemachange.Reconciler.Reconcile` when the mode is `ResumeReconcile`. The row's phase is
 dispatched first — `Phase.Terminal()` has nothing to resume, `cutover` is `InspectSwapped`'s
 question — and only then is the slot read. Both `InspectResume` and `Reconcile` refuse with a
-`*RefusalError` keyed on `RefusalCause`; each cause means a different action, so route them:
+`*RefusalError` keyed on `RefusalCause`; each cause means a different action, so route them.
+Route on `RefusalCauseOf(err)`, not on the sentinel: every refusal answers
+`errors.Is(err, ErrInvariantViolation)`, the `environmental` ones below included, so an adapter
+that tests the sentinel first would send an operator-dropped shadow or a held slot down its
+"report a bug" path. The class each cause carries is the
+[refusal-classes table](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause):
 
 | Refusal | What it means | Orchestrator action |
 | --- | --- | --- |
 | `resume-row-terminal` | The row is `done` or `failed`; there is no run to resume | Report the recorded outcome; a new run needs `Store.Delete` of the row the caller was shown |
 | `resume-row-cutover` | The row says a swap began and nothing says how it ended; neither a clean resume nor a reconcile may touch the slot or the shadow until that is known. The refusal is answered before the slot is read, so it says nothing about whether the slot survived | Call `InspectSwapped` first; a committed swap continues from `DropOldTable`. A rolled-back swap (`ErrNotSwapped`) is a run still catching up: write the row back to `catching_up` and call `InspectResume` again — it answers clean when the slot is intact, and reconcile when the slot was lost during the cutover window, in which case `Reconcile` repairs the gap before the cutover is retried |
-| `resume-row-mismatch` | The row is for another table, names another slot, or (in `Reconcile` and the quiesced `Runner`) carries another statement's shadow name, fingerprints, or shadow proof; from `Runner` also a row whose recorded statement is not the one `Run` was given, compared as parsed, or a row that records no statement | Configuration or operator action: the target and the row disagree; retrying cannot succeed. A caller that means a second, different change on the same table deletes the row (`Store.Delete`) — and drops the shadow and the fence — first |
+| `resume-row-mismatch` | The row is for another table, names another slot, or (in `Reconcile` and `Runner`) carries another statement's shadow name, fingerprints, or shadow proof; from `Runner` also a row whose recorded statement is not the one `Run` was given, compared as parsed, or a row that records no statement | Configuration or operator action: the target and the row disagree; retrying cannot succeed. A caller that means a second, different change on the same table deletes the row (`Store.Delete`) — and drops the shadow and the fence — first |
 | `shadow-statement-target` (from `Runner`, on resume) | The statement `Run` was given names another table than the proven target, caught before the row's statement is compared with it | Configuration: the statement and the target disagree; retrying cannot succeed |
-| `resume-row-decoding` (from `Runner`) | The row names a slot or publication, or is in `catching_up` or `reconciling`: a run that decodes WAL made it, and the quiesced runner has no slot to continue it with | Resume the row through the decoding path (`InspectResume`, `Reconcile`), not the quiesced `Runner` |
+| `resume-row-decoding` (from `Runner`) | The row was written by the other kind of run: a target proven without logical decoding was handed a row that names a slot or publication, or is in `catching_up` or `reconciling`, and has no slot to continue it with; a target proven for decoding was handed a row that names no slot, whose source was fenced, not captured | Run the row under the kind of `CopySwapTarget` proof that made it; the proof, not the caller, chooses the route |
 | `shadow-unrecorded` (from `Runner`) | A relation bears the target's derived shadow name and no row records a run for the target | `DropShadow` the leftover and run again; a relation the engine did not make is an operator's to rename |
+| `resume-shadow-gone` (from `Runner`) | The row's swap has not committed (any phase from `copying` to a `cutover` whose swap rolled back) and it records a shadow under which no relation stands; `ErrShadowNotFound` is reachable through the refusal, and nothing was written | Quiesced row: `Store.Delete` the row and run again; the next run builds a fresh shadow, and the source stays fenced until `DropWriteFence` or that run's swap. Live row (it names a slot): `decode.DropSlot` the row's slot, then `Store.Delete` the row, and run again; the slot retains WAL until it is dropped, and a run started while it stands fails creating its own. A live source has no fence |
 | `resume-slot-foreign` | The slot of the derived name is physical or another database's; the engine may neither decode from it nor drop it | Operator action on the slot; retrying cannot succeed while it is there |
 | `resume-slot-held` | The engine's own slot is held by another backend — a previous run still draining, or a tool reading it | Wait and inspect again; a holder that never lets go is an operator action |
 | `cutover-relation-replaced` (from `Reconcile`) | The source or the shadow is no longer the relation the build recorded, read before the reconcile wrote anything | Stop; the table under the names is not the one this run proved — operator action |
 
-The quiesced `Runner` also ends with errors that are not refusals but still route differently;
-each leaves the row at its last save, the shadow in place, and the source fenced:
+`Runner` also ends with errors that are not refusals but still route differently; each leaves
+the row at its last save and the shadow in place, with the source fenced (quiesced target) or
+the slot under the row (decoding target):
 
 | `Run` outcome | What it means | Orchestrator action |
 | --- | --- | --- |
-| `*checksum.DivergenceError` | The verification pass found the shadow differing from the source; under a fence nothing should have written either, so the run stops rather than repair (CO-3 `DivergenceAbort`) and the row stays in `verifying` | Do not retry blindly: a retry runs the same pass over the same shadow and stops the same way. Abandon the run — `DropShadow`, `DropWriteFence`, `Store.Delete` under the table lock — and run again; a difference that recurs is a writer bypassing the fence (a superuser, or `session_replication_role = replica`) to find |
+| `*decode.SlotExistsError` (decoding target, first start) | A logical slot of the engine's derived name already exists and no row names it: a run that ended before its row landed, or a slot made by hand. The run made nothing and dropped nothing — the slot, its publication, and the absence of a row are as the run found them | Run `Store.ReapOrphanSlots`, which drops the slot once nothing holds it, and then `Run` again; a slot that stays held is an operator's to inspect |
+| `*checksum.DivergenceError` | The verification pass found the shadow differing from the source — under a fence nothing should have written either, and under a stream a difference the catch-up did not settle is a confirmed divergence — so the run stops rather than repair (CO-3 `DivergenceAbort`) and the row stays in `verifying` | Do not retry blindly: a retry runs the same pass over the same shadow and stops the same way. Abandon the run — `DropShadow`, `DropWriteFence` or `decode.DropSlot`, `Store.Delete` under the table lock — and run again; a difference that recurs under a fence is a writer bypassing it (a superuser, or `session_replication_role = replica`) to find |
+| `*checksum.UnresolvedError` (decoding target) | The live pass could not settle a chunk the source kept writing within its reread bound; nothing was found wrong and nothing was minted, and the row stays in `verifying`. The bound is `LiveOptions.Attempts` fresh rereads of one chunk (default `checksum.DefaultSettleAttempts`), each waited on for the catch-up up to `LiveOptions.SettleWait`: a chunk written again between every two of its rereads never settles, so a table whose writes land on one chunk faster than the pass can read it twice is the case, whatever the table's total write rate | Retry `Run`: the resumed row catches up again and runs a fresh pass; a chunk that never settles is a hot spot to wait out, write less often, or give more `Attempts` |
+| `cutover-drain-deferred` (decoding target) | The swap's drain met a unique-key move it could not order into the shadow; the swap rolled back and the row is in `cutover` with the position the drain reopened from | Retry `Run`: `InspectSwapped` answers `ErrNotSwapped`, the row goes back to `catching_up`, and the same changes are drained again once the rows the move touched have settled |
+| `*decode.SlotLagExceededError` (decoding target) | The slot retained more WAL than `CatchupOptions.SlotLagCeiling` while the capture ran; the run stopped with the slot in place under the row | Retry `Run` once the source's write rate allows: the stream reopens at the row's position and drains the backlog. Abandoning the run (`DropShadow`, `decode.DropSlot`, `Store.Delete`) releases the WAL |
 | `ErrCutoverRolledBack` / `ErrLockRetriesExhausted` | The swap did not commit; the source is still live and the row is in `cutover` | Retry `Run`: the row is answered by `InspectSwapped`, which sends the run back through verify and gate to a fresh swap attempt |
 | `ErrTableLockLost` (`shadow-lock-lost`) | The lock session dropped mid-run; whatever was in flight was cancelled with it | Retry `Run` once the database is reachable; the row says where to continue |
 | An error wrapped `after the checkpoint in phase …` | The row saved; `AfterCheckpoint` returned an error after it | The row and the run are consistent; retry `Run` when the hook's cause is cleared. A hook that fails at the first save leaves the shadow, since the row records it |
-| `ErrShadowNotFound` under a `copying` or `verifying` row | The row records a shadow that no longer exists | `Store.Delete` the row and run again; the next run builds a fresh shadow. The source stays fenced until `DropWriteFence` or the next run's swap |
 | `context.Canceled` / `DeadlineExceeded` | The caller stopped the run; a cancelled copy saves what its committed chunks landed before returning | Retry `Run`; the copy continues from the saved watermark |
 
 A refusal from either read leaves the row and the slot as they were. A `Reconcile` that fails
 after its marker leaves the row in `reconciling`, and `InspectResume` answers that row as
 reconcile whatever the catalog shows under the slot name, so the adapter repeats `Start`
 rather than deciding anything itself.
+
+#### What a live `Run` holds open
+
+A `Run` on a decoding target keeps server sessions outside the pool it is handed, and draws on
+the pool besides; an importer running many tables from one process sizes for both:
+
+- **Outside the pool, dialled from the `dbconn.Config`:** the table-lock session for the whole
+  run; one replication connection for the capture's stream while the row is in `copying`,
+  `catching_up`, or `verifying`, and one more for the drain's stream during each swap attempt
+  (preflight already requires two free `max_wal_senders` for this); one plain connection that
+  holds the slot's advisory lock only while the run makes its slot and commits its first row
+  (`Store.WithSlotLock`); and one plain connection for the drain's marker and slot reads during
+  each swap attempt. None of these waits on the pool, so a claim or a swap never holds a pool
+  connection while waiting for another — as many live runs at once as the pool has connections
+  all finish (`TestRunnersOnOnePoolDoNotStarveEachOther` runs four on a pool of four;
+  `TestSlotLockLeavesThePoolToTheCallback` runs a claim on a pool of one).
+- **From the pool:** `Copier.Workers` connections (default `copier.DefaultWorkers`) while the
+  copy runs, one at a time for the capture's flushes and the checkpoint saves, one for the
+  verification pass, and one for the swap transaction. A pool smaller than the copy's workers
+  slows the copy; it does not stall the run.
+
+### What `Runner.Run` returns
+
+`Run` returns a `Result` only with a nil error; with an error it returns the zero `Result`, so
+read no field of it then. A returned `Result` means the swap committed and the row is `done`
+(`Result.Checkpoint`). What the adapter can record about the swap depends on how the run met it:
+
+| How the run met the swap | `Swapped` | `SwapProven` | `OldTableDropped` | `Verification` |
+| --- | --- | --- | --- | --- |
+| This run's cutover made it | The proof of the renames | `true` | `true`, or `false` under `KeepOld` | This run's pass |
+| A resume found it committed with the retained source still there | The proof re-derived from the catalog | `true` | `true`, or `false` under `KeepOld` | Zero: no pass was made |
+| A resume found it committed with the retained source already dropped | Zero `SwapProof` | `false` | `true` | Zero: no pass was made |
+
+`SwapProven == false` does not mean the swap is in doubt: it committed, but the renames it
+performed can no longer be read back once one side of them is gone, so there is no proof to
+persist; `Shadow` still names the table that is now live. Record the swap's renames only when
+`SwapProven` is true. `Reconciled` and `Reconciliation` say whether a live run replaced a lost
+slot on its way there.
 
 ### Routing the checkpoint store's own refusals
 
@@ -346,6 +394,11 @@ installation, not the run, and each means a different action:
 | `ErrTableNewer` (`*checkpoint.TableNewerError`, `Unknown` naming the columns) | The table carries columns this engine does not know: a newer engine shaped it, or an operator added a column by hand. `Ensure` ran no DDL | Operator action — run the newer engine, roll the table back to this engine's shape, or drop the hand-added column; retrying this engine cannot succeed while the columns are there |
 | `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion < checkpoint.FormatVersion` | The row was written by an older engine whose row format this engine does not read | Operator action: finish or abandon the old run. When no run is in flight, `Store.Delete(Stored)` is the fresh start; the row is never silently rewritten |
 | `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion > checkpoint.FormatVersion` | The row was written by a newer engine | Upgrade the engine; this one must not touch the row |
+
+Releases through v0.3.3 write format 2, whose model fingerprints leave out the table's
+storage parameters and its columns' sequence declarations. A copy-and-swap run in flight across the upgrade to format 3 surfaces as
+`MismatchFormat` with `Stored.FormatVersion == 2`: finish it with the release that started
+it, or, once no run is in flight, `Store.Delete(Stored)` and start over.
 
 `ErrTableBehind` wraps the server's own `42703` undefined-column error, so an adapter that
 logs the chain sees both the engine's classification and the server's words. `ErrTableNewer`

@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 func TestNewRefusalEnforcesRF7(t *testing.T) {
@@ -129,6 +131,22 @@ func TestClassConstructorsAgreeWithNewRefusal(t *testing.T) {
 	assert.Equal(t, ClassByDesign, ByDesign(ReasonDestructiveChange).Class())
 	assert.Equal(t, ClassEnvironmental, Environmental(ReasonTableTooLarge).Class())
 	assert.Equal(t, ClassInvariantViolation, InvariantViolation(ReasonUnsupportedStatement).Class())
+}
+
+// Every class the core's refusal causes can name is in the verdict
+// contract's closed set, so an adapter turning a cause's Class() into a
+// refusal verdict converts the value and ParseClass accepts the result: a
+// core class added without a place in Classes() fails here. The verdict
+// keeps exactly one class of its own, for a statement that never reached
+// the engine.
+func TestCoreRefusalClassesAreVerdictClasses(t *testing.T) {
+	for _, class := range refusal.Classes() {
+		parsed, err := ParseClass(string(class))
+		require.NoError(t, err, "core refusal class %q is not a verdict class", class)
+		assert.Equal(t, Class(class), parsed)
+	}
+	assert.Len(t, Classes(), len(refusal.Classes())+1, "the verdict adds only no-online-safety-problem to the core classes")
+	assert.Contains(t, Classes(), ClassNoOnlineSafetyProblem)
 }
 
 func TestWithRefusalStampsOutcomeReasonClassOwner(t *testing.T) {
