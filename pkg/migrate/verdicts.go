@@ -110,19 +110,10 @@ func rewriteRequiredVerdict(st statement.Statement, rs router.Statement) (verdic
 }
 
 // manualPath states the steps a rewrite-required statement's guidance
-// names, ending in the guidance code an operator can look up.
+// names, in the wording the suggest report and dry run use, ending in the
+// guidance code an operator can look up.
 func manualPath(g suggest.Guidance) string {
-	switch g {
-	case suggest.GuidanceSplitStatement:
-		return "submit each operation as its own single-operation statement so the engine can build its safer form " +
-			"(a dry-run classification shows each operation's route)"
-	case suggest.GuidanceUniqueIndexThenConstraint:
-		return "build the index first with CREATE UNIQUE INDEX CONCURRENTLY on the same columns, with the statement's " +
-			"INCLUDE, NULLS NOT DISTINCT, WITH (...), and TABLESPACE, then attach it with ADD CONSTRAINT ... USING INDEX, " +
-			"keeping any DEFERRABLE and INITIALLY DEFERRED (guidance " + string(g) + ")"
-	default:
-		return "run the manual path its guidance names (guidance " + string(g) + ")"
-	}
+	return suggest.ManualPath(g) + " (guidance " + string(g) + ")"
 }
 
 // backendUnavailableVerdict is the refusal for a change that routes to an

@@ -136,8 +136,9 @@ sequence the named form gets constructed).
 ### `unique-index-then-constraint`
 
 **Emitted for:** `ADD PRIMARY KEY` / `ADD UNIQUE` whose `USING INDEX` rewrite could not
-be constructed from the statement: one with a `WITH (...)` storage parameter whose value is
-not a plain word, number, or string.
+be constructed from the statement: one with a `WITH (...)` storage parameter the sequence
+cannot render faithfully, whose value is not a plain word, number, or string, contains a
+backslash, or whose name is namespaced.
 
 Build the unique index with `CREATE UNIQUE INDEX CONCURRENTLY` on the same columns, with the
 key's `INCLUDE`, `NULLS NOT DISTINCT`, `WITH (...)`, and tablespace, then attach it with

@@ -316,8 +316,9 @@ func TestClassifyAddPrimaryKeySequence(t *testing.T) {
 // The online sequence must declare the constraint the statement declares:
 // an index built without INCLUDE, NULLS NOT DISTINCT, or the tablespace, or
 // an attach without DEFERRABLE or INITIALLY DEFERRED, is a different
-// constraint. A key with WITH (...) storage parameters gets no sequence,
-// so the decision carries guidance instead of SQL that drops them.
+// constraint. WITH (...) storage parameters ride on the index too; only a
+// parameter the sequence cannot render faithfully gets no sequence, so the
+// decision carries guidance instead of SQL that drops it.
 // TestUsingIndexSequenceDeclaresTheSameConstraint proves each on a server.
 func TestClassifyAddKeySequenceCarriesEveryAttribute(t *testing.T) {
 	cases := []struct {

@@ -89,5 +89,6 @@ func TestSuggestTextRendersGuidance(t *testing.T) {
 	require.NoError(t, err)
 	text := out.String()
 	assert.Contains(t, text, string(suggest.GuidanceSplitStatement))
-	assert.NotContains(t, text, "safer form")
+	assert.Contains(t, text, "submit each operation as its own single-operation statement")
+	assert.NotContains(t, text, "a safer online form exists")
 }
