@@ -24,14 +24,21 @@ import (
 // a string rejected here never produces the parsed config configureTLS is
 // called with.
 func dsnNamesSSLMode(dsn string) bool {
+	return dsnSSLMode(dsn) != ""
+}
+
+// dsnSSLMode returns the sslmode dsn selects, or "" when it selects none or
+// does not parse. dsnNamesSSLMode explains why the string, not the parsed
+// config, is the source.
+func dsnSSLMode(dsn string) string {
 	if isURLForm(dsn) {
 		u, err := url.Parse(dsn)
 		if err != nil {
-			return false
+			return ""
 		}
-		return u.Query().Get("sslmode") != ""
+		return u.Query().Get("sslmode")
 	}
-	return keywordDSNSetting(dsn, "sslmode") != ""
+	return keywordDSNSetting(dsn, "sslmode")
 }
 
 // isURLForm reports whether dsn is a connection URL rather than a
