@@ -726,7 +726,10 @@ through `Store.Inspect` before it knows the statement, and holds a `copying`, `c
 `reconciling`, or `verifying` row against the shadow `InspectShadow` re-derives — shadow name, both fingerprints, and the
 JSON-encoded proof the row carries (`resume-row-mismatch` otherwise) — and refuses a relation
 under the shadow's name that no row records (`shadow-unrecorded`), since the row is the only
-record of which statement a shadow embodies.
+record of which statement a shadow embodies, and a row whose swap has not committed and whose
+shadow no relation bears (`resume-shadow-gone`, in any phase from `copying` to a `cutover` whose swap
+rolled back), since the run can neither continue on it nor start over while the row stands; the
+refusal writes nothing, so a live row's slot stays with it for the operator to drop.
 `TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
@@ -736,7 +739,9 @@ record of which statement a shadow embodies.
 `TestSaveWithoutAProofDoesNotEraseTheRowsProof`, `TestProofSurvivesTheCheckpointStore`,
 `TestDeleteRefusesARowTheCallerWasNotShown`,
 `TestWritesAndReadsWithoutEnsureReportTheMissingTable`,
-`TestResumeFromCheckpointConvergesAfterAMidCopyKill`. *Source:* Spirit `checkpoint.IsIncompatible` +
+`TestResumeFromCheckpointConvergesAfterAMidCopyKill`,
+`TestRunnerRefusesARowWhoseShadowIsGone`,
+`TestRunnerLiveRowWhoseShadowIsGoneIsRestartedByDroppingItsSlotAndRow`. *Source:* Spirit `checkpoint.IsIncompatible` +
 "resume requires the identical ALTER".
 
 ### ST-3 — Slot cleanup is guaranteed on success, failure, and crash

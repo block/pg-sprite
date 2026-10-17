@@ -300,7 +300,12 @@ assumes the failed run left nothing behind.
 `schemachange.Reconciler.Reconcile` when the mode is `ResumeReconcile`. The row's phase is
 dispatched first — `Phase.Terminal()` has nothing to resume, `cutover` is `InspectSwapped`'s
 question — and only then is the slot read. Both `InspectResume` and `Reconcile` refuse with a
-`*RefusalError` keyed on `RefusalCause`; each cause means a different action, so route them:
+`*RefusalError` keyed on `RefusalCause`; each cause means a different action, so route them.
+Route on `RefusalCauseOf(err)`, not on the sentinel: every refusal answers
+`errors.Is(err, ErrInvariantViolation)`, the `environmental` ones below included, so an adapter
+that tests the sentinel first would send an operator-dropped shadow or a held slot down its
+"report a bug" path. The class each cause carries is the
+[refusal-classes table](refusal-classes.md#shadow-operation-refusals-keyed-on-refusalcause):
 
 | Refusal | What it means | Orchestrator action |
 | --- | --- | --- |
@@ -310,6 +315,7 @@ question — and only then is the slot read. Both `InspectResume` and `Reconcile
 | `shadow-statement-target` (from `Runner`, on resume) | The statement `Run` was given names another table than the proven target, caught before the row's statement is compared with it | Configuration: the statement and the target disagree; retrying cannot succeed |
 | `resume-row-decoding` (from `Runner`) | The row was written by the other kind of run: a target proven without logical decoding was handed a row that names a slot or publication, or is in `catching_up` or `reconciling`, and has no slot to continue it with; a target proven for decoding was handed a row that names no slot, whose source was fenced, not captured | Run the row under the kind of `CopySwapTarget` proof that made it; the proof, not the caller, chooses the route |
 | `shadow-unrecorded` (from `Runner`) | A relation bears the target's derived shadow name and no row records a run for the target | `DropShadow` the leftover and run again; a relation the engine did not make is an operator's to rename |
+| `resume-shadow-gone` (from `Runner`) | The row's swap has not committed (any phase from `copying` to a `cutover` whose swap rolled back) and it records a shadow under which no relation stands; `ErrShadowNotFound` is reachable through the refusal, and nothing was written | Quiesced row: `Store.Delete` the row and run again; the next run builds a fresh shadow, and the source stays fenced until `DropWriteFence` or that run's swap. Live row (it names a slot): `decode.DropSlot` the row's slot, then `Store.Delete` the row, and run again; the slot retains WAL until it is dropped, and a run started while it stands fails creating its own. A live source has no fence |
 | `resume-slot-foreign` | The slot of the derived name is physical or another database's; the engine may neither decode from it nor drop it | Operator action on the slot; retrying cannot succeed while it is there |
 | `resume-slot-held` | The engine's own slot is held by another backend — a previous run still draining, or a tool reading it | Wait and inspect again; a holder that never lets go is an operator action |
 | `cutover-relation-replaced` (from `Reconcile`) | The source or the shadow is no longer the relation the build recorded, read before the reconcile wrote anything | Stop; the table under the names is not the one this run proved — operator action |
@@ -328,7 +334,6 @@ the slot under the row (decoding target):
 | `ErrCutoverRolledBack` / `ErrLockRetriesExhausted` | The swap did not commit; the source is still live and the row is in `cutover` | Retry `Run`: the row is answered by `InspectSwapped`, which sends the run back through verify and gate to a fresh swap attempt |
 | `ErrTableLockLost` (`shadow-lock-lost`) | The lock session dropped mid-run; whatever was in flight was cancelled with it | Retry `Run` once the database is reachable; the row says where to continue |
 | An error wrapped `after the checkpoint in phase …` | The row saved; `AfterCheckpoint` returned an error after it | The row and the run are consistent; retry `Run` when the hook's cause is cleared. A hook that fails at the first save leaves the shadow, since the row records it |
-| `ErrShadowNotFound` under a `copying` or `verifying` row | The row records a shadow that no longer exists | `Store.Delete` the row and run again; the next run builds a fresh shadow. The source stays fenced until `DropWriteFence` or the next run's swap |
 | `context.Canceled` / `DeadlineExceeded` | The caller stopped the run; a cancelled copy saves what its committed chunks landed before returning | Retry `Run`; the copy continues from the saved watermark |
 
 A refusal from either read leaves the row and the slot as they were. A `Reconcile` that fails
@@ -355,6 +360,24 @@ the pool besides; an importer running many tables from one process sizes for bot
   copy runs, one at a time for the capture's flushes and the checkpoint saves, one for the
   verification pass, and one for the swap transaction. A pool smaller than the copy's workers
   slows the copy; it does not stall the run.
+
+### What `Runner.Run` returns
+
+`Run` returns a `Result` only with a nil error; with an error it returns the zero `Result`, so
+read no field of it then. A returned `Result` means the swap committed and the row is `done`
+(`Result.Checkpoint`). What the adapter can record about the swap depends on how the run met it:
+
+| How the run met the swap | `Swapped` | `SwapProven` | `OldTableDropped` | `Verification` |
+| --- | --- | --- | --- | --- |
+| This run's cutover made it | The proof of the renames | `true` | `true`, or `false` under `KeepOld` | This run's pass |
+| A resume found it committed with the retained source still there | The proof re-derived from the catalog | `true` | `true`, or `false` under `KeepOld` | Zero: no pass was made |
+| A resume found it committed with the retained source already dropped | Zero `SwapProof` | `false` | `true` | Zero: no pass was made |
+
+`SwapProven == false` does not mean the swap is in doubt: it committed, but the renames it
+performed can no longer be read back once one side of them is gone, so there is no proof to
+persist; `Shadow` still names the table that is now live. Record the swap's renames only when
+`SwapProven` is true. `Reconciled` and `Reconciliation` say whether a live run replaced a lost
+slot on its way there.
 
 ### Routing the checkpoint store's own refusals
 
