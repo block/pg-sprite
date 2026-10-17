@@ -195,14 +195,23 @@ returns the identical snapshot, elapsed values included.
 
 ## Polling semantics
 
-The tracker is caller-owned and has no goroutines or timers: polling lifetime is exactly the
-caller's context. A poll during an active concurrent index build performs one read of the
-server's progress view over the executor's reserved session; a poll during a `copy`,
-`checksum` or `catch-up` step asks the engine's work source once; every other poll is pure memory. On a query or source
+The tracker is caller-owned and has no goroutines or timers. A poll during an active
+concurrent index build performs one read of the server's progress view over the executor's
+reserved session; a poll during a `copy`, `checksum` or `catch-up` step asks the engine's
+work source once; every other poll is pure memory. On a query or source
 error the returned snapshot still carries the last-known tracker state — `phase` is never
 empty — with the error returned alongside for the caller to classify. Pollers serialize
 against each other, so the reserved session and the work source each see one observation
-at a time.
+at a time. A poller waits its turn for as long as its context lasts: one that gives up first
+gets the last-known snapshot and its context's error, having read nothing, so a stalled poll
+never holds every other observer behind it.
+
+The progress read itself never runs under the poller's context. It runs detached from it, under
+its own deadline: a context that ends mid-read — an HTTP request timing out — closes the
+connection the read rides on, and that connection is the reserved session the build's failure
+verdict needs. A read that is in flight when its poller gives up therefore finishes on its own
+terms and returns its result; the work source, which is not that session, is read under the
+poller's context.
 
 The handoffs that end a poll target's ownership of the step — stopping a build or a work
 source, or replacing one with the other — wait for an observation in flight before they

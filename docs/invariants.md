@@ -473,7 +473,10 @@ statement's only bound. In caller-owned mode the executor refuses a non-cancella
 the client call is bounded by construction; the server statement is not — it runs with
 `statement_timeout` off and stops only on a cancel request, so a client that dies without
 cancelling leaves it running until `Tracker.CancelBuild` or an operator's `pg_cancel_backend`
-stops it. `VALIDATE CONSTRAINT` is different in kind: its cancellation is
+stops it. The build's failure verdict runs on a reserved session that observers must not
+disturb: `Tracker.Progress` reads the build's progress on that session detached from the
+observer's context and under its own deadline, because a context that ends mid-query closes the
+connection, and `Tracker.CancelBuild` signals the same way. `VALIDATE CONSTRAINT` is different in kind: its cancellation is
 transactionally clean (the constraint simply stays `NOT VALID`; no debris), so the sequence
 executor's validate class deliberately keeps a bounded per-lock timeout — queueing behind a
 conflicting lock holder must not stall a sequence for the whole scan budget — while the scan
