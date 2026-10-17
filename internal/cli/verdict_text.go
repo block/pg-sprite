@@ -39,6 +39,9 @@ func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  %s     %s", pal.bold("safer:"), v.SaferIdiom)
 	}
+	if v.Guidance != "" {
+		fmt.Fprintf(&b, "\n  %s  %s", pal.bold("guidance:"), v.Guidance)
+	}
 	if v.Outcome == verdict.OutcomeExecutedWithoutOnlineSafety {
 		fmt.Fprintf(&b, "\n  %s   lock %s, statement %s", pal.bold("budgets:"), v.LockTimeout, v.StatementTimeout)
 	}

@@ -445,6 +445,16 @@ PostgreSQL can prove. It accepts exactly:
 - `varchar(n) → varchar(m)` with `m ≥ n`, `varchar(n) → varchar`, and `varchar → text`;
 - `numeric(p,s) → numeric(p',s)` with `p' ≥ p`, and `numeric(p,s) → numeric`.
 
+The widening rules apply to scalar columns only. An array column is a relabel only when
+its element type and modifier are unchanged (declared dimensions do not count); any other
+change to or from an array, including `varchar(50)[] → varchar(100)[]`, is a
+`type-rewrite`, because PostgreSQL converts the elements one by one
+([category F](#why-rewrites-happen-the-six-categories)). A target type qualified with a
+schema other than `pg_catalog`, such as `app.text`, is a user type that shares a
+built-in's name, and matches no rule. So is a quoted name in another case, such as
+`"TEXT"`: the parser folds only unquoted names to lower case, so the planner compares
+type names case-sensitively.
+
 Everything else — including changes PostgreSQL would relabel, such as `varbit` or temporal
 precision widening, unconstrained domains, `xml → text`, and the UTC `timestamp ↔
 timestamptz` case — is treated as `type-rewrite` and routed to the copy-and-swap path (a
