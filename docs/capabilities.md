@@ -182,7 +182,7 @@ are the canonical example.
 > `make gen-capabilities`; do not edit the generated regions below by hand.
 
 <!-- capabilities:begin summary -->
-**58 operations: 19 supported today, 23 planned behind a typed refusal, 14 out of scope
+**59 operations: 19 supported today, 24 planned behind a typed refusal, 14 out of scope
 by design, and 2 with no online mechanism in PostgreSQL to build on.**
 <!-- capabilities:end summary -->
 
@@ -197,8 +197,9 @@ review the object warrants) ·
 <!-- capabilities:begin column_changes -->
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| `ADD COLUMN` (no default, or constant default) | ✅ | native, as-is | Yes | Metadata-only / fast default (PG 11+); executes instantly under bounded locks |
-| `ADD COLUMN` with volatile default (`now()`, `gen_random_uuid()`, …) | 🟡 | copy-and-swap | Yes | Table rewrite; routes to copy-and-swap and is refused until that engine lands |
+| `ADD COLUMN` (no default, a constant default, or a non-volatile default such as `now()`) | ✅ | native, as-is | Yes | Metadata-only / fast default (PG 11+), proven by adding the column to an empty temporary table first; executes instantly under bounded locks |
+| `ADD COLUMN` with volatile default (`gen_random_uuid()`, `clock_timestamp()`, identity, `serial`, …) | 🟡 | copy-and-swap | Yes | Table rewrite; routes to copy-and-swap and is refused until that engine lands |
+| `ADD COLUMN` of a domain type with a `CHECK` or `NOT NULL`, with or without a default | 🟡 | copy-and-swap | Yes | Table rewrite to check every row against the domain; routes to copy-and-swap and is refused until that engine lands |
 | `ADD COLUMN ... GENERATED ... STORED` | 🟡 | copy-and-swap | Yes | Table rewrite; copy-and-swap route. The copy engine must **recompute, never copy,** generated columns on the shadow table |
 | `ALTER COLUMN ... SET EXPRESSION` (changed stored generated expression) | 🟡 | copy-and-swap | Yes | Planned but not executed. `diff` shows a changed stored generated expression as one `SET EXPRESSION` statement of kind `set-generated-expression`, refused with `unsupported-statement`, rather than a drop and re-add that would also drop the column's indexes. It recomputes every row under `ACCESS EXCLUSIVE`, and the statement needs PostgreSQL 17 or later |
 | `ADD COLUMN` with inline `UNIQUE`/`PRIMARY KEY`/`REFERENCES`/`CHECK` | 🟡 | native, planned flow | Yes | The inline constraint does its index build or validation scan under the `ADD COLUMN`'s `ACCESS EXCLUSIVE` lock; refused with guidance to add the column first, then build the constraint online |

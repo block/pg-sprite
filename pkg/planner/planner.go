@@ -108,8 +108,9 @@ const (
 	// ReasonOnlineIdiom: already the safe native form (CONCURRENTLY,
 	// NOT VALID, VALIDATE, USING INDEX).
 	ReasonOnlineIdiom Reason = "online-idiom"
-	// ReasonFastDefault: ADD COLUMN with a constant default — the catalog
-	// stores the default, no rewrite (PG 11+).
+	// ReasonFastDefault: ADD COLUMN with a default the catalog stores, so
+	// no row is rewritten (PG 11+): a constant, or any default the server
+	// proved does not rewrite (a non-volatile expression such as now()).
 	ReasonFastDefault Reason = "fast-default"
 	// ReasonBinaryCoercible: a type change PostgreSQL relabels without a
 	// rewrite (widen varchar, varchar to text, widen numeric precision).
@@ -126,14 +127,17 @@ const (
 	// its own reviewed change. For a table, coordinate the rename with
 	// the application deploy that adopts the new name.
 	ReasonAppBreakingRename Reason = "app-breaking-rename"
-	// ReasonVolatileDefault: ADD COLUMN whose default the planner cannot
-	// prove constant — PostgreSQL rewrites the table.
+	// ReasonVolatileDefault: ADD COLUMN whose default PostgreSQL computes
+	// for every row, rewriting the table — proven by the server, or assumed
+	// (Unverified) when the default is not a constant and nothing proved
+	// it.
 	ReasonVolatileDefault Reason = "volatile-default"
 	// ReasonGeneratedStored: adding a stored generated column computes
 	// every row — a full rewrite.
 	ReasonGeneratedStored Reason = "generated-stored"
-	// ReasonTypeRewrite: a type conversion PostgreSQL cannot relabel —
-	// rewrite plus reindex.
+	// ReasonTypeRewrite: a type PostgreSQL must check or convert row by
+	// row — a type conversion it cannot relabel (rewrite plus reindex), or
+	// an added column of a domain type with constraints.
 	ReasonTypeRewrite Reason = "type-rewrite"
 	// ReasonRelocation: SET TABLESPACE moves the heap — a rewrite-scale
 	// copy.
@@ -257,6 +261,13 @@ type Facts struct {
 	// ReplicaIdentity is what the replica identity indexes of the table and
 	// its partitions key on; the zero value when none selects an index.
 	ReplicaIdentity schemadiff.ReplicaIdentityKeys
+	// AddColumnProofs maps a column the change adds to what the server
+	// proved about adding it (preflight.AddColumnRewrites). A column absent
+	// from the map is unproven and classifies by the statement's shape
+	// alone, which assumes the worst of any default it cannot read as a
+	// constant; the proof leaves out only an ADD COLUMN IF NOT EXISTS for a
+	// column the table already has, which the server skips.
+	AddColumnProofs map[string]statement.AddColumnProof
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
@@ -270,6 +281,22 @@ func FactsFrom(live schemadiff.Model) Facts {
 		types[col.Name] = col.Type
 	}
 	return Facts{ColumnTypes: types, ReplicaIdentity: live.ReplicaIdentity}
+}
+
+// addColumnProof returns what the server proved about adding op's
+// column, or "" when no proof was run.
+func addColumnProof(op statement.Op, facts Facts) statement.AddColumnProof {
+	return facts.AddColumnProofs[op.Column]
+}
+
+// unprovenRewriteReason names the only cause the statement's shape leaves
+// for a rewrite nothing proved: an expression default may be computed for
+// every row, and without one only the column's type can rewrite.
+func unprovenRewriteReason(op statement.Op) Reason {
+	if op.Default == statement.DefaultExpression {
+		return ReasonVolatileDefault
+	}
+	return ReasonTypeRewrite
 }
 
 // Classify parses one statement and routes each of its operations. A parse
@@ -328,8 +355,16 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
 		case op.GeneratedStored:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonGeneratedStored
-		case op.Default == statement.DefaultExpression:
+		case addColumnProof(op, facts) == statement.AddColumnDefaultRewrites:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonVolatileDefault
+		case addColumnProof(op, facts) == statement.AddColumnTypeRewrites:
+			d.Route, d.Reason = RouteCopyAndSwap, ReasonTypeRewrite
+		case addColumnProof(op, facts) == statement.AddColumnUnproven:
+			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, unprovenRewriteReason(op), true
+		case op.Default == statement.DefaultExpression && addColumnProof(op, facts) != statement.AddColumnInPlace:
+			// No proof was run, as in an offline lint: the default may be
+			// computed for every row.
+			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, ReasonVolatileDefault, true
 		case len(op.InlineConstraints) > 0:
 			// An inline UNIQUE / PRIMARY KEY / FOREIGN KEY / CHECK does the
 			// same index build or validation as its ADD CONSTRAINT form,
@@ -338,7 +373,9 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			// the planner does not construct multi-statement splits, so the
 			// decision carries no rewrite and routing fails closed.
 			d.Route, d.Reason = RouteNative, ReasonSaferIdiom
-		case op.Default == statement.DefaultConstant:
+		case op.Default != statement.DefaultNone:
+			// A constant, or an expression the server proved it stores
+			// in the catalog.
 			d.Route, d.Reason = RouteNative, ReasonFastDefault
 		default:
 			d.Route, d.Reason = RouteNative, ReasonMetadataOnly
