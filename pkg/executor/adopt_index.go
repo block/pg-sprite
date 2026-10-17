@@ -80,12 +80,19 @@ func refuseAdoptedIndexDrift(ctx context.Context, tx pgx.Tx, st statement.Statem
 // reaches them. A lock not granted within the attempt's lock_timeout fails
 // like the statement itself would.
 func lockForCheck(ctx context.Context, tx pgx.Tx, st statement.Statement, why string) (string, error) {
+	return lockTableForCheck(ctx, tx, st, "ACCESS EXCLUSIVE", why)
+}
+
+// lockTableForCheck is lockForCheck in the given lock mode, for a
+// statement that takes a weaker lock than ACCESS EXCLUSIVE and must not
+// block more than it does.
+func lockTableForCheck(ctx context.Context, tx pgx.Tx, st statement.Statement, mode, why string) (string, error) {
 	target := pgx.Identifier{st.Table()}
 	if st.Schema() != "" {
 		target = pgx.Identifier{st.Schema(), st.Table()}
 	}
 	name := target.Sanitize()
-	if _, err := tx.Exec(ctx, "LOCK TABLE ONLY "+name+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+	if _, err := tx.Exec(ctx, "LOCK TABLE ONLY "+name+" IN "+mode+" MODE"); err != nil {
 		return "", fmt.Errorf("lock %s to %s: %w", name, why, err)
 	}
 	return name, nil

@@ -477,7 +477,7 @@ func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32, keyIndexD
 	rows, err := tx.Query(ctx, `
 		SELECT conname, pg_get_constraintdef(oid), contype = 'f', contype = 'p',
 		       CASE WHEN $2 AND contype IN ('p','u') THEN pg_get_indexdef(conindid) ELSE '' END,
-		       condeferrable, condeferred
+		       condeferrable, condeferred, NOT convalidated
 		FROM pg_constraint
 		WHERE conrelid = $1 AND contype IN ('p','u','c','f','x') AND conislocal
 		ORDER BY conname`, oid, keyIndexDefs)
@@ -488,7 +488,7 @@ func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32, keyIndexD
 	var cons []Constraint
 	for rows.Next() {
 		var c Constraint
-		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey, &c.Primary, &c.IndexDef, &c.Deferrable, &c.InitiallyDeferred); err != nil {
+		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey, &c.Primary, &c.IndexDef, &c.Deferrable, &c.InitiallyDeferred, &c.NotValid); err != nil {
 			return nil, fmt.Errorf("scan constraint: %w", err)
 		}
 		if c.IndexDef != "" {
