@@ -440,7 +440,10 @@ catalog implicitly do not change an answer), `pkg/schemachange` (the dependent r
 shadow's and source's indexes and extended statistics the cutover gate pairs, and the taken
 relation and constraint names — qualify every function, relation, type, and operator; planted
 `generate_series`, `unnest`, `array_to_string`, `to_jsonb`, and `||` overloads on a path that
-lists the source schema do not change the indexes or statistics read), `pkg/migrate`
+lists the source schema do not change the indexes or statistics read; the column and extended
+statistics reads, the cutover's backend reads, and the write fence function's `format`, which
+runs in the writer's session under the writer's own `search_path`, are qualified too, and decoy
+`pg_backend_pid`, `pg_stat_activity`, and `format` do not change them), `pkg/migrate`
 (`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
 acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
 `to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
