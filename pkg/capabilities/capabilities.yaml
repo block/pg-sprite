@@ -80,7 +80,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only; flagged **destructive** in the plan report. Refused with `replica-identity` when a replica identity index the drop reaches keys on the column: the table's own, or one on a partition or inheritance child below it unless the statement says `ONLY`. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, on a table the drop reaches, unless the statement says `CASCADE`"
+    reason_notes: "Metadata-only; flagged **destructive** in the plan report. Refused with `replica-identity` when a replica identity index the drop reaches keys on the column: the table's own, or one on a partition or inheritance child below it unless the statement says `ONLY`. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, on a table the drop reaches. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop the views that read the column"
   - id: alter-column-type-binary-coercible-proven-against-live-column-facts
     area: "column_changes"
     operation: "`ALTER COLUMN TYPE`, binary-coercible (proven against live column facts)"
@@ -217,7 +217,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only; flagged **destructive**. Refused with `replica-identity` when the constraint owns the table's replica identity index, or the index a partition's is attached under"
+    reason_notes: "Metadata-only; flagged **destructive**. Refused with `replica-identity` when the constraint owns the table's replica identity index, or the index a partition's is attached under. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop other tables' foreign keys on the constraint"
   - id: create-unique-index-on-a-plain-table-including-partial-expression-covering-include-gin-gist-brin
     area: "indexes"
     operation: "`CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN"
@@ -241,7 +241,7 @@ rows:
       migrate: refused
       diff: supported
     refusal_reason: index-statement
-    reason_notes: "`migrate` never runs this statement online-safely: the plain form is refused and names `DROP INDEX CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. A single-index plain `DROP INDEX` without `CASCADE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0); `--accept-blocking` checks the replica identity under the table's lock and refuses the drop as `unsupported-statement`, naming the identity index. `diff` reports an index to remove as a **destructive** `DROP INDEX` and hints to run it through `migrate --alter`, which ends in this `index-statement` refusal — run `DROP INDEX CONCURRENTLY` directly instead. `diff` refuses dropping the table's replica identity index, or one a partition's is attached under, with `replica-identity`"
+    reason_notes: "`migrate` never runs this statement online-safely: the plain form is refused and names `DROP INDEX CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. A single-index plain `DROP INDEX` without `CASCADE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0); `--accept-blocking` checks the replica identity under the table's lock and refuses the drop as `unsupported-statement`, naming the identity index. `diff` reports an index to remove as a **destructive** `DROP INDEX` and hints to run it through `migrate --alter`, which ends in this `index-statement` refusal — run `DROP INDEX CONCURRENTLY` directly instead. `diff` refuses dropping the table's replica identity index, or one a partition's is attached under, with `replica-identity`. `plan` and `lint` refuse `DROP INDEX … CASCADE` with `cascading-drop`, since `DROP INDEX CONCURRENTLY` does not accept `CASCADE`"
   - id: reindex
     area: "indexes"
     operation: "`REINDEX`"

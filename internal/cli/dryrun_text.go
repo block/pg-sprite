@@ -295,6 +295,8 @@ func impactText(r planner.Reason) string {
 		return "drops what the table's replica identity keys on; UPDATE and DELETE on the table fail while a publication publishes them"
 	case planner.ReasonDependentView:
 		return "changes a column a view reads; PostgreSQL refuses this until the view is dropped or redefined"
+	case planner.ReasonCascadingDrop:
+		return "CASCADE also drops the views and other tables' foreign keys that depend on it; drop those explicitly and resubmit without CASCADE"
 	case planner.ReasonUnsupportedOperation:
 		return "pg-sprite does not recognize this operation and will not run it"
 	}
