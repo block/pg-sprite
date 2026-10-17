@@ -440,10 +440,13 @@ another process is likewise not a verb here: a run stops when its context ends, 
 
 ### Outcomes of a checksum pass under the stream
 
-In the catch-up stage the orchestrator runs the checksum with `checksum.Verifier.CheckLive`
-while the source is written and `applier.Catchup` applies the stream, handing it the
-catch-up as the `ConfirmedSource` and the policy its setting names (`abort` or `repair`;
-`recopy` is refused). A pass returns one of five outcomes, each a typed error or a proof, and
+In the catch-up stage the checksum runs with `checksum.Verifier.CheckLive` while the source
+is written and `applier.Catchup` applies the stream, under the policy its setting names
+(`abort` or `repair`; `recopy` is refused). A caller that runs `CheckLive` under `repair`
+hands the catch-up as both the `ConfirmedSource` and the `FlushGate` that holds its flushes
+off the shadow while a repair recopies (`LiveOptions.Flushes`, required under `repair` and
+unused under `abort`); `schemachange.Runner` runs the pass under `DivergenceAbort` and hands
+only the `ConfirmedSource`, refusing a caller-supplied `Live.Confirmed` or `Live.Flushes`. A pass returns one of five outcomes, each a typed error or a proof, and
 each asks for a different action. Whether the pass wrote the shadow is part of the outcome:
 
 | Outcome | What it means | Orchestrator action | Shadow written? |
