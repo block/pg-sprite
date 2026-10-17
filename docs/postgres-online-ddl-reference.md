@@ -54,7 +54,8 @@ The remaining reasons are first-bucket by cost but carry a warning the cost alon
 the lock queue below applies to every query on the parent) and `app-breaking-rename` (the
 catalog change is instant; the running application code that still uses the old name is
 what breaks). `replica-identity` is a refusal: the operation would drop what the table's
-replica identity index keys on. `unsupported-operation` means the planner does not recognize the operation or
+replica identity index keys on. `dependent-view` is a refusal too: the operation retypes or
+drops a column a view reads, which PostgreSQL refuses. `unsupported-operation` means the planner does not recognize the operation or
 knows no safe path for it. The exclusion-constraint carve-out above is a known full-scan cost
 with no online path, not an operation with no cost bucket.
 
@@ -502,6 +503,21 @@ them. Move the identity first (`ALTER TABLE … REPLICA IDENTITY USING INDEX` an
 unique index, or `REPLICA IDENTITY DEFAULT` when a primary key remains), then re-plan.
 The planner judges this from live facts, so the linter, which has none, never
 reports it.
+
+### `dependent-view`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation changes the type of, or drops, a column that a view or materialized
+view reads. PostgreSQL refuses both while the view exists, even a type change it
+would otherwise relabel without a rewrite, so the statement could only fail. The
+plan names each view in `decisions[].dependent_views`. Drop or redefine the views
+first, then re-plan; a rename is not refused, because a view follows the column.
+The planner reads the views from live facts, so the linter, which has none, never
+reports it, and the server's own refusal remains the backstop for a view created
+after planning.
 
 ### `unsupported-operation`
 

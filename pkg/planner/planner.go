@@ -83,6 +83,7 @@ func Reasons() []Reason {
 		ReasonRelocation,
 		ReasonPartitionParentLock,
 		ReasonReplicaIdentity,
+		ReasonDependentView,
 		ReasonUnsupportedOperation,
 	}
 }
@@ -154,6 +155,12 @@ const (
 	// Move the identity first (ALTER TABLE ... REPLICA IDENTITY), then
 	// re-plan.
 	ReasonReplicaIdentity Reason = "replica-identity"
+	// ReasonDependentView: the operation changes the type of, or drops, a
+	// column that a view or materialized view reads. PostgreSQL refuses
+	// both while the view exists, even a type change that rewrites
+	// nothing, so the statement could only fail. The decision names the
+	// views; change or drop them first, then re-plan.
+	ReasonDependentView Reason = "dependent-view"
 	// ReasonUnsupportedOperation: the planner does not recognize the
 	// operation or knows no safe path for it.
 	ReasonUnsupportedOperation Reason = "unsupported-operation"
@@ -224,6 +231,10 @@ type Decision struct {
 	// of prose — it is what tells a consumer the sequence must not be
 	// wrapped in a transaction block.
 	SaferSQLExecution Execution `json:"safer_sql_execution,omitempty"`
+	// DependentViews names the views and materialized views that read the
+	// column, each schema-qualified with every identifier quoted, present
+	// exactly for dependent-view decisions.
+	DependentViews []string `json:"dependent_views,omitempty"`
 }
 
 // ExecutableAsSubmitted reports whether the operation's submitted form is
@@ -268,6 +279,11 @@ type Facts struct {
 	// constant; the proof leaves out only an ADD COLUMN IF NOT EXISTS for a
 	// column the table already has, which the server skips.
 	AddColumnProofs map[string]statement.AddColumnProof
+	// DependentViews maps a column to the views and materialized views that
+	// read it (preflight.ColumnDependentViews). A column absent from the map
+	// has none, or the facts were not read, as in an offline lint; either
+	// way the server's own refusal at execution remains the backstop.
+	DependentViews map[string][]string
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
@@ -281,6 +297,18 @@ func FactsFrom(live schemadiff.Model) Facts {
 		types[col.Name] = col.Type
 	}
 	return Facts{ColumnTypes: types, ReplicaIdentity: live.ReplicaIdentity}
+}
+
+// viewsReadingColumn returns the views that read the column op retypes or
+// drops: the two column changes PostgreSQL refuses while a view reads the
+// column. A rename is not one of them, since a view follows the column.
+func viewsReadingColumn(op statement.Op, facts Facts) []string {
+	switch op.Kind {
+	case statement.OpAlterColumnType, statement.OpDropColumn:
+		return facts.DependentViews[op.Column]
+	default:
+		return nil
+	}
 }
 
 // addColumnProof returns what the server proved about adding op's
@@ -334,6 +362,10 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	d := Decision{Operation: op.Describe(), Destructive: destructiveOp(op.Kind)}
 	if facts.ReplicaIdentity.DroppedBy(op) {
 		d.Route, d.Reason = RouteRefuse, ReasonReplicaIdentity
+		return d
+	}
+	if views := viewsReadingColumn(op, facts); len(views) > 0 {
+		d.Route, d.Reason, d.DependentViews = RouteRefuse, ReasonDependentView, views
 		return d
 	}
 	switch op.Kind {

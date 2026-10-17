@@ -295,6 +295,37 @@ func TestDryRunTextPlannerRefusalNamesOperation(t *testing.T) {
 	assert.NotContains(t, text, "error[refuse]")
 }
 
+// A refusal because views read the changed column names those views in
+// the refusal itself, rather than the generic no-safe-path sentence, and
+// the help line says what to do about them.
+func TestDryRunTextDependentViewRefusalNamesTheViews(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "app", "users", "16.10"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         "ALTER TABLE app.users DROP COLUMN email",
+		Route:       planner.RouteRefuse,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement,
+		Class:       verdict.ClassCapabilityBoundary,
+		Decisions: []planner.Decision{{
+			Operation:      "DROP COLUMN email",
+			Destructive:    true,
+			Route:          planner.RouteRefuse,
+			Reason:         planner.ReasonDependentView,
+			DependentViews: []string{`"app"."active_users"`, `"reports"."mail"`},
+		}},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := strings.Join(strings.Fields(out.String()), " ")
+	assert.Contains(t, text, `error[unsupported-statement]: refused — DROP COLUMN email changes a column read by "app"."active_users", "reports"."mail", and PostgreSQL refuses to retype or drop a column while a view reads it`)
+	assert.Contains(t, text, "help: drop or redefine those views first, then re-plan")
+	assert.Contains(t, text, onlineDDLReferenceURL+"#dependent-view")
+	assert.NotContains(t, text, "knows no safe path")
+}
+
 // A refused generated-expression change says why it cannot run, rather
 // than the generic no-safe-path sentence, so the reader knows the drift is
 // real and what applying it would cost.

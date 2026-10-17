@@ -32,8 +32,9 @@ import (
 // foreign-key create-shape cause. Version 7 added the
 // set-generated-expression change kind. Version 8 added the replica-identity
 // planner reason. Version 9 added the validate-constraint and
-// validate-foreign-key change kinds.
-const FormatVersion = 9
+// validate-foreign-key change kinds. Version 10 added the dependent-view
+// planner reason and the dependent_views decision field.
+const FormatVersion = 10
 
 // Source identifies which front door derived the plan.
 type Source string
