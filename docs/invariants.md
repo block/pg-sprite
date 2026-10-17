@@ -1057,9 +1057,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   vocabulary, and carries an owner exactly when its class is `no-online-safety-problem`.
   *Enforced:* `verdict.NewRefusal` and the per-class constructors are the only way to build a
   `verdict.Refusal`; `Verdict.WithRefusal` is the only way a verdict acquires its refusal
-  fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`)
-  is checked for completeness against the production closed sets by
-  `TestRefusalRegistryIsComplete`. Inside the core, `copier.RefusalCause.Class()`,
+  fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`,
+  `pkg/migrate/copy_swap_refusal.go`) is checked for completeness against the production closed
+  sets by `TestRefusalRegistryIsComplete`. Inside the core, `copier.RefusalCause.Class()`,
   `schemachange.RefusalCause.Class()`, `preflight.PartitionRefusalCause.Class()`,
   `preflight.CopySwapRefusalCause.Class()`, and `executor.CreateShapeCause.Class()` answer one
   class from `refusal.Classes()`, each held to its cause's row by a
