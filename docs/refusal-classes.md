@@ -92,7 +92,10 @@ routed to provisioning and never to the data change runner.
 
 The four causes span three classes. [RF-6](invariants.md#refusals-and-preflight-rf) already
 keeps the not-implemented case and the version-gated case apart in one sentence; this table
-agrees with it rather than collapsing them.
+agrees with it rather than collapsing them. An importer reads the cause from the `Cause` field of
+`*UnsupportedPartitionedParentError` (`errors.As`), and `PartitionRefusalCause.Class()` answers
+the `class` column below as a `refusal.Class`, which converts to `verdict.Class` with a plain
+conversion.
 
 | `PartitionRefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
@@ -126,8 +129,10 @@ vocabulary — `CopySwapRefusalCauseOf` answers only for the shape and environme
 | `ErrCopySwapProofMismatch` | `errors.Is` | The proofs handed in do not fit together: a shape minted for another database or dropped relation, or a decoding run on a shape whose privilege proof did not verify replication access. An adapter that calls the fold never produces this. |
 | any other error | wrapped query error | A catalog read failed; retry or surface it as an engine failure. |
 
-The verdict reason that carries these causes lands with the copy-and-swap route itself; the
-classification is fixed here first so the route inherits it.
+`CopySwapRefusalCause.Class()` answers the `class` column below as a `refusal.Class`, which
+converts to `verdict.Class` with a plain conversion. The verdict reason that carries these
+causes lands with the copy-and-swap route itself; the classification is fixed here first so
+the route inherits it.
 
 | `CopySwapRefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
@@ -288,7 +293,11 @@ server's answer, routed by SQLSTATE, not a fault in the engine's state.
 ### `unsupported-statement` on the create path, keyed on `CreateShapeCause`
 
 The closed set is `executor.CreateShapeCauses()`. The cause travels with the plan statement
-and reaches the verdict through `planRefusal`.
+and reaches the verdict through `planRefusal`. In process, `executor.CreateShapeCauseOf` reads
+the cause from an error and `CreateShapeCause.Class()` answers the `class` column below as a
+`refusal.Class`. A plan decoded from JSON already carries the producer's class in
+`Statement.Class`, which is authoritative there: `Statement.Cause.Class()` answers `""` for a
+cause added in a newer engine than the importer's pinned library.
 
 | `CreateShapeCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
@@ -409,15 +418,21 @@ The map in this document is pinned: the `docs_test.go` guards
 in `pkg/verdict`, `pkg/executor`, `pkg/preflight`, `pkg/schemachange`, and `pkg/copier` fail
 when a `Reason`, `CreateShapeCause`, `PartitionRefusalCause`, `CopySwapRefusalCause`, or either
 package's `RefusalCause` exists in the code without a row here, so a new discriminator value
-cannot land unclassified. The shadow and copier guards go one step further and compare each
-cause's `Class()` to its row's `class` cell, so the two cannot disagree, and each asserts that
-every class a cause answers is a member of `refusal.Classes()`; `pkg/refusal`'s guards hold
-its classes to the vocabulary table above and every `class` cell of every cause table in this
-document to its closed set, so a cause table cannot classify a cause under a class the engine
-cannot name; and `pkg/verdict`'s holds every one of them to be a `verdict.Class`, the
-verdict adding only `no-online-safety-problem`. `preflight.PartitionRefusalCause`,
-`preflight.CopySwapRefusalCause`, and `executor.CreateShapeCause` have a class cell but no
-`Class()` yet; their rows are already held to the closed set.
+cannot land unclassified. The shadow, copier, preflight, and create-path guards go one step
+further and compare each cause's `Class()` to its row's `class` cell, so the two cannot
+disagree, and each asserts that every class a cause answers is a member of
+`refusal.Classes()` — every typed refusal cause the core mints (`copier.RefusalCause`,
+`schemachange.RefusalCause`, `preflight.PartitionRefusalCause`,
+`preflight.CopySwapRefusalCause`, `executor.CreateShapeCause`) answers a `Class()` held this
+way, and the guards read the cause tables through one shared reader
+(`internal/testutil`), so each table is located and parsed the same way in every package;
+`pkg/refusal`'s guards hold its classes to the vocabulary table above and every `class`
+cell of every cause table in this document to its closed set, so a cause table cannot
+classify a cause under a class the engine cannot name; `pkg/verdict`'s holds every one of
+them to be a `verdict.Class`, the verdict adding only `no-online-safety-problem`; and
+`pkg/plan`'s holds the registry's class for each create-shape and partition cause to that
+cause's own `Class()`, so the registry's explicit classification and the cause's cannot
+drift apart.
 
 ## Shared vocabulary with the capabilities matrix
 

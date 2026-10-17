@@ -1,34 +1,46 @@
 package preflight_test
 
 import (
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/preflight"
 )
 
-// refusalClassesDoc is the routing contract that classifies every
-// partitioned-parent refusal cause; this test keeps its cause table honest.
-const refusalClassesDoc = "../../docs/refusal-classes.md"
+// refusalClassesPartitionSection heads the table of docs/refusal-classes.md
+// that classifies the partitioned-parent causes.
+const refusalClassesPartitionSection = "### `unsupported-partitioned-parent`, keyed on `PartitionRefusalCause`"
+
+// refusalClassesCopySwapSection heads the table that classifies the
+// copy-and-swap shape and environment causes.
+const refusalClassesCopySwapSection = "### Copy-and-swap preflight refusals, keyed on `CopySwapRefusalCause`"
 
 // Every partition refusal cause automation can branch on must have a row in
 // the refusal-class map: a cause added to the code without a classification
 // fails here.
 func TestRefusalClassesDocListsEveryPartitionCause(t *testing.T) {
-	raw, err := os.ReadFile(refusalClassesDoc)
-	require.NoError(t, err)
-	doc := string(raw)
+	table := testutil.RefusalCauseTable(t, refusalClassesPartitionSection)
 	for _, cause := range preflight.PartitionRefusalCauses() {
-		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", cause),
+		assert.Contains(t, table, testutil.RefusalCauseRow(string(cause)),
 			"docs/refusal-classes.md has no class row for partition refusal cause %q", cause)
+	}
+}
+
+// Every partition refusal cause's Class() is the class its row records: the
+// document decides the class, and the code's answer is held to it, so
+// neither can be changed without the other.
+func TestPartitionRefusalCauseClassMatchesDocClassColumn(t *testing.T) {
+	table := testutil.RefusalCauseTable(t, refusalClassesPartitionSection)
+	for _, cause := range preflight.PartitionRefusalCauses() {
+		assert.Equal(t, testutil.RefusalClassCell(t, table, string(cause)), string(cause.Class()),
+			"docs/refusal-classes.md classifies partition refusal cause %q differently from Class()", cause)
 	}
 }
 
@@ -79,12 +91,20 @@ func isPartitionRefusalCauseType(expr ast.Expr) bool {
 // Every copy-and-swap shape refusal cause has a row in the refusal-class
 // map: a cause added to the code without a classification fails here.
 func TestRefusalClassesDocListsEveryCopySwapCause(t *testing.T) {
-	raw, err := os.ReadFile(refusalClassesDoc)
-	require.NoError(t, err)
-	doc := string(raw)
+	table := testutil.RefusalCauseTable(t, refusalClassesCopySwapSection)
 	for _, cause := range preflight.CopySwapRefusalCauses() {
-		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", cause),
+		assert.Contains(t, table, testutil.RefusalCauseRow(string(cause)),
 			"docs/refusal-classes.md has no class row for copy-and-swap refusal cause %q", cause)
+	}
+}
+
+// Every copy-and-swap refusal cause's Class() is the class its row records,
+// shape and environment causes alike.
+func TestCopySwapRefusalCauseClassMatchesDocClassColumn(t *testing.T) {
+	table := testutil.RefusalCauseTable(t, refusalClassesCopySwapSection)
+	for _, cause := range preflight.CopySwapRefusalCauses() {
+		assert.Equal(t, testutil.RefusalClassCell(t, table, string(cause)), string(cause.Class()),
+			"docs/refusal-classes.md classifies copy-and-swap refusal cause %q differently from Class()", cause)
 	}
 }
 
