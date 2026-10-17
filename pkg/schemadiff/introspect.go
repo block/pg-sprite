@@ -60,12 +60,13 @@ func IntrospectTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model, 
 // introspectInTx introspects schema.table inside an open transaction. It
 // sets the transaction-local search_path so decompiled definitions print
 // unqualified, resolves the relation by explicit qualification (never via
-// search_path), and reads columns, constraints, and indexes. Its catalog
-// queries can name pg_class and = unqualified because the search_path they
-// run under is the one set here, which dbconn builds so pg_catalog is never
-// listed behind another schema and is searched first (CO-9); a query that
-// runs under the caller's session search_path (ListManagedTables) qualifies
-// everything instead.
+// search_path), and reads columns, constraints, and indexes. That
+// search_path serves the decompilers, not the catalog reads: pg_catalog is
+// searched first, but only an exact argument match is safe from a function
+// or operator the target schema defines that fits a call better, so every
+// catalog relation, function, operator, and type the queries name is
+// pg_catalog-qualified (CO-9), as in ListManagedTables, which runs under the
+// caller's session search_path.
 func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model, error) {
 	return introspectOnPath(ctx, tx, schema, table, searchPathFor(schema), false)
 }
@@ -94,12 +95,13 @@ func introspectOnPath(ctx context.Context, tx pgx.Tx, schema, table string, path
 	var relkind, persistence string
 	var isPartition bool
 	var partitionKey string
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	err := tx.QueryRow(ctx, `
-		SELECT c.oid, c.relkind::text, c.relpersistence::text, c.relispartition,
-		       COALESCE(pg_get_partkeydef(c.oid), '')
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2`, schema, table).
+		SELECT c.oid, c.relkind::pg_catalog.text, c.relpersistence::pg_catalog.text, c.relispartition,
+		       COALESCE(pg_catalog.pg_get_partkeydef(c.oid), '')
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`, schema, table).
 		Scan(&oid, &relkind, &persistence, &isPartition, &partitionKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Model{}, fmt.Errorf("%s.%s: %w", schema, table, ErrTableNotFound)
@@ -150,17 +152,18 @@ func introspectOnPath(ctx context.Context, tx pgx.Tx, schema, table string, path
 // (normalizeOption). A table with none returns nil.
 func introspectOptions(ctx context.Context, tx pgx.Tx, oid uint32) ([]string, error) {
 	var opts []string
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	err := tx.QueryRow(ctx, `
-		SELECT array_agg(opt ORDER BY opt)
+		SELECT pg_catalog.array_agg(opt ORDER BY opt)
 		FROM (
-			SELECT unnest(c.reloptions) AS opt
-			FROM pg_class c
-			WHERE c.oid = $1
+			SELECT pg_catalog.unnest(c.reloptions) AS opt
+			FROM pg_catalog.pg_class c
+			WHERE c.oid OPERATOR(pg_catalog.=) $1
 			UNION ALL
-			SELECT 'toast.' || unnest(toast.reloptions)
-			FROM pg_class c
-			JOIN pg_class toast ON toast.oid = c.reltoastrelid
-			WHERE c.oid = $1
+			SELECT 'toast.' OPERATOR(pg_catalog.||) pg_catalog.unnest(toast.reloptions)
+			FROM pg_catalog.pg_class c
+			JOIN pg_catalog.pg_class toast ON toast.oid OPERATOR(pg_catalog.=) c.reltoastrelid
+			WHERE c.oid OPERATOR(pg_catalog.=) $1
 		) options`, oid).Scan(&opts)
 	if err != nil {
 		return nil, fmt.Errorf("query storage parameters: %w", err)
@@ -206,14 +209,18 @@ func hasToastOptions(opts []string) bool {
 // reported, failing closed.
 func introspectToastMayNotRebuild(ctx context.Context, tx pgx.Tx, oid uint32) (bool, error) {
 	var mayNotRebuild bool
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	err := tx.QueryRow(ctx, `
-		SELECT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = $1 AND attnum > 0 AND attisdropped)
+		SELECT EXISTS (
+		           SELECT 1 FROM pg_catalog.pg_attribute
+		           WHERE attrelid OPERATOR(pg_catalog.=) $1 AND attnum OPERATOR(pg_catalog.>) 0 AND attisdropped)
 		   AND NOT EXISTS (
-		       SELECT 1 FROM pg_attribute a
-		       JOIN pg_type ty ON ty.oid = a.atttypid
-		       WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
-		         AND a.attlen = -1 AND a.atttypmod < 0
-		         AND a.attstorage <> 'p' AND ty.typstorage <> 'p')`, oid).Scan(&mayNotRebuild)
+		       SELECT 1 FROM pg_catalog.pg_attribute a
+		       JOIN pg_catalog.pg_type ty ON ty.oid OPERATOR(pg_catalog.=) a.atttypid
+		       WHERE a.attrelid OPERATOR(pg_catalog.=) $1 AND a.attnum OPERATOR(pg_catalog.>) 0
+		         AND NOT a.attisdropped
+		         AND a.attlen OPERATOR(pg_catalog.=) -1 AND a.atttypmod OPERATOR(pg_catalog.<) 0
+		         AND a.attstorage OPERATOR(pg_catalog.<>) 'p' AND ty.typstorage OPERATOR(pg_catalog.<>) 'p')`, oid).Scan(&mayNotRebuild)
 	if err != nil {
 		return false, fmt.Errorf("query whether the columns rebuild a TOAST table: %w", err)
 	}
@@ -239,39 +246,47 @@ func introspectToastMayNotRebuild(ctx context.Context, tx pgx.Tx, oid uint32) (b
 // counted on its own as well.
 func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIdentityKeys, error) {
 	var keys ReplicaIdentityKeys
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	err := tx.QueryRow(ctx, `
 		WITH RECURSIVE tree AS (
-		    SELECT $1::oid AS relid
+		    SELECT $1::pg_catalog.oid AS relid
 		    UNION
-		    SELECT inh.inhrelid FROM pg_inherits inh JOIN tree ON inh.inhparent = tree.relid
+		    SELECT inh.inhrelid FROM pg_catalog.pg_inherits inh
+		    JOIN tree ON inh.inhparent OPERATOR(pg_catalog.=) tree.relid
 		), identity AS (
 		    SELECT i.indexrelid, i.indrelid, i.indkey
 		    FROM tree
-		    JOIN pg_class c ON c.oid = tree.relid AND c.relreplident = 'i'
-		    JOIN pg_index i ON i.indrelid = c.oid AND i.indisreplident
+		    JOIN pg_catalog.pg_class c
+		      ON c.oid OPERATOR(pg_catalog.=) tree.relid AND c.relreplident OPERATOR(pg_catalog.=) 'i'
+		    JOIN pg_catalog.pg_index i ON i.indrelid OPERATOR(pg_catalog.=) c.oid AND i.indisreplident
 		), chain AS (
 		    SELECT indexrelid AS relid FROM identity
 		    UNION
 		    SELECT ancestor.relid
 		    FROM identity
-		    CROSS JOIN LATERAL pg_partition_ancestors(identity.indexrelid) ancestor
+		    CROSS JOIN LATERAL pg_catalog.pg_partition_ancestors(identity.indexrelid) ancestor
 		), here AS (
 		    SELECT chain.relid AS indexrelid
 		    FROM chain
-		    JOIN pg_index ai ON ai.indexrelid = chain.relid AND ai.indrelid = $1
+		    JOIN pg_catalog.pg_index ai
+		      ON ai.indexrelid OPERATOR(pg_catalog.=) chain.relid AND ai.indrelid OPERATOR(pg_catalog.=) $1
 		)
 		SELECT
-		    ARRAY(SELECT ic.relname::text FROM here JOIN pg_class ic ON ic.oid = here.indexrelid ORDER BY 1),
-		    ARRAY(SELECT con.conname::text FROM here JOIN pg_constraint con
-		          ON con.conindid = here.indexrelid AND con.conrelid = $1 AND con.contype IN ('p', 'u') ORDER BY 1),
-		    ARRAY(SELECT DISTINCT a.attname::text FROM identity
-		          CROSS JOIN LATERAL unnest(identity.indkey::int2[]) AS k(attnum)
-		          JOIN pg_attribute a ON a.attrelid = identity.indrelid AND a.attnum = k.attnum
+		    ARRAY(SELECT ic.relname::pg_catalog.text FROM here
+		          JOIN pg_catalog.pg_class ic ON ic.oid OPERATOR(pg_catalog.=) here.indexrelid ORDER BY 1),
+		    ARRAY(SELECT con.conname::pg_catalog.text FROM here JOIN pg_catalog.pg_constraint con
+		          ON con.conindid OPERATOR(pg_catalog.=) here.indexrelid AND con.conrelid OPERATOR(pg_catalog.=) $1
+		          AND con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[]) ORDER BY 1),
+		    ARRAY(SELECT DISTINCT a.attname::pg_catalog.text FROM identity
+		          CROSS JOIN LATERAL pg_catalog.unnest(identity.indkey::pg_catalog.int2[]) AS k(attnum)
+		          JOIN pg_catalog.pg_attribute a
+		            ON a.attrelid OPERATOR(pg_catalog.=) identity.indrelid AND a.attnum OPERATOR(pg_catalog.=) k.attnum
 		          ORDER BY 1),
-		    ARRAY(SELECT DISTINCT a.attname::text FROM identity
-		          CROSS JOIN LATERAL unnest(identity.indkey::int2[]) AS k(attnum)
-		          JOIN pg_attribute a ON a.attrelid = identity.indrelid AND a.attnum = k.attnum
-		          WHERE identity.indrelid = $1
+		    ARRAY(SELECT DISTINCT a.attname::pg_catalog.text FROM identity
+		          CROSS JOIN LATERAL pg_catalog.unnest(identity.indkey::pg_catalog.int2[]) AS k(attnum)
+		          JOIN pg_catalog.pg_attribute a
+		            ON a.attrelid OPERATOR(pg_catalog.=) identity.indrelid AND a.attnum OPERATOR(pg_catalog.=) k.attnum
+		          WHERE identity.indrelid OPERATOR(pg_catalog.=) $1
 		          ORDER BY 1)`, oid).Scan(&keys.Indexes, &keys.Constraints, &keys.Columns, &keys.OwnColumns)
 	if err != nil {
 		return ReplicaIdentityKeys{}, fmt.Errorf("query replica identity indexes: %w", err)
@@ -295,21 +310,22 @@ func ReadReplicaIdentity(ctx context.Context, tx pgx.Tx, oid uint32) (ReplicaIde
 // directions. Declarative partitioning also uses pg_inherits, so only edges
 // whose child is not marked relispartition belong to classic inheritance.
 func introspectInheritance(ctx context.Context, tx pgx.Tx, oid uint32) ([]string, []string, error) {
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
-		SELECT direction, nspname || '.' || relname
+		SELECT direction, nspname OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) relname
 		FROM (
 			SELECT 0 AS direction, pn.nspname, p.relname
-			FROM pg_inherits i
-			JOIN pg_class child ON child.oid = i.inhrelid
-			JOIN pg_class p ON p.oid = i.inhparent
-			JOIN pg_namespace pn ON pn.oid = p.relnamespace
-			WHERE i.inhrelid = $1 AND NOT child.relispartition
+			FROM pg_catalog.pg_inherits i
+			JOIN pg_catalog.pg_class child ON child.oid OPERATOR(pg_catalog.=) i.inhrelid
+			JOIN pg_catalog.pg_class p ON p.oid OPERATOR(pg_catalog.=) i.inhparent
+			JOIN pg_catalog.pg_namespace pn ON pn.oid OPERATOR(pg_catalog.=) p.relnamespace
+			WHERE i.inhrelid OPERATOR(pg_catalog.=) $1 AND NOT child.relispartition
 			UNION ALL
 			SELECT 1 AS direction, cn.nspname, child.relname
-			FROM pg_inherits i
-			JOIN pg_class child ON child.oid = i.inhrelid
-			JOIN pg_namespace cn ON cn.oid = child.relnamespace
-			WHERE i.inhparent = $1 AND NOT child.relispartition
+			FROM pg_catalog.pg_inherits i
+			JOIN pg_catalog.pg_class child ON child.oid OPERATOR(pg_catalog.=) i.inhrelid
+			JOIN pg_catalog.pg_namespace cn ON cn.oid OPERATOR(pg_catalog.=) child.relnamespace
+			WHERE i.inhparent OPERATOR(pg_catalog.=) $1 AND NOT child.relispartition
 		) inheritance
 		ORDER BY direction, nspname, relname`, oid)
 	if err != nil {
@@ -350,68 +366,76 @@ func introspectInheritance(ctx context.Context, tx pgx.Tx, oid uint32) ([]string
 // the owned sequence its serial default calls — rides along, recorded only
 // where it differs from what declaring the column fresh creates.
 func introspectColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]Column, error) {
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
 		SELECT a.attname,
-		       format_type(a.atttypid, a.atttypmod),
+		       pg_catalog.format_type(a.atttypid, a.atttypmod),
 		       a.attnotnull,
-		       COALESCE(pg_get_expr(d.adbin, d.adrelid), ''),
+		       COALESCE(pg_catalog.pg_get_expr(d.adbin, d.adrelid), ''),
 		       COALESCE((
 		           SELECT true
-		           FROM pg_depend dep
-		           JOIN pg_class s ON s.oid = dep.refobjid AND s.relkind = 'S'
-		           WHERE dep.classid = 'pg_attrdef'::regclass
-		             AND dep.objid = d.oid
-		             AND dep.refclassid = 'pg_class'::regclass
+		           FROM pg_catalog.pg_depend dep
+		           JOIN pg_catalog.pg_class s
+		             ON s.oid OPERATOR(pg_catalog.=) dep.refobjid AND s.relkind OPERATOR(pg_catalog.=) 'S'
+		           WHERE dep.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_attrdef'::pg_catalog.regclass
+		             AND dep.objid OPERATOR(pg_catalog.=) d.oid
+		             AND dep.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
 		           LIMIT 1
 		       ), false),
 		       COALESCE((
 		           SELECT true
-		           FROM pg_depend dep
-		           JOIN pg_class s ON s.oid = dep.refobjid AND s.relkind = 'S'
-		           JOIN pg_depend own ON own.classid = 'pg_class'::regclass
-		                             AND own.objid = s.oid
-		                             AND own.refclassid = 'pg_class'::regclass
-		                             AND own.refobjid = a.attrelid
-		                             AND own.refobjsubid = a.attnum
-		                             AND own.deptype = 'a'
-		           WHERE dep.classid = 'pg_attrdef'::regclass
-		             AND dep.objid = d.oid
-		             AND dep.refclassid = 'pg_class'::regclass
+		           FROM pg_catalog.pg_depend dep
+		           JOIN pg_catalog.pg_class s
+		             ON s.oid OPERATOR(pg_catalog.=) dep.refobjid AND s.relkind OPERATOR(pg_catalog.=) 'S'
+		           JOIN pg_catalog.pg_depend own
+		             ON own.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		            AND own.objid OPERATOR(pg_catalog.=) s.oid
+		            AND own.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		            AND own.refobjid OPERATOR(pg_catalog.=) a.attrelid
+		            AND own.refobjsubid OPERATOR(pg_catalog.=) a.attnum
+		            AND own.deptype OPERATOR(pg_catalog.=) 'a'
+		           WHERE dep.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_attrdef'::pg_catalog.regclass
+		             AND dep.objid OPERATOR(pg_catalog.=) d.oid
+		             AND dep.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
 		           LIMIT 1
 		       ), false),
 		       COALESCE((
-		           SELECT quote_ident(cn.nspname) || '.' || quote_ident(col.collname)
-		           FROM pg_collation col
-		           JOIN pg_namespace cn ON cn.oid = col.collnamespace
-		           JOIN pg_type t ON t.oid = a.atttypid
-		           WHERE col.oid = a.attcollation
-		             AND a.attcollation <> t.typcollation
+		           SELECT pg_catalog.quote_ident(cn.nspname) OPERATOR(pg_catalog.||) '.'
+		                  OPERATOR(pg_catalog.||) pg_catalog.quote_ident(col.collname)
+		           FROM pg_catalog.pg_collation col
+		           JOIN pg_catalog.pg_namespace cn ON cn.oid OPERATOR(pg_catalog.=) col.collnamespace
+		           JOIN pg_catalog.pg_type t ON t.oid OPERATOR(pg_catalog.=) a.atttypid
+		           WHERE col.oid OPERATOR(pg_catalog.=) a.attcollation
+		             AND a.attcollation OPERATOR(pg_catalog.<>) t.typcollation
 		       ), ''),
-		       a.attidentity::text,
-		       a.attgenerated::text,
+		       a.attidentity::pg_catalog.text,
+		       a.attgenerated::pg_catalog.text,
 		       seq.seqtype, seq.seqstart, seq.seqincrement, seq.seqmin, seq.seqmax, seq.seqcache, seq.seqcycle
-		FROM pg_attribute a
-		LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+		FROM pg_catalog.pg_attribute a
+		LEFT JOIN pg_catalog.pg_attrdef d
+		  ON d.adrelid OPERATOR(pg_catalog.=) a.attrelid AND d.adnum OPERATOR(pg_catalog.=) a.attnum
 		LEFT JOIN LATERAL (
-		    SELECT format_type(q.seqtypid, NULL) AS seqtype,
+		    SELECT pg_catalog.format_type(q.seqtypid, NULL) AS seqtype,
 		           q.seqstart, q.seqincrement, q.seqmin, q.seqmax, q.seqcache, q.seqcycle
-		    FROM pg_depend own
-		    JOIN pg_class s ON s.oid = own.objid AND s.relkind = 'S'
-		    JOIN pg_sequence q ON q.seqrelid = s.oid
-		    WHERE own.classid = 'pg_class'::regclass
-		      AND own.refclassid = 'pg_class'::regclass
-		      AND own.refobjid = a.attrelid
-		      AND own.refobjsubid = a.attnum
-		      AND (own.deptype = 'i'
-		           OR (own.deptype = 'a' AND EXISTS (
+		    FROM pg_catalog.pg_depend own
+		    JOIN pg_catalog.pg_class s
+		      ON s.oid OPERATOR(pg_catalog.=) own.objid AND s.relkind OPERATOR(pg_catalog.=) 'S'
+		    JOIN pg_catalog.pg_sequence q ON q.seqrelid OPERATOR(pg_catalog.=) s.oid
+		    WHERE own.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		      AND own.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		      AND own.refobjid OPERATOR(pg_catalog.=) a.attrelid
+		      AND own.refobjsubid OPERATOR(pg_catalog.=) a.attnum
+		      AND (own.deptype OPERATOR(pg_catalog.=) 'i'
+		           OR (own.deptype OPERATOR(pg_catalog.=) 'a' AND EXISTS (
 		               SELECT 1
-		               FROM pg_depend dep
-		               WHERE dep.classid = 'pg_attrdef'::regclass
-		                 AND dep.objid = d.oid
-		                 AND dep.refclassid = 'pg_class'::regclass
-		                 AND dep.refobjid = s.oid)))
+		               FROM pg_catalog.pg_depend dep
+		               WHERE dep.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_attrdef'::pg_catalog.regclass
+		                 AND dep.objid OPERATOR(pg_catalog.=) d.oid
+		                 AND dep.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		                 AND dep.refobjid OPERATOR(pg_catalog.=) s.oid)))
 		) seq ON true
-		WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
+		WHERE a.attrelid OPERATOR(pg_catalog.=) $1 AND a.attnum OPERATOR(pg_catalog.>) 0
+		  AND NOT a.attisdropped
 		ORDER BY a.attnum`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("query columns: %w", err)
@@ -474,12 +498,17 @@ func sequenceRowComplete(start, increment, minValue, maxValue, cache *int64, cyc
 // the table, so it is read only for a scratch table, which no other session
 // can hold.
 func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32, keyIndexDefs bool) ([]Constraint, error) {
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
-		SELECT conname, pg_get_constraintdef(oid), contype = 'f', contype = 'p',
-		       CASE WHEN $2 AND contype IN ('p','u') THEN pg_get_indexdef(conindid) ELSE '' END,
+		SELECT conname, pg_catalog.pg_get_constraintdef(oid),
+		       contype OPERATOR(pg_catalog.=) 'f', contype OPERATOR(pg_catalog.=) 'p',
+		       CASE WHEN $2 AND contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u']::pg_catalog."char"[])
+		            THEN pg_catalog.pg_get_indexdef(conindid) ELSE '' END,
 		       condeferrable, condeferred
-		FROM pg_constraint
-		WHERE conrelid = $1 AND contype IN ('p','u','c','f','x') AND conislocal
+		FROM pg_catalog.pg_constraint
+		WHERE conrelid OPERATOR(pg_catalog.=) $1
+		  AND contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'c', 'f', 'x']::pg_catalog."char"[])
+		  AND conislocal
 		ORDER BY conname`, oid, keyIndexDefs)
 	if err != nil {
 		return nil, fmt.Errorf("query constraints: %w", err)
@@ -514,11 +543,13 @@ func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32, keyIndexD
 // ones. These are not part of this table's definition; the model carries
 // them only for the renderer to refuse on.
 func introspectReferencedBy(ctx context.Context, tx pgx.Tx, oid uint32) ([]string, error) {
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
-		SELECT c.relname || '.' || con.conname
-		FROM pg_constraint con
-		JOIN pg_class c ON c.oid = con.conrelid
-		WHERE con.confrelid = $1 AND con.contype = 'f' AND con.conrelid <> $1
+		SELECT c.relname OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) con.conname
+		FROM pg_catalog.pg_constraint con
+		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) con.conrelid
+		WHERE con.confrelid OPERATOR(pg_catalog.=) $1 AND con.contype OPERATOR(pg_catalog.=) 'f'
+		      AND con.conrelid OPERATOR(pg_catalog.<>) $1
 		      AND con.conislocal
 		ORDER BY c.relname, con.conname`, oid)
 	if err != nil {
@@ -549,12 +580,15 @@ func introspectReferencedBy(ctx context.Context, tx pgx.Tx, oid uint32) ([]strin
 // indisready is deliberately not read — it turns true while a build is
 // still running, so it would report an in-flight index as delivered.
 func introspectIndexes(ctx context.Context, tx pgx.Tx, oid uint32) ([]Index, error) {
+	// INV: CO-9 — every catalog name in this query is pg_catalog-qualified.
 	rows, err := tx.Query(ctx, `
-		SELECT c.relname, pg_get_indexdef(i.indexrelid), NOT i.indisvalid
-		FROM pg_index i
-		JOIN pg_class c ON c.oid = i.indexrelid
-		WHERE i.indrelid = $1
-		  AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = i.indexrelid)
+		SELECT c.relname, pg_catalog.pg_get_indexdef(i.indexrelid), NOT i.indisvalid
+		FROM pg_catalog.pg_index i
+		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) i.indexrelid
+		WHERE i.indrelid OPERATOR(pg_catalog.=) $1
+		  AND NOT EXISTS (
+		      SELECT 1 FROM pg_catalog.pg_constraint con
+		      WHERE con.conindid OPERATOR(pg_catalog.=) i.indexrelid)
 		ORDER BY c.relname`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("query indexes: %w", err)
