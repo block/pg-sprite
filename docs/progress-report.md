@@ -202,16 +202,26 @@ work source once; every other poll is pure memory. On a query or source
 error the returned snapshot still carries the last-known tracker state — `phase` is never
 empty — with the error returned alongside for the caller to classify. Pollers serialize
 against each other, so the reserved session and the work source each see one observation
-at a time. A poller waits its turn for as long as its context lasts: one that gives up first
-gets the last-known snapshot and its context's error, having read nothing, so a stalled poll
-never holds every other observer behind it.
+at a time. A poller waits its turn for as long as its context lasts: one that gives up first,
+or whose context has already ended when its turn comes, gets the last-known snapshot and
+`progress.ErrProgressNotRead` wrapped with its context's error, having read nothing, so a
+stalled poll never holds every other observer behind it. Test for `ErrProgressNotRead` before
+testing for a context error: a context error without it came from the read itself.
 
 The progress read itself never runs under the poller's context. It runs detached from it, under
 its own deadline: a context that ends mid-read — an HTTP request timing out — closes the
 connection the read rides on, and that connection is the reserved session the build's failure
 verdict needs. A read that is in flight when its poller gives up therefore finishes on its own
 terms and returns its result; the work source, which is not that session, is read under the
-poller's context.
+poller's context. Once the read is issued, `Progress` is not bounded by its context: it returns
+when the server answers — within the pool's `statement_timeout` on a `pkg/dbconn` pool (30 s by
+default) — and within twice `dbconn.DefaultStatementTimeout` (one minute) at the latest, when
+the network has stopped answering. That margin holds for a pool with the default or a lower
+`statement_timeout`; on a pool configured above it, or one whose sessions carry none, a read
+that stalls that long closes the session. A caller that needs a hard return at its own deadline
+calls `Progress` from its own goroutine. A deadline error without `ErrProgressNotRead` means the
+reserved session stopped answering, not that the caller timed out — the case to surface, since
+the build's verdict runs on that session.
 
 The handoffs that end a poll target's ownership of the step — stopping a build or a work
 source, or replacing one with the other — wait for an observation in flight before they

@@ -484,10 +484,7 @@ statement's only bound. In caller-owned mode the executor refuses a non-cancella
 the client call is bounded by construction; the server statement is not — it runs with
 `statement_timeout` off and stops only on a cancel request, so a client that dies without
 cancelling leaves it running until `Tracker.CancelBuild` or an operator's `pg_cancel_backend`
-stops it. The build's failure verdict runs on a reserved session that observers must not
-disturb: `Tracker.Progress` reads the build's progress on that session detached from the
-observer's context and under its own deadline, because a context that ends mid-query closes the
-connection, and `Tracker.CancelBuild` signals the same way. `VALIDATE CONSTRAINT` is different in kind: its cancellation is
+stops it. `VALIDATE CONSTRAINT` is different in kind: its cancellation is
 transactionally clean (the constraint simply stays `NOT VALID`; no debris), so the sequence
 executor's validate class deliberately keeps a bounded per-lock timeout — queueing behind a
 conflicting lock holder must not stall a sequence for the whole scan budget — while the scan
@@ -502,6 +499,15 @@ pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repa
 transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so a pool
 built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued behind
 `ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
+The concurrent build's failure verdict runs on a reserved session that observers must not
+disturb: `Tracker.Progress` reads the build's progress on that session detached from the
+observer's context and under its own deadline, set above `pkg/dbconn`'s default
+`statement_timeout` so a slow read ends server-side with the session intact, because a context
+that ends mid-query closes the connection; `Tracker.CancelBuild` signals the same way.
+*Enforced:* `pkg/progress` (`Tracker.Progress`, `progressReadTimeout`;
+`TestProgressRunsTheBuildReadDetachedFromTheObserver`,
+`TestProgressBuildReadDeadlineOutlastsTheServerStatementTimeout`, and
+`TestProgressReadCancelledMidQueryLeavesTheVerdictSessionUsable` in `pkg/executor`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 

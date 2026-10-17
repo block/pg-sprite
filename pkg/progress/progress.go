@@ -297,6 +297,16 @@ var (
 	// other sentinels CancelBuild returns also mean nothing was delivered;
 	// see CancelBuild for the full outcome table.
 	ErrCancelNotDispatched = errors.New("the cancel signal was not sent")
+	// ErrProgressNotRead is returned by Progress when the caller's context
+	// ended before the read was issued — while it waited for another poll
+	// or a handoff fence to release the poll gate, or in the instant it took
+	// the gate. It is returned wrapped together with the caller's context
+	// error, so errors.Is matches both; test for this sentinel before
+	// testing for the context error. A context error without it came from
+	// the read itself: a concurrent build's read runs detached from the
+	// caller's context, so its deadline error means the reserved verdict
+	// session stopped answering, not that the caller timed out.
+	ErrProgressNotRead = errors.New("the progress read was not issued")
 )
 
 // cancelSignalTimeout bounds the cancel signal's round trip. The signal
@@ -312,9 +322,11 @@ const cancelSignalTimeout = 5 * time.Second
 // closes the connection, so the bound is a backstop, set above the pool's
 // baseline statement_timeout: a slow read ends at the server with a query
 // cancellation and leaves the session intact, and only a network that has
-// stopped answering — a session lost either way — reaches this deadline. A
-// pool configured with a statement_timeout above this bound reaches the
-// deadline first.
+// stopped answering — a session lost either way — reaches this deadline.
+// The margin holds for a pool built by pkg/dbconn with the default or a lower
+// statement_timeout; a pool configured above this bound, or one whose
+// sessions carry no statement_timeout, reaches the deadline first, and a
+// read that stalls that long closes the session.
 const progressReadTimeout = 2 * dbconn.DefaultStatementTimeout
 
 // cancelBuildSQL reads the build backend's state and signals it only when
@@ -540,19 +552,30 @@ func (t *Tracker) readState() (Snapshot, dbconn.RowQuerier, uint32, WorkSource) 
 // against the executor's own state updates.
 //
 // A poller waits for the poll gate for as long as its ctx lasts; one that
-// gives up first gets the last-known snapshot and ctx's error, having read
-// nothing. Once the gate is held, a concurrent build's progress read runs on
-// the executor's reserved verdict session bounded and detached from ctx, so
-// an observer whose context ends mid-read — an HTTP request timing out —
-// cannot tear down the session the build's failure verdict needs; the read
-// returns when the server answers, within progressReadTimeout at the latest.
-// A WorkSource is read under ctx, as its contract requires.
+// gives up first, or whose ctx has already ended when it takes the gate,
+// gets the last-known snapshot and ErrProgressNotRead wrapped with ctx's
+// error, having read nothing. Once the gate is held, a concurrent build's
+// progress read runs on the executor's reserved verdict session bounded and
+// detached from ctx, so an observer whose context ends mid-read — an HTTP
+// request timing out — cannot tear down the session the build's failure
+// verdict needs. Progress is therefore not bounded by ctx once the read is
+// issued: it returns when the server answers, which on a pkg/dbconn pool is
+// within its statement_timeout, and within twice dbconn's default
+// statement_timeout (one minute) at the latest. A caller that needs a hard
+// return at its own deadline calls Progress from its own goroutine. A
+// WorkSource is read under ctx, as its contract requires.
 func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
 	if err := t.takePollGateOrGiveUp(ctx); err != nil {
 		s, _, _, _ := t.readState()
-		return s, err
+		return s, fmt.Errorf("%w: %w", ErrProgressNotRead, err)
 	}
 	defer t.releasePollGate()
+	if err := ctx.Err(); err != nil {
+		// The caller gave up in the instant the gate came free; the gate is
+		// held, so this is the last point at which nothing has been read.
+		s, _, _, _ := t.readState()
+		return s, fmt.Errorf("%w: %w", ErrProgressNotRead, err)
+	}
 	s, session, pid, source := t.readState()
 	if s.Phase != PhaseRunning {
 		return s, nil
