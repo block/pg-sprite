@@ -113,6 +113,30 @@ func TestLintTextSuggestionCarriesExecutionCaveat(t *testing.T) {
 		"the caveat names the recovery check a manual run takes on")
 }
 
+// A CONCURRENTLY statement inside a BEGIN … COMMIT block names why the
+// script fails there and how to fix it, and links its own reference
+// section. This is the renderer's own unit test — everything else asserts
+// typed fields.
+func TestLintTextConcurrentInTransactionSaysHowToFixIt(t *testing.T) {
+	var out strings.Builder
+	cmd := LintCmd{}
+	err := cmd.runLint(strings.NewReader("BEGIN;\nCREATE INDEX CONCURRENTLY i ON t (c);\nCOMMIT;\n"), &out)
+	require.ErrorIs(t, err, ErrLintFindings)
+	assert.Contains(t, out.String(), `<stdin>:2:1:
+  CREATE INDEX CONCURRENTLY i ON t (c);
+
+error[concurrent-in-transaction]:
+  CREATE INDEX i — PostgreSQL refuses CONCURRENTLY inside a transaction
+  block, so the script fails here and the block rolls back
+
+help:
+  run this statement on its own, outside the BEGIN … COMMIT block
+
+docs:
+  `+onlineDDLReferenceURL+`#concurrent-in-transaction
+`)
+}
+
 func TestLintParseFailureIsErrorNotFinding(t *testing.T) {
 	var out strings.Builder
 	cmd := LintCmd{}
