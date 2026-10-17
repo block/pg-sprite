@@ -136,13 +136,14 @@ sequence the named form gets constructed).
 ### `unique-index-then-constraint`
 
 **Emitted for:** `ADD PRIMARY KEY` / `ADD UNIQUE` whose `USING INDEX` rewrite could not
-be constructed from the statement.
+be constructed from the statement: one with a `WITH (...)` storage parameter the sequence
+cannot render faithfully, whose value is not a plain word, number, or string, contains a
+backslash, or whose name is namespaced.
 
-Build the unique index with `CREATE UNIQUE INDEX CONCURRENTLY`, then attach it with
-`ALTER TABLE … ADD CONSTRAINT … USING INDEX` — the same sequence the constructed rewrite
-emits. This code keeps the guidance mapping total over every constraint kind the
-classifier can mark safer-idiom: no known statement shape reaches it today, but a shape
-that yields no rewrite surfaces as this advice rather than a failed report.
+Build the unique index with `CREATE UNIQUE INDEX CONCURRENTLY` on the same columns, with the
+key's `INCLUDE`, `NULLS NOT DISTINCT`, `WITH (...)`, and tablespace, then attach it with
+`ALTER TABLE … ADD CONSTRAINT … USING INDEX`, keeping any `DEFERRABLE` and `INITIALLY
+DEFERRED` — the same sequence the constructed rewrite emits.
 
 ## The rewrite table: operation → safer form → caveats
 

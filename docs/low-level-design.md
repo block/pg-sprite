@@ -849,7 +849,8 @@ operator-accepted blocking change that committed ends in an `executed-without-on
 verdict (exit 3), the one case that is committed but not vouched for as online-safe
 ([the ladder](cli-output-examples.md#exit-codes)). Native execution
 exposes a caller-owned `progress.Tracker`. Embedders run a blocking executor
-call in their own bounded task and poll `Tracker.Progress(ctx)`: sequence position and elapsed
+call in their own bounded task and poll `Tracker.Progress(ctx)` (a build read can outlast `ctx`
+by up to a minute; see [progress-report.md](progress-report.md)): sequence position and elapsed
 time come from in-process state, while an active concurrent index build is read on demand from
 `pg_stat_progress_create_index` by the build's backend PID. There is no background poller to
 own or stop, and a missing progress-view row is represented as an inactive observation rather

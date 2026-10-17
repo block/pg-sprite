@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -45,8 +46,19 @@ func Gate(st statement.Statement) (verdict.Verdict, bool) {
 // forms carry no safer idiom: suggesting the statement the user submitted
 // would confuse a human once and send a resubmitting automation into a loop.
 func indexAdvice(st statement.Statement) (detail, saferIdiom string) {
+	// Cascade comes first: PostgreSQL rejects DROP INDEX CONCURRENTLY ...
+	// CASCADE, so that form is not the safe concurrent idiom.
+	if st.Cascades() {
+		return "DROP INDEX ... CASCADE also drops the objects that depend on the index, which can lock and change " +
+			"tables other than the index's own; DROP INDEX CONCURRENTLY does not accept CASCADE — " +
+			"drop each dependent object explicitly, then the index, or resubmit without CASCADE; " +
+			"PostgreSQL then refuses the drop if anything depends on the index", ""
+	}
+	if st.Concurrent() && st.Kind() == statement.KindDropIndex && st.IndexTarget() != statement.IndexTargetSingleRelation {
+		return "DROP INDEX CONCURRENTLY drops exactly one index; submit one statement per index and run each directly against the database", ""
+	}
 	if st.Concurrent() {
-		return "this is already the safe concurrent idiom; pg-sprite does not drive this maintenance form yet — run it directly against the database", ""
+		return "this is already the safe concurrent idiom; pg-sprite does not drive this maintenance form — run it directly against the database", ""
 	}
 	switch st.Kind() {
 	case statement.KindDropIndex:
@@ -91,16 +103,28 @@ func partitionedParentVerdict(st statement.Statement, partitionErr *preflight.Un
 
 // rewriteRequiredVerdict is the refusal for a statement whose submitted
 // form blocks but for which the planner could not construct the safer
-// native sequence — a multi-operation statement, or a pattern it cannot
-// build. Running the submitted form would falsify the plan's own reason.
-func rewriteRequiredVerdict(st statement.Statement) verdict.Verdict {
+// native sequence. Running the submitted form would falsify the plan's own
+// reason. The verdict carries the plan report's guidance, and its detail
+// states the steps that guidance names, so the two surfaces give the same
+// advice.
+func rewriteRequiredVerdict(st statement.Statement, rs router.Statement) (verdict.Verdict, error) {
+	guidance, err := plan.RewriteRequiredGuidance(rs)
+	if err != nil {
+		return verdict.Verdict{}, fmt.Errorf("derive the manual path for rewrite-required %s: %w", qualified(st), err)
+	}
 	return verdict.Verdict{
 		Statement: st.SQL(),
 		Table:     qualified(st),
-		Detail: "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not " +
-			"construct one for this statement; submit each operation as its own single-operation statement " +
-			"so the engine can build its safer form (a dry-run classification shows each operation's route)",
-	}.WithRefusal(rewriteRequiredRefusal())
+		Detail:    "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not construct one for this statement; " + manualPath(guidance),
+		Guidance:  guidance,
+	}.WithRefusal(rewriteRequiredRefusal()), nil
+}
+
+// manualPath states the steps a rewrite-required statement's guidance
+// names, in the wording the suggest report and dry run use, ending in the
+// guidance code an operator can look up.
+func manualPath(g suggest.Guidance) string {
+	return suggest.ManualPath(g) + " (guidance " + string(g) + ")"
 }
 
 // backendUnavailableVerdict is the refusal for a change that routes to an
