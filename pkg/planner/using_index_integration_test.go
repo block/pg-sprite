@@ -20,8 +20,12 @@ import (
 // drops NULLS NOT DISTINCT accepts a second NULL key, one that drops
 // DEFERRABLE checks every row at the statement instead of at commit, and
 // one that drops INCLUDE builds a different index.
+//
+// CREATE INDEX CONCURRENTLY waits out every older transaction in its
+// database, so the test runs in a database of its own rather than beside
+// other packages' open transactions.
 func TestUsingIndexSequenceDeclaresTheSameConstraint(t *testing.T) {
-	url := testutil.StartPostgres(t)
+	url := testutil.NewDatabase(t, testutil.StartPostgres(t))
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
 	defer pool.Close()
