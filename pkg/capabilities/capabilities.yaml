@@ -1,7 +1,7 @@
 rows:
   - id: add-column-no-default-or-constant-default
     area: "column_changes"
-    operation: "`ADD COLUMN` (no default, or constant default)"
+    operation: "`ADD COLUMN` (no default, a constant default, or a non-volatile default such as `now()`)"
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
@@ -9,10 +9,10 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only / fast default (PG 11+); executes instantly under bounded locks"
+    reason_notes: "Metadata-only / fast default (PG 11+), proven by adding the column to an empty temporary table first; executes instantly under bounded locks"
   - id: add-column-with-volatile-default-now-gen-random-uuid
     area: "column_changes"
-    operation: "`ADD COLUMN` with volatile default (`now()`, `gen_random_uuid()`, …)"
+    operation: "`ADD COLUMN` with volatile default (`gen_random_uuid()`, `clock_timestamp()`, identity, `serial`, …)"
     tier: "t2"
     status_mark: "🟡"
     engine_path: "copy_and_swap"
@@ -22,6 +22,18 @@ rows:
       diff: refused
     refusal_reason: backend-unavailable
     reason_notes: "Table rewrite; routes to copy-and-swap and is refused until that engine lands"
+  - id: add-column-of-a-domain-with-constraints
+    area: "column_changes"
+    operation: "`ADD COLUMN` of a domain type with a `CHECK` or `NOT NULL`, with or without a default"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "copy_and_swap"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: backend-unavailable
+    reason_notes: "Table rewrite to check every row against the domain; routes to copy-and-swap and is refused until that engine lands"
   - id: add-column-generated-stored
     area: "column_changes"
     operation: "`ADD COLUMN ... GENERATED ... STORED`"
@@ -68,7 +80,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only; flagged **destructive** in the plan report"
+    reason_notes: "Metadata-only; flagged **destructive** in the plan report. Refused with `replica-identity` when a replica identity index the drop reaches keys on the column: the table's own, or one on a partition or inheritance child below it unless the statement says `ONLY`"
   - id: alter-column-type-binary-coercible-proven-against-live-column-facts
     area: "column_changes"
     operation: "`ALTER COLUMN TYPE`, binary-coercible (proven against live column facts)"
@@ -147,7 +159,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`"
+    reason_notes: "Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`. In a desired file, a new key whose name and index match a valid live unique index takes that index over with `ADD CONSTRAINT ... USING INDEX` at the key's declared deferrability, instead of a destructive drop and rebuild. Execution reads the index again under the table's lock and refuses with the permanent `adopted-index-drift` code, attaching nothing, if it was dropped, replaced, or left invalid since planning"
   - id: add-check-add-foreign-key-imperative
     area: "constraints"
     operation: "`ADD CHECK` / `ADD FOREIGN KEY` (imperative)"
@@ -205,7 +217,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only; flagged **destructive**"
+    reason_notes: "Metadata-only; flagged **destructive**. Refused with `replica-identity` when the constraint owns the table's replica identity index, or the index a partition's is attached under"
   - id: create-unique-index-on-a-plain-table-including-partial-expression-covering-include-gin-gist-brin
     area: "indexes"
     operation: "`CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN"
@@ -227,7 +239,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**. `migrate` refuses the plain form and names the idiom; a single-index `DROP INDEX` without `CASCADE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0)"
+    reason_notes: "Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**. `migrate` refuses the plain form and names the idiom; a single-index `DROP INDEX` without `CASCADE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `diff` refuses dropping the table's replica identity index, or one a partition's is attached under, with `replica-identity`. `migrate` refuses every plain `DROP INDEX` before it reads the table, so its dry-run names the concurrent idiom; `--accept-blocking` checks the replica identity under the table's lock and refuses the drop as `unsupported-statement`, naming the identity index. pg-sprite never runs the concurrent drop itself"
   - id: reindex
     area: "indexes"
     operation: "`REINDEX`"
@@ -275,7 +287,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "Typed refusal at both doors: the imperative door does not take `CREATE TABLE`, and the declarative create path refuses the form at plan time and re-checks it at apply — attaching a partition takes a brief `ACCESS EXCLUSIVE` on the **parent**, which the greenfield absence proof does not cover. The partition-aware flow is planned"
+    reason_notes: "Typed refusal at both doors: the imperative door does not take `CREATE TABLE`, and the declarative create path refuses the form at plan time and re-checks it at apply — attaching a partition takes a brief `ACCESS EXCLUSIVE` on the **parent**, which the greenfield absence proof does not cover. A desired file for a partition that already exists is refused before planning builds anything, since the scratch build would attach to the live parent. The partition-aware flow is planned"
   - id: attach-partition
     area: "partitioned_tables"
     operation: "`ATTACH PARTITION`"
@@ -344,7 +356,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "Typed refusal for both parents and children: the model cannot express inheritance edges, and flattening inherited columns would produce a silently lossy baseline"
+    reason_notes: "Typed refusal for both parents and children: the model cannot express inheritance edges, and flattening inherited columns would produce a silently lossy baseline. A desired file that declares `INHERITS` is refused before planning builds anything, since the scratch build would lock the live parent and add an inheritance edge to it"
   - id: tables-that-own-or-are-referenced-by-foreign-keys
     area: "declarative_model"
     operation: "Tables that own **or are referenced by** foreign keys"
@@ -381,6 +393,30 @@ rows:
       diff: refused
     refusal_reason: unsupported-statement
     reason_notes: "Typed refusal: dropping a `COLLATE` clause from a rendered baseline silently changes sort order and index semantics; a collation delta cannot converge without a rewrite"
+  - id: table-storage-parameters
+    area: "declarative_model"
+    operation: "Table storage parameters (`WITH (fillfactor = ...)`, `toast.*`)"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Modeled, exported, and compared, but not converged. `pull` writes a table's storage parameters, its TOAST table's included, back as a `WITH` clause, and a table whose file declares the live parameters plans the rest of its changes normally. A difference in either direction is a typed `diff` refusal: a parameter the file declares is never reported as applied, and a tuned live parameter the file omits is never reported as matching. A table with no column that needs a TOAST table has none, and the server discards `toast.*` parameters set on it, so a file that declares one alongside a newly added text-like column refuses too"
+  - id: column-owned-sequence-declarations
+    area: "declarative_model"
+    operation: "Identity and serial sequences declared away from the defaults (`START WITH`, `MAXVALUE`, ...)"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "native_planned_flow"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: unsupported-statement
+    reason_notes: "Modeled and compared, but not converged. An identity's declaration round-trips: `pull` writes it as the column's options clause, an added identity column carries it, and a file that states the live declaration plans the rest of its changes normally, while a difference in either direction is a typed `diff` refusal. A serial's declaration cannot be stated by the serial shorthand, so export refuses a serial whose sequence is declared otherwise, including an integer serial whose column was widened to `bigint` while its sequence stayed `integer`. A sequence's current position is data, not schema, and is never compared"
   - id: virtual-generated-columns
     area: "declarative_model"
     operation: "Virtual generated columns (PostgreSQL 18+)"

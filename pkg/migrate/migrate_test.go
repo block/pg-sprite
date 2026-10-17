@@ -264,6 +264,26 @@ func TestExecRefusal(t *testing.T) {
 		assert.False(t, refused, "a step failure means execution started; the committed prefix must surface")
 	})
 
+	t.Run("a replica identity re-check before anything committed is a refusal", func(t *testing.T) {
+		drop, err := statement.ParseOne("ALTER TABLE billing.invoices DROP COLUMN ref")
+		require.NoError(t, err)
+		for name, recheckErr := range map[string]error{
+			"the first step": &executor.SequenceStepError{Step: 1, Total: 1, Err: fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop)},
+			"a bare attempt": fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop),
+		} {
+			t.Run(name, func(t *testing.T) {
+				v, refused := execRefusal(drop, recheckErr, false, false, false)
+				require.True(t, refused)
+				assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+				assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+				assert.Contains(t, v.Detail, "replica identity")
+			})
+		}
+		later := &executor.SequenceStepError{Step: 2, Total: 2, Err: fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop)}
+		_, refused := execRefusal(drop, later, true, false, false)
+		assert.False(t, refused, "past the first step the committed prefix must surface")
+	})
+
 	t.Run("an operational server error is not a refusal", func(t *testing.T) {
 		_, refused := execRefusal(st, fmt.Errorf("connection reset"), false, false, false)
 		assert.False(t, refused)

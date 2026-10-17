@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil/modeltest"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
@@ -25,9 +26,9 @@ func roundTripRowSecurity(t *testing.T, pool *pgxpool.Pool, schema string) {
 	require.NoError(t, err)
 	desired, err := statement.ParseDesiredWithRowSecurity(sql)
 	require.NoError(t, err, sql)
-	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, desired)
+	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
 	require.NoError(t, err, sql)
-	assert.Equal(t, live, model, "complete catalog state must round-trip")
+	assert.Equal(t, live, modeltest.Comparable(model), "complete catalog state must round-trip")
 	changes, err := schemadiff.DiffWithRowSecurity(schema, live, model)
 	require.NoError(t, err)
 	assert.Empty(t, changes)
@@ -120,7 +121,7 @@ func TestRowSecurityRemovalOfLastPolicyIsRefused(t *testing.T) {
  );
  ALTER TABLE documents ENABLE ROW LEVEL SECURITY;`)
 	require.NoError(t, err)
-	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, desired)
+	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
 	require.NoError(t, err)
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
@@ -138,7 +139,7 @@ func TestRowSecurityTableChangeIsRefusedEvenWithUnchangedPolicies(t *testing.T) 
  );
  ALTER TABLE documents DISABLE ROW LEVEL SECURITY;`)
 	require.NoError(t, err)
-	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, desired)
+	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
 	require.NoError(t, err)
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
@@ -170,7 +171,7 @@ func TestRowSecurityForceChangeIsRefused(t *testing.T) {
 	require.NoError(t, err)
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(`ALTER TABLE %s.documents ENABLE ROW LEVEL SECURITY`, schema))
 	require.NoError(t, err)
-	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, desired)
+	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
 	require.NoError(t, err)
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
@@ -191,7 +192,7 @@ func TestRowSecurityChangedPredicateIsRefused(t *testing.T) {
  ALTER TABLE documents DISABLE ROW LEVEL SECURITY;
  CREATE POLICY readers ON documents FOR SELECT TO PUBLIC USING (true);`)
 	require.NoError(t, err)
-	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, desired)
+	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
 	require.NoError(t, err)
 	live, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
 	require.NoError(t, err)
@@ -207,6 +208,20 @@ func TestRowSecurityQualifiedEnumCastRoundTrips(t *testing.T) {
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE POLICY active_documents
      ON %[1]s.documents FOR SELECT
      USING ('active'::%[1]s.doc_status = 'active'::%[1]s.doc_status)`, schema))
+	require.NoError(t, err)
+	roundTripRowSecurity(t, pool, schema)
+}
+
+// A row-security table can carry a column whose type its own schema
+// defines. Export prints the type bare, as live introspection resolves it,
+// and the scratch build resolves the bare name in the target schema, so the
+// file round-trips without qualifying it.
+func TestRowSecurityRoundTripsATargetSchemaType(t *testing.T) {
+	pool, schema := rowSecurityTable(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`CREATE TYPE %[1]s.mood AS ENUM ('calm', 'busy');
+     ALTER TABLE %[1]s.documents ADD COLUMN m %[1]s.mood;
+     ALTER TABLE %[1]s.documents ENABLE ROW LEVEL SECURITY;
+     CREATE POLICY readers ON %[1]s.documents FOR SELECT USING (true)`, schema))
 	require.NoError(t, err)
 	roundTripRowSecurity(t, pool, schema)
 }
@@ -229,7 +244,7 @@ func TestRowSecurityDoesNotBindUnqualifiedPublicHelper(t *testing.T) {
  CREATE POLICY readers ON documents FOR SELECT USING (%s());`, name)
 	desired, err := statement.ParseDesiredWithRowSecurity(sql)
 	require.NoError(t, err)
-	_, err = schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, desired)
+	_, err = schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr)
 	assert.Equal(t, "42883", pgErr.Code, "unqualified public helper must not resolve")
@@ -237,7 +252,7 @@ func TestRowSecurityDoesNotBindUnqualifiedPublicHelper(t *testing.T) {
 	qualified := strings.Replace(sql, "USING ("+name, "USING (public."+name, 1)
 	desired, err = statement.ParseDesiredWithRowSecurity(qualified)
 	require.NoError(t, err)
-	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, desired)
+	model, err := schemadiff.IntrospectDesiredWithRowSecurity(t.Context(), pool, schema, desired)
 	require.NoError(t, err)
 	require.Len(t, model.RowSecurity.Policies, 1)
 }

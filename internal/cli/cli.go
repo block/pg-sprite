@@ -7,6 +7,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -115,6 +116,9 @@ type MigrateCmd struct {
 	LockAttempts      int           `help:"Maximum bounded attempts when native DDL exceeds lock_timeout; 1 disables retry." default:"3"`
 	LockBackoff       time.Duration `help:"Initial exponential backoff between lock-timeout attempts." default:"100ms"`
 	LockBackoffMax    time.Duration `help:"Maximum exponential backoff between lock-timeout attempts." default:"1s"`
+	FreeDisk          byteSize      `help:"Free space on the volume the table lives on, for a statement the planner routes to copy-and-swap; the preflight refuses the run when the shadow table and its indexes would not fit (binary units: B, KiB, MiB, GiB, TiB). Unset means no space and refuses." name:"free-disk" placeholder:"SIZE"`
+	KeepOld           bool          `help:"After a copy-and-swap, keep the retained source table under its _old name for a rollback window you end by hand, instead of dropping it before the run reports done." name:"keep-old"`
+	Quiesced          bool          `help:"Declare that nothing writes the table for the length of a copy-and-swap. The run then fences writes instead of streaming them through a replication slot, and needs no logical decoding from the server; a write that reaches the fence fails." name:"quiesced"`
 	DryRun            bool          `help:"Classify and route the statement, print the plan, and execute nothing."`
 	JSON              bool          `help:"Emit the verdict (or dry-run plan) as JSON."`
 }
@@ -131,7 +135,8 @@ type MigrateCmd struct {
 // outage bound, so the operator has to state it. Kong records which flags
 // the command line actually carried, which is the only place "explicitly
 // supplied" is observable — the value alone cannot tell a typed default
-// from an inherited one.
+// from an inherited one. The copy-and-swap policy flags govern a run, so
+// they have no meaning on a dry run either.
 func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 	if err := c.validateInput(); err != nil {
 		return err
@@ -150,6 +155,13 @@ func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 	}
 	if c.AcceptBlocking != "" && !flagSupplied(kctx, "statement-timeout") {
 		return errors.New("--accept-blocking requires --statement-timeout on the same command line: it is the outage bound you accept after the lock is granted, and the default is not an acknowledgement")
+	}
+	if c.DryRun {
+		for _, name := range []string{"free-disk", "keep-old", "quiesced"} {
+			if flagSupplied(kctx, name) {
+				return fmt.Errorf("--%s cannot be combined with --dry-run: the dry run executes nothing, so a copy-and-swap policy has nothing to govern", name)
+			}
+		}
 	}
 	return nil
 }

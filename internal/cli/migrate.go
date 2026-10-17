@@ -9,6 +9,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -53,6 +54,7 @@ func (c *MigrateCmd) run(ctx context.Context, out io.Writer) error {
 	defer pool.Close()
 
 	v, runErr := migrate.Run(ctx, pool, st, c.options(logger))
+	v = c.cliDiskHeadroomIdiom(v)
 	if runErr != nil {
 		// The failed verdict is the error's machine-readable twin on
 		// stdout, while the error itself still returns so the process
@@ -88,6 +90,12 @@ func (c *MigrateCmd) options(logger *slog.Logger) migrate.Options {
 		Retry:  c.retryPolicy(),
 		Logger: logger,
 		Audit:  c.audit(),
+		CopySwap: migrate.CopySwapOptions{
+			Connection:    c.Config(),
+			FreeDiskBytes: int64(c.FreeDisk),
+			KeepOld:       c.KeepOld,
+			Quiesced:      c.Quiesced,
+		},
 	}
 }
 
@@ -107,6 +115,23 @@ func cliSaferIdiom(st statement.Statement, v verdict.Verdict) verdict.Verdict {
 	if st.Kind() == statement.KindCreateTable {
 		v.SaferIdiom = "pg-sprite diff --desired schema.sql"
 	}
+	return v
+}
+
+// cliDiskHeadroomIdiom attaches this front door's spelling to the
+// copy-and-swap disk-headroom refusal when the operator passed no free
+// space at all: the library says the volume's free space was not measured,
+// and the flag that measures it is this front door's to name. A refusal
+// against a size the operator did pass is left as the library put it; the
+// number is the answer then, not the flag.
+func (c *MigrateCmd) cliDiskHeadroomIdiom(v verdict.Verdict) verdict.Verdict {
+	if v.Cause != verdict.Cause(preflight.CopySwapCauseDiskHeadroom) {
+		return v
+	}
+	if c.FreeDisk != 0 {
+		return v
+	}
+	v.Detail += "; pass --free-disk SIZE with the free space on the volume the table lives on"
 	return v
 }
 

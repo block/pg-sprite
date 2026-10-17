@@ -44,9 +44,21 @@ type sourceWriter struct {
 // is never held behind a lock indefinitely.
 const writerStatementBound = 2 * time.Second
 
+// liveUniqBase is where the first writer's unique keys start, clear of
+// the seeded rows'.
+const liveUniqBase = 100001
+
 // startWriter runs a sourceWriter over rows seeded keys. The caller stops it
 // with stop; the fixture's cleanup stops it too.
 func (f reconcileFixture) startWriter(t *testing.T, seeded int, interval time.Duration) *sourceWriter {
+	t.Helper()
+	return f.startWriterFrom(t, seeded, interval, liveUniqBase)
+}
+
+// startWriterFrom is startWriter with the inserted rows' unique keys
+// counting up from base, so a second writer on the same table follows a
+// stopped one without colliding with its rows.
+func (f reconcileFixture) startWriterFrom(t *testing.T, seeded int, interval time.Duration, base int) *sourceWriter {
 	t.Helper()
 	ctx, cancel := context.WithCancel(t.Context())
 	w := &sourceWriter{cancel: cancel, done: make(chan struct{})}
@@ -76,7 +88,7 @@ func (f reconcileFixture) startWriter(t *testing.T, seeded int, interval time.Du
 			if ctx.Err() != nil {
 				return
 			}
-			if !exec("live update", update, int64(i%seeded)+1) || !exec("live insert", insert, 100001+i) {
+			if !exec("live update", update, int64(i%seeded)+1) || !exec("live insert", insert, base+i) {
 				return
 			}
 			w.writes++

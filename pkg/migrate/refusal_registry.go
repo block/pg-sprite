@@ -6,6 +6,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -164,6 +165,26 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 	if errors.Is(err, executor.ErrIfNotExistsUnsupported) {
 		// The sentinel form of the if-not-exists create-shape cause.
 		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
+	}
+	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
+}
+
+// desiredShapeSentinels is the closed set of desired-file shapes the
+// planner refuses before it builds anything: a CREATE TABLE that names a
+// live parent. RunDesired maps them to a refusal, since nothing was
+// planned or executed.
+func desiredShapeSentinels() []error {
+	return []error{
+		schemadiff.ErrDesiredPartitionOf,
+		schemadiff.ErrDesiredInherits,
+	}
+}
+
+// desiredShapeRefusal classifies a desired-file shape refusal. ok is false
+// for an error outside desiredShapeSentinels().
+func desiredShapeRefusal(err error) (verdict.Refusal, bool) {
+	if !isInSentinelSet(err, desiredShapeSentinels()) {
+		return verdict.Refusal{}, false
 	}
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
 }
