@@ -351,7 +351,10 @@ managed-table listing, introspection — must resolve `pg_class`, `pg_index`, `p
 is configured with. PostgreSQL searches `pg_catalog` implicitly first unless the path names it
 explicitly, in which case a user schema listed ahead of it shadows the catalog: a decoy
 `app.pg_index` turns a fail-closed proof into a false clean, and a decoy `pg_cancel_backend`
-returns true and signals nothing. Two layers uphold the invariant. At the connection layer,
+returns true and signals nothing. Even with `pg_catalog` searched first, function and operator
+overload resolution ranks candidates across every schema on the path, so an exact-type overload
+planted in a schema the path lists (`pg_total_relation_size(oid)` against the catalog's
+`regclass` signature) beats the catalog's cast-requiring one. Two layers uphold the invariant. At the connection layer,
 every pooled session drops a `pg_catalog` entry that another schema precedes (`pkg/dbconn`
 `unshadowCatalog`), and every transaction-local path is built by `dbconn.LocalSearchPath`, which
 applies the same rewrite. At the query layer, reads that run under a path pg-sprite did not set
@@ -361,7 +364,12 @@ not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary ob
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
 *Enforced:* `pkg/dbconn` (session hook, `LocalSearchPath`, and the test that keeps it the only
 `search_path` writer under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
-`pkg/progress`, `pkg/schemadiff`, and `pkg/checksum` (the column-type read, the relation check,
+`pkg/progress`, `pkg/schemadiff`, `pkg/preflight` (every proof read — the size guard, the
+privilege probes, the absence and owned-name reads, and the copy-and-swap shape and environment
+facts — qualifies every function, relation, type, and operator, `IN` and `IS DISTINCT FROM`
+included since both resolve `=` through the path; planted `pg_total_relation_size(oid)`,
+`has_schema_privilege(name, name, text)`, `+`, and `=` overloads on a path that lists the
+catalog implicitly do not change an answer), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
