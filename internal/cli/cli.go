@@ -45,8 +45,8 @@ func New(version string) *CLI {
 type DBFlags struct {
 	URL              string        `help:"PostgreSQL connection URL or key=value DSN." env:"PGSPRITE_URL" required:""`
 	CACert           string        `help:"CA bundle path for verify-full TLS. RDS/Aurora endpoints verify with the embedded bundle automatically." env:"PGSPRITE_CA_CERT" type:"existingfile"`
-	LockTimeout      time.Duration `help:"Session lock_timeout applied to every statement." default:"3s"`
-	StatementTimeout time.Duration `help:"Session statement_timeout applied to every statement." default:"30s"`
+	LockTimeout      time.Duration `help:"Session lock_timeout applied to every statement. At least 1ms." default:"3s"`
+	StatementTimeout time.Duration `help:"Session statement_timeout applied to every statement. At least 1ms." default:"30s"`
 	Debug            bool          `help:"Log statement-level tracing and lifecycle diagnostics to stderr."`
 
 	// diagOut overrides the diagnostics destination (stderr) in tests. Kong
