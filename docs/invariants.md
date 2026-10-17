@@ -1041,6 +1041,20 @@ shadow attribute number; `copyColumns` takes only those). Tests:
 `TestRunnerLiveRunGivesAReaddedColumnItsDefault`. *Source:* adversarial review of the
 re-added-column copy fix.
 
+### ST-12 — A desired-state run reports executed only when a fresh plan is empty
+
+Every planned statement committing is not proof the table reached the desired schema: a
+concurrent session, an event trigger, or a planner gap can leave it still differing. On an
+existing table the run derives the plan again after its last commit and reports executed only
+when that plan is empty; otherwise the result is failed with `ErrNotConverged`, every
+statement it ran keeps its executed verdict, and the result's typed convergence status carries
+the plan a rerun would execute. A greenfield create proves its outcome through the names it claimed instead (ST-9 and
+the create-name checks), because deriving a plan needs `CREATE` on the database.
+*Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`). Tests:
+`TestRunDesired`, `TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,
+`TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt`.
+*Source:* review of desired-state outcome reporting.
+
 ## Refusals and preflight (RF)
 
 Each refusal is a preflight **error with a stated reason** — never a warning, never attempted.
@@ -1210,4 +1224,5 @@ about **how we write and review the code**.
 | ST-9 | 2 (declarative model) | every-relation-owned-by-owner, owner-mismatch fail-closed, unreadable-owner unverified, non-inheriting member admitted |
 | ST-10 | 8 | older-table evolve, newer-table refuse with no DDL, dropped-column and foreign-table shape reads, behind-table typed reads and writes |
 | ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
+| ST-12 | 2 (declarative model) | a table altered behind the run after its last commit fails as not converged with every verdict executed |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |
