@@ -285,7 +285,11 @@ func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st stateme
 		return fmt.Errorf("optimistic attempt: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("commit optimistic attempt: %w", err)
+		// INV: LK-4 — a COMMIT that did not return success may still have
+		// landed (a dropped connection, a failover, the caller's context
+		// ending mid-commit), so the attempt is never reported as rolled
+		// back: the outcome is typed unknown and left to catalog inspection.
+		return &CommitOutcomeUnknownError{Err: fmt.Errorf("commit optimistic attempt: %w", err)}
 	}
 	return nil
 }

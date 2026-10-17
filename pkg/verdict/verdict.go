@@ -490,7 +490,9 @@ type Verdict struct {
 	// FailedStep is the 1-based position of the sequence step that failed,
 	// matching the numbering the planner's partial-failure contracts use;
 	// zero when the failure was not a mid-sequence one (a single-statement
-	// attempt rolls back and commits nothing).
+	// attempt that fails before its COMMIT rolls back and commits nothing).
+	// When Code is an outcome-unknown code, the step's own COMMIT may have
+	// landed: its state is unknown, not failed.
 	FailedStep int `json:"failed_step,omitempty"`
 	// FailedStepSQL is the failed step's statement — the step the planner's
 	// partial-failure contract says a retry resumes from.
@@ -513,7 +515,10 @@ type Verdict struct {
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what
 	// tells automation a substitution happened). On a failed verdict it is
-	// the committed prefix that remains: empty means nothing committed.
+	// the committed prefix that remains: empty means nothing is known to
+	// have committed — and nothing at all did, unless Code is an
+	// outcome-unknown code, in which case the failed step itself (or the
+	// single statement) may have committed and the catalog decides.
 	ExecutedSQL []string `json:"executed_sql,omitempty"`
 	// Forced reports that --force overrode the engine's routing: the
 	// submitted form ran as-is instead of a safer substitution or a

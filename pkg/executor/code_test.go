@@ -1,6 +1,7 @@
 package executor_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,6 +75,15 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		},
 		{name: "cancelled by caller", err: executor.ErrCancelledByCaller, want: executor.CodeCancelledByCaller},
 		{name: "blocking outcome unknown", err: &executor.BlockingOutcomeUnknownError{Err: errors.New("lost")}, want: executor.CodeBlockingOutcomeUnknown},
+		{name: "commit outcome unknown", err: &executor.CommitOutcomeUnknownError{Err: errors.New("connection reset")}, want: executor.CodeCommitOutcomeUnknown},
+		{
+			name: "commit outcome unknown at a sequence step carries its own code",
+			err: &executor.SequenceStepError{
+				Step: 2, Total: 3, Kind: executor.StepBrief, SQL: "ALTER TABLE s.t ADD c int",
+				Err: &executor.CommitOutcomeUnknownError{Err: context.Canceled},
+			},
+			want: executor.CodeCommitOutcomeUnknown,
+		},
 		{name: "invalid blocking budget", err: executor.ErrInvalidBlockingBudget, want: executor.CodeInvalidBlockingBudget},
 		{name: "unsupported accepted blocking", err: executor.ErrUnsupportedAcceptedBlocking, want: executor.CodeUnsupportedAcceptedBlocking},
 		{
@@ -164,6 +174,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeBudgetLockExceeded:              false,
 		executor.CodeBudgetStatementExceeded:         false,
 		executor.CodeBlockingOutcomeUnknown:          false,
+		executor.CodeCommitOutcomeUnknown:            false,
 		executor.CodeRowSecurityRefused:              true,
 		executor.CodeRowSecurityPlanChanged:          true,
 		executor.CodeRowSecurityOutcomeUnknown:       false,

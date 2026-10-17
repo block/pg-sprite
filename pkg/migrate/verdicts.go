@@ -215,8 +215,10 @@ func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError, forc
 // failure the failed step and the committed prefix whose state remains.
 // It is the machine-readable twin of the returned error — automation
 // branches on Code and ExecutedSQL instead of parsing stderr prose. A
-// single bounded attempt (the submitted form, forced or not) rolls back on
-// failure, so it carries no step and an empty committed prefix.
+// single bounded attempt (the submitted form, forced or not) that fails
+// before its COMMIT rolls back, so it carries no step and an empty committed
+// prefix; one whose COMMIT did not return success may have landed, and the
+// verdict says the outcome is unknown instead.
 func failureVerdict(st statement.Statement, err error,
 	rep executor.SequenceReport, forced bool) verdict.Verdict {
 	v := verdict.Verdict{
@@ -227,14 +229,31 @@ func failureVerdict(st statement.Statement, err error,
 		Forced:    forced,
 		Detail:    "execution failed; nothing committed — a started bounded attempt rolls back",
 	}
+	unknown := errors.As(err, new(*executor.CommitOutcomeUnknownError))
 	var stepErr *executor.SequenceStepError
 	if !errors.As(err, &stepErr) {
+		if unknown {
+			v.Detail = fmt.Sprintf("outcome unknown: the connection or the caller's context ended while the COMMIT was in flight, "+
+				"so whether the change committed cannot be established from the client — inspect the catalog for %s before retrying",
+				v.Table)
+		}
 		return v
 	}
 	v.FailedStep = stepErr.Step
 	v.FailedStepSQL = stepErr.SQL
 	for _, s := range rep.Steps {
 		v.ExecutedSQL = append(v.ExecutedSQL, s.SQL)
+	}
+	if unknown {
+		// The failed step's COMMIT may have landed, so the planner's "a retry
+		// resumes from the failed step" contract cannot be assumed: the
+		// committed prefix is the steps before it, and the step itself is
+		// unknown until the catalog says otherwise.
+		v.Detail = fmt.Sprintf("sequence step %d of %d: outcome unknown — the COMMIT was in flight when the connection or "+
+			"the caller's context ended, so whether the step committed cannot be established from the client; "+
+			"the %d earlier steps committed and remain — inspect the catalog for %s before retrying, and do not assume a retry resumes from this step",
+			stepErr.Step, stepErr.Total, len(v.ExecutedSQL), v.Table)
+		return v
 	}
 	if len(v.ExecutedSQL) > 0 {
 		v.Detail = fmt.Sprintf("sequence step %d of %d failed; the %d committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes",
