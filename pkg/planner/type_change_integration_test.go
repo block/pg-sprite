@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -45,45 +46,138 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 	_, err = conn.Exec(t.Context(), "SET search_path = "+schema)
 	require.NoError(t, err)
 
+	// Each case names its table as %[1]s and, where a type is qualified by
+	// the fixture schema, that schema as %[2]s: quoted fixture names,
+	// substituted per case.
 	cases := []struct {
 		name     string
-		from     string
-		to       string
+		create   string
+		alter    string
 		route    planner.Route
 		rewrites bool
 	}{
-		{"widen varchar", "varchar(50)", "varchar(100)", planner.RouteNative, false},
-		{"varchar to text", "varchar(50)", "text", planner.RouteNative, false},
-		{"varchar to text named through pg_catalog", "varchar(50)", "pg_catalog.text", planner.RouteNative, false},
-		{"varchar to a user type named text", "varchar(50)", schema + ".text", planner.RouteCopyAndSwap, true},
-		{"varchar to a visible user type quoted as TEXT", "varchar(50)", `"TEXT"`, planner.RouteCopyAndSwap, true},
-		{"text array to an array of a visible user type quoted as TEXT", "text[]", `"TEXT"[]`, planner.RouteCopyAndSwap, true},
-		{"varchar array to text", "varchar(50)[]", "text", planner.RouteCopyAndSwap, true},
-		{"varchar array to a wider varchar", "varchar(50)[]", "varchar(100)", planner.RouteCopyAndSwap, true},
-		{"widen a varchar array's elements", "varchar(50)[]", "varchar(100)[]", planner.RouteCopyAndSwap, true},
-		{"varchar array to text array", "varchar(50)[]", "text[]", planner.RouteCopyAndSwap, true},
-		{"widen a numeric array's precision", "numeric(10,2)[]", "numeric(12,2)[]", planner.RouteCopyAndSwap, true},
-		{"text array to varchar array", "text[]", "varchar[]", planner.RouteCopyAndSwap, true},
-		{"unchanged varchar array", "varchar(50)[]", "varchar(50)[]", planner.RouteNative, false},
-		{"unchanged varchar array spelled ARRAY", "varchar(50)[]", "varchar(50) ARRAY", planner.RouteNative, false},
-		// PostgreSQL ignores declared array dimensions.
-		{"unchanged varchar array with more dimensions", "varchar(50)[]", "varchar(50)[][]", planner.RouteNative, false},
-		// The server relabels this one; the planner has no array rule
-		// beyond an unchanged element and takes the slower safe route.
-		{"drop a varchar array's element bound", "varchar(50)[]", "varchar[]", planner.RouteCopyAndSwap, false},
+		{
+			name:   "widen varchar",
+			create: "CREATE TABLE %[1]s (c varchar(50))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE varchar(100)",
+			route:  planner.RouteNative,
+		},
+		{
+			name:   "varchar to text",
+			create: "CREATE TABLE %[1]s (c varchar(50))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE text",
+			route:  planner.RouteNative,
+		},
+		{
+			name:   "varchar to text named through pg_catalog",
+			create: "CREATE TABLE %[1]s (c varchar(50))",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE pg_catalog.text",
+			route:  planner.RouteNative,
+		},
+		{
+			name:     "varchar to a user type named text",
+			create:   "CREATE TABLE %[1]s (c varchar(50))",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE %[2]s.text",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "varchar to a visible user type quoted as TEXT",
+			create:   "CREATE TABLE %[1]s (c varchar(50))",
+			alter:    `ALTER TABLE %[1]s ALTER COLUMN c TYPE "TEXT"`,
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "text array to an array of a visible user type quoted as TEXT",
+			create:   "CREATE TABLE %[1]s (c text[])",
+			alter:    `ALTER TABLE %[1]s ALTER COLUMN c TYPE "TEXT"[]`,
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "varchar array to text",
+			create:   "CREATE TABLE %[1]s (c varchar(50)[])",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE text",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "varchar array to a wider varchar",
+			create:   "CREATE TABLE %[1]s (c varchar(50)[])",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE varchar(100)",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "widen a varchar array's elements",
+			create:   "CREATE TABLE %[1]s (c varchar(50)[])",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE varchar(100)[]",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "varchar array to text array",
+			create:   "CREATE TABLE %[1]s (c varchar(50)[])",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE text[]",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "widen a numeric array's precision",
+			create:   "CREATE TABLE %[1]s (c numeric(10,2)[])",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE numeric(12,2)[]",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:     "text array to varchar array",
+			create:   "CREATE TABLE %[1]s (c text[])",
+			alter:    "ALTER TABLE %[1]s ALTER COLUMN c TYPE varchar[]",
+			route:    planner.RouteCopyAndSwap,
+			rewrites: true,
+		},
+		{
+			name:   "unchanged varchar array",
+			create: "CREATE TABLE %[1]s (c varchar(50)[])",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE varchar(50)[]",
+			route:  planner.RouteNative,
+		},
+		{
+			name:   "unchanged varchar array spelled ARRAY",
+			create: "CREATE TABLE %[1]s (c varchar(50)[])",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE varchar(50) ARRAY",
+			route:  planner.RouteNative,
+		},
+		{
+			// PostgreSQL ignores declared array dimensions.
+			name:   "unchanged varchar array with more dimensions",
+			create: "CREATE TABLE %[1]s (c varchar(50)[])",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE varchar(50)[][]",
+			route:  planner.RouteNative,
+		},
+		{
+			// The server relabels this one; the planner has no array rule
+			// beyond an unchanged element and takes the slower safe route.
+			name:   "drop a varchar array's element bound",
+			create: "CREATE TABLE %[1]s (c varchar(50)[])",
+			alter:  "ALTER TABLE %[1]s ALTER COLUMN c TYPE varchar[]",
+			route:  planner.RouteCopyAndSwap,
+		},
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			table := fmt.Sprintf("t%d", i)
-			qualified := schema + "." + table
-			_, err := conn.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s (c %s)", qualified, tc.from))
+			qualified := pgx.Identifier{schema, table}.Sanitize()
+			quotedSchema := pgx.Identifier{schema}.Sanitize()
+			_, err := conn.Exec(t.Context(), fmt.Sprintf(tc.create, qualified, quotedSchema))
 			require.NoError(t, err)
 			_, err = conn.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s DEFAULT VALUES", qualified))
 			require.NoError(t, err)
 
 			live, err := schemadiff.Introspect(t.Context(), pool, schema, table)
 			require.NoError(t, err)
-			alter := fmt.Sprintf("ALTER TABLE %s ALTER COLUMN c TYPE %s", qualified, tc.to)
+			alter := fmt.Sprintf(tc.alter, qualified, quotedSchema)
 			plan, err := planner.Classify(alter, planner.FactsFrom(live))
 			require.NoError(t, err)
 			require.Len(t, plan.Decisions, 1)
@@ -97,8 +191,8 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 			require.NoError(t, conn.QueryRow(t.Context(),
 				"SELECT pg_relation_filenode($1::regclass)::int8", qualified).Scan(&after))
 
-			assert.Equal(t, tc.rewrites, before != after, "server rewrite for %s -> %s", tc.from, tc.to)
-			assert.Equal(t, tc.route, decision.Route, "route for %s -> %s (reason %s)", tc.from, tc.to, decision.Reason)
+			assert.Equal(t, tc.rewrites, before != after, "server rewrite for %s", alter)
+			assert.Equal(t, tc.route, decision.Route, "route for %s (reason %s)", alter, decision.Reason)
 			if decision.Route == planner.RouteNative {
 				assert.Equal(t, planner.ReasonBinaryCoercible, decision.Reason)
 				assert.False(t, before != after, "a native verdict must never rewrite the table")
