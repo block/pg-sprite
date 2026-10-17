@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -32,7 +33,7 @@ func parseCopySwapStatement(t *testing.T) statement.Statement {
 // means "nothing was executed".
 func TestCopyAndSwapRequiresTheConnection(t *testing.T) {
 	v, err := copyAndSwap(t.Context(), nil, parseCopySwapStatement(t), Options{}, slog.New(slog.DiscardHandler))
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCopySwapConnectionRequired)
 	assert.Zero(t, v)
 }
 
@@ -116,6 +117,38 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		v, _ := copySwapRunVerdict(st, true, divergence)
 		assert.Contains(t, v.Detail, "take the write fence off the source")
 		assert.NotContains(t, v.Detail, "replication slot")
+	})
+
+	t.Run("a value the new type will not hold is a failure whose remedy is to abandon the run", func(t *testing.T) {
+		// 22001 string_data_right_truncation: a varchar(10) retype over a
+		// longer value. The copy meets the same row on every rerun.
+		tooLong := &pgconn.PgError{Code: "22001", Message: "value too long for type character varying(10)"}
+		runErr := fmt.Errorf("copy chunk: %w", tooLong)
+		v, err := copySwapRunVerdict(st, true, runErr)
+		assert.ErrorIs(t, err, runErr)
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Contains(t, v.Detail, "abandon the run")
+		assert.Contains(t, v.Detail, "take the write fence off the source", "a quiesced run's hold is its fence")
+		assert.NotContains(t, v.Detail, "resumes")
+	})
+
+	t.Run("a constraint the copied rows break is a failure whose remedy is to abandon the run", func(t *testing.T) {
+		// 23502 not_null_violation: a re-added NOT NULL column with no
+		// default fills from NULL on the first chunk.
+		notNull := &pgconn.PgError{Code: "23502", Message: "null value in column violates not-null constraint"}
+		v, _ := copySwapRunVerdict(st, false, fmt.Errorf("copy chunk: %w", notNull))
+		assert.Contains(t, v.Detail, "abandon the run")
+		assert.Contains(t, v.Detail, "drop the replication slot", "a live run's hold is its slot")
+		assert.NotContains(t, v.Detail, "resumes")
+	})
+
+	t.Run("a server fault outside the data classes is resumed", func(t *testing.T) {
+		// 57P01 admin_shutdown: the server went away under the copy; the
+		// rows are not at fault and the next run carries on from the row.
+		shutdown := &pgconn.PgError{Code: "57P01", Message: "terminating connection due to administrator command"}
+		v, _ := copySwapRunVerdict(st, false, fmt.Errorf("copy chunk: %w", shutdown))
+		assert.Contains(t, v.Detail, "resumes from the row")
+		assert.NotContains(t, v.Detail, "abandon")
 	})
 
 	t.Run("a stop a rerun clears says the slot stays until it resumes", func(t *testing.T) {

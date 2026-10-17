@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
@@ -42,22 +43,88 @@ type runState struct {
 }
 
 // dispatch reads the target's checkpoint row and starts fresh or resumes
-// as it says, returning the state the phases continue from (ST-2).
+// as it says, returning the state the phases continue from (ST-2). A done
+// row is replaced first when RunOptions.ReplaceDone asks for it, and the
+// run then starts fresh as if there had been none.
 func (r *Runner) dispatch(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, st statement.Statement) (runState, error) {
 	cp, err := r.store.Inspect(ctx, target.Schema(), target.Table())
-	if errors.Is(err, checkpoint.ErrNotFound) {
-		if target.DecodesWAL() {
-			return r.startFreshLive(ctx, pool, lock, target, st)
-		}
-		return r.startFresh(ctx, pool, lock, target, st)
-	}
-	if err != nil {
+	switch {
+	case errors.Is(err, checkpoint.ErrNotFound):
+	case err != nil:
 		return runState{}, err
+	case cp.Phase == checkpoint.PhaseDone && r.opts.ReplaceDone:
+		if err := r.replaceDoneRow(ctx, pool, lock, target, cp); err != nil {
+			return runState{}, err
+		}
+	default:
+		if target.DecodesWAL() {
+			return r.resumeLive(ctx, pool, lock, target, cp, st)
+		}
+		return r.resume(ctx, pool, lock, target, cp, st)
 	}
 	if target.DecodesWAL() {
-		return r.resumeLive(ctx, pool, lock, target, cp, st)
+		return r.startFreshLive(ctx, pool, lock, target, st)
 	}
-	return r.resume(ctx, pool, lock, target, cp, st)
+	return r.startFresh(ctx, pool, lock, target, st)
+}
+
+// replaceDoneRow deletes the done row cp, under this run's lock session,
+// so the run can start fresh (RunOptions.ReplaceDone). The one thing a
+// done row can still stand for is a KeepOld rollback window: the retained
+// source under its derived _old name, which the next run's cutover gate
+// would meet as cutover-name-taken only after a shadow had been built and
+// filled. So the row is replaced only when nothing bears that name, and
+// is otherwise refused as terminal with the remedy in the detail. The
+// delete removes only the row this run was shown (ST-2).
+func (r *Runner) replaceDoneRow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, cp checkpoint.Checkpoint) error {
+	schema, table := target.Schema(), target.Table()
+	old := OldName(schema, table)
+	held, err := relationBearsName(ctx, pool, lock, schema, old, r.opts.Shadow)
+	if err != nil {
+		return err
+	}
+	if held {
+		// INV: ST-4
+		return refuse(CauseResumeTerminal, nil, "checkpoint row for %s.%s is in phase %s and the retained source still stands as %s.%s; end the rollback window — drop the old table with DropOldTable under the table's lock — before running the table again", schema, table, cp.Phase, schema, old)
+	}
+	if err := r.store.Delete(ctx, lock, schema, table, cp.Identity()); err != nil {
+		return fmt.Errorf("replace done row for %s.%s: %w", schema, table, err)
+	}
+	return nil
+}
+
+// relationBearsName reports whether any relation in schema bears name, in
+// one bounded read-only transaction that confirms the table lock (LK-1).
+func relationBearsName(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, schema, name string, opts Options) (bool, error) {
+	ctx, stop := lock.Bind(ctx)
+	defer stop()
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return false, fmt.Errorf("begin relation lookup for %s.%s: %w", schema, name, err)
+	}
+	defer func() {
+		// Redundant safety closer: after a successful Commit this returns
+		// the guaranteed ErrTxClosed; on a failure path the server aborts
+		// the transaction with its session either way.
+		_ = tx.Rollback(context.WithoutCancel(ctx))
+	}()
+	if err := setBudgets(ctx, tx, opts); err != nil {
+		return false, err
+	}
+	if err := setSearchPath(ctx, tx, schema); err != nil {
+		return false, err
+	}
+	if err := confirmTableLock(ctx, tx, lock); err != nil {
+		return false, lockLossCause(lock, err)
+	}
+	_, found, err := lookupRelation(ctx, tx, schema, name)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("commit relation lookup for %s.%s: %w", schema, name, err)
+	}
+	return found, nil
 }
 
 // startFresh builds the shadow, fences the source, and writes the row

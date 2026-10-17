@@ -123,6 +123,53 @@ func TestRunDispatch(t *testing.T) {
 		assert.Equal(t, 0, n, "the refused change must not touch the schema")
 	})
 
+	t.Run("carries a type rewrite's native siblings through copy-and-swap", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %s.t (
+				id  int PRIMARY KEY,
+				qty int,
+				v   text
+			)`, schema))
+		require.NoError(t, err)
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(
+			"INSERT INTO %s.t SELECT g, g, 'x' FROM generate_series(1, 100) g", schema))
+		require.NoError(t, err)
+
+		// The retype routes the statement to copy-and-swap; the SET NOT
+		// NULL and the CHECK are native siblings that ride along inside the
+		// gated ALTER on the shadow, so the swapped-in table carries all
+		// three and every row.
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf(`
+				ALTER TABLE %s.t
+					ALTER COLUMN id TYPE bigint,
+					ALTER COLUMN v SET NOT NULL,
+					ADD CONSTRAINT t_qty_positive CHECK (qty > 0)`, schema)), copySwapRunOptions(url))
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+
+		var idType string
+		var vNotNull bool
+		var checks, rows, qtySum int
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT data_type FROM information_schema.columns
+			 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&idType))
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT attnotnull FROM pg_attribute
+			 WHERE attrelid = ($1 || '.t')::regclass AND attname = 'v'`, schema).Scan(&vNotNull))
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM pg_constraint
+			 WHERE conrelid = ($1 || '.t')::regclass AND conname = 't_qty_positive' AND convalidated`, schema).Scan(&checks))
+		require.NoError(t, pool.QueryRow(t.Context(),
+			fmt.Sprintf("SELECT count(*), sum(qty) FROM %s.t", schema)).Scan(&rows, &qtySum))
+		assert.Equal(t, "bigint", idType, "the retype is live under the source's name")
+		assert.True(t, vNotNull, "the SET NOT NULL sibling rode along")
+		assert.Equal(t, 1, checks, "the CHECK sibling rode along and is validated")
+		assert.Equal(t, 100, rows, "every row is carried across the swap")
+		assert.Equal(t, 5050, qtySum, "the carried rows keep their values")
+	})
+
 	t.Run("refuses an unconstructible rewrite as rewrite-required", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))

@@ -130,6 +130,7 @@ func TestDryRunTextCopyAndSwapExecutes(t *testing.T) {
 	text := out.String()
 	assert.Contains(t, text, "note[type-rewrite]:\n  alter column type — converting or checking every row for the column's\n  type forces a full")
 	assert.Contains(t, text, "note:\n  pg-sprite will run it as a copy-and-swap: build a shadow table")
+	assert.Contains(t, text, "is not part of this dry run", "the note says the route's preflight is read at the run, not here")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#type-rewrite\n")
 	assert.Contains(t, text, "plan:\n  public.users (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
 	assert.Contains(t, text, "apply:\n  re-run without --dry-run\n")

@@ -192,6 +192,22 @@ func TestRouteRefusedStatementHasNoBackend(t *testing.T) {
 	assert.Equal(t, router.DispositionRefuse, routed.Disposition)
 }
 
+// A route the router does not know is a planner/router version skew. It
+// is refused with no backend rather than guessed at: the only way an
+// unknown value reaches the backend gate is through this switch, so this
+// is the fail-closed line for the whole routing step.
+func TestRouteUnknownRouteIsRefused(t *testing.T) {
+	plan := classify(t, "ALTER TABLE t ADD COLUMN age int DEFAULT 0")
+	plan.Route = planner.Route("bogus")
+
+	routed := router.Route([]planner.Plan{plan})
+	st := routed.Statements[0]
+	assert.Empty(t, st.Backend)
+	assert.Equal(t, router.DispositionRefuse, st.Disposition)
+	assert.Empty(t, st.ExecSQL)
+	assert.Equal(t, router.DispositionRefuse, routed.Disposition)
+}
+
 func TestRouteAggregateIsWorstDisposition(t *testing.T) {
 	plans := []planner.Plan{
 		classify(t, "ALTER TABLE t ADD COLUMN age int"),

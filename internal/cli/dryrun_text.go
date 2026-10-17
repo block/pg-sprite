@@ -156,6 +156,7 @@ func writeRefusal(w *stickyWriter, ps plan.Statement) []string {
 func writeExecutionNotes(w *stickyWriter, ps plan.Statement, runner string) int {
 	if ps.Backend == router.BackendCopyAndSwap {
 		w.diag("note", "", runner+" will run it as a copy-and-swap: build a shadow table with the change applied, copy the rows into it while streaming live writes, verify, then swap the two under a brief lock (needs --free-disk; --quiesced when nothing writes the table)")
+		w.diag("note", "", "the route's preflight — free disk, logical decoding, triggers, dependent views, publication membership — is not part of this dry run; the run reads it before anything executes and refuses with nothing run when it fails")
 		return 1
 	}
 	if substituted(ps) {

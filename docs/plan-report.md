@@ -75,7 +75,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `owner` | string | `no-online-safety-problem` refusals only | Who owns the work (see Owners). Present exactly when `class` is `no-online-safety-problem`. Explanatory: excluded from the fingerprint. |
 | `blocking_passthrough_eligible` | bool | refusals only | Whether this typed refusal is in the closed accepted-blocking registry. Independent of flags and catalog lookups; explanatory and excluded from the fingerprint. |
 | `decisions` | array | always | The planner's per-operation classifications (below). |
-| `exec_sql` | array | native route | The ordered SQL the native backend would run — the safer sequence when the planner constructed one, or the statement as written for a table that does not exist yet (the greenfield create path runs plain builds; see Fingerprint). Absent for non-native routes. |
+| `exec_sql` | array | native route | The ordered SQL the native backend would run — the safer sequence when the planner constructed one, or the statement as written for a table that does not exist yet (the greenfield create path runs plain builds; see Fingerprint). Absent for non-native routes: an `execute` statement whose `backend` is `copy-and-swap` runs no literal SQL a consumer could replay — the shadow-table change is one engine step — so a consumer that runs statements itself must hand such a statement back to pg-sprite rather than treat the absence as "nothing to run". |
 | `execution` | string | with `exec_sql` | The typed execution contract for `exec_sql` (see Execution contracts). A consumer that runs the statements itself branches on this — it is what says the steps must not be wrapped in a transaction block. Present exactly when `exec_sql` is. |
 | `guidance` | string | `rewrite-required` only | The typed manual path for a rewrite-required refusal, drawn from the [suggest report's Guidance vocabulary](suggest-report.md#guidance-guidance). The engine will not run the statement; this names what to do instead (`split-statement`, `add-column-then-constraint`, …). Present exactly when `disposition` is `rewrite-required`. Explanatory: excluded from the fingerprint. |
 
@@ -160,7 +160,7 @@ and privilege checks because it needs no connection.
 
 | Value | Meaning |
 |---|---|
-| `execute` | The engine would run it now — natively, or through the copy-and-swap backend when that is the statement's `backend`. |
+| `execute` | The engine would run it now — natively, or through the copy-and-swap backend when that is the statement's `backend`. The disposition is decided from the statement and the table's shape as planned; it does not run the copy-and-swap preflight (free disk, logical decoding, triggers, dependent views, publication membership), which execution reads before any statement of the plan runs and which can refuse the whole plan with `copy-and-swap-refused` and nothing executed. |
 | `rewrite-required` | Native but blocking as submitted, and no safer sequence could be constructed — resubmit in the online form. |
 | `unavailable` | Routed to copy-and-swap for an operation the engine does not carry yet; nothing executes. |
 | `refuse` | The planner refused the statement; no backend is assigned. |
