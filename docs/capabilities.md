@@ -148,14 +148,17 @@ engine:
   closed); the row is a typed refusal until that flow lands, and each such row is a
   tracked roadmap item.
 - **copy-and-swap** — the change is a genuine table rewrite and routes to the
-  shadow-copy engine; a typed refusal until that engine lands (see
+  shadow-copy engine: the changed shape is built as a shadow table, filled and verified,
+  then swapped in under the source's name. A ✅ row on this path executes; a 🟡 row is a
+  typed refusal (`backend-unavailable`) for an operation the engine does not carry yet (see
   [optimistic-attempt.md](optimistic-attempt.md) for how the router proves the rewrite).
 - **—** — no engine path: either the job belongs to another tool class (⚪ / 🔵) or
   PostgreSQL offers no online mechanism to build on (❌).
 
 Path and tier are orthogonal on purpose: a 🟡 row's path says what kind of work lifts
-the refusal — building a native flow or landing the copy engine — and a ✅ row's path
-says whether the engine ran your statement or substituted a safer one.
+the refusal — building a native flow or teaching the copy engine the operation — and a
+✅ row's path says whether the engine ran your statement as written, substituted a safer
+one, or rebuilt the table through copy-and-swap.
 
 ## The two front doors
 
