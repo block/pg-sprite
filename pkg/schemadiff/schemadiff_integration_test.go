@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/internal/testutil/modeltest"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/schemadiff"
@@ -58,11 +59,11 @@ func TestIntrospectDesiredMatchesLiveIntrospection(t *testing.T) {
 	desired, err := schemadiff.IntrospectDesired(t.Context(), pool, schema, ds)
 	require.NoError(t, err)
 
-	assert.Equal(t, live, desired,
+	assert.Equal(t, live, modeltest.Comparable(desired),
 		"live introspection and scratch execute-and-introspect must agree on the canonical model")
 
-	// A key constraint carries the definition of the index it owns, and no
-	// other constraint carries one.
+	// The key's index definition is read on the scratch side only, where no
+	// other session can hold the table.
 	keyIndexDefs := func(m schemadiff.Model) map[string]string {
 		defs := make(map[string]string)
 		for _, con := range m.Constraints {
@@ -72,6 +73,7 @@ func TestIntrospectDesiredMatchesLiveIntrospection(t *testing.T) {
 	}
 	assert.Equal(t, "CREATE UNIQUE INDEX events_pkey ON events USING btree (id)", keyIndexDefs(desired)["events_pkey"])
 	assert.Empty(t, keyIndexDefs(desired)["name_not_empty"])
+	assert.Empty(t, keyIndexDefs(live)["events_pkey"])
 }
 
 // A key constraint declared over a live unique index of its name is
