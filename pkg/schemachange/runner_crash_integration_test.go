@@ -365,12 +365,18 @@ func TestRunnerResumesMidCopyFromThePeriodicSave(t *testing.T) {
 
 	// While nothing runs the source stays fenced: a writer that reaches it
 	// is refused, so no change can slip in between the stop and the
-	// resume. A stray row in the shadow above the watermark — the chunk
-	// that was in flight at the stop — is cleared by the resumed copy
-	// before it lands that key space again.
+	// resume. A shadow row above the watermark that disagrees with the
+	// source stands for whatever the stopped copy left there, and is
+	// cleared by the resumed copy before it lands that key space again.
+	// The other worker runs ahead of the pinned chunk, so the key may
+	// already be in the shadow: the stray value overwrites it rather than
+	// colliding with it.
 	f.assertWriteFenced(t, "orders")
 	shadow := pgx.Identifier{f.schema, row.ShadowTable}.Sanitize()
-	f.exec(t, "INSERT INTO "+shadow+" (id, qty) VALUES (1500, 999)")
+	f.exec(t, "INSERT INTO "+shadow+" (id, qty) VALUES (1500, 999) ON CONFLICT (id) DO UPDATE SET qty = EXCLUDED.qty")
+	var strayQty int
+	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT qty FROM "+shadow+" WHERE id = 1500").Scan(&strayQty))
+	require.Equal(t, 999, strayQty, "the shadow holds the stray value above the watermark before the resume")
 
 	second := &stopAfter{}
 	f.assertResumedToDone(t, alter, schemachange.RunOptions{AfterCheckpoint: second.hook})
