@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/progress"
 )
 
@@ -824,6 +825,108 @@ func TestProgressReturnsSnapshotAlongsideQueryError(t *testing.T) {
 	assert.Equal(t, progress.PhaseRunning, s.Phase, "the snapshot must keep the last-known state on error")
 	assert.Equal(t, 1, s.Step)
 	assert.Equal(t, 1, s.TotalSteps)
+}
+
+// The progress read rides on the executor's reserved verdict session, so it
+// never runs under the observer's own context: pgx closes a connection whose
+// query's context ends mid-read, and the build's failure verdict needs that
+// session intact. The read carries its own deadline instead.
+func TestProgressRunsTheBuildReadDetachedFromTheObserver(t *testing.T) {
+	observer, giveUp := context.WithCancel(t.Context())
+	session := fakeSession{query: func(ctx context.Context, _ string, _ ...any) pgx.Row {
+		giveUp()
+		assert.NoError(t, ctx.Err(), "an observer giving up must not cancel the read's context")
+		_, bounded := ctx.Deadline()
+		assert.True(t, bounded, "a detached read must carry its own deadline")
+		return fakeRow{scan: func(...any) error { return pgx.ErrNoRows }}
+	}}
+	tracker := runningTrackerWithBuild(t, session)
+
+	_, err := tracker.Progress(observer)
+	require.NoError(t, err)
+}
+
+// A caller whose context ended before it called Progress has given up: it
+// reads nothing, like a caller that gives up while waiting for the gate, and
+// it can tell from the error that no read was issued. The gate is free, so
+// without the check after taking it the select would pick the read about
+// half the time.
+func TestProgressWithAnEndedContextReadsNothing(t *testing.T) {
+	var reads atomic.Int32
+	session := fakeSession{query: func(context.Context, string, ...any) pgx.Row {
+		reads.Add(1)
+		return fakeRow{scan: func(...any) error { return pgx.ErrNoRows }}
+	}}
+	tracker := runningTrackerWithBuild(t, session)
+	ended, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	for range 200 {
+		snapshot, err := tracker.Progress(ended)
+		require.ErrorIs(t, err, progress.ErrProgressNotRead)
+		require.ErrorIs(t, err, context.Canceled)
+		require.Equal(t, progress.PhaseRunning, snapshot.Phase)
+	}
+	assert.Zero(t, reads.Load(), "reads issued for a caller whose context had already ended")
+}
+
+// The detached read's deadline outlasts the statement_timeout a pkg/dbconn
+// pool gives the reserved session, so the server ends a slow read with a
+// query cancellation and the client deadline never closes the connection
+// first.
+func TestProgressBuildReadDeadlineOutlastsTheServerStatementTimeout(t *testing.T) {
+	var remaining time.Duration
+	session := fakeSession{query: func(ctx context.Context, _ string, _ ...any) pgx.Row {
+		deadline, ok := ctx.Deadline()
+		require.True(t, ok)
+		remaining = time.Until(deadline)
+		return fakeRow{scan: func(...any) error { return pgx.ErrNoRows }}
+	}}
+	tracker := runningTrackerWithBuild(t, session)
+
+	_, err := tracker.Progress(t.Context())
+	require.NoError(t, err)
+	assert.Greater(t, remaining, dbconn.DefaultStatementTimeout)
+}
+
+// An observer waits for the poll gate only as long as its context lasts: a
+// poll stalled on the reserved session — a half-open connection, say — must
+// not hang every other observer behind it. The one that gives up gets the
+// last-known snapshot and its context's error, and never touches the session.
+func TestProgressGivesUpWaitingForThePollGateWhenTheObserverEnds(t *testing.T) {
+	blocking := newBlockingSession()
+	tracker := runningTrackerWithBuild(t, blocking.session())
+
+	var workers sync.WaitGroup
+	defer workers.Wait()
+	defer close(blocking.releasePoll)
+	workers.Go(func() {
+		_, err := tracker.Progress(t.Context())
+		assert.NoError(t, err)
+	})
+	<-blocking.pollEntered
+
+	type outcome struct {
+		snapshot progress.Snapshot
+		err      error
+	}
+	impatient, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+	defer cancel()
+	waited := make(chan outcome, 1)
+	workers.Go(func() {
+		snapshot, err := tracker.Progress(impatient)
+		waited <- outcome{snapshot: snapshot, err: err}
+	})
+
+	select {
+	case got := <-waited:
+		require.ErrorIs(t, got.err, context.DeadlineExceeded)
+		assert.ErrorIs(t, got.err, progress.ErrProgressNotRead, "a caller can tell it gave up before any read from a read that timed out")
+		assert.Equal(t, progress.PhaseRunning, got.snapshot.Phase, "the snapshot must keep the last-known state")
+		assert.Equal(t, 1, got.snapshot.Step)
+	case <-time.After(cancelOutcomeDeadline):
+		t.Fatal("an observer whose context ended kept waiting for a stalled poll")
+	}
 }
 
 // Two concurrent pollers must never drive the reserved session at the same

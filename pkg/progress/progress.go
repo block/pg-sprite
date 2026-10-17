@@ -138,8 +138,10 @@ type Snapshot struct {
 
 // Tracker is a concurrency-safe progress source. The caller owns it; it has
 // no goroutines. Progress performs the one read needed for an active index
-// build, or the one WorkSource call for an engine-measured step, making
-// polling lifetime identical to the caller's context.
+// build, or the one WorkSource call for an engine-measured step. A
+// WorkSource call lives as long as the caller's context; an index build's
+// read is bounded on its own, so a caller's context ending never reaches the
+// reserved session.
 //
 // Two guards split the tracker's concerns: mu guards the state fields and
 // is held only for memory access, so the executor's own updates never wait
@@ -147,8 +149,8 @@ type Snapshot struct {
 // session — a single pgx connection that is not safe for concurrent use —
 // only ever carries one progress query at a time, and a WorkSource sees one
 // poll at a time. The gate is a one-slot channel rather than a mutex so
-// that CancelBuild, the one taker with a caller waiting on an answer, can
-// stop waiting when that caller's context ends.
+// that Progress and CancelBuild, the takers with a caller waiting on an
+// answer, can stop waiting when that caller's context ends.
 //
 // Four state changes take the poll gate, because each ends a poll target's
 // ownership of the step's work and must not do so under a poll still in
@@ -192,9 +194,11 @@ func NewTracker(clock Clock) (*Tracker, error) {
 // Now returns the tracker's injected time for executor duration accounting.
 func (t *Tracker) Now() time.Time { return t.clock.Now() }
 
-// takePollGate waits, without limit, for the poll gate. The observers and
-// the handoff fences take it this way: a poll is bounded by its own
-// context once it holds the gate, and a fence waits only for that poll.
+// takePollGate waits, without limit, for the poll gate. The handoff fences
+// take it this way: a poll is bounded once it holds the gate — a build read
+// by its own timeout, a WorkSource read by its contract — so a fence waits
+// only for that poll, and the executor's verdict never depends on an
+// observer's patience.
 func (t *Tracker) takePollGate() {
 	t.pollGate <- struct{}{}
 }
@@ -293,6 +297,16 @@ var (
 	// other sentinels CancelBuild returns also mean nothing was delivered;
 	// see CancelBuild for the full outcome table.
 	ErrCancelNotDispatched = errors.New("the cancel signal was not sent")
+	// ErrProgressNotRead is returned by Progress when the caller's context
+	// ended before the read was issued — while it waited for another poll
+	// or a handoff fence to release the poll gate, or in the instant it took
+	// the gate. It is returned wrapped together with the caller's context
+	// error, so errors.Is matches both; test for this sentinel before
+	// testing for the context error. A context error without it came from
+	// the read itself: a concurrent build's read runs detached from the
+	// caller's context, so its deadline error means the reserved verdict
+	// session stopped answering, not that the caller timed out.
+	ErrProgressNotRead = errors.New("the progress read was not issued")
 )
 
 // cancelSignalTimeout bounds the cancel signal's round trip. The signal
@@ -301,6 +315,19 @@ var (
 // down that session and leave the build's failure verdict indeterminate —
 // the outcome the reserved session exists to prevent.
 const cancelSignalTimeout = 5 * time.Second
+
+// progressReadTimeout bounds one progress read on the reserved verdict
+// session, which runs detached from the observer's context for the same
+// reason the cancel signal does. A client-side deadline that fires mid-query
+// closes the connection, so the bound is a backstop, set above the pool's
+// baseline statement_timeout: a slow read ends at the server with a query
+// cancellation and leaves the session intact, and only a network that has
+// stopped answering — a session lost either way — reaches this deadline.
+// The margin holds for a pool built by pkg/dbconn with the default or a lower
+// statement_timeout; a pool configured above this bound, or one whose
+// sessions carry no statement_timeout, reaches the deadline first, and a
+// read that stalls that long closes the session.
+const progressReadTimeout = 2 * dbconn.DefaultStatementTimeout
 
 // cancelBuildSQL reads the build backend's state and signals it only when
 // the server reports it active, in one statement so the read and the
@@ -499,17 +526,11 @@ func (t *Tracker) Finish(err error) {
 	t.session, t.buildPID, t.source = nil, 0, nil
 }
 
-// Progress returns a snapshot and, for an active concurrent index build,
-// queries PostgreSQL's progress view by the executor-owned backend PID; for
-// a step with a WorkSource it asks the source for the step's counters. On a
-// query or source error the snapshot still carries the last-known tracker
-// state. The state lock is released before the query, so concurrent pollers
-// serialize only against each other (and the four handoff fences), never
-// against the executor's own state updates.
-func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
-	t.takePollGate()
-	defer t.releasePollGate()
+// readState snapshots the tracker under one lock acquisition: the snapshot,
+// and the poll target it was taken against.
+func (t *Tracker) readState() (Snapshot, dbconn.RowQuerier, uint32, WorkSource) {
 	t.mu.RLock()
+	defer t.mu.RUnlock()
 	now := t.clock.Now()
 	if !t.ended.IsZero() {
 		now = t.ended
@@ -519,8 +540,43 @@ func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
 		s.Elapsed = now.Sub(t.started)
 		s.StepElapsed = now.Sub(t.stepStart)
 	}
-	session, pid, source := t.session, t.buildPID, t.source
-	t.mu.RUnlock()
+	return s, t.session, t.buildPID, t.source
+}
+
+// Progress returns a snapshot and, for an active concurrent index build,
+// queries PostgreSQL's progress view by the executor-owned backend PID; for
+// a step with a WorkSource it asks the source for the step's counters. On a
+// query or source error the snapshot still carries the last-known tracker
+// state. The state lock is released before the query, so concurrent pollers
+// serialize only against each other (and the four handoff fences), never
+// against the executor's own state updates.
+//
+// A poller waits for the poll gate for as long as its ctx lasts; one that
+// gives up first, or whose ctx has already ended when it takes the gate,
+// gets the last-known snapshot and ErrProgressNotRead wrapped with ctx's
+// error, having read nothing. Once the gate is held, a concurrent build's
+// progress read runs on the executor's reserved verdict session bounded and
+// detached from ctx, so an observer whose context ends mid-read — an HTTP
+// request timing out — cannot tear down the session the build's failure
+// verdict needs. Progress is therefore not bounded by ctx once the read is
+// issued: it returns when the server answers, which on a pkg/dbconn pool is
+// within its statement_timeout, and within twice dbconn's default
+// statement_timeout (one minute) at the latest. A caller that needs a hard
+// return at its own deadline calls Progress from its own goroutine. A
+// WorkSource is read under ctx, as its contract requires.
+func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
+	if err := t.takePollGateOrGiveUp(ctx); err != nil {
+		s, _, _, _ := t.readState()
+		return s, fmt.Errorf("%w: %w", ErrProgressNotRead, err)
+	}
+	defer t.releasePollGate()
+	if err := ctx.Err(); err != nil {
+		// The caller gave up in the instant the gate came free; the gate is
+		// held, so this is the last point at which nothing has been read.
+		s, _, _, _ := t.readState()
+		return s, fmt.Errorf("%w: %w", ErrProgressNotRead, err)
+	}
+	s, session, pid, source := t.readState()
 	if s.Phase != PhaseRunning {
 		return s, nil
 	}
@@ -530,7 +586,13 @@ func (t *Tracker) Progress(ctx context.Context) (Snapshot, error) {
 	if pid == 0 || session == nil {
 		return s, nil
 	}
-	p, active, err := dbconn.ConcurrentIndexProgress(ctx, session, pid)
+	// INV: LK-2 — the poll is bounded without being cancelled by its
+	// observer: the reserved session's statement_timeout ends a slow read
+	// server-side and leaves the session usable, and progressReadTimeout
+	// backstops a network that has stopped answering.
+	pollCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), progressReadTimeout)
+	defer cancel()
+	p, active, err := dbconn.ConcurrentIndexProgress(pollCtx, session, pid)
 	if err != nil {
 		return s, err
 	}

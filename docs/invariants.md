@@ -515,6 +515,15 @@ pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repa
 transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so a pool
 built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued behind
 `ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
+The concurrent build's failure verdict runs on a reserved session that observers must not
+disturb: `Tracker.Progress` reads the build's progress on that session detached from the
+observer's context and under its own deadline, set above `pkg/dbconn`'s default
+`statement_timeout` so a slow read ends server-side with the session intact, because a context
+that ends mid-query closes the connection; `Tracker.CancelBuild` signals the same way.
+*Enforced:* `pkg/progress` (`Tracker.Progress`, `progressReadTimeout`;
+`TestProgressRunsTheBuildReadDetachedFromTheObserver`,
+`TestProgressBuildReadDeadlineOutlastsTheServerStatementTimeout`, and
+`TestProgressReadCancelledMidQueryLeavesTheVerdictSessionUsable` in `pkg/executor`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
