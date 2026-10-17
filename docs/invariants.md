@@ -646,10 +646,19 @@ relation (a table where the statement needs an index, or the reverse) is a usage
 no verdict — each its own typed error — and nothing executes. The acknowledgement is never
 inferred from the statement text. The resolution and the execution are separate statements
 on the pool, so a concurrent re-pointing of the index name between them is outside what this
-invariant guarantees; the design records the window. *Enforced:* `pkg/migrate`
+invariant guarantees; the design records the window. The statement's scope must also be
+exactly that table: a `DROP INDEX ... CASCADE` also drops the objects that depend on the index,
+such as a foreign key on another table, so it is not a single-relation statement and the
+executor refuses it (`ErrUnsupportedAcceptedBlocking`) before opening a transaction.
+*Enforced:* `pkg/migrate`
 (`acceptBlocking`, `lockedTable`; `ErrAcceptBlockingMismatch`,
 `ErrAcceptBlockingRelationNotFound`, `ErrAcceptBlockingWrongRelationKind`),
-`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`.
+`pkg/executor` (`acceptedBlockingIneligibility`), `pkg/statement` (`ParseOne` classifies a
+cascading drop as `IndexTargetOther`),
+`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`,
+`TestAcceptedBlockingAdmission`, `TestExecuteAcceptedBlockingRefusesCascadeDrop`,
+`TestExecuteAcceptedBlockingPlainDropOfReferencedIndexIsRefusedByServer`,
+`TestExecuteAcceptedBlockingRestrictDropOfReferencedIndexIsRefusedByServer`.
 *Source:* [lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door).
 
 ### AB-4 — Acceptance applies only to an eligible in-process refusal, and to nothing else
@@ -657,13 +666,16 @@ invariant guarantees; the design records the window. *Enforced:* `pkg/migrate`
 The acknowledgement changes the outcome of exactly one thing: a gate refusal whose in-process
 proof the eligibility registry marks eligible (RF-8). Every other refusal — an ineligible
 gate refusal, a planner refusal, a size-guard or preflight refusal — stands exactly as it
-would without the flag, and a statement the gate admits runs its normal path. The
+would without the flag — including a `DROP INDEX ... CASCADE`, whose refusal site is the
+ineligible one because its scope exceeds the acknowledged table — and a statement the gate
+admits runs its normal path. The
 acknowledgement is not `--force`: the two cannot be combined, and a dry run reports the
 refusal as it stands rather than the accepted execution. The front door requires the
 statement budget to be stated on the same command line, because the accepted outage bound is
 a decision, not a default. *Enforced:* `migrate.AcceptedRefusal`, `MigrateCmd.Validate`,
-`TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
-`TestMigrateAcceptBlockingLeavesIneligibleRefusalsAlone`. *Source:*
+`migrate.gateRefusal` (the refusal site), `TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
+`TestMigrateAcceptBlockingLeavesIneligibleRefusalsAlone`,
+`TestMigrateAcceptBlockingRefusesCascadeAndKeepsDependentForeignKey`. *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door).
 
 ### AB-5 — The accepted outcome is distinguishable from online-safe execution at every surface
