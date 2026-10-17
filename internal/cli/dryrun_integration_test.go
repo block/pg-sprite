@@ -378,3 +378,121 @@ func TestMigrateDryRunMissingTableRefusesExecutablePlan(t *testing.T) {
 	require.NotNil(t, report.TableExists)
 	assert.False(t, *report.TableExists)
 }
+
+// admissionRefusalVerdicts runs alter as a dry run and as an apply, requires
+// both to end in the refusal exit, and returns the two refusal verdicts. The
+// dry run goes first; neither run changes the database, because the apply
+// refuses before executing anything.
+func admissionRefusalVerdicts(t *testing.T, url, alter string) (dryRun, applied verdict.Verdict) {
+	t.Helper()
+	run := func(dry bool) verdict.Verdict {
+		cmd := newMigrateCmd(url, alter)
+		cmd.DryRun = dry
+		cmd.JSON = true
+		var out strings.Builder
+		require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused,
+			"the refusal exit code must not depend on --dry-run")
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		return v
+	}
+	return run(true), run(false)
+}
+
+// The sequence executor refuses DETACH PARTITION CONCURRENTLY — the form the
+// planner substitutes for a plain DETACH PARTITION — before it runs anything,
+// because a cancelled concurrent detach leaves a detach-pending partition the
+// executor does not recover. The dry run must end in that same refusal
+// instead of promising an executable plan the apply would turn down.
+func TestMigrateDryRunRefusesDetachPartitionLikeApply(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := createPartitionFixture(t, pool)
+
+	dryRun, applied := admissionRefusalVerdicts(t, url,
+		fmt.Sprintf("ALTER TABLE %s.p DETACH PARTITION %s.p1", schema, schema))
+
+	assert.Equal(t, verdict.OutcomeRefused, dryRun.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, dryRun.Reason)
+	assert.Equal(t, applied, dryRun, "the dry run must report the refusal the apply reports")
+}
+
+// The concurrent index build executor needs a name for the index it builds
+// and later verifies, so an unnamed CREATE INDEX is refused before anything
+// executes. The dry run must report that refusal, not the plan that would
+// have run into it.
+func TestMigrateDryRunRefusesUnnamedCreateIndexLikeApply(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+
+	dryRun, applied := admissionRefusalVerdicts(t, url, fmt.Sprintf("CREATE INDEX ON %s.t (c)", schema))
+
+	assert.Equal(t, verdict.OutcomeRefused, dryRun.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, dryRun.Reason)
+	assert.Equal(t, applied, dryRun, "the dry run must report the refusal the apply reports")
+}
+
+// IF NOT EXISTS is refused on an index build — the executor cannot tell a
+// skipped build from a finished one — and that refusal is a permanent design
+// decision, so its class differs from the capability boundary the other two
+// admission refusals carry. The dry run must carry the apply's class too.
+func TestMigrateDryRunRefusesIfNotExistsCreateIndexLikeApply(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+
+	dryRun, applied := admissionRefusalVerdicts(t, url,
+		fmt.Sprintf("CREATE INDEX IF NOT EXISTS t_c_idx ON %s.t (c)", schema))
+
+	assert.Equal(t, verdict.OutcomeRefused, dryRun.Outcome)
+	assert.Equal(t, verdict.ReasonUnsupportedStatement, dryRun.Reason)
+	assert.Equal(t, verdict.ClassByDesign, dryRun.Class)
+	assert.Equal(t, applied, dryRun, "the dry run must report the refusal the apply reports")
+}
+
+// A named, schema-qualified CREATE INDEX passes admission, so the dry run
+// keeps reporting the plan it always did: the check refuses only what the
+// apply refuses.
+func TestMigrateDryRunAdmitsNamedCreateIndex(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, c int)", schema))
+	require.NoError(t, err)
+
+	report := dryRunPlan(t, url, fmt.Sprintf("CREATE INDEX t_c_idx ON %s.t (c)", schema))
+
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	assert.Len(t, report.Statements[0].ExecSQL, 1)
+}
+
+// An unqualified table is resolved before the apply's admission runs, so the
+// dry run must not read the missing schema qualification as a refusal: the
+// named index build on a table in public stays an executable plan.
+func TestMigrateDryRunAdmitsNamedCreateIndexOnUnqualifiedTable(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	table := testutil.NewPublicTable(t, pool, "(id int PRIMARY KEY, c int)")
+
+	report := dryRunPlan(t, url, fmt.Sprintf("CREATE INDEX %s_c_idx ON %s (c)", table, table))
+
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+	require.Len(t, report.Statements, 1)
+	assert.Len(t, report.Statements[0].ExecSQL, 1)
+}
