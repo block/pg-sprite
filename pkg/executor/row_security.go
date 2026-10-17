@@ -148,7 +148,7 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 		return RowSecurityReport{}, err
 	}
 	// Materialize the declaration before blocking application reads and writes.
-	wanted, err := schemadiff.IntrospectDesiredWithRowSecurityTx(ctx, tx, desired)
+	wanted, err := schemadiff.IntrospectDesiredWithRowSecurityTx(ctx, tx, schema, desired)
 	if err != nil {
 		return RowSecurityReport{}, fmt.Errorf("inspect desired row security for %s: %w", target, classifyRowSecurityDesiredError(err))
 	}

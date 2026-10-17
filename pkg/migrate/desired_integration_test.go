@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -135,6 +136,7 @@ CREATE INDEX t_v_idx ON t (v);`
 		res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+		assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceVerified}, res.Convergence)
 		require.Len(t, res.Verdicts, len(res.Plan.Statements),
 			"every planned statement carries a verdict")
 		for _, v := range res.Verdicts {
@@ -159,6 +161,7 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
 		assert.Empty(t, res.Plan.Statements, "the converged table plans no statements")
 		assert.Empty(t, res.Verdicts)
+		assert.Nil(t, res.Convergence, "a run with nothing to execute has no convergence to check")
 	})
 
 	t.Run("creates the greenfield table and re-runs as a no-op", func(t *testing.T) {
@@ -674,4 +677,78 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.NotEmpty(t, res.Verdicts[0].ExecutedSQL,
 			"the failed verdict discloses the committed prefix inside the statement")
 	})
+}
+
+// A run reports converged only when a plan derived again after its last
+// commit is empty. Here an event trigger stands in for another session:
+// whenever the table is altered, it adds a column the desired file does
+// not declare, so every planned statement commits and the table still
+// differs. The run fails with ErrNotConverged, carries the plan a rerun
+// would execute as data, and reports every statement it ran as executed, so the caller
+// reads the failure as unproven convergence and not as a rollback.
+func TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, "add_extra", fmt.Sprintf(`
+		IF TG_TAG = 'ALTER TABLE'
+			AND EXISTS (SELECT FROM pg_catalog.pg_event_trigger_ddl_commands() WHERE object_identity = '%[1]s.t')
+			AND NOT EXISTS (SELECT FROM pg_catalog.pg_attribute WHERE attrelid = '%[1]s.t'::regclass AND attname = 'extra') THEN
+			ALTER TABLE %[1]s.t ADD COLUMN extra int;
+		END IF;`, schema))
+
+	req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, "CREATE TABLE t (id int PRIMARY KEY, v text);")}
+	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
+	require.ErrorIs(t, err, migrate.ErrNotConverged)
+	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+	require.NotNil(t, res.Convergence)
+	assert.Equal(t, migrate.ConvergenceRemaining, res.Convergence.Status)
+	require.NotNil(t, res.Convergence.Remaining)
+	require.Len(t, res.Convergence.Remaining.Statements, 1)
+	assert.Equal(t, "ALTER TABLE "+schema+".t DROP extra", res.Convergence.Remaining.Statements[0].SQL)
+	require.Len(t, res.Verdicts, 1)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
+	assert.True(t, hasColumn(t, pool, schema, "v"), "the planned statement stays committed")
+}
+
+// When the plan derived after the last commit cannot be built, the run
+// cannot prove convergence either way. Here an event trigger fails the
+// re-plan's scratch build once the run's ADD COLUMN has committed, so only
+// that second derivation fails. The run fails with the derivation's own
+// error rather than ErrNotConverged, reports convergence as unverifiable,
+// and reports the committed statement as executed and still in effect.
+func TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+	// The scratch build creates the desired table in a pgsprite_scratch_
+	// schema with the target schema on its search_path, which scopes the
+	// fault to this test's own builds.
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, "fail_replan", fmt.Sprintf(`
+		IF TG_TAG = 'CREATE TABLE'
+			AND pg_catalog.current_schema() LIKE 'pgsprite\_scratch\_%%'
+			AND pg_catalog.current_setting('search_path') LIKE '%%%[1]s%%'
+			AND EXISTS (SELECT FROM pg_catalog.pg_attribute
+				WHERE attrelid = pg_catalog.to_regclass('%[1]s.t') AND attname = 'v') THEN
+			RAISE EXCEPTION 'injected re-plan failure';
+		END IF;`, schema))
+
+	req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, "CREATE TABLE t (id int PRIMARY KEY, v text);")}
+	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, migrate.ErrNotConverged)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "injected re-plan failure", pgErr.Message)
+	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+	assert.Equal(t, &migrate.Convergence{Status: migrate.ConvergenceUnverifiable}, res.Convergence)
+	require.Len(t, res.Verdicts, 1)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
+	assert.True(t, hasColumn(t, pool, schema, "v"), "the planned statement stays committed")
 }

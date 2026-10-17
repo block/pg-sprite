@@ -16,8 +16,9 @@ import (
 
 // FormatVersion identifies the report contract. A consumer must reject a
 // report whose version it does not understand instead of guessing at the
-// field semantics.
-const FormatVersion = 1
+// field semantics. Version 2 added the replica-identity planner reason to
+// the embedded Reasons vocabulary.
+const FormatVersion = 2
 
 // Severity ranks a finding by what the engine would do with it.
 type Severity string

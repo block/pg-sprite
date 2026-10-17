@@ -12,7 +12,12 @@
 // and the core executors re-verify their own preconditions.
 package schemadiff
 
-import "math"
+import (
+	"math"
+	"slices"
+
+	"github.com/block/pg-sprite/pkg/statement"
+)
 
 // Identity is a column's identity kind, as pg_attribute.attidentity spells
 // it.
@@ -152,6 +157,24 @@ type Constraint struct {
 	// from JSON when false, so a model without foreign keys digests the
 	// same as it did before the field existed.
 	ForeignKey bool `json:",omitempty"`
+	// Primary reports a PRIMARY KEY constraint (contype 'p').
+	Primary bool `json:"-"`
+	// IndexDef is the CREATE UNIQUE INDEX statement of the index a primary
+	// key or unique constraint owns, unqualified like Index.Def, and empty
+	// for every other constraint. Only a desired model carries it: the diff
+	// compares a desired key's with a live index of the constraint's name to
+	// adopt that index instead of rebuilding it.
+	IndexDef string `json:"-"`
+	// Deferrable reports a constraint declared DEFERRABLE.
+	Deferrable bool `json:"-"`
+	// InitiallyDeferred reports a deferrable constraint declared INITIALLY
+	// DEFERRED.
+	InitiallyDeferred bool `json:"-"`
+	// NotValid reports a check or foreign-key constraint the server has not
+	// validated (pg_constraint.convalidated is false), which Def ends with
+	// " NOT VALID". Only a live table carries one: CREATE TABLE ignores NOT
+	// VALID, so a desired constraint is always validated.
+	NotValid bool `json:"-"`
 }
 
 // Index is one non-constraint index: its name plus the server-decompiled
@@ -171,6 +194,53 @@ type Index struct {
 	// desired-side index, materialized on the scratch schema, is never
 	// invalid, so the zero value is the delivered state.
 	Invalid bool
+}
+
+// ReplicaIdentityKeys is what a table's REPLICA IDENTITY USING INDEX
+// is built on, across the table and every table below it, partitions and
+// inheritance children alike. Logical decoding
+// keys UPDATE and DELETE on that index, and PostgreSQL keeps the setting
+// when the index is dropped, so the table is left with no usable identity
+// and every UPDATE and DELETE on it fails while a publication publishes
+// them. The zero value means no table in the tree selects an index.
+type ReplicaIdentityKeys struct {
+	// Indexes are the indexes on this table whose drop removes a replica
+	// identity index: the table's own, or a partitioned index that a
+	// partition's identity index is attached under. Name-sorted.
+	Indexes []string
+	// Constraints are the primary key or unique constraints on this table
+	// that own one of Indexes. Name-sorted.
+	Constraints []string
+	// Columns are the columns every replica identity index in the tree
+	// covers, INCLUDE columns too. Dropping one drops each index built on
+	// it, those of the tables below included. Name-sorted.
+	Columns []string // OwnColumns are the columns this table's own replica identity index
+	// covers, INCLUDE columns too: what a DROP COLUMN under ALTER TABLE
+	// ONLY can take, since it leaves the column in the tables below.
+	// Name-sorted.
+	OwnColumns []string
+}
+
+// DroppedBy reports whether op drops a replica identity index of the table
+// or of a table below it: an index it is, or is attached under, the
+// constraint that owns one, or a column one is built on, which takes the
+// index with it. A column dropped under ONLY stays in the tables below, so
+// only the table's own identity index counts for it. The planner refuses such an operation, and the executor
+// asks again under the table's lock before a native drop runs.
+func (k ReplicaIdentityKeys) DroppedBy(op statement.Op) bool {
+	switch op.Kind {
+	case statement.OpDropIndex:
+		return slices.ContainsFunc(op.Indexes, func(name string) bool { return slices.Contains(k.Indexes, name) })
+	case statement.OpDropConstraint:
+		return slices.Contains(k.Constraints, op.Name)
+	case statement.OpDropColumn:
+		if op.Only {
+			return slices.Contains(k.OwnColumns, op.Column)
+		}
+		return slices.Contains(k.Columns, op.Column)
+	default:
+		return false
+	}
 }
 
 // Model is the canonical, comparison-ready description of one table. It
@@ -235,6 +305,11 @@ type Model struct {
 	// only alongside TOAST parameters, and not part of the table's shape,
 	// so it never reaches a digest.
 	ToastMayNotRebuild bool `json:"-"`
+	// ReplicaIdentity is what the replica identity indexes of the table
+	// and of every table below it are built on. It is a live fact for the
+	// planner, not part of the table's declared shape, so it is left out of
+	// the model's JSON and every digest of it.
+	ReplicaIdentity ReplicaIdentityKeys `json:"-"`
 	// ReferencedBy lists the incoming foreign keys — constraints on other
 	// tables that reference this one — as "table.constraint" strings, in
 	// that order. Incoming foreign keys are not part of this table's own

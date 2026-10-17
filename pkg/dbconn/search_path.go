@@ -68,12 +68,38 @@ func unshadowCatalog(ctx context.Context, conn *pgx.Conn) error {
 // is built here, and TestLocalSearchPathIsTheOnlySearchPathWriter keeps it
 // that way.
 func LocalSearchPath(schemas ...string) string {
+	return "SET LOCAL search_path = " + searchPathOf(schemas)
+}
+
+// SessionSearchPath returns the SET statement that sets the session's
+// search_path to schemas, in order, with the same quoting and rewrite as
+// LocalSearchPath. It is for statements that refuse to run inside a
+// transaction block, which rules out SET LOCAL: the caller reads the
+// session's path first and puts it back with RestoreSessionSearchPath
+// before the session returns to the pool (INV: CO-9).
+func SessionSearchPath(schemas ...string) string {
+	return "SET search_path = " + searchPathOf(schemas)
+}
+
+// RestoreSessionSearchPath returns the statement, and its one argument,
+// that puts a session's search_path back to path, a value read with
+// current_setting('search_path'). The value is passed as a parameter, so
+// an empty path round-trips, and receives the rewrite every pooled
+// session's does (INV: CO-9).
+func RestoreSessionSearchPath(path string) (string, string) {
+	unshadowed, _ := withoutShadowedCatalog(path)
+	return "SELECT pg_catalog.set_config('search_path', $1, false)", unshadowed
+}
+
+// searchPathOf quotes each schema as an identifier and joins them into a
+// search_path value without a shadowed pg_catalog entry.
+func searchPathOf(schemas []string) string {
 	quoted := make([]string, len(schemas))
 	for i, schema := range schemas {
 		quoted[i] = pgx.Identifier{schema}.Sanitize()
 	}
 	path, _ := withoutShadowedCatalog(strings.Join(quoted, ", "))
-	return "SET LOCAL search_path = " + path
+	return path
 }
 
 // withoutShadowedCatalog returns path with every pg_catalog entry that a

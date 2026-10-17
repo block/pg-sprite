@@ -27,6 +27,100 @@ func TestFactsFromExtractsColumnTypes(t *testing.T) {
 	}}, planner.FactsFrom(live))
 }
 
+// FactsFrom carries what the live table's replica identity keys on, so a
+// drop of it is judged from the same facts on every front door.
+func TestFactsFromExtractsReplicaIdentity(t *testing.T) {
+	keys := schemadiff.ReplicaIdentityKeys{
+		Indexes:     []string{"t_ref_key"},
+		Constraints: []string{"t_ref_key"},
+		Columns:     []string{"ref", "tenant"},
+	}
+	live := schemadiff.Model{
+		Columns:         []schemadiff.Column{{Name: "id", Type: "bigint"}},
+		ReplicaIdentity: keys,
+	}
+	assert.Equal(t, keys, planner.FactsFrom(live).ReplicaIdentity)
+}
+
+// Dropping what REPLICA IDENTITY USING INDEX keys on leaves the table with
+// no usable identity, so UPDATE and DELETE fail under a publication. The
+// planner refuses the index drop in every form, the drop of the constraint
+// that owns the index, and the drop of any key column, which takes the
+// index with it. Everything else on the table classifies as before, and a
+// table whose identity is not an index has nothing to protect.
+func TestClassifyRefusesDroppingTheReplicaIdentity(t *testing.T) {
+	identity := planner.Facts{
+		ColumnTypes: map[string]string{"tenant": "bigint", "ref": "text", "note": "text"},
+		ReplicaIdentity: schemadiff.ReplicaIdentityKeys{
+			Indexes:     []string{"t_ref_key"},
+			Constraints: []string{"t_ref_key"},
+			Columns:     []string{"ref", "tenant"},
+		},
+	}
+	refused := []string{
+		"DROP INDEX t_ref_key",
+		"DROP INDEX CONCURRENTLY t_ref_key",
+		"DROP INDEX IF EXISTS public.t_ref_key",
+		"DROP INDEX t_other_idx, t_ref_key",
+		"ALTER TABLE t DROP CONSTRAINT t_ref_key",
+		"ALTER TABLE t DROP COLUMN ref",
+		"ALTER TABLE t DROP COLUMN tenant CASCADE",
+	}
+	for _, sql := range refused {
+		plan, err := planner.Classify(sql, identity)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		d := plan.Decisions[0]
+		assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+		assert.Equal(t, planner.ReasonReplicaIdentity, d.Reason, sql)
+		assert.True(t, d.Destructive, sql)
+		assert.Equal(t, planner.RouteRefuse, plan.Route, sql)
+	}
+
+	allowed := map[string]planner.Reason{
+		"DROP INDEX CONCURRENTLY t_other_idx":        planner.ReasonOnlineIdiom,
+		"ALTER TABLE t DROP CONSTRAINT t_note_check": planner.ReasonMetadataOnly,
+		"ALTER TABLE t DROP COLUMN note":             planner.ReasonMetadataOnly,
+		"ALTER TABLE t ADD COLUMN extra int":         planner.ReasonMetadataOnly,
+	}
+	for sql, reason := range allowed {
+		plan, err := planner.Classify(sql, identity)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, reason, plan.Decisions[0].Reason, sql)
+	}
+
+	noIndexIdentity := identity
+	noIndexIdentity.ReplicaIdentity = schemadiff.ReplicaIdentityKeys{}
+	plan, err := planner.Classify("ALTER TABLE t DROP COLUMN ref", noIndexIdentity)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+}
+
+// A column dropped under ONLY stays in the tables below, so only the
+// table's own identity index counts: a column only a child's identity uses
+// classifies as an ordinary drop, while one the table's own identity uses
+// is refused either way.
+func TestClassifyJudgesAnOnlyDropByTheTablesOwnIdentity(t *testing.T) {
+	facts := planner.Facts{
+		ColumnTypes: map[string]string{"ref": "text", "code": "text"},
+		ReplicaIdentity: schemadiff.ReplicaIdentityKeys{
+			Columns:    []string{"code", "ref"},
+			OwnColumns: []string{"code"},
+		},
+	}
+	for sql, reason := range map[string]planner.Reason{
+		"ALTER TABLE ONLY parent DROP COLUMN ref":  planner.ReasonMetadataOnly,
+		"ALTER TABLE parent DROP COLUMN ref":       planner.ReasonReplicaIdentity,
+		"ALTER TABLE ONLY parent DROP COLUMN code": planner.ReasonReplicaIdentity,
+	} {
+		plan, err := planner.Classify(sql, facts)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, reason, plan.Decisions[0].Reason, sql)
+	}
+}
+
 // facts mirrors a live table whose column types exercise both sides of the
 // binary-coercible rules.
 var facts = planner.Facts{ColumnTypes: map[string]string{
@@ -35,6 +129,8 @@ var facts = planner.Facts{ColumnTypes: map[string]string{
 	"num":  "numeric(10,2)",
 	"i":    "integer",
 	"txt":  "text",
+	"varr": "character varying(50)[]",
+	"narr": "numeric(10,2)[]",
 }}
 
 func classifyOne(t *testing.T, sql string) planner.Decision {
@@ -102,6 +198,42 @@ func TestClassifyUnverifiedMarksFactlessTypeChanges(t *testing.T) {
 	require.Len(t, using.Decisions, 1)
 	assert.Equal(t, planner.RouteCopyAndSwap, using.Decisions[0].Route)
 	assert.False(t, using.Decisions[0].Unverified)
+}
+
+// The scalar relabel rules do not carry over to arrays: PostgreSQL converts
+// an array column element by element and rewrites the table for any element
+// change, widenings included. Only an unchanged element type is a relabel,
+// whatever dimensions are declared. A target qualified with a schema other
+// than pg_catalog is a user type, never the built-in that shares its name.
+// TestBinaryCoercibleVerdictMatchesTheServer proves each row on a server.
+func TestClassifyArrayAndQualifiedTypeChanges(t *testing.T) {
+	cases := []struct {
+		sql   string
+		route planner.Route
+	}{
+		{"ALTER TABLE t ALTER COLUMN varr TYPE text", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(100)", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(100)[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE text[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN narr TYPE numeric(12,2)[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN v50 TYPE text[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN v50 TYPE app.text", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(50)[]", planner.RouteNative},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(50)[][]", planner.RouteNative},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(50) ARRAY", planner.RouteNative},
+		{"ALTER TABLE t ALTER COLUMN v50 TYPE pg_catalog.text", planner.RouteNative},
+	}
+	for _, tc := range cases {
+		d := classifyOne(t, tc.sql)
+		assert.Equal(t, tc.route, d.Route, tc.sql)
+		if tc.route == planner.RouteNative {
+			assert.Equal(t, planner.ReasonBinaryCoercible, d.Reason, tc.sql)
+		} else {
+			assert.Equal(t, planner.ReasonTypeRewrite, d.Reason, tc.sql)
+			assert.False(t, d.Unverified, "a proven rewrite is not unverified: %s", tc.sql)
+		}
+	}
 }
 
 // TestClassifyReferenceRows is the golden mapping: one case per row of
@@ -219,6 +351,88 @@ func TestClassifyAddPrimaryKeySequence(t *testing.T) {
 	}, d.SaferSQL)
 }
 
+// The online sequence must declare the constraint the statement declares:
+// an index built without INCLUDE, NULLS NOT DISTINCT, or the tablespace, or
+// an attach without DEFERRABLE or INITIALLY DEFERRED, is a different
+// constraint. WITH (...) storage parameters ride on the index too; only a
+// parameter the sequence cannot render faithfully gets no sequence, so the
+// decision carries guidance instead of SQL that drops it.
+// TestUsingIndexSequenceDeclaresTheSameConstraint proves each on a server.
+func TestClassifyAddKeySequenceCarriesEveryAttribute(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want []string
+	}{
+		{
+			"include columns",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) INCLUDE (name, id)",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") INCLUDE ("name", "id")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"nulls not distinct",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (email)",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") NULLS NOT DISTINCT`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"index tablespace",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) USING INDEX TABLESPACE fast",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"storage parameters",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) INCLUDE (id) WITH (fillfactor = 70, deduplicate_items = off) USING INDEX TABLESPACE fast",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") INCLUDE ("id") WITH ("fillfactor" = '70', "deduplicate_items" = 'off') TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"deferrable initially deferred",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) DEFERRABLE INITIALLY DEFERRED",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k" DEFERRABLE INITIALLY DEFERRED`,
+			},
+		},
+		{
+			"deferrable primary key",
+			"ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY (id) DEFERRABLE",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "t_pkey" ON "t" ("id")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "t_pkey" PRIMARY KEY USING INDEX "t_pkey" DEFERRABLE`,
+			},
+		},
+		{
+			"every attribute at once",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (a, b) INCLUDE (c) USING INDEX TABLESPACE fast DEFERRABLE INITIALLY DEFERRED",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("a", "b") INCLUDE ("c") NULLS NOT DISTINCT TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k" DEFERRABLE INITIALLY DEFERRED`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, classifyOne(t, tc.sql).SaferSQL)
+		})
+	}
+
+	d := classifyOne(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = s.seventy)")
+	assert.Equal(t, planner.RouteNative, d.Route)
+	assert.Equal(t, planner.ReasonSaferIdiom, d.Reason)
+	assert.Empty(t, d.SaferSQL, "a sequence would build the index without the parameter it cannot carry")
+}
+
 func TestClassifyAddCheckSequenceValidates(t *testing.T) {
 	d := classifyOne(t, "ALTER TABLE t ADD CONSTRAINT c CHECK (age > 0)")
 	require.Len(t, d.SaferSQL, 2)
@@ -259,6 +473,58 @@ func TestClassifyNoFactsIsConservative(t *testing.T) {
 	require.Len(t, plan.Decisions, 1)
 	assert.Equal(t, planner.RouteCopyAndSwap, plan.Decisions[0].Route,
 		"without live column facts every type change is a rewrite")
+}
+
+// An added column classifies by what the server proved about the rewrite
+// before the statement's shape: a constant default on a constrained domain
+// still rewrites, and a default the catalog stores runs in place however it
+// is written. A proven rewrite takes its reason from what the server found
+// rewrites, the type or the default, never from how the default is
+// written. A column the server could not prove, or that no proof was run
+// for, keeps the shape rules, and an expression default there fails closed
+// as unverified.
+func TestClassifyAddColumnByTheProvenRewrite(t *testing.T) {
+	proven := planner.Facts{AddColumnProofs: map[string]statement.AddColumnProof{
+		"code":    statement.AddColumnTypeRewrites,
+		"strict":  statement.AddColumnTypeRewrites,
+		"scored":  statement.AddColumnTypeRewrites,
+		"id":      statement.AddColumnDefaultRewrites,
+		"created": statement.AddColumnInPlace,
+		"checked": statement.AddColumnInPlace,
+		"age":     statement.AddColumnInPlace,
+		"high":    statement.AddColumnUnproven,
+		"capped":  statement.AddColumnUnproven,
+	}}
+	cases := []struct {
+		name       string
+		sql        string
+		route      planner.Route
+		reason     planner.Reason
+		unverified bool
+	}{
+		{"constrained domain with a constant default", "ALTER TABLE t ADD COLUMN code positive_int DEFAULT 1", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, false},
+		{"constrained domain without a default", "ALTER TABLE t ADD COLUMN strict positive_int", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, false},
+		{"constrained domain with a stable default", "ALTER TABLE t ADD COLUMN scored positive_int DEFAULT next_score()", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, false},
+		{"volatile default", "ALTER TABLE t ADD COLUMN id uuid DEFAULT gen_random_uuid()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, false},
+		{"stable default stored in the catalog", "ALTER TABLE t ADD COLUMN created timestamptz NOT NULL DEFAULT now()", planner.RouteNative, planner.ReasonFastDefault, false},
+		{"stored default with an inline check", "ALTER TABLE t ADD COLUMN checked timestamptz DEFAULT now() CHECK (checked > '2000-01-01')", planner.RouteNative, planner.ReasonSaferIdiom, false},
+		{"plain column", "ALTER TABLE t ADD COLUMN age int", planner.RouteNative, planner.ReasonMetadataOnly, false},
+		{"expression default the server could not prove", "ALTER TABLE t ADD COLUMN high bigint DEFAULT max_id()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, true},
+		{"constant default the server could not prove", "ALTER TABLE t ADD COLUMN capped bounded DEFAULT 5", planner.RouteCopyAndSwap, planner.ReasonTypeRewrite, true},
+		{"expression default with no proof run", "ALTER TABLE t ADD COLUMN other timestamptz DEFAULT now()", planner.RouteCopyAndSwap, planner.ReasonVolatileDefault, true},
+		{"constant default with no proof run", "ALTER TABLE t ADD COLUMN other int DEFAULT 0", planner.RouteNative, planner.ReasonFastDefault, false},
+		{"generated stored whatever the proof says", "ALTER TABLE t ADD COLUMN age int GENERATED ALWAYS AS (1) STORED", planner.RouteCopyAndSwap, planner.ReasonGeneratedStored, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, err := planner.Classify(tc.sql, proven)
+			require.NoError(t, err)
+			require.Len(t, plan.Decisions, 1)
+			assert.Equal(t, tc.route, plan.Decisions[0].Route)
+			assert.Equal(t, tc.reason, plan.Decisions[0].Reason)
+			assert.Equal(t, tc.unverified, plan.Decisions[0].Unverified)
+		})
+	}
 }
 
 func TestClassifyParseErrorSurfaces(t *testing.T) {
@@ -327,6 +593,7 @@ func TestReasonsVocabularyPinned(t *testing.T) {
 		planner.ReasonTypeRewrite,
 		planner.ReasonRelocation,
 		planner.ReasonPartitionParentLock,
+		planner.ReasonReplicaIdentity,
 		planner.ReasonUnsupportedOperation,
 	}, planner.Reasons())
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -89,7 +90,7 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		// compiler style, where help: follows the diagnosis. help is
 		// reserved for steps the user runs; a sequence pg-sprite runs
 		// itself is a note.
-		w.diag("help", string(ps.Guidance), guidanceText(ps.Guidance))
+		w.diag("help", string(ps.Guidance), suggest.ManualPath(ps.Guidance))
 	}
 	if ps.Disposition == router.DispositionExecute {
 		if substituted(ps) {
@@ -270,7 +271,7 @@ func impactText(r planner.Reason) string {
 	case planner.ReasonOnlineIdiom:
 		return "already the safe online form; does not block the table while it runs"
 	case planner.ReasonFastDefault:
-		return "catalog-only (fast default); no table scan or rewrite"
+		return "the catalog stores the default (fast default); no table scan or rewrite"
 	case planner.ReasonBinaryCoercible:
 		return "PostgreSQL relabels the type in place; no table rewrite"
 	case planner.ReasonSaferIdiom:
@@ -278,15 +279,17 @@ func impactText(r planner.Reason) string {
 	case planner.ReasonAppBreakingRename:
 		return "the rename itself is a brief catalog change, but every query still using the old name fails the moment it commits"
 	case planner.ReasonVolatileDefault:
-		return "the default must be computed per row: a full table rewrite under an exclusive lock that blocks reads and writes"
+		return "a default computed for every row forces a full table rewrite under an exclusive lock that blocks reads and writes"
 	case planner.ReasonGeneratedStored:
 		return "computing the stored column forces a full table rewrite under an exclusive lock that blocks reads and writes"
 	case planner.ReasonTypeRewrite:
-		return "the type conversion forces a full table rewrite under an exclusive lock that blocks reads and writes"
+		return "converting or checking every row for the column's type forces a full table rewrite under an exclusive lock that blocks reads and writes"
 	case planner.ReasonRelocation:
 		return "physically moves the table's storage: rewrite-scale I/O under an exclusive lock that blocks reads and writes"
 	case planner.ReasonPartitionParentLock:
 		return "takes a brief exclusive lock on the partitioned parent, briefly blocking access to every partition"
+	case planner.ReasonReplicaIdentity:
+		return "drops what the table's replica identity keys on; UPDATE and DELETE on the table fail while a publication publishes them"
 	case planner.ReasonUnsupportedOperation:
 		return "pg-sprite does not recognize this operation and will not run it"
 	}

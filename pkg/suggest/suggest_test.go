@@ -375,3 +375,12 @@ func TestReportJSONCleanSuggestionsAreEmptyArray(t *testing.T) {
 		"suggestions": []
 	}`, string(raw))
 }
+
+// Every guidance code has its own steps, so no surface falls back to
+// printing a bare code where an operator needs the manual path.
+func TestManualPathStatesStepsForEveryGuidance(t *testing.T) {
+	for _, g := range suggest.Guidances() {
+		assert.NotEqual(t, string(g), suggest.ManualPath(g), "guidance %q has no steps", g)
+	}
+	assert.Equal(t, "not-a-guidance", suggest.ManualPath("not-a-guidance"))
+}
