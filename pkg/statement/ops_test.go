@@ -176,6 +176,13 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpAddConstraint, Name: "t_pkey", Constraint: statement.ConstraintPrimaryKey, Columns: []string{"id"}},
 		},
 		{
+			name: "add unique with every index attribute",
+			sql:  "ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (a) INCLUDE (b) WITH (fillfactor = 70) USING INDEX TABLESPACE fast DEFERRABLE INITIALLY DEFERRED",
+			want: statement.Op{Kind: statement.OpAddConstraint, Name: "k", Constraint: statement.ConstraintUnique, Columns: []string{"a"},
+				IncludeColumns: []string{"b"}, NullsNotDistinct: true, Deferrable: true, InitiallyDeferred: true,
+				IndexTablespace: "fast", IndexOptions: true},
+		},
+		{
 			name: "add unique using index",
 			sql:  "ALTER TABLE t ADD CONSTRAINT u UNIQUE USING INDEX u_idx",
 			want: statement.Op{Kind: statement.OpAddConstraint, Name: "u", Constraint: statement.ConstraintUnique, UsingIndex: true, Indexes: []string{"u_idx"}},

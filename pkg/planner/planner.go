@@ -487,7 +487,10 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, 
 		// Direct ADD PK/UNIQUE builds its index under ACCESS EXCLUSIVE;
 		// the safer sequence builds it concurrently and attaches it.
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
-		if single && len(op.Columns) > 0 {
+		if single && len(op.Columns) > 0 && !op.IndexOptions {
+			// WITH (...) storage parameters are not rendered into the
+			// sequence; without one, the decision carries manual guidance
+			// instead of SQL that would build the index without them.
 			d.SaferSQL = usingIndexSequence(st, op)
 		}
 
@@ -701,7 +704,12 @@ func setNotNullSequence(st statement.Statement, column string) []string {
 
 // usingIndexSequence is the native two-step ADD PRIMARY KEY / UNIQUE
 // pattern: build the unique index concurrently, then attach it as the
-// constraint under a brief lock.
+// constraint under a brief lock. The sequence must declare the same
+// constraint the statement does, so the index carries the INCLUDE columns,
+// NULLS NOT DISTINCT, and the tablespace, and the attach carries
+// DEFERRABLE and INITIALLY DEFERRED; a key built without one of them
+// accepts rows, or checks them at a moment, the statement did not ask for.
+// The caller builds no sequence for a key with WITH (...) parameters.
 //
 // Partial-failure contract: a failed CREATE INDEX CONCURRENTLY (step 1)
 // leaves an INVALID index under the generated name, and re-running step 1
@@ -728,8 +736,26 @@ func usingIndexSequence(st statement.Statement, op statement.Op) []string {
 		cols[i] = pgx.Identifier{c}.Sanitize()
 	}
 	table := tableIdent(st)
-	return []string{
-		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY %s ON %s (%s)", idx, table, strings.Join(cols, ", ")),
-		fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s USING INDEX %s", table, idx, keyword, idx),
+	create := fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY %s ON %s (%s)", idx, table, strings.Join(cols, ", "))
+	if len(op.IncludeColumns) > 0 {
+		include := make([]string, len(op.IncludeColumns))
+		for i, c := range op.IncludeColumns {
+			include[i] = pgx.Identifier{c}.Sanitize()
+		}
+		create += " INCLUDE (" + strings.Join(include, ", ") + ")"
 	}
+	if op.NullsNotDistinct {
+		create += " NULLS NOT DISTINCT"
+	}
+	if op.IndexTablespace != "" {
+		create += " TABLESPACE " + pgx.Identifier{op.IndexTablespace}.Sanitize()
+	}
+	attach := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s USING INDEX %s", table, idx, keyword, idx)
+	if op.Deferrable {
+		attach += " DEFERRABLE"
+	}
+	if op.InitiallyDeferred {
+		attach += " INITIALLY DEFERRED"
+	}
+	return []string{create, attach}
 }

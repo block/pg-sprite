@@ -102,6 +102,22 @@ type Op struct {
 	// Columns are the plain key columns of an ADD PRIMARY KEY / UNIQUE;
 	// empty when the keys are expressions.
 	Columns []string
+	// IncludeColumns are the INCLUDE columns of an ADD PRIMARY KEY /
+	// UNIQUE: carried in the index, not part of the key.
+	IncludeColumns []string
+	// NullsNotDistinct is true for an ADD UNIQUE NULLS NOT DISTINCT, which
+	// rejects a second row whose key is NULL.
+	NullsNotDistinct bool
+	// Deferrable and InitiallyDeferred are an ADD PRIMARY KEY / UNIQUE's
+	// DEFERRABLE and INITIALLY DEFERRED: when the uniqueness check runs.
+	Deferrable        bool
+	InitiallyDeferred bool
+	// IndexTablespace is the USING INDEX TABLESPACE of an ADD PRIMARY KEY
+	// / UNIQUE: where its index is built.
+	IndexTablespace string
+	// IndexOptions is true when an ADD PRIMARY KEY / UNIQUE sets its
+	// index's storage parameters with WITH (...).
+	IndexOptions bool
 	// Constraint is the constraint family for OpAddConstraint.
 	Constraint ConstraintKind
 	// NotValid is true for ADD CONSTRAINT ... NOT VALID.
@@ -476,7 +492,24 @@ func addConstraintOp(con *pganalyze.Constraint) Op {
 	for _, k := range con.GetKeys() {
 		op.Columns = append(op.Columns, k.GetString_().GetSval())
 	}
+	if op.Constraint == ConstraintPrimaryKey || op.Constraint == ConstraintUnique {
+		keyIndexAttributes(&op, con)
+	}
 	return op
+}
+
+// keyIndexAttributes records what an ADD PRIMARY KEY / UNIQUE declares
+// beyond its key columns: everything an online sequence that builds the
+// index first has to carry for the result to be the same constraint.
+func keyIndexAttributes(op *Op, con *pganalyze.Constraint) {
+	for _, c := range con.GetIncluding() {
+		op.IncludeColumns = append(op.IncludeColumns, c.GetString_().GetSval())
+	}
+	op.NullsNotDistinct = con.GetNullsNotDistinct()
+	op.Deferrable = con.GetDeferrable()
+	op.InitiallyDeferred = con.GetInitdeferred()
+	op.IndexTablespace = con.GetIndexspace()
+	op.IndexOptions = len(con.GetOptions()) > 0
 }
 
 // renameOp maps a RENAME statement (column, table, or index — the grammar

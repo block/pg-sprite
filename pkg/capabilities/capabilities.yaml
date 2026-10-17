@@ -159,7 +159,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`. In a desired file, a new key whose name and index match a valid live unique index takes that index over with `ADD CONSTRAINT ... USING INDEX` at the key's declared deferrability, instead of a destructive drop and rebuild. Execution reads the index again under the table's lock and refuses with the permanent `adopted-index-drift` code, attaching nothing, if it was dropped, replaced, or left invalid since planning"
+    reason_notes: "Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`. The sequence carries the key's `INCLUDE` columns, `NULLS NOT DISTINCT`, and index tablespace onto the index, and `DEFERRABLE` / `INITIALLY DEFERRED` onto the attach. A key with `WITH (...)` storage parameters gets no rewrite and is refused with guidance to build the index with them, then attach it. In a desired file, a new key whose name and index match a valid live unique index takes that index over with `ADD CONSTRAINT ... USING INDEX` at the key's declared deferrability, instead of a destructive drop and rebuild. Execution reads the index again under the table's lock and refuses with the permanent `adopted-index-drift` code, attaching nothing, if it was dropped, replaced, or left invalid since planning"
   - id: add-check-add-foreign-key-imperative
     area: "constraints"
     operation: "`ADD CHECK` / `ADD FOREIGN KEY` (imperative)"

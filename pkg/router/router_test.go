@@ -63,6 +63,21 @@ func TestRouteSaferIdiomWithoutRewriteFailsClosed(t *testing.T) {
 	assert.Equal(t, router.DispositionRewriteRequired, routed.Disposition)
 }
 
+func TestRouteKeyWithStorageParametersFailsClosed(t *testing.T) {
+	// The online sequence does not render WITH (...) storage parameters,
+	// so the planner builds none: the key must be refused, never built by
+	// its blocking form or by a sequence that leaves the parameters out.
+	plan := classify(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = 70)")
+	require.Equal(t, planner.RouteNative, plan.Route)
+	require.Len(t, plan.Decisions, 1)
+	require.Empty(t, plan.Decisions[0].SaferSQL)
+
+	routed := router.Route([]planner.Plan{plan})
+	st := routed.Statements[0]
+	assert.Equal(t, router.DispositionRewriteRequired, st.Disposition)
+	assert.Empty(t, st.ExecSQL)
+}
+
 func TestRouteMultiOpPartialRewriteFailsClosed(t *testing.T) {
 	// SET NOT NULL needs a safer sequence, but multi-operation statements
 	// carry no rewrites — the submitted form must not run on the strength
