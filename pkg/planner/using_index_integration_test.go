@@ -28,7 +28,7 @@ func TestUsingIndexSequenceDeclaresTheSameConstraint(t *testing.T) {
 	url := testutil.NewDatabase(t, testutil.StartPostgres(t))
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	var version int
 	require.NoError(t, pool.QueryRow(t.Context(),
 		"SELECT current_setting('server_version_num')::int").Scan(&version))
