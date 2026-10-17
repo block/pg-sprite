@@ -67,7 +67,7 @@ func IntrospectTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model, 
 // runs under the caller's session search_path (ListManagedTables) qualifies
 // everything instead.
 func introspectInTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model, error) {
-	return introspectOnPath(ctx, tx, schema, table, searchPathFor(schema))
+	return introspectOnPath(ctx, tx, schema, table, searchPathFor(schema), false)
 }
 
 // searchPathFor is the search_path a table in schema is introspected under:
@@ -82,8 +82,10 @@ func searchPathFor(schema string) []string {
 // introspectOnPath introspects schema.table with the transaction-local
 // search_path set to path, which must start with schema. A scratch build
 // passes its own path so it deparses a reference to the target schema the
-// way the live introspection does: unqualified.
-func introspectOnPath(ctx context.Context, tx pgx.Tx, schema, table string, path []string) (Model, error) {
+// way the live introspection does: unqualified. keyIndexDefs reads the
+// definition of the index each key constraint owns (Constraint.IndexDef),
+// which only the desired side needs.
+func introspectOnPath(ctx context.Context, tx pgx.Tx, schema, table string, path []string, keyIndexDefs bool) (Model, error) {
 	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath(path...)); err != nil {
 		return Model{}, fmt.Errorf("set introspection search_path: %w", err)
 	}
@@ -127,7 +129,7 @@ func introspectOnPath(ctx context.Context, tx pgx.Tx, schema, table string, path
 	if m.Columns, err = introspectColumns(ctx, tx, oid); err != nil {
 		return Model{}, fmt.Errorf("introspect columns of %s.%s: %w", schema, table, err)
 	}
-	if m.Constraints, err = introspectConstraints(ctx, tx, oid); err != nil {
+	if m.Constraints, err = introspectConstraints(ctx, tx, oid, keyIndexDefs); err != nil {
 		return Model{}, fmt.Errorf("introspect constraints of %s.%s: %w", schema, table, err)
 	}
 	if m.Indexes, err = introspectIndexes(ctx, tx, oid); err != nil {
@@ -466,13 +468,19 @@ func sequenceRowComplete(start, increment, minValue, maxValue, cache *int64, cyc
 // unique, check, foreign key, exclusion) as server-decompiled definitions.
 // NOT NULL is modeled on the column (pg_attribute.attnotnull), so the PG 18
 // pg_constraint rows for NOT NULL are deliberately excluded to keep the
-// model identical across supported majors.
-func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32) ([]Constraint, error) {
+// model identical across supported majors. keyIndexDefs reads the
+// definition of the index each primary key and unique constraint owns;
+// pg_get_indexdef waits behind any lock that conflicts with ACCESS SHARE on
+// the table, so it is read only for a scratch table, which no other session
+// can hold.
+func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32, keyIndexDefs bool) ([]Constraint, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT conname, pg_get_constraintdef(oid), contype = 'f'
+		SELECT conname, pg_get_constraintdef(oid), contype = 'f', contype = 'p',
+		       CASE WHEN $2 AND contype IN ('p','u') THEN pg_get_indexdef(conindid) ELSE '' END,
+		       condeferrable, condeferred
 		FROM pg_constraint
 		WHERE conrelid = $1 AND contype IN ('p','u','c','f','x') AND conislocal
-		ORDER BY conname`, oid)
+		ORDER BY conname`, oid, keyIndexDefs)
 	if err != nil {
 		return nil, fmt.Errorf("query constraints: %w", err)
 	}
@@ -480,8 +488,13 @@ func introspectConstraints(ctx context.Context, tx pgx.Tx, oid uint32) ([]Constr
 	var cons []Constraint
 	for rows.Next() {
 		var c Constraint
-		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey); err != nil {
+		if err := rows.Scan(&c.Name, &c.Def, &c.ForeignKey, &c.Primary, &c.IndexDef, &c.Deferrable, &c.InitiallyDeferred); err != nil {
 			return nil, fmt.Errorf("scan constraint: %w", err)
+		}
+		if c.IndexDef != "" {
+			if c.IndexDef, err = statement.Qualify(c.IndexDef, ""); err != nil {
+				return nil, fmt.Errorf("unqualify the index of constraint %s: %w", c.Name, err)
+			}
 		}
 		cons = append(cons, c)
 	}

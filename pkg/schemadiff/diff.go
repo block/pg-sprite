@@ -110,6 +110,21 @@ type Change struct {
 	// Destructive changes are gated by the caller, never executed
 	// silently.
 	Destructive bool `json:"destructive,omitempty"`
+	// Adopts is set on an ADD CONSTRAINT ... USING INDEX: the live index
+	// the constraint takes over, with the definition the diff matched it
+	// against. The statement names only the index, so execution checks
+	// the definition again under the table's lock before attaching it.
+	// The SQL already identifies the change, so it stays out of the JSON.
+	Adopts *IndexAdoption `json:"-"`
+}
+
+// IndexAdoption is an index a new primary key or unique constraint takes
+// over, and the definition, as introspection reads it (pg_get_indexdef with
+// the schema qualification removed), that the index must still have when
+// it does.
+type IndexAdoption struct {
+	Index string
+	Def   string
 }
 
 // Diff derives the ordered statement list that converges live onto desired.
@@ -169,9 +184,15 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// alone. Only a plain table's invalid entry is an unfinished build.
 	partitioned := live.PartitionKey != ""
 
+	adopted := adoptableIndexes(partitioned, liveCons, liveIdx, desired.Constraints)
+
 	// Indexes to drop: gone from desired, or changed (dropped here,
-	// recreated in the create bucket below).
+	// recreated in the create bucket below). An index a new key constraint
+	// adopts stays: the constraint takes it over below.
 	for _, ix := range live.Indexes {
+		if _, ok := adopted[ix.Name]; ok {
+			continue
+		}
 		if indexNeedsDrop(partitioned, ix, desiredIdx) {
 			changes = append(changes, Change{
 				SQL:         "DROP INDEX " + pgx.Identifier{schema, ix.Name}.Sanitize(),
@@ -245,6 +266,14 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 
 	// Constraints to add: new, or re-added after a definition change.
 	for _, con := range desired.Constraints {
+		if _, ok := adopted[con.Name]; ok {
+			changes = append(changes, Change{
+				SQL:    adoptIndexSQL(table, con),
+				Kind:   ChangeAddConstraint,
+				Adopts: &IndexAdoption{Index: con.Name, Def: con.IndexDef},
+			})
+			continue
+		}
 		had, ok := liveCons[con.Name]
 		if !ok || had.Def != con.Def {
 			sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize() + " " + con.Def
@@ -491,6 +520,57 @@ func columnsByName(cols []Column) map[string]Column {
 		m[c.Name] = c
 	}
 	return m
+}
+
+// adoptableIndexes names the live indexes a new primary key or unique
+// constraint can take over with ADD CONSTRAINT ... USING INDEX, keyed by
+// index name, which is also the constraint's. Dropping such an index and
+// letting the constraint build its own would leave the table without the
+// uniqueness guarantee and without the index for as long as the rebuild
+// runs. A live index qualifies when it has the constraint's name and is
+// exactly the index the constraint would build, so adopting it leaves the
+// table as building the constraint fresh would. An unfinished build keeps
+// the drop and rebuild, and so does a partitioned parent, where the server
+// refuses USING INDEX.
+func adoptableIndexes(partitioned bool, liveCons map[string]Constraint, liveIdx map[string]Index, desired []Constraint) map[string]struct{} {
+	adopted := make(map[string]struct{})
+	if partitioned {
+		return adopted
+	}
+	for _, con := range desired {
+		if con.IndexDef == "" {
+			continue
+		}
+		if _, ok := liveCons[con.Name]; ok {
+			continue
+		}
+		ix, ok := liveIdx[con.Name]
+		if !ok || ix.Invalid || ix.Def != con.IndexDef {
+			continue
+		}
+		adopted[con.Name] = struct{}{}
+	}
+	return adopted
+}
+
+// adoptIndexSQL is the statement that makes a primary key or unique
+// constraint take over the live index of its own name, with the
+// constraint's declared deferrability: the server marks the index
+// deferred as it attaches it.
+func adoptIndexSQL(table string, con Constraint) string {
+	key := "UNIQUE"
+	if con.Primary {
+		key = "PRIMARY KEY"
+	}
+	name := pgx.Identifier{con.Name}.Sanitize()
+	sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + name + " " + key + " USING INDEX " + name
+	if con.Deferrable {
+		sql += " DEFERRABLE"
+	}
+	if con.InitiallyDeferred {
+		sql += " INITIALLY DEFERRED"
+	}
+	return sql
 }
 
 // dropConstraintKind classifies a constraint drop, keeping foreign keys in
