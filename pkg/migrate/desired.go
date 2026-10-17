@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -29,6 +30,13 @@ const stoppedBeforeVerdict = "stopped before a verdict; nothing about it was exe
 // operational failure with [errors.Is].
 var ErrForceNotSupported = errors.New(
 	"the force acknowledgement applies to the imperative front door only; desired-state execution never runs a submitted form blind")
+
+// ErrNotConverged is returned by [RunDesired] when every planned statement
+// committed but a plan derived again from the live table afterwards is not
+// empty: the table still differs from the desired schema, so the run cannot
+// report it converged. The committed statements stay in effect; the error
+// names the statements a rerun would plan.
+var ErrNotConverged = errors.New("every planned statement committed but the table still differs from the desired schema")
 
 // DesiredRequest names the inputs to [RunDesired]. Zero-value fields are
 // invalid: the schema must be set, and the desired state must come from
@@ -67,13 +75,15 @@ type DesiredResult struct {
 	// attempted statement.
 	Verdicts []verdict.Verdict `json:"verdicts,omitempty"`
 	// Outcome is what happened overall: executed when every planned
-	// statement committed (or there was nothing to run), refused when the
-	// plan or one of its statements was refused and execution stopped,
-	// failed when execution stopped on an operational error. A failed
-	// result whose stopping statement has no verdict means the pipeline
-	// stopped before reaching one — nothing about that statement was
-	// executed; a failed verdict means the statement was attempted and
-	// failed. Detail says which.
+	// statement committed and, for an existing table, a plan derived
+	// again afterwards is empty (or there was nothing to run), refused
+	// when the plan or one of its statements was refused and execution
+	// stopped, failed when execution stopped on an operational error. A failed result whose stopping
+	// statement has no verdict means the pipeline stopped before reaching
+	// one — nothing about that statement was executed; a failed verdict
+	// means the statement was attempted and failed. A failed result with
+	// an executed verdict for every planned statement means everything
+	// committed but convergence could not be verified. Detail says which.
 	Outcome verdict.Outcome `json:"outcome"`
 	// Reason is the typed refusal cause; empty unless Outcome is refused.
 	Reason verdict.Reason `json:"reason,omitempty"`
@@ -121,6 +131,18 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // running, an executed statement stays committed even when a later one
 // refuses or fails, and the result's verdicts disclose exactly how far
 // convergence got.
+//
+// Convergence of an existing table is verified, not assumed: after the
+// last statement commits, the plan is derived again from the live table,
+// and the run is executed only when that plan is empty. A non-empty plan
+// returns the failed result with [ErrNotConverged], naming what a rerun
+// would plan; a failure to derive it returns the failed result with that
+// error. Either way every statement stays committed. The greenfield path
+// is not re-planned: deriving a plan for an existing table builds the
+// desired side in a scratch schema, which needs CREATE on the database,
+// and a create needs only CREATE in its own schema. A create runs the
+// desired file's own statements and verifies every name it claims before
+// it reports, which is its proof instead.
 //
 // The result-and-error contract mirrors [Run]'s three shapes. A refusal —
 // at plan admission or on a mid-plan statement — returns the result with a
@@ -215,9 +237,45 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 			return result.refused(ref, committedPrefixDetail(i, len(report.Statements), "was refused at execution time")), nil
 		}
 	}
+	if err := verifyConverged(ctx, pool, req); err != nil {
+		return result.unproven(len(report.Statements), err)
+	}
 	result.Outcome = verdict.OutcomeExecuted
-	result.Detail = fmt.Sprintf("converged: all %d planned statements committed", len(report.Statements))
+	result.Detail = fmt.Sprintf("converged: all %d planned statements committed and a fresh plan is empty", len(report.Statements))
 	return result, nil
+}
+
+// verifyConverged derives the plan again from the live table and returns
+// nil only when it is empty. Every statement committing is not proof the
+// table matches the desired schema: a statement can commit and leave the
+// table short of what the plan modeled, and another session can change the
+// table between the last commit and the end of the run. The fresh plan is
+// the same comparison the next run would make, so a run reports converged
+// only when its rerun would plan nothing.
+func verifyConverged(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest) error {
+	again, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
+	if err != nil {
+		return fmt.Errorf("derive the plan again to verify convergence: %w", err)
+	}
+	if len(again.Statements) == 0 {
+		return nil
+	}
+	remaining := make([]string, len(again.Statements))
+	for i, ps := range again.Statements {
+		remaining[i] = ps.SQL
+	}
+	return fmt.Errorf("%w; a rerun would plan: %s", ErrNotConverged, strings.Join(remaining, "; "))
+}
+
+// unproven returns r as the failed result of a run whose n planned
+// statements all committed but whose convergence check did not pass. The
+// result is failed rather than executed because the run cannot claim what
+// it was asked to do; the detail says every statement committed, so the
+// caller does not read the failure as a rollback.
+func (r DesiredResult) unproven(n int, err error) (DesiredResult, error) {
+	r.Outcome = verdict.OutcomeFailed
+	r.Detail = fmt.Sprintf("all %d planned statements committed and remain in effect, but convergence is unproven: %v", n, err)
+	return r, err
 }
 
 // runCreate is the greenfield branch of desired-state execution: the plan's

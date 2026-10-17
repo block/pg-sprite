@@ -135,6 +135,7 @@ CREATE INDEX t_v_idx ON t (v);`
 		res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
+		assert.Equal(t, "converged: all 2 planned statements committed and a fresh plan is empty", res.Detail)
 		require.Len(t, res.Verdicts, len(res.Plan.Statements),
 			"every planned statement carries a verdict")
 		for _, v := range res.Verdicts {
@@ -674,4 +675,36 @@ CREATE INDEX t_v_idx ON t (v);`
 		assert.NotEmpty(t, res.Verdicts[0].ExecutedSQL,
 			"the failed verdict discloses the committed prefix inside the statement")
 	})
+}
+
+// A run reports converged only when a plan derived again after its last
+// commit is empty. Here an event trigger stands in for another session:
+// whenever the table is altered, it adds a column the desired file does
+// not declare, so every planned statement commits and the table still
+// differs. The run fails with ErrNotConverged, names what a rerun would
+// plan, and reports every statement it ran as executed, so the caller
+// reads the failure as unproven convergence and not as a rollback.
+func TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, "add_extra", fmt.Sprintf(`
+		IF TG_TAG = 'ALTER TABLE'
+			AND EXISTS (SELECT FROM pg_catalog.pg_event_trigger_ddl_commands() WHERE object_identity = '%[1]s.t')
+			AND NOT EXISTS (SELECT FROM pg_catalog.pg_attribute WHERE attrelid = '%[1]s.t'::regclass AND attname = 'extra') THEN
+			ALTER TABLE %[1]s.t ADD COLUMN extra int;
+		END IF;`, schema))
+
+	req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, "CREATE TABLE t (id int PRIMARY KEY, v text);")}
+	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
+	require.ErrorIs(t, err, migrate.ErrNotConverged)
+	assert.Contains(t, err.Error(), "the table still differs from the desired schema; a rerun would plan: ALTER TABLE "+schema+".t DROP extra")
+	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+	assert.Contains(t, res.Detail, "all 1 planned statements committed and remain in effect, but convergence is unproven")
+	require.Len(t, res.Verdicts, 1)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
+	assert.True(t, hasColumn(t, pool, schema, "v"), "the planned statement stays committed")
 }

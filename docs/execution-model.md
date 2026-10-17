@@ -277,6 +277,17 @@ plan, one verdict per attempted statement, and a detail naming exactly which
 planned statements committed and remain in effect: the committed prefix at
 the plan level, statements instead of steps.
 
+Committing every planned statement is not proof the table converged: a
+concurrent session, an event trigger, or a planner gap can leave the table
+still differing from the desired schema after the last commit. So on an
+existing table `RunDesired` derives the plan again after the last commit and
+reports executed only when that fresh plan is empty. When it is not, the
+result is failed with `migrate.ErrNotConverged`, every verdict still reads
+executed, and the error names what a rerun would plan. A greenfield create
+does not re-plan, since deriving a plan builds the desired side in a scratch
+schema and needs `CREATE` on the database; it verifies instead that the new
+table owns every relation name the desired file claimed.
+
 ## Outcome codes
 
 `executor.Codes()` enumerates the closed vocabulary below, and
