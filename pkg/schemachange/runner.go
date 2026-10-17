@@ -45,7 +45,9 @@ type RunOptions struct {
 	Catchup applier.CatchupOptions
 	// Live bounds how the verification pass settles a chunk the stream was
 	// still carrying changes for. Its Confirmed source is the run's own
-	// catch-up and must be left nil.
+	// catch-up and must be left nil. So must Flushes: the run's pass
+	// recopies nothing (a divergence aborts it), and the flush gate a
+	// repair needs is the run's own catch-up too.
 	Live checksum.LiveOptions
 	// KeepOld leaves the retained source under its derived _old name after
 	// the swap (D9), for a rollback window the caller manages; the run
@@ -91,6 +93,9 @@ func (o RunOptions) validate() error {
 	}
 	if o.Live.Confirmed != nil {
 		return fmt.Errorf("%w: the live verification pass reads the run's own catch-up; leave Live.Confirmed nil", ErrInvalidOptions)
+	}
+	if o.Live.Flushes != nil {
+		return fmt.Errorf("%w: the live verification pass holds the run's own catch-up's flushes; leave Live.Flushes nil", ErrInvalidOptions)
 	}
 	return nil
 }

@@ -50,8 +50,24 @@ const liveRows = 2500
 // hold before the flush gives up and ends the catch-up.
 const heldFlushLockTimeout = 30 * time.Second
 
+// liveSetup is how a test shapes its fixture. The zero value is the
+// orchestrator's wiring.
+type liveSetup struct {
+	// flushLockTimeout is the flusher's lock wait; zero means
+	// heldFlushLockTimeout.
+	flushLockTimeout time.Duration
+}
+
 func newLiveFixture(t *testing.T) *liveFixture {
 	t.Helper()
+	return newLiveFixtureWith(t, liveSetup{})
+}
+
+func newLiveFixtureWith(t *testing.T, setup liveSetup) *liveFixture {
+	t.Helper()
+	if setup.flushLockTimeout == 0 {
+		setup.flushLockTimeout = heldFlushLockTimeout
+	}
 	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=logical", "wal_sender_timeout=2s")
 	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL), MaxConns: 16}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
@@ -64,7 +80,7 @@ func newLiveFixture(t *testing.T) *liveFixture {
 		preflight.CopySwapEnvironment{LogicalDecoding: true, FreeDiskBytes: testutil.UnlimitedDisk})
 	require.NoError(t, err)
 	f := &liveFixture{cfg: cfg, pool: pool, table: table, target: target, done: make(chan error, 1)}
-	f.start(t)
+	f.start(t, setup)
 	return f
 }
 
@@ -72,7 +88,7 @@ func newLiveFixture(t *testing.T) *liveFixture {
 // under the table lock before the shadow is built, the stream opened from
 // its consistent point, the copy run to completion so every key is landed,
 // and the catch-up started against the finished copier's position.
-func (f *liveFixture) start(t *testing.T) {
+func (f *liveFixture) start(t *testing.T, setup liveSetup) {
 	t.Helper()
 	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.table.Schema, f.table.Table)
 	require.NoError(t, err)
@@ -102,7 +118,7 @@ func (f *liveFixture) start(t *testing.T) {
 		assert.NoError(t, stream.Close(context.WithoutCancel(t.Context())))
 	})
 
-	flusher, err := applier.NewFlusher(f.target, f.shadow, lock, applier.Options{LockTimeout: heldFlushLockTimeout})
+	flusher, err := applier.NewFlusher(f.target, f.shadow, lock, applier.Options{LockTimeout: setup.flushLockTimeout})
 	require.NoError(t, err)
 	c, err := copier.NewCopier(f.target, f.shadow, lock, copier.Watermark{}, copier.Options{
 		Workers: 2,
@@ -185,11 +201,15 @@ func (f *liveFixture) verifier(t *testing.T, opts checksum.Options) *checksum.Ve
 	return v
 }
 
-// checkLive runs one live pass through the complete watermark.
+// checkLive runs one live pass through the complete watermark, against
+// the fixture's catch-up unless the test stands in for it.
 func (f *liveFixture) checkLive(t *testing.T, v *checksum.Verifier, policy checksum.DivergencePolicy, live checksum.LiveOptions) (checksum.Outcome, error) {
 	t.Helper()
 	if live.Confirmed == nil {
 		live.Confirmed = f.catchup
+	}
+	if live.Flushes == nil {
+		live.Flushes = f.catchup
 	}
 	return v.CheckLive(t.Context(), f.pool, copier.NewWatermark(math.MaxInt64), policy, live)
 }
