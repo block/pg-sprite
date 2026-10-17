@@ -1051,7 +1051,8 @@ statement it ran keeps its executed verdict, and the error names the statements 
 plan. A greenfield create proves its outcome through the names it claimed instead (ST-9 and
 the create-name checks), because deriving a plan needs `CREATE` on the database.
 *Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`). Tests:
-`TestRunDesired`, `TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`.
+`TestRunDesired`, `TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,
+`TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt`.
 *Source:* review of desired-state outcome reporting.
 
 ## Refusals and preflight (RF)

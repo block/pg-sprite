@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -702,6 +703,46 @@ func TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit(t *testing.T)
 	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
 	require.ErrorIs(t, err, migrate.ErrNotConverged)
 	assert.Contains(t, err.Error(), "the table still differs from the desired schema; a rerun would plan: ALTER TABLE "+schema+".t DROP extra")
+	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+	assert.Contains(t, res.Detail, "all 1 planned statements committed and remain in effect, but convergence is unproven")
+	require.Len(t, res.Verdicts, 1)
+	assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
+	assert.True(t, hasColumn(t, pool, schema, "v"), "the planned statement stays committed")
+}
+
+// When the plan derived after the last commit cannot be built, the run
+// cannot prove convergence either way. Here an event trigger fails the
+// re-plan's scratch build once the run's ADD COLUMN has committed, so only
+// that second derivation fails. The run fails with the derivation's own
+// error rather than ErrNotConverged, and reports the committed statement
+// as executed and still in effect.
+func TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
+	require.NoError(t, err)
+	// The scratch build creates the desired table in a pgsprite_scratch_
+	// schema with the target schema on its search_path, which scopes the
+	// fault to this test's own builds.
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, "fail_replan", fmt.Sprintf(`
+		IF TG_TAG = 'CREATE TABLE'
+			AND pg_catalog.current_schema() LIKE 'pgsprite\_scratch\_%%'
+			AND pg_catalog.current_setting('search_path') LIKE '%%%[1]s%%'
+			AND EXISTS (SELECT FROM pg_catalog.pg_attribute
+				WHERE attrelid = pg_catalog.to_regclass('%[1]s.t') AND attname = 'v') THEN
+			RAISE EXCEPTION 'injected re-plan failure';
+		END IF;`, schema))
+
+	req := migrate.DesiredRequest{Schema: schema, Desired: parseDesired(t, "CREATE TABLE t (id int PRIMARY KEY, v text);")}
+	res, err := migrate.RunDesired(t.Context(), pool, req, runOptions())
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, migrate.ErrNotConverged)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "injected re-plan failure", pgErr.Message)
+	assert.Contains(t, err.Error(), "derive the plan again to verify convergence")
 	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
 	assert.Contains(t, res.Detail, "all 1 planned statements committed and remain in effect, but convergence is unproven")
 	require.Len(t, res.Verdicts, 1)
