@@ -351,6 +351,88 @@ func TestClassifyAddPrimaryKeySequence(t *testing.T) {
 	}, d.SaferSQL)
 }
 
+// The online sequence must declare the constraint the statement declares:
+// an index built without INCLUDE, NULLS NOT DISTINCT, or the tablespace, or
+// an attach without DEFERRABLE or INITIALLY DEFERRED, is a different
+// constraint. WITH (...) storage parameters ride on the index too; only a
+// parameter the sequence cannot render faithfully gets no sequence, so the
+// decision carries guidance instead of SQL that drops it.
+// TestUsingIndexSequenceDeclaresTheSameConstraint proves each on a server.
+func TestClassifyAddKeySequenceCarriesEveryAttribute(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want []string
+	}{
+		{
+			"include columns",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) INCLUDE (name, id)",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") INCLUDE ("name", "id")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"nulls not distinct",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (email)",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") NULLS NOT DISTINCT`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"index tablespace",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) USING INDEX TABLESPACE fast",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"storage parameters",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) INCLUDE (id) WITH (fillfactor = 70, deduplicate_items = off) USING INDEX TABLESPACE fast",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") INCLUDE ("id") WITH ("fillfactor" = '70', "deduplicate_items" = 'off') TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"deferrable initially deferred",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) DEFERRABLE INITIALLY DEFERRED",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k" DEFERRABLE INITIALLY DEFERRED`,
+			},
+		},
+		{
+			"deferrable primary key",
+			"ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY (id) DEFERRABLE",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "t_pkey" ON "t" ("id")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "t_pkey" PRIMARY KEY USING INDEX "t_pkey" DEFERRABLE`,
+			},
+		},
+		{
+			"every attribute at once",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (a, b) INCLUDE (c) USING INDEX TABLESPACE fast DEFERRABLE INITIALLY DEFERRED",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("a", "b") INCLUDE ("c") NULLS NOT DISTINCT TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k" DEFERRABLE INITIALLY DEFERRED`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, classifyOne(t, tc.sql).SaferSQL)
+		})
+	}
+
+	d := classifyOne(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = s.seventy)")
+	assert.Equal(t, planner.RouteNative, d.Route)
+	assert.Equal(t, planner.ReasonSaferIdiom, d.Reason)
+	assert.Empty(t, d.SaferSQL, "a sequence would build the index without the parameter it cannot carry")
+}
+
 func TestClassifyAddCheckSequenceValidates(t *testing.T) {
 	d := classifyOne(t, "ALTER TABLE t ADD CONSTRAINT c CHECK (age > 0)")
 	require.Len(t, d.SaferSQL, 2)
