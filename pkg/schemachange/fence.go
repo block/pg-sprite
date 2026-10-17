@@ -46,8 +46,11 @@ $pgsprite$`
 // writeFenceLockSQL serializes two engines creating the fence function
 // for the first time in one database, on the engine's advisory key for
 // the function, so neither meets the catalog's duplicate-key failure for
-// a CREATE the other has in flight.
-const writeFenceLockSQL = "SELECT pg_advisory_xact_lock($1, hashtext(quote_ident($2) || '.' || quote_ident($3)))"
+// a CREATE the other has in flight. It runs under the caller's session
+// search_path, so every function and operator is qualified (INV: CO-9): a
+// planted overload in a searched schema cannot change the key.
+const writeFenceLockSQL = "SELECT pg_catalog.pg_advisory_xact_lock($1, pg_catalog.hashtext(" +
+	"pg_catalog.quote_ident($2) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident($3)))"
 
 // writeFenceTriggerType is pg_trigger.tgtype for the fence as installed: a
 // statement-level BEFORE trigger on INSERT (4), DELETE (8), UPDATE (16), and
@@ -277,11 +280,14 @@ func dropWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableL
 func checkSource(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget) error {
 	schema, table := target.Schema(), target.Table()
 	var relkind, owner string
+	// INV: CO-9 — the transaction runs under the caller's session search_path,
+	// so every catalog name is qualified and a planted overload in a searched
+	// schema cannot answer this read.
 	err := tx.QueryRow(ctx, `
-		SELECT c.relkind::text, pg_get_userbyid(c.relowner)
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2`, schema, table).Scan(&relkind, &owner)
+		SELECT c.relkind::pg_catalog.text, pg_catalog.pg_get_userbyid(c.relowner)
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`, schema, table).Scan(&relkind, &owner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: %s.%s", ErrSourceNotFound, schema, table)
 	}

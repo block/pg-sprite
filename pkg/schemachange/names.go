@@ -68,11 +68,14 @@ func OldDependentName(schema, table, dependent string) string {
 // always lives in its source's schema, so the source is whichever table in
 // that schema derives the name. It returns ErrNotDerivedName when none does.
 func SourceOfDerivedName(ctx context.Context, db dbconn.Querier, schema, derived string) (string, DerivedKind, error) {
+	// INV: CO-9 — db runs under the caller's session search_path, so every
+	// catalog name is qualified and a planted overload in a searched schema
+	// cannot answer this read.
 	rows, err := db.Query(ctx, `
 		SELECT c.relname
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relkind = 'r'`, schema)
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relkind OPERATOR(pg_catalog.=) 'r'`, schema)
 	if err != nil {
 		return "", "", fmt.Errorf("list tables in schema %s: %w", schema, err)
 	}
