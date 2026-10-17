@@ -13,6 +13,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -170,6 +171,45 @@ func TestRunDispatch(t *testing.T) {
 		assert.Equal(t, 5050, qtySum, "the carried rows keep their values")
 	})
 
+	t.Run("builds a key with storage parameters online and keeps them", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, email text)", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(
+			"ALTER TABLE %s.t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = 70)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		require.Len(t, v.ExecutedSQL, 2)
+		assert.Contains(t, v.ExecutedSQL[0], "CREATE UNIQUE INDEX CONCURRENTLY")
+
+		var def string
+		require.NoError(t, pool.QueryRow(t.Context(),
+			"SELECT pg_get_indexdef(conindid) FROM pg_constraint WHERE conrelid = $1::regclass AND conname = 'k'",
+			schema+".t").Scan(&def))
+		assert.Contains(t, def, "WITH (fillfactor='70')")
+	})
+
+	t.Run("refuses a key whose storage parameter it cannot carry, naming the manual sequence", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, email text)", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(
+			"ALTER TABLE %s.t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = s.seventy)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+		assert.Equal(t, suggest.GuidanceUniqueIndexThenConstraint, v.Guidance,
+			"the statement already is one operation, so the manual path builds the key, not a split")
+
+		var exists bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			"SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = $1::regclass AND conname = 'k')",
+			schema+".t").Scan(&exists))
+		assert.False(t, exists, "the refused change must not touch the schema")
+	})
+
 	t.Run("refuses an unconstructible rewrite as rewrite-required", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
@@ -180,6 +220,7 @@ func TestRunDispatch(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+		assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, v.Guidance)
 
 		var exists bool
 		require.NoError(t, pool.QueryRow(t.Context(),

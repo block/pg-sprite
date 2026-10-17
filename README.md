@@ -90,10 +90,19 @@ refusal — never a silently wrong or incomplete result:
   tooling, then state it in the file. A serial cannot state one, so export
   refuses a serial whose sequence was declared otherwise.
 - **Partitioned tables** support in-place statement changes, but cannot be
-  expressed in or exported to desired files.
+  expressed in or exported to desired files, and `migrate` refuses
+  `ATTACH PARTITION` and `DETACH PARTITION`.
+- **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
+  `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.
+- **A key whose storage parameter cannot be rendered is refused** —
+  `ADD PRIMARY KEY` / `ADD UNIQUE` runs as a concurrent index build plus
+  `USING INDEX`, carrying the key's `WITH (...)` parameters; a value that
+  is not a plain word, number, or string, contains a backslash, or a
+  namespaced parameter name refuses with `rewrite-required` and the steps
+  to build the index by hand, then attach it.
 - **Dropping what a replica identity index is built on is refused** — the
   index, the constraint that owns it, or a column it covers; move
   `REPLICA IDENTITY` first, then re-plan.
@@ -102,7 +111,9 @@ refusal — never a silently wrong or incomplete result:
   to discard live structure. A new primary key or unique constraint over a live
   unique index of its name is not destructive: it takes the index over with
   `ADD CONSTRAINT ... USING INDEX`, and refuses with `adopted-index-drift` if the
-  index changed after planning.
+  index changed after planning. Nor is a live check constraint left `NOT VALID`
+  with the desired definition: it plans as one online `VALIDATE CONSTRAINT`, and
+  refuses with `validated-constraint-drift` if the constraint changed after planning.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
   build's leftover is reported with a typed state, and the proven removal
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when

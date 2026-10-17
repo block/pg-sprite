@@ -493,7 +493,7 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, 
 		// Direct ADD PK/UNIQUE builds its index under ACCESS EXCLUSIVE;
 		// the safer sequence builds it concurrently and attaches it.
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
-		if single && len(op.Columns) > 0 {
+		if canBuildUsingIndexSequence(single, op) {
 			d.SaferSQL = usingIndexSequence(st, op)
 		}
 
@@ -535,17 +535,33 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 		// would prove.
 		return RouteCopyAndSwap, ReasonTypeRewrite, true
 	}
-	if binaryCoercible(parseTypeText(oldType), typeShape{name: normalizeTypeName(op.NewType), mods: op.NewTypeMods}) {
+	if binaryCoercible(parseTypeText(oldType), targetTypeShape(op)) {
 		return RouteNative, ReasonBinaryCoercible, false
 	}
 	return RouteCopyAndSwap, ReasonTypeRewrite, false
 }
 
-// typeShape is a normalized type family plus its modifiers, comparable
-// across the grammar's spelling and format_type's rendering.
+// typeShape is a normalized type family plus its modifiers and whether it
+// is an array of that family, comparable across the grammar's spelling and
+// format_type's rendering.
 type typeShape struct {
-	name string
-	mods []int32
+	name  string
+	mods  []int32
+	array bool
+}
+
+// targetTypeShape reads the statement's target type into the shape
+// parseTypeText gives the live one. A type qualified with a schema other
+// than pg_catalog is a user type that only shares a built-in's name, so it
+// gets no shape and matches no rule. The name is taken as the parser left
+// it: the grammar already spells every built-in the rules know by its
+// catalog name (varchar, numeric, timestamptz), so a target named
+// "decimal" or "character varying" was quoted and names a user type.
+func targetTypeShape(op statement.Op) typeShape {
+	if op.NewTypeSchema != "" {
+		return typeShape{}
+	}
+	return typeShape{name: strings.TrimSpace(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}
 }
 
 // binaryCoercible reports whether changing old to new is a relabel
@@ -553,12 +569,23 @@ type typeShape struct {
 // reference table's rows, deliberately narrow: widening varchar, varchar to
 // text, and widening numeric precision at the same scale. Anything not
 // provably on this list is not coercible.
+//
+// The widening rules hold for scalar columns only. An array column's
+// elements are converted one by one, and PostgreSQL rewrites the table for
+// any element change, widenings included; only an unchanged element type
+// is a relabel.
 func binaryCoercible(old, next typeShape) bool {
 	if old.name == "" || next.name == "" {
 		return false
 	}
+	if old.array != next.array {
+		return false
+	}
 	if old.name == next.name && int32sEqual(old.mods, next.mods) {
 		return true // no-op relabel
+	}
+	if old.array {
+		return false
 	}
 	switch old.name {
 	case "varchar":
@@ -599,36 +626,51 @@ func int32sEqual(a, b []int32) bool {
 	return true
 }
 
-// normalizeTypeName maps spelling variants of the families binaryCoercible
-// knows onto one name. Unknown names pass through unchanged (and will never
-// match a rule).
-func normalizeTypeName(name string) string {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "varchar", "character varying":
+// catalogTypeName maps format_type's SQL-standard spelling of a built-in
+// onto the catalog name the grammar gives the same type, so a live type and
+// a target type compare by name. Unknown names pass through unchanged (and
+// will never match a rule).
+//
+// The match is case-sensitive on purpose. format_type renders the catalog's
+// name, and a name that still carries upper case was quoted, so "TEXT"
+// names a user type, not the built-in text, and folding it would let that
+// type pass as the built-in.
+func catalogTypeName(name string) string {
+	switch name = strings.TrimSpace(name); name {
+	case "character varying":
 		return "varchar"
-	case "numeric", "decimal":
-		return "numeric"
-	case "text":
-		return "text"
+	case "timestamp without time zone":
+		return "timestamp"
+	case "timestamp with time zone":
+		return "timestamptz"
+	case "time without time zone":
+		return "time"
+	case "time with time zone":
+		return "timetz"
 	default:
-		return strings.ToLower(strings.TrimSpace(name))
+		return name
 	}
 }
 
 // parseTypeText splits a format_type rendering ("character varying(50)",
-// "numeric(10,2)", "text") into its normalized shape. This reads catalog
-// output, not SQL — format_type's rendering is stable.
+// "numeric(10,2)", "text", "character varying(50)[]",
+// "timestamp(3) with time zone") into its normalized shape. This reads
+// catalog output, not SQL — format_type's rendering is stable, and it marks
+// every array with one trailing "[]" whatever the declared dimensions. The
+// modifiers can sit inside the name, so whatever follows them is part of
+// the name: "timestamp(3) with time zone" is timestamptz, not timestamp.
 func parseTypeText(s string) typeShape {
+	s, array := strings.CutSuffix(strings.TrimSpace(s), "[]")
 	name, rest, found := strings.Cut(s, "(")
-	shape := typeShape{name: normalizeTypeName(name)}
 	if !found {
-		return shape
+		return typeShape{name: catalogTypeName(name), array: array}
 	}
-	rest, _, found = strings.Cut(rest, ")")
+	mods, suffix, found := strings.Cut(rest, ")")
 	if !found {
 		return typeShape{}
 	}
-	for part := range strings.SplitSeq(rest, ",") {
+	shape := typeShape{name: catalogTypeName(name + suffix), array: array}
+	for part := range strings.SplitSeq(mods, ",") {
 		n, err := strconv.ParseInt(strings.TrimSpace(part), 10, 32)
 		if err != nil {
 			return typeShape{}
@@ -705,9 +747,26 @@ func setNotNullSequence(st statement.Statement, column string) []string {
 	}
 }
 
+// canBuildUsingIndexSequence reports whether an ADD PRIMARY KEY / UNIQUE
+// can be rewritten to the two-step USING INDEX sequence: the statement
+// has this one operation, the key names its columns, and every storage
+// parameter renders faithfully. A sequence that left a parameter out
+// would build a different index than the statement declares, so such a
+// key gets guidance instead.
+func canBuildUsingIndexSequence(single bool, op statement.Op) bool {
+	return single && len(op.Columns) > 0 && !op.IndexOptionsUnrenderable
+}
+
 // usingIndexSequence is the native two-step ADD PRIMARY KEY / UNIQUE
 // pattern: build the unique index concurrently, then attach it as the
-// constraint under a brief lock.
+// constraint under a brief lock. The sequence must declare the same
+// constraint the statement does, so the index carries the INCLUDE columns,
+// NULLS NOT DISTINCT, and the tablespace, and the attach carries
+// DEFERRABLE and INITIALLY DEFERRED; a key built without one of them
+// accepts rows, or checks them at a moment, the statement did not ask for.
+// The index carries the key's WITH (...) storage parameters too; the
+// caller builds no sequence when one cannot be rendered faithfully
+// (canBuildUsingIndexSequence).
 //
 // Partial-failure contract: a failed CREATE INDEX CONCURRENTLY (step 1)
 // leaves an INVALID index under the generated name, and re-running step 1
@@ -734,8 +793,36 @@ func usingIndexSequence(st statement.Statement, op statement.Op) []string {
 		cols[i] = pgx.Identifier{c}.Sanitize()
 	}
 	table := tableIdent(st)
-	return []string{
-		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY %s ON %s (%s)", idx, table, strings.Join(cols, ", ")),
-		fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s USING INDEX %s", table, idx, keyword, idx),
+	create := fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY %s ON %s (%s)", idx, table, strings.Join(cols, ", "))
+	if len(op.IncludeColumns) > 0 {
+		include := make([]string, len(op.IncludeColumns))
+		for i, c := range op.IncludeColumns {
+			include[i] = pgx.Identifier{c}.Sanitize()
+		}
+		create += " INCLUDE (" + strings.Join(include, ", ") + ")"
 	}
+	if op.NullsNotDistinct {
+		create += " NULLS NOT DISTINCT"
+	}
+	if len(op.IndexStorageParams) > 0 {
+		params := make([]string, len(op.IndexStorageParams))
+		for i, p := range op.IndexStorageParams {
+			params[i] = pgx.Identifier{p.Name}.Sanitize()
+			if p.HasValue {
+				params[i] += " = '" + strings.ReplaceAll(p.Value, "'", "''") + "'"
+			}
+		}
+		create += " WITH (" + strings.Join(params, ", ") + ")"
+	}
+	if op.IndexTablespace != "" {
+		create += " TABLESPACE " + pgx.Identifier{op.IndexTablespace}.Sanitize()
+	}
+	attach := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s USING INDEX %s", table, idx, keyword, idx)
+	if op.Deferrable {
+		attach += " DEFERRABLE"
+	}
+	if op.InitiallyDeferred {
+		attach += " INITIALLY DEFERRED"
+	}
+	return []string{create, attach}
 }

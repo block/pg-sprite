@@ -17,7 +17,7 @@ kinds, guidance, causes, classes, owners) and the fingerprint serialization are 
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **8**: version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
+The current version is **9**: version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
 and on refused statements, each drawn from a closed vocabulary (see Classes and Owners);
@@ -253,6 +253,8 @@ bumps `format_version`. Present exactly when `class` is `no-online-safety-proble
 | `drop-not-null` | Removes the NOT NULL attribute. |
 | `add-constraint` | Adds a table constraint other than a foreign key. |
 | `add-foreign-key` | Adds a foreign-key constraint. Always refused for execution (`declarative-foreign-key`). |
+| `validate-constraint` | Validates a live check constraint left `NOT VALID` whose definition otherwise matches the desired one, the state an interrupted online add leaves behind. Not destructive. |
+| `validate-foreign-key` | Validates a live foreign key left `NOT VALID` whose definition otherwise matches the desired one. Always refused for execution (`declarative-foreign-key`). |
 | `create-index` | Creates an index. |
 
 ## Fingerprint
@@ -299,7 +301,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 8,
+  "format_version": 9,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -342,7 +344,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 8,
+  "format_version": 9,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -409,7 +411,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 8,
+  "format_version": 9,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

@@ -57,8 +57,9 @@ pg-sprite capabilities --json | jq '.capabilities[] | select(.engine_path == "co
 # in diff, but can execute through migrate --desired.
 pg-sprite capabilities --json | jq '.capabilities[] | select(.front_doors.diff == "refused")'
 
-# Rows another tool class owns: the ⚪ and 🔵 rows. The ❌ rows name no owner, because
-# PostgreSQL offers no online mechanism for them, so this is not the full out-of-scope set.
+# Rows another tool class owns: the ⚪ and 🔵 rows. The ❌ rows name no owner: they have
+# no online mechanism pg-sprite will drive (PostgreSQL has none, or the only online form
+# is a direct statement the operator runs), so this is not the full out-of-scope set.
 pg-sprite capabilities --json | jq '.capabilities[] | select(.owning_tool_class != null)'
 ```
 
@@ -96,9 +97,9 @@ Two consequences follow, and they explain most of this page:
 
 | Tier | Meaning | What you see today |
 | --- | --- | --- |
-| **T1 — supported today** | The engine executes the change through an online-safe pattern | Execution (or the safer rewritten sequence), exit 0; where `migrate` refuses a plain index-maintenance form and names its `CONCURRENTLY` idiom, `--accept-blocking` runs the plain form under budgets and exits 3 |
+| **T1 — supported today** | The engine executes the change through an online-safe pattern | Execution (or the safer rewritten sequence), exit 0 |
 | **T2 — planned** | A known online pattern exists (or requires the copy-and-swap engine); building it is on the roadmap | A **typed refusal** naming the reason, exit 2 — never a silent fallback to a blocking form |
-| **T3 — out of scope by design** | No online-safety problem to solve, solving it belongs to a different tool class, or PostgreSQL offers no online mechanism to build on | A typed refusal or a parse-level rejection, with the reason stating *why it is not planned* |
+| **T3 — out of scope by design** | No online-safety problem to solve, solving it belongs to a different tool class, or there is no online mechanism pg-sprite will drive (PostgreSQL has none, or the only online form is a direct statement the operator runs) | A typed refusal or a parse-level rejection, with the reason stating *why it is not planned* |
 
 T3 rows carry one of three marks, because they mean different things — and only one of
 them is a limitation:
@@ -112,9 +113,12 @@ them is a limitation:
 - **🔵 a different tool class owns it** — the job is real but belongs to another kind of
   tool (data-change runners, provisioning/IaC, convergence planners, expand/contract
   frameworks). The row's "Online-safety problem?" column names the class to look for.
-- **❌ no online mechanism exists** — PostgreSQL itself provides no online pattern to
-  build on, so pg-sprite refuses rather than silently run the blocking form. These are
-  the only rows where "unsupported" is the honest reading.
+- **❌ no online mechanism pg-sprite will drive** — PostgreSQL has none, or the only
+  online form is a direct statement the operator runs, so pg-sprite refuses rather than
+  silently run the blocking form. Index maintenance (`DROP INDEX`, `REINDEX`) is the
+  second case: the online form is a plain `CONCURRENTLY` statement, which `migrate`
+  refuses to wrap and names so you run it directly; for a single-relation plain form,
+  `--accept-blocking` runs it under budgets and exits 3.
 
 Every matrix table carries an **"Online-safety problem?"** column: "Yes" means there is a
 readers-and-writers problem for an online engine to solve (pg-sprite solves it, plans to,
@@ -153,7 +157,8 @@ engine:
   typed refusal (`backend-unavailable`) for an operation the engine does not carry yet (see
   [optimistic-attempt.md](optimistic-attempt.md) for how the router proves the rewrite).
 - **—** — no engine path: either the job belongs to another tool class (⚪ / 🔵) or
-  PostgreSQL offers no online mechanism to build on (❌).
+  there is no online mechanism pg-sprite will drive (❌): PostgreSQL has none, or the
+  only online form is a direct statement the operator runs.
 
 Path and tier are orthogonal on purpose: a 🟡 row's path says what kind of work lifts
 the refusal — building a native flow or teaching the copy engine the operation — and a
@@ -185,15 +190,16 @@ are the canonical example.
 > `make gen-capabilities`; do not edit the generated regions below by hand.
 
 <!-- capabilities:begin summary -->
-**59 operations: 21 supported today, 22 planned behind a typed refusal, 14 out of scope
-by design, and 2 with no online mechanism in PostgreSQL to build on.**
+**60 operations: 18 supported today, 24 planned behind a typed refusal, 14 out of scope
+by design, and 4 with no online mechanism for pg-sprite to build on.**
 <!-- capabilities:end summary -->
 
 Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today) ·
 ⚪ T3 (out of scope; **no online-safety problem** — run directly, or through whatever
 review the object warrants) ·
 🔵 T3 (out of scope; **a different tool class owns it**) ·
-❌ T3 (out of scope; **no online mechanism exists** in PostgreSQL).
+❌ T3 (out of scope; **no online mechanism pg-sprite will drive**: PostgreSQL has none,
+or the only online form is a direct statement the operator runs).
 
 ### Column changes
 
@@ -220,7 +226,7 @@ review the object warrants) ·
 <!-- capabilities:begin constraints -->
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| `ADD PRIMARY KEY` / `ADD UNIQUE` (plain key columns) | ✅ | native, safer sequence | Yes | Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`. In a desired file, a new key whose name and index match a valid live unique index takes that index over with `ADD CONSTRAINT ... USING INDEX` at the key's declared deferrability, instead of a destructive drop and rebuild. Execution reads the index again under the table's lock and refuses with the permanent `adopted-index-drift` code, attaching nothing, if it was dropped, replaced, or left invalid since planning |
+| `ADD PRIMARY KEY` / `ADD UNIQUE` (plain key columns) | ✅ | native, safer sequence | Yes | Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`. The sequence carries the key's `INCLUDE` columns, `NULLS NOT DISTINCT`, `WITH (...)` storage parameters, and index tablespace onto the index, and `DEFERRABLE` / `INITIALLY DEFERRED` onto the attach. A storage parameter the sequence cannot render faithfully (a value that is not a plain word, number, or string, a value containing a backslash, or a namespaced parameter name) gets no rewrite and is refused as `rewrite-required` with the `unique-index-then-constraint` guidance: build the index with it, then attach it. In a desired file, a new key whose name and index match a valid live unique index takes that index over with `ADD CONSTRAINT ... USING INDEX` at the key's declared deferrability, instead of a destructive drop and rebuild. Execution reads the index again under the table's lock and refuses with the permanent `adopted-index-drift` code, attaching nothing, if it was dropped, replaced, or left invalid since planning |
 | `ADD CHECK` / `ADD FOREIGN KEY` (imperative) | ✅ | native, safer sequence | Yes | Rewritten to the online sequence: `ADD CONSTRAINT ... NOT VALID` (brief metadata lock) → `VALIDATE CONSTRAINT` (writes keep flowing during the scan) |
 | `ADD CONSTRAINT ... NOT VALID` / `... USING INDEX` / `VALIDATE CONSTRAINT` | ✅ | native, as-is | Yes | Already the online idiom; executed as-is |
 | `ADD FOREIGN KEY ... NOT VALID` on a **partitioned parent** | ✅ | native, safer sequence | Yes — server version 18 or later | Supported on version 18 and later; refused on 14–17 with an environmental class |
@@ -234,8 +240,8 @@ review the object warrants) ·
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | `CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN | ✅ | native, safer sequence | Yes | Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification, typed invalid-index outcomes, and a proven recovery for abandoned leftovers (`RebuildAbandonedIndex`, or `DropAbandonedIndex` to remove the leftover without rebuilding; both library-only; [runbook](invalid-index-recovery.md)) |
-| `DROP INDEX` | ✅ | native, safer sequence | Yes | Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**. `migrate` refuses the plain form and names the idiom; a single-index `DROP INDEX` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `diff` refuses dropping the table's replica identity index, or one a partition's is attached under, with `replica-identity`. `migrate` refuses every plain `DROP INDEX` before it reads the table, so its dry-run names the concurrent idiom; `--accept-blocking` checks the replica identity under the table's lock and refuses the drop as `unsupported-statement`, naming the identity index. pg-sprite never runs the concurrent drop itself |
-| `REINDEX` | ✅ | native, safer sequence | Yes | Rewritten to `REINDEX ... CONCURRENTLY`. `migrate` refuses the plain form and names the idiom; a plain `REINDEX INDEX` or `REINDEX TABLE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM` stay refused |
+| `DROP INDEX` | ❌ | — | Yes — the online form is a direct `CONCURRENTLY` statement that `migrate` does not drive | `migrate` never runs this statement online-safely: the plain form is refused and names `DROP INDEX CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. A single-index plain `DROP INDEX` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0); `--accept-blocking` checks the replica identity under the table's lock and refuses the drop as `unsupported-statement`, naming the identity index. `diff` reports an index to remove as a **destructive** `DROP INDEX` and hints to run it through `migrate --alter`, which ends in this `index-statement` refusal — run `DROP INDEX CONCURRENTLY` directly instead. `diff` refuses dropping the table's replica identity index, or one a partition's is attached under, with `replica-identity` |
+| `REINDEX` | ❌ | — | Yes — the online form is a direct `CONCURRENTLY` statement that `migrate` does not drive | `migrate` never runs this statement online-safely: the plain form is refused and names `REINDEX ... CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. A plain `REINDEX INDEX` or `REINDEX TABLE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM` stay refused. A desired schema cannot express a reindex, so `diff` never produces one |
 | Index build on a **partitioned parent** | 🟡 | native, planned flow | Yes | PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it, and `--accept-blocking` does not reach it yet). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned |
 | `ADD CONSTRAINT ... USING INDEX` on a partitioned parent | ❌ | — | Yes — unsolvable today | PostgreSQL does not support adopting an index on a partitioned parent in any supported version; refused before execution |
 <!-- capabilities:end indexes -->
@@ -246,8 +252,8 @@ review the object warrants) ·
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | `CREATE TABLE ... PARTITION OF` | 🟡 | native, planned flow | Yes | Typed refusal at both doors: the imperative door does not take `CREATE TABLE`, and the declarative create path refuses the form at plan time and re-checks it at apply — attaching a partition takes a brief `ACCESS EXCLUSIVE` on the **parent**, which the greenfield absence proof does not cover. A desired file for a partition that already exists is refused before planning builds anything, since the scratch build would attach to the live parent. The partition-aware flow is planned |
-| `ATTACH PARTITION` | ✅ | native, as-is | Yes | Executed; the safer idiom (pre-prove the bound with a validated `CHECK` so the attach skips its scan) is surfaced as guidance. A classify-first flow that constructs the proof itself is planned |
-| `DETACH PARTITION [CONCURRENTLY]` | ✅ | native, safer sequence | Yes | `CONCURRENTLY` is the idiom; the blocking form is rewritten to it |
+| `ATTACH PARTITION` | 🟡 | native, planned flow | Yes | Without `--force`, a typed refusal with nothing executed: the attach scans the partition to validate its bound unless a validated `CHECK` already proves it, and the engine does not yet construct that proof. The safer idiom (pre-prove the bound with a validated `CHECK` so the attach skips its scan) is surfaced as guidance. `--force SCHEMA.TABLE` runs the blocking `ATTACH PARTITION` as submitted under bounded budgets, taking the blocking lock, and records the override. The classify-first flow that constructs the proof itself is planned. A desired schema cannot express an attach, so `diff` never produces one |
+| `DETACH PARTITION [CONCURRENTLY]` | 🟡 | native, planned flow | Yes | `CONCURRENTLY` is the idiom and the blocking form is rewritten to it (`--dry-run` and `suggest` show the rewrite), but without `--force` `migrate` refuses both forms before anything executes: a cancelled concurrent detach leaves a detach-pending partition state the executor does not yet own recovering. `--force SCHEMA.TABLE` runs a plain `DETACH PARTITION` as submitted under bounded budgets, taking the blocking lock; `DETACH ... CONCURRENTLY` stays refused under `--force`. `migrate --dry-run` of either form reports the rewrite as a safer sequence to run and exits 0 while the real run refuses and exits 2, so the dry-run exit code is not a submit gate for a detach. A desired schema cannot express a detach, so `diff` never produces one |
 | Partitioned parents in the **declarative model** | 🟡 | native, planned flow | Yes | Typed refusal: the model does not yet carry partition keys, and rendering a partitioned parent as a plain `CREATE TABLE` would be silently wrong |
 | Partitioned tables in **copy-and-swap** | 🟡 | copy-and-swap | Yes | Root-vs-leaf publication semantics and per-partition swap; the copy-and-swap preflight refuses a partitioned source |
 <!-- capabilities:end partitioned_tables -->
@@ -258,6 +264,7 @@ review the object warrants) ·
 | Table shape | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | Plain tables + their indexes | ✅ | native, as-is | Yes | `diff`, `pull`, and desired-file rendering round-trip the canonical model. The model carries each index's validity (`pg_index.indisvalid`): on a plain table an invalid entry is a concurrent build that did not finish — abandoned, or still running — so a live entry with the desired name and definition does not deliver the desired index, and `diff` plans it as a `create-index` change. `diff` never emits a drop for an invalid entry, whatever the desired file says about its name: a plain `DROP INDEX` blocks the table and cannot tell abandoned debris from a build still in progress. A `pull`ed baseline of such a table therefore re-diffs to that one rebuild rather than to zero. On a partitioned parent an invalid index means unattached partition indexes, not an unfinished build, so validity plays no part in the parent's comparison |
+| A live check constraint or foreign key left `NOT VALID` | ✅ | native, as-is | Yes | The model carries each constraint's validity (`pg_constraint.convalidated`). A live constraint left `NOT VALID` with the desired definition, which an interrupted online add leaves behind, plans as one `VALIDATE CONSTRAINT` statement (`validate-constraint`), which scans under `SHARE UPDATE EXCLUSIVE` while writes keep flowing, instead of a destructive drop and re-add. The statement names only the constraint, so execution reads the constraint again under that same lock and refuses with the permanent `validated-constraint-drift` code, validating nothing, if it was dropped or replaced under the same name since planning. A foreign key plans as `validate-foreign-key`, refused with `declarative-foreign-key` like every declarative foreign-key change. `CREATE TABLE` ignores `NOT VALID`, so a desired file cannot declare it: for a check constraint, `pull` renders the validated definition, and the baseline re-diffs to that one validation rather than to zero. `pull` refuses a table that owns a foreign key, validated or not, with `ErrUnrenderableForeignKey` |
 | Classic table inheritance (`INHERITS`) | 🟡 | native, planned flow | Yes | Typed refusal for both parents and children: the model cannot express inheritance edges, and flattening inherited columns would produce a silently lossy baseline. A desired file that declares `INHERITS` is refused before planning builds anything, since the scratch build would lock the live parent and add an inheritance edge to it |
 | Tables that own **or are referenced by** foreign keys | 🟡 | native, planned flow | Yes | Planned but not executed. A desired file may declare a foreign key to an unqualified table that exists in the target schema; `diff` shows a matching foreign key as no change and an added or dropped one as an `add-foreign-key` or `drop-foreign-key` statement refused with `declarative-foreign-key`, and `migrate --desired` refuses the whole plan. Planning binds each reference to an empty scratch copy of the live table, which needs `SELECT` on it, so planning takes only `ACCESS SHARE` on the live referenced table, the lock a plain `SELECT` takes, and never blocks its writes. Export still refuses both sides — an incoming FK cannot be expressed in the table's own desired file. Declarative FK execution (composite keys as the primary case, two-phase `NOT VALID` → `VALIDATE` execution) is planned |
 | Unlogged tables | 🟡 | native, planned flow | Yes | Typed refusal: persistence is not modeled, converging it (`SET LOGGED`) is a full rewrite, and rendering the table as plain `CREATE TABLE` would silently change crash-safety |
@@ -276,7 +283,7 @@ review the object warrants) ·
 | --- | --- | --- | --- | --- |
 | Enum-typed columns on plain tables | 🟡 | native, planned flow | Yes | Tolerance end to end (introspection already canonicalizes via `format_type`; desired-file admission and transaction-scoped scratch-schema mechanics are being verified) |
 | `ALTER TYPE ... ADD VALUE` | 🟡 | native, planned flow | Yes | Metadata-only and online-safe (PG 14+ allows it in a transaction; the value is usable after commit) — planned as an owned operation. No peer online executor owns it |
-| Enum value rename / removal | 🟡 | copy-and-swap | Yes | PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite — routes to a typed refusal toward copy-and-swap |
+| Enum value rename / removal | 🟡 | copy-and-swap | Yes | PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite, planned on copy-and-swap. Today the imperative door refuses `ALTER TYPE ... RENAME VALUE` as `unsupported-statement`, since it takes only `ALTER TABLE` and `CREATE INDEX`, and `DROP VALUE` does not parse |
 | Enum/domain type creation and drop | ⚪ | — | No — owner tooling (psql, shipped with the code change) | Bootstrap/catalog work with no concurrent-access problem; owner tooling applies it in the same change that ships the code |
 | Views, materialized views (create and replace) | ⚪ | — | No — owner tooling | Transactional catalog work, but `CREATE OR REPLACE VIEW` takes a brief `ACCESS EXCLUSIVE` on the view and queues behind in-flight readers — run it under a `lock_timeout` |
 | `REFRESH MATERIALIZED VIEW` | 🔵 | — | No — data jobs / owner tooling | A data operation, not catalog work: the plain form holds `ACCESS EXCLUSIVE` on the matview for the whole rebuild (`CONCURRENTLY` needs a unique index and trades the lock for churn). Scheduling refreshes belongs to data jobs |
@@ -432,8 +439,8 @@ Three related jobs stay with humans on purpose:
   the recovery handles, and what the rest license a human to do is
   [invalid-index-recovery.md](invalid-index-recovery.md).
 - **Index maintenance (`REINDEX` automation, bloat-driven rebuild scheduling).** The
-  engine executes `REINDEX CONCURRENTLY` when asked (see matrix); *deciding* when an
-  index needs rebuilding is monitoring-and-operations territory. Automating it is
+  engine does not drive `REINDEX` at all (see matrix) — run `REINDEX ... CONCURRENTLY`
+  directly; *deciding* when an index needs rebuilding is monitoring-and-operations territory. Automating it is
   considered but on hold for the same ownership reasons as above.
 
 ---

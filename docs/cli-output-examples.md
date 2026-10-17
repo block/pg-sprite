@@ -95,7 +95,7 @@ is a one-line summary; the linked reference entry is authoritative.
 | [`metadata-only`](postgres-online-ddl-reference.md#metadata-only) | A brief catalog-only change: at most a short `ACCESS EXCLUSIVE` lock, no table scan or rewrite. Runs as written. |
 | [`safer-idiom`](postgres-online-ddl-reference.md#safer-idiom) | The statement blocks as written but an equivalent online sequence exists; pg-sprite substitutes it. Each step commits on its own — the sequence is not transactionally equivalent to the original. |
 | [`type-rewrite`](postgres-online-ddl-reference.md#type-rewrite) | The column type change is not binary-coercible, so PostgreSQL rewrites the whole table under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend, which builds the changed shape as a shadow table, fills and verifies it, and swaps it in under the source's name. Executes. |
-| [`rewrite-required`](postgres-online-ddl-reference.md#rewrite-required) | The statement blocks as written and no online replacement could be constructed. Refused; split the change into separate online steps. The statement's `guidance` field names the typed manual path ([Guidance vocabulary](suggest-report.md#guidance-guidance)). |
+| [`rewrite-required`](postgres-online-ddl-reference.md#rewrite-required) | The statement blocks as written and no online replacement could be constructed. Refused; split the change into separate online steps. The statement's `guidance` field names the typed manual path ([Guidance vocabulary](suggest-report.md#guidance-guidance)), and a refused verdict carries the same `guidance`. |
 | [`backend-unavailable`](postgres-online-ddl-reference.md#backend-unavailable) | The plan routes to the copy-and-swap backend for an operation the engine does not carry yet (a volatile column default, a stored generated column, a relocation). Refused; nothing executes. |
 | [`unsupported-partitioned-parent`](postgres-online-ddl-reference.md#unsupported-partitioned-parent) | The routed plan builds an index concurrently but the target is a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. Refused. |
 | [`unsupported-statement`](postgres-online-ddl-reference.md#unsupported-statement) | The planner knows no safe path for the statement (for example `SET UNLOGGED`, `CLUSTER ON`). Refused — the same typed reason the run path's refusal verdict carries. |
@@ -148,7 +148,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 8,
+  "format_version": 9,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -189,7 +189,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 8,
+  "format_version": 9,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -291,7 +291,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 8,
+  "format_version": 9,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -333,7 +333,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 8,
+  "format_version": 9,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -387,7 +387,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 8,
+  "format_version": 9,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -424,7 +424,7 @@ The refusal cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 8,
+  "format_version": 9,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -464,7 +464,7 @@ the reviewer or orchestrator to gate on; `migrate` itself does not block it.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --json
 {
-  "format_version": 8,
+  "format_version": 9,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -591,7 +591,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 8,
+  "format_version": 9,
   "source": "diff",
   "schema": "public",
   "table": "users",

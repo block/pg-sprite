@@ -170,6 +170,11 @@ type Constraint struct {
 	// InitiallyDeferred reports a deferrable constraint declared INITIALLY
 	// DEFERRED.
 	InitiallyDeferred bool `json:"-"`
+	// NotValid reports a check or foreign-key constraint the server has not
+	// validated (pg_constraint.convalidated is false), which Def ends with
+	// " NOT VALID". Only a live table carries one: CREATE TABLE ignores NOT
+	// VALID, so a desired constraint is always validated.
+	NotValid bool `json:"-"`
 }
 
 // Index is one non-constraint index: its name plus the server-decompiled
