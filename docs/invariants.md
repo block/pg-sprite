@@ -398,6 +398,15 @@ obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with decoy catalo
 and functions in the schema) yields the same answer as
 the default path, per read site and per pooled session.
 
+Introspection (`pkg/schemadiff` `introspect.go`) runs under the target schema, then `public`, so
+it qualifies every relation, function, operator, and type it names. `pg_catalog` is searched first
+there, but only an exact argument match is safe from a function or operator the target schema
+defines with an argument list that fits a call better — `unnest(text[])`, `array_agg(text)`,
+`pg_partition_ancestors(oid)`, `quote_ident(name)`, `format_type(oid, text)`, `||` on two names,
+`=` on an oid and a regclass — which would answer in the catalog's place. *Test obligation:*
+`TestIntrospectResistsImpostorsInTheTargetSchema` plants each in the target schema and requires
+the model the catalog gives.
+
 ## Locking and concurrency (LK)
 
 ### LK-1 — At most one migration runs per table
