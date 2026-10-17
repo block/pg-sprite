@@ -80,16 +80,17 @@ func (c *Copier) clearBatch(ctx context.Context, pool *pgxpool.Pool, lower, limi
 // fenceStragglers waits for every chunk transaction of the earlier run that
 // is still writing into the shadow, or still committing into it, before the
 // clear reads the shadow. Such a transaction holds ROW EXCLUSIVE on the
-// shadow until its commit completes — through a wait for a synchronous
-// standby included — and its rows are invisible to the clear until then, so
-// a clear that ran ahead of it would leave a row above the watermark that
-// the resumed run's own insert never overwrites (CO-4). SHARE MODE conflicts
-// with ROW EXCLUSIVE, so the lock is granted only once every straggler has
-// ended and the delete that follows, in the same transaction, sees whatever
-// they committed; the wait is bounded by the transaction's lock_timeout.
-// Only the first batch needs the fence: no transaction of the earlier run
-// can begin after the table lock passed to this one, since every chunk
-// transaction confirms the lock before it writes.
+// shadow from before it confirms the table lock until its commit completes —
+// through a wait for a synchronous standby included — and its rows are
+// invisible to the clear until then, so a clear that ran ahead of it would
+// leave a row above the watermark that the resumed run's own insert never
+// overwrites (CO-4). SHARE MODE conflicts with ROW EXCLUSIVE, so the lock is
+// granted only once every straggler has ended and the delete that follows, in
+// the same transaction, sees whatever they committed; the wait is bounded by
+// the transaction's lock_timeout. Only the first batch needs the fence: a
+// chunk transaction of the earlier run that confirmed the lock before it
+// passed to this one already holds ROW EXCLUSIVE, and one that has not yet
+// taken it confirms the lock afterwards and is refused.
 func (c *Copier) fenceStragglers(ctx context.Context, tx pgx.Tx) error {
 	// INV: CO-4
 	if _, err := tx.Exec(ctx, c.fenceSQL); err != nil {

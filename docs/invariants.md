@@ -171,13 +171,17 @@ every key above W is genuinely uncut when the applier starts discarding for it; 
 batch takes `LOCK TABLE <shadow> IN SHARE MODE` before its delete, so a chunk transaction of the
 earlier run that is still committing into the shadow (holding `ROW EXCLUSIVE` through a
 synchronous-commit wait) ends before the clear reads, and a row it publishes cannot outlive the
-clear (straggler test); and `Position` snapshots the cut
+clear (straggler test); every chunk and clear transaction takes `ROW EXCLUSIVE` on the shadow
+before it confirms the table lock, so one that confirmed the lock before it passed to the resumed
+run already holds the lock the fence waits on, even if it is paused before its insert, and one
+that takes it afterwards fails the confirmation (parked-transaction test); and `Position` snapshots the cut
 frontier, the in-flight chunks, and the landed watermark under one lock so `Position.Classify`
 gives the applier the three-way answer (uncut / in-flight / landed) for any key (whole-table with
 a Position-consistency sampler, never-overwrites, resume-from-watermark with stale rows above and
 below W, resume-from-zero-watermark with stale rows down to the smallest key, out-of-order
 landing, pinned-chunk cancellation followed by a resume that re-copies the
-cleared tail, a resume that waits behind a straggling chunk transaction, a shadow replaced
+cleared tail, a resume that waits behind a straggling chunk transaction and behind one parked
+before its insert, a shadow replaced
 between a chunk's claim and its transaction, and frontier-ordered ledger tests including the
 frontier at the largest key refusing every claim); `pkg/applier` `Buffer.Drain` — every
 buffered key is judged against one `Position` snapshot: landed flushes, uncut is discarded,
