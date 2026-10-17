@@ -131,6 +131,9 @@ func TestClassifyRefusesChangingAColumnAViewReads(t *testing.T) {
 		DependentViews: map[string][]string{
 			"email": {`"app"."active_users"`, `"reports"."emails"`},
 		},
+		OwnDependentViews: map[string][]string{
+			"email": {`"app"."active_users"`, `"reports"."emails"`},
+		},
 	}
 	for _, sql := range []string{
 		"ALTER TABLE t ALTER COLUMN email TYPE varchar(100)",
@@ -166,6 +169,41 @@ func TestClassifyRefusesChangingAColumnAViewReads(t *testing.T) {
 		planner.Facts{ColumnTypes: views.ColumnTypes})
 	require.NoError(t, err)
 	assert.Equal(t, planner.ReasonBinaryCoercible, plan.Decisions[0].Reason)
+}
+
+// A DROP COLUMN ... CASCADE drops the views with the column, which the
+// server accepts, so it is not refused; it stays destructive. A view on a
+// table below counts against a recursive change and not against one under
+// ONLY, which stops at the table.
+func TestClassifyJudgesDependentViewsByWhatTheChangeReaches(t *testing.T) {
+	facts := planner.Facts{
+		ColumnTypes:       map[string]string{"email": "character varying(50)", "code": "text"},
+		DependentViews:    map[string][]string{"email": {`"app"."active_users"`}, "code": {`"app"."child_codes"`}},
+		OwnDependentViews: map[string][]string{"email": {`"app"."active_users"`}},
+	}
+	plan, err := planner.Classify("ALTER TABLE t DROP COLUMN email CASCADE", facts)
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 1)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+	assert.True(t, plan.Decisions[0].Destructive)
+	assert.Empty(t, plan.Decisions[0].DependentViews)
+
+	for sql, want := range map[string][]string{
+		"ALTER TABLE t DROP COLUMN email RESTRICT":         {`"app"."active_users"`},
+		"ALTER TABLE ONLY t DROP COLUMN email":             {`"app"."active_users"`},
+		"ALTER TABLE t DROP COLUMN code":                   {`"app"."child_codes"`},
+		"ALTER TABLE t ALTER COLUMN code TYPE varchar(10)": {`"app"."child_codes"`},
+	} {
+		plan, err := planner.Classify(sql, facts)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, planner.ReasonDependentView, plan.Decisions[0].Reason, sql)
+		assert.Equal(t, want, plan.Decisions[0].DependentViews, sql)
+	}
+
+	plan, err = planner.Classify("ALTER TABLE ONLY t DROP COLUMN code", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
 }
 
 // facts mirrors a live table whose column types exercise both sides of the

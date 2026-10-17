@@ -280,10 +280,14 @@ type Facts struct {
 	// column the table already has, which the server skips.
 	AddColumnProofs map[string]statement.AddColumnProof
 	// DependentViews maps a column to the views and materialized views that
-	// read it (preflight.ColumnDependentViews). A column absent from the map
-	// has none, or the facts were not read, as in an offline lint; either
-	// way the server's own refusal at execution remains the backstop.
+	// read it, on the table or on any table below it
+	// (preflight.ColumnDependentViews). A column absent from the map has
+	// none, or the facts were not read, as in an offline lint; either way
+	// the server's own refusal at execution remains the backstop.
 	DependentViews map[string][]string
+	// OwnDependentViews is DependentViews for the table alone, which is
+	// all an ALTER TABLE ONLY changes.
+	OwnDependentViews map[string][]string
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
@@ -301,13 +305,20 @@ func FactsFrom(live schemadiff.Model) Facts {
 
 // viewsReadingColumn returns the views that read the column op retypes or
 // drops: the two column changes PostgreSQL refuses while a view reads the
-// column. A rename is not one of them, since a view follows the column.
+// column. A rename is not one of them, since a view follows the column, and
+// neither is a DROP COLUMN ... CASCADE, which the server accepts by dropping
+// the views with it; that drop stays destructive. Under ONLY the change
+// stops at the table, so only its own views count.
 func viewsReadingColumn(op statement.Op, facts Facts) []string {
-	switch op.Kind {
-	case statement.OpAlterColumnType, statement.OpDropColumn:
-		return facts.DependentViews[op.Column]
-	default:
+	switch {
+	case op.Kind == statement.OpDropColumn && op.Cascade:
 		return nil
+	case op.Kind != statement.OpAlterColumnType && op.Kind != statement.OpDropColumn:
+		return nil
+	case op.Only:
+		return facts.OwnDependentViews[op.Column]
+	default:
+		return facts.DependentViews[op.Column]
 	}
 }
 

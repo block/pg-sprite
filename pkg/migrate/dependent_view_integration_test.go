@@ -100,6 +100,18 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 			},
 		},
 		{
+			name:      "dropping the column with CASCADE, which drops the views",
+			statement: "ALTER TABLE %s.users DROP COLUMN email CASCADE",
+			check: func(t *testing.T, schema string) {
+				assert.False(t, columnExists(t, pool, schema, "users", "email"))
+				var views int
+				require.NoError(t, pool.QueryRow(t.Context(),
+					`SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+					  WHERE n.nspname = $1 AND c.relkind IN ('v', 'm')`, schema).Scan(&views))
+				assert.Zero(t, views, "CASCADE drops the views with the column")
+			},
+		},
+		{
 			name:      "dropping a column no view reads",
 			statement: "ALTER TABLE %s.users DROP COLUMN note",
 			check: func(t *testing.T, schema string) {
@@ -115,4 +127,49 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 			tc.check(t, schema)
 		})
 	}
+}
+
+// A recursive change reaches the column on every table below, so a view on
+// an inheritance child refuses the parent's change with the child's view
+// named, while the same drop under ONLY, which leaves the child's column in
+// place, runs.
+func TestRunRefusesChangingAColumnAChildsViewReads(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	seed := func(t *testing.T) string {
+		t.Helper()
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %[1]s.users (id bigint PRIMARY KEY, email varchar(50));
+			CREATE TABLE %[1]s.admins (level int) INHERITS (%[1]s.users);
+			CREATE VIEW %[1]s.admin_mail AS SELECT email, level FROM %[1]s.admins`, schema))
+		require.NoError(t, err)
+		return schema
+	}
+
+	for _, statement := range []string{
+		"ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(100)",
+		"ALTER TABLE %s.users DROP COLUMN email",
+	} {
+		t.Run(statement, func(t *testing.T) {
+			schema := seed(t)
+			v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(statement, schema)), runOptions())
+			require.NoError(t, err)
+			assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+			assert.Contains(t, v.Detail, fmt.Sprintf(`a column read by "%s"."admin_mail"`, schema))
+			assert.Equal(t, "character varying(50)", columnType(t, pool, schema, "admins", "email"))
+		})
+	}
+
+	t.Run("dropping under ONLY", func(t *testing.T) {
+		schema := seed(t)
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TABLE ONLY %s.users DROP COLUMN email", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, "detail: %s", v.Detail)
+		assert.False(t, columnExists(t, pool, schema, "users", "email"))
+		assert.True(t, columnExists(t, pool, schema, "admins", "email"))
+	})
 }

@@ -125,7 +125,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `relocation` | SET TABLESPACE moves the heap — a rewrite-scale copy. |
 | `partition-parent-lock` | Creating a partition (`CREATE TABLE … PARTITION OF`): a brief `ACCESS EXCLUSIVE` on the parent, no scan. |
 | `replica-identity` | The operation drops what a `REPLICA IDENTITY USING INDEX` of the table, or of a partition or inheritance child below it, is built on: the index, the constraint that owns it, or one of its columns, `INCLUDE` columns too. The setting outlives the index, so every `UPDATE` and `DELETE` on the table fails while a publication publishes them. Refused; move the identity first (`ALTER TABLE … REPLICA IDENTITY`), then re-plan. |
-| `dependent-view` | The operation retypes or drops a column that a view or materialized view reads, which PostgreSQL refuses while the view exists, even for a type change it would relabel. Refused; `dependent_views` names the views. Drop or redefine them first, then re-plan. |
+| `dependent-view` | The operation retypes or drops a column that a view or materialized view reads, on the table or, without `ONLY`, on a partition or inheritance child below it. PostgreSQL refuses this while the view exists, even for a type change it would relabel. Refused; `dependent_views` names the views. Drop or redefine them first, then re-plan. `DROP COLUMN … CASCADE`, which drops the views with the column, is not refused. |
 | `unsupported-operation` | The planner does not recognize the operation or knows no safe path for it. |
 
 ### Target-dependent refusal reasons (`reason`, `statements[].reason`)

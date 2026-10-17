@@ -15,7 +15,8 @@ import (
 // ColumnDependentViews maps each column to the views and materialized views
 // that read it, from any schema. A view that reads the table without naming
 // a column, or reads another table, does not count against the column, and
-// a column no view reads is absent.
+// a column no view reads is absent. A view on an inheritance child counts
+// for the tree, not for the table alone.
 func TestColumnDependentViews(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -30,7 +31,9 @@ func TestColumnDependentViews(t *testing.T) {
 		CREATE VIEW %[1]s.contacts AS SELECT id, email FROM %[1]s.users;
 		CREATE MATERIALIZED VIEW %[2]s."Notes" AS SELECT note FROM %[1]s.users WHERE email IS NOT NULL;
 		CREATE VIEW %[1]s.user_count AS SELECT pg_catalog.count(*) FROM %[1]s.users;
-		CREATE VIEW %[1]s.team_mail AS SELECT email FROM %[1]s.teams`, schema, other))
+		CREATE VIEW %[1]s.team_mail AS SELECT email FROM %[1]s.teams;
+		CREATE TABLE %[1]s.admins (level int) INHERITS (%[1]s.users);
+		CREATE VIEW %[1]s.admin_notes AS SELECT note, level FROM %[1]s.admins`, schema, other))
 	require.NoError(t, err)
 
 	views, err := preflight.ColumnDependentViews(t.Context(), pool, schema, "users")
@@ -39,7 +42,12 @@ func TestColumnDependentViews(t *testing.T) {
 		"id":    {fmt.Sprintf(`"%s"."contacts"`, schema)},
 		"email": sortedQualified([2]string{schema, "contacts"}, [2]string{other, "Notes"}),
 		"note":  {fmt.Sprintf(`"%s"."Notes"`, other)},
-	}, views)
+	}, views.Own)
+	assert.Equal(t, map[string][]string{
+		"id":    {fmt.Sprintf(`"%s"."contacts"`, schema)},
+		"email": sortedQualified([2]string{schema, "contacts"}, [2]string{other, "Notes"}),
+		"note":  sortedQualified([2]string{schema, "admin_notes"}, [2]string{other, "Notes"}),
+	}, views.Tree)
 }
 
 // sortedQualified renders the views as ColumnDependentViews orders them: by

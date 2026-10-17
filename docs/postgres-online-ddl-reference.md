@@ -512,9 +512,13 @@ reports it.
 
 The operation changes the type of, or drops, a column that a view or materialized
 view reads. PostgreSQL refuses both while the view exists, even a type change it
-would otherwise relabel without a rewrite, so the statement could only fail. The
-plan names each view in `decisions[].dependent_views`. Drop or redefine the views
-first, then re-plan; a rename is not refused, because a view follows the column.
+would otherwise relabel without a rewrite, so the statement could only fail. A
+change without `ONLY` reaches the column on every partition and inheritance child
+too, so a view on one of them counts. The plan names each view in
+`decisions[].dependent_views`. Drop or redefine the views first, then re-plan. A
+rename is not refused, because a view follows the column, and neither is
+`DROP COLUMN … CASCADE`, which the server runs by dropping the views with the
+column; that drop is flagged destructive.
 The planner reads the views from live facts, so the linter, which has none, never
 reports it, and the server's own refusal remains the backstop for a view created
 after planning.

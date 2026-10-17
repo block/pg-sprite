@@ -107,6 +107,16 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpDropColumn, Column: "age"},
 		},
 		{
+			name: "drop column cascade",
+			sql:  "ALTER TABLE t DROP COLUMN age CASCADE",
+			want: statement.Op{Kind: statement.OpDropColumn, Column: "age", Cascade: true},
+		},
+		{
+			name: "drop column restrict",
+			sql:  "ALTER TABLE t DROP COLUMN age RESTRICT",
+			want: statement.Op{Kind: statement.OpDropColumn, Column: "age"},
+		},
+		{
 			name: "alter type with mods",
 			sql:  "ALTER TABLE t ALTER COLUMN name TYPE varchar(100)",
 			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "varchar", NewTypeMods: []int32{100}},

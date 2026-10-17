@@ -80,7 +80,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only; flagged **destructive** in the plan report. Refused with `replica-identity` when a replica identity index the drop reaches keys on the column: the table's own, or one on a partition or inheritance child below it unless the statement says `ONLY`. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column"
+    reason_notes: "Metadata-only; flagged **destructive** in the plan report. Refused with `replica-identity` when a replica identity index the drop reaches keys on the column: the table's own, or one on a partition or inheritance child below it unless the statement says `ONLY`. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, on a table the drop reaches, unless the statement says `CASCADE`"
   - id: alter-column-type-binary-coercible-proven-against-live-column-facts
     area: "column_changes"
     operation: "`ALTER COLUMN TYPE`, binary-coercible (proven against live column facts)"

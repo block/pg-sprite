@@ -62,9 +62,11 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 		return Facts{}, err
 	}
 	if st.Kind() == statement.KindAlterTable {
-		if classifier.DependentViews, err = preflight.ColumnDependentViews(ctx, pool, ResolvedSchema(st), st.Table()); err != nil {
+		views, err := preflight.ColumnDependentViews(ctx, pool, ResolvedSchema(st), st.Table())
+		if err != nil {
 			return Facts{}, err
 		}
+		classifier.DependentViews, classifier.OwnDependentViews = views.Tree, views.Own
 	}
 	if adds {
 		if classifier.AddColumnProofs, err = preflight.AddColumnRewrites(ctx, pool, ResolvedSchema(st), st.Table(), st.SQL()); err != nil {
