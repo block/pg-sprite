@@ -91,7 +91,8 @@ type Op struct {
 	Only bool
 	// Indexes are the unqualified names of the indexes an OpDropIndex
 	// drops, in statement order, so a classifier can match each one
-	// without parsing Name's display form.
+	// without parsing Name's display form, or the one index an
+	// ADD CONSTRAINT ... USING INDEX takes over.
 	Indexes []string
 	// Columns are the plain key columns of an ADD PRIMARY KEY / UNIQUE;
 	// empty when the keys are expressions.
@@ -449,6 +450,9 @@ func addConstraintOp(con *pganalyze.Constraint) Op {
 		Name:       con.GetConname(),
 		NotValid:   con.GetSkipValidation(),
 		UsingIndex: con.GetIndexname() != "",
+	}
+	if index := con.GetIndexname(); index != "" {
+		op.Indexes = []string{index}
 	}
 	switch con.GetContype() {
 	case pganalyze.ConstrType_CONSTR_PRIMARY:

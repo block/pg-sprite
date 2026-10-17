@@ -119,7 +119,7 @@ func introspectDesiredTransaction(ctx context.Context, tx pgx.Tx, table string, 
 	if err := confirmForeignKeysBindScratch(ctx, tx, scratch, table); err != nil {
 		return Model{}, err
 	}
-	m, err := introspectOnPath(ctx, tx, scratch, table, path)
+	m, err := introspectOnPath(ctx, tx, scratch, table, path, true)
 	if err != nil {
 		return Model{}, fmt.Errorf("introspect desired state: %w", err)
 	}

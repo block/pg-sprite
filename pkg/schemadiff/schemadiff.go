@@ -157,6 +157,19 @@ type Constraint struct {
 	// from JSON when false, so a model without foreign keys digests the
 	// same as it did before the field existed.
 	ForeignKey bool `json:",omitempty"`
+	// Primary reports a PRIMARY KEY constraint (contype 'p').
+	Primary bool `json:"-"`
+	// IndexDef is the CREATE UNIQUE INDEX statement of the index a primary
+	// key or unique constraint owns, unqualified like Index.Def, and empty
+	// for every other constraint. Only a desired model carries it: the diff
+	// compares a desired key's with a live index of the constraint's name to
+	// adopt that index instead of rebuilding it.
+	IndexDef string `json:"-"`
+	// Deferrable reports a constraint declared DEFERRABLE.
+	Deferrable bool `json:"-"`
+	// InitiallyDeferred reports a deferrable constraint declared INITIALLY
+	// DEFERRED.
+	InitiallyDeferred bool `json:"-"`
 }
 
 // Index is one non-constraint index: its name plus the server-decompiled
