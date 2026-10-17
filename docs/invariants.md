@@ -205,7 +205,11 @@ requeued while its chunk is in flight and flushed once the chunk lands). *Open:*
 transaction whose commit the walsender has already sent while its backend is still in a
 synchronous-commit wait is not yet visible to a snapshot taken after the stream delivered it, so
 an uncut key's change can be discarded ahead of a chunk read that does not see it; the drain
-has no rule for that window yet. Also open: a primary-key move or a unique-value swap that
+has no rule for that window yet. The same window reaches a moved image's completion: the read of
+the source row under `Key` does not see the delivered move, finds no row, and the flush writes a
+delete at `Key` (`Result.Skipped`) with no stream gate, so the shadow loses a row the source
+holds. Nothing re-reads it before cutover; the checksum (CO-1) finds the missing row and, under
+`abort`, refuses the cutover. Also open: a primary-key move or a unique-value swap that
 straddles a chunk the copier is reading collides, on the copier's own insert of the moved row,
 with the stale shadow row the flush has not yet deleted (SQLSTATE `23505`); the catch-up's half
 of the exchange is correct and the resolution is the copier's, so the convergence tests for key
