@@ -156,6 +156,15 @@ const (
 	// target (ST-2). The row is the only record of which statement a shadow
 	// embodies; without one the shadow is dropped and the run started over.
 	CauseShadowUnrecorded RefusalCause = "shadow-unrecorded"
+	// CauseResumeShadowGone means the checkpoint row handed to a resume
+	// records a shadow under which no relation stands (ST-2): the row's
+	// swap has not committed — it is in copying, catching_up, reconciling,
+	// verifying, or a cutover whose swap rolled back — so the shadow it
+	// names should be there, and the run can neither continue on it nor
+	// start over while the row stands. Nothing is written: the row, and
+	// the slot a live row names, are left for the operator to drop and
+	// delete; ErrShadowNotFound is wrapped for errors.Is.
+	CauseResumeShadowGone RefusalCause = "resume-shadow-gone"
 	// CauseResumeSlotForeign means the slot wearing the row's derived name
 	// is not this route's (ST-3): it is a physical slot, or a logical slot
 	// of another database. It is neither decoded from nor replaced; an
@@ -222,6 +231,7 @@ func RefusalCauses() []RefusalCause {
 		CauseResumeRowMismatch,
 		CauseResumeRowDecoding,
 		CauseShadowUnrecorded,
+		CauseResumeShadowGone,
 		CauseResumeSlotForeign,
 		CauseResumeSlotHeld,
 		CauseCopyShadowMismatch,
@@ -257,7 +267,7 @@ func (c RefusalCause) Invariant() string {
 		return "LK-4"
 	case CauseResumeTerminal, CauseResumeSlotHeld:
 		return "ST-4"
-	case CauseResumeRowMismatch, CauseShadowUnrecorded:
+	case CauseResumeRowMismatch, CauseShadowUnrecorded, CauseResumeShadowGone:
 		return "ST-2"
 	case CauseResumeSlotForeign, CauseResumeRowDecoding:
 		return "ST-3"
@@ -286,8 +296,8 @@ func (c RefusalCause) Class() refusal.Class {
 	case CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed, CauseSourceShape,
 		CauseShadowOwner, CauseForeignRelation, CauseIdentityHandoff, CauseDrainDeferred,
 		CauseRelationReplaced, CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid,
-		CauseNameTaken, CauseOutcomeAmbiguous, CauseShadowUnrecorded, CauseResumeSlotForeign,
-		CauseResumeSlotHeld:
+		CauseNameTaken, CauseOutcomeAmbiguous, CauseShadowUnrecorded, CauseResumeShadowGone,
+		CauseResumeSlotForeign, CauseResumeSlotHeld:
 		return refusal.ClassEnvironmental
 	case CauseStatementConversion:
 		return refusal.ClassCapabilityBoundary

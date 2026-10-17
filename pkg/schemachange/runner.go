@@ -165,7 +165,16 @@ type Result struct {
 	// SwapProof when the run resumed after the retained source was already
 	// dropped: the renames the swap performed cannot be read back once
 	// one side of them is gone, and Shadow still names the live table.
+	// SwapProven says which of the two Swapped is.
 	Swapped SwapProof
+	// SwapProven reports whether Swapped is a proof this run made or
+	// re-derived. It is false only when the run resumed after the retained
+	// source was already dropped, so a reader does not compare Swapped
+	// against the zero value to learn that; the swap itself committed in
+	// every run that returns. False does not mean the swap is in doubt.
+	// Run returns the zero Result with an error, so the field is read only
+	// when Run returned nil.
+	SwapProven bool
 	// Verification is the report of the verification pass this run made,
 	// or the zero Report when the run resumed after the swap had already
 	// committed and so made none.
@@ -222,13 +231,18 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 //   - A row before its cutover: the shadow under the row's name is
 //     inspected and its proof must equal the one the row carries, or the
 //     row is refused as resume-row-mismatch; the run continues from the
-//     row's phase and watermark. A live run reads its slot too
+//     row's phase and watermark. A row whose shadow no relation bears is
+//     refused as resume-shadow-gone, the counterpart of shadow-unrecorded,
+//     and the row — with the slot a live row names — is left for the
+//     operator to drop and delete. A live run reads its slot too
 //     (InspectResume): a slot that is gone or that the server reports lost
 //     is replaced in reconcile mode (ST-4) before any stream opens.
 //   - A row in PhaseCutover: whether the swap committed is read from the
 //     catalog (LK-4) — a committed swap continues at the old table drop,
 //     a swap that rolled back is verified and gated again and swapped,
-//     after a live run has caught up again from the row's position.
+//     after a live run has caught up again from the row's position. A
+//     rolled-back swap's row is held against its shadow as a row before
+//     its cutover is, resume-shadow-gone included.
 //   - A terminal row is refused as resume-row-terminal: the run it
 //     records has ended, and a caller that means to run the table again
 //     deletes it first with Store.Delete, under the table's lock.
@@ -322,8 +336,10 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 	}
 	if !state.oldTableGone {
 		// A swap found with its retained source already dropped has no
-		// SwappedTable to report; Result.Swapped stays zero.
+		// SwappedTable to report; Result.Swapped stays zero and SwapProven
+		// says so.
 		result.Swapped = state.swappedTable.Proof()
+		result.SwapProven = true
 	}
 	if !state.oldTableGone {
 		if err := r.settleOldTable(ctx, pool, lock, &state); err != nil {
