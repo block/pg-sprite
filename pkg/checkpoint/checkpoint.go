@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/block/pg-sprite/pkg/copier"
@@ -13,6 +14,15 @@ import (
 // labels: the happy path visits them in declaration order, but PhaseFailed
 // is reachable from any phase, so callers never compare phases for order —
 // they switch on the value or ask Terminal.
+//
+// The set of phases is append-only within a row format: a new phase is
+// added without a FormatVersion bump, since every row in a phase this
+// engine knows still reads the same way. The one row an older engine of
+// the same format cannot read is a row left in a phase it does not know,
+// and Load and Inspect report that row as an IncompatibleError on
+// MismatchPhase — written by a newer engine — carrying the row's Identity,
+// not as a row no Save could have written. Removing or renaming a phase
+// changes what stored rows mean and is a FormatVersion bump.
 type Phase uint8
 
 const (
@@ -64,8 +74,7 @@ func (p Phase) String() string {
 }
 
 // parsePhase reads a stable phase name back into its Phase. A name String
-// never produces is an error: the store wrote the row, so an unknown name
-// is a row the store cannot have written.
+// never produces is an error: this engine has no phase of that name.
 func parsePhase(name string) (Phase, error) {
 	for p := PhaseCopying; p <= PhaseFailed; p++ {
 		if p.String() == name {
@@ -73,6 +82,17 @@ func parsePhase(name string) (Phase, error) {
 		}
 	}
 	return 0, fmt.Errorf("unknown phase %q", name)
+}
+
+// knownPhaseNames lists the stable names of every phase this engine knows,
+// in declaration order; it is what an IncompatibleError on MismatchPhase
+// reports as this engine's side.
+func knownPhaseNames() string {
+	names := make([]string, 0, PhaseFailed)
+	for p := PhaseCopying; p <= PhaseFailed; p++ {
+		names = append(names, p.String())
+	}
+	return strings.Join(names, ", ")
 }
 
 // Fingerprints identifies the statement a checkpoint belongs to: the digests

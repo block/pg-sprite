@@ -275,7 +275,7 @@ func TestLoadReportsNoRowAsNotFound(t *testing.T) {
 // because their meaning is not trusted. Among the fingerprints, the source
 // is judged before the target.
 func TestRowIncompatibilityOrdersFormatThenSourceThenTarget(t *testing.T) {
-	base := row{schema: "app", table: "orders", formatVersion: FormatVersion, sourceFingerprint: "src-a", targetFingerprint: "tgt-a"}
+	base := row{schema: "app", table: "orders", formatVersion: FormatVersion, sourceFingerprint: "src-a", targetFingerprint: "tgt-a", phase: PhaseCopying.String()}
 
 	assert.Nil(t, base.incompatibility(wantFP))
 
@@ -300,12 +300,40 @@ func TestRowIncompatibilityOrdersFormatThenSourceThenTarget(t *testing.T) {
 		other.incompatibility(wantFP))
 }
 
+// A row in a phase this engine does not know is the typed mismatch Load and
+// Inspect report, judged after the identity: the stored phase name is what
+// the row carries, this engine's side is the names it knows, and the row's
+// identity rides along for Delete. A row in another format is reported as
+// that, whatever phase name it carries, since its phase column is not
+// trusted to mean the same thing.
+func TestRowIncompatibilityReportsAnUnknownPhaseAfterTheIdentity(t *testing.T) {
+	stored := row{schema: "app", table: "orders", formatVersion: FormatVersion, sourceFingerprint: "src-a", targetFingerprint: "tgt-a", phase: "settling"}
+	want := &IncompatibleError{Schema: "app", Table: "orders", Mismatch: MismatchPhase, Have: "settling",
+		Want: "copying, catching_up, reconciling, verifying, cutover, done, failed", Stored: stored.identity()}
+	assert.Equal(t, want, stored.incompatibility(wantFP))
+	assert.Equal(t, want, stored.formatIncompatibility())
+
+	known := stored
+	known.phase = PhaseReconciling.String()
+	assert.Nil(t, known.incompatibility(wantFP))
+	assert.Nil(t, known.formatIncompatibility())
+
+	otherStatement := stored
+	otherStatement.targetFingerprint = "tgt-b"
+	assert.Equal(t, MismatchTarget, otherStatement.incompatibility(wantFP).Mismatch)
+
+	otherFormat := stored
+	otherFormat.formatVersion = FormatVersion + 1
+	assert.Equal(t, MismatchFormat, otherFormat.incompatibility(wantFP).Mismatch)
+	assert.Equal(t, MismatchFormat, otherFormat.formatIncompatibility().Mismatch)
+}
+
 // Delete judges the row against the identity the caller was shown, so a
 // row in the caller's format but written by another statement is reported
 // with that statement's fingerprint; the identity Save writes for a
 // checkpoint is the one Delete accepts for its own row.
 func TestRowIncompatibleWithJudgesTheWholeIdentity(t *testing.T) {
-	stored := row{schema: "app", table: "orders", formatVersion: FormatVersion, sourceFingerprint: "src-a", targetFingerprint: "tgt-a"}
+	stored := row{schema: "app", table: "orders", formatVersion: FormatVersion, sourceFingerprint: "src-a", targetFingerprint: "tgt-a", phase: PhaseCopying.String()}
 	assert.Nil(t, stored.incompatibleWith(Identity{FormatVersion: FormatVersion, Fingerprints: wantFP}))
 
 	cp := Checkpoint{SourceFingerprint: "src-a", TargetFingerprint: "tgt-a"}
@@ -323,7 +351,7 @@ func TestRowIncompatibleWithJudgesTheWholeIdentity(t *testing.T) {
 // format is admitted, and a row in another format is the same typed
 // mismatch Load reports, carrying the row's own identity for Delete.
 func TestRowFormatIncompatibilityIgnoresTheFingerprints(t *testing.T) {
-	stored := row{schema: "app", table: "orders", formatVersion: FormatVersion, sourceFingerprint: "src-other", targetFingerprint: "tgt-other"}
+	stored := row{schema: "app", table: "orders", formatVersion: FormatVersion, sourceFingerprint: "src-other", targetFingerprint: "tgt-other", phase: PhaseCopying.String()}
 	assert.Nil(t, stored.formatIncompatibility())
 
 	stored.formatVersion = FormatVersion + 1
