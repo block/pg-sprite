@@ -44,7 +44,7 @@ func New(version string) *CLI {
 // database, so every entry point carries the same bounded session defaults.
 type DBFlags struct {
 	URL              string        `help:"PostgreSQL connection URL or key=value DSN." env:"PGSPRITE_URL" required:""`
-	CACert           string        `help:"CA bundle path for verify-full TLS. RDS/Aurora endpoints verify with the embedded bundle automatically." env:"PGSPRITE_CA_CERT" type:"existingfile"`
+	CACert           string        `help:"CA bundle path for verify-full TLS. Overrides the URL's sslmode: every network host is verified against the bundle, with no plaintext or unverified fallback; refused with sslmode=disable. RDS/Aurora endpoints verify with the embedded bundle automatically." env:"PGSPRITE_CA_CERT" type:"existingfile"`
 	LockTimeout      time.Duration `help:"Session lock_timeout applied to every statement." default:"3s"`
 	StatementTimeout time.Duration `help:"Session statement_timeout applied to every statement." default:"30s"`
 	Debug            bool          `help:"Log statement-level tracing and lifecycle diagnostics to stderr."`
