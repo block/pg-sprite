@@ -137,6 +137,31 @@ func Guidances() []Guidance {
 	}
 }
 
+// ManualPath states the steps a guidance code names, in the one wording
+// every surface renders: the suggest report, the dry run, and a
+// rewrite-required run verdict. An unknown code renders as itself: the
+// typed value is the contract, the prose is display only.
+func ManualPath(g Guidance) string {
+	switch g {
+	case GuidanceSplitStatement:
+		return "submit each operation as its own single-operation statement so each gets its own safer form " +
+			"(a dry-run classification shows each operation's route)"
+	case GuidanceAddColumnThenConstraint:
+		return "add the plain column first, then build the constraint as a separate, named ADD CONSTRAINT with its online pattern"
+	case GuidancePrevalidatedCheck:
+		return "pre-add a validated CHECK matching the partition bound on the child, attach, then drop it"
+	case GuidanceNotNullScaffold:
+		return "prove the invariant with a NOT VALID CHECK plus an online VALIDATE, then SET NOT NULL is a catalog flip"
+	case GuidanceNameConstraintThenValidate:
+		return "name the constraint, add it NOT VALID, then VALIDATE CONSTRAINT online"
+	case GuidanceUniqueIndexThenConstraint:
+		return "build the index first with CREATE UNIQUE INDEX CONCURRENTLY on the same columns, with the statement's " +
+			"INCLUDE, NULLS NOT DISTINCT, WITH (...), and TABLESPACE, then attach it with ADD CONSTRAINT ... USING INDEX, " +
+			"keeping any DEFERRABLE and INITIALLY DEFERRED"
+	}
+	return string(g)
+}
+
 // Suggestion is one advisory result: the statement as written and either
 // the safer native sequence with its typed metadata, or typed guidance
 // naming the manual path when no sequence could be constructed.
