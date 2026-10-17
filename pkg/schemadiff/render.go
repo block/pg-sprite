@@ -125,8 +125,15 @@ func Render(m Model) (string, error) {
 		}
 		defs = append(defs, "    "+def)
 	}
+	// CREATE TABLE ignores NOT VALID, so a constraint the live table has not
+	// validated renders as the validated one the file actually declares; the
+	// diff then plans its validation.
 	for _, con := range m.Constraints {
-		defs = append(defs, "    CONSTRAINT "+pgx.Identifier{con.Name}.Sanitize()+" "+con.Def)
+		def := con.Def
+		if con.NotValid {
+			def = strings.TrimSuffix(def, notValidSuffix)
+		}
+		defs = append(defs, "    CONSTRAINT "+pgx.Identifier{con.Name}.Sanitize()+" "+def)
 	}
 
 	var b strings.Builder

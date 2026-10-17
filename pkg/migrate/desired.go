@@ -141,6 +141,9 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		return DesiredResult{}, ErrForceNotSupported
 	}
 	report, err := diffplan.Plan(ctx, pool, diffplan.Request{Schema: req.Schema, Desired: req.Desired})
+	if ref, ok := desiredShapeRefusal(err); ok {
+		return DesiredResult{}.refused(ref, fmt.Sprintf("%v; nothing was planned or executed", err)), nil
+	}
 	if err != nil {
 		return DesiredResult{}, err
 	}
@@ -183,7 +186,7 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 			return result, fmt.Errorf("%w: planned statement %d is engine-generated SQL its own parser rejects: %w",
 				executor.ErrInvariantViolation, i+1, err)
 		}
-		v, runErr := Run(ctx, pool, st, opts)
+		v, runErr := run(ctx, pool, st, opts, ps.Adopts, ps.Validates)
 		if runErr != nil {
 			result.Outcome = verdict.OutcomeFailed
 			// A zero verdict is Run's "stopped before reaching a verdict"

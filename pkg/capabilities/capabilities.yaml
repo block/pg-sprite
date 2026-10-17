@@ -1,7 +1,7 @@
 rows:
   - id: add-column-no-default-or-constant-default
     area: "column_changes"
-    operation: "`ADD COLUMN` (no default, or constant default)"
+    operation: "`ADD COLUMN` (no default, a constant default, or a non-volatile default such as `now()`)"
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
@@ -9,10 +9,10 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only / fast default (PG 11+); executes instantly under bounded locks"
+    reason_notes: "Metadata-only / fast default (PG 11+), proven by adding the column to an empty temporary table first; executes instantly under bounded locks"
   - id: add-column-with-volatile-default-now-gen-random-uuid
     area: "column_changes"
-    operation: "`ADD COLUMN` with volatile default (`now()`, `gen_random_uuid()`, …)"
+    operation: "`ADD COLUMN` with volatile default (`gen_random_uuid()`, `clock_timestamp()`, identity, `serial`, …)"
     tier: "t2"
     status_mark: "🟡"
     engine_path: "copy_and_swap"
@@ -22,6 +22,18 @@ rows:
       diff: refused
     refusal_reason: backend-unavailable
     reason_notes: "Table rewrite; routes to copy-and-swap and is refused until that engine lands"
+  - id: add-column-of-a-domain-with-constraints
+    area: "column_changes"
+    operation: "`ADD COLUMN` of a domain type with a `CHECK` or `NOT NULL`, with or without a default"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "copy_and_swap"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: backend-unavailable
+    reason_notes: "Table rewrite to check every row against the domain; routes to copy-and-swap and is refused until that engine lands"
   - id: add-column-generated-stored
     area: "column_changes"
     operation: "`ADD COLUMN ... GENERATED ... STORED`"
@@ -147,7 +159,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`"
+    reason_notes: "Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`. In a desired file, a new key whose name and index match a valid live unique index takes that index over with `ADD CONSTRAINT ... USING INDEX` at the key's declared deferrability, instead of a destructive drop and rebuild. Execution reads the index again under the table's lock and refuses with the permanent `adopted-index-drift` code, attaching nothing, if it was dropped, replaced, or left invalid since planning"
   - id: add-check-add-foreign-key-imperative
     area: "constraints"
     operation: "`ADD CHECK` / `ADD FOREIGN KEY` (imperative)"
@@ -275,7 +287,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "Typed refusal at both doors: the imperative door does not take `CREATE TABLE`, and the declarative create path refuses the form at plan time and re-checks it at apply — attaching a partition takes a brief `ACCESS EXCLUSIVE` on the **parent**, which the greenfield absence proof does not cover. The partition-aware flow is planned"
+    reason_notes: "Typed refusal at both doors: the imperative door does not take `CREATE TABLE`, and the declarative create path refuses the form at plan time and re-checks it at apply — attaching a partition takes a brief `ACCESS EXCLUSIVE` on the **parent**, which the greenfield absence proof does not cover. A desired file for a partition that already exists is refused before planning builds anything, since the scratch build would attach to the live parent. The partition-aware flow is planned"
   - id: attach-partition
     area: "partitioned_tables"
     operation: "`ATTACH PARTITION`"
@@ -333,6 +345,17 @@ rows:
       migrate: supported
       diff: supported
     reason_notes: "`diff`, `pull`, and desired-file rendering round-trip the canonical model. The model carries each index's validity (`pg_index.indisvalid`): on a plain table an invalid entry is a concurrent build that did not finish — abandoned, or still running — so a live entry with the desired name and definition does not deliver the desired index, and `diff` plans it as a `create-index` change. `diff` never emits a drop for an invalid entry, whatever the desired file says about its name: a plain `DROP INDEX` blocks the table and cannot tell abandoned debris from a build still in progress. A `pull`ed baseline of such a table therefore re-diffs to that one rebuild rather than to zero. On a partitioned parent an invalid index means unattached partition indexes, not an unfinished build, so validity plays no part in the parent's comparison"
+  - id: declarative-not-valid-constraint
+    area: "declarative_model"
+    operation: "A live check constraint or foreign key left `NOT VALID`"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: supported
+    reason_notes: "The model carries each constraint's validity (`pg_constraint.convalidated`). A live constraint left `NOT VALID` with the desired definition, which an interrupted online add leaves behind, plans as one `VALIDATE CONSTRAINT` statement (`validate-constraint`), which scans under `SHARE UPDATE EXCLUSIVE` while writes keep flowing, instead of a destructive drop and re-add. The statement names only the constraint, so execution reads the constraint again under that same lock and refuses with the permanent `validated-constraint-drift` code, validating nothing, if it was dropped or replaced under the same name since planning. A foreign key plans as `validate-foreign-key`, refused with `declarative-foreign-key` like every declarative foreign-key change. `CREATE TABLE` ignores `NOT VALID`, so a desired file cannot declare it: for a check constraint, `pull` renders the validated definition, and the baseline re-diffs to that one validation rather than to zero. `pull` refuses a table that owns a foreign key, validated or not, with `ErrUnrenderableForeignKey`"
   - id: classic-table-inheritance-inherits
     area: "declarative_model"
     operation: "Classic table inheritance (`INHERITS`)"
@@ -344,7 +367,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: unsupported-statement
-    reason_notes: "Typed refusal for both parents and children: the model cannot express inheritance edges, and flattening inherited columns would produce a silently lossy baseline"
+    reason_notes: "Typed refusal for both parents and children: the model cannot express inheritance edges, and flattening inherited columns would produce a silently lossy baseline. A desired file that declares `INHERITS` is refused before planning builds anything, since the scratch build would lock the live parent and add an inheritance edge to it"
   - id: tables-that-own-or-are-referenced-by-foreign-keys
     area: "declarative_model"
     operation: "Tables that own **or are referenced by** foreign keys"

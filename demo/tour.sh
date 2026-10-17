@@ -72,7 +72,7 @@ dry_run() {
         else
             assert_eq "dry-run refusal exit of [$sql]" 2 "$status"
         fi
-        assert_eq "plan format_version of [$sql]" 8 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "plan format_version of [$sql]" 9 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "disposition of [$sql]" "$disposition" "$(jq -r '.disposition' <<<"$out")"
         assert_eq "route of [$sql]" "$route" "$(jq -r '.statements[0].route' <<<"$out")"
         assert_eq "reason of [$sql]" "$reason" "$(jq -r '.statements[0].decisions[0].reason' <<<"$out")"
@@ -180,7 +180,7 @@ diff_plan() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff exit of [$desired]" 0 "$status"
-        assert_eq "diff format_version of [$desired]" 8 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 9 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
         case "$(jq -r '.statements[0].sql' <<<"$out")" in
         *"$fragment"*) ;;
@@ -208,7 +208,7 @@ diff_refused() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff refusal exit of [$desired]" 2 "$status"
-        assert_eq "diff format_version of [$desired]" 8 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 9 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "diff disposition of [$desired]" refuse "$(jq -r '.disposition' <<<"$out")"
         assert_eq "diff reason of [$desired]" unsupported-statement "$(jq -r '.statements[0].reason' <<<"$out")"
         assert_eq "diff class of [$desired]" "$class" "$(jq -r '.statements[0].class' <<<"$out")"
@@ -243,7 +243,7 @@ run_pull() {
             out=$("$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" --json) || status=$?
             assert_eq "diff exit of [$desired]" 0 "$status"
             # Plan report contract version (plan.FormatVersion), same pin as diff_plan.
-            assert_eq "diff format_version of [$desired]" 8 "$(jq -r '.format_version' <<<"$out")"
+            assert_eq "diff format_version of [$desired]" 9 "$(jq -r '.format_version' <<<"$out")"
             assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
             assert_eq "zero diff of [$desired]" 0 "$(jq -r '.statements | length' <<<"$out")"
         else
@@ -266,7 +266,8 @@ run_dryrun() {
     dry_run native         safer-idiom            false execute     "ALTER TABLE users ADD CONSTRAINT users_email_uniq UNIQUE (email)"
     dry_run native         safer-idiom            false rewrite-required "ALTER TABLE users ADD COLUMN nick text UNIQUE"
     dry_run copy-and-swap  type-rewrite           false unavailable "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
-    dry_run copy-and-swap  volatile-default       false unavailable "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()"
+    dry_run native         fast-default           false execute     "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()"
+    dry_run copy-and-swap  volatile-default       false unavailable "ALTER TABLE users ADD COLUMN started timestamptz DEFAULT clock_timestamp()"
     dry_run native         app-breaking-rename    false execute     "ALTER TABLE users RENAME COLUMN name TO full_name"
     dry_run native         metadata-only          true  execute     "ALTER TABLE users DROP COLUMN status"
     dry_run copy-and-swap  relocation             false unavailable "ALTER TABLE users SET TABLESPACE pg_default"

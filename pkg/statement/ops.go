@@ -44,18 +44,23 @@ const (
 )
 
 // DefaultKind classifies the DEFAULT expression shape of an added column.
-// Only a provable constant qualifies for PostgreSQL's fast default; any
-// other expression is treated as volatile, conservatively.
+// The shape alone cannot settle whether PostgreSQL rewrites the table: a
+// constant still rewrites every row when the column's type is a domain with
+// constraints, and a non-volatile expression such as now() does not. The
+// server answers that (preflight.AddColumnRewrites); without its answer,
+// any expression is treated as volatile, conservatively.
 type DefaultKind int
 
 // The default shapes an added column can carry.
 const (
 	// DefaultNone: no DEFAULT clause.
 	DefaultNone DefaultKind = iota
-	// DefaultConstant: a literal (possibly type-cast) — fast-default safe.
+	// DefaultConstant: a literal (possibly type-cast), which the catalog
+	// stores unless the column's type forces a rewrite.
 	DefaultConstant
 	// DefaultExpression: anything else — function calls, identity, serial.
-	// The engine does not evaluate volatility offline; it assumes the worst.
+	// The engine does not evaluate volatility offline; without the
+	// server's answer it assumes the worst.
 	DefaultExpression
 )
 
@@ -91,7 +96,8 @@ type Op struct {
 	Only bool
 	// Indexes are the unqualified names of the indexes an OpDropIndex
 	// drops, in statement order, so a classifier can match each one
-	// without parsing Name's display form.
+	// without parsing Name's display form, or the one index an
+	// ADD CONSTRAINT ... USING INDEX takes over.
 	Indexes []string
 	// Columns are the plain key columns of an ADD PRIMARY KEY / UNIQUE;
 	// empty when the keys are expressions.
@@ -449,6 +455,9 @@ func addConstraintOp(con *pganalyze.Constraint) Op {
 		Name:       con.GetConname(),
 		NotValid:   con.GetSkipValidation(),
 		UsingIndex: con.GetIndexname() != "",
+	}
+	if index := con.GetIndexname(); index != "" {
+		op.Indexes = []string{index}
 	}
 	switch con.GetContype() {
 	case pganalyze.ConstrType_CONSTR_PRIMARY:

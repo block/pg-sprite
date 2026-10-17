@@ -50,34 +50,31 @@ func replicaIdentityDrops(st statement.Statement) ([]statement.Op, error) {
 // granted within the attempt's lock_timeout fails like the drop itself
 // would.
 func refuseReplicaIdentityLoss(ctx context.Context, tx pgx.Tx, st statement.Statement, drops []statement.Op) error {
-	target := pgx.Identifier{st.Table()}
-	if st.Schema() != "" {
-		target = pgx.Identifier{st.Schema(), st.Table()}
-	}
-	if _, err := tx.Exec(ctx, "LOCK TABLE ONLY "+target.Sanitize()+" IN ACCESS EXCLUSIVE MODE"); err != nil {
-		return fmt.Errorf("lock %s to check its replica identity: %w", target.Sanitize(), err)
+	target, err := lockForCheck(ctx, tx, st, "check its replica identity")
+	if err != nil {
+		return err
 	}
 	var oid uint32
 	var partitioned bool
 	if err := tx.QueryRow(ctx, "SELECT oid, relkind = 'p' FROM pg_class WHERE oid = $1::regclass",
-		target.Sanitize()).Scan(&oid, &partitioned); err != nil {
-		return fmt.Errorf("resolve %s to check its replica identity: %w", target.Sanitize(), err)
+		target).Scan(&oid, &partitioned); err != nil {
+		return fmt.Errorf("resolve %s to check its replica identity: %w", target, err)
 	}
 	if dropsReachTablesBelow(drops, partitioned) {
-		if _, err := tx.Exec(ctx, "LOCK TABLE "+target.Sanitize()+" IN ACCESS EXCLUSIVE MODE"); err != nil {
-			return fmt.Errorf("lock the tables below %s to check their replica identity: %w", target.Sanitize(), err)
+		if _, err := tx.Exec(ctx, "LOCK TABLE "+target+" IN ACCESS EXCLUSIVE MODE"); err != nil {
+			return fmt.Errorf("lock the tables below %s to check their replica identity: %w", target, err)
 		}
 	}
 	keys, err := schemadiff.ReadReplicaIdentity(ctx, tx, oid)
 	if err != nil {
-		return fmt.Errorf("read the replica identity of %s: %w", target.Sanitize(), err)
+		return fmt.Errorf("read the replica identity of %s: %w", target, err)
 	}
 	for _, op := range drops {
 		if keys.DroppedBy(op) {
 			return fmt.Errorf("%w: %s on %s, which makes UPDATE and DELETE fail "+
 				"while a publication publishes them; point REPLICA IDENTITY at another unique index first "+
 				"(or DEFAULT, if a usable primary key remains after the drop), then re-plan",
-				ErrReplicaIdentityDrop, op.Describe(), target.Sanitize())
+				ErrReplicaIdentityDrop, op.Describe(), target)
 		}
 	}
 	return nil

@@ -31,6 +31,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/progress"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -193,7 +194,7 @@ func (b Budget) validate() error {
 // work that exceeded its execution budget is not a lock-acquisition
 // strategy.
 func ExecuteNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy) error {
-	return executeNative(ctx, pool, pt, st, b, retry, nil)
+	return executeNative(ctx, pool, pt, st, b, retry, nil, nil, nil)
 }
 
 // ExecuteNativeWithProgress runs an optimistic native attempt while updating
@@ -205,10 +206,15 @@ func ExecuteNativeWithProgress(ctx context.Context, pool *pgxpool.Pool, pt prefl
 	tracker.Start(1, progress.OperationOptimistic)
 	tracker.StartStep(1, progress.OperationOptimistic, st.SQL())
 	defer func() { tracker.Finish(err) }()
-	return executeNative(ctx, pool, pt, st, b, retry, tracker)
+	return executeNative(ctx, pool, pt, st, b, retry, nil, nil, tracker)
 }
 
-func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) error {
+// executeNative runs st as bounded native attempts. When adopts is set, st
+// is the ADD CONSTRAINT ... USING INDEX that takes over that index, and
+// each attempt checks the index against the planned definition under the
+// table's lock before attaching it. When validates is set, st is the
+// VALIDATE CONSTRAINT of that constraint, checked the same way.
+func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, tracker *progress.Tracker) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
@@ -226,17 +232,56 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	// under the session default), so the statement's unqualified secondary
 	// names — a column's type, an expression's function — resolve in the
 	// target schema whether the run creates the table or alters it.
-	// A native drop is checked against the replica identity again inside
-	// its own transaction, under the lock it runs with: the plan's facts
-	// were read before the transaction began.
+	// A native drop is checked against the replica identity, an index
+	// adoption against the planned index definition, and a validation
+	// against the planned constraint definition, again inside the
+	// attempt's own transaction, under the lock it runs with: the plan's
+	// facts were read before the transaction began.
 	drops, err := replicaIdentityDrops(st)
 	if err != nil {
 		return err
 	}
-	var before func(context.Context, pgx.Tx) error
+	var checks []func(context.Context, pgx.Tx) error
 	if len(drops) > 0 {
-		before = func(ctx context.Context, tx pgx.Tx) error {
+		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
 			return refuseReplicaIdentityLoss(ctx, tx, st, drops)
+		})
+	}
+	if adopts != nil {
+		ok, err := adoptsIndex(st, adopts.Index)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: %q was planned to take over index %s but does not",
+				ErrInvariantViolation, st.SQL(), adopts.Index)
+		}
+		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
+			return refuseAdoptedIndexDrift(ctx, tx, st, *adopts)
+		})
+	}
+	if validates != nil {
+		ok, err := validatesConstraint(st, validates.Constraint)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: %q was planned to validate constraint %s but does not",
+				ErrInvariantViolation, st.SQL(), validates.Constraint)
+		}
+		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
+			return refuseValidatedConstraintDrift(ctx, tx, st, *validates)
+		})
+	}
+	var before func(context.Context, pgx.Tx) error
+	if len(checks) > 0 {
+		before = func(ctx context.Context, tx pgx.Tx) error {
+			for _, check := range checks {
+				if err := check(ctx, tx); err != nil {
+					return err
+				}
+			}
+			return nil
 		}
 	}
 	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {

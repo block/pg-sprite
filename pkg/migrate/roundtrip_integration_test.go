@@ -71,6 +71,60 @@ CREATE INDEX t_email_idx ON t (email);`
 		assert.Equal(t, []string{"CREATE INDEX t_email_idx ON t USING btree (email)"}, plannedSQL(t, res))
 	})
 
+	t.Run("adopts a unique index as a unique constraint", func(t *testing.T) {
+		// The constraint takes the live index over in place, so the table
+		// never goes without the guarantee or the index.
+		live := `CREATE TABLE t (
+    id bigint PRIMARY KEY,
+    email text NOT NULL
+);
+CREATE UNIQUE INDEX t_email_key ON t (email);`
+		desired := `CREATE TABLE t (
+    id bigint PRIMARY KEY,
+    email text NOT NULL UNIQUE
+);`
+		res := assertRoundTrip(t, pool, live, desired)
+		assert.Equal(t, []string{"ALTER TABLE t ADD CONSTRAINT t_email_key UNIQUE USING INDEX t_email_key"}, plannedSQL(t, res))
+	})
+
+	t.Run("adopts a unique index as a deferrable unique constraint", func(t *testing.T) {
+		// The constraint takes the index over with its declared
+		// deferrability, which the server records on the index as it
+		// attaches it, so the table matches a fresh build of the file.
+		live := `CREATE TABLE t (
+    id bigint PRIMARY KEY,
+    email text NOT NULL
+);
+CREATE UNIQUE INDEX t_email_key ON t (email);`
+		desired := `CREATE TABLE t (
+    id bigint PRIMARY KEY,
+    email text NOT NULL,
+    CONSTRAINT t_email_key UNIQUE (email) DEFERRABLE INITIALLY DEFERRED
+);`
+		res := assertRoundTrip(t, pool, live, desired)
+		assert.Equal(t, []string{"ALTER TABLE t ADD CONSTRAINT t_email_key UNIQUE USING INDEX t_email_key DEFERRABLE INITIALLY DEFERRED"}, plannedSQL(t, res))
+	})
+
+	t.Run("adopts a unique index as the primary key", func(t *testing.T) {
+		// A primary key needs its columns NOT NULL, which the plan sets
+		// online first, so adopting the index does not scan the table under
+		// its lock.
+		live := `CREATE TABLE t (
+    id bigint,
+    note text
+);
+CREATE UNIQUE INDEX t_pkey ON t (id);`
+		desired := `CREATE TABLE t (
+    id bigint PRIMARY KEY,
+    note text
+);`
+		res := assertRoundTrip(t, pool, live, desired)
+		assert.Equal(t, []string{
+			"ALTER TABLE t ALTER COLUMN id SET NOT NULL",
+			"ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY USING INDEX t_pkey",
+		}, plannedSQL(t, res))
+	})
+
 	t.Run("sets a column NOT NULL", func(t *testing.T) {
 		// The planner runs SET NOT NULL as an online sequence: a NOT VALID
 		// check, its validation, then SET NOT NULL, which the validated

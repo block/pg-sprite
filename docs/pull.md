@@ -47,6 +47,7 @@ against the same database before committing the baseline:
 
 ```sh
 export PGSPRITE_URL='postgres://user:password@localhost/database?sslmode=disable'
+# (with PGSPRITE_CA_CERT or --ca-cert set, drop sslmode=disable: a CA bundle requires TLS)
 
 pg-sprite pull --schema public --out schema
 

@@ -96,7 +96,12 @@ refusal — never a silently wrong or incomplete result:
   `REPLICA IDENTITY` first, then re-plan.
 - **Destructive desired-state plans are refused as a whole** — `migrate --desired`
   creates missing tables and converges supported changes, but never infers permission
-  to discard live structure.
+  to discard live structure. A new primary key or unique constraint over a live
+  unique index of its name is not destructive: it takes the index over with
+  `ADD CONSTRAINT ... USING INDEX`, and refuses with `adopted-index-drift` if the
+  index changed after planning. Nor is a live check constraint left `NOT VALID`
+  with the desired definition: it plans as one online `VALIDATE CONSTRAINT`, and
+  refuses with `validated-constraint-drift` if the constraint changed after planning.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
   build's leftover is reported with a typed state, and the proven removal
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
@@ -120,6 +125,9 @@ refusal — never a silently wrong or incomplete result:
   `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a relation name the desired
   set claims twice — refuse at plan time, and the same rules re-check at
   apply.
+- **A desired file that names a live parent** with `PARTITION OF` or
+  `INHERITS` refuses before planning builds anything, since the scratch
+  build would lock that parent.
 
 The codebase is partitioned into a small safety-critical core and a
 periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the

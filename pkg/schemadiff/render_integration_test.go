@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/internal/testutil/modeltest"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -62,8 +63,46 @@ func TestRenderRoundTripsLiveTable(t *testing.T) {
 	}
 
 	live, desired, changes := roundTrip(t, pool, schema, "events")
-	assert.Equal(t, live, desired, "rendered output must introspect back to the identical model")
+	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
+}
+
+// A live check constraint left NOT VALID renders as the validated constraint
+// the desired file can declare, since CREATE TABLE ignores NOT VALID. The
+// baseline re-diffs to that one validation rather than to zero, and the
+// models differ only in the constraint's validity.
+func TestRenderNotValidConstraintRendersValidated(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (id bigint PRIMARY KEY, qty int);
+		ALTER TABLE %[1]s.events ADD CONSTRAINT qty_positive CHECK (qty > 0) NOT VALID`, schema))
+	require.NoError(t, err)
+
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "events")
+	require.NoError(t, err)
+	rendered, err := schemadiff.Render(live)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, `CONSTRAINT "qty_positive" CHECK ((qty > 0))`)
+	assert.NotContains(t, rendered, "NOT VALID")
+
+	live, desired, changes := roundTrip(t, pool, schema, "events")
+	require.Len(t, changes, 1)
+	assert.Equal(t, schemadiff.ChangeValidateConstraint, changes[0].Kind)
+	assert.Equal(t, fmt.Sprintf(`ALTER TABLE "%s"."events" VALIDATE CONSTRAINT "qty_positive"`, schema), changes[0].SQL)
+
+	validated := live
+	validated.Constraints = append([]schemadiff.Constraint(nil), live.Constraints...)
+	for i, con := range validated.Constraints {
+		if con.Name == "qty_positive" {
+			require.True(t, con.NotValid)
+			validated.Constraints[i].Def = "CHECK ((qty > 0))"
+			validated.Constraints[i].NotValid = false
+		}
+	}
+	assert.Equal(t, validated, modeltest.Comparable(desired))
 }
 
 // A serial table round-trips through the serial pseudo-type: the rendered
@@ -79,7 +118,7 @@ func TestRenderRoundTripsSerialTable(t *testing.T) {
 	require.NoError(t, err)
 
 	live, desired, changes := roundTrip(t, pool, schema, "t")
-	assert.Equal(t, live, desired)
+	assert.Equal(t, live, modeltest.Comparable(desired))
 	assert.Empty(t, changes)
 }
 
@@ -107,7 +146,7 @@ func TestRenderRoundTripsQuotedIdentifiers(t *testing.T) {
 	}
 
 	live, desired, changes := roundTrip(t, pool, schema, "Order Items")
-	assert.Equal(t, live, desired, "rendered output must introspect back to the identical model")
+	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
 }
 
@@ -433,7 +472,7 @@ func TestRenderRoundTripsStorageParameters(t *testing.T) {
 
 	live, desired, changes := roundTrip(t, pool, schema, "tuned")
 	assert.Equal(t, []string{"autovacuum_vacuum_scale_factor=0.05", "fillfactor=70", "toast.autovacuum_enabled=false"}, live.Options)
-	assert.Equal(t, live, desired, "rendered output must introspect back to the identical model")
+	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes)
 
 	rendered, err := schemadiff.Render(live)
@@ -592,7 +631,7 @@ func TestRenderRoundTripsIdentitySequenceOptions(t *testing.T) {
 	live, desired, changes := roundTrip(t, pool, schema, "tickets")
 	assert.Equal(t, &schemadiff.SequenceOptions{Type: "bigint", Start: 1000, Increment: 10, Min: 1, Max: 900000, Cache: 20}, live.Columns[0].Sequence)
 	assert.Nil(t, live.Columns[1].Sequence, "a sequence declared at the defaults records nothing")
-	assert.Equal(t, live, desired, "rendered output must introspect back to the identical model")
+	assert.Equal(t, live, modeltest.Comparable(desired), "rendered output must introspect back to the identical model")
 	assert.Empty(t, changes)
 
 	rendered, err := schemadiff.Render(live)
