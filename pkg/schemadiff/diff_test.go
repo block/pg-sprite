@@ -300,6 +300,70 @@ func TestDiffConstraintChangeDropsAndReadds(t *testing.T) {
 	assert.False(t, changes[1].Destructive)
 }
 
+// A live constraint left NOT VALID with the desired definition, the state an
+// interrupted online add leaves behind, converges by validating it: no drop,
+// no re-add, nothing destructive. Validity is the only difference that earns
+// this; a NOT VALID constraint whose definition also changed, or that the
+// desired file no longer declares, is planned as before.
+func TestDiffValidatesANotValidConstraintInPlace(t *testing.T) {
+	check := Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 0))"}
+	fk := Constraint{Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id)", ForeignKey: true}
+	notValid := func(c Constraint) Constraint {
+		c.Def += " NOT VALID"
+		c.NotValid = true
+		return c
+	}
+	with := func(cons ...Constraint) Model {
+		m := base()
+		m.Constraints = append(m.Constraints, cons...)
+		return m
+	}
+
+	t.Run("check constraint", func(t *testing.T) {
+		changes, err := Diff("public", with(notValid(check)), with(check))
+		require.NoError(t, err)
+		require.Len(t, changes, 1)
+		assert.Equal(t, `ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_name_check"`, changes[0].SQL)
+		assert.Equal(t, ChangeValidateConstraint, changes[0].Kind)
+		assert.False(t, changes[0].Destructive)
+		assert.False(t, changes[0].Kind.IsForeignKey())
+	})
+
+	t.Run("foreign key", func(t *testing.T) {
+		changes, err := Diff("public", with(notValid(fk)), with(fk))
+		require.NoError(t, err)
+		require.Len(t, changes, 1)
+		assert.Equal(t, `ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_owner_fkey"`, changes[0].SQL)
+		assert.Equal(t, ChangeValidateForeignKey, changes[0].Kind)
+		assert.False(t, changes[0].Destructive)
+		assert.True(t, changes[0].Kind.IsForeignKey(), "desired-state execution refuses it with every foreign-key change")
+	})
+
+	t.Run("definition also changed", func(t *testing.T) {
+		changed := Constraint{Name: check.Name, Def: "CHECK ((length((name)::text) > 1))"}
+		changes, err := Diff("public", with(notValid(check)), with(changed))
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" DROP CONSTRAINT "events_name_check"`,
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_check" CHECK ((length((name)::text) > 1))`,
+		}, sqls(changes))
+		assert.True(t, changes[0].Destructive)
+	})
+
+	t.Run("no longer declared", func(t *testing.T) {
+		changes, err := Diff("public", with(notValid(check)), base())
+		require.NoError(t, err)
+		require.Equal(t, []string{`ALTER TABLE "public"."events" DROP CONSTRAINT "events_name_check"`}, sqls(changes))
+		assert.True(t, changes[0].Destructive)
+	})
+
+	t.Run("validated on both sides", func(t *testing.T) {
+		changes, err := Diff("public", with(check), with(check))
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+	})
+}
+
 func TestDiffIndexChangeDropsAndRecreatesQualified(t *testing.T) {
 	desired := base()
 	desired.Indexes = []Index{
@@ -606,8 +670,8 @@ func TestDiffVirtualGeneratedColumn(t *testing.T) {
 }
 
 // The change-kind vocabulary is a closed set a consumer branches on; it is
-// pinned to plan-report format_version 1 (docs/plan-report.md). A new value
-// here without a format_version bump is a contract break.
+// pinned to the plan report's format_version (docs/plan-report.md). A new
+// value here without a format_version bump is a contract break.
 func TestChangeKindsVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []ChangeKind{
 		ChangeCreateTable,
@@ -624,6 +688,8 @@ func TestChangeKindsVocabularyPinned(t *testing.T) {
 		ChangeDropNotNull,
 		ChangeAddConstraint,
 		ChangeAddForeignKey,
+		ChangeValidateConstraint,
+		ChangeValidateForeignKey,
 		ChangeCreateIndex,
 	}, ChangeKinds())
 }

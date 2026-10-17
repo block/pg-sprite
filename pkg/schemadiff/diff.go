@@ -65,6 +65,12 @@ const (
 	// ChangeAddForeignKey adds a foreign-key constraint. Desired-state
 	// execution refuses it: foreign-key changes are planned, not run.
 	ChangeAddForeignKey ChangeKind = "add-foreign-key"
+	// ChangeValidateConstraint validates a live check constraint left NOT
+	// VALID, the state an interrupted online add leaves behind.
+	ChangeValidateConstraint ChangeKind = "validate-constraint"
+	// ChangeValidateForeignKey validates a live foreign key left NOT VALID.
+	// Desired-state execution refuses it like every foreign-key change.
+	ChangeValidateForeignKey ChangeKind = "validate-foreign-key"
 	// ChangeCreateIndex creates an index.
 	ChangeCreateIndex ChangeKind = "create-index"
 )
@@ -89,13 +95,16 @@ func ChangeKinds() []ChangeKind {
 		ChangeDropNotNull,
 		ChangeAddConstraint,
 		ChangeAddForeignKey,
+		ChangeValidateConstraint,
+		ChangeValidateForeignKey,
 		ChangeCreateIndex,
 	}
 }
 
-// IsForeignKey reports whether the kind adds or drops a foreign key.
+// IsForeignKey reports whether the kind adds, drops, or validates a foreign
+// key.
 func (k ChangeKind) IsForeignKey() bool {
-	return k == ChangeAddForeignKey || k == ChangeDropForeignKey
+	return k == ChangeAddForeignKey || k == ChangeDropForeignKey || k == ChangeValidateForeignKey
 }
 
 // Change is one derived statement of the ordered plan.
@@ -203,9 +212,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	}
 
 	// Constraints to drop: gone from desired, or changed (re-added below).
+	// One left NOT VALID with the desired definition is validated below
+	// instead.
 	for _, con := range live.Constraints {
 		want, ok := desiredCons[con.Name]
-		if !ok || want.Def != con.Def {
+		if !ok || (want.Def != con.Def && !validatesInPlace(con, want)) {
 			changes = append(changes, Change{
 				SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
 				Kind:        dropConstraintKind(con),
@@ -275,6 +286,13 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			continue
 		}
 		had, ok := liveCons[con.Name]
+		if ok && validatesInPlace(had, con) {
+			changes = append(changes, Change{
+				SQL:  "ALTER TABLE " + table + " VALIDATE CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
+				Kind: validateConstraintKind(con),
+			})
+			continue
+		}
 		if !ok || had.Def != con.Def {
 			sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize() + " " + con.Def
 			if con.ForeignKey {
@@ -588,6 +606,27 @@ func addConstraintKind(con Constraint) ChangeKind {
 		return ChangeAddForeignKey
 	}
 	return ChangeAddConstraint
+}
+
+// validateConstraintKind classifies a constraint validation the same way.
+func validateConstraintKind(con Constraint) ChangeKind {
+	if con.ForeignKey {
+		return ChangeValidateForeignKey
+	}
+	return ChangeValidateConstraint
+}
+
+// notValidSuffix is what pg_get_constraintdef appends to the definition of a
+// constraint the server has not validated, and the only difference from the
+// definition of the same constraint validated.
+const notValidSuffix = " NOT VALID"
+
+// validatesInPlace reports whether live is the desired constraint left NOT
+// VALID, so validating it converges the two: the drop and re-add the
+// definitions' difference would otherwise plan is destructive, and the
+// re-add scans the table again.
+func validatesInPlace(live, desired Constraint) bool {
+	return live.NotValid && !desired.NotValid && live.Def == desired.Def+notValidSuffix
 }
 
 // constraintsByName indexes constraints for lookup during the diff.
