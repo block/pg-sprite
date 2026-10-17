@@ -382,7 +382,7 @@ slot on its way there.
 ### Routing the checkpoint store's own refusals
 
 Before `Load` can be guarded on the statement's fingerprints, the resume reads the row with
-`checkpoint.Store.Inspect`, guarded on the row format alone, because the row's phase and
+`checkpoint.Store.Inspect`, guarded on the row format and the phase alone, because the row's phase and
 shadow proof are what tell it which statement it is resuming. `Inspect`, `Load`, and `Save`
 share a set of typed errors about the table and the row format that are about the engine
 installation, not the run, and each means a different action:
@@ -394,6 +394,7 @@ installation, not the run, and each means a different action:
 | `ErrTableNewer` (`*checkpoint.TableNewerError`, `Unknown` naming the columns) | The table carries columns this engine does not know: a newer engine shaped it, or an operator added a column by hand. `Ensure` ran no DDL | Operator action — run the newer engine, roll the table back to this engine's shape, or drop the hand-added column; retrying this engine cannot succeed while the columns are there |
 | `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion < checkpoint.FormatVersion` | The row was written by an older engine whose row format this engine does not read | Operator action: finish or abandon the old run. When no run is in flight, `Store.Delete(Stored)` is the fresh start; the row is never silently rewritten |
 | `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion > checkpoint.FormatVersion` | The row was written by a newer engine | Upgrade the engine; this one must not touch the row |
+| `*IncompatibleError` with `Mismatch == MismatchPhase` | The row stands in a phase this engine has no name for (`Have` is the stored name, `Want` the names this engine knows): a newer engine of the same row format wrote it, since the phase set only grows within a format | Upgrade the engine, or finish the run with the engine that started it; once no run is in flight, `Store.Delete(Stored)` is the fresh start. This engine must not touch the row |
 
 Releases through v0.3.3 write format 2, whose model fingerprints leave out the table's
 storage parameters and its columns' sequence declarations. A copy-and-swap run in flight across the upgrade to format 3 surfaces as
