@@ -125,6 +125,11 @@ type Change struct {
 	// the definition again under the table's lock before attaching it.
 	// The SQL already identifies the change, so it stays out of the JSON.
 	Adopts *IndexAdoption `json:"-"`
+	// Validates is set on a VALIDATE CONSTRAINT: the live constraint it
+	// validates, with the definition the diff matched it against. The
+	// statement names only the constraint, so execution checks the
+	// definition again under the table's lock before validating it.
+	Validates *ConstraintValidation `json:"-"`
 }
 
 // IndexAdoption is an index a new primary key or unique constraint takes
@@ -134,6 +139,15 @@ type Change struct {
 type IndexAdoption struct {
 	Index string
 	Def   string
+}
+
+// ConstraintValidation is a NOT VALID constraint a planned VALIDATE
+// CONSTRAINT validates, and the definition, as introspection reads it
+// (pg_get_constraintdef, NOT VALID suffix included), that the constraint
+// must still have when it does.
+type ConstraintValidation struct {
+	Constraint string
+	Def        string
 }
 
 // Diff derives the ordered statement list that converges live onto desired.
@@ -288,8 +302,9 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 		had, ok := liveCons[con.Name]
 		if ok && validatesInPlace(had, con) {
 			changes = append(changes, Change{
-				SQL:  "ALTER TABLE " + table + " VALIDATE CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
-				Kind: validateConstraintKind(con),
+				SQL:       "ALTER TABLE " + table + " VALIDATE CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
+				Kind:      validateConstraintKind(con),
+				Validates: &ConstraintValidation{Constraint: con.Name, Def: had.Def},
 			})
 			continue
 		}

@@ -55,6 +55,8 @@ func TestRunDesiredValidatesTheConstraintAFailedValidationLeftBehind(t *testing.
 	assert.Equal(t, schemadiff.ChangeValidateConstraint, st.Kind)
 	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.t VALIDATE CONSTRAINT t_qty_check", schema), st.SQL)
 	assert.False(t, st.Destructive)
+	assert.Equal(t, &schemadiff.ConstraintValidation{Constraint: "t_qty_check", Def: "CHECK ((qty > 0)) NOT VALID"}, st.Validates,
+		"the plan carries the definition execution checks again before validating")
 	require.Len(t, res.Verdicts, 1)
 	assert.Equal(t, verdict.OutcomeExecuted, res.Verdicts[0].Outcome)
 	assert.Equal(t, []bool{true}, constraintValidity(t, pool, schema, "t_qty_check"),

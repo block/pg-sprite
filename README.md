@@ -100,7 +100,8 @@ refusal — never a silently wrong or incomplete result:
   unique index of its name is not destructive: it takes the index over with
   `ADD CONSTRAINT ... USING INDEX`, and refuses with `adopted-index-drift` if the
   index changed after planning. Nor is a live check constraint left `NOT VALID`
-  with the desired definition: it plans as one online `VALIDATE CONSTRAINT`.
+  with the desired definition: it plans as one online `VALIDATE CONSTRAINT`, and
+  refuses with `validated-constraint-drift` if the constraint changed after planning.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
   build's leftover is reported with a typed state, and the proven removal
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when

@@ -327,6 +327,8 @@ func TestDiffValidatesANotValidConstraintInPlace(t *testing.T) {
 		assert.Equal(t, ChangeValidateConstraint, changes[0].Kind)
 		assert.False(t, changes[0].Destructive)
 		assert.False(t, changes[0].Kind.IsForeignKey())
+		assert.Equal(t, &ConstraintValidation{Constraint: check.Name, Def: check.Def + " NOT VALID"}, changes[0].Validates,
+			"execution checks the live definition the diff matched")
 	})
 
 	t.Run("foreign key", func(t *testing.T) {
@@ -337,6 +339,7 @@ func TestDiffValidatesANotValidConstraintInPlace(t *testing.T) {
 		assert.Equal(t, ChangeValidateForeignKey, changes[0].Kind)
 		assert.False(t, changes[0].Destructive)
 		assert.True(t, changes[0].Kind.IsForeignKey(), "desired-state execution refuses it with every foreign-key change")
+		assert.Equal(t, &ConstraintValidation{Constraint: fk.Name, Def: fk.Def + " NOT VALID"}, changes[0].Validates)
 	})
 
 	t.Run("definition also changed", func(t *testing.T) {

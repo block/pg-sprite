@@ -75,6 +75,11 @@ type Statement struct {
 	// attaches it (see schemadiff.Change.Adopts). Nil otherwise, and out
 	// of the JSON: the SQL already identifies the change.
 	Adopts *schemadiff.IndexAdoption `json:"-"`
+	// Validates is the constraint a diff-derived VALIDATE CONSTRAINT
+	// validates and the definition it must still have when execution
+	// validates it (see schemadiff.Change.Validates). Nil otherwise, and
+	// out of the JSON for the same reason.
+	Validates *schemadiff.ConstraintValidation `json:"-"`
 	// Destructive marks statements that discard live structure — a dropped
 	// column, constraint, index, or NOT NULL. It is derived from the classifier's
 	// decisions, so both sources report it identically; it is always
