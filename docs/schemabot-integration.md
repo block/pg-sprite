@@ -116,7 +116,7 @@ implementation time):
   makes for the copy-and-swap route: it folds the privilege, shape, and environment checks
   and returns the `CopySwapTarget` every writing step requires; how to classify each of its
   refusals is in
-  [refusal-classes.md](refusal-classes.md#copy-and-swap-preflight-refusals-keyed-on-copyswaprefusalcause).
+  [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause).
 - **Fan-out is per table.** A `DesiredSchema` is one `CREATE TABLE` plus its indexes, while
   SchemaBot's declarative roots are directories of many tables: the adapter loops `Plan` per
   table and merges into one `PlanResult`. One pool serves the whole fan-out (`Plan` does not
@@ -405,6 +405,39 @@ logs the chain sees both the engine's classification and the server's words. `Er
 comes from `Ensure`'s read of the table's shape, before any statement could fail, so it
 carries no server error; the `*TableNewerError` names the columns instead.
 
+### Verdicts of a statement routed to copy-and-swap
+
+The tables above are the engine's own vocabulary — `Runner.Run`'s errors and refusals — for
+an adapter that drives the copy-and-swap packages directly. The imperative front door,
+`migrate.Run`, folds that vocabulary into the same one-verdict contract every other route
+reports through, so an adapter that already consumes `verdict.Verdict` reads a copy-and-swap
+run without a second error taxonomy. A statement the router assigns to the copy-and-swap
+backend ends in exactly one of three verdicts:
+
+| Verdict | What it means | Orchestrator action |
+| --- | --- | --- |
+| `outcome: executed-via-copy-and-swap` | The shadow was built, filled, verified, and swapped in under the source's name; `detail` says how many rows and chunks the verification pass covered, whether the retained source was dropped or kept under its `_old` name, whether the run first reconciled a lost slot, and — for a quiesced run — that the source's writes were fenced for the run's length, since exit 0 otherwise reads as online-safe. A run whose done row is saved is this outcome even when the release of its lock session failed afterwards; the detail then names the release error. The error is nil | Done. Exit 0 at the CLI; the outcome token is distinct from `executed-natively` so an adapter can tell the two paths apart in its record |
+| `outcome: refused`, `reason: copy-and-swap-refused` | The route's own gates declined: the preflight found a table shape or an environment it will not run against, or a shadow operation refused mid-run to keep an invariant. `cause` is the route's token unchanged — a `copy-and-swap-…` cause from the preflight, a `shadow-…`, `cutover-…`, `resume-…`, or `copy-…` cause from the shadow operations — and `class` is its routing class. The error is nil | Route on `cause` with the two tables above and [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause). A preflight refusal touched nothing. A refusal raised after the row was saved — a `cutover-…` or `resume-…` cause — leaves the row, the shadow, and the run's hold on the source in place: the write fence of a quiesced run, or the replication slot of a live run, which pins WAL until it is dropped; the cause says whether the next run clears it or the run is abandoned first. A missing privilege is not this reason: it is the same `insufficient-privileges` refusal the native route reports, with the exact `GRANT` in `detail` |
+| `outcome: failed`, with `code` | The run stopped on an error that is not a refusal; the error is returned alongside the verdict. `code` is `cancelled-by-caller` when the caller's context ended, `invariant-violation` when the engine caught a breach of its own contract, and `execution-failed` for everything else — a divergence, an unsettled chunk, a rolled-back swap, a lost lock session, exhausted lock retries, a slot past its lag ceiling | The checkpoint row remains at its last save with the run's hold on the source — the fence or the slot — and `detail` says what to do with it: a divergence (`*checksum.DivergenceError`) is wedged in `verifying`, so the detail says to abandon the run — drop the shadow, take off the fence or drop the slot, delete the row — before running the statement again; every other stop says that running the same statement again resumes from the row. The `Run` outcome table above is the finer map. Match the wrapped error with `errors.Is`/`errors.As` for the finer routing — the verdict's `code` is the coarse class |
+
+The adapter supplies the route's policy on `migrate.Options.CopySwap`: the connection the
+pool was dialed with (the route opens dedicated sessions — the table lock, the copy workers,
+the replication stream — so the pool alone does not suffice), the free space on the table's
+volume for the preflight's disk-headroom check, whether to keep the retained source under
+its `_old` name, and whether the table is quiesced for the run — the fenced path that needs
+no logical decoding — or live. The native route's budget, retry policy, and size ceiling do not govern
+this route: the Runner's sessions carry `pkg/dbconn`'s bounded `lock_timeout` and
+`statement_timeout`, the cutover runs its own bounded lock retry, and the size ceiling guards
+the native route's blind bounded attempt, which this route never makes. A statement routed to copy-and-swap and run with `--force`
+does not take this route at all: `--force` keeps its one meaning, the submitted form run
+natively as a bounded blind attempt, and the audit record says so.
+
+Divergence policy is not a knob on this seam: the front door runs the verification pass under
+`DivergenceAbort` (CO-3), and a divergence is a `failed` verdict whose remedy is the
+`Run`-outcome table's — abandon and rerun — never an in-place repair. Stopping a run from
+another process is likewise not a verb here: a run stops when its context ends, and the next
+`migrate.Run` over the same statement resumes it.
+
 ### Outcomes of a checksum pass under the stream
 
 In the catch-up stage the orchestrator runs the checksum with `checksum.Verifier.CheckLive`
@@ -417,7 +450,7 @@ each asks for a different action. Whether the pass wrote the shadow is part of t
 | --- | --- | --- | --- |
 | `Outcome` with `VerifiedShadow` minted (`Live()` true) | Every chunk was equal or settled against the catch-up's confirmed position; the shadow equals the source as of those positions and every change since is in the stream | Hand the proof to `GateCutover`; `Cutover` requires a `DrainFunc` that applies the stream through the final position under the swap lock, and refuses the proof without one (`cutover-undrained`) | No |
 | `*UnresolvedError`, no repairs | A chunk could not be settled: the catch-up did not confirm past the read within the wait (`lagging`), or the chunk changed on every reread (`hot`). Not a finding about the data | Run the pass again — after the catch-up has confirmed further, or when the source is quieter; `Outcome.Report.Unsettled` counts the chunks that did not settle | No |
-| `*DivergenceError` (policy `abort`) | At least one chunk held still on both sides across a confirmed position and still differed; the stream delivered everything and the shadow does not match. `Report.Unsettled` may also be non-zero | Stop and report; a divergence under the stream is a defect, not a retry | No |
+| `*DivergenceError` (policy `abort`) | At least one chunk held still on both sides across a confirmed position and still differed; the stream delivered everything and the shadow does not match. `Report.Unsettled` may also be non-zero | Stop and report; a divergence under the stream is a defect, or the known synchronous-commit window recorded in [CO-4's *Open* note](invariants.md#co-4--the-copyapply-ordering-invariants), and either way not a retry: a second pass reads the same shadow and stops the same way, so abandon the run and run it again (the `*checksum.DivergenceError` row above). A chunk that settled is not compared again, so a loss that lands in that window after the pass has settled its chunk is not caught | No |
 | `*UnresolvedError` with `Outcome.Repairs` listed (policy `repair`) | Every confirmed divergence was recopied and read back clean, but another chunk did not settle | The repairs are committed; run the pass again as above. No proof was minted (CO-2) | Yes — the listed repairs |
 | `*RepairError` (policy `repair`) | A repaired chunk was a confirmed divergence again after its recopy | Stop and report; the recopy committed and is listed in `Outcome.Repairs`, and something other than the stream is writing the shadow | Yes — the listed repairs |
 

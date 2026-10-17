@@ -172,8 +172,8 @@ type Result struct {
 	// source was already dropped, so a reader does not compare Swapped
 	// against the zero value to learn that; the swap itself committed in
 	// every run that returns. False does not mean the swap is in doubt.
-	// Run returns the zero Result with an error, so the field is read only
-	// when Run returned nil.
+	// Run returns the zero Result with an error from a stopped run, so the
+	// field is read only when Checkpoint stands in PhaseDone.
 	SwapProven bool
 	// Verification is the report of the verification pass this run made,
 	// or the zero Report when the run resumed after the swap had already
@@ -281,7 +281,12 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 // with DropWriteFence or drops the slot with decode.DropSlot, and deletes
 // the row; no Run goes back to the copy on its own. Every error is
 // returned as the step returned it, with a lost table lock reported as
-// shadow-lock-lost.
+// shadow-lock-lost, and with the zero Result — except when the run is
+// complete and its done row saved and only the release of the lock
+// session failed afterwards: the change is then done and recorded, so the
+// Result is returned as it stands with the release error alongside, and
+// Result.Checkpoint.Phase in PhaseDone is how a caller tells that case
+// from a stopped run.
 func (r *Runner) Run(ctx context.Context, pool *pgxpool.Pool, target preflight.CopySwapTarget, st statement.Statement) (result Result, err error) {
 	if err := checkProof(target); err != nil {
 		return Result{}, err

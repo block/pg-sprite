@@ -205,11 +205,21 @@ requeued while its chunk is in flight and flushed once the chunk lands). *Open:*
 transaction whose commit the walsender has already sent while its backend is still in a
 synchronous-commit wait is not yet visible to a snapshot taken after the stream delivered it, so
 an uncut key's change can be discarded ahead of a chunk read that does not see it; the drain
-has no rule for that window yet. Also open: a primary-key move or a unique-value swap that
-straddles a chunk the copier is reading collides, on the copier's own insert of the moved row,
-with the stale shadow row the flush has not yet deleted (SQLSTATE `23505`); the catch-up's half
-of the exchange is correct and the resolution is the copier's, so the convergence tests for key
-moves and unique-key swaps start their load after the copy has landed. *Test obligation:* a
+has no rule for that window yet. The same window reaches a moved image whose unchanged-TOAST
+markers the flush completes from the source: an image `CompleteFirst` names whose old key's
+shadow row is absent or was reused, so its completion is read from the source row under `Key`.
+Inside the window that read does not see the delivered move. When it finds no row, the flush
+writes a delete at `Key` (`Result.Skipped`) with no stream gate, and the shadow ends up without
+a row the source holds; when the same invisible commit also removed another row from `Key`, the
+read finds that row and completes the image with its stale marker values. Nothing completes the
+image again. The checksum (CO-1) finds the differing row when the loss lands before the pass
+settles its chunk, and under `abort` refuses the cutover while `repair` recopies the chunk; a
+loss between the pass and the swap has no later comparison. Also open: a primary-key move or a
+unique-value swap that straddles a chunk the copier is reading collides, on the copier's own
+insert of the moved row, with the stale shadow row the flush has not yet deleted (SQLSTATE
+`23505`); the catch-up's half of the exchange is correct and the resolution is the copier's, so
+the convergence tests for key moves and unique-key swaps start their load after the copy has
+landed. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark
@@ -1008,6 +1018,29 @@ the unknown columns and is `ErrTableNewer` to `errors.Is`; `tableUnusable` maps 
 `TestReadsAndWritesAgainstAnOlderTableReportItBehind`. *Source:* adversarial review of the
 checkpoint table format.
 
+### ST-11 — The shadow takes a column's values only from the same source column
+
+The copy list names a source column only when the shadow's column of that name is the same
+column after the gated statement, not merely the same name: the shadow is cloned with its
+columns numbered 1..n in the source's live order, a retype keeps a column's number, and an added
+column is numbered past n, so a source column at live position `i` is the same column exactly
+when the shadow's column of that name has attribute number `i`. A column the statement dropped
+and added again under one name therefore takes its own default (or NULL), never the dropped
+column's values. No later gate can catch a wrong list: CO-1's digest compares the same list on
+both sides, so a name-matched list verifies clean, and the list itself is the guard. The copier,
+the checksum digest and its repair, and the live flusher all take their columns from
+`BuiltShadow.CopyColumns()`, and a resume re-derives the list from the catalog and compares it
+field for field against the checkpointed proof. *Enforced:* `pkg/schemachange`
+(`readColumnPositions` reads both relations' live attribute numbers inside the build's and the
+inspection's transaction; `sameColumns` keeps a column only when its live position equals its
+shadow attribute number; `copyColumns` takes only those). Tests:
+`TestSameColumnsComparesLivePositionToShadowNumber`,
+`TestBuildShadowLeavesAReaddedColumnOutOfTheCopyWhenTheSourceHasADroppedColumn`,
+`TestBuildShadowCopiesEveryColumnTheChangeKeeps`,
+`TestRunnerGivesAReaddedColumnItsDefaultNotTheDroppedValues`,
+`TestRunnerLiveRunGivesAReaddedColumnItsDefault`. *Source:* adversarial review of the
+re-added-column copy fix.
+
 ## Refusals and preflight (RF)
 
 Each refusal is a preflight **error with a stated reason** — never a warning, never attempted.
@@ -1047,13 +1080,18 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   vocabulary, and carries an owner exactly when its class is `no-online-safety-problem`.
   *Enforced:* `verdict.NewRefusal` and the per-class constructors are the only way to build a
   `verdict.Refusal`; `Verdict.WithRefusal` is the only way a verdict acquires its refusal
-  fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`)
-  is checked for completeness against the production closed sets by
-  `TestRefusalRegistryIsComplete`. Inside the core, `copier.RefusalCause.Class()` and
-  `schemachange.RefusalCause.Class()` answer one class from `refusal.Classes()`, held to each
-  cause's row by `TestRefusalCauseClassMatchesDocClassColumn` in both packages, every cause
-  table's `class` cell held to the closed set by `TestEveryCauseTableClassIsACoreClass`, and
-  the core's tokens held to the verdict's by `TestCoreRefusalClassesAreVerdictClasses`.
+  fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`,
+  `pkg/migrate/copy_swap_refusal.go`) is checked for completeness against the production closed
+  sets by `TestRefusalRegistryIsComplete`. Inside the core, `copier.RefusalCause.Class()`,
+  `schemachange.RefusalCause.Class()`, `preflight.PartitionRefusalCause.Class()`,
+  `preflight.CopySwapRefusalCause.Class()`, and `executor.CreateShapeCause.Class()` answer one
+  class from `refusal.Classes()`, each held to its cause's row by a
+  `Test*ClassMatchesDocClassColumn` guard in its own package, every cause table's `class`
+  cell held to the closed set by `TestEveryCauseTableClassIsACoreClass`, the core's tokens
+  held to the verdict's by `TestCoreRefusalClassesAreVerdictClasses`, and the plan-side
+  registry's class for every create-shape and partition cause held to that cause's `Class()`
+  by `TestCreateShapeRefusalClassMatchesCauseClass` and
+  `TestPartitionRefusalClassMatchesCauseClass`.
   *Source:* [refusal classes](refusal-classes.md).
 - **RF-8** — An in-process refused verdict retains its full typed refusal proof, and
   `Verdict.Refusal` hands that proof out only when it validates under RF-7 and still matches
@@ -1171,4 +1209,5 @@ about **how we write and review the code**.
 | ST-8 | 2 (declarative model) | parse-time ordering + forged-proof refusal tests at every replay site |
 | ST-9 | 2 (declarative model) | every-relation-owned-by-owner, owner-mismatch fail-closed, unreadable-owner unverified, non-inheriting member admitted |
 | ST-10 | 8 | older-table evolve, newer-table refuse with no DDL, dropped-column and foreign-table shape reads, behind-table typed reads and writes |
+| ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |
