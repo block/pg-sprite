@@ -3,9 +3,12 @@ package statement
 import (
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 
 	pganalyze "github.com/pganalyze/pg_query_go/v6"
 	pgquery "github.com/wasilibs/go-pgquery"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
 // Typed refusals for advisory rewrites. The rewriters flip one syntactic
@@ -16,7 +19,7 @@ var (
 	// CONCURRENTLY form to rewrite to.
 	ErrNotRewritable = errors.New("statement has no concurrent form")
 	// ErrNotValidNotApplicable is returned when the statement is not a
-	// single named ADD CHECK / ADD FOREIGN KEY that could take NOT VALID.
+	// single ADD CHECK / ADD FOREIGN KEY that could take NOT VALID.
 	ErrNotValidNotApplicable = errors.New("statement cannot take NOT VALID")
 )
 
@@ -50,9 +53,16 @@ func Concurrently(sql string) (string, error) {
 }
 
 // AddNotValid rewrites a single-command ALTER TABLE ... ADD CONSTRAINT
-// (named CHECK or FOREIGN KEY) to its NOT VALID form and returns the
-// rewritten statement plus the constraint name for the follow-up
-// VALIDATE CONSTRAINT step.
+// (CHECK or FOREIGN KEY) to its NOT VALID form and returns the rewritten
+// statement plus the constraint name for the follow-up VALIDATE CONSTRAINT
+// step.
+//
+// The VALIDATE step has to name the constraint, so an unnamed constraint is
+// given the name PostgreSQL would choose first (defaultConstraintName) and
+// the rewrite states it. The server moves past its first choice only when a
+// constraint in the schema already holds it; stated explicitly, the name
+// instead fails the NOT VALID step with a duplicate-object error when the
+// table already has a constraint of that name, before anything is added.
 func AddNotValid(sql string) (rewritten, constraint string, err error) {
 	node, err := parseSingle(sql)
 	if err != nil {
@@ -69,8 +79,11 @@ func AddNotValid(sql string) (rewritten, constraint string, err error) {
 	con := cmd.GetDef().GetConstraint()
 	validatable := con.GetContype() == pganalyze.ConstrType_CONSTR_CHECK ||
 		con.GetContype() == pganalyze.ConstrType_CONSTR_FOREIGN
-	if !validatable || con.GetConname() == "" {
+	if !validatable {
 		return "", "", ErrNotValidNotApplicable
+	}
+	if con.GetConname() == "" {
+		con.Conname = defaultConstraintName(alter.GetRelation().GetRelname(), con)
 	}
 	con.SkipValidation = true
 	con.InitiallyValid = false
@@ -78,6 +91,76 @@ func AddNotValid(sql string) (rewritten, constraint string, err error) {
 		return "", "", err
 	}
 	return rewritten, con.GetConname(), nil
+}
+
+// defaultConstraintName mirrors the first choice of PostgreSQL's
+// ChooseConstraintName for an unnamed CHECK or FOREIGN KEY added to table:
+// `<table>_<columns>_fkey` over the referencing columns of a foreign key,
+// and for a check `<table>_<column>_check` when its expression references
+// exactly one distinct column, else `<table>_check`, truncated the way the
+// server truncates (makeObjectName). The server counts the columns of the
+// analyzed expression; this counts the column references of the parsed one,
+// which agree except for a bare reference that resolves to the table's
+// whole row, and the server itself calls the rule an approximation of the
+// column-versus-table constraint distinction.
+func defaultConstraintName(table string, con *pganalyze.Constraint) string {
+	if con.GetContype() == pganalyze.ConstrType_CONSTR_FOREIGN {
+		columns := make([]string, 0, len(con.GetFkAttrs()))
+		for _, attr := range con.GetFkAttrs() {
+			columns = append(columns, attr.GetString_().GetSval())
+		}
+		return makeObjectName(table, strings.Join(columns, "_"), "fkey")
+	}
+	var column string
+	if refs := columnRefNames(con.GetRawExpr().ProtoReflect(), nil); len(refs) == 1 && refs[0] != "*" {
+		column = refs[0]
+	}
+	return makeObjectName(table, column, "check")
+}
+
+// columnRefNames appends to names the distinct columns msg's parse tree
+// references, each by its last name part (`t.qty` is `qty`) and a
+// whole-row reference as `*`. The walk covers every message field, list,
+// and map, so a reference inside a function call, CASE, or operand counts
+// like one at the top.
+func columnRefNames(msg protoreflect.Message, names []string) []string {
+	if ref, ok := msg.Interface().(*pganalyze.ColumnRef); ok {
+		fields := ref.GetFields()
+		if len(fields) == 0 {
+			return names
+		}
+		name := "*"
+		if last := fields[len(fields)-1]; last.GetAStar() == nil {
+			name = last.GetString_().GetSval()
+		}
+		if !slices.Contains(names, name) {
+			names = append(names, name)
+		}
+		return names
+	}
+	msg.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
+		if field.Kind() != protoreflect.MessageKind {
+			return true
+		}
+		switch {
+		case field.IsMap():
+			if field.MapValue().Kind() == protoreflect.MessageKind {
+				value.Map().Range(func(_ protoreflect.MapKey, item protoreflect.Value) bool {
+					names = columnRefNames(item.Message(), names)
+					return true
+				})
+			}
+		case field.IsList():
+			list := value.List()
+			for i := 0; i < list.Len(); i++ {
+				names = columnRefNames(list.Get(i).Message(), names)
+			}
+		default:
+			names = columnRefNames(value.Message(), names)
+		}
+		return true
+	})
+	return names
 }
 
 // parseSingle parses sql and requires exactly one statement, returning its

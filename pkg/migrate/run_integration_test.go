@@ -83,6 +83,33 @@ func TestRunDispatch(t *testing.T) {
 		assert.True(t, notNull)
 	})
 
+	// An unnamed CHECK runs as the same NOT VALID → VALIDATE sequence as a
+	// named one, under the name the server would have chosen, and ends
+	// validated.
+	t.Run("names an unnamed check and validates it online", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, qty int)", schema))
+		require.NoError(t, err)
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(
+			"INSERT INTO %s.t SELECT g, g FROM generate_series(1, 100) g", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ADD CHECK (qty > 0)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		assert.Equal(t, []string{
+			fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT t_qty_check CHECK (qty > 0) NOT VALID", schema),
+			fmt.Sprintf(`ALTER TABLE "%s"."t" VALIDATE CONSTRAINT "t_qty_check"`, schema),
+		}, v.ExecutedSQL)
+
+		var validated bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT convalidated FROM pg_constraint
+			 WHERE conrelid = ($1 || '.t')::regclass AND conname = 't_qty_check'`, schema).Scan(&validated))
+		assert.True(t, validated)
+	})
+
 	t.Run("re-checks the gate for callers that skipped it", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))

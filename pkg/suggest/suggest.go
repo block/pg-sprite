@@ -91,9 +91,8 @@ const (
 	// GuidanceAddColumnThenConstraint: an inline UNIQUE / PRIMARY KEY /
 	// FOREIGN KEY / CHECK on ADD COLUMN builds or validates under the ADD
 	// COLUMN's ACCESS EXCLUSIVE lock. Add the plain column first, then
-	// build the constraint with its online pattern as a separate, named
-	// ADD CONSTRAINT — named, because the unnamed ADD CHECK / ADD FOREIGN
-	// KEY forms are themselves refused (GuidanceNameConstraintThenValidate).
+	// build the constraint with its online pattern as a separate ADD
+	// CONSTRAINT.
 	GuidanceAddColumnThenConstraint Guidance = "add-column-then-constraint"
 	// GuidancePrevalidatedCheck: ATTACH PARTITION scans the child under
 	// the parent's lock unless a validated CHECK matching the partition
@@ -106,11 +105,12 @@ const (
 	// constraint is a catalog flip — the same scaffold sequence the
 	// SET NOT NULL form gets constructed.
 	GuidanceNotNullScaffold Guidance = "not-null-scaffold"
-	// GuidanceNameConstraintThenValidate: an unnamed ADD CHECK / ADD
-	// FOREIGN KEY has no constructible rewrite because the online
-	// sequence's VALIDATE CONSTRAINT step needs the constraint's name and
-	// the server assigns one only at creation. Name the constraint, add
-	// it NOT VALID, then VALIDATE it online.
+	// GuidanceNameConstraintThenValidate: an ADD CHECK / ADD FOREIGN KEY
+	// whose NOT VALID rewrite could not be constructed from the statement.
+	// Name the constraint, add it NOT VALID, then VALIDATE it online — the
+	// sequence the constructed rewrite emits, under the server's default
+	// name when the statement names none. Keeps ManualGuidance total over
+	// every constraint kind the classifier can mark safer-idiom.
 	GuidanceNameConstraintThenValidate Guidance = "name-constraint-then-validate"
 	// GuidanceUniqueIndexThenConstraint: an ADD PRIMARY KEY / ADD UNIQUE
 	// whose USING INDEX rewrite could not be constructed. Build the unique
@@ -305,8 +305,9 @@ func ManualGuidance(op statement.Op, multi bool) (Guidance, error) {
 		case statement.ConstraintNotNull:
 			return GuidanceNotNullScaffold, nil
 		case statement.ConstraintCheck, statement.ConstraintForeignKey:
-			// Reached only for the unnamed form: a named CHECK / FOREIGN
-			// KEY gets the NOT VALID → VALIDATE rewrite constructed.
+			// Reached only when the NOT VALID → VALIDATE rewrite could
+			// not be constructed from the statement; named or not, a
+			// single CHECK / FOREIGN KEY gets it constructed.
 			return GuidanceNameConstraintThenValidate, nil
 		case statement.ConstraintPrimaryKey, statement.ConstraintUnique:
 			// Reached only when the USING INDEX rewrite could not be

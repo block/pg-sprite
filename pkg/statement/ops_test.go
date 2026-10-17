@@ -365,7 +365,6 @@ func TestAddNotValidRefusals(t *testing.T) {
 		name string
 		sql  string
 	}{
-		{"unnamed constraint", "ALTER TABLE t ADD CHECK (age > 0)"},
 		{"primary key", "ALTER TABLE t ADD CONSTRAINT p PRIMARY KEY (id)"},
 		{"not an add constraint", "ALTER TABLE t DROP COLUMN a"},
 		{"multiple subcommands", "ALTER TABLE t ADD CONSTRAINT c CHECK (a > 0), DROP COLUMN b"},

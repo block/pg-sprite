@@ -1,5 +1,5 @@
 # Refuse with typed help and the CI exit-code contract:
-# error[rewrite-required] + note[safer-idiom] + help[name-constraint-then-validate],
+# error[rewrite-required] + note[safer-idiom] + help[add-column-then-constraint],
 # doc anchors, and echo $? showing 2.
 # Render from this directory: vhs refuse.tape (or `make demos` at the repo root).
 # Needs: make build && make db-up first. Hidden setup reseeds the users table.
@@ -30,7 +30,7 @@ Type "clear" Enter
 Sleep 1.5s
 Show
 
-Type "pg-sprite migrate --alter 'ALTER TABLE users ADD CHECK (id > 0)' --dry-run"
+Type "pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN code text UNIQUE' --dry-run"
 Sleep 500ms
 Enter
 Sleep 8s
