@@ -38,10 +38,13 @@ type Config struct {
 	// URL is a libpq connection string or URL (postgres://...).
 	URL string
 	// LockTimeout is applied as the session lock_timeout on every connection.
-	// Zero means DefaultLockTimeout.
+	// Zero means DefaultLockTimeout; any other value must be at least one
+	// millisecond, or the connection is refused with ErrInvalidTimeout.
 	LockTimeout time.Duration
 	// StatementTimeout is applied as the session statement_timeout on every
-	// connection. Zero means DefaultStatementTimeout.
+	// connection. Zero means DefaultStatementTimeout; any other value must be
+	// at least one millisecond, or the connection is refused with
+	// ErrInvalidTimeout.
 	StatementTimeout time.Duration
 	// ConnectTimeout bounds each dial attempt. The session affinity proof
 	// runs against the same server and opens a connection of its own, so its
@@ -240,6 +243,9 @@ func ConcurrentIndexProgress(ctx context.Context, session RowQuerier, backendPID
 // buildPoolConfig translates Config into a pgxpool configuration. It is pure
 // (no dialing), so every option's wiring is unit-testable without a server.
 func buildPoolConfig(cfg Config) (*pgxpool.Config, error) {
+	if err := validateTimeouts(cfg); err != nil {
+		return nil, err
+	}
 	pc, err := pgxpool.ParseConfig(cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parse connection config: %w", err)

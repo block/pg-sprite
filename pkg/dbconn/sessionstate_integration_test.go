@@ -66,6 +66,28 @@ func TestNewPoolAcceptsSessionPooling(t *testing.T) {
 	assert.Equal(t, int64(2000), sessionSetting(t, pool, "lock_timeout"))
 }
 
+// A request for less than a millisecond used to reach the server as 0, which
+// PostgreSQL reads as no timeout, and the read-back then compared that 0
+// with the server's 0 and passed: the caller asked for a tiny bound and got
+// none (LK-2). Both ways of opening a session now refuse it before any
+// connection is made, while one millisecond — the smallest bound the server
+// can hold — still opens a session that carries it.
+func TestSubMillisecondTimeoutNeverYieldsAnUnboundedSession(t *testing.T) {
+	url := testutil.StartPostgres(t)
+
+	_, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url, LockTimeout: 500 * time.Microsecond})
+	require.ErrorIs(t, err, dbconn.ErrInvalidTimeout)
+
+	conn, err := dbconn.ConnectSession(t.Context(), dbconn.Config{URL: url, StatementTimeout: 500 * time.Microsecond})
+	require.ErrorIs(t, err, dbconn.ErrInvalidTimeout)
+	assert.Nil(t, conn)
+
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url, LockTimeout: time.Millisecond})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	assert.Equal(t, int64(1), sessionSetting(t, pool, "lock_timeout"))
+}
+
 // sessionSetting reads a timeout the server actually holds, in milliseconds
 // — the value the engine's bounds really have, not the one it asked for.
 func sessionSetting(t *testing.T, pool *pgxpool.Pool, name string) int64 {

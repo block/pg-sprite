@@ -487,7 +487,11 @@ never-released tests); in `pkg/copier` and `pkg/checksum`, every statement on th
 pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repair — runs inside a
 transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so a pool
 built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued behind
-`ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
+`ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout). `pkg/dbconn` refuses a
+`LockTimeout` or `StatementTimeout` that is neither zero (the default) nor at least one
+millisecond with `ErrInvalidTimeout` before any connection is made, because PostgreSQL counts
+these settings in whole milliseconds and reads 0 as no timeout; its session read-back also refuses
+a server value of 0 for any requested bound.
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
