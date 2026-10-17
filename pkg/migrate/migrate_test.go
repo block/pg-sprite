@@ -76,6 +76,22 @@ func TestGate(t *testing.T) {
 	})
 }
 
+// PostgreSQL rejects DROP INDEX CONCURRENTLY ... CASCADE, so the refusal must
+// not describe it as the safe concurrent idiom to run directly.
+func TestGateConcurrentCascadeIsNotCalledSafe(t *testing.T) {
+	for _, sql := range []string{
+		"DROP INDEX CONCURRENTLY billing.i CASCADE",
+		"DROP INDEX CONCURRENTLY billing.i, billing.j",
+	} {
+		st, err := statement.ParseOne(sql)
+		require.NoError(t, err)
+		v, refused := Gate(st)
+		require.True(t, refused, sql)
+		assert.Equal(t, verdict.ClassByDesign, v.Class, "%s: PostgreSQL rejects it, so it is not the safe concurrent idiom", sql)
+		assert.Empty(t, v.Owner, "%s: no direct operator is pointed at a statement PostgreSQL rejects", sql)
+	}
+}
+
 func TestRunRejectsUnrunnableOptions(t *testing.T) {
 	st, err := statement.ParseOne("ALTER TABLE billing.invoices ADD COLUMN age int")
 	require.NoError(t, err)

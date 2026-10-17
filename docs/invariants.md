@@ -645,10 +645,12 @@ executor refuses it (`ErrUnsupportedAcceptedBlocking`) before opening a transact
 *Enforced:* `pkg/migrate`
 (`acceptBlocking`, `lockedTable`; `ErrAcceptBlockingMismatch`,
 `ErrAcceptBlockingRelationNotFound`, `ErrAcceptBlockingWrongRelationKind`),
-`pkg/executor` (`acceptedBlockingShape`), `pkg/statement` (`ParseOne` classifies a cascading
-drop as `IndexTargetOther`),
+`pkg/executor` (`acceptedBlockingIneligibility`), `pkg/statement` (`ParseOne` classifies a
+cascading drop as `IndexTargetOther`),
 `TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`,
-`TestAcceptedBlockingAdmission`, `TestExecuteAcceptedBlockingRefusesCascadeDrop`.
+`TestAcceptedBlockingAdmission`, `TestExecuteAcceptedBlockingRefusesCascadeDrop`,
+`TestExecuteAcceptedBlockingPlainDropOfReferencedIndexIsRefusedByServer`,
+`TestExecuteAcceptedBlockingRestrictDropOfReferencedIndexIsRefusedByServer`.
 *Source:* [lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door).
 
 ### AB-4 — Acceptance applies only to an eligible in-process refusal, and to nothing else

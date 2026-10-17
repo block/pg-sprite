@@ -173,8 +173,9 @@ drops the objects that depend on the index — a foreign key on another table th
 unique index, for one — which locks and changes tables the acknowledgement never named. The
 parse boundary classifies it as a statement whose scope is wider than one relation, so the
 registry refuses it, and the executor's shape check refuses it again for a library caller
-that reaches `ExecuteAcceptedBlocking` directly. An explicit `RESTRICT` is the default
-behavior and stays eligible.
+that reaches `ExecuteAcceptedBlocking` directly. A plain drop or an explicit `RESTRICT` (the
+default behavior) stays eligible, and is the safe retry: if anything still depends on the
+index, PostgreSQL refuses the drop with SQLSTATE `2BP01` and changes nothing.
 
 Execution is exposed only by the imperative `migrate` front door. Declarative `diff` still
 classifies and reports eligibility, but it cannot accept the flag or execute this path. A

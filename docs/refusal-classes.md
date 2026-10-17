@@ -76,8 +76,8 @@ routed to provisioning and never to the data change runner.
 | `unsupported-statement` | Imperative or create admission sentinel `ErrIfNotExistsUnsupported`; create admission sentinel `ErrDuplicateCreateName` (the sentinel forms of the `if-not-exists` and `duplicate-name` causes below) | `by-design` | — |
 | `unsupported-statement` | Create admission sentinel `ErrPartitionOfUnsupported` (the sentinel form of the `partition-of` cause below) | `capability-boundary` | — |
 | `unsupported-statement` | `planRefusal` in `pkg/migrate/desired.go`: a statement whose disposition this build does not know, or a plan whose aggregate disposition no statement carries | `invariant-violation` | — |
-| `index-statement` | Plain `DROP INDEX` or `REINDEX`, for which the verdict names the concurrent form | `by-design` | — |
-| `index-statement` | An already-concurrent maintenance statement that pg-sprite need not wrap | `no-online-safety-problem` | `direct-operator` |
+| `index-statement` | Plain `DROP INDEX` or `REINDEX`, for which the verdict names the concurrent form; also a `DROP INDEX CONCURRENTLY` that PostgreSQL rejects (with `CASCADE`, or naming several indexes) | `by-design` | — |
+| `index-statement` | An already-concurrent maintenance statement that pg-sprite need not wrap and PostgreSQL accepts | `no-online-safety-problem` | `direct-operator` |
 | `not-native-safe-table-too-large` | The size policy prevents a blind bounded attempt | `environmental` | — |
 | `insufficient-privileges` | The connected role lacks a required grant | `environmental` | — |
 | `not-native-safe-budget-exceeded` | The lock or statement budget cancels an attempt | `environmental` | — |

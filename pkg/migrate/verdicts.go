@@ -45,13 +45,19 @@ func Gate(st statement.Statement) (verdict.Verdict, bool) {
 // forms carry no safer idiom: suggesting the statement the user submitted
 // would confuse a human once and send a resubmitting automation into a loop.
 func indexAdvice(st statement.Statement) (detail, saferIdiom string) {
-	if st.Concurrent() {
-		return "this is already the safe concurrent idiom; pg-sprite does not drive this maintenance form yet — run it directly against the database", ""
-	}
+	// Cascade comes first: PostgreSQL rejects DROP INDEX CONCURRENTLY ...
+	// CASCADE, so that form is not the safe concurrent idiom.
 	if st.Cascades() {
 		return "DROP INDEX ... CASCADE also drops the objects that depend on the index, which can lock and change " +
 			"tables other than the index's own; DROP INDEX CONCURRENTLY does not accept CASCADE — " +
-			"drop each dependent object explicitly, then the index", ""
+			"drop each dependent object explicitly, then the index, or resubmit without CASCADE; " +
+			"PostgreSQL then refuses the drop if anything depends on the index", ""
+	}
+	if st.Concurrent() && st.Kind() == statement.KindDropIndex && st.IndexTarget() != statement.IndexTargetSingleRelation {
+		return "DROP INDEX CONCURRENTLY drops exactly one index; submit one statement per index and run each directly against the database", ""
+	}
+	if st.Concurrent() {
+		return "this is already the safe concurrent idiom; pg-sprite does not drive this maintenance form — run it directly against the database", ""
 	}
 	switch st.Kind() {
 	case statement.KindDropIndex:

@@ -108,7 +108,8 @@ func TestAcceptedBlockingAdmission(t *testing.T) {
 		t.Run(tt.sql, func(t *testing.T) {
 			st, err := statement.ParseOne(tt.sql)
 			require.NoError(t, err)
-			assert.Equal(t, tt.want, acceptedBlockingShape(st))
+			reason := acceptedBlockingIneligibility(st)
+			assert.Equal(t, tt.want, reason == "", "ineligibility reason: %q", reason)
 		})
 	}
 }

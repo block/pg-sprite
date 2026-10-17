@@ -95,9 +95,13 @@ type Statement struct {
 	buildsIndex   bool
 }
 
-// IndexTarget identifies whether an index-maintenance statement names one
-// relation. The gate uses this parse-only fact to keep forms requiring more
-// than one lock acknowledgement out of accepted-blocking eligibility.
+// IndexTarget identifies whether an index-maintenance statement's scope
+// stays within one relation. IndexTargetOther means the scope is wider than
+// one relation, for any reason — several indexes, a schema or database
+// scope, or a cascading drop (see Cascades()) — so it is not a count of the
+// relations the statement names. The gate uses this parse-only fact to keep
+// forms requiring more than one lock acknowledgement out of
+// accepted-blocking eligibility.
 type IndexTarget int
 
 const (
@@ -182,8 +186,10 @@ func (s Statement) Concurrent() bool { return s.concurrent }
 // IndexTarget returns the typed target shape of an index-maintenance statement.
 func (s Statement) IndexTarget() IndexTarget { return s.indexTarget }
 
-// IndexRelation returns the relation a single-relation index-maintenance
-// statement names; the zero value for every other statement.
+// IndexRelation returns the relation an IndexTargetSingleRelation statement
+// names; the zero value for every other statement, including an
+// IndexTargetOther statement that names one index but whose scope is wider,
+// such as DROP INDEX ... CASCADE (see Cascades()).
 func (s Statement) IndexRelation() IndexRelation { return s.indexRelation }
 
 // Cascades reports whether a DROP INDEX used CASCADE, which also drops the

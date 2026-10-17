@@ -99,7 +99,9 @@ refusal — never a silently wrong or incomplete result:
   to discard live structure. A new primary key or unique constraint over a live
   unique index of its name is not destructive: it takes the index over with
   `ADD CONSTRAINT ... USING INDEX`, and refuses with `adopted-index-drift` if the
-  index changed after planning.
+  index changed after planning. Nor is a live check constraint left `NOT VALID`
+  with the desired definition: it plans as one online `VALIDATE CONSTRAINT`, and
+  refuses with `validated-constraint-drift` if the constraint changed after planning.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
   build's leftover is reported with a typed state, and the proven removal
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
@@ -107,10 +109,11 @@ refusal — never a silently wrong or incomplete result:
   [runbook](docs/invalid-index-recovery.md) applies.
 - **The accepted-blocking passthrough covers index maintenance only** —
   `migrate --accept-blocking SCHEMA.TABLE` runs an otherwise-refused plain
-  `DROP INDEX` (not `CASCADE`), `REINDEX INDEX`, or `REINDEX TABLE` deliberately under the
-  engine's bounded lock and statement budgets, with the verdict marked
-  `executed-without-online-safety` (exit 3). Every other refusal — including
-  a blocking index build on a partitioned parent — still exits 2. Design:
+  `DROP INDEX` (not `CASCADE`), `REINDEX INDEX`, or `REINDEX TABLE`
+  deliberately under the engine's bounded lock and statement budgets, with
+  the verdict marked `executed-without-online-safety` (exit 3). Every other
+  refusal — including a blocking index build on a partitioned parent — still
+  exits 2. Design:
   [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
