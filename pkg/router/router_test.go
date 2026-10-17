@@ -8,6 +8,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // classify runs the real classifier so routing tests exercise the same
@@ -146,6 +147,25 @@ func TestRouteCopyAndSwapReasonsTheEngineDoesNotCarryAreUnavailable(t *testing.T
 			assert.Equal(t, router.DispositionUnavailable, routed.Disposition)
 		})
 	}
+}
+
+func TestRouteAddColumnTypeRewriteIsUnavailable(t *testing.T) {
+	// The server proved that adding the column rewrites the table for its
+	// type alone (a domain with a CHECK). The decision carries the same
+	// type-rewrite reason as a retype, but the engine carries only the
+	// retype of a column the source has, so the statement is unavailable.
+	facts := planner.Facts{AddColumnProofs: map[string]statement.AddColumnProof{"score": statement.AddColumnTypeRewrites}}
+	plan, err := planner.Classify("ALTER TABLE t ADD COLUMN score positive_int DEFAULT 1", facts)
+	require.NoError(t, err)
+	require.Equal(t, planner.RouteCopyAndSwap, plan.Route)
+	require.Len(t, plan.Decisions, 1)
+	require.Equal(t, planner.ReasonTypeRewrite, plan.Decisions[0].Reason)
+
+	routed := router.Route([]planner.Plan{plan})
+	st := routed.Statements[0]
+	assert.Equal(t, router.BackendCopyAndSwap, st.Backend)
+	assert.Equal(t, router.DispositionUnavailable, st.Disposition)
+	assert.Empty(t, st.ExecSQL, "no literal SQL for a change the backend cannot carry")
 }
 
 func TestRouteTypeRewriteWithUncarriedSiblingIsUnavailable(t *testing.T) {

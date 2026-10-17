@@ -341,7 +341,7 @@ func TestMigrateRefusesVolatileDefaultAsUnavailable(t *testing.T) {
 	require.NoError(t, err)
 
 	cmd := newMigrateCmd(url, fmt.Sprintf(
-		"ALTER TABLE %s.t ADD COLUMN joined timestamptz DEFAULT now()", schema))
+		"ALTER TABLE %s.t ADD COLUMN joined timestamptz DEFAULT clock_timestamp()", schema))
 	cmd.JSON = true
 	var out strings.Builder
 	err = cmd.run(t.Context(), &out)

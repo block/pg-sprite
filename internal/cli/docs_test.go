@@ -112,8 +112,12 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 		Table:     "public.users",
 		Detail:    "verified 1000 rows in 2 chunks; the retained source is dropped",
 	}
-	backendUnavailable := alterReport(t, "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()",
-		"public", "users", usersFacts())
+	// A live plan proves the default against the server; clock_timestamp()
+	// is computed per row, so the probe reports the default rewrites.
+	volatileDefaultFacts := usersFacts()
+	volatileDefaultFacts.AddColumnProofs = map[string]statement.AddColumnProof{"joined": statement.AddColumnDefaultRewrites}
+	backendUnavailable := alterReport(t, "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()",
+		"public", "users", volatileDefaultFacts)
 
 	partitioned := alterReport(t, "CREATE INDEX events_created_idx ON events (created)",
 		"public", "events", eventsFacts())

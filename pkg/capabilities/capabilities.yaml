@@ -1,7 +1,7 @@
 rows:
   - id: add-column-no-default-or-constant-default
     area: "column_changes"
-    operation: "`ADD COLUMN` (no default, or constant default)"
+    operation: "`ADD COLUMN` (no default, a constant default, or a non-volatile default such as `now()`)"
     tier: "t1"
     status_mark: "✅"
     engine_path: "native_as_is"
@@ -9,10 +9,10 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only / fast default (PG 11+); executes instantly under bounded locks"
+    reason_notes: "Metadata-only / fast default (PG 11+), proven by adding the column to an empty temporary table first; executes instantly under bounded locks"
   - id: add-column-with-volatile-default-now-gen-random-uuid
     area: "column_changes"
-    operation: "`ADD COLUMN` with volatile default (`now()`, `gen_random_uuid()`, …)"
+    operation: "`ADD COLUMN` with volatile default (`gen_random_uuid()`, `clock_timestamp()`, identity, `serial`, …)"
     tier: "t2"
     status_mark: "🟡"
     engine_path: "copy_and_swap"
@@ -22,6 +22,18 @@ rows:
       diff: refused
     refusal_reason: backend-unavailable
     reason_notes: "Table rewrite; routes to copy-and-swap, which does not carry a volatile default yet (the shadow fill would have to evaluate the default per row and the stream would have to agree)"
+  - id: add-column-of-a-domain-with-constraints
+    area: "column_changes"
+    operation: "`ADD COLUMN` of a domain type with a `CHECK` or `NOT NULL`, with or without a default"
+    tier: "t2"
+    status_mark: "🟡"
+    engine_path: "copy_and_swap"
+    online_safety_problem: true
+    front_doors:
+      migrate: refused
+      diff: refused
+    refusal_reason: backend-unavailable
+    reason_notes: "Table rewrite to check every row against the domain; routes to copy-and-swap, which does not carry an added column yet (the shadow fill and the stream would each fill it from the default)"
   - id: add-column-generated-stored
     area: "column_changes"
     operation: "`ADD COLUMN ... GENERATED ... STORED`"

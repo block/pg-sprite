@@ -111,7 +111,7 @@ func TestRunDispatch(t *testing.T) {
 		// A volatile default is evaluated per row at rewrite time; the
 		// shadow-table engine has no carrying path for it yet.
 		v, err := migrate.Run(t.Context(), pool,
-			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN joined timestamptz DEFAULT now()", schema)), runOptions())
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN joined timestamptz DEFAULT clock_timestamp()", schema)), runOptions())
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonBackendUnavailable, v.Reason)

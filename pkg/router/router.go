@@ -10,7 +10,10 @@
 // Executors enforce their own protections regardless of the route.
 package router
 
-import "github.com/block/pg-sprite/pkg/planner"
+import (
+	"github.com/block/pg-sprite/pkg/planner"
+	"github.com/block/pg-sprite/pkg/statement"
+)
 
 // Backend identifies an execution strategy.
 type Backend string
@@ -60,25 +63,29 @@ func copyAndSwapCarries(p planner.Plan) bool {
 		if d.Route != planner.RouteCopyAndSwap {
 			continue
 		}
-		if !copyAndSwapCarriesReason(d.Reason) {
+		if !copyAndSwapCarriesOperation(d) {
 			return false
 		}
 	}
 	return true
 }
 
-// copyAndSwapCarriesReason names the planner reasons the copy-and-swap
-// engine carries: the shadow is built by running the gated ALTER on an
-// empty LIKE clone and the copy converts each row through the statement's
-// own conversion, which is exactly what a type rewrite needs. The other
-// copy-and-swap reasons still name real rewrites PostgreSQL would do under
-// ACCESS EXCLUSIVE, but the engine has no carrying path for them yet: a
-// volatile default would be evaluated chunk by chunk as the copy runs
-// rather than once for the table, a stored generated column's recompute has
-// no checksum that proves it, and a relocation is undone by the fidelity
-// step that carries the source's tablespace to the shadow.
-func copyAndSwapCarriesReason(r planner.Reason) bool {
-	return r == planner.ReasonTypeRewrite
+// copyAndSwapCarriesOperation names the one copy-and-swap decision the
+// engine carries: a type rewrite of an existing column (ALTER COLUMN TYPE).
+// The shadow is built by running the gated ALTER on an empty LIKE clone and
+// the copy converts each row through the statement's own conversion, which
+// is exactly what retyping a column needs. The other copy-and-swap decisions
+// still name real rewrites PostgreSQL would do under ACCESS EXCLUSIVE, but
+// the engine has no carrying path for them yet: a volatile default would be
+// evaluated chunk by chunk as the copy runs rather than once for the table,
+// a stored generated column's recompute has no checksum that proves it, a
+// relocation is undone by the fidelity step that carries the source's
+// tablespace to the shadow, and an added column whose type rewrites (a
+// domain with a CHECK or NOT NULL) is a column the source lacks, which the
+// chunk copy and the stream would each have to fill from its default with
+// nothing yet proving the two agree.
+func copyAndSwapCarriesOperation(d planner.Decision) bool {
+	return d.Kind == statement.OpAlterColumnType && d.Reason == planner.ReasonTypeRewrite
 }
 
 // Disposition is what would happen to one statement if the routed plan were

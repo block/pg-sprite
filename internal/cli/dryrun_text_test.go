@@ -128,7 +128,7 @@ func TestDryRunTextCopyAndSwapExecutes(t *testing.T) {
 	var out strings.Builder
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
-	assert.Contains(t, text, "note[type-rewrite]:\n  alter column type — the type conversion forces a full")
+	assert.Contains(t, text, "note[type-rewrite]:\n  alter column type — converting or checking every row for the column's\n  type forces a full")
 	assert.Contains(t, text, "note:\n  pg-sprite will run it as a copy-and-swap: build a shadow table")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#type-rewrite\n")
 	assert.Contains(t, text, "plan:\n  public.users (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
@@ -160,7 +160,7 @@ func TestDryRunTextBackendUnavailable(t *testing.T) {
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "error[backend-unavailable]:\n  refused — needs the copy-and-swap backend")
-	assert.Contains(t, text, "note[volatile-default]:\n  add column joined — the default must be computed per row")
+	assert.Contains(t, text, "note[volatile-default]:\n  add column joined — a default computed for every row forces a full table")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#backend-unavailable\n")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#volatile-default\n")
 	assert.Contains(t, text, "plan:\n  public.users (PostgreSQL 16.10) — 1 statement, 0 steps to run, 1 refused\n")

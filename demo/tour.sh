@@ -286,7 +286,8 @@ run_dryrun() {
     dry_run native         safer-idiom            false execute     "ALTER TABLE users ADD CONSTRAINT users_email_uniq UNIQUE (email)"
     dry_run native         safer-idiom            false rewrite-required "ALTER TABLE users ADD COLUMN nick text UNIQUE"
     dry_run copy-and-swap  type-rewrite           false execute     "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
-    dry_run copy-and-swap  volatile-default       false unavailable "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()"
+    dry_run native         fast-default           false execute     "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()"
+    dry_run copy-and-swap  volatile-default       false unavailable "ALTER TABLE users ADD COLUMN started timestamptz DEFAULT clock_timestamp()"
     dry_run native         app-breaking-rename    false execute     "ALTER TABLE users RENAME COLUMN name TO full_name"
     dry_run native         metadata-only          true  execute     "ALTER TABLE users DROP COLUMN status"
     dry_run copy-and-swap  relocation             false unavailable "ALTER TABLE users SET TABLESPACE pg_default"
@@ -424,7 +425,7 @@ run_exec() {
     # retained source is dropped. It runs before the DROP INDEX rows so the
     # swap carries orders_total_idx across for them to drop.
     execute_copy_swap                   "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
-    execute_refused backend-unavailable "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()"
+    execute_refused backend-unavailable "ALTER TABLE users ADD COLUMN started timestamptz DEFAULT clock_timestamp()"
     # The plain DROP INDEX is refused (the concurrent drop is the safe
     # idiom); the acknowledgement runs it anyway under budgets. The mismatch
     # runs first so the index is still there to drop afterwards.

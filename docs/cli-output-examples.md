@@ -118,7 +118,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 | `unsupported-partitioned-parent` | The routed plan builds an index on a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. |
 | `not-native-safe-budget-exceeded` | The optimistic attempt exceeded its lock or statement budget and was cancelled; the verdict's `cause` narrows which budget fired. The same `cause` field carries the partitioned-parent shape under `unsupported-partitioned-parent`; both are refusal causes, unrelated to the plan statement's create-shape `cause`. |
 | `not-native-safe-rewrite-required` | The submitted form blocks and must run as a safer native sequence, but none could be constructed. |
-| `backend-unavailable` | The change routes to copy-and-swap for an operation the engine does not carry yet (a volatile column default, a stored generated column, a relocation); a type rewrite executes through the route instead. |
+| `backend-unavailable` | The change routes to copy-and-swap for an operation the engine does not carry yet (a volatile column default, a stored generated column, a relocation, an added column whose type rewrites); a type rewrite of an existing column (`ALTER COLUMN TYPE`) executes through the route instead. |
 | `destructive-change` | The desired-state plan discards live structure — a dropped column, constraint, index, or `NOT NULL` — and desired-state execution runs no destructive statement; run the drop deliberately instead ([execution model](execution-model.md)). |
 | `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
 | `declarative-foreign-key` | The desired-state plan adds or drops a foreign key, or creates a table that declares one. Desired-state execution does not run foreign-key changes yet; the plan still shows the statement, and `migrate --alter` runs `ADD FOREIGN KEY` through the online `NOT VALID` + `VALIDATE` sequence. |
@@ -385,7 +385,7 @@ does not carry them yet — a volatile column default, a stored generated
 column, a relocation — so the plan is `unavailable` and nothing executes.
 
 ```console
-$ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()' --dry-run --json
+$ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
   "format_version": 8,
   "source": "alter",
@@ -394,10 +394,10 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEF
   "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
   "table_exists": true,
   "disposition": "unavailable",
-  "fingerprint": "sha256:5b8105ab55a9ab67e9d295db8068463db39e4f86254a550c9567bc9fb1ad1a7a",
+  "fingerprint": "sha256:f94d3738f00b2f2bb7f5c05e72720c1e650c191e8a6e79f9aa5087b9491928cf",
   "statements": [
     {
-      "sql": "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()",
+      "sql": "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()",
       "destructive": false,
       "route": "copy-and-swap",
       "backend": "copy-and-swap",
@@ -644,7 +644,7 @@ $ pg-sprite capabilities --json | head
     {
       "id": "add-column-no-default-or-constant-default",
       "area": "column_changes",
-      "operation": "`ADD COLUMN` (no default, or constant default)",
+      "operation": "`ADD COLUMN` (no default, a constant default, or a non-volatile default such as `now()`)",
       "tier": "t1",
       "status_mark": "✅",
       "engine_path": "native_as_is",
