@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/block/pg-sprite/pkg/refusal"
+	"github.com/block/pg-sprite/pkg/suggest"
 )
 
 const (
@@ -528,6 +529,12 @@ type Verdict struct {
 	// SaferIdiom is a native alternative to the refused statement, when one
 	// exists (e.g. CREATE INDEX CONCURRENTLY, ADD CONSTRAINT ... NOT VALID).
 	SaferIdiom string `json:"safer_idiom,omitempty"`
+	// Guidance is the typed manual path for a rewrite-required refusal,
+	// drawn from the suggest contract's Guidance vocabulary
+	// (docs/suggest-report.md), the same value the plan report's statement
+	// carries. Detail states the steps for a human; Guidance is the key an
+	// automated caller branches on. Empty for every other verdict.
+	Guidance suggest.Guidance `json:"guidance,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what
@@ -545,6 +552,23 @@ type Verdict struct {
 	LockTimeout string `json:"lock_timeout,omitempty"`
 	// StatementTimeout is the explicit statement execution budget.
 	StatementTimeout string `json:"statement_timeout,omitempty"`
+	// StatisticsRefresh reports the ANALYZE a committed type change owes
+	// the planner; nil when the statement retyped no column.
+	StatisticsRefresh *StatisticsRefresh `json:"statistics_refresh,omitempty"`
+}
+
+// StatisticsRefresh is the outcome of re-analyzing a table after a
+// committed type change, which deletes the retyped columns' planner
+// statistics. The change stays committed whether or not the refresh ran,
+// so a refresh still owed leaves the verdict executed and names the
+// ANALYZE to run.
+type StatisticsRefresh struct {
+	// Columns are the columns the statement retyped, in statement order.
+	Columns []string `json:"columns"`
+	// Refreshed reports that the ANALYZE committed.
+	Refreshed bool `json:"refreshed"`
+	// Pending is the ANALYZE still to run; empty when Refreshed.
+	Pending string `json:"pending,omitempty"`
 }
 
 // JSON renders the verdict as a single JSON object.
@@ -594,6 +618,9 @@ func (v Verdict) String() string {
 	}
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  safer:     %s", v.SaferIdiom)
+	}
+	if v.Guidance != "" {
+		fmt.Fprintf(&b, "\n  guidance:  %s", v.Guidance)
 	}
 	if v.Outcome == OutcomeExecutedWithoutOnlineSafety {
 		fmt.Fprintf(&b, "\n  budgets:   lock %s, statement %s", v.LockTimeout, v.StatementTimeout)
