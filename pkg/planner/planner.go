@@ -487,7 +487,7 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, 
 		// Direct ADD PK/UNIQUE builds its index under ACCESS EXCLUSIVE;
 		// the safer sequence builds it concurrently and attaches it.
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
-		if single && len(op.Columns) > 0 {
+		if canBuildUsingIndexSequence(single, op) {
 			d.SaferSQL = usingIndexSequence(st, op)
 		}
 
@@ -742,9 +742,26 @@ func setNotNullSequence(st statement.Statement, column string) []string {
 	}
 }
 
+// canBuildUsingIndexSequence reports whether an ADD PRIMARY KEY / UNIQUE
+// can be rewritten to the two-step USING INDEX sequence: the statement
+// has this one operation, the key names its columns, and every storage
+// parameter renders faithfully. A sequence that left a parameter out
+// would build a different index than the statement declares, so such a
+// key gets guidance instead.
+func canBuildUsingIndexSequence(single bool, op statement.Op) bool {
+	return single && len(op.Columns) > 0 && !op.IndexOptionsUnrenderable
+}
+
 // usingIndexSequence is the native two-step ADD PRIMARY KEY / UNIQUE
 // pattern: build the unique index concurrently, then attach it as the
-// constraint under a brief lock.
+// constraint under a brief lock. The sequence must declare the same
+// constraint the statement does, so the index carries the INCLUDE columns,
+// NULLS NOT DISTINCT, and the tablespace, and the attach carries
+// DEFERRABLE and INITIALLY DEFERRED; a key built without one of them
+// accepts rows, or checks them at a moment, the statement did not ask for.
+// The index carries the key's WITH (...) storage parameters too; the
+// caller builds no sequence when one cannot be rendered faithfully
+// (canBuildUsingIndexSequence).
 //
 // Partial-failure contract: a failed CREATE INDEX CONCURRENTLY (step 1)
 // leaves an INVALID index under the generated name, and re-running step 1
@@ -771,8 +788,36 @@ func usingIndexSequence(st statement.Statement, op statement.Op) []string {
 		cols[i] = pgx.Identifier{c}.Sanitize()
 	}
 	table := tableIdent(st)
-	return []string{
-		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY %s ON %s (%s)", idx, table, strings.Join(cols, ", ")),
-		fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s USING INDEX %s", table, idx, keyword, idx),
+	create := fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY %s ON %s (%s)", idx, table, strings.Join(cols, ", "))
+	if len(op.IncludeColumns) > 0 {
+		include := make([]string, len(op.IncludeColumns))
+		for i, c := range op.IncludeColumns {
+			include[i] = pgx.Identifier{c}.Sanitize()
+		}
+		create += " INCLUDE (" + strings.Join(include, ", ") + ")"
 	}
+	if op.NullsNotDistinct {
+		create += " NULLS NOT DISTINCT"
+	}
+	if len(op.IndexStorageParams) > 0 {
+		params := make([]string, len(op.IndexStorageParams))
+		for i, p := range op.IndexStorageParams {
+			params[i] = pgx.Identifier{p.Name}.Sanitize()
+			if p.HasValue {
+				params[i] += " = '" + strings.ReplaceAll(p.Value, "'", "''") + "'"
+			}
+		}
+		create += " WITH (" + strings.Join(params, ", ") + ")"
+	}
+	if op.IndexTablespace != "" {
+		create += " TABLESPACE " + pgx.Identifier{op.IndexTablespace}.Sanitize()
+	}
+	attach := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s USING INDEX %s", table, idx, keyword, idx)
+	if op.Deferrable {
+		attach += " DEFERRABLE"
+	}
+	if op.InitiallyDeferred {
+		attach += " INITIALLY DEFERRED"
+	}
+	return []string{create, attach}
 }
