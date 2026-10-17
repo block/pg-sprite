@@ -44,18 +44,23 @@ const (
 )
 
 // DefaultKind classifies the DEFAULT expression shape of an added column.
-// Only a provable constant qualifies for PostgreSQL's fast default; any
-// other expression is treated as volatile, conservatively.
+// The shape alone cannot settle whether PostgreSQL rewrites the table: a
+// constant still rewrites every row when the column's type is a domain with
+// constraints, and a non-volatile expression such as now() does not. The
+// server answers that (preflight.AddColumnRewrites); without its answer,
+// any expression is treated as volatile, conservatively.
 type DefaultKind int
 
 // The default shapes an added column can carry.
 const (
 	// DefaultNone: no DEFAULT clause.
 	DefaultNone DefaultKind = iota
-	// DefaultConstant: a literal (possibly type-cast) — fast-default safe.
+	// DefaultConstant: a literal (possibly type-cast), which the catalog
+	// stores unless the column's type forces a rewrite.
 	DefaultConstant
 	// DefaultExpression: anything else — function calls, identity, serial.
-	// The engine does not evaluate volatility offline; it assumes the worst.
+	// The engine does not evaluate volatility offline; without the
+	// server's answer it assumes the worst.
 	DefaultExpression
 )
 
@@ -85,6 +90,15 @@ type Op struct {
 	// Name is the constraint or index name where the operation has one,
 	// or the new name for renames.
 	Name string
+	// Only reports that an ALTER TABLE names its table with ONLY, so the
+	// operation stops at the table and does not recurse into the tables
+	// below it.
+	Only bool
+	// Indexes are the unqualified names of the indexes an OpDropIndex
+	// drops, in statement order, so a classifier can match each one
+	// without parsing Name's display form, or the one index an
+	// ADD CONSTRAINT ... USING INDEX takes over.
+	Indexes []string
 	// Columns are the plain key columns of an ADD PRIMARY KEY / UNIQUE;
 	// empty when the keys are expressions.
 	Columns []string
@@ -230,6 +244,20 @@ func dropIndexNames(drop *pganalyze.DropStmt) string {
 	return strings.Join(names, ", ")
 }
 
+// droppedIndexes returns the unqualified name of each index a DROP INDEX
+// names: the last part of each object's qualified name.
+func droppedIndexes(drop *pganalyze.DropStmt) []string {
+	names := make([]string, 0, len(drop.GetObjects()))
+	for _, obj := range drop.GetObjects() {
+		items := obj.GetList().GetItems()
+		if len(items) == 0 {
+			continue
+		}
+		names = append(names, items[len(items)-1].GetString_().GetSval())
+	}
+	return names
+}
+
 // formatType renders a type name with its modifiers — varchar(50),
 // numeric(12,2) — exactly as the grammar spells the target type. The
 // modifier is what distinguishes a widen from a narrow, so a rendering
@@ -267,7 +295,9 @@ func ParseOps(sql string) ([]Op, error) {
 		}
 		ops := make([]Op, 0, len(alter.GetCmds()))
 		for _, cmd := range alter.GetCmds() {
-			ops = append(ops, alterTableOp(cmd.GetAlterTableCmd()))
+			op := alterTableOp(cmd.GetAlterTableCmd())
+			op.Only = !alter.GetRelation().GetInh()
+			ops = append(ops, op)
 		}
 		return ops, nil
 	case node.GetCreateStmt() != nil:
@@ -295,7 +325,7 @@ func ParseOps(sql string) ([]Op, error) {
 		if drop.GetRemoveType() != pganalyze.ObjectType_OBJECT_INDEX {
 			return []Op{{Kind: OpUnrecognized}}, nil
 		}
-		return []Op{{Kind: OpDropIndex, Name: dropIndexNames(drop), Concurrent: drop.GetConcurrent()}}, nil
+		return []Op{{Kind: OpDropIndex, Name: dropIndexNames(drop), Indexes: droppedIndexes(drop), Concurrent: drop.GetConcurrent()}}, nil
 	case node.GetReindexStmt() != nil:
 		re := node.GetReindexStmt()
 		return []Op{{
@@ -425,6 +455,9 @@ func addConstraintOp(con *pganalyze.Constraint) Op {
 		Name:       con.GetConname(),
 		NotValid:   con.GetSkipValidation(),
 		UsingIndex: con.GetIndexname() != "",
+	}
+	if index := con.GetIndexname(); index != "" {
+		op.Indexes = []string{index}
 	}
 	switch con.GetContype() {
 	case pganalyze.ConstrType_CONSTR_PRIMARY:

@@ -144,8 +144,8 @@ failed (budget-lock-exceeded)
   detail:    sequence step 3 of 4 failed; the 2 committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes
   failed at: step 3: ALTER TABLE "public"."users" ALTER COLUMN "email" SET NOT NULL
   committed before the failure (their state remains):
-    1. ALTER TABLE "public"."users" ADD CONSTRAINT "users_email_not_null" CHECK ("email" IS NOT NULL) NOT VALID
-    2. ALTER TABLE "public"."users" VALIDATE CONSTRAINT "users_email_not_null"
+    1. ALTER TABLE "public"."users" ADD CONSTRAINT "users_email_not_null_check" CHECK ("email" IS NOT NULL) NOT VALID
+    2. ALTER TABLE "public"."users" VALIDATE CONSTRAINT "users_email_not_null_check"
 ```
 
 With `--json`, the same verdict is the machine-readable twin — `executed_sql`
@@ -162,8 +162,8 @@ everything after was never attempted:
   "table": "public.users",
   "detail": "sequence step 3 of 4 failed; the 2 committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes",
   "executed_sql": [
-    "ALTER TABLE \"public\".\"users\" ADD CONSTRAINT \"users_email_not_null\" CHECK (\"email\" IS NOT NULL) NOT VALID",
-    "ALTER TABLE \"public\".\"users\" VALIDATE CONSTRAINT \"users_email_not_null\""
+    "ALTER TABLE \"public\".\"users\" ADD CONSTRAINT \"users_email_not_null_check\" CHECK (\"email\" IS NOT NULL) NOT VALID",
+    "ALTER TABLE \"public\".\"users\" VALIDATE CONSTRAINT \"users_email_not_null_check\""
   ]
 }
 ```
@@ -240,12 +240,26 @@ needed):
 
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN email SET NOT NULL' --force public.users
-$ pg-sprite migrate --alter 'ALTER TABLE users DROP CONSTRAINT users_email_not_null'
+$ pg-sprite migrate --alter 'ALTER TABLE users DROP CONSTRAINT users_email_not_null_check'
 ```
 
 Re-issuing the original statement *without* `--force` fails loudly at step 1
 with `duplicate_object` instead of silently double-applying: that SQLSTATE
 is the guard against repeating committed work, not a resume mechanism.
+
+That guard only matches a scaffold of the current name. Releases through
+v0.3.3 named it `<table>_<column>_not_null`, the name PostgreSQL 18 gives
+the NOT NULL constraint itself, so a scaffold such a release left behind is
+not caught by step 1: a re-issue adds a second scaffold, drops only that
+one, and on PostgreSQL 18 records the NOT NULL constraint as
+`<table>_<column>_not_null1`. Before finishing a partial failure an older
+release left, drop the old scaffold first, after confirming it is the CHECK
+and not the server's own NOT NULL constraint (`contype = 'c'` in
+`pg_constraint`):
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users DROP CONSTRAINT users_email_not_null'
+```
 
 The same semantics scale up one level: anything that executes more than one
 statement around the engine — an orchestrator converging a table onto its
@@ -320,6 +334,8 @@ concurrently is.
 | `partition-of-unsupported` | yes | `CREATE TABLE PARTITION OF` locks the partitioned parent, which the absence proof does not cover |
 | `unsupported-create-step` | yes | A desired statement is not a shape the create path can run |
 | `pool-too-small` | yes | The pool cannot hold every session the operation needs at once: a build's session and verdict connection, or a recovery's own session beside those |
+| `replica-identity-drop` | yes | A native drop would remove what a replica identity index is built on, read again under the table's lock after planning; nothing was dropped. Point `REPLICA IDENTITY` at another unique index first, or `DEFAULT` if a usable primary key remains after the drop, then re-plan |
+| `adopted-index-drift` | yes | The index a planned `ADD CONSTRAINT ... USING INDEX` takes over was dropped, replaced under the same name, or left invalid after planning, read again under the table's lock; nothing was attached. Re-plan against the index as it stands |
 | `table-not-found` | yes | The statement's qualified table does not exist |
 | `invariant-violation` | yes | A breach of the invariant registry; never a retry candidate |
 | `execution-failed` | no | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |

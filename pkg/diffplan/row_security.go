@@ -34,7 +34,7 @@ func PlanWithRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string,
 	if err != nil {
 		return plan.Report{}, err
 	}
-	model, err := schemadiff.IntrospectDesiredWithRowSecurity(ctx, pool, desired)
+	model, err := schemadiff.IntrospectDesiredWithRowSecurity(ctx, pool, schema, desired)
 	if err != nil {
 		return plan.Report{}, err
 	}

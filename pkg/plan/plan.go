@@ -30,8 +30,9 @@ import (
 // 5 added blocking_passthrough_eligible to refused statements. Version 6
 // added the add-foreign-key and drop-foreign-key change kinds and the
 // foreign-key create-shape cause. Version 7 added the
-// set-generated-expression change kind.
-const FormatVersion = 7
+// set-generated-expression change kind. Version 8 added the replica-identity
+// planner reason.
+const FormatVersion = 8
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -68,6 +69,11 @@ type Statement struct {
 	// alter source: a submitted statement may carry several operations and
 	// has no single kind.
 	Kind schemadiff.ChangeKind `json:"kind,omitempty"`
+	// Adopts is the index a diff-derived ADD CONSTRAINT ... USING INDEX
+	// takes over and the definition it must still have when execution
+	// attaches it (see schemadiff.Change.Adopts). Nil otherwise, and out
+	// of the JSON: the SQL already identifies the change.
+	Adopts *schemadiff.IndexAdoption `json:"-"`
 	// Destructive marks statements that discard live structure — a dropped
 	// column, constraint, index, or NOT NULL. It is derived from the classifier's
 	// decisions, so both sources report it identically; it is always
@@ -99,7 +105,9 @@ type Statement struct {
 	// rather than derived because a JSON consumer has no desired schema to
 	// recompute the shape check from; it is the executor's own explanation,
 	// so a renderer prints Description() instead. Explanatory, so it is
-	// excluded from the fingerprint.
+	// excluded from the fingerprint. Route on Class, not Cause.Class(): Class
+	// is the producer's answer, while Cause.Class() is the reading library's
+	// and answers "" for a cause added in a newer engine.
 	Cause executor.CreateShapeCause `json:"cause,omitempty"`
 	// Decisions are the planner's per-operation classifications.
 	Decisions []planner.Decision `json:"decisions"`

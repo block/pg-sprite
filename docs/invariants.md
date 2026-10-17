@@ -54,12 +54,17 @@ provably delivered what the pass's read saw on the source; anything it cannot pr
 unsettled, never clean, and mints nothing. The proof such a pass mints says so
 (`VerifiedShadow.Live`), and the swap refuses it without a drain to apply the stream's changes
 since under the swap lock (`cutover-undrained`); the mechanism is in
-[copy-and-swap-design.md](copy-and-swap-design.md#live-verification). The quiesced `Runner`
-makes the quiescence its pass relies on true rather than assumed: it fences the source with a
-statement-level `BEFORE` trigger (`pgsprite_write_fence`, SQLSTATE `55006`) before its first
-save and keeps it through every stop until the swap carries it to the retained table, so the
-copy and one quiesced pass are the whole proof (fences-the-source, leaves-the-fence-on-a-
-stopped-run, unfences-the-old-table-it-keeps, stops-on-a-shadow-that-differs tests).
+[copy-and-swap-design.md](copy-and-swap-design.md#live-verification). The `Runner` on a
+quiesced target makes the quiescence its pass relies on true rather than assumed: it fences
+the source with a statement-level `BEFORE` trigger (`pgsprite_write_fence`, SQLSTATE `55006`)
+before its first save and keeps it through every stop until the swap carries it to the
+retained table, so the copy and one quiesced pass are the whole proof (fences-the-source,
+leaves-the-fence-on-a-stopped-run, unfences-the-old-table-it-keeps,
+stops-on-a-shadow-that-differs tests). On a decoding target it runs `CheckLive` under
+`DivergenceAbort` once the catch-up has passed a marker written after the copy, with the
+capture's own `Catchup` as the pass's confirmed source, and hands the swap a drain that
+reopens the stream from the position the capture confirmed and applies it under the swap's
+lock (carries-a-live-table-from-no-row-to-done test).
 *Source:* [design-principles](design-principles.md#correctness-and-safety),
 risks-and-mitigations; Spirit's "never skip it".
 
@@ -200,11 +205,21 @@ requeued while its chunk is in flight and flushed once the chunk lands). *Open:*
 transaction whose commit the walsender has already sent while its backend is still in a
 synchronous-commit wait is not yet visible to a snapshot taken after the stream delivered it, so
 an uncut key's change can be discarded ahead of a chunk read that does not see it; the drain
-has no rule for that window yet. Also open: a primary-key move or a unique-value swap that
-straddles a chunk the copier is reading collides, on the copier's own insert of the moved row,
-with the stale shadow row the flush has not yet deleted (SQLSTATE `23505`); the catch-up's half
-of the exchange is correct and the resolution is the copier's, so the convergence tests for key
-moves and unique-key swaps start their load after the copy has landed. *Test obligation:* a
+has no rule for that window yet. The same window reaches a moved image whose unchanged-TOAST
+markers the flush completes from the source: an image `CompleteFirst` names whose old key's
+shadow row is absent or was reused, so its completion is read from the source row under `Key`.
+Inside the window that read does not see the delivered move. When it finds no row, the flush
+writes a delete at `Key` (`Result.Skipped`) with no stream gate, and the shadow ends up without
+a row the source holds; when the same invisible commit also removed another row from `Key`, the
+read finds that row and completes the image with its stale marker values. Nothing completes the
+image again. The checksum (CO-1) finds the differing row when the loss lands before the pass
+settles its chunk, and under `abort` refuses the cutover while `repair` recopies the chunk; a
+loss between the pass and the swap has no later comparison. Also open: a primary-key move or a
+unique-value swap that straddles a chunk the copier is reading collides, on the copier's own
+insert of the moved row, with the stale shadow row the flush has not yet deleted (SQLSTATE
+`23505`); the catch-up's half of the exchange is correct and the resolution is the copier's, so
+the convergence tests for key moves and unique-key swaps start their load after the copy has
+landed. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark
@@ -348,14 +363,15 @@ explicitly, in which case a user schema listed ahead of it shadows the catalog: 
 `app.pg_index` turns a fail-closed proof into a false clean, and a decoy `pg_cancel_backend`
 returns true and signals nothing. Two layers uphold the invariant. At the connection layer,
 every pooled session drops a `pg_catalog` entry that another schema precedes (`pkg/dbconn`
-`unshadowCatalog`), and every transaction-local path is built by `dbconn.LocalSearchPath`, which
-applies the same rewrite. At the query layer, reads that run under a path pg-sprite did not set
+`unshadowCatalog`), and every path pg-sprite sets is built in `pkg/dbconn`, which applies the
+same rewrite: `LocalSearchPath` for a transaction, and `SessionSearchPath` with
+`RestoreSessionSearchPath` for a session-level statement such as a concurrent build. At the query layer, reads that run under a path pg-sprite did not set
 — the session's own — qualify every relation, function, operator, and type with `pg_catalog`.
 The connection-layer guarantee is per session: it rewrites an explicit `pg_catalog` entry only,
 not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary objects), and a
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
-*Enforced:* `pkg/dbconn` (session hook, `LocalSearchPath`, and the test that keeps it the only
-`search_path` writer under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
+*Enforced:* `pkg/dbconn` (session hook, the path builders, and the test that keeps them the only
+`search_path` writers under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
 `pkg/progress`, `pkg/schemadiff`, and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
@@ -534,10 +550,12 @@ other state — no relation, or one the build never proved — is refused as
 checkpoint row in `cutover` is refused by `InspectResume` and `Reconciler.Reconcile` as
 `resume-row-cutover` before any slot is touched, since only `InspectSwapped` can say which
 table bears the source name, and a reconcile that dropped the slot or recopied the shadow
-behind a committed swap would be acting on a live table; the quiesced `Runner` writes the row
+behind a committed swap would be acting on a live table; the `Runner` writes the row
 to `cutover` before it calls `Cutover`, and on resume hands a `cutover` row to `InspectSwapped`
 first, continuing at `DropOldTable` on a committed swap and back through verify and gate on
-`ErrNotSwapped`. Every attempt the
+`ErrNotSwapped` — a live run writes such a row back to `catching_up` before it reads its slot,
+so the resume inspection never meets a `cutover` row whose swap is known to have rolled back.
+Every attempt the
 catalog shows rolled back — a lock timeout, a drain error, a refusal inside the transaction, or
 a lost connection the inspection resolved — is reported wrapping `ErrCutoverRolledBack`, so a
 caller distinguishes "the source is still live, retry is safe" from an unresolved outcome
@@ -713,12 +731,15 @@ be non-terminal (`resume-row-terminal`), and not be a row whose cutover already 
 (`resume-row-cutover`, whose answer is `InspectSwapped`) — and `Reconcile` goes on through
 `checkShadowRow`, which holds the row's shadow name and fingerprints against the `BuiltShadow`
 it was handed, so a row of another source shape is `resume-row-mismatch` before the marker is
-written (refuses-a-row-of-another-source-shape test). The quiesced `Runner` reads the row
-through `Store.Inspect` before it knows the statement, and holds a `copying` or `verifying`
-row against the shadow `InspectShadow` re-derives — shadow name, both fingerprints, and the
+written (refuses-a-row-of-another-source-shape test). The `Runner` reads the row
+through `Store.Inspect` before it knows the statement, and holds a `copying`, `catching_up`,
+`reconciling`, or `verifying` row against the shadow `InspectShadow` re-derives — shadow name, both fingerprints, and the
 JSON-encoded proof the row carries (`resume-row-mismatch` otherwise) — and refuses a relation
 under the shadow's name that no row records (`shadow-unrecorded`), since the row is the only
-record of which statement a shadow embodies.
+record of which statement a shadow embodies, and a row whose swap has not committed and whose
+shadow no relation bears (`resume-shadow-gone`, in any phase from `copying` to a `cutover` whose swap
+rolled back), since the run can neither continue on it nor start over while the row stands; the
+refusal writes nothing, so a live row's slot stays with it for the operator to drop.
 `TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
@@ -728,7 +749,9 @@ record of which statement a shadow embodies.
 `TestSaveWithoutAProofDoesNotEraseTheRowsProof`, `TestProofSurvivesTheCheckpointStore`,
 `TestDeleteRefusesARowTheCallerWasNotShown`,
 `TestWritesAndReadsWithoutEnsureReportTheMissingTable`,
-`TestResumeFromCheckpointConvergesAfterAMidCopyKill`. *Source:* Spirit `checkpoint.IsIncompatible` +
+`TestResumeFromCheckpointConvergesAfterAMidCopyKill`,
+`TestRunnerRefusesARowWhoseShadowIsGone`,
+`TestRunnerLiveRowWhoseShadowIsGoneIsRestartedByDroppingItsSlotAndRow`. *Source:* Spirit `checkpoint.IsIncompatible` +
 "resume requires the identical ALTER".
 
 ### ST-3 — Slot cleanup is guaranteed on success, failure, and crash
@@ -750,28 +773,39 @@ lost before any measure, unknown never read as nothing retained, over the ceilin
 `SlotLagExceededError` — and refuses a ceiling below one byte) + `pkg/checkpoint`
 `Store.ReapOrphanSlots` (one pass over the logical, engine-prefixed slots of the store's own
 database: the slots are listed first and the checkpoint rows that own them read in a later
-statement, so a row committed before its slot appears is seen whenever the slot is, and each
-slot's row is read again right before its drop so a run that claimed it since the pass began
-keeps it; a slot no row in a non-terminal phase names is dropped through `DropIdleSlot`,
+statement, which sorts the slots a live row plainly names out of the pass, and each slot's row
+is read again right before its drop — the read that decides — under the engine's advisory lock
+on the slot's name (`Store.WithSlotLock`, transaction-scoped on a connection dialled outside
+the store's pool and proven to be on its cluster and database, so the holder's own work on the pool never waits on the seat the lock sits
+in) that a run claiming the slot holds while it makes the slot and commits the row that names
+it, so a run that claimed it since the pass began keeps it and one claiming it now waits for
+the drop and creates afresh; a slot no row in a non-terminal phase
+names is dropped through `DropIdleSlot`,
 publication and all, which refuses a held slot instead of waiting for its holder — whether a
 slot is held is judged at the drop, since `pg_replication_slots` reads shared memory, not a
 snapshot; a slot a live row names, a slot a process holds, and a name wearing the prefix
 without the engine's shape are reported and left; a database whose checkpoint table does not
 exist is refused with `ErrTableMissing` rather than read as all orphans; two reapers over one
-database race each other at the drop, so run one per database at a time) + `pkg/applier`
+database take turns at each slot, the one that waited finding the slot gone) + `pkg/applier`
 `Catchup` (every cycle ends by inspecting the stream's slot on the pool and judging it
 against `CatchupOptions.SlotLagCeiling`, default `decode.DefaultSlotLagCeiling`, which cannot
 be set below one byte; a slot that vanished is `SlotLostError`; crossing the ceiling ends
-`Run` with the table lock intact and the slot in place for the operator to read). *Open:* a
-ceiling abort leaves the slot in place under a row still in a non-terminal phase, which the
-reaper reads as live and leaves; whoever handles `ErrSlotLagCeiling` must move the row to a
-terminal phase — or resume and drain the slot — before the reaper can reclaim it, and that
-handler is the orchestrator's, not yet written. The quiesced `pkg/schemachange.Runner` never
-creates a slot and refuses to continue a row that has one: a row naming a slot or publication,
-or standing in `catching_up` or `reconciling`, is `resume-row-decoding`, since a run without
-the slot would leave it behind as nobody's, and a `CopySwapTarget` proven for decoding is
-refused before the lock is taken (refuses-a-row-that-names-a-slot,
-refuses-a-target-proven-for-decoding-WAL tests).
+`Run` with the table lock intact and the slot in place for the operator to read) +
+`pkg/schemachange.Runner` (on a decoding target it creates the slot under the store's lock on
+the slot's name, in the same step as the row that names it, so the reaper never meets the slot
+before its row; a first save whose row does not land drops the slot and the shadow again, while
+a slot of the derived name the run did not make is reported as the `*decode.SlotExistsError`
+it is and left as found; a
+stopped run leaves the slot under its row, and the next `Run` reopens the stream from the
+row's position — a ceiling abort included, so the backlog is drained by resuming — or the
+operator abandons the run with `DropShadow`, `decode.DropSlot`, and `Store.Delete`; the slot
+is dropped once the swap has committed, before the old table is settled, and a run resumed on
+a swapped row drops the slot it left too). Each runner refuses the other kind's row as
+`resume-row-decoding`: a quiesced target's run never creates a slot and refuses a row naming a
+slot or publication, or standing in `catching_up` or `reconciling`, since a run without the
+slot would leave it behind as nobody's; a decoding target's run refuses a row that names no
+slot, since the source behind it was fenced, not captured, and no stream could replay what it
+missed (refuses-a-row-that-names-a-slot, refuses-the-other-kind-of-runs-row tests).
 *Source:* risks-and-mitigations § logical-decoding risks.
 
 ### ST-4 — Slot loss is a modeled state transition, not a crash
@@ -984,6 +1018,29 @@ the unknown columns and is `ErrTableNewer` to `errors.Is`; `tableUnusable` maps 
 `TestReadsAndWritesAgainstAnOlderTableReportItBehind`. *Source:* adversarial review of the
 checkpoint table format.
 
+### ST-11 — The shadow takes a column's values only from the same source column
+
+The copy list names a source column only when the shadow's column of that name is the same
+column after the gated statement, not merely the same name: the shadow is cloned with its
+columns numbered 1..n in the source's live order, a retype keeps a column's number, and an added
+column is numbered past n, so a source column at live position `i` is the same column exactly
+when the shadow's column of that name has attribute number `i`. A column the statement dropped
+and added again under one name therefore takes its own default (or NULL), never the dropped
+column's values. No later gate can catch a wrong list: CO-1's digest compares the same list on
+both sides, so a name-matched list verifies clean, and the list itself is the guard. The copier,
+the checksum digest and its repair, and the live flusher all take their columns from
+`BuiltShadow.CopyColumns()`, and a resume re-derives the list from the catalog and compares it
+field for field against the checkpointed proof. *Enforced:* `pkg/schemachange`
+(`readColumnPositions` reads both relations' live attribute numbers inside the build's and the
+inspection's transaction; `sameColumns` keeps a column only when its live position equals its
+shadow attribute number; `copyColumns` takes only those). Tests:
+`TestSameColumnsComparesLivePositionToShadowNumber`,
+`TestBuildShadowLeavesAReaddedColumnOutOfTheCopyWhenTheSourceHasADroppedColumn`,
+`TestBuildShadowCopiesEveryColumnTheChangeKeeps`,
+`TestRunnerGivesAReaddedColumnItsDefaultNotTheDroppedValues`,
+`TestRunnerLiveRunGivesAReaddedColumnItsDefault`. *Source:* adversarial review of the
+re-added-column copy fix.
+
 ## Refusals and preflight (RF)
 
 Each refusal is a preflight **error with a stated reason** — never a warning, never attempted.
@@ -1023,9 +1080,19 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   vocabulary, and carries an owner exactly when its class is `no-online-safety-problem`.
   *Enforced:* `verdict.NewRefusal` and the per-class constructors are the only way to build a
   `verdict.Refusal`; `Verdict.WithRefusal` is the only way a verdict acquires its refusal
-  fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`)
-  is checked for completeness against the production closed sets by
-  `TestRefusalRegistryIsComplete`. *Source:* [refusal classes](refusal-classes.md).
+  fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`,
+  `pkg/migrate/copy_swap_refusal.go`) is checked for completeness against the production closed
+  sets by `TestRefusalRegistryIsComplete`. Inside the core, `copier.RefusalCause.Class()`,
+  `schemachange.RefusalCause.Class()`, `preflight.PartitionRefusalCause.Class()`,
+  `preflight.CopySwapRefusalCause.Class()`, and `executor.CreateShapeCause.Class()` answer one
+  class from `refusal.Classes()`, each held to its cause's row by a
+  `Test*ClassMatchesDocClassColumn` guard in its own package, every cause table's `class`
+  cell held to the closed set by `TestEveryCauseTableClassIsACoreClass`, the core's tokens
+  held to the verdict's by `TestCoreRefusalClassesAreVerdictClasses`, and the plan-side
+  registry's class for every create-shape and partition cause held to that cause's `Class()`
+  by `TestCreateShapeRefusalClassMatchesCauseClass` and
+  `TestPartitionRefusalClassMatchesCauseClass`.
+  *Source:* [refusal classes](refusal-classes.md).
 - **RF-8** — An in-process refused verdict retains its full typed refusal proof, and
   `Verdict.Refusal` hands that proof out only when it validates under RF-7 and still matches
   the verdict's exported refusal fields. A verdict decoded from JSON reconstructs class,
@@ -1142,4 +1209,5 @@ about **how we write and review the code**.
 | ST-8 | 2 (declarative model) | parse-time ordering + forged-proof refusal tests at every replay site |
 | ST-9 | 2 (declarative model) | every-relation-owned-by-owner, owner-mismatch fail-closed, unreadable-owner unverified, non-inheriting member admitted |
 | ST-10 | 8 | older-table evolve, newer-table refuse with no DDL, dropped-column and foreign-table shape reads, behind-table typed reads and writes |
+| ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

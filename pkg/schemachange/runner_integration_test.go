@@ -102,6 +102,7 @@ func TestRunnerCarriesAQuiescedTableFromNoRowToDone(t *testing.T) {
 	assert.True(t, result.Checkpoint.Watermark.Complete(), "the row carries the complete watermark")
 	assert.Equal(t, result.Shadow.SourceFingerprint, result.Checkpoint.SourceFingerprint)
 	assert.Equal(t, result.Shadow.TargetFingerprint, result.Checkpoint.TargetFingerprint)
+	assert.True(t, result.SwapProven, "this run's cutover made the proof")
 	assert.Equal(t, result.Shadow.ShadowOID, result.Swapped.LiveOID, "the shadow the run built is the live table")
 	assert.Equal(t, liveOID, result.Swapped.OldOID, "the source the run started from was retained as old")
 	assert.Equal(t, 3, result.Verification.Chunks, "2500 rows in thousand-row chunks is three chunks")

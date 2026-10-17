@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -33,6 +34,11 @@ type runState struct {
 	// oldTableGone reports that the retained source is already gone, so
 	// there is nothing to drop.
 	oldTableGone bool
+	// reconciled reports that the run replaced a lost slot in reconcile
+	// mode before its stream reopened; reconciliation is that recopy
+	// pass's outcome.
+	reconciled     bool
+	reconciliation checksum.Outcome
 }
 
 // dispatch reads the target's checkpoint row and starts fresh or resumes
@@ -40,10 +46,16 @@ type runState struct {
 func (r *Runner) dispatch(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, st statement.Statement) (runState, error) {
 	cp, err := r.store.Inspect(ctx, target.Schema(), target.Table())
 	if errors.Is(err, checkpoint.ErrNotFound) {
+		if target.DecodesWAL() {
+			return r.startFreshLive(ctx, pool, lock, target, st)
+		}
 		return r.startFresh(ctx, pool, lock, target, st)
 	}
 	if err != nil {
 		return runState{}, err
+	}
+	if target.DecodesWAL() {
+		return r.resumeLive(ctx, pool, lock, target, cp, st)
 	}
 	return r.resume(ctx, pool, lock, target, cp, st)
 }
@@ -120,14 +132,35 @@ func newRunState(built BuiltShadow, st statement.Statement) (runState, error) {
 	}, nil
 }
 
-// resume continues the run cp records. The row's phase says which
-// operation reads it; a row this runner cannot act on, or one that
-// records another statement than st, is refused before anything is
-// written.
+// resume continues the quiesced run cp records. A row this runner cannot
+// act on, or one that records another statement than st, is refused
+// before anything is written.
 func (r *Runner) resume(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, cp checkpoint.Checkpoint, st statement.Statement) (runState, error) {
 	if err := checkQuiescedRow(target, cp); err != nil {
 		return runState{}, err
 	}
+	state, err := r.resumeOnRow(ctx, pool, lock, target, cp, st)
+	if err != nil {
+		return runState{}, err
+	}
+	if state.swapped {
+		return state, nil
+	}
+	// INV: CO-1 — the resumed run installs over the fence the stopped run
+	// left, so the source takes no write from here to the swap and the
+	// copy and the verification pass are the whole proof.
+	if err := installWriteFence(ctx, pool, lock, target, r.opts.Shadow); err != nil {
+		return runState{}, err
+	}
+	return state, nil
+}
+
+// resumeOnRow reads the catalog for the run cp records, once the row is
+// known to be this runner's kind: the row's phase says which operation
+// reads it, and a row that records another statement than st, or that
+// does not describe the shadow under its name, is refused before anything
+// is written.
+func (r *Runner) resumeOnRow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, cp checkpoint.Checkpoint, st statement.Statement) (runState, error) {
 	if err := checkRowStatement(target, cp, st); err != nil {
 		return runState{}, err
 	}
@@ -152,7 +185,10 @@ func (r *Runner) resume(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Ta
 	}
 	built, err := InspectShadow(ctx, pool, lock, target, st, r.opts.Shadow)
 	if errors.Is(err, ErrShadowNotFound) {
-		return runState{}, fmt.Errorf("checkpoint row for %s.%s is in phase %s but %w; delete the row to start over", cp.Schema, cp.Table, cp.Phase, err)
+		// INV: ST-2 — the refusal writes nothing: a live row's slot stays
+		// with the row for the operator to drop, as it does for every
+		// other resume refusal.
+		return runState{}, refuse(CauseResumeShadowGone, []error{err}, "checkpoint row for %s.%s is in phase %s but no relation bears its shadow name %s; %s", cp.Schema, cp.Table, cp.Phase, cp.ShadowTable, shadowGoneRemedy(cp))
 	}
 	if err != nil {
 		return runState{}, err
@@ -160,13 +196,17 @@ func (r *Runner) resume(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Ta
 	if err := checkRowDescribes(cp, proof, built); err != nil {
 		return runState{}, err
 	}
-	// INV: CO-1 — the resumed run installs over the fence the stopped run
-	// left, so the source takes no write from here to the swap and the
-	// copy and the verification pass are the whole proof.
-	if err := installWriteFence(ctx, pool, lock, target, r.opts.Shadow); err != nil {
-		return runState{}, err
-	}
 	return runState{cp: cp, built: built, proof: proof}, nil
+}
+
+// shadowGoneRemedy says how to start over from a row whose shadow is gone.
+// A live row also names a slot, which retains WAL while it stands and
+// which a fresh run would meet when it creates its own.
+func shadowGoneRemedy(cp checkpoint.Checkpoint) string {
+	if cp.SlotName == "" {
+		return "delete the row to start over"
+	}
+	return fmt.Sprintf("drop its slot %s and delete the row to start over", cp.SlotName)
 }
 
 // checkQuiescedRow refuses a row the quiesced runner cannot act on: one in

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // WALStatus is pg_replication_slots.wal_status: the server's own verdict on
@@ -148,20 +148,21 @@ const inspectSlotSQL = `
 	CROSS JOIN LATERAL (SELECT pg_catalog.to_jsonb(s) AS rendered) AS extra
 	WHERE s.slot_name = $1`
 
-// InspectSlot reads the named slot from pg_replication_slots on pool. found
+// InspectSlot reads the named slot from pg_replication_slots on db, a pool
+// or one connection of the caller's. found
 // is false when no slot of that name exists on the cluster; a slot of
 // another database, or a physical one, is reported with Own false and its
 // Database so the caller never mistakes it for its own. On a server in
 // recovery the slot's retained WAL
 // is unknown and the rest of the row is reported. The invalidation cause
 // is Reported only on a server that has the column.
-func InspectSlot(ctx context.Context, pool *pgxpool.Pool, name string) (status SlotStatus, found bool, err error) {
+func InspectSlot(ctx context.Context, db dbconn.RowQuerier, name string) (status SlotStatus, found bool, err error) {
 	var database, walStatus, restartLSN, confirmedFlushLSN, invalidation *string
 	var activePID *int32
 	var retained *int64
 	var conflicting *bool
 	var inactiveSince *time.Time
-	err = pool.QueryRow(ctx, inspectSlotSQL, name).
+	err = db.QueryRow(ctx, inspectSlotSQL, name).
 		Scan(&database, &status.Logical, &status.Own, &status.Active, &activePID, &walStatus, &restartLSN, &confirmedFlushLSN, &retained,
 			&conflicting, &status.Invalidation.Reported, &invalidation, &inactiveSince)
 	if errors.Is(err, pgx.ErrNoRows) {

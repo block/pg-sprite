@@ -150,3 +150,79 @@ func TestExecuteRowSecurityAcceptsInheritedOwnership(t *testing.T) {
 	assert.False(t, actual.RowSecurity.Enabled)
 	assert.Empty(t, actual.RowSecurity.Policies)
 }
+
+// A policy change builds nothing from the table's rendering, so TOAST
+// parameters beside a dropped column, which export refuses to write, do
+// not stop a row-security apply whose file declares the live WITH clause.
+// That holds whether a remaining text column guarantees a rebuilt table its
+// TOAST table or only wide bounded columns, which export cannot rely on, do.
+func TestExecuteRowSecurityAcceptsToastParametersBesideADroppedColumn(t *testing.T) {
+	for _, tc := range []struct{ name, columns string }{
+		{"a remaining text column", "body text"},
+		{"only bounded columns", "title varchar(3000), summary varchar(3000)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, schema := rlsFixture(t)
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(`DROP TABLE %[1]s.documents;
+ CREATE TABLE %[1]s.documents (id bigint PRIMARY KEY, owner_id bigint NOT NULL, %[2]s, legacy text)
+     WITH (toast.autovacuum_enabled = false);
+ ALTER TABLE %[1]s.documents DROP COLUMN legacy;
+ ALTER TABLE %[1]s.documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON %[1]s.documents FOR SELECT USING (owner_id = 7);`, schema, tc.columns))
+			require.NoError(t, err)
+
+			_, err = applyRLS(t, pool, schema, fmt.Sprintf(`CREATE TABLE documents (
+     id bigint PRIMARY KEY,
+     owner_id bigint NOT NULL,
+     %s
+ ) WITH (toast.autovacuum_enabled = false);
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (owner_id = 9);`, tc.columns))
+			require.NoError(t, err)
+			var qual string
+			require.NoError(t, pool.QueryRow(t.Context(),
+				"SELECT pg_get_expr(polqual, polrelid) FROM pg_policy WHERE polrelid = $1::regclass AND polname = 'readers'",
+				schema+".documents").Scan(&qual))
+			assert.Equal(t, "(owner_id = 9)", qual)
+		})
+	}
+}
+
+// A serial whose sequence is declared away from its defaults, whether tuned
+// or left integer when its column was widened to bigint, is something only
+// export refuses: the serial shorthand cannot state the declaration, but a
+// policy change builds nothing from the table's rendering, so the apply
+// goes ahead.
+func TestExecuteRowSecurityAcceptsADeclaredSerialSequence(t *testing.T) {
+	for _, tc := range []struct{ name, setup string }{
+		{"a tuned serial", `CREATE TABLE %[1]s.documents (id bigserial PRIMARY KEY, owner_id bigint NOT NULL);
+ ALTER SEQUENCE %[1]s.documents_id_seq MAXVALUE 5000 CACHE 10;`},
+		{"a widened serial", `CREATE TABLE %[1]s.documents (id serial PRIMARY KEY, owner_id bigint NOT NULL);
+ ALTER TABLE %[1]s.documents ALTER COLUMN id TYPE bigint;`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool, schema := rlsFixture(t)
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(`DROP TABLE %[1]s.documents;
+ `+tc.setup+`
+ ALTER TABLE %[1]s.documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON %[1]s.documents FOR SELECT USING (owner_id = 7);`, schema))
+			require.NoError(t, err)
+			live, err := schemadiff.Introspect(t.Context(), pool, schema, "documents")
+			require.NoError(t, err)
+			require.NotNil(t, live.Columns[0].Sequence, "the fixture's serial must carry a declaration")
+
+			_, err = applyRLS(t, pool, schema, `CREATE TABLE documents (
+     id bigserial PRIMARY KEY,
+     owner_id bigint NOT NULL
+ );
+ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+ CREATE POLICY readers ON documents FOR SELECT USING (owner_id = 9);`)
+			require.NoError(t, err)
+			var qual string
+			require.NoError(t, pool.QueryRow(t.Context(),
+				"SELECT pg_get_expr(polqual, polrelid) FROM pg_policy WHERE polrelid = $1::regclass AND polname = 'readers'",
+				schema+".documents").Scan(&qual))
+			assert.Equal(t, "(owner_id = 9)", qual)
+		})
+	}
+}
