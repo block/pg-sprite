@@ -152,6 +152,13 @@ type Op struct {
 	// NewTypeMods are the target type's modifiers (e.g. 50 in varchar(50),
 	// 12 and 2 in numeric(12,2)); empty when unconstrained.
 	NewTypeMods []int32
+	// NewTypeSchema is the schema the target type is qualified with, empty
+	// when it is unqualified or qualified with pg_catalog. A qualified type
+	// is a user type that may share a built-in's name.
+	NewTypeSchema string
+	// NewTypeArray is true when the target type is an array of NewType
+	// (varchar(50)[], text ARRAY).
+	NewTypeArray bool
 	// HasUsing is true for ALTER COLUMN TYPE ... USING <expr>, which always
 	// means a conversion, never a binary-coercible relabel.
 	HasUsing bool
@@ -171,7 +178,7 @@ func (o Op) Describe() string {
 	case OpDropColumn:
 		return "DROP COLUMN " + o.Column
 	case OpAlterColumnType:
-		return "ALTER COLUMN " + o.Column + " TYPE " + formatType(o.NewType, o.NewTypeMods)
+		return "ALTER COLUMN " + o.Column + " TYPE " + o.formatNewType()
 	case OpSetDefault:
 		return "ALTER COLUMN " + o.Column + " SET DEFAULT"
 	case OpDropDefault:
@@ -258,19 +265,27 @@ func droppedIndexes(drop *pganalyze.DropStmt) []string {
 	return names
 }
 
-// formatType renders a type name with its modifiers — varchar(50),
-// numeric(12,2) — exactly as the grammar spells the target type. The
-// modifier is what distinguishes a widen from a narrow, so a rendering
-// that drops it would collapse changes that route in opposite directions.
-func formatType(name string, mods []int32) string {
-	if len(mods) == 0 {
-		return name
+// formatNewType renders the target type with its schema, modifiers, and
+// array marker — varchar(50), numeric(12,2), app.email, varchar(50)[]. Each
+// part can turn a relabel into a rewrite (a widen is not a narrow, a
+// varchar is not a varchar array), so a rendering that drops one would
+// collapse changes that route in opposite directions.
+func (o Op) formatNewType() string {
+	name := o.NewType
+	if o.NewTypeSchema != "" {
+		name = o.NewTypeSchema + "." + name
 	}
-	parts := make([]string, len(mods))
-	for i, m := range mods {
-		parts[i] = strconv.FormatInt(int64(m), 10)
+	if len(o.NewTypeMods) > 0 {
+		parts := make([]string, len(o.NewTypeMods))
+		for i, m := range o.NewTypeMods {
+			parts[i] = strconv.FormatInt(int64(m), 10)
+		}
+		name += "(" + strings.Join(parts, ",") + ")"
 	}
-	return name + "(" + strings.Join(parts, ",") + ")"
+	if o.NewTypeArray {
+		name += "[]"
+	}
+	return name
 }
 
 // ParseOps parses one SQL statement and returns its typed operations. An
@@ -356,11 +371,14 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 	case pganalyze.AlterTableType_AT_AlterColumnType:
 		def := cmd.GetDef().GetColumnDef()
 		name, mods := typeRef(def.GetTypeName())
+		schema, array := typeQualifiers(def.GetTypeName())
 		return Op{
-			Kind:        OpAlterColumnType,
-			Column:      cmd.GetName(),
-			NewType:     name,
-			NewTypeMods: mods,
+			Kind:          OpAlterColumnType,
+			Column:        cmd.GetName(),
+			NewType:       name,
+			NewTypeMods:   mods,
+			NewTypeSchema: schema,
+			NewTypeArray:  array,
 			// For ALTER COLUMN TYPE the grammar carries the USING
 			// expression in the column definition's raw default slot.
 			HasUsing: def.GetRawDefault() != nil,
@@ -410,6 +428,7 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 func addColumnOp(def *pganalyze.ColumnDef) Op {
 	op := Op{Kind: OpAddColumn, Column: def.GetColname()}
 	op.NewType, op.NewTypeMods = typeRef(def.GetTypeName())
+	op.NewTypeSchema, op.NewTypeArray = typeQualifiers(def.GetTypeName())
 	if isSerialType(op.NewType) {
 		op.Default = DefaultExpression
 	}
@@ -518,6 +537,22 @@ func typeRef(tn *pganalyze.TypeName) (string, []int32) {
 		mods = append(mods, int32(m.GetAConst().GetIval().GetIval()))
 	}
 	return name, mods
+}
+
+// typeQualifiers returns what typeRef leaves out of a grammar type name: the
+// schema it is qualified with (empty for pg_catalog, which the grammar adds
+// to keyword types such as varchar and numeric) and whether it is an array.
+func typeQualifiers(tn *pganalyze.TypeName) (string, bool) {
+	array := len(tn.GetArrayBounds()) > 0
+	names := tn.GetNames()
+	if len(names) < 2 {
+		return "", array
+	}
+	schema := names[len(names)-2].GetString_().GetSval()
+	if schema == "pg_catalog" {
+		return "", array
+	}
+	return schema, array
 }
 
 // isSerialType reports whether the grammar type name is one of the serial
