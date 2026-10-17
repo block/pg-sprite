@@ -249,7 +249,13 @@ func (f runnerFixture) pinShadowKey(t *testing.T, key int64) (clock *hookedClock
 		if pinErr != nil {
 			return
 		}
-		_, pinErr = tx.Exec(t.Context(), "INSERT INTO "+shadow+" (id, qty) VALUES ($1, 0)", key)
+		if _, pinErr = tx.Exec(t.Context(), "INSERT INTO "+shadow+" (id, qty) VALUES ($1, 0)", key); pinErr != nil {
+			// A failed insert leaves the transaction holding its pooled
+			// connection, and the package's pool.Close waits on it, so it
+			// is rolled back here, before release reports pinErr.
+			_ = tx.Rollback(context.WithoutCancel(t.Context()))
+			tx = nil
+		}
 	}}
 	var once sync.Once
 	release = func() {
