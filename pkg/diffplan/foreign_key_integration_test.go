@@ -133,6 +133,33 @@ func TestPlanAddForeignKeyIsShownAndRefused(t *testing.T) {
 	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, report.Reason)
 }
 
+// A live foreign key left NOT VALID with the declared definition plans as one
+// validation, not as a drop and re-add, and is refused like every declarative
+// foreign-key change: the plan shows the one statement that converges the
+// table, and nothing runs it.
+func TestPlanNotValidForeignKeyIsValidatedAndRefused(t *testing.T) {
+	pool, schema := foreignKeyPool(t)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (
+			id bigint PRIMARY KEY,
+			user_id bigint NOT NULL
+		);
+		ALTER TABLE %[1]s.orders ADD CONSTRAINT orders_user_id_fkey
+			FOREIGN KEY (user_id) REFERENCES %[1]s.users (id) NOT VALID`, schema))
+	require.NoError(t, err)
+
+	report := planOrders(t, t.Context(), pool, schema, ordersWithForeignKey)
+
+	require.Len(t, report.Statements, 1)
+	st := report.Statements[0]
+	assert.Equal(t, schemadiff.ChangeValidateForeignKey, st.Kind)
+	assert.Equal(t, fmt.Sprintf("ALTER TABLE %s.orders VALIDATE CONSTRAINT orders_user_id_fkey", schema), st.SQL)
+	assert.False(t, st.Destructive)
+	requireForeignKeyRefusal(t, st)
+	assert.Equal(t, router.DispositionRefuse, report.Disposition)
+	assert.Equal(t, verdict.ReasonDeclarativeForeignKey, report.Reason)
+}
+
 // Planning a foreign key never locks the live referenced table, even in the
 // public schema, where an unqualified reference in the scratch build would
 // otherwise resolve to the live table through the search_path. A writer
