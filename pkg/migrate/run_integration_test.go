@@ -100,7 +100,7 @@ func TestRunDispatch(t *testing.T) {
 		assert.True(t, exists, "a gated statement must never execute")
 	})
 
-	t.Run("refuses a copy-and-swap route as backend-unavailable", func(t *testing.T) {
+	t.Run("refuses a copy-and-swap route the engine does not carry as backend-unavailable", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
 		require.NoError(t, err)
@@ -108,17 +108,19 @@ func TestRunDispatch(t *testing.T) {
 			"INSERT INTO %s.t SELECT g, 'x' FROM generate_series(1, 100) g", schema))
 		require.NoError(t, err)
 
+		// A volatile default is evaluated per row at rewrite time; the
+		// shadow-table engine has no carrying path for it yet.
 		v, err := migrate.Run(t.Context(), pool,
-			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema)), runOptions())
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN joined timestamptz DEFAULT clock_timestamp()", schema)), runOptions())
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonBackendUnavailable, v.Reason)
 
-		var typ string
+		var n int
 		require.NoError(t, pool.QueryRow(t.Context(),
-			`SELECT data_type FROM information_schema.columns
-			 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
-		assert.Equal(t, "integer", typ, "the refused change must not touch the schema")
+			`SELECT count(*) FROM information_schema.columns
+			 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'joined'`, schema).Scan(&n))
+		assert.Equal(t, 0, n, "the refused change must not touch the schema")
 	})
 
 	t.Run("refuses an unconstructible rewrite as rewrite-required", func(t *testing.T) {

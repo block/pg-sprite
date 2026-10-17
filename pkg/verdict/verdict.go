@@ -98,7 +98,8 @@ const (
 	// engine refuses instead.
 	ReasonRewriteRequired Reason = "not-native-safe-rewrite-required"
 	// ReasonBackendUnavailable: the change routes to an execution strategy
-	// this build does not implement (copy-and-swap).
+	// that has no carrying path for the operation in this build (a
+	// copy-and-swap rewrite the shadow-table engine does not carry yet).
 	ReasonBackendUnavailable Reason = "backend-unavailable"
 	// ReasonDestructiveChange: the desired-state plan discards live
 	// structure — a dropped column, constraint, index, or NOT NULL — and

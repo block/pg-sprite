@@ -31,8 +31,8 @@ func rewriteRequiredRefusal() verdict.Refusal {
 	return verdict.CapabilityBoundary(verdict.ReasonRewriteRequired)
 }
 
-// backendUnavailableRefusal: the plan routes to an execution strategy this
-// build lacks.
+// backendUnavailableRefusal: the plan routes to an execution strategy that
+// has no carrying path for the operation in this build.
 func backendUnavailableRefusal() verdict.Refusal {
 	return verdict.CapabilityBoundary(verdict.ReasonBackendUnavailable)
 }

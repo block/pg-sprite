@@ -435,7 +435,7 @@ func planRefusal(report plan.Report) (verdict.Refusal, string) {
 		case router.DispositionRewriteRequired:
 			return rewriteRequiredRefusal(), detail("blocks and has no safer native sequence")
 		case router.DispositionUnavailable:
-			return backendUnavailableRefusal(), detail("routes to an execution strategy this build does not implement")
+			return backendUnavailableRefusal(), detail("routes to an execution strategy that does not carry this operation yet")
 		case router.DispositionRefuse:
 			// The plan-side registry classified the statement when it was
 			// refused; the class travels with the statement. A refused

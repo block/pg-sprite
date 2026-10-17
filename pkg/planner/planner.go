@@ -190,6 +190,12 @@ func Executions() []Execution {
 type Decision struct {
 	// Operation is the operator-facing label (display only).
 	Operation string `json:"operation"`
+	// Kind is the operation's parsed shape. The router's availability
+	// policy branches on it together with Reason: whether a backend
+	// carries a rewrite depends on what the operation does to the table,
+	// not only on why PostgreSQL would rewrite it. It is not part of the
+	// plan-report contract; a consumer branches on Reason.
+	Kind statement.OpKind `json:"-"`
 	// Destructive marks operations that discard live structure — a dropped
 	// column, constraint, index, or NOT NULL. It is derived from the operation shape
 	// here, in the one place every front door shares, so a plan reports the
@@ -331,7 +337,7 @@ func Classify(sql string, facts Facts) (Plan, error) {
 
 // classifyOp routes one operation per the reference table.
 func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string, single bool) Decision {
-	d := Decision{Operation: op.Describe(), Destructive: destructiveOp(op.Kind)}
+	d := Decision{Operation: op.Describe(), Kind: op.Kind, Destructive: destructiveOp(op.Kind)}
 	if facts.ReplicaIdentity.DroppedBy(op) {
 		d.Route, d.Reason = RouteRefuse, ReasonReplicaIdentity
 		return d
@@ -476,7 +482,7 @@ func concurrentlyDecision(d Decision, concurrent bool, sql string, single bool) 
 
 // classifyAddConstraint routes ADD CONSTRAINT per constraint family.
 func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, single bool) Decision {
-	d := Decision{Operation: op.Describe()}
+	d := Decision{Operation: op.Describe(), Kind: op.Kind}
 	switch {
 	case op.UsingIndex, op.NotValid:
 		// Already the safe pattern's cheap step.

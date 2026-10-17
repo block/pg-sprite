@@ -14,8 +14,8 @@ Aurora; 14+): a decoupled **planner → router → executor** design where the
 planner classifies each change, the router picks a strategy, and
 interchangeable executors carry it out — the cheap native PostgreSQL idiom
 when one exists (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default,
-`USING INDEX`), while a log-based, checksum-gated, resumable copy-and-swap for
-genuine table rewrites lands in a later phase.
+`USING INDEX`), and a log-based, checksum-gated, resumable copy-and-swap for
+genuine table rewrites — a general `ALTER COLUMN TYPE` runs through it today.
 
 The planner is PostgreSQL's missing `ALGORITHM=` / `LOCK=` declaration: MySQL
 lets authors assert a cost bracket and a concurrency impact and fails closed
@@ -63,8 +63,11 @@ and the mechanics of each current refusal are
 wherever an operation meets a boundary below, it fails closed with a typed
 refusal — never a silently wrong or incomplete result:
 
-- **Copy-and-swap** (genuine table rewrites) is not yet available — those
-  changes refuse rather than fall through to a blocking rewrite.
+- **Copy-and-swap** (genuine table rewrites) carries a general
+  `ALTER COLUMN TYPE` today; the other rewrite-class operations (volatile-default
+  `ADD COLUMN`, `GENERATED … STORED`, `SET TABLESPACE`) refuse rather than fall
+  through to a blocking rewrite, and the route's preflight refuses table shapes
+  and environments it cannot run against.
 - **Row security** is included in exports when present, with reviewable before/after differences. The
   [atomic executor](docs/atomic-row-security.md) applies RLS-only changes to existing tables
   through `migrate --desired` or the Go API. Only the Go API supports binding execution to
@@ -166,9 +169,9 @@ why the substituted sequence is safer — same end state, different locking
 the machine-readable shape is in
 [docs/cli-output-examples.md](docs/cli-output-examples.md).
 
-**Refuse: no safe path exists, so nothing runs.** A genuine table rewrite
-needs the copy-and-swap backend (a later phase); the dry run exits 2 so CI
-can gate on it without parsing JSON (the full four-code ladder is under
+**Refuse: no safe path exists, so nothing runs.** A rewrite the copy-and-swap
+backend does not carry yet (a volatile column default, for one) refuses; the
+dry run exits 2 so CI can gate on it without parsing JSON (the full four-code ladder is under
 [Exit codes](#exit-codes)). The exit-code gate stops refusals only —
 a destructive-but-executable change (`DROP COLUMN`) warns and exits 0, so a
 gate that must stop drops checks `.statements[].destructive` in the

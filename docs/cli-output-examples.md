@@ -47,7 +47,8 @@ a verdict, not a plan report — and exit 2. The JSON report schema is
   - [Safer-sequence substitution (`safer-idiom`) — exit 0](#safer-sequence-substitution-safer-idiom--exit-0)
   - [Real execution](#real-execution)
   - [Refused: no online rewrite exists (`rewrite-required`) — exit 2](#refused-no-online-rewrite-exists-rewrite-required--exit-2)
-  - [Refused: needs a backend this build lacks (`backend-unavailable`) — exit 2](#refused-needs-a-backend-this-build-lacks-backend-unavailable--exit-2)
+  - [Routed to copy-and-swap (`type-rewrite`) — exit 0](#routed-to-copy-and-swap-type-rewrite--exit-0)
+  - [Refused: the engine does not carry the operation yet (`backend-unavailable`) — exit 2](#refused-the-engine-does-not-carry-the-operation-yet-backend-unavailable--exit-2)
   - [Refused: target facts forbid the plan (`unsupported-partitioned-parent`) — exit 2](#refused-target-facts-forbid-the-plan-unsupported-partitioned-parent--exit-2)
   - [Executable but destructive (`destructive`) — exit 0](#executable-but-destructive-destructive--exit-0)
 - [Lint](#lint)
@@ -93,9 +94,9 @@ is a one-line summary; the linked reference entry is authoritative.
 |---|---|
 | [`metadata-only`](postgres-online-ddl-reference.md#metadata-only) | A brief catalog-only change: at most a short `ACCESS EXCLUSIVE` lock, no table scan or rewrite. Runs as written. |
 | [`safer-idiom`](postgres-online-ddl-reference.md#safer-idiom) | The statement blocks as written but an equivalent online sequence exists; pg-sprite substitutes it. Each step commits on its own — the sequence is not transactionally equivalent to the original. |
-| [`type-rewrite`](postgres-online-ddl-reference.md#type-rewrite) | The column type change is not binary-coercible, so PostgreSQL rewrites the whole table under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. |
+| [`type-rewrite`](postgres-online-ddl-reference.md#type-rewrite) | The column type change is not binary-coercible, so PostgreSQL rewrites the whole table under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend, which builds the changed shape as a shadow table, fills and verifies it, and swaps it in under the source's name. Executes. |
 | [`rewrite-required`](postgres-online-ddl-reference.md#rewrite-required) | The statement blocks as written and no online replacement could be constructed. Refused; split the change into separate online steps. The statement's `guidance` field names the typed manual path ([Guidance vocabulary](suggest-report.md#guidance-guidance)). |
-| [`backend-unavailable`](postgres-online-ddl-reference.md#backend-unavailable) | The plan routes to a backend (online shadow-table copy with cutover) this build does not implement yet. Refused; nothing executes. |
+| [`backend-unavailable`](postgres-online-ddl-reference.md#backend-unavailable) | The plan routes to the copy-and-swap backend for an operation the engine does not carry yet (a volatile column default, a stored generated column, a relocation). Refused; nothing executes. |
 | [`unsupported-partitioned-parent`](postgres-online-ddl-reference.md#unsupported-partitioned-parent) | The routed plan builds an index concurrently but the target is a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. Refused. |
 | [`unsupported-statement`](postgres-online-ddl-reference.md#unsupported-statement) | The planner knows no safe path for the statement (for example `SET UNLOGGED`, `CLUSTER ON`). Refused — the same typed reason the run path's refusal verdict carries. |
 | [`table-not-found`](postgres-online-ddl-reference.md#table-not-found) | The target table does not exist, so classification fell back to zero facts; running without `--dry-run` would fail. The dry run exits 2 and the report carries `table_exists: false`. |
@@ -117,7 +118,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 | `unsupported-partitioned-parent` | The routed plan builds an index on a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. |
 | `not-native-safe-budget-exceeded` | The optimistic attempt exceeded its lock or statement budget and was cancelled; the verdict's `cause` narrows which budget fired. The same `cause` field carries the partitioned-parent shape under `unsupported-partitioned-parent`; both are refusal causes, unrelated to the plan statement's create-shape `cause`. |
 | `not-native-safe-rewrite-required` | The submitted form blocks and must run as a safer native sequence, but none could be constructed. |
-| `backend-unavailable` | The change routes to an execution strategy this build does not implement (copy-and-swap). |
+| `backend-unavailable` | The change routes to copy-and-swap for an operation the engine does not carry yet (a volatile column default, a stored generated column, a relocation, an added column whose type rewrites); a type rewrite of an existing column (`ALTER COLUMN TYPE`) executes through the route instead. |
 | `destructive-change` | The desired-state plan discards live structure — a dropped column, constraint, index, or `NOT NULL` — and desired-state execution runs no destructive statement; run the drop deliberately instead ([execution model](execution-model.md)). |
 | `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
 | `declarative-foreign-key` | The desired-state plan adds or drops a foreign key, or creates a table that declares one. Desired-state execution does not run foreign-key changes yet; the plan still shows the statement, and `migrate --alter` runs `ADD FOREIGN KEY` through the online `NOT VALID` + `VALIDATE` sequence. |
@@ -319,10 +320,15 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' 
 }
 ```
 
-### Refused: needs a backend this build lacks (`backend-unavailable`) — exit 2
+### Routed to copy-and-swap (`type-rewrite`) — exit 0
 
-A genuine table rewrite routes to the copy-and-swap backend, which is not
-implemented yet.
+A column type change PostgreSQL would run as a whole-table rewrite under
+`ACCESS EXCLUSIVE` routes to the copy-and-swap backend and executes: the
+plan's disposition is `execute`, the statement's `route` and `backend` are
+`copy-and-swap`, and the decision's `reason` says why the native path was
+not taken. No `exec_sql` is offered — the backend derives the shadow
+table's shape by running the statement against an empty copy, so there is
+no native SQL to show.
 
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
@@ -333,21 +339,75 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-
   "table": "users",
   "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
   "table_exists": true,
-  "disposition": "unavailable",
-  "fingerprint": "sha256:fb4836fa89efab4280be1680b8c3181fb902ec67131ae5959df3d5e872f1b3c5",
+  "disposition": "execute",
+  "fingerprint": "sha256:be3fffa9b771b7fb9cc0cb024b041caf5ea08db2d28e1860d4d81f4e8773f44e",
   "statements": [
     {
       "sql": "ALTER TABLE users ALTER COLUMN id TYPE text",
       "destructive": false,
       "route": "copy-and-swap",
       "backend": "copy-and-swap",
-      "disposition": "unavailable",
+      "disposition": "execute",
       "decisions": [
         {
           "operation": "ALTER COLUMN id TYPE text",
           "destructive": false,
           "route": "copy-and-swap",
           "reason": "type-rewrite"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Without `--dry-run` the run needs `--free-disk` (the preflight refuses with
+`copy-and-swap-refused` / cause `copy-and-swap-disk-headroom` when the shadow
+and its indexes would not fit the declared space) and either logical
+decoding on the server or `--quiesced`. The verdict's outcome is distinct
+from `executed-natively`, and `detail` says what the verification pass
+covered and what became of the retained source:
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --free-disk 20GiB --json
+{
+  "outcome": "executed-via-copy-and-swap",
+  "statement": "ALTER TABLE users ALTER COLUMN id TYPE text",
+  "table": "public.users",
+  "detail": "verified 1000 rows in 2 chunks; the retained source is dropped"
+}
+```
+
+### Refused: the engine does not carry the operation yet (`backend-unavailable`) — exit 2
+
+Other rewrite-class operations also route to copy-and-swap, but the engine
+does not carry them yet — a volatile column default, a stored generated
+column, a relocation — so the plan is `unavailable` and nothing executes.
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
+{
+  "format_version": 8,
+  "source": "alter",
+  "schema": "public",
+  "table": "users",
+  "server_version": "16.14 (Debian 16.14-1.pgdg13+1)",
+  "table_exists": true,
+  "disposition": "unavailable",
+  "fingerprint": "sha256:f94d3738f00b2f2bb7f5c05e72720c1e650c191e8a6e79f9aa5087b9491928cf",
+  "statements": [
+    {
+      "sql": "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()",
+      "destructive": false,
+      "route": "copy-and-swap",
+      "backend": "copy-and-swap",
+      "disposition": "unavailable",
+      "decisions": [
+        {
+          "operation": "ADD COLUMN joined",
+          "destructive": false,
+          "route": "copy-and-swap",
+          "reason": "volatile-default"
         }
       ]
     }
