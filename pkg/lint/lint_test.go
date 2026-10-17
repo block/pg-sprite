@@ -181,7 +181,7 @@ func TestReportJSONShape(t *testing.T) {
 	suggestion, err := json.Marshal(report.Findings[0].Suggestion)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"postgres_versions": "14-18",
 		"findings": [
 			{
@@ -208,7 +208,7 @@ func TestReportJSONCleanFindingsAreEmptyArray(t *testing.T) {
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"postgres_versions": "14-18",
 		"findings": [],
 		"errors": 0,

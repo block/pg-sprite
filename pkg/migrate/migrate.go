@@ -47,6 +47,7 @@ import (
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -203,6 +204,14 @@ func (o Options) retry() executor.RetryPolicy {
 //
 // Run does not close the pool; one pool serves any number of calls.
 func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options) (verdict.Verdict, error) {
+	return run(ctx, pool, st, opts, nil)
+}
+
+// run is Run for a statement that may be a diff-planned index adoption:
+// when adopts is set, st takes over that index, and execution checks the
+// index against the planned definition under the table's lock before
+// attaching it.
+func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, adopts *schemadiff.IndexAdoption) (verdict.Verdict, error) {
 	if err := opts.validate(); err != nil {
 		return verdict.Verdict{}, err
 	}
@@ -253,7 +262,7 @@ func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 			// submitted form runs natively as a blind bounded attempt
 			// instead of through the shadow table.
 			auditForce(opts.audit(), st, rs)
-			return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, logger)
+			return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, logger)
 		}
 		execSQL := rs.ExecSQL
 		substituted := len(execSQL) != 1 || execSQL[0] != rs.Statement
@@ -264,19 +273,19 @@ func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 			execSQL, substituted = []string{canonical}, false
 			auditForce(opts.audit(), st, rs)
 		}
-		return execute(ctx, pool, st, execSQL, rs.Plan, substituted, forced, opts, logger)
+		return execute(ctx, pool, st, execSQL, rs.Plan, substituted, forced, opts, adopts, logger)
 	case router.DispositionRewriteRequired:
 		if opts.Force == "" {
 			return rewriteRequiredVerdict(st), nil
 		}
 		auditForce(opts.audit(), st, rs)
-		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, logger)
+		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, logger)
 	case router.DispositionUnavailable:
 		if opts.Force == "" {
 			return backendUnavailableVerdict(st, rs), nil
 		}
 		auditForce(opts.audit(), st, rs)
-		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, logger)
+		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, logger)
 	case router.DispositionRefuse:
 		// A planner refusal means no known safe path — there is nothing
 		// bounded to acknowledge, so the force acknowledgement does not
@@ -367,7 +376,14 @@ func auditForce(audit *slog.Logger, st statement.Statement, rs router.Statement)
 // with the exact provisioning statement instead.
 func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	execSQL []string, plan planner.Plan, substituted, forced bool,
-	opts Options, logger *slog.Logger) (verdict.Verdict, error) {
+	opts Options, adopts *schemadiff.IndexAdoption, logger *slog.Logger) (verdict.Verdict, error) {
+	if forced && adopts != nil {
+		// An adoption is diff-planned SQL, which is never forced: the
+		// override exists for a submitted statement the router would
+		// substitute or decline.
+		return verdict.Verdict{}, fmt.Errorf("%w: a forced attempt cannot carry the adoption of index %s",
+			executor.ErrInvariantViolation, adopts.Index)
+	}
 	limit := opts.MaxTableSizeBytes
 	if !sizeGuardApplies(plan, substituted) {
 		limit = preflight.NoSizeLimit
@@ -416,9 +432,12 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	retry := opts.retry()
 	start := time.Now()
 	var rep executor.SequenceReport
-	if forced {
+	switch {
+	case forced:
 		err = executor.ExecuteNative(ctx, pool, pt, st, opts.Budget.Brief, retry)
-	} else {
+	case adopts != nil:
+		rep, err = executor.RunSequenceAdopting(ctx, pool, pt, execSQL, opts.Budget, retry, *adopts)
+	default:
 		rep, err = executor.RunSequence(ctx, pool, pt, execSQL, opts.Budget, retry)
 	}
 	elapsed := time.Since(start)

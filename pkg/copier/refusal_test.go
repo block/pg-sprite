@@ -41,7 +41,9 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 // that moved are environmental, since re-acquiring or re-running preflight
 // may admit the same copy; every proof, shadow, chunk, and ledger cause is
 // an invariant violation, since no retry changes a caller's bad input or
-// the copier's own broken accounting. An unknown cause has no class.
+// the copier's own broken accounting; every answer is a member of
+// refusal.Classes(), so the closed set lists what the causes hand out. An
+// unknown cause has no class.
 func TestEveryRefusalCauseNamesItsClass(t *testing.T) {
 	want := map[RefusalCause]refusal.Class{
 		CauseProofEmpty:        refusal.ClassInvariantViolation,
@@ -58,6 +60,7 @@ func TestEveryRefusalCauseNamesItsClass(t *testing.T) {
 	assert.Len(t, RefusalCauses(), len(want), "every registered cause has an expected class")
 	for _, cause := range RefusalCauses() {
 		assert.Equal(t, want[cause], cause.Class(), "cause %q", cause)
+		assert.Contains(t, refusal.Classes(), cause.Class(), "cause %q answers a class refusal.Classes() does not list", cause)
 	}
 	assert.Empty(t, RefusalCause("not-a-cause").Class())
 }

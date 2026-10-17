@@ -67,6 +67,8 @@ func refusalOfClass(class refusal.Class, reason verdict.Reason) (verdict.Refusal
 	switch class {
 	case refusal.ClassCapabilityBoundary:
 		return verdict.CapabilityBoundary(reason), true
+	case refusal.ClassByDesign:
+		return verdict.ByDesign(reason), true
 	case refusal.ClassEnvironmental:
 		return verdict.Environmental(reason), true
 	case refusal.ClassInvariantViolation:

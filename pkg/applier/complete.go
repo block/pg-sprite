@@ -35,7 +35,10 @@ type completion struct {
 	// columns carries a present value for every marker column, each as the
 	// text the server rendered — which the write binds back as text for the
 	// server to read with the column's own input function, so a value of
-	// any type makes the round trip — and NULL as NULL.
+	// any type makes the round trip — and NULL as NULL. The value is in the
+	// form of the row it was read from: a shadow row holds a converted
+	// column's converted value, a source row the source's, and the held
+	// image says which row the read was of.
 	columns []decode.Column
 	// readLSN is the WAL insert position at the read. Every change the read
 	// saw had committed below it.

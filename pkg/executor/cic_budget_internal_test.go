@@ -205,7 +205,7 @@ func TestBudgetedSessionRestoresBoundsTheStartupPacketNeverCarried(t *testing.T)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	conn, release, err := acquireBudgetedSession(t.Context(), pool, ConcurrentBudget{Overall: time.Minute})
+	conn, release, err := acquireBudgetedSession(t.Context(), pool, ConcurrentBudget{Overall: time.Minute}, "")
 	require.NoError(t, err)
 	var buildPID, duringLock int64
 	require.NoError(t, conn.QueryRow(t.Context(),
@@ -227,4 +227,39 @@ func TestBudgetedSessionRestoresBoundsTheStartupPacketNeverCarried(t *testing.T)
 		"the released session must be the one reused, or this proves nothing about it")
 	assert.Equal(t, int64(3000), lockMS, "a reused session must not be left without a lock bound")
 	assert.Equal(t, int64(30000), statementMS, "a reused session must not be left without a statement bound")
+}
+
+// A concurrent build resolves its statement's unqualified names under the
+// target schema then public, the path the diff printed the statement under,
+// whatever path the session came with. The pin is session-level, since the
+// build cannot run in a transaction, so the release puts the session's own
+// path back by value before another borrower reuses it.
+func TestBudgetedSessionPinsSearchPathAndRestoresIt(t *testing.T) {
+	cfg, err := pgxpool.ParseConfig(testutil.StartPostgres(t))
+	require.NoError(t, err)
+	cfg.MaxConns = 1
+	cfg.AfterConnect = func(ctx context.Context, conn *pgx.Conn) error {
+		_, err := conn.Exec(ctx, "SELECT pg_catalog.set_config('search_path', 'elsewhere, public', false)")
+		return err
+	}
+	pool, err := pgxpool.NewWithConfig(t.Context(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	conn, release, err := acquireBudgetedSession(t.Context(), pool, ConcurrentBudget{Overall: time.Minute}, "app")
+	require.NoError(t, err)
+	var buildPID int64
+	var during string
+	require.NoError(t, conn.QueryRow(t.Context(), "SELECT pg_backend_pid(), pg_catalog.current_setting('search_path')").Scan(&buildPID, &during))
+	assert.Equal(t, "app, public", during, "the build resolves under the target schema then public")
+	release()
+
+	reused, err := pool.Acquire(t.Context())
+	require.NoError(t, err)
+	defer reused.Release()
+	var reusedPID int64
+	var after string
+	require.NoError(t, reused.QueryRow(t.Context(), "SELECT pg_backend_pid(), pg_catalog.current_setting('search_path')").Scan(&reusedPID, &after))
+	require.Equal(t, buildPID, reusedPID, "the released session must be the one reused, or this proves nothing about it")
+	assert.Equal(t, "elsewhere, public", after, "a reused session gets its own search_path back")
 }

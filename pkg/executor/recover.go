@@ -533,7 +533,7 @@ func dropQuarantinedIndex(ctx context.Context, pool *pgxpool.Pool, target indexT
 	fail := func(cleanup error) error {
 		return &InvalidIndexError{Schema: target.schema, Index: name, Table: entry.table, Cleanup: cleanup}
 	}
-	conn, release, err := acquireBudgetedSession(ctx, pool, b)
+	conn, release, err := acquireBudgetedSession(ctx, pool, b, "")
 	if err != nil {
 		return DroppedIndex{}, err
 	}

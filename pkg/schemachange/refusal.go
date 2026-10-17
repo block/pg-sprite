@@ -49,10 +49,13 @@ const (
 	// CauseStatementConversion means the gated statement retypes a column
 	// with a USING expression the copy cannot carry as written (ST-7): the
 	// deparser cannot prove it rendered the expression faithfully, the
-	// statement retypes the same column twice, or the expression converts
+	// expression reads a column other than the one it retypes, the
+	// statement retypes the same column twice, the expression converts
 	// the primary key, whose values the copy's chunk ranges, watermark, and
-	// resume clear are expressed in. The statement's own sentinel, when
-	// there is one, is wrapped for errors.Is.
+	// resume clear are expressed in, or the server does not classify the
+	// expression as immutable, so its evaluations in the copy, the recopy,
+	// and the catch-up need not agree. The statement's own sentinel, or
+	// ErrConversionNotImmutable, is wrapped for errors.Is.
 	CauseStatementConversion RefusalCause = "shadow-statement-conversion"
 	// CauseShadowOwner means the shadow the build just created is not owned
 	// by the source's owner (ST-5): the role the proof carries is no longer
@@ -94,11 +97,12 @@ const (
 	CauseRelationReplaced RefusalCause = "cutover-relation-replaced"
 	// CauseSchemaDrift means the source's or the shadow's introspected model
 	// no longer matches the fingerprint the build recorded (ST-5): a
-	// column, constraint, or index was added, dropped, or changed since.
+	// column, constraint, index, storage parameter, or column-owned
+	// sequence declaration was added, dropped, or changed since.
 	CauseSchemaDrift RefusalCause = "cutover-schema-drift"
 	// CauseFidelityDrift means the source's or the shadow's metadata — owner,
-	// grants, policies, comment, storage parameters, replica identity,
-	// statistics targets, unvalidated checks, or identity sequence options —
+	// grants, policies, comment, replica identity, statistics targets,
+	// unvalidated checks, or identity columns and their sequences —
 	// no longer matches the snapshot the build recorded (ST-5).
 	CauseFidelityDrift RefusalCause = "cutover-fidelity-drift"
 	// CauseIndexInvalid means a shadow index has pg_index.indisvalid false
@@ -263,15 +267,20 @@ func (c RefusalCause) Invariant() string {
 }
 
 // Class is the routing class of the cause, from docs/refusal-classes.md:
-// what an importer does about the refusal. A cause that describes a lock, a
-// proof, a relation, a slot, or a row whose state moved under the operation
-// is environmental — re-acquire, re-run preflight, drop and rebuild, or
-// inspect the catalog, and the same change may go through. A statement the
-// engine declines to carry as written is a capability boundary. Every other
-// cause is an invariant violation: an input the caller handed in that
-// cannot have come from this engine, or a write of the engine's own that
-// the catalog does not show; nothing on the server changes that, so the
-// importer reports it. An unknown cause has no class.
+// what kind of boundary the importer is looking at. A cause that describes
+// a lock, a proof, a relation, a slot, or a row whose state moved under the
+// operation is environmental — state outside the engine stopped a
+// supportable change. A statement the engine declines to carry as written
+// is a capability boundary. Every other cause is an invariant violation: an
+// input the caller handed in that cannot have come from this engine, or a
+// write of the engine's own that the catalog does not show; nothing on the
+// server changes that, so the importer reports it. The class is a triage
+// decision; the cause's row in the document decides what the importer does
+// next — re-acquire, re-run preflight, drop and rebuild, or hand the
+// catalog to an operator — and no class licenses an automatic retry on its
+// own: an ambiguous cutover outcome is environmental and is resolved by
+// inspection, never by running the swap again. An unknown cause has no
+// class.
 func (c RefusalCause) Class() refusal.Class {
 	switch c {
 	case CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed, CauseSourceShape,
@@ -333,7 +342,11 @@ func refuse(cause RefusalCause, wrapped []error, detail string, args ...any) err
 
 // RefusalCauseOf returns the shadow refusal cause carried by err, or the
 // empty cause when err is nil or carries no shadow refusal. Wrappers are
-// read through.
+// read through, so a copier refusal the Runner re-minted answers its shadow
+// cause here and its copier cause to copier.RefusalCauseOf.
+// RefusalCauseOf(err).Class() is therefore the refusal's class, and the
+// empty class for an error that is not a shadow refusal — a server error
+// the importer routes by SQLSTATE, or the bare sentinel.
 func RefusalCauseOf(err error) RefusalCause {
 	var refusal *RefusalError
 	if errors.As(err, &refusal) {

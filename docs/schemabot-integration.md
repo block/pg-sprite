@@ -320,8 +320,9 @@ the slot under the row (decoding target):
 
 | `Run` outcome | What it means | Orchestrator action |
 | --- | --- | --- |
+| `*decode.SlotExistsError` (decoding target, first start) | A logical slot of the engine's derived name already exists and no row names it: a run that ended before its row landed, or a slot made by hand. The run made nothing and dropped nothing — the slot, its publication, and the absence of a row are as the run found them | Run `Store.ReapOrphanSlots`, which drops the slot once nothing holds it, and then `Run` again; a slot that stays held is an operator's to inspect |
 | `*checksum.DivergenceError` | The verification pass found the shadow differing from the source — under a fence nothing should have written either, and under a stream a difference the catch-up did not settle is a confirmed divergence — so the run stops rather than repair (CO-3 `DivergenceAbort`) and the row stays in `verifying` | Do not retry blindly: a retry runs the same pass over the same shadow and stops the same way. Abandon the run — `DropShadow`, `DropWriteFence` or `decode.DropSlot`, `Store.Delete` under the table lock — and run again; a difference that recurs under a fence is a writer bypassing it (a superuser, or `session_replication_role = replica`) to find |
-| `*checksum.UnresolvedError` (decoding target) | The live pass could not settle a chunk the source kept writing within its reread bound; nothing was found wrong and nothing was minted, and the row stays in `verifying` | Retry `Run`: the resumed row catches up again and runs a fresh pass; a chunk that never settles is a hot spot to wait out or write less often |
+| `*checksum.UnresolvedError` (decoding target) | The live pass could not settle a chunk the source kept writing within its reread bound; nothing was found wrong and nothing was minted, and the row stays in `verifying`. The bound is `LiveOptions.Attempts` fresh rereads of one chunk (default `checksum.DefaultSettleAttempts`), each waited on for the catch-up up to `LiveOptions.SettleWait`: a chunk written again between every two of its rereads never settles, so a table whose writes land on one chunk faster than the pass can read it twice is the case, whatever the table's total write rate | Retry `Run`: the resumed row catches up again and runs a fresh pass; a chunk that never settles is a hot spot to wait out, write less often, or give more `Attempts` |
 | `cutover-drain-deferred` (decoding target) | The swap's drain met a unique-key move it could not order into the shadow; the swap rolled back and the row is in `cutover` with the position the drain reopened from | Retry `Run`: `InspectSwapped` answers `ErrNotSwapped`, the row goes back to `catching_up`, and the same changes are drained again once the rows the move touched have settled |
 | `*decode.SlotLagExceededError` (decoding target) | The slot retained more WAL than `CatchupOptions.SlotLagCeiling` while the capture ran; the run stopped with the slot in place under the row | Retry `Run` once the source's write rate allows: the stream reopens at the row's position and drains the backlog. Abandoning the run (`DropShadow`, `decode.DropSlot`, `Store.Delete`) releases the WAL |
 | `ErrCutoverRolledBack` / `ErrLockRetriesExhausted` | The swap did not commit; the source is still live and the row is in `cutover` | Retry `Run`: the row is answered by `InspectSwapped`, which sends the run back through verify and gate to a fresh swap attempt |
@@ -334,6 +335,26 @@ A refusal from either read leaves the row and the slot as they were. A `Reconcil
 after its marker leaves the row in `reconciling`, and `InspectResume` answers that row as
 reconcile whatever the catalog shows under the slot name, so the adapter repeats `Start`
 rather than deciding anything itself.
+
+#### What a live `Run` holds open
+
+A `Run` on a decoding target keeps server sessions outside the pool it is handed, and draws on
+the pool besides; an importer running many tables from one process sizes for both:
+
+- **Outside the pool, dialled from the `dbconn.Config`:** the table-lock session for the whole
+  run; one replication connection for the capture's stream while the row is in `copying`,
+  `catching_up`, or `verifying`, and one more for the drain's stream during each swap attempt
+  (preflight already requires two free `max_wal_senders` for this); one plain connection that
+  holds the slot's advisory lock only while the run makes its slot and commits its first row
+  (`Store.WithSlotLock`); and one plain connection for the drain's marker and slot reads during
+  each swap attempt. None of these waits on the pool, so a claim or a swap never holds a pool
+  connection while waiting for another — as many live runs at once as the pool has connections
+  all finish (`TestRunnersOnOnePoolDoNotStarveEachOther` runs four on a pool of four;
+  `TestSlotLockLeavesThePoolToTheCallback` runs a claim on a pool of one).
+- **From the pool:** `Copier.Workers` connections (default `copier.DefaultWorkers`) while the
+  copy runs, one at a time for the capture's flushes and the checkpoint saves, one for the
+  verification pass, and one for the swap transaction. A pool smaller than the copy's workers
+  slows the copy; it does not stall the run.
 
 ### Routing the checkpoint store's own refusals
 
@@ -350,6 +371,11 @@ installation, not the run, and each means a different action:
 | `ErrTableNewer` (`*checkpoint.TableNewerError`, `Unknown` naming the columns) | The table carries columns this engine does not know: a newer engine shaped it, or an operator added a column by hand. `Ensure` ran no DDL | Operator action — run the newer engine, roll the table back to this engine's shape, or drop the hand-added column; retrying this engine cannot succeed while the columns are there |
 | `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion < checkpoint.FormatVersion` | The row was written by an older engine whose row format this engine does not read | Operator action: finish or abandon the old run. When no run is in flight, `Store.Delete(Stored)` is the fresh start; the row is never silently rewritten |
 | `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion > checkpoint.FormatVersion` | The row was written by a newer engine | Upgrade the engine; this one must not touch the row |
+
+Releases through v0.3.3 write format 2, whose model fingerprints leave out the table's
+storage parameters and its columns' sequence declarations. A copy-and-swap run in flight across the upgrade to format 3 surfaces as
+`MismatchFormat` with `Stored.FormatVersion == 2`: finish it with the release that started
+it, or, once no run is in flight, `Store.Delete(Stored)` and start over.
 
 `ErrTableBehind` wraps the server's own `42703` undefined-column error, so an adapter that
 logs the chain sees both the engine's classification and the server's words. `ErrTableNewer`

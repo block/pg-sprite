@@ -29,8 +29,10 @@ import (
 // the report and on refused statements, and closed their vocabularies. Version
 // 5 added blocking_passthrough_eligible to refused statements. Version 6
 // added the add-foreign-key and drop-foreign-key change kinds and the
-// foreign-key create-shape cause.
-const FormatVersion = 6
+// foreign-key create-shape cause. Version 7 added the
+// set-generated-expression change kind. Version 8 added the replica-identity
+// planner reason.
+const FormatVersion = 8
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -67,6 +69,11 @@ type Statement struct {
 	// alter source: a submitted statement may carry several operations and
 	// has no single kind.
 	Kind schemadiff.ChangeKind `json:"kind,omitempty"`
+	// Adopts is the index a diff-derived ADD CONSTRAINT ... USING INDEX
+	// takes over and the definition it must still have when execution
+	// attaches it (see schemadiff.Change.Adopts). Nil otherwise, and out
+	// of the JSON: the SQL already identifies the change.
+	Adopts *schemadiff.IndexAdoption `json:"-"`
 	// Destructive marks statements that discard live structure — a dropped
 	// column, constraint, index, or NOT NULL. It is derived from the classifier's
 	// decisions, so both sources report it identically; it is always

@@ -131,13 +131,13 @@ func closeStream(ctx context.Context, stream *decode.Stream) error {
 	return nil
 }
 
-// awaitSlotIdle waits until no backend holds the slot, or ctx ends. The
-// backend that served a closed stream leaves on its own once it notices
-// the connection gone; until it has, the slot is active and no stream can
-// open on it.
-func awaitSlotIdle(ctx context.Context, pool *pgxpool.Pool, name string, sleep func(context.Context, time.Duration) error) error {
+// awaitSlotIdle waits until no backend holds the slot, or ctx ends,
+// reading the slot on db. The backend that served a closed stream leaves
+// on its own once it notices the connection gone; until it has, the slot
+// is active and no stream can open on it.
+func awaitSlotIdle(ctx context.Context, db dbconn.RowQuerier, name string, sleep func(context.Context, time.Duration) error) error {
 	for {
-		status, found, err := decode.InspectSlot(ctx, pool, name)
+		status, found, err := decode.InspectSlot(ctx, db, name)
 		if err != nil {
 			return fmt.Errorf("await slot %s idle: %w", name, err)
 		}

@@ -353,14 +353,15 @@ explicitly, in which case a user schema listed ahead of it shadows the catalog: 
 `app.pg_index` turns a fail-closed proof into a false clean, and a decoy `pg_cancel_backend`
 returns true and signals nothing. Two layers uphold the invariant. At the connection layer,
 every pooled session drops a `pg_catalog` entry that another schema precedes (`pkg/dbconn`
-`unshadowCatalog`), and every transaction-local path is built by `dbconn.LocalSearchPath`, which
-applies the same rewrite. At the query layer, reads that run under a path pg-sprite did not set
+`unshadowCatalog`), and every path pg-sprite sets is built in `pkg/dbconn`, which applies the
+same rewrite: `LocalSearchPath` for a transaction, and `SessionSearchPath` with
+`RestoreSessionSearchPath` for a session-level statement such as a concurrent build. At the query layer, reads that run under a path pg-sprite did not set
 — the session's own — qualify every relation, function, operator, and type with `pg_catalog`.
 The connection-layer guarantee is per session: it rewrites an explicit `pg_catalog` entry only,
 not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary objects), and a
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
-*Enforced:* `pkg/dbconn` (session hook, `LocalSearchPath`, and the test that keeps it the only
-`search_path` writer under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
+*Enforced:* `pkg/dbconn` (session hook, the path builders, and the test that keeps them the only
+`search_path` writers under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
 `pkg/progress`, `pkg/schemadiff`, and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
@@ -370,18 +371,21 @@ transaction, and the verifier's cut runs inside its guarded transaction under th
 (decoy bigint `>=` operator test in both packages: under the session path every cut returns the
 same key and the second cut fails CO-4). The one widening is the copy statement of a shadow
 whose proof carries conversions — the `USING` expressions of an `ALTER COLUMN TYPE` — which
-the copier's chunk transaction and every guarded transaction of the verifier's pass run under
-the shadow build's own path (`pg_catalog`, then the source schema, then `public`, built by
-`LocalSearchPath` so the catalog stays first): the expression ran under that path when the
-statement built the shadow, and an unqualified name in it must resolve in the copy and the
-recopy as it did then, while the digest's `pg_catalog.` qualification keeps its functions
-pinned whatever follows the catalog. That path is resolved afresh in every chunk, so the
+the copier's chunk transaction, every guarded transaction of the verifier's pass, and every
+flush transaction of the applier's catch-up run under the shadow build's own path
+(`pg_catalog`, then the source schema, then `public`, built by `LocalSearchPath` so the
+catalog stays first): the expression ran under that path when the
+statement built the shadow, and an unqualified name in it must resolve in the copy, the
+recopy, the digest's source side, and the flush's converted write as it did then, while the
+digest's and the flush's `pg_catalog.` qualification keeps their own functions pinned whatever
+follows the catalog. That path is resolved afresh in every chunk and every flush, so the
 widened copy trusts the source schema and `public` not to gain, during the run, a function or
 operator that fits an unqualified name in the expression better than the one the build
 resolved; nothing records what the build resolved, and a copy a concurrent `CREATE FUNCTION`
 redirected reads as divergence at verification, not before. The copier's cuts and
-measurements, and every conversion-free copy and pass, keep the catalog alone. *Test obligation:* a shadowing `search_path` (`<schema>,
-pg_catalog` with decoy catalog relations and functions in the schema) yields the same answer as
+measurements, and every conversion-free copy, pass, and flush, keep the catalog alone. *Test
+obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with decoy catalog relations
+and functions in the schema) yields the same answer as
 the default path, per read site and per pooled session.
 
 ## Locking and concurrency (LK)
@@ -754,11 +758,13 @@ lost before any measure, unknown never read as nothing retained, over the ceilin
 `SlotLagExceededError` — and refuses a ceiling below one byte) + `pkg/checkpoint`
 `Store.ReapOrphanSlots` (one pass over the logical, engine-prefixed slots of the store's own
 database: the slots are listed first and the checkpoint rows that own them read in a later
-statement, so a row committed before its slot appears is seen whenever the slot is, and each
-slot's row is read again right before its drop, under the engine's advisory lock on the slot's
-name (`Store.WithSlotLock`) that a run claiming the slot holds while it makes the slot and
-commits the row that names it, so a run that claimed it since the pass began keeps it and one
-claiming it now waits for the drop and creates afresh; a slot no row in a non-terminal phase
+statement, which sorts the slots a live row plainly names out of the pass, and each slot's row
+is read again right before its drop — the read that decides — under the engine's advisory lock
+on the slot's name (`Store.WithSlotLock`, transaction-scoped on a connection dialled outside
+the store's pool and proven to be on its cluster and database, so the holder's own work on the pool never waits on the seat the lock sits
+in) that a run claiming the slot holds while it makes the slot and commits the row that names
+it, so a run that claimed it since the pass began keeps it and one claiming it now waits for
+the drop and creates afresh; a slot no row in a non-terminal phase
 names is dropped through `DropIdleSlot`,
 publication and all, which refuses a held slot instead of waiting for its holder — whether a
 slot is held is judged at the drop, since `pg_replication_slots` reads shared memory, not a
@@ -772,7 +778,9 @@ be set below one byte; a slot that vanished is `SlotLostError`; crossing the cei
 `Run` with the table lock intact and the slot in place for the operator to read) +
 `pkg/schemachange.Runner` (on a decoding target it creates the slot under the store's lock on
 the slot's name, in the same step as the row that names it, so the reaper never meets the slot
-before its row; a first save whose row does not land drops the slot and the shadow again; a
+before its row; a first save whose row does not land drops the slot and the shadow again, while
+a slot of the derived name the run did not make is reported as the `*decode.SlotExistsError`
+it is and left as found; a
 stopped run leaves the slot under its row, and the next `Run` reopens the stream from the
 row's position — a ceiling abort included, so the backlog is drained by resuming — or the
 operator abandons the run with `DropShadow`, `decode.DropSlot`, and `Store.Delete`; the slot
@@ -938,7 +946,11 @@ every desired statement's target against the absence proof the same way), `pkg/s
 `statement.Statement` naming the proven table, retargets it onto the shadow through the
 deparser, and refuses before executing unless the retargeted form re-parses to the same
 operations with the shadow as its sole target —
-[copy-and-swap D1](copy-and-swap-design.md#d1--no-durable-scratch-database)).
+[copy-and-swap D1](copy-and-swap-design.md#d1--no-durable-scratch-database); it also refuses,
+inside the build's transaction and before the statement runs, a `USING` expression the server
+does not classify as immutable, tried as a stored generated column's expression on the empty
+shadow and rolled back, since the copy, the recopy, and the catch-up evaluate the expression
+again and must get the same answer).
 *Source:* adversarial review of the optimistic front door.
 
 ### ST-8 — A desired schema's statements carry execution order in the proof
@@ -1032,7 +1044,12 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `verdict.Refusal`; `Verdict.WithRefusal` is the only way a verdict acquires its refusal
   fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`)
   is checked for completeness against the production closed sets by
-  `TestRefusalRegistryIsComplete`. *Source:* [refusal classes](refusal-classes.md).
+  `TestRefusalRegistryIsComplete`. Inside the core, `copier.RefusalCause.Class()` and
+  `schemachange.RefusalCause.Class()` answer one class from `refusal.Classes()`, held to each
+  cause's row by `TestRefusalCauseClassMatchesDocClassColumn` in both packages, every cause
+  table's `class` cell held to the closed set by `TestEveryCauseTableClassIsACoreClass`, and
+  the core's tokens held to the verdict's by `TestCoreRefusalClassesAreVerdictClasses`.
+  *Source:* [refusal classes](refusal-classes.md).
 - **RF-8** — An in-process refused verdict retains its full typed refusal proof, and
   `Verdict.Refusal` hands that proof out only when it validates under RF-7 and still matches
   the verdict's exported refusal fields. A verdict decoded from JSON reconstructs class,

@@ -11,6 +11,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -286,6 +287,8 @@ func impactText(r planner.Reason) string {
 		return "physically moves the table's storage: rewrite-scale I/O under an exclusive lock that blocks reads and writes"
 	case planner.ReasonPartitionParentLock:
 		return "takes a brief exclusive lock on the partitioned parent, briefly blocking access to every partition"
+	case planner.ReasonReplicaIdentity:
+		return "drops what the table's replica identity keys on; UPDATE and DELETE on the table fail while a publication publishes them"
 	case planner.ReasonUnsupportedOperation:
 		return "pg-sprite does not recognize this operation and will not run it"
 	}
@@ -321,6 +324,12 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 	}
 	if r != verdict.ReasonUnsupportedStatement {
 		return verdictText(r)
+	}
+	if ps.Kind == schemadiff.ChangeSetGeneratedExpression {
+		return "changing a stored generated column's expression recomputes every row under an exclusive lock " +
+			"that blocks reads and writes; there is no online path for it, so this change is shown for review only. " +
+			"SET EXPRESSION needs PostgreSQL 17 or later; before that, the only path is to drop and re-add the column, " +
+			"which also drops its indexes"
 	}
 	if op := refusedOperation(ps); op != "" {
 		return "the planner knows no safe path for " + op

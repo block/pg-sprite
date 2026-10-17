@@ -68,11 +68,13 @@ type candidateSlot struct {
 // by one whose cleanup did not finish.
 //
 // Ownership is judged twice. The slots are listed first and the rows that
-// own them read in a later statement, so a row committed before its slot
-// appears is seen whenever the slot is; then, under the engine's lock on
-// the slot's name (WithSlotLock), the row is read again and the slot
-// dropped, so a run that claimed the slot since the pass began keeps it,
-// and a run claiming it now waits for the drop and creates afresh. Whether
+// own them read in a later statement, which sorts the slots a live row
+// plainly names out of the pass; then, under the engine's lock on the
+// slot's name (WithSlotLock), the row is read again and the slot dropped,
+// and that read is the one that decides: a run claims its slot and its row
+// under the same lock, so a run that claimed the slot since the pass began
+// keeps it, and a run claiming it now waits for the drop and creates
+// afresh. Whether
 // a slot is held is judged at the drop: each orphan goes through
 // decode.DropIdleSlot on a replication connection built from cfg, which
 // refuses a held slot instead of waiting for its holder and takes an idle
@@ -118,7 +120,7 @@ func (s *Store) ReapOrphanSlots(ctx context.Context, cfg dbconn.Config) (Reaped,
 // waiting for a holder, both under the engine's lock on the slot's name,
 // filing the slot under the list the outcome names.
 func (s *Store) dropIfStillOrphan(ctx context.Context, cfg dbconn.Config, name string, reaped *Reaped) error {
-	return s.WithSlotLock(ctx, name, func(ctx context.Context) error {
+	return s.WithSlotLock(ctx, cfg, name, func(ctx context.Context) error {
 		live, err := s.liveRowSlots(ctx, []string{name})
 		if err != nil {
 			return err

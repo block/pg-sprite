@@ -59,8 +59,8 @@ func TestShadowRefusalFollowsTheCausesOwnClass(t *testing.T) {
 }
 
 // Every class the core can hand out has a verdict counterpart of the same
-// token; the fourth and fifth verdict classes have no core counterpart and
-// are never minted from a core cause.
+// token; the verdict's own class, for a statement that never reached the
+// engine, has no core counterpart and is never minted from a core cause.
 func TestRefusalOfClassConvertsByToken(t *testing.T) {
 	for _, class := range refusal.Classes() {
 		r, ok := refusalOfClass(class, verdict.ReasonCopyAndSwapRefused)

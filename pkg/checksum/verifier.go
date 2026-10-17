@@ -348,7 +348,9 @@ type comparison struct {
 
 // digestStatements freezes the two digest statements for this pass from the
 // shadow's column types, read in a guarded transaction so the shadow whose
-// types they name is the shadow the proof describes.
+// types they name is the shadow the proof describes. The source statement
+// carries the statement's USING expressions, the shadow statement none: the
+// shadow already holds the converted values.
 func (v *Verifier) digestStatements(ctx context.Context, pool *pgxpool.Pool) (sourceSQL, shadowSQL string, err error) {
 	tx, err := v.begin(ctx, pool, snapshotRead())
 	if err != nil {
@@ -367,8 +369,8 @@ func (v *Verifier) digestStatements(ctx context.Context, pool *pgxpool.Pool) (so
 	if err := tx.Commit(ctx); err != nil {
 		return "", "", fmt.Errorf("commit column-type read of %s.%s: %w", v.shadow.Schema(), v.shadow.ShadowTable(), err)
 	}
-	return digestSQL(v.target, v.shadow.Schema(), v.shadow.SourceTable(), types),
-		digestSQL(v.target, v.shadow.Schema(), v.shadow.ShadowTable(), types),
+	return digestSQL(v.target, v.shadow.Schema(), v.shadow.SourceTable(), types, v.shadow.Conversions()),
+		digestSQL(v.target, v.shadow.Schema(), v.shadow.ShadowTable(), types, nil),
 		nil
 }
 
