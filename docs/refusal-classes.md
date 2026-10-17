@@ -92,7 +92,10 @@ routed to provisioning and never to the data change runner.
 
 The four causes span three classes. [RF-6](invariants.md#refusals-and-preflight-rf) already
 keeps the not-implemented case and the version-gated case apart in one sentence; this table
-agrees with it rather than collapsing them.
+agrees with it rather than collapsing them. An importer reads the cause from the `Cause` field of
+`*UnsupportedPartitionedParentError` (`errors.As`), and `PartitionRefusalCause.Class()` answers
+the `class` column below as a `refusal.Class`, which converts to `verdict.Class` with a plain
+conversion.
 
 | `PartitionRefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
@@ -126,8 +129,10 @@ vocabulary — `CopySwapRefusalCauseOf` answers only for the shape and environme
 | `ErrCopySwapProofMismatch` | `errors.Is` | The proofs handed in do not fit together: a shape minted for another database or dropped relation, or a decoding run on a shape whose privilege proof did not verify replication access. An adapter that calls the fold never produces this. |
 | any other error | wrapped query error | A catalog read failed; retry or surface it as an engine failure. |
 
-The verdict reason that carries these causes lands with the copy-and-swap route itself; the
-classification is fixed here first so the route inherits it.
+`CopySwapRefusalCause.Class()` answers the `class` column below as a `refusal.Class`, which
+converts to `verdict.Class` with a plain conversion. The verdict reason that carries these
+causes lands with the copy-and-swap route itself; the classification is fixed here first so
+the route inherits it.
 
 | `CopySwapRefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
@@ -199,6 +204,7 @@ inherits it.
 | `resume-row-mismatch` | The checkpoint row handed to a resume does not describe the proven target and built shadow: it is keyed on another table, names another shadow or a slot other than the target's derived name, carries the fingerprints of another statement, carries a shadow proof that is missing, does not decode, or differs from the proof the shadow under its name re-derives, or (from the quiesced `Runner`) records no statement or a statement that, compared as parsed, is not the one `Run` was given ([ST-2](invariants.md#st-2--an-incompatible-checkpoint-is-distinguishable-from-a-transient-read-error)) | `invariant-violation` | A caller paired a row with a target or shadow it was not written for; no retry against the server changes that. |
 | `resume-row-decoding` | The checkpoint row handed to a `Runner` was written by the other kind of run: the quiesced run was handed a row that names a slot or publication, or is in `catching_up` or `reconciling`, phases only a run that decodes WAL enters; or the live run was handed a row that names no slot ([ST-3](invariants.md#st-3--slot-cleanup-is-guaranteed-on-success-failure-and-crash)) | `invariant-violation` | A caller paired a row with a target proof of the other kind; continuing a decoding row without its slot would leave the slot as nobody's and the changes it carried unapplied, and a quiesced row names no position a stream could start from. The row is resumed under the proof kind that made it. |
 | `shadow-unrecorded` | A relation already bears the target's derived shadow name while no checkpoint row records a run for the target, so nothing says which statement the shadow embodies ([ST-2](invariants.md#st-2--an-incompatible-checkpoint-is-distinguishable-from-a-transient-read-error)) | `environmental` | A leftover from a run whose row was deleted, or a relation someone else named; `DropShadow` removes the engine's own leftover and the run starts over. The wrapped `ErrShadowExists` is reachable with `errors.Is`. |
+| `resume-shadow-gone` | The checkpoint row handed to a `Runner` resume is one whose swap has not committed — `copying`, `catching_up`, `reconciling`, `verifying`, or a `cutover` whose swap rolled back — and records a shadow under which no relation stands ([ST-2](invariants.md#st-2--an-incompatible-checkpoint-is-distinguishable-from-a-transient-read-error)) | `environmental` | Something other than the engine dropped the shadow; the run can neither continue on it nor start over while the row stands. The refusal writes nothing. A quiesced row is left for the operator to `Store.Delete`, and the next run builds a fresh shadow; the source keeps its write fence until that run's swap or `DropWriteFence`. A live row also names a slot, which retains WAL while it stands and which the next run would meet when it creates its own: the operator drops it with `decode.DropSlot` and then deletes the row; a live source has no fence. The wrapped `ErrShadowNotFound` is reachable with `errors.Is`. |
 | `resume-slot-foreign` | The slot wearing the row's derived name is not this route's — a physical slot, or a logical slot of another database — so neither a clean resume nor a reconcile may decode from it or replace it, whatever its WAL status says ([ST-3](invariants.md#st-3--slot-cleanup-is-guaranteed-on-success-failure-and-crash)) | `environmental` | Something else took the engine's derived name after the row was written; an operator renames or drops that slot, and the resume is inspected again. The refusal also answers `errors.Is` for `decode.ErrForeignDecodingState`. |
 | `resume-slot-held` | The row's slot is intact and the server still serves it, but another backend holds it, so no stream can be opened on it now; the holder's PID is named ([ST-4](invariants.md#st-4--slot-loss-is-a-modeled-state-transition-not-a-crash)) | `environmental` | A walsender of this engine's earlier process that has not yet noticed its client is gone lets go within `wal_sender_timeout`; anything else streaming from the engine's slot is an operator's to end. The resume is inspected again once the slot is free; a row already in `reconciling` is not refused, since the reconcile's drop waits the holder out. |
 | `copy-shadow-mismatch` | The `Runner`'s re-mint of the copier cause of the same name ([ST-6](invariants.md#st-6--preflight-before-the-first-write)); the copier table below says what it means | `invariant-violation` | The copier table below. |
@@ -287,7 +293,11 @@ server's answer, routed by SQLSTATE, not a fault in the engine's state.
 ### `unsupported-statement` on the create path, keyed on `CreateShapeCause`
 
 The closed set is `executor.CreateShapeCauses()`. The cause travels with the plan statement
-and reaches the verdict through `planRefusal`.
+and reaches the verdict through `planRefusal`. In process, `executor.CreateShapeCauseOf` reads
+the cause from an error and `CreateShapeCause.Class()` answers the `class` column below as a
+`refusal.Class`. A plan decoded from JSON already carries the producer's class in
+`Statement.Class`, which is authoritative there: `Statement.Cause.Class()` answers `""` for a
+cause added in a newer engine than the importer's pinned library.
 
 | `CreateShapeCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
@@ -408,15 +418,21 @@ The map in this document is pinned: the `docs_test.go` guards
 in `pkg/verdict`, `pkg/executor`, `pkg/preflight`, `pkg/schemachange`, and `pkg/copier` fail
 when a `Reason`, `CreateShapeCause`, `PartitionRefusalCause`, `CopySwapRefusalCause`, or either
 package's `RefusalCause` exists in the code without a row here, so a new discriminator value
-cannot land unclassified. The shadow and copier guards go one step further and compare each
-cause's `Class()` to its row's `class` cell, so the two cannot disagree, and each asserts that
-every class a cause answers is a member of `refusal.Classes()`; `pkg/refusal`'s guards hold
-its classes to the vocabulary table above and every `class` cell of every cause table in this
-document to its closed set, so a cause table cannot classify a cause under a class the engine
-cannot name; and `pkg/verdict`'s holds every one of them to be a `verdict.Class`, the
-verdict adding only `no-online-safety-problem`. `preflight.PartitionRefusalCause`,
-`preflight.CopySwapRefusalCause`, and `executor.CreateShapeCause` have a class cell but no
-`Class()` yet; their rows are already held to the closed set.
+cannot land unclassified. The shadow, copier, preflight, and create-path guards go one step
+further and compare each cause's `Class()` to its row's `class` cell, so the two cannot
+disagree, and each asserts that every class a cause answers is a member of
+`refusal.Classes()` — every typed refusal cause the core mints (`copier.RefusalCause`,
+`schemachange.RefusalCause`, `preflight.PartitionRefusalCause`,
+`preflight.CopySwapRefusalCause`, `executor.CreateShapeCause`) answers a `Class()` held this
+way, and the guards read the cause tables through one shared reader
+(`internal/testutil`), so each table is located and parsed the same way in every package;
+`pkg/refusal`'s guards hold its classes to the vocabulary table above and every `class`
+cell of every cause table in this document to its closed set, so a cause table cannot
+classify a cause under a class the engine cannot name; `pkg/verdict`'s holds every one of
+them to be a `verdict.Class`, the verdict adding only `no-online-safety-problem`; and
+`pkg/plan`'s holds the registry's class for each create-shape and partition cause to that
+cause's own `Class()`, so the registry's explicit classification and the cause's cannot
+drift apart.
 
 ## Shared vocabulary with the capabilities matrix
 

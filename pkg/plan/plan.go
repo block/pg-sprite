@@ -105,7 +105,9 @@ type Statement struct {
 	// rather than derived because a JSON consumer has no desired schema to
 	// recompute the shape check from; it is the executor's own explanation,
 	// so a renderer prints Description() instead. Explanatory, so it is
-	// excluded from the fingerprint.
+	// excluded from the fingerprint. Route on Class, not Cause.Class(): Class
+	// is the producer's answer, while Cause.Class() is the reading library's
+	// and answers "" for a cause added in a newer engine.
 	Cause executor.CreateShapeCause `json:"cause,omitempty"`
 	// Decisions are the planner's per-operation classifications.
 	Decisions []planner.Decision `json:"decisions"`

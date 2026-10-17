@@ -726,7 +726,10 @@ through `Store.Inspect` before it knows the statement, and holds a `copying`, `c
 `reconciling`, or `verifying` row against the shadow `InspectShadow` re-derives — shadow name, both fingerprints, and the
 JSON-encoded proof the row carries (`resume-row-mismatch` otherwise) — and refuses a relation
 under the shadow's name that no row records (`shadow-unrecorded`), since the row is the only
-record of which statement a shadow embodies.
+record of which statement a shadow embodies, and a row whose swap has not committed and whose
+shadow no relation bears (`resume-shadow-gone`, in any phase from `copying` to a `cutover` whose swap
+rolled back), since the run can neither continue on it nor start over while the row stands; the
+refusal writes nothing, so a live row's slot stays with it for the operator to drop.
 `TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
@@ -736,7 +739,9 @@ record of which statement a shadow embodies.
 `TestSaveWithoutAProofDoesNotEraseTheRowsProof`, `TestProofSurvivesTheCheckpointStore`,
 `TestDeleteRefusesARowTheCallerWasNotShown`,
 `TestWritesAndReadsWithoutEnsureReportTheMissingTable`,
-`TestResumeFromCheckpointConvergesAfterAMidCopyKill`. *Source:* Spirit `checkpoint.IsIncompatible` +
+`TestResumeFromCheckpointConvergesAfterAMidCopyKill`,
+`TestRunnerRefusesARowWhoseShadowIsGone`,
+`TestRunnerLiveRowWhoseShadowIsGoneIsRestartedByDroppingItsSlotAndRow`. *Source:* Spirit `checkpoint.IsIncompatible` +
 "resume requires the identical ALTER".
 
 ### ST-3 — Slot cleanup is guaranteed on success, failure, and crash
@@ -1044,11 +1049,16 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `verdict.Refusal`; `Verdict.WithRefusal` is the only way a verdict acquires its refusal
   fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`)
   is checked for completeness against the production closed sets by
-  `TestRefusalRegistryIsComplete`. Inside the core, `copier.RefusalCause.Class()` and
-  `schemachange.RefusalCause.Class()` answer one class from `refusal.Classes()`, held to each
-  cause's row by `TestRefusalCauseClassMatchesDocClassColumn` in both packages, every cause
-  table's `class` cell held to the closed set by `TestEveryCauseTableClassIsACoreClass`, and
-  the core's tokens held to the verdict's by `TestCoreRefusalClassesAreVerdictClasses`.
+  `TestRefusalRegistryIsComplete`. Inside the core, `copier.RefusalCause.Class()`,
+  `schemachange.RefusalCause.Class()`, `preflight.PartitionRefusalCause.Class()`,
+  `preflight.CopySwapRefusalCause.Class()`, and `executor.CreateShapeCause.Class()` answer one
+  class from `refusal.Classes()`, each held to its cause's row by a
+  `Test*ClassMatchesDocClassColumn` guard in its own package, every cause table's `class`
+  cell held to the closed set by `TestEveryCauseTableClassIsACoreClass`, the core's tokens
+  held to the verdict's by `TestCoreRefusalClassesAreVerdictClasses`, and the plan-side
+  registry's class for every create-shape and partition cause held to that cause's `Class()`
+  by `TestCreateShapeRefusalClassMatchesCauseClass` and
+  `TestPartitionRefusalClassMatchesCauseClass`.
   *Source:* [refusal classes](refusal-classes.md).
 - **RF-8** — An in-process refused verdict retains its full typed refusal proof, and
   `Verdict.Refusal` hands that proof out only when it validates under RF-7 and still matches

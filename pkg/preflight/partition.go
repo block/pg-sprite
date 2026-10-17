@@ -3,6 +3,7 @@ package preflight
 import (
 	"fmt"
 
+	"github.com/block/pg-sprite/pkg/refusal"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -35,6 +36,30 @@ func PartitionRefusalCauses() []PartitionRefusalCause {
 		PartitionCauseBlockingIndexBuild,
 		PartitionCauseIndexAdoption,
 		PartitionCauseNotValidForeignKey,
+	}
+}
+
+// Class is the routing class of the cause, from docs/refusal-classes.md:
+// what kind of boundary the consumer is looking at. The two index-build
+// causes are a capability boundary — the partition-aware concurrent index
+// flow is a planned engine capability, and refusing the blocking substitute
+// is the policy half of the same gap. Index adoption is by design: no
+// supported server adopts an index as a constraint on a partitioned parent,
+// so waiting for an engine release waits for nothing. The NOT VALID foreign
+// key is environmental: the same statement runs on a newer server, so the
+// action that unblocks it is a server upgrade. The class is a triage
+// decision; the cause's row in the document decides what the consumer does
+// next. The zero cause, and an unknown one, have no class.
+func (c PartitionRefusalCause) Class() refusal.Class {
+	switch c {
+	case PartitionCauseConcurrentIndexBuild, PartitionCauseBlockingIndexBuild:
+		return refusal.ClassCapabilityBoundary
+	case PartitionCauseIndexAdoption:
+		return refusal.ClassByDesign
+	case PartitionCauseNotValidForeignKey:
+		return refusal.ClassEnvironmental
+	default:
+		return ""
 	}
 }
 
