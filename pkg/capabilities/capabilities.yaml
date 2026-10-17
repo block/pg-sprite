@@ -170,7 +170,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Rewritten to the online sequence: `ADD CONSTRAINT ... NOT VALID` (brief metadata lock) → `VALIDATE CONSTRAINT` (writes keep flowing during the scan)"
+    reason_notes: "Rewritten to the online sequence: `ADD CONSTRAINT ... NOT VALID` (brief metadata lock) → `VALIDATE CONSTRAINT` (writes keep flowing during the scan). An unnamed constraint is given the name PostgreSQL would choose (`<table>_<column>_check`, `<table>_check`, `<table>_<columns>_fkey`, numbered `check1`, `fkey1`, ... past a name another constraint in the schema already holds), because the `VALIDATE` step has to name it"
   - id: add-constraint-not-valid-using-index-validate-constraint
     area: "constraints"
     operation: "`ADD CONSTRAINT ... NOT VALID` / `... USING INDEX` / `VALIDATE CONSTRAINT`"
