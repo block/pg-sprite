@@ -82,6 +82,7 @@ func Reasons() []Reason {
 		ReasonTypeRewrite,
 		ReasonRelocation,
 		ReasonPartitionParentLock,
+		ReasonReplicaIdentity,
 		ReasonUnsupportedOperation,
 	}
 }
@@ -107,8 +108,9 @@ const (
 	// ReasonOnlineIdiom: already the safe native form (CONCURRENTLY,
 	// NOT VALID, VALIDATE, USING INDEX).
 	ReasonOnlineIdiom Reason = "online-idiom"
-	// ReasonFastDefault: ADD COLUMN with a constant default — the catalog
-	// stores the default, no rewrite (PG 11+).
+	// ReasonFastDefault: ADD COLUMN with a default the catalog stores, so
+	// no row is rewritten (PG 11+): a constant, or any default the server
+	// proved does not rewrite (a non-volatile expression such as now()).
 	ReasonFastDefault Reason = "fast-default"
 	// ReasonBinaryCoercible: a type change PostgreSQL relabels without a
 	// rewrite (widen varchar, varchar to text, widen numeric precision).
@@ -125,14 +127,17 @@ const (
 	// its own reviewed change. For a table, coordinate the rename with
 	// the application deploy that adopts the new name.
 	ReasonAppBreakingRename Reason = "app-breaking-rename"
-	// ReasonVolatileDefault: ADD COLUMN whose default the planner cannot
-	// prove constant — PostgreSQL rewrites the table.
+	// ReasonVolatileDefault: ADD COLUMN whose default PostgreSQL computes
+	// for every row, rewriting the table — proven by the server, or assumed
+	// (Unverified) when the default is not a constant and nothing proved
+	// it.
 	ReasonVolatileDefault Reason = "volatile-default"
 	// ReasonGeneratedStored: adding a stored generated column computes
 	// every row — a full rewrite.
 	ReasonGeneratedStored Reason = "generated-stored"
-	// ReasonTypeRewrite: a type conversion PostgreSQL cannot relabel —
-	// rewrite plus reindex.
+	// ReasonTypeRewrite: a type PostgreSQL must check or convert row by
+	// row — a type conversion it cannot relabel (rewrite plus reindex), or
+	// an added column of a domain type with constraints.
 	ReasonTypeRewrite Reason = "type-rewrite"
 	// ReasonRelocation: SET TABLESPACE moves the heap — a rewrite-scale
 	// copy.
@@ -141,6 +146,14 @@ const (
 	// EXCLUSIVE on the partitioned parent — no scan, but it queues behind
 	// and then blocks every query on the parent while held.
 	ReasonPartitionParentLock Reason = "partition-parent-lock"
+	// ReasonReplicaIdentity: the operation drops what the table's
+	// REPLICA IDENTITY USING INDEX keys on — the index itself, the
+	// constraint that owns it, or one of its columns. The setting outlives
+	// the index, so the table is left with no usable identity, and every
+	// UPDATE and DELETE on it fails while a publication publishes them.
+	// Move the identity first (ALTER TABLE ... REPLICA IDENTITY), then
+	// re-plan.
+	ReasonReplicaIdentity Reason = "replica-identity"
 	// ReasonUnsupportedOperation: the planner does not recognize the
 	// operation or knows no safe path for it.
 	ReasonUnsupportedOperation Reason = "unsupported-operation"
@@ -245,18 +258,45 @@ type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
 	ColumnTypes map[string]string
+	// ReplicaIdentity is what the replica identity indexes of the table and
+	// its partitions key on; the zero value when none selects an index.
+	ReplicaIdentity schemadiff.ReplicaIdentityKeys
+	// AddColumnProofs maps a column the change adds to what the server
+	// proved about adding it (preflight.AddColumnRewrites). A column absent
+	// from the map is unproven and classifies by the statement's shape
+	// alone, which assumes the worst of any default it cannot read as a
+	// constant; the proof leaves out only an ADD COLUMN IF NOT EXISTS for a
+	// column the table already has, which the server skips.
+	AddColumnProofs map[string]statement.AddColumnProof
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
-// canonical type of every live column. Every front door — the declarative
-// diff and the imperative dry-run — extracts facts through this one
-// function so equivalent changes classify identically.
+// canonical type of every live column and what the table's replica
+// identity keys on. Every front door — the declarative diff and the
+// imperative dry-run — extracts facts through this one function so
+// equivalent changes classify identically.
 func FactsFrom(live schemadiff.Model) Facts {
 	types := make(map[string]string, len(live.Columns))
 	for _, col := range live.Columns {
 		types[col.Name] = col.Type
 	}
-	return Facts{ColumnTypes: types}
+	return Facts{ColumnTypes: types, ReplicaIdentity: live.ReplicaIdentity}
+}
+
+// addColumnProof returns what the server proved about adding op's
+// column, or "" when no proof was run.
+func addColumnProof(op statement.Op, facts Facts) statement.AddColumnProof {
+	return facts.AddColumnProofs[op.Column]
+}
+
+// unprovenRewriteReason names the only cause the statement's shape leaves
+// for a rewrite nothing proved: an expression default may be computed for
+// every row, and without one only the column's type can rewrite.
+func unprovenRewriteReason(op statement.Op) Reason {
+	if op.Default == statement.DefaultExpression {
+		return ReasonVolatileDefault
+	}
+	return ReasonTypeRewrite
 }
 
 // Classify parses one statement and routes each of its operations. A parse
@@ -292,6 +332,10 @@ func Classify(sql string, facts Facts) (Plan, error) {
 // classifyOp routes one operation per the reference table.
 func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string, single bool) Decision {
 	d := Decision{Operation: op.Describe(), Destructive: destructiveOp(op.Kind)}
+	if facts.ReplicaIdentity.DroppedBy(op) {
+		d.Route, d.Reason = RouteRefuse, ReasonReplicaIdentity
+		return d
+	}
 	switch op.Kind {
 	case statement.OpCreateTable:
 		if op.PartitionOf {
@@ -311,8 +355,16 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
 		case op.GeneratedStored:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonGeneratedStored
-		case op.Default == statement.DefaultExpression:
+		case addColumnProof(op, facts) == statement.AddColumnDefaultRewrites:
 			d.Route, d.Reason = RouteCopyAndSwap, ReasonVolatileDefault
+		case addColumnProof(op, facts) == statement.AddColumnTypeRewrites:
+			d.Route, d.Reason = RouteCopyAndSwap, ReasonTypeRewrite
+		case addColumnProof(op, facts) == statement.AddColumnUnproven:
+			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, unprovenRewriteReason(op), true
+		case op.Default == statement.DefaultExpression && addColumnProof(op, facts) != statement.AddColumnInPlace:
+			// No proof was run, as in an offline lint: the default may be
+			// computed for every row.
+			d.Route, d.Reason, d.Unverified = RouteCopyAndSwap, ReasonVolatileDefault, true
 		case len(op.InlineConstraints) > 0:
 			// An inline UNIQUE / PRIMARY KEY / FOREIGN KEY / CHECK does the
 			// same index build or validation as its ADD CONSTRAINT form,
@@ -321,7 +373,9 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 			// the planner does not construct multi-statement splits, so the
 			// decision carries no rewrite and routing fails closed.
 			d.Route, d.Reason = RouteNative, ReasonSaferIdiom
-		case op.Default == statement.DefaultConstant:
+		case op.Default != statement.DefaultNone:
+			// A constant, or an expression the server proved it stores
+			// in the catalog.
 			d.Route, d.Reason = RouteNative, ReasonFastDefault
 		default:
 			d.Route, d.Reason = RouteNative, ReasonMetadataOnly
@@ -475,17 +529,33 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 		// would prove.
 		return RouteCopyAndSwap, ReasonTypeRewrite, true
 	}
-	if binaryCoercible(parseTypeText(oldType), typeShape{name: normalizeTypeName(op.NewType), mods: op.NewTypeMods}) {
+	if binaryCoercible(parseTypeText(oldType), targetTypeShape(op)) {
 		return RouteNative, ReasonBinaryCoercible, false
 	}
 	return RouteCopyAndSwap, ReasonTypeRewrite, false
 }
 
-// typeShape is a normalized type family plus its modifiers, comparable
-// across the grammar's spelling and format_type's rendering.
+// typeShape is a normalized type family plus its modifiers and whether it
+// is an array of that family, comparable across the grammar's spelling and
+// format_type's rendering.
 type typeShape struct {
-	name string
-	mods []int32
+	name  string
+	mods  []int32
+	array bool
+}
+
+// targetTypeShape reads the statement's target type into the shape
+// parseTypeText gives the live one. A type qualified with a schema other
+// than pg_catalog is a user type that only shares a built-in's name, so it
+// gets no shape and matches no rule. The name is taken as the parser left
+// it: the grammar already spells every built-in the rules know by its
+// catalog name (varchar, numeric, timestamptz), so a target named
+// "decimal" or "character varying" was quoted and names a user type.
+func targetTypeShape(op statement.Op) typeShape {
+	if op.NewTypeSchema != "" {
+		return typeShape{}
+	}
+	return typeShape{name: strings.TrimSpace(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}
 }
 
 // binaryCoercible reports whether changing old to new is a relabel
@@ -493,12 +563,23 @@ type typeShape struct {
 // reference table's rows, deliberately narrow: widening varchar, varchar to
 // text, and widening numeric precision at the same scale. Anything not
 // provably on this list is not coercible.
+//
+// The widening rules hold for scalar columns only. An array column's
+// elements are converted one by one, and PostgreSQL rewrites the table for
+// any element change, widenings included; only an unchanged element type
+// is a relabel.
 func binaryCoercible(old, next typeShape) bool {
 	if old.name == "" || next.name == "" {
 		return false
 	}
+	if old.array != next.array {
+		return false
+	}
 	if old.name == next.name && int32sEqual(old.mods, next.mods) {
 		return true // no-op relabel
+	}
+	if old.array {
+		return false
 	}
 	switch old.name {
 	case "varchar":
@@ -539,36 +620,51 @@ func int32sEqual(a, b []int32) bool {
 	return true
 }
 
-// normalizeTypeName maps spelling variants of the families binaryCoercible
-// knows onto one name. Unknown names pass through unchanged (and will never
-// match a rule).
-func normalizeTypeName(name string) string {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "varchar", "character varying":
+// catalogTypeName maps format_type's SQL-standard spelling of a built-in
+// onto the catalog name the grammar gives the same type, so a live type and
+// a target type compare by name. Unknown names pass through unchanged (and
+// will never match a rule).
+//
+// The match is case-sensitive on purpose. format_type renders the catalog's
+// name, and a name that still carries upper case was quoted, so "TEXT"
+// names a user type, not the built-in text, and folding it would let that
+// type pass as the built-in.
+func catalogTypeName(name string) string {
+	switch name = strings.TrimSpace(name); name {
+	case "character varying":
 		return "varchar"
-	case "numeric", "decimal":
-		return "numeric"
-	case "text":
-		return "text"
+	case "timestamp without time zone":
+		return "timestamp"
+	case "timestamp with time zone":
+		return "timestamptz"
+	case "time without time zone":
+		return "time"
+	case "time with time zone":
+		return "timetz"
 	default:
-		return strings.ToLower(strings.TrimSpace(name))
+		return name
 	}
 }
 
 // parseTypeText splits a format_type rendering ("character varying(50)",
-// "numeric(10,2)", "text") into its normalized shape. This reads catalog
-// output, not SQL — format_type's rendering is stable.
+// "numeric(10,2)", "text", "character varying(50)[]",
+// "timestamp(3) with time zone") into its normalized shape. This reads
+// catalog output, not SQL — format_type's rendering is stable, and it marks
+// every array with one trailing "[]" whatever the declared dimensions. The
+// modifiers can sit inside the name, so whatever follows them is part of
+// the name: "timestamp(3) with time zone" is timestamptz, not timestamp.
 func parseTypeText(s string) typeShape {
+	s, array := strings.CutSuffix(strings.TrimSpace(s), "[]")
 	name, rest, found := strings.Cut(s, "(")
-	shape := typeShape{name: normalizeTypeName(name)}
 	if !found {
-		return shape
+		return typeShape{name: catalogTypeName(name), array: array}
 	}
-	rest, _, found = strings.Cut(rest, ")")
+	mods, suffix, found := strings.Cut(rest, ")")
 	if !found {
 		return typeShape{}
 	}
-	for part := range strings.SplitSeq(rest, ",") {
+	shape := typeShape{name: catalogTypeName(name + suffix), array: array}
+	for part := range strings.SplitSeq(mods, ",") {
 		n, err := strconv.ParseInt(strings.TrimSpace(part), 10, 32)
 		if err != nil {
 			return typeShape{}

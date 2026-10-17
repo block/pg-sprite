@@ -6,11 +6,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
@@ -96,12 +98,15 @@ func (f reconcileFixture) amountType(t *testing.T) string {
 }
 
 // assertLiveDone checks a live run's outcome: the row is done and still
-// names the slot it ran on, the slot itself is gone, the live table has
-// the statement's shape, and the retained source and the live table hold
-// the same rows.
+// names the slot it ran on, the swap is proven — these runs keep the old
+// table, so its renames can always be read — the slot itself is gone, the
+// live table has the statement's shape, and the retained source and the
+// live table hold the same rows.
 func (f reconcileFixture) assertLiveDone(t *testing.T, result schemachange.Result) {
 	t.Helper()
 	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
+	assert.True(t, result.SwapProven, "the retained source is there to prove the swap from")
+	assert.Equal(t, result.Shadow.ShadowOID, result.Swapped.LiveOID, "the shadow the run built is the live table")
 	assert.Equal(t, f.target.DecodingName(), result.Checkpoint.SlotName, "the done row records the slot the run decoded from")
 	_, found, err := decode.InspectSlot(t.Context(), f.pool, f.target.DecodingName())
 	require.NoError(t, err)
@@ -282,4 +287,42 @@ func TestRunnerRefusesTheOtherKindOfRunsRow(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, found, "the live run's slot is left for the live run to resume")
 	})
+}
+
+// A live row whose shadow has been dropped is refused as
+// resume-shadow-gone, and the refusal writes nothing: the row stays in its
+// phase and its slot stays with it, still retaining WAL, since a refusal
+// never drops what a row owns. The documented remedy then works on the
+// first try: drop the row's slot, delete the row, and the next run builds a
+// fresh shadow and slot. A live source carries no fence, so there is none
+// to take off.
+func TestRunnerLiveRowWhoseShadowIsGoneIsRestartedByDroppingItsSlotAndRow(t *testing.T) {
+	f := newDecodingFixture(t, 100)
+	stop := &stopAfter{phase: checkpoint.PhaseCopying}
+	_, err := f.runLive(t, schemachange.RunOptions{AfterCheckpoint: stop.hook})
+	require.ErrorIs(t, err, errStopHere)
+	row, err := f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
+	require.NoError(t, err)
+	_, err = f.pool.Exec(t.Context(), `DROP TABLE `+pgx.Identifier{f.table.Schema, row.ShadowTable}.Sanitize())
+	require.NoError(t, err)
+
+	_, err = f.runLive(t, schemachange.RunOptions{})
+	assert.Equal(t, schemachange.CauseResumeShadowGone, schemachange.RefusalCauseOf(err))
+	assert.ErrorIs(t, err, schemachange.ErrShadowNotFound, "the sentinel is reachable through the refusal")
+	after, err := f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.PhaseCopying, after.Phase, "the row stands for the operator to delete")
+	_, found, err := decode.InspectSlot(t.Context(), f.pool, row.SlotName)
+	require.NoError(t, err)
+	require.True(t, found, "the refusal leaves the row's slot for the operator to drop")
+
+	require.NoError(t, decode.DropSlot(t.Context(), f.cfg, f.pool, row.SlotName))
+	lock, err := dbconn.AcquireTableLock(t.Context(), f.cfg, f.table.Schema, f.table.Table)
+	require.NoError(t, err)
+	require.NoError(t, f.store.Delete(t.Context(), lock, f.table.Schema, f.table.Table, row.Identity()))
+	require.NoError(t, lock.Release(t.Context()))
+
+	result, err := f.runLive(t, schemachange.RunOptions{})
+	require.NoError(t, err, "the next run builds a fresh shadow and slot")
+	f.assertLiveDone(t, result)
 }

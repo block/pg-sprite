@@ -12,6 +12,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -97,6 +98,79 @@ func TestAcceptBlockingFlagGrammar(t *testing.T) {
 	})
 }
 
+// The copy-and-swap policy flags govern a run the planner routes to that
+// backend: the connection the route's dedicated sessions dial from, the
+// free space the preflight sizes the shadow against, and the two operator
+// choices. They reach the engine policy as typed values — a size in bytes,
+// not the flag's spelling — and they are refused on a dry run, which
+// executes nothing for them to govern.
+func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
+	t.Run("wires connection, free space, and choices", func(t *testing.T) {
+		c := parseMigrate(t, "--free-disk", "20GiB", "--keep-old", "--quiesced")
+		got := c.options(nil).CopySwap
+		assert.Equal(t, c.Config(), got.Connection)
+		assert.Equal(t, int64(20<<30), got.FreeDiskBytes)
+		assert.True(t, got.KeepOld)
+		assert.True(t, got.Quiesced)
+	})
+
+	t.Run("defaults to no free space and the live path", func(t *testing.T) {
+		got := parseMigrate(t).options(nil).CopySwap
+		assert.Zero(t, got.FreeDiskBytes)
+		assert.False(t, got.KeepOld)
+		assert.False(t, got.Quiesced)
+	})
+
+	for _, flag := range []string{"--free-disk=1GiB", "--keep-old", "--quiesced"} {
+		t.Run("rejects "+flag+" with --dry-run", func(t *testing.T) {
+			c := New("test")
+			k, err := kong.New(c, kong.Vars{"version": "test"})
+			require.NoError(t, err)
+			_, err = k.Parse([]string{
+				"migrate",
+				"--url", "postgres://user@localhost:5432/app",
+				"--alter", "ALTER TABLE t ALTER COLUMN c TYPE bigint",
+				"--dry-run",
+				flag,
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "cannot be combined with --dry-run")
+		})
+	}
+}
+
+// The disk-headroom refusal names the flag that supplies the measurement
+// only when no measurement was supplied: the library's wording says the
+// space was not measured, and this front door owns the spelling of how to
+// measure it. A refusal against a size the operator did pass, and every
+// other refusal, pass through untouched.
+func TestDiskHeadroomRefusalNamesTheFlagWhenNoneWasPassed(t *testing.T) {
+	refused := verdict.Verdict{
+		Outcome: verdict.OutcomeRefused,
+		Reason:  verdict.ReasonCopyAndSwapRefused,
+		Cause:   verdict.Cause(preflight.CopySwapCauseDiskHeadroom),
+		Detail:  "free disk space was not measured (0 bytes reported)",
+	}
+
+	t.Run("no --free-disk appends the flag", func(t *testing.T) {
+		got := parseMigrate(t).cliDiskHeadroomIdiom(refused)
+		assert.Equal(t, refused.Detail+"; pass --free-disk SIZE with the free space on the volume the table lives on", got.Detail)
+		assert.Equal(t, refused.Cause, got.Cause, "only the detail changes")
+	})
+
+	t.Run("a passed --free-disk leaves the refusal as the library put it", func(t *testing.T) {
+		got := parseMigrate(t, "--free-disk", "1GiB").cliDiskHeadroomIdiom(refused)
+		assert.Equal(t, refused, got)
+	})
+
+	t.Run("another cause passes through", func(t *testing.T) {
+		other := refused
+		other.Cause = verdict.Cause(preflight.CopySwapCauseUnlogged)
+		got := parseMigrate(t).cliDiskHeadroomIdiom(other)
+		assert.Equal(t, other, got)
+	})
+}
+
 func TestRetryFlagsWireIntoRetryPolicy(t *testing.T) {
 	c := parseMigrate(t,
 		"--lock-attempts", "5",
@@ -139,6 +213,7 @@ func TestEmitReturnsTheSentinelForEachOutcome(t *testing.T) {
 		want    error
 	}{
 		{outcome: verdict.OutcomeExecuted, want: nil},
+		{outcome: verdict.OutcomeExecutedViaCopyAndSwap, want: nil},
 		{outcome: verdict.OutcomeExecutedWithoutOnlineSafety, want: verdict.ErrAcceptedBlocking},
 		{outcome: verdict.OutcomeRefused, want: verdict.ErrRefused},
 		{outcome: verdict.OutcomeFailed, want: nil},

@@ -1,24 +1,18 @@
 package schemachange_test
 
 import (
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"os"
 	"strconv"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
-
-// refusalClassesDoc is the routing contract that classifies every shadow
-// refusal cause; these tests keep its cause table honest.
-const refusalClassesDoc = "../../docs/refusal-classes.md"
 
 // refusalClassesShadowSection heads the table that classifies the shadow
 // causes. The copier table in the same file lists some of the same names
@@ -29,26 +23,22 @@ const refusalClassesShadowSection = "### Shadow operation refusals, keyed on `Re
 // refusal-class map: a cause added to the code without a classification
 // fails here.
 func TestRefusalClassesDocListsEveryShadowCause(t *testing.T) {
-	raw, err := os.ReadFile(refusalClassesDoc)
-	require.NoError(t, err)
-	table := sectionOf(t, string(raw), refusalClassesShadowSection)
+	table := testutil.RefusalCauseTable(t, refusalClassesShadowSection)
 	for _, cause := range schemachange.RefusalCauses() {
-		assert.Contains(t, table, fmt.Sprintf("| `%s` |", cause),
+		assert.Contains(t, table, testutil.RefusalCauseRow(string(cause)),
 			"docs/refusal-classes.md has no shadow class row for shadow refusal cause %q", cause)
 	}
 }
 
-// sectionOf returns the text of doc under heading, up to the next heading
-// of the same level.
-func sectionOf(t *testing.T, doc, heading string) string {
-	t.Helper()
-	start := strings.Index(doc, heading)
-	require.NotEqual(t, -1, start, "docs/refusal-classes.md has the section %q", heading)
-	section := doc[start+len(heading):]
-	if end := strings.Index(section, "\n### "); end != -1 {
-		section = section[:end]
+// Every shadow refusal cause's Class() is the class its row in the shadow
+// table records: the document decides the class, and the code's answer is
+// held to it, so neither can be changed without the other.
+func TestRefusalCauseClassMatchesDocClassColumn(t *testing.T) {
+	table := testutil.RefusalCauseTable(t, refusalClassesShadowSection)
+	for _, cause := range schemachange.RefusalCauses() {
+		assert.Equal(t, testutil.RefusalClassCell(t, table, string(cause)), string(cause.Class()),
+			"docs/refusal-classes.md classifies shadow refusal cause %q differently from Class()", cause)
 	}
-	return section
 }
 
 // The closed set is complete: every RefusalCause constant declared in

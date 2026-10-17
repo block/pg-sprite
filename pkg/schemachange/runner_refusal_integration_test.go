@@ -152,20 +152,44 @@ func TestRunnerRefusesARowWithoutAShadowProof(t *testing.T) {
 	assert.Equal(t, schemachange.CauseResumeRowMismatch, schemachange.RefusalCauseOf(err))
 }
 
-// A row in copying whose shadow has been dropped is an error, not a
-// refusal class of its own: the run cannot continue and cannot start over
-// while the row stands, and the error says to delete the row.
-func TestRunnerFailsACopyingRowWhoseShadowIsGone(t *testing.T) {
-	f := newRunnerFixture(t)
-	f.createOrders(t)
-	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
-	built := f.leaveStoppedRun(t, alter, func(*checkpoint.Checkpoint) {})
-	f.exec(t, `DROP TABLE %s.`+built.ShadowTable())
+// A row whose swap has not committed and whose shadow has been dropped is
+// refused as resume-shadow-gone in every phase it can stand in: copying,
+// verifying, and a cutover whose swap never ran, which InspectSwapped
+// answers as not swapped and so sends back to the shadow. The run cannot
+// continue on a shadow that is not there and cannot start over while the
+// row stands, so the row is left for the operator to delete. The refusal
+// still answers for ErrShadowNotFound, and the fence the stopped run put
+// on the source stays until the next run swaps or the operator drops it.
+// Each run is stopped through the Runner, not assembled by hand, because
+// it is the Runner that fences the source.
+func TestRunnerRefusesARowWhoseShadowIsGone(t *testing.T) {
+	for _, phase := range []checkpoint.Phase{
+		checkpoint.PhaseCopying,
+		checkpoint.PhaseVerifying,
+		checkpoint.PhaseCutover,
+	} {
+		t.Run(phase.String(), func(t *testing.T) {
+			f := newRunnerFixture(t)
+			f.createOrders(t)
+			const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+			sourceOID := f.relationOID(t, "orders")
+			stop := &stopAfter{phase: phase}
+			_, err := f.run(t, "orders", alter, schemachange.RunOptions{AfterCheckpoint: stop.hook})
+			require.ErrorIs(t, err, errStopHere)
+			require.True(t, f.hasFence(t, "orders"), "the stopped run fenced the source")
+			require.Equal(t, sourceOID, f.relationOID(t, "orders"), "no swap ran")
+			f.exec(t, `DROP TABLE %s.`+f.inspectRow(t, "orders").ShadowTable)
 
-	_, err := f.run(t, "orders", alter, schemachange.RunOptions{})
-	require.ErrorIs(t, err, schemachange.ErrShadowNotFound)
-	assert.Empty(t, schemachange.RefusalCauseOf(err), "a missing shadow is not a refusal class")
-	assert.Equal(t, checkpoint.PhaseCopying, f.inspectRow(t, "orders").Phase, "the row stands for the operator to delete")
+			_, err = f.run(t, "orders", alter, schemachange.RunOptions{})
+			var refusal *schemachange.RefusalError
+			require.ErrorAs(t, err, &refusal)
+			assert.Equal(t, schemachange.CauseResumeShadowGone, refusal.Cause)
+			assert.ErrorIs(t, err, schemachange.ErrShadowNotFound, "the sentinel is reachable through the refusal")
+			assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+			assert.Equal(t, phase, f.inspectRow(t, "orders").Phase, "the row stands, in its phase, for the operator to delete")
+			assert.True(t, f.hasFence(t, "orders"), "the source stays fenced until the next run swaps or the operator unfences it")
+		})
+	}
 }
 
 // A row records the statement whose run it is, and a resume under another

@@ -64,6 +64,21 @@ func TestCheckFlagsUnverifiedTypeChangeAsPossibleRewrite(t *testing.T) {
 	assert.Equal(t, planner.ReasonTypeRewrite, f.Reason)
 }
 
+// Whether an expression default rewrites the table is the server's
+// answer, which an offline lint does not have: DEFAULT now() is stored in
+// the catalog, gen_random_uuid() is computed for every row. The finding
+// says the engine would take the heavy path, not that the change rewrites,
+// so lint and a live plan never disagree about a property of the change.
+func TestCheckFlagsUnprovenExpressionDefaultAsPossibleRewrite(t *testing.T) {
+	report, err := lint.Check("ALTER TABLE t ADD COLUMN created timestamptz DEFAULT now()")
+	require.NoError(t, err)
+	require.Len(t, report.Findings, 1)
+	f := report.Findings[0]
+	assert.Equal(t, lint.CodePossibleTableRewrite, f.Code)
+	assert.Equal(t, lint.SeverityWarning, f.Severity)
+	assert.Equal(t, planner.ReasonVolatileDefault, f.Reason)
+}
+
 // A USING clause is a rewrite regardless of live facts, so the finding is
 // the proven code, not the fail-closed one.
 func TestCheckFlagsProvenRewriteAsTableRewrite(t *testing.T) {
@@ -181,7 +196,7 @@ func TestReportJSONShape(t *testing.T) {
 	suggestion, err := json.Marshal(report.Findings[0].Suggestion)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"postgres_versions": "14-18",
 		"findings": [
 			{
@@ -208,7 +223,7 @@ func TestReportJSONCleanFindingsAreEmptyArray(t *testing.T) {
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 2,
 		"postgres_versions": "14-18",
 		"findings": [],
 		"errors": 0,

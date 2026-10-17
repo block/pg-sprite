@@ -13,15 +13,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/executor"
 )
 
 // executionModelDoc is the human-facing contract page this test keeps honest.
 const executionModelDoc = "../../docs/execution-model.md"
 
-// refusalClassesDoc is the routing contract that classifies every
-// create-shape cause; a cause without a row there cannot be routed.
-const refusalClassesDoc = "../../docs/refusal-classes.md"
+// refusalClassesCreateShapeSection heads the table of
+// docs/refusal-classes.md that classifies every create-shape cause; a cause
+// without a row there cannot be routed.
+const refusalClassesCreateShapeSection = "### `unsupported-statement` on the create path, keyed on `CreateShapeCause`"
 
 // Every step kind automation can branch on must be named in the execution
 // model: a StepKind added to the code without the doc naming it fails here.
@@ -64,12 +66,21 @@ func TestDocNamesEveryCreateShapeCause(t *testing.T) {
 // without a row in the refusal-class map fails here, so a new cause cannot
 // land without a routing decision.
 func TestRefusalClassesDocListsEveryCreateShapeCause(t *testing.T) {
-	raw, err := os.ReadFile(refusalClassesDoc)
-	require.NoError(t, err)
-	doc := string(raw)
+	table := testutil.RefusalCauseTable(t, refusalClassesCreateShapeSection)
 	for _, cause := range executor.CreateShapeCauses() {
-		assert.Contains(t, doc, fmt.Sprintf("| `%s` |", cause),
+		assert.Contains(t, table, testutil.RefusalCauseRow(string(cause)),
 			"docs/refusal-classes.md has no class row for create-shape cause %q", cause)
+	}
+}
+
+// Every create-shape cause's Class() is the class its row records: the
+// document decides the class, and the code's answer is held to it, so
+// neither can be changed without the other.
+func TestCreateShapeCauseClassMatchesDocClassColumn(t *testing.T) {
+	table := testutil.RefusalCauseTable(t, refusalClassesCreateShapeSection)
+	for _, cause := range executor.CreateShapeCauses() {
+		assert.Equal(t, testutil.RefusalClassCell(t, table, string(cause)), string(cause.Class()),
+			"docs/refusal-classes.md classifies create-shape cause %q differently from Class()", cause)
 	}
 }
 

@@ -14,17 +14,22 @@ import (
 
 // IntrospectDesiredWithRowSecurity materializes an explicitly RLS-scoped file in
 // a rolled-back scratch transaction. Roles and qualified helpers must exist;
-// this never provisions authentication or changes the live table.
-func IntrospectDesiredWithRowSecurity(ctx context.Context, db *pgxpool.Pool, desired statement.DesiredWithRowSecurity) (Model, error) {
+// this never provisions authentication or changes the live table. schema is
+// the target schema the table lives in: the table's own definition resolves
+// that schema's types and functions by the bare names live introspection
+// prints, as IntrospectDesired does. Policy expressions still resolve nothing
+// but the scratch schema, so their helpers must be qualified.
+func IntrospectDesiredWithRowSecurity(ctx context.Context, db *pgxpool.Pool, schema string, desired statement.DesiredWithRowSecurity) (Model, error) {
 	if desired.Table() == "" {
 		return Model{}, statement.ErrRowSecurityDeclaration
 	}
-	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{})
+	return introspectDesiredStatements(ctx, db, desired.Table(), desired.Statements(), referencedFrom{schema: schema})
 }
 
 // IntrospectDesiredWithRowSecurityTx materializes the declaration in a nested
 // transaction (savepoint) and always rolls it back. The parent's locks survive.
-func IntrospectDesiredWithRowSecurityTx(ctx context.Context, tx pgx.Tx, desired statement.DesiredWithRowSecurity) (Model, error) {
+// schema is resolved as in IntrospectDesiredWithRowSecurity.
+func IntrospectDesiredWithRowSecurityTx(ctx context.Context, tx pgx.Tx, schema string, desired statement.DesiredWithRowSecurity) (Model, error) {
 	if desired.Table() == "" {
 		return Model{}, statement.ErrRowSecurityDeclaration
 	}
@@ -32,7 +37,7 @@ func IntrospectDesiredWithRowSecurityTx(ctx context.Context, tx pgx.Tx, desired 
 	if err != nil {
 		return Model{}, fmt.Errorf("begin desired row security savepoint: %w", err)
 	}
-	return introspectDesiredTransaction(ctx, scratch, desired.Table(), desired.Statements(), referencedFrom{})
+	return introspectDesiredTransaction(ctx, scratch, desired.Table(), desired.Statements(), referencedFrom{schema: schema})
 }
 
 // RenderWithRowSecurity exports the complete table-local RLS definition,
