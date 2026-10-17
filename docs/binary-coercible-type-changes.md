@@ -441,7 +441,9 @@ change to or from an array, including `varchar(50)[] → varchar(100)[]`, is a
 `type-rewrite`, because PostgreSQL converts the elements one by one
 ([category F](#why-rewrites-happen-the-six-categories)). A target type qualified with a
 schema other than `pg_catalog`, such as `app.text`, is a user type that shares a
-built-in's name, and matches no rule.
+built-in's name, and matches no rule. So is a quoted name in another case, such as
+`"TEXT"`: the parser folds only unquoted names to lower case, so the planner compares
+type names case-sensitively.
 
 Everything else — including changes PostgreSQL would relabel, such as `varbit` or temporal
 precision widening, unconstrained domains, `xml → text`, and the UTC `timestamp ↔

@@ -26,12 +26,23 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	schema := testutil.NewSchema(t, pool)
-	// A user type that shares the built-in text's name but checks every
-	// value, so converting to it rewrites the table.
-	_, err = pool.Exec(t.Context(), fmt.Sprintf(
-		"CREATE DOMAIN %s.text AS pg_catalog.text CHECK (VALUE <> '')", schema))
+	// User types that share the built-in text's name, one in lower case
+	// and one quoted in upper case, each checking every value, so
+	// converting to either rewrites the table.
+	for _, domain := range []string{"text", `"TEXT"`} {
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(
+			"CREATE DOMAIN %s.%s AS pg_catalog.text CHECK (VALUE <> '')", schema, domain))
+		require.NoError(t, err)
+	}
+	// The statements run with the schema on the search path, so an
+	// unqualified "TEXT" resolves to the user type. pg_catalog is still
+	// searched first, so an unqualified text stays the built-in.
+	conn, err := pool.Acquire(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(conn.Release)
+	_, err = conn.Exec(t.Context(), "SET search_path = "+schema)
 	require.NoError(t, err)
 
 	cases := []struct {
@@ -45,6 +56,8 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 		{"varchar to text", "varchar(50)", "text", planner.RouteNative, false},
 		{"varchar to text named through pg_catalog", "varchar(50)", "pg_catalog.text", planner.RouteNative, false},
 		{"varchar to a user type named text", "varchar(50)", schema + ".text", planner.RouteCopyAndSwap, true},
+		{"varchar to a visible user type quoted as TEXT", "varchar(50)", `"TEXT"`, planner.RouteCopyAndSwap, true},
+		{"text array to an array of a visible user type quoted as TEXT", "text[]", `"TEXT"[]`, planner.RouteCopyAndSwap, true},
 		{"varchar array to text", "varchar(50)[]", "text", planner.RouteCopyAndSwap, true},
 		{"varchar array to a wider varchar", "varchar(50)[]", "varchar(100)", planner.RouteCopyAndSwap, true},
 		{"widen a varchar array's elements", "varchar(50)[]", "varchar(100)[]", planner.RouteCopyAndSwap, true},
@@ -63,9 +76,9 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			table := fmt.Sprintf("t%d", i)
 			qualified := schema + "." + table
-			_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s (c %s)", qualified, tc.from))
+			_, err := conn.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s (c %s)", qualified, tc.from))
 			require.NoError(t, err)
-			_, err = pool.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s DEFAULT VALUES", qualified))
+			_, err = conn.Exec(t.Context(), fmt.Sprintf("INSERT INTO %s DEFAULT VALUES", qualified))
 			require.NoError(t, err)
 
 			live, err := schemadiff.Introspect(t.Context(), pool, schema, table)
@@ -77,11 +90,11 @@ func TestBinaryCoercibleVerdictMatchesTheServer(t *testing.T) {
 			decision := plan.Decisions[0]
 
 			var before, after int64
-			require.NoError(t, pool.QueryRow(t.Context(),
+			require.NoError(t, conn.QueryRow(t.Context(),
 				"SELECT pg_relation_filenode($1::regclass)::int8", qualified).Scan(&before))
-			_, err = pool.Exec(t.Context(), alter)
+			_, err = conn.Exec(t.Context(), alter)
 			require.NoError(t, err)
-			require.NoError(t, pool.QueryRow(t.Context(),
+			require.NoError(t, conn.QueryRow(t.Context(),
 				"SELECT pg_relation_filenode($1::regclass)::int8", qualified).Scan(&after))
 
 			assert.Equal(t, tc.rewrites, before != after, "server rewrite for %s -> %s", tc.from, tc.to)

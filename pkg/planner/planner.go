@@ -620,16 +620,20 @@ func int32sEqual(a, b []int32) bool {
 // normalizeTypeName maps spelling variants of the families binaryCoercible
 // knows onto one name. Unknown names pass through unchanged (and will never
 // match a rule).
+//
+// The match is case-sensitive on purpose. Both inputs are already in the
+// server's case: the parser folds an unquoted identifier to lower case, and
+// format_type renders the catalog's name. A name that still carries upper
+// case was quoted, so "TEXT" names a user type, not the built-in text, and
+// folding it would let that type pass as the built-in.
 func normalizeTypeName(name string) string {
-	switch strings.ToLower(strings.TrimSpace(name)) {
+	switch name = strings.TrimSpace(name); name {
 	case "varchar", "character varying":
 		return "varchar"
 	case "numeric", "decimal":
 		return "numeric"
-	case "text":
-		return "text"
 	default:
-		return strings.ToLower(strings.TrimSpace(name))
+		return name
 	}
 }
 
