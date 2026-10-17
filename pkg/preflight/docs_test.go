@@ -20,7 +20,7 @@ const refusalClassesPartitionSection = "### `unsupported-partitioned-parent`, ke
 
 // refusalClassesCopySwapSection heads the table that classifies the
 // copy-and-swap shape and environment causes.
-const refusalClassesCopySwapSection = "### Copy-and-swap preflight refusals, keyed on `CopySwapRefusalCause`"
+const refusalClassesCopySwapSection = "### `copy-and-swap-refused`, keyed on `CopySwapRefusalCause`"
 
 // Every partition refusal cause automation can branch on must have a row in
 // the refusal-class map: a cause added to the code without a classification

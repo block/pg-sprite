@@ -108,7 +108,9 @@ the same dynamic via metadata locks. Read it first if any of that is unfamiliar.
 | --- | --- | --- | --- | --- | --- |
 | `ADD COLUMN` (no default / nullable) | ACCESS EXCLUSIVE (brief) | No | Yes (after lock) | ❌ No | Metadata only |
 | `ADD COLUMN ... DEFAULT <constant>` | ACCESS EXCLUSIVE (brief) | **No** (PG 11+) | Yes | ❌ No | "Fast default" stored in catalog; pre-PG11 this rewrote |
-| `ADD COLUMN ... DEFAULT <volatile>` (e.g. `now()`, `random()`, `uuid_generate_v4()`) | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** | The expensive case |
+| `ADD COLUMN ... DEFAULT <stable expression>` (e.g. `now()`, `CURRENT_TIMESTAMP`, `current_user`) | ACCESS EXCLUSIVE (brief) | **No** (PG 11+) | Yes | ❌ No | Evaluated once and stored in the catalog like a constant; every existing row reads the same value |
+| `ADD COLUMN ... DEFAULT <volatile>` (e.g. `random()`, `gen_random_uuid()`, `clock_timestamp()`), identity, `serial` | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** | The expensive case |
+| `ADD COLUMN` of a domain type with a `CHECK` or `NOT NULL`, with or without a default | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** | Every row is checked against the domain, even when the default is a constant |
 | `ADD COLUMN ... GENERATED ALWAYS AS (...) STORED` | ACCESS EXCLUSIVE | Yes | No | ✅ **Yes** | Values must be computed |
 | `ADD COLUMN ... UNIQUE` / `PRIMARY KEY` / `REFERENCES` / `CHECK` (inline constraint) | ACCESS EXCLUSIVE + index build or validation | No | No | ➖ Native pattern | Same work as the `ADD CONSTRAINT` form, under the `ADD COLUMN` lock — split: add the column first, then build the constraint online (`CONCURRENTLY` + `USING INDEX`, or `NOT VALID` + `VALIDATE`) |
 | `DROP COLUMN` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | Metadata only; disk space reclaimed lazily by VACUUM |
@@ -364,7 +366,10 @@ forms take a stronger lock but only for a brief catalog change with no scan:
 | runs as written | brief `ACCESS EXCLUSIVE` | none — default stored in the catalog | 0 |
 
 `ADD COLUMN ... DEFAULT <non-volatile>` on PostgreSQL 11+ stores the default in
-the catalog instead of rewriting the table. Catalog-only; runs as written.
+the catalog instead of rewriting the table. Catalog-only; runs as written. A
+constant qualifies by its shape; any other expression, such as `now()`,
+qualifies only when the engine proved, on an empty temporary table, that
+adding the column does not rewrite it.
 
 ### `binary-coercible`
 
@@ -425,9 +430,19 @@ rename is coordinated with application deploys.
 |---|---|---|---|
 | routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 until the backend lands (refused `backend-unavailable`) |
 
-`ADD COLUMN ... DEFAULT <volatile>` (for example `now()`, `gen_random_uuid()`)
-must compute the default per row: a full table rewrite under `ACCESS EXCLUSIVE`
-that blocks reads and writes. Routed to the copy-and-swap backend.
+`ADD COLUMN ... DEFAULT <volatile>` (for example `gen_random_uuid()`,
+`clock_timestamp()`, or an identity or `serial` column) must compute the default
+per row: a full table rewrite under `ACCESS EXCLUSIVE` that blocks reads and
+writes. Routed to the copy-and-swap backend. Before classifying, the engine adds
+each column to an empty temporary table inside a rolled-back transaction and
+checks whether that table's storage was replaced, so the server, not the
+statement's shape, decides: a non-volatile default such as `now()` is stored in
+the catalog and runs natively as `fast-default`. A column that rewrites is added
+again with its type alone, and carries this reason only when the type adds in
+place: when the type rewrites too, the reason is `type-rewrite`. A column the
+engine could not prove, because the probe needed a lock another session held, or
+for which no proof ran, as in `lint`, is classified by shape as `unverified`: any
+default that is not a constant is assumed volatile.
 
 ### `generated-stored`
 
@@ -447,7 +462,12 @@ backend.
 
 The column type change is not binary-coercible (for example `int` → `bigint`,
 `text` → `jsonb`), so PostgreSQL rewrites the whole table under
-`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend.
+`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. An `ADD COLUMN` of a
+domain type with a `CHECK` or `NOT NULL` carries the same reason: PostgreSQL
+rewrites the table to check every row against the domain, even when the default
+is a constant or one the catalog would store. An added column with a constant
+default the engine could not prove carries it too, as `unverified`, since only
+its type could rewrite.
 
 ### `relocation`
 

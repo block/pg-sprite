@@ -104,7 +104,7 @@ conversion.
 | `parent-index-adoption` | PostgreSQL does not support adopting an existing index as a constraint on a partitioned parent in any supported version | `by-design` | No online mechanism exists; the matrix marks it ❌. Waiting for a pg-sprite release would wait for nothing. |
 | `parent-not-valid-foreign-key` | PostgreSQL before version 18 cannot add a `NOT VALID` foreign key on a partitioned table | `environmental` | The same statement, table, and pg-sprite build runs on a newer server; the action that unblocks it is a server upgrade, not an engine release. The matrix marks this row ✅ with a server-version precondition. |
 
-### Copy-and-swap preflight refusals, keyed on `CopySwapRefusalCause`
+### `copy-and-swap-refused`, keyed on `CopySwapRefusalCause`
 
 The closed set is `preflight.CopySwapRefusalCauses()`, raised before the copy-and-swap route
 writes anything ([ST-6](invariants.md#st-6--preflight-before-the-first-write),
@@ -130,9 +130,12 @@ vocabulary — `CopySwapRefusalCauseOf` answers only for the shape and environme
 | any other error | wrapped query error | A catalog read failed; retry or surface it as an engine failure. |
 
 `CopySwapRefusalCause.Class()` answers the `class` column below as a `refusal.Class`, which
-converts to `verdict.Class` with a plain conversion. The verdict reason that carries these
-causes lands with the copy-and-swap route itself; the classification is fixed here first so
-the route inherits it.
+converts to `verdict.Class` with a plain conversion. The imperative front door carries every
+one of these causes on a verdict under the single reason `copy-and-swap-refused`: the verdict's
+`cause` is the preflight cause unchanged, so an adapter that switches on this table's first
+column reads the same token off the verdict, and its `class` is the class fixed here
+(`pkg/migrate/copy_swap_refusal.go`, pinned against this closed set by the registry's
+completeness test).
 
 | `CopySwapRefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
@@ -171,9 +174,10 @@ reading the cause's text, and a periphery adapter converts it to `verdict.Class`
 conversion, since the verdict declares its tokens from the same constants. The class is
 triage, not the action: an `environmental` cause such as `cutover-outcome-ambiguous` or
 `shadow-foreign-relation` is resolved by an operator reading the catalog, as its *Why* says,
-and no class licenses an automatic retry on its own. No verdict reason
-carries these causes yet; the classification is fixed here first so the cutover route
-inherits it.
+and no class licenses an automatic retry on its own. The imperative front door carries
+these causes on a verdict under the same `copy-and-swap-refused` reason as the preflight
+causes above: the verdict's `cause` is the shadow cause unchanged and its `class` is
+`RefusalCause.Class()` converted by token (`pkg/migrate/copy_swap_refusal.go`).
 
 | `RefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
