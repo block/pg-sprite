@@ -337,11 +337,14 @@ column count is the full count, and there is no value; the marker means "leave t
 unchanged", not NULL or an empty value. A full-row upsert that invents a value for that column
 would overwrite live shadow data and silently break convergence. *Enforced:* `pkg/decode`
 per-column presence on `ChangeEvent` — the `Stream` carries a text value or NULL as a present
-column and the marker as an absent one, and refuses a tuple whose column count does not match
-the relation rather than line columns up by guess; `pkg/applier` `Buffer` keeps the marker through every
-merge, and `Flusher` writes a marker-bearing image of a row that did not move as an `UPDATE` of
+`Column` and the marker as an absent one, and refuses a tuple whose column count does not match
+the relation rather than line columns up by guess. A `Column`'s value is readable only through
+`Get`, which returns it with its presence, so an absent column's value cannot be read as a
+NULL's: the two arrive alike and only the presence tells them apart. `pkg/applier` `Buffer`
+keeps the marker through every merge, and `Flusher` writes a marker-bearing image of a row that did not move as an `UPDATE` of
 only its present columns — zero rows updated is an `ErrInvariantViolation`, never an insert
-that invents the omitted value — and completes a marker before the whole-row fallback inserts
+that invents the omitted value — binds no column that carries no value (an `ErrInvariantViolation`
+before any statement runs), and completes a marker before the whole-row fallback inserts
 the row, from the shadow row the marker refers to, refusing when that row is absent; a moved
 image's marker, whose value lives under another key, is completed from the old key's shadow row
 or the source row and held in the buffer until the stream has passed the read, so a value read

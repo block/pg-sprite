@@ -57,14 +57,6 @@ func ParseLSN(s string) (LSN, error) {
 	return LSN(hi<<32 | lo), nil
 }
 
-// Column is one decoded column. Present=false means pgoutput omitted an
-// unchanged TOAST value, so an applier must leave the target column untouched.
-type Column struct {
-	Name    string
-	Value   any
-	Present bool
-}
-
 // ChangeEvent is one decoded row change. OldKey is non-nil only when an update moved the key.
 type ChangeEvent struct {
 	Kind ChangeKind
@@ -88,7 +80,7 @@ type ChangeEvent struct {
 func (e ChangeEvent) PresentColumns() []Column {
 	result := make([]Column, 0, len(e.Columns))
 	for _, c := range e.Columns {
-		if c.Present {
+		if c.Present() {
 			result = append(result, c)
 		}
 	}

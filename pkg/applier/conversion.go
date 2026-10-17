@@ -43,14 +43,30 @@ type shadowForm struct {
 }
 
 // inShadowForm returns cols with each value marked as read from the shadow
-// row, as Hold keeps a completion read from the shadow.
+// row, as Hold keeps a completion read from the shadow. A column with no
+// value has nothing to mark and is carried as it is.
 func inShadowForm(cols []decode.Column) []decode.Column {
 	out := make([]decode.Column, len(cols))
 	for i, c := range cols {
-		c.Value = shadowForm{value: c.Value}
-		out[i] = c
+		value, present := c.Get()
+		if !present {
+			out[i] = c
+			continue
+		}
+		out[i] = decode.PresentColumn(c.Name(), shadowForm{value: value})
 	}
 	return out
+}
+
+// isShadowForm reports whether the column carries a value read from the
+// shadow row.
+func isShadowForm(c decode.Column) bool {
+	value, present := c.Get()
+	if !present {
+		return false
+	}
+	_, ok := value.(shadowForm)
+	return ok
 }
 
 // sourceColumnTypesSQL reads the type and collation of each named column as
@@ -140,14 +156,14 @@ type columnType struct {
 // own name, which is the only name the statement admits it to refer to.
 func valueSQL(n int, c decode.Column, conv conversions) string {
 	param := "$" + strconv.Itoa(n)
-	cv, converted := conv[c.Name]
+	cv, converted := conv[c.Name()]
 	if !converted {
 		return param
 	}
-	if _, already := c.Value.(shadowForm); already {
+	if isShadowForm(c) {
 		return param
 	}
-	name := pgx.Identifier{c.Name}.Sanitize()
+	name := pgx.Identifier{c.Name()}.Sanitize()
 	return "(SELECT " + cv.expr + " FROM (SELECT " + cv.sourceValue(param) + " AS " + name + ") AS \"source\")"
 }
 
@@ -163,10 +179,16 @@ func (cv conversion) sourceValue(param string) string {
 }
 
 // bindValue is the value bound for a column: the value itself, or the
-// value a shadowForm wraps.
-func bindValue(c decode.Column) any {
-	if sf, ok := c.Value.(shadowForm); ok {
-		return sf.value
+// value a shadowForm wraps. A column with no value has nothing to bind:
+// binding one would write a value pgoutput never carried over the shadow's
+// (CO-8), so the flush refuses instead.
+func bindValue(c decode.Column) (any, error) {
+	value, present := c.Get()
+	if !present {
+		return nil, fmt.Errorf("%w (CO-8): column %s carries no value to bind", ErrInvariantViolation, c.Name())
 	}
-	return c.Value
+	if sf, ok := value.(shadowForm); ok {
+		return sf.value, nil
+	}
+	return value, nil
 }
