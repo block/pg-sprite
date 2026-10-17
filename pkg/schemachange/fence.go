@@ -49,16 +49,45 @@ $pgsprite$`
 // a CREATE the other has in flight.
 const writeFenceLockSQL = "SELECT pg_advisory_xact_lock($1, hashtext(quote_ident($2) || '.' || quote_ident($3)))"
 
+// writeFenceTriggerType is pg_trigger.tgtype for the fence as installed: a
+// statement-level BEFORE trigger on INSERT (4), DELETE (8), UPDATE (16), and
+// TRUNCATE (32), the BEFORE bit being 2 and the row-level bit unset.
+const writeFenceTriggerType = 2 + 4 + 8 + 16 + 32
+
+// triggerEnabledAlways is pg_trigger.tgenabled for a trigger that fires in
+// every session, whatever its session_replication_role.
+const triggerEnabledAlways = "A"
+
+// writeFenceStateSQL reads the enablement of the engine's fence on one
+// relation: the row exists only for a trigger of the fence's name, shape,
+// and function in the engine's schema. Every catalog name is qualified, so
+// the read does not depend on the session's search_path (CO-9).
+const writeFenceStateSQL = `
+SELECT tg.tgenabled::pg_catalog.text
+FROM pg_catalog.pg_trigger tg
+JOIN pg_catalog.pg_proc p ON p.oid OPERATOR(pg_catalog.=) tg.tgfoid
+JOIN pg_catalog.pg_namespace pn ON pn.oid OPERATOR(pg_catalog.=) p.pronamespace
+WHERE tg.tgrelid OPERATOR(pg_catalog.=) $1::pg_catalog.oid
+  AND tg.tgname::pg_catalog.text OPERATOR(pg_catalog.=) $2::pg_catalog.text
+  AND p.proname::pg_catalog.text OPERATOR(pg_catalog.=) $2::pg_catalog.text
+  AND pn.nspname::pg_catalog.text OPERATOR(pg_catalog.=) $3::pg_catalog.text
+  AND tg.tgtype::pg_catalog.int4 OPERATOR(pg_catalog.=) $4::pg_catalog.int4
+  AND NOT tg.tgisinternal`
+
 // installWriteFence puts the write fence on the source, in one bounded
 // transaction as the engine role and only while the caller holds the
 // table lock. The trigger is a statement-level BEFORE trigger on INSERT,
 // UPDATE, DELETE, and TRUNCATE, so it fires once per statement and costs
 // the run nothing per row; installing it waits, under lock_timeout, for
 // any write already in flight to finish, which is the point at which the
-// table is quiesced. The install is idempotent, so a resumed run installs
-// over the fence the stopped run left. The trigger is created as the
-// engine role, not the owner: the function lives in the engine's schema,
-// and the owner needs no access to that schema for the trigger to fire.
+// table is quiesced. The trigger is enabled ALWAYS, so it also fires for a
+// session running under session_replication_role = replica, which skips
+// every ordinary trigger. The install is idempotent, so a resumed run
+// installs over the fence the stopped run left, and a fence that run left
+// disabled, or enabled for origin sessions only, comes back enabled
+// ALWAYS. The trigger is created as the engine role, not the owner: the
+// function lives in the engine's schema, and the owner needs no access to
+// that schema for the trigger to fire.
 func installWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, opts Options) error {
 	if err := requireTableLock(lock, target.Schema(), target.Table()); err != nil {
 		return err
@@ -98,8 +127,41 @@ func installWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tab
 	if _, err := tx.Exec(ctx, create); err != nil {
 		return fmt.Errorf("install write fence on %s.%s: %w", target.Schema(), target.Table(), err)
 	}
+	// INV: CO-1 — a session in replica role fires no ORIGIN trigger, so the
+	// fence must be ALWAYS to refuse its writes too.
+	enable := "ALTER TABLE " + source + " ENABLE ALWAYS TRIGGER " + pgx.Identifier{WriteFenceTrigger}.Sanitize()
+	if _, err := tx.Exec(ctx, enable); err != nil {
+		return fmt.Errorf("enable write fence always on %s.%s: %w", target.Schema(), target.Table(), err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit write fence install: %w", err)
+	}
+	return nil
+}
+
+// confirmWriteFence refuses the swap of a quiesced proof unless the source
+// still carries the engine's fence, enabled ALWAYS. It runs under the swap's
+// ACCESS EXCLUSIVE lock, so the trigger cannot be disabled or dropped
+// between this read and the rename. The fence is what makes the proof's
+// quiescence true rather than assumed; a source whose fence was disabled or
+// dropped since the pass may have taken writes the pass never saw, and the
+// run stops there for a fresh install and a fresh pass.
+func confirmWriteFence(ctx context.Context, tx pgx.Tx, built BuiltShadow) error {
+	schema, table := built.Schema(), built.SourceTable()
+	var enabled string
+	err := tx.QueryRow(ctx, writeFenceStateSQL, built.SourceOID(), WriteFenceTrigger, preflight.EngineSchema, writeFenceTriggerType).Scan(&enabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// INV: CO-1
+		return refuse(CauseCutoverUnfenced, nil, "source %s.%s carries no %s trigger calling %s.%s, so the quiesced proof no longer holds",
+			schema, table, WriteFenceTrigger, preflight.EngineSchema, WriteFenceTrigger)
+	}
+	if err != nil {
+		return fmt.Errorf("read write fence on %s.%s: %w", schema, table, err)
+	}
+	if enabled != triggerEnabledAlways {
+		// INV: CO-1
+		return refuse(CauseCutoverUnfenced, nil, "the write fence on %s.%s has tgenabled %q, not %q, so a write could pass it",
+			schema, table, enabled, triggerEnabledAlways)
 	}
 	return nil
 }

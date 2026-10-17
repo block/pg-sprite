@@ -57,10 +57,18 @@ since under the swap lock (`cutover-undrained`); the mechanism is in
 [copy-and-swap-design.md](copy-and-swap-design.md#live-verification). The `Runner` on a
 quiesced target makes the quiescence its pass relies on true rather than assumed: it fences
 the source with a statement-level `BEFORE` trigger (`pgsprite_write_fence`, SQLSTATE `55006`)
-before its first save and keeps it through every stop until the swap carries it to the
-retained table, so the copy and one quiesced pass are the whole proof (fences-the-source,
-leaves-the-fence-on-a-stopped-run, unfences-the-old-table-it-keeps,
-stops-on-a-shadow-that-differs tests). On a decoding target it runs `CheckLive` under
+enabled `ALWAYS`, so a session in `session_replication_role = replica` is refused too, before
+its first save, and keeps it through every stop until the swap carries it to the retained
+table, so the copy and one quiesced pass are the whole proof (fences-the-source,
+refuses-a-replica-role-session, leaves-the-fence-on-a-stopped-run,
+unfences-the-old-table-it-keeps, stops-on-a-shadow-that-differs tests). A resumed run installs
+over the fence, which enables it `ALWAYS` again (resume-upgrades-an-origin-fence test). The
+quiesced swap re-reads the fence under its `ACCESS EXCLUSIVE` lock and refuses the proof as
+`cutover-unfenced` unless the engine's trigger is still on the source, enabled `ALWAYS`
+(refuses-when-the-fence-was-disabled and refuses-when-the-fence-was-dropped tests); a role
+that owns the table can still disable the fence, write, and restore it between the pass and
+the swap, and that write is not seen. A live run installs no fence, so its swap checks none.
+On a decoding target it runs `CheckLive` under
 `DivergenceAbort` once the catch-up has passed a marker written after the copy, with the
 capture's own `Catchup` as the pass's confirmed source, and hands the swap a drain that
 reopens the stream from the position the capture confirmed and applies it under the swap's

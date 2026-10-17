@@ -11,13 +11,14 @@ import (
 	"github.com/block/pg-sprite/pkg/preflight"
 )
 
-// swapOnce is one attempt at the swap transaction: lock, drain, re-check
-// the shape, re-gate, rename, hand off, recheck, commit. Any error leaves
+// swapOnce is one attempt at the swap transaction: lock, confirm the write
+// fence when the caller requires it, drain, re-check the shape, re-gate,
+// rename, hand off, recheck, commit. Any error leaves
 // the transaction rolled back on the server unless the client stopped
 // hearing from it, which the caller resolves by following the backend
 // returned here to its exit and then inspecting the catalog. The backend
 // is zero when the attempt ended before its transaction ran a statement.
-func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, opts Options) (SwappedTable, swapBackend, error) {
+func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, requireFence bool, opts Options) (SwappedTable, swapBackend, error) {
 	built := ready.built
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -33,7 +34,7 @@ func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSes
 	if err != nil {
 		return SwappedTable{}, swapBackend{}, err
 	}
-	swapped, err := swapInTx(ctx, tx, lock, ready, drain, opts)
+	swapped, err := swapInTx(ctx, tx, lock, ready, drain, requireFence, opts)
 	if err != nil {
 		return SwappedTable{}, backend, err
 	}
@@ -45,7 +46,7 @@ func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSes
 
 // swapInTx runs every statement of the swap inside the open transaction,
 // up to but not including COMMIT.
-func swapInTx(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, opts Options) (SwappedTable, error) {
+func swapInTx(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, requireFence bool, opts Options) (SwappedTable, error) {
 	built := ready.built
 	if err := setGateSession(ctx, tx, built, opts); err != nil {
 		return SwappedTable{}, err
@@ -55,6 +56,14 @@ func swapInTx(ctx context.Context, tx pgx.Tx, lock *dbconn.TableLockSession, rea
 	}
 	if err := lockForSwap(ctx, tx, built); err != nil {
 		return SwappedTable{}, err
+	}
+	// A quiesced proof is only as good as the fence that kept the source
+	// quiet; a live proof is finished by the drain instead.
+	// INV: CO-1
+	if requireFence && !ready.verified.Live() {
+		if err := confirmWriteFence(ctx, tx, built); err != nil {
+			return SwappedTable{}, err
+		}
 	}
 	if drain != nil {
 		if err := drain(ctx, tx); err != nil {

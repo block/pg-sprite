@@ -16,9 +16,11 @@
 // the checkpoint row at every phase transition and dispatching on the row
 // it finds, so a run that stops anywhere resumes from the row. The target's
 // proof chooses the route. A quiesced table's quiescence is enforced, not
-// assumed: the run fences the source with a statement trigger that refuses
-// every write until the swap, and the fence stays on a stopped run's
-// source until it is resumed or abandoned with DropWriteFence. A table
+// assumed: the run fences the source with a statement trigger, enabled
+// ALWAYS, that refuses every write until the swap, and the fence stays on a
+// stopped run's source until it is resumed or abandoned with
+// DropWriteFence. The quiesced swap refuses if the fence is no longer
+// there. A table
 // under writes is captured instead: the run creates the slot with the row
 // that owns it, applies the stream to the shadow beside the copy, catches
 // up to a marker past every change committed so far, verifies live, and
