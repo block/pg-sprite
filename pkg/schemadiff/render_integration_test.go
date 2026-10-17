@@ -67,6 +67,44 @@ func TestRenderRoundTripsLiveTable(t *testing.T) {
 	assert.Empty(t, changes, "diffing a table against its own rendering must yield no changes")
 }
 
+// A live check constraint left NOT VALID renders as the validated constraint
+// the desired file can declare, since CREATE TABLE ignores NOT VALID. The
+// baseline re-diffs to that one validation rather than to zero, and the
+// models differ only in the constraint's validity.
+func TestRenderNotValidConstraintRendersValidated(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.events (id bigint PRIMARY KEY, qty int);
+		ALTER TABLE %[1]s.events ADD CONSTRAINT qty_positive CHECK (qty > 0) NOT VALID`, schema))
+	require.NoError(t, err)
+
+	live, err := schemadiff.Introspect(t.Context(), pool, schema, "events")
+	require.NoError(t, err)
+	rendered, err := schemadiff.Render(live)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, `CONSTRAINT "qty_positive" CHECK ((qty > 0))`)
+	assert.NotContains(t, rendered, "NOT VALID")
+
+	live, desired, changes := roundTrip(t, pool, schema, "events")
+	require.Len(t, changes, 1)
+	assert.Equal(t, schemadiff.ChangeValidateConstraint, changes[0].Kind)
+	assert.Equal(t, fmt.Sprintf(`ALTER TABLE "%s"."events" VALIDATE CONSTRAINT "qty_positive"`, schema), changes[0].SQL)
+
+	validated := live
+	validated.Constraints = append([]schemadiff.Constraint(nil), live.Constraints...)
+	for i, con := range validated.Constraints {
+		if con.Name == "qty_positive" {
+			require.True(t, con.NotValid)
+			validated.Constraints[i].Def = "CHECK ((qty > 0))"
+			validated.Constraints[i].NotValid = false
+		}
+	}
+	assert.Equal(t, validated, modeltest.Comparable(desired))
+}
+
 // A serial table round-trips through the serial pseudo-type: the rendered
 // file recreates the owned sequence on the scratch schema and both sides
 // decompile the default identically.
