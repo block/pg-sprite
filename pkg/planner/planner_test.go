@@ -129,6 +129,8 @@ var facts = planner.Facts{ColumnTypes: map[string]string{
 	"num":  "numeric(10,2)",
 	"i":    "integer",
 	"txt":  "text",
+	"varr": "character varying(50)[]",
+	"narr": "numeric(10,2)[]",
 }}
 
 func classifyOne(t *testing.T, sql string) planner.Decision {
@@ -196,6 +198,42 @@ func TestClassifyUnverifiedMarksFactlessTypeChanges(t *testing.T) {
 	require.Len(t, using.Decisions, 1)
 	assert.Equal(t, planner.RouteCopyAndSwap, using.Decisions[0].Route)
 	assert.False(t, using.Decisions[0].Unverified)
+}
+
+// The scalar relabel rules do not carry over to arrays: PostgreSQL converts
+// an array column element by element and rewrites the table for any element
+// change, widenings included. Only an unchanged element type is a relabel,
+// whatever dimensions are declared. A target qualified with a schema other
+// than pg_catalog is a user type, never the built-in that shares its name.
+// TestBinaryCoercibleVerdictMatchesTheServer proves each row on a server.
+func TestClassifyArrayAndQualifiedTypeChanges(t *testing.T) {
+	cases := []struct {
+		sql   string
+		route planner.Route
+	}{
+		{"ALTER TABLE t ALTER COLUMN varr TYPE text", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(100)", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(100)[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE text[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN narr TYPE numeric(12,2)[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN v50 TYPE text[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN v50 TYPE app.text", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(50)[]", planner.RouteNative},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(50)[][]", planner.RouteNative},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(50) ARRAY", planner.RouteNative},
+		{"ALTER TABLE t ALTER COLUMN v50 TYPE pg_catalog.text", planner.RouteNative},
+	}
+	for _, tc := range cases {
+		d := classifyOne(t, tc.sql)
+		assert.Equal(t, tc.route, d.Route, tc.sql)
+		if tc.route == planner.RouteNative {
+			assert.Equal(t, planner.ReasonBinaryCoercible, d.Reason, tc.sql)
+		} else {
+			assert.Equal(t, planner.ReasonTypeRewrite, d.Reason, tc.sql)
+			assert.False(t, d.Unverified, "a proven rewrite is not unverified: %s", tc.sql)
+		}
+	}
 }
 
 // TestClassifyReferenceRows is the golden mapping: one case per row of
@@ -312,6 +350,88 @@ func TestClassifyAddPrimaryKeySequence(t *testing.T) {
 		`CREATE UNIQUE INDEX CONCURRENTLY "t_pkey" ON "s"."t" ("id")`,
 		`ALTER TABLE "s"."t" ADD CONSTRAINT "t_pkey" PRIMARY KEY USING INDEX "t_pkey"`,
 	}, d.SaferSQL)
+}
+
+// The online sequence must declare the constraint the statement declares:
+// an index built without INCLUDE, NULLS NOT DISTINCT, or the tablespace, or
+// an attach without DEFERRABLE or INITIALLY DEFERRED, is a different
+// constraint. WITH (...) storage parameters ride on the index too; only a
+// parameter the sequence cannot render faithfully gets no sequence, so the
+// decision carries guidance instead of SQL that drops it.
+// TestUsingIndexSequenceDeclaresTheSameConstraint proves each on a server.
+func TestClassifyAddKeySequenceCarriesEveryAttribute(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want []string
+	}{
+		{
+			"include columns",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) INCLUDE (name, id)",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") INCLUDE ("name", "id")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"nulls not distinct",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (email)",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") NULLS NOT DISTINCT`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"index tablespace",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) USING INDEX TABLESPACE fast",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"storage parameters",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) INCLUDE (id) WITH (fillfactor = 70, deduplicate_items = off) USING INDEX TABLESPACE fast",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") INCLUDE ("id") WITH ("fillfactor" = '70', "deduplicate_items" = 'off') TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"deferrable initially deferred",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) DEFERRABLE INITIALLY DEFERRED",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k" DEFERRABLE INITIALLY DEFERRED`,
+			},
+		},
+		{
+			"deferrable primary key",
+			"ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY (id) DEFERRABLE",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "t_pkey" ON "t" ("id")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "t_pkey" PRIMARY KEY USING INDEX "t_pkey" DEFERRABLE`,
+			},
+		},
+		{
+			"every attribute at once",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (a, b) INCLUDE (c) USING INDEX TABLESPACE fast DEFERRABLE INITIALLY DEFERRED",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("a", "b") INCLUDE ("c") NULLS NOT DISTINCT TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k" DEFERRABLE INITIALLY DEFERRED`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, classifyOne(t, tc.sql).SaferSQL)
+		})
+	}
+
+	d := classifyOne(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = s.seventy)")
+	assert.Equal(t, planner.RouteNative, d.Route)
+	assert.Equal(t, planner.ReasonSaferIdiom, d.Reason)
+	assert.Empty(t, d.SaferSQL, "a sequence would build the index without the parameter it cannot carry")
 }
 
 func TestClassifyAddCheckSequenceValidates(t *testing.T) {

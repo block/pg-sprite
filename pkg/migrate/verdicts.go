@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -91,16 +92,28 @@ func partitionedParentVerdict(st statement.Statement, partitionErr *preflight.Un
 
 // rewriteRequiredVerdict is the refusal for a statement whose submitted
 // form blocks but for which the planner could not construct the safer
-// native sequence — a multi-operation statement, or a pattern it cannot
-// build. Running the submitted form would falsify the plan's own reason.
-func rewriteRequiredVerdict(st statement.Statement) verdict.Verdict {
+// native sequence. Running the submitted form would falsify the plan's own
+// reason. The verdict carries the plan report's guidance, and its detail
+// states the steps that guidance names, so the two surfaces give the same
+// advice.
+func rewriteRequiredVerdict(st statement.Statement, rs router.Statement) (verdict.Verdict, error) {
+	guidance, err := plan.RewriteRequiredGuidance(rs)
+	if err != nil {
+		return verdict.Verdict{}, fmt.Errorf("derive the manual path for rewrite-required %s: %w", qualified(st), err)
+	}
 	return verdict.Verdict{
 		Statement: st.SQL(),
 		Table:     qualified(st),
-		Detail: "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not " +
-			"construct one for this statement; submit each operation as its own single-operation statement " +
-			"so the engine can build its safer form (a dry-run classification shows each operation's route)",
-	}.WithRefusal(rewriteRequiredRefusal())
+		Detail:    "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not construct one for this statement; " + manualPath(guidance),
+		Guidance:  guidance,
+	}.WithRefusal(rewriteRequiredRefusal()), nil
+}
+
+// manualPath states the steps a rewrite-required statement's guidance
+// names, in the wording the suggest report and dry run use, ending in the
+// guidance code an operator can look up.
+func manualPath(g suggest.Guidance) string {
+	return suggest.ManualPath(g) + " (guidance " + string(g) + ")"
 }
 
 // backendUnavailableVerdict is the refusal for a change that routes to an

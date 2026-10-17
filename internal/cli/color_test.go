@@ -177,6 +177,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		Table:               "public.t",
 		Detail:              "every field populated for the renderer parity lock",
 		SaferIdiom:          "DROP INDEX CONCURRENTLY",
+		Guidance:            suggest.GuidanceUniqueIndexThenConstraint,
 		ExecutedSQL:         []string{`ALTER TABLE "t" ADD CONSTRAINT "c" CHECK (x > 0) NOT VALID`},
 		Forced:              true,
 		BlockingPassthrough: true,

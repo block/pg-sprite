@@ -277,7 +277,7 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 		return execute(ctx, pool, st, execSQL, rs.Plan, substituted, forced, opts, adopts, validates, logger)
 	case router.DispositionRewriteRequired:
 		if opts.Force == "" {
-			return rewriteRequiredVerdict(st), nil
+			return rewriteRequiredVerdict(st, rs)
 		}
 		auditForce(opts.audit(), st, rs)
 		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, validates, logger)
