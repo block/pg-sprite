@@ -33,7 +33,10 @@ type ConfirmedSource interface {
 // and confirming the stream under the hold, so what the source writes
 // meanwhile is buffered and flushed after the resume. An implementation
 // of its own must make the same promise: nothing the stream carries
-// writes the shadow between Pause's return and the resume.
+// writes the shadow between Pause's return and the resume. The caller
+// calls resume exactly once on every path after Pause returns a nil
+// error, including when its own work fails, so an implementation need
+// not tolerate a second call or a missing one.
 type FlushGate interface {
 	Pause(ctx context.Context) (resume func(), err error)
 }
@@ -178,7 +181,7 @@ func (o LiveOptions) validate(policy DivergencePolicy) error {
 		return fmt.Errorf("%w: a live pass needs the catch-up's confirmed position", ErrInvalidOptions)
 	}
 	if policy == DivergenceRepair && o.Flushes == nil {
-		return fmt.Errorf("%w: a live pass under %q needs the catch-up's flush gate to hold its flushes while a repair recopies", ErrInvalidOptions, DivergenceRepair)
+		return fmt.Errorf("%w: a live pass under %q needs the catch-up's flush gate (LiveOptions.Flushes) to hold its flushes while a repair recopies", ErrInvalidOptions, DivergenceRepair)
 	}
 	if o.Attempts < 1 {
 		return fmt.Errorf("%w: settle attempts %d is below one; use zero for the default", ErrInvalidOptions, o.Attempts)

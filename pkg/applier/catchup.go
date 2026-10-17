@@ -100,7 +100,8 @@ func (o CatchupOptions) validate() error {
 
 // Status is one consistent snapshot of a catch-up as of the end of its last
 // completed cycle: the stream's positions and what the buffer and the
-// flushes have done with the changes, all recorded together.
+// flushes have done with the changes, all recorded together, and whether a
+// Pause holds the flushes now.
 type Status struct {
 	// Delivered is the stream's delivered position: every transaction that
 	// committed at or below it has been added to the buffer or discarded.
@@ -135,6 +136,13 @@ type Status struct {
 	// BatchesDeferred is the number of batches a constraint refused even
 	// whole-row, requeued for a later drain (CO-6).
 	BatchesDeferred uint64
+	// FlushesHeld is set while a Pause holds the flushes off the shadow,
+	// from Pause's return until its resume, and not while a cycle's own
+	// flush runs. Unlike the fields above it is not a cycle's record: it
+	// moves the moment the hold is taken or given back. Under the hold Lag
+	// grows and Applied stands still on purpose, so a caller watching for
+	// a stalled catch-up reads FlushesHeld first.
+	FlushesHeld bool
 }
 
 // Lag is how far the confirmed position trails the server's write position

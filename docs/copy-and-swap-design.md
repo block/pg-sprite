@@ -572,9 +572,15 @@ all took but which left other chunks unsettled returns the first of them as an
 `*UnresolvedError` with the repairs committed and listed. A pass with repairs mints no proof.
 `recopy` is refused for a live pass, since it reads nothing again and a live pass settles what
 it recopies (CO-3). The hold lasts for the whole recopy, so a divergence that spans many
-chunks buffers the stream's changes for as long as the copy takes; the buffer, not a flush's
-`lock_timeout`, is what bounds it, and the slot retains the WAL below the oldest buffered
-change until the resume lets it flush.
+chunks buffers the stream's changes for as long as the copy takes, one buffer entry per
+changed key, holding its full column values; no flush's `lock_timeout` ends the hold, and the
+slot retains the WAL below the oldest buffered change until the resume lets it flush. Every
+cycle under the hold still checks the slot, so a hold whose retained WAL outgrows the slot's
+WAL ceiling ends the catch-up with `SlotLagExceededError` (ST-3, fail closed) and the pass
+then reports the chunk `lagging`: under heavy writes that ceiling is the bound that fires
+first. `applier.Status.FlushesHeld` reports the hold while it lasts, so a caller watching
+`Lag` grow and `Applied` stand still can tell a repair holding the flushes from a stalled
+catch-up.
 
 **At the swap.** `GateCutover` accepts a live proof like a quiesced one. `Cutover` refuses a
 live proof handed to it with no `DrainFunc` (`cutover-undrained`, CO-1): the proof covers the

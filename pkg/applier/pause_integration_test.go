@@ -38,6 +38,7 @@ func TestCatchupPauseHoldsFlushesUntilResumed(t *testing.T) {
 		return s.Buffered == 1 && s.Delivered >= end
 	})
 	held := run.status(t)
+	assert.True(t, held.FlushesHeld, "the status reports the hold")
 	assert.Zero(t, held.Applied, "nothing is flushed while the hold lasts")
 	assert.Less(t, held.Confirmed, end, "the buffered write keeps the confirmation below its position")
 
@@ -48,6 +49,7 @@ func TestCatchupPauseHoldsFlushesUntilResumed(t *testing.T) {
 	require.ErrorIs(t, err, context.DeadlineExceeded, "a second Pause waits for the first's resume")
 
 	resume()
+	assert.False(t, run.status(t).FlushesHeld, "the resume ends the hold the status reports")
 	run.awaitStatus(t, "flush the buffered write and confirm past it", func(s applier.Status) bool {
 		return s.Applied == 1 && s.Buffered == 0 && s.Confirmed >= end
 	})
@@ -85,6 +87,7 @@ func TestCatchupPauseWaitsForAFlushInFlight(t *testing.T) {
 			shadow).Scan(&waiting))
 		return waiting
 	}, flushWaitDeadline, 20*time.Millisecond, "the flush asked for ROW EXCLUSIVE on the shadow and is waiting behind the hold")
+	assert.False(t, run.catchup.Status().FlushesHeld, "a cycle's own flush holding the gate is not a hold")
 
 	paused := make(chan error, 1)
 	go func() {
@@ -112,6 +115,48 @@ func TestCatchupPauseWaitsForAFlushInFlight(t *testing.T) {
 	end := f.currentWALLSN(t)
 	run.awaitStatus(t, "apply the write and confirm past it", func(s applier.Status) bool {
 		return s.Applied == 1 && s.Confirmed >= end
+	})
+	run.stop(t)
+	f.assertConverged(t, run.shadow)
+}
+
+// A paused cycle drains and flushes nothing, so what the last drain left
+// deferred and what the flushes have applied stand across it: row 2's
+// chunk is in flight, so its change waits while row 1's is applied; under
+// the hold a write to row 3 is buffered and the cycles go on reading the
+// stream past it, and the status still reports row 2 deferred and one
+// image applied. Once the hold is resumed and row 2's chunk lands, both
+// waiting rows are flushed.
+func TestCatchupPauseKeepsTheLastDrainsCountsStanding(t *testing.T) {
+	f := newCatchupFixture(t, 20)
+	positions := &switchPosition{pos: oneInFlight(t, 2)}
+	run := startCatchupWith(t, f, catchupSetup{positions: positions})
+	q := f.table.Qualified()
+
+	_, err := f.pool.Exec(t.Context(), `UPDATE `+q+` SET amount = amount + 1 WHERE id IN (1, 2)`)
+	require.NoError(t, err)
+	run.awaitStatus(t, "apply row 1 and defer row 2 behind its chunk", func(s applier.Status) bool {
+		return s.Applied == 1 && s.Deferred == 1
+	})
+
+	resume, err := run.catchup.Pause(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(resume)
+	_, err = f.pool.Exec(t.Context(), `UPDATE `+q+` SET amount = amount + 1 WHERE id = 3`)
+	require.NoError(t, err)
+	end := f.currentWALLSN(t)
+	run.awaitStatus(t, "buffer row 3 under the hold and read the stream past it", func(s applier.Status) bool {
+		return s.Buffered == 2 && s.Delivered >= end
+	})
+	held := run.status(t)
+	assert.True(t, held.FlushesHeld)
+	assert.Equal(t, 1, held.Deferred, "row 2 is still the last drain's one deferred entry")
+	assert.Equal(t, uint64(1), held.Applied, "the paused cycles applied nothing")
+
+	resume()
+	positions.set(allLanded())
+	run.awaitStatus(t, "flush rows 2 and 3 and confirm past them", func(s applier.Status) bool {
+		return s.Applied == 3 && s.Buffered == 0 && s.Deferred == 0 && s.Confirmed >= end
 	})
 	run.stop(t)
 	f.assertConverged(t, run.shadow)

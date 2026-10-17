@@ -200,3 +200,123 @@ func TestCheckLiveRepairHoldsTheCatchupsFlushesForTheRecopy(t *testing.T) {
 	}, confirmDeadline, 20*time.Millisecond, "the catch-up confirmed past a write after the pass")
 	f.assertConverged(t)
 }
+
+// countingGate is the fixture's catch-up as a FlushGate that counts the
+// holds and resumes.
+type countingGate struct {
+	f       *liveFixture
+	paused  atomic.Int32
+	resumed atomic.Int32
+}
+
+func (g *countingGate) Pause(ctx context.Context) (func(), error) {
+	resume, err := g.f.catchup.Pause(ctx)
+	if err != nil {
+		return nil, err
+	}
+	g.paused.Add(1)
+	return func() {
+		g.resumed.Add(1)
+		resume()
+	}, nil
+}
+
+// A live repair whose recopy fails before it commits gives the flushes
+// back: a transaction writes a shadow row and stays open, so the recopy's
+// SHARE MODE wait outlasts the verifier's lock wait and the pass returns
+// its error. The hold was taken once and resumed once, the catch-up is
+// not paused, and a write made after the failed repair is flushed and
+// confirmed. A resume on the success path alone would leave the catch-up
+// buffering under a hold nobody gives back.
+func TestCheckLiveRepairResumesTheFlushesWhenTheRecopyFails(t *testing.T) {
+	f := newLiveFixture(t)
+
+	writer, err := f.pool.Begin(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		// Redundant safety closer: the test rolls the writer back itself.
+		_ = writer.Rollback(context.WithoutCancel(t.Context()))
+	})
+	_, err = writer.Exec(t.Context(), "UPDATE "+f.shadowName()+" SET amount = amount WHERE id = 5")
+	require.NoError(t, err)
+	f.exec(t, "UPDATE "+f.shadowName()+" SET amount = 0 WHERE id = 1400")
+
+	const recopyLockWait = 500 * time.Millisecond
+	v := f.verifier(t, checksum.Options{LockTimeout: recopyLockWait})
+	gate := &countingGate{f: f}
+	outcome, err := f.checkLive(t, v, checksum.DivergenceRepair, checksum.LiveOptions{Flushes: gate})
+	require.Error(t, err, "the recopy's SHARE MODE wait ran out behind the writer")
+	assert.Empty(t, outcome.Repairs, "the recopy did not commit")
+	assertNoProofs(t, outcome)
+	assert.Equal(t, int32(1), gate.paused.Load())
+	assert.Equal(t, int32(1), gate.resumed.Load(), "a recopy that failed gives the flushes back")
+	assert.False(t, f.catchup.Status().FlushesHeld)
+
+	require.NoError(t, writer.Rollback(t.Context()))
+	before := f.catchup.Status().Applied
+	f.exec(t, "UPDATE "+f.table.Qualified()+" SET amount = amount + 1 WHERE id = 7")
+	end := f.currentWALLSN(t)
+	const confirmDeadline = 10 * time.Second
+	require.Eventually(t, func() bool {
+		s := f.catchup.Status()
+		return s.Confirmed >= end && s.Applied > before
+	}, confirmDeadline, 20*time.Millisecond, "the catch-up flushes a write made after the failed repair")
+}
+
+// bracketGate is the fixture's catch-up as a FlushGate that records, from
+// a second connection, whether the repair's SHARE MODE lock on the shadow
+// is granted at the moment of the hold and at the moment of the resume.
+// The pass calls Pause and the resume on the test's goroutine.
+type bracketGate struct {
+	t             *testing.T
+	f             *liveFixture
+	pauses        int
+	resumes       int
+	shareAtPause  bool
+	shareAtResume bool
+}
+
+func (g *bracketGate) shareGranted(ctx context.Context) bool {
+	var held bool
+	require.NoError(g.t, g.f.pool.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM pg_locks WHERE mode = 'ShareLock' AND granted AND relation = $1::regclass)",
+		g.f.shadowName()).Scan(&held))
+	return held
+}
+
+func (g *bracketGate) Pause(ctx context.Context) (func(), error) {
+	resume, err := g.f.catchup.Pause(ctx)
+	if err != nil {
+		return nil, err
+	}
+	g.pauses++
+	g.shareAtPause = g.shareGranted(ctx)
+	return func() {
+		g.resumes++
+		g.shareAtResume = g.shareGranted(context.WithoutCancel(ctx))
+		resume()
+	}, nil
+}
+
+// The hold brackets the recopy transaction: it is taken before the
+// transaction asks for SHARE MODE on the shadow, since a flush that
+// started after the lock was granted would wait on it with the gate held
+// and the hold behind that flush, and it is given back only after the
+// transaction has committed and let the lock go, since a flush resumed
+// earlier would wait on the lock under its own lock_timeout.
+func TestCheckLiveRepairHoldBracketsTheRecopyTransaction(t *testing.T) {
+	f := newLiveFixture(t)
+	f.exec(t, "UPDATE "+f.shadowName()+" SET amount = 0 WHERE id = 1400")
+
+	v := f.verifier(t, checksum.Options{LockTimeout: heldFlushLockTimeout})
+	gate := &bracketGate{t: t, f: f}
+	outcome, err := f.checkLive(t, v, checksum.DivergenceRepair, checksum.LiveOptions{Flushes: gate})
+	require.NoError(t, err)
+	require.Len(t, outcome.Repairs, 1)
+	assert.Equal(t, chunk(t, 1001, 2000), outcome.Repairs[0].Mismatch.Chunk)
+	assert.Equal(t, 1, gate.pauses)
+	assert.Equal(t, 1, gate.resumes)
+	assert.False(t, gate.shareAtPause, "the hold is taken before the recopy transaction holds its lock")
+	assert.False(t, gate.shareAtResume, "the flushes resume only after the recopy transaction has let go of its lock")
+	f.assertConverged(t)
+}

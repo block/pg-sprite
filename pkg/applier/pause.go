@@ -22,13 +22,29 @@ import (
 // flight to commit or fail, or for ctx to end; a second Pause waits for the
 // first's resume; resume is safe to call more than once. Pause before Run
 // takes the hold at once, and a Run started under it flushes nothing until
-// resume.
+// resume. Status reports the hold as FlushesHeld from Pause's return until
+// the resume.
 func (c *Catchup) Pause(ctx context.Context) (resume func(), err error) {
 	if err := c.holdFlushes(ctx); err != nil {
 		return nil, err
 	}
+	c.markFlushesHeld(true)
 	var once sync.Once
-	return func() { once.Do(c.releaseFlushes) }, nil
+	return func() {
+		once.Do(func() {
+			c.markFlushesHeld(false)
+			c.releaseFlushes()
+		})
+	}, nil
+}
+
+// markFlushesHeld records in the status whether a Pause holds the flushes.
+// Only Pause and its resume call it: a cycle's own flush takes the gate
+// too, but is not a hold.
+func (c *Catchup) markFlushesHeld(held bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.status.FlushesHeld = held
 }
 
 // holdFlushes takes the flush gate, waiting for a cycle's flush to give it

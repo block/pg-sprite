@@ -204,14 +204,15 @@ func (o Options) retry() executor.RetryPolicy {
 //
 // Run does not close the pool; one pool serves any number of calls.
 func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options) (verdict.Verdict, error) {
-	return run(ctx, pool, st, opts, nil)
+	return run(ctx, pool, st, opts, nil, nil)
 }
 
-// run is Run for a statement that may be a diff-planned index adoption:
-// when adopts is set, st takes over that index, and execution checks the
-// index against the planned definition under the table's lock before
-// attaching it.
-func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, adopts *schemadiff.IndexAdoption) (verdict.Verdict, error) {
+// run is Run for a statement that may be a diff-planned index adoption or
+// constraint validation: when adopts is set, st takes over that index, and
+// when validates is set, st validates that constraint. Either way
+// execution checks the planned definition again under the table's lock
+// before acting on it.
+func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation) (verdict.Verdict, error) {
 	if err := opts.validate(); err != nil {
 		return verdict.Verdict{}, err
 	}
@@ -262,7 +263,7 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 			// submitted form runs natively as a blind bounded attempt
 			// instead of through the shadow table.
 			auditForce(opts.audit(), st, rs)
-			return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, logger)
+			return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, validates, logger)
 		}
 		execSQL := rs.ExecSQL
 		substituted := len(execSQL) != 1 || execSQL[0] != rs.Statement
@@ -273,19 +274,19 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 			execSQL, substituted = []string{canonical}, false
 			auditForce(opts.audit(), st, rs)
 		}
-		return execute(ctx, pool, st, execSQL, rs.Plan, substituted, forced, opts, adopts, logger)
+		return execute(ctx, pool, st, execSQL, rs.Plan, substituted, forced, opts, adopts, validates, logger)
 	case router.DispositionRewriteRequired:
 		if opts.Force == "" {
 			return rewriteRequiredVerdict(st), nil
 		}
 		auditForce(opts.audit(), st, rs)
-		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, logger)
+		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, validates, logger)
 	case router.DispositionUnavailable:
 		if opts.Force == "" {
 			return backendUnavailableVerdict(st, rs), nil
 		}
 		auditForce(opts.audit(), st, rs)
-		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, logger)
+		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, validates, logger)
 	case router.DispositionRefuse:
 		// A planner refusal means no known safe path — there is nothing
 		// bounded to acknowledge, so the force acknowledgement does not
@@ -376,13 +377,23 @@ func auditForce(audit *slog.Logger, st statement.Statement, rs router.Statement)
 // with the exact provisioning statement instead.
 func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	execSQL []string, plan planner.Plan, substituted, forced bool,
-	opts Options, adopts *schemadiff.IndexAdoption, logger *slog.Logger) (verdict.Verdict, error) {
+	opts Options, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, logger *slog.Logger) (verdict.Verdict, error) {
+	// An adoption or a validation is diff-planned SQL, which is never
+	// forced: the override exists for a submitted statement the router
+	// would substitute or decline.
 	if forced && adopts != nil {
-		// An adoption is diff-planned SQL, which is never forced: the
-		// override exists for a submitted statement the router would
-		// substitute or decline.
 		return verdict.Verdict{}, fmt.Errorf("%w: a forced attempt cannot carry the adoption of index %s",
 			executor.ErrInvariantViolation, adopts.Index)
+	}
+	if forced && validates != nil {
+		return verdict.Verdict{}, fmt.Errorf("%w: a forced attempt cannot carry the validation of constraint %s",
+			executor.ErrInvariantViolation, validates.Constraint)
+	}
+	if adopts != nil && validates != nil {
+		// The diff plans an adoption and a validation as separate
+		// statements; one statement carrying both is outside its contract.
+		return verdict.Verdict{}, fmt.Errorf("%w: one statement cannot carry both the adoption of index %s and the validation of constraint %s",
+			executor.ErrInvariantViolation, adopts.Index, validates.Constraint)
 	}
 	limit := opts.MaxTableSizeBytes
 	if !sizeGuardApplies(plan, substituted) {
@@ -437,6 +448,8 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 		err = executor.ExecuteNative(ctx, pool, pt, st, opts.Budget.Brief, retry)
 	case adopts != nil:
 		rep, err = executor.RunSequenceAdopting(ctx, pool, pt, execSQL, opts.Budget, retry, *adopts)
+	case validates != nil:
+		rep, err = executor.RunSequenceValidating(ctx, pool, pt, execSQL, opts.Budget, retry, *validates)
 	default:
 		rep, err = executor.RunSequence(ctx, pool, pt, execSQL, opts.Budget, retry)
 	}
