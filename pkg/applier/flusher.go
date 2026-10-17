@@ -93,7 +93,11 @@ type Result struct {
 	// shadow row, or from the source row under Key, and did not write: the
 	// row read can be newer than the stream, so the buffer takes each
 	// completion only once the stream has passed its read position (D13).
-	// The stream owner gives them to Buffer.Hold before its next Add.
+	// The stream owner gives them to Buffer.Hold before its next Add. Also
+	// held, with no completion, is a marker-bearing image of a row that did
+	// not move whose shadow row is absent: the source can have deleted the
+	// row before its chunk was read, with the DELETE still undelivered, so
+	// the image waits for the stream to pass the check's position (D13).
 	Held []HeldImage
 	// Skipped are the keys of the moved images the flush wrote as a delete
 	// because neither the old key's shadow row nor the source row under Key
@@ -181,9 +185,12 @@ func NewFlusher(target preflight.CopySwapTarget, shadow copier.Shadow, lock *dbc
 // shadow row under its key, deletes every key in the batch, and inserts
 // every image whole (CO-6); a constraint that refuses that too means a
 // collision with a row the batch does not name, and the flush returns
-// ErrBatchDeferred with the shadow unchanged. An image the source could not
-// have produced given the shadow — a marker for a row the shadow does not
-// hold — is ErrInvariantViolation, and the flush commits nothing. The
+// ErrBatchDeferred with the shadow unchanged. A marker-bearing image of a row
+// that did not move, whose shadow row is absent, is held without a
+// completion, since the source can have deleted the row before its chunk was
+// read; one that returns after the stream has passed that check, still
+// absent, is an image the source could not have produced given the shadow,
+// and is ErrInvariantViolation, with nothing committed. The
 // transaction runs under the lock session's Bind context, so losing the
 // table lock cancels the flush and it reports the loss. An empty batch is a
 // no-op.
@@ -238,6 +245,10 @@ func (f *Flusher) apply(ctx context.Context, tx pgx.Tx, batch Batch) (Result, er
 	}
 	var result Result
 	entries, err := f.completeMoved(ctx, tx, batch, &result)
+	if err != nil {
+		return Result{}, err
+	}
+	entries, err = f.holdAbsent(ctx, tx, entries, &result)
 	if err != nil {
 		return Result{}, err
 	}
@@ -369,9 +380,10 @@ func (f *Flusher) applyColumnWise(ctx context.Context, tx pgx.Tx, entries []Entr
 
 // writeImage upserts an image that is whole and updates one that still
 // carries a marker: the marker stands for the value in the shadow row under
-// the image's own key — a moved image was completed before this — so that
-// row must exist, and an update that finds no row is the protocol error D13
-// names, not a row to invent (CO-8).
+// the image's own key — a moved image was completed before this, and an
+// image whose row was absent was held (holdAbsent) — so that row must exist,
+// and an update that finds no row is the protocol error D13 names, not a row
+// to invent (CO-8).
 func (f *Flusher) writeImage(ctx context.Context, tx pgx.Tx, e *Entry, conv conversions) error {
 	present, markers := f.split(e)
 	if len(markers) == 0 {
@@ -382,7 +394,8 @@ func (f *Flusher) writeImage(ctx context.Context, tx pgx.Tx, e *Entry, conv conv
 		return err
 	}
 	if !found {
-		// INV: CO-8
+		// INV: CO-8 — a defensive backstop: holdAbsent has already found the
+		// row in this transaction, and nothing else deletes it.
 		return fmt.Errorf("%w (CO-8): flush key %d: image omits %v and the shadow holds no row to keep them from", ErrInvariantViolation, e.Key, markers)
 	}
 	return nil
@@ -412,6 +425,8 @@ func (f *Flusher) applyWholeRows(ctx context.Context, tx pgx.Tx, entries []Entry
 			return err
 		}
 		if !found {
+			// INV: CO-8 — a defensive backstop: holdAbsent has already found
+			// the row in this transaction, and nothing else deletes it.
 			_, markers := f.split(e)
 			return fmt.Errorf("%w (CO-8): flush key %d: image omits %v and the shadow holds no row to complete them from", ErrInvariantViolation, e.Key, markers)
 		}

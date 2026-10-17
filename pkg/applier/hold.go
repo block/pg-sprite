@@ -6,14 +6,19 @@ import (
 	"github.com/block/pg-sprite/pkg/decode"
 )
 
-// HeldImage is a moved image a Flush completed but did not write. The value
-// its markers stand for was read from a row that can be newer than the
-// stream — the old key's shadow row, which the copier read live, or the
-// source row under Key — so a change the stream has not delivered yet could
-// have put another row's value there. The flush hands the completion back
-// with the WAL position of its read, and the buffer writes the image in a
-// later flush once the stream has delivered everything the read could have
-// seen and nothing touched the key (D13).
+// HeldImage is an image a Flush did not write: a moved image it completed, or
+// a marker-bearing image of a row that did not move whose shadow row was
+// absent, which carries no completion and has Entry.AbsenceAwaited set (D13).
+//
+// The value a moved image's markers stand for was read from a row that can be
+// newer than the stream — the old key's shadow row, which the copier read
+// live, or the source row under Key — so a change the stream has not
+// delivered yet could have put another row's value there. The flush hands the
+// completion back with the WAL position of its read, and the buffer writes
+// the image in a later flush once the stream has delivered everything the
+// read could have seen and nothing touched the key (D13). An image held for
+// an absent shadow row waits the same way, for the stream to deliver the
+// DELETE that removed the row from the source.
 type HeldImage struct {
 	// Entry is the image as the batch carried it, markers intact.
 	Entry Entry
@@ -26,10 +31,10 @@ type HeldImage struct {
 	// FromSource reports a read of the source row under Key; false is a read
 	// of the shadow row under the old key.
 	FromSource bool
-	// ReadLSN is the WAL insert position at the read. Every change the read
-	// saw had committed below it, so a stream that has delivered every
-	// change committed through ReadLSN has delivered every change the read
-	// knew about.
+	// ReadLSN is the WAL insert position at the read, or at the check that
+	// found the shadow row absent. Every change the read saw had committed
+	// below it, so a stream that has delivered every change committed through
+	// ReadLSN has delivered every change the read knew about.
 	ReadLSN decode.LSN
 }
 

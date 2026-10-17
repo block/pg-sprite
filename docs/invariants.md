@@ -222,6 +222,10 @@ the convergence tests for key moves and unique-key swaps start their load after 
 landed. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
+marker-bearing UPDATE for a key whose row the source then deleted before its chunk was read,
+with the DELETE not yet delivered, is held until the stream passes the flush's check and the
+catch-up converges, while the same image for a row the source still holds and the shadow lost
+fails closed once the stream has passed it (CO-8); a
 key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark
 1000) asserts key 5 is deleted from the shadow. *Source:* this doc set (Spirit's model
 translated).
@@ -279,8 +283,11 @@ for an unchanged-TOAST column (CO-8): before deleting, it completes any survivin
 still carries a marker from the current shadow row — the row for the key, or for
 `ChangeEvent.OldKey` when the UPDATE moved the primary key (`SELECT … FOR UPDATE`, same
 transaction). An absent shadow row for an image whose row did **not** move is an invariant
-violation (fail closed) — CO-5's merge rule guarantees the marker only survives for values that
-live in a shadow row the batch did not create; a **moved** image whose old key's shadow row is
+violation (fail closed) once the stream has passed a read that found it absent — CO-5's merge
+rule guarantees the marker only survives for values that live in a shadow row the batch did not
+create, and the row is absent legitimately only while the DELETE that removed it from the source
+before its chunk was read is still undelivered, so the first absence holds the image instead
+(CO-8, D13); a **moved** image whose old key's shadow row is
 absent, or whose old key the source has reused (`Entry.OldKeyReused`), is instead completed from
 the source row under `Key`, because a move captured while the old key was uncut leaves no shadow
 row under either key and the buffer cannot tell that history from one whose old row landed, and
@@ -342,7 +349,14 @@ the relation rather than line columns up by guess; `pkg/applier` `Buffer` keeps 
 merge, and `Flusher` writes a marker-bearing image of a row that did not move as an `UPDATE` of
 only its present columns — zero rows updated is an `ErrInvariantViolation`, never an insert
 that invents the omitted value — and completes a marker before the whole-row fallback inserts
-the row, from the shadow row the marker refers to, refusing when that row is absent; a moved
+the row, from the shadow row the marker refers to, refusing when that row is absent. The
+shadow row of such an image is absent without error exactly when the source deleted the row
+before the chunk covering its key was read and the DELETE has not reached the stream: before it
+writes, the flush checks that the row is there, and for an image whose row is absent it writes
+nothing, returns the image held with the read's WAL position and `Entry.AbsenceAwaited` set,
+and the buffer lets it in only once the stream has passed that position — by then a DELETE or
+INSERT has replaced the image, and one that returns still flagged for an absent row is the
+`ErrInvariantViolation` above; a moved
 image's marker, whose value lives under another key, is completed from the old key's shadow row
 or the source row and held in the buffer until the stream has passed the read, so a value read
 from a row newer than the stream is never written over the stream's own.
