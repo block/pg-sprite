@@ -22,7 +22,7 @@ const (
 	// something else, and is incompatible whatever its fingerprints say.
 	// In this format a run that has built its shadow carries the shadow's
 	// proof in the row, and the model fingerprints digest the table's
-	// storage parameters. What the fingerprints digest is part of the
+	// storage parameters and its columns' sequence declarations. What the fingerprints digest is part of the
 	// format: a row whose fingerprints were computed another way would
 	// otherwise surface as a fingerprint mismatch, blaming the run, rather
 	// than as a row an older engine wrote.

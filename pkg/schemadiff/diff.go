@@ -3,6 +3,7 @@ package schemadiff
 import (
 	"errors"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 
@@ -64,6 +65,12 @@ const (
 	// ChangeAddForeignKey adds a foreign-key constraint. Desired-state
 	// execution refuses it: foreign-key changes are planned, not run.
 	ChangeAddForeignKey ChangeKind = "add-foreign-key"
+	// ChangeValidateConstraint validates a live check constraint left NOT
+	// VALID, the state an interrupted online add leaves behind.
+	ChangeValidateConstraint ChangeKind = "validate-constraint"
+	// ChangeValidateForeignKey validates a live foreign key left NOT VALID.
+	// Desired-state execution refuses it like every foreign-key change.
+	ChangeValidateForeignKey ChangeKind = "validate-foreign-key"
 	// ChangeCreateIndex creates an index.
 	ChangeCreateIndex ChangeKind = "create-index"
 )
@@ -88,13 +95,16 @@ func ChangeKinds() []ChangeKind {
 		ChangeDropNotNull,
 		ChangeAddConstraint,
 		ChangeAddForeignKey,
+		ChangeValidateConstraint,
+		ChangeValidateForeignKey,
 		ChangeCreateIndex,
 	}
 }
 
-// IsForeignKey reports whether the kind adds or drops a foreign key.
+// IsForeignKey reports whether the kind adds, drops, or validates a foreign
+// key.
 func (k ChangeKind) IsForeignKey() bool {
-	return k == ChangeAddForeignKey || k == ChangeDropForeignKey
+	return k == ChangeAddForeignKey || k == ChangeDropForeignKey || k == ChangeValidateForeignKey
 }
 
 // Change is one derived statement of the ordered plan.
@@ -109,6 +119,35 @@ type Change struct {
 	// Destructive changes are gated by the caller, never executed
 	// silently.
 	Destructive bool `json:"destructive,omitempty"`
+	// Adopts is set on an ADD CONSTRAINT ... USING INDEX: the live index
+	// the constraint takes over, with the definition the diff matched it
+	// against. The statement names only the index, so execution checks
+	// the definition again under the table's lock before attaching it.
+	// The SQL already identifies the change, so it stays out of the JSON.
+	Adopts *IndexAdoption `json:"-"`
+	// Validates is set on a VALIDATE CONSTRAINT: the live constraint it
+	// validates, with the definition the diff matched it against. The
+	// statement names only the constraint, so execution checks the
+	// definition again under the table's lock before validating it.
+	Validates *ConstraintValidation `json:"-"`
+}
+
+// IndexAdoption is an index a new primary key or unique constraint takes
+// over, and the definition, as introspection reads it (pg_get_indexdef with
+// the schema qualification removed), that the index must still have when
+// it does.
+type IndexAdoption struct {
+	Index string
+	Def   string
+}
+
+// ConstraintValidation is a NOT VALID constraint a planned VALIDATE
+// CONSTRAINT validates, and the definition, as introspection reads it
+// (pg_get_constraintdef, NOT VALID suffix included), that the constraint
+// must still have when it does.
+type ConstraintValidation struct {
+	Constraint string
+	Def        string
 }
 
 // Diff derives the ordered statement list that converges live onto desired.
@@ -168,9 +207,15 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	// alone. Only a plain table's invalid entry is an unfinished build.
 	partitioned := live.PartitionKey != ""
 
+	adopted := adoptableIndexes(partitioned, liveCons, liveIdx, desired.Constraints)
+
 	// Indexes to drop: gone from desired, or changed (dropped here,
-	// recreated in the create bucket below).
+	// recreated in the create bucket below). An index a new key constraint
+	// adopts stays: the constraint takes it over below.
 	for _, ix := range live.Indexes {
+		if _, ok := adopted[ix.Name]; ok {
+			continue
+		}
 		if indexNeedsDrop(partitioned, ix, desiredIdx) {
 			changes = append(changes, Change{
 				SQL:         "DROP INDEX " + pgx.Identifier{schema, ix.Name}.Sanitize(),
@@ -181,9 +226,11 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 	}
 
 	// Constraints to drop: gone from desired, or changed (re-added below).
+	// One left NOT VALID with the desired definition is validated below
+	// instead.
 	for _, con := range live.Constraints {
 		want, ok := desiredCons[con.Name]
-		if !ok || want.Def != con.Def {
+		if !ok || (want.Def != con.Def && !validatesInPlace(con, want)) {
 			changes = append(changes, Change{
 				SQL:         "ALTER TABLE " + table + " DROP CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
 				Kind:        dropConstraintKind(con),
@@ -219,6 +266,9 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 			if col.Collation != "" {
 				return nil, fmt.Errorf("%w: column %q has an explicit collation (%s); the plan cannot carry it", ErrUnsupportedChange, col.Name, col.Collation)
 			}
+			if err := identityExpressible(col); err != nil {
+				return nil, fmt.Errorf("%w: %w", ErrUnsupportedChange, err)
+			}
 			changes = append(changes, Change{
 				SQL:  "ALTER TABLE " + table + " ADD COLUMN " + columnDef(col),
 				Kind: ChangeAddColumn,
@@ -241,7 +291,23 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 
 	// Constraints to add: new, or re-added after a definition change.
 	for _, con := range desired.Constraints {
+		if _, ok := adopted[con.Name]; ok {
+			changes = append(changes, Change{
+				SQL:    adoptIndexSQL(table, con),
+				Kind:   ChangeAddConstraint,
+				Adopts: &IndexAdoption{Index: con.Name, Def: con.IndexDef},
+			})
+			continue
+		}
 		had, ok := liveCons[con.Name]
+		if ok && validatesInPlace(had, con) {
+			changes = append(changes, Change{
+				SQL:       "ALTER TABLE " + table + " VALIDATE CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize(),
+				Kind:      validateConstraintKind(con),
+				Validates: &ConstraintValidation{Constraint: con.Name, Def: had.Def},
+			})
+			continue
+		}
 		if !ok || had.Def != con.Def {
 			sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + pgx.Identifier{con.Name}.Sanitize() + " " + con.Def
 			if con.ForeignKey {
@@ -274,7 +340,8 @@ func Diff(schema string, live, desired Model) ([]Change, error) {
 
 // alterColumnChanges derives the in-place column alterations between two
 // versions of the same column. Identity and generation cannot be altered in
-// place, so a delta there is refused as unsupported. A stored generated
+// place, so a delta there is refused as unsupported, and so is a delta in
+// an identity's sequence declaration. A stored generated
 // column whose expression alone differs is planned as SET EXPRESSION, the
 // one statement that states the change: it keeps the column's indexes,
 // where a drop and re-add would silently take them with it. The planner
@@ -288,6 +355,19 @@ func alterColumnChanges(table string, live, desired Column) ([]Change, error) {
 	}
 	if live.Virtual != desired.Virtual {
 		return nil, fmt.Errorf("%w: column %q virtual generated change", ErrUnsupportedChange, live.Name)
+	}
+	// An identity's sequence declaration is part of what the file states,
+	// and the diff does not converge it, so a difference fails closed. A
+	// serial's is not compared: the serial shorthand cannot state one, so
+	// the desired side always carries the defaults and export refuses a
+	// live serial declared otherwise.
+	// A type change on the column retypes its identity sequence too, so
+	// live is compared as the type change would leave it.
+	if desired.Identity != IdentityNone {
+		if after := identitySequenceAfterRetype(live, desired.Type); !sameSequence(after, desired.Sequence) {
+			return nil, fmt.Errorf("%w: column %q identity sequence differs between live (%s) and desired (%s)",
+				ErrUnsupportedChange, live.Name, formatSequence(after), formatSequence(desired.Sequence))
+		}
 	}
 	// A collation change rewrites the column and rebuilds its indexes —
 	// the engine does not derive it, so a delta fails closed instead of
@@ -360,9 +440,9 @@ func columnDef(c Column) string {
 	case c.Virtual:
 		def += " GENERATED ALWAYS AS (" + c.Default + ") VIRTUAL"
 	case c.Identity == IdentityAlways:
-		def += " GENERATED ALWAYS AS IDENTITY"
+		def += " GENERATED ALWAYS AS IDENTITY" + identityOptions(c.Sequence)
 	case c.Identity == IdentityByDefault:
-		def += " GENERATED BY DEFAULT AS IDENTITY"
+		def += " GENERATED BY DEFAULT AS IDENTITY" + identityOptions(c.Sequence)
 	case c.Default != "":
 		def += " DEFAULT " + c.Default
 	}
@@ -370,6 +450,91 @@ func columnDef(c Column) string {
 		def += " NOT NULL"
 	}
 	return def
+}
+
+// identityOptions renders an identity's sequence options clause, empty
+// when the sequence is declared at the defaults. The sequence's type is
+// not stated: it is always the column's, which identityExpressible checks.
+func identityOptions(seq *SequenceOptions) string {
+	if seq == nil {
+		return ""
+	}
+	return " (" + sequenceClause(*seq) + ")"
+}
+
+// sequenceClause spells every declared option, so the declaration does not
+// depend on which defaults the server would fill in.
+func sequenceClause(seq SequenceOptions) string {
+	cycle := "NO CYCLE"
+	if seq.Cycle {
+		cycle = "CYCLE"
+	}
+	return fmt.Sprintf("START WITH %d INCREMENT BY %d MINVALUE %d MAXVALUE %d CACHE %d %s",
+		seq.Start, seq.Increment, seq.Min, seq.Max, seq.Cache, cycle)
+}
+
+// identitySequenceAfterRetype returns the declaration live's identity
+// sequence carries once ALTER COLUMN ... TYPE gives the column type to. The
+// server retypes the identity sequence with its column, and a bound equal
+// to the sequence's old type's own limit was never chosen by anyone, so it
+// follows the new type; a declared bound stays as written. That is the
+// same rule the copy-and-swap cutover applies to the sequences it hands
+// over. A column keeping its type, or a type that is not an integer type,
+// leaves the declaration as it is.
+func identitySequenceAfterRetype(live Column, to string) *SequenceOptions {
+	if live.Type == to {
+		return live.Sequence
+	}
+	opts, ok := defaultSequenceOptions(live.Type)
+	if live.Sequence != nil {
+		opts, ok = *live.Sequence, true
+	}
+	fromMin, fromMax, fromOK := integerTypeRange(opts.Type)
+	toMin, toMax, toOK := integerTypeRange(to)
+	if !ok || !fromOK || !toOK {
+		return live.Sequence
+	}
+	opts.Type = to
+	if opts.Min == fromMin {
+		opts.Min = toMin
+	}
+	if opts.Max == fromMax {
+		opts.Max = toMax
+	}
+	return declaredSequence(to, opts)
+}
+
+// integerTypeRange returns the smallest and largest value of an integer
+// type a sequence can have, and false for any other type.
+func integerTypeRange(typ string) (minValue, maxValue int64, ok bool) {
+	switch typ {
+	case "smallint":
+		return math.MinInt16, math.MaxInt16, true
+	case "integer":
+		return math.MinInt32, math.MaxInt32, true
+	case "bigint":
+		return math.MinInt64, math.MaxInt64, true
+	default:
+		return 0, 0, false
+	}
+}
+
+// sameSequence reports whether two recorded sequence declarations match;
+// nil is the default declaration on both sides.
+func sameSequence(a, b *SequenceOptions) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
+}
+
+// formatSequence describes a recorded sequence declaration for an error
+// message.
+func formatSequence(seq *SequenceOptions) string {
+	if seq == nil {
+		return "the defaults"
+	}
+	return seq.Type + " " + sequenceClause(*seq)
 }
 
 // formatOptions lists storage parameters for an error message, "none" when
@@ -390,6 +555,57 @@ func columnsByName(cols []Column) map[string]Column {
 	return m
 }
 
+// adoptableIndexes names the live indexes a new primary key or unique
+// constraint can take over with ADD CONSTRAINT ... USING INDEX, keyed by
+// index name, which is also the constraint's. Dropping such an index and
+// letting the constraint build its own would leave the table without the
+// uniqueness guarantee and without the index for as long as the rebuild
+// runs. A live index qualifies when it has the constraint's name and is
+// exactly the index the constraint would build, so adopting it leaves the
+// table as building the constraint fresh would. An unfinished build keeps
+// the drop and rebuild, and so does a partitioned parent, where the server
+// refuses USING INDEX.
+func adoptableIndexes(partitioned bool, liveCons map[string]Constraint, liveIdx map[string]Index, desired []Constraint) map[string]struct{} {
+	adopted := make(map[string]struct{})
+	if partitioned {
+		return adopted
+	}
+	for _, con := range desired {
+		if con.IndexDef == "" {
+			continue
+		}
+		if _, ok := liveCons[con.Name]; ok {
+			continue
+		}
+		ix, ok := liveIdx[con.Name]
+		if !ok || ix.Invalid || ix.Def != con.IndexDef {
+			continue
+		}
+		adopted[con.Name] = struct{}{}
+	}
+	return adopted
+}
+
+// adoptIndexSQL is the statement that makes a primary key or unique
+// constraint take over the live index of its own name, with the
+// constraint's declared deferrability: the server marks the index
+// deferred as it attaches it.
+func adoptIndexSQL(table string, con Constraint) string {
+	key := "UNIQUE"
+	if con.Primary {
+		key = "PRIMARY KEY"
+	}
+	name := pgx.Identifier{con.Name}.Sanitize()
+	sql := "ALTER TABLE " + table + " ADD CONSTRAINT " + name + " " + key + " USING INDEX " + name
+	if con.Deferrable {
+		sql += " DEFERRABLE"
+	}
+	if con.InitiallyDeferred {
+		sql += " INITIALLY DEFERRED"
+	}
+	return sql
+}
+
 // dropConstraintKind classifies a constraint drop, keeping foreign keys in
 // their own kind so desired-state execution can refuse them.
 func dropConstraintKind(con Constraint) ChangeKind {
@@ -405,6 +621,27 @@ func addConstraintKind(con Constraint) ChangeKind {
 		return ChangeAddForeignKey
 	}
 	return ChangeAddConstraint
+}
+
+// validateConstraintKind classifies a constraint validation the same way.
+func validateConstraintKind(con Constraint) ChangeKind {
+	if con.ForeignKey {
+		return ChangeValidateForeignKey
+	}
+	return ChangeValidateConstraint
+}
+
+// notValidSuffix is what pg_get_constraintdef appends to the definition of a
+// constraint the server has not validated, and the only difference from the
+// definition of the same constraint validated.
+const notValidSuffix = " NOT VALID"
+
+// validatesInPlace reports whether live is the desired constraint left NOT
+// VALID, so validating it converges the two: the drop and re-add the
+// definitions' difference would otherwise plan is destructive, and the
+// re-add scans the table again.
+func validatesInPlace(live, desired Constraint) bool {
+	return live.NotValid && !desired.NotValid && live.Def == desired.Def+notValidSuffix
 }
 
 // constraintsByName indexes constraints for lookup during the diff.

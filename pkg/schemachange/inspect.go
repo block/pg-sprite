@@ -104,6 +104,14 @@ func inspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 	if err != nil {
 		return BuiltShadow{}, fmt.Errorf("introspect shadow %s.%s: %w", target.Schema(), shadow, err)
 	}
+	sourcePositions, err := readColumnPositions(ctx, tx, oid)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
+	shadowPositions, err := readColumnPositions(ctx, tx, shadowOID)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
 	identities, err := readIdentityColumns(ctx, tx, oid)
 	if err != nil {
 		return BuiltShadow{}, err
@@ -122,7 +130,7 @@ func inspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 	if err := tx.Commit(ctx); err != nil {
 		return BuiltShadow{}, fmt.Errorf("commit shadow inspection: %w", err)
 	}
-	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity, shadowFidelity, conversions)
+	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, sourcePositions, shadowPositions, identities, fidelity, shadowFidelity, conversions)
 }
 
 // resolveShadow returns the OID of the relation wearing the shadow's name,

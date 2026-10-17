@@ -10,6 +10,8 @@ package executor
 import (
 	"errors"
 	"fmt"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 // CreateShapeCause is the stable identity of why the create path refuses a
@@ -66,6 +68,39 @@ func CreateShapeCauses() []CreateShapeCause {
 		CreateShapeDuplicateName,
 		CreateShapeMultipleOperations,
 		CreateShapeUnsupportedKind,
+	}
+}
+
+// Class is the routing class of the cause, from docs/refusal-classes.md:
+// what kind of boundary the consumer is looking at. A shape outside the
+// absence proof — a partition, an inheritance parent, a LIKE source, a
+// composite type — a statement kind the create path does not run, and a
+// declared foreign key are a capability boundary: proofs and routes the
+// engine could mint later. A name-only IF NOT EXISTS, a desired set that
+// claims a name twice, and a concurrent build on a table born this run are
+// by design: permanent decisions whose Description names the deliberate
+// path. Two parse boundaries disagreeing about a statement's operation
+// count is an invariant violation: a state this build should not produce,
+// which no retry changes. The class is a triage decision; the cause's row
+// in the document decides what the consumer does next. An unknown cause
+// has no class.
+func (c CreateShapeCause) Class() refusal.Class {
+	switch c {
+	case CreateShapePartitionOf,
+		CreateShapeInherits,
+		CreateShapeLike,
+		CreateShapeOfType,
+		CreateShapeForeignKey,
+		CreateShapeUnsupportedKind:
+		return refusal.ClassCapabilityBoundary
+	case CreateShapeIfNotExists,
+		CreateShapeConcurrently,
+		CreateShapeDuplicateName:
+		return refusal.ClassByDesign
+	case CreateShapeMultipleOperations:
+		return refusal.ClassInvariantViolation
+	default:
+		return ""
 	}
 }
 

@@ -7,6 +7,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -43,7 +44,7 @@ func New(version string) *CLI {
 // database, so every entry point carries the same bounded session defaults.
 type DBFlags struct {
 	URL              string        `help:"PostgreSQL connection URL or key=value DSN." env:"PGSPRITE_URL" required:""`
-	CACert           string        `help:"CA bundle path for verify-full TLS. RDS/Aurora endpoints verify with the embedded bundle automatically." env:"PGSPRITE_CA_CERT" type:"existingfile"`
+	CACert           string        `help:"CA bundle path for verify-full TLS. Overrides the URL's sslmode: every network host is verified against the bundle, with no plaintext or unverified fallback; refused with sslmode=disable. RDS/Aurora endpoints verify with the embedded bundle automatically." env:"PGSPRITE_CA_CERT" type:"existingfile"`
 	LockTimeout      time.Duration `help:"Session lock_timeout applied to every statement." default:"3s"`
 	StatementTimeout time.Duration `help:"Session statement_timeout applied to every statement." default:"30s"`
 	Debug            bool          `help:"Log statement-level tracing and lifecycle diagnostics to stderr."`
@@ -111,10 +112,13 @@ type MigrateCmd struct {
 	IndexBuildTimeout time.Duration `help:"Overall bound (statement_timeout) for one concurrent index build step; expect large tables to need a generous value." default:"30m"`
 	ValidateTimeout   time.Duration `help:"Overall bound (statement_timeout) for one VALIDATE CONSTRAINT step; expect large tables to need a generous value." default:"30m"`
 	Force             string        `help:"Run the submitted form as-is, overriding a safer-sequence substitution or a rewrite-required/backend-unavailable refusal. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly. The forced run is still parsed, preflighted, size-guarded, and budget-bounded; planner refusals (no known safe path) and unsupported statement kinds cannot be forced." placeholder:"SCHEMA.TABLE"`
-	AcceptBlocking    string        `help:"Run one refused blocking index statement as-is, without online safety: a plain single-relation DROP INDEX, REINDEX INDEX, or REINDEX TABLE. The value is the typed acknowledgement: it must name the schema-qualified table whose lock you accept (the index's owning table) exactly. The statement runs in an engine-owned transaction under --lock-timeout and an explicitly supplied --statement-timeout, which must be longer than --lock-timeout; an exhausted lock budget refuses (exit 2), a cancelled or failed statement fails (exit 1), a commit exits 3. Every other refusal stands. Cannot be combined with --force or --dry-run." placeholder:"SCHEMA.TABLE"`
+	AcceptBlocking    string        `help:"Run one refused blocking index statement as-is, without online safety: a plain single-relation DROP INDEX (not CASCADE), REINDEX INDEX, or REINDEX TABLE. The value is the typed acknowledgement: it must name the schema-qualified table whose lock you accept (the index's owning table) exactly. The statement runs in an engine-owned transaction under --lock-timeout and an explicitly supplied --statement-timeout, which must be longer than --lock-timeout; an exhausted lock budget refuses (exit 2), a cancelled or failed statement fails (exit 1), a commit exits 3. Every other refusal stands. Cannot be combined with --force or --dry-run." placeholder:"SCHEMA.TABLE"`
 	LockAttempts      int           `help:"Maximum bounded attempts when native DDL exceeds lock_timeout; 1 disables retry." default:"3"`
 	LockBackoff       time.Duration `help:"Initial exponential backoff between lock-timeout attempts." default:"100ms"`
 	LockBackoffMax    time.Duration `help:"Maximum exponential backoff between lock-timeout attempts." default:"1s"`
+	FreeDisk          byteSize      `help:"Free space on the volume the table lives on, for a statement the planner routes to copy-and-swap; the preflight refuses the run when the shadow table and its indexes would not fit (binary units: B, KiB, MiB, GiB, TiB). Unset means no space and refuses." name:"free-disk" placeholder:"SIZE"`
+	KeepOld           bool          `help:"After a copy-and-swap, keep the retained source table under its _old name for a rollback window you end by hand, instead of dropping it before the run reports done." name:"keep-old"`
+	Quiesced          bool          `help:"Declare that nothing writes the table for the length of a copy-and-swap. The run then fences writes instead of streaming them through a replication slot, and needs no logical decoding from the server; a write that reaches the fence fails." name:"quiesced"`
 	DryRun            bool          `help:"Classify and route the statement, print the plan, and execute nothing."`
 	JSON              bool          `help:"Emit the verdict (or dry-run plan) as JSON."`
 }
@@ -131,7 +135,8 @@ type MigrateCmd struct {
 // outage bound, so the operator has to state it. Kong records which flags
 // the command line actually carried, which is the only place "explicitly
 // supplied" is observable — the value alone cannot tell a typed default
-// from an inherited one.
+// from an inherited one. The copy-and-swap policy flags govern a run, so
+// they have no meaning on a dry run either.
 func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 	if err := c.validateInput(); err != nil {
 		return err
@@ -150,6 +155,13 @@ func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 	}
 	if c.AcceptBlocking != "" && !flagSupplied(kctx, "statement-timeout") {
 		return errors.New("--accept-blocking requires --statement-timeout on the same command line: it is the outage bound you accept after the lock is granted, and the default is not an acknowledgement")
+	}
+	if c.DryRun {
+		for _, name := range []string{"free-disk", "keep-old", "quiesced"} {
+			if flagSupplied(kctx, name) {
+				return fmt.Errorf("--%s cannot be combined with --dry-run: the dry run executes nothing, so a copy-and-swap policy has nothing to govern", name)
+			}
+		}
 	}
 	return nil
 }

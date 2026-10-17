@@ -128,7 +128,7 @@ func TestDryRunTextBackendUnavailable(t *testing.T) {
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
 	assert.Contains(t, text, "error[backend-unavailable]:\n  refused — needs the copy-and-swap backend")
-	assert.Contains(t, text, "note[type-rewrite]:\n  alter column type — the type conversion forces a full")
+	assert.Contains(t, text, "note[type-rewrite]:\n  alter column type — converting or checking every row for the column's\n  type forces a full")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#backend-unavailable\n")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#type-rewrite\n")
 	assert.Contains(t, text, "plan:\n  public.users (PostgreSQL 16.10) — 1 statement, 0 steps to run, 1 refused\n")

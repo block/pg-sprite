@@ -6,6 +6,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -110,9 +111,17 @@ func gateRefusal(kind statement.Kind, concurrent bool, target statement.IndexTar
 	case statement.KindAlterTable, statement.KindCreateIndex:
 		return verdict.Refusal{}, false
 	case statement.KindDropIndex, statement.KindReindex:
-		if concurrent {
+		// A concurrent form is the safe idiom to run directly only when
+		// PostgreSQL accepts it: DROP INDEX CONCURRENTLY names exactly one
+		// index and takes no CASCADE, so a wider concurrent drop is refused
+		// as the plain one would be rather than pointed at a direct run the
+		// server rejects.
+		if concurrent && (kind == statement.KindReindex || target == statement.IndexTargetSingleRelation) {
 			return verdict.NoOnlineSafetyProblem(verdict.ReasonIndexStatement, verdict.OwnerDirectOperator), true
 		}
+		// INV: AB-4 — only a statement whose whole scope is one relation is
+		// at the eligible site; a cascading drop is not, so the
+		// acknowledgement cannot reach it.
 		site := verdict.RefusalSiteIndexOther
 		if target == statement.IndexTargetSingleRelation {
 			site = verdict.RefusalSiteIndexSingleRelation
@@ -161,6 +170,26 @@ func admissionRefusal(err error) (verdict.Refusal, bool) {
 	if errors.Is(err, executor.ErrIfNotExistsUnsupported) {
 		// The sentinel form of the if-not-exists create-shape cause.
 		return verdict.ByDesign(verdict.ReasonUnsupportedStatement), true
+	}
+	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
+}
+
+// desiredShapeSentinels is the closed set of desired-file shapes the
+// planner refuses before it builds anything: a CREATE TABLE that names a
+// live parent. RunDesired maps them to a refusal, since nothing was
+// planned or executed.
+func desiredShapeSentinels() []error {
+	return []error{
+		schemadiff.ErrDesiredPartitionOf,
+		schemadiff.ErrDesiredInherits,
+	}
+}
+
+// desiredShapeRefusal classifies a desired-file shape refusal. ok is false
+// for an error outside desiredShapeSentinels().
+func desiredShapeRefusal(err error) (verdict.Refusal, bool) {
+	if !isInSentinelSet(err, desiredShapeSentinels()) {
+		return verdict.Refusal{}, false
 	}
 	return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
 }
