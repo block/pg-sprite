@@ -19,7 +19,8 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 )
 
-// TLSPostgres describes a TLS-only PostgreSQL started by StartPostgresTLS.
+// TLSPostgres describes a TLS-capable PostgreSQL started by StartPostgresTLS
+// or StartPostgresTLSOrPlaintext.
 type TLSPostgres struct {
 	// URL is the connection URL without an sslmode parameter, so the
 	// caller's TLS configuration decides the handshake.
@@ -33,9 +34,11 @@ type TLSPostgres struct {
 }
 
 // tlsInitScript runs as the postgres user during initdb: it installs the
-// server certificate and restricts pg_hba to TLS-only TCP connections, so
-// every network connection in the test must complete a TLS handshake.
-const tlsInitScript = `#!/bin/sh
+// server certificate and sets pg_hba to the given TCP connection type —
+// "hostssl" accepts only connections that complete a TLS handshake, "host"
+// also accepts plaintext ones.
+func tlsInitScript(hbaType string) string {
+	return `#!/bin/sh
 set -e
 cp /tls/server.crt /tls/server.key "$PGDATA"/
 chmod 0600 "$PGDATA"/server.key
@@ -46,16 +49,30 @@ ssl_key_file = 'server.key'
 EOF
 cat > "$PGDATA"/pg_hba.conf <<EOF
 local all all trust
-hostssl all all 0.0.0.0/0 scram-sha-256
-hostssl all all ::/0 scram-sha-256
+` + hbaType + ` all all 0.0.0.0/0 scram-sha-256
+` + hbaType + ` all all ::/0 scram-sha-256
 EOF
 `
+}
 
 // StartPostgresTLS starts a disposable PostgreSQL container that accepts
 // only TLS connections, using a CA generated for this test. Unlike
 // StartPostgres it never uses PG_DSN — the whole point is controlling the
 // server's TLS posture. Set SKIP_INTEGRATION=1 to skip.
 func StartPostgresTLS(t *testing.T) TLSPostgres {
+	t.Helper()
+	return startPostgresTLS(t, "hostssl")
+}
+
+// StartPostgresTLSOrPlaintext is StartPostgresTLS for a server that also
+// accepts plaintext TCP connections, so a client that falls back from a
+// failed TLS handshake would succeed rather than be refused.
+func StartPostgresTLSOrPlaintext(t *testing.T) TLSPostgres {
+	t.Helper()
+	return startPostgresTLS(t, "host")
+}
+
+func startPostgresTLS(t *testing.T, hbaType string) TLSPostgres {
 	t.Helper()
 	if os.Getenv("SKIP_INTEGRATION") != "" {
 		t.Skip("SKIP_INTEGRATION set; skipping test that needs a database")
@@ -66,7 +83,7 @@ func StartPostgresTLS(t *testing.T) TLSPostgres {
 	untrustedCAPath := filepath.Join(dir, "untrusted-ca.crt")
 	writeCACert(t, untrustedCAPath)
 	scriptPath := filepath.Join(dir, "000-tls.sh")
-	require.NoError(t, os.WriteFile(scriptPath, []byte(tlsInitScript), 0o755))
+	require.NoError(t, os.WriteFile(scriptPath, []byte(tlsInitScript(hbaType)), 0o755))
 
 	// t.Context only governs the start request; the running container is
 	// not tied to it and is terminated via t.Cleanup below.

@@ -37,6 +37,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -204,14 +206,15 @@ func (o Options) retry() executor.RetryPolicy {
 //
 // Run does not close the pool; one pool serves any number of calls.
 func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options) (verdict.Verdict, error) {
-	return run(ctx, pool, st, opts, nil)
+	return run(ctx, pool, st, opts, nil, nil)
 }
 
-// run is Run for a statement that may be a diff-planned index adoption:
-// when adopts is set, st takes over that index, and execution checks the
-// index against the planned definition under the table's lock before
-// attaching it.
-func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, adopts *schemadiff.IndexAdoption) (verdict.Verdict, error) {
+// run is Run for a statement that may be a diff-planned index adoption or
+// constraint validation: when adopts is set, st takes over that index, and
+// when validates is set, st validates that constraint. Either way
+// execution checks the planned definition again under the table's lock
+// before acting on it.
+func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation) (verdict.Verdict, error) {
 	if err := opts.validate(); err != nil {
 		return verdict.Verdict{}, err
 	}
@@ -262,7 +265,7 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 			// submitted form runs natively as a blind bounded attempt
 			// instead of through the shadow table.
 			auditForce(opts.audit(), st, rs)
-			return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, logger)
+			return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, validates, logger)
 		}
 		execSQL := rs.ExecSQL
 		substituted := len(execSQL) != 1 || execSQL[0] != rs.Statement
@@ -273,19 +276,19 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 			execSQL, substituted = []string{canonical}, false
 			auditForce(opts.audit(), st, rs)
 		}
-		return execute(ctx, pool, st, execSQL, rs.Plan, substituted, forced, opts, adopts, logger)
+		return execute(ctx, pool, st, execSQL, rs.Plan, substituted, forced, opts, adopts, validates, logger)
 	case router.DispositionRewriteRequired:
 		if opts.Force == "" {
-			return rewriteRequiredVerdict(st), nil
+			return rewriteRequiredVerdict(st, rs)
 		}
 		auditForce(opts.audit(), st, rs)
-		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, logger)
+		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, validates, logger)
 	case router.DispositionUnavailable:
 		if opts.Force == "" {
 			return backendUnavailableVerdict(st, rs), nil
 		}
 		auditForce(opts.audit(), st, rs)
-		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, logger)
+		return execute(ctx, pool, st, []string{canonical}, rs.Plan, false, true, opts, adopts, validates, logger)
 	case router.DispositionRefuse:
 		// A planner refusal means no known safe path — there is nothing
 		// bounded to acknowledge, so the force acknowledgement does not
@@ -376,13 +379,23 @@ func auditForce(audit *slog.Logger, st statement.Statement, rs router.Statement)
 // with the exact provisioning statement instead.
 func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	execSQL []string, plan planner.Plan, substituted, forced bool,
-	opts Options, adopts *schemadiff.IndexAdoption, logger *slog.Logger) (verdict.Verdict, error) {
+	opts Options, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, logger *slog.Logger) (verdict.Verdict, error) {
+	// An adoption or a validation is diff-planned SQL, which is never
+	// forced: the override exists for a submitted statement the router
+	// would substitute or decline.
 	if forced && adopts != nil {
-		// An adoption is diff-planned SQL, which is never forced: the
-		// override exists for a submitted statement the router would
-		// substitute or decline.
 		return verdict.Verdict{}, fmt.Errorf("%w: a forced attempt cannot carry the adoption of index %s",
 			executor.ErrInvariantViolation, adopts.Index)
+	}
+	if forced && validates != nil {
+		return verdict.Verdict{}, fmt.Errorf("%w: a forced attempt cannot carry the validation of constraint %s",
+			executor.ErrInvariantViolation, validates.Constraint)
+	}
+	if adopts != nil && validates != nil {
+		// The diff plans an adoption and a validation as separate
+		// statements; one statement carrying both is outside its contract.
+		return verdict.Verdict{}, fmt.Errorf("%w: one statement cannot carry both the adoption of index %s and the validation of constraint %s",
+			executor.ErrInvariantViolation, adopts.Index, validates.Constraint)
 	}
 	limit := opts.MaxTableSizeBytes
 	if !sizeGuardApplies(plan, substituted) {
@@ -437,6 +450,8 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 		err = executor.ExecuteNative(ctx, pool, pt, st, opts.Budget.Brief, retry)
 	case adopts != nil:
 		rep, err = executor.RunSequenceAdopting(ctx, pool, pt, execSQL, opts.Budget, retry, *adopts)
+	case validates != nil:
+		rep, err = executor.RunSequenceValidating(ctx, pool, pt, execSQL, opts.Budget, retry, *validates)
 	default:
 		rep, err = executor.RunSequence(ctx, pool, pt, execSQL, opts.Budget, retry)
 	}
@@ -480,7 +495,71 @@ func execute(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 		v.Detail = fmt.Sprintf("forced: the submitted form ran as-is under budgets (lock %s, statement %s), overriding the engine's routing",
 			opts.Budget.Brief.LockTimeout, opts.Budget.Brief.StatementTimeout)
 	}
+	v.StatisticsRefresh = refreshRetypedStatistics(ctx, pool, pt, st, opts.Budget.Brief, logger)
+	v.Detail += statisticsDetail(v.StatisticsRefresh)
 	return v, nil
+}
+
+// refreshRetypedStatistics re-analyzes the table after a committed
+// statement that changed a column's type, since ALTER COLUMN TYPE deletes
+// the column's statistics, and returns what the verdict reports about it:
+// nil when the statement retyped no column. The schema change is already
+// committed, so a refresh that fails does not fail the run: the result
+// names the ANALYZE the operator still has to run, and the failure is
+// logged with its cause.
+func refreshRetypedStatistics(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable,
+	st statement.Statement, b executor.Budget, logger *slog.Logger) *verdict.StatisticsRefresh {
+	columns, err := retypedColumns(st)
+	if err != nil {
+		// Which columns changed is unknown, so the refresh runs as though
+		// one did: an unneeded ANALYZE costs a sample, a skipped one leaves
+		// the planner on defaults.
+		logger.Warn("the committed statement did not parse back; refreshing the table's statistics in case it retyped a column",
+			"table", qualified(st), "error", err)
+	} else if len(columns) == 0 {
+		return nil
+	}
+	analyze, err := executor.RefreshTableStatistics(ctx, pool, pt, b)
+	if err != nil {
+		logger.Warn("table statistics not refreshed after a type change",
+			"table", qualified(st), "columns", columns, "pending", analyze, "error", err)
+		return &verdict.StatisticsRefresh{Columns: columns, Pending: analyze}
+	}
+	logger.Debug("table statistics refreshed after a type change",
+		"table", qualified(st), "columns", columns, "analyze", analyze)
+	return &verdict.StatisticsRefresh{Columns: columns, Refreshed: true}
+}
+
+// statisticsDetail is the sentence a verdict's detail gains from its
+// statistics refresh; empty when there was none.
+func statisticsDetail(r *verdict.StatisticsRefresh) string {
+	if r == nil {
+		return ""
+	}
+	subject := "the statistics of any column whose type changed"
+	if len(r.Columns) > 0 {
+		subject = "the statistics of " + strings.Join(r.Columns, ", ")
+	}
+	if r.Refreshed {
+		return "; " + subject + " were refreshed after the type change"
+	}
+	return "; " + subject + " were not refreshed after the type change: run " + r.Pending
+}
+
+// retypedColumns returns the columns a statement's ALTER COLUMN TYPE
+// subcommands retype, each once, in statement order.
+func retypedColumns(st statement.Statement) ([]string, error) {
+	ops, err := statement.ParseOps(st.SQL())
+	if err != nil {
+		return nil, fmt.Errorf("parse %s for its type changes: %w", qualified(st), err)
+	}
+	var columns []string
+	for _, op := range ops {
+		if op.Kind == statement.OpAlterColumnType && !slices.Contains(columns, op.Column) {
+			columns = append(columns, op.Column)
+		}
+	}
+	return columns, nil
 }
 
 // qualified renders the statement's target table for the verdict, empty when

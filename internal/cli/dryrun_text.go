@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -89,7 +90,7 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		// compiler style, where help: follows the diagnosis. help is
 		// reserved for steps the user runs; a sequence pg-sprite runs
 		// itself is a note.
-		w.diag("help", string(ps.Guidance), guidanceText(ps.Guidance))
+		w.diag("help", string(ps.Guidance), suggest.ManualPath(ps.Guidance))
 	}
 	if ps.Disposition == router.DispositionExecute {
 		if substituted(ps) {
