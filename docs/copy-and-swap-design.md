@@ -37,6 +37,17 @@ DDL remain the server's. The executor re-verifies the retargeted statement befor
 re-parsed, it must equal the gated statement in every respect except the target relation, which
 must equal the shadow (the ST-7 check, with the shadow as the permitted target).
 
+**Which columns are copied.** The copy list names a source column only when it is the same
+column on the shadow after the statement, not merely a column of the same name. A column the
+statement dropped and added again under one name is a new column: it takes its own default (or
+NULL) on the shadow, as it would under a direct `ALTER TABLE`, and the dropped column's values are
+not copied into it. The shadow is cloned with its columns numbered 1..n in the source's live column
+order, a retype keeps a column's attribute number, and an added column is numbered past n, so a
+source column at live position `i` is the same column exactly when the shadow's column of that
+name has attribute number `i`. The build and a resume's inspection both read the numbers from the
+catalog, so they derive the same list, and the copier, the checksum digest, and the live flusher
+all take their columns from it (ST-11).
+
 **Comparison-only exception.** `RowSecurityChange.CanonicalSQLForNamespace` may erase
 only the validated RLS operation target's schema on a fresh parsed tree. This supports
 comparison across physical schemas when the key separately carries the canonical
@@ -58,7 +69,7 @@ avoids the retarget but cannot handle a schema-qualified statement and would mov
 a rename to a `SET SCHEMA`; it was rejected for the two behaviours it would fork.
 
 **Where enforced.** `pkg/schemachange` shadow builder and `pkg/schemadiff`; ST-2, ST-6, ST-7 (the
-retarget re-verification, with the shadow as the sole permitted target).
+retarget re-verification, with the shadow as the sole permitted target), ST-11 (the copy list).
 
 ### D2 — Build indexes and constraints up front
 
@@ -212,8 +223,9 @@ than what an explicit cast of the source column would make of it. SHA-256 rather
 PostgreSQL built against OpenSSL routes `md5()` through it, and an OpenSSL in FIPS mode
 refuses MD5, which would fail every pass on such a host; the digest
 never leaves the process, so the hash has no compatibility surface.
-Generated columns are absent from the copy list but included after the shadow recomputes them;
-dropped columns are absent from the comparison.
+The digest compares the copy list only: a generated column is absent from both the copy and the
+comparison, since the shadow recomputes it on insert, and so are a dropped column and a column
+the statement dropped and added again under the same name ([D1](#d1--no-durable-scratch-database)).
 
 **Why.** One comparison shape proves the stored post-change representation for widening,
 narrowing, and precision changes instead of comparing unlike textual representations.

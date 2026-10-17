@@ -34,32 +34,6 @@ func TestClassifyTypeChangeRewritesWhatTheModelCannotSee(t *testing.T) {
 			sql:      "ALTER TABLE t ALTER COLUMN c TYPE time(3)",
 		},
 		{
-			// Widening the element length of an array is not a scalar
-			// widen: the live array type must not read as a varchar(50).
-			name:     "live array column retyped to a scalar",
-			liveType: "character varying(50)[]",
-			sql:      "ALTER TABLE t ALTER COLUMN c TYPE varchar(100)",
-		},
-		{
-			// The target's array bounds are part of the type: a scalar
-			// varchar(50) column cannot be relabelled to an array.
-			name:     "live scalar retyped to an array",
-			liveType: "character varying(50)",
-			sql:      "ALTER TABLE t ALTER COLUMN c TYPE varchar(100)[]",
-		},
-		{
-			name:     "live array retyped to an array",
-			liveType: "character varying(50)[]",
-			sql:      "ALTER TABLE t ALTER COLUMN c TYPE varchar(100)[]",
-		},
-		{
-			// myschema.text is a different type from the built-in text; the
-			// qualifier must not be dropped.
-			name:     "target type in a user schema",
-			liveType: "character varying(50)",
-			sql:      "ALTER TABLE t ALTER COLUMN c TYPE myschema.text",
-		},
-		{
 			// A COLLATE clause changes the column's collation, which
 			// rebuilds every index on it.
 			name:     "target with a collation",

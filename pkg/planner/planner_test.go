@@ -129,6 +129,8 @@ var facts = planner.Facts{ColumnTypes: map[string]string{
 	"num":  "numeric(10,2)",
 	"i":    "integer",
 	"txt":  "text",
+	"varr": "character varying(50)[]",
+	"narr": "numeric(10,2)[]",
 }}
 
 func classifyOne(t *testing.T, sql string) planner.Decision {
@@ -196,6 +198,42 @@ func TestClassifyUnverifiedMarksFactlessTypeChanges(t *testing.T) {
 	require.Len(t, using.Decisions, 1)
 	assert.Equal(t, planner.RouteCopyAndSwap, using.Decisions[0].Route)
 	assert.False(t, using.Decisions[0].Unverified)
+}
+
+// The scalar relabel rules do not carry over to arrays: PostgreSQL converts
+// an array column element by element and rewrites the table for any element
+// change, widenings included. Only an unchanged element type is a relabel,
+// whatever dimensions are declared. A target qualified with a schema other
+// than pg_catalog is a user type, never the built-in that shares its name.
+// TestBinaryCoercibleVerdictMatchesTheServer proves each row on a server.
+func TestClassifyArrayAndQualifiedTypeChanges(t *testing.T) {
+	cases := []struct {
+		sql   string
+		route planner.Route
+	}{
+		{"ALTER TABLE t ALTER COLUMN varr TYPE text", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(100)", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(100)[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE text[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN narr TYPE numeric(12,2)[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN v50 TYPE text[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN v50 TYPE app.text", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(50)[]", planner.RouteNative},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(50)[][]", planner.RouteNative},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(50) ARRAY", planner.RouteNative},
+		{"ALTER TABLE t ALTER COLUMN v50 TYPE pg_catalog.text", planner.RouteNative},
+	}
+	for _, tc := range cases {
+		d := classifyOne(t, tc.sql)
+		assert.Equal(t, tc.route, d.Route, tc.sql)
+		if tc.route == planner.RouteNative {
+			assert.Equal(t, planner.ReasonBinaryCoercible, d.Reason, tc.sql)
+		} else {
+			assert.Equal(t, planner.ReasonTypeRewrite, d.Reason, tc.sql)
+			assert.False(t, d.Unverified, "a proven rewrite is not unverified: %s", tc.sql)
+		}
+	}
 }
 
 // TestClassifyReferenceRows is the golden mapping: one case per row of

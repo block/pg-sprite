@@ -186,7 +186,7 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 			return result, fmt.Errorf("%w: planned statement %d is engine-generated SQL its own parser rejects: %w",
 				executor.ErrInvariantViolation, i+1, err)
 		}
-		v, runErr := run(ctx, pool, st, opts, ps.Adopts)
+		v, runErr := run(ctx, pool, st, opts, ps.Adopts, ps.Validates)
 		if runErr != nil {
 			result.Outcome = verdict.OutcomeFailed
 			// A zero verdict is Run's "stopped before reaching a verdict"

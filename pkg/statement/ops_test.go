@@ -111,6 +111,31 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "varchar", NewTypeMods: []int32{100}},
 		},
 		{
+			name: "alter type to an array",
+			sql:  "ALTER TABLE t ALTER COLUMN tags TYPE varchar(100)[]",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "tags", NewType: "varchar", NewTypeMods: []int32{100}, NewTypeArray: true},
+		},
+		{
+			name: "alter type to an array spelled ARRAY",
+			sql:  "ALTER TABLE t ALTER COLUMN tags TYPE text ARRAY",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "tags", NewType: "text", NewTypeArray: true},
+		},
+		{
+			name: "alter type to a schema-qualified type",
+			sql:  "ALTER TABLE t ALTER COLUMN email TYPE app.text",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "email", NewType: "text", NewTypeSchema: "app"},
+		},
+		{
+			name: "alter type qualified with pg_catalog",
+			sql:  "ALTER TABLE t ALTER COLUMN email TYPE pg_catalog.text",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "email", NewType: "text"},
+		},
+		{
+			name: "add column of an array type",
+			sql:  "ALTER TABLE t ADD COLUMN tags text[]",
+			want: statement.Op{Kind: statement.OpAddColumn, Column: "tags", NewType: "text", NewTypeArray: true},
+		},
+		{
 			name: "alter type with using",
 			sql:  "ALTER TABLE t ALTER COLUMN doc TYPE jsonb USING doc::jsonb",
 			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "doc", NewType: "jsonb", HasUsing: true},
@@ -126,19 +151,9 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "varchar", NewTypeMods: []int32{100}},
 		},
 		{
-			name: "alter type to an array is opaque",
-			sql:  "ALTER TABLE t ALTER COLUMN tags TYPE varchar(100)[]",
-			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "tags", NewType: "varchar", NewTypeMods: []int32{100}, NewTypeOpaque: true},
-		},
-		{
-			name: "alter type to a schema-qualified type is opaque",
-			sql:  "ALTER TABLE t ALTER COLUMN name TYPE myschema.text",
-			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "text", NewTypeOpaque: true},
-		},
-		{
-			name: "alter type with a collation is opaque",
+			name: "alter type with a collation",
 			sql:  `ALTER TABLE t ALTER COLUMN name TYPE text COLLATE "C"`,
-			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "text", NewTypeOpaque: true},
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "text", NewTypeCollated: true},
 		},
 		{
 			name: "set default",
@@ -323,10 +338,11 @@ func TestParseOpsShapes(t *testing.T) {
 	}
 }
 
-// Describe must render the type modifier: the modifier is what
-// distinguishes a widen (varchar(100), routes native) from a narrow
-// (varchar(30), routes copy-and-swap), and a label that drops it would
-// render changes that route in opposite directions identically.
+// Describe must render the type modifier, the array marker, and the
+// schema: each distinguishes changes that route in opposite directions — a
+// widen (varchar(100), native) from a narrow (varchar(30), copy-and-swap),
+// text from a text array, the built-in text from a user type named text —
+// and a label that drops one would render them identically.
 func TestDescribeRendersTypeModifiers(t *testing.T) {
 	cases := []struct {
 		sql  string
@@ -335,6 +351,8 @@ func TestDescribeRendersTypeModifiers(t *testing.T) {
 		{"ALTER TABLE t ALTER COLUMN v TYPE varchar(100)", "ALTER COLUMN v TYPE varchar(100)"},
 		{"ALTER TABLE t ALTER COLUMN p TYPE numeric(12,2)", "ALTER COLUMN p TYPE numeric(12,2)"},
 		{"ALTER TABLE t ALTER COLUMN v TYPE text", "ALTER COLUMN v TYPE text"},
+		{"ALTER TABLE t ALTER COLUMN v TYPE varchar(50)[]", "ALTER COLUMN v TYPE varchar(50)[]"},
+		{"ALTER TABLE t ALTER COLUMN v TYPE app.text", "ALTER COLUMN v TYPE app.text"},
 	}
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, parseOneOp(t, tc.sql).Describe(), tc.sql)
