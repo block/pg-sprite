@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 // RefusalCause identifies why a shadow operation refused to proceed. Every
@@ -95,11 +97,12 @@ const (
 	CauseRelationReplaced RefusalCause = "cutover-relation-replaced"
 	// CauseSchemaDrift means the source's or the shadow's introspected model
 	// no longer matches the fingerprint the build recorded (ST-5): a
-	// column, constraint, or index was added, dropped, or changed since.
+	// column, constraint, index, storage parameter, or column-owned
+	// sequence declaration was added, dropped, or changed since.
 	CauseSchemaDrift RefusalCause = "cutover-schema-drift"
 	// CauseFidelityDrift means the source's or the shadow's metadata — owner,
-	// grants, policies, comment, storage parameters, replica identity,
-	// statistics targets, unvalidated checks, or identity sequence options —
+	// grants, policies, comment, replica identity, statistics targets,
+	// unvalidated checks, or identity columns and their sequences —
 	// no longer matches the snapshot the build recorded (ST-5).
 	CauseFidelityDrift RefusalCause = "cutover-fidelity-drift"
 	// CauseIndexInvalid means a shadow index has pg_index.indisvalid false
@@ -153,6 +156,15 @@ const (
 	// target (ST-2). The row is the only record of which statement a shadow
 	// embodies; without one the shadow is dropped and the run started over.
 	CauseShadowUnrecorded RefusalCause = "shadow-unrecorded"
+	// CauseResumeShadowGone means the checkpoint row handed to a resume
+	// records a shadow under which no relation stands (ST-2): the row's
+	// swap has not committed — it is in copying, catching_up, reconciling,
+	// verifying, or a cutover whose swap rolled back — so the shadow it
+	// names should be there, and the run can neither continue on it nor
+	// start over while the row stands. Nothing is written: the row, and
+	// the slot a live row names, are left for the operator to drop and
+	// delete; ErrShadowNotFound is wrapped for errors.Is.
+	CauseResumeShadowGone RefusalCause = "resume-shadow-gone"
 	// CauseResumeSlotForeign means the slot wearing the row's derived name
 	// is not this route's (ST-3): it is a physical slot, or a logical slot
 	// of another database. It is neither decoded from nor replaced; an
@@ -219,6 +231,7 @@ func RefusalCauses() []RefusalCause {
 		CauseResumeRowMismatch,
 		CauseResumeRowDecoding,
 		CauseShadowUnrecorded,
+		CauseResumeShadowGone,
 		CauseResumeSlotForeign,
 		CauseResumeSlotHeld,
 		CauseCopyShadowMismatch,
@@ -254,10 +267,46 @@ func (c RefusalCause) Invariant() string {
 		return "LK-4"
 	case CauseResumeTerminal, CauseResumeSlotHeld:
 		return "ST-4"
-	case CauseResumeRowMismatch, CauseShadowUnrecorded:
+	case CauseResumeRowMismatch, CauseShadowUnrecorded, CauseResumeShadowGone:
 		return "ST-2"
 	case CauseResumeSlotForeign, CauseResumeRowDecoding:
 		return "ST-3"
+	default:
+		return ""
+	}
+}
+
+// Class is the routing class of the cause, from docs/refusal-classes.md:
+// what kind of boundary the importer is looking at. A cause that describes
+// a lock, a proof, a relation, a slot, or a row whose state moved under the
+// operation is environmental — state outside the engine stopped a
+// supportable change. A statement the engine declines to carry as written
+// is a capability boundary. Every other cause is an invariant violation: an
+// input the caller handed in that cannot have come from this engine, or a
+// write of the engine's own that the catalog does not show; nothing on the
+// server changes that, so the importer reports it. The class is a triage
+// decision; the cause's row in the document decides what the importer does
+// next — re-acquire, re-run preflight, drop and rebuild, or hand the
+// catalog to an operator — and no class licenses an automatic retry on its
+// own: an ambiguous cutover outcome is environmental and is resolved by
+// inspection, never by running the swap again. An unknown cause has no
+// class.
+func (c RefusalCause) Class() refusal.Class {
+	switch c {
+	case CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed, CauseSourceShape,
+		CauseShadowOwner, CauseForeignRelation, CauseIdentityHandoff, CauseDrainDeferred,
+		CauseRelationReplaced, CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid,
+		CauseNameTaken, CauseOutcomeAmbiguous, CauseShadowUnrecorded, CauseResumeShadowGone,
+		CauseResumeSlotForeign, CauseResumeSlotHeld:
+		return refusal.ClassEnvironmental
+	case CauseStatementConversion:
+		return refusal.ClassCapabilityBoundary
+	case CauseLockUnproven, CauseProofEmpty, CauseStatementTarget, CauseGrantsDiffer,
+		CauseCutoverUnverified, CauseCutoverUndrained, CauseSwapMismatch, CauseResumeTerminal,
+		CauseResumeCutover, CauseResumeRowMismatch, CauseResumeRowDecoding,
+		CauseCopyShadowMismatch, CauseCopyFrontierBroken, CauseCopyChunksInFlight,
+		CauseCopyChunkUnknown:
+		return refusal.ClassInvariantViolation
 	default:
 		return ""
 	}
@@ -303,7 +352,11 @@ func refuse(cause RefusalCause, wrapped []error, detail string, args ...any) err
 
 // RefusalCauseOf returns the shadow refusal cause carried by err, or the
 // empty cause when err is nil or carries no shadow refusal. Wrappers are
-// read through.
+// read through, so a copier refusal the Runner re-minted answers its shadow
+// cause here and its copier cause to copier.RefusalCauseOf.
+// RefusalCauseOf(err).Class() is therefore the refusal's class, and the
+// empty class for an error that is not a shadow refusal — a server error
+// the importer routes by SQLSTATE, or the bare sentinel.
 func RefusalCauseOf(err error) RefusalCause {
 	var refusal *RefusalError
 	if errors.As(err, &refusal) {

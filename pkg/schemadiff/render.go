@@ -3,6 +3,7 @@ package schemadiff
 import (
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/jackc/pgx/v5"
@@ -57,8 +58,30 @@ var ErrUnrenderableCollation = errors.New("columns with an explicit collation ca
 // as STORED or as a plain default would silently change what it is.
 var ErrUnrenderableVirtual = errors.New("virtual generated columns cannot be rendered as a desired schema")
 
+// ErrUnrenderableToastOptions is returned for TOAST storage parameters on a
+// table whose TOAST table a fresh CREATE TABLE might not build (see
+// Model.ToastMayNotRebuild). The server would discard the parameters when
+// it builds the rendered file, so the baseline would plan them again on
+// every diff against the table it came from.
+var ErrUnrenderableToastOptions = errors.New("TOAST storage parameters on a table whose remaining columns may not build a TOAST table cannot be rendered as a desired schema")
+
+// ErrMultipleOwnedSequences is returned for a column whose default uses
+// more than one sequence the column owns (Column.MultipleOwnedSequences):
+// the serial shorthand declares one, and exporting the default as written
+// would leave both sequences out of the file.
+var ErrMultipleOwnedSequences = errors.New("column default uses more than one sequence the column owns")
+
+// ErrUnrenderableSequenceOptions is returned when a column owns a
+// sequence declared differently from what declaring the column fresh
+// creates and a desired file cannot state the declaration: a serial
+// column, whose shorthand has no options clause, or an identity whose
+// sequence's type differs from the column's. Rendering the column at the
+// defaults would silently move its bounds, step, or type.
+var ErrUnrenderableSequenceOptions = errors.New("sequence options cannot be rendered as a desired schema")
+
 // Render renders the canonical model into a desired-state schema file: one
-// CREATE TABLE followed by the model's CREATE INDEX statements. The output
+// CREATE TABLE, with a WITH clause carrying the table's storage parameters,
+// followed by the model's CREATE INDEX statements. The output
 // is proven admissible by parsing it through statement.ParseDesired before
 // it is returned, so anything a desired file refuses (a schema-qualified
 // name, for example) surfaces here as that gate's typed error. Materializing the
@@ -112,7 +135,18 @@ func Render(m Model) (string, error) {
 	if len(defs) != 0 {
 		b.WriteString("\n" + strings.Join(defs, ",\n") + "\n")
 	}
-	b.WriteString(");\n")
+	b.WriteString(")")
+	if m.ToastMayNotRebuild {
+		return "", fmt.Errorf("render table %q: %w", m.Table, ErrUnrenderableToastOptions)
+	}
+	if len(m.Options) != 0 {
+		opts, err := renderOptions(m.Options)
+		if err != nil {
+			return "", fmt.Errorf("render table %q: %w", m.Table, err)
+		}
+		b.WriteString(" WITH (" + opts + ")")
+	}
+	b.WriteString(";\n")
 	for _, ix := range m.Indexes {
 		b.WriteString("\n" + ix.Def + ";\n")
 	}
@@ -124,13 +158,34 @@ func Render(m Model) (string, error) {
 	return out, nil
 }
 
+// optionName matches a storage parameter name as the server stores it,
+// optionally in the toast namespace.
+var optionName = regexp.MustCompile(`^(toast\.)?[a-z_][a-z0-9_]*$`)
+
+// renderOptions renders storage parameters for a WITH clause, each value as
+// a quoted literal the way pg_dump writes them, so a value is never parsed
+// as anything but the parameter's text. A name outside the server's own
+// spelling is refused rather than interpolated.
+func renderOptions(opts []string) (string, error) {
+	rendered := make([]string, 0, len(opts))
+	for _, opt := range opts {
+		name, value, ok := strings.Cut(opt, "=")
+		if !ok || !optionName.MatchString(name) {
+			return "", fmt.Errorf("storage parameter %q is not in name=value form", opt)
+		}
+		rendered = append(rendered, name+"='"+strings.ReplaceAll(value, "'", "''")+"'")
+	}
+	return strings.Join(rendered, ", "), nil
+}
+
 // renderColumnDef renders one column for CREATE TABLE. A serial column is
 // rendered back to its pseudo-type so the desired file recreates the owned
 // sequence on the scratch schema; every other sequence-backed default is
 // refused because the sequence it references cannot exist there. An
 // explicit column collation is refused: the model carries it only to keep
 // the baseline from silently dropping it. A virtual generated column is
-// refused because no desired file can declare one.
+// refused because no desired file can declare one, and so is a sequence
+// declaration the column's definition cannot state.
 func renderColumnDef(table string, c Column) (string, error) {
 	if c.Collation != "" {
 		return "", fmt.Errorf("column %q collation %s: %w", c.Name, c.Collation, ErrUnrenderableCollation)
@@ -138,14 +193,34 @@ func renderColumnDef(table string, c Column) (string, error) {
 	if c.Virtual {
 		return "", fmt.Errorf("column %q: %w", c.Name, ErrUnrenderableVirtual)
 	}
+	if c.MultipleOwnedSequences {
+		return "", fmt.Errorf("column %q: %w", c.Name, ErrMultipleOwnedSequences)
+	}
 	if c.SequenceDefault {
 		st, ok := serialType(table, c)
 		if !ok {
 			return "", fmt.Errorf("column %q default %q: %w", c.Name, c.Default, ErrUnrenderableDefault)
 		}
+		if c.Sequence != nil {
+			return "", fmt.Errorf("column %q serial sequence declared as %s: %w", c.Name, formatSequence(c.Sequence), ErrUnrenderableSequenceOptions)
+		}
 		return pgx.Identifier{c.Name}.Sanitize() + " " + st + " NOT NULL", nil
 	}
+	if err := identityExpressible(c); err != nil {
+		return "", err
+	}
 	return columnDef(c), nil
+}
+
+// identityExpressible refuses an identity column whose sequence a column
+// definition cannot declare: its options clause sets the bounds, step,
+// start, cache, and cycling, but the sequence always takes the column's
+// type.
+func identityExpressible(c Column) error {
+	if c.Identity != IdentityNone && c.Sequence != nil && c.Sequence.Type != c.Type {
+		return fmt.Errorf("column %q identity sequence is %s, column is %s: %w", c.Name, c.Sequence.Type, c.Type, ErrUnrenderableSequenceOptions)
+	}
+	return nil
 }
 
 // serialType maps a sequence-backed integer column back to the serial

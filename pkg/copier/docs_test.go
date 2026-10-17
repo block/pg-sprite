@@ -38,6 +38,36 @@ func TestRefusalClassesDocListsEveryCopierCause(t *testing.T) {
 	}
 }
 
+// Every copier refusal cause's Class() is the class its row in the copier
+// table records: the document decides the class, and the code's answer is
+// held to it, so neither can be changed without the other.
+func TestRefusalCauseClassMatchesDocClassColumn(t *testing.T) {
+	raw, err := os.ReadFile(refusalClassesDoc)
+	require.NoError(t, err)
+	table := sectionOf(t, string(raw), refusalClassesCopierSection)
+	for _, cause := range copier.RefusalCauses() {
+		assert.Equal(t, classColumnOf(t, table, string(cause)), string(cause.Class()),
+			"docs/refusal-classes.md classifies copier refusal cause %q differently from Class()", cause)
+	}
+}
+
+// classColumnOf returns the `class` cell of the row keyed on cause in a
+// cause table whose columns are the cause, what it says, its class, and why.
+func classColumnOf(t *testing.T, table, cause string) string {
+	t.Helper()
+	key := fmt.Sprintf("| `%s` |", cause)
+	for line := range strings.SplitSeq(table, "\n") {
+		if !strings.HasPrefix(line, key) {
+			continue
+		}
+		cells := strings.Split(line, "|")
+		require.GreaterOrEqual(t, len(cells), 5, "row for %q has a class column", cause)
+		return strings.Trim(strings.TrimSpace(cells[3]), "`")
+	}
+	require.Failf(t, "missing row", "docs/refusal-classes.md has no row for cause %q", cause)
+	return ""
+}
+
 // sectionOf returns the text of doc under heading, up to the next heading
 // of the same level.
 func sectionOf(t *testing.T, doc, heading string) string {

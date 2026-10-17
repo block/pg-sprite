@@ -195,3 +195,42 @@ func TestRenderRefusesIncomingForeignKey(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnrenderableForeignKey)
 	assert.Equal(t, `render table "events": referenced by foreign keys (orders.orders_user_id_fkey): tables that own or are referenced by foreign keys cannot be rendered as a desired schema`, err.Error())
 }
+
+// A storage parameter renders as a quoted literal, so a value carrying a
+// quote stays one literal, and a parameter that is not in the server's
+// name=value spelling is refused rather than interpolated into the file.
+func TestRenderStorageParameters(t *testing.T) {
+	m := base()
+	m.Options = []string{"fillfactor=70", "toast.autovacuum_enabled=false", "weird=it's"}
+	out, err := Render(m)
+	require.NoError(t, err)
+	assert.Contains(t, out, `) WITH (fillfactor='70', toast.autovacuum_enabled='false', weird='it''s');`)
+
+	for _, opt := range []string{"fillfactor", "fill factor=70", "fillfactor) ; DROP TABLE x; --=1"} {
+		m.Options = []string{opt}
+		_, err := Render(m)
+		require.Error(t, err, opt)
+		assert.Contains(t, err.Error(), "is not in name=value form", opt)
+	}
+}
+
+// A serial whose sequence is declared away from the defaults refuses: the
+// serial shorthand cannot state the declaration. So does an identity whose
+// sequence type differs from its column's, which no options clause states.
+func TestRenderRefusesUnstatableSequence(t *testing.T) {
+	m := base()
+	m.Columns[0] = Column{
+		Name: "id", Type: "bigint", NotNull: true,
+		Default: "nextval('events_id_seq'::regclass)", SequenceDefault: true, SequenceOwned: true,
+		Sequence: &SequenceOptions{Type: "bigint", Start: 1, Increment: 1, Min: 1, Max: 5000, Cache: 1},
+	}
+	_, err := Render(m)
+	require.ErrorIs(t, err, ErrUnrenderableSequenceOptions)
+
+	m.Columns[0] = Column{
+		Name: "id", Type: "bigint", NotNull: true, Identity: IdentityAlways,
+		Sequence: &SequenceOptions{Type: "integer", Start: 1, Increment: 1, Min: 1, Max: 2147483647, Cache: 1},
+	}
+	_, err = Render(m)
+	require.ErrorIs(t, err, ErrUnrenderableSequenceOptions)
+}

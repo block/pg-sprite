@@ -13,8 +13,9 @@ import (
 )
 
 // Every copier cause is re-minted as a shadow cause that upholds the same
-// invariant: a copier cause added without a mapping, or mapped across
-// invariants, fails here.
+// invariant and routes to the same class, so an importer reading either
+// vocabulary reacts the same way: a copier cause added without a mapping,
+// or mapped across invariants or classes, fails here.
 func TestEveryCopierCauseIsRemintedUnderTheSameInvariant(t *testing.T) {
 	assert.Empty(t, copierCause(""), "the empty copier cause is no refusal")
 	assert.Empty(t, copierCause("not-a-cause"))
@@ -23,6 +24,7 @@ func TestEveryCopierCauseIsRemintedUnderTheSameInvariant(t *testing.T) {
 		require.NotEmpty(t, mapped, "copier cause %q has no shadow cause", cause)
 		assert.Contains(t, RefusalCauses(), mapped, "copier cause %q maps to unregistered %q", cause, mapped)
 		assert.Equal(t, cause.Invariant(), mapped.Invariant(), "copier cause %q and %q uphold different invariants", cause, mapped)
+		assert.Equal(t, cause.Class(), mapped.Class(), "copier cause %q and %q route to different classes", cause, mapped)
 	}
 }
 

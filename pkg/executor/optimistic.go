@@ -31,6 +31,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/progress"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -193,7 +194,7 @@ func (b Budget) validate() error {
 // work that exceeded its execution budget is not a lock-acquisition
 // strategy.
 func ExecuteNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy) error {
-	return executeNative(ctx, pool, pt, st, b, retry, nil)
+	return executeNative(ctx, pool, pt, st, b, retry, nil, nil)
 }
 
 // ExecuteNativeWithProgress runs an optimistic native attempt while updating
@@ -205,10 +206,14 @@ func ExecuteNativeWithProgress(ctx context.Context, pool *pgxpool.Pool, pt prefl
 	tracker.Start(1, progress.OperationOptimistic)
 	tracker.StartStep(1, progress.OperationOptimistic, st.SQL())
 	defer func() { tracker.Finish(err) }()
-	return executeNative(ctx, pool, pt, st, b, retry, tracker)
+	return executeNative(ctx, pool, pt, st, b, retry, nil, tracker)
 }
 
-func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, tracker *progress.Tracker) error {
+// executeNative runs st as bounded native attempts. When adopts is set, st
+// is the ADD CONSTRAINT ... USING INDEX that takes over that index, and
+// each attempt checks the index against the planned definition under the
+// table's lock before attaching it.
+func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, st statement.Statement, b Budget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, tracker *progress.Tracker) error {
 	if err := b.validate(); err != nil {
 		return err
 	}
@@ -226,8 +231,46 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	// under the session default), so the statement's unqualified secondary
 	// names — a column's type, an expression's function — resolve in the
 	// target schema whether the run creates the table or alters it.
+	// A native drop is checked against the replica identity, and an index
+	// adoption against the planned index definition, again inside the
+	// attempt's own transaction, under the lock it runs with: the plan's
+	// facts were read before the transaction began.
+	drops, err := replicaIdentityDrops(st)
+	if err != nil {
+		return err
+	}
+	var checks []func(context.Context, pgx.Tx) error
+	if len(drops) > 0 {
+		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
+			return refuseReplicaIdentityLoss(ctx, tx, st, drops)
+		})
+	}
+	if adopts != nil {
+		ok, err := adoptsIndex(st, adopts.Index)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("%w: %q was planned to take over index %s but does not",
+				ErrInvariantViolation, st.SQL(), adopts.Index)
+		}
+		checks = append(checks, func(ctx context.Context, tx pgx.Tx) error {
+			return refuseAdoptedIndexDrift(ctx, tx, st, *adopts)
+		})
+	}
+	var before func(context.Context, pgx.Tx) error
+	if len(checks) > 0 {
+		before = func(ctx context.Context, tx pgx.Tx) error {
+			for _, check := range checks {
+				if err := check(ctx, tx); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
 	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
-		return executeBoundedAttempt(ctx, pool, st, b, pt.Schema())
+		return executeBoundedAttemptAs(ctx, pool, st, b, pt.Schema(), "", before)
 	}, sleepContext, func(attempt int) {
 		if tracker != nil {
 			tracker.SetAttempt(attempt)
@@ -235,18 +278,19 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 	})
 }
 
-// executeBoundedAttempt is the shared transactional attempt behind the
+// executeBoundedAttemptAs is the shared transactional attempt behind the
 // optimistic and create paths. When searchPathSchema is set, the
 // transaction's search_path is pinned to that schema then public — the
 // same policy the introspection read path sets — so a statement's
 // unqualified references (a column's type, an expression's function)
 // resolve exactly as the diff resolved them, never via the session's
 // ambient search_path.
-func executeBoundedAttempt(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPathSchema string) error {
-	return executeBoundedAttemptAs(ctx, pool, st, b, searchPathSchema, "")
-}
-
-func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPathSchema, role string) error {
+//
+// It runs as role when one is set, and runs before, when set, inside the
+// attempt's transaction under its budgets and ahead of the statement. An
+// error from before ends the attempt with nothing submitted; a lock it waits on past lock_timeout is a lock budget
+// failure like the statement's own.
+func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPathSchema, role string, before func(context.Context, pgx.Tx) error) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin optimistic attempt: %w", err)
@@ -278,6 +322,14 @@ func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st stateme
 		}
 	}
 
+	if before != nil {
+		if err := before(ctx, tx); err != nil {
+			if budgetErr := asBudgetError(err, b); budgetErr != nil {
+				return budgetErr
+			}
+			return err
+		}
+	}
 	if _, err := tx.Exec(ctx, st.SQL()); err != nil {
 		if budgetErr := asBudgetError(err, b); budgetErr != nil {
 			return budgetErr

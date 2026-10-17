@@ -17,7 +17,7 @@ kinds, guidance, causes, classes, owners) and the fingerprint serialization are 
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **7**: version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
+The current version is **8**: version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
 and on refused statements, each drawn from a closed vocabulary (see Classes and Owners);
@@ -123,6 +123,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `type-rewrite` | A type conversion PostgreSQL cannot relabel — rewrite plus reindex. |
 | `relocation` | SET TABLESPACE moves the heap — a rewrite-scale copy. |
 | `partition-parent-lock` | Creating a partition (`CREATE TABLE … PARTITION OF`): a brief `ACCESS EXCLUSIVE` on the parent, no scan. |
+| `replica-identity` | The operation drops what a `REPLICA IDENTITY USING INDEX` of the table, or of a partition or inheritance child below it, is built on: the index, the constraint that owns it, or one of its columns, `INCLUDE` columns too. The setting outlives the index, so every `UPDATE` and `DELETE` on the table fails while a publication publishes them. Refused; move the identity first (`ALTER TABLE … REPLICA IDENTITY`), then re-plan. |
 | `unsupported-operation` | The planner does not recognize the operation or knows no safe path for it. |
 
 ### Target-dependent refusal reasons (`reason`, `statements[].reason`)
@@ -298,7 +299,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 7,
+  "format_version": 8,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -341,7 +342,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 7,
+  "format_version": 8,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -408,7 +409,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 7,
+  "format_version": 8,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",
