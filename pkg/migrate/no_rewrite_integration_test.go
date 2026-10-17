@@ -169,11 +169,13 @@ func TestNoRewriteCasesCoverEveryNativeRow(t *testing.T) {
 		_, exempt := noRewriteNotApplicable[id]
 		assert.True(t, proven != exempt, "row %s needs no-rewrite cases or a reason a filenode cannot speak to it, not both", id)
 	}
-	for id := range noRewriteCases {
+	for id, cases := range noRewriteCases {
 		assert.True(t, native[id], "no-rewrite cases for %s, which is not a natively executed row", id)
+		assert.NotEmpty(t, cases, "row %s is classified as proven but has no cases to run", id)
 	}
-	for id := range noRewriteNotApplicable {
+	for id, reason := range noRewriteNotApplicable {
 		assert.True(t, native[id], "no-rewrite exemption for %s, which is not a natively executed row", id)
+		assert.NotEmpty(t, reason, "row %s is exempt without a reason", id)
 	}
 }
 
