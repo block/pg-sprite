@@ -177,6 +177,23 @@ func TestAdviseUnnamedCheckAndForeignKeyGetTheRewriteUnderTheServerName(t *testi
 	}
 }
 
+// Two unnamed CHECKs on one column in one script: running the script, the
+// server names the second past the first, so the advice does too and its
+// two sequences never collide.
+func TestAdviseUnnamedChecksInOneScriptGetDistinctNames(t *testing.T) {
+	report, err := suggest.Advise("ALTER TABLE t ADD CHECK (qty > 0); ALTER TABLE t ADD CHECK (qty < 100);")
+	require.NoError(t, err)
+	require.Len(t, report.Suggestions, 2)
+	assert.Equal(t, []string{
+		"ALTER TABLE t ADD CONSTRAINT t_qty_check CHECK (qty > 0) NOT VALID",
+		`ALTER TABLE "t" VALIDATE CONSTRAINT "t_qty_check"`,
+	}, report.Suggestions[0].Recommended)
+	assert.Equal(t, []string{
+		"ALTER TABLE t ADD CONSTRAINT t_qty_check1 CHECK (qty < 100) NOT VALID",
+		`ALTER TABLE "t" VALIDATE CONSTRAINT "t_qty_check1"`,
+	}, report.Suggestions[1].Recommended)
+}
+
 // Following add-column-then-constraint literally must not land on a second
 // refusal: the plain column add is clean, and the separate, named ADD
 // CONSTRAINT the guidance describes gets a constructed rewrite — not

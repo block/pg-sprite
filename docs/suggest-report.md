@@ -130,9 +130,10 @@ constructed from the statement.
 Name the constraint, add it `NOT VALID`, then `VALIDATE` it online: the same sequence the
 constructed rewrite emits. A statement that names no constraint gets that rewrite too, under
 the name PostgreSQL would choose first (`<table>_<column>_check`, `<table>_check`,
-`<table>_<columns>_fkey`), because the `VALIDATE` step has to name it. Suggest reads no
-live table, so it cannot see a name the schema already uses, which the server would number
-past (`<table>_<column>_check1`), nor tell a bare reference to the table's own name, which
+`<table>_<columns>_fkey`), because the `VALIDATE` step has to name it. A name an earlier
+statement of the same script adds is numbered past (`<table>_<column>_check1`), as the
+server would number it. Suggest reads no live table, so it cannot see a name the schema
+already uses, nor tell a bare reference to the table's own name, which
 reads as its whole row unless the table has a column by that name. A dry-run against the
 target reads both and names the constraint as the server would.
 

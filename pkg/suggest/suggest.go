@@ -213,7 +213,9 @@ type Report struct {
 }
 
 // Advise maps a DDL script to its advisory results: every statement is
-// parsed with the PostgreSQL grammar and classified with zero live facts,
+// parsed with the PostgreSQL grammar and classified with zero live facts
+// beyond the constraint names the script's earlier statements claim
+// (planner.ScriptClassifier),
 // and each risky-as-written operation yields a Suggestion — the safer
 // sequence when the planner could construct it, typed guidance when it
 // could not. Nothing is executed and no database is touched. A parse
@@ -224,8 +226,9 @@ func Advise(sql string) (Report, error) {
 		return Report{}, err
 	}
 	report := Report{FormatVersion: FormatVersion, Suggestions: []Suggestion{}}
+	var classifier planner.ScriptClassifier
 	for i, stmt := range stmts {
-		suggestions, err := adviseStatement(i+1, stmt)
+		suggestions, err := adviseStatement(&classifier, i+1, stmt)
 		if err != nil {
 			return Report{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
@@ -238,8 +241,8 @@ func Advise(sql string) (Report, error) {
 // safer-idiom decision. The operation list and decision list are
 // index-aligned by the planner's contract (one decision per operation, in
 // order); a mismatch is a contract violation and fails closed.
-func adviseStatement(index int, stmt statement.SourceStatement) ([]Suggestion, error) {
-	plan, err := planner.Classify(stmt.SQL, planner.Facts{})
+func adviseStatement(classifier *planner.ScriptClassifier, index int, stmt statement.SourceStatement) ([]Suggestion, error) {
+	plan, err := classifier.Classify(stmt.SQL)
 	if err != nil {
 		return nil, err
 	}

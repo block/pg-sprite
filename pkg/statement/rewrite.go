@@ -155,12 +155,45 @@ const wholeRowRef = ""
 // parse tree references, resolving each reference with checkColumn. The
 // walk covers every message field, list, and map, so a reference inside a
 // function call, CASE, or operand counts like one at the top.
+//
+// Two forms read columns other than the reference they wrap, as the
+// server's analysis resolves them. A field selected from the whole row,
+// `(t).qty` or `(t.*).qty`, reads that column alone. A whole-row star
+// inside ROW(...), `ROW(t.*)`, expands to every column of the table, which
+// takes columns to be known; without them it counts as the whole row.
 func checkColumns(msg protoreflect.Message, table string, columns map[string]bool, names []string) []string {
-	if ref, ok := msg.Interface().(*pganalyze.ColumnRef); ok {
-		if name, ok := checkColumn(ref.GetFields(), table, columns); ok && !slices.Contains(names, name) {
+	addName := func(name string) {
+		if !slices.Contains(names, name) {
 			names = append(names, name)
 		}
+	}
+	switch node := msg.Interface().(type) {
+	case *pganalyze.ColumnRef:
+		if name, ok := checkColumn(node.GetFields(), table, columns); ok {
+			addName(name)
+		}
 		return names
+	case *pganalyze.A_Indirection:
+		if field, ok := wholeRowField(node, table, columns); ok {
+			addName(field)
+			for _, ind := range node.GetIndirection()[1:] {
+				names = checkColumns(ind.ProtoReflect(), table, columns, names)
+			}
+			return names
+		}
+	case *pganalyze.RowExpr:
+		if columns != nil {
+			for _, arg := range node.GetArgs() {
+				if ref := arg.GetColumnRef(); ref != nil && isWholeRowStar(ref, table) {
+					for column := range columns {
+						addName(column)
+					}
+					continue
+				}
+				names = checkColumns(arg.ProtoReflect(), table, columns, names)
+			}
+			return names
+		}
 	}
 	msg.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
 		if field.Kind() != protoreflect.MessageKind {
@@ -208,6 +241,33 @@ func checkColumn(fields []*pganalyze.Node, table string, columns map[string]bool
 		return wholeRowRef, true
 	}
 	return name, true
+}
+
+// wholeRowField reports the column a field selection from the table's
+// whole row names: `(t).qty` and `(t.*).qty` read qty.
+func wholeRowField(ind *pganalyze.A_Indirection, table string, columns map[string]bool) (string, bool) {
+	ref := ind.GetArg().GetColumnRef()
+	if ref == nil || len(ind.GetIndirection()) == 0 {
+		return "", false
+	}
+	field := ind.GetIndirection()[0].GetString_()
+	if field == nil {
+		return "", false
+	}
+	if name, ok := checkColumn(ref.GetFields(), table, columns); !ok || name != wholeRowRef {
+		return "", false
+	}
+	return field.GetSval(), true
+}
+
+// isWholeRowStar reports `t.*` or a bare `*`, the forms ROW(...) expands
+// to the table's columns.
+func isWholeRowStar(ref *pganalyze.ColumnRef, table string) bool {
+	fields := ref.GetFields()
+	if len(fields) == 0 || fields[len(fields)-1].GetAStar() == nil {
+		return false
+	}
+	return len(fields) == 1 || fields[len(fields)-2].GetString_().GetSval() == table
 }
 
 // parseSingle parses sql and requires exactly one statement, returning its

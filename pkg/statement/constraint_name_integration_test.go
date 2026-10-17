@@ -105,6 +105,42 @@ func TestAddNotValidNamesAnUnnamedConstraintAsTheServerDoes(t *testing.T) {
 			alter:  "ALTER TABLE %[1]s.t ADD CHECK (t IS NOT NULL)",
 		},
 		{
+			name:   "check on a field selected from the whole row",
+			table:  "t",
+			create: "CREATE TABLE %[1]s.t (qty int, code text)",
+			alter:  "ALTER TABLE %[1]s.t ADD CHECK ((t).qty > 0)",
+		},
+		{
+			name:   "check on a field selected from the whole row's star",
+			table:  "t",
+			create: "CREATE TABLE %[1]s.t (qty int, code text)",
+			alter:  "ALTER TABLE %[1]s.t ADD CHECK ((t.*).qty > 0)",
+		},
+		{
+			name:   "check on a row of the whole row's one column",
+			table:  "t",
+			create: "CREATE TABLE %[1]s.t (qty int)",
+			alter:  "ALTER TABLE %[1]s.t ADD CHECK (ROW(t.*) IS NOT NULL)",
+		},
+		{
+			name:   "check on a row of the whole row's two columns",
+			table:  "t",
+			create: "CREATE TABLE %[1]s.t (qty int, code text)",
+			alter:  "ALTER TABLE %[1]s.t ADD CHECK (ROW(t.*) IS NOT NULL)",
+		},
+		{
+			name:   "check on a row of a column and the whole row's one column",
+			table:  "t",
+			create: "CREATE TABLE %[1]s.t (qty int)",
+			alter:  "ALTER TABLE %[1]s.t ADD CHECK (ROW(qty, t.*) IS NOT NULL)",
+		},
+		{
+			name:   "check on the whole row and a field selected from it",
+			table:  "t",
+			create: "CREATE TABLE %[1]s.t (qty int, code text)",
+			alter:  "ALTER TABLE %[1]s.t ADD CHECK (t IS NOT NULL AND (t).qty > 0)",
+		},
+		{
 			name:   "check on a column named like its table",
 			table:  "t",
 			create: "CREATE TABLE %[1]s.t (t int)",
