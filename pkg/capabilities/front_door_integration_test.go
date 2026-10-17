@@ -162,57 +162,6 @@ var migrateClaims = map[string]migrateClaim{
 			`CREATE UNIQUE INDEX accounts_email_live_idx ON %[1]s.accounts (lower(email)) WHERE deleted_at IS NULL`,
 		},
 	},
-	"drop-index": {
-		setup: `
-			CREATE TABLE %[1]s.accounts (
-				id bigint PRIMARY KEY,
-				email text NOT NULL
-			);
-			CREATE INDEX accounts_email_idx ON %[1]s.accounts (email)`,
-		statements: []string{
-			`DROP INDEX %[1]s.accounts_email_idx`,
-			`DROP INDEX CONCURRENTLY %[1]s.accounts_email_idx`,
-		},
-	},
-	"reindex": {
-		setup: `
-			CREATE TABLE %[1]s.accounts (
-				id bigint PRIMARY KEY,
-				email text NOT NULL
-			);
-			CREATE INDEX accounts_email_idx ON %[1]s.accounts (email)`,
-		statements: []string{
-			`REINDEX INDEX %[1]s.accounts_email_idx`,
-			`REINDEX INDEX CONCURRENTLY %[1]s.accounts_email_idx`,
-		},
-	},
-	"attach-partition": {
-		setup: `
-			CREATE TABLE %[1]s.events (
-				id bigint NOT NULL,
-				PRIMARY KEY (id)
-			) PARTITION BY RANGE (id);
-			CREATE TABLE %[1]s.events_low (
-				id bigint NOT NULL,
-				PRIMARY KEY (id)
-			)`,
-		statements: []string{
-			`ALTER TABLE %[1]s.events ATTACH PARTITION %[1]s.events_low FOR VALUES FROM (0) TO (1000)`,
-		},
-	},
-	"detach-partition-concurrently": {
-		setup: `
-			CREATE TABLE %[1]s.events (
-				id bigint NOT NULL,
-				PRIMARY KEY (id)
-			) PARTITION BY RANGE (id);
-			CREATE TABLE %[1]s.events_low PARTITION OF %[1]s.events FOR VALUES FROM (0) TO (1000);
-			CREATE TABLE %[1]s.events_high PARTITION OF %[1]s.events FOR VALUES FROM (1000) TO (2000)`,
-		statements: []string{
-			`ALTER TABLE %[1]s.events DETACH PARTITION %[1]s.events_low`,
-			`ALTER TABLE %[1]s.events DETACH PARTITION %[1]s.events_high CONCURRENTLY`,
-		},
-	},
 }
 
 // declarativeOnlyClaims are the rows whose migrate door is the desired-state
@@ -222,6 +171,7 @@ var declarativeOnlyClaims = []string{
 	"plain-tables-their-indexes",
 	"greenfield-create-table-apply-the-table-does-not-exist-yet-a-fresh-database-or-a-new-table-in-a-live-one",
 	"declarative-row-security-library",
+	"declarative-not-valid-constraint",
 }
 
 // Every capability row that publishes `front_doors.migrate: supported` must

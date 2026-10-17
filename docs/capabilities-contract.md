@@ -33,7 +33,8 @@ become `area`; the first column is named `operation`, `table_shape`, or
 - `status_mark`: exactly `✅`, `🟡`, `⚪`, `🔵`, or `❌`. They mean, respectively,
   supported today, planned with a typed refusal today, out of scope because there is
   no online-safety problem, out of scope because another tool class owns the work, and
-  out of scope because PostgreSQL has no online mechanism.
+  out of scope because there is no online mechanism pg-sprite will drive: PostgreSQL
+  has none, or the only online form is a direct statement the operator runs.
 - `tier`: `t1`, `t2`, or `t3`, derived consistently from the mark but stored and
   validated so a consumer need not understand emoji. `✅` is T1, `🟡` is T2, and all
   three remaining marks are T3.
@@ -214,9 +215,13 @@ row and a consumer reading a verdict reach the same route:
 | T2 / `🟡` | `capability-boundary` |
 | T3 / `⚪` | `no-online-safety-problem`, with `owner: direct-operator` |
 | T3 / `🔵` | `no-online-safety-problem`, with `owner` naming the tool class |
-| T3 / `❌` | `by-design` |
+| T3 / `❌` | `by-design` (see below for index maintenance) |
 
-T1 / `✅` has no capability refusal class. Two classes have no matrix row: `environmental`
+The `❌` rows for index maintenance (`drop-index`, `reindex`) span two classes: the
+plain form refuses as `by-design`, while the concurrent form, which is the direct
+statement the operator runs, refuses as `no-online-safety-problem` with
+`owner: direct-operator`. Both carry the row's `index-statement` reason. T1 / `✅` has
+no capability refusal class. Two classes have no matrix row: `environmental`
 describes the run site — privileges, contention, budgets, or other conditions — not whether
 pg-sprite supports an operation, and `invariant-violation` reports a defect in pg-sprite,
 not a property of the operation. The matrix and that contract must change together.

@@ -31,8 +31,9 @@ import (
 // added the add-foreign-key and drop-foreign-key change kinds and the
 // foreign-key create-shape cause. Version 7 added the
 // set-generated-expression change kind. Version 8 added the replica-identity
-// planner reason.
-const FormatVersion = 8
+// planner reason. Version 9 added the validate-constraint and
+// validate-foreign-key change kinds.
+const FormatVersion = 9
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -74,6 +75,11 @@ type Statement struct {
 	// attaches it (see schemadiff.Change.Adopts). Nil otherwise, and out
 	// of the JSON: the SQL already identifies the change.
 	Adopts *schemadiff.IndexAdoption `json:"-"`
+	// Validates is the constraint a diff-derived VALIDATE CONSTRAINT
+	// validates and the definition it must still have when execution
+	// validates it (see schemadiff.Change.Validates). Nil otherwise, and
+	// out of the JSON for the same reason.
+	Validates *schemadiff.ConstraintValidation `json:"-"`
 	// Destructive marks statements that discard live structure — a dropped
 	// column, constraint, index, or NOT NULL. It is derived from the classifier's
 	// decisions, so both sources report it identically; it is always
