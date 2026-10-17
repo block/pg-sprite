@@ -134,7 +134,7 @@ space the host reports for the data directory; on a managed volume that grows on
 the operator set — the shadow copy and the WAL a replication slot pins both land there.
 Never pass a sentinel such as the largest integer; that disables the only check that stands
 between the copy and a full volume. Each refusal carries its own cause
-([refusal-classes.md](refusal-classes.md#copy-and-swap-preflight-refusals-keyed-on-copyswaprefusalcause)).
+([refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause)).
 
 ### Off-ladder: greenfield `CREATE TABLE`
 
