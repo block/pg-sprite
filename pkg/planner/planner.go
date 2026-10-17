@@ -418,7 +418,12 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		d.Route, d.Reason = RouteCopyAndSwap, ReasonRelocation
 
 	case statement.OpAddConstraint:
-		d = classifyAddConstraint(op, st, facts, sql, single)
+		d = classifyAddConstraint(op, st, sql, single)
+		if len(d.SaferSQL) > 0 && validatedOnAdd(op) {
+			// Restated from the live facts, which name an unnamed
+			// constraint as the server would on this table.
+			d.SaferSQL = notValidSequence(st, sql, facts)
+		}
 
 	case statement.OpValidateConstraint:
 		d.Route, d.Reason = RouteNative, ReasonOnlineIdiom
@@ -481,7 +486,7 @@ func concurrentlyDecision(d Decision, concurrent bool, sql string, single bool) 
 }
 
 // classifyAddConstraint routes ADD CONSTRAINT per constraint family.
-func classifyAddConstraint(op statement.Op, st statement.Statement, facts Facts, sql string, single bool) Decision {
+func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, single bool) Decision {
 	d := Decision{Operation: op.Describe()}
 	switch {
 	case op.UsingIndex, op.NotValid:
@@ -497,18 +502,15 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, facts Facts,
 			d.SaferSQL = usingIndexSequence(st, op)
 		}
 
-	case op.Constraint == statement.ConstraintCheck,
-		op.Constraint == statement.ConstraintForeignKey:
+	case validatedOnAdd(op):
 		// Direct ADD CHECK/FK validates under ACCESS EXCLUSIVE; the safer
-		// sequence is NOT VALID plus an online VALIDATE.
+		// sequence is NOT VALID plus an online VALIDATE. An unnamed
+		// constraint gets the server's first choice here, from the
+		// statement alone; classifyOp restates the sequence from the live
+		// facts.
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
 		if single {
-			if notValid, name, err := statement.AddNotValid(sql, constraintNaming(facts)); err == nil {
-				d.SaferSQL = []string{
-					notValid,
-					"ALTER TABLE " + tableIdent(st) + " VALIDATE CONSTRAINT " + pgx.Identifier{name}.Sanitize(),
-				}
-			}
+			d.SaferSQL = notValidSequence(st, sql, Facts{})
 		}
 
 	case op.Constraint == statement.ConstraintNotNull:
@@ -519,6 +521,26 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, facts Facts,
 		d.Route, d.Reason = RouteRefuse, ReasonUnsupportedOperation
 	}
 	return d
+}
+
+// validatedOnAdd reports a CHECK or FOREIGN KEY, the constraints ADD
+// CONSTRAINT validates against every row unless told NOT VALID.
+func validatedOnAdd(op statement.Op) bool {
+	return op.Constraint == statement.ConstraintCheck || op.Constraint == statement.ConstraintForeignKey
+}
+
+// notValidSequence is the safer sequence for a single ADD CHECK or FOREIGN
+// KEY: the constraint added NOT VALID, then validated online. It is nil
+// when the statement cannot take NOT VALID.
+func notValidSequence(st statement.Statement, sql string, facts Facts) []string {
+	notValid, name, err := statement.AddNotValid(sql, constraintNaming(facts))
+	if err != nil {
+		return nil
+	}
+	return []string{
+		notValid,
+		"ALTER TABLE " + tableIdent(st) + " VALIDATE CONSTRAINT " + pgx.Identifier{name}.Sanitize(),
+	}
 }
 
 // constraintNaming is what facts tell the rewrite about naming an unnamed
