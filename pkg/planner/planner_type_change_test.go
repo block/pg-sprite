@@ -58,6 +58,39 @@ func TestClassifyTypeChangeRewritesWhatTheModelCannotSee(t *testing.T) {
 	}
 }
 
+// A column with a collation of its own that is retyped without a COLLATE
+// clause takes the new type's default collation, so every index on it is
+// rebuilt under ACCESS EXCLUSIVE and its sort order changes. The type part
+// of the change is a textbook relabel (varchar widen); the collation makes
+// it a rewrite, and the live fact is known, so the route is proven.
+func TestClassifyTypeChangeRewritesACollatedLiveColumn(t *testing.T) {
+	facts := planner.Facts{
+		ColumnTypes:      map[string]string{"c": "character varying(50)"},
+		ColumnCollations: map[string]string{"c": `pg_catalog."C"`},
+	}
+	plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN c TYPE varchar(100)", facts)
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 1)
+	assert.Equal(t, planner.RouteCopyAndSwap, plan.Decisions[0].Route)
+	assert.Equal(t, planner.ReasonTypeRewrite, plan.Decisions[0].Reason)
+	assert.False(t, plan.Decisions[0].Unverified, "the live collation was known; this is a proven rewrite route")
+}
+
+// The same widen on a column with the default collation stays a relabel:
+// the collation fact must only ever take the route away from native for
+// the column it names.
+func TestClassifyTypeChangeKeepsTheRelabelForAnUncollatedColumn(t *testing.T) {
+	facts := planner.Facts{
+		ColumnTypes:      map[string]string{"c": "character varying(50)", "other": "text"},
+		ColumnCollations: map[string]string{"other": `pg_catalog."C"`},
+	}
+	plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN c TYPE varchar(100)", facts)
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 1)
+	assert.Equal(t, planner.RouteNative, plan.Decisions[0].Route)
+	assert.Equal(t, planner.ReasonBinaryCoercible, plan.Decisions[0].Reason)
+}
+
 // A pg_catalog qualifier names the built-in type, so it must not defeat the
 // relabel proof: the SQL-standard spelling and the explicit qualifier are the
 // same varchar widen as the bare form.

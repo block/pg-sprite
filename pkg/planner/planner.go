@@ -136,8 +136,9 @@ const (
 	// every row — a full rewrite.
 	ReasonGeneratedStored Reason = "generated-stored"
 	// ReasonTypeRewrite: a type PostgreSQL must check or convert row by
-	// row — a type conversion it cannot relabel (rewrite plus reindex), or
-	// an added column of a domain type with constraints.
+	// row — a type conversion it cannot relabel (rewrite plus reindex), a
+	// type change that moves the column's collation (reindex alone), or an
+	// added column of a domain type with constraints.
 	ReasonTypeRewrite Reason = "type-rewrite"
 	// ReasonRelocation: SET TABLESPACE moves the heap — a rewrite-scale
 	// copy.
@@ -258,6 +259,13 @@ type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
 	ColumnTypes map[string]string
+	// ColumnCollations maps each live column whose collation is not its
+	// type's default to that collation, as schemadiff renders it. A column
+	// absent from the map has the default collation. Retyping a column
+	// without a COLLATE clause resets it to the new type's default, so a
+	// column present here loses its collation and every index on it is
+	// rebuilt: never a relabel.
+	ColumnCollations map[string]string
 	// ReplicaIdentity is what the replica identity indexes of the table and
 	// its partitions key on; the zero value when none selects an index.
 	ReplicaIdentity schemadiff.ReplicaIdentityKeys
@@ -271,16 +279,21 @@ type Facts struct {
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
-// canonical type of every live column and what the table's replica
-// identity keys on. Every front door — the declarative diff and the
-// imperative dry-run — extracts facts through this one function so
-// equivalent changes classify identically.
+// canonical type of every live column, the collation of every column that
+// has one of its own, and what the table's replica identity keys on. Every
+// front door — the declarative diff and the imperative dry-run — extracts
+// facts through this one function so equivalent changes classify
+// identically.
 func FactsFrom(live schemadiff.Model) Facts {
 	types := make(map[string]string, len(live.Columns))
+	collations := make(map[string]string)
 	for _, col := range live.Columns {
 		types[col.Name] = col.Type
+		if col.Collation != "" {
+			collations[col.Name] = col.Collation
+		}
 	}
-	return Facts{ColumnTypes: types, ReplicaIdentity: live.ReplicaIdentity}
+	return Facts{ColumnTypes: types, ColumnCollations: collations, ReplicaIdentity: live.ReplicaIdentity}
 }
 
 // addColumnProof returns what the server proved about adding op's
@@ -522,6 +535,12 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 	if op.HasUsing {
 		return RouteCopyAndSwap, ReasonTypeRewrite, false
 	}
+	if _, collated := facts.ColumnCollations[op.Column]; collated {
+		// The live column has a collation of its own, which the new type
+		// either resets to its default or (with a COLLATE clause) replaces;
+		// either way every index on the column is rebuilt.
+		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	}
 	oldType, ok := facts.ColumnTypes[op.Column]
 	if !ok {
 		// No live type for the column: fail closed to the rewrite route,
@@ -548,12 +567,13 @@ type typeShape struct {
 // parseTypeText gives the live one. A type qualified with a schema other
 // than pg_catalog is a user type that only shares a built-in's name, and a
 // COLLATE clause changes the collation every index on the column is built
-// with, so neither gets a shape and neither matches a rule. The name is taken as the parser left
-// it: the grammar already spells every built-in the rules know by its
-// catalog name (varchar, numeric, timestamptz), so a target named
-// "decimal" or "character varying" was quoted and names a user type.
+// with, so neither gets a shape and neither matches a rule. The name is
+// taken as the parser left it: the grammar already spells every built-in
+// the rules know by its catalog name (varchar, numeric, timestamptz), so a
+// target named "decimal" or "character varying" was quoted and names a
+// user type.
 func targetTypeShape(op statement.Op) typeShape {
-	if op.NewTypeSchema != "" || op.NewTypeCollated {
+	if op.NewTypeSchema != "" || op.NewTypeCollation != "" {
 		return typeShape{}
 	}
 	return typeShape{name: strings.TrimSpace(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}

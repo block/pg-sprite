@@ -146,6 +146,35 @@ func TestMigrateDryRunRoutesTimestamptzToTimestampAsRewrite(t *testing.T) {
 	assert.Equal(t, planner.ReasonTypeRewrite, st.Decisions[0].Reason)
 }
 
+// A column with an explicit collation that is retyped without a COLLATE
+// clause takes the type's default collation, so every index on it is rebuilt
+// under ACCESS EXCLUSIVE and its sort order changes. That is not a relabel:
+// the dry-run must read the live collation and route to copy-and-swap even
+// though the type part is a plain varchar widen.
+func TestMigrateDryRunRoutesCollatedColumnRetypeAsRewrite(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE TABLE %s.t (
+		id int PRIMARY KEY,
+		c varchar(50) COLLATE "C"
+	)`, schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`CREATE INDEX t_c ON %s.t (c)`, schema))
+	require.NoError(t, err)
+
+	report := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN c TYPE varchar(100)", schema))
+	require.Len(t, report.Statements, 1)
+	st := report.Statements[0]
+	assert.Equal(t, planner.RouteCopyAndSwap, st.Route)
+	assert.Empty(t, st.ExecSQL, "dry-run must not offer the native statement")
+	require.Len(t, st.Decisions, 1)
+	assert.Equal(t, planner.ReasonTypeRewrite, st.Decisions[0].Reason)
+	assert.False(t, st.Decisions[0].Unverified)
+}
+
 // The dry-run advisory covers statements the execute gate refuses: a plain
 // CREATE INDEX comes back native with its concurrent rewrite, not created.
 func TestMigrateDryRunSuggestsConcurrentIndex(t *testing.T) {
