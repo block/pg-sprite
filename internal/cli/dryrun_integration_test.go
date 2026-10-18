@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	neturl "net/url"
 	"strings"
 	"testing"
 
@@ -273,8 +274,9 @@ func TestDryRunAndDiffAgreeOnDestructive(t *testing.T) {
 }
 
 // An unqualified statement resolves to the schema the engine actually
-// introspected — public — and the report says so: a stored plan must not
-// depend on the reader's search_path to name its target. The report also
+// introspected (public, on the default search_path) and the report says
+// so: a stored plan must not depend on the reader's search_path to name
+// its target. The report also
 // stamps the server version its classification was derived against.
 func TestDryRunResolvesUnqualifiedSchemaAndStampsServerVersion(t *testing.T) {
 	url := testutil.StartPostgres(t)
@@ -296,6 +298,47 @@ func TestDryRunResolvesUnqualifiedSchemaAndStampsServerVersion(t *testing.T) {
 	require.Len(t, report.Statements, 1)
 	assert.Equal(t, planner.ReasonBinaryCoercible, report.Statements[0].Decisions[0].Reason,
 		"resolving to public must feed the live facts to the classifier")
+}
+
+// A dry-run reads an unqualified table where the session search_path
+// resolves it, as execution does, even when public holds a table of the
+// same name. The schema it resolves to already holds the server's first
+// choice for an unnamed CHECK, so the plan names the constraint as the
+// server would there, and execution runs exactly the planned SQL.
+func TestMigrateDryRunResolvesTheTableThroughSearchPath(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	table := testutil.NewPublicTable(t, pool, "(qty int)")
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"CREATE TABLE %s.%s (qty int, CONSTRAINT %s_qty_check CHECK (qty < 1000))", schema, table, table))
+	require.NoError(t, err)
+
+	u, err := neturl.Parse(url)
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("options", "-csearch_path="+schema+",public")
+	u.RawQuery = q.Encode()
+	alter := fmt.Sprintf("ALTER TABLE %s ADD CHECK (qty > 0)", table)
+
+	report := dryRunPlan(t, u.String(), alter)
+	assert.Equal(t, schema, report.Schema, "the plan names the schema the search_path resolves the table to")
+	require.Len(t, report.Statements, 1)
+	planned := report.Statements[0].ExecSQL
+	require.Len(t, planned, 2)
+	assert.Contains(t, planned[0], table+"_qty_check1", "the plan numbers past the name the resolved schema holds")
+
+	cmd := newMigrateCmd(u.String(), alter)
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	require.Len(t, v.ExecutedSQL, 2)
+	assert.Contains(t, v.ExecutedSQL[0], table+"_qty_check1", "execution names the constraint as the plan did")
 }
 
 // A dry-run against a table that does not exist classifies with zero facts:
