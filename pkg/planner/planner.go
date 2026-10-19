@@ -84,6 +84,7 @@ func Reasons() []Reason {
 		ReasonPartitionParentLock,
 		ReasonReplicaIdentity,
 		ReasonDependentView,
+		ReasonCascadingDrop,
 		ReasonUnsupportedOperation,
 	}
 }
@@ -162,6 +163,14 @@ const (
 	// nothing, so the statement could only fail. The decision names the
 	// views; change or drop them first, then re-plan.
 	ReasonDependentView Reason = "dependent-view"
+	// ReasonCascadingDrop: a drop with CASCADE, which also drops whatever
+	// depends on what it drops: a view that reads a dropped column, or
+	// another table's foreign key on a dropped key. Those objects are not
+	// in the statement, so neither the plan nor the table's lock covers
+	// them. Drop each dependent object as its own change, then resubmit
+	// without CASCADE, which PostgreSQL refuses while anything still
+	// depends on the target.
+	ReasonCascadingDrop Reason = "cascading-drop"
 	// ReasonUnsupportedOperation: the planner does not recognize the
 	// operation or knows no safe path for it.
 	ReasonUnsupportedOperation Reason = "unsupported-operation"
@@ -331,15 +340,11 @@ func FactsFrom(live schemadiff.Model) Facts {
 
 // viewsReadingColumn returns the views that read the column op retypes or
 // drops: the two column changes PostgreSQL refuses while a view reads the
-// column. A rename is not one of them, since a view follows the column, and
-// neither is a DROP COLUMN ... CASCADE, which the server accepts by dropping
-// the views with it; that drop stays destructive. Under ONLY the change
-// stops at the table, so only its own views count, and a recursive drop
-// counts only the copies of the column it drops.
+// column. A rename is not one of them, since a view follows the column.
+// Under ONLY the change stops at the table, so only its own views count,
+// and a recursive drop counts only the copies of the column it drops.
 func viewsReadingColumn(op statement.Op, facts Facts) []string {
 	switch {
-	case op.Kind == statement.OpDropColumn && op.Cascade:
-		return nil
 	case op.Kind != statement.OpAlterColumnType && op.Kind != statement.OpDropColumn:
 		return nil
 	case op.Only:
@@ -402,6 +407,10 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	d := Decision{Operation: op.Describe(), Destructive: destructiveOp(op.Kind)}
 	if facts.ReplicaIdentity.DroppedBy(op) {
 		d.Route, d.Reason = RouteRefuse, ReasonReplicaIdentity
+		return d
+	}
+	if op.Cascade {
+		d.Route, d.Reason = RouteRefuse, ReasonCascadingDrop
 		return d
 	}
 	if views := viewsReadingColumn(op, facts); len(views) > 0 {

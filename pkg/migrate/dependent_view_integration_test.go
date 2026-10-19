@@ -104,18 +104,6 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 			},
 		},
 		{
-			name:      "dropping the column with CASCADE, which drops the views",
-			statement: "ALTER TABLE %s.users DROP COLUMN email CASCADE",
-			check: func(t *testing.T, schema string) {
-				assert.False(t, columnExists(t, pool, schema, "users", "email"))
-				var views int
-				require.NoError(t, pool.QueryRow(t.Context(),
-					`SELECT count(*) FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-					  WHERE n.nspname = $1 AND c.relkind IN ('v', 'm')`, schema).Scan(&views))
-				assert.Zero(t, views, "CASCADE drops the views with the column")
-			},
-		},
-		{
 			name:      "dropping a column no view reads",
 			statement: "ALTER TABLE %s.users DROP COLUMN note",
 			check: func(t *testing.T, schema string) {

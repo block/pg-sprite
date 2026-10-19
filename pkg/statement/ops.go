@@ -94,8 +94,9 @@ type Op struct {
 	// operation stops at the table and does not recurse into the tables
 	// below it.
 	Only bool
-	// Cascade reports a DROP COLUMN ... CASCADE, which also drops the
-	// objects that depend on the column, views among them, where the
+	// Cascade reports a drop with CASCADE (DROP COLUMN, DROP CONSTRAINT,
+	// or DROP INDEX), which also drops the objects that depend on what it
+	// drops, such as a view or another table's foreign key, where the
 	// default RESTRICT refuses while any exist.
 	Cascade bool
 	// Indexes are the unqualified names of the indexes an OpDropIndex
@@ -375,7 +376,13 @@ func ParseOps(sql string) ([]Op, error) {
 		if drop.GetRemoveType() != pganalyze.ObjectType_OBJECT_INDEX {
 			return []Op{{Kind: OpUnrecognized}}, nil
 		}
-		return []Op{{Kind: OpDropIndex, Name: dropIndexNames(drop), Indexes: droppedIndexes(drop), Concurrent: drop.GetConcurrent()}}, nil
+		return []Op{{
+			Kind:       OpDropIndex,
+			Name:       dropIndexNames(drop),
+			Indexes:    droppedIndexes(drop),
+			Concurrent: drop.GetConcurrent(),
+			Cascade:    drop.GetBehavior() == pganalyze.DropBehavior_DROP_CASCADE,
+		}}, nil
 	case node.GetReindexStmt() != nil:
 		re := node.GetReindexStmt()
 		return []Op{{
@@ -443,7 +450,7 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 	case pganalyze.AlterTableType_AT_ValidateConstraint:
 		return Op{Kind: OpValidateConstraint, Name: cmd.GetName()}
 	case pganalyze.AlterTableType_AT_DropConstraint:
-		return Op{Kind: OpDropConstraint, Name: cmd.GetName()}
+		return Op{Kind: OpDropConstraint, Name: cmd.GetName(), Cascade: cmd.GetBehavior() == pganalyze.DropBehavior_DROP_CASCADE}
 	case pganalyze.AlterTableType_AT_AttachPartition:
 		return Op{Kind: OpAttachPartition}
 	case pganalyze.AlterTableType_AT_DetachPartition:
