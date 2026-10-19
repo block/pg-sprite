@@ -138,8 +138,9 @@ const (
 	// every row — a full rewrite.
 	ReasonGeneratedStored Reason = "generated-stored"
 	// ReasonTypeRewrite: a type PostgreSQL must check or convert row by
-	// row — a type conversion it cannot relabel (rewrite plus reindex), or
-	// an added column of a domain type with constraints.
+	// row — a type conversion it cannot relabel (rewrite plus reindex), a
+	// type change that moves the column's collation (reindex alone), or an
+	// added column of a domain type with constraints.
 	ReasonTypeRewrite Reason = "type-rewrite"
 	// ReasonRelocation: SET TABLESPACE moves the heap — a rewrite-scale
 	// copy.
@@ -271,13 +272,21 @@ type Plan struct {
 // they are trusted as stated: the CLI fills them by introspecting the
 // target database, and a library caller may supply facts it already holds —
 // but they must describe the database the change will run on, because a
-// wrong fact can upgrade a rewrite to native. Missing facts are always
-// safe: the zero value is valid and classifies strictly more
-// conservatively (every type change becomes copy-and-swap).
+// wrong fact can upgrade a rewrite to native. Missing facts never let an
+// unsafe change succeed: the zero value is valid, routes every type change
+// to copy-and-swap, and only defers some refusals, such as a column a view
+// reads, to the server's own refusal at execution.
 type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
 	ColumnTypes map[string]string
+	// ColumnCollations maps each live column whose collation is not its
+	// type's default to that collation, as schemadiff renders it. A column
+	// absent from the map has the default collation. Retyping a column
+	// without a COLLATE clause resets it to the new type's default, so a
+	// column present here loses its collation and every index on it is
+	// rebuilt: never a relabel.
+	ColumnCollations map[string]string
 	// ReplicaIdentity is what the replica identity indexes of the table and
 	// its partitions key on; the zero value when none selects an index.
 	ReplicaIdentity schemadiff.ReplicaIdentityKeys
@@ -289,11 +298,16 @@ type Facts struct {
 	// column the table already has, which the server skips.
 	AddColumnProofs map[string]statement.AddColumnProof
 	// DependentViews maps a column to the views and materialized views that
-	// read it, on the table or on any table below it
+	// read it, on the table or on any table below it, which is what a
+	// recursive ALTER COLUMN TYPE changes
 	// (preflight.ColumnDependentViews). A column absent from the map has
 	// none, or the facts were not read, as in an offline lint; either way
 	// the server's own refusal at execution remains the backstop.
 	DependentViews map[string][]string
+	// DropDependentViews is DependentViews for the tables whose copy of
+	// the column a recursive DROP COLUMN drops: a child that declares the
+	// column itself or inherits it from a second parent keeps its copy.
+	DropDependentViews map[string][]string
 	// OwnDependentViews is DependentViews for the table alone, which is
 	// all an ALTER TABLE ONLY changes.
 	OwnDependentViews map[string][]string
@@ -306,28 +320,36 @@ type Facts struct {
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
-// canonical type of every live column and what the table's replica
-// identity keys on. Every front door — the declarative diff and the
-// imperative dry-run — extracts facts through this one function so
-// equivalent changes classify identically.
+// canonical type of every live column, the collation of every column that
+// has one of its own, and what the table's replica identity keys on. Every
+// front door — the declarative diff and the imperative dry-run — extracts
+// facts through this one function so equivalent changes classify
+// identically.
 func FactsFrom(live schemadiff.Model) Facts {
 	types := make(map[string]string, len(live.Columns))
+	collations := make(map[string]string)
 	for _, col := range live.Columns {
 		types[col.Name] = col.Type
+		if col.Collation != "" {
+			collations[col.Name] = col.Collation
+		}
 	}
-	return Facts{ColumnTypes: types, ReplicaIdentity: live.ReplicaIdentity}
+	return Facts{ColumnTypes: types, ColumnCollations: collations, ReplicaIdentity: live.ReplicaIdentity}
 }
 
 // viewsReadingColumn returns the views that read the column op retypes or
 // drops: the two column changes PostgreSQL refuses while a view reads the
 // column. A rename is not one of them, since a view follows the column.
-// Under ONLY the change stops at the table, so only its own views count.
+// Under ONLY the change stops at the table, so only its own views count,
+// and a recursive drop counts only the copies of the column it drops.
 func viewsReadingColumn(op statement.Op, facts Facts) []string {
 	switch {
 	case op.Kind != statement.OpAlterColumnType && op.Kind != statement.OpDropColumn:
 		return nil
 	case op.Only:
 		return facts.OwnDependentViews[op.Column]
+	case op.Kind == statement.OpDropColumn:
+		return facts.DropDependentViews[op.Column]
 	default:
 		return facts.DependentViews[op.Column]
 	}
@@ -615,6 +637,12 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 	if op.HasUsing {
 		return RouteCopyAndSwap, ReasonTypeRewrite, false
 	}
+	if _, collated := facts.ColumnCollations[op.Column]; collated {
+		// The live column has a collation of its own, which the new type
+		// either resets to its default or (with a COLLATE clause) replaces;
+		// either way every index on the column is rebuilt.
+		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	}
 	oldType, ok := facts.ColumnTypes[op.Column]
 	if !ok {
 		// No live type for the column: fail closed to the rewrite route,
@@ -639,13 +667,15 @@ type typeShape struct {
 
 // targetTypeShape reads the statement's target type into the shape
 // parseTypeText gives the live one. A type qualified with a schema other
-// than pg_catalog is a user type that only shares a built-in's name, so it
-// gets no shape and matches no rule. The name is taken as the parser left
-// it: the grammar already spells every built-in the rules know by its
-// catalog name (varchar, numeric, timestamptz), so a target named
-// "decimal" or "character varying" was quoted and names a user type.
+// than pg_catalog is a user type that only shares a built-in's name, and a
+// COLLATE clause changes the collation every index on the column is built
+// with, so neither gets a shape and neither matches a rule. The name is
+// taken as the parser left it: the grammar already spells every built-in
+// the rules know by its catalog name (varchar, numeric, timestamptz), so a
+// target named "decimal" or "character varying" was quoted and names a
+// user type.
 func targetTypeShape(op statement.Op) typeShape {
-	if op.NewTypeSchema != "" {
+	if op.NewTypeSchema != "" || op.NewTypeCollation != "" {
 		return typeShape{}
 	}
 	return typeShape{name: strings.TrimSpace(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}

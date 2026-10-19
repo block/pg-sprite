@@ -464,7 +464,13 @@ backend.
 
 The column type change is not binary-coercible (for example `int` → `bigint`,
 `text` → `jsonb`), so PostgreSQL rewrites the whole table under
-`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. An `ADD COLUMN` of a
+`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. A type change that
+moves the column's collation — a target with a `COLLATE` clause, or a column
+with a collation of its own retyped without one, which resets it to the new
+type's default — carries the same reason even when the type part is a plain
+relabel: the heap is not rewritten, but every index on the column is rebuilt
+under the same lock, and the native route would run that rebuild as if it were
+free. An `ADD COLUMN` of a
 domain type with a `CHECK` or `NOT NULL` carries the same reason: PostgreSQL
 rewrites the table to check every row against the domain, even when the default
 is a constant or one the catalog would store. An added column with a constant
@@ -514,12 +520,16 @@ reports it.
 The operation changes the type of, or drops, a column that a view or materialized
 view reads. PostgreSQL refuses both while the view exists, even a type change it
 would otherwise relabel without a rewrite, so the statement could only fail. A
-change without `ONLY` reaches the column on every partition and inheritance child
-too, so a view on one of them counts. The plan names each view in
-`decisions[].dependent_views`. Drop or redefine the views first, then re-plan. A
-rename is not refused, because a view follows the column. `DROP COLUMN … CASCADE`,
-which the server runs by dropping the views with the column, is refused as
-`cascading-drop` instead.
+type change without `ONLY` reaches the column on every partition and inheritance
+child too, so a view on one of them counts. A drop without `ONLY` reaches every
+partition, but only the inheritance children that inherit the column from this one
+parent without declaring it: a child that declares the column, or inherits it from
+a second parent, keeps its copy, so a view on that copy does not count. The plan
+names each view in `decisions[].dependent_views`, and a refused run's verdict in
+`dependent_views`. Drop or redefine the views first, then re-plan. A rename is not
+refused, because a view follows the column. `DROP COLUMN … CASCADE`, which the
+server runs by dropping the views with the column, is refused as `cascading-drop`
+instead.
 The planner reads the views from live facts, so the linter, which has none, never
 reports it, and the server's own refusal remains the backstop for a view created
 after planning.

@@ -159,6 +159,7 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 				"point REPLICA IDENTITY at another unique index first (or DEFAULT, if a usable primary key remains after the drop), then re-plan", d.Operation)
 		}
 		if d.Reason == planner.ReasonDependentView {
+			v.DependentViews = d.DependentViews
 			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a view reads it; "+
 				"drop or redefine those views first, then re-plan", d.Operation, strings.Join(d.DependentViews, ", "))
 		}

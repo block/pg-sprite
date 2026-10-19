@@ -15,16 +15,22 @@ import (
 
 // FactsFrom is the one seam between live introspection and classification:
 // every column's canonical type must come through so type-narrowing
-// decisions see the real live types.
+// decisions see the real live types, and a column's own collation must
+// come through so retyping it is never read as a relabel.
 func TestFactsFromExtractsColumnTypes(t *testing.T) {
 	live := schemadiff.Model{Columns: []schemadiff.Column{
 		{Name: "id", Type: "bigint"},
 		{Name: "name", Type: "character varying(50)"},
+		{Name: "code", Type: "text", Collation: `pg_catalog."C"`},
 	}}
-	assert.Equal(t, planner.Facts{ColumnTypes: map[string]string{
-		"id":   "bigint",
-		"name": "character varying(50)",
-	}}, planner.FactsFrom(live))
+	assert.Equal(t, planner.Facts{
+		ColumnTypes: map[string]string{
+			"id":   "bigint",
+			"name": "character varying(50)",
+			"code": "text",
+		},
+		ColumnCollations: map[string]string{"code": `pg_catalog."C"`},
+	}, planner.FactsFrom(live))
 }
 
 // FactsFrom carries what the live table's replica identity keys on, so a
@@ -131,6 +137,9 @@ func TestClassifyRefusesChangingAColumnAViewReads(t *testing.T) {
 		DependentViews: map[string][]string{
 			"email": {`"app"."active_users"`, `"reports"."emails"`},
 		},
+		DropDependentViews: map[string][]string{
+			"email": {`"app"."active_users"`, `"reports"."emails"`},
+		},
 		OwnDependentViews: map[string][]string{
 			"email": {`"app"."active_users"`, `"reports"."emails"`},
 		},
@@ -172,12 +181,18 @@ func TestClassifyRefusesChangingAColumnAViewReads(t *testing.T) {
 }
 
 // A view on a table below counts against a recursive change and not
-// against one under ONLY, which stops at the table.
+// against one under ONLY, which stops at the table. A recursive drop counts
+// only the copies of the column it drops: a view on a child's own declared
+// copy blocks a type change, which reaches that copy, and not a drop, which
+// leaves it.
 func TestClassifyJudgesDependentViewsByWhatTheChangeReaches(t *testing.T) {
 	facts := planner.Facts{
-		ColumnTypes:       map[string]string{"email": "character varying(50)", "code": "text"},
-		DependentViews:    map[string][]string{"email": {`"app"."active_users"`}, "code": {`"app"."child_codes"`}},
-		OwnDependentViews: map[string][]string{"email": {`"app"."active_users"`}},
+		ColumnTypes: map[string]string{"email": "character varying(50)", "code": "text", "tag": "text"},
+		DependentViews: map[string][]string{
+			"email": {`"app"."active_users"`}, "code": {`"app"."child_codes"`}, "tag": {`"app"."child_tags"`},
+		},
+		DropDependentViews: map[string][]string{"email": {`"app"."active_users"`}, "code": {`"app"."child_codes"`}},
+		OwnDependentViews:  map[string][]string{"email": {`"app"."active_users"`}},
 	}
 	for sql, want := range map[string][]string{
 		"ALTER TABLE t DROP COLUMN email RESTRICT":         {`"app"."active_users"`},
@@ -195,6 +210,16 @@ func TestClassifyJudgesDependentViewsByWhatTheChangeReaches(t *testing.T) {
 	plan, err := planner.Classify("ALTER TABLE ONLY t DROP COLUMN code", facts)
 	require.NoError(t, err)
 	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+
+	plan, err = planner.Classify("ALTER TABLE t DROP COLUMN tag", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+	assert.Empty(t, plan.Decisions[0].DependentViews)
+
+	plan, err = planner.Classify("ALTER TABLE t ALTER COLUMN tag TYPE varchar(10)", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonDependentView, plan.Decisions[0].Reason)
+	assert.Equal(t, []string{`"app"."child_tags"`}, plan.Decisions[0].DependentViews)
 }
 
 // CASCADE also drops whatever depends on the target, objects the
@@ -204,9 +229,10 @@ func TestClassifyJudgesDependentViewsByWhatTheChangeReaches(t *testing.T) {
 // keeps that more specific reason.
 func TestClassifyRefusesACascadingDrop(t *testing.T) {
 	views := planner.Facts{
-		ColumnTypes:       map[string]string{"email": "character varying(50)"},
-		DependentViews:    map[string][]string{"email": {`"app"."active_users"`}},
-		OwnDependentViews: map[string][]string{"email": {`"app"."active_users"`}},
+		ColumnTypes:        map[string]string{"email": "character varying(50)"},
+		DependentViews:     map[string][]string{"email": {`"app"."active_users"`}},
+		DropDependentViews: map[string][]string{"email": {`"app"."active_users"`}},
+		OwnDependentViews:  map[string][]string{"email": {`"app"."active_users"`}},
 	}
 	for _, facts := range []planner.Facts{{}, views} {
 		for _, sql := range []string{

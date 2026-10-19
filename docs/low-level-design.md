@@ -347,7 +347,7 @@ Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operatio
 
 | Invocation | Behaviour |
 | --- | --- |
-| `lint` | Offline (no database): classify every statement with zero live facts and report typed findings — unsupported operations are errors (non-zero exit), blocking idioms (with the safer SQL), conservative rewrites, and destructive drops are warnings. |
+| `lint` | Offline (no database): classify every statement with zero live facts and report typed findings — unsupported operations and a `CONCURRENTLY` operation inside an explicit `BEGIN` … `COMMIT` block, which PostgreSQL refuses, are errors (non-zero exit), blocking idioms (with the safer SQL), conservative rewrites, and destructive drops are warnings. |
 | `diff` / `migrate --dry-run` | Print the classified, routed plan and safer SQL where applicable. **Never writes the live table.** `diff` has no `--dry-run` flag because it never executes the plan (its desired-state diff does run the desired DDL in an always-rolled-back scratch transaction — see the scratch-schema note above). |
 | `migrate` (default) | Run the statement gate, classify and route exactly as dry-run would, then execute the routed SQL: the planner's **safer native sequence by default** when the submitted form blocks, the submitted form as a bounded optimistic attempt otherwise. The verdict's `executed_sql` reports the substitution. |
 | `migrate --force` | Run the statement **exactly as submitted**, overriding a safer-sequence substitution or a rewrite-required / backend-unavailable refusal. Gated — see below. |

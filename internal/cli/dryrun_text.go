@@ -339,37 +339,26 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 			"SET EXPRESSION needs PostgreSQL 17 or later; before that, the only path is to drop and re-add the column, " +
 			"which also drops its indexes"
 	}
-	if d, ok := dependentViewRefusal(ps); ok {
+	d, ok := firstRefusal(ps)
+	if !ok {
+		return "the planner knows no safe path for this statement"
+	}
+	if d.Reason == planner.ReasonDependentView {
 		return d.Operation + " changes a column read by " + strings.Join(d.DependentViews, ", ") +
 			", and PostgreSQL refuses to retype or drop a column while a view reads it"
 	}
-	if op := refusedOperation(ps); op != "" {
-		return "the planner knows no safe path for " + op
-	}
-	return "the planner knows no safe path for this statement"
+	return "the planner knows no safe path for " + d.Operation
 }
 
-// dependentViewRefusal returns the decision that refused the statement
-// because views read the column it changes, the one refusal whose views
-// the text names.
-func dependentViewRefusal(ps plan.Statement) (planner.Decision, bool) {
+// firstRefusal returns the first decision the planner refused — the same
+// decision the run path's refusal verdict explains in its detail.
+func firstRefusal(ps plan.Statement) (planner.Decision, bool) {
 	for _, d := range ps.Decisions {
-		if d.Route == planner.RouteRefuse && d.Reason == planner.ReasonDependentView {
+		if d.Route == planner.RouteRefuse {
 			return d, true
 		}
 	}
 	return planner.Decision{}, false
-}
-
-// refusedOperation names the first operation the planner refused — the
-// same operation the run path's refusal verdict names in its detail.
-func refusedOperation(ps plan.Statement) string {
-	for _, d := range ps.Decisions {
-		if d.Route == planner.RouteRefuse {
-			return d.Operation
-		}
-	}
-	return ""
 }
 
 // stickyWriter accumulates the first write error so the renderer reads as
