@@ -133,6 +133,20 @@ const (
 	// CodePoolTooSmall: the pool cannot hold the build session and the
 	// verdict connection at once.
 	CodePoolTooSmall Code = "pool-too-small"
+	// CodeReplicaIdentityDrop: a native drop would remove what a replica
+	// identity index is built on, read again under the table's lock;
+	// nothing was dropped. Point REPLICA IDENTITY elsewhere, then re-plan.
+	CodeReplicaIdentityDrop Code = "replica-identity-drop"
+	// CodeAdoptedIndexDrift: the index a planned ADD CONSTRAINT ... USING
+	// INDEX takes over was dropped, replaced, or left invalid after
+	// planning, read again under the table's lock; nothing was attached.
+	// Re-plan against the index as it stands.
+	CodeAdoptedIndexDrift Code = "adopted-index-drift"
+	// CodeValidatedConstraintDrift: the constraint a planned VALIDATE
+	// CONSTRAINT validates was dropped or replaced after planning, read
+	// again under the table's lock; nothing was validated. Re-plan against
+	// the constraint as it stands.
+	CodeValidatedConstraintDrift Code = "validated-constraint-drift"
 	// CodeTableNotFound: the statement's qualified table does not exist.
 	CodeTableNotFound Code = "table-not-found"
 	// CodeInvariantViolation: a breach of the invariant registry; never a
@@ -184,6 +198,9 @@ func Codes() []Code {
 		CodePartitionOfUnsupported,
 		CodeUnsupportedCreateStep,
 		CodePoolTooSmall,
+		CodeReplicaIdentityDrop,
+		CodeAdoptedIndexDrift,
+		CodeValidatedConstraintDrift,
 		CodeTableNotFound,
 		CodeInvariantViolation,
 		CodeExecutionFailed,
@@ -222,6 +239,9 @@ func (c Code) Permanent() bool {
 		CodePartitionOfUnsupported,
 		CodeUnsupportedCreateStep,
 		CodePoolTooSmall,
+		CodeReplicaIdentityDrop,
+		CodeAdoptedIndexDrift,
+		CodeValidatedConstraintDrift,
 		CodeTableNotFound,
 		CodeInvariantViolation:
 		return true
@@ -319,6 +339,12 @@ func sentinelCode(err error) Code {
 		return CodeRowSecurityPlanChanged
 	case errors.Is(err, ErrRowSecurityRefused):
 		return CodeRowSecurityRefused
+	case errors.Is(err, ErrReplicaIdentityDrop):
+		return CodeReplicaIdentityDrop
+	case errors.Is(err, ErrAdoptedIndexDrift):
+		return CodeAdoptedIndexDrift
+	case errors.Is(err, ErrValidatedConstraintDrift):
+		return CodeValidatedConstraintDrift
 	case errors.Is(err, ErrTableNotFound):
 		return CodeTableNotFound
 	default:

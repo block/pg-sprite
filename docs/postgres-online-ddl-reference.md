@@ -53,7 +53,8 @@ The remaining reasons are first-bucket by cost but carry a warning the cost alon
 `partition-parent-lock` (a new partition takes a brief `ACCESS EXCLUSIVE` on the parent, so
 the lock queue below applies to every query on the parent) and `app-breaking-rename` (the
 catalog change is instant; the running application code that still uses the old name is
-what breaks). `unsupported-operation` means the planner does not recognize the operation or
+what breaks). `replica-identity` is a refusal: the operation would drop what the table's
+replica identity index keys on. `unsupported-operation` means the planner does not recognize the operation or
 knows no safe path for it. The exclusion-constraint carve-out above is a known full-scan cost
 with no online path, not an operation with no cost bucket.
 
@@ -107,7 +108,9 @@ the same dynamic via metadata locks. Read it first if any of that is unfamiliar.
 | --- | --- | --- | --- | --- | --- |
 | `ADD COLUMN` (no default / nullable) | ACCESS EXCLUSIVE (brief) | No | Yes (after lock) | ❌ No | Metadata only |
 | `ADD COLUMN ... DEFAULT <constant>` | ACCESS EXCLUSIVE (brief) | **No** (PG 11+) | Yes | ❌ No | "Fast default" stored in catalog; pre-PG11 this rewrote |
-| `ADD COLUMN ... DEFAULT <volatile>` (e.g. `now()`, `random()`, `uuid_generate_v4()`) | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** | The expensive case |
+| `ADD COLUMN ... DEFAULT <stable expression>` (e.g. `now()`, `CURRENT_TIMESTAMP`, `current_user`) | ACCESS EXCLUSIVE (brief) | **No** (PG 11+) | Yes | ❌ No | Evaluated once and stored in the catalog like a constant; every existing row reads the same value |
+| `ADD COLUMN ... DEFAULT <volatile>` (e.g. `random()`, `gen_random_uuid()`, `clock_timestamp()`), identity, `serial` | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** | The expensive case |
+| `ADD COLUMN` of a domain type with a `CHECK` or `NOT NULL`, with or without a default | ACCESS EXCLUSIVE | **Yes** (full rewrite) | No | ✅ **Yes** | Every row is checked against the domain, even when the default is a constant |
 | `ADD COLUMN ... GENERATED ALWAYS AS (...) STORED` | ACCESS EXCLUSIVE | Yes | No | ✅ **Yes** | Values must be computed |
 | `ADD COLUMN ... UNIQUE` / `PRIMARY KEY` / `REFERENCES` / `CHECK` (inline constraint) | ACCESS EXCLUSIVE + index build or validation | No | No | ➖ Native pattern | Same work as the `ADD CONSTRAINT` form, under the `ADD COLUMN` lock — split: add the column first, then build the constraint online (`CONCURRENTLY` + `USING INDEX`, or `NOT VALID` + `VALIDATE`) |
 | `DROP COLUMN` | ACCESS EXCLUSIVE (brief) | No | Yes | ❌ No | Metadata only; disk space reclaimed lazily by VACUUM |
@@ -363,7 +366,10 @@ forms take a stronger lock but only for a brief catalog change with no scan:
 | runs as written | brief `ACCESS EXCLUSIVE` | none — default stored in the catalog | 0 |
 
 `ADD COLUMN ... DEFAULT <non-volatile>` on PostgreSQL 11+ stores the default in
-the catalog instead of rewriting the table. Catalog-only; runs as written.
+the catalog instead of rewriting the table. Catalog-only; runs as written. A
+constant qualifies by its shape; any other expression, such as `now()`,
+qualifies only when the engine proved, on an empty temporary table, that
+adding the column does not rewrite it.
 
 ### `binary-coercible`
 
@@ -424,9 +430,19 @@ rename is coordinated with application deploys.
 |---|---|---|---|
 | routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 until the backend lands (refused `backend-unavailable`) |
 
-`ADD COLUMN ... DEFAULT <volatile>` (for example `now()`, `gen_random_uuid()`)
-must compute the default per row: a full table rewrite under `ACCESS EXCLUSIVE`
-that blocks reads and writes. Routed to the copy-and-swap backend.
+`ADD COLUMN ... DEFAULT <volatile>` (for example `gen_random_uuid()`,
+`clock_timestamp()`, or an identity or `serial` column) must compute the default
+per row: a full table rewrite under `ACCESS EXCLUSIVE` that blocks reads and
+writes. Routed to the copy-and-swap backend. Before classifying, the engine adds
+each column to an empty temporary table inside a rolled-back transaction and
+checks whether that table's storage was replaced, so the server, not the
+statement's shape, decides: a non-volatile default such as `now()` is stored in
+the catalog and runs natively as `fast-default`. A column that rewrites is added
+again with its type alone, and carries this reason only when the type adds in
+place: when the type rewrites too, the reason is `type-rewrite`. A column the
+engine could not prove, because the probe needed a lock another session held, or
+for which no proof ran, as in `lint`, is classified by shape as `unverified`: any
+default that is not a constant is assumed volatile.
 
 ### `generated-stored`
 
@@ -446,7 +462,18 @@ backend.
 
 The column type change is not binary-coercible (for example `int` → `bigint`,
 `text` → `jsonb`), so PostgreSQL rewrites the whole table under
-`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend.
+`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. A type change that
+moves the column's collation — a target with a `COLLATE` clause, or a column
+with a collation of its own retyped without one, which resets it to the new
+type's default — carries the same reason even when the type part is a plain
+relabel: the heap is not rewritten, but every index on the column is rebuilt
+under the same lock, and the native route would run that rebuild as if it were
+free. An `ADD COLUMN` of a
+domain type with a `CHECK` or `NOT NULL` carries the same reason: PostgreSQL
+rewrites the table to check every row against the domain, even when the default
+is a constant or one the catalog would store. An added column with a constant
+default the engine could not prove carries it too, as `unverified`, since only
+its type could rewrite.
 
 ### `relocation`
 
@@ -466,6 +493,21 @@ copy-and-swap backend.
 
 The operation takes a brief exclusive lock on a partitioned parent, briefly
 blocking access to every partition. Flagged so it is scheduled deliberately.
+
+### `replica-identity`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation drops what the table's `REPLICA IDENTITY USING INDEX` keys on: the
+index itself, the constraint that owns it, or one of its key columns, which takes
+the index with it. PostgreSQL keeps the setting and leaves the table with no usable
+identity, so every `UPDATE` and `DELETE` on it fails while a publication publishes
+them. Move the identity first (`ALTER TABLE … REPLICA IDENTITY USING INDEX` another
+unique index, or `REPLICA IDENTITY DEFAULT` when a primary key remains), then re-plan.
+The planner judges this from live facts, so the linter, which has none, never
+reports it.
 
 ### `unsupported-operation`
 
@@ -489,6 +531,19 @@ truncating conversions, a dropped constraint or index, or `DROP NOT NULL`
 about existing rows and is recreated by a metadata-only statement). Emitted
 alongside the routing decision as a warning so destructive intent is always
 visible in review.
+
+### `concurrent-in-transaction`
+
+| Verdict | Lock | Scan / rewrite | Lint exit |
+|---|---|---|---|
+| lint error — the script fails at this statement | none: PostgreSQL refuses the statement before it starts | — | 1 |
+
+A `CONCURRENTLY` operation (`CREATE INDEX`, `DROP INDEX`, `REINDEX`, or `DETACH
+PARTITION`) sits inside a transaction block the script opens with `BEGIN` or
+`START TRANSACTION`. PostgreSQL refuses every `CONCURRENTLY` form inside a block,
+so the script stops at that statement and the whole block rolls back. Move the
+statement out of the block and run it on its own. Only `lint` reports this code:
+it is a property of the script, and `migrate` takes one statement at a time.
 
 ### `rewrite-required`
 

@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 // Every cause upholds the one invariant docs/invariants.md files it under —
@@ -37,6 +39,7 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 		CauseNameTaken:           "ST-5",
 		CauseCutoverUnverified:   "CO-1",
 		CauseCutoverUndrained:    "CO-1",
+		CauseCutoverUnfenced:     "CO-1",
 		CauseDrainDeferred:       "CO-6",
 		CauseSwapMismatch:        "ST-6",
 		CauseOutcomeAmbiguous:    "LK-4",
@@ -45,6 +48,7 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 		CauseResumeRowMismatch:   "ST-2",
 		CauseResumeRowDecoding:   "ST-3",
 		CauseShadowUnrecorded:    "ST-2",
+		CauseResumeShadowGone:    "ST-2",
 		CauseResumeSlotForeign:   "ST-3",
 		CauseResumeSlotHeld:      "ST-4",
 		CauseCopyShadowMismatch:  "ST-6",
@@ -57,6 +61,61 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 		assert.Equal(t, want[cause], cause.Invariant(), "cause %q", cause)
 	}
 	assert.Empty(t, RefusalCause("not-a-cause").Invariant())
+}
+
+// Every cause routes to the class docs/refusal-classes.md decides for it.
+// Lock, shape, ownership, drift, name, slot, and ambiguous-outcome causes
+// are environmental, since the state they describe moved under the run and
+// may not next time; the one statement the engine declines to carry is a
+// capability boundary; a proof, row, statement pairing, or catalog the
+// caller or the engine's own write got wrong is an invariant violation,
+// since no retry changes it; every answer is a member of refusal.Classes(),
+// so the closed set lists what the causes hand out. An unknown cause has no
+// class.
+func TestEveryRefusalCauseNamesItsClass(t *testing.T) {
+	want := map[RefusalCause]refusal.Class{
+		CauseLockUnproven:        refusal.ClassInvariantViolation,
+		CauseLockLost:            refusal.ClassEnvironmental,
+		CauseLockHeldElsewhere:   refusal.ClassEnvironmental,
+		CauseLockUnconfirmed:     refusal.ClassEnvironmental,
+		CauseProofEmpty:          refusal.ClassInvariantViolation,
+		CauseSourceShape:         refusal.ClassEnvironmental,
+		CauseStatementTarget:     refusal.ClassInvariantViolation,
+		CauseStatementConversion: refusal.ClassCapabilityBoundary,
+		CauseShadowOwner:         refusal.ClassEnvironmental,
+		CauseForeignRelation:     refusal.ClassEnvironmental,
+		CauseGrantsDiffer:        refusal.ClassInvariantViolation,
+		CauseIdentityHandoff:     refusal.ClassEnvironmental,
+		CauseCutoverUnverified:   refusal.ClassInvariantViolation,
+		CauseCutoverUndrained:    refusal.ClassInvariantViolation,
+		CauseCutoverUnfenced:     refusal.ClassEnvironmental,
+		CauseDrainDeferred:       refusal.ClassEnvironmental,
+		CauseRelationReplaced:    refusal.ClassEnvironmental,
+		CauseSchemaDrift:         refusal.ClassEnvironmental,
+		CauseFidelityDrift:       refusal.ClassEnvironmental,
+		CauseIndexInvalid:        refusal.ClassEnvironmental,
+		CauseNameTaken:           refusal.ClassEnvironmental,
+		CauseSwapMismatch:        refusal.ClassInvariantViolation,
+		CauseOutcomeAmbiguous:    refusal.ClassEnvironmental,
+		CauseResumeTerminal:      refusal.ClassInvariantViolation,
+		CauseResumeCutover:       refusal.ClassInvariantViolation,
+		CauseResumeRowMismatch:   refusal.ClassInvariantViolation,
+		CauseResumeRowDecoding:   refusal.ClassInvariantViolation,
+		CauseShadowUnrecorded:    refusal.ClassEnvironmental,
+		CauseResumeShadowGone:    refusal.ClassEnvironmental,
+		CauseResumeSlotForeign:   refusal.ClassEnvironmental,
+		CauseResumeSlotHeld:      refusal.ClassEnvironmental,
+		CauseCopyShadowMismatch:  refusal.ClassInvariantViolation,
+		CauseCopyFrontierBroken:  refusal.ClassInvariantViolation,
+		CauseCopyChunksInFlight:  refusal.ClassInvariantViolation,
+		CauseCopyChunkUnknown:    refusal.ClassInvariantViolation,
+	}
+	assert.Len(t, RefusalCauses(), len(want), "every registered cause has an expected class")
+	for _, cause := range RefusalCauses() {
+		assert.Equal(t, want[cause], cause.Class(), "cause %q", cause)
+		assert.Contains(t, refusal.Classes(), cause.Class(), "cause %q answers a class refusal.Classes() does not list", cause)
+	}
+	assert.Empty(t, RefusalCause("not-a-cause").Class())
 }
 
 // A refusal answers errors.Is for the sentinel and for every error behind

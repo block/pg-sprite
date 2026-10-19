@@ -13,6 +13,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -83,6 +84,56 @@ func TestRunDispatch(t *testing.T) {
 		assert.True(t, notNull)
 	})
 
+	// An unnamed CHECK runs as the same NOT VALID → VALIDATE sequence as a
+	// named one, under the name the server would have chosen, and ends
+	// validated.
+	t.Run("names an unnamed check and validates it online", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, qty int)", schema))
+		require.NoError(t, err)
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(
+			"INSERT INTO %s.t SELECT g, g FROM generate_series(1, 100) g", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ADD CHECK (qty > 0)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		assert.Equal(t, []string{
+			fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT t_qty_check CHECK (qty > 0) NOT VALID", schema),
+			fmt.Sprintf(`ALTER TABLE "%s"."t" VALIDATE CONSTRAINT "t_qty_check"`, schema),
+		}, v.ExecutedSQL)
+
+		var validated bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT convalidated FROM pg_constraint
+			 WHERE conrelid = ($1 || '.t')::regclass AND conname = 't_qty_check'`, schema).Scan(&validated))
+		assert.True(t, validated)
+	})
+
+	// When the table already holds the server's first choice, the unnamed
+	// CHECK runs under the numbered name the server would move on to, so
+	// the NOT VALID step does not collide with the existing constraint.
+	t.Run("names an unnamed check past a name the table holds", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		for _, ddl := range []string{
+			"CREATE TABLE %s.t (id int PRIMARY KEY, qty int)",
+			"ALTER TABLE %s.t ADD CONSTRAINT t_qty_check CHECK (qty < 1000)",
+		} {
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(ddl, schema))
+			require.NoError(t, err, ddl)
+		}
+
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ADD CHECK (qty > 0)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		assert.Equal(t, []string{
+			fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT t_qty_check1 CHECK (qty > 0) NOT VALID", schema),
+			fmt.Sprintf(`ALTER TABLE "%s"."t" VALIDATE CONSTRAINT "t_qty_check1"`, schema),
+		}, v.ExecutedSQL)
+	})
+
 	t.Run("re-checks the gate for callers that skipped it", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
@@ -121,6 +172,45 @@ func TestRunDispatch(t *testing.T) {
 		assert.Equal(t, "integer", typ, "the refused change must not touch the schema")
 	})
 
+	t.Run("builds a key with storage parameters online and keeps them", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, email text)", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(
+			"ALTER TABLE %s.t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = 70)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		require.Len(t, v.ExecutedSQL, 2)
+		assert.Contains(t, v.ExecutedSQL[0], "CREATE UNIQUE INDEX CONCURRENTLY")
+
+		var def string
+		require.NoError(t, pool.QueryRow(t.Context(),
+			"SELECT pg_get_indexdef(conindid) FROM pg_constraint WHERE conrelid = $1::regclass AND conname = 'k'",
+			schema+".t").Scan(&def))
+		assert.Contains(t, def, "WITH (fillfactor='70')")
+	})
+
+	t.Run("refuses a key whose storage parameter it cannot carry, naming the manual sequence", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, email text)", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(
+			"ALTER TABLE %s.t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = s.seventy)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+		assert.Equal(t, suggest.GuidanceUniqueIndexThenConstraint, v.Guidance,
+			"the statement already is one operation, so the manual path builds the key, not a split")
+
+		var exists bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			"SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = $1::regclass AND conname = 'k')",
+			schema+".t").Scan(&exists))
+		assert.False(t, exists, "the refused change must not touch the schema")
+	})
+
 	t.Run("refuses an unconstructible rewrite as rewrite-required", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
@@ -131,6 +221,7 @@ func TestRunDispatch(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+		assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, v.Guidance)
 
 		var exists bool
 		require.NoError(t, pool.QueryRow(t.Context(),

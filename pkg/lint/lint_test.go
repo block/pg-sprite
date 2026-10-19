@@ -64,6 +64,21 @@ func TestCheckFlagsUnverifiedTypeChangeAsPossibleRewrite(t *testing.T) {
 	assert.Equal(t, planner.ReasonTypeRewrite, f.Reason)
 }
 
+// Whether an expression default rewrites the table is the server's
+// answer, which an offline lint does not have: DEFAULT now() is stored in
+// the catalog, gen_random_uuid() is computed for every row. The finding
+// says the engine would take the heavy path, not that the change rewrites,
+// so lint and a live plan never disagree about a property of the change.
+func TestCheckFlagsUnprovenExpressionDefaultAsPossibleRewrite(t *testing.T) {
+	report, err := lint.Check("ALTER TABLE t ADD COLUMN created timestamptz DEFAULT now()")
+	require.NoError(t, err)
+	require.Len(t, report.Findings, 1)
+	f := report.Findings[0]
+	assert.Equal(t, lint.CodePossibleTableRewrite, f.Code)
+	assert.Equal(t, lint.SeverityWarning, f.Severity)
+	assert.Equal(t, planner.ReasonVolatileDefault, f.Reason)
+}
+
 // A USING clause is a rewrite regardless of live facts, so the finding is
 // the proven code, not the fail-closed one.
 func TestCheckFlagsProvenRewriteAsTableRewrite(t *testing.T) {
@@ -181,7 +196,7 @@ func TestReportJSONShape(t *testing.T) {
 	suggestion, err := json.Marshal(report.Findings[0].Suggestion)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 3,
 		"postgres_versions": "14-18",
 		"findings": [
 			{
@@ -208,10 +223,90 @@ func TestReportJSONCleanFindingsAreEmptyArray(t *testing.T) {
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 1,
+		"format_version": 3,
 		"postgres_versions": "14-18",
 		"findings": [],
 		"errors": 0,
 		"warnings": 0
 	}`, string(raw))
+}
+
+// A CONCURRENTLY operation inside an explicit transaction block is an
+// error whatever the classifier makes of it, and only while the block is
+// open: a savepoint or COMMIT AND CHAIN keeps the script inside it, and a
+// COMMIT, ROLLBACK, or PREPARE TRANSACTION closes it.
+func TestCheckFlagsConcurrentInsideTransactionBlock(t *testing.T) {
+	cases := []struct {
+		name   string
+		script string
+		// flagged lists the statement indexes carrying the finding.
+		flagged []int
+	}{
+		{name: "create index in a block", script: "BEGIN; CREATE INDEX CONCURRENTLY i ON t (c); COMMIT", flagged: []int{2}},
+		{name: "start transaction", script: "START TRANSACTION; CREATE INDEX CONCURRENTLY i ON t (c); COMMIT", flagged: []int{2}},
+		{name: "drop index", script: "BEGIN; DROP INDEX CONCURRENTLY i; COMMIT", flagged: []int{2}},
+		{name: "reindex", script: "BEGIN; REINDEX INDEX CONCURRENTLY i; COMMIT", flagged: []int{2}},
+		{name: "reindex with concurrently true", script: "BEGIN; REINDEX (CONCURRENTLY true) INDEX i; COMMIT", flagged: []int{2}},
+		{name: "reindex with concurrently false", script: "BEGIN; REINDEX (CONCURRENTLY false) INDEX i; COMMIT"},
+		{name: "reindex with concurrently 0", script: "BEGIN; REINDEX (CONCURRENTLY 0) INDEX i; COMMIT"},
+		{name: "detach partition", script: "BEGIN; ALTER TABLE t DETACH PARTITION p CONCURRENTLY; COMMIT", flagged: []int{2}},
+		{name: "block never closed", script: "BEGIN; CREATE INDEX CONCURRENTLY i ON t (c)", flagged: []int{2}},
+		{name: "after a savepoint", script: "BEGIN; SAVEPOINT s; CREATE INDEX CONCURRENTLY i ON t (c); COMMIT", flagged: []int{3}},
+		{name: "after commit and chain", script: "BEGIN; COMMIT AND CHAIN; CREATE INDEX CONCURRENTLY i ON t (c); COMMIT", flagged: []int{3}},
+		{name: "after commit", script: "BEGIN; ALTER TABLE t ADD COLUMN c int; COMMIT; CREATE INDEX CONCURRENTLY i ON t (c)"},
+		{name: "after rollback", script: "BEGIN; ROLLBACK; CREATE INDEX CONCURRENTLY i ON t (c)"},
+		{name: "after prepare transaction", script: "BEGIN; PREPARE TRANSACTION 'g'; CREATE INDEX CONCURRENTLY i ON t (c)"},
+		{name: "no block", script: "CREATE INDEX CONCURRENTLY i ON t (c)"},
+		{name: "blocking form in a block", script: "BEGIN; CREATE INDEX i ON t (c); COMMIT"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			report, err := lint.Check(tc.script)
+			require.NoError(t, err)
+			var flagged []int
+			for _, f := range report.Findings {
+				if f.Code != lint.CodeConcurrentInTransaction {
+					continue
+				}
+				flagged = append(flagged, f.Statement)
+				assert.Equal(t, lint.SeverityError, f.Severity)
+				assert.Empty(t, f.Reason)
+				assert.Empty(t, f.Suggestion)
+			}
+			assert.Equal(t, tc.flagged, flagged)
+		})
+	}
+}
+
+func TestCheckConcurrentInTransactionNamesTheOperation(t *testing.T) {
+	report, err := lint.Check("BEGIN;\nCREATE INDEX CONCURRENTLY t_c_idx ON t (c);\nCOMMIT;")
+	require.NoError(t, err)
+	var found *lint.Finding
+	for i := range report.Findings {
+		if report.Findings[i].Code == lint.CodeConcurrentInTransaction {
+			found = &report.Findings[i]
+		}
+	}
+	require.NotNil(t, found)
+	assert.Equal(t, 2, found.Statement)
+	assert.Equal(t, 2, found.Line)
+	assert.Equal(t, "CREATE INDEX CONCURRENTLY t_c_idx ON t (c)", found.SQL)
+	assert.Equal(t, "CREATE INDEX t_c_idx", found.Operation)
+}
+
+// Two unnamed CHECKs on one column in one script: the second finding's
+// suggestion names its constraint past the first's, as the server would.
+func TestCheckUnnamedChecksInOneScriptSuggestDistinctNames(t *testing.T) {
+	report, err := lint.Check("ALTER TABLE t ADD CHECK (qty > 0); ALTER TABLE t ADD CHECK (qty < 100);")
+	require.NoError(t, err)
+	var suggested []string
+	for _, f := range report.Findings {
+		if len(f.Suggestion) > 0 {
+			suggested = append(suggested, f.Suggestion[0])
+		}
+	}
+	assert.Equal(t, []string{
+		"ALTER TABLE t ADD CONSTRAINT t_qty_check CHECK (qty > 0) NOT VALID",
+		"ALTER TABLE t ADD CONSTRAINT t_qty_check1 CHECK (qty < 100) NOT VALID",
+	}, suggested)
 }

@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 func TestCheckPartitionSupport(t *testing.T) {
@@ -55,4 +57,25 @@ func TestRefusesPartitionedParentNotValidForeignKeyByServerVersion(t *testing.T)
 	cause, err = RefusesPartitionedParent(14, checkSteps)
 	require.NoError(t, err)
 	assert.Empty(t, cause)
+}
+
+// Every partition cause routes to the class docs/refusal-classes.md decides
+// for it: the two index-build causes are a capability boundary, index
+// adoption is by design, the NOT VALID foreign key is environmental; every
+// answer is a member of refusal.Classes(), and the zero cause — the steps
+// are supported — has no class.
+func TestEveryPartitionRefusalCauseNamesItsClass(t *testing.T) {
+	want := map[PartitionRefusalCause]refusal.Class{
+		PartitionCauseConcurrentIndexBuild: refusal.ClassCapabilityBoundary,
+		PartitionCauseBlockingIndexBuild:   refusal.ClassCapabilityBoundary,
+		PartitionCauseIndexAdoption:        refusal.ClassByDesign,
+		PartitionCauseNotValidForeignKey:   refusal.ClassEnvironmental,
+	}
+	assert.Len(t, PartitionRefusalCauses(), len(want), "every registered cause has an expected class")
+	for _, cause := range PartitionRefusalCauses() {
+		assert.Equal(t, want[cause], cause.Class(), "cause %q", cause)
+		assert.Contains(t, refusal.Classes(), cause.Class(), "cause %q answers a class refusal.Classes() does not list", cause)
+	}
+	assert.Empty(t, PartitionRefusalCause("").Class())
+	assert.Empty(t, PartitionRefusalCause("not-a-cause").Class())
 }

@@ -52,7 +52,16 @@ type Config struct {
 	// DefaultConnectTimeout.
 	ConnectTimeout time.Duration
 	// CACertPath, when set, enables verify-full TLS using the given CA bundle
-	// (e.g. the RDS/Aurora global bundle). Unset, RDS/Aurora endpoints in
+	// (e.g. the RDS/Aurora global bundle) and overrides whatever sslmode the
+	// URL asks for: every connection attempt, including each host of a
+	// multi-host URL, is verified against the bundle, and none falls back to
+	// an unencrypted or unverified session. The bundle always means
+	// verify-full: sslmode=verify-ca is promoted to verify the host name as
+	// well. Each attempt keeps the client certificate (sslcert / sslkey) and
+	// ALPN (sslnegotiation=direct) the URL configures, and a unix-domain
+	// socket host stays without TLS, which PostgreSQL does not offer over a
+	// socket. A URL that selects sslmode=disable alongside it is refused with
+	// ErrCACertWithSSLModeDisable. Unset, RDS/Aurora endpoints in
 	// the partitions the embedded bundle covers are auto-verified with it
 	// (see rds.go); an RDS/Aurora endpoint in any other partition (GovCloud)
 	// refuses to open with ErrRDSBundleDoesNotCoverHost unless its
@@ -373,11 +382,7 @@ func configureTLS(pc *pgxpool.Config, cfg Config) error {
 	host := pc.ConnConfig.Host
 	switch {
 	case cfg.CACertPath != "":
-		tlsCfg, err := caTLSConfig(cfg.CACertPath, host)
-		if err != nil {
-			return err
-		}
-		pc.ConnConfig.TLSConfig = tlsCfg
+		return pinToCABundle(pc, cfg)
 	case !IsRDSHost(host):
 		// Not a managed endpoint: the connection string's choice stands.
 	case dsnNamesSSLMode(cfg.URL):

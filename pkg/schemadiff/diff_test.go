@@ -73,6 +73,51 @@ func TestDiffRefusesPersistenceMismatch(t *testing.T) {
 	require.ErrorIs(t, err, ErrUnsupportedChange)
 }
 
+// Storage parameters are not converged: matching parameters diff to
+// nothing, and any difference is a typed refusal, never a silent zero diff.
+func TestDiffStorageParameters(t *testing.T) {
+	tuned := base()
+	tuned.Options = []string{"fillfactor=70"}
+	changes, err := Diff("public", tuned, tuned)
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+
+	_, err = Diff("public", base(), tuned)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	_, err = Diff("public", tuned, base())
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+}
+
+// An identity's sequence declaration is not converged, so a difference is
+// a typed refusal; an added identity column carries its declaration in
+// the emitted ADD COLUMN, so the column lands declared as the file says.
+func TestDiffIdentitySequenceOptions(t *testing.T) {
+	seq := &SequenceOptions{Type: "bigint", Start: 1000, Increment: 1, Min: 1, Max: 5000, Cache: 1}
+	identity := func(s *SequenceOptions) Model {
+		m := base()
+		m.Columns = append(m.Columns, Column{Name: "ref", Type: "bigint", NotNull: true, Identity: IdentityAlways, Sequence: s})
+		return m
+	}
+
+	_, err := Diff("public", identity(nil), identity(seq))
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	_, err = Diff("public", identity(seq), identity(nil))
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	changes, err := Diff("public", identity(seq), identity(&SequenceOptions{Type: "bigint", Start: 1000, Increment: 1, Min: 1, Max: 5000, Cache: 1}))
+	require.NoError(t, err)
+	assert.Empty(t, changes)
+
+	changes, err = Diff("public", base(), identity(seq))
+	require.NoError(t, err)
+	require.Len(t, changes, 1)
+	assert.Equal(t, `ALTER TABLE "public"."events" ADD COLUMN "ref" bigint GENERATED ALWAYS AS IDENTITY (START WITH 1000 INCREMENT BY 1 MINVALUE 1 MAXVALUE 5000 CACHE 1 NO CYCLE) NOT NULL`, changes[0].SQL)
+
+	mistyped := identity(&SequenceOptions{Type: "integer", Start: 1, Increment: 1, Min: 1, Max: 5000, Cache: 1})
+	_, err = Diff("public", base(), mistyped)
+	require.ErrorIs(t, err, ErrUnsupportedChange)
+	require.ErrorIs(t, err, ErrUnrenderableSequenceOptions)
+}
+
 // A collation delta on an existing column rewrites the column, and an
 // added column's COLLATE clause is not carried by the emitted ADD COLUMN —
 // both are typed refusals, never a silent zero diff or a silently dropped
@@ -255,6 +300,73 @@ func TestDiffConstraintChangeDropsAndReadds(t *testing.T) {
 	assert.False(t, changes[1].Destructive)
 }
 
+// A live constraint left NOT VALID with the desired definition, the state an
+// interrupted online add leaves behind, converges by validating it: no drop,
+// no re-add, nothing destructive. Validity is the only difference that earns
+// this; a NOT VALID constraint whose definition also changed, or that the
+// desired file no longer declares, is planned as before.
+func TestDiffValidatesANotValidConstraintInPlace(t *testing.T) {
+	check := Constraint{Name: "events_name_check", Def: "CHECK ((length((name)::text) > 0))"}
+	fk := Constraint{Name: "events_owner_fkey", Def: "FOREIGN KEY (id) REFERENCES owners(id)", ForeignKey: true}
+	notValid := func(c Constraint) Constraint {
+		c.Def += " NOT VALID"
+		c.NotValid = true
+		return c
+	}
+	with := func(cons ...Constraint) Model {
+		m := base()
+		m.Constraints = append(m.Constraints, cons...)
+		return m
+	}
+
+	t.Run("check constraint", func(t *testing.T) {
+		changes, err := Diff("public", with(notValid(check)), with(check))
+		require.NoError(t, err)
+		require.Len(t, changes, 1)
+		assert.Equal(t, `ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_name_check"`, changes[0].SQL)
+		assert.Equal(t, ChangeValidateConstraint, changes[0].Kind)
+		assert.False(t, changes[0].Destructive)
+		assert.False(t, changes[0].Kind.IsForeignKey())
+		assert.Equal(t, &ConstraintValidation{Constraint: check.Name, Def: check.Def + " NOT VALID"}, changes[0].Validates,
+			"execution checks the live definition the diff matched")
+	})
+
+	t.Run("foreign key", func(t *testing.T) {
+		changes, err := Diff("public", with(notValid(fk)), with(fk))
+		require.NoError(t, err)
+		require.Len(t, changes, 1)
+		assert.Equal(t, `ALTER TABLE "public"."events" VALIDATE CONSTRAINT "events_owner_fkey"`, changes[0].SQL)
+		assert.Equal(t, ChangeValidateForeignKey, changes[0].Kind)
+		assert.False(t, changes[0].Destructive)
+		assert.True(t, changes[0].Kind.IsForeignKey(), "desired-state execution refuses it with every foreign-key change")
+		assert.Equal(t, &ConstraintValidation{Constraint: fk.Name, Def: fk.Def + " NOT VALID"}, changes[0].Validates)
+	})
+
+	t.Run("definition also changed", func(t *testing.T) {
+		changed := Constraint{Name: check.Name, Def: "CHECK ((length((name)::text) > 1))"}
+		changes, err := Diff("public", with(notValid(check)), with(changed))
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" DROP CONSTRAINT "events_name_check"`,
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_check" CHECK ((length((name)::text) > 1))`,
+		}, sqls(changes))
+		assert.True(t, changes[0].Destructive)
+	})
+
+	t.Run("no longer declared", func(t *testing.T) {
+		changes, err := Diff("public", with(notValid(check)), base())
+		require.NoError(t, err)
+		require.Equal(t, []string{`ALTER TABLE "public"."events" DROP CONSTRAINT "events_name_check"`}, sqls(changes))
+		assert.True(t, changes[0].Destructive)
+	})
+
+	t.Run("validated on both sides", func(t *testing.T) {
+		changes, err := Diff("public", with(check), with(check))
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+	})
+}
+
 func TestDiffIndexChangeDropsAndRecreatesQualified(t *testing.T) {
 	desired := base()
 	desired.Indexes = []Index{
@@ -266,6 +378,106 @@ func TestDiffIndexChangeDropsAndRecreatesQualified(t *testing.T) {
 		`DROP INDEX "public"."events_name_idx"`,
 		`CREATE UNIQUE INDEX events_name_idx ON public.events USING btree (name)`,
 	}, sqls(changes))
+}
+
+// A new unique constraint whose name and index match a live unique index
+// takes the index over in place rather than dropping it and building its
+// own, which would leave the table without the guarantee and without the
+// index while the build runs. Every shape the server would not adopt, or
+// that would not come out the same as a fresh constraint, keeps the drop
+// and rebuild.
+func TestDiffKeyConstraintAdoptsTheLiveIndex(t *testing.T) {
+	const indexDef = "CREATE UNIQUE INDEX events_name_key ON events USING btree (name)"
+	live := func(ix Index) Model {
+		m := base()
+		m.Indexes = []Index{ix}
+		return m
+	}
+	desired := func(con Constraint) Model {
+		m := base()
+		m.Indexes = nil
+		m.Constraints = append(m.Constraints, con)
+		return m
+	}
+	unique := Constraint{Name: "events_name_key", Def: "UNIQUE (name)", IndexDef: indexDef}
+	rebuild := []string{
+		`DROP INDEX "public"."events_name_key"`,
+		`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE (name)`,
+	}
+
+	t.Run("a unique constraint", func(t *testing.T) {
+		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef}), desired(unique))
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE USING INDEX "events_name_key"`,
+		}, sqls(changes))
+		assert.False(t, changes[0].Destructive)
+		assert.Equal(t, ChangeAddConstraint, changes[0].Kind)
+		assert.Equal(t, &IndexAdoption{Index: "events_name_key", Def: indexDef}, changes[0].Adopts,
+			"execution checks the index against the definition the diff matched")
+	})
+
+	t.Run("a primary key", func(t *testing.T) {
+		const pkDef = "CREATE UNIQUE INDEX events_pkey ON events USING btree (id)"
+		l := base()
+		l.Constraints = nil
+		l.Indexes = []Index{{Name: "events_pkey", Def: pkDef}}
+		d := base()
+		d.Indexes = nil
+		d.Constraints = []Constraint{{Name: "events_pkey", Def: "PRIMARY KEY (id)", Primary: true, IndexDef: pkDef}}
+		changes, err := Diff("public", l, d)
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_pkey" PRIMARY KEY USING INDEX "events_pkey"`,
+		}, sqls(changes))
+	})
+
+	t.Run("an index of another definition", func(t *testing.T) {
+		other := Index{Name: "events_name_key", Def: "CREATE UNIQUE INDEX events_name_key ON events USING btree (name) WHERE (id > 0)"}
+		changes, err := Diff("public", live(other), desired(unique))
+		require.NoError(t, err)
+		assert.Equal(t, rebuild, sqls(changes))
+	})
+
+	t.Run("an unfinished build", func(t *testing.T) {
+		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef, Invalid: true}), desired(unique))
+		require.NoError(t, err)
+		assert.Equal(t, rebuild[1:], sqls(changes), "the unfinished build is never dropped here, and never adopted")
+	})
+
+	t.Run("a deferrable constraint", func(t *testing.T) {
+		deferrable := unique
+		deferrable.Def = "UNIQUE (name) DEFERRABLE"
+		deferrable.Deferrable = true
+		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef}), desired(deferrable))
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE USING INDEX "events_name_key" DEFERRABLE`,
+		}, sqls(changes))
+		assert.Equal(t, &IndexAdoption{Index: "events_name_key", Def: indexDef}, changes[0].Adopts)
+	})
+
+	t.Run("an initially deferred constraint", func(t *testing.T) {
+		deferred := unique
+		deferred.Def = "UNIQUE (name) DEFERRABLE INITIALLY DEFERRED"
+		deferred.Deferrable, deferred.InitiallyDeferred = true, true
+		changes, err := Diff("public", live(Index{Name: "events_name_key", Def: indexDef}), desired(deferred))
+		require.NoError(t, err)
+		require.Equal(t, []string{
+			`ALTER TABLE "public"."events" ADD CONSTRAINT "events_name_key" UNIQUE USING INDEX "events_name_key" DEFERRABLE INITIALLY DEFERRED`,
+		}, sqls(changes))
+		assert.Equal(t, &IndexAdoption{Index: "events_name_key", Def: indexDef}, changes[0].Adopts)
+	})
+
+	t.Run("a partitioned parent", func(t *testing.T) {
+		l := live(Index{Name: "events_name_key", Def: indexDef})
+		l.PartitionKey = "RANGE (id)"
+		d := desired(unique)
+		d.PartitionKey = "RANGE (id)"
+		changes, err := Diff("public", l, d)
+		require.NoError(t, err)
+		assert.Equal(t, rebuild, sqls(changes))
+	})
 }
 
 // A live index that matches the desired definition but is invalid is an
@@ -461,8 +673,8 @@ func TestDiffVirtualGeneratedColumn(t *testing.T) {
 }
 
 // The change-kind vocabulary is a closed set a consumer branches on; it is
-// pinned to plan-report format_version 1 (docs/plan-report.md). A new value
-// here without a format_version bump is a contract break.
+// pinned to the plan report's format_version (docs/plan-report.md). A new
+// value here without a format_version bump is a contract break.
 func TestChangeKindsVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []ChangeKind{
 		ChangeCreateTable,
@@ -479,6 +691,8 @@ func TestChangeKindsVocabularyPinned(t *testing.T) {
 		ChangeDropNotNull,
 		ChangeAddConstraint,
 		ChangeAddForeignKey,
+		ChangeValidateConstraint,
+		ChangeValidateForeignKey,
 		ChangeCreateIndex,
 	}, ChangeKinds())
 }

@@ -1,6 +1,7 @@
 package statement_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -111,9 +112,54 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "varchar", NewTypeMods: []int32{100}},
 		},
 		{
+			name: "alter type to an array",
+			sql:  "ALTER TABLE t ALTER COLUMN tags TYPE varchar(100)[]",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "tags", NewType: "varchar", NewTypeMods: []int32{100}, NewTypeArray: true},
+		},
+		{
+			name: "alter type to an array spelled ARRAY",
+			sql:  "ALTER TABLE t ALTER COLUMN tags TYPE text ARRAY",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "tags", NewType: "text", NewTypeArray: true},
+		},
+		{
+			name: "alter type to a schema-qualified type",
+			sql:  "ALTER TABLE t ALTER COLUMN email TYPE app.text",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "email", NewType: "text", NewTypeSchema: "app"},
+		},
+		{
+			name: "alter type qualified with pg_catalog",
+			sql:  "ALTER TABLE t ALTER COLUMN email TYPE pg_catalog.text",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "email", NewType: "text"},
+		},
+		{
+			name: "add column of an array type",
+			sql:  "ALTER TABLE t ADD COLUMN tags text[]",
+			want: statement.Op{Kind: statement.OpAddColumn, Column: "tags", NewType: "text", NewTypeArray: true},
+		},
+		{
 			name: "alter type with using",
 			sql:  "ALTER TABLE t ALTER COLUMN doc TYPE jsonb USING doc::jsonb",
 			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "doc", NewType: "jsonb", HasUsing: true},
+		},
+		{
+			name: "alter type pg_catalog qualified stays bare",
+			sql:  "ALTER TABLE t ALTER COLUMN name TYPE pg_catalog.varchar(100)",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "varchar", NewTypeMods: []int32{100}},
+		},
+		{
+			name: "alter type SQL-standard spelling stays bare",
+			sql:  "ALTER TABLE t ALTER COLUMN name TYPE character varying(100)",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "varchar", NewTypeMods: []int32{100}},
+		},
+		{
+			name: "alter type with a collation",
+			sql:  `ALTER TABLE t ALTER COLUMN name TYPE text COLLATE "C"`,
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "text", NewTypeCollation: "C"},
+		},
+		{
+			name: "alter type with a schema-qualified collation",
+			sql:  `ALTER TABLE t ALTER COLUMN name TYPE text COLLATE pg_catalog."C"`,
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "text", NewTypeCollation: "pg_catalog.C"},
 		},
 		{
 			name: "set default",
@@ -176,9 +222,41 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpAddConstraint, Name: "t_pkey", Constraint: statement.ConstraintPrimaryKey, Columns: []string{"id"}},
 		},
 		{
+			name: "add unique with every index attribute",
+			sql:  "ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (a) INCLUDE (b) WITH (fillfactor = 70) USING INDEX TABLESPACE fast DEFERRABLE INITIALLY DEFERRED",
+			want: statement.Op{Kind: statement.OpAddConstraint, Name: "k", Constraint: statement.ConstraintUnique, Columns: []string{"a"},
+				IncludeColumns: []string{"b"}, NullsNotDistinct: true, Deferrable: true, InitiallyDeferred: true,
+				IndexTablespace: "fast", IndexStorageParams: []statement.StorageParam{{Name: "fillfactor", Value: "70", HasValue: true}}},
+		},
+		{
+			name: "add unique with storage parameters spelled every way",
+			sql:  "ALTER TABLE t ADD CONSTRAINT k UNIQUE (a) WITH (fillfactor = 70, deduplicate_items = off, x = 'it''s', y = 1.5, z = true, bare)",
+			want: statement.Op{Kind: statement.OpAddConstraint, Name: "k", Constraint: statement.ConstraintUnique, Columns: []string{"a"},
+				IndexStorageParams: []statement.StorageParam{
+					{Name: "fillfactor", Value: "70", HasValue: true},
+					{Name: "deduplicate_items", Value: "off", HasValue: true},
+					{Name: "x", Value: "it's", HasValue: true},
+					{Name: "y", Value: "1.5", HasValue: true},
+					{Name: "z", Value: "true", HasValue: true},
+					{Name: "bare"},
+				}},
+		},
+		{
+			name: "add unique with a storage parameter whose value is a qualified name",
+			sql:  "ALTER TABLE t ADD CONSTRAINT k UNIQUE (a) WITH (x = s.y)",
+			want: statement.Op{Kind: statement.OpAddConstraint, Name: "k", Constraint: statement.ConstraintUnique, Columns: []string{"a"},
+				IndexOptionsUnrenderable: true},
+		},
+		{
+			name: "add unique with a backslash in a storage parameter",
+			sql:  `ALTER TABLE t ADD CONSTRAINT k UNIQUE (a) WITH (x = 'a\b')`,
+			want: statement.Op{Kind: statement.OpAddConstraint, Name: "k", Constraint: statement.ConstraintUnique, Columns: []string{"a"},
+				IndexOptionsUnrenderable: true},
+		},
+		{
 			name: "add unique using index",
 			sql:  "ALTER TABLE t ADD CONSTRAINT u UNIQUE USING INDEX u_idx",
-			want: statement.Op{Kind: statement.OpAddConstraint, Name: "u", Constraint: statement.ConstraintUnique, UsingIndex: true},
+			want: statement.Op{Kind: statement.OpAddConstraint, Name: "u", Constraint: statement.ConstraintUnique, UsingIndex: true, Indexes: []string{"u_idx"}},
 		},
 		{
 			name: "add check not valid",
@@ -233,12 +311,12 @@ func TestParseOpsShapes(t *testing.T) {
 		{
 			name: "drop index",
 			sql:  "DROP INDEX i",
-			want: statement.Op{Kind: statement.OpDropIndex, Name: "i"},
+			want: statement.Op{Kind: statement.OpDropIndex, Name: "i", Indexes: []string{"i"}},
 		},
 		{
 			name: "drop index concurrently",
 			sql:  "DROP INDEX CONCURRENTLY i",
-			want: statement.Op{Kind: statement.OpDropIndex, Name: "i", Concurrent: true},
+			want: statement.Op{Kind: statement.OpDropIndex, Name: "i", Indexes: []string{"i"}, Concurrent: true},
 		},
 		{
 			name: "reindex",
@@ -249,6 +327,31 @@ func TestParseOpsShapes(t *testing.T) {
 			name: "reindex concurrently",
 			sql:  "REINDEX INDEX CONCURRENTLY i",
 			want: statement.Op{Kind: statement.OpReindex, Name: "i", Concurrent: true},
+		},
+		{
+			name: "reindex with concurrently true",
+			sql:  "REINDEX (CONCURRENTLY TRUE) INDEX i",
+			want: statement.Op{Kind: statement.OpReindex, Name: "i", Concurrent: true},
+		},
+		{
+			name: "reindex with concurrently 1",
+			sql:  "REINDEX (CONCURRENTLY 1) INDEX i",
+			want: statement.Op{Kind: statement.OpReindex, Name: "i", Concurrent: true},
+		},
+		{
+			name: "reindex with concurrently false",
+			sql:  "REINDEX (CONCURRENTLY false) INDEX i",
+			want: statement.Op{Kind: statement.OpReindex, Name: "i"},
+		},
+		{
+			name: "reindex with concurrently off",
+			sql:  "REINDEX (CONCURRENTLY Off) INDEX i",
+			want: statement.Op{Kind: statement.OpReindex, Name: "i"},
+		},
+		{
+			name: "reindex with concurrently 0",
+			sql:  "REINDEX (CONCURRENTLY 0) INDEX i",
+			want: statement.Op{Kind: statement.OpReindex, Name: "i"},
 		},
 		{
 			name: "create table",
@@ -298,10 +401,12 @@ func TestParseOpsShapes(t *testing.T) {
 	}
 }
 
-// Describe must render the type modifier: the modifier is what
-// distinguishes a widen (varchar(100), routes native) from a narrow
-// (varchar(30), routes copy-and-swap), and a label that drops it would
-// render changes that route in opposite directions identically.
+// Describe must render the type modifier, the array marker, the schema,
+// and the collation: each distinguishes changes that route in opposite
+// directions — a widen (varchar(100), native) from a narrow (varchar(30),
+// copy-and-swap), text from a text array, the built-in text from a user
+// type named text, text from text under another collation — and a label
+// that drops one would render them identically.
 func TestDescribeRendersTypeModifiers(t *testing.T) {
 	cases := []struct {
 		sql  string
@@ -310,6 +415,10 @@ func TestDescribeRendersTypeModifiers(t *testing.T) {
 		{"ALTER TABLE t ALTER COLUMN v TYPE varchar(100)", "ALTER COLUMN v TYPE varchar(100)"},
 		{"ALTER TABLE t ALTER COLUMN p TYPE numeric(12,2)", "ALTER COLUMN p TYPE numeric(12,2)"},
 		{"ALTER TABLE t ALTER COLUMN v TYPE text", "ALTER COLUMN v TYPE text"},
+		{"ALTER TABLE t ALTER COLUMN v TYPE varchar(50)[]", "ALTER COLUMN v TYPE varchar(50)[]"},
+		{"ALTER TABLE t ALTER COLUMN v TYPE app.text", "ALTER COLUMN v TYPE app.text"},
+		{`ALTER TABLE t ALTER COLUMN v TYPE text COLLATE "C"`, "ALTER COLUMN v TYPE text COLLATE C"},
+		{`ALTER TABLE t ALTER COLUMN v TYPE varchar(50)[] COLLATE pg_catalog."POSIX"`, "ALTER COLUMN v TYPE varchar(50)[] COLLATE pg_catalog.POSIX"},
 	}
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, parseOneOp(t, tc.sql).Describe(), tc.sql)
@@ -322,6 +431,14 @@ func TestParseOpsMultipleSubcommands(t *testing.T) {
 	require.Len(t, ops, 2)
 	assert.Equal(t, statement.OpAddColumn, ops[0].Kind)
 	assert.Equal(t, statement.OpDropColumn, ops[1].Kind)
+}
+
+// A constraint's WITH list takes plain option names only: the grammar
+// rejects a namespaced one such as toast.fillfactor, which only a table's
+// reloptions accept, so no namespace reaches the storage parameters.
+func TestParseOpsRejectsANamespacedConstraintOption(t *testing.T) {
+	_, err := statement.ParseOps("ALTER TABLE t ADD CONSTRAINT k UNIQUE (a) WITH (toast.fillfactor = 70)")
+	require.ErrorContains(t, err, `syntax error at or near "."`)
 }
 
 func TestParseOpsRejectsMultipleStatements(t *testing.T) {
@@ -347,13 +464,30 @@ func TestConcurrentlyRewrites(t *testing.T) {
 	}
 }
 
+// A REINDEX with CONCURRENTLY switched off is rewritten to the concurrent
+// rebuild by replacing the option, never by adding a second one, which the
+// server refuses as a conflicting option.
+func TestConcurrentlyReplacesADisabledReindexOption(t *testing.T) {
+	for _, sql := range []string{"REINDEX (CONCURRENTLY false) INDEX i", "REINDEX (VERBOSE, CONCURRENTLY 0) INDEX i"} {
+		t.Run(sql, func(t *testing.T) {
+			safer, err := statement.Concurrently(sql)
+			require.NoError(t, err)
+			assert.True(t, parseOneOp(t, safer).Concurrent, "rewritten statement must be concurrent: %s", safer)
+			assert.Equal(t, 1, strings.Count(strings.ToUpper(safer), "CONCURRENTLY"), "one CONCURRENTLY option: %s", safer)
+			if strings.Contains(sql, "VERBOSE") {
+				assert.Contains(t, strings.ToUpper(safer), "VERBOSE", "other options survive: %s", safer)
+			}
+		})
+	}
+}
+
 func TestConcurrentlyRefusesOtherStatements(t *testing.T) {
 	_, err := statement.Concurrently("ALTER TABLE t ADD COLUMN a int")
 	assert.ErrorIs(t, err, statement.ErrNotRewritable)
 }
 
 func TestAddNotValidRewritesNamedCheck(t *testing.T) {
-	safer, name, err := statement.AddNotValid("ALTER TABLE t ADD CONSTRAINT c CHECK (age > 0)")
+	safer, name, err := statement.AddNotValid("ALTER TABLE t ADD CONSTRAINT c CHECK (age > 0)", statement.ConstraintNaming{})
 	require.NoError(t, err)
 	assert.Equal(t, "c", name)
 	op := parseOneOp(t, safer)
@@ -365,14 +499,13 @@ func TestAddNotValidRefusals(t *testing.T) {
 		name string
 		sql  string
 	}{
-		{"unnamed constraint", "ALTER TABLE t ADD CHECK (age > 0)"},
 		{"primary key", "ALTER TABLE t ADD CONSTRAINT p PRIMARY KEY (id)"},
 		{"not an add constraint", "ALTER TABLE t DROP COLUMN a"},
 		{"multiple subcommands", "ALTER TABLE t ADD CONSTRAINT c CHECK (a > 0), DROP COLUMN b"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, _, err := statement.AddNotValid(tc.sql)
+			_, _, err := statement.AddNotValid(tc.sql, statement.ConstraintNaming{})
 			assert.ErrorIs(t, err, statement.ErrNotValidNotApplicable)
 		})
 	}
@@ -387,11 +520,13 @@ func TestParseOpsDropIndexCapturesName(t *testing.T) {
 	assert.Equal(t, statement.OpDropIndex, ops[0].Kind)
 	assert.Equal(t, "app.orders_legacy_idx", ops[0].Name)
 	assert.Equal(t, "DROP INDEX app.orders_legacy_idx", ops[0].Describe())
+	assert.Equal(t, []string{"orders_legacy_idx"}, ops[0].Indexes, "Indexes carries each name unqualified")
 
 	multi, err := statement.ParseOps("DROP INDEX a_idx, b_idx")
 	require.NoError(t, err)
 	require.Len(t, multi, 1)
 	assert.Equal(t, "a_idx, b_idx", multi[0].Name)
+	assert.Equal(t, []string{"a_idx", "b_idx"}, multi[0].Indexes)
 }
 
 // An unnamed CREATE INDEX labels cleanly, without a dangling space.
@@ -400,4 +535,19 @@ func TestDescribeUnnamedCreateIndexHasNoTrailingSpace(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, ops, 1)
 	assert.Equal(t, "CREATE INDEX", ops[0].Describe())
+}
+
+// ALTER TABLE ONLY stops at the named table, so every operation of the
+// statement carries Only; without it the operations recurse.
+func TestParseOpsRecordsOnly(t *testing.T) {
+	ops, err := statement.ParseOps("ALTER TABLE ONLY t DROP COLUMN a, DROP CONSTRAINT t_b_key")
+	require.NoError(t, err)
+	require.Len(t, ops, 2)
+	assert.True(t, ops[0].Only)
+	assert.True(t, ops[1].Only)
+
+	ops, err = statement.ParseOps("ALTER TABLE t DROP COLUMN a")
+	require.NoError(t, err)
+	require.Len(t, ops, 1)
+	assert.False(t, ops[0].Only)
 }
