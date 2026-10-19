@@ -271,7 +271,9 @@ name, however long, can push a derived name into the server's silent truncation 
 the route has no name-length refusal. The hash has no inverse, but a derived relation always
 lives in its source's schema, so `schemachange.SourceOfDerivedName` recovers the source by
 recomputing each table's derived names in that one schema — the query an operator runs on
-finding a `_pgsprite_…` relation they did not create.
+finding a `_pgsprite_…` relation they did not create. The lookup names every catalog relation,
+function, and operator by schema, so its answer is the same on a caller-built pool whatever that
+pool's `search_path` (CO-9).
 
 **Why.** Stable names make catalog inspection and resume deterministic; restoring user names keeps
 the swap invisible to code that names constraints; fixed-width hashed names make truncation, and

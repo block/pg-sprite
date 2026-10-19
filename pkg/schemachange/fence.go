@@ -46,8 +46,12 @@ $pgsprite$`
 // writeFenceLockSQL serializes two engines creating the fence function
 // for the first time in one database, on the engine's advisory key for
 // the function, so neither meets the catalog's duplicate-key failure for
-// a CREATE the other has in flight.
-const writeFenceLockSQL = "SELECT pg_advisory_xact_lock($1, hashtext(quote_ident($2) || '.' || quote_ident($3)))"
+// a CREATE the other has in flight. Every function and operator is
+// qualified (INV: CO-9), so a planted overload in a searched schema cannot
+// change the key even if the transaction's catalog-only search_path were
+// not set.
+const writeFenceLockSQL = "SELECT pg_catalog.pg_advisory_xact_lock($1, pg_catalog.hashtext(" +
+	"pg_catalog.quote_ident($2) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident($3)))"
 
 // writeFenceTriggerType is pg_trigger.tgtype for the fence as installed: a
 // statement-level BEFORE trigger on INSERT (4), DELETE (8), UPDATE (16), and
@@ -115,6 +119,9 @@ func installWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tab
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
 	if err := setBudgets(ctx, tx, opts); err != nil {
+		return err
+	}
+	if err := pinCatalogSearchPath(ctx, tx); err != nil {
 		return err
 	}
 	if err := confirmTableLock(ctx, tx, lock); err != nil {
@@ -185,7 +192,10 @@ func confirmWriteFence(ctx context.Context, tx pgx.Tx, built BuiltShadow) error 
 // bounded transaction and only while the caller holds the table lock, so
 // it cannot race a run on the same table, and it refuses anything under
 // the source's name that is not a plain table owned by the proof's owner
-// (ST-5). A source without the fence is left as it is.
+// (ST-5). A source without the fence is left as it is. The answer does not
+// depend on the pool's session search_path: the drop's transaction searches the
+// catalog alone, so a caller-built pool with another schema ahead of it
+// gets the same verdict.
 func DropWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, opts Options) error {
 	if err := opts.validate(); err != nil {
 		return err
@@ -254,6 +264,9 @@ func dropWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableL
 	if err := setBudgets(ctx, tx, opts); err != nil {
 		return err
 	}
+	if err := pinCatalogSearchPath(ctx, tx); err != nil {
+		return err
+	}
 	if err := confirmTableLock(ctx, tx, lock); err != nil {
 		return err
 	}
@@ -270,6 +283,23 @@ func dropWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableL
 	return nil
 }
 
+// pinCatalogSearchPath scopes a fence transaction's search_path to
+// pg_catalog alone. The transaction runs on the caller's pool, under
+// whatever session search_path that pool was built with, and not every
+// read in it is this package's own: the table lock confirmation reads
+// pg_locks through pkg/dbconn. With the catalog the only searched schema,
+// no planted relation, function, or operator can answer any of them
+// (CO-9). The fence's own statements name every object by schema, so
+// they need no path; the pin and their qualification are two layers for
+// the same guarantee, and neither is the redundant one.
+func pinCatalogSearchPath(ctx context.Context, tx pgx.Tx) error {
+	// INV: CO-9
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath("pg_catalog")); err != nil {
+		return fmt.Errorf("set write fence search_path: %w", err)
+	}
+	return nil
+}
+
 // checkSource confirms that the source's name is borne by a plain table
 // owned by the proof's owner. Nothing under the name is ErrSourceNotFound;
 // another kind of relation, or a table of another owner, is refused as a
@@ -277,11 +307,14 @@ func dropWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableL
 func checkSource(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget) error {
 	schema, table := target.Schema(), target.Table()
 	var relkind, owner string
+	// INV: CO-9 — every catalog name is qualified, so the read does not
+	// depend on the transaction's search_path and a planted overload in a
+	// searched schema cannot answer it.
 	err := tx.QueryRow(ctx, `
-		SELECT c.relkind::text, pg_get_userbyid(c.relowner)
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2`, schema, table).Scan(&relkind, &owner)
+		SELECT c.relkind::pg_catalog.text, pg_catalog.pg_get_userbyid(c.relowner)
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`, schema, table).Scan(&relkind, &owner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: %s.%s", ErrSourceNotFound, schema, table)
 	}
