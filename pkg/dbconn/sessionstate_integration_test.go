@@ -66,12 +66,12 @@ func TestNewPoolAcceptsSessionPooling(t *testing.T) {
 	assert.Equal(t, int64(2000), sessionSetting(t, pool, "lock_timeout"))
 }
 
-// A request for less than a millisecond used to reach the server as 0, which
-// PostgreSQL reads as no timeout, and the read-back then compared that 0
-// with the server's 0 and passed: the caller asked for a tiny bound and got
-// none (LK-2). Both ways of opening a session now refuse it before any
-// connection is made, while one millisecond — the smallest bound the server
-// can hold — still opens a session that carries it.
+// A timeout below one millisecond is refused before any connection is made,
+// by both ways of opening a session (LK-2). PostgreSQL counts these settings
+// in whole milliseconds and reads 0 as no timeout, so such a request would
+// reach the server as no bound at all, and a read-back comparing 0 with 0
+// could not tell. One millisecond, the smallest bound the server can hold,
+// opens a session that carries it.
 func TestSubMillisecondTimeoutNeverYieldsAnUnboundedSession(t *testing.T) {
 	url := testutil.StartPostgres(t)
 
