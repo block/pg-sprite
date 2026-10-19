@@ -43,6 +43,17 @@ func TestGate(t *testing.T) {
 		assert.Equal(t, "DROP INDEX CONCURRENTLY", v.SaferIdiom)
 	})
 
+	t.Run("a cascading drop is refused at the ineligible site with no concurrent idiom", func(t *testing.T) {
+		v, refused := Gate(parse(t, "DROP INDEX billing.i CASCADE"))
+		require.True(t, refused)
+		assert.Equal(t, verdict.ReasonIndexStatement, v.Reason)
+		proof, err := v.Refusal()
+		require.NoError(t, err)
+		assert.Equal(t, verdict.RefusalSiteIndexOther, proof.Site())
+		assert.Empty(t, v.SaferIdiom,
+			"DROP INDEX CONCURRENTLY does not accept CASCADE, so it is not an equivalent to suggest")
+	})
+
 	t.Run("already-concurrent maintenance carries no safer idiom", func(t *testing.T) {
 		v, refused := Gate(parse(t, "DROP INDEX CONCURRENTLY billing.i"))
 		require.True(t, refused)
@@ -65,6 +76,22 @@ func TestGate(t *testing.T) {
 		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
 		assert.Empty(t, v.SaferIdiom)
 	})
+}
+
+// PostgreSQL rejects DROP INDEX CONCURRENTLY ... CASCADE, so the refusal must
+// not describe it as the safe concurrent idiom to run directly.
+func TestGateConcurrentCascadeIsNotCalledSafe(t *testing.T) {
+	for _, sql := range []string{
+		"DROP INDEX CONCURRENTLY billing.i CASCADE",
+		"DROP INDEX CONCURRENTLY billing.i, billing.j",
+	} {
+		st, err := statement.ParseOne(sql)
+		require.NoError(t, err)
+		v, refused := Gate(st)
+		require.True(t, refused, sql)
+		assert.Equal(t, verdict.ClassByDesign, v.Class, "%s: PostgreSQL rejects it, so it is not the safe concurrent idiom", sql)
+		assert.Empty(t, v.Owner, "%s: no direct operator is pointed at a statement PostgreSQL rejects", sql)
+	}
 }
 
 func TestRunRejectsUnrunnableOptions(t *testing.T) {
@@ -300,6 +327,26 @@ func TestExecRefusal(t *testing.T) {
 		stepErr := &executor.SequenceStepError{Step: 2, Total: 3, Err: executor.ErrUnnamedIndex}
 		_, refused := execRefusal(st, stepErr, true, false, false)
 		assert.False(t, refused, "a step failure means execution started; the committed prefix must surface")
+	})
+
+	t.Run("a replica identity re-check before anything committed is a refusal", func(t *testing.T) {
+		drop, err := statement.ParseOne("ALTER TABLE billing.invoices DROP COLUMN ref")
+		require.NoError(t, err)
+		for name, recheckErr := range map[string]error{
+			"the first step": &executor.SequenceStepError{Step: 1, Total: 1, Err: fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop)},
+			"a bare attempt": fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop),
+		} {
+			t.Run(name, func(t *testing.T) {
+				v, refused := execRefusal(drop, recheckErr, false, false, false)
+				require.True(t, refused)
+				assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+				assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+				assert.Contains(t, v.Detail, "replica identity")
+			})
+		}
+		later := &executor.SequenceStepError{Step: 2, Total: 2, Err: fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop)}
+		_, refused := execRefusal(drop, later, true, false, false)
+		assert.False(t, refused, "past the first step the committed prefix must surface")
 	})
 
 	t.Run("an operational server error is not a refusal", func(t *testing.T) {

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 // RefusalCause identifies why the copier refused to copy, or refused to
@@ -98,6 +100,29 @@ func (c RefusalCause) Invariant() string {
 	}
 }
 
+// Class is the routing class of the cause, from docs/refusal-classes.md:
+// what kind of boundary the importer is looking at. A lock the session lost
+// or that the server shows held elsewhere or by nobody, and a relation that
+// is no longer the one proved, are environmental — state outside the copier
+// moved under it. Every other cause is an invariant violation: a proof,
+// shadow, or chunk the caller handed in that cannot have come from this
+// engine, or a ledger that disagrees with its workers; nothing on the
+// server changes that, so the importer reports it. The class is a triage
+// decision; the cause's row in the document decides what the importer does
+// next, and no class licenses an automatic retry on its own. An unknown
+// cause has no class.
+func (c RefusalCause) Class() refusal.Class {
+	switch c {
+	case CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed, CauseRelationReplaced:
+		return refusal.ClassEnvironmental
+	case CauseProofEmpty, CauseShadowMismatch, CauseLockUnproven, CauseFrontierBroken,
+		CauseChunksInFlight, CauseChunkUnknown:
+		return refusal.ClassInvariantViolation
+	default:
+		return ""
+	}
+}
+
 // RefusalError is the copier's fail-closed refusal. It wraps
 // ErrInvariantViolation, so errors.Is against that sentinel keeps working,
 // and any error behind the refusal — the lock session's loss, the server's
@@ -138,7 +163,9 @@ func refuse(cause RefusalCause, wrapped []error, detail string, args ...any) err
 
 // RefusalCauseOf returns the copier refusal cause carried by err, or the
 // empty cause when err is nil or carries no copier refusal. Wrappers are
-// read through.
+// read through. RefusalCauseOf(err).Class() is therefore the refusal's
+// class, and the empty class for an error that is not a copier refusal — a
+// server error the importer routes by SQLSTATE, or the bare sentinel.
 func RefusalCauseOf(err error) RefusalCause {
 	var refusal *RefusalError
 	if errors.As(err, &refusal) {

@@ -85,7 +85,10 @@ Use `sslmode=verify-full` with `sslrootcert` in the URL, or point pg-sprite at t
 export PGSPRITE_CA_CERT='/absolute/path/to/project-ca.crt'
 ```
 
-That variable sets the certificate file used by the commands below. A certificate
+That variable sets the certificate file used by the commands below. It overrides
+the URL's `sslmode`: every connection attempt is verified against the file, none
+falls back to an unencrypted or unverified session, and a URL with
+`sslmode=disable` is refused. A certificate
 error should be fixed by checking the hostname and trusted certificate, rather
 than disabling verification. Hosted checks passed with the default URI,
 `sslmode=require`, and `verify-full` with the downloaded CA. The default connection

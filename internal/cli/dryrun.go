@@ -60,7 +60,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		"route", string(classified.Route), "disposition", string(routed.Disposition))
 
 	report := plan.NewReport(plan.SourceAlter)
-	report.Schema = migrate.ResolvedSchema(st)
+	report.Schema = facts.Schema
 	report.Table = st.Table()
 	report.TableExists = facts.TableExists
 	if report.ServerVersion, err = dbconn.ServerVersion(ctx, pool); err != nil {

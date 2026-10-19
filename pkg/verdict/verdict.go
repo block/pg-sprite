@@ -14,6 +14,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/block/pg-sprite/pkg/refusal"
+	"github.com/block/pg-sprite/pkg/suggest"
 )
 
 const (
@@ -47,6 +50,11 @@ const (
 	// OutcomeExecutedWithoutOnlineSafety means the operator accepted a typed
 	// blocking refusal and the statement committed under explicit budgets.
 	OutcomeExecutedWithoutOnlineSafety Outcome = "executed-without-online-safety"
+	// OutcomeExecutedViaCopyAndSwap means the change committed through the
+	// copy-and-swap route: a shadow table built under the changed shape,
+	// filled and verified against the source, then swapped into the
+	// source's name. The source table was never rewritten in place.
+	OutcomeExecutedViaCopyAndSwap Outcome = "executed-via-copy-and-swap"
 	// OutcomeRefused means the change was not executed; Reason says why.
 	OutcomeRefused Outcome = "refused"
 	// OutcomeFailed means execution was attempted and failed: an
@@ -114,6 +122,12 @@ const (
 	// execution does not run foreign-key changes yet. The plan still shows
 	// the change; the imperative front door runs ADD FOREIGN KEY online.
 	ReasonDeclarativeForeignKey Reason = "declarative-foreign-key"
+	// ReasonCopyAndSwapRefused: the change routes to copy-and-swap and the
+	// route's own gates declined it — the preflight found a table shape or
+	// an environment it cannot run against, or the engine refused mid-run
+	// to keep an invariant. Cause carries the route's own refusal token
+	// (see docs/refusal-classes.md), Class its routing class.
+	ReasonCopyAndSwapRefused Reason = "copy-and-swap-refused"
 )
 
 // Reasons returns the closed set of non-zero Reason values. It is part of
@@ -134,23 +148,29 @@ func Reasons() []Reason {
 		ReasonPlanFingerprintMismatch,
 		ReasonCreateCollision,
 		ReasonDeclarativeForeignKey,
+		ReasonCopyAndSwapRefused,
 	}
 }
 
-// Class identifies the routing category of a refusal.
+// Class identifies the routing category of a refusal. The classes an
+// engine cause can take are declared once, in the core's pkg/refusal, and
+// carried here under the same token, so an adapter converts a cause's
+// refusal.Class to a verdict Class with a plain conversion and nothing can
+// spell the two apart; no-online-safety-problem is the verdict's own,
+// since it describes a statement that never reached the engine.
 type Class string
 
 const (
 	// ClassCapabilityBoundary means the engine has no implemented safe route.
-	ClassCapabilityBoundary Class = "capability-boundary"
+	ClassCapabilityBoundary = Class(refusal.ClassCapabilityBoundary)
 	// ClassNoOnlineSafetyProblem means another owner should run the work.
 	ClassNoOnlineSafetyProblem Class = "no-online-safety-problem"
 	// ClassByDesign means pg-sprite permanently refuses the form.
-	ClassByDesign Class = "by-design"
+	ClassByDesign = Class(refusal.ClassByDesign)
 	// ClassEnvironmental means the current run environment blocked the work.
-	ClassEnvironmental Class = "environmental"
+	ClassEnvironmental = Class(refusal.ClassEnvironmental)
 	// ClassInvariantViolation reports incoherent engine state.
-	ClassInvariantViolation Class = "invariant-violation"
+	ClassInvariantViolation = Class(refusal.ClassInvariantViolation)
 )
 
 // Classes returns the closed set of refusal classes.
@@ -218,8 +238,8 @@ const (
 	// RefusalSiteIndexSingleRelation is the plain one-relation DROP INDEX,
 	// REINDEX INDEX, or REINDEX TABLE gate site.
 	RefusalSiteIndexSingleRelation RefusalSite = "index-statement-single-relation"
-	// RefusalSiteIndexOther is a multi-relation DROP INDEX or a REINDEX scope
-	// that does not identify one relation.
+	// RefusalSiteIndexOther is a multi-relation DROP INDEX, a DROP INDEX with
+	// CASCADE, or a REINDEX scope that does not identify one relation.
 	RefusalSiteIndexOther RefusalSite = "index-statement-other"
 )
 
@@ -511,6 +531,12 @@ type Verdict struct {
 	// SaferIdiom is a native alternative to the refused statement, when one
 	// exists (e.g. CREATE INDEX CONCURRENTLY, ADD CONSTRAINT ... NOT VALID).
 	SaferIdiom string `json:"safer_idiom,omitempty"`
+	// Guidance is the typed manual path for a rewrite-required refusal,
+	// drawn from the suggest contract's Guidance vocabulary
+	// (docs/suggest-report.md), the same value the plan report's statement
+	// carries. Detail states the steps for a human; Guidance is the key an
+	// automated caller branches on. Empty for every other verdict.
+	Guidance suggest.Guidance `json:"guidance,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what
@@ -531,6 +557,23 @@ type Verdict struct {
 	LockTimeout string `json:"lock_timeout,omitempty"`
 	// StatementTimeout is the explicit statement execution budget.
 	StatementTimeout string `json:"statement_timeout,omitempty"`
+	// StatisticsRefresh reports the ANALYZE a committed type change owes
+	// the planner; nil when the statement retyped no column.
+	StatisticsRefresh *StatisticsRefresh `json:"statistics_refresh,omitempty"`
+}
+
+// StatisticsRefresh is the outcome of re-analyzing a table after a
+// committed type change, which deletes the retyped columns' planner
+// statistics. The change stays committed whether or not the refresh ran,
+// so a refresh still owed leaves the verdict executed and names the
+// ANALYZE to run.
+type StatisticsRefresh struct {
+	// Columns are the columns the statement retyped, in statement order.
+	Columns []string `json:"columns"`
+	// Refreshed reports that the ANALYZE committed.
+	Refreshed bool `json:"refreshed"`
+	// Pending is the ANALYZE still to run; empty when Refreshed.
+	Pending string `json:"pending,omitempty"`
 }
 
 // JSON renders the verdict as a single JSON object.
@@ -550,6 +593,8 @@ func (v Verdict) String() string {
 		b.WriteString("executed natively")
 	case OutcomeExecutedWithoutOnlineSafety:
 		b.WriteString("executed without online safety (accepted blocking refusal)")
+	case OutcomeExecutedViaCopyAndSwap:
+		b.WriteString("executed via copy-and-swap")
 	case OutcomeRefused:
 		fmt.Fprintf(&b, "refused (%s)", v.Reason)
 	case OutcomeFailed:
@@ -578,6 +623,9 @@ func (v Verdict) String() string {
 	}
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  safer:     %s", v.SaferIdiom)
+	}
+	if v.Guidance != "" {
+		fmt.Fprintf(&b, "\n  guidance:  %s", v.Guidance)
 	}
 	if v.Outcome == OutcomeExecutedWithoutOnlineSafety {
 		fmt.Fprintf(&b, "\n  budgets:   lock %s, statement %s", v.LockTimeout, v.StatementTimeout)

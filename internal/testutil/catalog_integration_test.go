@@ -89,6 +89,14 @@ func TestReadTableCatalog(t *testing.T) {
 		ExecInSchema(t, pool, right, `ALTER TABLE t RESET (fillfactor)`)
 	})
 
+	t.Run("TOAST storage parameter", func(t *testing.T) {
+		ExecInSchema(t, pool, right, `ALTER TABLE t SET (toast.autovacuum_enabled = false)`)
+		got := readCatalog(t, pool, right)
+		assert.Empty(t, want.ToastOptions)
+		assert.Equal(t, []string{"autovacuum_enabled=false"}, got.ToastOptions)
+		ExecInSchema(t, pool, right, `ALTER TABLE t RESET (toast.autovacuum_enabled)`)
+	})
+
 	t.Run("identity sequence parameter", func(t *testing.T) {
 		ExecInSchema(t, pool, right, `ALTER TABLE t ALTER COLUMN ref SET MAXVALUE 9000`)
 		got := readCatalog(t, pool, right)

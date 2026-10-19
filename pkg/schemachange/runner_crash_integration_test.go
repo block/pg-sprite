@@ -171,6 +171,7 @@ func TestRunnerResumesFromCutoverAfterTheSwapCommitted(t *testing.T) {
 	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
 	assert.Equal(t, []checkpoint.Phase{checkpoint.PhaseDone}, second.seen())
 	assert.Zero(t, result.Verification, "a resume past the swap makes no verification pass")
+	assert.True(t, result.SwapProven, "the swap was re-derived from the catalog")
 	assert.Equal(t, s.built.ShadowOID(), result.Swapped.LiveOID)
 	assert.Equal(t, sourceOID, result.Swapped.OldOID)
 	assert.True(t, result.OldTableDropped)
@@ -213,6 +214,7 @@ func TestRunnerResumesFromCutoverAfterTheOldTableWasDropped(t *testing.T) {
 	assert.True(t, result.OldTableDropped, "the drop had already committed")
 	assert.Equal(t, s.built.ShadowOID(), result.Shadow.ShadowOID, "the row's proof names the shadow")
 	assert.Equal(t, s.built.ShadowOID(), f.relationOID(t, "orders"), "the shadow bears the source's name")
+	assert.False(t, result.SwapProven, "nothing was left to re-derive the swap from")
 	assert.Equal(t, schemachange.SwapProof{}, result.Swapped, "the swap's renames cannot be re-derived once the retained source is gone")
 }
 
@@ -232,7 +234,9 @@ func (c *hookedClock) Now() time.Time {
 // pinShadowKey inserts key into the shadow in a transaction left open at
 // the copier's first clock reading, so the chunk holding key waits on the
 // primary key and every other chunk lands around it. The returned func
-// rolls the pin back.
+// waits for the pin and rolls it back. The cleanup first disarms the
+// hook, so a test that fails before the copier reads its clock ends with
+// no pin to roll back instead of waiting on a reading that never comes.
 func (f runnerFixture) pinShadowKey(t *testing.T, key int64) (clock *hookedClock, release func()) {
 	t.Helper()
 	pinned := make(chan struct{})
@@ -245,17 +249,28 @@ func (f runnerFixture) pinShadowKey(t *testing.T, key int64) (clock *hookedClock
 		if pinErr != nil {
 			return
 		}
-		_, pinErr = tx.Exec(t.Context(), "INSERT INTO "+shadow+" (id, qty) VALUES ($1, 0)", key)
+		if _, pinErr = tx.Exec(t.Context(), "INSERT INTO "+shadow+" (id, qty) VALUES ($1, 0)", key); pinErr != nil {
+			// A failed insert leaves the transaction holding its pooled
+			// connection, and the package's pool.Close waits on it, so it
+			// is rolled back here, before release reports pinErr.
+			_ = tx.Rollback(context.WithoutCancel(t.Context()))
+			tx = nil
+		}
 	}}
 	var once sync.Once
 	release = func() {
 		once.Do(func() {
 			<-pinned
 			require.NoError(t, pinErr)
-			assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
+			if tx != nil {
+				assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
+			}
 		})
 	}
-	t.Cleanup(release)
+	t.Cleanup(func() {
+		clock.once.Do(func() { close(pinned) })
+		release()
+	})
 	return clock, release
 }
 

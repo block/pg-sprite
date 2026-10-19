@@ -30,8 +30,10 @@ import (
 // 5 added blocking_passthrough_eligible to refused statements. Version 6
 // added the add-foreign-key and drop-foreign-key change kinds and the
 // foreign-key create-shape cause. Version 7 added the
-// set-generated-expression change kind.
-const FormatVersion = 7
+// set-generated-expression change kind. Version 8 added the replica-identity
+// planner reason. Version 9 added the validate-constraint and
+// validate-foreign-key change kinds.
+const FormatVersion = 9
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -68,6 +70,16 @@ type Statement struct {
 	// alter source: a submitted statement may carry several operations and
 	// has no single kind.
 	Kind schemadiff.ChangeKind `json:"kind,omitempty"`
+	// Adopts is the index a diff-derived ADD CONSTRAINT ... USING INDEX
+	// takes over and the definition it must still have when execution
+	// attaches it (see schemadiff.Change.Adopts). Nil otherwise, and out
+	// of the JSON: the SQL already identifies the change.
+	Adopts *schemadiff.IndexAdoption `json:"-"`
+	// Validates is the constraint a diff-derived VALIDATE CONSTRAINT
+	// validates and the definition it must still have when execution
+	// validates it (see schemadiff.Change.Validates). Nil otherwise, and
+	// out of the JSON for the same reason.
+	Validates *schemadiff.ConstraintValidation `json:"-"`
 	// Destructive marks statements that discard live structure — a dropped
 	// column, constraint, index, or NOT NULL. It is derived from the classifier's
 	// decisions, so both sources report it identically; it is always
@@ -99,7 +111,9 @@ type Statement struct {
 	// rather than derived because a JSON consumer has no desired schema to
 	// recompute the shape check from; it is the executor's own explanation,
 	// so a renderer prints Description() instead. Explanatory, so it is
-	// excluded from the fingerprint.
+	// excluded from the fingerprint. Route on Class, not Cause.Class(): Class
+	// is the producer's answer, while Cause.Class() is the reading library's
+	// and answers "" for a cause added in a newer engine.
 	Cause executor.CreateShapeCause `json:"cause,omitempty"`
 	// Decisions are the planner's per-operation classifications.
 	Decisions []planner.Decision `json:"decisions"`
@@ -360,7 +374,7 @@ func FromRouted(rs router.Statement) (Statement, error) {
 		}
 	}
 	if rs.Disposition == router.DispositionRewriteRequired {
-		guidance, err := rewriteRequiredGuidance(rs)
+		guidance, err := RewriteRequiredGuidance(rs)
 		if err != nil {
 			return Statement{}, err
 		}
@@ -369,8 +383,9 @@ func FromRouted(rs router.Statement) (Statement, error) {
 	return st, nil
 }
 
-// rewriteRequiredGuidance derives the typed manual path for a statement
-// the router marked rewrite-required: the first safer-idiom decision names
+// RewriteRequiredGuidance derives the typed manual path for a statement
+// the router marked rewrite-required, for the plan report and the run
+// verdict alike: the first safer-idiom decision names
 // the operation the manual path is for. A multi-operation statement always
 // advises splitting first (ManualGuidance's contract), which covers the
 // case where the rewrite exists but could not be applied to a compound
@@ -378,7 +393,7 @@ func FromRouted(rs router.Statement) (Statement, error) {
 // planner's contract (one decision per operation, in order); a mismatch,
 // or a rewrite-required statement with no safer-idiom decision, is a
 // contract violation and fails closed.
-func rewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
+func RewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 	ops, err := statement.ParseOps(rs.Statement)
 	if err != nil {
 		return "", fmt.Errorf("parse rewrite-required statement: %w", err)

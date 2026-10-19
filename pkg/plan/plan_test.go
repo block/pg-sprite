@@ -74,25 +74,6 @@ func TestFromRoutedDerivesGuidanceForRewriteRequired(t *testing.T) {
 	assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, st.Guidance)
 }
 
-// An unnamed CHECK or FOREIGN KEY is rewrite-required — the VALIDATE step
-// needs the name the server assigns only at creation — and carries the
-// naming guidance rather than failing the whole plan.
-func TestFromRoutedUnnamedConstraintCarriesNamingGuidance(t *testing.T) {
-	for _, sql := range []string{
-		"ALTER TABLE users ADD CHECK (age > 0)",
-		"ALTER TABLE users ADD FOREIGN KEY (org_id) REFERENCES orgs (id)",
-	} {
-		routed := router.Route([]planner.Plan{classifyCanonical(t, sql)})
-		require.Len(t, routed.Statements, 1, "statement: %s", sql)
-		require.Equal(t, router.DispositionRewriteRequired, routed.Statements[0].Disposition,
-			"an unnamed constraint has no constructible online rewrite: %s", sql)
-
-		st, err := plan.FromRouted(routed.Statements[0])
-		require.NoError(t, err, "statement: %s", sql)
-		assert.Equal(t, suggest.GuidanceNameConstraintThenValidate, st.Guidance, "statement: %s", sql)
-	}
-}
-
 // A compound rewrite-required statement advises splitting first: no safer
 // sequence can be constructed for a multi-operation statement, so the
 // manual path starts with one statement per operation.
@@ -473,7 +454,7 @@ func TestDiscloseGreenfieldExecutionRequiresAbsentTable(t *testing.T) {
 }
 
 // The JSON shape is the adapter-facing contract: exact keys, exact
-// omissions. A consumer pins format_version 7 against this test.
+// omissions. A consumer pins format_version 9 against this test.
 func TestReportJSONShape(t *testing.T) {
 	exists := true
 	r := plan.Report{
@@ -529,7 +510,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 7,
+		"format_version": 9,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -587,7 +568,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 7,
+		"format_version": 9,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
@@ -671,7 +652,7 @@ func TestFingerprintCoversExecutionNotExplanation(t *testing.T) {
 }
 
 // Sources is the closed vocabulary a consumer branches on; the set is
-// pinned to format_version 7.
+// pinned to format_version 9.
 func TestSourcesVocabularyPinned(t *testing.T) {
 	assert.Equal(t, []plan.Source{plan.SourceAlter, plan.SourceDiff}, plan.Sources())
 }

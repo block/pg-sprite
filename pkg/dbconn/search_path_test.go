@@ -62,6 +62,22 @@ func TestLocalSearchPath(t *testing.T) {
 	}
 }
 
+func TestSessionSearchPath(t *testing.T) {
+	assert.Equal(t, `SET search_path = "app", "public"`, SessionSearchPath("app", "public"))
+	assert.Equal(t, `SET search_path = "app", "public"`, SessionSearchPath("app", "pg_catalog", "public"),
+		"a catalog entry another schema precedes is dropped")
+}
+
+func TestRestoreSessionSearchPath(t *testing.T) {
+	sql, path := RestoreSessionSearchPath(`"$user", public`)
+	assert.Equal(t, "SELECT pg_catalog.set_config('search_path', $1, false)", sql)
+	assert.Equal(t, `"$user", public`, path)
+	_, path = RestoreSessionSearchPath("app, pg_catalog, public")
+	assert.Equal(t, "app, public", path, "a catalog entry another schema precedes is dropped")
+	_, path = RestoreSessionSearchPath("")
+	assert.Empty(t, path)
+}
+
 // searchPathWriter matches SQL that sets search_path: SET [LOCAL|SESSION],
 // set_config, or a connection-time runtime parameter.
 var searchPathWriter = regexp.MustCompile(`(?i)\bSET\s+(LOCAL\s+|SESSION\s+)?search_path\b|set_config\(\s*'search_path'|RuntimeParams\["search_path"\]`)
@@ -69,8 +85,9 @@ var searchPathWriter = regexp.MustCompile(`(?i)\bSET\s+(LOCAL\s+|SESSION\s+)?sea
 // Every search_path pg-sprite sets in production code is built in this
 // package, where the catalog-shadowing rewrite lives; a site that assembled
 // its own SET LOCAL would bypass it. The test walks the production sources
-// under pkg/ so a new site cannot be added without either using
-// LocalSearchPath or changing this test.
+// under pkg/ so a new site cannot be added without either using one of
+// LocalSearchPath, SessionSearchPath, or RestoreSessionSearchPath or
+// changing this test.
 func TestLocalSearchPathIsTheOnlySearchPathWriter(t *testing.T) {
 	root := filepath.Join("..", "..", "pkg")
 	self, err := filepath.Abs(".")
