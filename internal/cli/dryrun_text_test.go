@@ -326,6 +326,41 @@ func TestDryRunTextDependentViewRefusalNamesTheViews(t *testing.T) {
 	assert.NotContains(t, text, "knows no safe path")
 }
 
+// The refusal sentence explains the first refused operation, the same one
+// the run's verdict explains, even when a later operation is refused
+// because views read its column; that operation's views still appear in
+// its own diagnostic.
+func TestDryRunTextRefusalLeadsWithTheFirstRefusedOperation(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "app", "users", "16.10"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         "ALTER TABLE app.users DROP COLUMN ref, DROP COLUMN email",
+		Route:       planner.RouteRefuse,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement,
+		Class:       verdict.ClassCapabilityBoundary,
+		Decisions: []planner.Decision{
+			{Operation: "DROP COLUMN ref", Destructive: true, Route: planner.RouteRefuse, Reason: planner.ReasonReplicaIdentity},
+			{
+				Operation:      "DROP COLUMN email",
+				Destructive:    true,
+				Route:          planner.RouteRefuse,
+				Reason:         planner.ReasonDependentView,
+				DependentViews: []string{`"app"."active_users"`},
+			},
+		},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := strings.Join(strings.Fields(out.String()), " ")
+	assert.Contains(t, text, "error[unsupported-statement]: refused — the planner knows no safe path for DROP COLUMN ref")
+	assert.NotContains(t, text, "refused — DROP COLUMN email changes a column read by")
+	assert.Contains(t, text, "DROP COLUMN email — changes a column a view reads")
+	assert.Contains(t, text, "help: drop or redefine those views first, then re-plan")
+}
+
 // A refused generated-expression change says why it cannot run, rather
 // than the generic no-safe-path sentence, so the reader knows the drift is
 // real and what applying it would cost.

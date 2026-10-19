@@ -535,6 +535,12 @@ type Verdict struct {
 	// carries. Detail states the steps for a human; Guidance is the key an
 	// automated caller branches on. Empty for every other verdict.
 	Guidance suggest.Guidance `json:"guidance,omitempty"`
+	// DependentViews names the views and materialized views that read the
+	// column a refused statement retypes or drops, each schema-qualified
+	// with every identifier quoted, sorted: the objects to drop or redefine
+	// before the change can run. The same list the plan report's
+	// dependent-view decision carries. Empty for every other verdict.
+	DependentViews []string `json:"dependent_views,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what

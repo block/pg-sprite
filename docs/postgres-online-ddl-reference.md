@@ -519,9 +519,13 @@ reports it.
 The operation changes the type of, or drops, a column that a view or materialized
 view reads. PostgreSQL refuses both while the view exists, even a type change it
 would otherwise relabel without a rewrite, so the statement could only fail. A
-change without `ONLY` reaches the column on every partition and inheritance child
-too, so a view on one of them counts. The plan names each view in
-`decisions[].dependent_views`. Drop or redefine the views first, then re-plan. A
+type change without `ONLY` reaches the column on every partition and inheritance
+child too, so a view on one of them counts. A drop without `ONLY` reaches every
+partition, but only the inheritance children that inherit the column from this one
+parent without declaring it: a child that declares the column, or inherits it from
+a second parent, keeps its copy, so a view on that copy does not count. The plan
+names each view in `decisions[].dependent_views`, and a refused run's verdict in
+`dependent_views`. Drop or redefine the views first, then re-plan. A
 rename is not refused, because a view follows the column, and neither is
 `DROP COLUMN … CASCADE`, which the server runs by dropping the views with the
 column; that drop is flagged destructive.

@@ -66,6 +66,10 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 			assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 			assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
 			assert.Equal(t, verdict.ClassCapabilityBoundary, v.Class)
+			assert.Equal(t, []string{
+				fmt.Sprintf(`"%s"."Mail Report"`, schema),
+				fmt.Sprintf(`"%s"."active_users"`, schema),
+			}, v.DependentViews)
 			assert.Contains(t, v.Detail, fmt.Sprintf(`a column read by "%s"."Mail Report", "%s"."active_users"`, schema, schema))
 			assert.Contains(t, v.Detail, "drop or redefine those views first, then re-plan")
 			assert.Equal(t, "character varying(50)", columnType(t, pool, schema, "users", "email"))
@@ -159,6 +163,7 @@ func TestRunRefusesChangingAColumnAChildsViewReads(t *testing.T) {
 			v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(statement, schema)), runOptions())
 			require.NoError(t, err)
 			assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+			assert.Equal(t, []string{fmt.Sprintf(`"%s"."admin_mail"`, schema)}, v.DependentViews)
 			assert.Contains(t, v.Detail, fmt.Sprintf(`a column read by "%s"."admin_mail"`, schema))
 			assert.Equal(t, "character varying(50)", columnType(t, pool, schema, "admins", "email"))
 		})
@@ -172,4 +177,84 @@ func TestRunRefusesChangingAColumnAChildsViewReads(t *testing.T) {
 		assert.False(t, columnExists(t, pool, schema, "users", "email"))
 		assert.True(t, columnExists(t, pool, schema, "admins", "email"))
 	})
+}
+
+// A recursive drop leaves a child's copy of the column in place when the
+// child declares the column itself, so a view on that copy does not block
+// the drop and the run goes ahead: the parent loses the column, the child
+// and its view keep theirs. A type change still reaches the child's copy,
+// so the same view refuses it.
+func TestRunDropsAColumnAChildDeclaresWhileAViewReadsTheChildsCopy(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	seed := func(t *testing.T) string {
+		t.Helper()
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %[1]s.users (id bigint PRIMARY KEY, email varchar(50));
+			CREATE TABLE %[1]s.admins (email varchar(50), level int) INHERITS (%[1]s.users);
+			CREATE VIEW %[1]s.admin_mail AS SELECT email, level FROM %[1]s.admins`, schema))
+		require.NoError(t, err)
+		return schema
+	}
+
+	t.Run("the drop runs", func(t *testing.T) {
+		schema := seed(t)
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TABLE %s.users DROP COLUMN email", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, "detail: %s", v.Detail)
+		assert.False(t, columnExists(t, pool, schema, "users", "email"))
+		assert.True(t, columnExists(t, pool, schema, "admins", "email"))
+	})
+
+	t.Run("a type change is refused", func(t *testing.T) {
+		schema := seed(t)
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(100)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, []string{fmt.Sprintf(`"%s"."admin_mail"`, schema)}, v.DependentViews)
+		assert.Equal(t, "character varying(50)", columnType(t, pool, schema, "admins", "email"))
+	})
+}
+
+// The views are read only for a statement that retypes or drops a column,
+// the two changes they block; any other ALTER TABLE plans without that
+// catalog read.
+func TestLiveFactsReadsDependentViewsOnlyForARetypeOrDrop(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.users (id bigint PRIMARY KEY, email text);
+		CREATE VIEW %[1]s.active_users AS SELECT id, email FROM %[1]s.users`, schema))
+	require.NoError(t, err)
+	want := []string{fmt.Sprintf(`"%s"."active_users"`, schema)}
+
+	for _, sql := range []string{
+		"ALTER TABLE %s.users ADD COLUMN note text",
+		"ALTER TABLE %s.users ALTER COLUMN email SET NOT NULL",
+		"ALTER TABLE %s.users RENAME COLUMN email TO mail",
+	} {
+		facts, err := migrate.LiveFacts(t.Context(), pool, parseOne(t, fmt.Sprintf(sql, schema)))
+		require.NoError(t, err, sql)
+		assert.Nil(t, facts.Classifier.DependentViews, sql)
+		assert.Nil(t, facts.Classifier.DropDependentViews, sql)
+		assert.Nil(t, facts.Classifier.OwnDependentViews, sql)
+	}
+	for _, sql := range []string{
+		"ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(100)",
+		"ALTER TABLE %s.users ADD COLUMN note text, DROP COLUMN email",
+	} {
+		facts, err := migrate.LiveFacts(t.Context(), pool, parseOne(t, fmt.Sprintf(sql, schema)))
+		require.NoError(t, err, sql)
+		assert.Equal(t, want, facts.Classifier.DependentViews["email"], sql)
+		assert.Equal(t, want, facts.Classifier.DropDependentViews["email"], sql)
+		assert.Equal(t, want, facts.Classifier.OwnDependentViews["email"], sql)
+	}
 }

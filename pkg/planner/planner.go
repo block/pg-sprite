@@ -263,9 +263,10 @@ type Plan struct {
 // they are trusted as stated: the CLI fills them by introspecting the
 // target database, and a library caller may supply facts it already holds —
 // but they must describe the database the change will run on, because a
-// wrong fact can upgrade a rewrite to native. Missing facts are always
-// safe: the zero value is valid and classifies strictly more
-// conservatively (every type change becomes copy-and-swap).
+// wrong fact can upgrade a rewrite to native. Missing facts never let an
+// unsafe change succeed: the zero value is valid, routes every type change
+// to copy-and-swap, and only defers some refusals, such as a column a view
+// reads, to the server's own refusal at execution.
 type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
@@ -288,11 +289,16 @@ type Facts struct {
 	// column the table already has, which the server skips.
 	AddColumnProofs map[string]statement.AddColumnProof
 	// DependentViews maps a column to the views and materialized views that
-	// read it, on the table or on any table below it
+	// read it, on the table or on any table below it, which is what a
+	// recursive ALTER COLUMN TYPE changes
 	// (preflight.ColumnDependentViews). A column absent from the map has
 	// none, or the facts were not read, as in an offline lint; either way
 	// the server's own refusal at execution remains the backstop.
 	DependentViews map[string][]string
+	// DropDependentViews is DependentViews for the tables whose copy of
+	// the column a recursive DROP COLUMN drops: a child that declares the
+	// column itself or inherits it from a second parent keeps its copy.
+	DropDependentViews map[string][]string
 	// OwnDependentViews is DependentViews for the table alone, which is
 	// all an ALTER TABLE ONLY changes.
 	OwnDependentViews map[string][]string
@@ -327,7 +333,8 @@ func FactsFrom(live schemadiff.Model) Facts {
 // column. A rename is not one of them, since a view follows the column, and
 // neither is a DROP COLUMN ... CASCADE, which the server accepts by dropping
 // the views with it; that drop stays destructive. Under ONLY the change
-// stops at the table, so only its own views count.
+// stops at the table, so only its own views count, and a recursive drop
+// counts only the copies of the column it drops.
 func viewsReadingColumn(op statement.Op, facts Facts) []string {
 	switch {
 	case op.Kind == statement.OpDropColumn && op.Cascade:
@@ -336,6 +343,8 @@ func viewsReadingColumn(op statement.Op, facts Facts) []string {
 		return nil
 	case op.Only:
 		return facts.OwnDependentViews[op.Column]
+	case op.Kind == statement.OpDropColumn:
+		return facts.DropDependentViews[op.Column]
 	default:
 		return facts.DependentViews[op.Column]
 	}

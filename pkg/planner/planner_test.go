@@ -137,6 +137,9 @@ func TestClassifyRefusesChangingAColumnAViewReads(t *testing.T) {
 		DependentViews: map[string][]string{
 			"email": {`"app"."active_users"`, `"reports"."emails"`},
 		},
+		DropDependentViews: map[string][]string{
+			"email": {`"app"."active_users"`, `"reports"."emails"`},
+		},
 		OwnDependentViews: map[string][]string{
 			"email": {`"app"."active_users"`, `"reports"."emails"`},
 		},
@@ -180,12 +183,17 @@ func TestClassifyRefusesChangingAColumnAViewReads(t *testing.T) {
 // A DROP COLUMN ... CASCADE drops the views with the column, which the
 // server accepts, so it is not refused; it stays destructive. A view on a
 // table below counts against a recursive change and not against one under
-// ONLY, which stops at the table.
+// ONLY, which stops at the table. A recursive drop counts only the copies
+// of the column it drops: a view on a child's own declared copy blocks a
+// type change, which reaches that copy, and not a drop, which leaves it.
 func TestClassifyJudgesDependentViewsByWhatTheChangeReaches(t *testing.T) {
 	facts := planner.Facts{
-		ColumnTypes:       map[string]string{"email": "character varying(50)", "code": "text"},
-		DependentViews:    map[string][]string{"email": {`"app"."active_users"`}, "code": {`"app"."child_codes"`}},
-		OwnDependentViews: map[string][]string{"email": {`"app"."active_users"`}},
+		ColumnTypes: map[string]string{"email": "character varying(50)", "code": "text", "tag": "text"},
+		DependentViews: map[string][]string{
+			"email": {`"app"."active_users"`}, "code": {`"app"."child_codes"`}, "tag": {`"app"."child_tags"`},
+		},
+		DropDependentViews: map[string][]string{"email": {`"app"."active_users"`}, "code": {`"app"."child_codes"`}},
+		OwnDependentViews:  map[string][]string{"email": {`"app"."active_users"`}},
 	}
 	plan, err := planner.Classify("ALTER TABLE t DROP COLUMN email CASCADE", facts)
 	require.NoError(t, err)
@@ -210,6 +218,16 @@ func TestClassifyJudgesDependentViewsByWhatTheChangeReaches(t *testing.T) {
 	plan, err = planner.Classify("ALTER TABLE ONLY t DROP COLUMN code", facts)
 	require.NoError(t, err)
 	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+
+	plan, err = planner.Classify("ALTER TABLE t DROP COLUMN tag", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+	assert.Empty(t, plan.Decisions[0].DependentViews)
+
+	plan, err = planner.Classify("ALTER TABLE t ALTER COLUMN tag TYPE varchar(10)", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonDependentView, plan.Decisions[0].Reason)
+	assert.Equal(t, []string{`"app"."child_tags"`}, plan.Decisions[0].DependentViews)
 }
 
 // facts mirrors a live table whose column types exercise both sides of the
