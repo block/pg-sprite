@@ -17,8 +17,9 @@ import (
 // FormatVersion identifies the report contract. A consumer must reject a
 // report whose version it does not understand instead of guessing at the
 // field semantics. Version 2 added the replica-identity planner reason to
-// the embedded Reasons vocabulary.
-const FormatVersion = 2
+// the embedded Reasons vocabulary; version 3 added the
+// concurrent-in-transaction code.
+const FormatVersion = 3
 
 // Severity ranks a finding by what the engine would do with it.
 type Severity string
@@ -71,6 +72,12 @@ const (
 	// whether an index is unique — and a dropped unique index whose gap
 	// admitted duplicates cannot be recreated at all.
 	CodeDestructive Code = "destructive"
+	// CodeConcurrentInTransaction: a CONCURRENTLY operation sits inside
+	// an explicit transaction block the script opens with BEGIN or START
+	// TRANSACTION. PostgreSQL refuses every CONCURRENTLY form inside a
+	// block, so the script fails at that statement and the block rolls
+	// back. Run the statement outside the block, on its own.
+	CodeConcurrentInTransaction Code = "concurrent-in-transaction"
 )
 
 // Finding is one lint result: the statement it is about, the typed code,
@@ -128,7 +135,8 @@ type Report struct {
 }
 
 // Check lints a DDL script: every statement is parsed with the PostgreSQL
-// grammar and classified with zero live facts. A parse failure is an
+// grammar and classified with zero live facts beyond the constraint names
+// the script's earlier statements claim (planner.ScriptClassifier). A parse failure is an
 // error; an unsupported operation is not — it is an error-severity
 // finding, so one bad statement never hides the rest of the report.
 func Check(sql string) (Report, error) {
@@ -141,12 +149,24 @@ func Check(sql string) (Report, error) {
 		PostgresVersions: planner.RulesPostgresVersions,
 		Findings:         []Finding{},
 	}
+	inBlock := false
+	var classifier planner.ScriptClassifier
 	for i, stmt := range stmts {
-		findings, err := checkStatement(i+1, stmt)
+		findings, err := checkStatement(&classifier, i+1, stmt, inBlock)
 		if err != nil {
 			return Report{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
 		report.Findings = append(report.Findings, findings...)
+		control, err := statement.TransactionControlOf(stmt.SQL)
+		if err != nil {
+			return Report{}, fmt.Errorf("statement %d: %w", i+1, err)
+		}
+		switch control {
+		case statement.TransactionBegin:
+			inBlock = true
+		case statement.TransactionEnd:
+			inBlock = false
+		}
 	}
 	for _, f := range report.Findings {
 		if f.Severity == SeverityError {
@@ -162,9 +182,12 @@ func Check(sql string) (Report, error) {
 // from the classifier's routing decisions: a routing finding where the
 // route warrants one, and a destructive finding where the decision is
 // marked destructive. The classifier is the single rulebook — the linter
-// adds severity and presentation, never a second opinion.
-func checkStatement(index int, stmt statement.SourceStatement) ([]Finding, error) {
-	classified, err := planner.Classify(stmt.SQL, planner.Facts{})
+// adds severity and presentation, never a second opinion. The one finding
+// it adds is about the script rather than the statement: a CONCURRENTLY
+// operation inside an explicit transaction block, which PostgreSQL refuses
+// whatever the classifier makes of the operation.
+func checkStatement(classifier *planner.ScriptClassifier, index int, stmt statement.SourceStatement, inBlock bool) ([]Finding, error) {
+	classified, err := classifier.Classify(stmt.SQL)
 	if err != nil {
 		return nil, err
 	}
@@ -172,6 +195,21 @@ func checkStatement(index int, stmt statement.SourceStatement) ([]Finding, error
 	place := func(f Finding) Finding {
 		f.Statement, f.Line, f.Column, f.SQL = index, stmt.Line, stmt.Column, stmt.SQL
 		return f
+	}
+	if inBlock {
+		ops, err := statement.ParseOps(stmt.SQL)
+		if err != nil {
+			return nil, err
+		}
+		for _, op := range ops {
+			if op.Concurrent {
+				findings = append(findings, place(Finding{
+					Operation: op.Describe(),
+					Code:      CodeConcurrentInTransaction,
+					Severity:  SeverityError,
+				}))
+			}
+		}
 	}
 	for _, d := range classified.Decisions {
 		if f, flagged := decisionFinding(d); flagged {

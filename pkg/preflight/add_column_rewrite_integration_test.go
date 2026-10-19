@@ -71,10 +71,17 @@ func (f rewriteFixture) holdAccessExclusive(t *testing.T) {
 // for %[1]s, and fails the test if it waited on a lock.
 func (f rewriteFixture) prove(t *testing.T, alter string) map[string]statement.AddColumnProof {
 	t.Helper()
+	sql := fmt.Sprintf(alter, f.schema)
+	// The proof parses the statement before it probes anything, and the
+	// parser's first use in a process is slow, most of all under the race
+	// detector. Parse once here so neither the deadline nor the stopwatch
+	// pays for that one-time setup.
+	_, err := statement.ParseOne(sql)
+	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(t.Context(), probeDeadline)
 	defer cancel()
 	start := time.Now()
-	proofs, err := preflight.AddColumnRewrites(ctx, f.pool, f.schema, "t", fmt.Sprintf(alter, f.schema))
+	proofs, err := preflight.AddColumnRewrites(ctx, f.pool, f.schema, "t", sql)
 	require.NoError(t, err)
 	assert.Less(t, time.Since(start), probeDeadline/2, "a probe waited on a lock")
 	return proofs

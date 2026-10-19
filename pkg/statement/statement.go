@@ -91,21 +91,29 @@ type Statement struct {
 	concurrent    bool
 	indexTarget   IndexTarget
 	indexRelation IndexRelation
+	cascades      bool
 	buildsIndex   bool
 }
 
-// IndexTarget identifies whether an index-maintenance statement names one
-// relation. The gate uses this parse-only fact to keep forms requiring more
-// than one lock acknowledgement out of accepted-blocking eligibility.
+// IndexTarget identifies whether an index-maintenance statement's scope
+// stays within one relation. IndexTargetOther means the scope is wider than
+// one relation, for any reason — several indexes, a schema or database
+// scope, or a cascading drop (see Cascades()) — so it is not a count of the
+// relations the statement names. The gate uses this parse-only fact to keep
+// forms requiring more than one lock acknowledgement out of
+// accepted-blocking eligibility.
 type IndexTarget int
 
 const (
 	// IndexTargetNone is carried by statements outside index maintenance.
 	IndexTargetNone IndexTarget = iota
-	// IndexTargetSingleRelation covers one DROP INDEX and REINDEX INDEX or TABLE.
+	// IndexTargetSingleRelation covers one DROP INDEX (without CASCADE) and
+	// REINDEX INDEX or TABLE.
 	IndexTargetSingleRelation
-	// IndexTargetOther covers multi-index DROP and REINDEX scopes that do not
-	// name one relation: SCHEMA, DATABASE, and SYSTEM.
+	// IndexTargetOther covers the DROP and REINDEX scopes that do not stay
+	// within one relation: several indexes in one DROP INDEX, DROP INDEX with
+	// CASCADE (which also drops dependent objects), and REINDEX SCHEMA,
+	// DATABASE, and SYSTEM.
 	IndexTargetOther
 )
 
@@ -178,9 +186,15 @@ func (s Statement) Concurrent() bool { return s.concurrent }
 // IndexTarget returns the typed target shape of an index-maintenance statement.
 func (s Statement) IndexTarget() IndexTarget { return s.indexTarget }
 
-// IndexRelation returns the relation a single-relation index-maintenance
-// statement names; the zero value for every other statement.
+// IndexRelation returns the relation an IndexTargetSingleRelation statement
+// names; the zero value for every other statement, including an
+// IndexTargetOther statement that names one index but whose scope is wider,
+// such as DROP INDEX ... CASCADE (see Cascades()).
 func (s Statement) IndexRelation() IndexRelation { return s.indexRelation }
+
+// Cascades reports whether a DROP INDEX used CASCADE, which also drops the
+// objects that depend on the index. It is always false for other statements.
+func (s Statement) Cascades() bool { return s.cascades }
 
 // BuildsIndex reports whether executing the statement creates a new index:
 // every CREATE INDEX, and the ALTER TABLE shapes that build one as a side
@@ -288,8 +302,11 @@ func ParseOne(sql string) (Statement, error) {
 		if node.GetDropStmt().GetRemoveType() == pganalyze.ObjectType_OBJECT_INDEX {
 			st.kind = KindDropIndex
 			st.concurrent = node.GetDropStmt().GetConcurrent()
+			st.cascades = node.GetDropStmt().GetBehavior() == pganalyze.DropBehavior_DROP_CASCADE
 			objects := node.GetDropStmt().GetObjects()
-			if len(objects) == 1 {
+			// CASCADE also drops the objects that depend on the named index,
+			// so its scope is wider than the one relation it names.
+			if len(objects) == 1 && !st.cascades {
 				st.indexTarget = IndexTargetSingleRelation
 				st.indexRelation = droppedIndex(objects[0])
 			} else {
@@ -386,14 +403,44 @@ func reindexedRelation(rel *pganalyze.RangeVar, kind IndexRelationKind) IndexRel
 	return IndexRelation{Schema: rel.GetSchemaname(), Name: rel.GetRelname(), Kind: kind}
 }
 
-// reindexConcurrently reports whether a REINDEX statement used its
-// CONCURRENTLY form, which the grammar carries as a generic option rather
-// than a dedicated field.
+// reindexConcurrently reports whether a REINDEX statement runs
+// concurrently. The grammar carries CONCURRENTLY as a generic option, and
+// the server reads a value given with it as a boolean: CONCURRENTLY,
+// CONCURRENTLY true, and CONCURRENTLY 1 rebuild concurrently, while
+// CONCURRENTLY false and CONCURRENTLY 0 rebuild with the blocking lock. The
+// last occurrence decides, though the server refuses a repeated option.
 func reindexConcurrently(stmt *pganalyze.ReindexStmt) bool {
+	concurrent := false
 	for _, p := range stmt.GetParams() {
-		if strings.EqualFold(p.GetDefElem().GetDefname(), "concurrently") {
-			return true
+		if isConcurrentlyOption(p) {
+			concurrent = optionEnabled(p.GetDefElem().GetArg())
 		}
 	}
-	return false
+	return concurrent
+}
+
+// isConcurrentlyOption reports whether a REINDEX parameter is the
+// CONCURRENTLY option.
+func isConcurrentlyOption(p *pganalyze.Node) bool {
+	return strings.EqualFold(p.GetDefElem().GetDefname(), "concurrently")
+}
+
+// optionEnabled reads a boolean option's value as the server's
+// defGetBoolean does: no value, a nonzero integer, or true or on in any
+// case enable it; zero, false, and off disable it. Any other value the
+// server rejects outright, and it reads as enabled here, the reading that
+// flags and refuses more.
+func optionEnabled(arg *pganalyze.Node) bool {
+	switch {
+	case arg == nil:
+		return true
+	case arg.GetInteger() != nil:
+		return arg.GetInteger().GetIval() != 0
+	case arg.GetString_() != nil:
+		switch strings.ToLower(arg.GetString_().GetSval()) {
+		case "false", "off":
+			return false
+		}
+	}
+	return true
 }

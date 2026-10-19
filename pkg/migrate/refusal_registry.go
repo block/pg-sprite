@@ -111,9 +111,17 @@ func gateRefusal(kind statement.Kind, concurrent bool, target statement.IndexTar
 	case statement.KindAlterTable, statement.KindCreateIndex:
 		return verdict.Refusal{}, false
 	case statement.KindDropIndex, statement.KindReindex:
-		if concurrent {
+		// A concurrent form is the safe idiom to run directly only when
+		// PostgreSQL accepts it: DROP INDEX CONCURRENTLY names exactly one
+		// index and takes no CASCADE, so a wider concurrent drop is refused
+		// as the plain one would be rather than pointed at a direct run the
+		// server rejects.
+		if concurrent && (kind == statement.KindReindex || target == statement.IndexTargetSingleRelation) {
 			return verdict.NoOnlineSafetyProblem(verdict.ReasonIndexStatement, verdict.OwnerDirectOperator), true
 		}
+		// INV: AB-4 — only a statement whose whole scope is one relation is
+		// at the eligible site; a cascading drop is not, so the
+		// acknowledgement cannot reach it.
 		site := verdict.RefusalSiteIndexOther
 		if target == statement.IndexTargetSingleRelation {
 			site = verdict.RefusalSiteIndexSingleRelation

@@ -57,18 +57,32 @@ since under the swap lock (`cutover-undrained`); the mechanism is in
 [copy-and-swap-design.md](copy-and-swap-design.md#live-verification). The `Runner` on a
 quiesced target makes the quiescence its pass relies on true rather than assumed: it fences
 the source with a statement-level `BEFORE` trigger (`pgsprite_write_fence`, SQLSTATE `55006`)
-before its first save and keeps it through every stop until the swap carries it to the
-retained table, so the copy and one quiesced pass are the whole proof (fences-the-source,
-leaves-the-fence-on-a-stopped-run, unfences-the-old-table-it-keeps,
-stops-on-a-shadow-that-differs tests). On a decoding target it runs `CheckLive` under
-`DivergenceAbort` once the catch-up has passed a marker written after the copy, with the
-capture's own `Catchup` as the pass's confirmed source, and hands the swap a drain that
-reopens the stream from the position the capture confirmed and applies it under the swap's
-lock (carries-a-live-table-from-no-row-to-done test). The live path reaches the `Runner`
-through `pkg/router`, which marks a `type-rewrite` plan executable only because the
-copy-and-swap engine carries that operation (`copyAndSwapCarriesReason`); every other
-copy-and-swap reason stays unavailable, so no rewrite reaches an executor without the gate
-(`migrate --alter` type-rewrite-runs-via-copy-and-swap and refuses-without-free-disk tests).
+enabled `ALWAYS`, so a session in `session_replication_role = replica` is refused too, before
+its first save, and keeps it through every stop until the swap carries it to the retained
+table, so the copy and one quiesced pass are the whole proof (fences-the-source,
+refuses-a-replica-role-session, leaves-the-fence-on-a-stopped-run,
+unfences-the-old-table-it-keeps, stops-on-a-shadow-that-differs tests). A resumed run installs
+over the fence, which enables it `ALWAYS` again (resume-upgrades-an-origin-fence test).
+
+The quiesced swap confirms the fence once more, under its `ACCESS EXCLUSIVE` lock: it refuses
+the proof as `cutover-unfenced` unless the engine's trigger is still on the source, of the
+shape the install gave it — no `WHEN` condition, no `UPDATE OF` column list, no arguments, not
+deferrable — and enabled `ALWAYS` (refuses-when-the-fence-was-disabled,
+refuses-when-the-fence-was-dropped, refuses-when-the-fence-is-origin-only, and
+refuses-when-the-fence-was-replaced-by-a-conditional-one tests). The check has a stated
+limit: a role that owns the table can disable the fence, write, and restore it between the
+pass and the swap, and that write is not seen. A live run installs no fence, so its swap
+checks none.
+
+On a decoding target the `Runner` runs `CheckLive` under `DivergenceAbort` once the catch-up
+has passed a marker written after the copy, with the capture's own `Catchup` as the pass's
+confirmed source, and hands the swap a drain that reopens the stream from the position the
+capture confirmed and applies it under the swap's lock (carries-a-live-table-from-no-row-to-done
+test). The live path reaches the `Runner` through `pkg/router`, which marks a `type-rewrite`
+plan executable only because the copy-and-swap engine carries that operation
+(`copyAndSwapCarriesReason`); every other copy-and-swap reason stays unavailable, so no
+rewrite reaches an executor without the gate (`migrate --alter`
+type-rewrite-runs-via-copy-and-swap and refuses-without-free-disk tests).
 *Source:* [design-principles](design-principles.md#correctness-and-safety),
 risks-and-mitigations; Spirit's "never skip it".
 
@@ -120,7 +134,15 @@ the same recopy commits with no reread — the policy for a source that is writt
 pass runs, where a fresh read would refuse a chunk the recopy itself made right; the stream
 carries that write, and the next pass, not this one, is the proof (no-policy,
 abort-leaves-shadow-alone, repairs-every-chunk, moved-unique-value,
-later-repair-fails, and recopy-tolerates-a-source-write-inside-the-pass tests). *Source:* Spirit AGENTS.md
+later-repair-fails, and recopy-tolerates-a-source-write-inside-the-pass tests). Under the
+stream (`CheckLive` under `repair`) the one recopy transaction is kept apart from the stream's
+own writes: the pass holds the catch-up's flushes off the shadow in Go before the transaction
+asks for `SHARE MODE` and gives them back only after it commits, on every path
+(`checksum.LiveOptions.Flushes`, a `FlushGate`, required under `repair`; `applier.Catchup.Pause`
+is the hold), so no flush interleaves with the delete and the copy
+(`TestCheckLiveRepairHoldsTheCatchupsFlushesForTheRecopy`,
+`TestCheckLiveRepairHoldBracketsTheRecopyTransaction`,
+`TestCheckLiveRepairResumesTheFlushesWhenTheRecopyFails`). *Source:* Spirit AGENTS.md
 (block/spirit#994 policy) — maps directly onto our failover-reconcile design.
 
 ### CO-4 — The copy/apply ordering invariants
@@ -503,6 +525,15 @@ pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repa
 transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so a pool
 built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued behind
 `ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
+The concurrent build's failure verdict runs on a reserved session that observers must not
+disturb: `Tracker.Progress` reads the build's progress on that session detached from the
+observer's context and under its own deadline, set above `pkg/dbconn`'s default
+`statement_timeout` so a slow read ends server-side with the session intact, because a context
+that ends mid-query closes the connection; `Tracker.CancelBuild` signals the same way.
+*Enforced:* `pkg/progress` (`Tracker.Progress`, `progressReadTimeout`;
+`TestProgressRunsTheBuildReadDetachedFromTheObserver`,
+`TestProgressBuildReadDeadlineOutlastsTheServerStatementTimeout`, and
+`TestProgressReadCancelledMidQueryLeavesTheVerdictSessionUsable` in `pkg/executor`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -642,10 +673,19 @@ relation (a table where the statement needs an index, or the reverse) is a usage
 no verdict — each its own typed error — and nothing executes. The acknowledgement is never
 inferred from the statement text. The resolution and the execution are separate statements
 on the pool, so a concurrent re-pointing of the index name between them is outside what this
-invariant guarantees; the design records the window. *Enforced:* `pkg/migrate`
+invariant guarantees; the design records the window. The statement's scope must also be
+exactly that table: a `DROP INDEX ... CASCADE` also drops the objects that depend on the index,
+such as a foreign key on another table, so it is not a single-relation statement and the
+executor refuses it (`ErrUnsupportedAcceptedBlocking`) before opening a transaction.
+*Enforced:* `pkg/migrate`
 (`acceptBlocking`, `lockedTable`; `ErrAcceptBlockingMismatch`,
 `ErrAcceptBlockingRelationNotFound`, `ErrAcceptBlockingWrongRelationKind`),
-`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`.
+`pkg/executor` (`acceptedBlockingIneligibility`), `pkg/statement` (`ParseOne` classifies a
+cascading drop as `IndexTargetOther`),
+`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`,
+`TestAcceptedBlockingAdmission`, `TestExecuteAcceptedBlockingRefusesCascadeDrop`,
+`TestExecuteAcceptedBlockingPlainDropOfReferencedIndexIsRefusedByServer`,
+`TestExecuteAcceptedBlockingRestrictDropOfReferencedIndexIsRefusedByServer`.
 *Source:* [lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door).
 
 ### AB-4 — Acceptance applies only to an eligible in-process refusal, and to nothing else
@@ -653,13 +693,16 @@ invariant guarantees; the design records the window. *Enforced:* `pkg/migrate`
 The acknowledgement changes the outcome of exactly one thing: a gate refusal whose in-process
 proof the eligibility registry marks eligible (RF-8). Every other refusal — an ineligible
 gate refusal, a planner refusal, a size-guard or preflight refusal — stands exactly as it
-would without the flag, and a statement the gate admits runs its normal path. The
+would without the flag — including a `DROP INDEX ... CASCADE`, whose refusal site is the
+ineligible one because its scope exceeds the acknowledged table — and a statement the gate
+admits runs its normal path. The
 acknowledgement is not `--force`: the two cannot be combined, and a dry run reports the
 refusal as it stands rather than the accepted execution. The front door requires the
 statement budget to be stated on the same command line, because the accepted outage bound is
 a decision, not a default. *Enforced:* `migrate.AcceptedRefusal`, `MigrateCmd.Validate`,
-`TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
-`TestMigrateAcceptBlockingLeavesIneligibleRefusalsAlone`. *Source:*
+`migrate.gateRefusal` (the refusal site), `TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
+`TestMigrateAcceptBlockingLeavesIneligibleRefusalsAlone`,
+`TestMigrateAcceptBlockingRefusesCascadeAndKeepsDependentForeignKey`. *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door).
 
 ### AB-5 — The accepted outcome is distinguishable from online-safe execution at every surface

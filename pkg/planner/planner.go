@@ -136,8 +136,9 @@ const (
 	// every row — a full rewrite.
 	ReasonGeneratedStored Reason = "generated-stored"
 	// ReasonTypeRewrite: a type PostgreSQL must check or convert row by
-	// row — a type conversion it cannot relabel (rewrite plus reindex), or
-	// an added column of a domain type with constraints.
+	// row — a type conversion it cannot relabel (rewrite plus reindex), a
+	// type change that moves the column's collation (reindex alone), or an
+	// added column of a domain type with constraints.
 	ReasonTypeRewrite Reason = "type-rewrite"
 	// ReasonRelocation: SET TABLESPACE moves the heap — a rewrite-scale
 	// copy.
@@ -264,6 +265,13 @@ type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
 	ColumnTypes map[string]string
+	// ColumnCollations maps each live column whose collation is not its
+	// type's default to that collation, as schemadiff renders it. A column
+	// absent from the map has the default collation. Retyping a column
+	// without a COLLATE clause resets it to the new type's default, so a
+	// column present here loses its collation and every index on it is
+	// rebuilt: never a relabel.
+	ColumnCollations map[string]string
 	// ReplicaIdentity is what the replica identity indexes of the table and
 	// its partitions key on; the zero value when none selects an index.
 	ReplicaIdentity schemadiff.ReplicaIdentityKeys
@@ -274,19 +282,30 @@ type Facts struct {
 	// constant; the proof leaves out only an ADD COLUMN IF NOT EXISTS for a
 	// column the table already has, which the server skips.
 	AddColumnProofs map[string]statement.AddColumnProof
+	// ConstraintNames are the names of the constraints already in the
+	// table's schema, which the server passes over when it names an
+	// unnamed CHECK or FOREIGN KEY. Without them the safer sequence states
+	// the server's first choice, and if the table already uses that name
+	// its NOT VALID step fails before anything is added.
+	ConstraintNames map[string]bool
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
-// canonical type of every live column and what the table's replica
-// identity keys on. Every front door — the declarative diff and the
-// imperative dry-run — extracts facts through this one function so
-// equivalent changes classify identically.
+// canonical type of every live column, the collation of every column that
+// has one of its own, and what the table's replica identity keys on. Every
+// front door — the declarative diff and the imperative dry-run — extracts
+// facts through this one function so equivalent changes classify
+// identically.
 func FactsFrom(live schemadiff.Model) Facts {
 	types := make(map[string]string, len(live.Columns))
+	collations := make(map[string]string)
 	for _, col := range live.Columns {
 		types[col.Name] = col.Type
+		if col.Collation != "" {
+			collations[col.Name] = col.Collation
+		}
 	}
-	return Facts{ColumnTypes: types, ReplicaIdentity: live.ReplicaIdentity}
+	return Facts{ColumnTypes: types, ColumnCollations: collations, ReplicaIdentity: live.ReplicaIdentity}
 }
 
 // addColumnProof returns what the server proved about adding op's
@@ -419,6 +438,11 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 
 	case statement.OpAddConstraint:
 		d = classifyAddConstraint(op, st, sql, single)
+		if len(d.SaferSQL) > 0 && validatedOnAdd(op) {
+			// Restated from the live facts, which name an unnamed
+			// constraint as the server would on this table.
+			d.SaferSQL = notValidSequence(st, sql, facts)
+		}
 
 	case statement.OpValidateConstraint:
 		d.Route, d.Reason = RouteNative, ReasonOnlineIdiom
@@ -497,18 +521,15 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, 
 			d.SaferSQL = usingIndexSequence(st, op)
 		}
 
-	case op.Constraint == statement.ConstraintCheck,
-		op.Constraint == statement.ConstraintForeignKey:
+	case validatedOnAdd(op):
 		// Direct ADD CHECK/FK validates under ACCESS EXCLUSIVE; the safer
-		// sequence is NOT VALID plus an online VALIDATE.
+		// sequence is NOT VALID plus an online VALIDATE. An unnamed
+		// constraint gets the server's first choice here, from the
+		// statement alone; classifyOp restates the sequence from the live
+		// facts.
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
 		if single {
-			if notValid, name, err := statement.AddNotValid(sql); err == nil {
-				d.SaferSQL = []string{
-					notValid,
-					"ALTER TABLE " + tableIdent(st) + " VALIDATE CONSTRAINT " + pgx.Identifier{name}.Sanitize(),
-				}
-			}
+			d.SaferSQL = notValidSequence(st, sql, Facts{})
 		}
 
 	case op.Constraint == statement.ConstraintNotNull:
@@ -521,11 +542,50 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, 
 	return d
 }
 
+// validatedOnAdd reports a CHECK or FOREIGN KEY, the constraints ADD
+// CONSTRAINT validates against every row unless told NOT VALID.
+func validatedOnAdd(op statement.Op) bool {
+	return op.Constraint == statement.ConstraintCheck || op.Constraint == statement.ConstraintForeignKey
+}
+
+// notValidSequence is the safer sequence for a single ADD CHECK or FOREIGN
+// KEY: the constraint added NOT VALID, then validated online. It is nil
+// when the statement cannot take NOT VALID.
+func notValidSequence(st statement.Statement, sql string, facts Facts) []string {
+	notValid, name, err := statement.AddNotValid(sql, constraintNaming(facts))
+	if err != nil {
+		return nil
+	}
+	return []string{
+		notValid,
+		"ALTER TABLE " + tableIdent(st) + " VALIDATE CONSTRAINT " + pgx.Identifier{name}.Sanitize(),
+	}
+}
+
+// constraintNaming is what facts tell the rewrite about naming an unnamed
+// constraint: the live columns, and the names the schema already uses.
+func constraintNaming(facts Facts) statement.ConstraintNaming {
+	naming := statement.ConstraintNaming{Taken: facts.ConstraintNames}
+	if facts.ColumnTypes != nil {
+		naming.Columns = make(map[string]bool, len(facts.ColumnTypes))
+		for column := range facts.ColumnTypes {
+			naming.Columns[column] = true
+		}
+	}
+	return naming
+}
+
 // classifyTypeChange routes ALTER COLUMN TYPE: binary-coercible changes are
 // a brief catalog relabel; everything else — or anything the planner cannot
 // verify against live column facts — is a rewrite.
 func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 	if op.HasUsing {
+		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	}
+	if _, collated := facts.ColumnCollations[op.Column]; collated {
+		// The live column has a collation of its own, which the new type
+		// either resets to its default or (with a COLLATE clause) replaces;
+		// either way every index on the column is rebuilt.
 		return RouteCopyAndSwap, ReasonTypeRewrite, false
 	}
 	oldType, ok := facts.ColumnTypes[op.Column]
@@ -552,13 +612,15 @@ type typeShape struct {
 
 // targetTypeShape reads the statement's target type into the shape
 // parseTypeText gives the live one. A type qualified with a schema other
-// than pg_catalog is a user type that only shares a built-in's name, so it
-// gets no shape and matches no rule. The name is taken as the parser left
-// it: the grammar already spells every built-in the rules know by its
-// catalog name (varchar, numeric, timestamptz), so a target named
-// "decimal" or "character varying" was quoted and names a user type.
+// than pg_catalog is a user type that only shares a built-in's name, and a
+// COLLATE clause changes the collation every index on the column is built
+// with, so neither gets a shape and neither matches a rule. The name is
+// taken as the parser left it: the grammar already spells every built-in
+// the rules know by its catalog name (varchar, numeric, timestamptz), so a
+// target named "decimal" or "character varying" was quoted and names a
+// user type.
 func targetTypeShape(op statement.Op) typeShape {
-	if op.NewTypeSchema != "" {
+	if op.NewTypeSchema != "" || op.NewTypeCollation != "" {
 		return typeShape{}
 	}
 	return typeShape{name: strings.TrimSpace(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}

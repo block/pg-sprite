@@ -86,12 +86,62 @@ func TestMigrateAcceptBlockingMismatchExecutesNothing(t *testing.T) {
 	assert.True(t, exists, "nothing must have executed")
 }
 
+// DROP INDEX ... CASCADE also drops the objects that depend on the index.
+// Here orders.user_email references the unique index on users, so the
+// cascade would drop that foreign key and lock and change orders — a table
+// the acknowledgement of users never named. The statement is refused as it
+// would be without the flag, and the foreign key stays.
+func TestMigrateAcceptBlockingRefusesCascadeAndKeepsDependentForeignKey(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.users (
+			id int PRIMARY KEY,
+			email text NOT NULL
+		);
+		CREATE UNIQUE INDEX users_email_key ON %[1]s.users (email);
+		CREATE TABLE %[1]s.orders (
+			id int PRIMARY KEY,
+			user_email text REFERENCES %[1]s.users (email)
+		)`, schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("DROP INDEX %s.users_email_key CASCADE", schema))
+	cmd.AcceptBlocking = schema + ".users"
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+	require.NotErrorIs(t, err, verdict.ErrAcceptedBlocking)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonIndexStatement, v.Reason)
+	assert.False(t, v.BlockingPassthrough)
+
+	var indexes, foreignKeys int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_indexes WHERE schemaname = $1 AND indexname = 'users_email_key'`,
+		schema).Scan(&indexes))
+	assert.Equal(t, 1, indexes, "the unique index must still exist")
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_constraint
+		  WHERE contype = 'f' AND conrelid = to_regclass($1)`,
+		schema+".orders").Scan(&foreignKeys))
+	assert.Equal(t, 1, foreignKeys, "the foreign key on the unacknowledged table must still exist")
+}
+
 // The acknowledgement applies only to the eligible refusals. A gate
-// refusal outside the set — an already-concurrent form, an unsupported
-// kind — still refuses before dialing, flag or no flag.
+// refusal outside the set — an already-concurrent form, a cascading drop, an
+// unsupported kind — still refuses before dialing, flag or no flag.
 func TestMigrateAcceptBlockingLeavesIneligibleRefusalsAlone(t *testing.T) {
 	for _, alter := range []string{
 		"DROP INDEX CONCURRENTLY public.users_email_idx",
+		"DROP INDEX public.users_email_idx CASCADE",
 		"REINDEX SCHEMA public",
 		"ALTER INDEX public.users_email_idx SET (fillfactor = 90)",
 	} {

@@ -513,7 +513,7 @@ ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);
 ```console
 $ pg-sprite lint /tmp/changes.sql --json
 {
-  "format_version": 2,
+  "format_version": 3,
   "postgres_versions": "14-18",
   "findings": [
     {

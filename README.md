@@ -121,10 +121,11 @@ refusal — never a silently wrong or incomplete result:
   [runbook](docs/invalid-index-recovery.md) applies.
 - **The accepted-blocking passthrough covers index maintenance only** —
   `migrate --accept-blocking SCHEMA.TABLE` runs an otherwise-refused plain
-  `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` deliberately under the
-  engine's bounded lock and statement budgets, with the verdict marked
-  `executed-without-online-safety` (exit 3). Every other refusal — including
-  a blocking index build on a partitioned parent — still exits 2. Design:
+  `DROP INDEX` (not `CASCADE`), `REINDEX INDEX`, or `REINDEX TABLE`
+  deliberately under the engine's bounded lock and statement budgets, with
+  the verdict marked `executed-without-online-safety` (exit 3). Every other
+  refusal — including a blocking index build on a partitioned parent — still
+  exits 2. Design:
   [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
