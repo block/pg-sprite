@@ -56,6 +56,17 @@ type RunOptions struct {
 	// the row is done. The caller ends the window with InspectSwapped on
 	// the done row's proof and DropOldTable, under the table's lock.
 	KeepOld bool
+	// ReplaceDone lets the run start fresh on a table whose checkpoint row
+	// is done: the row is deleted under the run's own lock session and the
+	// run proceeds as on a table with no row, so a second change on the
+	// table needs no separate lock, Delete, and release in which another
+	// engine could take the table. Only a done row whose retained source
+	// is gone is replaced — one whose _old table still stands, kept under
+	// KeepOld, is that run's rollback window, which the caller ends with
+	// DropOldTable first — and a failed row is never replaced: nothing
+	// this Runner writes puts a row there, so it is another engine's to
+	// clear. False refuses every terminal row as resume-row-terminal.
+	ReplaceDone bool
 	// CheckpointInterval is how often the copy in progress saves its
 	// landed watermark, so a run that stops mid-copy resumes from the last
 	// save rather than from the start (TM-3). Zero means the default.
@@ -259,7 +270,9 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 //     its cutover is, resume-shadow-gone included.
 //   - A terminal row is refused as resume-row-terminal: the run it
 //     records has ended, and a caller that means to run the table again
-//     deletes it first with Store.Delete, under the table's lock.
+//     deletes it first with Store.Delete, under the table's lock — or
+//     sets ReplaceDone, under which a done row whose retained source is
+//     gone is deleted under this run's lock and the run starts fresh.
 //   - A row of the other kind of run — one naming a slot, or in a phase
 //     only a live run enters, met by a quiesced Runner; one naming none,
 //     met by a live Runner — is refused as resume-row-decoding.

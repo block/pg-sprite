@@ -46,18 +46,30 @@ type runState struct {
 func (r *Runner) dispatch(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, st statement.Statement) (runState, error) {
 	cp, err := r.store.Inspect(ctx, target.Schema(), target.Table())
 	if errors.Is(err, checkpoint.ErrNotFound) {
-		if target.DecodesWAL() {
-			return r.startFreshLive(ctx, pool, lock, target, st)
-		}
-		return r.startFresh(ctx, pool, lock, target, st)
+		return r.fresh(ctx, pool, lock, target, st)
 	}
 	if err != nil {
 		return runState{}, err
+	}
+	if r.replacesRow(cp) {
+		if err := r.replaceDoneRow(ctx, pool, lock, cp); err != nil {
+			return runState{}, err
+		}
+		return r.fresh(ctx, pool, lock, target, st)
 	}
 	if target.DecodesWAL() {
 		return r.resumeLive(ctx, pool, lock, target, cp, st)
 	}
 	return r.resume(ctx, pool, lock, target, cp, st)
+}
+
+// fresh starts the run of a table with no row, as the target's kind
+// prescribes.
+func (r *Runner) fresh(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, st statement.Statement) (runState, error) {
+	if target.DecodesWAL() {
+		return r.startFreshLive(ctx, pool, lock, target, st)
+	}
+	return r.startFresh(ctx, pool, lock, target, st)
 }
 
 // startFresh builds the shadow, fences the source, and writes the row
