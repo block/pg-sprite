@@ -142,6 +142,26 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "doc", NewType: "jsonb", HasUsing: true},
 		},
 		{
+			name: "alter type pg_catalog qualified stays bare",
+			sql:  "ALTER TABLE t ALTER COLUMN name TYPE pg_catalog.varchar(100)",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "varchar", NewTypeMods: []int32{100}},
+		},
+		{
+			name: "alter type SQL-standard spelling stays bare",
+			sql:  "ALTER TABLE t ALTER COLUMN name TYPE character varying(100)",
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "varchar", NewTypeMods: []int32{100}},
+		},
+		{
+			name: "alter type with a collation",
+			sql:  `ALTER TABLE t ALTER COLUMN name TYPE text COLLATE "C"`,
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "text", NewTypeCollation: "C"},
+		},
+		{
+			name: "alter type with a schema-qualified collation",
+			sql:  `ALTER TABLE t ALTER COLUMN name TYPE text COLLATE pg_catalog."C"`,
+			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "text", NewTypeCollation: "pg_catalog.C"},
+		},
+		{
 			name: "set default",
 			sql:  "ALTER TABLE t ALTER COLUMN age SET DEFAULT 1",
 			want: statement.Op{Kind: statement.OpSetDefault, Column: "age"},
@@ -381,11 +401,12 @@ func TestParseOpsShapes(t *testing.T) {
 	}
 }
 
-// Describe must render the type modifier, the array marker, and the
-// schema: each distinguishes changes that route in opposite directions — a
-// widen (varchar(100), native) from a narrow (varchar(30), copy-and-swap),
-// text from a text array, the built-in text from a user type named text —
-// and a label that drops one would render them identically.
+// Describe must render the type modifier, the array marker, the schema,
+// and the collation: each distinguishes changes that route in opposite
+// directions — a widen (varchar(100), native) from a narrow (varchar(30),
+// copy-and-swap), text from a text array, the built-in text from a user
+// type named text, text from text under another collation — and a label
+// that drops one would render them identically.
 func TestDescribeRendersTypeModifiers(t *testing.T) {
 	cases := []struct {
 		sql  string
@@ -396,6 +417,8 @@ func TestDescribeRendersTypeModifiers(t *testing.T) {
 		{"ALTER TABLE t ALTER COLUMN v TYPE text", "ALTER COLUMN v TYPE text"},
 		{"ALTER TABLE t ALTER COLUMN v TYPE varchar(50)[]", "ALTER COLUMN v TYPE varchar(50)[]"},
 		{"ALTER TABLE t ALTER COLUMN v TYPE app.text", "ALTER COLUMN v TYPE app.text"},
+		{`ALTER TABLE t ALTER COLUMN v TYPE text COLLATE "C"`, "ALTER COLUMN v TYPE text COLLATE C"},
+		{`ALTER TABLE t ALTER COLUMN v TYPE varchar(50)[] COLLATE pg_catalog."POSIX"`, "ALTER COLUMN v TYPE varchar(50)[] COLLATE pg_catalog.POSIX"},
 	}
 	for _, tc := range cases {
 		assert.Equal(t, tc.want, parseOneOp(t, tc.sql).Describe(), tc.sql)
