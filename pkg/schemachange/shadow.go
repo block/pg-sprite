@@ -477,11 +477,13 @@ func setSearchPath(ctx context.Context, tx pgx.Tx, schema string) error {
 // qualification rather than search_path.
 func resolveRelation(ctx context.Context, tx pgx.Tx, schema, table string) (uint32, error) {
 	var oid uint32
+	// INV: CO-9 — every catalog name is qualified, so a planted overload in a
+	// searched schema cannot answer this read.
 	err := tx.QueryRow(ctx, `
 		SELECT c.oid
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2`, schema, table).Scan(&oid)
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`, schema, table).Scan(&oid)
 	if err != nil {
 		return 0, fmt.Errorf("resolve source %s.%s: %w", schema, table, err)
 	}
@@ -492,12 +494,14 @@ func resolveRelation(ctx context.Context, tx pgx.Tx, schema, table string) (uint
 // wears the shadow's name in the schema.
 func refuseExistingShadow(ctx context.Context, tx pgx.Tx, schema, shadow string) error {
 	var exists bool
+	// INV: CO-9 — every catalog name is qualified, so a planted overload in a
+	// searched schema cannot answer this read.
 	err := tx.QueryRow(ctx, `
 		SELECT EXISTS (
 			SELECT 1
-			FROM pg_class c
-			JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE n.nspname = $1 AND c.relname = $2)`, schema, shadow).Scan(&exists)
+			FROM pg_catalog.pg_class c
+			JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+			WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2)`, schema, shadow).Scan(&exists)
 	if err != nil {
 		return fmt.Errorf("check for existing shadow %s.%s: %w", schema, shadow, err)
 	}
@@ -520,11 +524,13 @@ func createShadow(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarge
 	}
 	var oid uint32
 	var shadowOwner string
+	// INV: CO-9 — every catalog name is qualified, so a planted overload in a
+	// searched schema cannot answer this read.
 	err := tx.QueryRow(ctx, `
-		SELECT c.oid, pg_get_userbyid(c.relowner)
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2`, target.Schema(), shadow).Scan(&oid, &shadowOwner)
+		SELECT c.oid, pg_catalog.pg_get_userbyid(c.relowner)
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`, target.Schema(), shadow).Scan(&oid, &shadowOwner)
 	if err != nil {
 		return 0, fmt.Errorf("read owner of shadow %s: %w", table, err)
 	}

@@ -15,16 +15,22 @@ import (
 
 // FactsFrom is the one seam between live introspection and classification:
 // every column's canonical type must come through so type-narrowing
-// decisions see the real live types.
+// decisions see the real live types, and a column's own collation must
+// come through so retyping it is never read as a relabel.
 func TestFactsFromExtractsColumnTypes(t *testing.T) {
 	live := schemadiff.Model{Columns: []schemadiff.Column{
 		{Name: "id", Type: "bigint"},
 		{Name: "name", Type: "character varying(50)"},
+		{Name: "code", Type: "text", Collation: `pg_catalog."C"`},
 	}}
-	assert.Equal(t, planner.Facts{ColumnTypes: map[string]string{
-		"id":   "bigint",
-		"name": "character varying(50)",
-	}}, planner.FactsFrom(live))
+	assert.Equal(t, planner.Facts{
+		ColumnTypes: map[string]string{
+			"id":   "bigint",
+			"name": "character varying(50)",
+			"code": "text",
+		},
+		ColumnCollations: map[string]string{"code": `pg_catalog."C"`},
+	}, planner.FactsFrom(live))
 }
 
 // FactsFrom carries what the live table's replica identity keys on, so a
@@ -295,7 +301,8 @@ func TestClassifyReferenceRows(t *testing.T) {
 		{"add foreign key", "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p (id)", planner.RouteNative, planner.ReasonSaferIdiom, 2},
 		{"add check not valid", "ALTER TABLE t ADD CONSTRAINT c CHECK (age > 0) NOT VALID", planner.RouteNative, planner.ReasonOnlineIdiom, 0},
 		{"add foreign key not valid", "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p (id) NOT VALID", planner.RouteNative, planner.ReasonOnlineIdiom, 0},
-		{"add unnamed check", "ALTER TABLE t ADD CHECK (age > 0)", planner.RouteNative, planner.ReasonSaferIdiom, 0},
+		{"add unnamed check", "ALTER TABLE t ADD CHECK (age > 0)", planner.RouteNative, planner.ReasonSaferIdiom, 2},
+		{"add unnamed foreign key", "ALTER TABLE t ADD FOREIGN KEY (pid) REFERENCES p (id)", planner.RouteNative, planner.ReasonSaferIdiom, 2},
 		{"add exclusion", "ALTER TABLE t ADD CONSTRAINT ex EXCLUDE USING gist (room WITH =)", planner.RouteRefuse, planner.ReasonUnsupportedOperation, 0},
 		{"validate constraint", "ALTER TABLE t VALIDATE CONSTRAINT c", planner.RouteNative, planner.ReasonOnlineIdiom, 0},
 		{"drop constraint", "ALTER TABLE t DROP CONSTRAINT c", planner.RouteNative, planner.ReasonMetadataOnly, 0},
@@ -349,6 +356,88 @@ func TestClassifyAddPrimaryKeySequence(t *testing.T) {
 		`CREATE UNIQUE INDEX CONCURRENTLY "t_pkey" ON "s"."t" ("id")`,
 		`ALTER TABLE "s"."t" ADD CONSTRAINT "t_pkey" PRIMARY KEY USING INDEX "t_pkey"`,
 	}, d.SaferSQL)
+}
+
+// The online sequence must declare the constraint the statement declares:
+// an index built without INCLUDE, NULLS NOT DISTINCT, or the tablespace, or
+// an attach without DEFERRABLE or INITIALLY DEFERRED, is a different
+// constraint. WITH (...) storage parameters ride on the index too; only a
+// parameter the sequence cannot render faithfully gets no sequence, so the
+// decision carries guidance instead of SQL that drops it.
+// TestUsingIndexSequenceDeclaresTheSameConstraint proves each on a server.
+func TestClassifyAddKeySequenceCarriesEveryAttribute(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want []string
+	}{
+		{
+			"include columns",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) INCLUDE (name, id)",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") INCLUDE ("name", "id")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"nulls not distinct",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (email)",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") NULLS NOT DISTINCT`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"index tablespace",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) USING INDEX TABLESPACE fast",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"storage parameters",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) INCLUDE (id) WITH (fillfactor = 70, deduplicate_items = off) USING INDEX TABLESPACE fast",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") INCLUDE ("id") WITH ("fillfactor" = '70', "deduplicate_items" = 'off') TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"deferrable initially deferred",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) DEFERRABLE INITIALLY DEFERRED",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k" DEFERRABLE INITIALLY DEFERRED`,
+			},
+		},
+		{
+			"deferrable primary key",
+			"ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY (id) DEFERRABLE",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "t_pkey" ON "t" ("id")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "t_pkey" PRIMARY KEY USING INDEX "t_pkey" DEFERRABLE`,
+			},
+		},
+		{
+			"every attribute at once",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (a, b) INCLUDE (c) USING INDEX TABLESPACE fast DEFERRABLE INITIALLY DEFERRED",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("a", "b") INCLUDE ("c") NULLS NOT DISTINCT TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k" DEFERRABLE INITIALLY DEFERRED`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, classifyOne(t, tc.sql).SaferSQL)
+		})
+	}
+
+	d := classifyOne(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = s.seventy)")
+	assert.Equal(t, planner.RouteNative, d.Route)
+	assert.Equal(t, planner.ReasonSaferIdiom, d.Reason)
+	assert.Empty(t, d.SaferSQL, "a sequence would build the index without the parameter it cannot carry")
 }
 
 func TestClassifyAddCheckSequenceValidates(t *testing.T) {

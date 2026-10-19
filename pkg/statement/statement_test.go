@@ -114,6 +114,20 @@ func TestParseOneKinds(t *testing.T) {
 			want: Statement{kind: KindDropIndex, indexTarget: IndexTargetOther},
 		},
 		{
+			name: "drop index restrict is the default behavior spelled out",
+			sql:  "DROP INDEX app.idx_users_email RESTRICT",
+			want: Statement{kind: KindDropIndex, indexTarget: IndexTargetSingleRelation,
+				indexRelation: IndexRelation{Schema: "app", Name: "idx_users_email", Kind: IndexRelationIndex}},
+		},
+		{
+			// CASCADE also drops the objects that depend on the index, such as a
+			// foreign key on another table, so the statement's scope is not the
+			// one relation it names.
+			name: "drop index cascade names no single relation",
+			sql:  "DROP INDEX app.idx_users_email CASCADE",
+			want: Statement{kind: KindDropIndex, indexTarget: IndexTargetOther, cascades: true},
+		},
+		{
 			name: "drop index concurrently",
 			sql:  "DROP INDEX CONCURRENTLY idx_users_email",
 			want: Statement{kind: KindDropIndex, concurrent: true, indexTarget: IndexTargetSingleRelation,

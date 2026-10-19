@@ -102,10 +102,8 @@ and advise again.
 **Emitted for:** `ADD COLUMN` with an inline UNIQUE / PRIMARY KEY / FOREIGN KEY / CHECK.
 
 The inline constraint builds or validates under the ADD COLUMN's ACCESS EXCLUSIVE lock.
-Add the plain column first, then build the constraint as a separate, **named**
-`ADD CONSTRAINT` with its online pattern — named, because the unnamed `ADD CHECK` /
-`ADD FOREIGN KEY` forms are themselves refused
-([`name-constraint-then-validate`](#name-constraint-then-validate)).
+Add the plain column first, then build the constraint as a separate `ADD CONSTRAINT`
+with its online pattern.
 
 ### `pre-add-validated-check`
 
@@ -126,23 +124,30 @@ then the NOT NULL constraint is a catalog flip — the same scaffold sequence th
 
 ### `name-constraint-then-validate`
 
-**Emitted for:** unnamed `ADD CHECK` / `ADD FOREIGN KEY`.
+**Emitted for:** `ADD CHECK` / `ADD FOREIGN KEY` whose `NOT VALID` rewrite could not be
+constructed from the statement.
 
-The online sequence's `VALIDATE CONSTRAINT` step needs the constraint's name, and the
-server assigns one only at creation — so no rewrite can be constructed from the statement
-alone. Name the constraint, add it `NOT VALID`, then `VALIDATE` it online (the same
-sequence the named form gets constructed).
+Name the constraint, add it `NOT VALID`, then `VALIDATE` it online: the same sequence the
+constructed rewrite emits. A statement that names no constraint gets that rewrite too, under
+the name PostgreSQL would choose first (`<table>_<column>_check`, `<table>_check`,
+`<table>_<columns>_fkey`), because the `VALIDATE` step has to name it. A name an earlier
+statement of the same script adds is numbered past (`<table>_<column>_check1`), as the
+server would number it. Suggest reads no live table, so it cannot see a name the schema
+already uses, nor tell a bare reference to the table's own name, which
+reads as its whole row unless the table has a column by that name. A dry-run against the
+target reads both and names the constraint as the server would.
 
 ### `unique-index-then-constraint`
 
 **Emitted for:** `ADD PRIMARY KEY` / `ADD UNIQUE` whose `USING INDEX` rewrite could not
-be constructed from the statement.
+be constructed from the statement: one with a `WITH (...)` storage parameter the sequence
+cannot render faithfully, whose value is not a plain word, number, or string, contains a
+backslash, or whose name is namespaced.
 
-Build the unique index with `CREATE UNIQUE INDEX CONCURRENTLY`, then attach it with
-`ALTER TABLE … ADD CONSTRAINT … USING INDEX` — the same sequence the constructed rewrite
-emits. This code keeps the guidance mapping total over every constraint kind the
-classifier can mark safer-idiom: no known statement shape reaches it today, but a shape
-that yields no rewrite surfaces as this advice rather than a failed report.
+Build the unique index with `CREATE UNIQUE INDEX CONCURRENTLY` on the same columns, with the
+key's `INCLUDE`, `NULLS NOT DISTINCT`, `WITH (...)`, and tablespace, then attach it with
+`ALTER TABLE … ADD CONSTRAINT … USING INDEX`, keeping any `DEFERRABLE` and `INITIALLY
+DEFERRED` — the same sequence the constructed rewrite emits.
 
 ## The rewrite table: operation → safer form → caveats
 

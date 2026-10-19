@@ -102,6 +102,27 @@ type Op struct {
 	// Columns are the plain key columns of an ADD PRIMARY KEY / UNIQUE;
 	// empty when the keys are expressions.
 	Columns []string
+	// IncludeColumns are the INCLUDE columns of an ADD PRIMARY KEY /
+	// UNIQUE: carried in the index, not part of the key.
+	IncludeColumns []string
+	// NullsNotDistinct is true for an ADD UNIQUE NULLS NOT DISTINCT, which
+	// rejects a second row whose key is NULL.
+	NullsNotDistinct bool
+	// Deferrable and InitiallyDeferred are an ADD PRIMARY KEY / UNIQUE's
+	// DEFERRABLE and INITIALLY DEFERRED: when the uniqueness check runs.
+	Deferrable        bool
+	InitiallyDeferred bool
+	// IndexTablespace is the USING INDEX TABLESPACE of an ADD PRIMARY KEY
+	// / UNIQUE: where its index is built.
+	IndexTablespace string
+	// IndexStorageParams are the WITH (...) storage parameters of an ADD
+	// PRIMARY KEY / UNIQUE's index, in statement order.
+	IndexStorageParams []StorageParam
+	// IndexOptionsUnrenderable is true when an ADD PRIMARY KEY / UNIQUE's
+	// WITH (...) carries a parameter IndexStorageParams cannot hold
+	// faithfully: one whose value is not a plain word, number, or string,
+	// or holds a backslash.
+	IndexOptionsUnrenderable bool
 	// Constraint is the constraint family for OpAddConstraint.
 	Constraint ConstraintKind
 	// NotValid is true for ADD CONSTRAINT ... NOT VALID.
@@ -159,6 +180,12 @@ type Op struct {
 	// NewTypeArray is true when the target type is an array of NewType
 	// (varchar(50)[], text ARRAY).
 	NewTypeArray bool
+	// NewTypeCollation is the collation the target's COLLATE clause names,
+	// as the statement spells it with any schema (C, pg_catalog.C); empty
+	// when there is no clause. A collation change rebuilds every index on
+	// the column, so a consumer comparing NewType to a live type must not
+	// read a collated target as a relabel.
+	NewTypeCollation string
 	// HasUsing is true for ALTER COLUMN TYPE ... USING <expr>, which always
 	// means a conversion, never a binary-coercible relabel.
 	HasUsing bool
@@ -265,10 +292,11 @@ func droppedIndexes(drop *pganalyze.DropStmt) []string {
 	return names
 }
 
-// formatNewType renders the target type with its schema, modifiers, and
-// array marker — varchar(50), numeric(12,2), app.email, varchar(50)[]. Each
-// part can turn a relabel into a rewrite (a widen is not a narrow, a
-// varchar is not a varchar array), so a rendering that drops one would
+// formatNewType renders the target type with its schema, modifiers, array
+// marker, and collation — varchar(50), numeric(12,2), app.email,
+// varchar(50)[], text COLLATE C. Each part can turn a relabel into a
+// rewrite (a widen is not a narrow, a varchar is not a varchar array, a
+// collated text is not a text), so a rendering that drops one would
 // collapse changes that route in opposite directions.
 func (o Op) formatNewType() string {
 	name := o.NewType
@@ -284,6 +312,9 @@ func (o Op) formatNewType() string {
 	}
 	if o.NewTypeArray {
 		name += "[]"
+	}
+	if o.NewTypeCollation != "" {
+		name += " COLLATE " + o.NewTypeCollation
 	}
 	return name
 }
@@ -346,7 +377,7 @@ func ParseOps(sql string) ([]Op, error) {
 		return []Op{{
 			Kind:       OpReindex,
 			Name:       re.GetRelation().GetRelname(),
-			Concurrent: reindexConcurrent(re),
+			Concurrent: reindexConcurrently(re),
 		}}, nil
 	case node.GetRenameStmt() != nil:
 		return []Op{renameOp(node.GetRenameStmt())}, nil
@@ -373,12 +404,13 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 		name, mods := typeRef(def.GetTypeName())
 		schema, array := typeQualifiers(def.GetTypeName())
 		return Op{
-			Kind:          OpAlterColumnType,
-			Column:        cmd.GetName(),
-			NewType:       name,
-			NewTypeMods:   mods,
-			NewTypeSchema: schema,
-			NewTypeArray:  array,
+			Kind:             OpAlterColumnType,
+			Column:           cmd.GetName(),
+			NewType:          name,
+			NewTypeMods:      mods,
+			NewTypeSchema:    schema,
+			NewTypeArray:     array,
+			NewTypeCollation: collationName(def.GetCollClause()),
 			// For ALTER COLUMN TYPE the grammar carries the USING
 			// expression in the column definition's raw default slot.
 			HasUsing: def.GetRawDefault() != nil,
@@ -495,7 +527,91 @@ func addConstraintOp(con *pganalyze.Constraint) Op {
 	for _, k := range con.GetKeys() {
 		op.Columns = append(op.Columns, k.GetString_().GetSval())
 	}
+	if op.Constraint == ConstraintPrimaryKey || op.Constraint == ConstraintUnique {
+		keyIndexAttributes(&op, con)
+	}
 	return op
+}
+
+// keyIndexAttributes records what an ADD PRIMARY KEY / UNIQUE declares
+// beyond its key columns: everything an online sequence that builds the
+// index first has to carry for the result to be the same constraint.
+func keyIndexAttributes(op *Op, con *pganalyze.Constraint) {
+	for _, c := range con.GetIncluding() {
+		op.IncludeColumns = append(op.IncludeColumns, c.GetString_().GetSval())
+	}
+	op.NullsNotDistinct = con.GetNullsNotDistinct()
+	op.Deferrable = con.GetDeferrable()
+	op.InitiallyDeferred = con.GetInitdeferred()
+	op.IndexTablespace = con.GetIndexspace()
+	for _, o := range con.GetOptions() {
+		param, ok := storageParam(o.GetDefElem())
+		if !ok {
+			op.IndexOptionsUnrenderable = true
+			continue
+		}
+		op.IndexStorageParams = append(op.IndexStorageParams, param)
+	}
+}
+
+// StorageParam is one WITH (...) storage parameter. The server reads every
+// parameter's value as text, so Value holds that text whatever literal
+// spelled it; HasValue is false for a bare name, which the server reads as
+// true.
+type StorageParam struct {
+	Name     string
+	Value    string
+	HasValue bool
+}
+
+// plainWord returns the word a type name spells when it is one unqualified
+// name with no modifiers or array bounds, and "" otherwise.
+func plainWord(tn *pganalyze.TypeName) string {
+	if tn == nil || len(tn.GetNames()) != 1 || len(tn.GetTypmods()) > 0 || len(tn.GetArrayBounds()) > 0 ||
+		tn.GetSetof() || tn.GetPctType() {
+		return ""
+	}
+	return tn.GetNames()[0].GetString_().GetSval()
+}
+
+// storageParam reads one WITH (...) element, reporting false for one a
+// StorageParam cannot hold faithfully.
+func storageParam(de *pganalyze.DefElem) (StorageParam, bool) {
+	if de == nil {
+		return StorageParam{}, false
+	}
+	if de.GetDefnamespace() != "" {
+		// A StorageParam has no namespace to carry, and rendering the bare
+		// name would set a different option than the one written.
+		return StorageParam{}, false
+	}
+	param := StorageParam{Name: de.GetDefname()}
+	arg := de.GetArg()
+	switch {
+	case arg == nil:
+		return param, true
+	case arg.GetString_() != nil:
+		param.Value = arg.GetString_().GetSval()
+	case arg.GetInteger() != nil:
+		param.Value = strconv.FormatInt(int64(arg.GetInteger().GetIval()), 10)
+	case arg.GetFloat() != nil:
+		param.Value = arg.GetFloat().GetFval()
+	case arg.GetBoolean() != nil:
+		param.Value = strconv.FormatBool(arg.GetBoolean().GetBoolval())
+	case plainWord(arg.GetTypeName()) != "":
+		// The grammar parses an unreserved bare word such as off as a
+		// type name; the server reads it back as the word.
+		param.Value = plainWord(arg.GetTypeName())
+	default:
+		return StorageParam{}, false
+	}
+	if strings.Contains(param.Value, `\`) {
+		// A backslash reads differently under standard_conforming_strings
+		// off, and no storage parameter takes one.
+		return StorageParam{}, false
+	}
+	param.HasValue = true
+	return param, true
 }
 
 // renameOp maps a RENAME statement (column, table, or index — the grammar
@@ -511,17 +627,6 @@ func renameOp(ren *pganalyze.RenameStmt) Op {
 	default:
 		return Op{Kind: OpUnrecognized}
 	}
-}
-
-// reindexConcurrent reports whether a REINDEX statement carries the
-// CONCURRENTLY option (a DefElem in the statement's parameter list).
-func reindexConcurrent(re *pganalyze.ReindexStmt) bool {
-	for _, p := range re.GetParams() {
-		if p.GetDefElem().GetDefname() == "concurrently" {
-			return true
-		}
-	}
-	return false
 }
 
 // typeRef returns the bare grammar type name (last path element, without
@@ -553,6 +658,20 @@ func typeQualifiers(tn *pganalyze.TypeName) (string, bool) {
 		return "", array
 	}
 	return schema, array
+}
+
+// collationName renders a COLLATE clause's collation as the statement
+// spells it, schema and all (C, pg_catalog.C), or "" when there is no
+// clause.
+func collationName(coll *pganalyze.CollateClause) string {
+	if coll == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(coll.GetCollname()))
+	for _, part := range coll.GetCollname() {
+		parts = append(parts, part.GetString_().GetSval())
+	}
+	return strings.Join(parts, ".")
 }
 
 // isSerialType reports whether the grammar type name is one of the serial

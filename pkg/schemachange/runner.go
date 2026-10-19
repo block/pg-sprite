@@ -45,7 +45,9 @@ type RunOptions struct {
 	Catchup applier.CatchupOptions
 	// Live bounds how the verification pass settles a chunk the stream was
 	// still carrying changes for. Its Confirmed source is the run's own
-	// catch-up and must be left nil.
+	// catch-up and must be left nil. So must Flushes: the run's pass
+	// recopies nothing (a divergence aborts it), and the flush gate a
+	// repair needs is the run's own catch-up too.
 	Live checksum.LiveOptions
 	// KeepOld leaves the retained source under its derived _old name after
 	// the swap (D9), for a rollback window the caller manages; the run
@@ -92,6 +94,9 @@ func (o RunOptions) validate() error {
 	if o.Live.Confirmed != nil {
 		return fmt.Errorf("%w: the live verification pass reads the run's own catch-up; leave Live.Confirmed nil", ErrInvalidOptions)
 	}
+	if o.Live.Flushes != nil {
+		return fmt.Errorf("%w: the live verification pass holds the run's own catch-up's flushes; leave Live.Flushes nil", ErrInvalidOptions)
+	}
 	return nil
 }
 
@@ -130,10 +135,19 @@ func (o RunOptions) livePoll() time.Duration {
 //     no WAL and applies no captured change, so the copy and the
 //     verification pass are the whole proof of data equality (CO-1). The
 //     Runner enforces that itself with a write fence on the source — a
-//     statement trigger that refuses INSERT, UPDATE, DELETE, and TRUNCATE
-//     with SQLSTATE WriteFenceSQLState — installed before the copy starts
-//     and in place until the swap, across any stop and resume in between;
-//     a writer that reaches the table gets an error, never a silent loss.
+//     statement trigger, enabled ALWAYS so that it fires in every session
+//     whatever its session_replication_role, that refuses INSERT, UPDATE,
+//     DELETE, and TRUNCATE with SQLSTATE WriteFenceSQLState — installed
+//     before the copy starts and in place until the swap, across any stop
+//     and resume in between. A writer that reaches the table while the
+//     fence is in place gets an error. The swap confirms, under its
+//     ACCESS EXCLUSIVE lock, that the fence is still there, of the shape
+//     the install gave it, and enabled ALWAYS, and refuses as
+//     CauseCutoverUnfenced when it was disabled, dropped, or replaced,
+//     leaving the next Run to install it again and verify again. The
+//     fence is not tamper-proof: a role that owns the table can disable
+//     it, write, and put it back between the verification pass and the
+//     swap, and that write is not seen.
 //   - A live run, for a target proven to decode WAL. The source keeps
 //     taking writes throughout: the run owns a replication slot under the
 //     target's derived name, decodes the source's changes from it, and
@@ -410,7 +424,7 @@ func (r *Runner) swapQuiesced(ctx context.Context, pool *pgxpool.Pool, lock *dbc
 			return report, err
 		}
 	}
-	swapped, err := Cutover(ctx, pool, lock, ready, nil, r.opts.Cutover)
+	swapped, err := Cutover(ctx, pool, lock, ready, nil, r.opts.Cutover.withWriteFence())
 	if err != nil {
 		return report, err
 	}

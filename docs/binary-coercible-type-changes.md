@@ -369,6 +369,16 @@ statement rolls back; the time and lock are spent regardless).
   relabel. `RememberAllDependentForRebuilding` refuses rather than re-plans the generation
   expression. The generated column has to be dropped before the change and re-added after
   it — and re-adding a `STORED` generated column is itself a full rewrite.
+- **The column's planner statistics are deleted**, even for a relabel: `ATExecAlterColumnType`
+  calls `RemoveStatistics` for the column because the stored histogram and most-common
+  values are of the old type. Nothing puts them back until autovacuum's analyze threshold
+  trips, which on a table that changes slowly can take days, and until then the planner
+  estimates every predicate on the column from built-in defaults. An expression index over
+  the column is rebuilt and an extended statistics object that covers it is recreated, so
+  theirs go too. `ANALYZE <table>` restores all of them by sampling, under `SHARE UPDATE
+  EXCLUSIVE`, which blocks neither reads nor writes; the column-list form `ANALYZE <table>
+  (<column>)` does not rebuild expression-index statistics, nor an extended statistics
+  object unless every column it covers is listed.
 
 ## Checking before you run it
 
@@ -443,7 +453,14 @@ change to or from an array, including `varchar(50)[] → varchar(100)[]`, is a
 schema other than `pg_catalog`, such as `app.text`, is a user type that shares a
 built-in's name, and matches no rule. So is a quoted name in another case, such as
 `"TEXT"`: the parser folds only unquoted names to lower case, so the planner compares
-type names case-sensitively.
+type names case-sensitively. A collation on either side also matches no rule: a target
+with a `COLLATE` clause changes the column's collation, and a live column with a
+collation of its own loses it when retyped without one (`ALTER COLUMN TYPE` resets the
+collation to the new type's default). Neither rewrites the heap, but both rebuild every
+index on the column under `ACCESS EXCLUSIVE`
+([a collation change alone](#things-that-are-not-rewrite-reasons)), so the planner takes
+the rewrite route and the plan's `ALTER COLUMN … TYPE` line renders the target's `COLLATE`
+clause so the verdict can be read from the report.
 
 Everything else — including changes PostgreSQL would relabel, such as `varbit` or temporal
 precision widening, unconstrained domains, `xml → text`, and the UTC `timestamp ↔
@@ -456,6 +473,18 @@ table in [postgres-online-ddl-reference.md](postgres-online-ddl-reference.md).
 Because the decision needs the column's current type, the classifier takes the introspected
 catalog shape as input. Without it, no type change can be proven free, and the planner
 routes the statement to the rewrite path rather than gamble.
+
+Once a native type change commits, pg-sprite runs a whole-table `ANALYZE` under the same
+lock and statement budgets as the change. A type change on an inheritance parent recurses
+into its children and deletes their statistics too, and `ANALYZE` on the parent does not
+analyze them, so the refresh names every child; a partitioned table needs no such list,
+since `ANALYZE` on it recurses into its partitions. The verdict's `statistics_refresh`
+field reports the retyped columns and whether the refresh ran. The change is already
+committed by then, so a refresh that cannot run does not fail the run: it stays executed,
+and `statistics_refresh.pending` names the `ANALYZE` still to run. That happens when a
+`VACUUM` or another `ANALYZE` holds a table past the lock budget, when the role cannot act
+as the owner of every table covered (the server would skip the others with only a warning),
+or when a child is a foreign table, whose wrapper may not be able to sample it.
 
 ## Source pointers
 

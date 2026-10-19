@@ -31,6 +31,9 @@ func writeLintText(out io.Writer, pal palette, name string, report lint.Report) 
 			statement = f.Statement
 		}
 		w.diag(string(f.Severity), string(f.Code), lintMessage(f))
+		if f.Code == lint.CodeConcurrentInTransaction {
+			w.diag("help", "", "run this statement on its own, outside the BEGIN … COMMIT block")
+		}
 		if f.Code == lint.CodePossibleTableRewrite {
 			w.diag("note", "", "the table was not introspected, so this is the conservative classification; with live facts the same change may classify as cheaper")
 		}
@@ -59,6 +62,9 @@ func writeLintText(out io.Writer, pal palette, name string, report lint.Report) 
 func lintMessage(f lint.Finding) string {
 	if f.Code == lint.CodeDestructive {
 		return f.Operation + " — discards live data or structure"
+	}
+	if f.Code == lint.CodeConcurrentInTransaction {
+		return f.Operation + " — PostgreSQL refuses CONCURRENTLY inside a transaction block, so the script fails here and the block rolls back"
 	}
 	if f.Reason != "" {
 		return fmt.Sprintf("%s — %s", f.Operation, impactText(f.Reason))
