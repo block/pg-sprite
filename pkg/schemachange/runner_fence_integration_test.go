@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
 
@@ -337,6 +338,72 @@ func TestRunnerRefusesTheSwapWhenTheFenceWasDropped(t *testing.T) {
 
 	f.assertResumedToDone(t, alter, schemachange.RunOptions{})
 	f.assertWritable(t, "orders")
+}
+
+// A fence left enabled for origin sessions only, by a later ENABLE TRIGGER
+// after the verification pass, fires for no replica-role writer, so the
+// swap refuses it as it refuses a disabled one: the proof's quiescence is
+// only as strong as a fence that fires in every session. The refusal does
+// not touch the fence; the resumed run installs over it.
+func TestRunnerRefusesTheSwapWhenTheFenceIsOriginOnly(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	opts := schemachange.RunOptions{AfterCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase == checkpoint.PhaseCutover {
+			f.exec(t, `ALTER TABLE %s.orders ENABLE TRIGGER pgsprite_write_fence`)
+		}
+		return nil
+	}}
+
+	_, err := f.run(t, "orders", alter, opts)
+
+	require.Error(t, err)
+	assert.Equal(t, schemachange.CauseCutoverUnfenced, schemachange.RefusalCauseOf(err))
+	assert.True(t, f.hasColumn(t, "orders", "note"), "the source was not swapped out")
+	assert.Equal(t, "O", f.fenceEnabled(t, "orders"), "the refusal does not touch the fence")
+
+	f.assertResumedToDone(t, alter, schemachange.RunOptions{})
+	f.assertWritable(t, "orders")
+}
+
+// A trigger of the fence's name and function that fires for fewer
+// statements than the fence — here one with a WHEN condition that is never
+// true, enabled ALWAYS — is not the fence, and the swap refuses it: a write
+// made under it reached the source after the verification pass, and
+// swapping would drop that row with the old table. The source keeps the
+// row, and the resumed run's install replaces the trigger with the fence,
+// so its pass stops on the divergence that write made.
+func TestRunnerRefusesTheSwapWhenTheFenceWasReplacedByAConditionalOne(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	opts := schemachange.RunOptions{AfterCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase == checkpoint.PhaseCutover {
+			f.exec(t, `
+				CREATE OR REPLACE TRIGGER pgsprite_write_fence
+					BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON %s.orders
+					FOR EACH STATEMENT
+					WHEN (false)
+					EXECUTE FUNCTION pgsprite.pgsprite_write_fence()`)
+			f.exec(t, `ALTER TABLE %s.orders ENABLE ALWAYS TRIGGER pgsprite_write_fence`)
+			f.exec(t, `INSERT INTO %s.orders (id, qty) VALUES (999999, 1)`)
+		}
+		return nil
+	}}
+	before := f.rowCount(t, "orders")
+
+	_, err := f.run(t, "orders", alter, opts)
+
+	require.Error(t, err)
+	assert.Equal(t, schemachange.CauseCutoverUnfenced, schemachange.RefusalCauseOf(err))
+	assert.True(t, f.hasColumn(t, "orders", "note"), "the source was not swapped out")
+	assert.Equal(t, before+1, f.rowCount(t, "orders"), "the row the replaced trigger let through is still on the source")
+	assert.Equal(t, "A", f.fenceEnabled(t, "orders"), "the replaced trigger is enabled ALWAYS and is still not the fence")
+
+	var divergence *checksum.DivergenceError
+	_, err = f.run(t, "orders", alter, schemachange.RunOptions{})
+	require.ErrorAs(t, err, &divergence, "the resumed run's pass sees the row the pass before it did not")
 }
 
 // A fence an earlier engine left enabled for origin sessions only is not

@@ -141,12 +141,13 @@ func (o RunOptions) livePoll() time.Duration {
 //     before the copy starts and in place until the swap, across any stop
 //     and resume in between. A writer that reaches the table while the
 //     fence is in place gets an error. The swap confirms, under its
-//     ACCESS EXCLUSIVE lock, that the fence is still there and enabled
-//     ALWAYS, and refuses as CauseCutoverUnfenced when it is not, leaving
-//     the next Run to install it again and verify again. The fence is not
-//     tamper-proof: a role that owns the table can disable it, write, and
-//     put it back between the verification pass and the swap, and that
-//     write is not seen.
+//     ACCESS EXCLUSIVE lock, that the fence is still there, of the shape
+//     the install gave it, and enabled ALWAYS, and refuses as
+//     CauseCutoverUnfenced when it was disabled, dropped, or replaced,
+//     leaving the next Run to install it again and verify again. The
+//     fence is not tamper-proof: a role that owns the table can disable
+//     it, write, and put it back between the verification pass and the
+//     swap, and that write is not seen.
 //   - A live run, for a target proven to decode WAL. The source keeps
 //     taking writes throughout: the run owns a replication slot under the
 //     target's derived name, decodes the source's changes from it, and

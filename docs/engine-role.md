@@ -100,24 +100,31 @@ nothing writes the table: it installs a statement-level `BEFORE INSERT OR UPDATE
 TRUNCATE` trigger, `pgsprite_write_fence`, on the source before its first checkpoint save, and
 every write the trigger sees is refused with SQLSTATE `55006` (`object_in_use`) and a message
 naming the table. The trigger is enabled `ALWAYS`, so it fires for a session running under
-`session_replication_role = replica` as well. The trigger calls a function of the same name in the engine's own `pgsprite`
-schema, created once per database as the engine role and owned by it, so the table's owner
-needs no access to that schema for the fence to fire. The fence stays on a stopped run's source
-until the run is resumed or abandoned (`DropWriteFence`); a completed run carries it to the
-retained `_old` table with the swap, where it is dropped with the table or, under `KeepOld`,
-taken off so the retained table can be renamed back and take writes at once.
+`session_replication_role = replica` as well. The writers that run in that role are the apply
+worker of a logical-replication subscription that writes into the source, and a bulk restore
+run with triggers disabled; a fence enabled for origin sessions only would let their writes
+through to be lost with the old table at the swap. For a subscription apply worker the
+refusal means a worker that errors and retries until the run completes or is abandoned, with
+the publisher retaining WAL for the subscription's slot meanwhile. The trigger calls a
+function of the same name in the engine's own `pgsprite` schema, created once per database as
+the engine role and owned by it, so the table's owner needs no access to that schema for the
+fence to fire. The fence stays on a stopped run's source until the run is resumed or
+abandoned (`DropWriteFence`); a completed run carries it to the retained `_old` table with
+the swap, where it is dropped with the table or, under `KeepOld`, taken off so the retained
+table can be renamed back and take writes at once.
 
 What this needs: `CREATE TRIGGER` and `ALTER TABLE … ENABLE ALWAYS TRIGGER` on a table require
 ownership, which the Tier 1 membership in the owning role already gives; the function needs
 `CREATE` on the `pgsprite` schema, which the engine owns. A pre-provisioned deployment that
 created the schema for the engine needs nothing further once the schema is owned by the engine
-role. The fence does not stop a role that owns the table, which can disable or drop it; the
-swap refuses (`cutover-unfenced`) a fence found disabled or gone under its lock, but a role that
-disables the fence, writes, and restores it between the verification pass and the swap is not
-seen. A deployment whose writers can hold table ownership has to quiesce the table by its own
-means, and a difference the verification pass finds is reported, never repaired. Before `Run`, quiesce the table as far
-as the application allows — stop or pause its writers, or route them around it — so the fence
-refuses nothing in practice; the fence is the proof, not the plan.
+role. The fence does not stop a role that owns the table, which can disable, drop, or replace
+it. The swap refuses (`cutover-unfenced`) a fence found under its lock disabled, dropped, or
+replaced by a trigger of another shape, but a role that disables the fence, writes, and
+restores it between the verification pass and the swap is not seen. A deployment whose
+writers can hold table ownership has to quiesce the table by its own means, and a difference
+the verification pass finds is reported, never repaired. Before `Run`, quiesce the table as
+far as the application allows — stop or pause its writers, or route them around it — so the
+fence refuses nothing in practice; the fence is the proof, not the plan.
 
 Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are checked by
 `preflight.CheckCopySwapEnvironment` once the privilege check has passed and the shape check

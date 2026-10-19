@@ -20,12 +20,12 @@
 // ALWAYS, that refuses every write until the swap, and the fence stays on a
 // stopped run's source until it is resumed or abandoned with
 // DropWriteFence. The quiesced swap refuses if the fence is no longer
-// there. A table
-// under writes is captured instead: the run creates the slot with the row
-// that owns it, applies the stream to the shadow beside the copy, catches
-// up to a marker past every change committed so far, verifies live, and
-// drains the stream under the swap's lock before it renames; a stopped
-// run's slot stays until it is resumed or abandoned with decode.DropSlot.
+// there as installed. A table under writes is captured instead: the run
+// creates the slot with the row that owns it, applies the stream to the
+// shadow beside the copy, catches up to a marker past every change
+// committed so far, verifies live, and drains the stream under the swap's
+// lock before it renames; a stopped run's slot stays until it is resumed
+// or abandoned with decode.DropSlot.
 // The one exception to "a shadow is only dropped on abandonment" is a
 // first save whose row does not land: the run drops the shadow it just
 // built, and the slot with it, since a shadow no row records would refuse

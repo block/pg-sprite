@@ -59,9 +59,15 @@ const writeFenceTriggerType = 2 + 4 + 8 + 16 + 32
 const triggerEnabledAlways = "A"
 
 // writeFenceStateSQL reads the enablement of the engine's fence on one
-// relation: the row exists only for a trigger of the fence's name, shape,
-// and function in the engine's schema. Every catalog name is qualified, so
-// the read does not depend on the session's search_path (CO-9).
+// relation: the row exists only for a trigger of the fence's name, calling
+// the fence's function in the engine's schema, of the shape the install
+// gives it — a statement-level BEFORE trigger on every write statement
+// (tgtype), with no WHEN condition (tgqual), no UPDATE OF column list
+// (tgattr), no arguments (tgnargs), and not deferrable. A trigger of the
+// same name and function whose shape differs fires for fewer statements
+// than the fence, so it yields no row and the swap refuses it as a fence
+// that is gone. Every catalog name is qualified, so the read does not
+// depend on the session's search_path (CO-9).
 const writeFenceStateSQL = `
 SELECT tg.tgenabled::pg_catalog.text
 FROM pg_catalog.pg_trigger tg
@@ -72,6 +78,10 @@ WHERE tg.tgrelid OPERATOR(pg_catalog.=) $1::pg_catalog.oid
   AND p.proname::pg_catalog.text OPERATOR(pg_catalog.=) $2::pg_catalog.text
   AND pn.nspname::pg_catalog.text OPERATOR(pg_catalog.=) $3::pg_catalog.text
   AND tg.tgtype::pg_catalog.int4 OPERATOR(pg_catalog.=) $4::pg_catalog.int4
+  AND tg.tgqual IS NULL
+  AND tg.tgattr::pg_catalog.text OPERATOR(pg_catalog.=) ''
+  AND tg.tgnargs::pg_catalog.int4 OPERATOR(pg_catalog.=) 0
+  AND NOT tg.tgdeferrable
   AND NOT tg.tgisinternal`
 
 // installWriteFence puts the write fence on the source, in one bounded
@@ -140,19 +150,21 @@ func installWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tab
 }
 
 // confirmWriteFence refuses the swap of a quiesced proof unless the source
-// still carries the engine's fence, enabled ALWAYS. It runs under the swap's
-// ACCESS EXCLUSIVE lock, so the trigger cannot be disabled or dropped
-// between this read and the rename. The fence is what makes the proof's
-// quiescence true rather than assumed; a source whose fence was disabled or
-// dropped since the pass may have taken writes the pass never saw, and the
-// run stops there for a fresh install and a fresh pass.
+// still carries the engine's fence, of the shape the install gave it and
+// enabled ALWAYS. It runs under the swap's ACCESS EXCLUSIVE lock, so the
+// trigger cannot be disabled, dropped, or replaced between this read and
+// the rename. The fence is what makes the proof's quiescence true rather
+// than assumed; a source whose fence was disabled, dropped, or replaced by
+// a trigger that fires for fewer statements since the pass may have taken
+// writes the pass never saw, and the run stops there for a fresh install
+// and a fresh pass.
 func confirmWriteFence(ctx context.Context, tx pgx.Tx, built BuiltShadow) error {
 	schema, table := built.Schema(), built.SourceTable()
 	var enabled string
 	err := tx.QueryRow(ctx, writeFenceStateSQL, built.SourceOID(), WriteFenceTrigger, preflight.EngineSchema, writeFenceTriggerType).Scan(&enabled)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// INV: CO-1
-		return refuse(CauseCutoverUnfenced, nil, "source %s.%s carries no %s trigger calling %s.%s, so the quiesced proof no longer holds",
+		return refuse(CauseCutoverUnfenced, nil, "source %s.%s carries no %s trigger of the fence's shape calling %s.%s, so the quiesced proof no longer holds",
 			schema, table, WriteFenceTrigger, preflight.EngineSchema, WriteFenceTrigger)
 	}
 	if err != nil {

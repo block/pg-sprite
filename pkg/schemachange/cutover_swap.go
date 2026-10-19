@@ -13,11 +13,11 @@ import (
 
 // swapOnce is one attempt at the swap transaction: lock, confirm the write
 // fence when the caller requires it, drain, re-check the shape, re-gate,
-// rename, hand off, recheck, commit. Any error leaves
-// the transaction rolled back on the server unless the client stopped
-// hearing from it, which the caller resolves by following the backend
-// returned here to its exit and then inspecting the catalog. The backend
-// is zero when the attempt ended before its transaction ran a statement.
+// rename, hand off, recheck, commit. Any error leaves the transaction
+// rolled back on the server unless the client stopped hearing from it,
+// which the caller resolves by following the backend returned here to its
+// exit and then inspecting the catalog. The backend is zero when the
+// attempt ended before its transaction ran a statement.
 func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, requireFence bool, opts Options) (SwappedTable, swapBackend, error) {
 	built := ready.built
 	tx, err := pool.Begin(ctx)

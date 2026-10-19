@@ -87,9 +87,10 @@ const (
 	CauseCutoverUndrained RefusalCause = "cutover-undrained"
 	// CauseCutoverUnfenced means the swap of a quiesced proof found the
 	// source without the engine's write fence enabled ALWAYS under the
-	// swap lock (CO-1): the trigger was disabled, dropped, or replaced
-	// since it was installed, so a write may have reached the source
-	// after the pass that proved the shadow equal to it.
+	// swap lock (CO-1): the trigger was disabled, dropped, or replaced by
+	// one of another shape since it was installed, so a write may have
+	// reached the source after the pass that proved the shadow equal to
+	// it.
 	CauseCutoverUnfenced RefusalCause = "cutover-unfenced"
 	// CauseDrainDeferred means the shadow refused a batch the swap's drain
 	// had to apply under the swap lock (CO-6): a unique-key move the
