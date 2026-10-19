@@ -377,7 +377,7 @@ func ParseOps(sql string) ([]Op, error) {
 		return []Op{{
 			Kind:       OpReindex,
 			Name:       re.GetRelation().GetRelname(),
-			Concurrent: reindexConcurrent(re),
+			Concurrent: reindexConcurrently(re),
 		}}, nil
 	case node.GetRenameStmt() != nil:
 		return []Op{renameOp(node.GetRenameStmt())}, nil
@@ -627,17 +627,6 @@ func renameOp(ren *pganalyze.RenameStmt) Op {
 	default:
 		return Op{Kind: OpUnrecognized}
 	}
-}
-
-// reindexConcurrent reports whether a REINDEX statement carries the
-// CONCURRENTLY option (a DefElem in the statement's parameter list).
-func reindexConcurrent(re *pganalyze.ReindexStmt) bool {
-	for _, p := range re.GetParams() {
-		if p.GetDefElem().GetDefname() == "concurrently" {
-			return true
-		}
-	}
-	return false
 }
 
 // typeRef returns the bare grammar type name (last path element, without

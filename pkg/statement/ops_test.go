@@ -1,6 +1,7 @@
 package statement_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -328,6 +329,31 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpReindex, Name: "i", Concurrent: true},
 		},
 		{
+			name: "reindex with concurrently true",
+			sql:  "REINDEX (CONCURRENTLY TRUE) INDEX i",
+			want: statement.Op{Kind: statement.OpReindex, Name: "i", Concurrent: true},
+		},
+		{
+			name: "reindex with concurrently 1",
+			sql:  "REINDEX (CONCURRENTLY 1) INDEX i",
+			want: statement.Op{Kind: statement.OpReindex, Name: "i", Concurrent: true},
+		},
+		{
+			name: "reindex with concurrently false",
+			sql:  "REINDEX (CONCURRENTLY false) INDEX i",
+			want: statement.Op{Kind: statement.OpReindex, Name: "i"},
+		},
+		{
+			name: "reindex with concurrently off",
+			sql:  "REINDEX (CONCURRENTLY Off) INDEX i",
+			want: statement.Op{Kind: statement.OpReindex, Name: "i"},
+		},
+		{
+			name: "reindex with concurrently 0",
+			sql:  "REINDEX (CONCURRENTLY 0) INDEX i",
+			want: statement.Op{Kind: statement.OpReindex, Name: "i"},
+		},
+		{
 			name: "create table",
 			sql:  "CREATE TABLE t (id int PRIMARY KEY)",
 			want: statement.Op{Kind: statement.OpCreateTable},
@@ -434,6 +460,23 @@ func TestConcurrentlyRewrites(t *testing.T) {
 			require.NoError(t, err)
 			op := parseOneOp(t, safer)
 			assert.True(t, op.Concurrent, "rewritten statement must be concurrent: %s", safer)
+		})
+	}
+}
+
+// A REINDEX with CONCURRENTLY switched off is rewritten to the concurrent
+// rebuild by replacing the option, never by adding a second one, which the
+// server refuses as a conflicting option.
+func TestConcurrentlyReplacesADisabledReindexOption(t *testing.T) {
+	for _, sql := range []string{"REINDEX (CONCURRENTLY false) INDEX i", "REINDEX (VERBOSE, CONCURRENTLY 0) INDEX i"} {
+		t.Run(sql, func(t *testing.T) {
+			safer, err := statement.Concurrently(sql)
+			require.NoError(t, err)
+			assert.True(t, parseOneOp(t, safer).Concurrent, "rewritten statement must be concurrent: %s", safer)
+			assert.Equal(t, 1, strings.Count(strings.ToUpper(safer), "CONCURRENTLY"), "one CONCURRENTLY option: %s", safer)
+			if strings.Contains(sql, "VERBOSE") {
+				assert.Contains(t, strings.ToUpper(safer), "VERBOSE", "other options survive: %s", safer)
+			}
 		})
 	}
 }

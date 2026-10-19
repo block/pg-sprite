@@ -40,7 +40,10 @@ func Concurrently(sql string) (string, error) {
 		node.GetDropStmt().Concurrent = true
 	case node.GetReindexStmt() != nil:
 		re := node.GetReindexStmt()
-		if !reindexConcurrent(re) {
+		if !reindexConcurrently(re) {
+			// A CONCURRENTLY false is replaced, not joined: the server
+			// refuses a repeated option.
+			re.Params = slices.DeleteFunc(re.Params, isConcurrentlyOption)
 			re.Params = append(re.Params, &pganalyze.Node{
 				Node: &pganalyze.Node_DefElem{DefElem: &pganalyze.DefElem{Defname: "concurrently"}},
 			})

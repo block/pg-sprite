@@ -532,6 +532,19 @@ about existing rows and is recreated by a metadata-only statement). Emitted
 alongside the routing decision as a warning so destructive intent is always
 visible in review.
 
+### `concurrent-in-transaction`
+
+| Verdict | Lock | Scan / rewrite | Lint exit |
+|---|---|---|---|
+| lint error — the script fails at this statement | none: PostgreSQL refuses the statement before it starts | — | 1 |
+
+A `CONCURRENTLY` operation (`CREATE INDEX`, `DROP INDEX`, `REINDEX`, or `DETACH
+PARTITION`) sits inside a transaction block the script opens with `BEGIN` or
+`START TRANSACTION`. PostgreSQL refuses every `CONCURRENTLY` form inside a block,
+so the script stops at that statement and the whole block rolls back. Move the
+statement out of the block and run it on its own. Only `lint` reports this code:
+it is a property of the script, and `migrate` takes one statement at a time.
+
 ### `rewrite-required`
 
 | Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
