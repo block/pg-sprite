@@ -145,28 +145,60 @@ func TestAdviseInlineConstraintGetsAddColumnThenConstraintGuidance(t *testing.T)
 	assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, s.Guidance)
 }
 
-// An unnamed CHECK or FOREIGN KEY has no constructible rewrite — the
-// VALIDATE step needs the name the server assigns only at creation — so
-// the advice is the typed manual path, not an error.
-func TestAdviseUnnamedCheckAndForeignKeyGetNamingGuidance(t *testing.T) {
-	for _, sql := range []string{
-		"ALTER TABLE t ADD CHECK (age > 0)",
-		"ALTER TABLE t ADD FOREIGN KEY (o) REFERENCES orders (id)",
+// An unnamed CHECK or FOREIGN KEY gets the NOT VALID → VALIDATE rewrite
+// constructed under the name the server would choose first, which the
+// VALIDATE step needs: the advice is runnable SQL, not a manual path.
+func TestAdviseUnnamedCheckAndForeignKeyGetTheRewriteUnderTheServerName(t *testing.T) {
+	for _, tc := range []struct {
+		sql         string
+		recommended []string
+	}{
+		{
+			sql: "ALTER TABLE t ADD CHECK (age > 0)",
+			recommended: []string{
+				"ALTER TABLE t ADD CONSTRAINT t_age_check CHECK (age > 0) NOT VALID",
+				`ALTER TABLE "t" VALIDATE CONSTRAINT "t_age_check"`,
+			},
+		},
+		{
+			sql: "ALTER TABLE t ADD FOREIGN KEY (o) REFERENCES orders (id)",
+			recommended: []string{
+				"ALTER TABLE t ADD CONSTRAINT t_o_fkey FOREIGN KEY (o) REFERENCES orders (id) NOT VALID",
+				`ALTER TABLE "t" VALIDATE CONSTRAINT "t_o_fkey"`,
+			},
+		},
 	} {
-		report, err := suggest.Advise(sql)
-		require.NoError(t, err, "statement: %s", sql)
-		require.Len(t, report.Suggestions, 1, "statement: %s", sql)
+		report, err := suggest.Advise(tc.sql)
+		require.NoError(t, err, "statement: %s", tc.sql)
+		require.Len(t, report.Suggestions, 1, "statement: %s", tc.sql)
 		s := report.Suggestions[0]
-		assert.Empty(t, s.Recommended, "statement: %s", sql)
-		assert.Equal(t, suggest.GuidanceNameConstraintThenValidate, s.Guidance, "statement: %s", sql)
+		assert.Equal(t, tc.recommended, s.Recommended, "statement: %s", tc.sql)
+		assert.Empty(t, s.Guidance, "statement: %s", tc.sql)
 	}
+}
+
+// Two unnamed CHECKs on one column in one script: running the script, the
+// server names the second past the first, so the advice does too and its
+// two sequences never collide.
+func TestAdviseUnnamedChecksInOneScriptGetDistinctNames(t *testing.T) {
+	report, err := suggest.Advise("ALTER TABLE t ADD CHECK (qty > 0); ALTER TABLE t ADD CHECK (qty < 100);")
+	require.NoError(t, err)
+	require.Len(t, report.Suggestions, 2)
+	assert.Equal(t, []string{
+		"ALTER TABLE t ADD CONSTRAINT t_qty_check CHECK (qty > 0) NOT VALID",
+		`ALTER TABLE "t" VALIDATE CONSTRAINT "t_qty_check"`,
+	}, report.Suggestions[0].Recommended)
+	assert.Equal(t, []string{
+		"ALTER TABLE t ADD CONSTRAINT t_qty_check1 CHECK (qty < 100) NOT VALID",
+		`ALTER TABLE "t" VALIDATE CONSTRAINT "t_qty_check1"`,
+	}, report.Suggestions[1].Recommended)
 }
 
 // Following add-column-then-constraint literally must not land on a second
 // refusal: the plain column add is clean, and the separate, named ADD
 // CONSTRAINT the guidance describes gets a constructed rewrite — not
 // guidance again. This chains the two hops for both inline forms whose
-// unnamed ADD CONSTRAINT counterpart is itself refused.
+// counterpart takes the NOT VALID → VALIDATE rewrite.
 func TestAdviseAddColumnGuidanceChainEndsInConstructedRewrite(t *testing.T) {
 	for _, tc := range []struct {
 		inline string

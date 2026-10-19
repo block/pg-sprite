@@ -462,7 +462,13 @@ backend.
 
 The column type change is not binary-coercible (for example `int` → `bigint`,
 `text` → `jsonb`), so PostgreSQL rewrites the whole table under
-`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. An `ADD COLUMN` of a
+`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. A type change that
+moves the column's collation — a target with a `COLLATE` clause, or a column
+with a collation of its own retyped without one, which resets it to the new
+type's default — carries the same reason even when the type part is a plain
+relabel: the heap is not rewritten, but every index on the column is rebuilt
+under the same lock, and the native route would run that rebuild as if it were
+free. An `ADD COLUMN` of a
 domain type with a `CHECK` or `NOT NULL` carries the same reason: PostgreSQL
 rewrites the table to check every row against the domain, even when the default
 is a constant or one the catalog would store. An added column with a constant

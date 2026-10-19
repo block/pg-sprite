@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -95,4 +97,45 @@ func TestSetNotNullSequenceResidueMatchesCaveat(t *testing.T) {
 		 WHERE attrelid = ($1 || '.orders')::regclass AND attname = 'paid_at'`,
 		schema).Scan(&notNull))
 	assert.True(t, notNull, "resuming from VALIDATE converges on the declared end state")
+}
+
+// Two-oracle check for a script: the advice for two unnamed CHECKs on one
+// column runs on a server, and leaves the same constraint names as the
+// original script run directly.
+func TestAdviceForUnnamedChecksInOneScriptRunsUnderTheServerNames(t *testing.T) {
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	script := "ALTER TABLE %[1]s.t ADD CHECK (qty > 0); ALTER TABLE %[1]s.t ADD CHECK (qty < 100);"
+
+	serverSchema := testutil.NewSchema(t, pool)
+	adviceSchema := testutil.NewSchema(t, pool)
+	for _, schema := range []string{serverSchema, adviceSchema} {
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (qty int)", schema))
+		require.NoError(t, err)
+	}
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(script, serverSchema))
+	require.NoError(t, err)
+
+	report, err := suggest.Advise(fmt.Sprintf(script, adviceSchema))
+	require.NoError(t, err)
+	require.Len(t, report.Suggestions, 2)
+	for _, s := range report.Suggestions {
+		for _, sql := range s.Recommended {
+			_, err := pool.Exec(t.Context(), sql)
+			require.NoError(t, err, sql)
+		}
+	}
+	assert.Equal(t, checkNames(t, pool, serverSchema), checkNames(t, pool, adviceSchema))
+}
+
+// checkNames returns the sorted names of the CHECK constraints on schema.t.
+func checkNames(t *testing.T, pool *pgxpool.Pool, schema string) []string {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), `SELECT conname::text FROM pg_catalog.pg_constraint
+		WHERE conrelid = ($1 || '.t')::regclass AND contype = 'c' ORDER BY conname`, schema)
+	require.NoError(t, err)
+	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	require.NoError(t, err)
+	return names
 }

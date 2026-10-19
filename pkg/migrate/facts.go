@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/planner"
@@ -27,6 +28,14 @@ type Facts struct {
 	// for plan-time partition checks; zero whenever Classifier is.
 	Target preflight.TargetFacts
 
+	// Schema is the schema the facts describe: the statement's
+	// qualification, or the schema an unqualified table resolves to on the
+	// session search_path, the one Run resolves it to. An unqualified table
+	// the search_path does not show is looked up in public, and reported
+	// missing; a statement without a single table target carries its own
+	// qualification.
+	Schema string
+
 	// TableExists mirrors the introspection outcome for a plan report:
 	// true when the table was found, false when it was looked up and
 	// missing, nil when the statement has no single table target to
@@ -36,21 +45,28 @@ type Facts struct {
 
 // LiveFacts introspects the statement's target table for classifier facts,
 // and for an ALTER TABLE that adds columns, has the server prove whether
-// each one rewrites the table (preflight.AddColumnRewrites).
+// each one rewrites the table (preflight.AddColumnRewrites). For one that
+// adds an unnamed CHECK or FOREIGN KEY it also reads the constraint names
+// the schema already uses, so the safer sequence names the constraint as
+// the server would.
 func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	st statement.Statement) (Facts, error) {
 	if st.Table() == "" {
-		return Facts{}, nil
+		return Facts{Schema: st.Schema()}, nil
 	}
-	live, err := schemadiff.Introspect(ctx, pool, ResolvedSchema(st), st.Table())
+	schema, err := factsSchema(ctx, pool, st)
+	if err != nil {
+		return Facts{}, err
+	}
+	live, err := schemadiff.Introspect(ctx, pool, schema, st.Table())
 	switch {
 	case errors.Is(err, schemadiff.ErrTableNotFound):
 		exists := false
-		return Facts{TableExists: &exists}, nil
+		return Facts{Schema: schema, TableExists: &exists}, nil
 	case err != nil:
 		return Facts{}, err
 	}
-	targetFacts, err := preflight.LookupTargetFacts(ctx, pool, ResolvedSchema(st), st.Table())
+	targetFacts, err := preflight.LookupTargetFacts(ctx, pool, schema, st.Table())
 	if err != nil {
 		return Facts{}, err
 	}
@@ -60,16 +76,56 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 		return Facts{}, err
 	}
 	if adds {
-		if classifier.AddColumnProofs, err = preflight.AddColumnRewrites(ctx, pool, ResolvedSchema(st), st.Table(), st.SQL()); err != nil {
+		if classifier.AddColumnProofs, err = preflight.AddColumnRewrites(ctx, pool, schema, st.Table(), st.SQL()); err != nil {
+			return Facts{}, err
+		}
+	}
+	names, err := addsUnnamedValidatableConstraint(st)
+	if err != nil {
+		return Facts{}, err
+	}
+	if names {
+		if classifier.ConstraintNames, err = preflight.SchemaConstraintNames(ctx, pool, schema); err != nil {
 			return Facts{}, err
 		}
 	}
 	exists := true
 	return Facts{
+		Schema:      schema,
 		Classifier:  classifier,
 		Target:      targetFacts,
 		TableExists: &exists,
 	}, nil
+}
+
+// factsSchema is the schema LiveFacts reads st's table in: its
+// qualification, or where the session search_path resolves the unqualified
+// name, so a dry-run reads the table Run would act on. A name the
+// search_path does not show falls back to ResolvedSchema, where the table
+// is then reported missing.
+func factsSchema(ctx context.Context, pool *pgxpool.Pool, st statement.Statement) (string, error) {
+	if st.Schema() != "" {
+		return st.Schema(), nil
+	}
+	// INV: CO-9 — every function, operator, and relation is
+	// pg_catalog-qualified, so a planted overload on the session's
+	// search_path cannot resolve the name to another relation's schema.
+	// to_regclass itself resolves the bare name on that path, as Run's
+	// resolveTarget does.
+	const q = `
+		SELECT n.nspname
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(pg_catalog.quote_ident($1))`
+	var schema string
+	err := pool.QueryRow(ctx, q, st.Table()).Scan(&schema)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ResolvedSchema(st), nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("resolve %s against search_path: %w", st.Table(), err)
+	}
+	return schema, nil
 }
 
 // ResolvedSchema is the schema the engine plans against: the statement's
@@ -95,4 +151,20 @@ func addsColumn(st statement.Statement) (bool, error) {
 		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
 	}
 	return slices.ContainsFunc(ops, func(op statement.Op) bool { return op.Kind == statement.OpAddColumn }), nil
+}
+
+// addsUnnamedValidatableConstraint reports whether st is an ALTER TABLE
+// adding a CHECK or FOREIGN KEY it does not name.
+func addsUnnamedValidatableConstraint(st statement.Statement) (bool, error) {
+	if st.Kind() != statement.KindAlterTable {
+		return false, nil
+	}
+	ops, err := statement.ParseOps(st.SQL())
+	if err != nil {
+		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
+	}
+	return slices.ContainsFunc(ops, func(op statement.Op) bool {
+		validatable := op.Constraint == statement.ConstraintCheck || op.Constraint == statement.ConstraintForeignKey
+		return op.Kind == statement.OpAddConstraint && validatable && op.Name == ""
+	}), nil
 }
