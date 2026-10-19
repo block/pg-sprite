@@ -5,8 +5,6 @@ import (
 	"fmt"
 
 	"github.com/jackc/pglogrepl"
-
-	"github.com/block/pg-sprite/pkg/preflight"
 )
 
 // ErrSourceShapeChanged is returned when pgoutput describes the target table
@@ -28,15 +26,32 @@ type relation struct {
 	keyIndex        int
 }
 
+// relationTarget is what a relation message is checked against: the names
+// and the catalog OID the target was proven for, and the column its key is
+// expected in. preflight.CopySwapTarget is the one the stream carries.
+type relationTarget interface {
+	Schema() string
+	Table() string
+	OID() uint32
+	PKColumn() string
+}
+
 // newRelation checks that a relation message describes the target table and
 // records it. The message must name the target — the publication publishes
 // nothing else, so any other relation is state this package did not create —
-// and must flag the target's primary-key column as part of the key, which is
-// what makes a key-only old tuple carry it.
-func newRelation(msg *pglogrepl.RelationMessage, target preflight.CopySwapTarget) (*relation, error) {
+// and must carry the OID the target was proven under: pgoutput reports the
+// table's OID with its name, and a table dropped and recreated under the
+// same name is another table, which the names alone cannot tell apart. The
+// message must also flag the target's primary-key column as part of the
+// key, which is what makes a key-only old tuple carry it.
+func newRelation(msg *pglogrepl.RelationMessage, target relationTarget) (*relation, error) {
 	if msg.Namespace != target.Schema() || msg.RelationName != target.Table() {
 		return nil, fmt.Errorf("%w: ST-3: stream for %s.%s decoded relation %s.%s",
 			ErrInvariantViolation, target.Schema(), target.Table(), msg.Namespace, msg.RelationName)
+	}
+	if msg.RelationID != target.OID() {
+		return nil, fmt.Errorf("%w: ST-3: stream for %s.%s, OID %d, decoded a relation of that name with OID %d: not the table the target was proven for",
+			ErrInvariantViolation, target.Schema(), target.Table(), target.OID(), msg.RelationID)
 	}
 	r := &relation{id: msg.RelationID, replicaIdentity: msg.ReplicaIdentity, keyIndex: -1}
 	for i, c := range msg.Columns {
