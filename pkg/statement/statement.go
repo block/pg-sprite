@@ -403,14 +403,44 @@ func reindexedRelation(rel *pganalyze.RangeVar, kind IndexRelationKind) IndexRel
 	return IndexRelation{Schema: rel.GetSchemaname(), Name: rel.GetRelname(), Kind: kind}
 }
 
-// reindexConcurrently reports whether a REINDEX statement used its
-// CONCURRENTLY form, which the grammar carries as a generic option rather
-// than a dedicated field.
+// reindexConcurrently reports whether a REINDEX statement runs
+// concurrently. The grammar carries CONCURRENTLY as a generic option, and
+// the server reads a value given with it as a boolean: CONCURRENTLY,
+// CONCURRENTLY true, and CONCURRENTLY 1 rebuild concurrently, while
+// CONCURRENTLY false and CONCURRENTLY 0 rebuild with the blocking lock. The
+// last occurrence decides, though the server refuses a repeated option.
 func reindexConcurrently(stmt *pganalyze.ReindexStmt) bool {
+	concurrent := false
 	for _, p := range stmt.GetParams() {
-		if strings.EqualFold(p.GetDefElem().GetDefname(), "concurrently") {
-			return true
+		if isConcurrentlyOption(p) {
+			concurrent = optionEnabled(p.GetDefElem().GetArg())
 		}
 	}
-	return false
+	return concurrent
+}
+
+// isConcurrentlyOption reports whether a REINDEX parameter is the
+// CONCURRENTLY option.
+func isConcurrentlyOption(p *pganalyze.Node) bool {
+	return strings.EqualFold(p.GetDefElem().GetDefname(), "concurrently")
+}
+
+// optionEnabled reads a boolean option's value as the server's
+// defGetBoolean does: no value, a nonzero integer, or true or on in any
+// case enable it; zero, false, and off disable it. Any other value the
+// server rejects outright, and it reads as enabled here, the reading that
+// flags and refuses more.
+func optionEnabled(arg *pganalyze.Node) bool {
+	switch {
+	case arg == nil:
+		return true
+	case arg.GetInteger() != nil:
+		return arg.GetInteger().GetIval() != 0
+	case arg.GetString_() != nil:
+		switch strings.ToLower(arg.GetString_().GetSval()) {
+		case "false", "off":
+			return false
+		}
+	}
+	return true
 }
