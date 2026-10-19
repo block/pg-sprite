@@ -15,16 +15,22 @@ import (
 
 // FactsFrom is the one seam between live introspection and classification:
 // every column's canonical type must come through so type-narrowing
-// decisions see the real live types.
+// decisions see the real live types, and a column's own collation must
+// come through so retyping it is never read as a relabel.
 func TestFactsFromExtractsColumnTypes(t *testing.T) {
 	live := schemadiff.Model{Columns: []schemadiff.Column{
 		{Name: "id", Type: "bigint"},
 		{Name: "name", Type: "character varying(50)"},
+		{Name: "code", Type: "text", Collation: `pg_catalog."C"`},
 	}}
-	assert.Equal(t, planner.Facts{ColumnTypes: map[string]string{
-		"id":   "bigint",
-		"name": "character varying(50)",
-	}}, planner.FactsFrom(live))
+	assert.Equal(t, planner.Facts{
+		ColumnTypes: map[string]string{
+			"id":   "bigint",
+			"name": "character varying(50)",
+			"code": "text",
+		},
+		ColumnCollations: map[string]string{"code": `pg_catalog."C"`},
+	}, planner.FactsFrom(live))
 }
 
 // FactsFrom carries what the live table's replica identity keys on, so a
@@ -295,7 +301,8 @@ func TestClassifyReferenceRows(t *testing.T) {
 		{"add foreign key", "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p (id)", planner.RouteNative, planner.ReasonSaferIdiom, 2},
 		{"add check not valid", "ALTER TABLE t ADD CONSTRAINT c CHECK (age > 0) NOT VALID", planner.RouteNative, planner.ReasonOnlineIdiom, 0},
 		{"add foreign key not valid", "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p (id) NOT VALID", planner.RouteNative, planner.ReasonOnlineIdiom, 0},
-		{"add unnamed check", "ALTER TABLE t ADD CHECK (age > 0)", planner.RouteNative, planner.ReasonSaferIdiom, 0},
+		{"add unnamed check", "ALTER TABLE t ADD CHECK (age > 0)", planner.RouteNative, planner.ReasonSaferIdiom, 2},
+		{"add unnamed foreign key", "ALTER TABLE t ADD FOREIGN KEY (pid) REFERENCES p (id)", planner.RouteNative, planner.ReasonSaferIdiom, 2},
 		{"add exclusion", "ALTER TABLE t ADD CONSTRAINT ex EXCLUDE USING gist (room WITH =)", planner.RouteRefuse, planner.ReasonUnsupportedOperation, 0},
 		{"validate constraint", "ALTER TABLE t VALIDATE CONSTRAINT c", planner.RouteNative, planner.ReasonOnlineIdiom, 0},
 		{"drop constraint", "ALTER TABLE t DROP CONSTRAINT c", planner.RouteNative, planner.ReasonMetadataOnly, 0},

@@ -462,7 +462,13 @@ backend.
 
 The column type change is not binary-coercible (for example `int` → `bigint`,
 `text` → `jsonb`), so PostgreSQL rewrites the whole table under
-`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. An `ADD COLUMN` of a
+`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. A type change that
+moves the column's collation — a target with a `COLLATE` clause, or a column
+with a collation of its own retyped without one, which resets it to the new
+type's default — carries the same reason even when the type part is a plain
+relabel: the heap is not rewritten, but every index on the column is rebuilt
+under the same lock, and the native route would run that rebuild as if it were
+free. An `ADD COLUMN` of a
 domain type with a `CHECK` or `NOT NULL` carries the same reason: PostgreSQL
 rewrites the table to check every row against the domain, even when the default
 is a constant or one the catalog would store. An added column with a constant
@@ -525,6 +531,19 @@ truncating conversions, a dropped constraint or index, or `DROP NOT NULL`
 about existing rows and is recreated by a metadata-only statement). Emitted
 alongside the routing decision as a warning so destructive intent is always
 visible in review.
+
+### `concurrent-in-transaction`
+
+| Verdict | Lock | Scan / rewrite | Lint exit |
+|---|---|---|---|
+| lint error — the script fails at this statement | none: PostgreSQL refuses the statement before it starts | — | 1 |
+
+A `CONCURRENTLY` operation (`CREATE INDEX`, `DROP INDEX`, `REINDEX`, or `DETACH
+PARTITION`) sits inside a transaction block the script opens with `BEGIN` or
+`START TRANSACTION`. PostgreSQL refuses every `CONCURRENTLY` form inside a block,
+so the script stops at that statement and the whole block rolls back. Move the
+statement out of the block and run it on its own. Only `lint` reports this code:
+it is a property of the script, and `migrate` takes one statement at a time.
 
 ### `rewrite-required`
 

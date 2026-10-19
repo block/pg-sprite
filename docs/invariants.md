@@ -57,14 +57,28 @@ since under the swap lock (`cutover-undrained`); the mechanism is in
 [copy-and-swap-design.md](copy-and-swap-design.md#live-verification). The `Runner` on a
 quiesced target makes the quiescence its pass relies on true rather than assumed: it fences
 the source with a statement-level `BEFORE` trigger (`pgsprite_write_fence`, SQLSTATE `55006`)
-before its first save and keeps it through every stop until the swap carries it to the
-retained table, so the copy and one quiesced pass are the whole proof (fences-the-source,
-leaves-the-fence-on-a-stopped-run, unfences-the-old-table-it-keeps,
-stops-on-a-shadow-that-differs tests). On a decoding target it runs `CheckLive` under
-`DivergenceAbort` once the catch-up has passed a marker written after the copy, with the
-capture's own `Catchup` as the pass's confirmed source, and hands the swap a drain that
-reopens the stream from the position the capture confirmed and applies it under the swap's
-lock (carries-a-live-table-from-no-row-to-done test).
+enabled `ALWAYS`, so a session in `session_replication_role = replica` is refused too, before
+its first save, and keeps it through every stop until the swap carries it to the retained
+table, so the copy and one quiesced pass are the whole proof (fences-the-source,
+refuses-a-replica-role-session, leaves-the-fence-on-a-stopped-run,
+unfences-the-old-table-it-keeps, stops-on-a-shadow-that-differs tests). A resumed run installs
+over the fence, which enables it `ALWAYS` again (resume-upgrades-an-origin-fence test).
+
+The quiesced swap confirms the fence once more, under its `ACCESS EXCLUSIVE` lock: it refuses
+the proof as `cutover-unfenced` unless the engine's trigger is still on the source, of the
+shape the install gave it — no `WHEN` condition, no `UPDATE OF` column list, no arguments, not
+deferrable — and enabled `ALWAYS` (refuses-when-the-fence-was-disabled,
+refuses-when-the-fence-was-dropped, refuses-when-the-fence-is-origin-only, and
+refuses-when-the-fence-was-replaced-by-a-conditional-one tests). The check has a stated
+limit: a role that owns the table can disable the fence, write, and restore it between the
+pass and the swap, and that write is not seen. A live run installs no fence, so its swap
+checks none.
+
+On a decoding target the `Runner` runs `CheckLive` under `DivergenceAbort` once the catch-up
+has passed a marker written after the copy, with the capture's own `Catchup` as the pass's
+confirmed source, and hands the swap a drain that reopens the stream from the position the
+capture confirmed and applies it under the swap's lock (carries-a-live-table-from-no-row-to-done
+test).
 *Source:* [design-principles](design-principles.md#correctness-and-safety),
 risks-and-mitigations; Spirit's "never skip it".
 
@@ -507,6 +521,15 @@ pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repa
 transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so a pool
 built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued behind
 `ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
+The concurrent build's failure verdict runs on a reserved session that observers must not
+disturb: `Tracker.Progress` reads the build's progress on that session detached from the
+observer's context and under its own deadline, set above `pkg/dbconn`'s default
+`statement_timeout` so a slow read ends server-side with the session intact, because a context
+that ends mid-query closes the connection; `Tracker.CancelBuild` signals the same way.
+*Enforced:* `pkg/progress` (`Tracker.Progress`, `progressReadTimeout`;
+`TestProgressRunsTheBuildReadDetachedFromTheObserver`,
+`TestProgressBuildReadDeadlineOutlastsTheServerStatementTimeout`, and
+`TestProgressReadCancelledMidQueryLeavesTheVerdictSessionUsable` in `pkg/executor`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
