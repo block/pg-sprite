@@ -127,13 +127,13 @@ func manualPath(g suggest.Guidance) string {
 	return suggest.ManualPath(g) + " (guidance " + string(g) + ")"
 }
 
-// backendUnavailableVerdict is the refusal for a change that routes to an
-// execution strategy this build does not implement.
+// backendUnavailableVerdict is the refusal for a change whose backend has no
+// carrying path for it in this build.
 func backendUnavailableVerdict(st statement.Statement, rs router.Statement) verdict.Verdict {
 	return verdict.Verdict{
 		Statement: st.SQL(),
 		Table:     qualified(st),
-		Detail: fmt.Sprintf("the change requires the %s strategy, which this build does not implement yet: "+
+		Detail: fmt.Sprintf("the change requires the %s strategy, which does not carry this operation yet: "+
 			"PostgreSQL would rewrite the table under ACCESS EXCLUSIVE for the whole operation", rs.Backend),
 	}.WithRefusal(backendUnavailableRefusal())
 }

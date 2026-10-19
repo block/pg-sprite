@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
@@ -18,11 +19,31 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
+// ErrCopySwapConnectionRequired is returned by [Run] and [RunDesired] when
+// a statement routes to the copy-and-swap backend and
+// Options.CopySwap.Connection is unset. The route opens dedicated sessions
+// of its own and needs the connection the pool was dialed with, not the
+// pool alone; a library caller that builds Options by hand wires it, the
+// CLI always does. It is a sentinel so an embedder can tell the missing
+// wiring apart from an operational failure with [errors.Is]; nothing has
+// been executed when it is returned.
+var ErrCopySwapConnectionRequired = errors.New(
+	"Options.CopySwap.Connection must name the database the pool was dialed with; the copy-and-swap route opens dedicated sessions from it")
+
 // CopySwapOptions is the policy for a statement the router assigns to the
 // copy-and-swap backend. The zero value is not runnable: the route opens
 // dedicated sessions of its own — the table lock, the copy workers, the
 // replication stream — so it needs the connection the pool was built from,
 // not the pool alone.
+//
+// A table that already carries the done row of an earlier copy-and-swap is
+// run again without ceremony: the route replaces the row inside its own
+// lock session (schemachange.RunOptions.ReplaceDone), so a second type
+// change on a table — the next planned statement, or next month's — needs
+// no step between the two runs. The one done row the route will not
+// replace is one whose retained source still stands under its _old name
+// (KeepOld): that is an open rollback window, and the run is refused until
+// the operator ends it.
 type CopySwapOptions struct {
 	// Connection is the database the pool handed to Run was dialed with.
 	// The route's dedicated sessions are opened from it.
@@ -45,6 +66,16 @@ type CopySwapOptions struct {
 	Quiesced bool
 }
 
+// environment is what the operator declared about the run's surroundings,
+// in the form the preflight reads: a quiesced run decodes no WAL, so it
+// needs none of the server's logical-decoding facilities.
+func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
+	return preflight.CopySwapEnvironment{
+		LogicalDecoding: !o.Quiesced,
+		FreeDiskBytes:   o.FreeDiskBytes,
+	}
+}
+
 // copyAndSwap runs a statement the router assigned to the copy-and-swap
 // backend through the schemachange.Runner and folds the result into one
 // verdict. The verdict-and-error contract is Run's: a preflight or shadow
@@ -56,13 +87,9 @@ type CopySwapOptions struct {
 func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	opts Options, logger *slog.Logger) (verdict.Verdict, error) {
 	if opts.CopySwap.Connection.URL == "" {
-		return verdict.Verdict{}, errors.New("migrate: Options.CopySwap.Connection must name the database the pool was dialed with; the copy-and-swap route opens dedicated sessions from it")
+		return verdict.Verdict{}, fmt.Errorf("migrate: %w", ErrCopySwapConnectionRequired)
 	}
-	env := preflight.CopySwapEnvironment{
-		LogicalDecoding: !opts.CopySwap.Quiesced,
-		FreeDiskBytes:   opts.CopySwap.FreeDiskBytes,
-	}
-	target, err := preflight.CheckCopySwap(ctx, pool, st.Schema(), st.Table(), env)
+	target, err := preflight.CheckCopySwap(ctx, pool, st.Schema(), st.Table(), opts.CopySwap.environment())
 	if err != nil {
 		return copySwapPreflightVerdict(st, err)
 	}
@@ -74,7 +101,8 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 		return verdict.Verdict{}, err
 	}
 	runner, err := schemachange.NewRunner(opts.CopySwap.Connection, store, schemachange.RunOptions{
-		KeepOld: opts.CopySwap.KeepOld,
+		KeepOld:     opts.CopySwap.KeepOld,
+		ReplaceDone: true,
 		AfterCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
 			logger.Debug("copy-and-swap checkpoint saved", "phase", cp.Phase.String())
 			return nil
@@ -115,20 +143,36 @@ func copySwapOutcome(st statement.Statement, quiesced bool, result schemachange.
 // contract: a missing privilege and a refused shape or environment are
 // refused verdicts; anything else stopped the pipeline before a verdict.
 func copySwapPreflightVerdict(st statement.Statement, err error) (verdict.Verdict, error) {
+	r, detail, err := classifyCopySwapPreflight(err)
+	if err != nil {
+		return verdict.Verdict{}, err
+	}
+	return refusedVerdict(st, r, detail), nil
+}
+
+// classifyCopySwapPreflight sorts an error out of preflight.CheckCopySwap
+// into the refusal it stands for — with the prose behind it as detail — or
+// returns the error when it is not a refusal: the preflight could not
+// finish, and nothing has been decided about the table. A missing privilege
+// is the same insufficient-privileges refusal the native path produces; a
+// refused shape or environment carries the preflight's own cause under the
+// class the cause declares. Both front doors fold the same classification,
+// one into a verdict and one into a whole-plan refusal.
+func classifyCopySwapPreflight(err error) (verdict.Refusal, string, error) {
 	var privErr *preflight.PrivilegeError
 	if errors.As(err, &privErr) {
-		return privilegeVerdict(st, privErr, false), nil
+		return insufficientPrivilegesRefusal(), privErr.Error(), nil
 	}
 	cause := preflight.CopySwapRefusalCauseOf(err)
 	if cause == "" {
-		return verdict.Verdict{}, err
+		return verdict.Refusal{}, "", err
 	}
 	r, ok := copySwapPreflightRefusal(cause)
 	if !ok {
-		return verdict.Verdict{}, fmt.Errorf("%w: copy-and-swap preflight refusal carries unclassified cause %q",
+		return verdict.Refusal{}, "", fmt.Errorf("%w: copy-and-swap preflight refusal carries unclassified cause %q",
 			executor.ErrInvariantViolation, cause)
 	}
-	return refusedVerdict(st, r, err.Error()), nil
+	return r, err.Error(), nil
 }
 
 // copySwapRunVerdict folds an error out of the Runner into Run's contract.
@@ -156,15 +200,18 @@ func copySwapRunVerdict(st statement.Statement, quiesced bool, err error) (verdi
 	}, err
 }
 
-// copySwapStoppedRemedy says what the operator does with a stopped run. A
-// divergence is the one stop a rerun cannot clear: the row stands in
-// verifying, so the next run verifies the same copy against the same
-// source and diverges again; the run has to be abandoned first. Every
-// other stop is resumed by running the statement again. Either way the
-// detail names the hold the stopped run keeps on the source, since that
-// is what the operator is paying for in the meantime: the write fence of a
-// quiesced run, or the replication slot of a live run, which pins WAL on
-// the server until it is dropped.
+// copySwapStoppedRemedy says what the operator does with a stopped run.
+// Two kinds of stop a rerun cannot clear: a divergence, where the row
+// stands in verifying and the next run verifies the same copy against the
+// same source and diverges again; and a data fault from the server — a
+// value the new type will not hold, a constraint the copied rows break —
+// where the next run copies the same rows and meets the same fault. Both
+// have to be abandoned, and the detail says how. Every other stop is
+// resumed by running the statement again. Either way the detail names the
+// hold the stopped run keeps on the source, since that is what the
+// operator is paying for in the meantime: the write fence of a quiesced
+// run, or the replication slot of a live run, which pins WAL on the server
+// until it is dropped.
 func copySwapStoppedRemedy(quiesced bool, err error) string {
 	hold := "its replication slot stays and pins WAL on the server"
 	release := "drop the replication slot"
@@ -172,12 +219,43 @@ func copySwapStoppedRemedy(quiesced bool, err error) string {
 		hold = "the source stays fenced against writes"
 		release = "take the write fence off the source"
 	}
+	abandon := "abandon the run — drop the shadow, " + release + ", and delete the checkpoint row — then correct the data or the statement and run it again"
 	var divergence *checksum.DivergenceError
 	if errors.As(err, &divergence) {
-		return "the shadow did not match the source, so running the same statement again would verify the same copy and stop here again; " +
-			"abandon the run — drop the shadow, " + release + ", and delete the checkpoint row — then run the statement again"
+		return "the shadow did not match the source, so running the same statement again would verify the same copy and stop here again; " + abandon
+	}
+	if isDataFault(err) {
+		return "the server rejected the rows as the statement would shape them, so running the same statement again would copy the same rows and stop here again; " + abandon
 	}
 	return "any checkpoint row it saved remains and " + hold + " until the same statement is run again, which resumes from the row"
+}
+
+// SQLSTATE classes of the faults the data itself raises when it is copied
+// into the shadow's shape: a value the new type will not hold (22, data
+// exception: a string too long, a number out of range, a cast that fails)
+// and a constraint the copied rows break (23, integrity constraint
+// violation: NOT NULL, a check, a unique key). The class is the first two
+// characters of the five-character code.
+const (
+	sqlstateClassDataException       = "22"
+	sqlstateClassIntegrityConstraint = "23"
+)
+
+// isDataFault reports whether err is the server rejecting the data under
+// the statement's new shape — a fault a rerun meets again on the same rows,
+// as opposed to a lost connection, a cancelled context, or a lock the run
+// could take next time.
+func isDataFault(err error) bool {
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || len(pgErr.Code) < 2 {
+		return false
+	}
+	switch pgErr.Code[:2] {
+	case sqlstateClassDataException, sqlstateClassIntegrityConstraint:
+		return true
+	default:
+		return false
+	}
 }
 
 // copySwapFailureCode names the executor outcome code for an error out of

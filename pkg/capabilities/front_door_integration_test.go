@@ -25,6 +25,12 @@ type migrateClaim struct {
 	// minMajor is the oldest PostgreSQL major the row claims support on;
 	// zero means every supported major.
 	minMajor int
+	// copyAndSwap marks a row whose statements the router sends through
+	// the copy-and-swap backend: the run is given the route's policy (its
+	// connection, disk headroom, and the quiesced declaration, since the
+	// fixture server has no logical decoding) and its executed outcome is
+	// the route's own token.
+	copyAndSwap bool
 }
 
 // migrateClaims maps every capability row whose imperative `migrate` door is
@@ -58,6 +64,31 @@ var migrateClaims = map[string]migrateClaim{
 				nickname varchar(50)
 			)`,
 		statements: []string{`ALTER TABLE %[1]s.accounts ALTER COLUMN nickname TYPE varchar(100)`},
+	},
+	"alter-column-type-general-or-with-using": {
+		setup: `
+			CREATE TABLE %[1]s.accounts (
+				id      bigint PRIMARY KEY,
+				balance int
+			);
+			INSERT INTO %[1]s.accounts SELECT g, g FROM generate_series(1, 100) g`,
+		statements: []string{
+			`ALTER TABLE %[1]s.accounts ALTER COLUMN balance TYPE bigint`,
+			`ALTER TABLE %[1]s.accounts ALTER COLUMN balance TYPE text USING balance::text`,
+		},
+		copyAndSwap: true,
+	},
+	"column-transform-expressions-during-a-copy-and-swap-rewrite": {
+		setup: `
+			CREATE TABLE %[1]s.accounts (
+				id    bigint PRIMARY KEY,
+				price numeric(10, 2)
+			);
+			INSERT INTO %[1]s.accounts SELECT g, g * 1.25 FROM generate_series(1, 100) g`,
+		statements: []string{
+			`ALTER TABLE %[1]s.accounts ALTER COLUMN price TYPE integer USING (price * 100)::integer`,
+		},
+		copyAndSwap: true,
 	},
 	"set-default-drop-default-drop-not-null": {
 		setup: `
@@ -214,13 +245,23 @@ func TestMigrateSupportedRowsExecute(t *testing.T) {
 			_, err := pool.Exec(t.Context(), fmt.Sprintf(claim.setup, schema))
 			require.NoError(t, err)
 
+			opts := migrate.DefaultOptions()
+			executed := verdict.OutcomeExecuted
+			if claim.copyAndSwap {
+				opts.CopySwap = migrate.CopySwapOptions{
+					Connection:    dbconn.Config{URL: url},
+					FreeDiskBytes: testutil.UnlimitedDisk,
+					Quiesced:      true,
+				}
+				executed = verdict.OutcomeExecutedViaCopyAndSwap
+			}
 			for _, sql := range claim.statements {
 				sql = fmt.Sprintf(sql, schema)
 				st, err := statement.ParseOne(sql)
 				require.NoError(t, err)
-				v, err := migrate.Run(t.Context(), pool, st, migrate.DefaultOptions())
+				v, err := migrate.Run(t.Context(), pool, st, opts)
 				require.NoError(t, err, sql)
-				assert.Equal(t, verdict.OutcomeExecuted, v.Outcome,
+				assert.Equal(t, executed, v.Outcome,
 					"%s: the matrix publishes migrate as supported but it answered %s (%s): %s", sql, v.Outcome, v.Reason, v.Detail)
 			}
 		})

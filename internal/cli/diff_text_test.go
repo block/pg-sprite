@@ -285,14 +285,14 @@ func TestDiffTextRefusedStatementDropsApply(t *testing.T) {
 	exists := true
 	report.TableExists = &exists
 	report.Statements = append(report.Statements, plan.Statement{
-		SQL:         `ALTER TABLE "users" ALTER COLUMN "id" TYPE text`,
+		SQL:         `ALTER TABLE "users" ADD COLUMN "joined" timestamptz DEFAULT now()`,
 		Route:       planner.RouteCopyAndSwap,
 		Backend:     router.BackendCopyAndSwap,
 		Disposition: router.DispositionUnavailable,
 		Decisions: []planner.Decision{{
-			Operation: "alter column type",
+			Operation: "add column joined",
 			Route:     planner.RouteCopyAndSwap,
-			Reason:    planner.ReasonTypeRewrite,
+			Reason:    planner.ReasonVolatileDefault,
 		}},
 	})
 

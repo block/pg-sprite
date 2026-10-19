@@ -43,8 +43,9 @@ func dryRunPlan(t *testing.T, url, alter string) plan.Report {
 	return report
 }
 
-// A rewrite-requiring change dry-runs to the copy-and-swap backend as
-// unavailable, and nothing executes: the live column type is untouched.
+// A rewrite-requiring type change dry-runs to the copy-and-swap backend as
+// executable — the route the real run takes — and nothing executes: the
+// live column type is untouched.
 func TestMigrateDryRunRoutesRewriteWithoutExecuting(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -55,12 +56,12 @@ func TestMigrateDryRunRoutesRewriteWithoutExecuting(t *testing.T) {
 	require.NoError(t, err)
 
 	report := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
-	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 	require.Len(t, report.Statements, 1)
 	st := report.Statements[0]
 	assert.Equal(t, planner.RouteCopyAndSwap, st.Route)
 	assert.Equal(t, router.BackendCopyAndSwap, st.Backend)
-	assert.Empty(t, st.ExecSQL)
+	assert.Empty(t, st.ExecSQL, "the copy-and-swap backend lists no literal SQL")
 
 	var typ string
 	require.NoError(t, pool.QueryRow(t.Context(),
@@ -137,7 +138,7 @@ func TestMigrateDryRunRoutesTimestamptzToTimestampAsRewrite(t *testing.T) {
 	require.NoError(t, err)
 
 	report := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN ts TYPE timestamp(3)", schema))
-	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 	require.Len(t, report.Statements, 1)
 	st := report.Statements[0]
 	assert.Equal(t, planner.RouteCopyAndSwap, st.Route)
@@ -342,15 +343,16 @@ func TestMigrateDryRunResolvesTheTableThroughSearchPath(t *testing.T) {
 }
 
 // A dry-run against a table that does not exist classifies with zero facts:
-// the unprovable type change routes conservatively instead of failing, and
-// the report records the missing target.
+// the unprovable type change routes conservatively to copy-and-swap instead
+// of failing, marked unverified, and the report records the missing target.
 func TestMigrateDryRunMissingTableIsConservative(t *testing.T) {
 	url := testutil.StartPostgres(t)
 
 	report := dryRunPlan(t, url, "ALTER TABLE missing ALTER COLUMN v TYPE varchar(50)")
-	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 	require.Len(t, report.Statements, 1)
 	assert.Equal(t, planner.RouteCopyAndSwap, report.Statements[0].Route)
+	assert.True(t, report.Statements[0].Decisions[0].Unverified)
 	require.NotNil(t, report.TableExists)
 	assert.False(t, *report.TableExists)
 }

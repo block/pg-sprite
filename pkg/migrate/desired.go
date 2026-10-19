@@ -157,7 +157,9 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 //
 // Plan-time admission is all-or-nothing: a plan that contains a
 // destructive statement, routes any statement away from execution, or
-// does not match the pinned fingerprint is refused before anything runs.
+// does not match the pinned fingerprint is refused before anything runs,
+// and so is a plan that routes a statement through copy-and-swap when that
+// route's preflight refuses the table or the server as they stand now.
 // Execution-time semantics are committed-prefix: once statements start
 // running, an executed statement stays committed even when a later one
 // refuses or fails, and the result's verdicts disclose exactly how far
@@ -226,6 +228,13 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 		// per-statement Run pipeline below states facts about an existing
 		// table and its gate refuses CREATE TABLE outright.
 		return runCreate(ctx, pool, req, report, opts)
+	}
+	stopped, admitted, err := admitCopySwap(ctx, pool, report, opts)
+	if err != nil {
+		return stopped, err
+	}
+	if !admitted {
+		return stopped, nil
 	}
 
 	result := DesiredResult{Plan: report}
@@ -531,7 +540,7 @@ func planRefusal(report plan.Report) (verdict.Refusal, string) {
 		case router.DispositionRewriteRequired:
 			return rewriteRequiredRefusal(), detail("blocks and has no safer native sequence")
 		case router.DispositionUnavailable:
-			return backendUnavailableRefusal(), detail("routes to an execution strategy this build does not implement")
+			return backendUnavailableRefusal(), detail("routes to an execution strategy that does not carry this operation yet")
 		case router.DispositionRefuse:
 			// The plan-side registry classified the statement when it was
 			// refused; the class travels with the statement. A refused
