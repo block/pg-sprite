@@ -455,7 +455,14 @@ change to or from an array, including `varchar(50)[] → varchar(100)[]`, is a
 schema other than `pg_catalog`, such as `app.text`, is a user type that shares a
 built-in's name, and matches no rule. So is a quoted name in another case, such as
 `"TEXT"`: the parser folds only unquoted names to lower case, so the planner compares
-type names case-sensitively.
+type names case-sensitively. A collation on either side also matches no rule: a target
+with a `COLLATE` clause changes the column's collation, and a live column with a
+collation of its own loses it when retyped without one (`ALTER COLUMN TYPE` resets the
+collation to the new type's default). Neither rewrites the heap, but both rebuild every
+index on the column under `ACCESS EXCLUSIVE`
+([a collation change alone](#things-that-are-not-rewrite-reasons)), so the planner takes
+the rewrite route and the plan's `ALTER COLUMN … TYPE` line renders the target's `COLLATE`
+clause so the verdict can be read from the report.
 
 Everything else — including changes PostgreSQL would relabel, such as `varbit` or temporal
 precision widening, unconstrained domains, `xml → text`, and the UTC `timestamp ↔
