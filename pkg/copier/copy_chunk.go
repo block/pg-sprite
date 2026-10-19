@@ -19,6 +19,26 @@ import (
 // names a relation that does not exist.
 const sqlstateUndefinedTable = "42P01"
 
+// lockMode is a table lock mode as LOCK TABLE spells it.
+type lockMode string
+
+const (
+	// lockAccessShare is the mode a read holds: it conflicts with nothing
+	// short of ACCESS EXCLUSIVE and keeps a DROP or rename from completing.
+	lockAccessShare lockMode = "ACCESS SHARE"
+	// lockRowExclusive is the mode an INSERT, UPDATE, or DELETE holds on
+	// the table it writes until its commit completes.
+	lockRowExclusive lockMode = "ROW EXCLUSIVE"
+	// lockShareRowExclusive is the resume fence's mode: it conflicts with
+	// the ROW EXCLUSIVE a writer holds and with itself, so it waits behind
+	// every straggling write and behind another fence, and it still admits
+	// every ACCESS SHARE reader. A transaction that takes it as its first
+	// lock on the shadow never asks the server to strengthen a lock it
+	// already holds, so two fences meeting on the shadow queue instead of
+	// deadlocking.
+	lockShareRowExclusive lockMode = "SHARE ROW EXCLUSIVE"
+)
+
 // copyChunk copies one chunk in its own guarded transaction: it inserts the
 // chunk's live rows into the shadow without overwriting any row already
 // there and returns the number of rows the insert added.
@@ -33,7 +53,7 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 		// the transaction with its session either way.
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
-	if err := c.guard(ctx, tx); err != nil {
+	if err := c.guard(ctx, tx, lockRowExclusive); err != nil {
 		return 0, err
 	}
 	tag, err := tx.Exec(ctx, c.sql, chunk.Lower(), chunk.Upper())
@@ -53,14 +73,15 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 // are still the relations the proofs describe. Both relations are locked by
 // name before their identity is checked, so nothing can replace either one
 // between the check and the statements that follow it in the same
-// transaction. The shadow is locked for writing before the table lock is
-// confirmed, so a transaction that confirmed it already holds the lock a
-// resumed run's fence waits on (CO-4).
-func (c *Copier) guard(ctx context.Context, tx pgx.Tx) error {
+// transaction. The shadow is locked in shadowMode — the mode the write that
+// follows holds, or the fence's — before the table lock is confirmed, so a
+// transaction that confirmed it already holds the lock a resumed run's fence
+// waits on (CO-4).
+func (c *Copier) guard(ctx context.Context, tx pgx.Tx, shadowMode lockMode) error {
 	if err := setCopySession(ctx, tx, c.target, c.searchPath, c.opts); err != nil {
 		return err
 	}
-	if err := c.holdRelations(ctx, tx); err != nil {
+	if err := c.holdRelations(ctx, tx, shadowMode); err != nil {
 		return err
 	}
 	if err := c.confirmLock(ctx, tx); err != nil {
@@ -134,29 +155,32 @@ func (c *Copier) confirmLock(ctx context.Context, conn dbconn.AdvisoryLockHolder
 	return fmt.Errorf("confirm the table lock from the copy transaction: %w", err)
 }
 
-// holdRelations takes ACCESS SHARE on the source and ROW EXCLUSIVE on the
-// shadow, the lock the chunk's insert takes there, for the rest of the
-// transaction. LOCK TABLE resolves the names as the statements after it will,
-// and holding even ACCESS SHARE keeps a DROP or rename from completing until
-// the transaction ends, so the identity check that follows stays true for
-// every statement in it. The guard takes both before it confirms the table
-// lock, so a transaction that has confirmed it is already one the resumed
-// run's SHARE fence waits behind, whatever it is paused before.
-func (c *Copier) holdRelations(ctx context.Context, tx pgx.Tx) error {
+// holdRelations takes ACCESS SHARE on the source and shadowMode on the
+// shadow, for the rest of the transaction. LOCK TABLE resolves the names as
+// the statements after it will, and holding even ACCESS SHARE keeps a DROP or
+// rename from completing until the transaction ends, so the identity check
+// that follows stays true for every statement in it. The shadow lock is the
+// transaction's first on the shadow and at least the mode its write holds,
+// so it never strengthens a lock it already holds; the guard takes it before
+// it confirms the table lock, so a transaction that has confirmed it is
+// already one the resumed run's fence waits behind, whatever it is paused
+// before. The source is locked first, the order the cutover's one LOCK TABLE
+// statement takes them in.
+func (c *Copier) holdRelations(ctx context.Context, tx pgx.Tx, shadowMode lockMode) error {
 	source := pgx.Identifier{c.shadow.Schema(), c.shadow.SourceTable()}.Sanitize()
 	shadow := pgx.Identifier{c.shadow.Schema(), c.shadow.ShadowTable()}.Sanitize()
-	if err := holdRelation(ctx, tx, source, "ACCESS SHARE"); err != nil {
+	if err := holdRelation(ctx, tx, source, lockAccessShare); err != nil {
 		return err
 	}
 	// INV: CO-4
-	return holdRelation(ctx, tx, shadow, "ROW EXCLUSIVE")
+	return holdRelation(ctx, tx, shadow, shadowMode)
 }
 
 // holdRelation locks one relation by its sanitized name in mode. A name that
 // no longer resolves is a relation replaced or gone since its proof was
 // minted.
-func holdRelation(ctx context.Context, tx pgx.Tx, relation, mode string) error {
-	_, err := tx.Exec(ctx, "LOCK TABLE "+relation+" IN "+mode+" MODE")
+func holdRelation(ctx context.Context, tx pgx.Tx, relation string, mode lockMode) error {
+	_, err := tx.Exec(ctx, "LOCK TABLE "+relation+" IN "+string(mode)+" MODE")
 	if err == nil {
 		return nil
 	}

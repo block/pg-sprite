@@ -47,7 +47,8 @@ func (c *Copier) clearAbove(ctx context.Context, pool *pgxpool.Pool, from Waterm
 
 // clearBatch deletes up to limit shadow rows whose key is at or above lower
 // in one guarded transaction and reports how many it removed. With fence set
-// it first waits for the earlier run's straggling chunk transactions.
+// its guard takes the shadow in the fence's mode, so it waits for the earlier
+// run's straggling chunk transactions before the delete reads.
 func (c *Copier) clearBatch(ctx context.Context, pool *pgxpool.Pool, lower, limit int64, fence bool) (int64, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -59,13 +60,8 @@ func (c *Copier) clearBatch(ctx context.Context, pool *pgxpool.Pool, lower, limi
 		// the transaction with its session either way.
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
-	if err := c.guard(ctx, tx); err != nil {
+	if err := c.guard(ctx, tx, clearShadowLockMode(fence)); err != nil {
 		return 0, err
-	}
-	if fence {
-		if err := c.fenceStragglers(ctx, tx); err != nil {
-			return 0, err
-		}
 	}
 	tag, err := tx.Exec(ctx, c.clearSQL, lower, limit)
 	if err != nil {
@@ -77,34 +73,31 @@ func (c *Copier) clearBatch(ctx context.Context, pool *pgxpool.Pool, lower, limi
 	return tag.RowsAffected(), nil
 }
 
-// fenceStragglers waits for every chunk transaction of the earlier run that
-// is still writing into the shadow, or still committing into it, before the
-// clear reads the shadow. Such a transaction holds ROW EXCLUSIVE on the
-// shadow from before it confirms the table lock until its commit completes —
-// through a wait for a synchronous standby included — and its rows are
-// invisible to the clear until then, so a clear that ran ahead of it would
-// leave a row above the watermark that the resumed run's own insert never
-// overwrites (CO-4). SHARE MODE conflicts with ROW EXCLUSIVE, so the lock is
-// granted only once every straggler has ended and the delete that follows, in
-// the same transaction, sees whatever they committed; the wait is bounded by
-// the transaction's lock_timeout. Only the first batch needs the fence: a
-// chunk transaction of the earlier run that confirmed the lock before it
-// passed to this one already holds ROW EXCLUSIVE, and one that has not yet
-// taken it confirms the lock afterwards and is refused.
-func (c *Copier) fenceStragglers(ctx context.Context, tx pgx.Tx) error {
+// clearShadowLockMode is the mode a clear batch's guard takes on the shadow.
+// The first batch is the fence: it must wait for every chunk transaction of
+// the earlier run that is still writing into the shadow, or still committing
+// into it, before its delete reads. Such a transaction holds ROW EXCLUSIVE on
+// the shadow from before it confirms the table lock until its commit
+// completes — through a wait for a synchronous standby included — and its
+// rows are invisible to the clear until then, so a clear that ran ahead of
+// it would leave a row above the watermark that the resumed run's own insert
+// never overwrites (CO-4). SHARE ROW EXCLUSIVE conflicts with ROW EXCLUSIVE,
+// so it is granted only once every straggler has ended and the delete that
+// follows, in the same transaction, sees whatever they committed; the wait
+// is bounded by the transaction's lock_timeout. It is the guard's one lock
+// on the shadow rather than a stronger lock taken after a weaker one, so an
+// earlier run stalled inside its own first batch holds the same mode and
+// this fence queues behind it instead of deadlocking with it. Only the first
+// batch needs the fence: a chunk transaction of the earlier run that
+// confirmed the lock before it passed to this one already holds ROW
+// EXCLUSIVE, and one that has not yet taken it confirms the lock afterwards
+// and is refused. Every later batch holds what its delete does.
+func clearShadowLockMode(fence bool) lockMode {
 	// INV: CO-4
-	if _, err := tx.Exec(ctx, c.fenceSQL); err != nil {
-		return fmt.Errorf("fence %s against the earlier run's chunk transactions: %w", c.shadow.ShadowTable(), err)
+	if fence {
+		return lockShareRowExclusive
 	}
-	return nil
-}
-
-// fenceStragglersSQL is the one statement the first clear batch runs before
-// its delete: a SHARE MODE lock on the shadow, which waits behind any ROW
-// EXCLUSIVE holder — an insert into it that has not finished committing —
-// and blocks none of the ACCESS SHARE readers.
-func fenceStragglersSQL(shadow Shadow) string {
-	return "LOCK TABLE " + pgx.Identifier{shadow.Schema(), shadow.ShadowTable()}.Sanitize() + " IN SHARE MODE"
+	return lockRowExclusive
 }
 
 // clearAboveSQL is the one statement every clear batch runs: delete the
