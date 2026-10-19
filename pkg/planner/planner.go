@@ -306,7 +306,8 @@ type Facts struct {
 	DependentViews map[string][]string
 	// DropDependentViews is DependentViews for the tables whose copy of
 	// the column a recursive DROP COLUMN drops: a child that declares the
-	// column itself or inherits it from a second parent keeps its copy.
+	// column itself or also inherits it from a table outside the drop
+	// keeps its copy.
 	DropDependentViews map[string][]string
 	// OwnDependentViews is DependentViews for the table alone, which is
 	// all an ALTER TABLE ONLY changes.

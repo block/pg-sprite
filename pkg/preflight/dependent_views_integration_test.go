@@ -53,10 +53,10 @@ func TestColumnDependentViews(t *testing.T) {
 	assert.Equal(t, views.Tree, views.Drop, "admins inherits every column from users alone, so a drop reaches it")
 }
 
-// A recursive DROP COLUMN drops a child's copy only when the child
-// inherits the column from this one parent and does not declare it, and
-// descends only through the copies it drops; a type change reaches every
-// copy. The server is the oracle: with the views Drop names removed the
+// A recursive DROP COLUMN drops a child's copy only when the child does
+// not declare the column and every parent it inherits the column from
+// drops its own, as both parents in a diamond do, and descends only
+// through the copies it drops; a type change reaches every copy. The server is the oracle: with the views Drop names removed the
 // drop succeeds, so no other view blocks it, and each view Drop names
 // blocks it on its own.
 func TestColumnDependentViewsForADrop(t *testing.T) {
@@ -76,6 +76,10 @@ func TestColumnDependentViewsForADrop(t *testing.T) {
 		CREATE TABLE %[1]s.two_parents () INHERITS (%[1]s.users, %[1]s.other_parent);
 		CREATE TABLE %[1]s.attached (id bigint NOT NULL, email text);
 		ALTER TABLE %[1]s.attached INHERIT %[1]s.users;
+		CREATE TABLE %[1]s.branch_a () INHERITS (%[1]s.users);
+		CREATE TABLE %[1]s.branch_b () INHERITS (%[1]s.users);
+		CREATE TABLE %[1]s.diamond () INHERITS (%[1]s.branch_a, %[1]s.branch_b);
+		CREATE TABLE %[1]s.uneven () INHERITS (%[1]s.below_inherited, %[1]s.branch_b);
 		CREATE VIEW %[1]s.v_users AS SELECT email FROM ONLY %[1]s.users;
 		CREATE VIEW %[1]s.v_inherited AS SELECT email FROM ONLY %[1]s.inherited;
 		CREATE VIEW %[1]s.v_below_inherited AS SELECT email FROM %[1]s.below_inherited;
@@ -83,6 +87,8 @@ func TestColumnDependentViewsForADrop(t *testing.T) {
 		CREATE VIEW %[1]s.v_below_declared AS SELECT email FROM %[1]s.below_declared;
 		CREATE VIEW %[1]s.v_two_parents AS SELECT email FROM %[1]s.two_parents;
 		CREATE VIEW %[1]s.v_attached AS SELECT email FROM %[1]s.attached;
+		CREATE VIEW %[1]s.v_diamond AS SELECT email FROM %[1]s.diamond;
+		CREATE VIEW %[1]s.v_uneven AS SELECT email FROM %[1]s.uneven;
 		CREATE TABLE %[1]s.events (id bigint, email text) PARTITION BY RANGE (id);
 		CREATE TABLE %[1]s.events_1 PARTITION OF %[1]s.events FOR VALUES FROM (0) TO (10);
 		CREATE VIEW %[1]s.v_events_1 AS SELECT email FROM %[1]s.events_1`, schema))
@@ -98,8 +104,8 @@ func TestColumnDependentViewsForADrop(t *testing.T) {
 	views, err := preflight.ColumnDependentViews(t.Context(), pool, schema, "users")
 	require.NoError(t, err)
 	assert.Equal(t, qualified("v_attached", "v_below_declared", "v_below_inherited", "v_declared",
-		"v_inherited", "v_two_parents", "v_users"), views.Tree["email"])
-	assert.Equal(t, qualified("v_below_inherited", "v_inherited", "v_users"), views.Drop["email"])
+		"v_diamond", "v_inherited", "v_two_parents", "v_uneven", "v_users"), views.Tree["email"])
+	assert.Equal(t, qualified("v_below_inherited", "v_diamond", "v_inherited", "v_uneven", "v_users"), views.Drop["email"])
 	assert.Equal(t, qualified("v_users"), views.Own["email"])
 
 	dropFails := func(t *testing.T, keep string) error {
