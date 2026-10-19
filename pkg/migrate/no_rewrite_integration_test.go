@@ -35,8 +35,8 @@ type noRewriteCase struct {
 var noRewriteFixture = []string{
 	"CREATE TABLE %[1]s.parent (id int PRIMARY KEY)",
 	"INSERT INTO %[1]s.parent SELECT generate_series(1, 100)",
-	"CREATE TABLE %[1]s.t (id int NOT NULL, email varchar(50) NOT NULL, note text DEFAULT 'x', qty int, parent_id int, tags text[])",
-	"INSERT INTO %[1]s.t SELECT g, 'u' || g, NULL, g, g, ARRAY['a'] FROM generate_series(1, 100) g",
+	"CREATE TABLE %[1]s.t (id int NOT NULL, email varchar(50) NOT NULL, note text DEFAULT 'x', qty int, parent_id int, tags text[], amount numeric(10,2), span int4range)",
+	"INSERT INTO %[1]s.t SELECT g, 'u' || g, NULL, g, g, ARRAY['a'], g * 1.25, int4range(g, g + 10) FROM generate_series(1, 100) g",
 }
 
 // noRewritePartitioned is a partitioned table with one partition and a
@@ -78,6 +78,7 @@ var noRewriteCases = map[string][]noRewriteCase{
 	"alter-column-type-binary-coercible-proven-against-live-column-facts": {
 		{name: "widen varchar", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN email TYPE varchar(100)"},
 		{name: "varchar to text", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN email TYPE text"},
+		{name: "widen numeric precision", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN amount TYPE numeric(12,2)"},
 	},
 	"declarative-not-valid-constraint": {
 		{
@@ -136,6 +137,7 @@ var noRewriteCases = map[string][]noRewriteCase{
 		{name: "expression index", setup: noRewriteFixture, statement: "CREATE INDEX t_lower_email_idx ON %[1]s.t (lower(email))"},
 		{name: "covering index", setup: noRewriteFixture, statement: "CREATE INDEX t_qty_idx ON %[1]s.t (qty) INCLUDE (email)"},
 		{name: "gin index", setup: noRewriteFixture, statement: "CREATE INDEX t_tags_idx ON %[1]s.t USING gin (tags)"},
+		{name: "gist index", setup: noRewriteFixture, statement: "CREATE INDEX t_span_idx ON %[1]s.t USING gist (span)"},
 		{name: "brin index", setup: noRewriteFixture, statement: "CREATE INDEX t_id_brin ON %[1]s.t USING brin (id)"},
 	},
 	"set-not-null": {
