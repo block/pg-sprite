@@ -347,7 +347,7 @@ Classification belongs to `pkg/planner`; `pkg/statement` supplies typed operatio
 
 | Invocation | Behaviour |
 | --- | --- |
-| `lint` | Offline (no database): classify every statement with zero live facts and report typed findings — unsupported operations are errors (non-zero exit), blocking idioms (with the safer SQL), conservative rewrites, and destructive drops are warnings. |
+| `lint` | Offline (no database): classify every statement with zero live facts and report typed findings — unsupported operations and a `CONCURRENTLY` operation inside an explicit `BEGIN` … `COMMIT` block, which PostgreSQL refuses, are errors (non-zero exit), blocking idioms (with the safer SQL), conservative rewrites, and destructive drops are warnings. |
 | `diff` / `migrate --dry-run` | Print the classified, routed plan and safer SQL where applicable. **Never writes the live table.** `diff` has no `--dry-run` flag because it never executes the plan (its desired-state diff does run the desired DDL in an always-rolled-back scratch transaction — see the scratch-schema note above). |
 | `migrate` (default) | Run the statement gate, classify and route exactly as dry-run would, then execute the routed SQL: the planner's **safer native sequence by default** when the submitted form blocks, the submitted form as a bounded optimistic attempt otherwise. The verdict's `executed_sql` reports the substitution. |
 | `migrate --force` | Run the statement **exactly as submitted**, overriding a safer-sequence substitution or a rewrite-required / backend-unavailable refusal. Gated — see below. |
@@ -849,7 +849,8 @@ operator-accepted blocking change that committed ends in an `executed-without-on
 verdict (exit 3), the one case that is committed but not vouched for as online-safe
 ([the ladder](cli-output-examples.md#exit-codes)). Native execution
 exposes a caller-owned `progress.Tracker`. Embedders run a blocking executor
-call in their own bounded task and poll `Tracker.Progress(ctx)`: sequence position and elapsed
+call in their own bounded task and poll `Tracker.Progress(ctx)` (a build read can outlast `ctx`
+by up to a minute; see [progress-report.md](progress-report.md)): sequence position and elapsed
 time come from in-process state, while an active concurrent index build is read on demand from
 `pg_stat_progress_create_index` by the build's backend PID. There is no background poller to
 own or stop, and a missing progress-view row is represented as an inactive observation rather

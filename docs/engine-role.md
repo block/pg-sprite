@@ -41,6 +41,21 @@ applies):
 Each tier includes everything above it. A schema change is admitted at the tier its plan
 requires — nothing higher.
 
+Before it classifies an `ADD COLUMN`, the engine adds each column to an empty temporary table
+with no columns (`CREATE TEMPORARY TABLE ... ()`) inside a transaction it always rolls back, to
+learn from the server whether the addition rewrites the table. Whether it does depends only on
+the added column's type and default, so the probe itself never opens the live table: it takes
+no lock on it and needs no privilege on it. Adding the column does evaluate its default and its
+domain's checks once, as the real `ALTER TABLE` would, and a function either one calls may read
+a table another session has locked; the probe never waits for such a lock, and plans the
+column as an `unverified` rewrite instead. A column that rewrites is added again with its type
+alone, which tells whether its type or its default is what rewrites, and the plan's reason names
+that cause. An `ADD COLUMN IF NOT EXISTS` for a column the table already has is
+read from the catalog and not probed, since the server skips it. The probe does need `TEMPORARY` on the database and a server that
+accepts writes, so an `ADD COLUMN` cannot be planned on a hot standby or by a role whose
+`TEMPORARY` was revoked from `PUBLIC` and not granted back. The plan fails with
+`preflight.ErrAddColumnProbeUnavailable` rather than guessing, naming which of the two to fix.
+
 The per-table session lock uses `pg_try_advisory_lock`, which is available to every role and
 requires no additional grant in any tier. Naming the holder of a contended lock reads
 `pg_stat_activity`; a role that cannot see other sessions still gets the holder's backend PID.
@@ -48,7 +63,7 @@ requires no additional grant in any tier. Naming the holder of a contended lock 
 | Tier | Capability | Required access | Preflight check |
 | --- | --- | --- | --- |
 | 0 | Connect and resolve the target | `LOGIN`; `CONNECT` on the database; `USAGE` on the target schema (directly or via membership) | `has_database_privilege`, `has_schema_privilege(..., 'USAGE')` |
-| 1 | In-place `ALTER TABLE` (the instant and fast native paths) | Inheritable **membership in the owning role** — sufficient on its own | `pg_has_role(current_user, <owner>, 'USAGE')` |
+| 1 | In-place `ALTER TABLE` (the instant and fast native paths) | Inheritable **membership in the owning role**; an `ADD COLUMN` also needs `TEMPORARY` on the database, which PostgreSQL grants to `PUBLIC` by default | `pg_has_role(current_user, <owner>, 'USAGE')` |
 | 2 | Index builds: `CREATE INDEX [CONCURRENTLY]`, and the `ALTER TABLE` shapes that build one — `ADD CONSTRAINT UNIQUE` / `PRIMARY KEY` / `EXCLUDE` without `USING INDEX`, or `ADD COLUMN` with an inline `UNIQUE` / `PRIMARY KEY` | Tier 1 + **`CREATE` on the target schema** — table ownership alone is refused with `permission denied for schema` | `has_schema_privilege(..., 'CREATE')` |
 | 3 | Copy-and-swap | Tier 2 + membership usable with `SET ROLE` (for owner-correct shadow objects); for logical-decoding CDC: `rds_replication` membership (Aurora/RDS) or the `REPLICATION` attribute (self-managed) | `pg_has_role(..., 'SET')` (16+; on 14–15 the Tier 1 `USAGE` check already proves `SET ROLE` access — membership options arrive in 16); `pg_has_role(current_user, 'rds_replication', 'MEMBER')` |
 
@@ -84,23 +99,32 @@ A quiesced copy-and-swap run (`pkg/schemachange.Runner`) does not take the calle
 nothing writes the table: it installs a statement-level `BEFORE INSERT OR UPDATE OR DELETE OR
 TRUNCATE` trigger, `pgsprite_write_fence`, on the source before its first checkpoint save, and
 every write the trigger sees is refused with SQLSTATE `55006` (`object_in_use`) and a message
-naming the table. The trigger calls a function of the same name in the engine's own `pgsprite`
-schema, created once per database as the engine role and owned by it, so the table's owner
-needs no access to that schema for the fence to fire. The fence stays on a stopped run's source
-until the run is resumed or abandoned (`DropWriteFence`); a completed run carries it to the
-retained `_old` table with the swap, where it is dropped with the table or, under `KeepOld`,
-taken off so the retained table can be renamed back and take writes at once.
+naming the table. The trigger is enabled `ALWAYS`, so it fires for a session running under
+`session_replication_role = replica` as well. The writers that run in that role are the apply
+worker of a logical-replication subscription that writes into the source, and a bulk restore
+run with triggers disabled; a fence enabled for origin sessions only would let their writes
+through to be lost with the old table at the swap. For a subscription apply worker the
+refusal means a worker that errors and retries until the run completes or is abandoned, with
+the publisher retaining WAL for the subscription's slot meanwhile. The trigger calls a
+function of the same name in the engine's own `pgsprite` schema, created once per database as
+the engine role and owned by it, so the table's owner needs no access to that schema for the
+fence to fire. The fence stays on a stopped run's source until the run is resumed or
+abandoned (`DropWriteFence`); a completed run carries it to the retained `_old` table with
+the swap, where it is dropped with the table or, under `KeepOld`, taken off so the retained
+table can be renamed back and take writes at once.
 
-What this needs: `CREATE TRIGGER` on a table requires the `TRIGGER` privilege on it or
+What this needs: `CREATE TRIGGER` and `ALTER TABLE … ENABLE ALWAYS TRIGGER` on a table require
 ownership, which the Tier 1 membership in the owning role already gives; the function needs
 `CREATE` on the `pgsprite` schema, which the engine owns. A pre-provisioned deployment that
 created the schema for the engine needs nothing further once the schema is owned by the engine
-role. The fence does not stop a superuser, nor a session running under
-`session_replication_role = replica`, which fires no ordinary triggers; a deployment whose
-writers can hold either has to quiesce the table by its own means, and a difference the
-verification pass then finds is reported, never repaired. Before `Run`, quiesce the table as far
-as the application allows — stop or pause its writers, or route them around it — so the fence
-refuses nothing in practice; the fence is the proof, not the plan.
+role. The fence does not stop a role that owns the table, which can disable, drop, or replace
+it. The swap refuses (`cutover-unfenced`) a fence found under its lock disabled, dropped, or
+replaced by a trigger of another shape, but a role that disables the fence, writes, and
+restores it between the verification pass and the swap is not seen. A deployment whose
+writers can hold table ownership has to quiesce the table by its own means, and a difference
+the verification pass finds is reported, never repaired. Before `Run`, quiesce the table as
+far as the application allows — stop or pause its writers, or route them around it — so the
+fence refuses nothing in practice; the fence is the proof, not the plan.
 
 Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are checked by
 `preflight.CheckCopySwapEnvironment` once the privilege check has passed and the shape check
@@ -119,7 +143,7 @@ space the host reports for the data directory; on a managed volume that grows on
 the operator set — the shadow copy and the WAL a replication slot pins both land there.
 Never pass a sentinel such as the largest integer; that disables the only check that stands
 between the copy and a full volume. Each refusal carries its own cause
-([refusal-classes.md](refusal-classes.md#copy-and-swap-preflight-refusals-keyed-on-copyswaprefusalcause)).
+([refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause)).
 
 ### Off-ladder: greenfield `CREATE TABLE`
 

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/checksum"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
 
@@ -220,6 +221,216 @@ func TestRunnerDropsTheShadowWhenItsFirstSaveFails(t *testing.T) {
 	result, err := f.run(t, "orders", alter, schemachange.RunOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
+}
+
+// fenceEnabled reads pg_trigger.tgenabled of the fence on table: "A" fires
+// in every session, "O" only in origin sessions, "D" never.
+func (f runnerFixture) fenceEnabled(t *testing.T, table string) string {
+	t.Helper()
+	var enabled string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT tg.tgenabled::text FROM pg_trigger tg
+		JOIN pg_class c ON c.oid = tg.tgrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+		WHERE n.nspname = $1 AND c.relname = $2 AND tg.tgname = $3 AND NOT tg.tgisinternal`,
+		f.schema, table, schemachange.WriteFenceTrigger).Scan(&enabled))
+	return enabled
+}
+
+// assertReplicaWritesFenced checks that a session running under
+// session_replication_role = replica, which skips every trigger not enabled
+// ALWAYS, is refused by the fence on every kind of write to table.
+func (f runnerFixture) assertReplicaWritesFenced(t *testing.T, table string) {
+	t.Helper()
+	conn, err := f.pool.Acquire(t.Context())
+	require.NoError(t, err)
+	defer conn.Release()
+	_, err = conn.Exec(t.Context(), "SET session_replication_role = replica")
+	require.NoError(t, err, "the test role may set session_replication_role")
+	defer func() {
+		_, err := conn.Exec(context.WithoutCancel(t.Context()), "RESET session_replication_role")
+		assert.NoError(t, err)
+	}()
+	before := f.rowCount(t, table)
+	for kind, sql := range f.writeStatements(table) {
+		_, err := conn.Exec(t.Context(), sql)
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, err, &pgErr, "%s from a replica-role session should be refused by the server", kind)
+		assert.Equal(t, schemachange.WriteFenceSQLState, pgErr.Code, "%s is refused with the fence's SQLSTATE", kind)
+	}
+	assert.Equal(t, before, f.rowCount(t, table), "a refused write changes nothing")
+}
+
+// A session running under session_replication_role = replica fires no
+// ordinary trigger, so a fence enabled for origin sessions only would let
+// its write through and the swap would drop the row. The fence is enabled
+// ALWAYS, so every kind of write from such a session is refused at the
+// latest point a writer could reach the source, after the verification pass
+// and with the swap still ahead, and the run completes.
+func TestRunnerFenceRefusesASessionInReplicaRole(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	checked := false
+	opts := schemachange.RunOptions{AfterCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase == checkpoint.PhaseCutover {
+			assert.Equal(t, "A", f.fenceEnabled(t, "orders"), "the fence fires in every session")
+			f.assertReplicaWritesFenced(t, "orders")
+			checked = true
+		}
+		return nil
+	}}
+
+	_, err := f.run(t, "orders", `ALTER TABLE %s.orders DROP COLUMN note`, opts)
+	require.NoError(t, err)
+
+	assert.True(t, checked, "the hook saw the cutover save")
+}
+
+// The swap of a quiesced proof is gated on the fence still being there. A
+// fence disabled after the verification pass, with the swap ahead, no longer
+// keeps the source quiet, so the swap refuses as cutover-unfenced and leaves
+// the source in place. The row stays in cutover, and the next Run installs
+// the fence again, verifies again, and completes.
+func TestRunnerRefusesTheSwapWhenTheFenceWasDisabled(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	opts := schemachange.RunOptions{AfterCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase == checkpoint.PhaseCutover {
+			f.exec(t, `ALTER TABLE %s.orders DISABLE TRIGGER pgsprite_write_fence`)
+		}
+		return nil
+	}}
+
+	_, err := f.run(t, "orders", alter, opts)
+
+	require.Error(t, err)
+	assert.Equal(t, schemachange.CauseCutoverUnfenced, schemachange.RefusalCauseOf(err))
+	assert.ErrorIs(t, err, schemachange.ErrCutoverRolledBack)
+	assert.True(t, f.hasColumn(t, "orders", "note"), "the source was not swapped out")
+	assert.True(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "the shadow is still in place")
+	assert.Equal(t, checkpoint.PhaseCutover, f.inspectRow(t, "orders").Phase)
+	assert.Equal(t, "D", f.fenceEnabled(t, "orders"), "the refusal does not touch the fence")
+
+	f.assertResumedToDone(t, alter, schemachange.RunOptions{})
+	f.assertWritable(t, "orders")
+}
+
+// A fence dropped after the verification pass is refused the same way: the
+// trigger the proof relies on is gone, so the swap does not proceed, and the
+// resumed run installs it again.
+func TestRunnerRefusesTheSwapWhenTheFenceWasDropped(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	opts := schemachange.RunOptions{AfterCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase == checkpoint.PhaseCutover {
+			f.exec(t, `DROP TRIGGER pgsprite_write_fence ON %s.orders`)
+		}
+		return nil
+	}}
+
+	_, err := f.run(t, "orders", alter, opts)
+
+	require.Error(t, err)
+	assert.Equal(t, schemachange.CauseCutoverUnfenced, schemachange.RefusalCauseOf(err))
+	assert.True(t, f.hasColumn(t, "orders", "note"), "the source was not swapped out")
+	assert.False(t, f.hasFence(t, "orders"))
+
+	f.assertResumedToDone(t, alter, schemachange.RunOptions{})
+	f.assertWritable(t, "orders")
+}
+
+// A fence left enabled for origin sessions only, by a later ENABLE TRIGGER
+// after the verification pass, fires for no replica-role writer, so the
+// swap refuses it as it refuses a disabled one: the proof's quiescence is
+// only as strong as a fence that fires in every session. The refusal does
+// not touch the fence; the resumed run installs over it.
+func TestRunnerRefusesTheSwapWhenTheFenceIsOriginOnly(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	opts := schemachange.RunOptions{AfterCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase == checkpoint.PhaseCutover {
+			f.exec(t, `ALTER TABLE %s.orders ENABLE TRIGGER pgsprite_write_fence`)
+		}
+		return nil
+	}}
+
+	_, err := f.run(t, "orders", alter, opts)
+
+	require.Error(t, err)
+	assert.Equal(t, schemachange.CauseCutoverUnfenced, schemachange.RefusalCauseOf(err))
+	assert.True(t, f.hasColumn(t, "orders", "note"), "the source was not swapped out")
+	assert.Equal(t, "O", f.fenceEnabled(t, "orders"), "the refusal does not touch the fence")
+
+	f.assertResumedToDone(t, alter, schemachange.RunOptions{})
+	f.assertWritable(t, "orders")
+}
+
+// A trigger of the fence's name and function that fires for fewer
+// statements than the fence — here one with a WHEN condition that is never
+// true, enabled ALWAYS — is not the fence, and the swap refuses it: a write
+// made under it reached the source after the verification pass, and
+// swapping would drop that row with the old table. The source keeps the
+// row, and the resumed run's install replaces the trigger with the fence,
+// so its pass stops on the divergence that write made.
+func TestRunnerRefusesTheSwapWhenTheFenceWasReplacedByAConditionalOne(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	opts := schemachange.RunOptions{AfterCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase == checkpoint.PhaseCutover {
+			f.exec(t, `
+				CREATE OR REPLACE TRIGGER pgsprite_write_fence
+					BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE ON %s.orders
+					FOR EACH STATEMENT
+					WHEN (false)
+					EXECUTE FUNCTION pgsprite.pgsprite_write_fence()`)
+			f.exec(t, `ALTER TABLE %s.orders ENABLE ALWAYS TRIGGER pgsprite_write_fence`)
+			f.exec(t, `INSERT INTO %s.orders (id, qty) VALUES (999999, 1)`)
+		}
+		return nil
+	}}
+	before := f.rowCount(t, "orders")
+
+	_, err := f.run(t, "orders", alter, opts)
+
+	require.Error(t, err)
+	assert.Equal(t, schemachange.CauseCutoverUnfenced, schemachange.RefusalCauseOf(err))
+	assert.True(t, f.hasColumn(t, "orders", "note"), "the source was not swapped out")
+	assert.Equal(t, before+1, f.rowCount(t, "orders"), "the row the replaced trigger let through is still on the source")
+	assert.Equal(t, "A", f.fenceEnabled(t, "orders"), "the replaced trigger is enabled ALWAYS and is still not the fence")
+
+	var divergence *checksum.DivergenceError
+	_, err = f.run(t, "orders", alter, schemachange.RunOptions{})
+	require.ErrorAs(t, err, &divergence, "the resumed run's pass sees the row the pass before it did not")
+}
+
+// A fence an earlier engine left enabled for origin sessions only is not
+// refused for good: the resumed run installs over it, which enables it
+// ALWAYS, so the swap finds the fence it requires.
+func TestRunnerResumeUpgradesAnOriginFenceToAlways(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	stop := &stopAfter{phase: checkpoint.PhaseCopying}
+
+	_, err := f.run(t, "orders", alter, schemachange.RunOptions{AfterCheckpoint: stop.hook})
+	require.ErrorIs(t, err, errStopHere)
+	f.exec(t, `ALTER TABLE %s.orders ENABLE TRIGGER pgsprite_write_fence`)
+	require.Equal(t, "O", f.fenceEnabled(t, "orders"), "the stopped run's fence is origin-only")
+
+	upgraded := false
+	opts := schemachange.RunOptions{AfterCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase == checkpoint.PhaseCutover {
+			assert.Equal(t, "A", f.fenceEnabled(t, "orders"), "the resume enabled the fence ALWAYS")
+			upgraded = true
+		}
+		return nil
+	}}
+	f.assertResumedToDone(t, alter, opts)
+
+	assert.True(t, upgraded, "the hook saw the cutover save")
 }
 
 // cancelClock cancels a context whenever it is read, and tells the wall

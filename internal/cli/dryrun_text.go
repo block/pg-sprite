@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/schemadiff"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -89,23 +90,10 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		// compiler style, where help: follows the diagnosis. help is
 		// reserved for steps the user runs; a sequence pg-sprite runs
 		// itself is a note.
-		w.diag("help", string(ps.Guidance), guidanceText(ps.Guidance))
+		w.diag("help", string(ps.Guidance), suggest.ManualPath(ps.Guidance))
 	}
 	if ps.Disposition == router.DispositionExecute {
-		if substituted(ps) {
-			w.diag("note", "", runner+" will run a safer online sequence instead:")
-			for n, sql := range ps.ExecSQL {
-				w.printf("  %d. %s;\n", n+1, sql)
-			}
-			if len(ps.ExecSQL) > 1 {
-				w.diag("note", "", "each step commits on its own — not transactionally equivalent, and the sequence must not run inside a transaction block")
-			} else {
-				w.diag("note", "", "the substituted statement commits on its own and must not run inside a transaction block")
-			}
-		} else {
-			w.diag("note", "", "runs as written")
-		}
-		steps = len(ps.ExecSQL)
+		steps = writeExecutionNotes(w, ps, runner)
 	}
 	if len(codes) > 0 {
 		w.entry("docs:")
@@ -138,7 +126,7 @@ func writeRefusal(w *stickyWriter, ps plan.Statement) []string {
 		w.diag("error", "rewrite-required", "refused — blocks as written and no online replacement could be constructed; rewrite the change as separate online steps and dry-run each one")
 		return []string{"rewrite-required"}
 	case router.DispositionUnavailable:
-		w.diag("error", "backend-unavailable", fmt.Sprintf("refused — needs the %s backend (an online shadow-table copy with a cutover), which this build does not implement yet", ps.Backend))
+		w.diag("error", "backend-unavailable", fmt.Sprintf("refused — needs the %s backend (an online shadow-table copy with a cutover), which does not carry this operation yet", ps.Backend))
 		return []string{"backend-unavailable"}
 	case router.DispositionRefuse:
 		reason := ps.Reason
@@ -157,6 +145,35 @@ func writeRefusal(w *stickyWriter, ps plan.Statement) []string {
 	// a code this build does not know has no anchor to link.
 	w.diag("error", "unknown-disposition", fmt.Sprintf("refused — unrecognized disposition %q; treat the statement as not executable", ps.Disposition))
 	return nil
+}
+
+// writeExecutionNotes renders how an executable statement will run and
+// returns the execution steps it contributes. The native backend runs the
+// listed SQL — the safer sequence when one was substituted, otherwise the
+// statement as written — one step per command. The copy-and-swap backend
+// runs no literal SQL the plan can list: the whole shadow-table change is
+// one step, and the note tells the operator what that step does and that
+// the run needs the free-disk declaration.
+func writeExecutionNotes(w *stickyWriter, ps plan.Statement, runner string) int {
+	if ps.Backend == router.BackendCopyAndSwap {
+		w.diag("note", "", runner+" will run it as a copy-and-swap: build a shadow table with the change applied, copy the rows into it while streaming live writes, verify, then swap the two under a brief lock (needs --free-disk; --quiesced when nothing writes the table)")
+		w.diag("note", "", "the route's preflight — free disk, logical decoding, triggers, dependent views, publication membership — is not part of this dry run; the run reads it before anything executes and refuses with nothing run when it fails")
+		return 1
+	}
+	if substituted(ps) {
+		w.diag("note", "", runner+" will run a safer online sequence instead:")
+		for n, sql := range ps.ExecSQL {
+			w.printf("  %d. %s;\n", n+1, sql)
+		}
+		if len(ps.ExecSQL) > 1 {
+			w.diag("note", "", "each step commits on its own — not transactionally equivalent, and the sequence must not run inside a transaction block")
+		} else {
+			w.diag("note", "", "the substituted statement commits on its own and must not run inside a transaction block")
+		}
+	} else {
+		w.diag("note", "", "runs as written")
+	}
+	return len(ps.ExecSQL)
 }
 
 // writeRefusalClass emits the refusal's typed class and owner as a note, so
@@ -270,7 +287,7 @@ func impactText(r planner.Reason) string {
 	case planner.ReasonOnlineIdiom:
 		return "already the safe online form; does not block the table while it runs"
 	case planner.ReasonFastDefault:
-		return "catalog-only (fast default); no table scan or rewrite"
+		return "the catalog stores the default (fast default); no table scan or rewrite"
 	case planner.ReasonBinaryCoercible:
 		return "PostgreSQL relabels the type in place; no table rewrite"
 	case planner.ReasonSaferIdiom:
@@ -278,15 +295,17 @@ func impactText(r planner.Reason) string {
 	case planner.ReasonAppBreakingRename:
 		return "the rename itself is a brief catalog change, but every query still using the old name fails the moment it commits"
 	case planner.ReasonVolatileDefault:
-		return "the default must be computed per row: a full table rewrite under an exclusive lock that blocks reads and writes"
+		return "a default computed for every row forces a full table rewrite under an exclusive lock that blocks reads and writes"
 	case planner.ReasonGeneratedStored:
 		return "computing the stored column forces a full table rewrite under an exclusive lock that blocks reads and writes"
 	case planner.ReasonTypeRewrite:
-		return "the type conversion forces a full table rewrite under an exclusive lock that blocks reads and writes"
+		return "converting or checking every row for the column's type forces a full table rewrite under an exclusive lock that blocks reads and writes"
 	case planner.ReasonRelocation:
 		return "physically moves the table's storage: rewrite-scale I/O under an exclusive lock that blocks reads and writes"
 	case planner.ReasonPartitionParentLock:
 		return "takes a brief exclusive lock on the partitioned parent, briefly blocking access to every partition"
+	case planner.ReasonReplicaIdentity:
+		return "drops what the table's replica identity keys on; UPDATE and DELETE on the table fail while a publication publishes them"
 	case planner.ReasonUnsupportedOperation:
 		return "pg-sprite does not recognize this operation and will not run it"
 	}

@@ -72,7 +72,7 @@ dry_run() {
         else
             assert_eq "dry-run refusal exit of [$sql]" 2 "$status"
         fi
-        assert_eq "plan format_version of [$sql]" 7 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "plan format_version of [$sql]" 9 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "disposition of [$sql]" "$disposition" "$(jq -r '.disposition' <<<"$out")"
         assert_eq "route of [$sql]" "$route" "$(jq -r '.statements[0].route' <<<"$out")"
         assert_eq "reason of [$sql]" "$reason" "$(jq -r '.statements[0].decisions[0].reason' <<<"$out")"
@@ -111,6 +111,26 @@ execute_native() {
     fi
 }
 
+# execute_copy_swap sql
+#
+# Runs a schema change the planner routes to copy-and-swap and requires the
+# route's own outcome and exit 0. The free-disk declaration is the route's
+# admission for the shadow table and its indexes; the demo tables are tiny,
+# so the figure only has to be non-zero. The compose database runs with
+# logical decoding on, so the run streams the source's writes through a
+# replication slot the way it does against a production server.
+execute_copy_swap() {
+    local sql="$1" out status=0
+    step "execute (copy-and-swap): $sql"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" migrate --url "$PG_DSN" --json --free-disk 1GiB --alter "$sql") || status=$?
+        assert_eq "exit of [$sql]" 0 "$status"
+        assert_eq "outcome of [$sql]" "executed-via-copy-and-swap" "$(jq -r '.outcome' <<<"$out")"
+    else
+        "$PGS" migrate --url "$PG_DSN" --free-disk 1GiB --alter "$sql"
+    fi
+}
+
 # execute_refused reason sql
 #
 # Runs a schema change the engine must refuse and requires the refusal
@@ -125,7 +145,7 @@ execute_refused() {
         assert_eq "refusal reason of [$sql]" "$reason" "$(jq -r '.reason' <<<"$out")"
     else
         "$PGS" migrate --url "$PG_DSN" --alter "$sql" \
-            || echo "(refused, exit $? — expected: this route's backend is not available yet)"
+            || echo "(refused, exit $? — expected: the engine does not carry this operation yet)"
     fi
 }
 
@@ -180,7 +200,7 @@ diff_plan() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff exit of [$desired]" 0 "$status"
-        assert_eq "diff format_version of [$desired]" 7 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 9 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
         case "$(jq -r '.statements[0].sql' <<<"$out")" in
         *"$fragment"*) ;;
@@ -208,7 +228,7 @@ diff_refused() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff refusal exit of [$desired]" 2 "$status"
-        assert_eq "diff format_version of [$desired]" 7 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 9 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "diff disposition of [$desired]" refuse "$(jq -r '.disposition' <<<"$out")"
         assert_eq "diff reason of [$desired]" unsupported-statement "$(jq -r '.statements[0].reason' <<<"$out")"
         assert_eq "diff class of [$desired]" "$class" "$(jq -r '.statements[0].class' <<<"$out")"
@@ -243,7 +263,7 @@ run_pull() {
             out=$("$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" --json) || status=$?
             assert_eq "diff exit of [$desired]" 0 "$status"
             # Plan report contract version (plan.FormatVersion), same pin as diff_plan.
-            assert_eq "diff format_version of [$desired]" 7 "$(jq -r '.format_version' <<<"$out")"
+            assert_eq "diff format_version of [$desired]" 9 "$(jq -r '.format_version' <<<"$out")"
             assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
             assert_eq "zero diff of [$desired]" 0 "$(jq -r '.statements | length' <<<"$out")"
         else
@@ -265,8 +285,9 @@ run_dryrun() {
     dry_run native         safer-idiom            false execute     "ALTER TABLE users ADD CONSTRAINT users_name_nonempty CHECK (char_length(name) > 0)"
     dry_run native         safer-idiom            false execute     "ALTER TABLE users ADD CONSTRAINT users_email_uniq UNIQUE (email)"
     dry_run native         safer-idiom            false rewrite-required "ALTER TABLE users ADD COLUMN nick text UNIQUE"
-    dry_run copy-and-swap  type-rewrite           false unavailable "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
-    dry_run copy-and-swap  volatile-default       false unavailable "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()"
+    dry_run copy-and-swap  type-rewrite           false execute     "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
+    dry_run native         fast-default           false execute     "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()"
+    dry_run copy-and-swap  volatile-default       false unavailable "ALTER TABLE users ADD COLUMN started timestamptz DEFAULT clock_timestamp()"
     dry_run native         app-breaking-rename    false execute     "ALTER TABLE users RENAME COLUMN name TO full_name"
     dry_run native         metadata-only          true  execute     "ALTER TABLE users DROP COLUMN status"
     dry_run copy-and-swap  relocation             false unavailable "ALTER TABLE users SET TABLESPACE pg_default"
@@ -325,7 +346,7 @@ run_offline() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" lint --json risky.sql) || status=$?
         assert_eq "lint exit" 1 "$status"
-        assert_eq "lint format_version" 1 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "lint format_version" 3 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "lint errors" 1 "$(jq -r '.errors' <<<"$out")"
     else
         "$PGS" lint risky.sql || echo "(exit $? — error findings gate, by design)"
@@ -399,7 +420,12 @@ run_exec() {
     execute_native 0     ""            "ALTER TABLE users ADD COLUMN bio text"
     execute_native 1     CONCURRENTLY  "CREATE INDEX idx_users_email ON users (email)"
     execute_native 4     "NOT VALID"   "ALTER TABLE users ALTER COLUMN email SET NOT NULL"
-    execute_refused backend-unavailable "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
+    # A genuine rewrite runs through copy-and-swap: the shadow is built,
+    # filled, verified, and swapped in under the source's name while the
+    # retained source is dropped. It runs before the DROP INDEX rows so the
+    # swap carries orders_total_idx across for them to drop.
+    execute_copy_swap                   "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
+    execute_refused backend-unavailable "ALTER TABLE users ADD COLUMN started timestamptz DEFAULT clock_timestamp()"
     # The plain DROP INDEX is refused (the concurrent drop is the safe
     # idiom); the acknowledgement runs it anyway under budgets. The mismatch
     # runs first so the index is still there to drop afterwards.
@@ -432,6 +458,7 @@ elif [ "$section" = all ]; then
     heading "Tour complete"
     echo "Every statement above was classified before anything ran. The"
     echo "executions committed online — where the submitted form would have"
-    echo "blocked, pg-sprite ran the safer native sequence instead — and the"
-    echo "changes it cannot yet do safely were refused before they could hurt."
+    echo "blocked, pg-sprite ran the safer native sequence instead; a genuine"
+    echo "rewrite went through copy-and-swap — and the changes it cannot yet do"
+    echo "safely were refused before they could hurt."
 fi

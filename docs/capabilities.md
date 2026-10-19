@@ -57,8 +57,9 @@ pg-sprite capabilities --json | jq '.capabilities[] | select(.engine_path == "co
 # in diff, but can execute through migrate --desired.
 pg-sprite capabilities --json | jq '.capabilities[] | select(.front_doors.diff == "refused")'
 
-# Rows another tool class owns: the ⚪ and 🔵 rows. The ❌ rows name no owner, because
-# PostgreSQL offers no online mechanism for them, so this is not the full out-of-scope set.
+# Rows another tool class owns: the ⚪ and 🔵 rows. The ❌ rows name no owner: they have
+# no online mechanism pg-sprite will drive (PostgreSQL has none, or the only online form
+# is a direct statement the operator runs), so this is not the full out-of-scope set.
 pg-sprite capabilities --json | jq '.capabilities[] | select(.owning_tool_class != null)'
 ```
 
@@ -96,9 +97,9 @@ Two consequences follow, and they explain most of this page:
 
 | Tier | Meaning | What you see today |
 | --- | --- | --- |
-| **T1 — supported today** | The engine executes the change through an online-safe pattern | Execution (or the safer rewritten sequence), exit 0; where `migrate` refuses a plain index-maintenance form and names its `CONCURRENTLY` idiom, `--accept-blocking` runs the plain form under budgets and exits 3 |
+| **T1 — supported today** | The engine executes the change through an online-safe pattern | Execution (or the safer rewritten sequence), exit 0 |
 | **T2 — planned** | A known online pattern exists (or requires the copy-and-swap engine); building it is on the roadmap | A **typed refusal** naming the reason, exit 2 — never a silent fallback to a blocking form |
-| **T3 — out of scope by design** | No online-safety problem to solve, solving it belongs to a different tool class, or PostgreSQL offers no online mechanism to build on | A typed refusal or a parse-level rejection, with the reason stating *why it is not planned* |
+| **T3 — out of scope by design** | No online-safety problem to solve, solving it belongs to a different tool class, or there is no online mechanism pg-sprite will drive (PostgreSQL has none, or the only online form is a direct statement the operator runs) | A typed refusal or a parse-level rejection, with the reason stating *why it is not planned* |
 
 T3 rows carry one of three marks, because they mean different things — and only one of
 them is a limitation:
@@ -112,9 +113,12 @@ them is a limitation:
 - **🔵 a different tool class owns it** — the job is real but belongs to another kind of
   tool (data-change runners, provisioning/IaC, convergence planners, expand/contract
   frameworks). The row's "Online-safety problem?" column names the class to look for.
-- **❌ no online mechanism exists** — PostgreSQL itself provides no online pattern to
-  build on, so pg-sprite refuses rather than silently run the blocking form. These are
-  the only rows where "unsupported" is the honest reading.
+- **❌ no online mechanism pg-sprite will drive** — PostgreSQL has none, or the only
+  online form is a direct statement the operator runs, so pg-sprite refuses rather than
+  silently run the blocking form. Index maintenance (`DROP INDEX`, `REINDEX`) is the
+  second case: the online form is a plain `CONCURRENTLY` statement, which `migrate`
+  refuses to wrap and names so you run it directly; for a single-relation plain form,
+  `--accept-blocking` runs it under budgets and exits 3.
 
 Every matrix table carries an **"Online-safety problem?"** column: "Yes" means there is a
 readers-and-writers problem for an online engine to solve (pg-sprite solves it, plans to,
@@ -148,14 +152,18 @@ engine:
   closed); the row is a typed refusal until that flow lands, and each such row is a
   tracked roadmap item.
 - **copy-and-swap** — the change is a genuine table rewrite and routes to the
-  shadow-copy engine; a typed refusal until that engine lands (see
+  shadow-copy engine: the changed shape is built as a shadow table, filled and verified,
+  then swapped in under the source's name. A ✅ row on this path executes; a 🟡 row is a
+  typed refusal (`backend-unavailable`) for an operation the engine does not carry yet (see
   [optimistic-attempt.md](optimistic-attempt.md) for how the router proves the rewrite).
 - **—** — no engine path: either the job belongs to another tool class (⚪ / 🔵) or
-  PostgreSQL offers no online mechanism to build on (❌).
+  there is no online mechanism pg-sprite will drive (❌): PostgreSQL has none, or the
+  only online form is a direct statement the operator runs.
 
 Path and tier are orthogonal on purpose: a 🟡 row's path says what kind of work lifts
-the refusal — building a native flow or landing the copy engine — and a ✅ row's path
-says whether the engine ran your statement or substituted a safer one.
+the refusal — building a native flow or teaching the copy engine the operation — and a
+✅ row's path says whether the engine ran your statement as written, substituted a safer
+one, or rebuilt the table through copy-and-swap.
 
 ## The two front doors
 
@@ -182,33 +190,35 @@ are the canonical example.
 > `make gen-capabilities`; do not edit the generated regions below by hand.
 
 <!-- capabilities:begin summary -->
-**56 operations: 19 supported today, 21 planned behind a typed refusal, 14 out of scope
-by design, and 2 with no online mechanism in PostgreSQL to build on.**
+**60 operations: 18 supported today, 24 planned behind a typed refusal, 14 out of scope
+by design, and 4 with no online mechanism for pg-sprite to build on.**
 <!-- capabilities:end summary -->
 
 Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today) ·
 ⚪ T3 (out of scope; **no online-safety problem** — run directly, or through whatever
 review the object warrants) ·
 🔵 T3 (out of scope; **a different tool class owns it**) ·
-❌ T3 (out of scope; **no online mechanism exists** in PostgreSQL).
+❌ T3 (out of scope; **no online mechanism pg-sprite will drive**: PostgreSQL has none,
+or the only online form is a direct statement the operator runs).
 
 ### Column changes
 
 <!-- capabilities:begin column_changes -->
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| `ADD COLUMN` (no default, or constant default) | ✅ | native, as-is | Yes | Metadata-only / fast default (PG 11+); executes instantly under bounded locks |
-| `ADD COLUMN` with volatile default (`now()`, `gen_random_uuid()`, …) | 🟡 | copy-and-swap | Yes | Table rewrite; routes to copy-and-swap and is refused until that engine lands |
-| `ADD COLUMN ... GENERATED ... STORED` | 🟡 | copy-and-swap | Yes | Table rewrite; copy-and-swap route. The copy engine must **recompute, never copy,** generated columns on the shadow table |
+| `ADD COLUMN` (no default, a constant default, or a non-volatile default such as `now()`) | ✅ | native, as-is | Yes | Metadata-only / fast default (PG 11+), proven by adding the column to an empty temporary table first; executes instantly under bounded locks |
+| `ADD COLUMN` with volatile default (`gen_random_uuid()`, `clock_timestamp()`, identity, `serial`, …) | 🟡 | copy-and-swap | Yes | Table rewrite; routes to copy-and-swap, which does not carry a volatile default yet (the shadow fill would have to evaluate the default per row and the stream would have to agree) |
+| `ADD COLUMN` of a domain type with a `CHECK` or `NOT NULL`, with or without a default | 🟡 | copy-and-swap | Yes | Table rewrite to check every row against the domain; routes to copy-and-swap, which does not carry an added column yet (the shadow fill and the stream would each fill it from the default) |
+| `ADD COLUMN ... GENERATED ... STORED` | 🟡 | copy-and-swap | Yes | Table rewrite; routes to copy-and-swap, which does not carry stored generated columns yet — the copy must **recompute, never copy,** them on the shadow table |
 | `ALTER COLUMN ... SET EXPRESSION` (changed stored generated expression) | 🟡 | copy-and-swap | Yes | Planned but not executed. `diff` shows a changed stored generated expression as one `SET EXPRESSION` statement of kind `set-generated-expression`, refused with `unsupported-statement`, rather than a drop and re-add that would also drop the column's indexes. It recomputes every row under `ACCESS EXCLUSIVE`, and the statement needs PostgreSQL 17 or later |
 | `ADD COLUMN` with inline `UNIQUE`/`PRIMARY KEY`/`REFERENCES`/`CHECK` | 🟡 | native, planned flow | Yes | The inline constraint does its index build or validation scan under the `ADD COLUMN`'s `ACCESS EXCLUSIVE` lock; refused with guidance to add the column first, then build the constraint online |
-| `DROP COLUMN` | ✅ | native, as-is | Yes | Metadata-only; flagged **destructive** in the plan report |
+| `DROP COLUMN` | ✅ | native, as-is | Yes | Metadata-only; flagged **destructive** in the plan report. Refused with `replica-identity` when a replica identity index the drop reaches keys on the column: the table's own, or one on a partition or inheritance child below it unless the statement says `ONLY` |
 | `ALTER COLUMN TYPE`, binary-coercible (proven against live column facts) | ✅ | native, as-is | Yes | Catalog relabel, e.g. `varchar(50)` → `varchar(100)`, `varchar` → `text`; PostgreSQL itself refuses the change when a view, rule, or `STORED` generated column depends on the column — see [binary-coercible-type-changes.md](binary-coercible-type-changes.md#no-rewrite-is-not-no-cost) |
-| `ALTER COLUMN TYPE`, general (or with `USING`) | 🟡 | copy-and-swap | Yes | Table rewrite; copy-and-swap route, refused today. A `USING` expression will be admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (see limitations) |
+| `ALTER COLUMN TYPE`, general (or with `USING`) | ✅ | copy-and-swap | Yes | Table rewrite; runs through copy-and-swap: the changed shape is built as a shadow table, filled in chunks (a `USING` expression is applied per row), verified, and swapped in under the source's name. The route's preflight still refuses table shapes and environments it cannot run against (`copy-and-swap-refused`), and a `USING` expression is admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (`shadow-statement-conversion`) — see [limitations.md](limitations.md) |
 | `SET DEFAULT` / `DROP DEFAULT` / `DROP NOT NULL` | ✅ | native, as-is | Yes | Metadata-only |
 | `SET NOT NULL` | ✅ | native, safer sequence | Yes | Executed as the native four-step pattern: `ADD CONSTRAINT ... CHECK (col IS NOT NULL) NOT VALID` → online `VALIDATE` → `SET NOT NULL` (catalog flip, PG 12+) → drop the scaffold check |
 | `RENAME COLUMN` / `RENAME TABLE` | ✅ | native, as-is | Yes | Metadata-only for PostgreSQL but **app-breaking** across deployed instances; executed with a typed reason so lint/plan consumers can steer away |
-| `SET TABLESPACE` | 🟡 | copy-and-swap | Yes | Physical relocation is a rewrite; copy-and-swap route |
+| `SET TABLESPACE` | 🟡 | copy-and-swap | Yes | Physical relocation is a rewrite; routes to copy-and-swap, which does not carry a tablespace move yet |
 <!-- capabilities:end column_changes -->
 
 ### Constraints
@@ -216,12 +226,12 @@ review the object warrants) ·
 <!-- capabilities:begin constraints -->
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| `ADD PRIMARY KEY` / `ADD UNIQUE` (plain key columns) | ✅ | native, safer sequence | Yes | Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX` |
-| `ADD CHECK` / `ADD FOREIGN KEY` (imperative) | ✅ | native, safer sequence | Yes | Rewritten to the online sequence: `ADD CONSTRAINT ... NOT VALID` (brief metadata lock) → `VALIDATE CONSTRAINT` (writes keep flowing during the scan) |
+| `ADD PRIMARY KEY` / `ADD UNIQUE` (plain key columns) | ✅ | native, safer sequence | Yes | Rewritten to the online sequence: `CREATE UNIQUE INDEX CONCURRENTLY` → `ADD CONSTRAINT ... USING INDEX`. The sequence carries the key's `INCLUDE` columns, `NULLS NOT DISTINCT`, `WITH (...)` storage parameters, and index tablespace onto the index, and `DEFERRABLE` / `INITIALLY DEFERRED` onto the attach. A storage parameter the sequence cannot render faithfully (a value that is not a plain word, number, or string, a value containing a backslash, or a namespaced parameter name) gets no rewrite and is refused as `rewrite-required` with the `unique-index-then-constraint` guidance: build the index with it, then attach it. In a desired file, a new key whose name and index match a valid live unique index takes that index over with `ADD CONSTRAINT ... USING INDEX` at the key's declared deferrability, instead of a destructive drop and rebuild. Execution reads the index again under the table's lock and refuses with the permanent `adopted-index-drift` code, attaching nothing, if it was dropped, replaced, or left invalid since planning |
+| `ADD CHECK` / `ADD FOREIGN KEY` (imperative) | ✅ | native, safer sequence | Yes | Rewritten to the online sequence: `ADD CONSTRAINT ... NOT VALID` (brief metadata lock) → `VALIDATE CONSTRAINT` (writes keep flowing during the scan). An unnamed constraint is given the name PostgreSQL would choose (`<table>_<column>_check`, `<table>_check`, `<table>_<columns>_fkey`, numbered `check1`, `fkey1`, ... past a name another constraint in the schema already holds), because the `VALIDATE` step has to name it |
 | `ADD CONSTRAINT ... NOT VALID` / `... USING INDEX` / `VALIDATE CONSTRAINT` | ✅ | native, as-is | Yes | Already the online idiom; executed as-is |
 | `ADD FOREIGN KEY ... NOT VALID` on a **partitioned parent** | ✅ | native, safer sequence | Yes — server version 18 or later | Supported on version 18 and later; refused on 14–17 with an environmental class |
 | `EXCLUDE` constraints (and unrecognized constraint forms) | ❌ | — | Yes — unsolvable today | No online pattern exists in PostgreSQL — the build scans under `ACCESS EXCLUSIVE` with no `NOT VALID`/`USING INDEX` equivalent. Refused; revisit only if PostgreSQL grows one |
-| `DROP CONSTRAINT` | ✅ | native, as-is | Yes | Metadata-only; flagged **destructive** |
+| `DROP CONSTRAINT` | ✅ | native, as-is | Yes | Metadata-only; flagged **destructive**. Refused with `replica-identity` when the constraint owns the table's replica identity index, or the index a partition's is attached under |
 <!-- capabilities:end constraints -->
 
 ### Indexes
@@ -230,8 +240,8 @@ review the object warrants) ·
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | `CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN | ✅ | native, safer sequence | Yes | Executed as (or rewritten to) `CREATE INDEX CONCURRENTLY`, with validity verification, typed invalid-index outcomes, and a proven recovery for abandoned leftovers (`RebuildAbandonedIndex`, or `DropAbandonedIndex` to remove the leftover without rebuilding; both library-only; [runbook](invalid-index-recovery.md)) |
-| `DROP INDEX` | ✅ | native, safer sequence | Yes | Rewritten to `DROP INDEX CONCURRENTLY`; flagged **destructive**. `migrate` refuses the plain form and names the idiom; a single-index `DROP INDEX` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0) |
-| `REINDEX` | ✅ | native, safer sequence | Yes | Rewritten to `REINDEX ... CONCURRENTLY`. `migrate` refuses the plain form and names the idiom; a plain `REINDEX INDEX` or `REINDEX TABLE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM` stay refused |
+| `DROP INDEX` | ❌ | — | Yes — the online form is a direct `CONCURRENTLY` statement that `migrate` does not drive | `migrate` never runs this statement online-safely: the plain form is refused and names `DROP INDEX CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. A single-index plain `DROP INDEX` without `CASCADE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0); `--accept-blocking` checks the replica identity under the table's lock and refuses the drop as `unsupported-statement`, naming the identity index. `diff` reports an index to remove as a **destructive** `DROP INDEX` and hints to run it through `migrate --alter`, which ends in this `index-statement` refusal — run `DROP INDEX CONCURRENTLY` directly instead. `diff` refuses dropping the table's replica identity index, or one a partition's is attached under, with `replica-identity` |
+| `REINDEX` | ❌ | — | Yes — the online form is a direct `CONCURRENTLY` statement that `migrate` does not drive | `migrate` never runs this statement online-safely: the plain form is refused and names `REINDEX ... CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. A plain `REINDEX INDEX` or `REINDEX TABLE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM` stay refused. A desired schema cannot express a reindex, so `diff` never produces one |
 | Index build on a **partitioned parent** | 🟡 | native, planned flow | Yes | PostgreSQL has no parent-level `CONCURRENTLY`; the blocking form is refused by policy (`--force` does not bypass it, and `--accept-blocking` does not reach it yet). The partition-aware flow — `CREATE INDEX ON ONLY` → per-partition CIC → `ATTACH PARTITION`, with crash-resume per leaf — is planned |
 | `ADD CONSTRAINT ... USING INDEX` on a partitioned parent | ❌ | — | Yes — unsolvable today | PostgreSQL does not support adopting an index on a partitioned parent in any supported version; refused before execution |
 <!-- capabilities:end indexes -->
@@ -241,11 +251,11 @@ review the object warrants) ·
 <!-- capabilities:begin partitioned_tables -->
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
-| `CREATE TABLE ... PARTITION OF` | 🟡 | native, planned flow | Yes | Typed refusal at both doors: the imperative door does not take `CREATE TABLE`, and the declarative create path refuses the form at plan time and re-checks it at apply — attaching a partition takes a brief `ACCESS EXCLUSIVE` on the **parent**, which the greenfield absence proof does not cover. The partition-aware flow is planned |
-| `ATTACH PARTITION` | ✅ | native, as-is | Yes | Executed; the safer idiom (pre-prove the bound with a validated `CHECK` so the attach skips its scan) is surfaced as guidance. A classify-first flow that constructs the proof itself is planned |
-| `DETACH PARTITION [CONCURRENTLY]` | ✅ | native, safer sequence | Yes | `CONCURRENTLY` is the idiom; the blocking form is rewritten to it |
+| `CREATE TABLE ... PARTITION OF` | 🟡 | native, planned flow | Yes | Typed refusal at both doors: the imperative door does not take `CREATE TABLE`, and the declarative create path refuses the form at plan time and re-checks it at apply — attaching a partition takes a brief `ACCESS EXCLUSIVE` on the **parent**, which the greenfield absence proof does not cover. A desired file for a partition that already exists is refused before planning builds anything, since the scratch build would attach to the live parent. The partition-aware flow is planned |
+| `ATTACH PARTITION` | 🟡 | native, planned flow | Yes | Without `--force`, a typed refusal with nothing executed: the attach scans the partition to validate its bound unless a validated `CHECK` already proves it, and the engine does not yet construct that proof. The safer idiom (pre-prove the bound with a validated `CHECK` so the attach skips its scan) is surfaced as guidance. `--force SCHEMA.TABLE` runs the blocking `ATTACH PARTITION` as submitted under bounded budgets, taking the blocking lock, and records the override. The classify-first flow that constructs the proof itself is planned. A desired schema cannot express an attach, so `diff` never produces one |
+| `DETACH PARTITION [CONCURRENTLY]` | 🟡 | native, planned flow | Yes | `CONCURRENTLY` is the idiom and the blocking form is rewritten to it (`--dry-run` and `suggest` show the rewrite), but without `--force` `migrate` refuses both forms before anything executes: a cancelled concurrent detach leaves a detach-pending partition state the executor does not yet own recovering. `--force SCHEMA.TABLE` runs a plain `DETACH PARTITION` as submitted under bounded budgets, taking the blocking lock; `DETACH ... CONCURRENTLY` stays refused under `--force`. `migrate --dry-run` of either form reports the rewrite as a safer sequence to run and exits 0 while the real run refuses and exits 2, so the dry-run exit code is not a submit gate for a detach. A desired schema cannot express a detach, so `diff` never produces one |
 | Partitioned parents in the **declarative model** | 🟡 | native, planned flow | Yes | Typed refusal: the model does not yet carry partition keys, and rendering a partitioned parent as a plain `CREATE TABLE` would be silently wrong |
-| Partitioned tables in **copy-and-swap** | 🟡 | copy-and-swap | Yes | Root-vs-leaf publication semantics and per-partition swap; sequenced after the copy engine core |
+| Partitioned tables in **copy-and-swap** | 🟡 | copy-and-swap | Yes | Root-vs-leaf publication semantics and per-partition swap; the copy-and-swap preflight refuses a partitioned source |
 <!-- capabilities:end partitioned_tables -->
 
 ### The declarative model (desired files, diff, pull)
@@ -254,10 +264,13 @@ review the object warrants) ·
 | Table shape | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | Plain tables + their indexes | ✅ | native, as-is | Yes | `diff`, `pull`, and desired-file rendering round-trip the canonical model. The model carries each index's validity (`pg_index.indisvalid`): on a plain table an invalid entry is a concurrent build that did not finish — abandoned, or still running — so a live entry with the desired name and definition does not deliver the desired index, and `diff` plans it as a `create-index` change. `diff` never emits a drop for an invalid entry, whatever the desired file says about its name: a plain `DROP INDEX` blocks the table and cannot tell abandoned debris from a build still in progress. A `pull`ed baseline of such a table therefore re-diffs to that one rebuild rather than to zero. On a partitioned parent an invalid index means unattached partition indexes, not an unfinished build, so validity plays no part in the parent's comparison |
-| Classic table inheritance (`INHERITS`) | 🟡 | native, planned flow | Yes | Typed refusal for both parents and children: the model cannot express inheritance edges, and flattening inherited columns would produce a silently lossy baseline |
+| A live check constraint or foreign key left `NOT VALID` | ✅ | native, as-is | Yes | The model carries each constraint's validity (`pg_constraint.convalidated`). A live constraint left `NOT VALID` with the desired definition, which an interrupted online add leaves behind, plans as one `VALIDATE CONSTRAINT` statement (`validate-constraint`), which scans under `SHARE UPDATE EXCLUSIVE` while writes keep flowing, instead of a destructive drop and re-add. The statement names only the constraint, so execution reads the constraint again under that same lock and refuses with the permanent `validated-constraint-drift` code, validating nothing, if it was dropped or replaced under the same name since planning. A foreign key plans as `validate-foreign-key`, refused with `declarative-foreign-key` like every declarative foreign-key change. `CREATE TABLE` ignores `NOT VALID`, so a desired file cannot declare it: for a check constraint, `pull` renders the validated definition, and the baseline re-diffs to that one validation rather than to zero. `pull` refuses a table that owns a foreign key, validated or not, with `ErrUnrenderableForeignKey` |
+| Classic table inheritance (`INHERITS`) | 🟡 | native, planned flow | Yes | Typed refusal for both parents and children: the model cannot express inheritance edges, and flattening inherited columns would produce a silently lossy baseline. A desired file that declares `INHERITS` is refused before planning builds anything, since the scratch build would lock the live parent and add an inheritance edge to it |
 | Tables that own **or are referenced by** foreign keys | 🟡 | native, planned flow | Yes | Planned but not executed. A desired file may declare a foreign key to an unqualified table that exists in the target schema; `diff` shows a matching foreign key as no change and an added or dropped one as an `add-foreign-key` or `drop-foreign-key` statement refused with `declarative-foreign-key`, and `migrate --desired` refuses the whole plan. Planning binds each reference to an empty scratch copy of the live table, which needs `SELECT` on it, so planning takes only `ACCESS SHARE` on the live referenced table, the lock a plain `SELECT` takes, and never blocks its writes. Export still refuses both sides — an incoming FK cannot be expressed in the table's own desired file. Declarative FK execution (composite keys as the primary case, two-phase `NOT VALID` → `VALIDATE` execution) is planned |
 | Unlogged tables | 🟡 | native, planned flow | Yes | Typed refusal: persistence is not modeled, converging it (`SET LOGGED`) is a full rewrite, and rendering the table as plain `CREATE TABLE` would silently change crash-safety |
 | Explicit column collations | 🟡 | native, planned flow | Yes | Typed refusal: dropping a `COLLATE` clause from a rendered baseline silently changes sort order and index semantics; a collation delta cannot converge without a rewrite |
+| Table storage parameters (`WITH (fillfactor = ...)`, `toast.*`) | 🟡 | native, planned flow | Yes | Modeled, exported, and compared, but not converged. `pull` writes a table's storage parameters, its TOAST table's included, back as a `WITH` clause, and a table whose file declares the live parameters plans the rest of its changes normally. A difference in either direction is a typed `diff` refusal: a parameter the file declares is never reported as applied, and a tuned live parameter the file omits is never reported as matching. A table with no column that needs a TOAST table has none, and the server discards `toast.*` parameters set on it, so a file that declares one alongside a newly added text-like column refuses too |
+| Identity and serial sequences declared away from the defaults (`START WITH`, `MAXVALUE`, ...) | 🟡 | native, planned flow | Yes | Modeled and compared, but not converged. An identity's declaration round-trips: `pull` writes it as the column's options clause, an added identity column carries it, and a file that states the live declaration plans the rest of its changes normally, while a difference in either direction is a typed `diff` refusal. A serial's declaration cannot be stated by the serial shorthand, so export refuses a serial whose sequence is declared otherwise, including an integer serial whose column was widened to `bigint` while its sequence stayed `integer`. A sequence's current position is data, not schema, and is never compared |
 | Virtual generated columns (PostgreSQL 18+) | 🟡 | native, planned flow | Yes | Typed refusal: the desired-file grammar cannot declare `VIRTUAL`, export refuses a live virtual column, and a desired file that declares it any other way fails the diff, so a virtual expression is never converged as a column default |
 | Columns whose default uses a sequence the column does not own | 🟡 | native, planned flow | Yes | Typed refusal: in a desired-state model that sequence exists only inside the scratch transaction, so no derived plan can reference it. Column-owned (`serial`-style) sequences are fine |
 | Greenfield `CREATE TABLE` apply (the table does not exist yet — a fresh database or a new table in a live one) | ✅ | native, as-is | Yes — a `REFERENCES` clause would take a brief `SHARE ROW EXCLUSIVE` on each **referenced** live table, but the create path refuses a `CREATE TABLE` that declares one, so no live table is locked | Desired-state execution creates the table: `CheckTableAbsent` verifies the table relation and composite-type name are free, the executor verifies every relation name the desired file states (explicit index names and first-choice constraint-index and column-sequence names) is free in the schema, and `CheckCreatePrivileges` verifies the role can create there. It then runs the `CREATE TABLE` and index builds as brief bounded steps under the engine's budgets. An occupied claimed name is a typed `create-collision` refusal before execution — drop or rename the occupant, name a constraint's index explicitly, or for a sequence use an explicitly named sequence or a non-serial column. Duplicate-name SQLSTATEs backstop races for explicit names; for server-chosen names, the probe narrows the race to the time-of-check window, and after the `CREATE TABLE` commits the executor reads the constraint-index and sequence names the table actually owns and compares them against the claimed first-choice names — a name taken inside the window makes the server pick a suffixed replacement, which surfaces as a typed `create-name-mismatch` failure at step 1 with the born table left in place for an operator to rename the relation or drop, then re-diff (a read of the owned names that does not complete is the same step-1 failure as `create-names-unverified`, never a pass). `PARTITION OF`, `INHERITS`, `LIKE`, `OF`, `REFERENCES`, `IF NOT EXISTS`, and in-set duplicate names refuse at plan time and are re-checked at apply, while `CONCURRENTLY` is refused upstream at desired-file parse and re-checked at admission as defense in depth |
@@ -270,7 +283,7 @@ review the object warrants) ·
 | --- | --- | --- | --- | --- |
 | Enum-typed columns on plain tables | 🟡 | native, planned flow | Yes | Tolerance end to end (introspection already canonicalizes via `format_type`; desired-file admission and transaction-scoped scratch-schema mechanics are being verified) |
 | `ALTER TYPE ... ADD VALUE` | 🟡 | native, planned flow | Yes | Metadata-only and online-safe (PG 14+ allows it in a transaction; the value is usable after commit) — planned as an owned operation. No peer online executor owns it |
-| Enum value rename / removal | 🟡 | copy-and-swap | Yes | PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite — routes to a typed refusal toward copy-and-swap |
+| Enum value rename / removal | 🟡 | copy-and-swap | Yes | PostgreSQL has no `DROP VALUE`; this is a type swap + table rewrite, planned on copy-and-swap. Today the imperative door refuses `ALTER TYPE ... RENAME VALUE` as `unsupported-statement`, since it takes only `ALTER TABLE` and `CREATE INDEX`, and `DROP VALUE` does not parse |
 | Enum/domain type creation and drop | ⚪ | — | No — owner tooling (psql, shipped with the code change) | Bootstrap/catalog work with no concurrent-access problem; owner tooling applies it in the same change that ships the code |
 | Views, materialized views (create and replace) | ⚪ | — | No — owner tooling | Transactional catalog work, but `CREATE OR REPLACE VIEW` takes a brief `ACCESS EXCLUSIVE` on the view and queues behind in-flight readers — run it under a `lock_timeout` |
 | `REFRESH MATERIALIZED VIEW` | 🔵 | — | No — data jobs / owner tooling | A data operation, not catalog work: the plain form holds `ACCESS EXCLUSIVE` on the matview for the whole rebuild (`CONCURRENTLY` needs a unique index and trades the lock for churn). Scheduling refreshes belongs to data jobs |
@@ -290,8 +303,8 @@ review the object warrants) ·
 | --- | --- | --- | --- | --- |
 | `DROP TABLE` | ⚪ | — | No — owner tooling, through a reviewed process | Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it — the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. pg-sprite never plans or executes it; accounting for undeclared tables is the whole-schema owner's job, described under [Deliberately operator-owned](#deliberately-operator-owned) |
 | Data backfills, `UPDATE`/`DELETE` batches, DML of any kind | 🔵 | — | No — data-change runners, application batch jobs | pg-sprite changes table *shape*, never table *contents*. Versioned-script runners and application jobs own data changes |
-| Column-transform expressions during a copy-and-swap rewrite | 🟡 | copy-and-swap | Yes | The one principled exception: when a rewrite is already copying every row, deriving a new column's value by expression is part of the shape change, not a data job. Planned as part of the copy engine |
-| Online table rebuild with no shape change (bloat reclamation) | 🟡 | copy-and-swap | Yes | A copy-and-swap with an identical target shape — the pg_repack use case with checksum-gated cutover and crash-resume. Planned once the copy engine lands |
+| Column-transform expressions during a copy-and-swap rewrite | ✅ | copy-and-swap | Yes | The one principled exception: when a rewrite is already copying every row, deriving the retyped column's value by expression is part of the shape change, not a data job. `ALTER COLUMN TYPE … USING expr` runs the expression per row during the copy and through the stream |
+| Online table rebuild with no shape change (bloat reclamation) | 🟡 | copy-and-swap | Yes | A copy-and-swap with an identical target shape — the pg_repack use case with checksum-gated cutover and crash-resume. Planned; the planner has no statement form that requests it yet |
 | Whole-schema convergence (apply a directory of desired files, dependency-ordered) | 🔵 | — | No — convergence planners (pg-schema-diff, pgschema, pgdelta) | Convergence planning across objects is a planner's job; pg-sprite stays the execution engine for the table-shape subset |
 | Versioned schema-change-file workflow (Flyway-style ordered scripts) | 🔵 | — | No — versioned-script runners (Flyway-style) | Declarative-only by design; see [vision.md](vision.md) |
 | Expand/contract dual-schema versions (pgroll/reshape style) | 🔵 | — | No — pgroll/reshape own this model | Rejected: application invisibility is a core invariant; see [vision.md](vision.md) |
@@ -356,7 +369,8 @@ unmistakably marked as executed without an online-safety guarantee
 0). The value must name the table whose lock you accept — the owning table of the index —
 resolved from the catalog, and `--statement-timeout` must be spelled on the same command
 line. Only changes the engine understands but cannot run *safely* are eligible: today a
-single-relation plain `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE`. Refusals for
+single-relation plain `DROP INDEX` (never `CASCADE`, which also drops dependent objects such
+as a foreign key on another table), `REINDEX INDEX`, or `REINDEX TABLE`. Refusals for
 unrecognized SQL never are, and the refused statement's `blocking_passthrough_eligible`
 field on the plan report says whether a refusal qualifies. An exhausted lock budget is
 still a refusal (exit 2, nothing ran); a statement cancelled by its budget is a failure
@@ -426,8 +440,8 @@ Three related jobs stay with humans on purpose:
   the recovery handles, and what the rest license a human to do is
   [invalid-index-recovery.md](invalid-index-recovery.md).
 - **Index maintenance (`REINDEX` automation, bloat-driven rebuild scheduling).** The
-  engine executes `REINDEX CONCURRENTLY` when asked (see matrix); *deciding* when an
-  index needs rebuilding is monitoring-and-operations territory. Automating it is
+  engine does not drive `REINDEX` at all (see matrix) — run `REINDEX ... CONCURRENTLY`
+  directly; *deciding* when an index needs rebuilding is monitoring-and-operations territory. Automating it is
   considered but on hold for the same ownership reasons as above.
 
 ---

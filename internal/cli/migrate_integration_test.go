@@ -242,10 +242,93 @@ func TestMigrateExecutesRenameColumn(t *testing.T) {
 	assert.Equal(t, 1, n, "the rename must have committed")
 }
 
-// Acceptance (ii): a rewrite-requiring change is refused up front — the
-// planner classifies the type change as copy-and-swap before anything runs,
-// so no attempt ever holds ACCESS EXCLUSIVE doing rewrite work.
-func TestMigrateRefusesTypeRewriteAsUnavailable(t *testing.T) {
+// A type rewrite routes to the copy-and-swap backend and runs end to end
+// from this front door: the shadow table takes the new type, every row is
+// carried, the retained source is dropped, and the one verdict says so.
+// --quiesced keeps the run to the write fence, so the test server needs no
+// logical decoding.
+func TestMigrateRunsTypeRewriteViaCopyAndSwap(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %s.t (
+			id int PRIMARY KEY,
+			v  text
+		)`, schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(
+		"INSERT INTO %s.t SELECT g, repeat('x', 100) FROM generate_series(1, 1000) g", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
+	cmd.Quiesced = true
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+	assert.Equal(t, schema+".t", v.Table)
+	assert.False(t, v.Forced, "the copy-and-swap route is the planned path, not an override")
+
+	var typ string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT data_type FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
+	assert.Equal(t, "bigint", typ, "the swapped-in table carries the new type")
+	var count int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		fmt.Sprintf("SELECT count(*) FROM %s.t", schema)).Scan(&count))
+	assert.Equal(t, 1000, count, "every row is carried across the swap")
+	var retained int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+		 WHERE n.nspname = $1 AND c.relname LIKE '%\_old'`, schema).Scan(&retained))
+	assert.Equal(t, 0, retained, "without --keep-old the retained source is dropped")
+}
+
+// Without --free-disk a copy-and-swap route is refused by its preflight
+// before any session of the route opens: the verdict carries the route's
+// own cause and nothing about the table changes.
+func TestMigrateCopyAndSwapRefusesWithoutFreeDisk(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	require.NoError(t, err)
+
+	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd.Quiesced = true
+	cmd.JSON = true
+	var out strings.Builder
+	err = cmd.run(t.Context(), &out)
+	require.ErrorIs(t, err, verdict.ErrRefused)
+
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, v.Reason)
+	assert.Equal(t, verdict.Cause(preflight.CopySwapCauseDiskHeadroom), v.Cause)
+
+	var typ string
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT data_type FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
+	assert.Equal(t, "integer", typ, "the refused change must not touch the schema")
+}
+
+// A copy-and-swap-routed operation the engine does not carry yet is
+// refused up front — the planner classifies the volatile default as
+// copy-and-swap before anything runs and the router finds no backend for
+// it, so no attempt ever holds ACCESS EXCLUSIVE doing rewrite work.
+func TestMigrateRefusesVolatileDefaultAsUnavailable(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
@@ -257,7 +340,8 @@ func TestMigrateRefusesTypeRewriteAsUnavailable(t *testing.T) {
 		"INSERT INTO %s.t SELECT g, repeat('x', 100) FROM generate_series(1, 1000) g", schema))
 	require.NoError(t, err)
 
-	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
+	cmd := newMigrateCmd(url, fmt.Sprintf(
+		"ALTER TABLE %s.t ADD COLUMN joined timestamptz DEFAULT clock_timestamp()", schema))
 	cmd.JSON = true
 	var out strings.Builder
 	err = cmd.run(t.Context(), &out)
@@ -269,11 +353,11 @@ func TestMigrateRefusesTypeRewriteAsUnavailable(t *testing.T) {
 	assert.Equal(t, verdict.ReasonBackendUnavailable, v.Reason)
 	assert.Equal(t, schema+".t", v.Table)
 
-	var typ string
+	var n int
 	require.NoError(t, pool.QueryRow(t.Context(),
-		`SELECT data_type FROM information_schema.columns
-		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
-	assert.Equal(t, "integer", typ, "the refused change must not touch the schema")
+		`SELECT count(*) FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'joined'`, schema).Scan(&n))
+	assert.Equal(t, 0, n, "the refused change must not touch the schema")
 	var count int
 	require.NoError(t, pool.QueryRow(t.Context(),
 		fmt.Sprintf("SELECT count(*) FROM %s.t", schema)).Scan(&count))
@@ -571,9 +655,10 @@ func TestMigrateForceRunsSubmittedFormOverSubstitution(t *testing.T) {
 	assert.True(t, notNull, "the forced change must have committed")
 }
 
-// --force also overrides a backend-unavailable refusal: the rewrite-carrying
-// type change runs as a blind bounded attempt and commits on a small table.
-func TestMigrateForceRunsUnavailableRewrite(t *testing.T) {
+// --force also overrides the copy-and-swap route: the rewrite-carrying type
+// change runs natively as a blind bounded attempt instead of through the
+// shadow table, and commits on a small table.
+func TestMigrateForceRunsTypeRewriteNatively(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)

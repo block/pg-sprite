@@ -102,6 +102,7 @@ func TestRunnerCarriesAQuiescedTableFromNoRowToDone(t *testing.T) {
 	assert.True(t, result.Checkpoint.Watermark.Complete(), "the row carries the complete watermark")
 	assert.Equal(t, result.Shadow.SourceFingerprint, result.Checkpoint.SourceFingerprint)
 	assert.Equal(t, result.Shadow.TargetFingerprint, result.Checkpoint.TargetFingerprint)
+	assert.True(t, result.SwapProven, "this run's cutover made the proof")
 	assert.Equal(t, result.Shadow.ShadowOID, result.Swapped.LiveOID, "the shadow the run built is the live table")
 	assert.Equal(t, liveOID, result.Swapped.OldOID, "the source the run started from was retained as old")
 	assert.Equal(t, 3, result.Verification.Chunks, "2500 rows in thousand-row chunks is three chunks")
@@ -198,6 +199,49 @@ func TestRunnerRefusesARowAlreadyDone(t *testing.T) {
 	assert.Equal(t, schemachange.CauseResumeTerminal, schemachange.RefusalCauseOf(err))
 	assert.Equal(t, before, f.inspectRow(t, "orders"), "a refused run leaves the row as it found it")
 	assert.True(t, f.hasColumn(t, "orders", "sku"), "nothing was built for the second statement")
+}
+
+// Under ReplaceDone a second change on the same table replaces the first
+// run's done row inside the second run's lock session and runs to done:
+// both statements' shapes are live afterwards and the row records the
+// second run. A done row whose retained source still stands — the first
+// run kept it for a rollback window — is refused as terminal instead,
+// with the row and both relations as they were, since the next cutover
+// would only meet the old name taken after a shadow had been filled.
+func TestRunnerReplacesADoneRowWhenAsked(t *testing.T) {
+	t.Run("a done row whose retained source is dropped is replaced", func(t *testing.T) {
+		f := newRunnerFixture(t)
+		f.createOrders(t)
+		first, err := f.run(t, "orders", `ALTER TABLE %s.orders DROP COLUMN note`, schemachange.RunOptions{})
+		require.NoError(t, err)
+
+		second, err := f.run(t, "orders", `ALTER TABLE %s.orders DROP COLUMN sku`, schemachange.RunOptions{ReplaceDone: true})
+		require.NoError(t, err)
+
+		assert.Equal(t, checkpoint.PhaseDone, second.Checkpoint.Phase)
+		assert.NotEqual(t, first.Checkpoint.TargetFingerprint, second.Checkpoint.TargetFingerprint, "the second run wrote its own row")
+		row := f.inspectRow(t, "orders")
+		assert.Equal(t, second.Checkpoint.TargetFingerprint, row.TargetFingerprint, "the row under the table is the second run's")
+		assert.False(t, f.hasColumn(t, "orders", "note"), "the first statement's shape is still live")
+		assert.False(t, f.hasColumn(t, "orders", "sku"), "the second statement's shape is live")
+		assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
+	})
+
+	t.Run("a done row whose retained source still stands is refused", func(t *testing.T) {
+		f := newRunnerFixture(t)
+		f.createOrders(t)
+		_, err := f.run(t, "orders", `ALTER TABLE %s.orders DROP COLUMN note`, schemachange.RunOptions{KeepOld: true})
+		require.NoError(t, err)
+		before := f.inspectRow(t, "orders")
+		old := schemachange.OldName(f.schema, "orders")
+
+		_, err = f.run(t, "orders", `ALTER TABLE %s.orders DROP COLUMN sku`, schemachange.RunOptions{ReplaceDone: true})
+		require.Error(t, err)
+		assert.Equal(t, schemachange.CauseResumeTerminal, schemachange.RefusalCauseOf(err))
+		assert.Equal(t, before, f.inspectRow(t, "orders"), "the refused run leaves the done row in place")
+		assert.True(t, f.relationExists(t, old), "the retained source still stands")
+		assert.True(t, f.hasColumn(t, "orders", "sku"), "nothing was built for the second statement")
+	})
 }
 
 // AfterCheckpoint sees every save in order, with the row as saved, so a

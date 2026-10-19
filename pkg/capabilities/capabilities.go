@@ -224,7 +224,7 @@ func RenderDocument(input []byte, rows []Row) ([]byte, error) {
 		counts[r.StatusMark]++
 		tiers[r.Tier]++
 	}
-	summary := fmt.Sprintf("**%d operations: %d supported today, %d planned behind a typed refusal, %d out of scope\nby design, and %d with no online mechanism in PostgreSQL to build on.**", len(rows), tiers[TierOne], tiers[TierTwo], counts[StatusNoSafetyProblem]+counts[StatusOtherTool], counts[StatusNoOnlineMechanism])
+	summary := fmt.Sprintf("**%d operations: %d supported today, %d planned behind a typed refusal, %d out of scope\nby design, and %d with no online mechanism for pg-sprite to build on.**", len(rows), tiers[TierOne], tiers[TierTwo], counts[StatusNoSafetyProblem]+counts[StatusOtherTool], counts[StatusNoOnlineMechanism])
 	var err error
 	out, err = replaceRegion(out, "summary", summary)
 	if err != nil {

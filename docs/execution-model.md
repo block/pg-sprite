@@ -277,6 +277,20 @@ plan, one verdict per attempted statement, and a detail naming exactly which
 planned statements committed and remain in effect: the committed prefix at
 the plan level, statements instead of steps.
 
+Committing every planned statement is not proof the table converged: a
+concurrent session, an event trigger, or a planner gap can leave the table
+still differing from the desired schema after the last commit. So on an
+existing table `RunDesired` derives the plan again after the last commit and
+reports executed only when that fresh plan is empty. When it is not, the
+result is failed with `migrate.ErrNotConverged`, every verdict still reads
+executed, and the result's `convergence` field reports `not-converged` with the
+fresh plan as `remaining`, what a rerun would execute. A fresh plan that cannot
+be derived reports `unverifiable`, and a proven run reports `converged`, so a
+`--json` consumer tells the three apart without reading `detail`. A greenfield create
+does not re-plan, since deriving a plan builds the desired side in a scratch
+schema and needs `CREATE` on the database; it verifies instead that the new
+table owns every relation name the desired file claimed.
+
 ## Outcome codes
 
 `executor.Codes()` enumerates the closed vocabulary below, and
@@ -334,6 +348,9 @@ concurrently is.
 | `partition-of-unsupported` | yes | `CREATE TABLE PARTITION OF` locks the partitioned parent, which the absence proof does not cover |
 | `unsupported-create-step` | yes | A desired statement is not a shape the create path can run |
 | `pool-too-small` | yes | The pool cannot hold every session the operation needs at once: a build's session and verdict connection, or a recovery's own session beside those |
+| `replica-identity-drop` | yes | A native drop would remove what a replica identity index is built on, read again under the table's lock after planning; nothing was dropped. Point `REPLICA IDENTITY` at another unique index first, or `DEFAULT` if a usable primary key remains after the drop, then re-plan |
+| `adopted-index-drift` | yes | The index a planned `ADD CONSTRAINT ... USING INDEX` takes over was dropped, replaced under the same name, or left invalid after planning, read again under the table's lock; nothing was attached. Re-plan against the index as it stands |
+| `validated-constraint-drift` | yes | The constraint a planned `VALIDATE CONSTRAINT` validates was dropped or replaced under the same name after planning, read again under the validation's `SHARE UPDATE EXCLUSIVE` lock; nothing was validated. Re-plan against the constraint as it stands |
 | `table-not-found` | yes | The statement's qualified table does not exist |
 | `invariant-violation` | yes | A breach of the invariant registry; never a retry candidate |
 | `execution-failed` | no | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |
