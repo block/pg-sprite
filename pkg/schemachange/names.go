@@ -67,6 +67,8 @@ func OldDependentName(schema, table, dependent string) string {
 // table it was derived from: the hash has no inverse, but a derived relation
 // always lives in its source's schema, so the source is whichever table in
 // that schema derives the name. It returns ErrNotDerivedName when none does.
+// The answer does not depend on db's session search_path: a caller-built
+// pool with another schema ahead of the catalog gets the same source.
 func SourceOfDerivedName(ctx context.Context, db dbconn.Querier, schema, derived string) (string, DerivedKind, error) {
 	// INV: CO-9 — db runs under the caller's session search_path, so every
 	// catalog name is qualified and a planted overload in a searched schema
