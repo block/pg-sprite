@@ -85,6 +85,13 @@ const (
 	// the stream — and no drain to apply those changes under the swap lock
 	// (CO-1).
 	CauseCutoverUndrained RefusalCause = "cutover-undrained"
+	// CauseCutoverUnfenced means the swap of a quiesced proof found the
+	// source without the engine's write fence enabled ALWAYS under the
+	// swap lock (CO-1): the trigger was disabled, dropped, or replaced by
+	// one of another shape since it was installed, so a write may have
+	// reached the source after the pass that proved the shadow equal to
+	// it.
+	CauseCutoverUnfenced RefusalCause = "cutover-unfenced"
 	// CauseDrainDeferred means the shadow refused a batch the swap's drain
 	// had to apply under the swap lock (CO-6): a unique-key move the
 	// changes since the live pass cannot be ordered into the shadow. No
@@ -218,6 +225,7 @@ func RefusalCauses() []RefusalCause {
 		CauseIdentityHandoff,
 		CauseCutoverUnverified,
 		CauseCutoverUndrained,
+		CauseCutoverUnfenced,
 		CauseDrainDeferred,
 		CauseRelationReplaced,
 		CauseSchemaDrift,
@@ -259,7 +267,7 @@ func (c RefusalCause) Invariant() string {
 	case CauseShadowOwner, CauseForeignRelation, CauseGrantsDiffer, CauseIdentityHandoff,
 		CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid, CauseNameTaken:
 		return "ST-5"
-	case CauseCutoverUnverified, CauseCutoverUndrained:
+	case CauseCutoverUnverified, CauseCutoverUndrained, CauseCutoverUnfenced:
 		return "CO-1"
 	case CauseDrainDeferred:
 		return "CO-6"
@@ -296,8 +304,8 @@ func (c RefusalCause) Class() refusal.Class {
 	case CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed, CauseSourceShape,
 		CauseShadowOwner, CauseForeignRelation, CauseIdentityHandoff, CauseDrainDeferred,
 		CauseRelationReplaced, CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid,
-		CauseNameTaken, CauseOutcomeAmbiguous, CauseShadowUnrecorded, CauseResumeShadowGone,
-		CauseResumeSlotForeign, CauseResumeSlotHeld:
+		CauseNameTaken, CauseOutcomeAmbiguous, CauseCutoverUnfenced, CauseShadowUnrecorded,
+		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld:
 		return refusal.ClassEnvironmental
 	case CauseStatementConversion:
 		return refusal.ClassCapabilityBoundary
