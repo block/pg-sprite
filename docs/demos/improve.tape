@@ -15,6 +15,9 @@ Set Padding 16
 Set TypingSpeed 30ms
 Set Theme "Dracula"
 
+# The seed names public explicitly: the compose role is named pgsprite, like
+# the engine's own schema, so an unqualified name would land there once a
+# copy-swap run has created it.
 Hide
 Type `export PATH="$(git rev-parse --show-toplevel)/bin:$PATH"` Enter
 # The rendering machine's environment leaks into the recorded shell: strip
@@ -22,7 +25,7 @@ Type `export PATH="$(git rev-parse --show-toplevel)/bin:$PATH"` Enter
 # terminal and the GIF shows the diagnostic colors deterministically.
 Type "unset NO_COLOR && export TERM=xterm-256color" Enter
 Type "export PGSPRITE_URL='postgres://pgsprite:pgsprite@localhost:5432/pgsprite?sslmode=disable'" Enter
-Type `docker exec compose-postgres-1 psql -U pgsprite -d pgsprite -c 'DROP TABLE IF EXISTS users' -c 'CREATE TABLE users (id bigint PRIMARY KEY, email text)' -c "INSERT INTO users SELECT g, 'u'||g||'@x.com' FROM generate_series(1,1000) g" >/dev/null` Enter
+Type `docker exec compose-postgres-1 psql -U pgsprite -d pgsprite -c 'DROP TABLE IF EXISTS public.users' -c 'CREATE TABLE public.users (id bigint PRIMARY KEY, email text)' -c "INSERT INTO public.users SELECT g, 'u'||g||'@x.com' FROM generate_series(1,1000) g" >/dev/null` Enter
 Type `demo_dir="$(mktemp -d)" && cd "$demo_dir"` Enter
 Type "echo 'CREATE TABLE users (' > users.sql" Enter
 Type "echo '    id bigint PRIMARY KEY,' >> users.sql" Enter

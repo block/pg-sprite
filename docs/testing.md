@@ -377,7 +377,7 @@ same package cover the rest of it.
 | Pool config, bounded session timeouts | [pkg/dbconn](../pkg/dbconn/pool_config_test.go), [integration](../pkg/dbconn/dbconn_integration_test.go) |
 | Retry classification and behavior | [pkg/dbconn/retry_test.go](../pkg/dbconn/retry_test.go) |
 | RDS/Aurora TLS (unit) | [pkg/dbconn/rds_test.go](../pkg/dbconn/rds_test.go) |
-| Verify-full TLS against a live TLS-only server | [pkg/dbconn/tls_integration_test.go](../pkg/dbconn/tls_integration_test.go) |
+| Verify-full TLS against a live TLS-only server; a CA bundle never falls back to plaintext against a server that accepts both (`TestTLSIntegrationNoPlaintextFallback`, `StartPostgresTLSOrPlaintext`) | [pkg/dbconn/tls_integration_test.go](../pkg/dbconn/tls_integration_test.go), [CA pinning (unit)](../pkg/dbconn/ca_tls_test.go) |
 | Targeted blocker termination | [pkg/dbconn/dbconn_integration_test.go](../pkg/dbconn/dbconn_integration_test.go) |
 | Test harness self-checks | [internal/testutil](../internal/testutil/postgres_test.go) |
 | RDS control-plane provisioning → endpoint discovery → `dbconn` connect, reader read-only behavior, stop/start resilience, metadata failover, error contract, password rotation (Ministack) | [internal/testutil/ministack_integration_test.go](../internal/testutil/ministack_integration_test.go) |
@@ -437,7 +437,7 @@ implementation makes them meaningful:
 
 | Pattern (peer precedent) | Where it lands here |
 | --- | --- |
-| TLS-required server, verify-full + untrusted-CA rejection (pg-delta) | **Done** — `StartPostgresTLS` + [tls_integration_test.go](../pkg/dbconn/tls_integration_test.go). |
+| TLS-required server, verify-full + untrusted-CA rejection (pg-delta) | **Done** — `StartPostgresTLS` + [tls_integration_test.go](../pkg/dbconn/tls_integration_test.go); `StartPostgresTLSOrPlaintext` proves a CA bundle never falls back to plaintext. |
 | Non-`public` schema placement (pgroll matrix dimension) | Structural — every test already runs in a throwaway non-`public` schema; Phase 1 classifier tests must keep qualifying objects. |
 | Partitioned tables (pg_repack regression, pg-schema-diff acceptance) | Phases 1–2 — classifier and native-executor cases for partitioned parents/partitions (`DETACH PARTITION CONCURRENTLY` is PG 14+). |
 | Tablespaces, including quoted names (pg_repack) | Phases 4–7 — shadow-table placement must preserve tablespace. |

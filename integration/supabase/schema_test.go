@@ -6,6 +6,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -90,16 +91,20 @@ func TestDesiredExtensionType(t *testing.T) {
 	assert.Equal(t, "citext", typ)
 }
 
+// A text-to-integer rewrite routes to the live copy-and-swap backend; with
+// no reported disk headroom its preflight refuses and the column keeps its
+// type and value.
 func TestTextRewriteLeavesSchemaUnchanged(t *testing.T) {
 	pool := fixture(t)
 	table := newTable(t, pool, "pgsprite_refused_rewrite")
 	execSQL(t, pool, "INSERT INTO "+table+" VALUES (1,'00000000-0000-0000-0000-000000000001','123')")
 	st, err := statement.ParseOne("ALTER TABLE " + table + " ALTER COLUMN body TYPE integer USING body::integer")
 	require.NoError(t, err)
-	v, err := migrate.Run(t.Context(), pool, st, migrate.DefaultOptions())
+	v, err := migrate.Run(t.Context(), pool, st, copySwapOptions())
 	require.NoError(t, err)
 	require.Equal(t, verdict.OutcomeRefused, v.Outcome)
-	assert.Equal(t, verdict.ReasonBackendUnavailable, v.Reason)
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, v.Reason)
+	assert.Equal(t, verdict.Cause(preflight.CopySwapCauseDiskHeadroom), v.Cause)
 	var typ, body string
 	require.NoError(t, pool.QueryRow(t.Context(), "SELECT pg_typeof(body)::text,body FROM "+table+" WHERE id=1").Scan(&typ, &body))
 	assert.Equal(t, "text", typ)
