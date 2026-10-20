@@ -44,16 +44,26 @@ type runState struct {
 
 // dispatch reads the target's checkpoint row and starts fresh or resumes
 // as it says, returning the state the phases continue from (ST-2). A done
-// row is replaced first when RunOptions.ReplaceDone asks for it, and the
-// run then starts fresh as if there had been none.
+// row is replaced first when RunOptions.ReplaceDone asks for it, and any
+// other row — or a shadow no row records — is discarded first when
+// RunOptions.Restart asks for it; the run then starts fresh as if there
+// had been none.
 func (r *Runner) dispatch(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, st statement.Statement) (runState, error) {
 	cp, err := r.store.Inspect(ctx, target.Schema(), target.Table())
 	switch {
+	case errors.Is(err, checkpoint.ErrNotFound) && r.opts.Restart:
+		if err := r.discardUnrecorded(ctx, pool, lock, target); err != nil {
+			return runState{}, err
+		}
 	case errors.Is(err, checkpoint.ErrNotFound):
 	case err != nil:
 		return runState{}, err
 	case cp.Phase == checkpoint.PhaseDone && r.opts.ReplaceDone:
 		if err := r.replaceDoneRow(ctx, pool, lock, target, cp); err != nil {
+			return runState{}, err
+		}
+	case cp.Phase != checkpoint.PhaseDone && r.opts.Restart:
+		if err := r.discardRow(ctx, pool, lock, target, cp); err != nil {
 			return runState{}, err
 		}
 	default:

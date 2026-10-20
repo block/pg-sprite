@@ -471,5 +471,5 @@ func TestRunnerStopsOnAShadowThatDiffersFromTheSource(t *testing.T) {
 	assert.Zero(t, result, "a run that stopped hands back no result")
 	assert.Equal(t, checkpoint.PhaseVerifying, f.inspectRow(t, "orders").Phase, "the row stays where the pass found the difference")
 	assert.Equal(t, sourceOID, f.relationOID(t, "orders"), "nothing was swapped")
-	assert.True(t, f.hasFence(t, "orders"), "the source stays fenced for the operator to abandon the run")
+	assert.True(t, f.hasFence(t, "orders"), "the source stays fenced for the operator to start the run over")
 }
