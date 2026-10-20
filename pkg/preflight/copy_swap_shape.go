@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 // EngineSchema is the schema the engine owns in every target database: the
@@ -100,6 +102,41 @@ func CopySwapRefusalCauses() []CopySwapRefusalCause {
 		CopySwapCauseSlotCollision,
 		CopySwapCauseSlotHeadroom,
 		CopySwapCauseDiskHeadroom,
+	}
+}
+
+// Class is the routing class of the cause, from docs/refusal-classes.md:
+// what kind of boundary the consumer is looking at. A replica identity the
+// operator can set, and every cluster and volume cause — a server setting,
+// a foreign slot, exhausted slot or sender headroom, a short or unmeasured
+// volume — are environmental: the same table is admitted once state outside
+// the engine changes, and no engine release is waited on. Every other shape
+// cause is a capability boundary: a wider key family, an OID-bound dependent
+// re-pointed at cutover, a persistence or row-security path the engine has
+// not built. The class is a triage decision; the cause's row in the document
+// decides what the consumer does next. The zero cause, and an unknown one,
+// have no class.
+func (c CopySwapRefusalCause) Class() refusal.Class {
+	switch c {
+	case CopySwapCauseReplicaIdentity,
+		CopySwapCauseLogicalDecodingUnavailable,
+		CopySwapCauseSlotCollision,
+		CopySwapCauseSlotHeadroom,
+		CopySwapCauseDiskHeadroom:
+		return refusal.ClassEnvironmental
+	case CopySwapCausePKUnsupported,
+		CopySwapCauseForeignKeys,
+		CopySwapCauseTriggers,
+		CopySwapCausePartitioned,
+		CopySwapCauseUnlogged,
+		CopySwapCauseForceRLS,
+		CopySwapCauseDependentViews,
+		CopySwapCausePublicationMember,
+		CopySwapCauseSubscriptionTarget,
+		CopySwapCauseDependents:
+		return refusal.ClassCapabilityBoundary
+	default:
+		return ""
 	}
 }
 

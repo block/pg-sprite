@@ -167,15 +167,21 @@ func readSwappedTable(ctx context.Context, tx pgx.Tx, expected Proof) (SwappedTa
 // is retryable: the same call answers once that backend exits.
 func refuseSwapInFlight(ctx context.Context, tx pgx.Tx, expected Proof) error {
 	var holders int
+	// INV: CO-9 — every catalog name, operator, and type is qualified, so a
+	// planted overload in a searched schema cannot answer this read.
 	err := tx.QueryRow(ctx, `
-		SELECT count(*)
+		SELECT pg_catalog.count(*)
 		FROM pg_catalog.pg_locks l
-		WHERE l.locktype = 'relation'
+		WHERE l.locktype OPERATOR(pg_catalog.=) 'relation'
 		  AND l.granted
-		  AND l.database = (SELECT d.oid FROM pg_catalog.pg_database d WHERE d.datname = pg_catalog.current_database())
-		  AND l.relation IN ($1::oid, $2::oid)
-		  AND l.mode = 'AccessExclusiveLock'
-		  AND l.pid <> pg_catalog.pg_backend_pid()`, expected.SourceOID, expected.ShadowOID).Scan(&holders)
+		  AND l.database OPERATOR(pg_catalog.=) (
+		      SELECT d.oid
+		      FROM pg_catalog.pg_database d
+		      WHERE d.datname OPERATOR(pg_catalog.=) pg_catalog.current_database())
+		  AND (l.relation OPERATOR(pg_catalog.=) $1::pg_catalog.oid
+		       OR l.relation OPERATOR(pg_catalog.=) $2::pg_catalog.oid)
+		  AND l.mode OPERATOR(pg_catalog.=) 'AccessExclusiveLock'
+		  AND l.pid OPERATOR(pg_catalog.<>) pg_catalog.pg_backend_pid()`, expected.SourceOID, expected.ShadowOID).Scan(&holders)
 	if err != nil {
 		return fmt.Errorf("check for a swap in flight on %s.%s: %w", expected.Schema, expected.SourceTable, err)
 	}
@@ -279,7 +285,12 @@ func confirmOwner(ctx context.Context, tx pgx.Tx, expected Proof, liveOID, oldOI
 // readOwner returns the name of the role that owns the relation.
 func readOwner(ctx context.Context, tx pgx.Tx, oid uint32) (string, error) {
 	var owner string
-	err := tx.QueryRow(ctx, `SELECT pg_get_userbyid(c.relowner) FROM pg_class c WHERE c.oid = $1`, oid).Scan(&owner)
+	// INV: CO-9 — every catalog name is qualified, so a planted overload in a
+	// searched schema cannot answer this read.
+	err := tx.QueryRow(ctx, `
+		SELECT pg_catalog.pg_get_userbyid(c.relowner)
+		FROM pg_catalog.pg_class c
+		WHERE c.oid OPERATOR(pg_catalog.=) $1`, oid).Scan(&owner)
 	if err != nil {
 		return "", fmt.Errorf("read owner of relation %d: %w", oid, err)
 	}
@@ -354,11 +365,13 @@ func pairByDerivedName(kind DependentKind, schema, table string, old, live []str
 // not an error.
 func lookupRelation(ctx context.Context, tx pgx.Tx, schema, name string) (uint32, bool, error) {
 	var oid uint32
+	// INV: CO-9 — every catalog name is qualified, so a planted overload in a
+	// searched schema cannot answer this read.
 	err := tx.QueryRow(ctx, `
 		SELECT c.oid
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2`, schema, name).Scan(&oid)
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`, schema, name).Scan(&oid)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, false, nil
 	}
@@ -372,11 +385,13 @@ func lookupRelation(ctx context.Context, tx pgx.Tx, schema, name string) (uint32
 // bears and whether the catalog still has it; a dropped relation is an
 // answer here, not an error.
 func lookupRelationName(ctx context.Context, tx pgx.Tx, oid uint32) (schema, name string, exists bool, err error) {
+	// INV: CO-9 — every catalog name is qualified, so a planted overload in a
+	// searched schema cannot answer this read.
 	err = tx.QueryRow(ctx, `
 		SELECT n.nspname, c.relname
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE c.oid = $1`, oid).Scan(&schema, &name)
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE c.oid OPERATOR(pg_catalog.=) $1`, oid).Scan(&schema, &name)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", "", false, nil
 	}

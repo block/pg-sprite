@@ -90,7 +90,10 @@ func (c *hookedClock) Now() time.Time {
 // the copier's first clock reading, so the chunk holding key waits on the
 // unique index and every other chunk lands around it; the run is then
 // cancelled with that one chunk in flight, which is the mid-copy kill the
-// checkpoint must survive.
+// checkpoint must survive. The returned func waits for the pin and rolls
+// it back. The cleanup first disarms the hook, so a test that fails
+// before the copier reads its clock ends with no pin to roll back instead
+// of waiting on a reading that never comes.
 func (f copyFixture) pinShadowKey(t *testing.T, shadow schemachange.BuiltShadow, key int64) (clock *hookedClock, pinned chan struct{}, release func()) {
 	t.Helper()
 	pinned = make(chan struct{})
@@ -102,17 +105,28 @@ func (f copyFixture) pinShadowKey(t *testing.T, shadow schemachange.BuiltShadow,
 		if pinErr != nil {
 			return
 		}
-		_, pinErr = tx.Exec(t.Context(), "INSERT INTO "+pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()+" (id, qty) VALUES ($1, 0)", key)
+		if _, pinErr = tx.Exec(t.Context(), "INSERT INTO "+pgx.Identifier{f.schema, shadow.ShadowTable()}.Sanitize()+" (id, qty) VALUES ($1, 0)", key); pinErr != nil {
+			// A failed insert leaves the transaction holding its pooled
+			// connection, and the package's pool.Close waits on it, so it
+			// is rolled back here, before release reports pinErr.
+			_ = tx.Rollback(context.WithoutCancel(t.Context()))
+			tx = nil
+		}
 	}}
 	var once sync.Once
 	release = func() {
 		once.Do(func() {
 			<-pinned
 			require.NoError(t, pinErr)
-			assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
+			if tx != nil {
+				assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
+			}
 		})
 	}
-	t.Cleanup(release)
+	t.Cleanup(func() {
+		clock.once.Do(func() { close(pinned) })
+		release()
+	})
 	return clock, pinned, release
 }
 

@@ -34,6 +34,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/progress"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -229,7 +230,27 @@ type sequenceStep struct {
 // lock_timeout retries on each owner-gated step, exactly as in
 // ExecuteNative.
 func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy) (SequenceReport, error) {
-	return runSequence(ctx, pool, pt, steps, b, retry, nil)
+	return runSequence(ctx, pool, pt, steps, b, retry, nil, nil, nil)
+}
+
+// RunSequenceAdopting is RunSequence for a planned ADD CONSTRAINT ... USING
+// INDEX: the step that takes over adopts.Index first checks, under the
+// table's lock and in the same transaction, that the index is still valid
+// and still has adopts.Def, and refuses with ErrAdoptedIndexDrift when it
+// is not. A sequence with no step that takes over that index is refused as
+// an invariant violation before anything runs.
+func RunSequenceAdopting(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, adopts schemadiff.IndexAdoption) (SequenceReport, error) {
+	return runSequence(ctx, pool, pt, steps, b, retry, &adopts, nil, nil)
+}
+
+// RunSequenceValidating is RunSequence for a planned VALIDATE CONSTRAINT:
+// the step that validates validates.Constraint first checks, under the
+// table's lock and in the same transaction, that the constraint still has
+// validates.Def, and refuses with ErrValidatedConstraintDrift when it does
+// not. A sequence with no step that validates that constraint is refused
+// as an invariant violation before anything runs.
+func RunSequenceValidating(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, validates schemadiff.ConstraintValidation) (SequenceReport, error) {
+	return runSequence(ctx, pool, pt, steps, b, retry, nil, &validates, nil)
 }
 
 // RunSequenceWithProgress runs a sequence while updating tracker with the
@@ -240,7 +261,7 @@ func RunSequenceWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflig
 	}
 	tracker.Start(len(steps), progress.OperationAdmitting)
 	defer func() { tracker.Finish(err) }()
-	return runSequence(ctx, pool, pt, steps, b, retry, tracker)
+	return runSequence(ctx, pool, pt, steps, b, retry, nil, nil, tracker)
 }
 
 // elapsedSince reports the time since start on the tracker's injected clock
@@ -254,7 +275,7 @@ func elapsedSince(tracker *progress.Tracker, start time.Time) time.Duration {
 	return time.Since(start)
 }
 
-func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, tracker *progress.Tracker) (SequenceReport, error) {
+func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, tracker *progress.Tracker) (SequenceReport, error) {
 	var rep SequenceReport
 	if err := b.validate(); err != nil {
 		return rep, err
@@ -291,6 +312,14 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 	if sequenceHasConcurrentBuild(admitted) && pool.Config().MaxConns < 2 {
 		return rep, ErrPoolTooSmall
 	}
+	adoptingStep, err := adoptionStep(admitted, adopts)
+	if err != nil {
+		return rep, err
+	}
+	validatingStep, err := validationStep(admitted, validates)
+	if err != nil {
+		return rep, err
+	}
 	for i, step := range admitted {
 		start := time.Now()
 		if tracker != nil {
@@ -306,13 +335,21 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 				indexReport = &r
 			}
 		case StepValidateConstraint:
+			var stepValidates *schemadiff.ConstraintValidation
+			if i == validatingStep {
+				stepValidates = validates
+			}
 			err = executeNative(ctx, pool, pt, step.st, Budget{
 				LockTimeout:      b.Validate.LockTimeout,
 				StatementTimeout: b.Validate.Overall,
-			}, retry, tracker)
+			}, retry, nil, stepValidates, tracker)
 			err = corroborateValidateCancel(ctx, err, b.Validate, elapsedSince(tracker, start))
 		case StepBrief:
-			err = executeNative(ctx, pool, pt, step.st, b.Brief, retry, tracker)
+			var stepAdopts *schemadiff.IndexAdoption
+			if i == adoptingStep {
+				stepAdopts = adopts
+			}
+			err = executeNative(ctx, pool, pt, step.st, b.Brief, retry, stepAdopts, nil, tracker)
 		default:
 			// Admission produces only the three kinds above; an unknown
 			// kind here is a programming error and aborts fail-closed.
@@ -493,4 +530,29 @@ func admitAlterTableStep(st statement.Statement, sql string) (sequenceStep, erro
 		return sequenceStep{st: st, kind: StepValidateConstraint}, nil
 	}
 	return sequenceStep{st: st, kind: StepBrief}, nil
+}
+
+// adoptionStep returns the index of the admitted step that takes over
+// adopts.Index, or -1 when adopts is nil. A planned adoption no step
+// performs, or one a step other than a brief native attempt performs, is a
+// breach of the plan's own contract and refuses before anything runs.
+func adoptionStep(admitted []sequenceStep, adopts *schemadiff.IndexAdoption) (int, error) {
+	if adopts == nil {
+		return -1, nil
+	}
+	for i, step := range admitted {
+		ok, err := adoptsIndex(step.st, adopts.Index)
+		if err != nil {
+			return -1, err
+		}
+		if !ok {
+			continue
+		}
+		if step.kind != StepBrief {
+			return -1, fmt.Errorf("%w: step %d takes over index %s as a %s step, not a brief one",
+				ErrInvariantViolation, i+1, adopts.Index, step.kind)
+		}
+		return i, nil
+	}
+	return -1, fmt.Errorf("%w: no step takes over index %s, which the plan adopts", ErrInvariantViolation, adopts.Index)
 }

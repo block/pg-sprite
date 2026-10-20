@@ -106,17 +106,18 @@ func TestDryRunTextRunAsWritten(t *testing.T) {
 	assert.NotContains(t, text, "safer online sequence")
 }
 
-// A copy-and-swap route in a build without that backend is refused with the
-// backend named, no SQL offered to run, and no apply footer.
-func TestDryRunTextBackendUnavailable(t *testing.T) {
+// A copy-and-swap route the engine carries renders as one step: no literal
+// SQL is listed, the note says what the run does, and the apply footer
+// invites the real run.
+func TestDryRunTextCopyAndSwapExecutes(t *testing.T) {
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
-	report.Disposition = router.DispositionUnavailable
+	report.Disposition = router.DispositionExecute
 	report.Statements = append(report.Statements, plan.Statement{
 		SQL:         `ALTER TABLE "users" ALTER COLUMN "id" TYPE text`,
 		Route:       planner.RouteCopyAndSwap,
 		Backend:     router.BackendCopyAndSwap,
-		Disposition: router.DispositionUnavailable,
+		Disposition: router.DispositionExecute,
 		Decisions: []planner.Decision{{
 			Operation: "alter column type",
 			Route:     planner.RouteCopyAndSwap,
@@ -127,10 +128,42 @@ func TestDryRunTextBackendUnavailable(t *testing.T) {
 	var out strings.Builder
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
-	assert.Contains(t, text, "error[backend-unavailable]:\n  refused — needs the copy-and-swap backend")
-	assert.Contains(t, text, "note[type-rewrite]:\n  alter column type — the type conversion forces a full")
-	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#backend-unavailable\n")
+	assert.Contains(t, text, "note[type-rewrite]:\n  alter column type — converting or checking every row for the column's\n  type forces a full")
+	assert.Contains(t, text, "note:\n  pg-sprite will run it as a copy-and-swap: build a shadow table")
+	assert.Contains(t, text, "is not part of this dry run", "the note says the route's preflight is read at the run, not here")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#type-rewrite\n")
+	assert.Contains(t, text, "plan:\n  public.users (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
+	assert.Contains(t, text, "apply:\n  re-run without --dry-run\n")
+	assert.NotContains(t, text, "error[")
+	assert.NotContains(t, text, "runs as written")
+}
+
+// A copy-and-swap route for an operation the engine does not carry yet is
+// refused with the backend named, no SQL offered to run, and no apply
+// footer.
+func TestDryRunTextBackendUnavailable(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+	report.Disposition = router.DispositionUnavailable
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         `ALTER TABLE "users" ADD COLUMN "joined" timestamptz DEFAULT now()`,
+		Route:       planner.RouteCopyAndSwap,
+		Backend:     router.BackendCopyAndSwap,
+		Disposition: router.DispositionUnavailable,
+		Decisions: []planner.Decision{{
+			Operation: "add column joined",
+			Route:     planner.RouteCopyAndSwap,
+			Reason:    planner.ReasonVolatileDefault,
+		}},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := out.String()
+	assert.Contains(t, text, "error[backend-unavailable]:\n  refused — needs the copy-and-swap backend")
+	assert.Contains(t, text, "note[volatile-default]:\n  add column joined — a default computed for every row forces a full table")
+	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#backend-unavailable\n")
+	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#volatile-default\n")
 	assert.Contains(t, text, "plan:\n  public.users (PostgreSQL 16.10) — 1 statement, 0 steps to run, 1 refused\n")
 	assert.NotContains(t, text, "pg-sprite will run")
 	assert.NotContains(t, text, "apply:")
@@ -212,12 +245,12 @@ func TestDryRunTextRefusalAndDestructive(t *testing.T) {
 func TestDryRunTextUnverifiedNote(t *testing.T) {
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema, report.Table = "public", "missing"
-	report.Disposition = router.DispositionUnavailable
+	report.Disposition = router.DispositionExecute
 	report.Statements = append(report.Statements, plan.Statement{
 		SQL:         `ALTER TABLE "missing" ALTER COLUMN "c" TYPE text`,
 		Route:       planner.RouteCopyAndSwap,
 		Backend:     router.BackendCopyAndSwap,
-		Disposition: router.DispositionUnavailable,
+		Disposition: router.DispositionExecute,
 		Decisions: []planner.Decision{{
 			Operation:  "alter column type",
 			Route:      planner.RouteCopyAndSwap,

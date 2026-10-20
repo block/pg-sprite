@@ -115,8 +115,9 @@ func TestDiffPrintsOrderedPlanJSON(t *testing.T) {
 }
 
 // A desired state that needs a table rewrite routes to the copy-and-swap
-// backend, and the routed plan says that backend is unavailable in this
-// build — the plan is honest about what execution would do.
+// backend, and the routed plan says execution would run it there: no
+// native SQL is listed, because the shadow-table engine runs the gated
+// statement rather than a native sequence.
 func TestDiffRoutesRewriteToCopyAndSwap(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -130,18 +131,18 @@ func TestDiffRoutesRewriteToCopyAndSwap(t *testing.T) {
 	cmd := newDiffCmd(t, url, schema, "CREATE TABLE events (id bigint PRIMARY KEY)")
 	cmd.JSON = true
 	var out strings.Builder
-	require.ErrorIs(t, cmd.run(t.Context(), &out), verdict.ErrRefused,
-		"a plan execution would refuse exits with the refusal code")
+	require.NoError(t, cmd.run(t.Context(), &out),
+		"a plan execution would run exits with the success code")
 
 	var report plan.Report
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &report))
-	assert.Equal(t, router.DispositionUnavailable, report.Disposition)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
 	require.Len(t, report.Statements, 1)
 	ch := report.Statements[0]
 	assert.Equal(t, planner.RouteCopyAndSwap, ch.Route)
 	assert.Equal(t, router.BackendCopyAndSwap, ch.Backend)
-	assert.Equal(t, router.DispositionUnavailable, ch.Disposition)
-	assert.Empty(t, ch.ExecSQL)
+	assert.Equal(t, router.DispositionExecute, ch.Disposition)
+	assert.Empty(t, ch.ExecSQL, "the copy-and-swap backend lists no native SQL")
 	require.Len(t, ch.Decisions, 1)
 	assert.Equal(t, planner.ReasonTypeRewrite, ch.Decisions[0].Reason)
 }

@@ -21,8 +21,12 @@ const (
 	// carrying another value was written by an engine whose columns mean
 	// something else, and is incompatible whatever its fingerprints say.
 	// In this format a run that has built its shadow carries the shadow's
-	// proof in the row.
-	FormatVersion int32 = 2
+	// proof in the row, and the model fingerprints digest the table's
+	// storage parameters and its columns' sequence declarations. What the fingerprints digest is part of the
+	// format: a row whose fingerprints were computed another way would
+	// otherwise surface as a fingerprint mismatch, blaming the run, rather
+	// than as a row an older engine wrote.
+	FormatVersion int32 = 3
 	// SchemaName is the engine-owned schema the checkpoint table lives in.
 	// It is the engine's, not the target's, so one table holds every
 	// target's row (D3) and no target schema is written to. It is the same

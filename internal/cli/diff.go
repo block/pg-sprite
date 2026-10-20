@@ -172,8 +172,8 @@ func writeChangeText(out io.Writer, ps plan.Statement) error {
 }
 
 // annotate renders one statement's route annotation: the route, the
-// distinct decision reasons, and the availability note for backends this
-// build does not implement.
+// distinct decision reasons, and the availability note for an operation
+// its backend does not carry in this build.
 func annotate(ps plan.Statement) string {
 	var reasons []string
 	seen := map[planner.Reason]bool{}
@@ -186,7 +186,7 @@ func annotate(ps plan.Statement) string {
 	s := fmt.Sprintf("%s (%s)", ps.Route, strings.Join(reasons, ", "))
 	switch ps.Disposition {
 	case router.DispositionUnavailable:
-		s += ": needs the " + string(ps.Backend) + " backend, which is not implemented yet"
+		s += ": needs the " + string(ps.Backend) + " backend, which does not carry this operation yet"
 	case router.DispositionRewriteRequired:
 		s += ": blocks as submitted and no online rewrite was constructed — the engine will not run it"
 	case router.DispositionRefuse:

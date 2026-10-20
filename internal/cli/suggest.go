@@ -67,7 +67,7 @@ func writeSuggestText(out io.Writer, pal palette, name string, report suggest.Re
 			fmt.Sprintf("%s — %s", s.Operation, impactText(s.Reason)))
 		docs = appendCode(docs, onlineDDLReferenceURL+"#"+string(s.Reason))
 		if len(s.Recommended) == 0 {
-			w.diag("help", string(s.Guidance), guidanceText(s.Guidance))
+			w.diag("help", string(s.Guidance), suggest.ManualPath(s.Guidance))
 			docs = appendCode(docs, suggestReportURL+"#"+string(s.Guidance))
 			continue
 		}
@@ -83,27 +83,6 @@ func writeSuggestText(out io.Writer, pal palette, name string, report suggest.Re
 	w.printf("  %s — %s; advisory only, nothing was executed\n", name,
 		countNoun(len(report.Suggestions), "suggestion"))
 	return w.err
-}
-
-// guidanceText renders the manual path a guidance code names. An unknown
-// code renders as itself: the typed value is the contract, the prose is
-// display only.
-func guidanceText(g suggest.Guidance) string {
-	switch g {
-	case suggest.GuidanceSplitStatement:
-		return "split the statement into one operation per statement, then advise again"
-	case suggest.GuidanceAddColumnThenConstraint:
-		return "add the plain column first, then build the constraint as a separate, named ADD CONSTRAINT with its online pattern"
-	case suggest.GuidancePrevalidatedCheck:
-		return "pre-add a validated CHECK matching the partition bound on the child, attach, then drop it"
-	case suggest.GuidanceNotNullScaffold:
-		return "prove the invariant with a NOT VALID CHECK plus an online VALIDATE, then SET NOT NULL is a catalog flip"
-	case suggest.GuidanceNameConstraintThenValidate:
-		return "name the constraint, add it NOT VALID, then VALIDATE CONSTRAINT online"
-	case suggest.GuidanceUniqueIndexThenConstraint:
-		return "build the unique index with CREATE UNIQUE INDEX CONCURRENTLY, then attach it with ADD CONSTRAINT ... USING INDEX"
-	}
-	return string(g)
 }
 
 // joinCaveats renders the typed caveats as a comma-separated list.

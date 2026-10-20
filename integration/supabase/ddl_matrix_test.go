@@ -6,6 +6,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/diffplan"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
@@ -300,16 +301,26 @@ func runNativeDDL(t *testing.T, tc nativeDDLCase) {
 	verifyAPITenants(t, "pgsprite_native_"+tc.name, map[int][]int{1: {1}, 2: {2}, 3: {}})
 }
 
-// The safe_prefix addition proves whole-plan refusal: even a supported change
-// must remain unapplied when another change requires unavailable copy-and-swap.
+// A copy-and-swap probe pairs an imperative statement with the desired
+// schema that plans to it. The safe_prefix addition rides along in both: for
+// a shape the engine does not carry it proves whole-plan refusal — even a
+// supported change stays unapplied when another needs the unavailable
+// backend; for a shape the engine carries it shows the native sibling
+// riding along in the one routed statement.
 type copySwapCase struct {
 	ddl     string
 	desired string
+	// carried says the copy-and-swap engine runs this shape, so the route
+	// is live and only its preflight stands between the statement and the
+	// table. Unset, the router refuses the shape as backend-unavailable.
+	carried bool
 }
 
-// Integer widening needs copy-and-swap, so both entry points must refuse before applying any DDL.
-func TestIntegerWideningRequiresUnavailableCopySwap(t *testing.T) {
+// Integer widening is carried by the copy-and-swap engine: the route is live,
+// and its preflight refuses fail-closed on the realtime publication.
+func TestIntegerWideningRoutesToCopySwap(t *testing.T) {
 	runServiceRefusal(t, copySwapCase{
+		carried: true,
 		ddl: `ALTER TABLE %s
 			ADD COLUMN safe_prefix text,
 			ALTER COLUMN id TYPE bigint`,
@@ -325,9 +336,12 @@ func TestIntegerWideningRequiresUnavailableCopySwap(t *testing.T) {
 	})
 }
 
-// Converting text to integer needs copy-and-swap, even when all fixture values can be cast.
-func TestTextToIntegerRequiresUnavailableCopySwap(t *testing.T) {
+// Converting text to integer is carried by the copy-and-swap engine even when
+// every fixture value casts; the route is live and its preflight refuses
+// fail-closed on the realtime publication.
+func TestTextToIntegerRoutesToCopySwap(t *testing.T) {
 	runServiceRefusal(t, copySwapCase{
+		carried: true,
 		ddl: `ALTER TABLE %s
 			ADD COLUMN safe_prefix text,
 			ALTER COLUMN body TYPE integer USING body::integer`,
@@ -343,9 +357,11 @@ func TestTextToIntegerRequiresUnavailableCopySwap(t *testing.T) {
 	})
 }
 
-// Narrowing varchar is refused through the unavailable copy-and-swap path.
-func TestVarcharShrinkRequiresUnavailableCopySwap(t *testing.T) {
+// Narrowing varchar is carried by the copy-and-swap engine; the route is live
+// and its preflight refuses fail-closed on the realtime publication.
+func TestVarcharShrinkRoutesToCopySwap(t *testing.T) {
 	runServiceRefusal(t, copySwapCase{
+		carried: true,
 		ddl: `ALTER TABLE %s
 			ADD COLUMN safe_prefix text,
 			ALTER COLUMN label TYPE varchar(4)`,
@@ -361,9 +377,11 @@ func TestVarcharShrinkRequiresUnavailableCopySwap(t *testing.T) {
 	})
 }
 
-// Changing numeric scale is refused through the unavailable copy-and-swap path.
-func TestNumericScaleChangeRequiresUnavailableCopySwap(t *testing.T) {
+// Changing numeric scale is carried by the copy-and-swap engine; the route is
+// live and its preflight refuses fail-closed on the realtime publication.
+func TestNumericScaleChangeRoutesToCopySwap(t *testing.T) {
 	runServiceRefusal(t, copySwapCase{
+		carried: true,
 		ddl: `ALTER TABLE %s
 			ADD COLUMN safe_prefix text,
 			ALTER COLUMN amount TYPE numeric(8, 1)`,
@@ -379,7 +397,9 @@ func TestNumericScaleChangeRequiresUnavailableCopySwap(t *testing.T) {
 	})
 }
 
-// A volatile UUID default needs copy-and-swap rather than a metadata-only column addition.
+// A volatile UUID default needs copy-and-swap rather than a metadata-only
+// column addition, and the engine does not carry it yet: both entry points
+// refuse before applying any DDL.
 func TestVolatileUUIDDefaultRequiresUnavailableCopySwap(t *testing.T) {
 	runServiceRefusal(t, copySwapCase{
 		ddl: `ALTER TABLE %s
@@ -398,7 +418,9 @@ func TestVolatileUUIDDefaultRequiresUnavailableCopySwap(t *testing.T) {
 	})
 }
 
-// A volatile timestamp default needs copy-and-swap rather than a metadata-only column addition.
+// A volatile timestamp default needs copy-and-swap rather than a metadata-only
+// column addition, and the engine does not carry it yet: both entry points
+// refuse before applying any DDL.
 func TestVolatileTimestampDefaultRequiresUnavailableCopySwap(t *testing.T) {
 	runServiceRefusal(t, copySwapCase{
 		ddl: `ALTER TABLE %s
@@ -419,6 +441,10 @@ func TestVolatileTimestampDefaultRequiresUnavailableCopySwap(t *testing.T) {
 
 func refuseCopySwap(t *testing.T, pool *pgxpool.Pool, table, name string, tc copySwapCase) {
 	t.Helper()
+	if tc.carried {
+		routeCopySwap(t, pool, table, name, tc)
+		return
+	}
 	before := snapshot(t, pool, table)
 	st, err := statement.ParseOne(fmt.Sprintf(tc.ddl, table))
 	require.NoError(t, err)
@@ -440,4 +466,28 @@ func refuseCopySwap(t *testing.T, pool *pgxpool.Pool, table, name string, tc cop
 	assert.Equal(t, verdict.ReasonBackendUnavailable, result.Reason)
 	assert.Empty(t, result.Verdicts, "a refused desired plan must not execute its safe prefix")
 	assert.Equal(t, before, snapshot(t, pool, table), "desired-schema refusal must have no side effects")
+}
+
+// routeCopySwap is the carried half of the probe. The statement routes to the
+// live copy-and-swap backend and its preflight refuses before any of the
+// route's sessions open — the seeded table is published through
+// supabase_realtime, a publication the route neither shares nor carries;
+// the desired plan says execution would run it there, with the safe_prefix
+// sibling riding along in the one routed statement. The plan is not executed here:
+// desired-state execution commits its native prefix before a later
+// statement's preflight runs, and this probe is about a refusal that leaves
+// the table and its subscribers untouched.
+func routeCopySwap(t *testing.T, pool *pgxpool.Pool, table, name string, tc copySwapCase) {
+	t.Helper()
+	refuseCarriedCopySwap(t, pool, table, fmt.Sprintf(tc.ddl, table), preflight.CopySwapCausePublicationMember)
+	ds, err := statement.ParseDesired(fmt.Sprintf(tc.desired, name))
+	require.NoError(t, err)
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{Schema: "public", Desired: ds})
+	require.NoError(t, err)
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+	backends := make([]router.Backend, 0, len(report.Statements))
+	for _, ps := range report.Statements {
+		backends = append(backends, ps.Backend)
+	}
+	assert.Contains(t, backends, router.BackendCopyAndSwap, "the plan routes the rewrite to the copy-and-swap backend")
 }

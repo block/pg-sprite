@@ -39,6 +39,9 @@ func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  %s     %s", pal.bold("safer:"), v.SaferIdiom)
 	}
+	if v.Guidance != "" {
+		fmt.Fprintf(&b, "\n  %s  %s", pal.bold("guidance:"), v.Guidance)
+	}
 	if v.Outcome == verdict.OutcomeExecutedWithoutOnlineSafety {
 		fmt.Fprintf(&b, "\n  %s   lock %s, statement %s", pal.bold("budgets:"), v.LockTimeout, v.StatementTimeout)
 	}
@@ -72,6 +75,8 @@ func outcomeHeadline(pal palette, v verdict.Verdict) string {
 	switch v.Outcome {
 	case verdict.OutcomeExecuted:
 		return pal.severity("help", "executed natively")
+	case verdict.OutcomeExecutedViaCopyAndSwap:
+		return pal.severity("help", "executed via copy-and-swap")
 	case verdict.OutcomeExecutedWithoutOnlineSafety:
 		return pal.severity("warning", "executed without online safety (accepted blocking refusal)")
 	case verdict.OutcomeRefused:
