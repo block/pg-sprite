@@ -107,6 +107,16 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpDropColumn, Column: "age"},
 		},
 		{
+			name: "drop column cascade",
+			sql:  "ALTER TABLE t DROP COLUMN age CASCADE",
+			want: statement.Op{Kind: statement.OpDropColumn, Column: "age", Cascade: true},
+		},
+		{
+			name: "drop column restrict",
+			sql:  "ALTER TABLE t DROP COLUMN age RESTRICT",
+			want: statement.Op{Kind: statement.OpDropColumn, Column: "age"},
+		},
+		{
 			name: "alter type with mods",
 			sql:  "ALTER TABLE t ALTER COLUMN name TYPE varchar(100)",
 			want: statement.Op{Kind: statement.OpAlterColumnType, Column: "name", NewType: "varchar", NewTypeMods: []int32{100}},
@@ -279,6 +289,11 @@ func TestParseOpsShapes(t *testing.T) {
 			want: statement.Op{Kind: statement.OpDropConstraint, Name: "c"},
 		},
 		{
+			name: "drop constraint cascade",
+			sql:  "ALTER TABLE t DROP CONSTRAINT c CASCADE",
+			want: statement.Op{Kind: statement.OpDropConstraint, Name: "c", Cascade: true},
+		},
+		{
 			name: "attach partition",
 			sql:  "ALTER TABLE t ATTACH PARTITION p FOR VALUES FROM (1) TO (10)",
 			want: statement.Op{Kind: statement.OpAttachPartition},
@@ -317,6 +332,11 @@ func TestParseOpsShapes(t *testing.T) {
 			name: "drop index concurrently",
 			sql:  "DROP INDEX CONCURRENTLY i",
 			want: statement.Op{Kind: statement.OpDropIndex, Name: "i", Indexes: []string{"i"}, Concurrent: true},
+		},
+		{
+			name: "drop index cascade",
+			sql:  "DROP INDEX i CASCADE",
+			want: statement.Op{Kind: statement.OpDropIndex, Name: "i", Indexes: []string{"i"}, Cascade: true},
 		},
 		{
 			name: "reindex",

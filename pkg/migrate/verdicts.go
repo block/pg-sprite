@@ -3,6 +3,7 @@ package migrate
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
@@ -156,6 +157,16 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 			v.Detail = fmt.Sprintf("%s drops what the table's replica identity index keys on, "+
 				"which makes UPDATE and DELETE fail while a publication publishes them; "+
 				"point REPLICA IDENTITY at another unique index first (or DEFAULT, if a usable primary key remains after the drop), then re-plan", d.Operation)
+		}
+		if d.Reason == planner.ReasonDependentView {
+			v.DependentViews = d.DependentViews
+			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a view reads it; "+
+				"drop or redefine those views first, then re-plan", d.Operation, strings.Join(d.DependentViews, ", "))
+		}
+		if d.Reason == planner.ReasonCascadingDrop {
+			v.Detail = fmt.Sprintf("%s uses CASCADE, which also drops the objects that depend on it, such as views or other tables' foreign keys, "+
+				"outside this statement's table; drop each dependent object explicitly, then resubmit without CASCADE, "+
+				"and PostgreSQL then refuses the drop if anything still depends on it", d.Operation)
 		}
 		break
 	}

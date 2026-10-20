@@ -43,12 +43,14 @@ type Facts struct {
 	TableExists *bool
 }
 
-// LiveFacts introspects the statement's target table for classifier facts,
-// and for an ALTER TABLE that adds columns, has the server prove whether
-// each one rewrites the table (preflight.AddColumnRewrites). For one that
-// adds an unnamed CHECK or FOREIGN KEY it also reads the constraint names
-// the schema already uses, so the safer sequence names the constraint as
-// the server would.
+// LiveFacts introspects the statement's target table for classifier facts.
+// For an ALTER TABLE that retypes or drops a column it reads which views
+// depend on each column (preflight.ColumnDependentViews), and for one that
+// adds columns, has the
+// server prove whether each one rewrites the table
+// (preflight.AddColumnRewrites). For one that adds an unnamed CHECK or
+// FOREIGN KEY it also reads the constraint names the schema already uses,
+// so the safer sequence names the constraint as the server would.
 func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	st statement.Statement) (Facts, error) {
 	if st.Table() == "" {
@@ -74,6 +76,17 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	adds, err := addsColumn(st)
 	if err != nil {
 		return Facts{}, err
+	}
+	changes, err := retypesOrDropsColumn(st)
+	if err != nil {
+		return Facts{}, err
+	}
+	if changes {
+		views, err := preflight.ColumnDependentViews(ctx, pool, schema, st.Table())
+		if err != nil {
+			return Facts{}, err
+		}
+		classifier.DependentViews, classifier.DropDependentViews, classifier.OwnDependentViews = views.Tree, views.Drop, views.Own
 	}
 	if adds {
 		if classifier.AddColumnProofs, err = preflight.AddColumnRewrites(ctx, pool, schema, st.Table(), st.SQL()); err != nil {
@@ -151,6 +164,22 @@ func addsColumn(st statement.Statement) (bool, error) {
 		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
 	}
 	return slices.ContainsFunc(ops, func(op statement.Op) bool { return op.Kind == statement.OpAddColumn }), nil
+}
+
+// retypesOrDropsColumn reports whether st is an ALTER TABLE that changes a
+// column's type or drops a column, the two changes a view reading the
+// column blocks.
+func retypesOrDropsColumn(st statement.Statement) (bool, error) {
+	if st.Kind() != statement.KindAlterTable {
+		return false, nil
+	}
+	ops, err := statement.ParseOps(st.SQL())
+	if err != nil {
+		return false, fmt.Errorf("read the operations of %q: %w", st.SQL(), err)
+	}
+	return slices.ContainsFunc(ops, func(op statement.Op) bool {
+		return op.Kind == statement.OpAlterColumnType || op.Kind == statement.OpDropColumn
+	}), nil
 }
 
 // addsUnnamedValidatableConstraint reports whether st is an ALTER TABLE

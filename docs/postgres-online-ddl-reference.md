@@ -54,7 +54,9 @@ The remaining reasons are first-bucket by cost but carry a warning the cost alon
 the lock queue below applies to every query on the parent) and `app-breaking-rename` (the
 catalog change is instant; the running application code that still uses the old name is
 what breaks). `replica-identity` is a refusal: the operation would drop what the table's
-replica identity index keys on. `unsupported-operation` means the planner does not recognize the operation or
+replica identity index keys on. `dependent-view` is a refusal too: the operation retypes or
+drops a column a view reads, which PostgreSQL refuses. `cascading-drop` is a refusal as well:
+the drop's `CASCADE` would also drop objects outside the statement. `unsupported-operation` means the planner does not recognize the operation or
 knows no safe path for it. The exclusion-constraint carve-out above is a known full-scan cost
 with no online path, not an operation with no cost bucket.
 
@@ -515,6 +517,48 @@ them. Move the identity first (`ALTER TABLE … REPLICA IDENTITY USING INDEX` an
 unique index, or `REPLICA IDENTITY DEFAULT` when a primary key remains), then re-plan.
 The planner judges this from live facts, so the linter, which has none, never
 reports it.
+
+### `dependent-view`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation changes the type of, or drops, a column that a view or materialized
+view reads. PostgreSQL refuses both while the view exists, even a type change it
+would otherwise relabel without a rewrite, so the statement could only fail. A
+type change without `ONLY` reaches the column on every partition and inheritance
+child too, so a view on one of them counts. A drop without `ONLY` reaches every
+partition, but only the inheritance children that do not declare the column and
+inherit it only from tables the drop also reaches: a child that declares the
+column, or also inherits it from a table outside the drop, keeps its copy, so a
+view on that copy does not count, while a child that inherits it along two paths
+from the dropped table loses it, so a view on that copy does. The plan
+names each view in `decisions[].dependent_views`, and a refused run's verdict in
+`dependent_views`. Drop or redefine the views first, then re-plan. A rename is not
+refused, because a view follows the column. `DROP COLUMN … CASCADE`, which the
+server runs by dropping the views with the column, is refused as `cascading-drop`
+instead.
+The planner reads the views from live facts, so the linter, which has none, never
+reports it, and the server's own refusal remains the backstop for a view created
+after planning.
+
+### `cascading-drop`
+
+| Verdict | Lock | Scan / rewrite | Dry-run exit |
+|---|---|---|---|
+| refused — never executed | — | — | 2 |
+
+The operation is a `DROP COLUMN`, `DROP CONSTRAINT`, or `DROP INDEX` with `CASCADE`.
+PostgreSQL then also drops whatever depends on the target: a view or materialized
+view that reads the column, or another table's foreign key on a dropped primary key
+or unique constraint. Those objects are not named in the statement, so the plan
+cannot show them, and dropping a foreign key locks the table that holds it, which the
+one-table lock does not cover. `DROP INDEX CONCURRENTLY` does not accept `CASCADE`
+either, so there is no online form to suggest. Drop each dependent object as its own
+change, then resubmit without `CASCADE`: PostgreSQL then refuses the drop while
+anything still depends on the target. The refusal is read from the statement alone,
+so the linter reports it too.
 
 ### `unsupported-operation`
 

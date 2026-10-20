@@ -106,6 +106,8 @@ refusal — never a silently wrong or incomplete result:
 - **Dropping what a replica identity index is built on is refused** — the
   index, the constraint that owns it, or a column it covers; move
   `REPLICA IDENTITY` first, then re-plan.
+- **Retyping or dropping a column a view reads is refused** — PostgreSQL would
+  refuse it anyway; the plan names the views to drop or redefine first.
 - **Destructive desired-state plans are refused as a whole** — `migrate --desired`
   creates missing tables and converges supported changes, but never infers permission
   to discard live structure. A new primary key or unique constraint over a live
