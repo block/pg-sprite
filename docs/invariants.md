@@ -194,18 +194,28 @@ never read as landed; a resumed copy first deletes every shadow row above W in b
 each in its own guarded transaction, before its first chunk is cut — the whole shadow when
 nothing landed, since a zero watermark says nothing about what an earlier run left above it — so
 every key above W is genuinely uncut when the applier starts discarding for it; the first clear
-batch takes `LOCK TABLE <shadow> IN SHARE MODE` before its delete, so a chunk transaction of the
-earlier run that is still committing into the shadow (holding `ROW EXCLUSIVE` through a
-synchronous-commit wait) ends before the clear reads, and a row it publishes cannot outlive the
-clear (straggler test); and `Position` snapshots the cut
-frontier, the in-flight chunks, and the landed watermark under one lock so `Position.Classify`
-gives the applier the three-way answer (uncut / in-flight / landed) for any key (whole-table with
-a Position-consistency sampler, never-overwrites, resume-from-watermark with stale rows above and
-below W, resume-from-zero-watermark with stale rows down to the smallest key, out-of-order
-landing, pinned-chunk cancellation followed by a resume that re-copies the
-cleared tail, a resume that waits behind a straggling chunk transaction, a shadow replaced
-between a chunk's claim and its transaction, and frontier-ordered ledger tests including the
-frontier at the largest key refusing every claim); `pkg/applier` `Buffer.Drain` — every
+batch's guard takes the shadow in `SHARE ROW EXCLUSIVE` as its one lock on it, so a chunk
+transaction of the earlier run that is still committing into the shadow (holding `ROW EXCLUSIVE`
+through a synchronous-commit wait) ends before the clear reads, a row it publishes cannot outlive
+the clear (straggler test), and an earlier run stalled inside its own first batch holds the same
+mode, so the two fences queue rather than deadlock (stalled-clear test); and `Position` snapshots
+the cut frontier, the in-flight chunks, and the landed watermark under one lock so
+`Position.Classify` gives the applier the three-way answer (uncut / in-flight / landed) for any
+key (whole-table with a Position-consistency sampler, never-overwrites, resume-from-watermark
+with stale rows above and below W, resume-from-zero-watermark with stale rows down to the
+smallest key, out-of-order landing, pinned-chunk cancellation followed by a resume that re-copies
+the cleared tail, a resume that waits behind a straggling chunk transaction, behind one parked
+before its insert, and behind an earlier run's stalled clear, a shadow replaced between a chunk's
+claim and its transaction, and frontier-ordered ledger tests including the frontier at the
+largest key refusing every claim). Every chunk and clear transaction in `pkg/copier` locks the
+shadow — `ROW EXCLUSIVE` for a write, the fence's mode for the first clear batch — before it
+confirms the table lock, so one that confirmed the lock before it passed to the resumed run
+already holds the lock the fence waits on, even if it is paused before its insert, and one that
+takes it afterwards fails the confirmation (parked-before-insert and parked-before-shadow-lock
+tests). The applier's flush holds only `ACCESS SHARE` on the shadow until its first write, so a
+flush transaction of an earlier run parked between confirming the table lock and that write is
+not one the copier's fence — or the verifier's repair fence — waits on; that gap is open.
+`pkg/applier` `Buffer.Drain` — every
 buffered key is judged against one `Position` snapshot: landed flushes, uncut is discarded,
 in-flight stays buffered until a later drain finds its chunk landed, and a key-moving UPDATE's
 two entries are judged per key, except that once neither is uncut the image and its old key's
