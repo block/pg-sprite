@@ -430,7 +430,7 @@ rename is coordinated with application deploys.
 
 | Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
-| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 until the backend lands (refused `backend-unavailable`) |
+| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 — the engine does not carry this operation yet (refused `backend-unavailable`) |
 
 `ADD COLUMN ... DEFAULT <volatile>` (for example `gen_random_uuid()`,
 `clock_timestamp()`, or an identity or `serial` column) must compute the default
@@ -450,7 +450,7 @@ default that is not a constant is assumed volatile.
 
 | Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
-| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 until the backend lands (refused `backend-unavailable`) |
+| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 — the engine does not carry this operation yet (refused `backend-unavailable`) |
 
 Adding a `GENERATED ... STORED` column computes and stores the value for every
 row: a full table rewrite under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap
@@ -460,11 +460,16 @@ backend.
 
 | Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
-| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 2 until the backend lands (refused `backend-unavailable`) |
+| routed to the copy-and-swap backend | `ACCESS EXCLUSIVE` for the whole rewrite | full table rewrite | 0 (plan disposition `execute`) |
 
 The column type change is not binary-coercible (for example `int` → `bigint`,
-`text` → `jsonb`), so PostgreSQL rewrites the whole table under
-`ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend. A type change that
+`text` → `jsonb`), or carries a `USING` expression, so PostgreSQL would rewrite
+the whole table under `ACCESS EXCLUSIVE`. Routed to the copy-and-swap backend,
+which executes it: the changed shape is built as a shadow table, filled in
+chunks while writes stream through a replication slot, verified, and swapped in
+under the source's name. The route's own preflight can still refuse the run
+(`copy-and-swap-refused`) for a table shape or environment it cannot run
+against — see [limitations.md](limitations.md). A type change that
 moves the column's collation — a target with a `COLLATE` clause, or a column
 with a collation of its own retyped without one, which resets it to the new
 type's default — carries the same reason even when the type part is a plain
@@ -475,13 +480,15 @@ domain type with a `CHECK` or `NOT NULL` carries the same reason: PostgreSQL
 rewrites the table to check every row against the domain, even when the default
 is a constant or one the catalog would store. An added column with a constant
 default the engine could not prove carries it too, as `unverified`, since only
-its type could rewrite.
+its type could rewrite. The backend carries only the retype of a column the
+table already has, so an added column with this reason is refused
+`backend-unavailable` (exit 2) rather than executed.
 
 ### `relocation`
 
 | Verdict | Lock (as written) | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
-| routed to the copy-and-swap backend | exclusive lock for the whole move | rewrite-scale I/O | 2 until the backend lands (refused `backend-unavailable`) |
+| routed to the copy-and-swap backend | exclusive lock for the whole move | rewrite-scale I/O | 2 — the engine does not carry this operation yet (refused `backend-unavailable`) |
 
 The operation physically moves the table's storage (for example
 `SET TABLESPACE`): rewrite-scale I/O under an exclusive lock. Routed to the
@@ -606,9 +613,10 @@ online steps and dry-run each one.
 |---|---|---|---|
 | refused — nothing executes | — | — | 2 |
 
-The plan routes to a backend — an online shadow-table copy with a cutover —
-that this build does not implement yet. Refused; nothing executes. The
-copy-and-swap backend is on the roadmap; until it lands these changes need a
+The plan routes to the copy-and-swap backend for an operation the engine does
+not carry yet — a volatile column default, a stored generated column, a
+relocation. Refused; nothing executes. A general type change (`type-rewrite`)
+is the operation the backend carries today; until the others land they need a
 manual online plan.
 
 ### `unsupported-partitioned-parent`

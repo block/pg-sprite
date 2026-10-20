@@ -21,7 +21,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: backend-unavailable
-    reason_notes: "Table rewrite; routes to copy-and-swap and is refused until that engine lands"
+    reason_notes: "Table rewrite; routes to copy-and-swap, which does not carry a volatile default yet (the shadow fill would have to evaluate the default per row and the stream would have to agree)"
   - id: add-column-of-a-domain-with-constraints
     area: "column_changes"
     operation: "`ADD COLUMN` of a domain type with a `CHECK` or `NOT NULL`, with or without a default"
@@ -33,7 +33,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: backend-unavailable
-    reason_notes: "Table rewrite to check every row against the domain; routes to copy-and-swap and is refused until that engine lands"
+    reason_notes: "Table rewrite to check every row against the domain; routes to copy-and-swap, which does not carry an added column yet (the shadow fill and the stream would each fill it from the default)"
   - id: add-column-generated-stored
     area: "column_changes"
     operation: "`ADD COLUMN ... GENERATED ... STORED`"
@@ -45,7 +45,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: backend-unavailable
-    reason_notes: "Table rewrite; copy-and-swap route. The copy engine must **recompute, never copy,** generated columns on the shadow table"
+    reason_notes: "Table rewrite; routes to copy-and-swap, which does not carry stored generated columns yet — the copy must **recompute, never copy,** them on the shadow table"
   - id: alter-column-set-expression
     area: "column_changes"
     operation: "`ALTER COLUMN ... SET EXPRESSION` (changed stored generated expression)"
@@ -95,15 +95,14 @@ rows:
   - id: alter-column-type-general-or-with-using
     area: "column_changes"
     operation: "`ALTER COLUMN TYPE`, general (or with `USING`)"
-    tier: "t2"
-    status_mark: "🟡"
+    tier: "t1"
+    status_mark: "✅"
     engine_path: "copy_and_swap"
     online_safety_problem: true
     front_doors:
-      migrate: refused
-      diff: refused
-    refusal_reason: backend-unavailable
-    reason_notes: "Table rewrite; copy-and-swap route, refused today. A `USING` expression will be admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (see limitations)"
+      migrate: supported
+      diff: supported
+    reason_notes: "Table rewrite; runs through copy-and-swap: the changed shape is built as a shadow table, filled in chunks (a `USING` expression is applied per row), verified, and swapped in under the source's name. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, before the route runs. The route's preflight still refuses table shapes and environments it cannot run against (`copy-and-swap-refused`), and a `USING` expression is admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (`shadow-statement-conversion`) — see [limitations.md](limitations.md)"
   - id: set-default-drop-default-drop-not-null
     area: "column_changes"
     operation: "`SET DEFAULT` / `DROP DEFAULT` / `DROP NOT NULL`"
@@ -148,7 +147,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: backend-unavailable
-    reason_notes: "Physical relocation is a rewrite; copy-and-swap route"
+    reason_notes: "Physical relocation is a rewrite; routes to copy-and-swap, which does not carry a tablespace move yet"
   - id: add-primary-key-add-unique-plain-key-columns
     area: "constraints"
     operation: "`ADD PRIMARY KEY` / `ADD UNIQUE` (plain key columns)"
@@ -339,7 +338,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: backend-unavailable
-    reason_notes: "Root-vs-leaf publication semantics and per-partition swap; sequenced after the copy engine core"
+    reason_notes: "Root-vs-leaf publication semantics and per-partition swap; the copy-and-swap preflight refuses a partitioned source"
   - id: plain-tables-their-indexes
     area: "declarative_model"
     operation: "Plain tables + their indexes"
@@ -664,15 +663,14 @@ rows:
   - id: column-transform-expressions-during-a-copy-and-swap-rewrite
     area: "data_and_whole_table_operations"
     operation: "Column-transform expressions during a copy-and-swap rewrite"
-    tier: "t2"
-    status_mark: "🟡"
+    tier: "t1"
+    status_mark: "✅"
     engine_path: "copy_and_swap"
     online_safety_problem: true
     front_doors:
-      migrate: refused
-      diff: refused
-    refusal_reason: backend-unavailable
-    reason_notes: "The one principled exception: when a rewrite is already copying every row, deriving a new column's value by expression is part of the shape change, not a data job. Planned as part of the copy engine"
+      migrate: supported
+      diff: supported
+    reason_notes: "The one principled exception: when a rewrite is already copying every row, deriving the retyped column's value by expression is part of the shape change, not a data job. `ALTER COLUMN TYPE … USING expr` runs the expression per row during the copy and through the stream"
   - id: online-table-rebuild-with-no-shape-change-bloat-reclamation
     area: "data_and_whole_table_operations"
     operation: "Online table rebuild with no shape change (bloat reclamation)"
@@ -684,7 +682,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: backend-unavailable
-    reason_notes: "A copy-and-swap with an identical target shape — the pg_repack use case with checksum-gated cutover and crash-resume. Planned once the copy engine lands"
+    reason_notes: "A copy-and-swap with an identical target shape — the pg_repack use case with checksum-gated cutover and crash-resume. Planned; the planner has no statement form that requests it yet"
   - id: whole-schema-convergence-apply-a-directory-of-desired-files-dependency-ordered
     area: "data_and_whole_table_operations"
     operation: "Whole-schema convergence (apply a directory of desired files, dependency-ordered)"

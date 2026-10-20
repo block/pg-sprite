@@ -152,15 +152,18 @@ engine:
   closed); the row is a typed refusal until that flow lands, and each such row is a
   tracked roadmap item.
 - **copy-and-swap** — the change is a genuine table rewrite and routes to the
-  shadow-copy engine; a typed refusal until that engine lands (see
+  shadow-copy engine: the changed shape is built as a shadow table, filled and verified,
+  then swapped in under the source's name. A ✅ row on this path executes; a 🟡 row is a
+  typed refusal (`backend-unavailable`) for an operation the engine does not carry yet (see
   [optimistic-attempt.md](optimistic-attempt.md) for how the router proves the rewrite).
 - **—** — no engine path: either the job belongs to another tool class (⚪ / 🔵) or
   there is no online mechanism pg-sprite will drive (❌): PostgreSQL has none, or the
   only online form is a direct statement the operator runs.
 
 Path and tier are orthogonal on purpose: a 🟡 row's path says what kind of work lifts
-the refusal — building a native flow or landing the copy engine — and a ✅ row's path
-says whether the engine ran your statement or substituted a safer one.
+the refusal — building a native flow or teaching the copy engine the operation — and a
+✅ row's path says whether the engine ran your statement as written, substituted a safer
+one, or rebuilt the table through copy-and-swap.
 
 ## The two front doors
 
@@ -187,7 +190,7 @@ are the canonical example.
 > `make gen-capabilities`; do not edit the generated regions below by hand.
 
 <!-- capabilities:begin summary -->
-**60 operations: 16 supported today, 26 planned behind a typed refusal, 14 out of scope
+**60 operations: 18 supported today, 24 planned behind a typed refusal, 14 out of scope
 by design, and 4 with no online mechanism for pg-sprite to build on.**
 <!-- capabilities:end summary -->
 
@@ -204,18 +207,18 @@ or the only online form is a direct statement the operator runs).
 | Operation | Status | Engine path | Online-safety problem? | Behavior and why |
 | --- | --- | --- | --- | --- |
 | `ADD COLUMN` (no default, a constant default, or a non-volatile default such as `now()`) | ✅ | native, as-is | Yes | Metadata-only / fast default (PG 11+), proven by adding the column to an empty temporary table first; executes instantly under bounded locks |
-| `ADD COLUMN` with volatile default (`gen_random_uuid()`, `clock_timestamp()`, identity, `serial`, …) | 🟡 | copy-and-swap | Yes | Table rewrite; routes to copy-and-swap and is refused until that engine lands |
-| `ADD COLUMN` of a domain type with a `CHECK` or `NOT NULL`, with or without a default | 🟡 | copy-and-swap | Yes | Table rewrite to check every row against the domain; routes to copy-and-swap and is refused until that engine lands |
-| `ADD COLUMN ... GENERATED ... STORED` | 🟡 | copy-and-swap | Yes | Table rewrite; copy-and-swap route. The copy engine must **recompute, never copy,** generated columns on the shadow table |
+| `ADD COLUMN` with volatile default (`gen_random_uuid()`, `clock_timestamp()`, identity, `serial`, …) | 🟡 | copy-and-swap | Yes | Table rewrite; routes to copy-and-swap, which does not carry a volatile default yet (the shadow fill would have to evaluate the default per row and the stream would have to agree) |
+| `ADD COLUMN` of a domain type with a `CHECK` or `NOT NULL`, with or without a default | 🟡 | copy-and-swap | Yes | Table rewrite to check every row against the domain; routes to copy-and-swap, which does not carry an added column yet (the shadow fill and the stream would each fill it from the default) |
+| `ADD COLUMN ... GENERATED ... STORED` | 🟡 | copy-and-swap | Yes | Table rewrite; routes to copy-and-swap, which does not carry stored generated columns yet — the copy must **recompute, never copy,** them on the shadow table |
 | `ALTER COLUMN ... SET EXPRESSION` (changed stored generated expression) | 🟡 | copy-and-swap | Yes | Planned but not executed. `diff` shows a changed stored generated expression as one `SET EXPRESSION` statement of kind `set-generated-expression`, refused with `unsupported-statement`, rather than a drop and re-add that would also drop the column's indexes. It recomputes every row under `ACCESS EXCLUSIVE`, and the statement needs PostgreSQL 17 or later |
 | `ADD COLUMN` with inline `UNIQUE`/`PRIMARY KEY`/`REFERENCES`/`CHECK` | 🟡 | native, planned flow | Yes | The inline constraint does its index build or validation scan under the `ADD COLUMN`'s `ACCESS EXCLUSIVE` lock; refused with guidance to add the column first, then build the constraint online |
 | `DROP COLUMN` | ✅ | native, as-is | Yes | Metadata-only; flagged **destructive** in the plan report. Refused with `replica-identity` when a replica identity index the drop reaches keys on the column: the table's own, or one on a partition or inheritance child below it unless the statement says `ONLY`. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, on a table the drop reaches. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop the views that read the column |
 | `ALTER COLUMN TYPE`, binary-coercible (proven against live column facts) | ✅ | native, as-is | Yes | Catalog relabel, e.g. `varchar(50)` → `varchar(100)`, `varchar` → `text`; refused with `dependent-view`, naming the views, when a view or materialized view reads the column; PostgreSQL itself refuses the change when a rule or `STORED` generated column depends on it — see [binary-coercible-type-changes.md](binary-coercible-type-changes.md#no-rewrite-is-not-no-cost) |
-| `ALTER COLUMN TYPE`, general (or with `USING`) | 🟡 | copy-and-swap | Yes | Table rewrite; copy-and-swap route, refused today. A `USING` expression will be admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (see limitations) |
+| `ALTER COLUMN TYPE`, general (or with `USING`) | ✅ | copy-and-swap | Yes | Table rewrite; runs through copy-and-swap: the changed shape is built as a shadow table, filled in chunks (a `USING` expression is applied per row), verified, and swapped in under the source's name. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, before the route runs. The route's preflight still refuses table shapes and environments it cannot run against (`copy-and-swap-refused`), and a `USING` expression is admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (`shadow-statement-conversion`) — see [limitations.md](limitations.md) |
 | `SET DEFAULT` / `DROP DEFAULT` / `DROP NOT NULL` | ✅ | native, as-is | Yes | Metadata-only |
 | `SET NOT NULL` | ✅ | native, safer sequence | Yes | Executed as the native four-step pattern: `ADD CONSTRAINT ... CHECK (col IS NOT NULL) NOT VALID` → online `VALIDATE` → `SET NOT NULL` (catalog flip, PG 12+) → drop the scaffold check |
 | `RENAME COLUMN` / `RENAME TABLE` | ✅ | native, as-is | Yes | Metadata-only for PostgreSQL but **app-breaking** across deployed instances; executed with a typed reason so lint/plan consumers can steer away |
-| `SET TABLESPACE` | 🟡 | copy-and-swap | Yes | Physical relocation is a rewrite; copy-and-swap route |
+| `SET TABLESPACE` | 🟡 | copy-and-swap | Yes | Physical relocation is a rewrite; routes to copy-and-swap, which does not carry a tablespace move yet |
 <!-- capabilities:end column_changes -->
 
 ### Constraints
@@ -252,7 +255,7 @@ or the only online form is a direct statement the operator runs).
 | `ATTACH PARTITION` | 🟡 | native, planned flow | Yes | Without `--force`, a typed refusal with nothing executed: the attach scans the partition to validate its bound unless a validated `CHECK` already proves it, and the engine does not yet construct that proof. The safer idiom (pre-prove the bound with a validated `CHECK` so the attach skips its scan) is surfaced as guidance. `--force SCHEMA.TABLE` runs the blocking `ATTACH PARTITION` as submitted under bounded budgets, taking the blocking lock, and records the override. The classify-first flow that constructs the proof itself is planned. A desired schema cannot express an attach, so `diff` never produces one |
 | `DETACH PARTITION [CONCURRENTLY]` | 🟡 | native, planned flow | Yes | `CONCURRENTLY` is the idiom and the blocking form is rewritten to it (`--dry-run` and `suggest` show the rewrite), but without `--force` `migrate` refuses both forms before anything executes: a cancelled concurrent detach leaves a detach-pending partition state the executor does not yet own recovering. `--force SCHEMA.TABLE` runs a plain `DETACH PARTITION` as submitted under bounded budgets, taking the blocking lock; `DETACH ... CONCURRENTLY` stays refused under `--force`. `migrate --dry-run` of either form reports the rewrite as a safer sequence to run and exits 0 while the real run refuses and exits 2, so the dry-run exit code is not a submit gate for a detach. A desired schema cannot express a detach, so `diff` never produces one |
 | Partitioned parents in the **declarative model** | 🟡 | native, planned flow | Yes | Typed refusal: the model does not yet carry partition keys, and rendering a partitioned parent as a plain `CREATE TABLE` would be silently wrong |
-| Partitioned tables in **copy-and-swap** | 🟡 | copy-and-swap | Yes | Root-vs-leaf publication semantics and per-partition swap; sequenced after the copy engine core |
+| Partitioned tables in **copy-and-swap** | 🟡 | copy-and-swap | Yes | Root-vs-leaf publication semantics and per-partition swap; the copy-and-swap preflight refuses a partitioned source |
 <!-- capabilities:end partitioned_tables -->
 
 ### The declarative model (desired files, diff, pull)
@@ -300,8 +303,8 @@ or the only online form is a direct statement the operator runs).
 | --- | --- | --- | --- | --- |
 | `DROP TABLE` | ⚪ | — | No — owner tooling, through a reviewed process | Discards the table and its data in one brief `ACCESS EXCLUSIVE` step: there is nothing online for an engine to make safer, only an irreversible decision an operator must own. Both front doors refuse it — the imperative door as an unsupported statement kind, and the declarative diff is single-table scoped, so a live table with no desired file is not in its view. pg-sprite never plans or executes it; accounting for undeclared tables is the whole-schema owner's job, described under [Deliberately operator-owned](#deliberately-operator-owned) |
 | Data backfills, `UPDATE`/`DELETE` batches, DML of any kind | 🔵 | — | No — data-change runners, application batch jobs | pg-sprite changes table *shape*, never table *contents*. Versioned-script runners and application jobs own data changes |
-| Column-transform expressions during a copy-and-swap rewrite | 🟡 | copy-and-swap | Yes | The one principled exception: when a rewrite is already copying every row, deriving a new column's value by expression is part of the shape change, not a data job. Planned as part of the copy engine |
-| Online table rebuild with no shape change (bloat reclamation) | 🟡 | copy-and-swap | Yes | A copy-and-swap with an identical target shape — the pg_repack use case with checksum-gated cutover and crash-resume. Planned once the copy engine lands |
+| Column-transform expressions during a copy-and-swap rewrite | ✅ | copy-and-swap | Yes | The one principled exception: when a rewrite is already copying every row, deriving the retyped column's value by expression is part of the shape change, not a data job. `ALTER COLUMN TYPE … USING expr` runs the expression per row during the copy and through the stream |
+| Online table rebuild with no shape change (bloat reclamation) | 🟡 | copy-and-swap | Yes | A copy-and-swap with an identical target shape — the pg_repack use case with checksum-gated cutover and crash-resume. Planned; the planner has no statement form that requests it yet |
 | Whole-schema convergence (apply a directory of desired files, dependency-ordered) | 🔵 | — | No — convergence planners (pg-schema-diff, pgschema, pgdelta) | Convergence planning across objects is a planner's job; pg-sprite stays the execution engine for the table-shape subset |
 | Versioned schema-change-file workflow (Flyway-style ordered scripts) | 🔵 | — | No — versioned-script runners (Flyway-style) | Declarative-only by design; see [vision.md](vision.md) |
 | Expand/contract dual-schema versions (pgroll/reshape style) | 🔵 | — | No — pgroll/reshape own this model | Rejected: application invisibility is a core invariant; see [vision.md](vision.md) |

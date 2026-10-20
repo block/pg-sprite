@@ -43,9 +43,15 @@ func TestExecuteAcceptedBlockingLockBudgetExecutesNothing(t *testing.T) {
 	_, err = holder.Exec(t.Context(), fmt.Sprintf("LOCK TABLE %s.t IN ACCESS EXCLUSIVE MODE", schema))
 	require.NoError(t, err)
 	b := executor.BlockingBudget{LockTimeout: 100 * time.Millisecond, StatementTimeout: 5 * time.Second}
+	sql := fmt.Sprintf("DROP INDEX %s.i", schema)
+	// The executor parses the statement before it waits on anything, and the
+	// parser's first use in a process is slow, most of all under the race
+	// detector. Parse once here so the stopwatch times the lock wait, not
+	// that one-time setup.
+	mustParse(t, sql)
 	start := time.Now()
 
-	_, err = executor.ExecuteAcceptedBlocking(t.Context(), pool, fmt.Sprintf("DROP INDEX %s.i", schema), pgx.Identifier{schema, "t"}, b)
+	_, err = executor.ExecuteAcceptedBlocking(t.Context(), pool, sql, pgx.Identifier{schema, "t"}, b)
 	var budgetErr *executor.BudgetError
 	require.ErrorAs(t, err, &budgetErr)
 	assert.Equal(t, executor.CauseLock, budgetErr.Cause)

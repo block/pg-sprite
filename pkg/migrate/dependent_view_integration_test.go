@@ -30,8 +30,9 @@ func columnType(t *testing.T, pool *pgxpool.Pool, schema, table, column string) 
 
 // A column a view or materialized view reads cannot be retyped or dropped
 // while the view exists; PostgreSQL refuses even a type change it would
-// otherwise relabel without a rewrite. The run is refused at plan time with
-// the views named, so the operator learns what to change before anything
+// otherwise relabel without a rewrite, and one that needs a rewrite is
+// refused before the copy-and-swap route runs. The run is refused at plan
+// time with the views named, so the operator learns what to change before anything
 // reaches the server, and the column is left as it was. A rename, which the
 // views follow, and changes to a column no view reads still run.
 func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
@@ -57,6 +58,7 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 	}{
 		{name: "a type change the server would relabel", statement: "ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(100)"},
 		{name: "a type change to text", statement: "ALTER TABLE %s.users ALTER COLUMN email TYPE text"},
+		{name: "a type change copy-and-swap would run", statement: "ALTER TABLE %s.users ALTER COLUMN email TYPE varchar(20)"},
 		{name: "a column drop", statement: "ALTER TABLE %s.users DROP COLUMN email"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
