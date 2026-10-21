@@ -75,6 +75,9 @@ canonical statement of the ladder; a wording fix lands there first.
 | 2 | Refused: no online-safe path; the verdict names the typed `reason` and `class` | no | not applicable |
 | 3 | Committed through the accepted-blocking passthrough, under bounded budgets, without an online-safety guarantee | yes | no |
 
+A usage error exits 1 and writes the usage and the error to stderr; stdout
+carries only the command's output, including under `--json`.
+
 Refusals from every command — `migrate`, its dry run, `diff`, and `pull` — share
 exit 2, so a gate branches on the status without caring which subcommand produced
 it; exit 3 is `migrate`'s alone, because no other command executes DDL, and only
