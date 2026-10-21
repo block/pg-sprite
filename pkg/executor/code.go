@@ -152,6 +152,13 @@ const (
 	CodeValidatedConstraintDrift Code = "validated-constraint-drift"
 	// CodeTableNotFound: the statement's qualified table does not exist.
 	CodeTableNotFound Code = "table-not-found"
+	// CodeDataFault: the server rejected the table's rows as the statement
+	// would shape them (SQLSTATE class 22, a value the new type will not
+	// hold; class 23, a constraint the rows break). The copy-and-swap run
+	// abandons itself — shadow, hold on the source, and checkpoint row all
+	// discarded — since any rerun meets the same rows; correct the data or
+	// the statement, then run it again from the beginning.
+	CodeDataFault Code = "data-fault"
 	// CodeInvariantViolation: a breach of the invariant registry; never a
 	// retry candidate.
 	CodeInvariantViolation Code = "invariant-violation"
@@ -206,6 +213,7 @@ func Codes() []Code {
 		CodeAdoptedIndexDrift,
 		CodeValidatedConstraintDrift,
 		CodeTableNotFound,
+		CodeDataFault,
 		CodeInvariantViolation,
 		CodeExecutionFailed,
 	}
@@ -247,6 +255,7 @@ func (c Code) Permanent() bool {
 		CodeAdoptedIndexDrift,
 		CodeValidatedConstraintDrift,
 		CodeTableNotFound,
+		CodeDataFault,
 		CodeInvariantViolation:
 		return true
 	}
