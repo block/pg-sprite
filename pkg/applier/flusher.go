@@ -401,16 +401,16 @@ func (f *Flusher) writeImage(ctx context.Context, tx pgx.Tx, e *Entry, conv conv
 	return nil
 }
 
-// applyWholeRows is the CO-6 fallback: complete every image that still
-// carries a marker from the shadow row under its own key — the row of an
-// image that did not move, present by CO-8 and the drain's deferral rule,
-// so an absent row is a protocol error — then delete every key in the batch
-// and insert every image whole, so no row the batch names is left to
-// collide with the inserts (D13). The deletes come after every completion
-// read, and the reads lock their rows. A completion read from the shadow is
-// already in the shadow's form and is inserted bare, not converted again.
-// The entries are the flush's own copies, so completing them in place
-// changes nothing the batch keeps.
+// applyWholeRows is the CO-6 fallback: complete every image that still carries
+// a marker from the shadow row under its own key — the row of an image that
+// did not move, which holdAbsent has already found present in this
+// transaction, so the absent-row refusal below is a backstop that cannot fire
+// — then delete every key in the batch and insert every image whole, so no row
+// the batch names is left to collide with the inserts (D13). The deletes come
+// after every completion read, and the reads lock their rows. A completion
+// read from the shadow is already in the shadow's form and is inserted bare,
+// not converted again. The entries are the flush's own copies, so completing
+// them in place changes nothing the batch keeps.
 func (f *Flusher) applyWholeRows(ctx context.Context, tx pgx.Tx, entries []Entry, conv conversions, result *Result) error {
 	// INV: CO-6, CO-8
 	keys := make([]int64, 0, len(entries))

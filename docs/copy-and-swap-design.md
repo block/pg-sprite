@@ -398,16 +398,16 @@ committed at or below that position (`Buffer.Release`). The deletion that explai
 committed before the chunk's read, which came before the check, so by then the stream has
 delivered it: a DELETE has replaced the image with a delete marker, and a later INSERT with a
 whole image, each applied as any other entry. An image that comes back with the flag still set
-— even if UPDATEs delivered meanwhile have filled in every marker — is one the stream still holds live under a key whose shadow row is absent, which no ordering of
-source changes produces: the applier aborts the change fail closed (CO-8). A moved image is
-different: its old key's shadow row holds the row's pre-buffer
-version only if the chunk covering the old key was read **before** the move. A move captured
-while the old key was uncut, or inside a chunk read after the move, leaves no shadow row under
-either key, and the buffer cannot tell the two histories apart. And when the source puts
-**another row** at the old key before the copier reads it — an INSERT, a different row's move
-onto it, or an UPDATE of a key the buffer does not hold — the chunk the copier reads copies that
-row, so the old key's shadow row is present but is not this row's; the buffer sees the reuse
-when the event arrives, marks every buffered image that left the key (`Entry.OldKeyReused`,
+— even if UPDATEs delivered meanwhile have filled in every marker — is one the stream still holds
+live under a key whose shadow row is absent, which no ordering of source changes produces: the
+applier aborts the change fail closed (CO-8). A moved image is different: its old key's shadow row
+holds the row's pre-buffer version only if the chunk covering the old key was read **before** the
+move. A move captured while the old key was uncut, or inside a chunk read after the move, leaves
+no shadow row under either key, and the buffer cannot tell the two histories apart. And when the
+source puts **another row** at the old key before the copier reads it — an INSERT, a different
+row's move onto it, or an UPDATE of a key the buffer does not hold — the chunk the copier reads
+copies that row, so the old key's shadow row is present but is not this row's; the buffer sees the
+reuse when the event arrives, marks every buffered image that left the key (`Entry.OldKeyReused`,
 inherited through a chain of moves; a row returning to the key it started at is not a reuse),
 and a flagged image is never completed from the old key's shadow row. The flush therefore reads
 a moved image's completion from the old key's shadow row when that row is present and the image

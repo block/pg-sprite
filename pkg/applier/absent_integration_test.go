@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/applier"
+	"github.com/block/pg-sprite/pkg/decode"
 )
 
 // The tests here play the stream owner against a copier whose chunk read
@@ -82,6 +83,63 @@ func TestFlushHeldAbsentImageIsReplacedByAnInsertOfTheKey(t *testing.T) {
 	doc, _ := f.text(t, p.shadow.ShadowTable(), "doc", 2)
 	assert.Equal(t, "the new row's document", *doc)
 	f.assertConverged(t, p.shadow)
+}
+
+// The check reads the WAL position after the source's DELETE committed, so
+// the held image stays out of every drain until the stream has delivered
+// that DELETE: a stream that stops just short of it releases nothing, and
+// the image is not flushed ahead of the change that explains the absence.
+func TestHeldAbsentImageWaitsForTheStreamToPassTheCheck(t *testing.T) {
+	f := newFlushFixture(t)
+	f.createSeats(t, 3)
+	p := f.prepare(t, "seats")
+	f.exec(t, `UPDATE %s.seats SET slot = 'Q' WHERE id = 2`)
+	f.exec(t, `DELETE FROM %s.seats WHERE id = 2`)
+	f.exec(t, `DELETE FROM %s.`+p.shadow.ShadowTable()+` WHERE id = 2`)
+	var text string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT pg_current_wal_insert_lsn()::text`).Scan(&text))
+	deleteDone, err := decode.ParseLSN(text)
+	require.NoError(t, err)
+	buffer := applier.NewBuffer()
+	require.NoError(t, buffer.Add(updateEvent(1, 2, col("slot", "Q"), marker("doc"), col("note", "seat 2"))))
+
+	result := f.flushAll(t, p, buffer)
+
+	require.Len(t, result.Held, 1)
+	assert.GreaterOrEqual(t, result.Held[0].ReadLSN, deleteDone, "the check reads a position at or past the DELETE's commit")
+	assert.Equal(t, 0, buffer.Release(deleteDone-1), "the stream has not delivered the DELETE")
+	assert.Equal(t, 1, buffer.Held())
+	next := buffer.Drain(everyKeyLanded())
+	assert.Empty(t, next.Entries, "the held image is not flushed before the stream passes the check")
+	assert.Equal(t, 1, next.Held)
+}
+
+// A batch whose column-wise writes collide on the unique slot falls back to
+// whole-row writes; an absent-row image the presence check held before the
+// collision stays held through the fallback, and no row is invented for it.
+func TestFallbackKeepsAnAbsentRowHold(t *testing.T) {
+	f := newFlushFixture(t)
+	f.createSeats(t, 4)
+	p := f.prepare(t, "seats")
+	f.exec(t, `DELETE FROM %s.`+p.shadow.ShadowTable()+` WHERE id = 3`)
+	doc1, _ := f.text(t, "seats", "doc", 1)
+	doc2, _ := f.text(t, "seats", "doc", 2)
+
+	result, err := p.flush.Flush(t.Context(), f.pool, batch(
+		image(1, col("slot", "B"), col("doc", *doc1)),
+		image(2, col("slot", "A"), col("doc", *doc2)),
+		image(3, col("slot", "C"), marker("doc")),
+	))
+
+	require.NoError(t, err)
+	assert.True(t, result.Fallback)
+	require.Len(t, result.Held, 1)
+	assert.Equal(t, int64(3), result.Held[0].Entry.Key)
+	assert.Equal(t, 2, result.Images)
+	_, present := f.text(t, p.shadow.ShadowTable(), "slot", 3)
+	assert.False(t, present, "no row was invented for the held image")
+	slot, _ := f.text(t, p.shadow.ShadowTable(), "slot", 1)
+	assert.Equal(t, "B", *slot)
 }
 
 // A row the source still holds, whose shadow row is gone with no DELETE on the
