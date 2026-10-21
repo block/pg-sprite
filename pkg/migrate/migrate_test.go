@@ -1,6 +1,8 @@
 package migrate
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -41,6 +43,17 @@ func TestGate(t *testing.T) {
 		assert.Equal(t, "DROP INDEX CONCURRENTLY", v.SaferIdiom)
 	})
 
+	t.Run("a cascading drop is refused at the ineligible site with no concurrent idiom", func(t *testing.T) {
+		v, refused := Gate(parse(t, "DROP INDEX billing.i CASCADE"))
+		require.True(t, refused)
+		assert.Equal(t, verdict.ReasonIndexStatement, v.Reason)
+		proof, err := v.Refusal()
+		require.NoError(t, err)
+		assert.Equal(t, verdict.RefusalSiteIndexOther, proof.Site())
+		assert.Empty(t, v.SaferIdiom,
+			"DROP INDEX CONCURRENTLY does not accept CASCADE, so it is not an equivalent to suggest")
+	})
+
 	t.Run("already-concurrent maintenance carries no safer idiom", func(t *testing.T) {
 		v, refused := Gate(parse(t, "DROP INDEX CONCURRENTLY billing.i"))
 		require.True(t, refused)
@@ -63,6 +76,22 @@ func TestGate(t *testing.T) {
 		assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
 		assert.Empty(t, v.SaferIdiom)
 	})
+}
+
+// PostgreSQL rejects DROP INDEX CONCURRENTLY ... CASCADE, so the refusal must
+// not describe it as the safe concurrent idiom to run directly.
+func TestGateConcurrentCascadeIsNotCalledSafe(t *testing.T) {
+	for _, sql := range []string{
+		"DROP INDEX CONCURRENTLY billing.i CASCADE",
+		"DROP INDEX CONCURRENTLY billing.i, billing.j",
+	} {
+		st, err := statement.ParseOne(sql)
+		require.NoError(t, err)
+		v, refused := Gate(st)
+		require.True(t, refused, sql)
+		assert.Equal(t, verdict.ClassByDesign, v.Class, "%s: PostgreSQL rejects it, so it is not the safe concurrent idiom", sql)
+		assert.Empty(t, v.Owner, "%s: no direct operator is pointed at a statement PostgreSQL rejects", sql)
+	}
 }
 
 func TestRunRejectsUnrunnableOptions(t *testing.T) {
@@ -182,6 +211,53 @@ func TestFailureVerdict(t *testing.T) {
 		assert.Empty(t, v.ExecutedSQL, "an empty committed prefix means nothing committed")
 	})
 
+	t.Run("a single attempt whose commit is lost is unknown, never rolled back", func(t *testing.T) {
+		err := &executor.CommitOutcomeUnknownError{Err: errors.New("connection reset")}
+		v := failureVerdict(st, err, executor.SequenceReport{}, false)
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Equal(t, string(executor.CodeCommitOutcomeUnknown), v.Code)
+		assert.Zero(t, v.FailedStep)
+		assert.Empty(t, v.ExecutedSQL, "nothing is known to have committed")
+		assert.Contains(t, v.Detail, "outcome unknown")
+		assert.Contains(t, v.Detail, "inspect the catalog for billing.invoices")
+		assert.NotContains(t, v.Detail, "nothing committed",
+			"the client cannot establish that fact, so the verdict must not claim it")
+	})
+
+	t.Run("a mid-sequence lost commit lists the earlier steps as committed and the step as unknown", func(t *testing.T) {
+		stepErr := &executor.SequenceStepError{
+			Step: 2, Total: 3, Kind: executor.StepBrief,
+			SQL: "ALTER TABLE billing.invoices ADD COLUMN b int",
+			Err: &executor.CommitOutcomeUnknownError{Err: context.Canceled},
+		}
+		rep := executor.SequenceReport{Steps: []executor.StepReport{
+			{SQL: "ALTER TABLE billing.invoices ADD COLUMN a int", Kind: executor.StepBrief},
+		}}
+		v := failureVerdict(st, stepErr, rep, false)
+		assert.Equal(t, string(executor.CodeCommitOutcomeUnknown), v.Code)
+		assert.Equal(t, 2, v.FailedStep)
+		assert.Equal(t, stepErr.SQL, v.FailedStepSQL)
+		assert.Equal(t, []string{rep.Steps[0].SQL}, v.ExecutedSQL, "only the steps before the unknown one are committed")
+		assert.Contains(t, v.Detail, "outcome unknown")
+		assert.Contains(t, v.Detail, "inspect the catalog for billing.invoices")
+		assert.NotContains(t, v.Detail, "partial-failure contract says how a retry resumes",
+			"a retry cannot be assumed to resume from a step whose commit may have landed")
+	})
+
+	t.Run("an unknown first step claims neither a rollback nor a committed prefix", func(t *testing.T) {
+		stepErr := &executor.SequenceStepError{
+			Step: 1, Total: 2, Kind: executor.StepBrief,
+			SQL: "ALTER TABLE billing.invoices ADD COLUMN a int",
+			Err: &executor.CommitOutcomeUnknownError{Err: errors.New("connection reset")},
+		}
+		v := failureVerdict(st, stepErr, executor.SequenceReport{}, false)
+		assert.Equal(t, string(executor.CodeCommitOutcomeUnknown), v.Code)
+		assert.Equal(t, 1, v.FailedStep)
+		assert.Empty(t, v.ExecutedSQL)
+		assert.Contains(t, v.Detail, "outcome unknown")
+		assert.NotContains(t, v.Detail, "no earlier steps had committed — Code names the outcome and any state the failed step itself left")
+	})
+
 	t.Run("a non-sequence failure carries no step and an empty prefix", func(t *testing.T) {
 		v := failureVerdict(st, fmt.Errorf("server error"), executor.SequenceReport{}, true)
 		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
@@ -251,6 +327,26 @@ func TestExecRefusal(t *testing.T) {
 		stepErr := &executor.SequenceStepError{Step: 2, Total: 3, Err: executor.ErrUnnamedIndex}
 		_, refused := execRefusal(st, stepErr, true, false, false)
 		assert.False(t, refused, "a step failure means execution started; the committed prefix must surface")
+	})
+
+	t.Run("a replica identity re-check before anything committed is a refusal", func(t *testing.T) {
+		drop, err := statement.ParseOne("ALTER TABLE billing.invoices DROP COLUMN ref")
+		require.NoError(t, err)
+		for name, recheckErr := range map[string]error{
+			"the first step": &executor.SequenceStepError{Step: 1, Total: 1, Err: fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop)},
+			"a bare attempt": fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop),
+		} {
+			t.Run(name, func(t *testing.T) {
+				v, refused := execRefusal(drop, recheckErr, false, false, false)
+				require.True(t, refused)
+				assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+				assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
+				assert.Contains(t, v.Detail, "replica identity")
+			})
+		}
+		later := &executor.SequenceStepError{Step: 2, Total: 2, Err: fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop)}
+		_, refused := execRefusal(drop, later, true, false, false)
+		assert.False(t, refused, "past the first step the committed prefix must surface")
 	})
 
 	t.Run("an operational server error is not a refusal", func(t *testing.T) {

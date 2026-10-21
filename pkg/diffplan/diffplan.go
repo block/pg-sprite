@@ -19,6 +19,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -95,6 +97,16 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if changes, err = schemadiff.Diff(req.Schema, live, desired); err != nil {
 			return plan.Report{}, err
 		}
+		if facts.AddColumnProofs, err = addColumnProofs(ctx, pool, req.Schema, ds.Table(), changes); err != nil {
+			return plan.Report{}, err
+		}
+		if retypesOrDropsColumn(changes) {
+			views, err := preflight.ColumnDependentViews(ctx, pool, req.Schema, ds.Table())
+			if err != nil {
+				return plan.Report{}, err
+			}
+			facts.DependentViews, facts.DropDependentViews, facts.OwnDependentViews = views.Tree, views.Drop, views.Own
+		}
 	}
 	report.TableExists = &tableExists
 	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
@@ -135,6 +147,34 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 	return report, nil
 }
 
+// addColumnProofs has the server prove, for every column the changes add
+// to the live table, whether adding it rewrites the table.
+func addColumnProofs(ctx context.Context, pool *pgxpool.Pool, schema, table string, changes []schemadiff.Change) (map[string]statement.AddColumnProof, error) {
+	var proofs map[string]statement.AddColumnProof
+	for _, ch := range changes {
+		if ch.Kind != schemadiff.ChangeAddColumn {
+			continue
+		}
+		proven, err := preflight.AddColumnRewrites(ctx, pool, schema, table, ch.SQL)
+		if err != nil {
+			return nil, err
+		}
+		if proofs == nil {
+			proofs = make(map[string]statement.AddColumnProof, len(proven))
+		}
+		maps.Copy(proofs, proven)
+	}
+	return proofs, nil
+}
+
+// retypesOrDropsColumn reports whether any change retypes or drops a
+// column, the two changes a view reading the column blocks.
+func retypesOrDropsColumn(changes []schemadiff.Change) bool {
+	return slices.ContainsFunc(changes, func(ch schemadiff.Change) bool {
+		return ch.Kind == schemadiff.ChangeAlterType || ch.Kind == schemadiff.ChangeDropColumn
+	})
+}
+
 // classifyChanges routes every derived change through the shared
 // classify-and-route pipeline. facts sharpen type-change classification;
 // the zero value is valid and strictly more conservative.
@@ -162,6 +202,8 @@ func classifyChanges(changes []schemadiff.Change, facts planner.Facts) ([]plan.S
 			return nil, "", fmt.Errorf("plan derived statement %q: %w", routed.Statements[i].Statement, err)
 		}
 		ps.Kind = ch.Kind
+		ps.Adopts = ch.Adopts
+		ps.Validates = ch.Validates
 		planned = append(planned, ps)
 	}
 	return planned, routed.Disposition, nil

@@ -14,8 +14,8 @@ Aurora; 14+): a decoupled **planner → router → executor** design where the
 planner classifies each change, the router picks a strategy, and
 interchangeable executors carry it out — the cheap native PostgreSQL idiom
 when one exists (`CONCURRENTLY`, `NOT VALID` + `VALIDATE`, fast default,
-`USING INDEX`), while a log-based, checksum-gated, resumable copy-and-swap for
-genuine table rewrites lands in a later phase.
+`USING INDEX`), and a log-based, checksum-gated, resumable copy-and-swap for
+genuine table rewrites — a general `ALTER COLUMN TYPE` runs through it today.
 
 The planner is PostgreSQL's missing `ALGORITHM=` / `LOCK=` declaration: MySQL
 lets authors assert a cost bracket and a concurrency impact and fails closed
@@ -63,8 +63,11 @@ and the mechanics of each current refusal are
 wherever an operation meets a boundary below, it fails closed with a typed
 refusal — never a silently wrong or incomplete result:
 
-- **Copy-and-swap** (genuine table rewrites) is not yet available — those
-  changes refuse rather than fall through to a blocking rewrite.
+- **Copy-and-swap** (genuine table rewrites) carries a general
+  `ALTER COLUMN TYPE` today; the other rewrite-class operations (volatile-default
+  `ADD COLUMN`, `GENERATED … STORED`, `SET TABLESPACE`) refuse rather than fall
+  through to a blocking rewrite, and the route's preflight refuses table shapes
+  and environments it cannot run against.
 - **Row security** is included in exports when present, with reviewable before/after differences. The
   [atomic executor](docs/atomic-row-security.md) applies RLS-only changes to existing tables
   through `migrate --desired` or the Go API. Only the Go API supports binding execution to
@@ -81,14 +84,38 @@ refusal — never a silently wrong or incomplete result:
   `unsupported-statement`, since it recomputes every row under an exclusive
   lock. Virtual generated columns (PostgreSQL 18+) are not modeled: export
   refuses them and a desired file that redeclares one fails the diff.
+- **Identity and serial sequence declarations** are modeled but not
+  converged: an identity's declared options export and compare, and a
+  difference is a typed `diff` refusal; change the declaration with owner
+  tooling, then state it in the file. A serial cannot state one, so export
+  refuses a serial whose sequence was declared otherwise.
 - **Partitioned tables** support in-place statement changes, but cannot be
-  expressed in or exported to desired files.
+  expressed in or exported to desired files, and `migrate` refuses
+  `ATTACH PARTITION` and `DETACH PARTITION`.
+- **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
+  `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.
+- **A key whose storage parameter cannot be rendered is refused** —
+  `ADD PRIMARY KEY` / `ADD UNIQUE` runs as a concurrent index build plus
+  `USING INDEX`, carrying the key's `WITH (...)` parameters; a value that
+  is not a plain word, number, or string, contains a backslash, or a
+  namespaced parameter name refuses with `rewrite-required` and the steps
+  to build the index by hand, then attach it.
+- **Dropping what a replica identity index is built on is refused** — the
+  index, the constraint that owns it, or a column it covers; move
+  `REPLICA IDENTITY` first, then re-plan.
+- **Retyping or dropping a column a view reads is refused** — PostgreSQL would
+  refuse it anyway; the plan names the views to drop or redefine first.
 - **Destructive desired-state plans are refused as a whole** — `migrate --desired`
   creates missing tables and converges supported changes, but never infers permission
-  to discard live structure.
+  to discard live structure. A new primary key or unique constraint over a live
+  unique index of its name is not destructive: it takes the index over with
+  `ADD CONSTRAINT ... USING INDEX`, and refuses with `adopted-index-drift` if the
+  index changed after planning. Nor is a live check constraint left `NOT VALID`
+  with the desired definition: it plans as one online `VALIDATE CONSTRAINT`, and
+  refuses with `validated-constraint-drift` if the constraint changed after planning.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
   build's leftover is reported with a typed state, and the proven removal
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
@@ -96,10 +123,11 @@ refusal — never a silently wrong or incomplete result:
   [runbook](docs/invalid-index-recovery.md) applies.
 - **The accepted-blocking passthrough covers index maintenance only** —
   `migrate --accept-blocking SCHEMA.TABLE` runs an otherwise-refused plain
-  `DROP INDEX`, `REINDEX INDEX`, or `REINDEX TABLE` deliberately under the
-  engine's bounded lock and statement budgets, with the verdict marked
-  `executed-without-online-safety` (exit 3). Every other refusal — including
-  a blocking index build on a partitioned parent — still exits 2. Design:
+  `DROP INDEX` (not `CASCADE`), `REINDEX INDEX`, or `REINDEX TABLE`
+  deliberately under the engine's bounded lock and statement budgets, with
+  the verdict marked `executed-without-online-safety` (exit 3). Every other
+  refusal — including a blocking index build on a partitioned parent — still
+  exits 2. Design:
   [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
 - **Non-table objects** — views, standalone sequences, enums, domains,
   extensions, functions, triggers — are outside the declarative model,
@@ -112,6 +140,9 @@ refusal — never a silently wrong or incomplete result:
   `INHERITS`, `LIKE`, `OF`, `IF NOT EXISTS`, or a relation name the desired
   set claims twice — refuse at plan time, and the same rules re-check at
   apply.
+- **A desired file that names a live parent** with `PARTITION OF` or
+  `INHERITS` refuses before planning builds anything, since the scratch
+  build would lock that parent.
 
 The codebase is partitioned into a small safety-critical core and a
 periphery — **[SAFETY.md](SAFETY.md)** says which packages are which and the
@@ -152,9 +183,9 @@ why the substituted sequence is safer — same end state, different locking
 the machine-readable shape is in
 [docs/cli-output-examples.md](docs/cli-output-examples.md).
 
-**Refuse: no safe path exists, so nothing runs.** A genuine table rewrite
-needs the copy-and-swap backend (a later phase); the dry run exits 2 so CI
-can gate on it without parsing JSON (the full four-code ladder is under
+**Refuse: no safe path exists, so nothing runs.** A rewrite the copy-and-swap
+backend does not carry yet (a volatile column default, for one) refuses; the
+dry run exits 2 so CI can gate on it without parsing JSON (the full four-code ladder is under
 [Exit codes](#exit-codes)). The exit-code gate stops refusals only —
 a destructive-but-executable change (`DROP COLUMN`) warns and exits 0, so a
 gate that must stop drops checks `.statements[].destructive` in the
@@ -223,14 +254,14 @@ vouch for it as online-safe.
 | Exit | Meaning | Anything committed? | Online-safe? |
 |---|---|---|---|
 | 0 | Executed through an online-safe path; or a dry run, `diff`, or `pull` found nothing to refuse | yes (dry run, `diff`, `pull`: nothing runs) | yes |
-| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in the verdict's `executed_sql` | not applicable |
+| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in the verdict's `executed_sql`; unknown when the verdict's `code` is `commit-outcome-unknown` — the failed step's `COMMIT` may have landed, so inspect the catalog before retrying | not applicable |
 | 2 | Refused: no online-safe path, and the verdict names the typed `reason` (and `class`) automation switches on | no | not applicable |
 | 3 | Committed through the accepted-blocking passthrough — the operator explicitly accepted a blocking form, and the engine ran it under bounded budgets without vouching for online safety | yes | no |
 
 A usage error exits 1 and writes the usage and the error to stderr; stdout
 carries only the command's output, including under `--json`.
 
-Three rules follow from the table, and one note for embedders:
+Four rules follow from the table, and one note for embedders:
 
 - **Gate on non-zero.** `pg-sprite migrate … || exit 1` is fail-closed for
   every code above. Allow 3 explicitly only where a maintenance-window
@@ -245,11 +276,20 @@ Three rules follow from the table, and one note for embedders:
   attempt that exceeded its statement budget did run — PostgreSQL cancelled
   it and transactional DDL rolled it back — and still exits 2, because the
   refusal is a routing answer (the change needs a different strategy).
+- **A lost `COMMIT` is exit 1, not 0, 2, or 3.** When the connection drops or
+  the caller's context ends while a bounded attempt's `COMMIT` is in flight,
+  the change may or may not have landed. Exit 0 and 3 would claim it did and
+  exit 2 would claim it did not; the failed exit says only that the engine
+  cannot vouch for the run, and the verdict's `code` (`commit-outcome-unknown`)
+  and detail tell the operator to inspect the catalog.
 - **Library callers get the same facts typed, not as a status.** An
   orchestrator that imports `pkg/executor` branches on the verdict's
   `outcome`, `errors.As` to the executor's typed errors, and
   `executor.OutcomeCode` — the exit code is the CLI's rendering of those
-  facts, not a surface the library exposes. The typed contract is in
+  facts, not a surface the library exposes. Check
+  `errors.As(err, new(*executor.CommitOutcomeUnknownError))` or `OutcomeCode`
+  before testing for context errors: a context cancelled during `COMMIT`
+  stays in the error chain, but the outcome is unknown, not a cancellation. The typed contract is in
   [docs/execution-model.md](docs/execution-model.md#how-a-failure-is-reported).
 
 Exit 3 comes from exactly one invocation shape: `migrate --accept-blocking

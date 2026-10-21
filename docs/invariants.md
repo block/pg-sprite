@@ -57,14 +57,32 @@ since under the swap lock (`cutover-undrained`); the mechanism is in
 [copy-and-swap-design.md](copy-and-swap-design.md#live-verification). The `Runner` on a
 quiesced target makes the quiescence its pass relies on true rather than assumed: it fences
 the source with a statement-level `BEFORE` trigger (`pgsprite_write_fence`, SQLSTATE `55006`)
-before its first save and keeps it through every stop until the swap carries it to the
-retained table, so the copy and one quiesced pass are the whole proof (fences-the-source,
-leaves-the-fence-on-a-stopped-run, unfences-the-old-table-it-keeps,
-stops-on-a-shadow-that-differs tests). On a decoding target it runs `CheckLive` under
-`DivergenceAbort` once the catch-up has passed a marker written after the copy, with the
-capture's own `Catchup` as the pass's confirmed source, and hands the swap a drain that
-reopens the stream from the position the capture confirmed and applies it under the swap's
-lock (carries-a-live-table-from-no-row-to-done test).
+enabled `ALWAYS`, so a session in `session_replication_role = replica` is refused too, before
+its first save, and keeps it through every stop until the swap carries it to the retained
+table, so the copy and one quiesced pass are the whole proof (fences-the-source,
+refuses-a-replica-role-session, leaves-the-fence-on-a-stopped-run,
+unfences-the-old-table-it-keeps, stops-on-a-shadow-that-differs tests). A resumed run installs
+over the fence, which enables it `ALWAYS` again (resume-upgrades-an-origin-fence test).
+
+The quiesced swap confirms the fence once more, under its `ACCESS EXCLUSIVE` lock: it refuses
+the proof as `cutover-unfenced` unless the engine's trigger is still on the source, of the
+shape the install gave it — no `WHEN` condition, no `UPDATE OF` column list, no arguments, not
+deferrable — and enabled `ALWAYS` (refuses-when-the-fence-was-disabled,
+refuses-when-the-fence-was-dropped, refuses-when-the-fence-is-origin-only, and
+refuses-when-the-fence-was-replaced-by-a-conditional-one tests). The check has a stated
+limit: a role that owns the table can disable the fence, write, and restore it between the
+pass and the swap, and that write is not seen. A live run installs no fence, so its swap
+checks none.
+
+On a decoding target the `Runner` runs `CheckLive` under `DivergenceAbort` once the catch-up
+has passed a marker written after the copy, with the capture's own `Catchup` as the pass's
+confirmed source, and hands the swap a drain that reopens the stream from the position the
+capture confirmed and applies it under the swap's lock (carries-a-live-table-from-no-row-to-done
+test). The live path reaches the `Runner` through `pkg/router`, which marks a `type-rewrite`
+plan executable only because the copy-and-swap engine carries that operation
+(`copyAndSwapCarriesReason`); every other copy-and-swap reason stays unavailable, so no
+rewrite reaches an executor without the gate (`migrate --alter`
+type-rewrite-runs-via-copy-and-swap and refuses-without-free-disk tests).
 *Source:* [design-principles](design-principles.md#correctness-and-safety),
 risks-and-mitigations; Spirit's "never skip it".
 
@@ -116,7 +134,15 @@ the same recopy commits with no reread — the policy for a source that is writt
 pass runs, where a fresh read would refuse a chunk the recopy itself made right; the stream
 carries that write, and the next pass, not this one, is the proof (no-policy,
 abort-leaves-shadow-alone, repairs-every-chunk, moved-unique-value,
-later-repair-fails, and recopy-tolerates-a-source-write-inside-the-pass tests). *Source:* Spirit AGENTS.md
+later-repair-fails, and recopy-tolerates-a-source-write-inside-the-pass tests). Under the
+stream (`CheckLive` under `repair`) the one recopy transaction is kept apart from the stream's
+own writes: the pass holds the catch-up's flushes off the shadow in Go before the transaction
+asks for `SHARE MODE` and gives them back only after it commits, on every path
+(`checksum.LiveOptions.Flushes`, a `FlushGate`, required under `repair`; `applier.Catchup.Pause`
+is the hold), so no flush interleaves with the delete and the copy
+(`TestCheckLiveRepairHoldsTheCatchupsFlushesForTheRecopy`,
+`TestCheckLiveRepairHoldBracketsTheRecopyTransaction`,
+`TestCheckLiveRepairResumesTheFlushesWhenTheRecopyFails`). *Source:* Spirit AGENTS.md
 (block/spirit#994 policy) — maps directly onto our failover-reconcile design.
 
 ### CO-4 — The copy/apply ordering invariants
@@ -168,18 +194,28 @@ never read as landed; a resumed copy first deletes every shadow row above W in b
 each in its own guarded transaction, before its first chunk is cut — the whole shadow when
 nothing landed, since a zero watermark says nothing about what an earlier run left above it — so
 every key above W is genuinely uncut when the applier starts discarding for it; the first clear
-batch takes `LOCK TABLE <shadow> IN SHARE MODE` before its delete, so a chunk transaction of the
-earlier run that is still committing into the shadow (holding `ROW EXCLUSIVE` through a
-synchronous-commit wait) ends before the clear reads, and a row it publishes cannot outlive the
-clear (straggler test); and `Position` snapshots the cut
-frontier, the in-flight chunks, and the landed watermark under one lock so `Position.Classify`
-gives the applier the three-way answer (uncut / in-flight / landed) for any key (whole-table with
-a Position-consistency sampler, never-overwrites, resume-from-watermark with stale rows above and
-below W, resume-from-zero-watermark with stale rows down to the smallest key, out-of-order
-landing, pinned-chunk cancellation followed by a resume that re-copies the
-cleared tail, a resume that waits behind a straggling chunk transaction, a shadow replaced
-between a chunk's claim and its transaction, and frontier-ordered ledger tests including the
-frontier at the largest key refusing every claim); `pkg/applier` `Buffer.Drain` — every
+batch's guard takes the shadow in `SHARE ROW EXCLUSIVE` as its one lock on it, so a chunk
+transaction of the earlier run that is still committing into the shadow (holding `ROW EXCLUSIVE`
+through a synchronous-commit wait) ends before the clear reads, a row it publishes cannot outlive
+the clear (straggler test), and an earlier run stalled inside its own first batch holds the same
+mode, so the two fences queue rather than deadlock (stalled-clear test); and `Position` snapshots
+the cut frontier, the in-flight chunks, and the landed watermark under one lock so
+`Position.Classify` gives the applier the three-way answer (uncut / in-flight / landed) for any
+key (whole-table with a Position-consistency sampler, never-overwrites, resume-from-watermark
+with stale rows above and below W, resume-from-zero-watermark with stale rows down to the
+smallest key, out-of-order landing, pinned-chunk cancellation followed by a resume that re-copies
+the cleared tail, a resume that waits behind a straggling chunk transaction, behind one parked
+before its insert, and behind an earlier run's stalled clear, a shadow replaced between a chunk's
+claim and its transaction, and frontier-ordered ledger tests including the frontier at the
+largest key refusing every claim). Every chunk and clear transaction in `pkg/copier` locks the
+shadow — `ROW EXCLUSIVE` for a write, the fence's mode for the first clear batch — before it
+confirms the table lock, so one that confirmed the lock before it passed to the resumed run
+already holds the lock the fence waits on, even if it is paused before its insert, and one that
+takes it afterwards fails the confirmation (parked-before-insert and parked-before-shadow-lock
+tests). The applier's flush holds only `ACCESS SHARE` on the shadow until its first write, so a
+flush transaction of an earlier run parked between confirming the table lock and that write is
+not one the copier's fence — or the verifier's repair fence — waits on; that gap is open.
+`pkg/applier` `Buffer.Drain` — every
 buffered key is judged against one `Position` snapshot: landed flushes, uncut is discarded,
 in-flight stays buffered until a later drain finds its chunk landed, and a key-moving UPDATE's
 two entries are judged per key, except that once neither is uncut the image and its old key's
@@ -205,11 +241,21 @@ requeued while its chunk is in flight and flushed once the chunk lands). *Open:*
 transaction whose commit the walsender has already sent while its backend is still in a
 synchronous-commit wait is not yet visible to a snapshot taken after the stream delivered it, so
 an uncut key's change can be discarded ahead of a chunk read that does not see it; the drain
-has no rule for that window yet. Also open: a primary-key move or a unique-value swap that
-straddles a chunk the copier is reading collides, on the copier's own insert of the moved row,
-with the stale shadow row the flush has not yet deleted (SQLSTATE `23505`); the catch-up's half
-of the exchange is correct and the resolution is the copier's, so the convergence tests for key
-moves and unique-key swaps start their load after the copy has landed. *Test obligation:* a
+has no rule for that window yet. The same window reaches a moved image whose unchanged-TOAST
+markers the flush completes from the source: an image `CompleteFirst` names whose old key's
+shadow row is absent or was reused, so its completion is read from the source row under `Key`.
+Inside the window that read does not see the delivered move. When it finds no row, the flush
+writes a delete at `Key` (`Result.Skipped`) with no stream gate, and the shadow ends up without
+a row the source holds; when the same invisible commit also removed another row from `Key`, the
+read finds that row and completes the image with its stale marker values. Nothing completes the
+image again. The checksum (CO-1) finds the differing row when the loss lands before the pass
+settles its chunk, and under `abort` refuses the cutover while `repair` recopies the chunk; a
+loss between the pass and the swap has no later comparison. Also open: a primary-key move or a
+unique-value swap that straddles a chunk the copier is reading collides, on the copier's own
+insert of the moved row, with the stale shadow row the flush has not yet deleted (SQLSTATE
+`23505`); the catch-up's half of the exchange is correct and the resolution is the copier's, so
+the convergence tests for key moves and unique-key swaps start their load after the copy has
+landed. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark
@@ -353,15 +399,26 @@ explicitly, in which case a user schema listed ahead of it shadows the catalog: 
 `app.pg_index` turns a fail-closed proof into a false clean, and a decoy `pg_cancel_backend`
 returns true and signals nothing. Two layers uphold the invariant. At the connection layer,
 every pooled session drops a `pg_catalog` entry that another schema precedes (`pkg/dbconn`
-`unshadowCatalog`), and every transaction-local path is built by `dbconn.LocalSearchPath`, which
-applies the same rewrite. At the query layer, reads that run under a path pg-sprite did not set
+`unshadowCatalog`), and every path pg-sprite sets is built in `pkg/dbconn`, which applies the
+same rewrite: `LocalSearchPath` for a transaction, and `SessionSearchPath` with
+`RestoreSessionSearchPath` for a session-level statement such as a concurrent build. At the query layer, reads that run under a path pg-sprite did not set
 — the session's own — qualify every relation, function, operator, and type with `pg_catalog`.
+Only this layer closes overload ranking: even with `pg_catalog` searched first, function and
+operator resolution ranks candidates across every schema on the path, so an exact-type overload
+planted in a schema the path lists (`pg_total_relation_size(oid)` against the catalog's
+`regclass` signature) beats the catalog's cast-requiring one.
 The connection-layer guarantee is per session: it rewrites an explicit `pg_catalog` entry only,
 not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary objects), and a
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
-*Enforced:* `pkg/dbconn` (session hook, `LocalSearchPath`, and the test that keeps it the only
-`search_path` writer under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
-`pkg/progress`, `pkg/schemadiff`, and `pkg/checksum` (the column-type read, the relation check,
+*Enforced:* `pkg/dbconn` (session hook, the path builders, and the test that keeps them the only
+`search_path` writers under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
+`pkg/progress`, `pkg/schemadiff`, `pkg/preflight` (every proof read — the size guard, the
+privilege probes, the absence, owned-name, and schema constraint-name reads, the add-column
+rewrite probe, and the copy-and-swap shape and environment facts — qualifies every function,
+relation, type, and operator, `IN` and `IS DISTINCT FROM`
+included since both resolve `=` through the path; planted `pg_total_relation_size(oid)`,
+`has_schema_privilege(name, name, text)`, `+`, and `=` overloads on a path that lists the
+catalog implicitly do not change an answer), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
@@ -487,7 +544,21 @@ never-released tests); in `pkg/copier` and `pkg/checksum`, every statement on th
 pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repair — runs inside a
 transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so a pool
 built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued behind
-`ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
+`ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout). `pkg/dbconn` refuses a
+`LockTimeout` or `StatementTimeout` that is neither zero (the default) nor between one
+millisecond and 2147483647ms with `ErrInvalidTimeout` before any connection is made, because
+PostgreSQL counts these settings in whole milliseconds, reads 0 as no timeout, and holds at most a
+32-bit count; its session read-back also refuses
+a server value of 0 for any requested bound.
+The concurrent build's failure verdict runs on a reserved session that observers must not
+disturb: `Tracker.Progress` reads the build's progress on that session detached from the
+observer's context and under its own deadline, set above `pkg/dbconn`'s default
+`statement_timeout` so a slow read ends server-side with the session intact, because a context
+that ends mid-query closes the connection; `Tracker.CancelBuild` signals the same way.
+*Enforced:* `pkg/progress` (`Tracker.Progress`, `progressReadTimeout`;
+`TestProgressRunsTheBuildReadDetachedFromTheObserver`,
+`TestProgressBuildReadDeadlineOutlastsTheServerStatementTimeout`, and
+`TestProgressReadCancelledMidQueryLeavesTheVerdictSessionUsable` in `pkg/executor`).
 *Source:* [design-principles](design-principles.md#correctness-and-safety), [mysql-vs-postgresql](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue);
 CIC exception from the validation review.
 
@@ -550,7 +621,17 @@ a lost connection the inspection resolved — is reported wrapping `ErrCutoverRo
 caller distinguishes "the source is still live, retry is safe" from an unresolved outcome
 without reading the catalog itself (terminated-backend test; commit-the-client-never-heard-of
 test; context-ends-during-commit test; backend-still-running test; three-catalog-state
-inspection test). *Source:* Spirit's cutover
+inspection test). The native bounded attempt — the optimistic run, every brief and
+`VALIDATE CONSTRAINT` sequence step, and each greenfield create step — does not inspect, but it
+honours the same rule from the reporting side: a `COMMIT` that did not return success (a lost
+connection, a failover, the caller's context ending mid-commit) is returned as
+`executor.CommitOutcomeUnknownError`, code `commit-outcome-unknown`, never as a rolled-back
+failure, and the validate step's cancellation corroboration leaves it untouched. The failed
+verdict then lists only the steps before it as committed, says the outcome is unknown, and names
+the table to inspect (`TestExecuteNativeTypesALostCommitAsOutcomeUnknown`,
+`TestRunSequenceTypesALostCommitMidSequenceAsOutcomeUnknown`,
+`TestRunReportsALostCommitAsAnUnknownOutcome`, `TestFailureVerdict`,
+`TestCorroborateValidateCancel`). *Source:* Spirit's cutover
 (`information_schema` inspection on dropped connection,
 [Spirit README](https://github.com/block/spirit#cut-over-and-cleanup)).
 
@@ -627,10 +708,19 @@ relation (a table where the statement needs an index, or the reverse) is a usage
 no verdict — each its own typed error — and nothing executes. The acknowledgement is never
 inferred from the statement text. The resolution and the execution are separate statements
 on the pool, so a concurrent re-pointing of the index name between them is outside what this
-invariant guarantees; the design records the window. *Enforced:* `pkg/migrate`
+invariant guarantees; the design records the window. The statement's scope must also be
+exactly that table: a `DROP INDEX ... CASCADE` also drops the objects that depend on the index,
+such as a foreign key on another table, so it is not a single-relation statement and the
+executor refuses it (`ErrUnsupportedAcceptedBlocking`) before opening a transaction.
+*Enforced:* `pkg/migrate`
 (`acceptBlocking`, `lockedTable`; `ErrAcceptBlockingMismatch`,
 `ErrAcceptBlockingRelationNotFound`, `ErrAcceptBlockingWrongRelationKind`),
-`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`.
+`pkg/executor` (`acceptedBlockingIneligibility`), `pkg/statement` (`ParseOne` classifies a
+cascading drop as `IndexTargetOther`),
+`TestRunAcceptBlockingRejectsFalseAcknowledgements`, `TestRelationKindMatches`,
+`TestAcceptedBlockingAdmission`, `TestExecuteAcceptedBlockingRefusesCascadeDrop`,
+`TestExecuteAcceptedBlockingPlainDropOfReferencedIndexIsRefusedByServer`,
+`TestExecuteAcceptedBlockingRestrictDropOfReferencedIndexIsRefusedByServer`.
 *Source:* [lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door).
 
 ### AB-4 — Acceptance applies only to an eligible in-process refusal, and to nothing else
@@ -638,13 +728,16 @@ invariant guarantees; the design records the window. *Enforced:* `pkg/migrate`
 The acknowledgement changes the outcome of exactly one thing: a gate refusal whose in-process
 proof the eligibility registry marks eligible (RF-8). Every other refusal — an ineligible
 gate refusal, a planner refusal, a size-guard or preflight refusal — stands exactly as it
-would without the flag, and a statement the gate admits runs its normal path. The
+would without the flag — including a `DROP INDEX ... CASCADE`, whose refusal site is the
+ineligible one because its scope exceeds the acknowledged table — and a statement the gate
+admits runs its normal path. The
 acknowledgement is not `--force`: the two cannot be combined, and a dry run reports the
 refusal as it stands rather than the accepted execution. The front door requires the
 statement budget to be stated on the same command line, because the accepted outage bound is
 a decision, not a default. *Enforced:* `migrate.AcceptedRefusal`, `MigrateCmd.Validate`,
-`TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
-`TestMigrateAcceptBlockingLeavesIneligibleRefusalsAlone`. *Source:*
+`migrate.gateRefusal` (the refusal site), `TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
+`TestMigrateAcceptBlockingLeavesIneligibleRefusalsAlone`,
+`TestMigrateAcceptBlockingRefusesCascadeAndKeepsDependentForeignKey`. *Source:*
 [lock-budgeted passthrough](lock-budgeted-passthrough.md#flag-and-front-door).
 
 ### AB-5 — The accepted outcome is distinguishable from online-safe execution at every surface
@@ -725,7 +818,10 @@ through `Store.Inspect` before it knows the statement, and holds a `copying`, `c
 `reconciling`, or `verifying` row against the shadow `InspectShadow` re-derives — shadow name, both fingerprints, and the
 JSON-encoded proof the row carries (`resume-row-mismatch` otherwise) — and refuses a relation
 under the shadow's name that no row records (`shadow-unrecorded`), since the row is the only
-record of which statement a shadow embodies.
+record of which statement a shadow embodies, and a row whose swap has not committed and whose
+shadow no relation bears (`resume-shadow-gone`, in any phase from `copying` to a `cutover` whose swap
+rolled back), since the run can neither continue on it nor start over while the row stands; the
+refusal writes nothing, so a live row's slot stays with it for the operator to drop.
 `TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
@@ -735,7 +831,9 @@ record of which statement a shadow embodies.
 `TestSaveWithoutAProofDoesNotEraseTheRowsProof`, `TestProofSurvivesTheCheckpointStore`,
 `TestDeleteRefusesARowTheCallerWasNotShown`,
 `TestWritesAndReadsWithoutEnsureReportTheMissingTable`,
-`TestResumeFromCheckpointConvergesAfterAMidCopyKill`. *Source:* Spirit `checkpoint.IsIncompatible` +
+`TestResumeFromCheckpointConvergesAfterAMidCopyKill`,
+`TestRunnerRefusesARowWhoseShadowIsGone`,
+`TestRunnerLiveRowWhoseShadowIsGoneIsRestartedByDroppingItsSlotAndRow`. *Source:* Spirit `checkpoint.IsIncompatible` +
 "resume requires the identical ALTER".
 
 ### ST-3 — Slot cleanup is guaranteed on success, failure, and crash
@@ -1002,6 +1100,43 @@ the unknown columns and is `ErrTableNewer` to `errors.Is`; `tableUnusable` maps 
 `TestReadsAndWritesAgainstAnOlderTableReportItBehind`. *Source:* adversarial review of the
 checkpoint table format.
 
+### ST-11 — The shadow takes a column's values only from the same source column
+
+The copy list names a source column only when the shadow's column of that name is the same
+column after the gated statement, not merely the same name: the shadow is cloned with its
+columns numbered 1..n in the source's live order, a retype keeps a column's number, and an added
+column is numbered past n, so a source column at live position `i` is the same column exactly
+when the shadow's column of that name has attribute number `i`. A column the statement dropped
+and added again under one name therefore takes its own default (or NULL), never the dropped
+column's values. No later gate can catch a wrong list: CO-1's digest compares the same list on
+both sides, so a name-matched list verifies clean, and the list itself is the guard. The copier,
+the checksum digest and its repair, and the live flusher all take their columns from
+`BuiltShadow.CopyColumns()`, and a resume re-derives the list from the catalog and compares it
+field for field against the checkpointed proof. *Enforced:* `pkg/schemachange`
+(`readColumnPositions` reads both relations' live attribute numbers inside the build's and the
+inspection's transaction; `sameColumns` keeps a column only when its live position equals its
+shadow attribute number; `copyColumns` takes only those). Tests:
+`TestSameColumnsComparesLivePositionToShadowNumber`,
+`TestBuildShadowLeavesAReaddedColumnOutOfTheCopyWhenTheSourceHasADroppedColumn`,
+`TestBuildShadowCopiesEveryColumnTheChangeKeeps`,
+`TestRunnerGivesAReaddedColumnItsDefaultNotTheDroppedValues`,
+`TestRunnerLiveRunGivesAReaddedColumnItsDefault`. *Source:* adversarial review of the
+re-added-column copy fix.
+
+### ST-12 — A desired-state run reports executed only when a fresh plan is empty
+
+Every planned statement committing is not proof the table reached the desired schema: a
+concurrent session, an event trigger, or a planner gap can leave it still differing. On an
+existing table the run derives the plan again after its last commit and reports executed only
+when that plan is empty; otherwise the result is failed with `ErrNotConverged`, every
+statement it ran keeps its executed verdict, and the result's typed convergence status carries
+the plan a rerun would execute. A greenfield create proves its outcome through the names it claimed instead (ST-9 and
+the create-name checks), because deriving a plan needs `CREATE` on the database.
+*Enforced:* `pkg/migrate` (`RunDesired` → `verifyConverged`). Tests:
+`TestRunDesired`, `TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit`,
+`TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt`.
+*Source:* review of desired-state outcome reporting.
+
 ## Refusals and preflight (RF)
 
 Each refusal is a preflight **error with a stated reason** — never a warning, never attempted.
@@ -1025,7 +1160,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   length, `NOT NULL` without default on null data, `text→jsonb` with unvalidatable rows) rather
   than discovered mid-copy. *Source:* Spirit blocklist + validation review.
 - **RF-4** — Renames are never guessed: a missing-plus-new column pair is drop+add unless rename
-  intent is explicit; dangerous rename-overlap patterns are refused. *Source:*
+  intent is explicit. The rename-overlap pattern Spirit refuses (one `ALTER` that renames a
+  column and reuses or retypes it) is unrepresentable: PostgreSQL parses a rename as its own
+  statement and the front door admits one statement (`TestClassifyRejectsARename*`). *Source:*
   [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options), Spirit.
 - **RF-5** — The dangerous literal never runs silently: risky statements with a safer native
   idiom get the idiom (reported) or a recommendation; running as-submitted requires a loud,
@@ -1041,13 +1178,18 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   vocabulary, and carries an owner exactly when its class is `no-online-safety-problem`.
   *Enforced:* `verdict.NewRefusal` and the per-class constructors are the only way to build a
   `verdict.Refusal`; `Verdict.WithRefusal` is the only way a verdict acquires its refusal
-  fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`)
-  is checked for completeness against the production closed sets by
-  `TestRefusalRegistryIsComplete`. Inside the core, `copier.RefusalCause.Class()` and
-  `schemachange.RefusalCause.Class()` answer one class from `refusal.Classes()`, held to each
-  cause's row by `TestRefusalCauseClassMatchesDocClassColumn` in both packages, every cause
-  table's `class` cell held to the closed set by `TestEveryCauseTableClassIsACoreClass`, and
-  the core's tokens held to the verdict's by `TestCoreRefusalClassesAreVerdictClasses`.
+  fields; the classification registry (`pkg/plan/refusal.go`, `pkg/migrate/refusal_registry.go`,
+  `pkg/migrate/copy_swap_refusal.go`) is checked for completeness against the production closed
+  sets by `TestRefusalRegistryIsComplete`. Inside the core, `copier.RefusalCause.Class()`,
+  `schemachange.RefusalCause.Class()`, `preflight.PartitionRefusalCause.Class()`,
+  `preflight.CopySwapRefusalCause.Class()`, and `executor.CreateShapeCause.Class()` answer one
+  class from `refusal.Classes()`, each held to its cause's row by a
+  `Test*ClassMatchesDocClassColumn` guard in its own package, every cause table's `class`
+  cell held to the closed set by `TestEveryCauseTableClassIsACoreClass`, the core's tokens
+  held to the verdict's by `TestCoreRefusalClassesAreVerdictClasses`, and the plan-side
+  registry's class for every create-shape and partition cause held to that cause's `Class()`
+  by `TestCreateShapeRefusalClassMatchesCauseClass` and
+  `TestPartitionRefusalClassMatchesCauseClass`.
   *Source:* [refusal classes](refusal-classes.md).
 - **RF-8** — An in-process refused verdict retains its full typed refusal proof, and
   `Verdict.Refusal` hands that proof out only when it validates under RF-7 and still matches
@@ -1165,4 +1307,6 @@ about **how we write and review the code**.
 | ST-8 | 2 (declarative model) | parse-time ordering + forged-proof refusal tests at every replay site |
 | ST-9 | 2 (declarative model) | every-relation-owned-by-owner, owner-mismatch fail-closed, unreadable-owner unverified, non-inheriting member admitted |
 | ST-10 | 8 | older-table evolve, newer-table refuse with no DDL, dropped-column and foreign-table shape reads, behind-table typed reads and writes |
+| ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
+| ST-12 | 2 (declarative model) | a table altered behind the run after its last commit fails as not converged with every verdict executed |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

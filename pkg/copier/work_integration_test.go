@@ -224,7 +224,7 @@ func TestCopierReportsItsWorkDuringTheResumeClear(t *testing.T) {
 
 	const fenceDeadline = 15 * time.Second
 	require.Eventually(t, func() bool {
-		return f.waitsForShareLock(t, shadow.ShadowOID())
+		return f.waitsForFenceLock(t, shadow.ShadowOID())
 	}, fenceDeadline, 20*time.Millisecond, "the first clear batch should wait behind the straggler's lock")
 
 	during, err := tracker.Progress(t.Context())

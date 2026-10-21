@@ -227,6 +227,13 @@ func TestCorroborateValidateCancel(t *testing.T) {
 		assert.Same(t, lockBudget, corroborateValidateCancel(live, lockBudget, budget, time.Minute))
 		assert.Same(t, lockBudget, corroborateValidateCancel(ended, lockBudget, budget, time.Minute))
 	})
+	t.Run("a commit that ended with the caller's context stays an unknown outcome", func(t *testing.T) {
+		unknown := &CommitOutcomeUnknownError{Err: fmt.Errorf("commit optimistic attempt: %w", context.Canceled)}
+		err := corroborateValidateCancel(ended, unknown, budget, time.Minute)
+		assert.Same(t, unknown, err)
+		assert.NotErrorIs(t, err, ErrCancelledByCaller)
+		assert.Equal(t, CodeCommitOutcomeUnknown, OutcomeCode(err))
+	})
 	t.Run("any other failure passes through", func(t *testing.T) {
 		boom := errors.New("connection reset")
 		assert.Same(t, boom, corroborateValidateCancel(ended, boom, budget, time.Minute))

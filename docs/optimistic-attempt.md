@@ -325,6 +325,9 @@ against `sizeGuardApplies`):
 | `generated-stored` | n/a — same |
 | `type-rewrite` | n/a — same |
 | `relocation` | n/a — same |
+| `replica-identity` | n/a — refused at plan time |
+| `dependent-view` | n/a — refused at plan time |
+| `cascading-drop` | n/a — refused at plan time |
 | `unsupported-operation` | n/a — refused at plan time |
 
 To check your own DDL, ask the planner — the classification is in the dry-run

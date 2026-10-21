@@ -49,8 +49,9 @@ the phased build plan should be traceable back to one of these.
   path) and every catalog-flip runs under `lock_timeout` + bounded retry/backoff, so the
   engine never sits at the head of the lock queue and amplifies one slow transaction into an
   outage (see [mysql-vs-postgresql.md § Why DDL is dangerous: the lock queue](mysql-vs-postgresql.md#why-ddl-is-dangerous-the-lock-queue)).
-- **Refuse the unsafe rather than guess.** Lossy conversions, PK changes, FK/trigger tables,
-  and ambiguous renames are rejected up front with a clear reason — never silently attempted
+- **Refuse the unsafe rather than guess.** Lossy conversions, PK changes, and FK/trigger
+  tables are rejected up front with a clear reason, and a rename is never inferred from a
+  dropped and an added column — never silently attempted
   (see [low-level-design's requirements](low-level-design.md#table-requirements-and-unsupported-operations-postgresql-analogs)).
 - **Fail safe, leave no mess.** On success, failure, *and* crash, the engine cleans up its
   artifacts — most importantly the replication slot, which otherwise pins WAL and can fill the

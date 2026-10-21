@@ -24,7 +24,8 @@ func TestNewRunnerRefusesANilStore(t *testing.T) {
 // The options every phase shares are validated at construction, so a run
 // cannot build a shadow and then stop at its first save or its swap over
 // a value it could have refused up front. The live pass reads the run's
-// own catch-up, so a confirmed source handed in is refused too.
+// own catch-up, so a confirmed source or a flush gate handed in is refused
+// too.
 func TestNewRunnerRefusesOptionsARunCouldNotHonour(t *testing.T) {
 	store := &checkpoint.Store{}
 	for name, opts := range map[string]schemachange.RunOptions{
@@ -32,6 +33,7 @@ func TestNewRunnerRefusesOptionsARunCouldNotHonour(t *testing.T) {
 		"shadow lock timeout below a millisecond": {Shadow: schemachange.Options{LockTimeout: time.Microsecond}},
 		"negative cutover lock attempts":          {Cutover: schemachange.CutoverOptions{LockAttempts: -1}},
 		"a confirmed source for the live pass":    {Live: checksum.LiveOptions{Confirmed: (*applier.Catchup)(nil)}},
+		"a flush gate for the live pass":          {Live: checksum.LiveOptions{Flushes: (*applier.Catchup)(nil)}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			_, err := schemachange.NewRunner(dbconn.Config{}, store, opts)

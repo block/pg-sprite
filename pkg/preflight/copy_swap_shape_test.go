@@ -5,6 +5,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 // supportedCopySwapShape is the fact set a plain bigint-keyed table
@@ -138,4 +140,38 @@ func TestRefuseCopySwapShapeDecidesWholeTableFactsFirst(t *testing.T) {
 	facts.foreignKeysOut = 1
 	cause, _ = refuseCopySwapShape(facts)
 	assert.Equal(t, CopySwapCauseForceRLS, cause)
+}
+
+// Every copy-and-swap cause routes to the class docs/refusal-classes.md
+// decides for it: a replica identity the operator can set and every cluster
+// and volume cause are environmental, since the same table is admitted once
+// state outside the engine changes; every other shape cause is a capability
+// boundary, since admitting it takes an engine capability; every answer is a
+// member of refusal.Classes(), and the zero cause — the shape is supported —
+// has no class.
+func TestEveryCopySwapRefusalCauseNamesItsClass(t *testing.T) {
+	want := map[CopySwapRefusalCause]refusal.Class{
+		CopySwapCausePKUnsupported:              refusal.ClassCapabilityBoundary,
+		CopySwapCauseReplicaIdentity:            refusal.ClassEnvironmental,
+		CopySwapCauseForeignKeys:                refusal.ClassCapabilityBoundary,
+		CopySwapCauseTriggers:                   refusal.ClassCapabilityBoundary,
+		CopySwapCausePartitioned:                refusal.ClassCapabilityBoundary,
+		CopySwapCauseUnlogged:                   refusal.ClassCapabilityBoundary,
+		CopySwapCauseForceRLS:                   refusal.ClassCapabilityBoundary,
+		CopySwapCauseDependentViews:             refusal.ClassCapabilityBoundary,
+		CopySwapCausePublicationMember:          refusal.ClassCapabilityBoundary,
+		CopySwapCauseSubscriptionTarget:         refusal.ClassCapabilityBoundary,
+		CopySwapCauseDependents:                 refusal.ClassCapabilityBoundary,
+		CopySwapCauseLogicalDecodingUnavailable: refusal.ClassEnvironmental,
+		CopySwapCauseSlotCollision:              refusal.ClassEnvironmental,
+		CopySwapCauseSlotHeadroom:               refusal.ClassEnvironmental,
+		CopySwapCauseDiskHeadroom:               refusal.ClassEnvironmental,
+	}
+	assert.Len(t, CopySwapRefusalCauses(), len(want), "every registered cause has an expected class")
+	for _, cause := range CopySwapRefusalCauses() {
+		assert.Equal(t, want[cause], cause.Class(), "cause %q", cause)
+		assert.Contains(t, refusal.Classes(), cause.Class(), "cause %q answers a class refusal.Classes() does not list", cause)
+	}
+	assert.Empty(t, CopySwapRefusalCause("").Class())
+	assert.Empty(t, CopySwapRefusalCause("not-a-cause").Class())
 }
