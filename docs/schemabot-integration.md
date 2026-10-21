@@ -431,7 +431,13 @@ pool was dialed with (the route opens dedicated sessions — the table lock, the
 the replication stream — so the pool alone does not suffice; a statement that routes to
 copy-and-swap with the connection unset is a caller wiring error: `Run` returns
 `migrate.ErrCopySwapConnectionRequired` with no verdict, before the preflight, so match it with
-`errors.Is` and fix the wiring rather than routing it as an outcome), the free space on the table's
+`errors.Is` and fix the wiring rather than routing it as an outcome; a connection that is set
+but reaches another database than the pool — another database of the cluster, or a database
+of the same name on another cluster — is the other wiring error, `*migrate.CopySwapConnectionMismatchError`,
+returned the same way after the route has compared both sides' `pg_control_system()` identity
+and `current_database()`, so a mistake that would otherwise surface mid-run as the environmental
+`shadow-lock-unconfirmed` refusal — which an adapter routing on class would retry — stops before
+the run takes its lock or writes its checkpoint row; match it with `errors.As`), the free space on the table's
 volume for the preflight's disk-headroom check, whether to keep the retained source under
 its `_old` name, and whether the table is quiesced for the run — the fenced path that needs
 no logical decoding — or live. The native route's budget, retry policy, and size ceiling do not govern

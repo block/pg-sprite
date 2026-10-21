@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -30,9 +31,10 @@ import (
 //
 // Two shapes, as RunDesired's: a refusal is the refused result with a nil
 // error; a stop — the route's connection not wired, which is
-// ErrCopySwapConnectionRequired, or a preflight that could not finish — is
-// a failed result carrying the plan and no verdict, with its error. Nothing
-// has executed in either case and the detail says so.
+// ErrCopySwapConnectionRequired, wired to another database than the pool,
+// which is a CopySwapConnectionMismatchError, or a preflight that could
+// not finish — is a failed result carrying the plan and no verdict, with
+// its error. Nothing has executed in either case and the detail says so.
 func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, opts Options) (DesiredResult, bool, error) {
 	first, routed := firstCopySwapStatement(report)
 	if !routed {
@@ -48,6 +50,13 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 	}
 	if opts.CopySwap.Connection.URL == "" {
 		return stopped("the route's connection is not configured", ErrCopySwapConnectionRequired)
+	}
+	if err := checkCopySwapConnection(ctx, pool, opts.CopySwap.Connection); err != nil {
+		var mismatch *CopySwapConnectionMismatchError
+		if errors.As(err, &mismatch) {
+			return stopped("the route's connection reaches another database than the pool", err)
+		}
+		return stopped("the route's connection could not be identified", err)
 	}
 	_, err := preflight.CheckCopySwap(ctx, pool, report.Schema, report.Table, opts.CopySwap.environment())
 	if err == nil {
