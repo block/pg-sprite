@@ -7,29 +7,12 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/executor"
 )
-
-// newShadowedPathPool returns a pool whose sessions list schema ahead of
-// pg_catalog, the path an operator's role or database setting can produce. It
-// is a raw pgx pool on purpose: pkg/dbconn pools rewrite that path before any
-// query runs, and the read under test must hold on a pool the library caller
-// built without that hook.
-func newShadowedPathPool(t *testing.T, serverURL, schema string) *pgxpool.Pool {
-	t.Helper()
-	pc, err := pgxpool.ParseConfig(serverURL)
-	require.NoError(t, err, "parse server URL")
-	pc.ConnConfig.RuntimeParams["search_path"] = pgx.Identifier{schema}.Sanitize() + ", pg_catalog"
-	pool, err := pgxpool.NewWithConfig(t.Context(), pc)
-	require.NoError(t, err, "connect with a shadowing search_path")
-	t.Cleanup(pool.Close)
-	return pool
-}
 
 // A pg_roles view planted in the schema that the session path lists ahead of
 // pg_catalog names the create owner as the owner of every role. Unqualified,
@@ -56,7 +39,7 @@ func TestExecuteCreateWithOwnerVerifiesOwnerThroughTheRealCatalog(t *testing.T) 
 		FROM pg_catalog.pg_roles`,
 		pgx.Identifier{f.schema}.Sanitize(), quoteLiteral(owner)))
 	require.NoError(t, err)
-	shadowed := newShadowedPathPool(t, f.pool.Config().ConnString(), f.schema)
+	shadowed := testutil.NewCatalogShadowingPool(t, f.pool.Config().ConnString(), f.schema)
 
 	var answered string
 	require.NoError(t, shadowed.QueryRow(t.Context(),
