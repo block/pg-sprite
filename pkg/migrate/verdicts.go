@@ -3,6 +3,7 @@ package migrate
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
@@ -157,6 +158,16 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 				"which makes UPDATE and DELETE fail while a publication publishes them; "+
 				"point REPLICA IDENTITY at another unique index first (or DEFAULT, if a usable primary key remains after the drop), then re-plan", d.Operation)
 		}
+		if d.Reason == planner.ReasonDependentView {
+			v.DependentViews = d.DependentViews
+			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a view reads it; "+
+				"drop or redefine those views first, then re-plan", d.Operation, strings.Join(d.DependentViews, ", "))
+		}
+		if d.Reason == planner.ReasonCascadingDrop {
+			v.Detail = fmt.Sprintf("%s uses CASCADE, which also drops the objects that depend on it, such as views or other tables' foreign keys, "+
+				"outside this statement's table; drop each dependent object explicitly, then resubmit without CASCADE, "+
+				"and PostgreSQL then refuses the drop if anything still depends on it", d.Operation)
+		}
 		break
 	}
 	return v
@@ -245,8 +256,10 @@ func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError, forc
 // failure the failed step and the committed prefix whose state remains.
 // It is the machine-readable twin of the returned error — automation
 // branches on Code and ExecutedSQL instead of parsing stderr prose. A
-// single bounded attempt (the submitted form, forced or not) rolls back on
-// failure, so it carries no step and an empty committed prefix.
+// single bounded attempt (the submitted form, forced or not) that fails
+// before its COMMIT rolls back, so it carries no step and an empty committed
+// prefix; one whose COMMIT did not return success may have landed, and the
+// verdict says the outcome is unknown instead.
 func failureVerdict(st statement.Statement, err error,
 	rep executor.SequenceReport, forced bool) verdict.Verdict {
 	v := verdict.Verdict{
@@ -257,14 +270,31 @@ func failureVerdict(st statement.Statement, err error,
 		Forced:    forced,
 		Detail:    "execution failed; nothing committed — a started bounded attempt rolls back",
 	}
+	unknown := errors.As(err, new(*executor.CommitOutcomeUnknownError))
 	var stepErr *executor.SequenceStepError
 	if !errors.As(err, &stepErr) {
+		if unknown {
+			v.Detail = fmt.Sprintf("outcome unknown: the COMMIT did not return success, "+
+				"so whether the change committed cannot be established from the client — inspect the catalog for %s before retrying",
+				v.Table)
+		}
 		return v
 	}
 	v.FailedStep = stepErr.Step
 	v.FailedStepSQL = stepErr.SQL
 	for _, s := range rep.Steps {
 		v.ExecutedSQL = append(v.ExecutedSQL, s.SQL)
+	}
+	if unknown {
+		// The failed step's COMMIT may have landed, so the planner's "a retry
+		// resumes from the failed step" contract cannot be assumed: the
+		// committed prefix is the steps before it, and the step itself is
+		// unknown until the catalog says otherwise.
+		v.Detail = fmt.Sprintf("sequence step %d of %d: outcome unknown — the step's COMMIT did not return success, "+
+			"so whether the step committed cannot be established from the client; "+
+			"the %d earlier steps committed and remain — inspect the catalog for %s before retrying, and do not assume a retry resumes from this step",
+			stepErr.Step, stepErr.Total, len(v.ExecutedSQL), v.Table)
+		return v
 	}
 	if len(v.ExecutedSQL) > 0 {
 		v.Detail = fmt.Sprintf("sequence step %d of %d failed; the %d committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes",

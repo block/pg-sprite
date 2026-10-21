@@ -182,8 +182,12 @@ func probeRewrite(ctx context.Context, tx pgx.Tx, probeTable, column string, alt
 	if _, err := tx.Exec(ctx, "CREATE TEMPORARY TABLE "+pgx.Identifier{probeTable}.Sanitize()+" ()"); err != nil {
 		return false, "", probeTableError(err)
 	}
+	// INV: CO-9 — every function, operator, relation, and type in the
+	// probe's reads is pg_catalog-qualified: the probe runs on the
+	// statement's path, and a planted (oid, regclass) = there would
+	// otherwise answer the attribute lookup.
 	var before, after uint32
-	if err := tx.QueryRow(ctx, "SELECT pg_relation_filenode($1::regclass)", probeIdent).Scan(&before); err != nil {
+	if err := tx.QueryRow(ctx, "SELECT pg_catalog.pg_relation_filenode($1::pg_catalog.regclass)", probeIdent).Scan(&before); err != nil {
 		return false, "", fmt.Errorf("read the probe table's storage before adding column %q: %w", column, err)
 	}
 	_, err = tx.Exec(ctx, alter(probeIdent))
@@ -194,9 +198,10 @@ func probeRewrite(ctx context.Context, tx pgx.Tx, probeTable, column string, alt
 	case err != nil:
 		return false, "", err
 	default:
-		if err := tx.QueryRow(ctx, `SELECT pg_relation_filenode($1::regclass),
-			(SELECT format_type(atttypid, atttypmod) FROM pg_catalog.pg_attribute
-			 WHERE attrelid = $1::regclass AND attname = $2)`, probeIdent, column).Scan(&after, &typeName); err != nil {
+		if err := tx.QueryRow(ctx, `SELECT pg_catalog.pg_relation_filenode($1::pg_catalog.regclass),
+			(SELECT pg_catalog.format_type(atttypid, atttypmod) FROM pg_catalog.pg_attribute
+			 WHERE attrelid OPERATOR(pg_catalog.=) $1::pg_catalog.regclass
+			   AND attname OPERATOR(pg_catalog.=) $2)`, probeIdent, column).Scan(&after, &typeName); err != nil {
 			return false, "", fmt.Errorf("read the probe table's storage after adding column %q: %w", column, err)
 		}
 		rewrites = before != after
@@ -235,11 +240,13 @@ func existingColumns(ctx context.Context, tx pgx.Tx, schema, table string, probe
 	if len(names) == 0 {
 		return nil, nil
 	}
+	// INV: CO-9 — pg_catalog-qualified like the probe's own reads.
 	rows, err := tx.Query(ctx, `SELECT a.attname FROM pg_catalog.pg_attribute a
-		JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
-		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2 AND a.attnum > 0 AND NOT a.attisdropped
-		  AND a.attname = ANY($3)`, schema, table, names)
+		JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) a.attrelid
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2
+		  AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped
+		  AND a.attname OPERATOR(pg_catalog.=) ANY($3)`, schema, table, names)
 	if err != nil {
 		return nil, fmt.Errorf("read the existing columns of %s: %w", qualifiedName(schema, table), err)
 	}

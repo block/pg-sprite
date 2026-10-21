@@ -511,10 +511,14 @@ type Verdict struct {
 	// FailedStep is the 1-based position of the sequence step that failed,
 	// matching the numbering the planner's partial-failure contracts use;
 	// zero when the failure was not a mid-sequence one (a single-statement
-	// attempt rolls back and commits nothing).
+	// attempt that fails before its COMMIT rolls back and commits nothing).
+	// When Code is an outcome-unknown code, the step's own COMMIT may have
+	// landed: its state is unknown, not failed.
 	FailedStep int `json:"failed_step,omitempty"`
 	// FailedStepSQL is the failed step's statement — the step the planner's
-	// partial-failure contract says a retry resumes from.
+	// partial-failure contract says a retry resumes from. When Code is an
+	// outcome-unknown code, the step may have committed, so a retry cannot
+	// be assumed to resume here until the catalog is inspected.
 	FailedStepSQL string `json:"failed_step_sql,omitempty"`
 	// Attempts is how many bounded attempts ran before a lock-budget
 	// refusal, so automation can tell an exhausted bounded retry from a
@@ -536,11 +540,20 @@ type Verdict struct {
 	// carries. Detail states the steps for a human; Guidance is the key an
 	// automated caller branches on. Empty for every other verdict.
 	Guidance suggest.Guidance `json:"guidance,omitempty"`
+	// DependentViews names the views and materialized views that read the
+	// column a refused statement retypes or drops, each schema-qualified
+	// with every identifier quoted, sorted: the objects to drop or redefine
+	// before the change can run. The same list the plan report's
+	// dependent-view decision carries. Empty for every other verdict.
+	DependentViews []string `json:"dependent_views,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what
 	// tells automation a substitution happened). On a failed verdict it is
-	// the committed prefix that remains: empty means nothing committed.
+	// the committed prefix that remains: empty means nothing is known to
+	// have committed — and nothing at all did, unless Code is an
+	// outcome-unknown code, in which case the failed step itself (or the
+	// single statement) may have committed and the catalog decides.
 	ExecutedSQL []string `json:"executed_sql,omitempty"`
 	// Forced reports that --force overrode the engine's routing: the
 	// submitted form ran as-is instead of a safer substitution or a

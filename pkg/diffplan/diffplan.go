@@ -20,6 +20,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"slices"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -99,6 +100,13 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if facts.AddColumnProofs, err = addColumnProofs(ctx, pool, req.Schema, ds.Table(), changes); err != nil {
 			return plan.Report{}, err
 		}
+		if retypesOrDropsColumn(changes) {
+			views, err := preflight.ColumnDependentViews(ctx, pool, req.Schema, ds.Table())
+			if err != nil {
+				return plan.Report{}, err
+			}
+			facts.DependentViews, facts.DropDependentViews, facts.OwnDependentViews = views.Tree, views.Drop, views.Own
+		}
 	}
 	report.TableExists = &tableExists
 	if report.Statements, report.Disposition, err = classifyChanges(changes, facts); err != nil {
@@ -157,6 +165,14 @@ func addColumnProofs(ctx context.Context, pool *pgxpool.Pool, schema, table stri
 		maps.Copy(proofs, proven)
 	}
 	return proofs, nil
+}
+
+// retypesOrDropsColumn reports whether any change retypes or drops a
+// column, the two changes a view reading the column blocks.
+func retypesOrDropsColumn(changes []schemadiff.Change) bool {
+	return slices.ContainsFunc(changes, func(ch schemadiff.Change) bool {
+		return ch.Kind == schemadiff.ChangeAlterType || ch.Kind == schemadiff.ChangeDropColumn
+	})
 }
 
 // classifyChanges routes every derived change through the shared

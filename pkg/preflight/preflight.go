@@ -96,12 +96,16 @@ func (f TargetFacts) ServerMajor() int { return f.serverMajor }
 // LookupTargetFacts verifies that the target is an ordinary or partitioned
 // table and returns its relation kind and server major in one catalog query.
 func LookupTargetFacts(ctx context.Context, pool *pgxpool.Pool, schema, table string) (TargetFacts, error) {
+	// INV: CO-9 — every function, operator, relation, and type is
+	// pg_catalog-qualified, so no overload on the session's search_path
+	// can answer in its place.
 	const q = `
-		SELECT c.relkind::text, current_setting('server_version_num')::int / 10000
-		FROM pg_class c
-		WHERE c.oid = to_regclass(
-			CASE WHEN $1 = '' THEN quote_ident($2)
-			     ELSE quote_ident($1) || '.' || quote_ident($2) END)`
+		SELECT c.relkind::pg_catalog.text,
+		       pg_catalog.current_setting('server_version_num')::int OPERATOR(pg_catalog./) 10000
+		FROM pg_catalog.pg_class c
+		WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(
+			CASE WHEN $1 OPERATOR(pg_catalog.=) '' THEN pg_catalog.quote_ident($2)
+			     ELSE pg_catalog.quote_ident($1) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident($2) END)`
 	var relkind string
 	var serverMajor int
 	err := pool.QueryRow(ctx, q, schema, table).Scan(&relkind, &serverMajor)
@@ -144,17 +148,21 @@ func CheckTable(ctx context.Context, pool *pgxpool.Pool, schema, table string, l
 	// pg_total_relation_size carries the total) and the parent's own
 	// relation is 0 bytes for a partitioned table (the descendants carry
 	// the total).
+	//
+	// INV: CO-9 — every function, operator, relation, and type is
+	// pg_catalog-qualified, the size sum's + included, so a planted
+	// overload on the session's search_path cannot report a smaller size.
 	const q = `
-		SELECT c.relkind::text,
-		       pg_total_relation_size(c.oid) +
-		       (SELECT COALESCE(sum(pg_total_relation_size(p.relid)), 0)
-		          FROM pg_partition_tree(c.oid) p
-		         WHERE p.relid <> c.oid),
+		SELECT c.relkind::pg_catalog.text,
+		       pg_catalog.pg_total_relation_size(c.oid) OPERATOR(pg_catalog.+)
+		       (SELECT COALESCE(pg_catalog.sum(pg_catalog.pg_total_relation_size(p.relid)), 0)
+		          FROM pg_catalog.pg_partition_tree(c.oid) p
+		         WHERE p.relid OPERATOR(pg_catalog.<>) c.oid),
 		       c.reltuples
-		FROM pg_class c
-		WHERE c.oid = to_regclass(
-			CASE WHEN $1 = '' THEN quote_ident($2)
-			     ELSE quote_ident($1) || '.' || quote_ident($2) END)`
+		FROM pg_catalog.pg_class c
+		WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(
+			CASE WHEN $1 OPERATOR(pg_catalog.=) '' THEN pg_catalog.quote_ident($2)
+			     ELSE pg_catalog.quote_ident($1) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident($2) END)`
 	var relkind string
 	var totalBytes int64
 	var relTuples float64

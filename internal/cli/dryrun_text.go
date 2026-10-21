@@ -77,6 +77,9 @@ func writeStatementDiagnostics(w *stickyWriter, n int, ps plan.Statement, runner
 		w.diag(decisionSeverity(ps, d), string(d.Reason),
 			fmt.Sprintf("%s — %s", d.Operation, impactText(d.Reason)))
 		codes = appendCode(codes, string(d.Reason))
+		if len(d.DependentViews) > 0 {
+			w.diag("help", "", "drop or redefine those views first, then re-plan")
+		}
 	}
 	if ps.Destructive {
 		w.diag("warning", "destructive", "this change discards live data or structure")
@@ -306,6 +309,10 @@ func impactText(r planner.Reason) string {
 		return "takes a brief exclusive lock on the partitioned parent, briefly blocking access to every partition"
 	case planner.ReasonReplicaIdentity:
 		return "drops what the table's replica identity keys on; UPDATE and DELETE on the table fail while a publication publishes them"
+	case planner.ReasonDependentView:
+		return "changes a column a view reads; PostgreSQL refuses this until the view is dropped or redefined"
+	case planner.ReasonCascadingDrop:
+		return "CASCADE also drops the views and other tables' foreign keys that depend on it; drop those explicitly and resubmit without CASCADE"
 	case planner.ReasonUnsupportedOperation:
 		return "pg-sprite does not recognize this operation and will not run it"
 	}
@@ -348,21 +355,26 @@ func refuseText(ps plan.Statement, r verdict.Reason) string {
 			"SET EXPRESSION needs PostgreSQL 17 or later; before that, the only path is to drop and re-add the column, " +
 			"which also drops its indexes"
 	}
-	if op := refusedOperation(ps); op != "" {
-		return "the planner knows no safe path for " + op
+	d, ok := firstRefusal(ps)
+	if !ok {
+		return "the planner knows no safe path for this statement"
 	}
-	return "the planner knows no safe path for this statement"
+	if d.Reason == planner.ReasonDependentView {
+		return d.Operation + " changes a column read by " + strings.Join(d.DependentViews, ", ") +
+			", and PostgreSQL refuses to retype or drop a column while a view reads it"
+	}
+	return "the planner knows no safe path for " + d.Operation
 }
 
-// refusedOperation names the first operation the planner refused — the
-// same operation the run path's refusal verdict names in its detail.
-func refusedOperation(ps plan.Statement) string {
+// firstRefusal returns the first decision the planner refused — the same
+// decision the run path's refusal verdict explains in its detail.
+func firstRefusal(ps plan.Statement) (planner.Decision, bool) {
 	for _, d := range ps.Decisions {
 		if d.Route == planner.RouteRefuse {
-			return d.Operation
+			return d, true
 		}
 	}
-	return ""
+	return planner.Decision{}, false
 }
 
 // stickyWriter accumulates the first write error so the renderer reads as

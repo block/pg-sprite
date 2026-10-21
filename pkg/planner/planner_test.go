@@ -127,6 +127,155 @@ func TestClassifyJudgesAnOnlyDropByTheTablesOwnIdentity(t *testing.T) {
 	}
 }
 
+// PostgreSQL refuses to retype or drop a column a view reads, so either
+// change on such a column is refused with the views named, even a type
+// change that would otherwise relabel in place. A rename, which the view
+// follows, and changes to columns no view reads classify as usual.
+func TestClassifyRefusesChangingAColumnAViewReads(t *testing.T) {
+	views := planner.Facts{
+		ColumnTypes: map[string]string{"email": "character varying(50)", "note": "text"},
+		DependentViews: map[string][]string{
+			"email": {`"app"."active_users"`, `"reports"."emails"`},
+		},
+		DropDependentViews: map[string][]string{
+			"email": {`"app"."active_users"`, `"reports"."emails"`},
+		},
+		OwnDependentViews: map[string][]string{
+			"email": {`"app"."active_users"`, `"reports"."emails"`},
+		},
+	}
+	for _, sql := range []string{
+		"ALTER TABLE t ALTER COLUMN email TYPE varchar(100)",
+		"ALTER TABLE t ALTER COLUMN email TYPE text",
+		"ALTER TABLE t ALTER COLUMN email TYPE bigint USING email::bigint",
+		"ALTER TABLE t DROP COLUMN email",
+		"ALTER TABLE ONLY t DROP COLUMN email",
+	} {
+		plan, err := planner.Classify(sql, views)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		d := plan.Decisions[0]
+		assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+		assert.Equal(t, planner.ReasonDependentView, d.Reason, sql)
+		assert.Equal(t, []string{`"app"."active_users"`, `"reports"."emails"`}, d.DependentViews, sql)
+		assert.Equal(t, planner.RouteRefuse, plan.Route, sql)
+	}
+
+	for sql, reason := range map[string]planner.Reason{
+		"ALTER TABLE t RENAME COLUMN email TO mail":       planner.ReasonAppBreakingRename,
+		"ALTER TABLE t ALTER COLUMN email SET DEFAULT ''": planner.ReasonMetadataOnly,
+		"ALTER TABLE t DROP COLUMN note":                  planner.ReasonMetadataOnly,
+		"ALTER TABLE t ALTER COLUMN note TYPE text":       planner.ReasonBinaryCoercible,
+	} {
+		plan, err := planner.Classify(sql, views)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, reason, plan.Decisions[0].Reason, sql)
+		assert.Empty(t, plan.Decisions[0].DependentViews, sql)
+	}
+
+	plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN email TYPE varchar(100)",
+		planner.Facts{ColumnTypes: views.ColumnTypes})
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonBinaryCoercible, plan.Decisions[0].Reason)
+}
+
+// A view on a table below counts against a recursive change and not
+// against one under ONLY, which stops at the table. A recursive drop counts
+// only the copies of the column it drops: a view on a child's own declared
+// copy blocks a type change, which reaches that copy, and not a drop, which
+// leaves it.
+func TestClassifyJudgesDependentViewsByWhatTheChangeReaches(t *testing.T) {
+	facts := planner.Facts{
+		ColumnTypes: map[string]string{"email": "character varying(50)", "code": "text", "tag": "text"},
+		DependentViews: map[string][]string{
+			"email": {`"app"."active_users"`}, "code": {`"app"."child_codes"`}, "tag": {`"app"."child_tags"`},
+		},
+		DropDependentViews: map[string][]string{"email": {`"app"."active_users"`}, "code": {`"app"."child_codes"`}},
+		OwnDependentViews:  map[string][]string{"email": {`"app"."active_users"`}},
+	}
+	for sql, want := range map[string][]string{
+		"ALTER TABLE t DROP COLUMN email RESTRICT":         {`"app"."active_users"`},
+		"ALTER TABLE ONLY t DROP COLUMN email":             {`"app"."active_users"`},
+		"ALTER TABLE t DROP COLUMN code":                   {`"app"."child_codes"`},
+		"ALTER TABLE t ALTER COLUMN code TYPE varchar(10)": {`"app"."child_codes"`},
+	} {
+		plan, err := planner.Classify(sql, facts)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, planner.ReasonDependentView, plan.Decisions[0].Reason, sql)
+		assert.Equal(t, want, plan.Decisions[0].DependentViews, sql)
+	}
+
+	plan, err := planner.Classify("ALTER TABLE ONLY t DROP COLUMN code", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+
+	plan, err = planner.Classify("ALTER TABLE t DROP COLUMN tag", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+	assert.Empty(t, plan.Decisions[0].DependentViews)
+
+	plan, err = planner.Classify("ALTER TABLE t ALTER COLUMN tag TYPE varchar(10)", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonDependentView, plan.Decisions[0].Reason)
+	assert.Equal(t, []string{`"app"."child_tags"`}, plan.Decisions[0].DependentViews)
+}
+
+// CASCADE also drops whatever depends on the target, objects the
+// statement does not name, so every drop with it is refused, from the
+// statement alone and whatever the live facts say, while the default
+// RESTRICT classifies as usual. A drop the replica identity guard refuses
+// keeps that more specific reason.
+func TestClassifyRefusesACascadingDrop(t *testing.T) {
+	views := planner.Facts{
+		ColumnTypes:        map[string]string{"email": "character varying(50)"},
+		DependentViews:     map[string][]string{"email": {`"app"."active_users"`}},
+		DropDependentViews: map[string][]string{"email": {`"app"."active_users"`}},
+		OwnDependentViews:  map[string][]string{"email": {`"app"."active_users"`}},
+	}
+	for _, facts := range []planner.Facts{{}, views} {
+		for _, sql := range []string{
+			"ALTER TABLE t DROP COLUMN email CASCADE",
+			"ALTER TABLE ONLY t DROP COLUMN email CASCADE",
+			"ALTER TABLE t DROP COLUMN IF EXISTS email CASCADE",
+			"ALTER TABLE t DROP CONSTRAINT t_pkey CASCADE",
+			"ALTER TABLE t DROP CONSTRAINT IF EXISTS t_pkey CASCADE",
+			"DROP INDEX t_email_idx CASCADE",
+			"DROP INDEX app.t_email_idx, app.t_other_idx CASCADE",
+		} {
+			plan, err := planner.Classify(sql, facts)
+			require.NoError(t, err, sql)
+			require.Len(t, plan.Decisions, 1, sql)
+			d := plan.Decisions[0]
+			assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+			assert.Equal(t, planner.ReasonCascadingDrop, d.Reason, sql)
+			assert.True(t, d.Destructive, sql)
+			assert.Empty(t, d.SaferSQL, "DROP INDEX CONCURRENTLY does not accept CASCADE: %s", sql)
+			assert.Empty(t, d.DependentViews, sql)
+			assert.Equal(t, planner.RouteRefuse, plan.Route, sql)
+		}
+	}
+
+	plan, err := planner.Classify("ALTER TABLE t ADD COLUMN note text, DROP CONSTRAINT t_pkey CASCADE", planner.Facts{})
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 2)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+	assert.Equal(t, planner.ReasonCascadingDrop, plan.Decisions[1].Reason)
+	assert.Equal(t, planner.RouteRefuse, plan.Route)
+
+	for sql, reason := range map[string]planner.Reason{
+		"ALTER TABLE t DROP CONSTRAINT t_pkey":          planner.ReasonMetadataOnly,
+		"ALTER TABLE t DROP CONSTRAINT t_pkey RESTRICT": planner.ReasonMetadataOnly,
+		"DROP INDEX t_email_idx RESTRICT":               planner.ReasonSaferIdiom,
+	} {
+		plan, err := planner.Classify(sql, planner.Facts{})
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, reason, plan.Decisions[0].Reason, sql)
+	}
+}
+
 // facts mirrors a live table whose column types exercise both sides of the
 // binary-coercible rules.
 var facts = planner.Facts{ColumnTypes: map[string]string{
@@ -601,6 +750,8 @@ func TestReasonsVocabularyPinned(t *testing.T) {
 		planner.ReasonRelocation,
 		planner.ReasonPartitionParentLock,
 		planner.ReasonReplicaIdentity,
+		planner.ReasonDependentView,
+		planner.ReasonCascadingDrop,
 		planner.ReasonUnsupportedOperation,
 	}, planner.Reasons())
 }

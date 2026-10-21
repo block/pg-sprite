@@ -15,10 +15,13 @@ and the closed vocabularies below (codes, severities, and the embedded planner r
 adding a value to any of them is a contract change and bumps `format_version`, even if no
 field is added or renamed.
 
-The current version is **3**: version 3 added the `concurrent-in-transaction` code. Version 2
-added the `replica-identity` reason to the embedded Reasons vocabulary. The linter itself never
-reports that reason, because it is judged from live replica identity facts the linter does not
-have.
+The current version is **5**: version 5 added the `cascading-drop` reason to the embedded
+Reasons vocabulary. Version 4 added the `dependent-view` reason. Version 3 added the
+`concurrent-in-transaction` code. Version 2 added the `replica-identity` reason. The linter
+never reports `replica-identity` or `dependent-view`, because each is judged from live facts
+(the table's replica identity, the views that read a column) the linter does not have. It does
+report `cascading-drop`, which it reads from the statement, on an `unsupported-operation`
+finding.
 
 ### Relationship to the plan report
 

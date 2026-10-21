@@ -209,9 +209,10 @@ func restoreSearchPath(ctx context.Context, conn *pgxpool.Conn, searchPathSchema
 // for 500 — which a caller that means to write the value straight back
 // would have to parse.
 func sessionBudgets(ctx context.Context, conn *pgxpool.Conn) (lockMS, statementMS int64, err error) {
+	// INV: CO-9 — every relation and operator is pg_catalog-qualified.
 	const query = `SELECT
-		(SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name = 'lock_timeout'),
-		(SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name = 'statement_timeout')`
+		(SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name OPERATOR(pg_catalog.=) 'lock_timeout'),
+		(SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name OPERATOR(pg_catalog.=) 'statement_timeout')`
 	if err := conn.QueryRow(ctx, query).Scan(&lockMS, &statementMS); err != nil {
 		return 0, 0, fmt.Errorf("read session budgets: %w", err)
 	}
