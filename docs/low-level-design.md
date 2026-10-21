@@ -383,6 +383,31 @@ flagged.
 4. Planner refusals (no known safe path) and unsupported statement kinds are **not** forceable —
    there is nothing bounded to acknowledge.
 
+What `--force` changes depends on how the statement routed:
+
+| Routing decision | Without `--force` | With `--force SCHEMA.TABLE` |
+| --- | --- | --- |
+| Execute, safer sequence substituted (e.g. `CREATE INDEX` → `CONCURRENTLY`) | runs the safer sequence | runs the submitted form as one blind bounded attempt |
+| Execute, submitted form already safe | runs it | runs it; nothing to override, so the verdict does not record `forced` |
+| Execute on copy-and-swap (a table rewrite) | runs through the shadow table | runs the submitted form natively as one blind bounded attempt, not through the shadow table |
+| `rewrite-required` (e.g. `RENAME COLUMN`, `RENAME TO`) | refused with guidance, nothing executed, exit 2 | runs the submitted form as one blind bounded attempt |
+| `backend-unavailable` | refused, nothing executed, exit 2 | runs the submitted form as one blind bounded attempt |
+| Planner refusal (e.g. `RENAME CONSTRAINT`, `EXCLUDE`) | refused, nothing executed, exit 2 | still refused, exit 2; a matching acknowledgement changes nothing and the verdict does not record `forced` |
+
+The acknowledgement is compared with the statement's target table after an unqualified name is
+resolved against the session's `search_path`, so it is always schema-qualified:
+`ALTER TABLE users RENAME COLUMN name TO full_name` on a `public.users` table needs
+`--force public.users`, and `--force users` is a mismatch. The rule is that the operator names
+the table whose lock they are accepting, which is the one that exists now: for `ALTER TABLE
+users RENAME TO accounts` that is `public.users`, not the new name. Naming the new name is a
+mismatch even if a separate `public.accounts` table already exists, so a typo or a wrong guess
+cannot run the rename by accident. Because
+the value must match each statement's own table, the override is per table, not a global
+switch. A mismatch exits 1 with no verdict and nothing executed. `--force` cannot be combined
+with `--dry-run` (the dry run reports the unforced plan) or `--accept-blocking` (a statement
+reaches one decision and one acknowledgement names it), and the declarative `--desired` path
+rejects it.
+
 Force exists for the rare legitimate case (e.g. a maintenance window where the table is known
 idle and a plain rewrite is acceptable); it is an escape hatch, not a shortcut, consistent with
 *decisions, not options*.

@@ -493,7 +493,10 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		// marks the statement rewrite-required and the typed guidance
 		// names the safe sequence; the acknowledged override is the one
 		// way to run the rename itself. Index renames stay metadata-only
-		// above — SQL never references an index by name.
+		// above: ordinary SQL names tables and columns, not indexes. An
+		// index that backs a constraint is the exception — renaming it
+		// renames the constraint, which ON CONFLICT ON CONSTRAINT names —
+		// and is not told apart here.
 		d.Route, d.Reason = RouteNative, ReasonAppBreakingRename
 
 	case statement.OpAlterColumnType:
