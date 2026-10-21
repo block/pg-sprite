@@ -57,7 +57,7 @@ func TestStreamDecodesANullAsAPresentColumn(t *testing.T) {
 
 	ev := nextChange(t, stream)
 	assert.Equal(t, decode.Insert, ev.Kind)
-	assert.Equal(t, []decode.Column{column("id", "101"), {Name: "note", Value: nil, Present: true}}, ev.Columns)
+	assert.Equal(t, []decode.Column{column("id", "101"), decode.PresentColumn("note", nil)}, ev.Columns)
 }
 
 // An UPDATE that leaves a column stored out of line untouched arrives with
@@ -96,9 +96,10 @@ func TestStreamDecodesAnUpdateOfAToastValueAsPresent(t *testing.T) {
 	ev := nextChange(t, stream)
 	assert.Equal(t, decode.Update, ev.Kind)
 	require.Len(t, ev.Columns, 2)
-	assert.True(t, ev.Columns[1].Present)
-	assert.Equal(t, "y", ev.Columns[1].Value.(string)[:1])
-	assert.Len(t, ev.Columns[1].Value, 4000)
+	value, present := ev.Columns[1].Get()
+	require.True(t, present)
+	assert.Equal(t, "y", value.(string)[:1])
+	assert.Len(t, value, 4000)
 }
 
 // An UPDATE that moves the primary key carries the key the row had as

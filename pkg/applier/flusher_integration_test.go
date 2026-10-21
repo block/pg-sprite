@@ -197,9 +197,9 @@ func (f flushFixture) count(t *testing.T, table string) int64 {
 // change each test states. Column values are the text pgoutput carries.
 
 func col(name string, value any) decode.Column {
-	return decode.Column{Name: name, Value: value, Present: true}
+	return decode.PresentColumn(name, value)
 }
-func marker(name string) decode.Column { return decode.Column{Name: name, Present: false} }
+func marker(name string) decode.Column { return decode.AbsentColumn(name) }
 
 func image(key int64, cols ...decode.Column) applier.Entry {
 	return applier.Entry{Key: key, Kind: applier.Image, Columns: cols, FirstLSN: decode.LSN(key)}

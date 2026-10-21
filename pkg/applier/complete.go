@@ -69,9 +69,9 @@ func (f *Flusher) completeFrom(ctx context.Context, tx pgx.Tx, sql string, key i
 	}
 	c := completion{columns: make([]decode.Column, len(markers)), readLSN: readLSN}
 	for i, name := range markers {
-		c.columns[i] = decode.Column{Name: name, Present: true}
+		c.columns[i] = decode.PresentColumn(name, nil)
 		if values[i] != nil {
-			c.columns[i].Value = *values[i]
+			c.columns[i] = decode.PresentColumn(name, *values[i])
 		}
 	}
 	return c, true, nil

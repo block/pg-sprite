@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/block/pg-sprite/pkg/decode"
 )
@@ -17,7 +18,7 @@ import (
 // image — Entry.Key is the key.
 func (f *Flusher) split(e *Entry) (present []decode.Column, markers []string) {
 	for _, name := range f.columns {
-		if i := e.index(name); i >= 0 && e.Columns[i].Present {
+		if i := e.index(name); i >= 0 && e.Columns[i].Present() {
 			present = append(present, e.Columns[i])
 			continue
 		}
@@ -52,7 +53,7 @@ func upsertSQL(relation, pk string, cols []decode.Column, conv conversions) stri
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		name := pgx.Identifier{c.Name}.Sanitize()
+		name := pgx.Identifier{c.Name()}.Sanitize()
 		b.WriteString(name)
 		b.WriteString(" = EXCLUDED.")
 		b.WriteString(name)
@@ -78,7 +79,7 @@ func updateSQL(relation, pk string, cols []decode.Column, conv conversions) stri
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		b.WriteString(pgx.Identifier{c.Name}.Sanitize())
+		b.WriteString(pgx.Identifier{c.Name()}.Sanitize())
 		b.WriteString(" = ")
 		b.WriteString(valueSQL(i+2, c, conv))
 	}
@@ -122,8 +123,8 @@ func rowSQL(relation, pk string, names []string) string {
 }
 
 func (f *Flusher) upsertRow(ctx context.Context, tx pgx.Tx, key int64, cols []decode.Column, conv conversions) error {
-	if _, err := tx.Exec(ctx, upsertSQL(f.shadowRelation(), f.pk(), cols, conv), args(key, cols)...); err != nil {
-		return fmt.Errorf("upsert key %d into %s: %w", key, f.shadowRelation(), err)
+	if _, err := execRow(ctx, tx, upsertSQL(f.shadowRelation(), f.pk(), cols, conv), key, cols); err != nil {
+		return fmt.Errorf("upsert into %s: %w", f.shadowRelation(), err)
 	}
 	return nil
 }
@@ -131,18 +132,34 @@ func (f *Flusher) upsertRow(ctx context.Context, tx pgx.Tx, key int64, cols []de
 // updateRow writes the columns onto the row under key and reports whether a
 // row was there to take them.
 func (f *Flusher) updateRow(ctx context.Context, tx pgx.Tx, key int64, cols []decode.Column, conv conversions) (bool, error) {
-	tag, err := tx.Exec(ctx, updateSQL(f.shadowRelation(), f.pk(), cols, conv), args(key, cols)...)
+	tag, err := execRow(ctx, tx, updateSQL(f.shadowRelation(), f.pk(), cols, conv), key, cols)
 	if err != nil {
-		return false, fmt.Errorf("update key %d in %s: %w", key, f.shadowRelation(), err)
+		return false, fmt.Errorf("update in %s: %w", f.shadowRelation(), err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
 
 func (f *Flusher) insertRow(ctx context.Context, tx pgx.Tx, key int64, cols []decode.Column, conv conversions) error {
-	if _, err := tx.Exec(ctx, insertSQL(f.shadowRelation(), f.pk(), cols, conv), args(key, cols)...); err != nil {
-		return fmt.Errorf("insert key %d into %s: %w", key, f.shadowRelation(), err)
+	if _, err := execRow(ctx, tx, insertSQL(f.shadowRelation(), f.pk(), cols, conv), key, cols); err != nil {
+		return fmt.Errorf("insert into %s: %w", f.shadowRelation(), err)
 	}
 	return nil
+}
+
+// execRow runs one row statement with key and cols bound as args lays
+// them out. A column that carries no value is refused before the
+// statement runs (CO-8), so every row write stops on the refusal rather
+// than send a statement with its parameters missing.
+func execRow(ctx context.Context, tx pgx.Tx, sql string, key int64, cols []decode.Column) (pgconn.CommandTag, error) {
+	params, err := args(key, cols)
+	if err != nil {
+		return pgconn.CommandTag{}, err
+	}
+	tag, err := tx.Exec(ctx, sql, params...)
+	if err != nil {
+		return pgconn.CommandTag{}, fmt.Errorf("key %d: %w", key, err)
+	}
+	return tag, nil
 }
 
 func (f *Flusher) deleteRow(ctx context.Context, tx pgx.Tx, key int64) error {
@@ -161,14 +178,20 @@ func (f *Flusher) deleteRows(ctx context.Context, tx pgx.Tx, keys []int64) error
 
 // args lays out a statement's parameters: the key first, then each
 // column's value in order, so every builder above binds the same way. A
-// value read from the shadow is bound as the value it wraps.
-func args(key int64, cols []decode.Column) []any {
+// value read from the shadow is bound as the value it wraps; a column with
+// no value is refused, since the statement would write what pgoutput never
+// carried (CO-8).
+func args(key int64, cols []decode.Column) ([]any, error) {
 	out := make([]any, 0, 1+len(cols))
 	out = append(out, key)
 	for _, c := range cols {
-		out = append(out, bindValue(c))
+		value, err := bindValue(c)
+		if err != nil {
+			return nil, fmt.Errorf("key %d: %w", key, err)
+		}
+		out = append(out, value)
 	}
-	return out
+	return out, nil
 }
 
 func (f *Flusher) shadowRelation() string {
@@ -189,7 +212,7 @@ func columnList(pk string, cols []decode.Column) string {
 	names := make([]string, 0, 1+len(cols))
 	names = append(names, pk)
 	for _, c := range cols {
-		names = append(names, pgx.Identifier{c.Name}.Sanitize())
+		names = append(names, pgx.Identifier{c.Name()}.Sanitize())
 	}
 	return strings.Join(names, ", ")
 }

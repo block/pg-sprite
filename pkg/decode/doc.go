@@ -7,9 +7,10 @@
 // make; and reads a slot's pg_replication_slots row, including the WAL it
 // retains and whether the server has declared that WAL lost.
 // A Stream decodes the slot with pgoutput into ChangeEvents — one per
-// committed row change, every column carried with its presence, so an
-// unchanged out-of-line value the server omitted is never mistaken for a
-// value, and the key a moved row had — and keeps two positions apart:
+// committed row change, every Column carried with its presence and its
+// value readable only together with it, so an unchanged out-of-line value
+// the server omitted is never mistaken for a value, and the key a moved
+// row had — and keeps two positions apart:
 // what it has delivered, which every transaction yielded so far committed
 // at or below, and what the caller has confirmed applied, which is the only
 // position it ever reports to the server. Both order transactions by

@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/decode"
 )
@@ -16,7 +17,7 @@ const (
 func cols(names ...string) []decode.Column {
 	out := make([]decode.Column, len(names))
 	for i, n := range names {
-		out[i] = decode.Column{Name: n, Value: n + "-value", Present: true}
+		out[i] = decode.PresentColumn(n, n+"-value")
 	}
 	return out
 }
@@ -81,15 +82,19 @@ func TestWritesConvertAColumnThroughItsExpression(t *testing.T) {
 // would apply the expression to its own output.
 func TestWritesBindAShadowFormValueBare(t *testing.T) {
 	conv := conversions{"qty": {expr: "(qty::numeric * 100)::integer", sourceType: "text"}}
-	completed := []decode.Column{{Name: "qty", Value: shadowForm{value: "250"}, Present: true}}
+	completed := []decode.Column{decode.PresentColumn("qty", shadowForm{value: "250"})}
 	assert.Equal(t,
 		`INSERT INTO "app"."orders_shadow" ("id", "qty") VALUES ($1, $2)`,
 		insertSQL(testRelation, testPK, completed, conv))
-	assert.Equal(t, []any{int64(7), "250"}, args(7, completed), "the bind is the wrapped value")
+	bound, err := args(7, completed)
+	require.NoError(t, err)
+	assert.Equal(t, []any{int64(7), "250"}, bound, "the bind is the wrapped value")
 
-	null := []decode.Column{{Name: "qty", Value: shadowForm{}, Present: true}}
+	null := []decode.Column{decode.PresentColumn("qty", shadowForm{})}
 	assert.Equal(t, `INSERT INTO "app"."orders_shadow" ("id", "qty") VALUES ($1, $2)`, insertSQL(testRelation, testPK, null, conv))
-	assert.Equal(t, []any{int64(7), nil}, args(7, null), "a shadow NULL stays NULL and is not converted")
+	bound, err = args(7, null)
+	require.NoError(t, err)
+	assert.Equal(t, []any{int64(7), nil}, bound, "a shadow NULL stays NULL and is not converted")
 }
 
 // A source column that collates differently from its type's default is
@@ -108,9 +113,11 @@ func TestWritesBindAConvertedValueUnderTheSourceColumnsCollation(t *testing.T) {
 // column with no conversion is never converted.
 func TestWritesBindAnUnconvertedShadowFormValueBare(t *testing.T) {
 	conv := conversions{"qty": {expr: "(qty::numeric * 100)::integer", sourceType: "text"}}
-	completed := []decode.Column{{Name: "note", Value: shadowForm{value: "as read"}, Present: true}}
+	completed := []decode.Column{decode.PresentColumn("note", shadowForm{value: "as read"})}
 	assert.Equal(t, `UPDATE "app"."orders_shadow" SET "note" = $2 WHERE "id" = $1`, updateSQL(testRelation, testPK, completed, conv))
-	assert.Equal(t, []any{int64(7), "as read"}, args(7, completed))
+	bound, err := args(7, completed)
+	require.NoError(t, err)
+	assert.Equal(t, []any{int64(7), "as read"}, bound)
 }
 
 func TestDeleteSQL(t *testing.T) {
@@ -128,10 +135,22 @@ func TestRowSQLRendersEachColumnAsTextWithTheReadPosition(t *testing.T) {
 }
 
 // args binds the key first and then each column's value in order, which is
-// the position every builder assigns.
+// the position every builder assigns; a NULL binds as nil.
 func TestArgsBindTheKeyThenTheValues(t *testing.T) {
-	assert.Equal(t, []any{int64(7), "qty-value", nil},
-		args(7, []decode.Column{{Name: "qty", Value: "qty-value", Present: true}, {Name: "note", Value: nil, Present: true}}))
+	bound, err := args(7, []decode.Column{decode.PresentColumn("qty", "qty-value"), decode.PresentColumn("note", nil)})
+	require.NoError(t, err)
+	assert.Equal(t, []any{int64(7), "qty-value", nil}, bound)
+}
+
+// A column with no value cannot be bound: a statement that bound it would
+// write a value pgoutput never carried over the shadow's (CO-8). The
+// refusal names the key and the column.
+func TestArgsRefuseAColumnWithNoValue(t *testing.T) {
+	bound, err := args(7, []decode.Column{decode.PresentColumn("qty", "2"), decode.AbsentColumn("blob")})
+	require.ErrorIs(t, err, ErrInvariantViolation)
+	assert.ErrorContains(t, err, "key 7")
+	assert.ErrorContains(t, err, "column blob")
+	assert.Nil(t, bound)
 }
 
 // split keeps the shadow's writable columns in shadow order whatever order
@@ -141,14 +160,14 @@ func TestArgsBindTheKeyThenTheValues(t *testing.T) {
 func TestSplitFollowsTheShadowColumns(t *testing.T) {
 	f := &Flusher{columns: []string{"qty", "blob", "note"}}
 	e := &Entry{Key: 1, Kind: Image, Columns: []decode.Column{
-		{Name: "note", Value: "n", Present: true},
-		{Name: "id", Value: "1", Present: true},
-		{Name: "dropped", Value: "x", Present: true},
-		{Name: "qty", Value: "2", Present: true},
-		{Name: "blob", Present: false},
+		decode.PresentColumn("note", "n"),
+		decode.PresentColumn("id", "1"),
+		decode.PresentColumn("dropped", "x"),
+		decode.PresentColumn("qty", "2"),
+		decode.AbsentColumn("blob"),
 	}}
 	present, markers := f.split(e)
-	assert.Equal(t, []decode.Column{{Name: "qty", Value: "2", Present: true}, {Name: "note", Value: "n", Present: true}}, present)
+	assert.Equal(t, []decode.Column{decode.PresentColumn("qty", "2"), decode.PresentColumn("note", "n")}, present)
 	assert.Equal(t, []string{"blob"}, markers)
 
 	_, markers = f.split(&Entry{Key: 2, Kind: Image, Columns: cols("qty")})

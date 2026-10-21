@@ -60,7 +60,7 @@ type Entry struct {
 	// for the key never carries it.
 	AbsenceAwaited bool
 	// Columns is the merged row image for an Image, in the decoded column
-	// order; a column with Present=false is an unchanged-TOAST marker whose
+	// order; an absent column is an unchanged-TOAST marker whose
 	// value no buffered event carried. It is nil for a DeleteMarker.
 	Columns []decode.Column
 	// FirstLSN is the delivered position the earliest event this entry still
@@ -75,7 +75,7 @@ type Entry struct {
 // event supplied, so the flush must complete it (CO-8).
 func (e Entry) HasMarker() bool {
 	for _, c := range e.Columns {
-		if !c.Present {
+		if !c.Present() {
 			return true
 		}
 	}
@@ -86,10 +86,10 @@ func (e Entry) HasMarker() bool {
 // appending a name the image does not hold yet, and leaves the rest alone.
 func (e *Entry) overlay(cols []decode.Column) {
 	for _, c := range cols {
-		if !c.Present {
+		if !c.Present() {
 			continue
 		}
-		if i := e.index(c.Name); i >= 0 {
+		if i := e.index(c.Name()); i >= 0 {
 			e.Columns[i] = c
 			continue
 		}
@@ -103,11 +103,11 @@ func (e *Entry) overlay(cols []decode.Column) {
 // is newer than the completion.
 func (e *Entry) fill(cols []decode.Column) {
 	for _, c := range cols {
-		if !c.Present {
+		if !c.Present() {
 			continue
 		}
-		i := e.index(c.Name)
-		if i >= 0 && e.Columns[i].Present {
+		i := e.index(c.Name())
+		if i >= 0 && e.Columns[i].Present() {
 			continue
 		}
 		if i >= 0 {
@@ -120,7 +120,7 @@ func (e *Entry) fill(cols []decode.Column) {
 
 func (e Entry) index(name string) int {
 	for i, c := range e.Columns {
-		if c.Name == name {
+		if c.Name() == name {
 			return i
 		}
 	}
