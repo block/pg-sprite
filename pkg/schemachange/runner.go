@@ -322,7 +322,15 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 // with DropWriteFence or drops the slot with decode.DropSlot, and deletes
 // the row, or runs the statement again with RunOptions.Restart, which
 // does those steps under the run's own lock; no Run without the restart
-// goes back to the copy. Every error is
+// goes back to the copy. A run that stopped on a data fault (IsDataFault)
+// — the server rejecting the rows as the statement would shape them, in
+// the copy, the stream's apply, or the swap's drain — is the one stop the Runner does not leave to resume,
+// since every resume would meet the same rows: it is discarded whole
+// under this run's lock session, as RunOptions.Restart would discard it,
+// and the error returned is an *AbandonedError carrying the fault; the
+// next Run of the statement starts from the beginning. A cutover row is
+// still answered by the catalog first, and one whose swap committed is
+// refused as restart-swap-committed rather than discarded. Every error is
 // returned as the step returned it, with a lost table lock reported as
 // shadow-lock-lost, and with the zero Result — except when the run is
 // complete and its done row saved and only the release of the lock
@@ -370,7 +378,7 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 		report, err := r.swap(ctx, pool, lock, target, &state)
 		result.Verification = report
 		if err != nil {
-			return Result{}, err
+			return Result{}, r.abandonOnDataFault(ctx, pool, lock, target, &state, err)
 		}
 	}
 	result.Reconciled = state.reconciled

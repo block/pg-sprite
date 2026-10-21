@@ -119,26 +119,51 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.NotContains(t, v.Detail, "replication slot")
 	})
 
-	t.Run("a value the new type will not hold is a failure whose remedy is to start the run over", func(t *testing.T) {
+	t.Run("a value the new type will not hold is an abandoned run coded as a data fault", func(t *testing.T) {
 		// 22001 string_data_right_truncation: a varchar(10) retype over a
-		// longer value. The copy meets the same row on every rerun.
+		// longer value. The copy would meet the same row on every rerun,
+		// so the Runner discarded the run before returning; the detail
+		// says what is gone and that the corrected statement starts from
+		// the beginning — there is no row to resume and nothing for
+		// --restart to discard.
 		tooLong := &pgconn.PgError{Code: "22001", Message: "value too long for type character varying(10)"}
-		runErr := fmt.Errorf("copy chunk: %w", tooLong)
+		runErr := &schemachange.AbandonedError{Schema: "billing", Table: "orders", Fault: fmt.Errorf("copy chunk: %w", tooLong)}
 		v, err := copySwapRunVerdict(st, true, runErr)
 		assert.ErrorIs(t, err, runErr)
 		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
-		assert.Contains(t, v.Detail, "start the run over")
-		assert.Contains(t, v.Detail, "takes the write fence off the source", "a quiesced run's hold is its fence")
+		assert.Equal(t, string(executor.CodeDataFault), v.Code)
+		assert.Contains(t, v.Detail, "the run was abandoned")
+		assert.Contains(t, v.Detail, "the write fence is off the source", "a quiesced run's hold was its fence")
+		assert.Contains(t, v.Detail, "starts from the beginning")
+		assert.NotContains(t, v.Detail, "--restart")
 		assert.NotContains(t, v.Detail, "resumes")
 	})
 
-	t.Run("a constraint the copied rows break is a failure whose remedy is to start the run over", func(t *testing.T) {
+	t.Run("a constraint the copied rows break is an abandoned run that names the slot as released", func(t *testing.T) {
 		// 23502 not_null_violation: a re-added NOT NULL column with no
 		// default fills from NULL on the first chunk.
 		notNull := &pgconn.PgError{Code: "23502", Message: "null value in column violates not-null constraint"}
-		v, _ := copySwapRunVerdict(st, false, fmt.Errorf("copy chunk: %w", notNull))
+		runErr := &schemachange.AbandonedError{Schema: "billing", Table: "orders", Fault: fmt.Errorf("copy chunk: %w", notNull)}
+		v, _ := copySwapRunVerdict(st, false, runErr)
+		assert.Equal(t, string(executor.CodeDataFault), v.Code)
+		assert.Contains(t, v.Detail, "the run was abandoned")
+		assert.Contains(t, v.Detail, "its replication slot is dropped", "a live run's hold was its slot")
+		assert.NotContains(t, v.Detail, "--restart")
+	})
+
+	t.Run("a data fault whose abandon did not finish is coded as a data fault with the restart remedy", func(t *testing.T) {
+		// The Runner joins the discard's failure behind the fault; the row
+		// still stands as far as the discard got, so the operator finishes
+		// the discard with the restart acknowledgement. The code still
+		// names the fault, since that is what the operator corrects.
+		tooLong := &pgconn.PgError{Code: "22001", Message: "value too long for type character varying(10)"}
+		runErr := errors.Join(fmt.Errorf("copy chunk: %w", tooLong), errors.New("abandon run on billing.orders: drop shadow: connection reset"))
+		v, err := copySwapRunVerdict(st, true, runErr)
+		assert.ErrorIs(t, err, runErr)
+		assert.Equal(t, string(executor.CodeDataFault), v.Code)
+		assert.Contains(t, v.Detail, "could not be abandoned")
 		assert.Contains(t, v.Detail, "start the run over")
-		assert.Contains(t, v.Detail, "drops the replication slot", "a live run's hold is its slot")
+		assert.Contains(t, v.Detail, "takes the write fence off the source", "a quiesced run's hold is its fence")
 		assert.NotContains(t, v.Detail, "resumes")
 	})
 
