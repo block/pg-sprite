@@ -54,6 +54,14 @@ var errEventTriggerDrainTimedOut = errors.New("event trigger drain timed out")
 // that may still hold the trigger in its event-trigger cache has ended
 // (see dropEventTrigger), which an inline DROP EVENT TRIGGER followed by
 // the function's drop — or the schema's cascade — does not.
+//
+// The function runs for every other test's DDL too, as whatever role that
+// DDL runs as, and such a role need not hold USAGE on schema. So the body
+// must not resolve a name in schema before its guard has matched: a
+// '<schema>.t'::regclass cast or to_regclass('<schema>.t') is resolved
+// even when an earlier condition is false and raises "permission denied
+// for schema" in the other test. Find the test's objects by name in the
+// catalogs (pg_namespace.nspname, pg_class.relname) instead.
 func InstallEventTrigger(t *testing.T, pool *pgxpool.Pool, event TriggerEvent, schema, name, body string) {
 	t.Helper()
 	functionName := pgx.Identifier{schema, name}.Sanitize()

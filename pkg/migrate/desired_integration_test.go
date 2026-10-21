@@ -696,7 +696,10 @@ func TestRunDesiredFailsWhenTheTableStillDiffersAfterTheLastCommit(t *testing.T)
 	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, "add_extra", fmt.Sprintf(`
 		IF TG_TAG = 'ALTER TABLE'
 			AND EXISTS (SELECT FROM pg_catalog.pg_event_trigger_ddl_commands() WHERE object_identity = '%[1]s.t')
-			AND NOT EXISTS (SELECT FROM pg_catalog.pg_attribute WHERE attrelid = '%[1]s.t'::regclass AND attname = 'extra') THEN
+			AND NOT EXISTS (SELECT FROM pg_catalog.pg_attribute a
+				JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+				JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+				WHERE n.nspname = '%[1]s' AND c.relname = 't' AND a.attname = 'extra') THEN
 			ALTER TABLE %[1]s.t ADD COLUMN extra int;
 		END IF;`, schema))
 
@@ -734,8 +737,10 @@ func TestRunDesiredFailsWhenTheConvergenceReplanCannotBeBuilt(t *testing.T) {
 		IF TG_TAG = 'CREATE TABLE'
 			AND pg_catalog.current_schema() LIKE 'pgsprite\_scratch\_%%'
 			AND pg_catalog.current_setting('search_path') LIKE '%%%[1]s%%'
-			AND EXISTS (SELECT FROM pg_catalog.pg_attribute
-				WHERE attrelid = pg_catalog.to_regclass('%[1]s.t') AND attname = 'v') THEN
+			AND EXISTS (SELECT FROM pg_catalog.pg_attribute a
+				JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+				JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+				WHERE n.nspname = '%[1]s' AND c.relname = 't' AND a.attname = 'v') THEN
 			RAISE EXCEPTION 'injected re-plan failure';
 		END IF;`, schema))
 
