@@ -544,7 +544,12 @@ never-released tests); in `pkg/copier` and `pkg/checksum`, every statement on th
 pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repair — runs inside a
 transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so a pool
 built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued behind
-`ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
+`ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout). `pkg/dbconn` refuses a
+`LockTimeout` or `StatementTimeout` that is neither zero (the default) nor between one
+millisecond and 2147483647ms with `ErrInvalidTimeout` before any connection is made, because
+PostgreSQL counts these settings in whole milliseconds, reads 0 as no timeout, and holds at most a
+32-bit count; its session read-back also refuses
+a server value of 0 for any requested bound.
 The concurrent build's failure verdict runs on a reserved session that observers must not
 disturb: `Tracker.Progress` reads the build's progress on that session detached from the
 observer's context and under its own deadline, set above `pkg/dbconn`'s default
