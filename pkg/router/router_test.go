@@ -64,6 +64,46 @@ func TestRouteSaferIdiomWithoutRewriteFailsClosed(t *testing.T) {
 	assert.Equal(t, router.DispositionRewriteRequired, routed.Disposition)
 }
 
+// A column or table rename is a brief catalog change for PostgreSQL, but it
+// breaks every application instance still using the old name the moment it
+// commits. The planner marks it not executable as submitted and routing
+// refuses it the same way it refuses a safer idiom with no constructed
+// rewrite: the submitted form never becomes executable SQL.
+func TestRouteAppBreakingRenameFailsClosed(t *testing.T) {
+	for name, sql := range map[string]string{
+		"rename column": "ALTER TABLE t RENAME COLUMN a TO b",
+		"rename table":  "ALTER TABLE t RENAME TO t2",
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan := classify(t, sql)
+			require.Equal(t, planner.RouteNative, plan.Route)
+			require.Len(t, plan.Decisions, 1)
+			require.Equal(t, planner.ReasonAppBreakingRename, plan.Decisions[0].Reason)
+			require.False(t, plan.Decisions[0].ExecutableAsSubmitted())
+
+			routed := router.Route([]planner.Plan{plan})
+			st := routed.Statements[0]
+			assert.Equal(t, router.BackendNative, st.Backend)
+			assert.Equal(t, router.DispositionRewriteRequired, st.Disposition)
+			assert.Empty(t, st.ExecSQL, "no executable SQL: the rename only runs under an explicit override")
+			assert.Equal(t, router.DispositionRewriteRequired, routed.Disposition)
+		})
+	}
+}
+
+// An index rename is invisible to applications — queries name tables and
+// columns, not indexes — so it stays metadata-only and executes as submitted.
+func TestRouteIndexRenameExecutes(t *testing.T) {
+	plan := classify(t, "ALTER INDEX i RENAME TO i2")
+	require.Len(t, plan.Decisions, 1)
+	require.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+
+	routed := router.Route([]planner.Plan{plan})
+	assert.Equal(t, router.DispositionExecute, routed.Statements[0].Disposition)
+	assert.Equal(t, []string{"ALTER INDEX i RENAME TO i2"}, routed.Statements[0].ExecSQL,
+		"metadata-only: the submitted form is the executable form")
+}
+
 func TestRouteKeyWithStorageParametersRunsTheSequence(t *testing.T) {
 	plan := classify(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = 70)")
 	routed := router.Route([]planner.Plan{plan})

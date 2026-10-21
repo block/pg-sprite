@@ -22,6 +22,7 @@ import (
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -215,9 +216,13 @@ func assertPartitionedParentRefusal(t *testing.T, url string, pool *pgxpool.Pool
 }
 
 // ALTER TABLE ... RENAME COLUMN parses as a RenameStmt, not an
-// AlterTableStmt, but is a table-targeted instant catalog change: the front
-// door must route it through, not refuse it as unsupported.
-func TestMigrateExecutesRenameColumn(t *testing.T) {
+// AlterTableStmt, but is a table-targeted change the front door routes
+// through rather than refusing as unsupported. It is then refused on its
+// own merits — a rename breaks every application instance still using the
+// old name the moment it commits — with the rollout the application can
+// follow named in the verdict, and runs as written only when --force names
+// the table.
+func TestMigrateRenameColumnRefusedUnlessForced(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
@@ -226,20 +231,44 @@ func TestMigrateExecutesRenameColumn(t *testing.T) {
 	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, a int)", schema))
 	require.NoError(t, err)
 
-	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t RENAME COLUMN a TO b", schema))
-	cmd.JSON = true
-	var out strings.Builder
-	require.NoError(t, cmd.run(t.Context(), &out))
+	columnCount := func(column string) int {
+		var n int
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM information_schema.columns
+			 WHERE table_schema = $1 AND table_name = 't' AND column_name = $2`, schema, column).Scan(&n))
+		return n
+	}
 
-	var v verdict.Verdict
-	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
-	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	t.Run("refused without the override", func(t *testing.T) {
+		cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t RENAME COLUMN a TO b", schema))
+		cmd.JSON = true
+		var out strings.Builder
+		err := cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, verdict.ErrRefused)
 
-	var n int
-	require.NoError(t, pool.QueryRow(t.Context(),
-		`SELECT count(*) FROM information_schema.columns
-		 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'b'`, schema).Scan(&n))
-	assert.Equal(t, 1, n, "the rename must have committed")
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+		assert.Equal(t, suggest.GuidanceExpandContractColumn, v.Guidance)
+		assert.Equal(t, 1, columnCount("a"), "the refused rename must not touch the schema")
+		assert.Zero(t, columnCount("b"))
+	})
+
+	t.Run("runs as written when --force names the table", func(t *testing.T) {
+		cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t RENAME COLUMN a TO b", schema))
+		cmd.JSON = true
+		cmd.Force = schema + ".t"
+		var out strings.Builder
+		require.NoError(t, cmd.run(t.Context(), &out))
+
+		var v verdict.Verdict
+		require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		assert.True(t, v.Forced, "the verdict must record the override")
+		assert.Zero(t, columnCount("a"))
+		assert.Equal(t, 1, columnCount("b"), "the rename must have committed")
+	})
 }
 
 // A type rewrite routes to the copy-and-swap backend and runs end to end

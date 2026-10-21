@@ -53,7 +53,7 @@ The remaining reasons are first-bucket by cost but carry a warning the cost alon
 `partition-parent-lock` (a new partition takes a brief `ACCESS EXCLUSIVE` on the parent, so
 the lock queue below applies to every query on the parent) and `app-breaking-rename` (the
 catalog change is instant; the running application code that still uses the old name is
-what breaks). `replica-identity` is a refusal: the operation would drop what the table's
+what breaks, so `migrate` refuses it as `rewrite-required` unless forced). `replica-identity` is a refusal: the operation would drop what the table's
 replica identity index keys on. `dependent-view` is a refusal too: the operation retypes or
 drops a column a view reads, which PostgreSQL refuses. `cascading-drop` is a refusal as well:
 the drop's `CASCADE` would also drop objects outside the statement. `unsupported-operation` means the planner does not recognize the operation or
@@ -420,11 +420,16 @@ path does not substitute `CONCURRENTLY`.
 
 | Verdict | Lock | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
-| runs as written — coordinate with application deploys | brief `ACCESS EXCLUSIVE` | none | 0 |
+| refused `rewrite-required` — runs as written only under `--force SCHEMA.TABLE` | brief `ACCESS EXCLUSIVE` (forced run) | none | 2 |
 
 `RENAME COLUMN` / `RENAME TABLE` is a brief catalog change, but every query
-still using the old name fails the moment it commits. pg-sprite flags it so the
-rename is coordinated with application deploys.
+still using the old name fails the moment it commits, and no sequence built
+from the statement alone can avoid that: the dual-write and the read switch
+live in the application. `migrate` refuses the rename with the
+`expand-contract-column` (column) or `coordinated-table-rename` (table)
+guidance; `--force SCHEMA.TABLE` runs the submitted rename as a blind bounded
+attempt, size guard included, for the operator who has coordinated the
+deploy.
 
 ### `volatile-default`
 
@@ -602,10 +607,14 @@ it is a property of the script, and `migrate` takes one statement at a time.
 |---|---|---|---|
 | refused — never executed | would block | — | 2 |
 
-The statement blocks as written and pg-sprite could not construct an online
-replacement (for example `ADD COLUMN ... UNIQUE`, where the column and the
-constraint arrive in one statement). Refused; rewrite the change as separate
-online steps and dry-run each one.
+The statement is not safe as written and pg-sprite could not construct an
+online replacement: it blocks the table (for example `ADD COLUMN ... UNIQUE`,
+where the column and the constraint arrive in one statement), or it is a
+`RENAME COLUMN` / `RENAME TO` whose catalog flip breaks the running
+application instances still using the old name
+([`app-breaking-rename`](#app-breaking-rename)). Refused; rewrite the change
+as separate online steps and dry-run each one. The rename alone can be run as
+submitted under `--force SCHEMA.TABLE`.
 
 ### `backend-unavailable`
 

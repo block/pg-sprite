@@ -12,7 +12,7 @@ The tour walks five sections, each runnable on its own via
 
 | Section   | What it shows                                                                                                       | Writes?             |
 | --------- | ------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| `dryrun`  | One statement per planner route, reason, and disposition: metadata-only, fast-default, binary-coercible, the safer idioms, a rewrite-required suggestion, type-rewrite, volatile-default, app-breaking-rename, destructive, relocation, and a refusal | no                  |
+| `dryrun`  | One statement per planner route, reason, and disposition: metadata-only, fast-default, binary-coercible, the safer idioms, a rewrite-required suggestion, type-rewrite, volatile-default, an app-breaking rename (refused as rewrite-required), destructive, relocation, and a refusal | no                  |
 | `diff`    | The declarative front door: a routed convergence plan for an existing table, for a missing one, and a typed create-shape refusal (exit code 2) for a missing table declared `IF NOT EXISTS` | no                  |
 | `pull`    | Existing-database onboarding: export one desired file per demo table, then prove each produces a zero-change `diff` | no                  |
 | `offline` | `lint` (gates on error findings), `suggest` (advises), `fmt` (canonicalizes) — no database                           | no                  |

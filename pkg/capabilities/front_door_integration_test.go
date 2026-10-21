@@ -110,17 +110,6 @@ var migrateClaims = map[string]migrateClaim{
 			)`,
 		statements: []string{`ALTER TABLE %[1]s.accounts ALTER COLUMN nickname SET NOT NULL`},
 	},
-	"rename-column-rename-table": {
-		setup: `
-			CREATE TABLE %[1]s.accounts (
-				id bigint PRIMARY KEY,
-				nickname text
-			)`,
-		statements: []string{
-			`ALTER TABLE %[1]s.accounts RENAME COLUMN nickname TO display_name`,
-			`ALTER TABLE %[1]s.accounts RENAME TO members`,
-		},
-	},
 	"add-primary-key-add-unique-plain-key-columns": {
 		setup: `
 			CREATE TABLE %[1]s.accounts (

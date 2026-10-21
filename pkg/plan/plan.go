@@ -34,8 +34,10 @@ import (
 // planner reason. Version 9 added the validate-constraint and
 // validate-foreign-key change kinds. Version 10 added the dependent-view
 // planner reason and the dependent_views decision field. Version 11 added
-// the cascading-drop planner reason.
-const FormatVersion = 11
+// the cascading-drop planner reason. Version 12 routes an app-breaking
+// rename to the rewrite-required disposition and added the
+// expand-contract-column and coordinated-table-rename guidance codes.
+const FormatVersion = 12
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -387,14 +389,15 @@ func FromRouted(rs router.Statement) (Statement, error) {
 
 // RewriteRequiredGuidance derives the typed manual path for a statement
 // the router marked rewrite-required, for the plan report and the run
-// verdict alike: the first safer-idiom decision names
-// the operation the manual path is for. A multi-operation statement always
+// verdict alike: the first decision that is not executable as submitted — a
+// safer-idiom decision or an app-breaking rename — names the operation the
+// manual path is for. A multi-operation statement always
 // advises splitting first (ManualGuidance's contract), which covers the
 // case where the rewrite exists but could not be applied to a compound
 // statement. The operation list and decision list are index-aligned by the
 // planner's contract (one decision per operation, in order); a mismatch,
-// or a rewrite-required statement with no safer-idiom decision, is a
-// contract violation and fails closed.
+// or a rewrite-required statement whose every decision is executable as
+// submitted, is a contract violation and fails closed.
 func RewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 	ops, err := statement.ParseOps(rs.Statement)
 	if err != nil {
@@ -404,11 +407,11 @@ func RewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 		return "", fmt.Errorf("planner produced %d decisions for %d operations", len(rs.Decisions), len(ops))
 	}
 	for i, d := range rs.Decisions {
-		if d.Reason == planner.ReasonSaferIdiom {
+		if !d.ExecutableAsSubmitted() {
 			return suggest.ManualGuidance(ops[i], len(ops) > 1)
 		}
 	}
-	return "", fmt.Errorf("rewrite-required statement %q has no safer-idiom decision", rs.Statement)
+	return "", fmt.Errorf("rewrite-required statement %q has no decision that needs a rewrite", rs.Statement)
 }
 
 // Fingerprint computes the plan's stable identity: "sha256:" plus the hex

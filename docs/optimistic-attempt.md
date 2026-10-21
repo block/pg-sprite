@@ -317,7 +317,7 @@ against `sizeGuardApplies`):
 | `metadata-only` | **Yes** — a blind bounded attempt of the submitted form |
 | `fast-default` | **Yes** — same |
 | `binary-coercible` | **Yes** — same |
-| `app-breaking-rename` | **Yes** — same (and a lint warning: the rename breaks running application code) |
+| `app-breaking-rename` | **Yes** — same, but only under `--force SCHEMA.TABLE`: without it the rename is refused `rewrite-required` (and a lint error) because it breaks running application code the moment it commits |
 | `partition-parent-lock` | **Yes** — same |
 | `online-idiom` | No — the submitted form is already the safe native shape |
 | `safer-idiom` | No — the planner substituted its own sequence (without a constructible rewrite the statement does not execute at all: `rewrite-required`) |

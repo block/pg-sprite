@@ -103,11 +103,12 @@ func partitionedParentVerdict(st statement.Statement, partitionErr *preflight.Un
 }
 
 // rewriteRequiredVerdict is the refusal for a statement whose submitted
-// form blocks but for which the planner could not construct the safer
-// native sequence. Running the submitted form would falsify the plan's own
-// reason. The verdict carries the plan report's guidance, and its detail
-// states the steps that guidance names, so the two surfaces give the same
-// advice.
+// form is not safe to run as submitted — it blocks the table, or it is a
+// rename that breaks running application instances — and for which the
+// planner has no safer native sequence to substitute. Running the
+// submitted form would falsify the plan's own reason. The verdict carries
+// the plan report's guidance, and its detail states the steps that
+// guidance names, so the two surfaces give the same advice.
 func rewriteRequiredVerdict(st statement.Statement, rs router.Statement) (verdict.Verdict, error) {
 	guidance, err := plan.RewriteRequiredGuidance(rs)
 	if err != nil {
@@ -116,9 +117,26 @@ func rewriteRequiredVerdict(st statement.Statement, rs router.Statement) (verdic
 	return verdict.Verdict{
 		Statement: st.SQL(),
 		Table:     qualified(st),
-		Detail:    "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not construct one for this statement; " + manualPath(guidance),
+		Detail:    "the submitted form " + rewriteRequiredCause(rs) + " and must run as a safer sequence, but pg-sprite has none to substitute for this statement; " + manualPath(guidance),
 		Guidance:  guidance,
 	}.WithRefusal(rewriteRequiredRefusal()), nil
+}
+
+// rewriteRequiredCause names why the submitted form may not run as
+// written, from the first decision the router could not execute as
+// submitted: a rename breaks the application instances still using the
+// old name; every other such decision blocks the table.
+func rewriteRequiredCause(rs router.Statement) string {
+	for _, d := range rs.Decisions {
+		if d.ExecutableAsSubmitted() {
+			continue
+		}
+		if d.Reason == planner.ReasonAppBreakingRename {
+			return "breaks every running application instance that still uses the old name"
+		}
+		return "blocks the table"
+	}
+	return "is not safe to run as written"
 }
 
 // manualPath states the steps a rewrite-required statement's guidance

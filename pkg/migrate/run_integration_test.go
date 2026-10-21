@@ -279,6 +279,48 @@ func TestRunDispatch(t *testing.T) {
 		assert.False(t, exists, "the refused change must not touch the schema")
 	})
 
+	t.Run("refuses an app-breaking rename as rewrite-required", func(t *testing.T) {
+		// RENAME COLUMN is a brief catalog change for PostgreSQL, but every
+		// application instance still reading the old name fails the moment
+		// it commits. Without an override the verdict refuses and names the
+		// expand-and-contract path; the column keeps its name.
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.users (id int PRIMARY KEY, name text)", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.users RENAME COLUMN name TO full_name", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+		assert.Equal(t, suggest.GuidanceExpandContractColumn, v.Guidance)
+		assert.False(t, v.Forced)
+
+		assert.True(t, columnExists(t, pool, schema, "users", "name"), "the refused rename must not touch the schema")
+		assert.False(t, columnExists(t, pool, schema, "users", "full_name"))
+	})
+
+	t.Run("runs the acknowledged rename as-is", func(t *testing.T) {
+		// The override names the table, so the operator has accepted the
+		// application break; the rename then runs as the brief catalog
+		// change it is.
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.users (id int PRIMARY KEY, name text)", schema))
+		require.NoError(t, err)
+
+		opts := runOptions()
+		opts.Force = schema + ".users"
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.users RENAME COLUMN name TO full_name", schema)), opts)
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		assert.True(t, v.Forced, "the verdict must record the override")
+		assert.Empty(t, v.ExecutedSQL, "the submitted form ran as-is; no substitution to report")
+
+		assert.False(t, columnExists(t, pool, schema, "users", "name"))
+		assert.True(t, columnExists(t, pool, schema, "users", "full_name"))
+	})
+
 	t.Run("runs the acknowledged submitted form as-is", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
