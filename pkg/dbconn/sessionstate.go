@@ -38,6 +38,16 @@ type sessionBound struct {
 	ms        int64
 }
 
+// applied renders the bound the pool sent the server: the whole milliseconds
+// it set, or, for a request that truncated to 0, the duration asked for, since
+// "0" would read as the very unbounded value the check refuses.
+func (b sessionBound) applied() string {
+	if b.ms == 0 {
+		return b.requested.String()
+	}
+	return describeTimeout(b.ms)
+}
+
 // sessionBounds lists the timeouts the pool applies and then relies on for
 // every statement the engine issues. Applying and verifying read the same
 // list, so a bound can never be set without also being checked, and the
@@ -81,7 +91,7 @@ func verifySessionSettings(ctx context.Context, pool *pgxpool.Pool, want []sessi
 		if got != bound.ms || got == 0 {
 			return fmt.Errorf("%w: %s is %s, not the %s this pool set; %s",
 				ErrSessionSettingsDiscarded, bound.name,
-				describeTimeout(got), bound.requested, sessionEndpointRemedy)
+				describeTimeout(got), bound.applied(), sessionEndpointRemedy)
 		}
 	}
 	return nil

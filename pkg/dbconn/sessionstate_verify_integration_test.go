@@ -61,6 +61,26 @@ func TestVerifySessionSettingsRefusesAnUnboundedSessionForASubMillisecondRequest
 		"the refusal names the duration that was asked for")
 }
 
+// The refusal names the bound the pool actually set, not the duration the
+// caller asked for: 1500µs is sent as 1ms, so a session that lost it is
+// reported against 1ms.
+func TestVerifySessionSettingsNamesTheWholeMillisecondsThePoolSet(t *testing.T) {
+	pc, err := buildPoolConfig(Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	delete(pc.ConnConfig.RuntimeParams, "lock_timeout")
+	delete(pc.ConnConfig.RuntimeParams, "statement_timeout")
+	pc.AfterConnect = unshadowCatalog
+
+	pool, err := pgxpool.NewWithConfig(t.Context(), pc)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	err = verifySessionSettings(t.Context(), pool, sessionBounds(1500*time.Microsecond, 30*time.Second))
+
+	require.ErrorIs(t, err, ErrSessionSettingsDiscarded)
+	assert.Contains(t, err.Error(), "lock_timeout is unbounded, not the 1ms this pool set")
+}
+
 // A session that carries the bounds passes, so the check refuses a missing
 // bound rather than refusing everything.
 func TestVerifySessionSettingsAcceptsASessionCarryingTheBounds(t *testing.T) {
