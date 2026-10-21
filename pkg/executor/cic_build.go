@@ -151,7 +151,7 @@ func buildIndexConcurrently(ctx context.Context, pool *pgxpool.Pool, sql string,
 	// One session carries resolution, the pre-build inspection, and the
 	// build itself, so the names the statement will resolve (search_path,
 	// temporary schemas) are the names the executor inspected.
-	conn, release, err := acquireBudgetedSession(ctx, pool, b)
+	conn, release, err := acquireBudgetedSession(ctx, pool, b, build.tableSchema)
 	if err != nil {
 		return rep, err
 	}

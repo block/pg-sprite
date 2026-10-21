@@ -199,24 +199,27 @@ func CheckPrivileges(ctx context.Context, pool *pgxpool.Pool, schema, table stri
 // ordinary or partitioned table is ErrNotTable — GRANT advice for a view
 // would conflate the causes.
 func gatherAccessFacts(ctx context.Context, pool *pgxpool.Pool, schema, table string) (accessFacts, error) {
+	// INV: CO-9 — every function, operator, relation, and type is
+	// pg_catalog-qualified, so a planted overload on the session's
+	// search_path cannot answer a privilege probe true.
 	const q = `
-		SELECT current_user::text,
-		       current_setting('server_version_num')::int,
-		       current_database()::text,
-		       n.nspname::text,
-		       c.relkind::text,
-		       r.rolname::text,
-		       has_database_privilege(current_user, current_database(), 'CONNECT'),
-		       has_schema_privilege(current_user, n.nspname, 'USAGE'),
-		       has_schema_privilege(current_user, n.nspname, 'CREATE'),
-		       pg_has_role(current_user, c.relowner, 'USAGE'),
-		       (SELECT rolinherit FROM pg_roles WHERE rolname = current_user)
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		JOIN pg_roles r ON r.oid = c.relowner
-		WHERE c.oid = to_regclass(
-			CASE WHEN $1 = '' THEN quote_ident($2)
-			     ELSE quote_ident($1) || '.' || quote_ident($2) END)`
+		SELECT current_user::pg_catalog.text,
+		       pg_catalog.current_setting('server_version_num')::int,
+		       pg_catalog.current_database()::pg_catalog.text,
+		       n.nspname::pg_catalog.text,
+		       c.relkind::pg_catalog.text,
+		       r.rolname::pg_catalog.text,
+		       pg_catalog.has_database_privilege(current_user, pg_catalog.current_database(), 'CONNECT'),
+		       pg_catalog.has_schema_privilege(current_user, n.nspname, 'USAGE'),
+		       pg_catalog.has_schema_privilege(current_user, n.nspname, 'CREATE'),
+		       pg_catalog.pg_has_role(current_user, c.relowner, 'USAGE'),
+		       (SELECT rolinherit FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) current_user)
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		JOIN pg_catalog.pg_roles r ON r.oid OPERATOR(pg_catalog.=) c.relowner
+		WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(
+			CASE WHEN $1 OPERATOR(pg_catalog.=) '' THEN pg_catalog.quote_ident($2)
+			     ELSE pg_catalog.quote_ident($1) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident($2) END)`
 	var f accessFacts
 	err := pool.QueryRow(ctx, q, schema, table).Scan(
 		&f.role, &f.versionNum, &f.database, &f.schema, &f.relkind, &f.owner,
@@ -260,11 +263,12 @@ func unresolvedTargetCause(ctx context.Context, db rowQuerier, schema, table str
 	if schema == "" {
 		return fmt.Errorf("%w: %s", ErrTableNotFound, table)
 	}
+	// INV: CO-9 — pg_catalog-qualified like every privilege probe.
 	const q = `
-		SELECT current_user::text,
-		       has_schema_privilege(current_user, n.nspname, 'USAGE')
-		FROM pg_namespace n
-		WHERE n.nspname = $1`
+		SELECT current_user::pg_catalog.text,
+		       pg_catalog.has_schema_privilege(current_user, n.nspname, 'USAGE')
+		FROM pg_catalog.pg_namespace n
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1`
 	var role string
 	var usage bool
 	err := db.QueryRow(ctx, q, schema).Scan(&role, &usage)
@@ -392,7 +396,11 @@ func checkSetRoleAccess(ctx context.Context, pool *pgxpool.Pool, f accessFacts) 
 	if f.versionNum < pg16 {
 		return nil
 	}
-	const q = `SELECT pg_has_role(current_user, r.oid, 'SET') FROM pg_roles r WHERE r.rolname = $1`
+	// INV: CO-9 — pg_catalog-qualified like every privilege probe.
+	const q = `
+		SELECT pg_catalog.pg_has_role(current_user, r.oid, 'SET')
+		FROM pg_catalog.pg_roles r
+		WHERE r.rolname OPERATOR(pg_catalog.=) $1`
 	var canSet bool
 	if err := pool.QueryRow(ctx, q, f.owner).Scan(&canSet); err != nil {
 		return fmt.Errorf("check SET ROLE access to %s: %w", f.owner, err)
@@ -414,11 +422,12 @@ func checkSetRoleAccess(ctx context.Context, pool *pgxpool.Pool, f accessFacts) 
 // role attribute also satisfies the check on a cluster that happens to have
 // an rds_replication role: either grant proves the same capability.
 func checkReplicationAccess(ctx context.Context, pool *pgxpool.Pool, role string) error {
+	// INV: CO-9 — pg_catalog-qualified like every privilege probe.
 	const q = `
-		SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_replication'),
-		       COALESCE((SELECT pg_has_role(current_user, r.oid, 'MEMBER')
-		                   FROM pg_roles r WHERE r.rolname = 'rds_replication'), false),
-		       (SELECT rolreplication FROM pg_roles WHERE rolname = current_user)`
+		SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) 'rds_replication'),
+		       COALESCE((SELECT pg_catalog.pg_has_role(current_user, r.oid, 'MEMBER')
+		                   FROM pg_catalog.pg_roles r WHERE r.rolname OPERATOR(pg_catalog.=) 'rds_replication'), false),
+		       (SELECT rolreplication FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) current_user)`
 	var rdsRoleExists, rdsMember, replicationAttr bool
 	if err := pool.QueryRow(ctx, q).Scan(&rdsRoleExists, &rdsMember, &replicationAttr); err != nil {
 		return fmt.Errorf("check replication access for %s: %w", role, err)

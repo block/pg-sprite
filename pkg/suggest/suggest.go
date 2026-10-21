@@ -91,9 +91,8 @@ const (
 	// GuidanceAddColumnThenConstraint: an inline UNIQUE / PRIMARY KEY /
 	// FOREIGN KEY / CHECK on ADD COLUMN builds or validates under the ADD
 	// COLUMN's ACCESS EXCLUSIVE lock. Add the plain column first, then
-	// build the constraint with its online pattern as a separate, named
-	// ADD CONSTRAINT — named, because the unnamed ADD CHECK / ADD FOREIGN
-	// KEY forms are themselves refused (GuidanceNameConstraintThenValidate).
+	// build the constraint with its online pattern as a separate ADD
+	// CONSTRAINT.
 	GuidanceAddColumnThenConstraint Guidance = "add-column-then-constraint"
 	// GuidancePrevalidatedCheck: ATTACH PARTITION scans the child under
 	// the parent's lock unless a validated CHECK matching the partition
@@ -106,11 +105,12 @@ const (
 	// constraint is a catalog flip — the same scaffold sequence the
 	// SET NOT NULL form gets constructed.
 	GuidanceNotNullScaffold Guidance = "not-null-scaffold"
-	// GuidanceNameConstraintThenValidate: an unnamed ADD CHECK / ADD
-	// FOREIGN KEY has no constructible rewrite because the online
-	// sequence's VALIDATE CONSTRAINT step needs the constraint's name and
-	// the server assigns one only at creation. Name the constraint, add
-	// it NOT VALID, then VALIDATE it online.
+	// GuidanceNameConstraintThenValidate: an ADD CHECK / ADD FOREIGN KEY
+	// whose NOT VALID rewrite could not be constructed from the statement.
+	// Name the constraint, add it NOT VALID, then VALIDATE it online — the
+	// sequence the constructed rewrite emits, under the server's default
+	// name when the statement names none. Keeps ManualGuidance total over
+	// every constraint kind the classifier can mark safer-idiom.
 	GuidanceNameConstraintThenValidate Guidance = "name-constraint-then-validate"
 	// GuidanceUniqueIndexThenConstraint: an ADD PRIMARY KEY / ADD UNIQUE
 	// whose USING INDEX rewrite could not be constructed. Build the unique
@@ -135,6 +135,31 @@ func Guidances() []Guidance {
 		GuidanceNameConstraintThenValidate,
 		GuidanceUniqueIndexThenConstraint,
 	}
+}
+
+// ManualPath states the steps a guidance code names, in the one wording
+// every surface renders: the suggest report, the dry run, and a
+// rewrite-required run verdict. An unknown code renders as itself: the
+// typed value is the contract, the prose is display only.
+func ManualPath(g Guidance) string {
+	switch g {
+	case GuidanceSplitStatement:
+		return "submit each operation as its own single-operation statement so each gets its own safer form " +
+			"(a dry-run classification shows each operation's route)"
+	case GuidanceAddColumnThenConstraint:
+		return "add the plain column first, then build the constraint as a separate, named ADD CONSTRAINT with its online pattern"
+	case GuidancePrevalidatedCheck:
+		return "pre-add a validated CHECK matching the partition bound on the child, attach, then drop it"
+	case GuidanceNotNullScaffold:
+		return "prove the invariant with a NOT VALID CHECK plus an online VALIDATE, then SET NOT NULL is a catalog flip"
+	case GuidanceNameConstraintThenValidate:
+		return "name the constraint, add it NOT VALID, then VALIDATE CONSTRAINT online"
+	case GuidanceUniqueIndexThenConstraint:
+		return "build the index first with CREATE UNIQUE INDEX CONCURRENTLY on the same columns, with the statement's " +
+			"INCLUDE, NULLS NOT DISTINCT, WITH (...), and TABLESPACE, then attach it with ADD CONSTRAINT ... USING INDEX, " +
+			"keeping any DEFERRABLE and INITIALLY DEFERRED"
+	}
+	return string(g)
 }
 
 // Suggestion is one advisory result: the statement as written and either
@@ -188,7 +213,9 @@ type Report struct {
 }
 
 // Advise maps a DDL script to its advisory results: every statement is
-// parsed with the PostgreSQL grammar and classified with zero live facts,
+// parsed with the PostgreSQL grammar and classified with zero live facts
+// beyond the constraint names the script's earlier statements claim
+// (planner.ScriptClassifier),
 // and each risky-as-written operation yields a Suggestion — the safer
 // sequence when the planner could construct it, typed guidance when it
 // could not. Nothing is executed and no database is touched. A parse
@@ -199,8 +226,9 @@ func Advise(sql string) (Report, error) {
 		return Report{}, err
 	}
 	report := Report{FormatVersion: FormatVersion, Suggestions: []Suggestion{}}
+	var classifier planner.ScriptClassifier
 	for i, stmt := range stmts {
-		suggestions, err := adviseStatement(i+1, stmt)
+		suggestions, err := adviseStatement(&classifier, i+1, stmt)
 		if err != nil {
 			return Report{}, fmt.Errorf("statement %d: %w", i+1, err)
 		}
@@ -213,8 +241,8 @@ func Advise(sql string) (Report, error) {
 // safer-idiom decision. The operation list and decision list are
 // index-aligned by the planner's contract (one decision per operation, in
 // order); a mismatch is a contract violation and fails closed.
-func adviseStatement(index int, stmt statement.SourceStatement) ([]Suggestion, error) {
-	plan, err := planner.Classify(stmt.SQL, planner.Facts{})
+func adviseStatement(classifier *planner.ScriptClassifier, index int, stmt statement.SourceStatement) ([]Suggestion, error) {
+	plan, err := classifier.Classify(stmt.SQL)
 	if err != nil {
 		return nil, err
 	}
@@ -305,8 +333,9 @@ func ManualGuidance(op statement.Op, multi bool) (Guidance, error) {
 		case statement.ConstraintNotNull:
 			return GuidanceNotNullScaffold, nil
 		case statement.ConstraintCheck, statement.ConstraintForeignKey:
-			// Reached only for the unnamed form: a named CHECK / FOREIGN
-			// KEY gets the NOT VALID → VALIDATE rewrite constructed.
+			// Reached only when the NOT VALID → VALIDATE rewrite could
+			// not be constructed from the statement; named or not, a
+			// single CHECK / FOREIGN KEY gets it constructed.
 			return GuidanceNameConstraintThenValidate, nil
 		case statement.ConstraintPrimaryKey, statement.ConstraintUnique:
 			// Reached only when the USING INDEX rewrite could not be

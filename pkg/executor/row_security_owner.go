@@ -23,10 +23,14 @@ var ErrRowSecurityDatabaseCreateRequired = errors.New("grant CREATE on the datab
 
 func checkRowSecurityPrivileges(ctx context.Context, tx pgx.Tx, schema, table string) error {
 	var owner, createSchema bool
-	err := tx.QueryRow(ctx, `SELECT pg_catalog.pg_has_role(current_user, c.relowner, 'USAGE'),
- pg_catalog.has_database_privilege(current_user, pg_catalog.current_database(), 'CREATE')
- FROM pg_catalog.pg_class c JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
- WHERE n.nspname = $1 AND c.relname = $2`, schema, table).Scan(&owner, &createSchema)
+	// INV: CO-9 — every relation, function, and operator is pg_catalog-qualified.
+	err := tx.QueryRow(ctx, `
+		SELECT pg_catalog.pg_has_role(current_user, c.relowner, 'USAGE'),
+		       pg_catalog.has_database_privilege(current_user, pg_catalog.current_database(), 'CREATE')
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`,
+		schema, table).Scan(&owner, &createSchema)
 	target := pgx.Identifier{schema, table}.Sanitize()
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("check row security owner for %s: %w", target, ErrTableNotFound)

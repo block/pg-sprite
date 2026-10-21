@@ -26,5 +26,7 @@
 // deferred batch or holds its images, and confirms the lesser of the delivered
 // position and the oldest pending change (ST-4); it is the tracker's
 // WorkSource for a catch-up step (changes_applied, changes_buffered,
-// lag_bytes).
+// lag_bytes). Pause holds its flushes for a caller that needs the shadow
+// still — a live repair — while the loop goes on reading and confirming the
+// stream.
 package applier

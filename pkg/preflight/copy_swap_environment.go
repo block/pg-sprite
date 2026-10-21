@@ -231,18 +231,22 @@ func refuseLogicalDecoding(f copySwapEnvironmentFacts) *CopySwapEnvironmentError
 // pg_catalog-qualified so the facts resolve to the real catalog whatever
 // search_path the session carries.
 func gatherCopySwapEnvironmentFacts(ctx context.Context, pool *pgxpool.Pool, shape CopySwapShape) (copySwapEnvironmentFacts, error) {
+	// INV: CO-9 — operators are qualified too; IS DISTINCT FROM resolves =
+	// through the search_path, so a physical slot (NULL database) is
+	// matched with an explicit IS NULL and a qualified <>.
 	const q = `
-		SELECT pg_catalog.current_setting('wal_level')::text,
+		SELECT pg_catalog.current_setting('wal_level')::pg_catalog.text,
 		       pg_catalog.current_setting('rds.logical_replication', true) IS NOT NULL,
 		       pg_catalog.current_setting('max_replication_slots')::bigint,
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_replication_slots),
 		       pg_catalog.current_setting('max_wal_senders')::bigint,
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_stat_replication),
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_replication_slots s
-		         WHERE s.slot_name = $2
-		           AND s.database IS DISTINCT FROM pg_catalog.current_database()),
+		         WHERE s.slot_name OPERATOR(pg_catalog.=) $2
+		           AND (s.database IS NULL
+		             OR s.database OPERATOR(pg_catalog.<>) pg_catalog.current_database())),
 		       (SELECT pg_catalog.pg_total_relation_size(c.oid) FROM pg_catalog.pg_class c
-		         WHERE c.oid = $1 AND pg_catalog.current_database() = $3)`
+		         WHERE c.oid OPERATOR(pg_catalog.=) $1 AND pg_catalog.current_database() OPERATOR(pg_catalog.=) $3)`
 	f := copySwapEnvironmentFacts{slotName: shape.DecodingName()}
 	var totalBytes *int64
 	err := pool.QueryRow(ctx, q, shape.oid, f.slotName, shape.database).Scan(

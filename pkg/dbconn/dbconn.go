@@ -38,10 +38,14 @@ type Config struct {
 	// URL is a libpq connection string or URL (postgres://...).
 	URL string
 	// LockTimeout is applied as the session lock_timeout on every connection.
-	// Zero means DefaultLockTimeout.
+	// Zero means DefaultLockTimeout; any other value must be at least one
+	// millisecond and at most 2147483647ms, or the connection is refused with
+	// ErrInvalidTimeout.
 	LockTimeout time.Duration
 	// StatementTimeout is applied as the session statement_timeout on every
-	// connection. Zero means DefaultStatementTimeout.
+	// connection. Zero means DefaultStatementTimeout; any other value must be
+	// at least one millisecond and at most 2147483647ms, or the connection is
+	// refused with ErrInvalidTimeout.
 	StatementTimeout time.Duration
 	// ConnectTimeout bounds each dial attempt. The session affinity proof
 	// runs against the same server and opens a connection of its own, so its
@@ -49,7 +53,16 @@ type Config struct {
 	// DefaultConnectTimeout.
 	ConnectTimeout time.Duration
 	// CACertPath, when set, enables verify-full TLS using the given CA bundle
-	// (e.g. the RDS/Aurora global bundle). Unset, RDS/Aurora endpoints in
+	// (e.g. the RDS/Aurora global bundle) and overrides whatever sslmode the
+	// URL asks for: every connection attempt, including each host of a
+	// multi-host URL, is verified against the bundle, and none falls back to
+	// an unencrypted or unverified session. The bundle always means
+	// verify-full: sslmode=verify-ca is promoted to verify the host name as
+	// well. Each attempt keeps the client certificate (sslcert / sslkey) and
+	// ALPN (sslnegotiation=direct) the URL configures, and a unix-domain
+	// socket host stays without TLS, which PostgreSQL does not offer over a
+	// socket. A URL that selects sslmode=disable alongside it is refused with
+	// ErrCACertWithSSLModeDisable. Unset, RDS/Aurora endpoints in
 	// the partitions the embedded bundle covers are auto-verified with it
 	// (see rds.go); an RDS/Aurora endpoint in any other partition (GovCloud)
 	// refuses to open with ErrRDSBundleDoesNotCoverHost unless its
@@ -240,6 +253,9 @@ func ConcurrentIndexProgress(ctx context.Context, session RowQuerier, backendPID
 // buildPoolConfig translates Config into a pgxpool configuration. It is pure
 // (no dialing), so every option's wiring is unit-testable without a server.
 func buildPoolConfig(cfg Config) (*pgxpool.Config, error) {
+	if err := validateTimeouts(cfg); err != nil {
+		return nil, err
+	}
 	pc, err := pgxpool.ParseConfig(cfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("parse connection config: %w", err)
@@ -367,11 +383,7 @@ func configureTLS(pc *pgxpool.Config, cfg Config) error {
 	host := pc.ConnConfig.Host
 	switch {
 	case cfg.CACertPath != "":
-		tlsCfg, err := caTLSConfig(cfg.CACertPath, host)
-		if err != nil {
-			return err
-		}
-		pc.ConnConfig.TLSConfig = tlsCfg
+		return pinToCABundle(pc, cfg)
 	case !IsRDSHost(host):
 		// Not a managed endpoint: the connection string's choice stands.
 	case dsnNamesSSLMode(cfg.URL):

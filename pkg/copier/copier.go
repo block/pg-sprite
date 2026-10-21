@@ -102,9 +102,6 @@ type Copier struct {
 	searchPath string
 	// clearSQL removes one batch of shadow rows above the resume watermark.
 	clearSQL string
-	// fenceSQL makes the first clear batch wait for the earlier run's
-	// straggling chunk transactions.
-	fenceSQL string
 
 	// claimMu is held from cutting a chunk to registering it, so chunks are
 	// registered in the order they were cut. It is the only lock held
@@ -154,7 +151,6 @@ func NewCopier(target preflight.CopySwapTarget, shadow Shadow, lock *dbconn.Tabl
 		sql:        copySQL(target, shadow),
 		searchPath: copySearchPath(shadow),
 		clearSQL:   clearAboveSQL(target, shadow),
-		fenceSQL:   fenceStragglersSQL(shadow),
 		ledger:     newLedger(from),
 	}, nil
 }

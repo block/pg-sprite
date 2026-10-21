@@ -9,6 +9,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/block/pg-sprite/pkg/refusal"
 )
 
 // EngineSchema is the schema the engine owns in every target database: the
@@ -100,6 +102,41 @@ func CopySwapRefusalCauses() []CopySwapRefusalCause {
 		CopySwapCauseSlotCollision,
 		CopySwapCauseSlotHeadroom,
 		CopySwapCauseDiskHeadroom,
+	}
+}
+
+// Class is the routing class of the cause, from docs/refusal-classes.md:
+// what kind of boundary the consumer is looking at. A replica identity the
+// operator can set, and every cluster and volume cause — a server setting,
+// a foreign slot, exhausted slot or sender headroom, a short or unmeasured
+// volume — are environmental: the same table is admitted once state outside
+// the engine changes, and no engine release is waited on. Every other shape
+// cause is a capability boundary: a wider key family, an OID-bound dependent
+// re-pointed at cutover, a persistence or row-security path the engine has
+// not built. The class is a triage decision; the cause's row in the document
+// decides what the consumer does next. The zero cause, and an unknown one,
+// have no class.
+func (c CopySwapRefusalCause) Class() refusal.Class {
+	switch c {
+	case CopySwapCauseReplicaIdentity,
+		CopySwapCauseLogicalDecodingUnavailable,
+		CopySwapCauseSlotCollision,
+		CopySwapCauseSlotHeadroom,
+		CopySwapCauseDiskHeadroom:
+		return refusal.ClassEnvironmental
+	case CopySwapCausePKUnsupported,
+		CopySwapCauseForeignKeys,
+		CopySwapCauseTriggers,
+		CopySwapCausePartitioned,
+		CopySwapCauseUnlogged,
+		CopySwapCauseForceRLS,
+		CopySwapCauseDependentViews,
+		CopySwapCausePublicationMember,
+		CopySwapCauseSubscriptionTarget,
+		CopySwapCauseDependents:
+		return refusal.ClassCapabilityBoundary
+	default:
+		return ""
 	}
 }
 
@@ -316,57 +353,60 @@ func refuseCopySwapShape(f copySwapShapeFacts) (CopySwapRefusalCause, string) {
 // catalog name is pg_catalog-qualified so the facts resolve to the real
 // catalog whatever search_path the session carries.
 func gatherCopySwapShapeFacts(ctx context.Context, db rowQuerier, schema, table string) (copySwapShapeFacts, error) {
+	// INV: CO-9 — every function, operator, relation, and type is
+	// pg_catalog-qualified, operators included (IN and IS DISTINCT FROM
+	// resolve = through the search_path, so they are spelled out).
 	const q = `
-		SELECT pg_catalog.current_database()::text, n.nspname::text, c.oid,
-		       c.relkind::text,
-		       c.relpersistence::text,
+		SELECT pg_catalog.current_database()::pg_catalog.text, n.nspname::pg_catalog.text, c.oid,
+		       c.relkind::pg_catalog.text,
+		       c.relpersistence::pg_catalog.text,
 		       c.relforcerowsecurity,
 		       c.relispartition,
 		       c.relhassubclass,
-		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_inherits i WHERE i.inhrelid = c.oid),
-		       c.relreplident::text,
-		       COALESCE((SELECT pg_catalog.cardinality(k.conkey) FROM pg_catalog.pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'p'), 0),
-		       COALESCE((SELECT a.attname::text FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.conkey[1]
-		                 WHERE k.conrelid = c.oid AND k.contype = 'p' AND pg_catalog.cardinality(k.conkey) = 1), ''),
-		       COALESCE((SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.conkey[1]
-		                 WHERE k.conrelid = c.oid AND k.contype = 'p' AND pg_catalog.cardinality(k.conkey) = 1), ''),
-		       COALESCE((SELECT k.condeferrable FROM pg_catalog.pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'p'), false),
-		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k WHERE k.conrelid = c.oid AND k.contype = 'f'),
-		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k WHERE k.confrelid = c.oid AND k.contype = 'f'),
+		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_inherits i WHERE i.inhrelid OPERATOR(pg_catalog.=) c.oid),
+		       c.relreplident::pg_catalog.text,
+		       COALESCE((SELECT pg_catalog.cardinality(k.conkey) FROM pg_catalog.pg_constraint k WHERE k.conrelid OPERATOR(pg_catalog.=) c.oid AND k.contype OPERATOR(pg_catalog.=) 'p'), 0),
+		       COALESCE((SELECT a.attname::pg_catalog.text FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) c.oid AND a.attnum OPERATOR(pg_catalog.=) k.conkey[1]
+		                 WHERE k.conrelid OPERATOR(pg_catalog.=) c.oid AND k.contype OPERATOR(pg_catalog.=) 'p' AND pg_catalog.cardinality(k.conkey) OPERATOR(pg_catalog.=) 1), ''),
+		       COALESCE((SELECT pg_catalog.format_type(a.atttypid, a.atttypmod) FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_attribute a ON a.attrelid OPERATOR(pg_catalog.=) c.oid AND a.attnum OPERATOR(pg_catalog.=) k.conkey[1]
+		                 WHERE k.conrelid OPERATOR(pg_catalog.=) c.oid AND k.contype OPERATOR(pg_catalog.=) 'p' AND pg_catalog.cardinality(k.conkey) OPERATOR(pg_catalog.=) 1), ''),
+		       COALESCE((SELECT k.condeferrable FROM pg_catalog.pg_constraint k WHERE k.conrelid OPERATOR(pg_catalog.=) c.oid AND k.contype OPERATOR(pg_catalog.=) 'p'), false),
+		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k WHERE k.conrelid OPERATOR(pg_catalog.=) c.oid AND k.contype OPERATOR(pg_catalog.=) 'f'),
+		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_constraint k WHERE k.confrelid OPERATOR(pg_catalog.=) c.oid AND k.contype OPERATOR(pg_catalog.=) 'f'),
 		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_trigger t
-		         WHERE t.tgrelid = c.oid
+		         WHERE t.tgrelid OPERATOR(pg_catalog.=) c.oid
 		           AND NOT t.tgisinternal
 		           AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_proc p
-		                             JOIN pg_catalog.pg_namespace pn ON pn.oid = p.pronamespace
-		                            WHERE p.oid = t.tgfoid AND pn.nspname = $3)),
-		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_rewrite r WHERE r.ev_class = c.oid),
+		                             JOIN pg_catalog.pg_namespace pn ON pn.oid OPERATOR(pg_catalog.=) p.pronamespace
+		                            WHERE p.oid OPERATOR(pg_catalog.=) t.tgfoid AND pn.nspname OPERATOR(pg_catalog.=) $3)),
+		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_rewrite r WHERE r.ev_class OPERATOR(pg_catalog.=) c.oid),
 		       (SELECT pg_catalog.count(DISTINCT v.oid)
 		          FROM pg_catalog.pg_depend d
-		          JOIN pg_catalog.pg_rewrite r ON r.oid = d.objid
-		          JOIN pg_catalog.pg_class v ON v.oid = r.ev_class
-		         WHERE d.classid = 'pg_catalog.pg_rewrite'::regclass
-		           AND d.refclassid = 'pg_catalog.pg_class'::regclass
-		           AND d.refobjid = c.oid
-		           AND v.oid <> c.oid
-		           AND v.relkind IN ('v', 'm')),
+		          JOIN pg_catalog.pg_rewrite r ON r.oid OPERATOR(pg_catalog.=) d.objid
+		          JOIN pg_catalog.pg_class v ON v.oid OPERATOR(pg_catalog.=) r.ev_class
+		         WHERE d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_rewrite'::pg_catalog.regclass
+		           AND d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		           AND d.refobjid OPERATOR(pg_catalog.=) c.oid
+		           AND v.oid OPERATOR(pg_catalog.<>) c.oid
+		           AND (v.relkind OPERATOR(pg_catalog.=) 'v' OR v.relkind OPERATOR(pg_catalog.=) 'm')),
 		       c.relnamespace,
 		       pg_catalog.current_setting('server_version_num')::int,
-		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_subscription_rel sr WHERE sr.srrelid = c.oid),
+		       (SELECT pg_catalog.count(*) FROM pg_catalog.pg_subscription_rel sr WHERE sr.srrelid OPERATOR(pg_catalog.=) c.oid),
 		       (SELECT COALESCE(pg_catalog.array_agg(dep.description ORDER BY dep.description), '{}')
 		          FROM (SELECT DISTINCT pg_catalog.pg_describe_object(d.classid, d.objid, d.objsubid) AS description
 		                  FROM pg_catalog.pg_depend d
-		                 WHERE d.deptype = 'n'
-		                   AND ((d.refclassid = 'pg_catalog.pg_class'::regclass AND d.refobjid = c.oid)
-		                     OR (d.refclassid = 'pg_catalog.pg_type'::regclass AND d.refobjid = c.reltype))
+		                 WHERE d.deptype OPERATOR(pg_catalog.=) 'n'
+		                   AND ((d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass AND d.refobjid OPERATOR(pg_catalog.=) c.oid)
+		                     OR (d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_type'::pg_catalog.regclass AND d.refobjid OPERATOR(pg_catalog.=) c.reltype))
 		                   AND NOT EXISTS (SELECT 1 FROM pg_catalog.pg_depend own
-		                                    WHERE own.classid = d.classid AND own.objid = d.objid
-		                                      AND own.refclassid = 'pg_catalog.pg_class'::regclass AND own.refobjid = c.oid
-		                                      AND own.deptype IN ('a', 'i'))) dep)
+		                                    WHERE own.classid OPERATOR(pg_catalog.=) d.classid AND own.objid OPERATOR(pg_catalog.=) d.objid
+		                                      AND own.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass AND own.refobjid OPERATOR(pg_catalog.=) c.oid
+		                                      AND (own.deptype OPERATOR(pg_catalog.=) 'a' OR own.deptype OPERATOR(pg_catalog.=) 'i'))) dep)
 		FROM pg_catalog.pg_class c
-		JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-		WHERE c.oid = pg_catalog.to_regclass(
-			CASE WHEN $1 = '' THEN pg_catalog.quote_ident($2)
-			     ELSE pg_catalog.quote_ident($1) || '.' || pg_catalog.quote_ident($2) END)`
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(
+			CASE WHEN $1 OPERATOR(pg_catalog.=) '' THEN pg_catalog.quote_ident($2)
+			     ELSE pg_catalog.quote_ident($1) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident($2) END)`
 	var f copySwapShapeFacts
 	var namespaceOID uint32
 	var version int
@@ -412,15 +452,16 @@ func publicationsOf(ctx context.Context, db rowQuerier, tableOID, namespaceOID u
 	inSchema := `false`
 	args := []any{tableOID}
 	if version >= schemaPublicationsSince {
-		inSchema = `EXISTS (SELECT 1 FROM pg_catalog.pg_publication_namespace pn WHERE pn.pnpubid = p.oid AND pn.pnnspid = $2)`
+		inSchema = `EXISTS (SELECT 1 FROM pg_catalog.pg_publication_namespace pn WHERE pn.pnpubid OPERATOR(pg_catalog.=) p.oid AND pn.pnnspid OPERATOR(pg_catalog.=) $2)`
 		args = append(args, namespaceOID)
 	}
 	var publications []string
+	// INV: CO-9 — pg_catalog-qualified like the shape facts it completes.
 	err := db.QueryRow(ctx, `
-		SELECT COALESCE(pg_catalog.array_agg(p.pubname::text ORDER BY p.pubname), '{}')
+		SELECT COALESCE(pg_catalog.array_agg(p.pubname::pg_catalog.text ORDER BY p.pubname), '{}')
 		FROM pg_catalog.pg_publication p
 		WHERE p.puballtables
-		   OR EXISTS (SELECT 1 FROM pg_catalog.pg_publication_rel r WHERE r.prpubid = p.oid AND r.prrelid = $1)
+		   OR EXISTS (SELECT 1 FROM pg_catalog.pg_publication_rel r WHERE r.prpubid OPERATOR(pg_catalog.=) p.oid AND r.prrelid OPERATOR(pg_catalog.=) $1)
 		   OR `+inSchema, args...).Scan(&publications)
 	if err != nil {
 		return nil, fmt.Errorf("read publications: %w", err)

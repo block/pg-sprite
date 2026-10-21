@@ -13,6 +13,7 @@ import (
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -83,6 +84,56 @@ func TestRunDispatch(t *testing.T) {
 		assert.True(t, notNull)
 	})
 
+	// An unnamed CHECK runs as the same NOT VALID → VALIDATE sequence as a
+	// named one, under the name the server would have chosen, and ends
+	// validated.
+	t.Run("names an unnamed check and validates it online", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, qty int)", schema))
+		require.NoError(t, err)
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(
+			"INSERT INTO %s.t SELECT g, g FROM generate_series(1, 100) g", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ADD CHECK (qty > 0)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		assert.Equal(t, []string{
+			fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT t_qty_check CHECK (qty > 0) NOT VALID", schema),
+			fmt.Sprintf(`ALTER TABLE "%s"."t" VALIDATE CONSTRAINT "t_qty_check"`, schema),
+		}, v.ExecutedSQL)
+
+		var validated bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT convalidated FROM pg_constraint
+			 WHERE conrelid = ($1 || '.t')::regclass AND conname = 't_qty_check'`, schema).Scan(&validated))
+		assert.True(t, validated)
+	})
+
+	// When the table already holds the server's first choice, the unnamed
+	// CHECK runs under the numbered name the server would move on to, so
+	// the NOT VALID step does not collide with the existing constraint.
+	t.Run("names an unnamed check past a name the table holds", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		for _, ddl := range []string{
+			"CREATE TABLE %s.t (id int PRIMARY KEY, qty int)",
+			"ALTER TABLE %s.t ADD CONSTRAINT t_qty_check CHECK (qty < 1000)",
+		} {
+			_, err := pool.Exec(t.Context(), fmt.Sprintf(ddl, schema))
+			require.NoError(t, err, ddl)
+		}
+
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ADD CHECK (qty > 0)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		assert.Equal(t, []string{
+			fmt.Sprintf("ALTER TABLE %s.t ADD CONSTRAINT t_qty_check1 CHECK (qty > 0) NOT VALID", schema),
+			fmt.Sprintf(`ALTER TABLE "%s"."t" VALIDATE CONSTRAINT "t_qty_check1"`, schema),
+		}, v.ExecutedSQL)
+	})
+
 	t.Run("re-checks the gate for callers that skipped it", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY)", schema))
@@ -100,7 +151,7 @@ func TestRunDispatch(t *testing.T) {
 		assert.True(t, exists, "a gated statement must never execute")
 	})
 
-	t.Run("refuses a copy-and-swap route as backend-unavailable", func(t *testing.T) {
+	t.Run("refuses a copy-and-swap route the engine does not carry as backend-unavailable", func(t *testing.T) {
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
 		require.NoError(t, err)
@@ -108,17 +159,105 @@ func TestRunDispatch(t *testing.T) {
 			"INSERT INTO %s.t SELECT g, 'x' FROM generate_series(1, 100) g", schema))
 		require.NoError(t, err)
 
+		// A volatile default is evaluated per row at rewrite time; the
+		// shadow-table engine has no carrying path for it yet.
 		v, err := migrate.Run(t.Context(), pool,
-			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema)), runOptions())
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN joined timestamptz DEFAULT clock_timestamp()", schema)), runOptions())
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonBackendUnavailable, v.Reason)
 
-		var typ string
+		var n int
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM information_schema.columns
+			 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'joined'`, schema).Scan(&n))
+		assert.Equal(t, 0, n, "the refused change must not touch the schema")
+	})
+
+	t.Run("carries a type rewrite's native siblings through copy-and-swap", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %s.t (
+				id  int PRIMARY KEY,
+				qty int,
+				v   text
+			)`, schema))
+		require.NoError(t, err)
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(
+			"INSERT INTO %s.t SELECT g, g, 'x' FROM generate_series(1, 100) g", schema))
+		require.NoError(t, err)
+
+		// The retype routes the statement to copy-and-swap; the SET NOT
+		// NULL and the CHECK are native siblings that ride along inside the
+		// gated ALTER on the shadow, so the swapped-in table carries all
+		// three and every row.
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf(`
+				ALTER TABLE %s.t
+					ALTER COLUMN id TYPE bigint,
+					ALTER COLUMN v SET NOT NULL,
+					ADD CONSTRAINT t_qty_positive CHECK (qty > 0)`, schema)), copySwapRunOptions(url))
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+
+		var idType string
+		var vNotNull bool
+		var checks, rows, qtySum int
 		require.NoError(t, pool.QueryRow(t.Context(),
 			`SELECT data_type FROM information_schema.columns
-			 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&typ))
-		assert.Equal(t, "integer", typ, "the refused change must not touch the schema")
+			 WHERE table_schema = $1 AND table_name = 't' AND column_name = 'id'`, schema).Scan(&idType))
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT attnotnull FROM pg_attribute
+			 WHERE attrelid = ($1 || '.t')::regclass AND attname = 'v'`, schema).Scan(&vNotNull))
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM pg_constraint
+			 WHERE conrelid = ($1 || '.t')::regclass AND conname = 't_qty_positive' AND convalidated`, schema).Scan(&checks))
+		require.NoError(t, pool.QueryRow(t.Context(),
+			fmt.Sprintf("SELECT count(*), sum(qty) FROM %s.t", schema)).Scan(&rows, &qtySum))
+		assert.Equal(t, "bigint", idType, "the retype is live under the source's name")
+		assert.True(t, vNotNull, "the SET NOT NULL sibling rode along")
+		assert.Equal(t, 1, checks, "the CHECK sibling rode along and is validated")
+		assert.Equal(t, 100, rows, "every row is carried across the swap")
+		assert.Equal(t, 5050, qtySum, "the carried rows keep their values")
+	})
+
+	t.Run("builds a key with storage parameters online and keeps them", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, email text)", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(
+			"ALTER TABLE %s.t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = 70)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		require.Len(t, v.ExecutedSQL, 2)
+		assert.Contains(t, v.ExecutedSQL[0], "CREATE UNIQUE INDEX CONCURRENTLY")
+
+		var def string
+		require.NoError(t, pool.QueryRow(t.Context(),
+			"SELECT pg_get_indexdef(conindid) FROM pg_constraint WHERE conrelid = $1::regclass AND conname = 'k'",
+			schema+".t").Scan(&def))
+		assert.Contains(t, def, "WITH (fillfactor='70')")
+	})
+
+	t.Run("refuses a key whose storage parameter it cannot carry, naming the manual sequence", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, email text)", schema))
+		require.NoError(t, err)
+
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(
+			"ALTER TABLE %s.t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = s.seventy)", schema)), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+		assert.Equal(t, suggest.GuidanceUniqueIndexThenConstraint, v.Guidance,
+			"the statement already is one operation, so the manual path builds the key, not a split")
+
+		var exists bool
+		require.NoError(t, pool.QueryRow(t.Context(),
+			"SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid = $1::regclass AND conname = 'k')",
+			schema+".t").Scan(&exists))
+		assert.False(t, exists, "the refused change must not touch the schema")
 	})
 
 	t.Run("refuses an unconstructible rewrite as rewrite-required", func(t *testing.T) {
@@ -131,6 +270,7 @@ func TestRunDispatch(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+		assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, v.Guidance)
 
 		var exists bool
 		require.NoError(t, pool.QueryRow(t.Context(),
