@@ -278,7 +278,10 @@ Four rules follow from the table, and one note for embedders:
   orchestrator that imports `pkg/executor` branches on the verdict's
   `outcome`, `errors.As` to the executor's typed errors, and
   `executor.OutcomeCode` — the exit code is the CLI's rendering of those
-  facts, not a surface the library exposes. The typed contract is in
+  facts, not a surface the library exposes. Check
+  `errors.As(err, new(*executor.CommitOutcomeUnknownError))` or `OutcomeCode`
+  before testing for context errors: a context cancelled during `COMMIT`
+  stays in the error chain, but the outcome is unknown, not a cancellation. The typed contract is in
   [docs/execution-model.md](docs/execution-model.md#how-a-failure-is-reported).
 
 Exit 3 comes from exactly one invocation shape: `migrate --accept-blocking

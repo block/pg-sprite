@@ -515,7 +515,9 @@ type Verdict struct {
 	// landed: its state is unknown, not failed.
 	FailedStep int `json:"failed_step,omitempty"`
 	// FailedStepSQL is the failed step's statement — the step the planner's
-	// partial-failure contract says a retry resumes from.
+	// partial-failure contract says a retry resumes from. When Code is an
+	// outcome-unknown code, the step may have committed, so a retry cannot
+	// be assumed to resume here until the catalog is inspected.
 	FailedStepSQL string `json:"failed_step_sql,omitempty"`
 	// Attempts is how many bounded attempts ran before a lock-budget
 	// refusal, so automation can tell an exhausted bounded retry from a

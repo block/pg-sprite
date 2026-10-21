@@ -263,7 +263,7 @@ func failureVerdict(st statement.Statement, err error,
 	var stepErr *executor.SequenceStepError
 	if !errors.As(err, &stepErr) {
 		if unknown {
-			v.Detail = fmt.Sprintf("outcome unknown: the connection or the caller's context ended while the COMMIT was in flight, "+
+			v.Detail = fmt.Sprintf("outcome unknown: the COMMIT did not return success, "+
 				"so whether the change committed cannot be established from the client — inspect the catalog for %s before retrying",
 				v.Table)
 		}
@@ -279,8 +279,8 @@ func failureVerdict(st statement.Statement, err error,
 		// resumes from the failed step" contract cannot be assumed: the
 		// committed prefix is the steps before it, and the step itself is
 		// unknown until the catalog says otherwise.
-		v.Detail = fmt.Sprintf("sequence step %d of %d: outcome unknown — the COMMIT was in flight when the connection or "+
-			"the caller's context ended, so whether the step committed cannot be established from the client; "+
+		v.Detail = fmt.Sprintf("sequence step %d of %d: outcome unknown — the step's COMMIT did not return success, "+
+			"so whether the step committed cannot be established from the client; "+
 			"the %d earlier steps committed and remain — inspect the catalog for %s before retrying, and do not assume a retry resumes from this step",
 			stepErr.Step, stepErr.Total, len(v.ExecutedSQL), v.Table)
 		return v
