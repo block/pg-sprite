@@ -13,10 +13,11 @@ import (
 // an unnamed constraint added to a table there, since it looks for a name
 // no constraint in the schema holds.
 func SchemaConstraintNames(ctx context.Context, pool *pgxpool.Pool, schema string) (map[string]bool, error) {
-	rows, err := pool.Query(ctx, `SELECT c.conname::text
+	// INV: CO-9 — every operator, relation, and type is pg_catalog-qualified.
+	rows, err := pool.Query(ctx, `SELECT c.conname::pg_catalog.text
 		FROM pg_catalog.pg_constraint c
-		JOIN pg_catalog.pg_namespace n ON n.oid = c.connamespace
-		WHERE n.nspname = $1`, schema)
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.connamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1`, schema)
 	if err != nil {
 		return nil, fmt.Errorf("read the constraint names in schema %s: %w", pgx.Identifier{schema}.Sanitize(), err)
 	}

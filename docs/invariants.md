@@ -403,12 +403,22 @@ every pooled session drops a `pg_catalog` entry that another schema precedes (`p
 same rewrite: `LocalSearchPath` for a transaction, and `SessionSearchPath` with
 `RestoreSessionSearchPath` for a session-level statement such as a concurrent build. At the query layer, reads that run under a path pg-sprite did not set
 — the session's own — qualify every relation, function, operator, and type with `pg_catalog`.
+Only this layer closes overload ranking: even with `pg_catalog` searched first, function and
+operator resolution ranks candidates across every schema on the path, so an exact-type overload
+planted in a schema the path lists (`pg_total_relation_size(oid)` against the catalog's
+`regclass` signature) beats the catalog's cast-requiring one.
 The connection-layer guarantee is per session: it rewrites an explicit `pg_catalog` entry only,
 not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary objects), and a
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
 *Enforced:* `pkg/dbconn` (session hook, the path builders, and the test that keeps them the only
 `search_path` writers under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
-`pkg/progress`, `pkg/schemadiff`, and `pkg/checksum` (the column-type read, the relation check,
+`pkg/progress`, `pkg/schemadiff`, `pkg/preflight` (every proof read — the size guard, the
+privilege probes, the absence, owned-name, and schema constraint-name reads, the add-column
+rewrite probe, and the copy-and-swap shape and environment facts — qualifies every function,
+relation, type, and operator, `IN` and `IS DISTINCT FROM`
+included since both resolve `=` through the path; planted `pg_total_relation_size(oid)`,
+`has_schema_privilege(name, name, text)`, `+`, and `=` overloads on a path that lists the
+catalog implicitly do not change an answer), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
