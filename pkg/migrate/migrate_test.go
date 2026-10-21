@@ -1,6 +1,8 @@
 package migrate
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -207,6 +209,53 @@ func TestFailureVerdict(t *testing.T) {
 		v := failureVerdict(st, stepErr, executor.SequenceReport{}, false)
 		assert.Equal(t, string(executor.CodeBudgetStatementExceeded), v.Code)
 		assert.Empty(t, v.ExecutedSQL, "an empty committed prefix means nothing committed")
+	})
+
+	t.Run("a single attempt whose commit is lost is unknown, never rolled back", func(t *testing.T) {
+		err := &executor.CommitOutcomeUnknownError{Err: errors.New("connection reset")}
+		v := failureVerdict(st, err, executor.SequenceReport{}, false)
+		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+		assert.Equal(t, string(executor.CodeCommitOutcomeUnknown), v.Code)
+		assert.Zero(t, v.FailedStep)
+		assert.Empty(t, v.ExecutedSQL, "nothing is known to have committed")
+		assert.Contains(t, v.Detail, "outcome unknown")
+		assert.Contains(t, v.Detail, "inspect the catalog for billing.invoices")
+		assert.NotContains(t, v.Detail, "nothing committed",
+			"the client cannot establish that fact, so the verdict must not claim it")
+	})
+
+	t.Run("a mid-sequence lost commit lists the earlier steps as committed and the step as unknown", func(t *testing.T) {
+		stepErr := &executor.SequenceStepError{
+			Step: 2, Total: 3, Kind: executor.StepBrief,
+			SQL: "ALTER TABLE billing.invoices ADD COLUMN b int",
+			Err: &executor.CommitOutcomeUnknownError{Err: context.Canceled},
+		}
+		rep := executor.SequenceReport{Steps: []executor.StepReport{
+			{SQL: "ALTER TABLE billing.invoices ADD COLUMN a int", Kind: executor.StepBrief},
+		}}
+		v := failureVerdict(st, stepErr, rep, false)
+		assert.Equal(t, string(executor.CodeCommitOutcomeUnknown), v.Code)
+		assert.Equal(t, 2, v.FailedStep)
+		assert.Equal(t, stepErr.SQL, v.FailedStepSQL)
+		assert.Equal(t, []string{rep.Steps[0].SQL}, v.ExecutedSQL, "only the steps before the unknown one are committed")
+		assert.Contains(t, v.Detail, "outcome unknown")
+		assert.Contains(t, v.Detail, "inspect the catalog for billing.invoices")
+		assert.NotContains(t, v.Detail, "partial-failure contract says how a retry resumes",
+			"a retry cannot be assumed to resume from a step whose commit may have landed")
+	})
+
+	t.Run("an unknown first step claims neither a rollback nor a committed prefix", func(t *testing.T) {
+		stepErr := &executor.SequenceStepError{
+			Step: 1, Total: 2, Kind: executor.StepBrief,
+			SQL: "ALTER TABLE billing.invoices ADD COLUMN a int",
+			Err: &executor.CommitOutcomeUnknownError{Err: errors.New("connection reset")},
+		}
+		v := failureVerdict(st, stepErr, executor.SequenceReport{}, false)
+		assert.Equal(t, string(executor.CodeCommitOutcomeUnknown), v.Code)
+		assert.Equal(t, 1, v.FailedStep)
+		assert.Empty(t, v.ExecutedSQL)
+		assert.Contains(t, v.Detail, "outcome unknown")
+		assert.NotContains(t, v.Detail, "no earlier steps had committed — Code names the outcome and any state the failed step itself left")
 	})
 
 	t.Run("a non-sequence failure carries no step and an empty prefix", func(t *testing.T) {
