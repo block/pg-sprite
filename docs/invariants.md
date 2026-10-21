@@ -1150,7 +1150,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   length, `NOT NULL` without default on null data, `text→jsonb` with unvalidatable rows) rather
   than discovered mid-copy. *Source:* Spirit blocklist + validation review.
 - **RF-4** — Renames are never guessed: a missing-plus-new column pair is drop+add unless rename
-  intent is explicit; dangerous rename-overlap patterns are refused. *Source:*
+  intent is explicit. The rename-overlap pattern Spirit refuses (one `ALTER` that renames a
+  column and reuses or retypes it) is unrepresentable: PostgreSQL parses a rename as its own
+  statement and the front door admits one statement (`TestClassifyRejectsARename*`). *Source:*
   [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options), Spirit.
 - **RF-5** — The dangerous literal never runs silently: risky statements with a safer native
   idiom get the idiom (reported) or a recommendation; running as-submitted requires a loud,
