@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/block/pg-sprite/pkg/decode"
 )
@@ -122,12 +123,8 @@ func rowSQL(relation, pk string, names []string) string {
 }
 
 func (f *Flusher) upsertRow(ctx context.Context, tx pgx.Tx, key int64, cols []decode.Column, conv conversions) error {
-	params, err := args(key, cols)
-	if err != nil {
+	if _, err := execRow(ctx, tx, upsertSQL(f.shadowRelation(), f.pk(), cols, conv), key, cols); err != nil {
 		return fmt.Errorf("upsert into %s: %w", f.shadowRelation(), err)
-	}
-	if _, err := tx.Exec(ctx, upsertSQL(f.shadowRelation(), f.pk(), cols, conv), params...); err != nil {
-		return fmt.Errorf("upsert key %d into %s: %w", key, f.shadowRelation(), err)
 	}
 	return nil
 }
@@ -135,26 +132,34 @@ func (f *Flusher) upsertRow(ctx context.Context, tx pgx.Tx, key int64, cols []de
 // updateRow writes the columns onto the row under key and reports whether a
 // row was there to take them.
 func (f *Flusher) updateRow(ctx context.Context, tx pgx.Tx, key int64, cols []decode.Column, conv conversions) (bool, error) {
-	params, err := args(key, cols)
+	tag, err := execRow(ctx, tx, updateSQL(f.shadowRelation(), f.pk(), cols, conv), key, cols)
 	if err != nil {
 		return false, fmt.Errorf("update in %s: %w", f.shadowRelation(), err)
-	}
-	tag, err := tx.Exec(ctx, updateSQL(f.shadowRelation(), f.pk(), cols, conv), params...)
-	if err != nil {
-		return false, fmt.Errorf("update key %d in %s: %w", key, f.shadowRelation(), err)
 	}
 	return tag.RowsAffected() == 1, nil
 }
 
 func (f *Flusher) insertRow(ctx context.Context, tx pgx.Tx, key int64, cols []decode.Column, conv conversions) error {
-	params, err := args(key, cols)
-	if err != nil {
+	if _, err := execRow(ctx, tx, insertSQL(f.shadowRelation(), f.pk(), cols, conv), key, cols); err != nil {
 		return fmt.Errorf("insert into %s: %w", f.shadowRelation(), err)
 	}
-	if _, err := tx.Exec(ctx, insertSQL(f.shadowRelation(), f.pk(), cols, conv), params...); err != nil {
-		return fmt.Errorf("insert key %d into %s: %w", key, f.shadowRelation(), err)
-	}
 	return nil
+}
+
+// execRow runs one row statement with key and cols bound as args lays
+// them out. A column that carries no value is refused before the
+// statement runs (CO-8), so every row write stops on the refusal rather
+// than send a statement with its parameters missing.
+func execRow(ctx context.Context, tx pgx.Tx, sql string, key int64, cols []decode.Column) (pgconn.CommandTag, error) {
+	params, err := args(key, cols)
+	if err != nil {
+		return pgconn.CommandTag{}, err
+	}
+	tag, err := tx.Exec(ctx, sql, params...)
+	if err != nil {
+		return pgconn.CommandTag{}, fmt.Errorf("key %d: %w", key, err)
+	}
+	return tag, nil
 }
 
 func (f *Flusher) deleteRow(ctx context.Context, tx pgx.Tx, key int64) error {

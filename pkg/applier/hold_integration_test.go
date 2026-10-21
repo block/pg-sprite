@@ -100,6 +100,33 @@ func TestFlushHoldsAMoveCompletedFromTheOldKeysShadowRow(t *testing.T) {
 	f.assertConverged(t, p.shadow)
 }
 
+// A completion that reads NULL from the old key's shadow row is a present
+// NULL, not a marker: the NULL is the value the shadow holds, so once the
+// stream has passed the read the image is written whole with that NULL,
+// rather than held again for a value no row will ever supply (CO-8, D13).
+// The shadow's NULL is planted for the test, so the shadow is not compared
+// with the source afterwards.
+func TestFlushCompletionOfANullValueIsPresent(t *testing.T) {
+	f := newFlushFixture(t)
+	f.createSeats(t, 3)
+	p := f.prepare(t, "seats")
+	f.exec(t, `UPDATE %s.`+p.shadow.ShadowTable()+` SET doc = NULL WHERE id = 2`)
+	f.exec(t, `UPDATE %s.seats SET id = 10 WHERE id = 2`)
+	buffer := applier.NewBuffer()
+	require.NoError(t, buffer.Add(moveEvent(1, 2, 10, col("slot", "B"), marker("doc"), col("note", "seat 2"))))
+
+	result := f.flushAll(t, p, buffer)
+
+	require.Len(t, result.Held, 1)
+	assert.Equal(t, []decode.Column{col("doc", nil)}, result.Held[0].Completed)
+	assert.Equal(t, 1, buffer.Release(passed(result.Held)))
+	result = f.flushAll(t, p, buffer)
+	assert.Equal(t, applier.Result{Images: 1}, result)
+	got, present := f.text(t, p.shadow.ShadowTable(), "doc", 10)
+	assert.True(t, present, "the row is written under the new key")
+	assert.Nil(t, got, "the NULL the shadow held is written whole")
+}
+
 // A move whose old key never landed — the copier read the old key's chunk
 // after the row had left it, so no shadow row holds the pre-move version
 // under either key — is completed from the live source row under the new

@@ -382,10 +382,11 @@ would overwrite live shadow data and silently break convergence. *Enforced:* `pk
 per-column presence on `ChangeEvent` — the `Stream` carries a text value or NULL as a present
 `Column` and the marker as an absent one, and refuses a tuple whose column count does not match
 the relation rather than line columns up by guess. A `Column`'s value is readable only through
-`Get`, which returns it with its presence, so an absent column's value cannot be read as a
-NULL's: the two arrive alike and only the presence tells them apart. `pkg/applier` `Buffer`
-keeps the marker through every merge, and `Flusher` writes a marker-bearing image of a row that did not move as an `UPDATE` of
-only its present columns — zero rows updated is an `ErrInvariantViolation`, never an insert
+`Get`, which returns it together with its presence, so a reader takes the presence with the
+value: a NULL and a marker arrive alike and only the presence tells them apart. A test refuses
+production code that discards that presence. `pkg/applier` `Buffer` keeps the marker through
+every merge, and `Flusher` writes a marker-bearing image of a row that did not move as an
+`UPDATE` of only its present columns — zero rows updated is an `ErrInvariantViolation`, never an insert
 that invents the omitted value — binds no column that carries no value (an `ErrInvariantViolation`
 before any statement runs), and completes a marker before the whole-row fallback inserts
 the row, from the shadow row the marker refers to, refusing when that row is absent. The

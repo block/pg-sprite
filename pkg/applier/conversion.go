@@ -185,6 +185,7 @@ func (cv conversion) sourceValue(param string) string {
 func bindValue(c decode.Column) (any, error) {
 	value, present := c.Get()
 	if !present {
+		// INV: CO-8 — a column with no value is refused, never bound as NULL.
 		return nil, fmt.Errorf("%w (CO-8): column %s carries no value to bind", ErrInvariantViolation, c.Name())
 	}
 	if sf, ok := value.(shadowForm); ok {
