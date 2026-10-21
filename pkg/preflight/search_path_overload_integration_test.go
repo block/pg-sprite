@@ -12,6 +12,7 @@ import (
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
+	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // newPlantedOverloadPool returns a pool whose sessions have schema as their
@@ -187,4 +188,120 @@ func TestCheckPrivilegesIgnoresAPlantedSchemaPrivilegeOverload(t *testing.T) {
 	assert.Equal(t, preflight.TierIndexBuild, privErr.Tier)
 	assert.Equal(t, fmt.Sprintf("GRANT CREATE ON SCHEMA %s TO %s",
 		pgx.Identifier{f.schema}.Sanitize(), pgx.Identifier{f.owner}.Sanitize()), privErr.Grant)
+}
+
+// plantSystemCatalogBlindEquality plants, in schema, an (oid, regclass) =
+// that compares OIDs as the catalog does for a user relation but answers
+// false for a system catalog. The target lookup still resolves, while every
+// comparison against 'pg_catalog.pg_class'::regclass and its siblings
+// silently matches nothing. It proves the plant answers an unqualified
+// comparison on pool before returning.
+func plantSystemCatalogBlindEquality(t *testing.T, admin, pool *pgxpool.Pool, schema string) {
+	t.Helper()
+	for _, ddl := range []string{
+		fmt.Sprintf(`
+			CREATE FUNCTION %s.eq_user_only(oid, regclass) RETURNS boolean LANGUAGE sql
+			AS 'SELECT $1::pg_catalog.oid OPERATOR(pg_catalog.=) $2::pg_catalog.oid
+			       AND $2::pg_catalog.oid OPERATOR(pg_catalog.>=) 16384::pg_catalog.oid'`, schema),
+		fmt.Sprintf(`
+			CREATE OPERATOR %s.= (
+				LEFTARG = oid,
+				RIGHTARG = regclass,
+				FUNCTION = %s.eq_user_only
+			)`, schema, schema),
+	} {
+		_, err := admin.Exec(t.Context(), ddl)
+		require.NoError(t, err)
+	}
+
+	var planted bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid = 'pg_catalog.pg_class'::regclass`).Scan(&planted))
+	require.False(t, planted, "the planted operator must answer an unqualified = on this pool")
+}
+
+// The owned-name read follows pg_depend edges whose refclassid and classid
+// it compares with 'pg_catalog.pg_class'::regclass, an (oid, regclass) pair.
+// Unqualified, the planted = would hide every edge, and a serial column's
+// sequence would be reported as not owned by the table.
+func TestLookupOwnedRelationNamesIgnoresAPlantedRegclassEquality(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+	schema := testutil.NewSchema(t, admin)
+	_, err = admin.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %s.t (
+			id serial PRIMARY KEY
+		)`, schema))
+	require.NoError(t, err)
+	pool := newPlantedOverloadPool(t, serverURL, schema)
+	plantSystemCatalogBlindEquality(t, admin, pool, schema)
+
+	names, err := preflight.LookupOwnedRelationNames(t.Context(), pool, schema, "t")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"t_pkey"}, names.ConstraintIndexes)
+	assert.Equal(t, []string{"t_id_seq"}, names.Sequences)
+}
+
+// The copy-and-swap shape facts count dependent views through pg_rewrite
+// edges compared with system-catalog regclass literals. Unqualified, the
+// planted = would hide the view, and a table a view selects from would be
+// admitted to copy-and-swap.
+func TestCheckCopySwapShapeIgnoresAPlantedRegclassEquality(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	admin, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	require.NoError(t, err)
+	t.Cleanup(admin.Close)
+	schema := testutil.NewSchema(t, admin)
+	for _, ddl := range []string{
+		fmt.Sprintf(`
+			CREATE TABLE %s.viewed (
+				id     bigint PRIMARY KEY,
+				amount numeric
+			)`, schema),
+		fmt.Sprintf(`
+			CREATE VIEW %s.viewed_totals AS
+			SELECT sum(amount) AS total
+			FROM %s.viewed`, schema, schema),
+	} {
+		_, err := admin.Exec(t.Context(), ddl)
+		require.NoError(t, err)
+	}
+	pool := newPlantedOverloadPool(t, serverURL, schema)
+	plantSystemCatalogBlindEquality(t, admin, pool, schema)
+	role, err := preflight.CheckPrivileges(t.Context(), admin, schema, "viewed", preflight.Requirement{Tier: preflight.TierCopyAndSwap})
+	require.NoError(t, err)
+
+	_, err = preflight.CheckCopySwapShape(t.Context(), pool, schema, "viewed", role)
+	requireCopySwapCause(t, err, preflight.CopySwapCauseDependentViews)
+}
+
+// The add-column probe runs on the statement's schema then public, and reads
+// the probe column back with attrelid = $1::regclass, an (oid, regclass)
+// pair. A planted = there that never matches would make the read-back
+// return no type and fail the whole proof; qualified, the probe still
+// proves a volatile default rewrites the table.
+func TestAddColumnRewritesIgnoresAPlantedRegclassEquality(t *testing.T) {
+	f := newRewriteFixture(t)
+	f.exec(t, `
+		CREATE FUNCTION %[1]s.never_equal(oid, regclass) RETURNS boolean LANGUAGE sql
+		AS 'SELECT false'`)
+	f.exec(t, `
+		CREATE OPERATOR %[1]s.= (
+			LEFTARG = oid,
+			RIGHTARG = regclass,
+			FUNCTION = %[1]s.never_equal
+		)`)
+	planted := newPlantedOverloadPool(t, f.url, f.schema)
+	var answer bool
+	require.NoError(t, planted.QueryRow(t.Context(),
+		`SELECT 'pg_catalog.pg_class'::pg_catalog.regclass::pg_catalog.oid = 'pg_catalog.pg_class'::regclass`).Scan(&answer))
+	require.False(t, answer, "the planted operator must answer an unqualified = on the probe's path")
+
+	proofs, err := preflight.AddColumnRewrites(t.Context(), f.pool, f.schema, "t", fmt.Sprintf(`
+		ALTER TABLE %s.t
+			ADD COLUMN stamped text DEFAULT clock_timestamp()::text`, f.schema))
+	require.NoError(t, err)
+	assert.Equal(t, map[string]statement.AddColumnProof{"stamped": statement.AddColumnDefaultRewrites}, proofs)
 }

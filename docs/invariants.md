@@ -387,23 +387,25 @@ managed-table listing, introspection — must resolve `pg_class`, `pg_index`, `p
 is configured with. PostgreSQL searches `pg_catalog` implicitly first unless the path names it
 explicitly, in which case a user schema listed ahead of it shadows the catalog: a decoy
 `app.pg_index` turns a fail-closed proof into a false clean, and a decoy `pg_cancel_backend`
-returns true and signals nothing. Even with `pg_catalog` searched first, function and operator
-overload resolution ranks candidates across every schema on the path, so an exact-type overload
-planted in a schema the path lists (`pg_total_relation_size(oid)` against the catalog's
-`regclass` signature) beats the catalog's cast-requiring one. Two layers uphold the invariant. At the connection layer,
+returns true and signals nothing. Two layers uphold the invariant. At the connection layer,
 every pooled session drops a `pg_catalog` entry that another schema precedes (`pkg/dbconn`
 `unshadowCatalog`), and every path pg-sprite sets is built in `pkg/dbconn`, which applies the
 same rewrite: `LocalSearchPath` for a transaction, and `SessionSearchPath` with
 `RestoreSessionSearchPath` for a session-level statement such as a concurrent build. At the query layer, reads that run under a path pg-sprite did not set
 — the session's own — qualify every relation, function, operator, and type with `pg_catalog`.
+Only this layer closes overload ranking: even with `pg_catalog` searched first, function and
+operator resolution ranks candidates across every schema on the path, so an exact-type overload
+planted in a schema the path lists (`pg_total_relation_size(oid)` against the catalog's
+`regclass` signature) beats the catalog's cast-requiring one.
 The connection-layer guarantee is per session: it rewrites an explicit `pg_catalog` entry only,
 not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary objects), and a
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
 *Enforced:* `pkg/dbconn` (session hook, the path builders, and the test that keeps them the only
 `search_path` writers under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
 `pkg/progress`, `pkg/schemadiff`, `pkg/preflight` (every proof read — the size guard, the
-privilege probes, the absence and owned-name reads, and the copy-and-swap shape and environment
-facts — qualifies every function, relation, type, and operator, `IN` and `IS DISTINCT FROM`
+privilege probes, the absence, owned-name, and schema constraint-name reads, the add-column
+rewrite probe, and the copy-and-swap shape and environment facts — qualifies every function,
+relation, type, and operator, `IN` and `IS DISTINCT FROM`
 included since both resolve `=` through the path; planted `pg_total_relation_size(oid)`,
 `has_schema_privilege(name, name, text)`, `+`, and `=` overloads on a path that lists the
 catalog implicitly do not change an answer), and `pkg/checksum` (the column-type read, the relation check,
