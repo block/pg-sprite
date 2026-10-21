@@ -230,7 +230,7 @@ type sequenceStep struct {
 // lock_timeout retries on each owner-gated step, exactly as in
 // ExecuteNative.
 func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy) (SequenceReport, error) {
-	return runSequence(ctx, pool, pt, steps, b, retry, nil, nil)
+	return runSequence(ctx, pool, pt, steps, b, retry, nil, nil, nil)
 }
 
 // RunSequenceAdopting is RunSequence for a planned ADD CONSTRAINT ... USING
@@ -240,7 +240,17 @@ func RunSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 // is not. A sequence with no step that takes over that index is refused as
 // an invariant violation before anything runs.
 func RunSequenceAdopting(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, adopts schemadiff.IndexAdoption) (SequenceReport, error) {
-	return runSequence(ctx, pool, pt, steps, b, retry, &adopts, nil)
+	return runSequence(ctx, pool, pt, steps, b, retry, &adopts, nil, nil)
+}
+
+// RunSequenceValidating is RunSequence for a planned VALIDATE CONSTRAINT:
+// the step that validates validates.Constraint first checks, under the
+// table's lock and in the same transaction, that the constraint still has
+// validates.Def, and refuses with ErrValidatedConstraintDrift when it does
+// not. A sequence with no step that validates that constraint is refused
+// as an invariant violation before anything runs.
+func RunSequenceValidating(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, validates schemadiff.ConstraintValidation) (SequenceReport, error) {
+	return runSequence(ctx, pool, pt, steps, b, retry, nil, &validates, nil)
 }
 
 // RunSequenceWithProgress runs a sequence while updating tracker with the
@@ -251,7 +261,7 @@ func RunSequenceWithProgress(ctx context.Context, pool *pgxpool.Pool, pt preflig
 	}
 	tracker.Start(len(steps), progress.OperationAdmitting)
 	defer func() { tracker.Finish(err) }()
-	return runSequence(ctx, pool, pt, steps, b, retry, nil, tracker)
+	return runSequence(ctx, pool, pt, steps, b, retry, nil, nil, tracker)
 }
 
 // elapsedSince reports the time since start on the tracker's injected clock
@@ -265,7 +275,7 @@ func elapsedSince(tracker *progress.Tracker, start time.Time) time.Duration {
 	return time.Since(start)
 }
 
-func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, tracker *progress.Tracker) (SequenceReport, error) {
+func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.PreflightedTable, steps []string, b SequenceBudget, retry RetryPolicy, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation, tracker *progress.Tracker) (SequenceReport, error) {
 	var rep SequenceReport
 	if err := b.validate(); err != nil {
 		return rep, err
@@ -306,6 +316,10 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 	if err != nil {
 		return rep, err
 	}
+	validatingStep, err := validationStep(admitted, validates)
+	if err != nil {
+		return rep, err
+	}
 	for i, step := range admitted {
 		start := time.Now()
 		if tracker != nil {
@@ -321,17 +335,21 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 				indexReport = &r
 			}
 		case StepValidateConstraint:
+			var stepValidates *schemadiff.ConstraintValidation
+			if i == validatingStep {
+				stepValidates = validates
+			}
 			err = executeNative(ctx, pool, pt, step.st, Budget{
 				LockTimeout:      b.Validate.LockTimeout,
 				StatementTimeout: b.Validate.Overall,
-			}, retry, nil, tracker)
+			}, retry, nil, stepValidates, tracker)
 			err = corroborateValidateCancel(ctx, err, b.Validate, elapsedSince(tracker, start))
 		case StepBrief:
 			var stepAdopts *schemadiff.IndexAdoption
 			if i == adoptingStep {
 				stepAdopts = adopts
 			}
-			err = executeNative(ctx, pool, pt, step.st, b.Brief, retry, stepAdopts, tracker)
+			err = executeNative(ctx, pool, pt, step.st, b.Brief, retry, stepAdopts, nil, tracker)
 		default:
 			// Admission produces only the three kinds above; an unknown
 			// kind here is a programming error and aborts fail-closed.
@@ -408,6 +426,13 @@ func sequenceHasConcurrentBuild(steps []sequenceStep) bool {
 // message, not the chain — the whole point is that neither failure is a
 // *BudgetError.
 func corroborateValidateCancel(ctx context.Context, err error, b ValidateBudget, elapsed time.Duration) error {
+	// INV: LK-4 — a COMMIT that ended with the caller's context may have
+	// landed, so it stays an unknown outcome rather than a cancellation the
+	// client can call clean.
+	var commitUnknown *CommitOutcomeUnknownError
+	if errors.As(err, &commitUnknown) {
+		return err
+	}
 	var budgetErr *BudgetError
 	serverCancelled := errors.As(err, &budgetErr) && budgetErr.Cause == CauseStatement
 	if serverCancelled && elapsed >= b.Overall {

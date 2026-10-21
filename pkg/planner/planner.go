@@ -83,6 +83,8 @@ func Reasons() []Reason {
 		ReasonRelocation,
 		ReasonPartitionParentLock,
 		ReasonReplicaIdentity,
+		ReasonDependentView,
+		ReasonCascadingDrop,
 		ReasonUnsupportedOperation,
 	}
 }
@@ -136,8 +138,9 @@ const (
 	// every row — a full rewrite.
 	ReasonGeneratedStored Reason = "generated-stored"
 	// ReasonTypeRewrite: a type PostgreSQL must check or convert row by
-	// row — a type conversion it cannot relabel (rewrite plus reindex), or
-	// an added column of a domain type with constraints.
+	// row — a type conversion it cannot relabel (rewrite plus reindex), a
+	// type change that moves the column's collation (reindex alone), or an
+	// added column of a domain type with constraints.
 	ReasonTypeRewrite Reason = "type-rewrite"
 	// ReasonRelocation: SET TABLESPACE moves the heap — a rewrite-scale
 	// copy.
@@ -154,6 +157,20 @@ const (
 	// Move the identity first (ALTER TABLE ... REPLICA IDENTITY), then
 	// re-plan.
 	ReasonReplicaIdentity Reason = "replica-identity"
+	// ReasonDependentView: the operation changes the type of, or drops, a
+	// column that a view or materialized view reads. PostgreSQL refuses
+	// both while the view exists, even a type change that rewrites
+	// nothing, so the statement could only fail. The decision names the
+	// views; change or drop them first, then re-plan.
+	ReasonDependentView Reason = "dependent-view"
+	// ReasonCascadingDrop: a drop with CASCADE, which also drops whatever
+	// depends on what it drops: a view that reads a dropped column, or
+	// another table's foreign key on a dropped key. Those objects are not
+	// in the statement, so neither the plan nor the table's lock covers
+	// them. Drop each dependent object as its own change, then resubmit
+	// without CASCADE, which PostgreSQL refuses while anything still
+	// depends on the target.
+	ReasonCascadingDrop Reason = "cascading-drop"
 	// ReasonUnsupportedOperation: the planner does not recognize the
 	// operation or knows no safe path for it.
 	ReasonUnsupportedOperation Reason = "unsupported-operation"
@@ -190,6 +207,12 @@ func Executions() []Execution {
 type Decision struct {
 	// Operation is the operator-facing label (display only).
 	Operation string `json:"operation"`
+	// Kind is the operation's parsed shape. The router's availability
+	// policy branches on it together with Reason: whether a backend
+	// carries a rewrite depends on what the operation does to the table,
+	// not only on why PostgreSQL would rewrite it. It is not part of the
+	// plan-report contract; a consumer branches on Reason.
+	Kind statement.OpKind `json:"-"`
 	// Destructive marks operations that discard live structure — a dropped
 	// column, constraint, index, or NOT NULL. It is derived from the operation shape
 	// here, in the one place every front door shares, so a plan reports the
@@ -224,6 +247,10 @@ type Decision struct {
 	// of prose — it is what tells a consumer the sequence must not be
 	// wrapped in a transaction block.
 	SaferSQLExecution Execution `json:"safer_sql_execution,omitempty"`
+	// DependentViews names the views and materialized views that read the
+	// column, each schema-qualified with every identifier quoted, present
+	// exactly for dependent-view decisions.
+	DependentViews []string `json:"dependent_views,omitempty"`
 }
 
 // ExecutableAsSubmitted reports whether the operation's submitted form is
@@ -251,13 +278,21 @@ type Plan struct {
 // they are trusted as stated: the CLI fills them by introspecting the
 // target database, and a library caller may supply facts it already holds —
 // but they must describe the database the change will run on, because a
-// wrong fact can upgrade a rewrite to native. Missing facts are always
-// safe: the zero value is valid and classifies strictly more
-// conservatively (every type change becomes copy-and-swap).
+// wrong fact can upgrade a rewrite to native. Missing facts never let an
+// unsafe change succeed: the zero value is valid, routes every type change
+// to copy-and-swap, and only defers some refusals, such as a column a view
+// reads, to the server's own refusal at execution.
 type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
 	ColumnTypes map[string]string
+	// ColumnCollations maps each live column whose collation is not its
+	// type's default to that collation, as schemadiff renders it. A column
+	// absent from the map has the default collation. Retyping a column
+	// without a COLLATE clause resets it to the new type's default, so a
+	// column present here loses its collation and every index on it is
+	// rebuilt: never a relabel.
+	ColumnCollations map[string]string
 	// ReplicaIdentity is what the replica identity indexes of the table and
 	// its partitions key on; the zero value when none selects an index.
 	ReplicaIdentity schemadiff.ReplicaIdentityKeys
@@ -268,19 +303,63 @@ type Facts struct {
 	// constant; the proof leaves out only an ADD COLUMN IF NOT EXISTS for a
 	// column the table already has, which the server skips.
 	AddColumnProofs map[string]statement.AddColumnProof
+	// DependentViews maps a column to the views and materialized views that
+	// read it, on the table or on any table below it, which is what a
+	// recursive ALTER COLUMN TYPE changes
+	// (preflight.ColumnDependentViews). A column absent from the map has
+	// none, or the facts were not read, as in an offline lint; either way
+	// the server's own refusal at execution remains the backstop.
+	DependentViews map[string][]string
+	// DropDependentViews is DependentViews for the tables whose copy of
+	// the column a recursive DROP COLUMN drops: a child that declares the
+	// column itself or also inherits it from a table outside the drop
+	// keeps its copy.
+	DropDependentViews map[string][]string
+	// OwnDependentViews is DependentViews for the table alone, which is
+	// all an ALTER TABLE ONLY changes.
+	OwnDependentViews map[string][]string
+	// ConstraintNames are the names of the constraints already in the
+	// table's schema, which the server passes over when it names an
+	// unnamed CHECK or FOREIGN KEY. Without them the safer sequence states
+	// the server's first choice, and if the table already uses that name
+	// its NOT VALID step fails before anything is added.
+	ConstraintNames map[string]bool
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
-// canonical type of every live column and what the table's replica
-// identity keys on. Every front door — the declarative diff and the
-// imperative dry-run — extracts facts through this one function so
-// equivalent changes classify identically.
+// canonical type of every live column, the collation of every column that
+// has one of its own, and what the table's replica identity keys on. Every
+// front door — the declarative diff and the imperative dry-run — extracts
+// facts through this one function so equivalent changes classify
+// identically.
 func FactsFrom(live schemadiff.Model) Facts {
 	types := make(map[string]string, len(live.Columns))
+	collations := make(map[string]string)
 	for _, col := range live.Columns {
 		types[col.Name] = col.Type
+		if col.Collation != "" {
+			collations[col.Name] = col.Collation
+		}
 	}
-	return Facts{ColumnTypes: types, ReplicaIdentity: live.ReplicaIdentity}
+	return Facts{ColumnTypes: types, ColumnCollations: collations, ReplicaIdentity: live.ReplicaIdentity}
+}
+
+// viewsReadingColumn returns the views that read the column op retypes or
+// drops: the two column changes PostgreSQL refuses while a view reads the
+// column. A rename is not one of them, since a view follows the column.
+// Under ONLY the change stops at the table, so only its own views count,
+// and a recursive drop counts only the copies of the column it drops.
+func viewsReadingColumn(op statement.Op, facts Facts) []string {
+	switch {
+	case op.Kind != statement.OpAlterColumnType && op.Kind != statement.OpDropColumn:
+		return nil
+	case op.Only:
+		return facts.OwnDependentViews[op.Column]
+	case op.Kind == statement.OpDropColumn:
+		return facts.DropDependentViews[op.Column]
+	default:
+		return facts.DependentViews[op.Column]
+	}
 }
 
 // addColumnProof returns what the server proved about adding op's
@@ -331,9 +410,17 @@ func Classify(sql string, facts Facts) (Plan, error) {
 
 // classifyOp routes one operation per the reference table.
 func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string, single bool) Decision {
-	d := Decision{Operation: op.Describe(), Destructive: destructiveOp(op.Kind)}
+	d := Decision{Operation: op.Describe(), Kind: op.Kind, Destructive: destructiveOp(op.Kind)}
 	if facts.ReplicaIdentity.DroppedBy(op) {
 		d.Route, d.Reason = RouteRefuse, ReasonReplicaIdentity
+		return d
+	}
+	if op.Cascade {
+		d.Route, d.Reason = RouteRefuse, ReasonCascadingDrop
+		return d
+	}
+	if views := viewsReadingColumn(op, facts); len(views) > 0 {
+		d.Route, d.Reason, d.DependentViews = RouteRefuse, ReasonDependentView, views
 		return d
 	}
 	switch op.Kind {
@@ -413,6 +500,11 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 
 	case statement.OpAddConstraint:
 		d = classifyAddConstraint(op, st, sql, single)
+		if len(d.SaferSQL) > 0 && validatedOnAdd(op) {
+			// Restated from the live facts, which name an unnamed
+			// constraint as the server would on this table.
+			d.SaferSQL = notValidSequence(st, sql, facts)
+		}
 
 	case statement.OpValidateConstraint:
 		d.Route, d.Reason = RouteNative, ReasonOnlineIdiom
@@ -476,7 +568,7 @@ func concurrentlyDecision(d Decision, concurrent bool, sql string, single bool) 
 
 // classifyAddConstraint routes ADD CONSTRAINT per constraint family.
 func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, single bool) Decision {
-	d := Decision{Operation: op.Describe()}
+	d := Decision{Operation: op.Describe(), Kind: op.Kind}
 	switch {
 	case op.UsingIndex, op.NotValid:
 		// Already the safe pattern's cheap step.
@@ -487,22 +579,19 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, 
 		// Direct ADD PK/UNIQUE builds its index under ACCESS EXCLUSIVE;
 		// the safer sequence builds it concurrently and attaches it.
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
-		if single && len(op.Columns) > 0 {
+		if canBuildUsingIndexSequence(single, op) {
 			d.SaferSQL = usingIndexSequence(st, op)
 		}
 
-	case op.Constraint == statement.ConstraintCheck,
-		op.Constraint == statement.ConstraintForeignKey:
+	case validatedOnAdd(op):
 		// Direct ADD CHECK/FK validates under ACCESS EXCLUSIVE; the safer
-		// sequence is NOT VALID plus an online VALIDATE.
+		// sequence is NOT VALID plus an online VALIDATE. An unnamed
+		// constraint gets the server's first choice here, from the
+		// statement alone; classifyOp restates the sequence from the live
+		// facts.
 		d.Route, d.Reason = RouteNative, ReasonSaferIdiom
 		if single {
-			if notValid, name, err := statement.AddNotValid(sql); err == nil {
-				d.SaferSQL = []string{
-					notValid,
-					"ALTER TABLE " + tableIdent(st) + " VALIDATE CONSTRAINT " + pgx.Identifier{name}.Sanitize(),
-				}
-			}
+			d.SaferSQL = notValidSequence(st, sql, Facts{})
 		}
 
 	case op.Constraint == statement.ConstraintNotNull:
@@ -515,11 +604,50 @@ func classifyAddConstraint(op statement.Op, st statement.Statement, sql string, 
 	return d
 }
 
+// validatedOnAdd reports a CHECK or FOREIGN KEY, the constraints ADD
+// CONSTRAINT validates against every row unless told NOT VALID.
+func validatedOnAdd(op statement.Op) bool {
+	return op.Constraint == statement.ConstraintCheck || op.Constraint == statement.ConstraintForeignKey
+}
+
+// notValidSequence is the safer sequence for a single ADD CHECK or FOREIGN
+// KEY: the constraint added NOT VALID, then validated online. It is nil
+// when the statement cannot take NOT VALID.
+func notValidSequence(st statement.Statement, sql string, facts Facts) []string {
+	notValid, name, err := statement.AddNotValid(sql, constraintNaming(facts))
+	if err != nil {
+		return nil
+	}
+	return []string{
+		notValid,
+		"ALTER TABLE " + tableIdent(st) + " VALIDATE CONSTRAINT " + pgx.Identifier{name}.Sanitize(),
+	}
+}
+
+// constraintNaming is what facts tell the rewrite about naming an unnamed
+// constraint: the live columns, and the names the schema already uses.
+func constraintNaming(facts Facts) statement.ConstraintNaming {
+	naming := statement.ConstraintNaming{Taken: facts.ConstraintNames}
+	if facts.ColumnTypes != nil {
+		naming.Columns = make(map[string]bool, len(facts.ColumnTypes))
+		for column := range facts.ColumnTypes {
+			naming.Columns[column] = true
+		}
+	}
+	return naming
+}
+
 // classifyTypeChange routes ALTER COLUMN TYPE: binary-coercible changes are
 // a brief catalog relabel; everything else — or anything the planner cannot
 // verify against live column facts — is a rewrite.
 func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 	if op.HasUsing {
+		return RouteCopyAndSwap, ReasonTypeRewrite, false
+	}
+	if _, collated := facts.ColumnCollations[op.Column]; collated {
+		// The live column has a collation of its own, which the new type
+		// either resets to its default or (with a COLLATE clause) replaces;
+		// either way every index on the column is rebuilt.
 		return RouteCopyAndSwap, ReasonTypeRewrite, false
 	}
 	oldType, ok := facts.ColumnTypes[op.Column]
@@ -529,17 +657,35 @@ func classifyTypeChange(op statement.Op, facts Facts) (Route, Reason, bool) {
 		// would prove.
 		return RouteCopyAndSwap, ReasonTypeRewrite, true
 	}
-	if binaryCoercible(parseTypeText(oldType), typeShape{name: normalizeTypeName(op.NewType), mods: op.NewTypeMods}) {
+	if binaryCoercible(parseTypeText(oldType), targetTypeShape(op)) {
 		return RouteNative, ReasonBinaryCoercible, false
 	}
 	return RouteCopyAndSwap, ReasonTypeRewrite, false
 }
 
-// typeShape is a normalized type family plus its modifiers, comparable
-// across the grammar's spelling and format_type's rendering.
+// typeShape is a normalized type family plus its modifiers and whether it
+// is an array of that family, comparable across the grammar's spelling and
+// format_type's rendering.
 type typeShape struct {
-	name string
-	mods []int32
+	name  string
+	mods  []int32
+	array bool
+}
+
+// targetTypeShape reads the statement's target type into the shape
+// parseTypeText gives the live one. A type qualified with a schema other
+// than pg_catalog is a user type that only shares a built-in's name, and a
+// COLLATE clause changes the collation every index on the column is built
+// with, so neither gets a shape and neither matches a rule. The name is
+// taken as the parser left it: the grammar already spells every built-in
+// the rules know by its catalog name (varchar, numeric, timestamptz), so a
+// target named "decimal" or "character varying" was quoted and names a
+// user type.
+func targetTypeShape(op statement.Op) typeShape {
+	if op.NewTypeSchema != "" || op.NewTypeCollation != "" {
+		return typeShape{}
+	}
+	return typeShape{name: strings.TrimSpace(op.NewType), mods: op.NewTypeMods, array: op.NewTypeArray}
 }
 
 // binaryCoercible reports whether changing old to new is a relabel
@@ -547,12 +693,23 @@ type typeShape struct {
 // reference table's rows, deliberately narrow: widening varchar, varchar to
 // text, and widening numeric precision at the same scale. Anything not
 // provably on this list is not coercible.
+//
+// The widening rules hold for scalar columns only. An array column's
+// elements are converted one by one, and PostgreSQL rewrites the table for
+// any element change, widenings included; only an unchanged element type
+// is a relabel.
 func binaryCoercible(old, next typeShape) bool {
 	if old.name == "" || next.name == "" {
 		return false
 	}
+	if old.array != next.array {
+		return false
+	}
 	if old.name == next.name && int32sEqual(old.mods, next.mods) {
 		return true // no-op relabel
+	}
+	if old.array {
+		return false
 	}
 	switch old.name {
 	case "varchar":
@@ -593,36 +750,51 @@ func int32sEqual(a, b []int32) bool {
 	return true
 }
 
-// normalizeTypeName maps spelling variants of the families binaryCoercible
-// knows onto one name. Unknown names pass through unchanged (and will never
-// match a rule).
-func normalizeTypeName(name string) string {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "varchar", "character varying":
+// catalogTypeName maps format_type's SQL-standard spelling of a built-in
+// onto the catalog name the grammar gives the same type, so a live type and
+// a target type compare by name. Unknown names pass through unchanged (and
+// will never match a rule).
+//
+// The match is case-sensitive on purpose. format_type renders the catalog's
+// name, and a name that still carries upper case was quoted, so "TEXT"
+// names a user type, not the built-in text, and folding it would let that
+// type pass as the built-in.
+func catalogTypeName(name string) string {
+	switch name = strings.TrimSpace(name); name {
+	case "character varying":
 		return "varchar"
-	case "numeric", "decimal":
-		return "numeric"
-	case "text":
-		return "text"
+	case "timestamp without time zone":
+		return "timestamp"
+	case "timestamp with time zone":
+		return "timestamptz"
+	case "time without time zone":
+		return "time"
+	case "time with time zone":
+		return "timetz"
 	default:
-		return strings.ToLower(strings.TrimSpace(name))
+		return name
 	}
 }
 
 // parseTypeText splits a format_type rendering ("character varying(50)",
-// "numeric(10,2)", "text") into its normalized shape. This reads catalog
-// output, not SQL — format_type's rendering is stable.
+// "numeric(10,2)", "text", "character varying(50)[]",
+// "timestamp(3) with time zone") into its normalized shape. This reads
+// catalog output, not SQL — format_type's rendering is stable, and it marks
+// every array with one trailing "[]" whatever the declared dimensions. The
+// modifiers can sit inside the name, so whatever follows them is part of
+// the name: "timestamp(3) with time zone" is timestamptz, not timestamp.
 func parseTypeText(s string) typeShape {
+	s, array := strings.CutSuffix(strings.TrimSpace(s), "[]")
 	name, rest, found := strings.Cut(s, "(")
-	shape := typeShape{name: normalizeTypeName(name)}
 	if !found {
-		return shape
+		return typeShape{name: catalogTypeName(name), array: array}
 	}
-	rest, _, found = strings.Cut(rest, ")")
+	mods, suffix, found := strings.Cut(rest, ")")
 	if !found {
 		return typeShape{}
 	}
-	for part := range strings.SplitSeq(rest, ",") {
+	shape := typeShape{name: catalogTypeName(name + suffix), array: array}
+	for part := range strings.SplitSeq(mods, ",") {
 		n, err := strconv.ParseInt(strings.TrimSpace(part), 10, 32)
 		if err != nil {
 			return typeShape{}
@@ -699,9 +871,26 @@ func setNotNullSequence(st statement.Statement, column string) []string {
 	}
 }
 
+// canBuildUsingIndexSequence reports whether an ADD PRIMARY KEY / UNIQUE
+// can be rewritten to the two-step USING INDEX sequence: the statement
+// has this one operation, the key names its columns, and every storage
+// parameter renders faithfully. A sequence that left a parameter out
+// would build a different index than the statement declares, so such a
+// key gets guidance instead.
+func canBuildUsingIndexSequence(single bool, op statement.Op) bool {
+	return single && len(op.Columns) > 0 && !op.IndexOptionsUnrenderable
+}
+
 // usingIndexSequence is the native two-step ADD PRIMARY KEY / UNIQUE
 // pattern: build the unique index concurrently, then attach it as the
-// constraint under a brief lock.
+// constraint under a brief lock. The sequence must declare the same
+// constraint the statement does, so the index carries the INCLUDE columns,
+// NULLS NOT DISTINCT, and the tablespace, and the attach carries
+// DEFERRABLE and INITIALLY DEFERRED; a key built without one of them
+// accepts rows, or checks them at a moment, the statement did not ask for.
+// The index carries the key's WITH (...) storage parameters too; the
+// caller builds no sequence when one cannot be rendered faithfully
+// (canBuildUsingIndexSequence).
 //
 // Partial-failure contract: a failed CREATE INDEX CONCURRENTLY (step 1)
 // leaves an INVALID index under the generated name, and re-running step 1
@@ -728,8 +917,36 @@ func usingIndexSequence(st statement.Statement, op statement.Op) []string {
 		cols[i] = pgx.Identifier{c}.Sanitize()
 	}
 	table := tableIdent(st)
-	return []string{
-		fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY %s ON %s (%s)", idx, table, strings.Join(cols, ", ")),
-		fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s USING INDEX %s", table, idx, keyword, idx),
+	create := fmt.Sprintf("CREATE UNIQUE INDEX CONCURRENTLY %s ON %s (%s)", idx, table, strings.Join(cols, ", "))
+	if len(op.IncludeColumns) > 0 {
+		include := make([]string, len(op.IncludeColumns))
+		for i, c := range op.IncludeColumns {
+			include[i] = pgx.Identifier{c}.Sanitize()
+		}
+		create += " INCLUDE (" + strings.Join(include, ", ") + ")"
 	}
+	if op.NullsNotDistinct {
+		create += " NULLS NOT DISTINCT"
+	}
+	if len(op.IndexStorageParams) > 0 {
+		params := make([]string, len(op.IndexStorageParams))
+		for i, p := range op.IndexStorageParams {
+			params[i] = pgx.Identifier{p.Name}.Sanitize()
+			if p.HasValue {
+				params[i] += " = '" + strings.ReplaceAll(p.Value, "'", "''") + "'"
+			}
+		}
+		create += " WITH (" + strings.Join(params, ", ") + ")"
+	}
+	if op.IndexTablespace != "" {
+		create += " TABLESPACE " + pgx.Identifier{op.IndexTablespace}.Sanitize()
+	}
+	attach := fmt.Sprintf("ALTER TABLE %s ADD CONSTRAINT %s %s USING INDEX %s", table, idx, keyword, idx)
+	if op.Deferrable {
+		attach += " DEFERRABLE"
+	}
+	if op.InitiallyDeferred {
+		attach += " INITIALLY DEFERRED"
+	}
+	return []string{create, attach}
 }

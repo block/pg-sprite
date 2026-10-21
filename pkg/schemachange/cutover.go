@@ -82,6 +82,18 @@ type CutoverOptions struct {
 	// wall clock. Tests inject one to drive the retry loop without real
 	// time passing.
 	Sleep func(ctx context.Context, d time.Duration) error
+
+	// requireWriteFence makes the swap of a quiesced proof refuse unless the
+	// source still carries the engine's write fence. Only the Runner, which
+	// installs the fence, sets it; a caller of Cutover that quiesces the
+	// table by its own means has no fence to find.
+	requireWriteFence bool
+}
+
+// withWriteFence is the options with the swap held to the write fence.
+func (o CutoverOptions) withWriteFence() CutoverOptions {
+	o.requireWriteFence = true
+	return o
 }
 
 // validate refuses bounds the retry loop could not honour.
@@ -206,7 +218,7 @@ func cutoverWithRetry(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tabl
 	attempts := opts.lockAttempts()
 	var last error
 	for attempt := 1; attempt <= attempts; attempt++ {
-		swapped, backend, err := swapOnce(ctx, pool, lock, ready, drain, opts.Options)
+		swapped, backend, err := swapOnce(ctx, pool, lock, ready, drain, opts.requireWriteFence, opts.Options)
 		if err == nil {
 			swapped.attempts = attempt
 			return swapped, nil

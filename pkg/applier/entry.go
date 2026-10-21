@@ -50,8 +50,17 @@ type Entry struct {
 	// chain of moves with OldKey; a row returning to its own origin is not a
 	// reuse.
 	OldKeyReused bool
+	// AbsenceAwaited is set on a marker-bearing Image of a row that did not
+	// move once a flush has found the shadow holding no row under Key and held
+	// the image until the stream passed that check (D13). The source can have
+	// deleted the row before the chunk covering its key was read, with the
+	// DELETE still undelivered, so a first absence is waited out; an image
+	// that returns with the flag set and the row still absent is one the
+	// stream holds live, which is an invariant violation (CO-8). A new entry
+	// for the key never carries it.
+	AbsenceAwaited bool
 	// Columns is the merged row image for an Image, in the decoded column
-	// order; a column with Present=false is an unchanged-TOAST marker whose
+	// order; an absent column is an unchanged-TOAST marker whose
 	// value no buffered event carried. It is nil for a DeleteMarker.
 	Columns []decode.Column
 	// FirstLSN is the delivered position the earliest event this entry still

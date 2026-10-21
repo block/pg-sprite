@@ -40,7 +40,7 @@ Aurora-only. Why that combination is the product is [vision.md](vision.md); star
 | [lock-budgeted-passthrough.md](lock-budgeted-passthrough.md) | The **lock-budgeted passthrough contract** — the explicit `--accept-blocking` acknowledgement, typed refusal eligibility, required engine-owned lock and statement budgets, marked verdict and exit code, interruption semantics, and orchestrator boundary. |
 | [plan-report.md](plan-report.md) | The **plan report contract** — the versioned JSON shape both front doors emit for dry-run plans: fields, closed vocabularies, the fingerprint identity, required consumer behavior for unknown versions/values, and one generated example per source (pinned by test). |
 | [pull.md](pull.md) | **Export an existing schema** — use `pull` to create one desired-state file per table, then prove the baseline round-trips with a zero-change `diff`. |
-| [cli-output-examples.md](cli-output-examples.md) | **CLI output examples** — one real, captured JSON output per shape the CLI produces: the plan report for every dry-run disposition (execute, safer-sequence substitution, rewrite-required, backend-unavailable, refusal, destructive), the execution verdict, exit codes, the linter, and diff. |
+| [cli-output-examples.md](cli-output-examples.md) | **CLI output examples** — one real, captured JSON output per shape the CLI produces: the plan report for every dry-run disposition (execute, safer-sequence substitution, copy-and-swap, rewrite-required, backend-unavailable, refusal, destructive), the execution verdicts, exit codes, the linter, and diff. |
 | [safer-sequences.md](safer-sequences.md) | **Safer-sequence substitution** (the improve path) — how the planner replaces a native-but-blocking form with the ordered online sequence that reaches the same end state: a worked `ADD CONSTRAINT … UNIQUE` comparison (locking, failure modes, transactionality, cost), what the engine adds over running the idiom by hand, the substitutions made today, and the typed caveats. |
 | [execution-model.md](execution-model.md) | The **execution model** — why safer sequences run autocommit-each-step with no wrapping transaction (PostgreSQL forbids it for the online forms), the **committed prefix** a mid-sequence failure leaves, how the verdict reports the boundary, and the per-sequence partial-failure contracts with their retry paths. Read this to answer "if a multi-step change fails halfway, what state is my table in?" |
 | [optimistic-attempt.md](optimistic-attempt.md) | The **optimistic attempt and the table-size guard** — the full entry-to-exit map every statement walks (proven idiom, bounded attempt, rewrite refusal, forced override), which routes are size-checked and which are exempt (`Options.MaxTableSizeBytes`), why a bounded attempt is the right design on PostgreSQL specifically (no `ALGORITHM=INSTANT`, but transactional DDL), the wrong-guess timelines, and what peer tools do instead. |
@@ -82,13 +82,14 @@ checksum correctness gate* before cutover, *dynamic time-based chunking*, and
    declarative diff. The deep treatment of the bounded attempt — the full
    entry-to-exit map, the size guard, and why the gamble is sane on PostgreSQL — is
    [optimistic-attempt.md](optimistic-attempt.md).
-2. **Otherwise copy — refuse honestly until the copy engine lands.** Genuine table
-   rewrites (`ALTER COLUMN TYPE` general, volatile-default `ADD COLUMN`, `STORED`
-   generated column, repack) get a clear **refusal with the classification and reason** —
-   no delegation to external copy tools — until our own **log-based, checksum-gated,
-   resumable copy-and-swap** lifts those refusals. PostgreSQL does far more changes as
-   native instant operations than MySQL, so refusing the rewrite cases still leaves the
-   tool useful for the majority of changes from day one.
+2. **Otherwise copy — and refuse honestly what the copy engine does not carry.** Genuine
+   table rewrites route to our own **log-based, checksum-gated, resumable copy-and-swap**:
+   a general `ALTER COLUMN TYPE` (with or without `USING`) runs through it today. The
+   rewrites the engine does not carry yet (volatile-default `ADD COLUMN`, `STORED`
+   generated column, relocation, repack) get a clear **refusal with the classification
+   and reason** — no delegation to external copy tools. PostgreSQL does far more changes
+   as native instant operations than MySQL, so the refused rewrite cases are a small
+   share of real changes.
 3. **Change capture is log-based.** v1 captures changes with **logical decoding** (pgoutput)
    only; clusters that cannot enable `rds.logical_replication` receive a typed refusal. A
    **trigger-based** implementation behind the same change-capture seam remains the documented

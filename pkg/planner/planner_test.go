@@ -15,16 +15,22 @@ import (
 
 // FactsFrom is the one seam between live introspection and classification:
 // every column's canonical type must come through so type-narrowing
-// decisions see the real live types.
+// decisions see the real live types, and a column's own collation must
+// come through so retyping it is never read as a relabel.
 func TestFactsFromExtractsColumnTypes(t *testing.T) {
 	live := schemadiff.Model{Columns: []schemadiff.Column{
 		{Name: "id", Type: "bigint"},
 		{Name: "name", Type: "character varying(50)"},
+		{Name: "code", Type: "text", Collation: `pg_catalog."C"`},
 	}}
-	assert.Equal(t, planner.Facts{ColumnTypes: map[string]string{
-		"id":   "bigint",
-		"name": "character varying(50)",
-	}}, planner.FactsFrom(live))
+	assert.Equal(t, planner.Facts{
+		ColumnTypes: map[string]string{
+			"id":   "bigint",
+			"name": "character varying(50)",
+			"code": "text",
+		},
+		ColumnCollations: map[string]string{"code": `pg_catalog."C"`},
+	}, planner.FactsFrom(live))
 }
 
 // FactsFrom carries what the live table's replica identity keys on, so a
@@ -121,6 +127,155 @@ func TestClassifyJudgesAnOnlyDropByTheTablesOwnIdentity(t *testing.T) {
 	}
 }
 
+// PostgreSQL refuses to retype or drop a column a view reads, so either
+// change on such a column is refused with the views named, even a type
+// change that would otherwise relabel in place. A rename, which the view
+// follows, and changes to columns no view reads classify as usual.
+func TestClassifyRefusesChangingAColumnAViewReads(t *testing.T) {
+	views := planner.Facts{
+		ColumnTypes: map[string]string{"email": "character varying(50)", "note": "text"},
+		DependentViews: map[string][]string{
+			"email": {`"app"."active_users"`, `"reports"."emails"`},
+		},
+		DropDependentViews: map[string][]string{
+			"email": {`"app"."active_users"`, `"reports"."emails"`},
+		},
+		OwnDependentViews: map[string][]string{
+			"email": {`"app"."active_users"`, `"reports"."emails"`},
+		},
+	}
+	for _, sql := range []string{
+		"ALTER TABLE t ALTER COLUMN email TYPE varchar(100)",
+		"ALTER TABLE t ALTER COLUMN email TYPE text",
+		"ALTER TABLE t ALTER COLUMN email TYPE bigint USING email::bigint",
+		"ALTER TABLE t DROP COLUMN email",
+		"ALTER TABLE ONLY t DROP COLUMN email",
+	} {
+		plan, err := planner.Classify(sql, views)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		d := plan.Decisions[0]
+		assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+		assert.Equal(t, planner.ReasonDependentView, d.Reason, sql)
+		assert.Equal(t, []string{`"app"."active_users"`, `"reports"."emails"`}, d.DependentViews, sql)
+		assert.Equal(t, planner.RouteRefuse, plan.Route, sql)
+	}
+
+	for sql, reason := range map[string]planner.Reason{
+		"ALTER TABLE t RENAME COLUMN email TO mail":       planner.ReasonAppBreakingRename,
+		"ALTER TABLE t ALTER COLUMN email SET DEFAULT ''": planner.ReasonMetadataOnly,
+		"ALTER TABLE t DROP COLUMN note":                  planner.ReasonMetadataOnly,
+		"ALTER TABLE t ALTER COLUMN note TYPE text":       planner.ReasonBinaryCoercible,
+	} {
+		plan, err := planner.Classify(sql, views)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, reason, plan.Decisions[0].Reason, sql)
+		assert.Empty(t, plan.Decisions[0].DependentViews, sql)
+	}
+
+	plan, err := planner.Classify("ALTER TABLE t ALTER COLUMN email TYPE varchar(100)",
+		planner.Facts{ColumnTypes: views.ColumnTypes})
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonBinaryCoercible, plan.Decisions[0].Reason)
+}
+
+// A view on a table below counts against a recursive change and not
+// against one under ONLY, which stops at the table. A recursive drop counts
+// only the copies of the column it drops: a view on a child's own declared
+// copy blocks a type change, which reaches that copy, and not a drop, which
+// leaves it.
+func TestClassifyJudgesDependentViewsByWhatTheChangeReaches(t *testing.T) {
+	facts := planner.Facts{
+		ColumnTypes: map[string]string{"email": "character varying(50)", "code": "text", "tag": "text"},
+		DependentViews: map[string][]string{
+			"email": {`"app"."active_users"`}, "code": {`"app"."child_codes"`}, "tag": {`"app"."child_tags"`},
+		},
+		DropDependentViews: map[string][]string{"email": {`"app"."active_users"`}, "code": {`"app"."child_codes"`}},
+		OwnDependentViews:  map[string][]string{"email": {`"app"."active_users"`}},
+	}
+	for sql, want := range map[string][]string{
+		"ALTER TABLE t DROP COLUMN email RESTRICT":         {`"app"."active_users"`},
+		"ALTER TABLE ONLY t DROP COLUMN email":             {`"app"."active_users"`},
+		"ALTER TABLE t DROP COLUMN code":                   {`"app"."child_codes"`},
+		"ALTER TABLE t ALTER COLUMN code TYPE varchar(10)": {`"app"."child_codes"`},
+	} {
+		plan, err := planner.Classify(sql, facts)
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, planner.ReasonDependentView, plan.Decisions[0].Reason, sql)
+		assert.Equal(t, want, plan.Decisions[0].DependentViews, sql)
+	}
+
+	plan, err := planner.Classify("ALTER TABLE ONLY t DROP COLUMN code", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+
+	plan, err = planner.Classify("ALTER TABLE t DROP COLUMN tag", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+	assert.Empty(t, plan.Decisions[0].DependentViews)
+
+	plan, err = planner.Classify("ALTER TABLE t ALTER COLUMN tag TYPE varchar(10)", facts)
+	require.NoError(t, err)
+	assert.Equal(t, planner.ReasonDependentView, plan.Decisions[0].Reason)
+	assert.Equal(t, []string{`"app"."child_tags"`}, plan.Decisions[0].DependentViews)
+}
+
+// CASCADE also drops whatever depends on the target, objects the
+// statement does not name, so every drop with it is refused, from the
+// statement alone and whatever the live facts say, while the default
+// RESTRICT classifies as usual. A drop the replica identity guard refuses
+// keeps that more specific reason.
+func TestClassifyRefusesACascadingDrop(t *testing.T) {
+	views := planner.Facts{
+		ColumnTypes:        map[string]string{"email": "character varying(50)"},
+		DependentViews:     map[string][]string{"email": {`"app"."active_users"`}},
+		DropDependentViews: map[string][]string{"email": {`"app"."active_users"`}},
+		OwnDependentViews:  map[string][]string{"email": {`"app"."active_users"`}},
+	}
+	for _, facts := range []planner.Facts{{}, views} {
+		for _, sql := range []string{
+			"ALTER TABLE t DROP COLUMN email CASCADE",
+			"ALTER TABLE ONLY t DROP COLUMN email CASCADE",
+			"ALTER TABLE t DROP COLUMN IF EXISTS email CASCADE",
+			"ALTER TABLE t DROP CONSTRAINT t_pkey CASCADE",
+			"ALTER TABLE t DROP CONSTRAINT IF EXISTS t_pkey CASCADE",
+			"DROP INDEX t_email_idx CASCADE",
+			"DROP INDEX app.t_email_idx, app.t_other_idx CASCADE",
+		} {
+			plan, err := planner.Classify(sql, facts)
+			require.NoError(t, err, sql)
+			require.Len(t, plan.Decisions, 1, sql)
+			d := plan.Decisions[0]
+			assert.Equal(t, planner.RouteRefuse, d.Route, sql)
+			assert.Equal(t, planner.ReasonCascadingDrop, d.Reason, sql)
+			assert.True(t, d.Destructive, sql)
+			assert.Empty(t, d.SaferSQL, "DROP INDEX CONCURRENTLY does not accept CASCADE: %s", sql)
+			assert.Empty(t, d.DependentViews, sql)
+			assert.Equal(t, planner.RouteRefuse, plan.Route, sql)
+		}
+	}
+
+	plan, err := planner.Classify("ALTER TABLE t ADD COLUMN note text, DROP CONSTRAINT t_pkey CASCADE", planner.Facts{})
+	require.NoError(t, err)
+	require.Len(t, plan.Decisions, 2)
+	assert.Equal(t, planner.ReasonMetadataOnly, plan.Decisions[0].Reason)
+	assert.Equal(t, planner.ReasonCascadingDrop, plan.Decisions[1].Reason)
+	assert.Equal(t, planner.RouteRefuse, plan.Route)
+
+	for sql, reason := range map[string]planner.Reason{
+		"ALTER TABLE t DROP CONSTRAINT t_pkey":          planner.ReasonMetadataOnly,
+		"ALTER TABLE t DROP CONSTRAINT t_pkey RESTRICT": planner.ReasonMetadataOnly,
+		"DROP INDEX t_email_idx RESTRICT":               planner.ReasonSaferIdiom,
+	} {
+		plan, err := planner.Classify(sql, planner.Facts{})
+		require.NoError(t, err, sql)
+		require.Len(t, plan.Decisions, 1, sql)
+		assert.Equal(t, reason, plan.Decisions[0].Reason, sql)
+	}
+}
+
 // facts mirrors a live table whose column types exercise both sides of the
 // binary-coercible rules.
 var facts = planner.Facts{ColumnTypes: map[string]string{
@@ -129,6 +284,8 @@ var facts = planner.Facts{ColumnTypes: map[string]string{
 	"num":  "numeric(10,2)",
 	"i":    "integer",
 	"txt":  "text",
+	"varr": "character varying(50)[]",
+	"narr": "numeric(10,2)[]",
 }}
 
 func classifyOne(t *testing.T, sql string) planner.Decision {
@@ -198,6 +355,42 @@ func TestClassifyUnverifiedMarksFactlessTypeChanges(t *testing.T) {
 	assert.False(t, using.Decisions[0].Unverified)
 }
 
+// The scalar relabel rules do not carry over to arrays: PostgreSQL converts
+// an array column element by element and rewrites the table for any element
+// change, widenings included. Only an unchanged element type is a relabel,
+// whatever dimensions are declared. A target qualified with a schema other
+// than pg_catalog is a user type, never the built-in that shares its name.
+// TestBinaryCoercibleVerdictMatchesTheServer proves each row on a server.
+func TestClassifyArrayAndQualifiedTypeChanges(t *testing.T) {
+	cases := []struct {
+		sql   string
+		route planner.Route
+	}{
+		{"ALTER TABLE t ALTER COLUMN varr TYPE text", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(100)", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(100)[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE text[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN narr TYPE numeric(12,2)[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN v50 TYPE text[]", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN v50 TYPE app.text", planner.RouteCopyAndSwap},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(50)[]", planner.RouteNative},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(50)[][]", planner.RouteNative},
+		{"ALTER TABLE t ALTER COLUMN varr TYPE varchar(50) ARRAY", planner.RouteNative},
+		{"ALTER TABLE t ALTER COLUMN v50 TYPE pg_catalog.text", planner.RouteNative},
+	}
+	for _, tc := range cases {
+		d := classifyOne(t, tc.sql)
+		assert.Equal(t, tc.route, d.Route, tc.sql)
+		if tc.route == planner.RouteNative {
+			assert.Equal(t, planner.ReasonBinaryCoercible, d.Reason, tc.sql)
+		} else {
+			assert.Equal(t, planner.ReasonTypeRewrite, d.Reason, tc.sql)
+			assert.False(t, d.Unverified, "a proven rewrite is not unverified: %s", tc.sql)
+		}
+	}
+}
+
 // TestClassifyReferenceRows is the golden mapping: one case per row of
 // docs/postgres-online-ddl-reference.md. saferSteps is the length of the
 // expected safer sequence (0 when the decision carries none).
@@ -257,7 +450,8 @@ func TestClassifyReferenceRows(t *testing.T) {
 		{"add foreign key", "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p (id)", planner.RouteNative, planner.ReasonSaferIdiom, 2},
 		{"add check not valid", "ALTER TABLE t ADD CONSTRAINT c CHECK (age > 0) NOT VALID", planner.RouteNative, planner.ReasonOnlineIdiom, 0},
 		{"add foreign key not valid", "ALTER TABLE t ADD CONSTRAINT fk FOREIGN KEY (pid) REFERENCES p (id) NOT VALID", planner.RouteNative, planner.ReasonOnlineIdiom, 0},
-		{"add unnamed check", "ALTER TABLE t ADD CHECK (age > 0)", planner.RouteNative, planner.ReasonSaferIdiom, 0},
+		{"add unnamed check", "ALTER TABLE t ADD CHECK (age > 0)", planner.RouteNative, planner.ReasonSaferIdiom, 2},
+		{"add unnamed foreign key", "ALTER TABLE t ADD FOREIGN KEY (pid) REFERENCES p (id)", planner.RouteNative, planner.ReasonSaferIdiom, 2},
 		{"add exclusion", "ALTER TABLE t ADD CONSTRAINT ex EXCLUDE USING gist (room WITH =)", planner.RouteRefuse, planner.ReasonUnsupportedOperation, 0},
 		{"validate constraint", "ALTER TABLE t VALIDATE CONSTRAINT c", planner.RouteNative, planner.ReasonOnlineIdiom, 0},
 		{"drop constraint", "ALTER TABLE t DROP CONSTRAINT c", planner.RouteNative, planner.ReasonMetadataOnly, 0},
@@ -311,6 +505,88 @@ func TestClassifyAddPrimaryKeySequence(t *testing.T) {
 		`CREATE UNIQUE INDEX CONCURRENTLY "t_pkey" ON "s"."t" ("id")`,
 		`ALTER TABLE "s"."t" ADD CONSTRAINT "t_pkey" PRIMARY KEY USING INDEX "t_pkey"`,
 	}, d.SaferSQL)
+}
+
+// The online sequence must declare the constraint the statement declares:
+// an index built without INCLUDE, NULLS NOT DISTINCT, or the tablespace, or
+// an attach without DEFERRABLE or INITIALLY DEFERRED, is a different
+// constraint. WITH (...) storage parameters ride on the index too; only a
+// parameter the sequence cannot render faithfully gets no sequence, so the
+// decision carries guidance instead of SQL that drops it.
+// TestUsingIndexSequenceDeclaresTheSameConstraint proves each on a server.
+func TestClassifyAddKeySequenceCarriesEveryAttribute(t *testing.T) {
+	cases := []struct {
+		name string
+		sql  string
+		want []string
+	}{
+		{
+			"include columns",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) INCLUDE (name, id)",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") INCLUDE ("name", "id")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"nulls not distinct",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (email)",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") NULLS NOT DISTINCT`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"index tablespace",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) USING INDEX TABLESPACE fast",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"storage parameters",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) INCLUDE (id) WITH (fillfactor = 70, deduplicate_items = off) USING INDEX TABLESPACE fast",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") INCLUDE ("id") WITH ("fillfactor" = '70', "deduplicate_items" = 'off') TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+			},
+		},
+		{
+			"deferrable initially deferred",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) DEFERRABLE INITIALLY DEFERRED",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k" DEFERRABLE INITIALLY DEFERRED`,
+			},
+		},
+		{
+			"deferrable primary key",
+			"ALTER TABLE t ADD CONSTRAINT t_pkey PRIMARY KEY (id) DEFERRABLE",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "t_pkey" ON "t" ("id")`,
+				`ALTER TABLE "t" ADD CONSTRAINT "t_pkey" PRIMARY KEY USING INDEX "t_pkey" DEFERRABLE`,
+			},
+		},
+		{
+			"every attribute at once",
+			"ALTER TABLE t ADD CONSTRAINT k UNIQUE NULLS NOT DISTINCT (a, b) INCLUDE (c) USING INDEX TABLESPACE fast DEFERRABLE INITIALLY DEFERRED",
+			[]string{
+				`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("a", "b") INCLUDE ("c") NULLS NOT DISTINCT TABLESPACE "fast"`,
+				`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k" DEFERRABLE INITIALLY DEFERRED`,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, classifyOne(t, tc.sql).SaferSQL)
+		})
+	}
+
+	d := classifyOne(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = s.seventy)")
+	assert.Equal(t, planner.RouteNative, d.Route)
+	assert.Equal(t, planner.ReasonSaferIdiom, d.Reason)
+	assert.Empty(t, d.SaferSQL, "a sequence would build the index without the parameter it cannot carry")
 }
 
 func TestClassifyAddCheckSequenceValidates(t *testing.T) {
@@ -474,6 +750,8 @@ func TestReasonsVocabularyPinned(t *testing.T) {
 		planner.ReasonRelocation,
 		planner.ReasonPartitionParentLock,
 		planner.ReasonReplicaIdentity,
+		planner.ReasonDependentView,
+		planner.ReasonCascadingDrop,
 		planner.ReasonUnsupportedOperation,
 	}, planner.Reasons())
 }

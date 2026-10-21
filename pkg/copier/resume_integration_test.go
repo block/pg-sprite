@@ -30,16 +30,15 @@ func TestClearAboveSQLIsFrozen(t *testing.T) {
 	assert.Equal(t, want, clearAboveSQL(target, shadow))
 }
 
-// The fence is one lock statement on the shadow in SHARE MODE: the weakest
-// mode that conflicts with the ROW EXCLUSIVE lock an insert holds until its
-// commit completes, and one that still admits the ACCESS SHARE readers.
-// A stronger mode would block readers for nothing; a weaker one would not
-// wait for the straggler at all.
-func TestFenceStragglersSQLIsFrozen(t *testing.T) {
-	shadow := fakeShadow{
-		schema: "t_1", source: "orders", shadow: "_pgsprite_orders_new",
-		sourceOID: 1, shadowOID: 2,
-		columns: []string{"id", "qty"},
-	}
-	assert.Equal(t, `LOCK TABLE "t_1"."_pgsprite_orders_new" IN SHARE MODE`, fenceStragglersSQL(shadow))
+// The fence is the first clear batch's own shadow lock, in SHARE ROW
+// EXCLUSIVE: the weakest mode that conflicts with the ROW EXCLUSIVE an insert
+// holds until its commit completes and with itself, so it waits behind every
+// straggler and behind an earlier run's fence, while it still admits the
+// ACCESS SHARE readers. A stronger mode would block readers for nothing; a
+// weaker one would not wait for the straggler, or would be a lock the fence
+// transaction must later strengthen. Every later batch holds only what its
+// delete holds.
+func TestClearBatchShadowLockModes(t *testing.T) {
+	assert.Equal(t, lockShareRowExclusive, clearShadowLockMode(true), "the first batch fences")
+	assert.Equal(t, lockRowExclusive, clearShadowLockMode(false), "later batches hold what their delete holds")
 }

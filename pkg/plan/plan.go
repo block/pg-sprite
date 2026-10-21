@@ -31,8 +31,11 @@ import (
 // added the add-foreign-key and drop-foreign-key change kinds and the
 // foreign-key create-shape cause. Version 7 added the
 // set-generated-expression change kind. Version 8 added the replica-identity
-// planner reason.
-const FormatVersion = 8
+// planner reason. Version 9 added the validate-constraint and
+// validate-foreign-key change kinds. Version 10 added the dependent-view
+// planner reason and the dependent_views decision field. Version 11 added
+// the cascading-drop planner reason.
+const FormatVersion = 11
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -74,6 +77,11 @@ type Statement struct {
 	// attaches it (see schemadiff.Change.Adopts). Nil otherwise, and out
 	// of the JSON: the SQL already identifies the change.
 	Adopts *schemadiff.IndexAdoption `json:"-"`
+	// Validates is the constraint a diff-derived VALIDATE CONSTRAINT
+	// validates and the definition it must still have when execution
+	// validates it (see schemadiff.Change.Validates). Nil otherwise, and
+	// out of the JSON for the same reason.
+	Validates *schemadiff.ConstraintValidation `json:"-"`
 	// Destructive marks statements that discard live structure — a dropped
 	// column, constraint, index, or NOT NULL. It is derived from the classifier's
 	// decisions, so both sources report it identically; it is always
@@ -368,7 +376,7 @@ func FromRouted(rs router.Statement) (Statement, error) {
 		}
 	}
 	if rs.Disposition == router.DispositionRewriteRequired {
-		guidance, err := rewriteRequiredGuidance(rs)
+		guidance, err := RewriteRequiredGuidance(rs)
 		if err != nil {
 			return Statement{}, err
 		}
@@ -377,8 +385,9 @@ func FromRouted(rs router.Statement) (Statement, error) {
 	return st, nil
 }
 
-// rewriteRequiredGuidance derives the typed manual path for a statement
-// the router marked rewrite-required: the first safer-idiom decision names
+// RewriteRequiredGuidance derives the typed manual path for a statement
+// the router marked rewrite-required, for the plan report and the run
+// verdict alike: the first safer-idiom decision names
 // the operation the manual path is for. A multi-operation statement always
 // advises splitting first (ManualGuidance's contract), which covers the
 // case where the rewrite exists but could not be applied to a compound
@@ -386,7 +395,7 @@ func FromRouted(rs router.Statement) (Statement, error) {
 // planner's contract (one decision per operation, in order); a mismatch,
 // or a rewrite-required statement with no safer-idiom decision, is a
 // contract violation and fails closed.
-func rewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
+func RewriteRequiredGuidance(rs router.Statement) (suggest.Guidance, error) {
 	ops, err := statement.ParseOps(rs.Statement)
 	if err != nil {
 		return "", fmt.Errorf("parse rewrite-required statement: %w", err)

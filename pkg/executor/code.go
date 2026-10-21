@@ -31,6 +31,9 @@ const (
 	CodeRowSecurityOutcomeUnknown Code = "row-security-outcome-unknown"
 	// CodeBlockingOutcomeUnknown requires catalog inspection before retry.
 	CodeBlockingOutcomeUnknown Code = "blocking-outcome-unknown"
+	// CodeCommitOutcomeUnknown requires catalog inspection before retry: a
+	// bounded attempt's COMMIT did not return success and may have landed.
+	CodeCommitOutcomeUnknown Code = "commit-outcome-unknown"
 	// CodeInvalidBlockingBudget identifies an unrepresentable or disabled bound.
 	CodeInvalidBlockingBudget Code = "invalid-blocking-budget"
 	// CodeUnsupportedAcceptedBlocking identifies a statement outside this narrow path.
@@ -142,6 +145,11 @@ const (
 	// planning, read again under the table's lock; nothing was attached.
 	// Re-plan against the index as it stands.
 	CodeAdoptedIndexDrift Code = "adopted-index-drift"
+	// CodeValidatedConstraintDrift: the constraint a planned VALIDATE
+	// CONSTRAINT validates was dropped or replaced after planning, read
+	// again under the table's lock; nothing was validated. Re-plan against
+	// the constraint as it stands.
+	CodeValidatedConstraintDrift Code = "validated-constraint-drift"
 	// CodeTableNotFound: the statement's qualified table does not exist.
 	CodeTableNotFound Code = "table-not-found"
 	// CodeInvariantViolation: a breach of the invariant registry; never a
@@ -163,6 +171,7 @@ func Codes() []Code {
 		CodeBudgetLockExceeded,
 		CodeBudgetStatementExceeded,
 		CodeBlockingOutcomeUnknown,
+		CodeCommitOutcomeUnknown,
 		CodeRowSecurityPlanChanged,
 		CodeRowSecurityRefused,
 		CodeRowSecurityOutcomeUnknown,
@@ -195,6 +204,7 @@ func Codes() []Code {
 		CodePoolTooSmall,
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
+		CodeValidatedConstraintDrift,
 		CodeTableNotFound,
 		CodeInvariantViolation,
 		CodeExecutionFailed,
@@ -235,6 +245,7 @@ func (c Code) Permanent() bool {
 		CodePoolTooSmall,
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
+		CodeValidatedConstraintDrift,
 		CodeTableNotFound,
 		CodeInvariantViolation:
 		return true
@@ -271,6 +282,10 @@ func OutcomeCode(err error) Code {
 	var unknownErr *BlockingOutcomeUnknownError
 	if errors.As(err, &unknownErr) {
 		return CodeBlockingOutcomeUnknown
+	}
+	var commitUnknown *CommitOutcomeUnknownError
+	if errors.As(err, &commitUnknown) {
+		return CodeCommitOutcomeUnknown
 	}
 	return sentinelCode(err)
 }
@@ -336,6 +351,8 @@ func sentinelCode(err error) Code {
 		return CodeReplicaIdentityDrop
 	case errors.Is(err, ErrAdoptedIndexDrift):
 		return CodeAdoptedIndexDrift
+	case errors.Is(err, ErrValidatedConstraintDrift):
+		return CodeValidatedConstraintDrift
 	case errors.Is(err, ErrTableNotFound):
 		return CodeTableNotFound
 	default:

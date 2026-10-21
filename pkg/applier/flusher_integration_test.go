@@ -271,21 +271,23 @@ func TestFlushLeavesAnOmittedColumnInPlace(t *testing.T) {
 }
 
 // A marker stands for a value in the shadow row under the image's own key;
-// an image that did not move and finds no row there is the protocol error
-// D13 names, and the whole batch is refused: the drain's deferral rule
-// means the row would have been there (CO-8, CO-4).
+// an image that did not move and finds no row there after the stream has
+// passed the check that found it absent is the protocol error D13 names, and
+// the whole batch is refused (CO-8, CO-4).
 func TestFlushRefusesAMarkerForARowTheShadowLacks(t *testing.T) {
 	f := newFlushFixture(t)
 	f.createSeats(t, 3)
 	p := f.prepare(t, "seats")
+	awaited := image(50, col("slot", "Z"), marker("doc"))
+	awaited.AbsenceAwaited = true
 
 	_, err := p.flush.Flush(t.Context(), f.pool, batch(
 		image(2, col("slot", "Y")),
-		image(50, col("slot", "Z"), marker("doc")),
+		awaited,
 	))
 
 	require.ErrorIs(t, err, applier.ErrInvariantViolation)
-	assert.Contains(t, err.Error(), "(CO-8): flush key 50: image omits [doc]")
+	assert.Contains(t, err.Error(), "(CO-8): flush key 50")
 	slot, _ := f.text(t, p.shadow.ShadowTable(), "slot", 2)
 	assert.Equal(t, "B", *slot, "nothing in the batch was written")
 	_, present := f.text(t, p.shadow.ShadowTable(), "slot", 50)

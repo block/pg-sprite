@@ -1,6 +1,7 @@
 package executor_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,6 +75,15 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		},
 		{name: "cancelled by caller", err: executor.ErrCancelledByCaller, want: executor.CodeCancelledByCaller},
 		{name: "blocking outcome unknown", err: &executor.BlockingOutcomeUnknownError{Err: errors.New("lost")}, want: executor.CodeBlockingOutcomeUnknown},
+		{name: "commit outcome unknown", err: &executor.CommitOutcomeUnknownError{Err: errors.New("connection reset")}, want: executor.CodeCommitOutcomeUnknown},
+		{
+			name: "commit outcome unknown at a sequence step carries its own code",
+			err: &executor.SequenceStepError{
+				Step: 2, Total: 3, Kind: executor.StepBrief, SQL: "ALTER TABLE s.t ADD c int",
+				Err: &executor.CommitOutcomeUnknownError{Err: context.Canceled},
+			},
+			want: executor.CodeCommitOutcomeUnknown,
+		},
 		{name: "invalid blocking budget", err: executor.ErrInvalidBlockingBudget, want: executor.CodeInvalidBlockingBudget},
 		{name: "unsupported accepted blocking", err: executor.ErrUnsupportedAcceptedBlocking, want: executor.CodeUnsupportedAcceptedBlocking},
 		{
@@ -125,6 +135,7 @@ func TestOutcomeCodeMapsTypedOutcomes(t *testing.T) {
 		{name: "pool too small", err: executor.ErrPoolTooSmall, want: executor.CodePoolTooSmall},
 		{name: "replica identity drop", err: fmt.Errorf("drop: %w", executor.ErrReplicaIdentityDrop), want: executor.CodeReplicaIdentityDrop},
 		{name: "adopted index drift", err: fmt.Errorf("adopt: %w", executor.ErrAdoptedIndexDrift), want: executor.CodeAdoptedIndexDrift},
+		{name: "validated constraint drift", err: fmt.Errorf("validate: %w", executor.ErrValidatedConstraintDrift), want: executor.CodeValidatedConstraintDrift},
 		{name: "table not found", err: executor.ErrTableNotFound, want: executor.CodeTableNotFound},
 		{name: "invariant violation", err: executor.ErrInvariantViolation, want: executor.CodeInvariantViolation},
 		{name: "untyped error is the fallback", err: errors.New("connection reset"), want: executor.CodeExecutionFailed},
@@ -166,6 +177,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeBudgetLockExceeded:              false,
 		executor.CodeBudgetStatementExceeded:         false,
 		executor.CodeBlockingOutcomeUnknown:          false,
+		executor.CodeCommitOutcomeUnknown:            false,
 		executor.CodeRowSecurityRefused:              true,
 		executor.CodeRowSecurityPlanChanged:          true,
 		executor.CodeRowSecurityOutcomeUnknown:       false,
@@ -198,6 +210,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodePoolTooSmall:                    true,
 		executor.CodeReplicaIdentityDrop:             true,
 		executor.CodeAdoptedIndexDrift:               true,
+		executor.CodeValidatedConstraintDrift:        true,
 		executor.CodeTableNotFound:                   true,
 		executor.CodeInvariantViolation:              true,
 		executor.CodeExecutionFailed:                 false,

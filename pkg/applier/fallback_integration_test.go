@@ -149,24 +149,27 @@ func TestFlushDefersABatchAUniqueIndexStillRefuses(t *testing.T) {
 	f.assertConverged(t, p.shadow)
 }
 
-// The fallback needs every image whole, so a surviving image that still
-// carries a marker after completion from its own row — a row the shadow
-// does not hold — is refused, and the flush commits nothing (CO-8).
-func TestFlushFallbackRefusesAnImageItCannotComplete(t *testing.T) {
+// A flagged image whose shadow row is absent is refused before any write is
+// applied, even in a batch whose other images would collide on the unique
+// index: the absence check runs ahead of both the column-wise pass and the
+// fallback, so nothing in the batch is applied (CO-8).
+func TestFlushRefusesAFlaggedAbsentImageBeforeApplyingACollidingBatch(t *testing.T) {
 	f := newFlushFixture(t)
 	f.createSeats(t, 2)
 	p := f.prepare(t, "seats")
 	doc2, _ := f.text(t, "seats", "doc", 2)
+	awaited := image(50, col("slot", "C"), marker("doc"))
+	awaited.AbsenceAwaited = true
 
 	_, err := p.flush.Flush(t.Context(), f.pool, batch(
 		image(1, col("slot", "B"), col("doc", "new document")),
 		image(2, col("slot", "A"), col("doc", *doc2)),
-		image(50, col("slot", "C"), marker("doc")),
+		awaited,
 	))
 
 	require.ErrorIs(t, err, applier.ErrInvariantViolation)
 	assert.Contains(t, err.Error(), "(CO-8): flush key 50")
 	slot, _ := f.text(t, p.shadow.ShadowTable(), "slot", 1)
-	assert.Equal(t, "A", *slot, "the fallback's deletes were rolled back with the rest")
+	assert.Equal(t, "A", *slot, "nothing in the batch was applied")
 	assert.Equal(t, int64(2), f.count(t, p.shadow.ShadowTable()))
 }

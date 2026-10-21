@@ -45,7 +45,9 @@ type RunOptions struct {
 	Catchup applier.CatchupOptions
 	// Live bounds how the verification pass settles a chunk the stream was
 	// still carrying changes for. Its Confirmed source is the run's own
-	// catch-up and must be left nil.
+	// catch-up and must be left nil. So must Flushes: the run's pass
+	// recopies nothing (a divergence aborts it), and the flush gate a
+	// repair needs is the run's own catch-up too.
 	Live checksum.LiveOptions
 	// KeepOld leaves the retained source under its derived _old name after
 	// the swap (D9), for a rollback window the caller manages; the run
@@ -54,6 +56,16 @@ type RunOptions struct {
 	// the row is done. The caller ends the window with InspectSwapped on
 	// the done row's proof and DropOldTable, under the table's lock.
 	KeepOld bool
+	// ReplaceDone lets a Run that meets a row in PhaseDone — the record of
+	// a run on the table that completed — delete that row inside its own
+	// lock session and start fresh, so a second change on the table needs
+	// no step between the two runs in which another engine could take the
+	// lock. The one thing a done row can still stand for is a KeepOld
+	// rollback window: a done row whose retained source still bears its
+	// derived _old name is refused as resume-row-terminal, with the
+	// remedy in the detail, as every done row is when this is false. A
+	// failed row and a live row are never replaced.
+	ReplaceDone bool
 	// CheckpointInterval is how often the copy in progress saves its
 	// landed watermark, so a run that stops mid-copy resumes from the last
 	// save rather than from the start (TM-3). Zero means the default.
@@ -91,6 +103,9 @@ func (o RunOptions) validate() error {
 	}
 	if o.Live.Confirmed != nil {
 		return fmt.Errorf("%w: the live verification pass reads the run's own catch-up; leave Live.Confirmed nil", ErrInvalidOptions)
+	}
+	if o.Live.Flushes != nil {
+		return fmt.Errorf("%w: the live verification pass holds the run's own catch-up's flushes; leave Live.Flushes nil", ErrInvalidOptions)
 	}
 	return nil
 }
@@ -130,10 +145,19 @@ func (o RunOptions) livePoll() time.Duration {
 //     no WAL and applies no captured change, so the copy and the
 //     verification pass are the whole proof of data equality (CO-1). The
 //     Runner enforces that itself with a write fence on the source — a
-//     statement trigger that refuses INSERT, UPDATE, DELETE, and TRUNCATE
-//     with SQLSTATE WriteFenceSQLState — installed before the copy starts
-//     and in place until the swap, across any stop and resume in between;
-//     a writer that reaches the table gets an error, never a silent loss.
+//     statement trigger, enabled ALWAYS so that it fires in every session
+//     whatever its session_replication_role, that refuses INSERT, UPDATE,
+//     DELETE, and TRUNCATE with SQLSTATE WriteFenceSQLState — installed
+//     before the copy starts and in place until the swap, across any stop
+//     and resume in between. A writer that reaches the table while the
+//     fence is in place gets an error. The swap confirms, under its
+//     ACCESS EXCLUSIVE lock, that the fence is still there, of the shape
+//     the install gave it, and enabled ALWAYS, and refuses as
+//     CauseCutoverUnfenced when it was disabled, dropped, or replaced,
+//     leaving the next Run to install it again and verify again. The
+//     fence is not tamper-proof: a role that owns the table can disable
+//     it, write, and put it back between the verification pass and the
+//     swap, and that write is not seen.
 //   - A live run, for a target proven to decode WAL. The source keeps
 //     taking writes throughout: the run owns a replication slot under the
 //     target's derived name, decodes the source's changes from it, and
@@ -245,7 +269,10 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 //     its cutover is, resume-shadow-gone included.
 //   - A terminal row is refused as resume-row-terminal: the run it
 //     records has ended, and a caller that means to run the table again
-//     deletes it first with Store.Delete, under the table's lock.
+//     deletes it first with Store.Delete, under the table's lock — or
+//     sets RunOptions.ReplaceDone, under which a done row whose retained
+//     source is gone is deleted here, inside this run's lock session, and
+//     the run starts fresh; a failed row is refused either way.
 //   - A row of the other kind of run — one naming a slot, or in a phase
 //     only a live run enters, met by a quiesced Runner; one naming none,
 //     met by a live Runner — is refused as resume-row-decoding.
@@ -410,7 +437,7 @@ func (r *Runner) swapQuiesced(ctx context.Context, pool *pgxpool.Pool, lock *dbc
 			return report, err
 		}
 	}
-	swapped, err := Cutover(ctx, pool, lock, ready, nil, r.opts.Cutover)
+	swapped, err := Cutover(ctx, pool, lock, ready, nil, r.opts.Cutover.withWriteFence())
 	if err != nil {
 		return report, err
 	}

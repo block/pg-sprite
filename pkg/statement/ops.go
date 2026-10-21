@@ -94,6 +94,11 @@ type Op struct {
 	// operation stops at the table and does not recurse into the tables
 	// below it.
 	Only bool
+	// Cascade reports a drop with CASCADE (DROP COLUMN, DROP CONSTRAINT,
+	// or DROP INDEX), which also drops the objects that depend on what it
+	// drops, such as a view or another table's foreign key, where the
+	// default RESTRICT refuses while any exist.
+	Cascade bool
 	// Indexes are the unqualified names of the indexes an OpDropIndex
 	// drops, in statement order, so a classifier can match each one
 	// without parsing Name's display form, or the one index an
@@ -102,6 +107,27 @@ type Op struct {
 	// Columns are the plain key columns of an ADD PRIMARY KEY / UNIQUE;
 	// empty when the keys are expressions.
 	Columns []string
+	// IncludeColumns are the INCLUDE columns of an ADD PRIMARY KEY /
+	// UNIQUE: carried in the index, not part of the key.
+	IncludeColumns []string
+	// NullsNotDistinct is true for an ADD UNIQUE NULLS NOT DISTINCT, which
+	// rejects a second row whose key is NULL.
+	NullsNotDistinct bool
+	// Deferrable and InitiallyDeferred are an ADD PRIMARY KEY / UNIQUE's
+	// DEFERRABLE and INITIALLY DEFERRED: when the uniqueness check runs.
+	Deferrable        bool
+	InitiallyDeferred bool
+	// IndexTablespace is the USING INDEX TABLESPACE of an ADD PRIMARY KEY
+	// / UNIQUE: where its index is built.
+	IndexTablespace string
+	// IndexStorageParams are the WITH (...) storage parameters of an ADD
+	// PRIMARY KEY / UNIQUE's index, in statement order.
+	IndexStorageParams []StorageParam
+	// IndexOptionsUnrenderable is true when an ADD PRIMARY KEY / UNIQUE's
+	// WITH (...) carries a parameter IndexStorageParams cannot hold
+	// faithfully: one whose value is not a plain word, number, or string,
+	// or holds a backslash.
+	IndexOptionsUnrenderable bool
 	// Constraint is the constraint family for OpAddConstraint.
 	Constraint ConstraintKind
 	// NotValid is true for ADD CONSTRAINT ... NOT VALID.
@@ -152,6 +178,19 @@ type Op struct {
 	// NewTypeMods are the target type's modifiers (e.g. 50 in varchar(50),
 	// 12 and 2 in numeric(12,2)); empty when unconstrained.
 	NewTypeMods []int32
+	// NewTypeSchema is the schema the target type is qualified with, empty
+	// when it is unqualified or qualified with pg_catalog. A qualified type
+	// is a user type that may share a built-in's name.
+	NewTypeSchema string
+	// NewTypeArray is true when the target type is an array of NewType
+	// (varchar(50)[], text ARRAY).
+	NewTypeArray bool
+	// NewTypeCollation is the collation the target's COLLATE clause names,
+	// as the statement spells it with any schema (C, pg_catalog.C); empty
+	// when there is no clause. A collation change rebuilds every index on
+	// the column, so a consumer comparing NewType to a live type must not
+	// read a collated target as a relabel.
+	NewTypeCollation string
 	// HasUsing is true for ALTER COLUMN TYPE ... USING <expr>, which always
 	// means a conversion, never a binary-coercible relabel.
 	HasUsing bool
@@ -171,7 +210,7 @@ func (o Op) Describe() string {
 	case OpDropColumn:
 		return "DROP COLUMN " + o.Column
 	case OpAlterColumnType:
-		return "ALTER COLUMN " + o.Column + " TYPE " + formatType(o.NewType, o.NewTypeMods)
+		return "ALTER COLUMN " + o.Column + " TYPE " + o.formatNewType()
 	case OpSetDefault:
 		return "ALTER COLUMN " + o.Column + " SET DEFAULT"
 	case OpDropDefault:
@@ -258,19 +297,31 @@ func droppedIndexes(drop *pganalyze.DropStmt) []string {
 	return names
 }
 
-// formatType renders a type name with its modifiers — varchar(50),
-// numeric(12,2) — exactly as the grammar spells the target type. The
-// modifier is what distinguishes a widen from a narrow, so a rendering
-// that drops it would collapse changes that route in opposite directions.
-func formatType(name string, mods []int32) string {
-	if len(mods) == 0 {
-		return name
+// formatNewType renders the target type with its schema, modifiers, array
+// marker, and collation — varchar(50), numeric(12,2), app.email,
+// varchar(50)[], text COLLATE C. Each part can turn a relabel into a
+// rewrite (a widen is not a narrow, a varchar is not a varchar array, a
+// collated text is not a text), so a rendering that drops one would
+// collapse changes that route in opposite directions.
+func (o Op) formatNewType() string {
+	name := o.NewType
+	if o.NewTypeSchema != "" {
+		name = o.NewTypeSchema + "." + name
 	}
-	parts := make([]string, len(mods))
-	for i, m := range mods {
-		parts[i] = strconv.FormatInt(int64(m), 10)
+	if len(o.NewTypeMods) > 0 {
+		parts := make([]string, len(o.NewTypeMods))
+		for i, m := range o.NewTypeMods {
+			parts[i] = strconv.FormatInt(int64(m), 10)
+		}
+		name += "(" + strings.Join(parts, ",") + ")"
 	}
-	return name + "(" + strings.Join(parts, ",") + ")"
+	if o.NewTypeArray {
+		name += "[]"
+	}
+	if o.NewTypeCollation != "" {
+		name += " COLLATE " + o.NewTypeCollation
+	}
+	return name
 }
 
 // ParseOps parses one SQL statement and returns its typed operations. An
@@ -325,13 +376,19 @@ func ParseOps(sql string) ([]Op, error) {
 		if drop.GetRemoveType() != pganalyze.ObjectType_OBJECT_INDEX {
 			return []Op{{Kind: OpUnrecognized}}, nil
 		}
-		return []Op{{Kind: OpDropIndex, Name: dropIndexNames(drop), Indexes: droppedIndexes(drop), Concurrent: drop.GetConcurrent()}}, nil
+		return []Op{{
+			Kind:       OpDropIndex,
+			Name:       dropIndexNames(drop),
+			Indexes:    droppedIndexes(drop),
+			Concurrent: drop.GetConcurrent(),
+			Cascade:    drop.GetBehavior() == pganalyze.DropBehavior_DROP_CASCADE,
+		}}, nil
 	case node.GetReindexStmt() != nil:
 		re := node.GetReindexStmt()
 		return []Op{{
 			Kind:       OpReindex,
 			Name:       re.GetRelation().GetRelname(),
-			Concurrent: reindexConcurrent(re),
+			Concurrent: reindexConcurrently(re),
 		}}, nil
 	case node.GetRenameStmt() != nil:
 		return []Op{renameOp(node.GetRenameStmt())}, nil
@@ -352,15 +409,19 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 	case pganalyze.AlterTableType_AT_AddColumn:
 		return addColumnOp(cmd.GetDef().GetColumnDef())
 	case pganalyze.AlterTableType_AT_DropColumn:
-		return Op{Kind: OpDropColumn, Column: cmd.GetName()}
+		return Op{Kind: OpDropColumn, Column: cmd.GetName(), Cascade: cmd.GetBehavior() == pganalyze.DropBehavior_DROP_CASCADE}
 	case pganalyze.AlterTableType_AT_AlterColumnType:
 		def := cmd.GetDef().GetColumnDef()
 		name, mods := typeRef(def.GetTypeName())
+		schema, array := typeQualifiers(def.GetTypeName())
 		return Op{
-			Kind:        OpAlterColumnType,
-			Column:      cmd.GetName(),
-			NewType:     name,
-			NewTypeMods: mods,
+			Kind:             OpAlterColumnType,
+			Column:           cmd.GetName(),
+			NewType:          name,
+			NewTypeMods:      mods,
+			NewTypeSchema:    schema,
+			NewTypeArray:     array,
+			NewTypeCollation: collationName(def.GetCollClause()),
 			// For ALTER COLUMN TYPE the grammar carries the USING
 			// expression in the column definition's raw default slot.
 			HasUsing: def.GetRawDefault() != nil,
@@ -389,7 +450,7 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 	case pganalyze.AlterTableType_AT_ValidateConstraint:
 		return Op{Kind: OpValidateConstraint, Name: cmd.GetName()}
 	case pganalyze.AlterTableType_AT_DropConstraint:
-		return Op{Kind: OpDropConstraint, Name: cmd.GetName()}
+		return Op{Kind: OpDropConstraint, Name: cmd.GetName(), Cascade: cmd.GetBehavior() == pganalyze.DropBehavior_DROP_CASCADE}
 	case pganalyze.AlterTableType_AT_AttachPartition:
 		return Op{Kind: OpAttachPartition}
 	case pganalyze.AlterTableType_AT_DetachPartition:
@@ -410,6 +471,7 @@ func alterTableOp(cmd *pganalyze.AlterTableCmd) Op {
 func addColumnOp(def *pganalyze.ColumnDef) Op {
 	op := Op{Kind: OpAddColumn, Column: def.GetColname()}
 	op.NewType, op.NewTypeMods = typeRef(def.GetTypeName())
+	op.NewTypeSchema, op.NewTypeArray = typeQualifiers(def.GetTypeName())
 	if isSerialType(op.NewType) {
 		op.Default = DefaultExpression
 	}
@@ -476,7 +538,91 @@ func addConstraintOp(con *pganalyze.Constraint) Op {
 	for _, k := range con.GetKeys() {
 		op.Columns = append(op.Columns, k.GetString_().GetSval())
 	}
+	if op.Constraint == ConstraintPrimaryKey || op.Constraint == ConstraintUnique {
+		keyIndexAttributes(&op, con)
+	}
 	return op
+}
+
+// keyIndexAttributes records what an ADD PRIMARY KEY / UNIQUE declares
+// beyond its key columns: everything an online sequence that builds the
+// index first has to carry for the result to be the same constraint.
+func keyIndexAttributes(op *Op, con *pganalyze.Constraint) {
+	for _, c := range con.GetIncluding() {
+		op.IncludeColumns = append(op.IncludeColumns, c.GetString_().GetSval())
+	}
+	op.NullsNotDistinct = con.GetNullsNotDistinct()
+	op.Deferrable = con.GetDeferrable()
+	op.InitiallyDeferred = con.GetInitdeferred()
+	op.IndexTablespace = con.GetIndexspace()
+	for _, o := range con.GetOptions() {
+		param, ok := storageParam(o.GetDefElem())
+		if !ok {
+			op.IndexOptionsUnrenderable = true
+			continue
+		}
+		op.IndexStorageParams = append(op.IndexStorageParams, param)
+	}
+}
+
+// StorageParam is one WITH (...) storage parameter. The server reads every
+// parameter's value as text, so Value holds that text whatever literal
+// spelled it; HasValue is false for a bare name, which the server reads as
+// true.
+type StorageParam struct {
+	Name     string
+	Value    string
+	HasValue bool
+}
+
+// plainWord returns the word a type name spells when it is one unqualified
+// name with no modifiers or array bounds, and "" otherwise.
+func plainWord(tn *pganalyze.TypeName) string {
+	if tn == nil || len(tn.GetNames()) != 1 || len(tn.GetTypmods()) > 0 || len(tn.GetArrayBounds()) > 0 ||
+		tn.GetSetof() || tn.GetPctType() {
+		return ""
+	}
+	return tn.GetNames()[0].GetString_().GetSval()
+}
+
+// storageParam reads one WITH (...) element, reporting false for one a
+// StorageParam cannot hold faithfully.
+func storageParam(de *pganalyze.DefElem) (StorageParam, bool) {
+	if de == nil {
+		return StorageParam{}, false
+	}
+	if de.GetDefnamespace() != "" {
+		// A StorageParam has no namespace to carry, and rendering the bare
+		// name would set a different option than the one written.
+		return StorageParam{}, false
+	}
+	param := StorageParam{Name: de.GetDefname()}
+	arg := de.GetArg()
+	switch {
+	case arg == nil:
+		return param, true
+	case arg.GetString_() != nil:
+		param.Value = arg.GetString_().GetSval()
+	case arg.GetInteger() != nil:
+		param.Value = strconv.FormatInt(int64(arg.GetInteger().GetIval()), 10)
+	case arg.GetFloat() != nil:
+		param.Value = arg.GetFloat().GetFval()
+	case arg.GetBoolean() != nil:
+		param.Value = strconv.FormatBool(arg.GetBoolean().GetBoolval())
+	case plainWord(arg.GetTypeName()) != "":
+		// The grammar parses an unreserved bare word such as off as a
+		// type name; the server reads it back as the word.
+		param.Value = plainWord(arg.GetTypeName())
+	default:
+		return StorageParam{}, false
+	}
+	if strings.Contains(param.Value, `\`) {
+		// A backslash reads differently under standard_conforming_strings
+		// off, and no storage parameter takes one.
+		return StorageParam{}, false
+	}
+	param.HasValue = true
+	return param, true
 }
 
 // renameOp maps a RENAME statement (column, table, or index — the grammar
@@ -494,17 +640,6 @@ func renameOp(ren *pganalyze.RenameStmt) Op {
 	}
 }
 
-// reindexConcurrent reports whether a REINDEX statement carries the
-// CONCURRENTLY option (a DefElem in the statement's parameter list).
-func reindexConcurrent(re *pganalyze.ReindexStmt) bool {
-	for _, p := range re.GetParams() {
-		if p.GetDefElem().GetDefname() == "concurrently" {
-			return true
-		}
-	}
-	return false
-}
-
 // typeRef returns the bare grammar type name (last path element, without
 // the pg_catalog qualification) and its integer modifiers.
 func typeRef(tn *pganalyze.TypeName) (string, []int32) {
@@ -518,6 +653,36 @@ func typeRef(tn *pganalyze.TypeName) (string, []int32) {
 		mods = append(mods, int32(m.GetAConst().GetIval().GetIval()))
 	}
 	return name, mods
+}
+
+// typeQualifiers returns what typeRef leaves out of a grammar type name: the
+// schema it is qualified with (empty for pg_catalog, which the grammar adds
+// to keyword types such as varchar and numeric) and whether it is an array.
+func typeQualifiers(tn *pganalyze.TypeName) (string, bool) {
+	array := len(tn.GetArrayBounds()) > 0
+	names := tn.GetNames()
+	if len(names) < 2 {
+		return "", array
+	}
+	schema := names[len(names)-2].GetString_().GetSval()
+	if schema == "pg_catalog" {
+		return "", array
+	}
+	return schema, array
+}
+
+// collationName renders a COLLATE clause's collation as the statement
+// spells it, schema and all (C, pg_catalog.C), or "" when there is no
+// clause.
+func collationName(coll *pganalyze.CollateClause) string {
+	if coll == nil {
+		return ""
+	}
+	parts := make([]string, 0, len(coll.GetCollname()))
+	for _, part := range coll.GetCollname() {
+		parts = append(parts, part.GetString_().GetSval())
+	}
+	return strings.Join(parts, ".")
 }
 
 // isSerialType reports whether the grammar type name is one of the serial

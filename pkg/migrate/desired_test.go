@@ -285,6 +285,14 @@ func TestCreateFailureDetailNamesWhatTheStepLeft(t *testing.T) {
 	assert.Contains(t, rolledBack, "rolled back")
 	assert.NotContains(t, rolledBack, "committed")
 
+	unknown := createFailureDetail(&executor.SequenceStepError{Step: 1, Total: 2, Err: &executor.CommitOutcomeUnknownError{Err: errors.New("connection reset")}})
+	assert.Contains(t, unknown, "cannot be established")
+	assert.NotContains(t, unknown, "rolled back", "a lost commit may have landed, so the step is never reported rolled back")
+	assert.Equal(t, "planned statement 2 of 3 has an unknown commit outcome — inspect the catalog before retrying; "+
+		"the 1 preceding statements committed and remain in effect",
+		committedPrefixDetail(1, 3, failedWhat(string(executor.CodeCommitOutcomeUnknown))))
+	assert.Equal(t, "failed", failedWhat(string(executor.CodeExecutionFailed)))
+
 	mismatch := createFailureDetail(&executor.SequenceStepError{Step: 1, Total: 2, Err: &executor.CreateNameMismatchError{
 		Schema: "app", Table: "t", Missing: []string{"t_pkey"}, Unclaimed: []string{"t_pkey1"},
 	}})

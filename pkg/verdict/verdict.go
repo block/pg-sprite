@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/block/pg-sprite/pkg/refusal"
+	"github.com/block/pg-sprite/pkg/suggest"
 )
 
 const (
@@ -98,7 +99,8 @@ const (
 	// engine refuses instead.
 	ReasonRewriteRequired Reason = "not-native-safe-rewrite-required"
 	// ReasonBackendUnavailable: the change routes to an execution strategy
-	// this build does not implement (copy-and-swap).
+	// that has no carrying path for the operation in this build (a
+	// copy-and-swap rewrite the shadow-table engine does not carry yet).
 	ReasonBackendUnavailable Reason = "backend-unavailable"
 	// ReasonDestructiveChange: the desired-state plan discards live
 	// structure — a dropped column, constraint, index, or NOT NULL — and
@@ -237,8 +239,8 @@ const (
 	// RefusalSiteIndexSingleRelation is the plain one-relation DROP INDEX,
 	// REINDEX INDEX, or REINDEX TABLE gate site.
 	RefusalSiteIndexSingleRelation RefusalSite = "index-statement-single-relation"
-	// RefusalSiteIndexOther is a multi-relation DROP INDEX or a REINDEX scope
-	// that does not identify one relation.
+	// RefusalSiteIndexOther is a multi-relation DROP INDEX, a DROP INDEX with
+	// CASCADE, or a REINDEX scope that does not identify one relation.
 	RefusalSiteIndexOther RefusalSite = "index-statement-other"
 )
 
@@ -509,10 +511,14 @@ type Verdict struct {
 	// FailedStep is the 1-based position of the sequence step that failed,
 	// matching the numbering the planner's partial-failure contracts use;
 	// zero when the failure was not a mid-sequence one (a single-statement
-	// attempt rolls back and commits nothing).
+	// attempt that fails before its COMMIT rolls back and commits nothing).
+	// When Code is an outcome-unknown code, the step's own COMMIT may have
+	// landed: its state is unknown, not failed.
 	FailedStep int `json:"failed_step,omitempty"`
 	// FailedStepSQL is the failed step's statement — the step the planner's
-	// partial-failure contract says a retry resumes from.
+	// partial-failure contract says a retry resumes from. When Code is an
+	// outcome-unknown code, the step may have committed, so a retry cannot
+	// be assumed to resume here until the catalog is inspected.
 	FailedStepSQL string `json:"failed_step_sql,omitempty"`
 	// Attempts is how many bounded attempts ran before a lock-budget
 	// refusal, so automation can tell an exhausted bounded retry from a
@@ -528,11 +534,26 @@ type Verdict struct {
 	// SaferIdiom is a native alternative to the refused statement, when one
 	// exists (e.g. CREATE INDEX CONCURRENTLY, ADD CONSTRAINT ... NOT VALID).
 	SaferIdiom string `json:"safer_idiom,omitempty"`
+	// Guidance is the typed manual path for a rewrite-required refusal,
+	// drawn from the suggest contract's Guidance vocabulary
+	// (docs/suggest-report.md), the same value the plan report's statement
+	// carries. Detail states the steps for a human; Guidance is the key an
+	// automated caller branches on. Empty for every other verdict.
+	Guidance suggest.Guidance `json:"guidance,omitempty"`
+	// DependentViews names the views and materialized views that read the
+	// column a refused statement retypes or drops, each schema-qualified
+	// with every identifier quoted, sorted: the objects to drop or redefine
+	// before the change can run. The same list the plan report's
+	// dependent-view decision carries. Empty for every other verdict.
+	DependentViews []string `json:"dependent_views,omitempty"`
 	// ExecutedSQL is the ordered SQL the engine actually ran and committed.
 	// On an executed verdict it is the substituted safer native sequence
 	// (empty when the submitted form ran as-is — a non-empty value is what
 	// tells automation a substitution happened). On a failed verdict it is
-	// the committed prefix that remains: empty means nothing committed.
+	// the committed prefix that remains: empty means nothing is known to
+	// have committed — and nothing at all did, unless Code is an
+	// outcome-unknown code, in which case the failed step itself (or the
+	// single statement) may have committed and the catalog decides.
 	ExecutedSQL []string `json:"executed_sql,omitempty"`
 	// Forced reports that --force overrode the engine's routing: the
 	// submitted form ran as-is instead of a safer substitution or a
@@ -545,6 +566,23 @@ type Verdict struct {
 	LockTimeout string `json:"lock_timeout,omitempty"`
 	// StatementTimeout is the explicit statement execution budget.
 	StatementTimeout string `json:"statement_timeout,omitempty"`
+	// StatisticsRefresh reports the ANALYZE a committed type change owes
+	// the planner; nil when the statement retyped no column.
+	StatisticsRefresh *StatisticsRefresh `json:"statistics_refresh,omitempty"`
+}
+
+// StatisticsRefresh is the outcome of re-analyzing a table after a
+// committed type change, which deletes the retyped columns' planner
+// statistics. The change stays committed whether or not the refresh ran,
+// so a refresh still owed leaves the verdict executed and names the
+// ANALYZE to run.
+type StatisticsRefresh struct {
+	// Columns are the columns the statement retyped, in statement order.
+	Columns []string `json:"columns"`
+	// Refreshed reports that the ANALYZE committed.
+	Refreshed bool `json:"refreshed"`
+	// Pending is the ANALYZE still to run; empty when Refreshed.
+	Pending string `json:"pending,omitempty"`
 }
 
 // JSON renders the verdict as a single JSON object.
@@ -594,6 +632,9 @@ func (v Verdict) String() string {
 	}
 	if v.SaferIdiom != "" {
 		fmt.Fprintf(&b, "\n  safer:     %s", v.SaferIdiom)
+	}
+	if v.Guidance != "" {
+		fmt.Fprintf(&b, "\n  guidance:  %s", v.Guidance)
 	}
 	if v.Outcome == OutcomeExecutedWithoutOnlineSafety {
 		fmt.Fprintf(&b, "\n  budgets:   lock %s, statement %s", v.LockTimeout, v.StatementTimeout)

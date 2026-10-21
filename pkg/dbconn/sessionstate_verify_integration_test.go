@@ -40,6 +40,47 @@ func TestVerifySessionSettingsRefusesASessionThatNeverReceivedTheBounds(t *testi
 		"the refusal names what an operator changes")
 }
 
+// The server holding 0 is a missing bound whatever was asked for. A
+// sub-millisecond request truncates to 0, which would otherwise equal the 0 a
+// session without the bound reports and read back as a match.
+func TestVerifySessionSettingsRefusesAnUnboundedSessionForASubMillisecondRequest(t *testing.T) {
+	pc, err := buildPoolConfig(Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	delete(pc.ConnConfig.RuntimeParams, "lock_timeout")
+	delete(pc.ConnConfig.RuntimeParams, "statement_timeout")
+	pc.AfterConnect = unshadowCatalog
+
+	pool, err := pgxpool.NewWithConfig(t.Context(), pc)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	err = verifySessionSettings(t.Context(), pool, sessionBounds(500*time.Microsecond, 30*time.Second))
+
+	require.ErrorIs(t, err, ErrSessionSettingsDiscarded)
+	assert.Contains(t, err.Error(), "lock_timeout is unbounded, not the 500µs",
+		"the refusal names the duration that was asked for")
+}
+
+// The refusal names the bound the pool actually set, not the duration the
+// caller asked for: 1500µs is sent as 1ms, so a session that lost it is
+// reported against 1ms.
+func TestVerifySessionSettingsNamesTheWholeMillisecondsThePoolSet(t *testing.T) {
+	pc, err := buildPoolConfig(Config{URL: testutil.StartPostgres(t)})
+	require.NoError(t, err)
+	delete(pc.ConnConfig.RuntimeParams, "lock_timeout")
+	delete(pc.ConnConfig.RuntimeParams, "statement_timeout")
+	pc.AfterConnect = unshadowCatalog
+
+	pool, err := pgxpool.NewWithConfig(t.Context(), pc)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+
+	err = verifySessionSettings(t.Context(), pool, sessionBounds(1500*time.Microsecond, 30*time.Second))
+
+	require.ErrorIs(t, err, ErrSessionSettingsDiscarded)
+	assert.Contains(t, err.Error(), "lock_timeout is unbounded, not the 1ms this pool set")
+}
+
 // A session that carries the bounds passes, so the check refuses a missing
 // bound rather than refusing everything.
 func TestVerifySessionSettingsAcceptsASessionCarryingTheBounds(t *testing.T) {

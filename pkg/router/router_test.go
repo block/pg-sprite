@@ -8,6 +8,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/statement"
 )
 
 // classify runs the real classifier so routing tests exercise the same
@@ -63,6 +64,32 @@ func TestRouteSaferIdiomWithoutRewriteFailsClosed(t *testing.T) {
 	assert.Equal(t, router.DispositionRewriteRequired, routed.Disposition)
 }
 
+func TestRouteKeyWithStorageParametersRunsTheSequence(t *testing.T) {
+	plan := classify(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = 70)")
+	routed := router.Route([]planner.Plan{plan})
+	st := routed.Statements[0]
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+	assert.Equal(t, []string{
+		`CREATE UNIQUE INDEX CONCURRENTLY "k" ON "t" ("email") WITH ("fillfactor" = '70')`,
+		`ALTER TABLE "t" ADD CONSTRAINT "k" UNIQUE USING INDEX "k"`,
+	}, st.ExecSQL)
+}
+
+func TestRouteKeyWithUnrenderableStorageParameterFailsClosed(t *testing.T) {
+	// A storage parameter the online sequence cannot carry faithfully gets
+	// no sequence: the key must be refused, never built by its blocking
+	// form or by a sequence that leaves the parameter out.
+	plan := classify(t, "ALTER TABLE t ADD CONSTRAINT k UNIQUE (email) WITH (fillfactor = s.seventy)")
+	require.Equal(t, planner.RouteNative, plan.Route)
+	require.Len(t, plan.Decisions, 1)
+	require.Empty(t, plan.Decisions[0].SaferSQL)
+
+	routed := router.Route([]planner.Plan{plan})
+	st := routed.Statements[0]
+	assert.Equal(t, router.DispositionRewriteRequired, st.Disposition)
+	assert.Empty(t, st.ExecSQL)
+}
+
 func TestRouteMultiOpPartialRewriteFailsClosed(t *testing.T) {
 	// SET NOT NULL needs a safer sequence, but multi-operation statements
 	// carry no rewrites — the submitted form must not run on the strength
@@ -88,16 +115,95 @@ func TestRouteInlineConstraintAddColumnFailsClosed(t *testing.T) {
 		"an inline constraint builds its index under ACCESS EXCLUSIVE; the submitted form must not run")
 }
 
-func TestRouteCopyAndSwapIsUnavailable(t *testing.T) {
+func TestRouteTypeRewriteExecutesViaCopyAndSwap(t *testing.T) {
+	// A type conversion PostgreSQL cannot relabel is the change the
+	// shadow-table engine carries: the gated ALTER retypes the empty shadow
+	// and the copy converts each row through the statement's own
+	// conversion.
 	plan := classify(t, "ALTER TABLE t ALTER COLUMN id TYPE bigint")
 	require.Equal(t, planner.RouteCopyAndSwap, plan.Route)
 
 	routed := router.Route([]planner.Plan{plan})
 	st := routed.Statements[0]
 	assert.Equal(t, router.BackendCopyAndSwap, st.Backend)
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+	assert.Empty(t, st.ExecSQL, "the copy-and-swap backend runs the statement itself, not literal native SQL")
+	assert.Equal(t, router.DispositionExecute, routed.Disposition)
+}
+
+func TestRouteTypeRewriteWithNativeSiblingExecutesViaCopyAndSwap(t *testing.T) {
+	// A native-routed operation in the same statement rides along: it runs
+	// inside the one gated ALTER on the shadow, so the engine carries the
+	// whole statement.
+	plan := classify(t, "ALTER TABLE t ALTER COLUMN id TYPE bigint, DROP COLUMN notes")
+	require.Equal(t, planner.RouteCopyAndSwap, plan.Route)
+	require.Len(t, plan.Decisions, 2)
+	require.Equal(t, planner.RouteNative, plan.Decisions[1].Route)
+
+	routed := router.Route([]planner.Plan{plan})
+	st := routed.Statements[0]
+	assert.Equal(t, router.BackendCopyAndSwap, st.Backend)
+	assert.Equal(t, router.DispositionExecute, st.Disposition)
+}
+
+func TestRouteCopyAndSwapReasonsTheEngineDoesNotCarryAreUnavailable(t *testing.T) {
+	// Each of these rewrites routes to copy-and-swap, but the engine has no
+	// carrying path for it yet; the router marks the statement unavailable
+	// so execution refuses it instead of running a change it cannot prove.
+	for _, tc := range []struct {
+		name   string
+		sql    string
+		reason planner.Reason
+	}{
+		{"volatile default", "ALTER TABLE t ADD COLUMN joined timestamptz DEFAULT now()", planner.ReasonVolatileDefault},
+		{"stored generated column", "ALTER TABLE t ADD COLUMN total numeric GENERATED ALWAYS AS (qty * price) STORED", planner.ReasonGeneratedStored},
+		{"relocation", "ALTER TABLE t SET TABLESPACE pg_default", planner.ReasonRelocation},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := classify(t, tc.sql)
+			require.Equal(t, planner.RouteCopyAndSwap, plan.Route)
+			require.Len(t, plan.Decisions, 1)
+			require.Equal(t, tc.reason, plan.Decisions[0].Reason)
+
+			routed := router.Route([]planner.Plan{plan})
+			st := routed.Statements[0]
+			assert.Equal(t, router.BackendCopyAndSwap, st.Backend)
+			assert.Equal(t, router.DispositionUnavailable, st.Disposition)
+			assert.Empty(t, st.ExecSQL, "no literal SQL for a change the backend cannot carry")
+			assert.Equal(t, router.DispositionUnavailable, routed.Disposition)
+		})
+	}
+}
+
+func TestRouteAddColumnTypeRewriteIsUnavailable(t *testing.T) {
+	// The server proved that adding the column rewrites the table for its
+	// type alone (a domain with a CHECK). The decision carries the same
+	// type-rewrite reason as a retype, but the engine carries only the
+	// retype of a column the source has, so the statement is unavailable.
+	facts := planner.Facts{AddColumnProofs: map[string]statement.AddColumnProof{"score": statement.AddColumnTypeRewrites}}
+	plan, err := planner.Classify("ALTER TABLE t ADD COLUMN score positive_int DEFAULT 1", facts)
+	require.NoError(t, err)
+	require.Equal(t, planner.RouteCopyAndSwap, plan.Route)
+	require.Len(t, plan.Decisions, 1)
+	require.Equal(t, planner.ReasonTypeRewrite, plan.Decisions[0].Reason)
+
+	routed := router.Route([]planner.Plan{plan})
+	st := routed.Statements[0]
+	assert.Equal(t, router.BackendCopyAndSwap, st.Backend)
 	assert.Equal(t, router.DispositionUnavailable, st.Disposition)
-	assert.Empty(t, st.ExecSQL, "no literal SQL for a backend that is not implemented")
-	assert.Equal(t, router.DispositionUnavailable, routed.Disposition)
+	assert.Empty(t, st.ExecSQL, "no literal SQL for a change the backend cannot carry")
+}
+
+func TestRouteTypeRewriteWithUncarriedSiblingIsUnavailable(t *testing.T) {
+	// One operation the engine does not carry makes the whole statement
+	// unavailable: the gated ALTER runs as one statement, so the carried
+	// type rewrite cannot be split from the sibling.
+	plan := classify(t, "ALTER TABLE t ALTER COLUMN id TYPE bigint, ADD COLUMN joined timestamptz DEFAULT now()")
+	require.Equal(t, planner.RouteCopyAndSwap, plan.Route)
+	require.Len(t, plan.Decisions, 2)
+
+	routed := router.Route([]planner.Plan{plan})
+	assert.Equal(t, router.DispositionUnavailable, routed.Statements[0].Disposition)
 }
 
 func TestRouteRefusedStatementHasNoBackend(t *testing.T) {
@@ -112,11 +218,27 @@ func TestRouteRefusedStatementHasNoBackend(t *testing.T) {
 	assert.Equal(t, router.DispositionRefuse, routed.Disposition)
 }
 
+// A route the router does not know is a planner/router version skew. It
+// is refused with no backend rather than guessed at: the only way an
+// unknown value reaches the backend gate is through this switch, so this
+// is the fail-closed line for the whole routing step.
+func TestRouteUnknownRouteIsRefused(t *testing.T) {
+	plan := classify(t, "ALTER TABLE t ADD COLUMN age int DEFAULT 0")
+	plan.Route = planner.Route("bogus")
+
+	routed := router.Route([]planner.Plan{plan})
+	st := routed.Statements[0]
+	assert.Empty(t, st.Backend)
+	assert.Equal(t, router.DispositionRefuse, st.Disposition)
+	assert.Empty(t, st.ExecSQL)
+	assert.Equal(t, router.DispositionRefuse, routed.Disposition)
+}
+
 func TestRouteAggregateIsWorstDisposition(t *testing.T) {
 	plans := []planner.Plan{
 		classify(t, "ALTER TABLE t ADD COLUMN age int"),
 		classify(t, "ALTER TABLE t ATTACH PARTITION p FOR VALUES FROM (1) TO (10)"),
-		classify(t, "ALTER TABLE t ALTER COLUMN id TYPE bigint"),
+		classify(t, "ALTER TABLE t ADD COLUMN joined timestamptz DEFAULT now()"),
 		classify(t, "ALTER TABLE t ADD CONSTRAINT ex EXCLUDE USING gist (room WITH =)"),
 	}
 	routed := router.Route(plans)

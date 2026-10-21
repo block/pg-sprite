@@ -9,6 +9,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/migrate"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 	"github.com/jackc/pgx/v5"
@@ -23,10 +24,14 @@ func TestRefuseStoredGeneratedColumn(t *testing.T) {
 		ADD COLUMN doubled int GENERATED ALWAYS AS (id * 2) STORED`)
 }
 
-// An explicit USING expression is refused through the unavailable copy-and-swap path.
-func TestRefuseUsingExpression(t *testing.T) {
-	runAdditionalRefusal(t, "pgsprite_extra_using_expression", `ALTER TABLE %s
-		ALTER COLUMN body TYPE text USING upper(body)`)
+// An explicit USING expression is carried by the copy-and-swap engine; the
+// route's preflight refuses fail-closed on the seeded table's realtime
+// publication and the table is unchanged.
+func TestUsingExpressionRoutesToCopySwap(t *testing.T) {
+	pool := fixture(t)
+	table := seedDDLTable(t, pool, "pgsprite_extra_using_expression")
+	refuseCarriedCopySwap(t, pool, table, fmt.Sprintf(`ALTER TABLE %s
+		ALTER COLUMN body TYPE text USING upper(body)`, table), preflight.CopySwapCausePublicationMember)
 }
 
 func runAdditionalRefusal(t *testing.T, name, ddl string) {

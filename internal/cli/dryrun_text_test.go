@@ -106,17 +106,18 @@ func TestDryRunTextRunAsWritten(t *testing.T) {
 	assert.NotContains(t, text, "safer online sequence")
 }
 
-// A copy-and-swap route in a build without that backend is refused with the
-// backend named, no SQL offered to run, and no apply footer.
-func TestDryRunTextBackendUnavailable(t *testing.T) {
+// A copy-and-swap route the engine carries renders as one step: no literal
+// SQL is listed, the note says what the run does, and the apply footer
+// invites the real run.
+func TestDryRunTextCopyAndSwapExecutes(t *testing.T) {
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
-	report.Disposition = router.DispositionUnavailable
+	report.Disposition = router.DispositionExecute
 	report.Statements = append(report.Statements, plan.Statement{
 		SQL:         `ALTER TABLE "users" ALTER COLUMN "id" TYPE text`,
 		Route:       planner.RouteCopyAndSwap,
 		Backend:     router.BackendCopyAndSwap,
-		Disposition: router.DispositionUnavailable,
+		Disposition: router.DispositionExecute,
 		Decisions: []planner.Decision{{
 			Operation: "alter column type",
 			Route:     planner.RouteCopyAndSwap,
@@ -127,10 +128,42 @@ func TestDryRunTextBackendUnavailable(t *testing.T) {
 	var out strings.Builder
 	require.NoError(t, writeDryRunText(&out, palette{}, report))
 	text := out.String()
-	assert.Contains(t, text, "error[backend-unavailable]:\n  refused — needs the copy-and-swap backend")
 	assert.Contains(t, text, "note[type-rewrite]:\n  alter column type — converting or checking every row for the column's\n  type forces a full")
-	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#backend-unavailable\n")
+	assert.Contains(t, text, "note:\n  pg-sprite will run it as a copy-and-swap: build a shadow table")
+	assert.Contains(t, text, "is not part of this dry run", "the note says the route's preflight is read at the run, not here")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#type-rewrite\n")
+	assert.Contains(t, text, "plan:\n  public.users (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
+	assert.Contains(t, text, "apply:\n  re-run without --dry-run\n")
+	assert.NotContains(t, text, "error[")
+	assert.NotContains(t, text, "runs as written")
+}
+
+// A copy-and-swap route for an operation the engine does not carry yet is
+// refused with the backend named, no SQL offered to run, and no apply
+// footer.
+func TestDryRunTextBackendUnavailable(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+	report.Disposition = router.DispositionUnavailable
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         `ALTER TABLE "users" ADD COLUMN "joined" timestamptz DEFAULT now()`,
+		Route:       planner.RouteCopyAndSwap,
+		Backend:     router.BackendCopyAndSwap,
+		Disposition: router.DispositionUnavailable,
+		Decisions: []planner.Decision{{
+			Operation: "add column joined",
+			Route:     planner.RouteCopyAndSwap,
+			Reason:    planner.ReasonVolatileDefault,
+		}},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := out.String()
+	assert.Contains(t, text, "error[backend-unavailable]:\n  refused — needs the copy-and-swap backend")
+	assert.Contains(t, text, "note[volatile-default]:\n  add column joined — a default computed for every row forces a full table")
+	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#backend-unavailable\n")
+	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#volatile-default\n")
 	assert.Contains(t, text, "plan:\n  public.users (PostgreSQL 16.10) — 1 statement, 0 steps to run, 1 refused\n")
 	assert.NotContains(t, text, "pg-sprite will run")
 	assert.NotContains(t, text, "apply:")
@@ -212,12 +245,12 @@ func TestDryRunTextRefusalAndDestructive(t *testing.T) {
 func TestDryRunTextUnverifiedNote(t *testing.T) {
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema, report.Table = "public", "missing"
-	report.Disposition = router.DispositionUnavailable
+	report.Disposition = router.DispositionExecute
 	report.Statements = append(report.Statements, plan.Statement{
 		SQL:         `ALTER TABLE "missing" ALTER COLUMN "c" TYPE text`,
 		Route:       planner.RouteCopyAndSwap,
 		Backend:     router.BackendCopyAndSwap,
-		Disposition: router.DispositionUnavailable,
+		Disposition: router.DispositionExecute,
 		Decisions: []planner.Decision{{
 			Operation:  "alter column type",
 			Route:      planner.RouteCopyAndSwap,
@@ -293,6 +326,72 @@ func TestDryRunTextPlannerRefusalNamesOperation(t *testing.T) {
 	assert.Contains(t, text, "note:\n  refusal class: capability-boundary\n")
 	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#unsupported-statement\n")
 	assert.NotContains(t, text, "error[refuse]")
+}
+
+// A refusal because views read the changed column names those views in
+// the refusal itself, rather than the generic no-safe-path sentence, and
+// the help line says what to do about them.
+func TestDryRunTextDependentViewRefusalNamesTheViews(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "app", "users", "16.10"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         "ALTER TABLE app.users DROP COLUMN email",
+		Route:       planner.RouteRefuse,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement,
+		Class:       verdict.ClassCapabilityBoundary,
+		Decisions: []planner.Decision{{
+			Operation:      "DROP COLUMN email",
+			Destructive:    true,
+			Route:          planner.RouteRefuse,
+			Reason:         planner.ReasonDependentView,
+			DependentViews: []string{`"app"."active_users"`, `"reports"."mail"`},
+		}},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := strings.Join(strings.Fields(out.String()), " ")
+	assert.Contains(t, text, `error[unsupported-statement]: refused — DROP COLUMN email changes a column read by "app"."active_users", "reports"."mail", and PostgreSQL refuses to retype or drop a column while a view reads it`)
+	assert.Contains(t, text, "help: drop or redefine those views first, then re-plan")
+	assert.Contains(t, text, onlineDDLReferenceURL+"#dependent-view")
+	assert.NotContains(t, text, "knows no safe path")
+}
+
+// The refusal sentence explains the first refused operation, the same one
+// the run's verdict explains, even when a later operation is refused
+// because views read its column; that operation's views still appear in
+// its own diagnostic.
+func TestDryRunTextRefusalLeadsWithTheFirstRefusedOperation(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "app", "users", "16.10"
+	report.Disposition = router.DispositionRefuse
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         "ALTER TABLE app.users DROP COLUMN ref, DROP COLUMN email",
+		Route:       planner.RouteRefuse,
+		Disposition: router.DispositionRefuse,
+		Reason:      verdict.ReasonUnsupportedStatement,
+		Class:       verdict.ClassCapabilityBoundary,
+		Decisions: []planner.Decision{
+			{Operation: "DROP COLUMN ref", Destructive: true, Route: planner.RouteRefuse, Reason: planner.ReasonReplicaIdentity},
+			{
+				Operation:      "DROP COLUMN email",
+				Destructive:    true,
+				Route:          planner.RouteRefuse,
+				Reason:         planner.ReasonDependentView,
+				DependentViews: []string{`"app"."active_users"`},
+			},
+		},
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := strings.Join(strings.Fields(out.String()), " ")
+	assert.Contains(t, text, "error[unsupported-statement]: refused — the planner knows no safe path for DROP COLUMN ref")
+	assert.NotContains(t, text, "refused — DROP COLUMN email changes a column read by")
+	assert.Contains(t, text, "DROP COLUMN email — changes a column a view reads")
+	assert.Contains(t, text, "help: drop or redefine those views first, then re-plan")
 }
 
 // A refused generated-expression change says why it cannot run, rather
