@@ -52,3 +52,63 @@ func TestUsageErrorExitsOneAndLeavesStdoutEmpty(t *testing.T) {
 		})
 	}
 }
+
+// Main's stderr is the CLI entry point's own rendering surface, so these
+// assert its usage header and error line — not incidental prose.
+func TestMainReportsUsageAndErrorOnStderr(t *testing.T) {
+	clearFlagEnv(t)
+	var stdout, stderr bytes.Buffer
+
+	code := cli.Main([]string{"migrate", "--json", "--no-such-flag"}, "test", &stdout, &stderr)
+
+	assert.Equal(t, 1, code)
+	assert.Empty(t, stdout.String())
+	assert.Contains(t, stderr.String(), "Usage: pg-sprite migrate")
+	assert.Contains(t, stderr.String(), "pg-sprite: error: unknown flag --no-such-flag")
+}
+
+// risky.sql carries one error-severity finding, so lint returns an error
+// after parsing succeeded: an operational failure, exit 1, reported on stderr.
+func TestMainMapsARunErrorToExitOneWithTheErrorOnStderr(t *testing.T) {
+	clearFlagEnv(t)
+	var stdout, stderr bytes.Buffer
+
+	code := cli.Main([]string{"lint", "--json", "../../demo/risky.sql"}, "test", &stdout, &stderr)
+
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "pg-sprite: error: lint found errors: 1")
+	assert.NotContains(t, stderr.String(), "Usage:", "a run error is not a usage error")
+}
+
+// --help and --version end inside kong's parse; Main returns 0 for both
+// instead of exiting the process, with their output on stdout.
+func TestHelpAndVersionReturnZero(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantStdout string
+	}{
+		{
+			name:       "help",
+			args:       []string{"--help"},
+			wantStdout: "Usage: pg-sprite",
+		},
+		{
+			name:       "version",
+			args:       []string{"--version"},
+			wantStdout: "v9.8.7-test",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearFlagEnv(t)
+			var stdout, stderr bytes.Buffer
+
+			code := cli.Main(tt.args, "v9.8.7-test", &stdout, &stderr)
+
+			assert.Equal(t, 0, code)
+			assert.Contains(t, stdout.String(), tt.wantStdout)
+			assert.Empty(t, stderr.String())
+		})
+	}
+}

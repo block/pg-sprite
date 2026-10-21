@@ -227,6 +227,9 @@ vouch for it as online-safe.
 | 2 | Refused: no online-safe path, and the verdict names the typed `reason` (and `class`) automation switches on | no | not applicable |
 | 3 | Committed through the accepted-blocking passthrough — the operator explicitly accepted a blocking form, and the engine ran it under bounded budgets without vouching for online safety | yes | no |
 
+A usage error exits 1 and writes the usage and the error to stderr; stdout
+carries only the command's output, including under `--json`.
+
 Three rules follow from the table, and one note for embedders:
 
 - **Gate on non-zero.** `pg-sprite migrate … || exit 1` is fail-closed for
