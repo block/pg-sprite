@@ -432,7 +432,11 @@ rewrite probe, and the copy-and-swap shape and environment facts — qualifies e
 relation, type, and operator, `IN` and `IS DISTINCT FROM`
 included since both resolve `=` through the path; planted `pg_total_relation_size(oid)`,
 `has_schema_privilege(name, name, text)`, `+`, and `=` overloads on a path that lists the
-catalog implicitly do not change an answer), and `pkg/checksum` (the column-type read, the relation check,
+catalog implicitly do not change an answer), `pkg/schemachange` (the dependent reads — the
+shadow's and source's indexes and extended statistics the cutover gate pairs, and the taken
+relation and constraint names — qualify every function, relation, type, and operator; planted
+`generate_series`, `unnest`, `array_to_string`, `to_jsonb`, and `||` overloads on a path that
+lists the source schema do not change the indexes or statistics read), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
