@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/checksum"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
@@ -217,6 +219,45 @@ func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 		v, err := copySwapOutcome(st, false, schemachange.Result{}, releaseErr)
 		assert.ErrorIs(t, err, releaseErr)
 		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+	})
+}
+
+// The host's sizing, interval, and progress hook reach the Runner as given,
+// and the route fixes ReplaceDone on. The Runner's hook is the route's own:
+// it tolerates a host that set none, hands the host's the row as saved,
+// and returns what the host's returned, so a host's error stops the run as
+// the Runner's contract says.
+func TestCopySwapRunOptionsCarryTheHostsPolicy(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	row := checkpoint.Checkpoint{Schema: "billing", Table: "orders", Phase: checkpoint.PhaseVerifying}
+
+	t.Run("passes sizing and choices through", func(t *testing.T) {
+		got := CopySwapOptions{
+			KeepOld:            true,
+			Copier:             copier.Options{Workers: 3},
+			CheckpointInterval: 2 * time.Second,
+		}.runOptions(logger)
+		assert.True(t, got.KeepOld)
+		assert.True(t, got.ReplaceDone)
+		assert.Equal(t, 3, got.Copier.Workers)
+		assert.Equal(t, 2*time.Second, got.CheckpointInterval)
+	})
+
+	t.Run("a run without a hook saves without complaint", func(t *testing.T) {
+		got := CopySwapOptions{}.runOptions(logger)
+		require.NotNil(t, got.AfterCheckpoint)
+		assert.NoError(t, got.AfterCheckpoint(t.Context(), row))
+	})
+
+	t.Run("the hook sees the row as saved and its error stops the run", func(t *testing.T) {
+		hookErr := errors.New("host is draining")
+		var seen checkpoint.Checkpoint
+		got := CopySwapOptions{OnCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
+			seen = cp
+			return hookErr
+		}}.runOptions(logger)
+		assert.ErrorIs(t, got.AfterCheckpoint(t.Context(), row), hookErr)
+		assert.Equal(t, row, seen)
 	})
 }
 

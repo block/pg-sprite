@@ -435,7 +435,20 @@ copy-and-swap with the connection unset is a caller wiring error: `Run` returns
 `errors.Is` and fix the wiring rather than routing it as an outcome), the free space on the table's
 volume for the preflight's disk-headroom check, whether to keep the retained source under
 its `_old` name, and whether the table is quiesced for the run — the fenced path that needs
-no logical decoding — or live. The native route's budget, retry policy, and size ceiling do not govern
+no logical decoding — or live. Three further fields let the adapter size and watch the run:
+`Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
+throttled toward — with zero values taking the copier's defaults, and is validated when the
+copy starts, after the shadow is built and the row saved, so a refused value stops the run
+in `copying` and the next run resumes once it is corrected; `CheckpointInterval` is how often
+a copy in progress saves its landed watermark (zero takes the Runner's default; a negative
+value is a wiring error refused before the preflight, like the missing connection, matched
+with `errors.Is(err, schemachange.ErrInvalidOptions)` and no verdict); and `OnCheckpoint` is
+the run's progress signal — called after every successful save of the checkpoint row with the
+row as saved, on the goroutine that called `Run` for the phase saves and on the copy's saving
+goroutine for the periodic watermark saves, so it must be safe to call from either. An error
+the hook returns stops the run at that save as a `failed` verdict with the
+`after the checkpoint in phase …` error of the `Run` outcome table above and the row as that save left it; the next `Run`
+over the same statement resumes from the row. The native route's budget, retry policy, and size ceiling do not govern
 this route: the Runner's sessions carry `pkg/dbconn`'s bounded `lock_timeout` and
 `statement_timeout`, the cutover runs its own bounded lock retry, and the size ceiling guards
 the native route's blind bounded attempt, which this route never makes. A statement routed to copy-and-swap and run with `--force`

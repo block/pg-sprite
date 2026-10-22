@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/checksum"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -77,6 +79,56 @@ type CopySwapOptions struct {
 	// so it can be finished without the acknowledgement. Empty resumes a
 	// leftover, as every run does.
 	Restart string
+
+	// Copier sizes the copy: its workers, the chunk sizes and the chunk
+	// time they are throttled toward, the budgets of each chunk
+	// transaction, and the progress tracker the copier reports to while it
+	// runs. Zero values take the copier's defaults. The copier validates
+	// it when the copy starts, after the shadow is built and the row
+	// saved, so a value it refuses stops the run in copying and the next
+	// run resumes from the row once the value is corrected.
+	Copier copier.Options
+
+	// CheckpointInterval is how often a copy in progress saves its landed
+	// watermark to the checkpoint row, which is how far a run that stops
+	// mid-copy resumes from, and how often OnCheckpoint hears from the
+	// copy. Zero means the Runner's default; a negative value is refused
+	// before anything is read.
+	CheckpointInterval time.Duration
+
+	// OnCheckpoint, when set, is the run's progress signal: it is called
+	// after every successful save of the checkpoint row with the row as
+	// saved — the phase it entered, the watermark the copy has landed, the
+	// position a live run has applied through — so a host can record where
+	// a run that may last hours stands. The phase saves call it on the
+	// goroutine that called Run; the periodic watermark saves call it on
+	// the copy's saving goroutine, every CheckpointInterval rather than as
+	// the copy lands rows, so it must be safe to call from either. An
+	// error it returns stops the run there, as a failed verdict with the
+	// row as that save left it, and the next run resumes from the row.
+	OnCheckpoint func(ctx context.Context, cp checkpoint.Checkpoint) error
+}
+
+// runOptions is the Runner's policy for the route: the operator's two
+// choices, the host's sizing and progress hook, and the one setting the
+// route fixes — a done row from an earlier run is replaced, since a second
+// change on the table is the next statement, not a rollback window.
+func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions {
+	return schemachange.RunOptions{
+		Copier:             o.Copier,
+		KeepOld:            o.KeepOld,
+		ReplaceDone:        true,
+		Restart:            o.Restart != "",
+		CheckpointInterval: o.CheckpointInterval,
+		AfterCheckpoint: func(ctx context.Context, cp checkpoint.Checkpoint) error {
+			logger.Debug("copy-and-swap checkpoint saved",
+				"schema", cp.Schema, "table", cp.Table, "phase", cp.Phase.String())
+			if o.OnCheckpoint == nil {
+				return nil
+			}
+			return o.OnCheckpoint(ctx, cp)
+		},
+	}
 }
 
 // environment is what the operator declared about the run's surroundings,
@@ -96,11 +148,21 @@ func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
 // the route's own cause and a nil error; a run that stops is a failed
 // verdict together with the error, and the checkpoint row it stopped at
 // remains so the next run resumes it; success is
-// verdict.OutcomeExecutedViaCopyAndSwap.
+// verdict.OutcomeExecutedViaCopyAndSwap. An option set the Runner refuses
+// is a caller wiring error like the missing connection: a plain error, no
+// verdict, before the preflight reads anything.
 func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	opts Options, logger *slog.Logger) (verdict.Verdict, error) {
 	if opts.CopySwap.Connection.URL == "" {
 		return verdict.Verdict{}, fmt.Errorf("migrate: %w", ErrCopySwapConnectionRequired)
+	}
+	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
+	if err != nil {
+		return verdict.Verdict{}, err
+	}
+	runner, err := schemachange.NewRunner(opts.CopySwap.Connection, store, opts.CopySwap.runOptions(logger))
+	if err != nil {
+		return verdict.Verdict{}, fmt.Errorf("migrate: copy-and-swap options: %w", err)
 	}
 	target, err := preflight.CheckCopySwap(ctx, pool, st.Schema(), st.Table(), opts.CopySwap.environment())
 	if err != nil {
@@ -109,22 +171,6 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	logger.Debug("copy-and-swap preflight passed",
 		"decodes_wal", target.DecodesWAL(), "keep_old", opts.CopySwap.KeepOld)
 
-	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
-	if err != nil {
-		return verdict.Verdict{}, err
-	}
-	runner, err := schemachange.NewRunner(opts.CopySwap.Connection, store, schemachange.RunOptions{
-		KeepOld:     opts.CopySwap.KeepOld,
-		ReplaceDone: true,
-		Restart:     opts.CopySwap.Restart != "",
-		AfterCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
-			logger.Debug("copy-and-swap checkpoint saved", "phase", cp.Phase.String())
-			return nil
-		},
-	})
-	if err != nil {
-		return verdict.Verdict{}, err
-	}
 	result, err := runner.Run(ctx, pool, target, st)
 	return copySwapOutcome(st, opts.CopySwap.Quiesced, result, err)
 }

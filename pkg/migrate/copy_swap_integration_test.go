@@ -1,10 +1,14 @@
 package migrate
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -12,7 +16,9 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -218,5 +224,145 @@ func TestCopyAndSwapRefusesWithoutDiskHeadroom(t *testing.T) {
 	assert.Equal(t, verdict.ClassEnvironmental, v.Class)
 	assert.Equal(t, verdict.Cause(preflight.CopySwapCauseDiskHeadroom), v.Cause)
 	assert.True(t, f.hasColumn(t, "orders", "note"), "nothing was executed")
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "no shadow was built")
+}
+
+// progressLog is an OnCheckpoint hook that records every row it is shown,
+// from whichever goroutine the save ran on, and stops the run at the first
+// save in stopAt when that is set.
+type progressLog struct {
+	stopAt checkpoint.Phase
+	mu     sync.Mutex
+	rows   []checkpoint.Checkpoint
+}
+
+// errHostStopped is what the hook stops a run with.
+var errHostStopped = errors.New("the host is draining")
+
+func (l *progressLog) hook(_ context.Context, cp checkpoint.Checkpoint) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rows = append(l.rows, cp)
+	if cp.Phase == l.stopAt {
+		return errHostStopped
+	}
+	return nil
+}
+
+// phases is the sequence of phases the hook was shown, with consecutive
+// repeats collapsed: the copy saves its watermark in copying as often as
+// the interval fires, and how many times depends on the clock.
+func (l *progressLog) phases() []checkpoint.Phase {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []checkpoint.Phase
+	for _, cp := range l.rows {
+		if len(out) == 0 || out[len(out)-1] != cp.Phase {
+			out = append(out, cp.Phase)
+		}
+	}
+	return out
+}
+
+// lastIn returns the last row the hook was shown in phase.
+func (l *progressLog) lastIn(t *testing.T, phase checkpoint.Phase) checkpoint.Checkpoint {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for i := len(l.rows) - 1; i >= 0; i-- {
+		if l.rows[i].Phase == phase {
+			return l.rows[i]
+		}
+	}
+	require.FailNowf(t, "phase never saved", "the hook saw no save in %s", phase)
+	return checkpoint.Checkpoint{}
+}
+
+// inspectRow reads the table's checkpoint row the way a host would between
+// two runs, without the run's lock.
+func (f copySwapFixture) inspectRow(t *testing.T) checkpoint.Checkpoint {
+	t.Helper()
+	store, err := checkpoint.NewStore(f.pool, checkpoint.Options{})
+	require.NoError(t, err)
+	cp, err := store.Inspect(t.Context(), f.schema, "orders")
+	require.NoError(t, err)
+	return cp
+}
+
+// The seam's progress hook is shown every save of the row, in the order
+// the run makes them, so a host that records what it is shown has the
+// run's whole course: copying from the fresh row through the complete
+// watermark, then verifying, cutover, and done, each naming the table.
+func TestCopyAndSwapReportsEverySaveToTheHost(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	progress := &progressLog{}
+	opts := f.options()
+	opts.CopySwap.OnCheckpoint = progress.hook
+
+	v, err := f.run(t, `ALTER TABLE {schema}.orders DROP COLUMN note`, opts)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+
+	assert.Equal(t, []checkpoint.Phase{
+		checkpoint.PhaseCopying,
+		checkpoint.PhaseVerifying,
+		checkpoint.PhaseCutover,
+		checkpoint.PhaseDone,
+	}, progress.phases())
+	for _, cp := range progress.rows {
+		assert.Equal(t, f.schema, cp.Schema)
+		assert.Equal(t, "orders", cp.Table)
+	}
+	assert.False(t, progress.rows[0].Watermark.Valid(), "the fresh row has nothing landed")
+	assert.True(t, progress.lastIn(t, checkpoint.PhaseCopying).Watermark.Complete(),
+		"the copy's last save in copying carries the complete watermark")
+}
+
+// A host that returns an error from the hook stops the run at that save:
+// the verdict is a failure whose detail says the same statement resumes
+// it, the row stands at the phase the host stopped in, and the next run
+// picks up from there — saving only the phases that remained — to the same
+// executed verdict a run that was never stopped reports.
+func TestCopyAndSwapStopsWhereTheHostSaysAndResumes(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE {schema}.orders DROP COLUMN note`
+	stop := &progressLog{stopAt: checkpoint.PhaseVerifying}
+	opts := f.options()
+	opts.CopySwap.OnCheckpoint = stop.hook
+
+	v, err := f.run(t, alter, opts)
+	require.ErrorIs(t, err, errHostStopped)
+	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+	assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
+	assert.Contains(t, v.Detail, "resumes from the row")
+	assert.Equal(t, checkpoint.PhaseVerifying, f.inspectRow(t).Phase, "the row stands where the host stopped")
+	assert.True(t, f.hasColumn(t, "orders", "note"), "the source is untouched while the run is stopped")
+
+	resumed := &progressLog{}
+	opts.CopySwap.OnCheckpoint = resumed.hook
+	v, err = f.run(t, alter, opts)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+	assert.Equal(t, []checkpoint.Phase{checkpoint.PhaseCutover, checkpoint.PhaseDone}, resumed.phases(),
+		"the resumed run saves only the phases the stopped run had left")
+	assert.False(t, f.hasColumn(t, "orders", "note"))
+	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
+}
+
+// An option set the Runner refuses is a caller's wiring error, reported
+// before the preflight reads anything: no verdict, the Runner's own error
+// to match on, and the table untouched.
+func TestCopyAndSwapRefusesANegativeIntervalBeforeReading(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	opts := f.options()
+	opts.CopySwap.CheckpointInterval = -time.Second
+
+	v, err := f.run(t, `ALTER TABLE {schema}.orders DROP COLUMN note`, opts)
+	require.ErrorIs(t, err, schemachange.ErrInvalidOptions)
+	assert.Zero(t, v)
+	assert.True(t, f.hasColumn(t, "orders", "note"))
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "no shadow was built")
 }
