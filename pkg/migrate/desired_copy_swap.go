@@ -56,7 +56,7 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 		if errors.As(err, &mismatch) {
 			return stopped("the route's connection reaches another database than the pool", err)
 		}
-		return stopped("the route's connection could not be identified", err)
+		return stopped("the route's connection could not be checked against the pool", err)
 	}
 	_, err := preflight.CheckCopySwap(ctx, pool, report.Schema, report.Table, opts.CopySwap.environment())
 	if err == nil {

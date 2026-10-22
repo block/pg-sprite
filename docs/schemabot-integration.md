@@ -431,13 +431,23 @@ pool was dialed with (the route opens dedicated sessions — the table lock, the
 the replication stream — so the pool alone does not suffice; a statement that routes to
 copy-and-swap with the connection unset is a caller wiring error: `Run` returns
 `migrate.ErrCopySwapConnectionRequired` with no verdict, before the preflight, so match it with
-`errors.Is` and fix the wiring rather than routing it as an outcome; a connection that is set
-but reaches another database than the pool — another database of the cluster, or a database
-of the same name on another cluster — is the other wiring error, `*migrate.CopySwapConnectionMismatchError`,
-returned the same way after the route has compared both sides' `pg_control_system()` identity
-and `current_database()`, so a mistake that would otherwise surface mid-run as the environmental
-`shadow-lock-unconfirmed` refusal — which an adapter routing on class would retry — stops before
-the run takes its lock or writes its checkpoint row; match it with `errors.As`), the free space on the table's
+`errors.Is` and fix the wiring rather than routing it as an outcome; the connection must also
+reach the pool's database, because the table lock is an advisory lock taken on a session
+opened from it, and an advisory lock excludes only runs in the database it was taken in. A
+connection that is set but reaches another database than the pool — another database of the
+cluster, or a database of the same name on another cluster — is the other wiring error,
+`*migrate.CopySwapConnectionMismatchError`, returned the same way after the route has compared
+both sides' `pg_control_system()` system identifier and `current_database()`, so the run stops
+before it takes its lock or writes its checkpoint row. Match it with `errors.As` and do not
+retry it: like `ErrCopySwapConnectionRequired` it is an error with no verdict, and no retry
+corrects the wiring. Its message names both databases and both clusters' system identifiers,
+a stable fingerprint of each server, so an adapter that posts results to a shared surface
+logs the typed fields and shows a fixed line. The comparison cannot tell a cluster from a
+physical copy of it — a standby, or a server restored from a base backup or a snapshot keeps
+the source's system identifier — and a run wired across such a pair stops later instead, as
+the environmental `shadow-lock-unconfirmed` refusal, when its first working transaction
+finds no lock to confirm. The check reads `pg_control_system()`, which PostgreSQL grants to
+`PUBLIC`; a server that withholds it stops the route with an ordinary error), the free space on the table's
 volume for the preflight's disk-headroom check, whether to keep the retained source under
 its `_old` name, and whether the table is quiesced for the run — the fenced path that needs
 no logical decoding — or live. The native route's budget, retry policy, and size ceiling do not govern

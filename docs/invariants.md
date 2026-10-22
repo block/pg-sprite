@@ -541,7 +541,12 @@ at every stage; `pkg/checkpoint` `Store.Save` and `Store.Delete` require the
 same session for the checkpoint's target, run under its `Bind` context, and confirm the lock
 from the write's own transaction before the upsert or the delete (nil-session, wrong-table,
 and rival-backend tests), so a run whose lock went to another engine cannot stamp its stale
-checkpoint over the newer engine's row.
+checkpoint over the newer engine's row; `pkg/migrate` `Run` and `RunDesired` prove, before the
+preflight and before the lock session opens, that `CopySwapOptions.Connection` reaches the
+pool's database (the cluster's system identifier and `current_database()` on both sides), and
+stop with `CopySwapConnectionMismatchError` otherwise, since an advisory lock taken in another
+database does not exclude a run in this one (another-database, another-cluster, unreachable,
+and unidentifiable tests).
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 

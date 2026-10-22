@@ -12,19 +12,26 @@ import (
 
 // CopySwapConnectionMismatchError is returned by [Run] and [RunDesired]
 // when Options.CopySwap.Connection reaches a database other than the one
-// the pool handed to Run was dialed with. The route opens its lock
-// session from the connection and runs every other statement on the pool,
-// and each working transaction confirms the table lock from the pool it
-// runs on; a pool on another database would see no lock and refuse as
-// shadow-lock-unconfirmed, an environmental refusal an orchestrator
-// retries, although no retry corrects a wiring mistake. The check runs
-// before the preflight, so nothing has been executed when it is returned;
-// match it with [errors.As] and fix the wiring rather than routing it as
-// an outcome.
+// the pool handed to Run was dialed with. The route takes its table lock
+// on a session opened from the connection and runs every other statement
+// on the pool. An advisory lock excludes only sessions of the database it
+// was taken in, so a lock taken in another database does not keep a
+// correctly wired second run off the table, and a working transaction on
+// another cluster cannot confirm it at all. The check runs before the
+// preflight, so nothing has been executed when it is returned; it is a
+// wiring mistake that no retry corrects, so match it with [errors.As] and
+// fix the wiring rather than routing it as an outcome. The error carries
+// both clusters' system identifiers, a stable fingerprint of each server,
+// so a caller that posts results to a shared surface logs the fields and
+// shows a fixed line rather than the raw text.
 //
 // A database is told from another by the cluster's system identifier,
-// minted once by initdb and shared by no two clusters, together with the
-// database name, which is unique only within a cluster.
+// minted by initdb, together with the database name, which is unique only
+// within a cluster. A physical copy of a cluster (a standby, or a server
+// restored from a base backup or a snapshot) keeps its source's system
+// identifier and database names, so the check does not tell such a copy
+// from its source; a run wired across that pair still stops, later, when
+// its first working transaction finds no lock to confirm.
 type CopySwapConnectionMismatchError struct {
 	// PoolCluster and PoolDatabase identify the database the pool reaches.
 	PoolCluster  string
@@ -89,6 +96,9 @@ func checkCopySwapConnection(ctx context.Context, pool *pgxpool.Pool, cfg dbconn
 	if err != nil {
 		return fmt.Errorf("identify the database Options.CopySwap.Connection reaches: %w", err)
 	}
+	// INV: LK-1 — the lock session is proven to be in the pool's database
+	// before it is opened, so the lock it takes excludes the runs that
+	// would work this table.
 	if connID != poolID {
 		return &CopySwapConnectionMismatchError{
 			PoolCluster:        poolID.cluster,
