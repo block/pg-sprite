@@ -3,7 +3,9 @@
 // that tile the whole int64 range, so every key belongs to exactly one chunk
 // (CO-4) and each copy statement stays bounded (LK-3). A Copier copies those
 // chunks with several workers — one guarded, never-overwriting insert per
-// chunk — first clearing the shadow above the watermark when it resumes, and
+// chunk, run again after a bounded wait when it collides with a shadow row
+// the catch-up has yet to rewrite — first clearing the shadow above the
+// watermark when it resumes, and
 // reports a Position whose Classify is the applier's rule for a captured key:
 // uncut, in flight, or landed. A column the Shadow proof names in
 // Conversions is copied through that USING expression; the copier does not
