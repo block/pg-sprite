@@ -84,15 +84,20 @@ func parsePhase(name string) (Phase, error) {
 	return 0, fmt.Errorf("unknown phase %q", name)
 }
 
-// knownPhaseNames lists the stable names of every phase this engine knows,
-// in declaration order; it is what an IncompatibleError on MismatchPhase
-// reports as this engine's side.
-func knownPhaseNames() string {
+// knownPhases lists the stable names of every phase this engine knows, in
+// declaration order.
+func knownPhases() []string {
 	names := make([]string, 0, PhaseFailed)
 	for p := PhaseCopying; p <= PhaseFailed; p++ {
 		names = append(names, p.String())
 	}
-	return strings.Join(names, ", ")
+	return names
+}
+
+// knownPhaseNames is knownPhases joined for reading; it is what an
+// IncompatibleError on MismatchPhase reports as this engine's side.
+func knownPhaseNames() string {
+	return strings.Join(knownPhases(), ", ")
 }
 
 // Fingerprints identifies the statement a checkpoint belongs to: the digests

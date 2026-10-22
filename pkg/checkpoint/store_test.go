@@ -120,6 +120,7 @@ func TestSaveSQLGuardsTheRowIdentity(t *testing.T) {
 	for _, column := range []string{"format_version", "source_fingerprint", "target_fingerprint"} {
 		assert.Contains(t, guard, `"pgsprite"."pgsprite_checkpoint".`+column+" = EXCLUDED."+column)
 	}
+	assert.Contains(t, guard, `"pgsprite"."pgsprite_checkpoint".phase = ANY($15)`, "the stored row's phase must be one this engine knows")
 	update, _, _ := strings.Cut(saveSQL, "\nWHERE ")
 	_, update, _ = strings.Cut(update, "DO UPDATE SET")
 	for _, column := range []string{"format_version", "source_fingerprint", "target_fingerprint"} {

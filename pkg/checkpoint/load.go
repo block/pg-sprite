@@ -19,20 +19,21 @@ import (
 // its four outcomes apart (ST-2): a row carrying want's format and
 // fingerprints is returned; no row is ErrNotFound, the one outcome a caller
 // may start fresh from; a row carrying another format version or another
-// statement's fingerprints is an IncompatibleError and must not be resumed
-// from or written over; a read that did not complete is retried through
-// transient errors under the store's bounded attempts and, once they are
-// spent, returned as an error that is none of the above — a blip never
-// reads as "no checkpoint". A database where Ensure has never run has no
-// table to read, which is ErrTableMissing: also none of the above, so a
-// status reader can report "no checkpoint table" without resume mistaking
-// it for ErrNotFound.
+// statement's fingerprints, or left in a phase this engine does not know,
+// is an IncompatibleError and must not be resumed from or written over; a
+// read that did not complete is retried through transient errors under the
+// store's bounded attempts and, once they are spent, returned as an error
+// that is none of the above — a blip never reads as "no checkpoint". A
+// database where Ensure has never run has no table to read, which is
+// ErrTableMissing: also none of the above, so a status reader can report
+// "no checkpoint table" without resume mistaking it for ErrNotFound.
 func (s *Store) Load(ctx context.Context, schema, table string, want Fingerprints) (Checkpoint, error) {
 	return s.load(ctx, s.pool, schema, table, func(r row) *IncompatibleError { return r.incompatibility(want) })
 }
 
 // rowGuard judges a stored row against the run reading it; nil admits the
-// row. Load guards on the whole identity, Inspect on the format alone.
+// row. Load guards on the whole identity and the phase, Inspect on the
+// format and the phase alone.
 type rowGuard func(row) *IncompatibleError
 
 func (s *Store) load(ctx context.Context, q dbconn.RowQuerier, schema, table string, guard rowGuard) (Checkpoint, error) {

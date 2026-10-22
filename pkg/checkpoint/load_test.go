@@ -347,9 +347,10 @@ func TestRowIncompatibleWithJudgesTheWholeIdentity(t *testing.T) {
 	assert.Equal(t, MismatchFormat, stored.incompatibleWith(shown).Mismatch)
 }
 
-// Inspect's guard judges the format alone: a row of any statement in this
-// format is admitted, and a row in another format is the same typed
-// mismatch Load reports, carrying the row's own identity for Delete.
+// Inspect's guard judges the format and the phase, never the fingerprints:
+// a row of any statement in this format and a known phase is admitted, and
+// a row in another format is the same typed mismatch Load reports,
+// carrying the row's own identity for Delete.
 func TestRowFormatIncompatibilityIgnoresTheFingerprints(t *testing.T) {
 	stored := row{schema: "app", table: "orders", formatVersion: FormatVersion, sourceFingerprint: "src-other", targetFingerprint: "tgt-other", phase: PhaseCopying.String()}
 	assert.Nil(t, stored.formatIncompatibility())

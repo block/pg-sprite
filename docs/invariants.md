@@ -839,7 +839,7 @@ no `Save` could have written. `Store.Inspect` is the
 same read guarded on the row format and the phase alone, for the resume that must read the row's proof and
 phase before it knows which statement it is resuming; it widens only the read. `Store.Save` applies the
 same identity guard on the write path, so a run can never write its state over another
-statement's row, and it treats the row's shadow proof as write-once: a save without a proof
+statement's row or over a row in a phase it does not know, and it treats the row's shadow proof as write-once: a save without a proof
 keeps the one the row holds, a save with the same proof is accepted, and a save with a
 different proof is `ErrInvariantViolation` and leaves the row unchanged, because a different
 shadow is a fresh start and a fresh start goes through `Delete`; `Delete` is the explicit fresh start, and it removes only the row whose
@@ -872,7 +872,8 @@ does-not-discard-a-done-row tests).
 `TestLoadReportsAnUnknownPhaseAsIncompatible`,
 `TestInspectReturnsTheRowWhateverStatementWroteIt`,
 `TestInspectReportsNotFoundMissingTableAndAnotherFormat`,
-`TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestSaveThenLoadRoundTripsTheShadowProof`,
+`TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestSaveRefusesToOverwriteARowInAnUnknownPhase`,
+`TestSaveThenLoadRoundTripsTheShadowProof`,
 `TestSaveWithoutAProofDoesNotEraseTheRowsProof`, `TestProofSurvivesTheCheckpointStore`,
 `TestDeleteRefusesARowTheCallerWasNotShown`,
 `TestWritesAndReadsWithoutEnsureReportTheMissingTable`,
@@ -907,8 +908,9 @@ the store's pool and proven to be on its cluster and database, so the holder's o
 in) that a run claiming the slot holds while it makes the slot and commits the row that names
 it, so a run that claimed it since the pass began keeps it and one claiming it now waits for
 the drop and creates afresh; a slot no row in a non-terminal phase
-names is dropped through `DropIdleSlot`,
-publication and all, which refuses a held slot instead of waiting for its holder — whether a
+names — terminal means `done` or `failed` by name, so a row a newer engine left in a phase this
+one does not know keeps its slot (`TestReapOrphanSlotsKeepsASlotARowInAnUnknownPhaseNames`) —
+is dropped through `DropIdleSlot`, publication and all, which refuses a held slot instead of waiting for its holder — whether a
 slot is held is judged at the drop, since `pg_replication_slots` reads shared memory, not a
 snapshot; a slot a live row names, a slot a process holds, and a name wearing the prefix
 without the engine's shape are reported and left; a database whose checkpoint table does not
