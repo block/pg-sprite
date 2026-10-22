@@ -73,6 +73,21 @@ func TestIntrospectResistsImpostorsInTheTargetSchema(t *testing.T) {
 		assert.Equal(t, []string{"fillfactor=70"}, introspect(t, schema, "t").Options)
 	})
 
+	// The TOAST table's reloptions are text[] too and are read by a second
+	// unnest, so the same unnest(text[]) beats the catalog's there.
+	t.Run("unnest of the TOAST storage parameters", func(t *testing.T) {
+		schema := newFixture(t, `
+			CREATE TABLE %[1]s.t (
+				id bigint,
+				body text
+			) WITH (toast.autovacuum_enabled = false)`, `
+			CREATE FUNCTION %[1]s.unnest(text[]) RETURNS SETOF text
+				LANGUAGE sql IMMUTABLE AS 'SELECT NULL::text WHERE false'`)
+		requireImpostorAnswers(t, schema, `SELECT count(*)::text FROM unnest('{autovacuum_enabled=false}'::text[])`, "0")
+
+		assert.Equal(t, []string{"toast.autovacuum_enabled=false"}, introspect(t, schema, "t").Options)
+	})
+
 	// The options are gathered with array_agg over text, which an
 	// array_agg(text) aggregate beats the polymorphic catalog one on.
 	t.Run("array_agg of the storage parameters", func(t *testing.T) {
@@ -198,6 +213,22 @@ func TestIntrospectResistsImpostorsInTheTargetSchema(t *testing.T) {
 			CREATE FUNCTION %[1]s.format_type(oid, text) RETURNS text
 				LANGUAGE sql IMMUTABLE AS 'SELECT ''impostor''::text'`)
 		requireImpostorAnswers(t, schema, `SELECT format_type('bigint'::regtype::oid, NULL)`, "impostor")
+
+		assert.Equal(t,
+			&schemadiff.SequenceOptions{Type: "bigint", Start: 1, Increment: 1, Min: 1, Max: 5000, Cache: 1},
+			introspect(t, schema, "t").Columns[0].Sequence)
+	})
+
+	// The identity column's sequence options are found through pg_depend rows
+	// whose classid and refclassid are compared with relations spelled as
+	// regclass, so the (oid, regclass) operator beats the catalog's = there too.
+	t.Run("oid and regclass comparison of the sequence options", func(t *testing.T) {
+		schema := newFixture(t, `
+			CREATE TABLE %[1]s.t (id bigint GENERATED ALWAYS AS IDENTITY (MAXVALUE 5000))`, `
+			CREATE FUNCTION %[1]s.impostor_never(oid, regclass) RETURNS boolean
+				LANGUAGE sql IMMUTABLE AS 'SELECT false';
+			CREATE OPERATOR %[1]s.= (LEFTARG = oid, RIGHTARG = regclass, FUNCTION = %[1]s.impostor_never)`)
+		requireImpostorAnswers(t, schema, `SELECT ('pg_class'::regclass::oid = 'pg_class'::regclass)::text`, "false")
 
 		assert.Equal(t,
 			&schemadiff.SequenceOptions{Type: "bigint", Start: 1, Increment: 1, Min: 1, Max: 5000, Cache: 1},

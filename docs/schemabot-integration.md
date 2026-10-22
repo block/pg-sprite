@@ -88,7 +88,7 @@ the integration phase starts; they drift.)
 | `Volume` | map 1–11 onto chunk-time target / parallelism / throttle |
 | `Revert` / `SkipRevert` | decline for the copy-and-swap path (like Spirit); only the expand/contract backend could honour them |
 
-Connect through `dbconn.NewPool`, as `Plan` and `Apply` do: a pool from `dbconn.NewPool` drops a shadowing `pg_catalog` search_path entry on every session, while any other pool relies on each read being `pg_catalog`-qualified ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)).
+Connect through `dbconn.NewPool`, as `Plan` and `Apply` do: a pool from `dbconn.NewPool` drops a shadowing `pg_catalog` search_path entry on every session, while any other pool relies on each read being `pg_catalog`-qualified ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)). Either way, a read that runs under a path pg-sprite builds that lists the application schema is only as safe as its own qualification; CO-9 lists the reads that are not qualified yet.
 
 A refusal is a first-class planning verdict, not a delegation fallback: it includes the reason,
 notes that copy-and-swap support arrives in later phases, and names a safer native alternative
