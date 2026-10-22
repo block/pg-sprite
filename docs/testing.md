@@ -209,7 +209,13 @@ the trigger's function alive until every transaction that may still hold
 the trigger in its event-trigger cache has ended, where an inline drop
 would fail another package's in-flight DDL with `cache lookup failed for
 function`. A harness test fails the build on an inline
-`CREATE EVENT TRIGGER` elsewhere in the suite.
+`CREATE EVENT TRIGGER` elsewhere in the suite. A trigger's body runs for
+every other test's DDL too, as whatever role issues it, so it finds its
+schema's objects by name in the catalogs and never resolves a
+schema-qualified name in an expression its guard evaluates; otherwise an
+unrelated test fails with `permission denied for schema`.
+`InstallEventTrigger` holds each DDL trigger to this when it is installed,
+by running a probe statement as a role without access to the schema.
 
 The privilege-ladder tests additionally create throwaway **cluster-level
 roles** (`NewRole`), so the role behind an external `PG_DSN` needs

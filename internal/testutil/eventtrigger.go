@@ -57,11 +57,15 @@ var errEventTriggerDrainTimedOut = errors.New("event trigger drain timed out")
 //
 // The function runs for every other test's DDL too, as whatever role that
 // DDL runs as, and such a role need not hold USAGE on schema. So the body
-// must not resolve a name in schema before its guard has matched: a
-// '<schema>.t'::regclass cast or to_regclass('<schema>.t') is resolved
-// even when an earlier condition is false and raises "permission denied
-// for schema" in the other test. Find the test's objects by name in the
-// catalogs (pg_namespace.nspname, pg_class.relname) instead.
+// must not name schema in anything its IF condition evaluates: a
+// '<schema>.t'::regclass cast, to_regclass('<schema>.t') inside a
+// subquery, or a schema-qualified relation in a subquery's FROM is
+// resolved while the condition is planned, even when an earlier condition
+// is false, and raises "permission denied for schema" in the other test.
+// Find the test's objects by name in the catalogs (pg_namespace.nspname,
+// pg_class.relname) instead. Names in the THEN branch are safe: plpgsql
+// analyzes a statement only when it runs. A DDL trigger's body is held to
+// this at install, by a probe DDL run as a role without access to schema.
 func InstallEventTrigger(t *testing.T, pool *pgxpool.Pool, event TriggerEvent, schema, name, body string) {
 	t.Helper()
 	functionName := pgx.Identifier{schema, name}.Sanitize()
@@ -86,6 +90,33 @@ func InstallEventTrigger(t *testing.T, pool *pgxpool.Pool, event TriggerEvent, s
 		}
 		assert.NoError(t, err)
 	})
+	// A login trigger fires on a session's start, not on DDL, so the probe
+	// would not run its body.
+	if event != Login {
+		requireHarmlessToOtherRoles(t, pool, schema, name)
+	}
+}
+
+// requireHarmlessToOtherRoles runs one DDL statement as a throwaway role
+// with no access to schema, the way another test's DDL meets the trigger
+// schema.name, and fails the installing test when the trigger's body
+// breaks it. The statement runs in a transaction that is rolled back, so
+// the pooled connection keeps neither the role nor the temporary table.
+func requireHarmlessToOtherRoles(t *testing.T, pool *pgxpool.Pool, schema, name string) {
+	t.Helper()
+	role := NewRole(t, pool, "NOLOGIN")
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() {
+		assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
+	}()
+	_, err = tx.Exec(t.Context(), "SET LOCAL ROLE "+pgx.Identifier{role}.Sanitize())
+	require.NoError(t, err)
+	_, err = tx.Exec(t.Context(), `
+		CREATE TEMP TABLE pgsprite_event_trigger_probe (
+			x int
+		)`)
+	require.NoError(t, err, "event trigger %s.%s must not fail DDL run by a role without access to %s", schema, name, schema)
 }
 
 // RunDuringDDL installs an event trigger that executes sql from inside the
