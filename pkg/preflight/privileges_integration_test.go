@@ -23,13 +23,19 @@ import (
 // serverURL but authenticated as the given role.
 func connectAs(t *testing.T, serverURL, role, password string) *pgxpool.Pool {
 	t.Helper()
-	u, err := url.Parse(serverURL)
-	require.NoError(t, err, "parse server URL")
-	u.User = url.UserPassword(role, password)
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: u.String()})
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: roleURL(t, serverURL, role, password)})
 	require.NoError(t, err, "connect as %s", role)
 	t.Cleanup(pool.Close)
 	return pool
+}
+
+// roleURL is serverURL with the given role's credentials.
+func roleURL(t *testing.T, serverURL, role, password string) string {
+	t.Helper()
+	u, err := url.Parse(serverURL)
+	require.NoError(t, err, "parse server URL")
+	u.User = url.UserPassword(role, password)
+	return u.String()
 }
 
 // privilegeFixture is the ladder scenario from docs/engine-role.md: a
@@ -41,6 +47,9 @@ type privilegeFixture struct {
 	schema string
 	owner  string
 	role   string // the engine role's name
+	// engineURL connects as the engine role, for tests that need a pool
+	// with a session configuration of their own.
+	engineURL string
 }
 
 func newPrivilegeFixture(t *testing.T) privilegeFixture {
@@ -61,7 +70,10 @@ func newPrivilegeFixture(t *testing.T) privilegeFixture {
 	require.NoError(t, err)
 
 	engine := connectAs(t, serverURL, role, password)
-	return privilegeFixture{admin: admin, engine: engine, schema: schema, owner: owner, role: role}
+	return privilegeFixture{
+		admin: admin, engine: engine, schema: schema, owner: owner, role: role,
+		engineURL: roleURL(t, serverURL, role, password),
+	}
 }
 
 func (f privilegeFixture) grant(t *testing.T, stmt string) {

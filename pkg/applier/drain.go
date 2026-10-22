@@ -25,9 +25,10 @@ type Batch struct {
 	// inside an in-flight chunk, or travel with one that is. This is the
 	// number a stalled catch-up is waiting on the copier for.
 	Deferred int
-	// Held counts the entries still buffered because a completion is
-	// pending for them (see Buffer.Hold): they wait for the stream to pass
-	// the completion's read position, not for the copier.
+	// Held counts the entries still buffered because a flush held them (see
+	// Buffer.Hold) — with a completion, or because their shadow row was
+	// absent: they wait for the stream to pass the position of the flush's
+	// read, not for the copier.
 	Held int
 }
 

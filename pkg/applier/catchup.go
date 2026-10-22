@@ -121,7 +121,10 @@ type Status struct {
 	// Deferred is the number of entries the last drain left waiting for an
 	// in-flight chunk, or for a batch a constraint refused (ErrBatchDeferred).
 	Deferred int
-	// Held is the number of images buffered with a completion pending.
+	// Held is the number of images buffered until the stream passes a read
+	// the flush made: a completion read for a moved image, or a presence
+	// check that found an unmoved image's shadow row absent. A nonzero value
+	// is normal for the cycle or two a hold lasts.
 	Held int
 	// Applied is the number of images and delete markers committed flushes
 	// have written to the shadow.
@@ -219,22 +222,22 @@ func (c *Catchup) Confirmed() decode.LSN {
 	return c.Status().Confirmed
 }
 
-// Run consumes the stream in cycles until ctx ends or the stream, the
-// buffer, or a flush fails. Each cycle gathers changes until MaxChanges
-// are buffered or Interval has passed, reads the copier's Position after
-// the last Add — so a discarded uncut key's change is one the copier's
-// read will see (CO-4) — drains, flushes the batch, puts a refused batch
-// back (ErrBatchDeferred) or holds the images the flush completed but did
-// not write, and then confirms the lowest of the stream's delivered
-// position and the buffer's oldest pending position: everything below it
-// is in the shadow or was discarded as uncut, so a stream reopened from
-// it misses nothing (ST-4). An empty cycle on a quiet table still confirms,
-// so the slot releases WAL while nothing changes. The cycle ends by reading
-// the server's write position on pool, so Status.Lag measures the WAL the
-// catch-up has yet to work through, not how far the walsender has decoded.
-// A cycle under a Pause gathers and confirms but neither drains nor
-// flushes, so the stream is read and answered for as long as the hold
-// lasts and the buffer holds what arrives for the cycle after the resume.
+// Run consumes the stream in cycles until ctx ends or the stream, the buffer,
+// or a flush fails. Each cycle gathers changes until MaxChanges are buffered
+// or Interval has passed, reads the copier's Position after the last Add — so
+// a discarded uncut key's change is one the copier's read will see (CO-4) —
+// drains, flushes the batch, puts a refused batch back (ErrBatchDeferred) or
+// holds the images the flush did not write — those it completed and those
+// whose shadow row it found absent — and then confirms the lowest of the
+// stream's delivered position and the buffer's oldest pending position:
+// everything below it is in the shadow or was discarded as uncut, so a stream
+// reopened from it misses nothing (ST-4). An empty cycle on a quiet table
+// still confirms, so the slot releases WAL while nothing changes. The cycle
+// ends by reading the server's write position on pool, so Status.Lag measures
+// the WAL the catch-up has yet to work through, not how far the walsender has
+// decoded. A cycle under a Pause gathers and confirms but neither drains nor
+// flushes, so the stream is read and answered for as long as the hold lasts
+// and the buffer holds what arrives for the cycle after the resume.
 //
 // Run never returns nil: a catch-up has no end of its own, so its owner
 // stops it by ending ctx once the shadow is close enough to cut over, and

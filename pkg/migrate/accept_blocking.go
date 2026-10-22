@@ -175,17 +175,23 @@ func lockedTable(ctx context.Context, pool *pgxpool.Pool, rel statement.IndexRel
 	// the table that owns it and that table's kind; for a table the owner
 	// columns repeat the relation itself, so the result is always the table
 	// the statement locks.
+	//
+	// INV: CO-9 — every function, operator, relation, and type is
+	// pg_catalog-qualified, so a planted overload on the session's
+	// search_path cannot change which table the acknowledgement is checked
+	// against. to_regclass itself still resolves the bare name on that path,
+	// exactly as the statement will.
 	const q = `
-		SELECT c.relkind::text,
+		SELECT c.relkind::pg_catalog.text,
 		       COALESCE(tn.nspname, n.nspname),
 		       COALESCE(t.relname, c.relname),
-		       COALESCE(t.relkind, c.relkind)::text
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		LEFT JOIN pg_index i ON i.indexrelid = c.oid
-		LEFT JOIN pg_class t ON t.oid = i.indrelid
-		LEFT JOIN pg_namespace tn ON tn.oid = t.relnamespace
-		WHERE c.oid = to_regclass($1)`
+		       COALESCE(t.relkind, c.relkind)::pg_catalog.text
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		LEFT JOIN pg_catalog.pg_index i ON i.indexrelid OPERATOR(pg_catalog.=) c.oid
+		LEFT JOIN pg_catalog.pg_class t ON t.oid OPERATOR(pg_catalog.=) i.indrelid
+		LEFT JOIN pg_catalog.pg_namespace tn ON tn.oid OPERATOR(pg_catalog.=) t.relnamespace
+		WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($1)`
 	name := regclassName(rel)
 	var relkind string
 	var table acceptedTable

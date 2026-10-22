@@ -83,6 +83,8 @@ func Reasons() []Reason {
 		ReasonRelocation,
 		ReasonPartitionParentLock,
 		ReasonReplicaIdentity,
+		ReasonDependentView,
+		ReasonCascadingDrop,
 		ReasonUnsupportedOperation,
 	}
 }
@@ -155,6 +157,20 @@ const (
 	// Move the identity first (ALTER TABLE ... REPLICA IDENTITY), then
 	// re-plan.
 	ReasonReplicaIdentity Reason = "replica-identity"
+	// ReasonDependentView: the operation changes the type of, or drops, a
+	// column that a view or materialized view reads. PostgreSQL refuses
+	// both while the view exists, even a type change that rewrites
+	// nothing, so the statement could only fail. The decision names the
+	// views; change or drop them first, then re-plan.
+	ReasonDependentView Reason = "dependent-view"
+	// ReasonCascadingDrop: a drop with CASCADE, which also drops whatever
+	// depends on what it drops: a view that reads a dropped column, or
+	// another table's foreign key on a dropped key. Those objects are not
+	// in the statement, so neither the plan nor the table's lock covers
+	// them. Drop each dependent object as its own change, then resubmit
+	// without CASCADE, which PostgreSQL refuses while anything still
+	// depends on the target.
+	ReasonCascadingDrop Reason = "cascading-drop"
 	// ReasonUnsupportedOperation: the planner does not recognize the
 	// operation or knows no safe path for it.
 	ReasonUnsupportedOperation Reason = "unsupported-operation"
@@ -231,6 +247,10 @@ type Decision struct {
 	// of prose — it is what tells a consumer the sequence must not be
 	// wrapped in a transaction block.
 	SaferSQLExecution Execution `json:"safer_sql_execution,omitempty"`
+	// DependentViews names the views and materialized views that read the
+	// column, each schema-qualified with every identifier quoted, present
+	// exactly for dependent-view decisions.
+	DependentViews []string `json:"dependent_views,omitempty"`
 }
 
 // ExecutableAsSubmitted reports whether the operation's submitted form is
@@ -258,9 +278,10 @@ type Plan struct {
 // they are trusted as stated: the CLI fills them by introspecting the
 // target database, and a library caller may supply facts it already holds —
 // but they must describe the database the change will run on, because a
-// wrong fact can upgrade a rewrite to native. Missing facts are always
-// safe: the zero value is valid and classifies strictly more
-// conservatively (every type change becomes copy-and-swap).
+// wrong fact can upgrade a rewrite to native. Missing facts never let an
+// unsafe change succeed: the zero value is valid, routes every type change
+// to copy-and-swap, and only defers some refusals, such as a column a view
+// reads, to the server's own refusal at execution.
 type Facts struct {
 	// ColumnTypes maps a column name to its live type as rendered by
 	// PostgreSQL's format_type (e.g. "character varying(50)").
@@ -282,6 +303,21 @@ type Facts struct {
 	// constant; the proof leaves out only an ADD COLUMN IF NOT EXISTS for a
 	// column the table already has, which the server skips.
 	AddColumnProofs map[string]statement.AddColumnProof
+	// DependentViews maps a column to the views and materialized views that
+	// read it, on the table or on any table below it, which is what a
+	// recursive ALTER COLUMN TYPE changes
+	// (preflight.ColumnDependentViews). A column absent from the map has
+	// none, or the facts were not read, as in an offline lint; either way
+	// the server's own refusal at execution remains the backstop.
+	DependentViews map[string][]string
+	// DropDependentViews is DependentViews for the tables whose copy of
+	// the column a recursive DROP COLUMN drops: a child that declares the
+	// column itself or also inherits it from a table outside the drop
+	// keeps its copy.
+	DropDependentViews map[string][]string
+	// OwnDependentViews is DependentViews for the table alone, which is
+	// all an ALTER TABLE ONLY changes.
+	OwnDependentViews map[string][]string
 	// ConstraintNames are the names of the constraints already in the
 	// table's schema, which the server passes over when it names an
 	// unnamed CHECK or FOREIGN KEY. Without them the safer sequence states
@@ -306,6 +342,24 @@ func FactsFrom(live schemadiff.Model) Facts {
 		}
 	}
 	return Facts{ColumnTypes: types, ColumnCollations: collations, ReplicaIdentity: live.ReplicaIdentity}
+}
+
+// viewsReadingColumn returns the views that read the column op retypes or
+// drops: the two column changes PostgreSQL refuses while a view reads the
+// column. A rename is not one of them, since a view follows the column.
+// Under ONLY the change stops at the table, so only its own views count,
+// and a recursive drop counts only the copies of the column it drops.
+func viewsReadingColumn(op statement.Op, facts Facts) []string {
+	switch {
+	case op.Kind != statement.OpAlterColumnType && op.Kind != statement.OpDropColumn:
+		return nil
+	case op.Only:
+		return facts.OwnDependentViews[op.Column]
+	case op.Kind == statement.OpDropColumn:
+		return facts.DropDependentViews[op.Column]
+	default:
+		return facts.DependentViews[op.Column]
+	}
 }
 
 // addColumnProof returns what the server proved about adding op's
@@ -359,6 +413,14 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	d := Decision{Operation: op.Describe(), Kind: op.Kind, Destructive: destructiveOp(op.Kind)}
 	if facts.ReplicaIdentity.DroppedBy(op) {
 		d.Route, d.Reason = RouteRefuse, ReasonReplicaIdentity
+		return d
+	}
+	if op.Cascade {
+		d.Route, d.Reason = RouteRefuse, ReasonCascadingDrop
+		return d
+	}
+	if views := viewsReadingColumn(op, facts); len(views) > 0 {
+		d.Route, d.Reason, d.DependentViews = RouteRefuse, ReasonDependentView, views
 		return d
 	}
 	switch op.Kind {

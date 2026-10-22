@@ -71,9 +71,12 @@ canonical statement of the ladder; a wording fix lands there first.
 | Exit | Meaning | Anything committed? | Online-safe? |
 |---|---|---|---|
 | 0 | Executed through an online-safe path; or a dry run, `diff`, or `pull` found nothing to refuse | yes (dry run, `diff`, `pull`: nothing runs) | yes |
-| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in `executed_sql` | not applicable |
+| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in `executed_sql`; unknown when `code` is `commit-outcome-unknown` — the failed step's `COMMIT` may have landed, so inspect the catalog before retrying | not applicable |
 | 2 | Refused: no online-safe path; the verdict names the typed `reason` and `class` | no | not applicable |
 | 3 | Committed through the accepted-blocking passthrough, under bounded budgets, without an online-safety guarantee | yes | no |
+
+A usage error exits 1 and writes the usage and the error to stderr; stdout
+carries only the command's output, including under `--json`.
 
 Refusals from every command — `migrate`, its dry run, `diff`, and `pull` — share
 exit 2, so a gate branches on the status without caring which subcommand produced
@@ -148,7 +151,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 9,
+  "format_version": 11,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -189,7 +192,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 9,
+  "format_version": 11,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -291,7 +294,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 9,
+  "format_version": 11,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -333,7 +336,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 9,
+  "format_version": 11,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -387,7 +390,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 9,
+  "format_version": 11,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -424,7 +427,7 @@ The refusal cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 9,
+  "format_version": 11,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -464,7 +467,7 @@ the reviewer or orchestrator to gate on; `migrate` itself does not block it.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --json
 {
-  "format_version": 9,
+  "format_version": 11,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -513,7 +516,7 @@ ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);
 ```console
 $ pg-sprite lint /tmp/changes.sql --json
 {
-  "format_version": 3,
+  "format_version": 5,
   "postgres_versions": "14-18",
   "findings": [
     {
@@ -591,7 +594,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 9,
+  "format_version": 11,
   "source": "diff",
   "schema": "public",
   "table": "users",

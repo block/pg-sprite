@@ -88,6 +88,8 @@ the integration phase starts; they drift.)
 | `Volume` | map 1–11 onto chunk-time target / parallelism / throttle |
 | `Revert` / `SkipRevert` | decline for the copy-and-swap path (like Spirit); only the expand/contract backend could honour them |
 
+Connect through `dbconn.NewPool`, as `Plan` and `Apply` do: a pool from `dbconn.NewPool` drops a shadowing `pg_catalog` search_path entry on every session, while any other pool relies on each read being `pg_catalog`-qualified ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)).
+
 A refusal is a first-class planning verdict, not a delegation fallback: it includes the reason,
 notes that copy-and-swap support arrives in later phases, and names a safer native alternative
 where one exists. The adapter maps that verdict to `engine.ExecutionModeBlocked` at plan time; it
@@ -189,6 +191,7 @@ them when admitting execution. A greenfield run resolves to one of six things:
 | `create-names-unverified` failure (exit 1, `failed_step` 1) | **Operator action on a table that now exists**: the `CREATE TABLE` committed but the read of the names the table owns did not complete, so the claims are unproven — not failed. An operator compares the table's constraint-index and sequence names against the desired file, renames or drops, then re-diffs; a rerun diffs the live table exactly as above |
 | `insufficient-privileges` refusal naming a create owner that does not exist | **Operator configuration action**: `Options.CreateOwner` names a role the server does not have. Nothing ran; create the role or correct the configured owner. Not retryable until one of those changes |
 | `create-owner-mismatch` failure (exit 1, `failed_step` 1) | **Operator action on a table that now exists**: the `CREATE TABLE` committed under `SET LOCAL ROLE`, but its catalog owner is not the configured `CreateOwner`. The executor never repairs ownership; an operator inspects, transfers with `ALTER TABLE ... OWNER TO`, or drops, then re-diffs. Permanent: a blind rerun finds the name occupied and reports a `create-collision` instead of the ownership fault |
+| `commit-outcome-unknown` failure (exit 1, `failed_step` 1) | **Operator inspection before any retry**: the `CREATE TABLE` step's `COMMIT` did not return success, so the table may or may not exist. Inspect the catalog for it; if it exists, re-diff (a rerun diffs the live table, as above), and if not, the create can run again |
 | `create-owner-unverified` failure (exit 1, `failed_step` 1) | **Operator action on a table that now exists**: the `CREATE TABLE` committed but the read of its owner did not complete, so the owner is unproven — not wrong. An operator compares the table's owner against the configured one (`\dt` shows it), then re-diffs |
 
 Greenfield refusals have deterministic precedence: a decidable shape refusal comes before the
@@ -500,7 +503,11 @@ server will not drop concurrently, left for an operator), and the recovery's who
 not one retry class: `invalid-index-other-table` and `invalid-index-not-droppable` are
 permanent — `Code.Permanent()` says so — while the rest wait on a recovery, a builder, or a
 re-taken proof. An adapter sorting these codes into "retry" and "refuse" groups starts from
-`Permanent()`, not from the family name.
+`Permanent()`, not from the family name — with one exception: the outcome-unknown codes
+(`commit-outcome-unknown`, `blocking-outcome-unknown`, `row-security-outcome-unknown`) are
+not permanent, yet belong in neither group. The change may have committed, so a blind retry
+can replay it onto its own result or resume a sequence from a step that already ran; route
+them to catalog inspection before any retry.
 
 ## Execution-mode verdicts and direct execution
 

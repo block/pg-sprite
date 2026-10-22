@@ -194,18 +194,28 @@ never read as landed; a resumed copy first deletes every shadow row above W in b
 each in its own guarded transaction, before its first chunk is cut — the whole shadow when
 nothing landed, since a zero watermark says nothing about what an earlier run left above it — so
 every key above W is genuinely uncut when the applier starts discarding for it; the first clear
-batch takes `LOCK TABLE <shadow> IN SHARE MODE` before its delete, so a chunk transaction of the
-earlier run that is still committing into the shadow (holding `ROW EXCLUSIVE` through a
-synchronous-commit wait) ends before the clear reads, and a row it publishes cannot outlive the
-clear (straggler test); and `Position` snapshots the cut
-frontier, the in-flight chunks, and the landed watermark under one lock so `Position.Classify`
-gives the applier the three-way answer (uncut / in-flight / landed) for any key (whole-table with
-a Position-consistency sampler, never-overwrites, resume-from-watermark with stale rows above and
-below W, resume-from-zero-watermark with stale rows down to the smallest key, out-of-order
-landing, pinned-chunk cancellation followed by a resume that re-copies the
-cleared tail, a resume that waits behind a straggling chunk transaction, a shadow replaced
-between a chunk's claim and its transaction, and frontier-ordered ledger tests including the
-frontier at the largest key refusing every claim); `pkg/applier` `Buffer.Drain` — every
+batch's guard takes the shadow in `SHARE ROW EXCLUSIVE` as its one lock on it, so a chunk
+transaction of the earlier run that is still committing into the shadow (holding `ROW EXCLUSIVE`
+through a synchronous-commit wait) ends before the clear reads, a row it publishes cannot outlive
+the clear (straggler test), and an earlier run stalled inside its own first batch holds the same
+mode, so the two fences queue rather than deadlock (stalled-clear test); and `Position` snapshots
+the cut frontier, the in-flight chunks, and the landed watermark under one lock so
+`Position.Classify` gives the applier the three-way answer (uncut / in-flight / landed) for any
+key (whole-table with a Position-consistency sampler, never-overwrites, resume-from-watermark
+with stale rows above and below W, resume-from-zero-watermark with stale rows down to the
+smallest key, out-of-order landing, pinned-chunk cancellation followed by a resume that re-copies
+the cleared tail, a resume that waits behind a straggling chunk transaction, behind one parked
+before its insert, and behind an earlier run's stalled clear, a shadow replaced between a chunk's
+claim and its transaction, and frontier-ordered ledger tests including the frontier at the
+largest key refusing every claim). Every chunk and clear transaction in `pkg/copier` locks the
+shadow — `ROW EXCLUSIVE` for a write, the fence's mode for the first clear batch — before it
+confirms the table lock, so one that confirmed the lock before it passed to the resumed run
+already holds the lock the fence waits on, even if it is paused before its insert, and one that
+takes it afterwards fails the confirmation (parked-before-insert and parked-before-shadow-lock
+tests). The applier's flush holds only `ACCESS SHARE` on the shadow until its first write, so a
+flush transaction of an earlier run parked between confirming the table lock and that write is
+not one the copier's fence — or the verifier's repair fence — waits on; that gap is open.
+`pkg/applier` `Buffer.Drain` — every
 buffered key is judged against one `Position` snapshot: landed flushes, uncut is discarded,
 in-flight stays buffered until a later drain finds its chunk landed, and a key-moving UPDATE's
 two entries are judged per key, except that once neither is uncut the image and its old key's
@@ -248,6 +258,10 @@ the convergence tests for key moves and unique-key swaps start their load after 
 landed. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
+marker-bearing UPDATE for a key whose row the source then deleted before its chunk was read,
+with the DELETE not yet delivered, is held until the stream passes the flush's check and the
+catch-up converges, while the same image for a row the source still holds and the shadow lost
+fails closed once the stream has passed it (CO-8); a
 key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark
 1000) asserts key 5 is deleted from the shadow. *Source:* this doc set (Spirit's model
 translated).
@@ -305,8 +319,11 @@ for an unchanged-TOAST column (CO-8): before deleting, it completes any survivin
 still carries a marker from the current shadow row — the row for the key, or for
 `ChangeEvent.OldKey` when the UPDATE moved the primary key (`SELECT … FOR UPDATE`, same
 transaction). An absent shadow row for an image whose row did **not** move is an invariant
-violation (fail closed) — CO-5's merge rule guarantees the marker only survives for values that
-live in a shadow row the batch did not create; a **moved** image whose old key's shadow row is
+violation (fail closed) once the stream has passed a read that found it absent — CO-5's merge
+rule guarantees the marker only survives for values that live in a shadow row the batch did not
+create, and the row is absent legitimately only while the DELETE that removed it from the source
+before its chunk was read is still undelivered, so the first absence holds the image instead
+(CO-8, D13); a **moved** image whose old key's shadow row is
 absent, or whose old key the source has reused (`Entry.OldKeyReused`), is instead completed from
 the source row under `Key`, because a move captured while the old key was uncut leaves no shadow
 row under either key and the buffer cannot tell that history from one whose old row landed, and
@@ -363,12 +380,23 @@ column count is the full count, and there is no value; the marker means "leave t
 unchanged", not NULL or an empty value. A full-row upsert that invents a value for that column
 would overwrite live shadow data and silently break convergence. *Enforced:* `pkg/decode`
 per-column presence on `ChangeEvent` — the `Stream` carries a text value or NULL as a present
-column and the marker as an absent one, and refuses a tuple whose column count does not match
-the relation rather than line columns up by guess; `pkg/applier` `Buffer` keeps the marker through every
-merge, and `Flusher` writes a marker-bearing image of a row that did not move as an `UPDATE` of
-only its present columns — zero rows updated is an `ErrInvariantViolation`, never an insert
-that invents the omitted value — and completes a marker before the whole-row fallback inserts
-the row, from the shadow row the marker refers to, refusing when that row is absent; a moved
+`Column` and the marker as an absent one, and refuses a tuple whose column count does not match
+the relation rather than line columns up by guess. A `Column`'s value is readable only through
+`Get`, which returns it together with its presence, so a reader takes the presence with the
+value: a NULL and a marker arrive alike and only the presence tells them apart. A test refuses
+production code that discards that presence. `pkg/applier` `Buffer` keeps the marker through
+every merge, and `Flusher` writes a marker-bearing image of a row that did not move as an
+`UPDATE` of only its present columns — zero rows updated is an `ErrInvariantViolation`, never an insert
+that invents the omitted value — binds no column that carries no value (an `ErrInvariantViolation`
+before any statement runs), and completes a marker before the whole-row fallback inserts
+the row, from the shadow row the marker refers to, refusing when that row is absent. The
+shadow row of such an image is absent without error exactly when the source deleted the row
+before the chunk covering its key was read and the DELETE has not reached the stream: before it
+writes, the flush checks that the row is there, and for an image whose row is absent it writes
+nothing, returns the image held with the read's WAL position and `Entry.AbsenceAwaited` set,
+and the buffer lets it in only once the stream has passed that position — by then a DELETE or
+INSERT has replaced the image, and one that returns still flagged for an absent row is the
+`ErrInvariantViolation` above; a moved
 image's marker, whose value lives under another key, is completed from the old key's shadow row
 or the source row and held in the buffer until the stream has passed the read, so a value read
 from a row newer than the stream is never written over the stream's own.
@@ -393,12 +421,33 @@ every pooled session drops a `pg_catalog` entry that another schema precedes (`p
 same rewrite: `LocalSearchPath` for a transaction, and `SessionSearchPath` with
 `RestoreSessionSearchPath` for a session-level statement such as a concurrent build. At the query layer, reads that run under a path pg-sprite did not set
 — the session's own — qualify every relation, function, operator, and type with `pg_catalog`.
+Only this layer closes overload ranking: even with `pg_catalog` searched first, function and
+operator resolution ranks candidates across every schema on the path, so an exact-type overload
+planted in a schema the path lists (`pg_total_relation_size(oid)` against the catalog's
+`regclass` signature) beats the catalog's cast-requiring one.
 The connection-layer guarantee is per session: it rewrites an explicit `pg_catalog` entry only,
 not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary objects), and a
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
 *Enforced:* `pkg/dbconn` (session hook, the path builders, and the test that keeps them the only
 `search_path` writers under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
-`pkg/progress`, `pkg/schemadiff`, and `pkg/checksum` (the column-type read, the relation check,
+`pkg/progress`, `pkg/schemadiff`, `pkg/preflight` (every proof read — the size guard, the
+privilege probes, the absence, owned-name, and schema constraint-name reads, the add-column
+rewrite probe, and the copy-and-swap shape and environment facts — qualifies every function,
+relation, type, and operator, `IN` and `IS DISTINCT FROM`
+included since both resolve `=` through the path; planted `pg_total_relation_size(oid)`,
+`has_schema_privilege(name, name, text)`, `+`, and `=` overloads on a path that lists the
+catalog implicitly do not change an answer), `pkg/schemachange` (the dependent reads — the
+shadow's and source's indexes and extended statistics the cutover gate pairs, and the taken
+relation and constraint names — qualify every function, relation, type, and operator; planted
+`generate_series`, `unnest`, `array_to_string`, `to_jsonb`, and `||` overloads on a path that
+lists the source schema do not change the indexes or statistics read), `pkg/migrate`
+(`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
+acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
+`to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
+a planted `oid = regclass` operator on a path that lists the catalog implicitly, and decoy
+`pg_class`, `pg_namespace`, `pg_index`, `to_regclass`, `quote_ident`, `oid = oid`, and `text` on a
+shadowing `<schema>, pg_catalog` path, do not change either answer — the replica identity read
+the executor runs for an accepted `DROP INDEX` is `pkg/executor`'s), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
@@ -524,7 +573,12 @@ never-released tests); in `pkg/copier` and `pkg/checksum`, every statement on th
 pool — chunk copy, resume clear, progress measurement, chunk cut, digest, repair — runs inside a
 transaction that sets its own `lock_timeout` and `statement_timeout` before reading, so a pool
 built without `pkg/dbconn`'s session defaults still bounds every lock wait (a cut queued behind
-`ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout).
+`ACCESS EXCLUSIVE` on a raw pool ends at the copier's lock timeout). `pkg/dbconn` refuses a
+`LockTimeout` or `StatementTimeout` that is neither zero (the default) nor between one
+millisecond and 2147483647ms with `ErrInvalidTimeout` before any connection is made, because
+PostgreSQL counts these settings in whole milliseconds, reads 0 as no timeout, and holds at most a
+32-bit count; its session read-back also refuses
+a server value of 0 for any requested bound.
 The concurrent build's failure verdict runs on a reserved session that observers must not
 disturb: `Tracker.Progress` reads the build's progress on that session detached from the
 observer's context and under its own deadline, set above `pkg/dbconn`'s default
@@ -596,7 +650,17 @@ a lost connection the inspection resolved — is reported wrapping `ErrCutoverRo
 caller distinguishes "the source is still live, retry is safe" from an unresolved outcome
 without reading the catalog itself (terminated-backend test; commit-the-client-never-heard-of
 test; context-ends-during-commit test; backend-still-running test; three-catalog-state
-inspection test). *Source:* Spirit's cutover
+inspection test). The native bounded attempt — the optimistic run, every brief and
+`VALIDATE CONSTRAINT` sequence step, and each greenfield create step — does not inspect, but it
+honours the same rule from the reporting side: a `COMMIT` that did not return success (a lost
+connection, a failover, the caller's context ending mid-commit) is returned as
+`executor.CommitOutcomeUnknownError`, code `commit-outcome-unknown`, never as a rolled-back
+failure, and the validate step's cancellation corroboration leaves it untouched. The failed
+verdict then lists only the steps before it as committed, says the outcome is unknown, and names
+the table to inspect (`TestExecuteNativeTypesALostCommitAsOutcomeUnknown`,
+`TestRunSequenceTypesALostCommitMidSequenceAsOutcomeUnknown`,
+`TestRunReportsALostCommitAsAnUnknownOutcome`, `TestFailureVerdict`,
+`TestCorroborateValidateCancel`). *Source:* Spirit's cutover
 (`information_schema` inspection on dropped connection,
 [Spirit README](https://github.com/block/spirit#cut-over-and-cleanup)).
 
@@ -1125,7 +1189,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   length, `NOT NULL` without default on null data, `text→jsonb` with unvalidatable rows) rather
   than discovered mid-copy. *Source:* Spirit blocklist + validation review.
 - **RF-4** — Renames are never guessed: a missing-plus-new column pair is drop+add unless rename
-  intent is explicit; dangerous rename-overlap patterns are refused. *Source:*
+  intent is explicit. The rename-overlap pattern Spirit refuses (one `ALTER` that renames a
+  column and reuses or retypes it) is unrepresentable: PostgreSQL parses a rename as its own
+  statement and the front door admits one statement (`TestClassifyRejectsARename*`). *Source:*
   [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options), Spirit.
 - **RF-5** — The dangerous literal never runs silently: risky statements with a safer native
   idiom get the idiom (reported) or a recommendation; running as-submitted requires a loud,

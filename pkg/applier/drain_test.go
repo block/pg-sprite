@@ -97,7 +97,7 @@ func TestDrainReturnsCopies(t *testing.T) {
 	require.NoError(t, b.Add(update(10, 1, col("label", "a"))))
 	flush := b.Drain(position(t, 30)).Entries
 	require.NoError(t, b.Add(update(20, 1, col("label", "b"))))
-	assert.Equal(t, "a", flush[0].Columns[0].Value)
+	assert.Equal(t, []decode.Column{col("label", "a")}, flush[0].Columns)
 }
 
 // A key-moving UPDATE is judged per key (D4): the deletion below the frontier
