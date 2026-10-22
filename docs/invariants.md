@@ -440,7 +440,14 @@ catalog implicitly do not change an answer), `pkg/schemachange` (the dependent r
 shadow's and source's indexes and extended statistics the cutover gate pairs, and the taken
 relation and constraint names — qualify every function, relation, type, and operator; planted
 `generate_series`, `unnest`, `array_to_string`, `to_jsonb`, and `||` overloads on a path that
-lists the source schema do not change the indexes or statistics read), and `pkg/checksum` (the column-type read, the relation check,
+lists the source schema do not change the indexes or statistics read), `pkg/migrate`
+(`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
+acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
+`to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
+a planted `oid = regclass` operator on a path that lists the catalog implicitly, and decoy
+`pg_class`, `pg_namespace`, `pg_index`, `to_regclass`, `quote_ident`, `oid = oid`, and `text` on a
+shadowing `<schema>, pg_catalog` path, do not change either answer — the replica identity read
+the executor runs for an accepted `DROP INDEX` is `pkg/executor`'s), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,

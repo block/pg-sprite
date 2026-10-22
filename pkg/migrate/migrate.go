@@ -204,6 +204,14 @@ func (o Options) retry() executor.RetryPolicy {
 // [verdict.OutcomeExecutedViaCopyAndSwap]; a failure on that path leaves a
 // checkpoint row the next Run over the same statement resumes from.
 //
+// A bare table name resolves on the pool's own search_path, so two pools
+// with different paths can address different tables from the same
+// statement text. Run's own catalog reads — the resolve and the
+// accept-blocking lookup — are pg_catalog-qualified whatever that path
+// lists; a pool from dbconn.NewPool also drops a shadowing pg_catalog
+// entry on every session, which the engine's other reads rely on (CO-9,
+// docs/schemabot-integration.md).
+//
 // Run does not close the pool; one pool serves any number of calls.
 func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options) (verdict.Verdict, error) {
 	return run(ctx, pool, st, opts, nil, nil)
@@ -319,11 +327,16 @@ func resolveTarget(ctx context.Context, pool *pgxpool.Pool, st statement.Stateme
 	if err := statement.CheckNoComments(st.SQL()); err != nil {
 		return statement.Statement{}, err
 	}
+	// INV: CO-9 — every function, operator, and relation is
+	// pg_catalog-qualified, so a planted overload on the session's
+	// search_path cannot resolve the name to another relation's schema.
+	// to_regclass itself still resolves the bare name on that path: that
+	// is the caller's intent this function exists to honor.
 	const q = `
 		SELECT n.nspname
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE c.oid = to_regclass(quote_ident($1))`
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(pg_catalog.quote_ident($1))`
 	var schema string
 	err := pool.QueryRow(ctx, q, st.Table()).Scan(&schema)
 	if errors.Is(err, pgx.ErrNoRows) {

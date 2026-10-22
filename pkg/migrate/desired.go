@@ -187,6 +187,9 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // submitted form blind. A destructive or force-worthy change belongs on
 // the imperative front door where the operator states it explicitly.
 //
+// Every planned statement runs back through [Run], so Run's note on the
+// pool's search_path applies to the pool passed here.
+//
 // RunDesired does not close the pool; one pool serves any number of calls.
 func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opts Options) (DesiredResult, error) {
 	if err := opts.validate(); err != nil {
