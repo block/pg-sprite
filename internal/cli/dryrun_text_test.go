@@ -206,6 +206,44 @@ func TestDryRunTextRewriteRequired(t *testing.T) {
 	assert.NotContains(t, text, "apply:")
 }
 
+// A rename is refused under the same rewrite-required code, but the refusal
+// text names the application break rather than a blocking lock, and the help
+// names the rollout the application can follow plus the override that runs
+// the rename as written.
+func TestDryRunTextAppBreakingRenameRefused(t *testing.T) {
+	report := plan.NewReport(plan.SourceAlter)
+	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+	report.Disposition = router.DispositionRewriteRequired
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         `ALTER TABLE "users" RENAME COLUMN "name" TO "full_name"`,
+		Route:       planner.RouteNative,
+		Disposition: router.DispositionRewriteRequired,
+		Decisions: []planner.Decision{{
+			Operation: "rename column",
+			Route:     planner.RouteNative,
+			Reason:    planner.ReasonAppBreakingRename,
+		}},
+		Guidance: suggest.GuidanceExpandContractColumn,
+	})
+
+	var out strings.Builder
+	require.NoError(t, writeDryRunText(&out, palette{}, report))
+	text := out.String()
+	assert.Contains(t, text, "error[rewrite-required]:\n  refused — breaks every running application instance")
+	assert.Contains(t, text, "run it as written with --force",
+		"the refusal names the override, since the rename itself is a valid change the operator may accept (wrapped, so assert its head)")
+	assert.NotContains(t, text, "no online replacement could be constructed",
+		"a rename is not a blocking-lock refusal; the text must not say it is")
+	assert.Contains(t, text, "help[expand-contract-column]:\n")
+	assert.Greater(t, strings.Index(text, "help[expand-contract-column]:"),
+		strings.Index(text, "note[app-breaking-rename]:"),
+		"the manual path trails the finding that explains it")
+	assert.Contains(t, text, "  "+onlineDDLReferenceURL+"#rewrite-required\n")
+	assert.Contains(t, text, "  "+suggestReportURL+"#expand-contract-column\n")
+	assert.NotContains(t, text, "pg-sprite will run")
+	assert.NotContains(t, text, "apply:")
+}
+
 // A target-fact refusal carries its typed cause as the rule code, and a
 // destructive statement carries the destructive warning alongside it.
 func TestDryRunTextRefusalAndDestructive(t *testing.T) {

@@ -557,6 +557,9 @@ func planRefusal(report plan.Report) (verdict.Refusal, string) {
 		case router.DispositionExecute:
 			continue
 		case router.DispositionRewriteRequired:
+			// A desired-state plan derives a renamed column as a drop and an
+			// add and never emits a rename, so the rewrite-required statement
+			// here is always one that blocks the table.
 			return rewriteRequiredRefusal(), detail("blocks and has no safer native sequence")
 		case router.DispositionUnavailable:
 			return backendUnavailableRefusal(), detail("routes to an execution strategy that does not carry this operation yet")

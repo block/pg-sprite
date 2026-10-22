@@ -92,11 +92,14 @@ const (
 	// ReasonBudgetExceeded: the optimistic attempt exceeded its lock or
 	// statement budget and was cancelled.
 	ReasonBudgetExceeded Reason = "not-native-safe-budget-exceeded"
-	// ReasonRewriteRequired: the submitted form blocks and must run as a
-	// safer native sequence, but the planner could not construct one (a
-	// multi-operation statement, or a pattern it cannot build). Running
-	// the submitted form would falsify the plan's own reason, so the
-	// engine refuses instead.
+	// ReasonRewriteRequired: the submitted form is not safe to run as
+	// submitted — it blocks the table, or it is a rename that breaks the
+	// application instances still using the old name — and must run as a
+	// safer sequence, but the planner has none to substitute (a
+	// multi-operation statement, a pattern it cannot build, or a rename,
+	// whose safe sequence spans application deploys). Running the
+	// submitted form would falsify the plan's own reason, so the engine
+	// refuses instead unless the override names the table.
 	ReasonRewriteRequired Reason = "not-native-safe-rewrite-required"
 	// ReasonBackendUnavailable: the change routes to an execution strategy
 	// that has no carrying path for the operation in this build (a

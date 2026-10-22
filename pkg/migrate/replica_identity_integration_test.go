@@ -25,6 +25,17 @@ func columnExists(t *testing.T, pool *pgxpool.Pool, schema, table, column string
 	return exists
 }
 
+// tableExists reports whether the named table is present in the schema.
+func tableExists(t *testing.T, pool *pgxpool.Pool, schema, table string) bool {
+	t.Helper()
+	var exists bool
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_tables
+		                WHERE schemaname = $1 AND tablename = $2)`,
+		schema, table).Scan(&exists))
+	return exists
+}
+
 // A table whose REPLICA IDENTITY USING INDEX selects a unique index keeps
 // that setting when the index goes, and every UPDATE and DELETE on it then
 // fails while a publication publishes them. Neither front door path drops

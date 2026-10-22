@@ -105,7 +105,13 @@ func seedDDLTable(t *testing.T, pool *pgxpool.Pool, name string) string {
 	return table
 }
 
-type nativeDDLCase struct{ name, setup, ddl, proof, want string }
+type nativeDDLCase struct {
+	name, setup, ddl, proof, want string
+	// forced acknowledges a statement migrate refuses by default (an
+	// app-breaking rename) so the matrix proves what the forced run
+	// preserves, not that the statement executes unasked.
+	forced bool
+}
 
 // Adding a constant default fills existing rows without replacing the table.
 func TestAddColumnWithConstantDefaultSucceeds(t *testing.T) {
@@ -253,11 +259,13 @@ func TestAddUniqueConstraintSucceeds(t *testing.T) {
 	})
 }
 
-// Renaming an application column preserves the table and tenant access.
-func TestRenameColumnSucceeds(t *testing.T) {
+// Renaming an application column is refused by default as app-breaking; the
+// forced run preserves the table and tenant access.
+func TestRenameColumnForcedSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
-		name: "rename_column",
-		ddl:  "ALTER TABLE %s RENAME COLUMN label TO caption",
+		name:   "rename_column",
+		forced: true,
+		ddl:    "ALTER TABLE %s RENAME COLUMN label TO caption",
 		proof: `SELECT count(*)::text
 			FROM pg_attribute
 			WHERE attrelid='%s'::regclass
@@ -284,13 +292,18 @@ func TestDropColumnStatementSucceeds(t *testing.T) {
 func runNativeDDL(t *testing.T, tc nativeDDLCase) {
 	t.Helper()
 	pool := fixture(t)
-	table := seedDDLTable(t, pool, "pgsprite_native_"+tc.name)
+	name := "pgsprite_native_" + tc.name
+	table := seedDDLTable(t, pool, name)
 	if tc.setup != "" {
 		execSQL(t, pool, fmt.Sprintf(tc.setup, table))
 	}
-	verifyAPITenants(t, "pgsprite_native_"+tc.name, map[int][]int{1: {1}, 2: {2}, 3: {}})
+	verifyAPITenants(t, name, map[int][]int{1: {1}, 2: {2}, 3: {}})
 	before := protections(t, pool, table)
-	change(t, pool, fmt.Sprintf(tc.ddl, table))
+	opts := migrate.DefaultOptions()
+	if tc.forced {
+		opts.Force = "public." + name
+	}
+	changeWith(t, pool, fmt.Sprintf(tc.ddl, table), opts)
 	var got string
 	require.NoError(t, pool.QueryRow(t.Context(), fmt.Sprintf(tc.proof, table)).Scan(&got))
 	assert.Equal(t, tc.want, got)

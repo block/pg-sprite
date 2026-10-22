@@ -289,12 +289,15 @@ live schema (introspected)  ─┘                          │
 - **Renames are ambiguous and are not guessed.** A column present in live but absent in desired
   plus a new column in desired is, by default, a *drop + add*, not a rename. Rename intent must
   eventually be stated explicitly; no rename-intent flag exists today. The engine does not
-  heuristically pair columns. The imperative path executes a direct column or table rename when
-  asked — it is metadata-only for PostgreSQL — but classifies it `app-breaking-rename`: the
-  rename cannot land atomically across running application instances. For a column the safe
-  sequence is expand/contract (add the new column, dual-write and backfill, switch reads, drop
-  the old column separately); for a table, coordinate the rename with the application deploy
-  that adopts the new name.
+  heuristically pair columns. The imperative path classifies a direct column or table rename
+  `app-breaking-rename` and refuses it as `rewrite-required`: the catalog flip is metadata-only
+  for PostgreSQL, but it cannot land atomically across running application instances, and no
+  safer sequence can be built from the statement alone. For a column the safe sequence is
+  expand/contract (add the new column, dual-write and backfill, switch reads, drop the old
+  column separately — guidance `expand-contract-column`); for a table, coordinate the rename
+  with the application deploy that adopts the new name (guidance
+  `coordinated-table-rename`). `--force SCHEMA.TABLE` runs the submitted rename as a blind
+  bounded attempt for the operator who has done that coordination.
 - **Diff is review-only.** `diff` prints every derived statement and its classified route without
   executing. Copy-and-swap routes render as unavailable until that backend exists.
 - **Out-of-band drift is surfaced, not steamrolled.** If the live table differs from what the
@@ -379,6 +382,35 @@ flagged.
    machine-readably in the verdict's `forced` field for audit.
 4. Planner refusals (no known safe path) and unsupported statement kinds are **not** forceable —
    there is nothing bounded to acknowledge.
+
+What `--force` changes depends on how the statement routed:
+
+| Routing decision | Without `--force` | With `--force SCHEMA.TABLE` |
+| --- | --- | --- |
+| Execute, safer sequence substituted (e.g. `CREATE INDEX` → `CONCURRENTLY`) | runs the safer sequence | runs the submitted form as one blind bounded attempt |
+| Execute, submitted form already safe | runs it | runs it; nothing to override, so the verdict does not record `forced` |
+| Execute on copy-and-swap (a table rewrite) | runs through the shadow table | runs the submitted form natively as one blind bounded attempt, not through the shadow table |
+| `rewrite-required` (e.g. `RENAME COLUMN`, `RENAME TO`) | refused with guidance, nothing executed, exit 2 | runs the submitted form as one blind bounded attempt |
+| `backend-unavailable` | refused, nothing executed, exit 2 | runs the submitted form as one blind bounded attempt |
+| Planner refusal (e.g. `RENAME CONSTRAINT`, `EXCLUDE`) | refused, nothing executed, exit 2 | still refused, exit 2; a matching acknowledgement changes nothing and the verdict does not record `forced` |
+
+Every forced attempt stays under the `--max-table-size` guard (default 1 GiB): on a larger table
+it is refused as `not-native-safe-table-too-large` and nothing runs, so forcing a rename of a large
+table also needs that threshold raised. `--force` cannot be combined with `--dry-run`.
+
+The acknowledgement is compared with the statement's target table after an unqualified name is
+resolved against the session's `search_path`, so it is always schema-qualified:
+`ALTER TABLE users RENAME COLUMN name TO full_name` on a `public.users` table needs
+`--force public.users`, and `--force users` is a mismatch. The rule is that the operator names
+the table whose lock they are accepting, which is the one that exists now: for `ALTER TABLE
+users RENAME TO accounts` that is `public.users`, not the new name. Naming the new name is a
+mismatch even if a separate `public.accounts` table already exists, so a typo or a wrong guess
+cannot run the rename by accident. Because
+the value must match each statement's own table, the override is per table, not a global
+switch. A mismatch exits 1 with no verdict and nothing executed. `--force` cannot be combined
+with `--dry-run` (the dry run reports the unforced plan) or `--accept-blocking` (a statement
+reaches one decision and one acknowledgement names it), and the declarative `--desired` path
+rejects it.
 
 Force exists for the rare legitimate case (e.g. a maintenance window where the table is known
 idle and a plain rewrite is acceptable); it is an escape hatch, not a shortcut, consistent with
@@ -583,7 +615,7 @@ this section states *why* and pins the analog to the underlying primitive.
 | --- | --- | --- |
 | **ALTER / DROP PRIMARY KEY** | Refuse — PK must be unchanged by the migration | The PK is simultaneously the chunk key, the CDC conflict target, and the resume watermark. Changing it mid-flight breaks all three. **Route decision:** a PK *change* is done as a separate expand/contract schema change. SchemaBot's [direct-execution doc](https://github.com/block/schemabot/blob/main/docs/direct-execution.md) calls small-table PK reshape its canonical direct-execution case — a legitimate answer on MySQL, deliberately **not** ours on PostgreSQL, where the native route holds `ACCESS EXCLUSIVE` and blocks reads (see [schemabot-integration.md § execution-mode verdicts](schemabot-integration.md#execution-mode-verdicts-and-direct-execution)). |
 | **FOREIGN KEYS or TRIGGERS on the migrated table** | Refuse in v1 | Inbound FKs (other tables referencing this one) must be re-pointed at cutover under the `ACCESS EXCLUSIVE` window — error-prone and lengthens the lock. Triggers/rules on the source would also have to be recreated on the shadow with exact firing order, and could fire during the copy. Both are deferred, same as Spirit. |
-| **RENAME column** | Not a copy-and-swap concern — a column or table rename never reaches the shadow table | Spirit guards `RENAME c1 TO n1, ADD COLUMN c1` because MySQL lets one `ALTER TABLE` carry both and its copier maps old names to new. PostgreSQL parses a rename as its own statement (`RenameStmt`) and the front door admits one statement, so that shape cannot be submitted; the planner routes every column or table rename native, primary key or not, because no copy means no chunk key to remap (pinned by `pkg/planner/planner_rename_test.go`). Native still takes a brief `ACCESS EXCLUSIVE` that queues behind open transactions ([lock queue](postgres-online-ddl-reference.md#why-ddl-is-dangerous-the-lock-queue)), and the hazard it carries is to the application: see [`app-breaking-rename`](postgres-online-ddl-reference.md#app-breaking-rename) and its [lint warning](lint-report.md#codes-code). |
+| **RENAME column** | Not a copy-and-swap concern — a column or table rename never reaches the shadow table | Spirit guards `RENAME c1 TO n1, ADD COLUMN c1` because MySQL lets one `ALTER TABLE` carry both and its copier maps old names to new. PostgreSQL parses a rename as its own statement (`RenameStmt`) and the front door admits one statement, so that shape cannot be submitted; the planner routes every column or table rename native, primary key or not, because no copy means no chunk key to remap (pinned by `pkg/planner/planner_rename_test.go`). The route only matters under `--force`: without it the rename is refused as `rewrite-required`, because the hazard it carries is to the application — see [`app-breaking-rename`](postgres-online-ddl-reference.md#app-breaking-rename) and its [lint error](lint-report.md#codes-code). A forced rename still takes a brief `ACCESS EXCLUSIVE` that queues behind open transactions ([lock queue](postgres-online-ddl-reference.md#why-ddl-is-dangerous-the-lock-queue)). |
 | **Lossy conversions** (shorten `VARCHAR` below longest value, add `NOT NULL` w/o default, add `UNIQUE` on non-unique data) | Refuse; require the data be fixed first | These can fail or truncate *during the copy or the constraint validation*, after work is spent. PG surfaces them as `VALIDATE CONSTRAINT` / cast failures; better to reject up front. |
 | Read-replica `<10s` lag fidelity | Not a goal | Like Spirit, the engine prioritizes copy throughput; it observes reader/slot lag only to throttle and protect DR, not to guarantee replica freshness. |
 

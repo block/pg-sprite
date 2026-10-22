@@ -190,8 +190,8 @@ are the canonical example.
 > `make gen-capabilities`; do not edit the generated regions below by hand.
 
 <!-- capabilities:begin summary -->
-**60 operations: 18 supported today, 24 planned behind a typed refusal, 14 out of scope
-by design, and 4 with no online mechanism for pg-sprite to build on.**
+**60 operations: 17 supported today, 24 planned behind a typed refusal, 14 out of scope
+by design, and 5 with no online mechanism for pg-sprite to build on.**
 <!-- capabilities:end summary -->
 
 Status legend: ✅ T1 (supported today) · 🟡 T2 (planned; typed refusal today) ·
@@ -217,7 +217,7 @@ or the only online form is a direct statement the operator runs).
 | `ALTER COLUMN TYPE`, general (or with `USING`) | ✅ | copy-and-swap | Yes | Table rewrite; runs through copy-and-swap: the changed shape is built as a shadow table, filled in chunks (a `USING` expression is applied per row), verified, and swapped in under the source's name. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, before the route runs. The route's preflight still refuses table shapes and environments it cannot run against (`copy-and-swap-refused`), and a `USING` expression is admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (`shadow-statement-conversion`) — see [limitations.md](limitations.md) |
 | `SET DEFAULT` / `DROP DEFAULT` / `DROP NOT NULL` | ✅ | native, as-is | Yes | Metadata-only |
 | `SET NOT NULL` | ✅ | native, safer sequence | Yes | Executed as the native four-step pattern: `ADD CONSTRAINT ... CHECK (col IS NOT NULL) NOT VALID` → online `VALIDATE` → `SET NOT NULL` (catalog flip, PG 12+) → drop the scaffold check |
-| `RENAME COLUMN` / `RENAME TABLE` | ✅ | native, as-is | Yes | Metadata-only for PostgreSQL but **app-breaking** across deployed instances; executed with a typed reason so lint/plan consumers can steer away |
+| `RENAME COLUMN` / `RENAME TABLE` | ❌ | — | Yes — the hazard is to the application, and no SQL exists for `migrate` to substitute | Metadata-only for PostgreSQL but **app-breaking** across deployed instances: code still using the old name breaks the instant the rename commits, and no safer SQL exists to substitute. Without `--force`, `migrate` refuses it as `rewrite-required`, class `by-design`, with the `expand-contract-column` or `coordinated-table-rename` guidance (and `lint` reports it at error severity). `--force SCHEMA.TABLE` runs the rename as submitted under bounded budgets and records the override; above `--max-table-size` the forced rename is refused as `not-native-safe-table-too-large`. A desired file cannot express a rename — `diff` shows a renamed column as a drop and an add |
 | `SET TABLESPACE` | 🟡 | copy-and-swap | Yes | Physical relocation is a rewrite; routes to copy-and-swap, which does not carry a tablespace move yet |
 <!-- capabilities:end column_changes -->
 

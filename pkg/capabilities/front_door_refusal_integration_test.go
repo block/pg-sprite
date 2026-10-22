@@ -84,6 +84,22 @@ var migrateRefusals = map[string]migrateClaim{
 			`ALTER TYPE %[1]s.mood RENAME VALUE 'sad' TO 'blue'`,
 		},
 	},
+	// A rename is a brief catalog change for PostgreSQL but breaks every
+	// application instance still using the old name the moment it commits;
+	// no safer SQL exists, so without --force it is refused with the rollout
+	// the application can follow. The refused column rename leaves the
+	// table untouched, so the table rename finds it under its name.
+	"rename-column-rename-table": {
+		setup: `
+			CREATE TABLE %[1]s.accounts (
+				id bigint PRIMARY KEY,
+				nickname text
+			)`,
+		statements: []string{
+			`ALTER TABLE %[1]s.accounts RENAME COLUMN nickname TO display_name`,
+			`ALTER TABLE %[1]s.accounts RENAME TO members`,
+		},
+	},
 	// The inline constraint would build its index under the ADD COLUMN's
 	// ACCESS EXCLUSIVE lock; the safe form adds the column first.
 	"add-column-with-inline-unique-primary-key-references-check": {

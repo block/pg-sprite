@@ -34,7 +34,8 @@ func columnType(t *testing.T, pool *pgxpool.Pool, schema, table, column string) 
 // refused before the copy-and-swap route runs. The run is refused at plan
 // time with the views named, so the operator learns what to change before anything
 // reaches the server, and the column is left as it was. A rename, which the
-// views follow, and changes to a column no view reads still run.
+// views follow, is not a dependent-view refusal — it runs once the override
+// names the table — and changes to a column no view reads still run.
 func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -96,11 +97,16 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		statement string
-		check     func(t *testing.T, schema string)
+		// forced acknowledges the rename, which migrate refuses by
+		// default as app-breaking; the view gate is what this case proves
+		// does not fire.
+		forced bool
+		check  func(t *testing.T, schema string)
 	}{
 		{
 			name:      "renaming the column the views read",
 			statement: "ALTER TABLE %s.users RENAME COLUMN email TO mail",
+			forced:    true,
 			check: func(t *testing.T, schema string) {
 				assert.True(t, columnExists(t, pool, schema, "users", "mail"))
 			},
@@ -115,9 +121,14 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			schema := seed(t)
-			v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(tc.statement, schema)), runOptions())
+			opts := runOptions()
+			if tc.forced {
+				opts.Force = schema + ".users"
+			}
+			v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(tc.statement, schema)), opts)
 			require.NoError(t, err)
 			assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, "detail: %s", v.Detail)
+			assert.Empty(t, v.DependentViews)
 			tc.check(t, schema)
 		})
 	}

@@ -127,7 +127,10 @@ const (
 	// column the safe sequence is expand/contract: add the new column,
 	// dual-write and backfill, switch reads, then drop the old column as
 	// its own reviewed change. For a table, coordinate the rename with
-	// the application deploy that adopts the new name.
+	// the application deploy that adopts the new name. Neither sequence
+	// can be constructed from the statement, so the rename is
+	// rewrite-required: the engine runs the submitted form only under the
+	// acknowledged override.
 	ReasonAppBreakingRename Reason = "app-breaking-rename"
 	// ReasonVolatileDefault: ADD COLUMN whose default PostgreSQL computes
 	// for every row, rewriting the table — proven by the server, or assumed
@@ -254,12 +257,20 @@ type Decision struct {
 }
 
 // ExecutableAsSubmitted reports whether the operation's submitted form is
-// itself safe to run. It is false exactly for safer-idiom decisions: their
-// submitted form blocks and must be replaced by the safer sequence —
-// whether or not one was constructed. Routing fails closed on the
-// combination of a false ExecutableAsSubmitted and an empty SaferSQL.
+// itself safe to run. It is false for the decisions whose submitted form
+// must be replaced by a safer sequence, whether or not one was
+// constructed: a safer-idiom decision, whose submitted form blocks the
+// table, and an app-breaking rename, whose submitted form breaks every
+// running application instance that still uses the old name. Routing
+// fails closed on the combination of a false ExecutableAsSubmitted and an
+// empty SaferSQL.
 func (d Decision) ExecutableAsSubmitted() bool {
-	return d.Reason != ReasonSaferIdiom
+	switch d.Reason {
+	case ReasonSaferIdiom, ReasonAppBreakingRename:
+		return false
+	default:
+		return true
+	}
 }
 
 // Plan is the classification of one statement: one decision per operation
@@ -478,10 +489,17 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		// Metadata-only for PostgreSQL, but not for the application: a
 		// rename cannot land atomically across deployed instances, so
 		// code querying the old name breaks the instant it commits. The
-		// engine still executes it when asked; the typed reason lets
-		// lint and plan consumers steer to a safe sequence instead.
-		// Index renames stay metadata-only above — SQL never references
-		// an index by name.
+		// submitted form is not executable as submitted, so the router
+		// marks the statement rewrite-required and the typed guidance
+		// names the safe sequence; the acknowledged override is the one
+		// way to run the rename itself. Index renames stay metadata-only
+		// above: ordinary SQL names tables and columns, not indexes. An
+		// index that backs a constraint is the exception — renaming it
+		// renames the constraint, which ON CONFLICT ON CONSTRAINT names —
+		// and is not told apart here. That exception is latent: migrate's
+		// imperative front door admits only ALTER TABLE and CREATE INDEX,
+		// so ALTER INDEX ... RENAME TO is refused there as
+		// unsupported-statement before it reaches this classification.
 		d.Route, d.Reason = RouteNative, ReasonAppBreakingRename
 
 	case statement.OpAlterColumnType:

@@ -72,7 +72,7 @@ dry_run() {
         else
             assert_eq "dry-run refusal exit of [$sql]" 2 "$status"
         fi
-        assert_eq "plan format_version of [$sql]" 11 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "plan format_version of [$sql]" 12 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "disposition of [$sql]" "$disposition" "$(jq -r '.disposition' <<<"$out")"
         assert_eq "route of [$sql]" "$route" "$(jq -r '.statements[0].route' <<<"$out")"
         assert_eq "reason of [$sql]" "$reason" "$(jq -r '.statements[0].decisions[0].reason' <<<"$out")"
@@ -200,7 +200,7 @@ diff_plan() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff exit of [$desired]" 0 "$status"
-        assert_eq "diff format_version of [$desired]" 11 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 12 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
         case "$(jq -r '.statements[0].sql' <<<"$out")" in
         *"$fragment"*) ;;
@@ -228,7 +228,7 @@ diff_refused() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff refusal exit of [$desired]" 2 "$status"
-        assert_eq "diff format_version of [$desired]" 11 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 12 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "diff disposition of [$desired]" refuse "$(jq -r '.disposition' <<<"$out")"
         assert_eq "diff reason of [$desired]" unsupported-statement "$(jq -r '.statements[0].reason' <<<"$out")"
         assert_eq "diff class of [$desired]" "$class" "$(jq -r '.statements[0].class' <<<"$out")"
@@ -263,7 +263,7 @@ run_pull() {
             out=$("$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" --json) || status=$?
             assert_eq "diff exit of [$desired]" 0 "$status"
             # Plan report contract version (plan.FormatVersion), same pin as diff_plan.
-            assert_eq "diff format_version of [$desired]" 11 "$(jq -r '.format_version' <<<"$out")"
+            assert_eq "diff format_version of [$desired]" 12 "$(jq -r '.format_version' <<<"$out")"
             assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
             assert_eq "zero diff of [$desired]" 0 "$(jq -r '.statements | length' <<<"$out")"
         else
@@ -288,7 +288,7 @@ run_dryrun() {
     dry_run copy-and-swap  type-rewrite           false execute     "ALTER TABLE orders ALTER COLUMN user_id TYPE bigint"
     dry_run native         fast-default           false execute     "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()"
     dry_run copy-and-swap  volatile-default       false unavailable "ALTER TABLE users ADD COLUMN started timestamptz DEFAULT clock_timestamp()"
-    dry_run native         app-breaking-rename    false execute     "ALTER TABLE users RENAME COLUMN name TO full_name"
+    dry_run native         app-breaking-rename    false rewrite-required "ALTER TABLE users RENAME COLUMN name TO full_name"
     dry_run native         metadata-only          true  execute     "ALTER TABLE users DROP COLUMN status"
     dry_run copy-and-swap  relocation             false unavailable "ALTER TABLE users SET TABLESPACE pg_default"
     dry_run refuse         unsupported-operation  false refuse      "ALTER TABLE users ENABLE ROW LEVEL SECURITY"
@@ -346,7 +346,7 @@ run_offline() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" lint --json risky.sql) || status=$?
         assert_eq "lint exit" 1 "$status"
-        assert_eq "lint format_version" 5 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "lint format_version" 6 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "lint errors" 1 "$(jq -r '.errors' <<<"$out")"
     else
         "$PGS" lint risky.sql || echo "(exit $? — error findings gate, by design)"
@@ -359,7 +359,7 @@ run_offline() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" suggest --json risky.sql) || status=$?
         assert_eq "suggest exit" 0 "$status"
-        assert_eq "suggest format_version" 2 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "suggest format_version" 3 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "suggest count" 2 "$(jq -r '.suggestions | length' <<<"$out")"
     else
         "$PGS" suggest risky.sql || echo "(exit $?)"

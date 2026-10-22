@@ -20,8 +20,10 @@ import (
 // the embedded Reasons vocabulary; version 3 added the
 // concurrent-in-transaction code; version 4 added the dependent-view
 // planner reason to the embedded Reasons vocabulary; version 5 added the
-// cascading-drop planner reason to it.
-const FormatVersion = 5
+// cascading-drop planner reason to it; version 6 raised the
+// app-breaking-rename finding from warning to error, because the engine
+// now refuses the rename unless the override names the table.
+const FormatVersion = 6
 
 // Severity ranks a finding by what the engine would do with it.
 type Severity string
@@ -62,7 +64,8 @@ const (
 	CodePossibleTableRewrite Code = "possible-table-rewrite"
 	// CodeAppBreakingRename: the statement renames a column or table in
 	// place — metadata-only for PostgreSQL, but running application code
-	// still referencing the old name breaks the instant it commits. For
+	// still referencing the old name breaks the instant it commits. The
+	// engine refuses the rename unless the override names the table. For
 	// a column the safe sequence is expand/contract: add the new column,
 	// dual-write and backfill, switch reads, then drop the old column as
 	// its own reviewed change. For a table, coordinate the rename with
@@ -253,7 +256,7 @@ func decisionFinding(d planner.Decision) (Finding, bool) {
 			f.Suggestion, f.SuggestionExecution = d.SaferSQL, d.SaferSQLExecution
 			return f, true
 		case planner.ReasonAppBreakingRename:
-			f.Code, f.Severity = CodeAppBreakingRename, SeverityWarning
+			f.Code, f.Severity = CodeAppBreakingRename, SeverityError
 			return f, true
 		}
 		return Finding{}, false

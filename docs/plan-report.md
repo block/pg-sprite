@@ -17,7 +17,7 @@ kinds, guidance, causes, classes, owners) and the fingerprint serialization are 
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **11**: version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
+The current version is **12**: version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
 and on refused statements, each drawn from a closed vocabulary (see Classes and Owners);
@@ -118,7 +118,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `fast-default` | ADD COLUMN whose default the catalog stores, so no row is rewritten: a constant, or an expression the server proved it stores, such as `now()`. |
 | `binary-coercible` | A type change PostgreSQL relabels without a rewrite (widen varchar, varchar to text, widen numeric precision). |
 | `safer-idiom` | Native, but the submitted form blocks; `safer_sql` carries the online rewrite when one can be constructed. Never appears on an executable statement of a greenfield plan — see `metadata-only`. |
-| `app-breaking-rename` | A column or table rename — metadata-only for PostgreSQL, but running application code still referencing the old name breaks the instant it commits. For a column the safe sequence is expand/contract: add the new column, dual-write and backfill, switch reads, then drop the old column as its own reviewed change. For a table, coordinate the rename with the application deploy that adopts the new name. Index renames stay `metadata-only` — SQL never references an index by name. |
+| `app-breaking-rename` | A column or table rename — metadata-only for PostgreSQL, but running application code still referencing the old name breaks the instant it commits. The statement's disposition is `rewrite-required` with guidance `expand-contract-column` or `coordinated-table-rename`; `migrate` runs the rename as written only when `--force` names the table. For a column the safe sequence is expand/contract: add the new column, dual-write and backfill, switch reads, then drop the old column as its own reviewed change. For a table, coordinate the rename with the application deploy that adopts the new name. Index renames stay `metadata-only`: ordinary SQL names tables and columns, not indexes. Renaming an index that backs a `UNIQUE` or primary-key constraint also renames the constraint, which `ON CONFLICT ON CONSTRAINT` names; that case still routes `metadata-only`. |
 | `volatile-default` | ADD COLUMN whose default PostgreSQL computes for every row, rewriting the table. Proven by the server, or, with `unverified`, assumed for an expression default nothing proved. |
 | `generated-stored` | Adding a stored generated column computes every row — a full rewrite. |
 | `type-rewrite` | A type PostgreSQL must convert or check row by row: a type change it cannot relabel (rewrite plus reindex), a type change that moves the column's collation (every index on it rebuilt, no heap rewrite), or an added column of a domain with constraints. With `unverified`, assumed for an added column the server could not prove. |
@@ -164,7 +164,7 @@ and privilege checks because it needs no connection.
 | Value | Meaning |
 |---|---|
 | `execute` | The engine would run it now — natively, or through the copy-and-swap backend when that is the statement's `backend`. The disposition is decided from the statement and the table's shape as planned; it does not run the copy-and-swap preflight (free disk, logical decoding, triggers, dependent views, publication membership), which execution reads before any statement of the plan runs and which can refuse the whole plan with `copy-and-swap-refused` and nothing executed. |
-| `rewrite-required` | Native but blocking as submitted, and no safer sequence could be constructed — resubmit in the online form. |
+| `rewrite-required` | Native but not executable as submitted — it blocks the table, or it is a rename that breaks every running application instance still using the old name — and no safer sequence could be constructed; `guidance` names the manual path. `migrate` runs it as written only when `--force` names the table. |
 | `unavailable` | Routed to copy-and-swap for an operation the engine does not carry yet; nothing executes. |
 | `refuse` | The planner refused the statement; no backend is assigned. |
 
@@ -183,6 +183,8 @@ code's full manual path; this contract embeds it, so a new guidance code bumps t
 | `not-null-scaffold` | Prove the invariant with a NOT VALID CHECK plus online VALIDATE, then flip NOT NULL. |
 | `name-constraint-then-validate` | Name the constraint, add it NOT VALID, then VALIDATE it online. |
 | `unique-index-then-constraint` | Build the unique index with CREATE UNIQUE INDEX CONCURRENTLY, then attach it with ADD CONSTRAINT … USING INDEX. |
+| `expand-contract-column` | Add the new column, dual-write and backfill it, switch reads, then drop the old column as its own change — instead of renaming the column under running application code. |
+| `coordinated-table-rename` | Coordinate the table rename with the application deploy that adopts the new name, then run it with `--force` naming the table. |
 
 ### Causes (`cause`, greenfield create-shape refusals only)
 
@@ -304,7 +306,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 11,
+  "format_version": 12,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -347,7 +349,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 11,
+  "format_version": 12,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -414,7 +416,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 11,
+  "format_version": 12,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

@@ -55,10 +55,12 @@ func TestClassifyRejectsARenameAndAnAddSubmittedTogether(t *testing.T) {
 	require.ErrorIs(t, err, statement.ErrNotOneStatement)
 }
 
-// A rename on its own runs native even when the column is the primary key,
+// A rename on its own routes native even when the column is the primary key,
 // which is also the replica identity: nothing is copied, so there is no chunk
-// key to remap. Dropping the same column is refused, which is what the
-// replica-identity facts are there to catch.
+// key to remap. The route is what a forced rename runs; without --force the
+// router refuses the rename as rewrite-required for the application's sake.
+// Dropping the same column is refused, which is what the replica-identity
+// facts are there to catch.
 func TestClassifyRunsAPrimaryKeyRenameNative(t *testing.T) {
 	primaryKey := planner.Facts{
 		ColumnTypes: map[string]string{"id": "bigint"},

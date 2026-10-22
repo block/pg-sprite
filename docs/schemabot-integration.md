@@ -537,6 +537,13 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   that wants the typed guidance or cause must obtain the plan report first (dry-run for the
   imperative front door, `diff --json` for the declarative one), then apply, and treat the
   verdict's `detail` as presentation until the verdict carries typed guidance too.
+- **A rename refusal is an operator decision, not a retry.** `RENAME COLUMN` and `RENAME TO`
+  refuse as `not-native-safe-rewrite-required` with class `by-design` and `guidance`
+  `expand-contract-column` (a column) or `coordinated-table-rename` (a table). Retrying, or
+  waiting for a pg-sprite release, changes nothing: route it to the operator, who either rolls
+  the change out as the guidance names or, after coordinating the application deploy, runs
+  the rename with `--force SCHEMA.TABLE`. A rewrite-required refusal of class
+  `capability-boundary` is the other case: a blocking form the planner cannot rewrite yet.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
   apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement

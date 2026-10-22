@@ -94,6 +94,13 @@ refusal — never a silently wrong or incomplete result:
   `ATTACH PARTITION` and `DETACH PARTITION`.
 - **Index maintenance** is not driven: `migrate` refuses `DROP INDEX` and
   `REINDEX` (plain or `CONCURRENTLY`); see the `--accept-blocking` note below.
+- **Renames are refused, not run**: `RENAME COLUMN` and `RENAME TO` are
+  instant in the catalog but break every running application instance that
+  still uses the old name, and no safer sequence can be built from the
+  statement alone, so `migrate` refuses them as `rewrite-required` with the
+  expand-and-contract (column) or coordinated-deploy (table) path as typed
+  guidance; `--force SCHEMA.TABLE` runs the submitted rename for the operator
+  who has coordinated the deploy.
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.
