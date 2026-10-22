@@ -99,6 +99,12 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 			if ps.Disposition != router.DispositionExecute {
 				continue
 			}
+			// Only the native route's steps run through the sequence
+			// executor; a copy-and-swap statement has none, since the
+			// engine builds its shadow from the statement itself.
+			if ps.Route != planner.RouteNative {
+				continue
+			}
 			v, refused, admitErr := migrate.AdmitRoutedSteps(st, ps.ExecSQL)
 			if admitErr != nil {
 				return admitErr
