@@ -101,9 +101,12 @@ corpus is shared across phases and **never shrinks to make a phase land**.
 
 #### Test harness
 
-`internal/testutil` provides a fixed workload table with identity and unique keys,
-numeric and TOAST-able values, and timestamps. Its seeded load generator runs inserts,
-updates, deletes, and transactional unique-key swaps while a copy is active. The
+`internal/testutil` provides a workload table with identity and unique keys,
+numeric and TOAST-able values, and timestamps. Its shape is fixed except for what
+`WorkloadShape` varies, such as an `integer` identity key for a test that retypes the
+key. Its seeded load generator runs inserts, updates, deletes, and transactional
+unique-key swaps while a copy is active, and `Snapshot` reads what it has committed so
+far without stopping it, so a test can prove a write landed inside a phase. The
 convergence oracle implements TM-5 with a typed symmetric difference computed in a
 single read-only `REPEATABLE READ` snapshot, so both directions and both row counts
 describe the same instant. It can ignore columns that a test deliberately excludes,

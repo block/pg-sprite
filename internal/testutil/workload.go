@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -15,7 +16,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// WorkloadTable is the fixed-shape table used by copy convergence tests.
+// WorkloadTable is the table copy convergence tests run on: one shape,
+// with the few variations WorkloadShape allows.
 type WorkloadTable struct {
 	Schema string
 	Table  string
@@ -162,6 +164,11 @@ type Summary struct {
 	Races       int
 	InsertedIDs []int64
 	DeletedIDs  []int64
+}
+
+// Committed returns how many mutations of every kind committed.
+func (s Summary) Committed() int {
+	return s.Inserts + s.Updates + s.Deletes + s.UniqueMoves + s.KeyMoves
 }
 
 // LoadGenerator owns running workload workers.
@@ -362,6 +369,18 @@ func (g *LoadGenerator) fail(err error) {
 	if g.err == nil {
 		g.err = err
 	}
+}
+
+// Snapshot returns the summary accumulated so far and leaves the workers
+// running, so a test can mark how much the load had committed when it
+// observed some point in the run under test.
+func (g *LoadGenerator) Snapshot() Summary {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	s := g.summary
+	s.InsertedIDs = slices.Clone(s.InsertedIDs)
+	s.DeletedIDs = slices.Clone(s.DeletedIDs)
+	return s
 }
 
 // Stop promptly cancels workers and waits a bounded time for completion. It
