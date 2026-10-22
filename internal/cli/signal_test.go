@@ -28,6 +28,7 @@ func TestFirstSignalCancelsTheContextAndKeepsTheProcessAlive(t *testing.T) {
 	}
 	assert.ErrorIs(t, ctx.Err(), context.Canceled, "callers branch on an ordinary cancellation")
 	assert.ErrorIs(t, context.Cause(ctx), errInterrupted)
+	assert.ErrorIs(t, context.Cause(ctx), context.Canceled, "a phase that returns the cause still reports a cancellation")
 	select {
 	case code := <-exited:
 		t.Fatalf("the first signal ended the process with %d; it must only cancel", code)

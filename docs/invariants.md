@@ -644,6 +644,11 @@ to `cutover` before it calls `Cutover`, and on resume hands a `cutover` row to `
 first, continuing at `DropOldTable` on a committed swap and back through verify and gate on
 `ErrNotSwapped` — a live run writes such a row back to `catching_up` before it reads its slot,
 so the resume inspection never meets a `cutover` row whose swap is known to have rolled back.
+A restart (`RunOptions.Restart`) answers a `cutover` row the same way before it discards
+anything: `Runner.refuseSwappedRestart` hands the row to `InspectSwapped`, refuses a committed
+swap — or one whose retained source is already gone — as `restart-swap-committed`, refuses any
+other answer with that answer's own cause, and discards the row only on `ErrNotSwapped`
+(refuses-a-committed-swap, refuses-a-cutover-row-the-catalog-does-not-answer-cleanly tests).
 Every attempt the
 catalog shows rolled back — a lock timeout, a drain error, a refusal inside the transaction, or
 a lost connection the inspection resolved — is reported wrapping `ErrCutoverRolledBack`, so a
@@ -849,8 +854,14 @@ JSON-encoded proof the row carries (`resume-row-mismatch` otherwise) — and ref
 under the shadow's name that no row records (`shadow-unrecorded`), since the row is the only
 record of which statement a shadow embodies, and a row whose swap has not committed and whose
 shadow no relation bears (`resume-shadow-gone`, in any phase from `copying` to a `cutover` whose swap
-rolled back), since the run can neither continue on it nor start over while the row stands; the
-refusal writes nothing, so a live row's slot stays with it for the operator to drop.
+rolled back), since the run can neither continue on it nor start over on its own while the row
+stands; the refusal writes nothing, so a live row's slot stays with it for the operator to drop.
+`RunOptions.Restart` is the operator's way to start over without those hand steps:
+`Runner.discardRow` discards the shadow, then the fence or the slot the row records, then the
+row — deleting only the row the run was shown — so a restart that stops partway leaves a row that
+still records what stands, and `Runner.discardUnrecorded` drops a shadow and any fence no row
+records; a done row is never discarded (stops-at-the-fence-leaves-the-row,
+does-not-discard-a-done-row tests).
 `TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
@@ -909,7 +920,11 @@ a slot of the derived name the run did not make is reported as the `*decode.Slot
 it is and left as found; a
 stopped run leaves the slot under its row, and the next `Run` reopens the stream from the
 row's position — a ceiling abort included, so the backlog is drained by resuming — or the
-operator abandons the run with `DropShadow`, `decode.DropSlot`, and `Store.Delete`; the slot
+operator abandons the run with `DropShadow`, `decode.DropSlot`, and `Store.Delete`, or has a
+restart (`RunOptions.Restart`) do the same sequence under the run's own lock, where
+`Runner.discardRow` drops a slot only when it is the target's derived name and refuses any other
+as `resume-row-mismatch` before discarding anything (refuses-a-row-naming-another-engine-slot
+test); the slot
 is dropped once the swap has committed, before the old table is settled, and a run resumed on
 a swapped row drops the slot it left too). Each runner refuses the other kind's row as
 `resume-row-decoding`: a quiesced target's run never creates a slot and refuses a row naming a

@@ -320,7 +320,9 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 // verification difference is wedged in PhaseVerifying until the operator
 // finds the cause, drops the shadow with DropShadow, takes the fence off
 // with DropWriteFence or drops the slot with decode.DropSlot, and deletes
-// the row; no Run goes back to the copy on its own. Every error is
+// the row, or runs the statement again with RunOptions.Restart, which
+// does those steps under the run's own lock; no Run without the restart
+// goes back to the copy. Every error is
 // returned as the step returned it, with a lost table lock reported as
 // shadow-lock-lost, and with the zero Result — except when the run is
 // complete and its done row saved and only the release of the lock

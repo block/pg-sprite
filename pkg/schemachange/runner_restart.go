@@ -22,8 +22,15 @@ import (
 // one to stop partway — the shadow first, then the fence or the slot,
 // then the row — so a row left standing still records a hold that is
 // gone or going, and a later restart meets each step as idempotent. The
-// row deleted is only the row this run was shown (ST-2).
+// row deleted is only the row this run was shown (ST-2). A row naming a
+// slot other than the target's derived name is refused before anything
+// is discarded, as a resume refuses it: it is not this target's run, and
+// its slot is not the restart's to drop (ST-3).
 func (r *Runner) discardRow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, cp checkpoint.Checkpoint) error {
+	// INV: ST-3 — a restart drops only the target's own slot.
+	if cp.SlotName != "" && cp.SlotName != target.DecodingName() {
+		return refuse(CauseResumeRowMismatch, nil, "checkpoint row for %s.%s names slot %s, the target's derived name is %s; a restart drops only the target's own slot", cp.Schema, cp.Table, cp.SlotName, target.DecodingName())
+	}
 	if cp.Phase == checkpoint.PhaseCutover {
 		if err := r.refuseSwappedRestart(ctx, pool, lock, cp); err != nil {
 			return err
@@ -64,17 +71,17 @@ func (r *Runner) refuseSwappedRestart(ctx context.Context, pool *pgxpool.Pool, l
 }
 
 // discardUnrecorded drops a relation under the target's shadow name that
-// no checkpoint row records, and takes the fence off a quiesced source,
-// so a restart starts fresh where a plain run would refuse the shadow as
-// shadow-unrecorded. No slot is touched: without a row nothing says a slot
-// of the derived name is this run's to drop (ST-3), and the reaper takes
-// an orphan of the engine's own.
+// no checkpoint row records, and takes any write fence off the source, so
+// a restart starts fresh where a plain run would refuse the shadow as
+// shadow-unrecorded. The fence is dropped whichever kind of run this one
+// is: a quiesced leftover's fence must not outlive a restart into a live
+// run, whose source keeps taking writes, and the drop is idempotent. No
+// slot is touched: without a row nothing says a slot of the derived name
+// is this run's to drop (ST-3), and the reaper takes an orphan of the
+// engine's own.
 func (r *Runner) discardUnrecorded(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget) error {
 	if err := r.discardShadow(ctx, pool, lock, target); err != nil {
 		return err
-	}
-	if target.DecodesWAL() {
-		return nil
 	}
 	return DropWriteFence(ctx, pool, lock, target, r.opts.Shadow)
 }
@@ -94,6 +101,7 @@ func (r *Runner) discardShadow(ctx context.Context, pool *pgxpool.Pool, lock *db
 // fence a quiesced row stands for. Which of the two is read from the row,
 // not from the target's proof: the row records what the stopped run made,
 // and a restart discards that whichever kind of run this one is.
+// discardRow has already refused a row whose slot is not the target's.
 func (r *Runner) discardHold(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, cp checkpoint.Checkpoint) error {
 	if cp.SlotName != "" {
 		return decode.DropSlot(ctx, r.cfg, pool, cp.SlotName)

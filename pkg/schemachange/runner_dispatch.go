@@ -281,9 +281,9 @@ func (r *Runner) resumeOnRow(ctx context.Context, pool *pgxpool.Pool, lock *dbco
 // which a fresh run would meet when it creates its own.
 func shadowGoneRemedy(cp checkpoint.Checkpoint) string {
 	if cp.SlotName == "" {
-		return "delete the row to start over"
+		return "delete the row to start over, or run the statement again with a restart"
 	}
-	return fmt.Sprintf("drop its slot %s and delete the row to start over", cp.SlotName)
+	return fmt.Sprintf("drop its slot %s and delete the row to start over, or run the statement again with a restart", cp.SlotName)
 }
 
 // checkQuiescedRow refuses a row the quiesced runner cannot act on: one in

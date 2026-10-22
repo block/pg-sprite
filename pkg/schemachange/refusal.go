@@ -175,9 +175,10 @@ const (
 	// swap has not committed — it is in copying, catching_up, reconciling,
 	// verifying, or a cutover whose swap rolled back — so the shadow it
 	// names should be there, and the run can neither continue on it nor
-	// start over while the row stands. Nothing is written: the row, and
-	// the slot a live row names, are left for the operator to drop and
-	// delete; ErrShadowNotFound is wrapped for errors.Is.
+	// start over on its own while the row stands. Nothing is written: the
+	// row, and the slot a live row names, are left for the operator to
+	// drop and delete, or for a restart (RunOptions.Restart) to discard;
+	// ErrShadowNotFound is wrapped for errors.Is.
 	CauseResumeShadowGone RefusalCause = "resume-shadow-gone"
 	// CauseResumeSlotForeign means the slot wearing the row's derived name
 	// is not this route's (ST-3): it is a physical slot, or a logical slot

@@ -2,7 +2,7 @@ package cli
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"os"
 	"os/signal"
 	"sync"
@@ -14,9 +14,11 @@ import (
 const exitCodeInterrupted = 128 + int(syscall.SIGINT)
 
 // errInterrupted is the cancellation cause recorded when an operator's
-// signal stops a run. The context still reports context.Canceled, so every
-// caller branching on ctx.Err() sees an ordinary cancellation.
-var errInterrupted = errors.New("interrupted by signal")
+// signal stops a run. It wraps context.Canceled, so a caller that reads
+// the cause (context.Cause) sees the same ordinary cancellation as one
+// that reads ctx.Err(), and the run's verdict is cancelled-by-caller
+// whichever phase the signal lands in.
+var errInterrupted = fmt.Errorf("interrupted by signal: %w", context.Canceled)
 
 // Interruptible derives a context that an operator's SIGINT or SIGTERM
 // cancels, and returns the stop function that releases the signal
