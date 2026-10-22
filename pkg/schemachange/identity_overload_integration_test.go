@@ -87,3 +87,31 @@ func TestBuildShadowReadsIdentitySequencesDespiteAPlantedEquality(t *testing.T) 
 		},
 	}}, built.IdentityColumns())
 }
+
+// The build renders each identity column's SET DEFAULT nextval(...) through
+// the server's format() on the same path, then executes the text it gets
+// back. A format(text, text[]) planted in the source schema matches the
+// call's argument types exactly and outranks the catalog's
+// format(text, VARIADIC "any"), even though pg_catalog is searched first.
+// This plant returns a harmless SELECT 1, so an unqualified call leaves the
+// shadow column without its default and the build refuses the handoff;
+// qualified, the catalog's format renders the statement and the build
+// records the handoff.
+func TestBuildShadowFormatsIdentityDefaultDespiteAPlantedFormat(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.widgets (
+			id  bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+			qty integer NOT NULL
+		)`)
+	f.exec(t, `
+		CREATE FUNCTION %s.format(text, text[]) RETURNS text LANGUAGE sql
+		AS 'SELECT ''SELECT 1''::pg_catalog.text'`)
+
+	built, err := f.build(t, "widgets", `ALTER TABLE %s.widgets ALTER COLUMN qty TYPE bigint`)
+
+	require.NoError(t, err)
+	require.Len(t, built.IdentityColumns(), 1)
+	assert.Equal(t, "id", built.IdentityColumns()[0].Column)
+	assert.Equal(t, "widgets_id_seq", built.IdentityColumns()[0].SequenceName)
+}

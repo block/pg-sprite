@@ -49,8 +49,9 @@ func Introspect(ctx context.Context, db *pgxpool.Pool, schema, table string) (Mo
 // so a caller that builds a relation and reads its model in one transaction
 // sees its own uncommitted DDL and leaves nothing behind if the read fails.
 // It sets the transaction-local search_path the same way Introspect does, so
-// decompiled definitions print unqualified; the caller's transaction keeps
-// that search_path until it ends.
+// decompiled definitions print unqualified. A successful read leaves the
+// transaction on a pg_catalog-only search_path, which the row-security read
+// sets last; a caller that needs another path afterwards sets it again.
 func IntrospectTx(ctx context.Context, tx pgx.Tx, schema, table string) (Model, error) {
 	return introspectInTx(ctx, tx, schema, table)
 }
