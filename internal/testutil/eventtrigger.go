@@ -54,6 +54,18 @@ var errEventTriggerDrainTimedOut = errors.New("event trigger drain timed out")
 // that may still hold the trigger in its event-trigger cache has ended
 // (see dropEventTrigger), which an inline DROP EVENT TRIGGER followed by
 // the function's drop — or the schema's cascade — does not.
+//
+// The function runs for every other test's DDL too, as whatever role that
+// DDL runs as, and such a role need not hold USAGE on schema. So the body
+// must not name schema in anything its IF condition evaluates: a
+// '<schema>.t'::regclass cast, to_regclass('<schema>.t') inside a
+// subquery, or a schema-qualified relation in a subquery's FROM is
+// resolved while the condition is planned, even when an earlier condition
+// is false, and raises "permission denied for schema" in the other test.
+// Find the test's objects by name in the catalogs (pg_namespace.nspname,
+// pg_class.relname) instead. Names in the THEN branch are safe: plpgsql
+// analyzes a statement only when it runs. A DDL trigger's body is held to
+// this at install, by a probe DDL run as a role without access to schema.
 func InstallEventTrigger(t *testing.T, pool *pgxpool.Pool, event TriggerEvent, schema, name, body string) {
 	t.Helper()
 	functionName := pgx.Identifier{schema, name}.Sanitize()
@@ -78,6 +90,43 @@ func InstallEventTrigger(t *testing.T, pool *pgxpool.Pool, event TriggerEvent, s
 		}
 		assert.NoError(t, err)
 	})
+	// A login trigger fires on a session's start, not on DDL, so the probe
+	// would not run its body.
+	if event != Login {
+		requireHarmlessToOtherRoles(t, pool, schema, name)
+	}
+}
+
+// requireHarmlessToOtherRoles runs one DDL statement as a throwaway role
+// with no access to schema, the way another test's DDL meets the trigger
+// schema.name, and fails the installing test when the trigger's body
+// breaks it. The statement runs in a transaction that is rolled back, so
+// the pooled connection keeps neither the role, its membership, nor the
+// temporary table. The session is granted membership first: a role that
+// created the throwaway role without being superuser holds only ADMIN on
+// it from PostgreSQL 16, and SET ROLE needs the SET option. Membership
+// runs from the session to the role, so the role gains no access. The
+// grantee is named, not written CURRENT_USER: Supabase's utility hook
+// crashes the backend on a GRANT to CURRENT_USER.
+func requireHarmlessToOtherRoles(t *testing.T, pool *pgxpool.Pool, schema, name string) {
+	t.Helper()
+	role := pgx.Identifier{NewRole(t, pool, "NOLOGIN")}.Sanitize()
+	tx, err := pool.Begin(t.Context())
+	require.NoError(t, err)
+	defer func() {
+		assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
+	}()
+	var session string
+	require.NoError(t, tx.QueryRow(t.Context(), "SELECT current_user").Scan(&session))
+	_, err = tx.Exec(t.Context(), "GRANT "+role+" TO "+pgx.Identifier{session}.Sanitize())
+	require.NoError(t, err)
+	_, err = tx.Exec(t.Context(), "SET LOCAL ROLE "+role)
+	require.NoError(t, err)
+	_, err = tx.Exec(t.Context(), `
+		CREATE TEMP TABLE pgsprite_event_trigger_probe (
+			x int
+		)`)
+	require.NoError(t, err, "event trigger %s.%s must not fail DDL run by a role without access to %s", schema, name, schema)
 }
 
 // RunDuringDDL installs an event trigger that executes sql from inside the
