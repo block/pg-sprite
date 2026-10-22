@@ -420,7 +420,9 @@ every pooled session drops a `pg_catalog` entry that another schema precedes (`p
 `unshadowCatalog`), and every path pg-sprite sets is built in `pkg/dbconn`, which applies the
 same rewrite: `LocalSearchPath` for a transaction, and `SessionSearchPath` with
 `RestoreSessionSearchPath` for a session-level statement such as a concurrent build. At the query layer, reads that run under a path pg-sprite did not set
-— the session's own — qualify every relation, function, operator, and type with `pg_catalog`.
+— the session's own — or under a path pg-sprite builds that lists a user schema — introspection's
+target schema then `public`, the shadow build's source schema then `public` — qualify every
+relation, function, operator, and type with `pg_catalog`.
 Only this layer closes overload ranking: even with `pg_catalog` searched first, function and
 operator resolution ranks candidates across every schema on the path, so an exact-type overload
 planted in a schema the path lists (`pg_total_relation_size(oid)` against the catalog's
@@ -430,7 +432,9 @@ not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary ob
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
 *Enforced:* `pkg/dbconn` (session hook, the path builders, and the test that keeps them the only
 `search_path` writers under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
-`pkg/progress`, `pkg/schemadiff`, `pkg/preflight` (every proof read — the size guard, the
+`pkg/progress`, `pkg/schemadiff` (introspection qualifies every relation, function, operator, and
+type; lookalike functions and operators planted in the target schema, each proven to answer the
+unqualified call on introspection's path, do not change the model), `pkg/preflight` (every proof read — the size guard, the
 privilege probes, the absence, owned-name, and schema constraint-name reads, the add-column
 rewrite probe, and the copy-and-swap shape and environment facts — qualifies every function,
 relation, type, and operator, `IN` and `IS DISTINCT FROM`
@@ -475,10 +479,13 @@ the `format` call that renders the shadow's identity default qualify every funct
 type, and operator: a planted `oid = regclass` operator on the build's path that hides
 `pg_class` and sequences does not change their answers, one that matches everything does not
 make a re-pointed default read as the source sequence, and a planted `format(text, text[])` does
-not change the default the build sets. *Test
-obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with decoy catalog relations
-and functions in the schema) yields the same answer as
-the default path, per read site and per pooled session.
+not change the default the build sets. *Open:* `pkg/schemachange`'s policy read runs under the
+shadow build's path and leaves `pg_policy`, `unnest`, and `pg_get_userbyid` unqualified, so a
+lookalike in the source schema changes what the shadow build and the cutover gate read for the
+table's policies. *Test obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with
+decoy catalog relations and functions in the schema) yields the same answer as the default
+path, per read site and per pooled session; and on a path pg-sprite builds that lists a user
+schema, a lookalike planted there that answers the unqualified call does not change the read.
 
 ## Locking and concurrency (LK)
 
