@@ -436,7 +436,14 @@ catalog implicitly do not change an answer), `pkg/schemachange` (the dependent r
 shadow's and source's indexes and extended statistics the cutover gate pairs, and the taken
 relation and constraint names — qualify every function, relation, type, and operator; planted
 `generate_series`, `unnest`, `array_to_string`, `to_jsonb`, and `||` overloads on a path that
-lists the source schema do not change the indexes or statistics read), and `pkg/checksum` (the column-type read, the relation check,
+lists the source schema do not change the indexes or statistics read), `pkg/migrate`
+(`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
+acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
+`to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
+a planted `oid = regclass` operator on a path that lists the catalog implicitly, and decoy
+`pg_class`, `pg_namespace`, `pg_index`, `to_regclass`, `quote_ident`, `oid = oid`, and `text` on a
+shadowing `<schema>, pg_catalog` path, do not change either answer — the replica identity read
+the executor runs for an accepted `DROP INDEX` is `pkg/executor`'s), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
@@ -457,12 +464,7 @@ widened copy trusts the source schema and `public` not to gain, during the run, 
 operator that fits an unqualified name in the expression better than the one the build
 resolved; nothing records what the build resolved, and a copy a concurrent `CREATE FUNCTION`
 redirected reads as divergence at verification, not before. The copier's cuts and
-measurements, and every conversion-free copy, pass, and flush, keep the catalog alone.
-`pkg/migrate` qualifies both catalog reads it makes on the caller's session — the unqualified-target
-resolve and the accept-blocking acknowledgement's locked-table lookup — with `pg_catalog.` on every
-function, relation, type, and operator (a planted `oid = regclass` operator on a path that lists the
-catalog implicitly does not change either answer); `to_regclass` still resolves the bare name on
-the session's path, which is the caller's intent. *Test
+measurements, and every conversion-free copy, pass, and flush, keep the catalog alone. *Test
 obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with decoy catalog relations
 and functions in the schema) yields the same answer as
 the default path, per read site and per pooled session.
