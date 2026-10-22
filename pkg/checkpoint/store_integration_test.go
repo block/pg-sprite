@@ -467,6 +467,52 @@ func TestSaveRefusesToOverwriteAnotherStatementsRow(t *testing.T) {
 	assert.Equal(t, int64(1), f.rowCount(t))
 }
 
+// A Save for a target whose row a newer engine of the same format left in
+// a phase this engine does not know is refused on MismatchPhase, even
+// though the identity agrees, and leaves the row exactly as it was (ST-2):
+// only the engine that knows the phase may move the row out of it.
+// Delete of the identity the refusal carries is still the fresh start.
+func TestSaveRefusesToOverwriteARowInAnUnknownPhase(t *testing.T) {
+	f := newStoreFixture(t)
+	f.ensure(t)
+	lock := f.ordersLock(t)
+	original := ordersCheckpoint()
+	require.NoError(t, f.store.Save(t.Context(), lock, original))
+	f.exec(t, `
+		UPDATE pgsprite.pgsprite_checkpoint
+		SET phase = 'settling',
+			watermark = 2000
+		WHERE schema_name = 'app'
+			AND table_name = 'orders'`)
+
+	resumed := ordersCheckpoint()
+	resumed.Phase = checkpoint.PhaseVerifying
+	err := f.store.Save(t.Context(), lock, resumed)
+	var incompatible *checkpoint.IncompatibleError
+	require.ErrorAs(t, err, &incompatible)
+	assert.Equal(t, &checkpoint.IncompatibleError{
+		Schema: "app", Table: "orders", Mismatch: checkpoint.MismatchPhase, Have: "settling",
+		Want:   "copying, catching_up, reconciling, verifying, cutover, done, failed",
+		Stored: original.Identity(),
+	}, incompatible)
+
+	var phase string
+	var watermark int64
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT phase, watermark
+		FROM pgsprite.pgsprite_checkpoint
+		WHERE schema_name = 'app'
+			AND table_name = 'orders'`).Scan(&phase, &watermark))
+	assert.Equal(t, "settling", phase, "the refused save left the newer engine's phase")
+	assert.Equal(t, int64(2000), watermark, "and the rest of its row")
+
+	require.NoError(t, f.store.Delete(t.Context(), lock, "app", "orders", incompatible.Stored))
+	require.NoError(t, f.store.Save(t.Context(), lock, resumed))
+	got, err := f.store.Load(t.Context(), "app", "orders", resumed.Fingerprints())
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.PhaseVerifying, got.Phase)
+}
+
 // Delete removes only the row the caller was shown (ST-2): a row another
 // statement wrote after the caller read its IncompatibleError is not the
 // one it agreed to discard, so the row stays and the caller is shown the

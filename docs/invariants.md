@@ -420,7 +420,9 @@ every pooled session drops a `pg_catalog` entry that another schema precedes (`p
 `unshadowCatalog`), and every path pg-sprite sets is built in `pkg/dbconn`, which applies the
 same rewrite: `LocalSearchPath` for a transaction, and `SessionSearchPath` with
 `RestoreSessionSearchPath` for a session-level statement such as a concurrent build. At the query layer, reads that run under a path pg-sprite did not set
-— the session's own — qualify every relation, function, operator, and type with `pg_catalog`.
+— the session's own — or under a path pg-sprite builds that lists a user schema — introspection's
+target schema then `public`, the shadow build's source schema then `public` — qualify every
+relation, function, operator, and type with `pg_catalog`.
 Only this layer closes overload ranking: even with `pg_catalog` searched first, function and
 operator resolution ranks candidates across every schema on the path, so an exact-type overload
 planted in a schema the path lists (`pg_total_relation_size(oid)` against the catalog's
@@ -430,7 +432,9 @@ not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary ob
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
 *Enforced:* `pkg/dbconn` (session hook, the path builders, and the test that keeps them the only
 `search_path` writers under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
-`pkg/progress`, `pkg/schemadiff`, `pkg/preflight` (every proof read — the size guard, the
+`pkg/progress`, `pkg/schemadiff` (introspection qualifies every relation, function, operator, and
+type; lookalike functions and operators planted in the target schema, each proven to answer the
+unqualified call on introspection's path, do not change the model), `pkg/preflight` (every proof read — the size guard, the
 privilege probes, the absence, owned-name, and schema constraint-name reads, the add-column
 rewrite probe, and the copy-and-swap shape and environment facts — qualifies every function,
 relation, type, and operator, `IN` and `IS DISTINCT FROM`
@@ -471,10 +475,20 @@ widened copy trusts the source schema and `public` not to gain, during the run, 
 operator that fits an unqualified name in the expression better than the one the build
 resolved; nothing records what the build resolved, and a copy a concurrent `CREATE FUNCTION`
 redirected reads as divergence at verification, not before. The copier's cuts and
-measurements, and every conversion-free copy, pass, and flush, keep the catalog alone. *Test
-obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with decoy catalog relations
-and functions in the schema) yields the same answer as
-the default path, per read site and per pooled session.
+measurements, and every conversion-free copy, pass, and flush, keep the catalog alone. In
+`pkg/schemachange`, the identity and owned-sequence handoff reads (`readIdentityColumns`,
+`readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the identity `setval`, and
+the `format` call that renders the shadow's identity default qualify every function, relation,
+type, and operator: a planted `oid = regclass` operator on the build's path that hides
+`pg_class` and sequences does not change their answers, one that matches everything does not
+make a re-pointed default read as the source sequence, and a planted `format(text, text[])` does
+not change the default the build sets. *Open:* `pkg/schemachange`'s policy read runs under the
+shadow build's path and leaves `pg_policy`, `unnest`, and `pg_get_userbyid` unqualified, so a
+lookalike in the source schema changes what the shadow build and the cutover gate read for the
+table's policies. *Test obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with
+decoy catalog relations and functions in the schema) yields the same answer as the default
+path, per read site and per pooled session; and on a path pg-sprite builds that lists a user
+schema, a lookalike planted there that answers the unqualified call does not change the read.
 
 ## Locking and concurrency (LK)
 
@@ -834,11 +848,15 @@ a fresh start — and for (c) retries through transient errors (what `dbconn.Ret
 server ended from outside it, `57P01`/`57P02`/`57P03`, which only a read may safely repeat) under bounded attempts
 before returning an error that is neither `ErrNotFound` nor incompatible; `ErrNotFound` is
 returned only for a completed read that found no row, and a database where the checkpoint table
-was never created is the typed `ErrTableMissing`, never `ErrNotFound`. `Store.Inspect` is the
-same read guarded on the row format alone, for the resume that must read the row's proof and
+was never created is the typed `ErrTableMissing`, never `ErrNotFound`. The phase set grows within
+a row format without a `FormatVersion` bump, so a row a newer engine of the same format left in a
+phase this one does not know is the same typed `IncompatibleError`, on `MismatchPhase`, judged after
+the identity and carrying it for `Delete` — never `ErrInvariantViolation`, which is kept for a row
+no `Save` could have written. `Store.Inspect` is the
+same read guarded on the row format and the phase alone, for the resume that must read the row's proof and
 phase before it knows which statement it is resuming; it widens only the read. `Store.Save` applies the
 same identity guard on the write path, so a run can never write its state over another
-statement's row, and it treats the row's shadow proof as write-once: a save without a proof
+statement's row or over a row in a phase it does not know, and it treats the row's shadow proof as write-once: a save without a proof
 keeps the one the row holds, a save with the same proof is accepted, and a save with a
 different proof is `ErrInvariantViolation` and leaves the row unchanged, because a different
 shadow is a fresh start and a fresh start goes through `Delete`; `Delete` is the explicit fresh start, and it removes only the row whose
@@ -868,9 +886,11 @@ does-not-discard-a-done-row tests).
 `TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
+`TestLoadReportsAnUnknownPhaseAsIncompatible`,
 `TestInspectReturnsTheRowWhateverStatementWroteIt`,
 `TestInspectReportsNotFoundMissingTableAndAnotherFormat`,
-`TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestSaveThenLoadRoundTripsTheShadowProof`,
+`TestSaveRefusesToOverwriteAnotherStatementsRow`, `TestSaveRefusesToOverwriteARowInAnUnknownPhase`,
+`TestSaveThenLoadRoundTripsTheShadowProof`,
 `TestSaveWithoutAProofDoesNotEraseTheRowsProof`, `TestProofSurvivesTheCheckpointStore`,
 `TestDeleteRefusesARowTheCallerWasNotShown`,
 `TestWritesAndReadsWithoutEnsureReportTheMissingTable`,
@@ -905,8 +925,9 @@ the store's pool and proven to be on its cluster and database, so the holder's o
 in) that a run claiming the slot holds while it makes the slot and commits the row that names
 it, so a run that claimed it since the pass began keeps it and one claiming it now waits for
 the drop and creates afresh; a slot no row in a non-terminal phase
-names is dropped through `DropIdleSlot`,
-publication and all, which refuses a held slot instead of waiting for its holder — whether a
+names — terminal means `done` or `failed` by name, so a row a newer engine left in a phase this
+one does not know keeps its slot (`TestReapOrphanSlotsKeepsASlotARowInAnUnknownPhaseNames`) —
+is dropped through `DropIdleSlot`, publication and all, which refuses a held slot instead of waiting for its holder — whether a
 slot is held is judged at the drop, since `pg_replication_slots` reads shared memory, not a
 snapshot; a slot a live row names, a slot a process holds, and a name wearing the prefix
 without the engine's shape are reported and left; a database whose checkpoint table does not

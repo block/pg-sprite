@@ -88,7 +88,7 @@ the integration phase starts; they drift.)
 | `Volume` | map 1–11 onto chunk-time target / parallelism / throttle |
 | `Revert` / `SkipRevert` | decline for the copy-and-swap path (like Spirit); only the expand/contract backend could honour them |
 
-Connect through `dbconn.NewPool`, as `Plan` and `Apply` do: a pool from `dbconn.NewPool` drops a shadowing `pg_catalog` search_path entry on every session, while any other pool relies on each read being `pg_catalog`-qualified ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)).
+Connect through `dbconn.NewPool`, as `Plan` and `Apply` do: a pool from `dbconn.NewPool` drops a shadowing `pg_catalog` search_path entry on every session, while any other pool relies on each read being `pg_catalog`-qualified ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)). Either way, a read that runs under a path pg-sprite builds that lists the application schema is only as safe as its own qualification; CO-9 lists the reads that are not qualified yet.
 
 A refusal is a first-class planning verdict, not a delegation fallback: it includes the reason,
 notes that copy-and-swap support arrives in later phases, and names a safer native alternative
@@ -388,7 +388,7 @@ slot on its way there.
 ### Routing the checkpoint store's own refusals
 
 Before `Load` can be guarded on the statement's fingerprints, the resume reads the row with
-`checkpoint.Store.Inspect`, guarded on the row format alone, because the row's phase and
+`checkpoint.Store.Inspect`, guarded on the row format and the phase alone, because the row's phase and
 shadow proof are what tell it which statement it is resuming. `Inspect`, `Load`, and `Save`
 share a set of typed errors about the table and the row format that are about the engine
 installation, not the run, and each means a different action:
@@ -400,6 +400,7 @@ installation, not the run, and each means a different action:
 | `ErrTableNewer` (`*checkpoint.TableNewerError`, `Unknown` naming the columns) | The table carries columns this engine does not know: a newer engine shaped it, or an operator added a column by hand. `Ensure` ran no DDL | Operator action — run the newer engine, roll the table back to this engine's shape, or drop the hand-added column; retrying this engine cannot succeed while the columns are there |
 | `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion < checkpoint.FormatVersion` | The row was written by an older engine whose row format this engine does not read | Operator action: finish or abandon the old run. When no run is in flight, `Store.Delete(Stored)` is the fresh start; the row is never silently rewritten |
 | `*IncompatibleError` with `Mismatch == MismatchFormat` and `Stored.FormatVersion > checkpoint.FormatVersion` | The row was written by a newer engine | Upgrade the engine; this one must not touch the row |
+| `*IncompatibleError` with `Mismatch == MismatchPhase` | The row stands in a phase this engine has no name for (`Have` is the stored name, `Want` the names this engine knows): a newer engine of the same row format wrote it, since the phase set only grows within a format | Upgrade the engine, or finish the run with the engine that started it. This engine must not touch the row: `Save` refuses it the same way, and a restart (`--restart`, `RunOptions.Restart`) cannot clear it, since the refusal comes before any discard. Abandoning the run by hand needs more than the row, and this engine cannot tell from an unknown phase whether the newer engine's swap already committed: if no relation bears the shadow's name, the swap may have committed — a retained `_old` relation says it did — and the run is the newer engine's to finish. Otherwise, with no run in flight, `DropShadow` the shadow, `decode.DropSlot` the row's slot or `DropWriteFence` a fenced source, as for `resume-shadow-gone`, and only then `Store.Delete(Stored)` |
 
 Releases through v0.3.3 write format 2, whose model fingerprints leave out the table's
 storage parameters and its columns' sequence declarations. A copy-and-swap run in flight across the upgrade to format 3 surfaces as
