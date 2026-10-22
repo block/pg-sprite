@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -59,7 +60,7 @@ func Main(args []string, version string, stdout, stderr io.Writer) (code int) {
 		return reportParseError(parser, err)
 	}
 
-	err = kctx.Run()
+	err = runInterruptible(kctx)
 	// A refusal verdict was already printed; its exit code is distinct from
 	// operational errors so automation can branch on the difference.
 	//
@@ -76,6 +77,19 @@ func Main(args []string, version string, stdout, stderr io.Writer) (code int) {
 		return exitFailed
 	}
 	return 0
+}
+
+// runInterruptible runs the parsed command under a context the operator's
+// SIGINT or SIGTERM cancels: the first signal lets the command stop on its
+// own terms (release locks, checkpoint, print its verdict), the second ends
+// the process. Offline commands take no context and are unaffected. The
+// signal handler is released when the command returns, before Main maps
+// the error to an exit code.
+func runInterruptible(kctx *kong.Context) error {
+	ctx, stop := Interruptible(context.Background())
+	defer stop()
+	kctx.BindTo(ctx, (*context.Context)(nil))
+	return kctx.Run()
 }
 
 // reportParseError writes the failing command's usage and the error to

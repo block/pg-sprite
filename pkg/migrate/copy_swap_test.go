@@ -99,7 +99,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Empty(t, v.Code, "a refusal is not a failure")
 	})
 
-	t.Run("a divergence is a failure whose remedy is to abandon the run", func(t *testing.T) {
+	t.Run("a divergence is a failure whose remedy is to start the run over", func(t *testing.T) {
 		divergence := &checksum.DivergenceError{Report: checksum.Report{Chunks: 3, Mismatches: []checksum.Mismatch{{}}}}
 		runErr := fmt.Errorf("run billing.orders: %w", divergence)
 		v, err := copySwapRunVerdict(st, false, runErr)
@@ -107,19 +107,19 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
 		assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
 		assert.Equal(t, "billing.orders", v.Table)
-		assert.Contains(t, v.Detail, "abandon the run")
-		assert.Contains(t, v.Detail, "drop the replication slot", "a live run's hold is its slot")
+		assert.Contains(t, v.Detail, "start the run over")
+		assert.Contains(t, v.Detail, "drops the replication slot", "a live run's hold is its slot")
 		assert.NotContains(t, v.Detail, "resumes")
 	})
 
 	t.Run("a quiesced divergence names the fence as the hold to release", func(t *testing.T) {
 		divergence := &checksum.DivergenceError{Report: checksum.Report{Chunks: 1, Mismatches: []checksum.Mismatch{{}}}}
 		v, _ := copySwapRunVerdict(st, true, divergence)
-		assert.Contains(t, v.Detail, "take the write fence off the source")
+		assert.Contains(t, v.Detail, "takes the write fence off the source")
 		assert.NotContains(t, v.Detail, "replication slot")
 	})
 
-	t.Run("a value the new type will not hold is a failure whose remedy is to abandon the run", func(t *testing.T) {
+	t.Run("a value the new type will not hold is a failure whose remedy is to start the run over", func(t *testing.T) {
 		// 22001 string_data_right_truncation: a varchar(10) retype over a
 		// longer value. The copy meets the same row on every rerun.
 		tooLong := &pgconn.PgError{Code: "22001", Message: "value too long for type character varying(10)"}
@@ -127,18 +127,18 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		v, err := copySwapRunVerdict(st, true, runErr)
 		assert.ErrorIs(t, err, runErr)
 		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
-		assert.Contains(t, v.Detail, "abandon the run")
-		assert.Contains(t, v.Detail, "take the write fence off the source", "a quiesced run's hold is its fence")
+		assert.Contains(t, v.Detail, "start the run over")
+		assert.Contains(t, v.Detail, "takes the write fence off the source", "a quiesced run's hold is its fence")
 		assert.NotContains(t, v.Detail, "resumes")
 	})
 
-	t.Run("a constraint the copied rows break is a failure whose remedy is to abandon the run", func(t *testing.T) {
+	t.Run("a constraint the copied rows break is a failure whose remedy is to start the run over", func(t *testing.T) {
 		// 23502 not_null_violation: a re-added NOT NULL column with no
 		// default fills from NULL on the first chunk.
 		notNull := &pgconn.PgError{Code: "23502", Message: "null value in column violates not-null constraint"}
 		v, _ := copySwapRunVerdict(st, false, fmt.Errorf("copy chunk: %w", notNull))
-		assert.Contains(t, v.Detail, "abandon the run")
-		assert.Contains(t, v.Detail, "drop the replication slot", "a live run's hold is its slot")
+		assert.Contains(t, v.Detail, "start the run over")
+		assert.Contains(t, v.Detail, "drops the replication slot", "a live run's hold is its slot")
 		assert.NotContains(t, v.Detail, "resumes")
 	})
 

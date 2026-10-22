@@ -169,6 +169,9 @@ func (o Options) validate() error {
 	if o.Force != "" && o.AcceptBlocking != "" {
 		return errors.New("migrate: Options.Force and Options.AcceptBlocking are mutually exclusive; a statement reaches one routing decision and one acknowledgement names it")
 	}
+	if o.CopySwap.Restart != "" && (o.Force != "" || o.AcceptBlocking != "") {
+		return errors.New("migrate: Options.CopySwap.Restart acknowledges a copy-and-swap run starting over, which Options.Force and Options.AcceptBlocking both route away from; name one acknowledgement")
+	}
 	return nil
 }
 
@@ -245,6 +248,11 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 			return verdict.Verdict{}, err
 		}
 	}
+	if opts.CopySwap.Restart != "" {
+		if err := checkRestartAck(st, opts.CopySwap.Restart); err != nil {
+			return verdict.Verdict{}, err
+		}
+	}
 
 	facts, err := LiveFacts(ctx, pool, st)
 	if err != nil {
@@ -262,6 +270,13 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 	rs := routed.Statements[0]
 	logger.Debug("statement routed",
 		"route", string(classified.Route), "disposition", string(rs.Disposition))
+
+	if opts.CopySwap.Restart != "" {
+		if err := checkRestartRoute(st, rs); err != nil {
+			return verdict.Verdict{}, err
+		}
+		auditRestart(opts.audit(), st)
+	}
 
 	switch rs.Disposition {
 	case router.DispositionExecute:

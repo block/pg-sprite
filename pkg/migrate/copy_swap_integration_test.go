@@ -98,6 +98,18 @@ func (f copySwapFixture) hasColumn(t *testing.T, table, column string) bool {
 	return exists
 }
 
+// columnType is the declared type of table's column as information_schema
+// reports it, the shape a retype through the front door changes.
+func (f copySwapFixture) columnType(t *testing.T, table, column string) string {
+	t.Helper()
+	var typ string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT data_type FROM information_schema.columns
+		WHERE table_schema = $1 AND table_name = $2 AND column_name = $3`,
+		f.schema, table, column).Scan(&typ))
+	return typ
+}
+
 func (f copySwapFixture) relationExists(t *testing.T, table string) bool {
 	t.Helper()
 	var exists bool

@@ -66,6 +66,20 @@ type RunOptions struct {
 	// remedy in the detail, as every done row is when this is false. A
 	// failed row and a live row are never replaced.
 	ReplaceDone bool
+	// Restart lets a Run that meets a row before its swap committed — the
+	// record of a run on the table that stopped — discard what that run
+	// left, inside its own lock session, and start fresh: the shadow is
+	// dropped, the write fence taken off a quiesced source or the slot
+	// dropped for a live one, and the row deleted, in that order, so a
+	// restart that stops partway leaves a row that still records what
+	// stands. A relation under the shadow's name with no row to record it
+	// is dropped the same way instead of being refused as
+	// shadow-unrecorded. The one row a restart will not discard is a
+	// cutover row whose swap the catalog shows committed: the change is
+	// past the point of starting over, so the run is refused as
+	// restart-swap-committed and the row is finished by a Run without
+	// this set. A done row is governed by ReplaceDone, not by this.
+	Restart bool
 	// CheckpointInterval is how often the copy in progress saves its
 	// landed watermark, so a run that stops mid-copy resumes from the last
 	// save rather than from the start (TM-3). Zero means the default.
@@ -306,7 +320,9 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 // verification difference is wedged in PhaseVerifying until the operator
 // finds the cause, drops the shadow with DropShadow, takes the fence off
 // with DropWriteFence or drops the slot with decode.DropSlot, and deletes
-// the row; no Run goes back to the copy on its own. Every error is
+// the row, or runs the statement again with RunOptions.Restart, which
+// does those steps under the run's own lock; no Run without the restart
+// goes back to the copy. Every error is
 // returned as the step returned it, with a lost table lock reported as
 // shadow-lock-lost, and with the zero Result — except when the run is
 // complete and its done row saved and only the release of the lock

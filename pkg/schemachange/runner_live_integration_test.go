@@ -326,3 +326,45 @@ func TestRunnerLiveRowWhoseShadowIsGoneIsRestartedByDroppingItsSlotAndRow(t *tes
 	require.NoError(t, err, "the next run builds a fresh shadow and slot")
 	f.assertLiveDone(t, result)
 }
+
+// The same leftover under RunOptions.Restart needs no hand steps: the
+// restart reads the slot the row names, drops it along with the row —
+// the shadow is already gone, which a restart treats as already
+// discarded — and the change runs fresh on a new shadow and a new slot,
+// all inside the restart's own lock session.
+func TestRunnerLiveRestartDiscardsTheRowAndItsSlot(t *testing.T) {
+	f := newDecodingFixture(t, 100)
+	stop := &stopAfter{phase: checkpoint.PhaseCopying}
+	_, err := f.runLive(t, schemachange.RunOptions{AfterCheckpoint: stop.hook})
+	require.ErrorIs(t, err, errStopHere)
+	row, err := f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
+	require.NoError(t, err)
+	_, err = f.pool.Exec(t.Context(), `DROP TABLE `+pgx.Identifier{f.table.Schema, row.ShadowTable}.Sanitize())
+	require.NoError(t, err)
+	_, found, err := decode.InspectSlot(t.Context(), f.pool, row.SlotName)
+	require.NoError(t, err)
+	require.True(t, found, "the stopped run's slot stands")
+
+	result, err := f.runLive(t, schemachange.RunOptions{Restart: true})
+	require.NoError(t, err, "the restart discards the leftover and runs the change")
+	f.assertLiveDone(t, result)
+}
+
+// A live run that stopped partway and whose shadow still stands is
+// discarded whole by a restart — shadow, slot, and row — and the change
+// runs fresh on a shadow of its own.
+func TestRunnerLiveRestartDiscardsAStoppedRunWhole(t *testing.T) {
+	f := newDecodingFixture(t, 100)
+	stop := &stopAfter{phase: checkpoint.PhaseCopying}
+	_, err := f.runLive(t, schemachange.RunOptions{AfterCheckpoint: stop.hook})
+	require.ErrorIs(t, err, errStopHere)
+	row, err := f.store.Inspect(t.Context(), f.table.Schema, f.table.Table)
+	require.NoError(t, err)
+	var stoppedShadowOID uint32
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT $1::regclass::oid`, pgx.Identifier{f.table.Schema, row.ShadowTable}.Sanitize()).Scan(&stoppedShadowOID))
+
+	result, err := f.runLive(t, schemachange.RunOptions{Restart: true})
+	require.NoError(t, err)
+	f.assertLiveDone(t, result)
+	assert.NotEqual(t, stoppedShadowOID, result.Shadow.ShadowOID, "the restart built a shadow of its own")
+}
