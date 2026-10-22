@@ -81,7 +81,8 @@ routed to provisioning and never to the data change runner.
 | `not-native-safe-table-too-large` | The size policy prevents a blind bounded attempt | `environmental` | — |
 | `insufficient-privileges` | The connected role lacks a required grant | `environmental` | — |
 | `not-native-safe-budget-exceeded` | The lock or statement budget cancels an attempt | `environmental` | — |
-| `not-native-safe-rewrite-required` | The planner cannot construct the required safer sequence | `capability-boundary` | — |
+| `not-native-safe-rewrite-required` | The submitted form blocks the table and the planner cannot construct the required safer sequence | `capability-boundary` | — |
+| `not-native-safe-rewrite-required` | A `RENAME COLUMN` or `RENAME TO` (`app-breaking-rename`): no SQL exists to substitute, and the deliberate path is the `guidance` rollout and then the statement under `--force` | `by-design` | — |
 | `backend-unavailable` | The plan routes to copy-and-swap for an operation the engine does not carry yet | `capability-boundary` | — |
 | `destructive-change` | Desired-state execution will not infer permission to discard live structure | `by-design` | — |
 | `plan-fingerprint-mismatch` | The recomputed plan is not the reviewed plan | `environmental` | — |

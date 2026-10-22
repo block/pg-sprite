@@ -293,11 +293,78 @@ func TestRunDispatch(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+		assert.Equal(t, verdict.ClassByDesign, v.Class, "no SQL exists to substitute, so the refusal is by design, not a missing capability")
 		assert.Equal(t, suggest.GuidanceExpandContractColumn, v.Guidance)
 		assert.False(t, v.Forced)
 
 		assert.True(t, columnExists(t, pool, schema, "users", "name"), "the refused rename must not touch the schema")
 		assert.False(t, columnExists(t, pool, schema, "users", "full_name"))
+	})
+
+	t.Run("refuses a table rename, and runs it only when the override names the table as it is now", func(t *testing.T) {
+		// RENAME TO breaks every instance still querying the old table name.
+		// Unforced, it is refused by design with the coordinated-rename
+		// guidance. The override must name the table as it exists before
+		// the rename: naming the new name is a mismatch and runs nothing.
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %s.users (
+				id int PRIMARY KEY
+			)`, schema))
+		require.NoError(t, err)
+		rename := fmt.Sprintf("ALTER TABLE %s.users RENAME TO accounts", schema)
+
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, rename), runOptions())
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonRewriteRequired, v.Reason)
+		assert.Equal(t, verdict.ClassByDesign, v.Class)
+		assert.Equal(t, suggest.GuidanceCoordinatedTableRename, v.Guidance)
+
+		opts := runOptions()
+		opts.Force = schema + ".accounts"
+		_, err = migrate.Run(t.Context(), pool, parseOne(t, rename), opts)
+		require.Error(t, err, "the acknowledgement names the new name, not the table as it exists now")
+		assert.True(t, tableExists(t, pool, schema, "users"))
+		assert.False(t, tableExists(t, pool, schema, "accounts"))
+
+		opts.Force = schema + ".users"
+		v, err = migrate.Run(t.Context(), pool, parseOne(t, rename), opts)
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+		assert.True(t, v.Forced)
+		assert.False(t, tableExists(t, pool, schema, "users"))
+		assert.True(t, tableExists(t, pool, schema, "accounts"))
+	})
+
+	t.Run("refuses a forced rename on a table above the size threshold", func(t *testing.T) {
+		// The override does not lift the size guard: on a table above
+		// MaxTableSizeBytes the forced rename is refused as table-too-large
+		// and nothing runs. The threshold is lowered so a small table is
+		// over it.
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %s.users (
+				id   int PRIMARY KEY,
+				name text
+			)`, schema))
+		require.NoError(t, err)
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+			INSERT INTO %s.users
+			SELECT g, repeat('x', 500)
+			FROM generate_series(1, 5000) g`, schema))
+		require.NoError(t, err)
+
+		opts := runOptions()
+		opts.MaxTableSizeBytes = 1024
+		opts.Force = schema + ".users"
+		v, err := migrate.Run(t.Context(), pool,
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.users RENAME COLUMN name TO full_name", schema)), opts)
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonTableTooLarge, v.Reason)
+		assert.True(t, v.Forced)
+		assert.True(t, columnExists(t, pool, schema, "users", "name"), "the refused rename must not touch the schema")
 	})
 
 	t.Run("runs the acknowledged rename as-is", func(t *testing.T) {

@@ -92,7 +92,9 @@ func TestRouteAppBreakingRenameFailsClosed(t *testing.T) {
 }
 
 // An index rename is invisible to applications — queries name tables and
-// columns, not indexes — so it stays metadata-only and executes as submitted.
+// columns, not indexes — so the router keeps it metadata-only and executable
+// as submitted. migrate's imperative front door does not admit ALTER INDEX,
+// so through migrate the statement is refused as unsupported-statement first.
 func TestRouteIndexRenameExecutes(t *testing.T) {
 	plan := classify(t, "ALTER INDEX i RENAME TO i2")
 	require.Len(t, plan.Decisions, 1)

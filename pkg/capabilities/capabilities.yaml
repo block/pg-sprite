@@ -128,15 +128,16 @@ rows:
   - id: rename-column-rename-table
     area: "column_changes"
     operation: "`RENAME COLUMN` / `RENAME TABLE`"
-    tier: "t1"
-    status_mark: "✅"
-    engine_path: "native_as_is"
+    tier: "t3"
+    status_mark: "❌"
+    engine_path: "none"
     online_safety_problem: true
+    online_safety_detail: "the hazard is to the application, and no SQL exists for `migrate` to substitute"
     front_doors:
       migrate: refused
       diff: not_applicable
     refusal_reason: not-native-safe-rewrite-required
-    reason_notes: "Metadata-only for PostgreSQL but **app-breaking** across deployed instances: code still using the old name breaks the instant the rename commits, and no safer SQL exists to substitute. Without `--force`, `migrate` refuses it as `rewrite-required` with the `expand-contract-column` or `coordinated-table-rename` guidance (and `lint` reports it at error severity). `--force SCHEMA.TABLE` runs the rename as submitted under bounded budgets and records the override. A desired file cannot express a rename — `diff` shows a renamed column as a drop and an add"
+    reason_notes: "Metadata-only for PostgreSQL but **app-breaking** across deployed instances: code still using the old name breaks the instant the rename commits, and no safer SQL exists to substitute. Without `--force`, `migrate` refuses it as `rewrite-required`, class `by-design`, with the `expand-contract-column` or `coordinated-table-rename` guidance (and `lint` reports it at error severity). `--force SCHEMA.TABLE` runs the rename as submitted under bounded budgets and records the override; above `--max-table-size` the forced rename is refused as `not-native-safe-table-too-large`. A desired file cannot express a rename — `diff` shows a renamed column as a drop and an add"
   - id: set-tablespace
     area: "column_changes"
     operation: "`SET TABLESPACE`"

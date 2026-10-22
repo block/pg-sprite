@@ -161,7 +161,7 @@ func rewriteRequiredRefusalText(ps plan.Statement) string {
 			continue
 		}
 		if d.Reason == planner.ReasonAppBreakingRename {
-			return "refused — breaks every running application instance that still uses the old name the moment it commits; roll the rename out as separate steps the application can follow, or run it as written with --force naming the table"
+			return "refused — breaks every running application instance that still uses the old name the moment it commits; roll the rename out as separate steps the application can follow, or run it as written with --force naming the table, which stays under the --max-table-size guard"
 		}
 		break
 	}
@@ -214,14 +214,15 @@ func writeRefusalClass(w *stickyWriter, ps plan.Statement) {
 }
 
 // decisionSeverity maps one operation's classification to its diagnostic
-// severity: note when the submitted form is safe to run, warning when it is
-// unsafe or app-breaking as written, and note on a refused statement, where
-// the leading error diagnostic already carries the severity.
+// severity: note when the submitted form is safe to run, warning when an
+// executable statement's submitted form is unsafe as written, and note on
+// a refused statement — an app-breaking rename among them — where the
+// leading error diagnostic already carries the severity.
 func decisionSeverity(ps plan.Statement, d planner.Decision) string {
 	if ps.Disposition != router.DispositionExecute {
 		return "note"
 	}
-	if d.Reason == planner.ReasonSaferIdiom || d.Reason == planner.ReasonAppBreakingRename {
+	if d.Reason == planner.ReasonSaferIdiom {
 		return "warning"
 	}
 	return "note"

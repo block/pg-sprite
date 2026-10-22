@@ -496,7 +496,10 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		// above: ordinary SQL names tables and columns, not indexes. An
 		// index that backs a constraint is the exception — renaming it
 		// renames the constraint, which ON CONFLICT ON CONSTRAINT names —
-		// and is not told apart here.
+		// and is not told apart here. That exception is latent: migrate's
+		// imperative front door admits only ALTER TABLE and CREATE INDEX,
+		// so ALTER INDEX ... RENAME TO is refused there as
+		// unsupported-statement before it reaches this classification.
 		d.Route, d.Reason = RouteNative, ReasonAppBreakingRename
 
 	case statement.OpAlterColumnType:
