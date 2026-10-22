@@ -200,6 +200,16 @@ func TestCopyAndSwapStopsWhenEitherSideCannotBeIdentified(t *testing.T) {
 		FROM PUBLIC`)
 	require.NoError(t, err)
 	role := testutil.NewRole(t, d.pool, "LOGIN PASSWORD 'unidentified'")
+	// A session that does not own the function, as on a managed server whose
+	// test user is not superuser, revokes nothing and is only warned, so the
+	// role can still be identified and there is nothing to test.
+	var identifiable bool
+	require.NoError(t, d.pool.QueryRow(t.Context(), `
+		SELECT pg_catalog.has_function_privilege($1, 'pg_catalog.pg_control_system()', 'EXECUTE')`,
+		role).Scan(&identifiable))
+	if identifiable {
+		t.Skip("this session cannot revoke pg_control_system() from PUBLIC")
+	}
 	t.Cleanup(func() {
 		// The role owns the table by then; its drop needs nothing left
 		// behind. Cleanups run in reverse, so this runs before the drop.
