@@ -63,6 +63,8 @@ func handOffIdentity(ctx context.Context, tx pgx.Tx, schema, live string, id Ide
 	oldSequence := sequenceRef{schema: id.SequenceSchema, name: OldDependentName(schema, live, id.SequenceName)}
 	var lastValue int64
 	var isCalled bool
+	// INV: CO-9 — the sequence is named by its schema-qualified, sanitized
+	// identifier and the read uses no function or operator.
 	if err := tx.QueryRow(ctx, "SELECT last_value, is_called FROM "+oldSequence.sql()).Scan(&lastValue, &isCalled); err != nil {
 		return IdentityColumn{}, fmt.Errorf("read position of identity sequence %s: %w", oldSequence.sql(), err)
 	}
@@ -93,7 +95,8 @@ func handOffIdentity(ctx context.Context, tx pgx.Tx, schema, live string, id Ide
 	if err := carrySequenceGrants(ctx, tx, oldSequence, sequence); err != nil {
 		return IdentityColumn{}, err
 	}
-	if _, err := tx.Exec(ctx, "SELECT setval($1::regclass, $2, $3)", sequence.sql(), lastValue, isCalled); err != nil {
+	// INV: CO-9 — the function and its regclass cast are pg_catalog-qualified.
+	if _, err := tx.Exec(ctx, "SELECT pg_catalog.setval($1::pg_catalog.regclass, $2, $3)", sequence.sql(), lastValue, isCalled); err != nil {
 		return IdentityColumn{}, fmt.Errorf("set identity sequence %s to (%d, %t): %w", sequence.sql(), lastValue, isCalled, err)
 	}
 	return declared, nil
@@ -103,11 +106,14 @@ func handOffIdentity(ctx context.Context, tx pgx.Tx, schema, live string, id Ide
 // declared with and the type the live column now has. They differ exactly
 // when the gated statement retyped the column.
 func readIdentityTypes(ctx context.Context, tx pgx.Tx, oldSequence sequenceRef, schema, live, column string) (oldType, newType uint32, err error) {
+	// INV: CO-9 — every relation, operator, and type is pg_catalog-qualified.
 	err = tx.QueryRow(ctx, `
 		SELECT q.seqtypid, a.atttypid
-		FROM pg_sequence q, pg_attribute a
-		WHERE q.seqrelid = $1::regclass
-		  AND a.attrelid = $2::regclass AND a.attname = $3 AND NOT a.attisdropped`,
+		FROM pg_catalog.pg_sequence q, pg_catalog.pg_attribute a
+		WHERE q.seqrelid OPERATOR(pg_catalog.=) $1::pg_catalog.regclass
+		  AND a.attrelid OPERATOR(pg_catalog.=) $2::pg_catalog.regclass
+		  AND a.attname OPERATOR(pg_catalog.=) $3
+		  AND NOT a.attisdropped`,
 		oldSequence.sql(), pgx.Identifier{schema, live}.Sanitize(), column).Scan(&oldType, &newType)
 	if err != nil {
 		return 0, 0, fmt.Errorf("read types of identity %s.%s.%s and its source sequence %s: %w", schema, live, column, oldSequence.sql(), err)

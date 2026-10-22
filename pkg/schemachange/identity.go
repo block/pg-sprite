@@ -76,18 +76,27 @@ func handoffIdentities(identities []IdentityColumn, shadow schemadiff.Model) []I
 // edge is a catalog the engine does not understand, and the builder fails
 // closed rather than guess which sequence to hand over.
 func readIdentityColumns(ctx context.Context, tx pgx.Tx, oid uint32) ([]IdentityColumn, error) {
+	// INV: CO-9 — every relation, operator, and type is pg_catalog-qualified,
+	// so a planted oid = regclass operator cannot hide the identity
+	// sequence edge and block a handoff the engine could carry.
 	rows, err := tx.Query(ctx, `
-		SELECT a.attname, a.attidentity = 'a',
+		SELECT a.attname, a.attidentity OPERATOR(pg_catalog.=) 'a',
 		       sn.nspname, s.relname,
 		       q.seqstart, q.seqincrement, q.seqmin, q.seqmax, q.seqcache, q.seqcycle
-		FROM pg_attribute a
-		LEFT JOIN pg_depend d
-		       ON d.refclassid = 'pg_class'::regclass AND d.refobjid = a.attrelid AND d.refobjsubid = a.attnum
-		      AND d.classid = 'pg_class'::regclass AND d.deptype = 'i'
-		LEFT JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S'
-		LEFT JOIN pg_namespace sn ON sn.oid = s.relnamespace
-		LEFT JOIN pg_sequence q ON q.seqrelid = s.oid
-		WHERE a.attrelid = $1 AND a.attidentity <> '' AND NOT a.attisdropped
+		FROM pg_catalog.pg_attribute a
+		LEFT JOIN pg_catalog.pg_depend d
+		       ON d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		      AND d.refobjid OPERATOR(pg_catalog.=) a.attrelid
+		      AND d.refobjsubid OPERATOR(pg_catalog.=) a.attnum
+		      AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		      AND d.deptype OPERATOR(pg_catalog.=) 'i'
+		LEFT JOIN pg_catalog.pg_class s
+		       ON s.oid OPERATOR(pg_catalog.=) d.objid AND s.relkind OPERATOR(pg_catalog.=) 'S'
+		LEFT JOIN pg_catalog.pg_namespace sn ON sn.oid OPERATOR(pg_catalog.=) s.relnamespace
+		LEFT JOIN pg_catalog.pg_sequence q ON q.seqrelid OPERATOR(pg_catalog.=) s.oid
+		WHERE a.attrelid OPERATOR(pg_catalog.=) $1
+		  AND a.attidentity OPERATOR(pg_catalog.<>) ''
+		  AND NOT a.attisdropped
 		ORDER BY a.attnum`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("read identity columns: %w", err)
@@ -146,16 +155,24 @@ func verifyIdentityDefaults(ctx context.Context, tx pgx.Tx, shadowOID uint32, id
 	for _, id := range identities {
 		var identity string
 		var defaultsToSequence bool
+		// INV: CO-9 — pg_catalog-qualified like every handoff read, so a
+		// planted oid = regclass operator cannot make a re-pointed default
+		// read as the source sequence.
 		err := tx.QueryRow(ctx, `
-			SELECT a.attidentity::text,
+			SELECT a.attidentity::pg_catalog.text,
 			       EXISTS (
 			           SELECT 1
-			           FROM pg_depend s
-			           WHERE s.classid = 'pg_attrdef'::regclass AND s.objid = d.oid
-			             AND s.refclassid = 'pg_class'::regclass AND s.refobjid = to_regclass($3))
-			FROM pg_attribute a
-			LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-			WHERE a.attrelid = $1 AND a.attname = $2 AND NOT a.attisdropped`, shadowOID, id.Column,
+			           FROM pg_catalog.pg_depend s
+			           WHERE s.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_attrdef'::pg_catalog.regclass
+			             AND s.objid OPERATOR(pg_catalog.=) d.oid
+			             AND s.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+			             AND s.refobjid OPERATOR(pg_catalog.=) pg_catalog.to_regclass($3))
+			FROM pg_catalog.pg_attribute a
+			LEFT JOIN pg_catalog.pg_attrdef d
+			       ON d.adrelid OPERATOR(pg_catalog.=) a.attrelid AND d.adnum OPERATOR(pg_catalog.=) a.attnum
+			WHERE a.attrelid OPERATOR(pg_catalog.=) $1
+			  AND a.attname OPERATOR(pg_catalog.=) $2
+			  AND NOT a.attisdropped`, shadowOID, id.Column,
 			pgx.Identifier{id.SequenceSchema, id.SequenceName}.Sanitize()).Scan(&identity, &defaultsToSequence)
 		if errors.Is(err, pgx.ErrNoRows) {
 			// INV: ST-5

@@ -468,7 +468,14 @@ widened copy trusts the source schema and `public` not to gain, during the run, 
 operator that fits an unqualified name in the expression better than the one the build
 resolved; nothing records what the build resolved, and a copy a concurrent `CREATE FUNCTION`
 redirected reads as divergence at verification, not before. The copier's cuts and
-measurements, and every conversion-free copy, pass, and flush, keep the catalog alone. *Test
+measurements, and every conversion-free copy, pass, and flush, keep the catalog alone. In
+`pkg/schemachange`, the identity and owned-sequence handoff reads (`readIdentityColumns`,
+`readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the identity `setval`, and
+the `format` call that renders the shadow's identity default qualify every function, relation,
+type, and operator: a planted `oid = regclass` operator on the build's path that hides
+`pg_class` and sequences does not change their answers, one that matches everything does not
+make a re-pointed default read as the source sequence, and a planted `format(text, text[])` does
+not change the default the build sets. *Test
 obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with decoy catalog relations
 and functions in the schema) yields the same answer as
 the default path, per read site and per pooled session.
