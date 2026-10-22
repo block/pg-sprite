@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -269,9 +270,9 @@ func (l *progressLog) lastIn(t *testing.T, phase checkpoint.Phase) checkpoint.Ch
 	t.Helper()
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	for i := len(l.rows) - 1; i >= 0; i-- {
-		if l.rows[i].Phase == phase {
-			return l.rows[i]
+	for _, row := range slices.Backward(l.rows) {
+		if row.Phase == phase {
+			return row
 		}
 	}
 	require.FailNowf(t, "phase never saved", "the hook saw no save in %s", phase)
