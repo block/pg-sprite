@@ -77,9 +77,10 @@ const (
 	// CauseStatementReadd means the gated statement drops a column and
 	// adds one under the same name that the copy cannot fill (ST-11): the
 	// re-added column is a new column the copy leaves out, and it is the
-	// primary key every chunk is keyed on, a NOT NULL column with no
-	// default for the copied rows to take, or the replacement of a source
-	// identity column whose sequence the handoff cannot carry to it.
+	// primary key every chunk is keyed on, a column that refuses NULL with
+	// no default of its own or its domain's for the copied rows to take, or
+	// the replacement of a source identity column whose sequence the
+	// handoff cannot carry to it.
 	CauseStatementReadd RefusalCause = "shadow-statement-readd"
 	// CauseCutoverUnverified means the cutover gate was handed no usable
 	// data-equality proof (CO-1): the built-shadow proof or the verified

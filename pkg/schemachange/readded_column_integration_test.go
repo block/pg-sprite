@@ -192,9 +192,13 @@ func TestBuildShadowRefusesAReaddedPrimaryKey(t *testing.T) {
 }
 
 // A plain column re-added as an identity column is a new column the server
-// numbers itself, so the copy leaves it out and the build admits it. The
-// refusal is for a column the copy cannot fill, not for every re-add.
-func TestBuildShadowAdmitsAPlainColumnReaddedAsAnIdentity(t *testing.T) {
+// numbers itself, so the server fills it and the re-add refusal does not
+// fire: the copy leaves it out and the build commits. This pins the build
+// only. A run carrying it still stops at the swap, which refuses any new
+// identity or sequence-owned column the source did not have
+// (cutover-swap-mismatch), as it does for such a column added without a
+// drop.
+func TestBuildShadowDoesNotRefuseAPlainColumnReaddedAsAnIdentity(t *testing.T) {
 	f := newShadowFixture(t)
 	f.createOrders(t)
 
@@ -205,6 +209,115 @@ func TestBuildShadowAdmitsAPlainColumnReaddedAsAnIdentity(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{"id", "qty", "note"}, built.CopyColumns(), "the re-added identity column is not a copy column")
+}
+
+// Dropping qty and adding it back NOT NULL as a domain with a default gives
+// the copy a value for it: a row that leaves the column out takes the
+// domain's default. The run completes and every row holds that default,
+// not the dropped column's values.
+func TestRunnerRunsAReaddedNotNullColumnWhoseDomainDefaultsIt(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	f.exec(t, `
+		CREATE DOMAIN %s.zero_int AS integer
+			DEFAULT 0`)
+
+	result, err := f.run(t, "orders", `
+		ALTER TABLE %s.orders
+			DROP COLUMN qty,
+			ADD COLUMN qty %s.zero_int NOT NULL`, schemachange.RunOptions{})
+	require.NoError(t, err)
+
+	assert.True(t, result.Verification.Clean())
+	assert.Equal(t, []string{"id", "note", "sku"}, result.Shadow.CopyColumns, "the re-added column is not a copy column")
+	var nonZero int64
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT count(*) FILTER (WHERE qty <> 0)
+		FROM `+f.schema+`.orders`).Scan(&nonZero))
+	assert.Zero(t, nonZero, "every row holds the domain's default")
+	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
+}
+
+// Dropping qty and adding it back as a domain that refuses NULL, with no
+// default anywhere, leaves the copy nothing to put in it even though the
+// column itself is declared nullable. The build refuses inside its
+// transaction, so the refusal costs no shadow.
+func TestBuildShadowRefusesAReaddedColumnWhoseDomainRefusesNull(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+	f.exec(t, `
+		CREATE DOMAIN %s.nonnull_int AS integer
+			NOT NULL`)
+
+	_, err := f.build(t, "orders", `
+		ALTER TABLE %s.orders
+			DROP COLUMN qty,
+			ADD COLUMN qty %s.nonnull_int`)
+
+	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, schemachange.CauseStatementReadd, schemachange.RefusalCauseOf(err))
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "a refused build creates nothing")
+}
+
+// The server enforces NOT NULL from every domain under a column's type, so
+// a domain built on a domain that refuses NULL refuses it too, although its
+// own catalog row does not say so. The build refuses the re-add.
+func TestBuildShadowRefusesAReaddedColumnWhoseBaseDomainRefusesNull(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+	f.exec(t, `
+		CREATE DOMAIN %s.nonnull_int AS integer
+			NOT NULL`)
+	f.exec(t, `CREATE DOMAIN %s.quantity AS %s.nonnull_int`)
+
+	_, err := f.build(t, "orders", `
+		ALTER TABLE %s.orders
+			DROP COLUMN qty,
+			ADD COLUMN qty %s.quantity`)
+
+	assert.Equal(t, schemachange.CauseStatementReadd, schemachange.RefusalCauseOf(err))
+}
+
+// The server takes a default only from the column's own type, which keeps
+// the default its base domain had when it was created. A default set on
+// the base domain afterwards does not reach a row of the derived domain,
+// so a NOT NULL re-add of the derived domain has no value and is refused.
+func TestBuildShadowRefusesAReaddedColumnWhoseDefaultIsOnlyOnTheBaseDomain(t *testing.T) {
+	f := newShadowFixture(t)
+	f.createOrders(t)
+	f.exec(t, `CREATE DOMAIN %s.base_int AS integer`)
+	f.exec(t, `CREATE DOMAIN %s.quantity AS %s.base_int`)
+	f.exec(t, `
+		ALTER DOMAIN %s.base_int
+			SET DEFAULT 0`)
+
+	_, err := f.build(t, "orders", `
+		ALTER TABLE %s.orders
+			DROP COLUMN qty,
+			ADD COLUMN qty %s.quantity NOT NULL`)
+
+	assert.Equal(t, schemachange.CauseStatementReadd, schemachange.RefusalCauseOf(err))
+}
+
+// Dropping an identity column outright, with no column added back under
+// its name, is not a re-add: the column is simply gone from the shadow and
+// from the copy, and the build commits.
+func TestBuildShadowAdmitsDroppingAnIdentityColumnOutright(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.widgets (
+			id    bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+			seqno bigint GENERATED BY DEFAULT AS IDENTITY,
+			qty   integer NOT NULL
+		)`)
+
+	built, err := f.build(t, "widgets", `
+		ALTER TABLE %s.widgets
+			DROP COLUMN seqno,
+			ALTER COLUMN qty TYPE bigint`)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"id", "qty"}, built.CopyColumns())
 }
 
 // Through the Runner the refusal lands before the run has touched anything:

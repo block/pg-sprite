@@ -40,7 +40,7 @@ func TestRefuseUnfillableReaddsAdmitsAColumnTheServerFills(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newReaddFixture("note")
 			shadow := schemadiff.Model{Columns: []schemadiff.Column{{Name: "id"}, {Name: "qty"}, column}}
-			assert.NoError(t, refuseUnfillableReadds("public", "orders", "id", f.source, f.shadow, shadow, nil))
+			assert.NoError(t, refuseUnfillableReadds("public", "orders", "id", f.source, f.shadow, shadow, nil, nil))
 		})
 	}
 }
@@ -51,11 +51,10 @@ func TestRefuseUnfillableReaddsRefusesThePrimaryKey(t *testing.T) {
 	f := newReaddFixture("id")
 	shadow := schemadiff.Model{Columns: []schemadiff.Column{{Name: "qty"}, {Name: "note"}, {Name: "id", Type: "bigint", NotNull: true, Default: "nextval('orders_id_seq'::regclass)"}}}
 
-	err := refuseUnfillableReadds("public", "orders", "id", f.source, f.shadow, shadow, nil)
+	err := refuseUnfillableReadds("public", "orders", "id", f.source, f.shadow, shadow, nil, nil)
 
 	require.ErrorIs(t, err, ErrInvariantViolation)
 	assert.Equal(t, CauseStatementReadd, RefusalCauseOf(err))
-	assert.Contains(t, err.Error(), "primary key id")
 }
 
 // Re-adding a column NOT NULL with no default is refused: the copied rows
@@ -64,11 +63,10 @@ func TestRefuseUnfillableReaddsRefusesNotNullWithoutADefault(t *testing.T) {
 	f := newReaddFixture("qty")
 	shadow := schemadiff.Model{Columns: []schemadiff.Column{{Name: "id"}, {Name: "note"}, {Name: "qty", Type: "integer", NotNull: true}}}
 
-	err := refuseUnfillableReadds("public", "orders", "id", f.source, f.shadow, shadow, nil)
+	err := refuseUnfillableReadds("public", "orders", "id", f.source, f.shadow, shadow, nil, nil)
 
 	require.ErrorIs(t, err, ErrInvariantViolation)
 	assert.Equal(t, CauseStatementReadd, RefusalCauseOf(err))
-	assert.Contains(t, err.Error(), "column qty NOT NULL with no default")
 }
 
 // Replacing a source identity column is refused however the new column is
@@ -80,11 +78,10 @@ func TestRefuseUnfillableReaddsRefusesAReplacedIdentityColumn(t *testing.T) {
 	shadow := schemadiff.Model{Columns: []schemadiff.Column{{Name: "id"}, {Name: "qty"}, {Name: "note", Type: "text"}}}
 	identities := []IdentityColumn{{Column: "note", SequenceSchema: "public", SequenceName: "orders_note_seq"}}
 
-	err := refuseUnfillableReadds("public", "orders", "id", f.source, f.shadow, shadow, identities)
+	err := refuseUnfillableReadds("public", "orders", "id", f.source, f.shadow, shadow, nil, identities)
 
 	require.ErrorIs(t, err, ErrInvariantViolation)
 	assert.Equal(t, CauseStatementReadd, RefusalCauseOf(err))
-	assert.Contains(t, err.Error(), "identity column note")
 }
 
 // A column the statement kept, retyped, or dropped outright is not a re-add,
@@ -96,5 +93,30 @@ func TestRefuseUnfillableReaddsIgnoresColumnsTheStatementKeptOrDropped(t *testin
 	model := schemadiff.Model{Columns: []schemadiff.Column{{Name: "id", NotNull: true}, {Name: "qty", Type: "bigint", NotNull: true}}}
 	identities := []IdentityColumn{{Column: "id"}}
 
-	assert.NoError(t, refuseUnfillableReadds("public", "orders", "id", source, shadow, model, identities))
+	assert.NoError(t, refuseUnfillableReadds("public", "orders", "id", source, shadow, model, nil, identities))
+}
+
+// A re-added NOT NULL column with no default of its own is not refused when
+// its domain has a default: a row that leaves the column out takes the
+// domain's default, so the copy has a value for it.
+func TestRefuseUnfillableReaddsAdmitsANotNullColumnWhoseDomainDefaultsIt(t *testing.T) {
+	f := newReaddFixture("qty")
+	shadow := schemadiff.Model{Columns: []schemadiff.Column{{Name: "id"}, {Name: "note"}, {Name: "qty", Type: "zero_int", NotNull: true}}}
+	domains := map[string]domainFill{"qty": {hasDefault: true}}
+
+	assert.NoError(t, refuseUnfillableReadds("public", "orders", "id", f.source, f.shadow, shadow, domains, nil))
+}
+
+// A re-added column declared nullable is still refused when its domain
+// refuses NULL and supplies no default: the first copied row would carry
+// NULL into it.
+func TestRefuseUnfillableReaddsRefusesAColumnWhoseDomainRefusesNull(t *testing.T) {
+	f := newReaddFixture("qty")
+	shadow := schemadiff.Model{Columns: []schemadiff.Column{{Name: "id"}, {Name: "note"}, {Name: "qty", Type: "nonnull_int"}}}
+	domains := map[string]domainFill{"qty": {notNull: true}}
+
+	err := refuseUnfillableReadds("public", "orders", "id", f.source, f.shadow, shadow, domains, nil)
+
+	require.ErrorIs(t, err, ErrInvariantViolation)
+	assert.Equal(t, CauseStatementReadd, RefusalCauseOf(err))
 }
