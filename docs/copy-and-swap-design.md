@@ -46,7 +46,10 @@ order, a retype keeps a column's attribute number, and an added column is number
 source column at live position `i` is the same column exactly when the shadow's column of that
 name has attribute number `i`. The build and a resume's inspection both read the numbers from the
 catalog, so they derive the same list, and the copier, the checksum digest, and the live flusher
-all take their columns from it (ST-11).
+all take their columns from it (ST-11). A re-added column the copy cannot leave to its default —
+the primary key, a `NOT NULL` column with no default, or the replacement of a source identity
+column — is refused inside the build's transaction (`shadow-statement-readd`), so no shadow is
+committed for a copy that could not run.
 
 **Comparison-only exception.** `RowSecurityChange.CanonicalSQLForNamespace` may erase
 only the validated RLS operation target's schema on a fresh parsed tree. This supports

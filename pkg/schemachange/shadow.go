@@ -286,6 +286,12 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err != nil {
 		return BuiltShadow{}, err
 	}
+	// A re-add the copy cannot fill is refused as the statement it is,
+	// before the handoff check would report a replaced identity column as
+	// a handoff the shadow lost.
+	if err := refuseUnfillableReadds(target.Schema(), target.Table(), target.PKColumn(), sourcePositions, shadowPositions, targetModel, identities); err != nil {
+		return BuiltShadow{}, err
+	}
 	// The handoff is proven on the shadow the statement left, not the one
 	// the defaults were applied to: the proof records exactly what an
 	// inspection of this shadow would accept.
