@@ -258,6 +258,10 @@ the convergence tests for key moves and unique-key swaps start their load after 
 landed. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
+marker-bearing UPDATE for a key whose row the source then deleted before its chunk was read,
+with the DELETE not yet delivered, is held until the stream passes the flush's check and the
+catch-up converges, while the same image for a row the source still holds and the shadow lost
+fails closed once the stream has passed it (CO-8); a
 key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark
 1000) asserts key 5 is deleted from the shadow. *Source:* this doc set (Spirit's model
 translated).
@@ -315,8 +319,11 @@ for an unchanged-TOAST column (CO-8): before deleting, it completes any survivin
 still carries a marker from the current shadow row — the row for the key, or for
 `ChangeEvent.OldKey` when the UPDATE moved the primary key (`SELECT … FOR UPDATE`, same
 transaction). An absent shadow row for an image whose row did **not** move is an invariant
-violation (fail closed) — CO-5's merge rule guarantees the marker only survives for values that
-live in a shadow row the batch did not create; a **moved** image whose old key's shadow row is
+violation (fail closed) once the stream has passed a read that found it absent — CO-5's merge
+rule guarantees the marker only survives for values that live in a shadow row the batch did not
+create, and the row is absent legitimately only while the DELETE that removed it from the source
+before its chunk was read is still undelivered, so the first absence holds the image instead
+(CO-8, D13); a **moved** image whose old key's shadow row is
 absent, or whose old key the source has reused (`Entry.OldKeyReused`), is instead completed from
 the source row under `Key`, because a move captured while the old key was uncut leaves no shadow
 row under either key and the buffer cannot tell that history from one whose old row landed, and
@@ -373,12 +380,23 @@ column count is the full count, and there is no value; the marker means "leave t
 unchanged", not NULL or an empty value. A full-row upsert that invents a value for that column
 would overwrite live shadow data and silently break convergence. *Enforced:* `pkg/decode`
 per-column presence on `ChangeEvent` — the `Stream` carries a text value or NULL as a present
-column and the marker as an absent one, and refuses a tuple whose column count does not match
-the relation rather than line columns up by guess; `pkg/applier` `Buffer` keeps the marker through every
-merge, and `Flusher` writes a marker-bearing image of a row that did not move as an `UPDATE` of
-only its present columns — zero rows updated is an `ErrInvariantViolation`, never an insert
-that invents the omitted value — and completes a marker before the whole-row fallback inserts
-the row, from the shadow row the marker refers to, refusing when that row is absent; a moved
+`Column` and the marker as an absent one, and refuses a tuple whose column count does not match
+the relation rather than line columns up by guess. A `Column`'s value is readable only through
+`Get`, which returns it together with its presence, so a reader takes the presence with the
+value: a NULL and a marker arrive alike and only the presence tells them apart. A test refuses
+production code that discards that presence. `pkg/applier` `Buffer` keeps the marker through
+every merge, and `Flusher` writes a marker-bearing image of a row that did not move as an
+`UPDATE` of only its present columns — zero rows updated is an `ErrInvariantViolation`, never an insert
+that invents the omitted value — binds no column that carries no value (an `ErrInvariantViolation`
+before any statement runs), and completes a marker before the whole-row fallback inserts
+the row, from the shadow row the marker refers to, refusing when that row is absent. The
+shadow row of such an image is absent without error exactly when the source deleted the row
+before the chunk covering its key was read and the DELETE has not reached the stream: before it
+writes, the flush checks that the row is there, and for an image whose row is absent it writes
+nothing, returns the image held with the read's WAL position and `Entry.AbsenceAwaited` set,
+and the buffer lets it in only once the stream has passed that position — by then a DELETE or
+INSERT has replaced the image, and one that returns still flagged for an absent row is the
+`ErrInvariantViolation` above; a moved
 image's marker, whose value lives under another key, is completed from the old key's shadow row
 or the source row and held in the buffer until the stream has passed the read, so a value read
 from a row newer than the stream is never written over the stream's own.
@@ -418,7 +436,18 @@ rewrite probe, and the copy-and-swap shape and environment facts — qualifies e
 relation, type, and operator, `IN` and `IS DISTINCT FROM`
 included since both resolve `=` through the path; planted `pg_total_relation_size(oid)`,
 `has_schema_privilege(name, name, text)`, `+`, and `=` overloads on a path that lists the
-catalog implicitly do not change an answer), and `pkg/checksum` (the column-type read, the relation check,
+catalog implicitly do not change an answer), `pkg/schemachange` (the dependent reads — the
+shadow's and source's indexes and extended statistics the cutover gate pairs, and the taken
+relation and constraint names — qualify every function, relation, type, and operator; planted
+`generate_series`, `unnest`, `array_to_string`, `to_jsonb`, and `||` overloads on a path that
+lists the source schema do not change the indexes or statistics read), `pkg/migrate`
+(`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
+acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
+`to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
+a planted `oid = regclass` operator on a path that lists the catalog implicitly, and decoy
+`pg_class`, `pg_namespace`, `pg_index`, `to_regclass`, `quote_ident`, `oid = oid`, and `text` on a
+shadowing `<schema>, pg_catalog` path, do not change either answer — the replica identity read
+the executor runs for an accepted `DROP INDEX` is `pkg/executor`'s), and `pkg/checksum` (the column-type read, the relation check,
 and every function in the digest statement, under a `LocalSearchPath("pg_catalog")` transaction;
 decoy `sha256`, `convert_to`, `getdatabaseencoding`, `encode`, `format_type`, and bigint `<=` operator test — the operator is what the local
 `search_path` alone can pin); `pkg/copier` runs every statement it issues — the chunk copy,
@@ -615,13 +644,28 @@ to `cutover` before it calls `Cutover`, and on resume hands a `cutover` row to `
 first, continuing at `DropOldTable` on a committed swap and back through verify and gate on
 `ErrNotSwapped` — a live run writes such a row back to `catching_up` before it reads its slot,
 so the resume inspection never meets a `cutover` row whose swap is known to have rolled back.
+A restart (`RunOptions.Restart`) answers a `cutover` row the same way before it discards
+anything: `Runner.refuseSwappedRestart` hands the row to `InspectSwapped`, refuses a committed
+swap — or one whose retained source is already gone — as `restart-swap-committed`, refuses any
+other answer with that answer's own cause, and discards the row only on `ErrNotSwapped`
+(refuses-a-committed-swap, refuses-a-cutover-row-the-catalog-does-not-answer-cleanly tests).
 Every attempt the
 catalog shows rolled back — a lock timeout, a drain error, a refusal inside the transaction, or
 a lost connection the inspection resolved — is reported wrapping `ErrCutoverRolledBack`, so a
 caller distinguishes "the source is still live, retry is safe" from an unresolved outcome
 without reading the catalog itself (terminated-backend test; commit-the-client-never-heard-of
 test; context-ends-during-commit test; backend-still-running test; three-catalog-state
-inspection test). *Source:* Spirit's cutover
+inspection test). The native bounded attempt — the optimistic run, every brief and
+`VALIDATE CONSTRAINT` sequence step, and each greenfield create step — does not inspect, but it
+honours the same rule from the reporting side: a `COMMIT` that did not return success (a lost
+connection, a failover, the caller's context ending mid-commit) is returned as
+`executor.CommitOutcomeUnknownError`, code `commit-outcome-unknown`, never as a rolled-back
+failure, and the validate step's cancellation corroboration leaves it untouched. The failed
+verdict then lists only the steps before it as committed, says the outcome is unknown, and names
+the table to inspect (`TestExecuteNativeTypesALostCommitAsOutcomeUnknown`,
+`TestRunSequenceTypesALostCommitMidSequenceAsOutcomeUnknown`,
+`TestRunReportsALostCommitAsAnUnknownOutcome`, `TestFailureVerdict`,
+`TestCorroborateValidateCancel`). *Source:* Spirit's cutover
 (`information_schema` inspection on dropped connection,
 [Spirit README](https://github.com/block/spirit#cut-over-and-cleanup)).
 
@@ -810,8 +854,14 @@ JSON-encoded proof the row carries (`resume-row-mismatch` otherwise) — and ref
 under the shadow's name that no row records (`shadow-unrecorded`), since the row is the only
 record of which statement a shadow embodies, and a row whose swap has not committed and whose
 shadow no relation bears (`resume-shadow-gone`, in any phase from `copying` to a `cutover` whose swap
-rolled back), since the run can neither continue on it nor start over while the row stands; the
-refusal writes nothing, so a live row's slot stays with it for the operator to drop.
+rolled back), since the run can neither continue on it nor start over on its own while the row
+stands; the refusal writes nothing, so a live row's slot stays with it for the operator to drop.
+`RunOptions.Restart` is the operator's way to start over without those hand steps:
+`Runner.discardRow` discards the shadow, then the fence or the slot the row records, then the
+row — deleting only the row the run was shown — so a restart that stops partway leaves a row that
+still records what stands, and `Runner.discardUnrecorded` drops a shadow and any fence no row
+records; a done row is never discarded (stops-at-the-fence-leaves-the-row,
+does-not-discard-a-done-row tests).
 `TestLoadRetriesAcrossATerminatedBackend`,
 `TestLoadReportsAnotherStatementsRowAsIncompatible`,
 `TestLoadReportsAnotherFormatVersionAsIncompatible`,
@@ -870,7 +920,11 @@ a slot of the derived name the run did not make is reported as the `*decode.Slot
 it is and left as found; a
 stopped run leaves the slot under its row, and the next `Run` reopens the stream from the
 row's position — a ceiling abort included, so the backlog is drained by resuming — or the
-operator abandons the run with `DropShadow`, `decode.DropSlot`, and `Store.Delete`; the slot
+operator abandons the run with `DropShadow`, `decode.DropSlot`, and `Store.Delete`, or has a
+restart (`RunOptions.Restart`) do the same sequence under the run's own lock, where
+`Runner.discardRow` drops a slot only when it is the target's derived name and refuses any other
+as `resume-row-mismatch` before discarding anything (refuses-a-row-naming-another-engine-slot
+test); the slot
 is dropped once the swap has committed, before the old table is settled, and a run resumed on
 a swapped row drops the slot it left too). Each runner refuses the other kind's row as
 `resume-row-decoding`: a quiesced target's run never creates a slot and refuses a row naming a
@@ -1150,7 +1204,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   length, `NOT NULL` without default on null data, `text→jsonb` with unvalidatable rows) rather
   than discovered mid-copy. *Source:* Spirit blocklist + validation review.
 - **RF-4** — Renames are never guessed: a missing-plus-new column pair is drop+add unless rename
-  intent is explicit; dangerous rename-overlap patterns are refused. *Source:*
+  intent is explicit. The rename-overlap pattern Spirit refuses (one `ALTER` that renames a
+  column and reuses or retypes it) is unrepresentable: PostgreSQL parses a rename as its own
+  statement and the front door admits one statement (`TestClassifyRejectsARename*`). *Source:*
   [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options), Spirit.
 - **RF-5** — The dangerous literal never runs silently: risky statements with a safer native
   idiom get the idiom (reported) or a recommendation; running as-submitted requires a loud,

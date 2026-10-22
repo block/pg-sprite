@@ -261,11 +261,14 @@ vouch for it as online-safe.
 | Exit | Meaning | Anything committed? | Online-safe? |
 |---|---|---|---|
 | 0 | Executed through an online-safe path; or a dry run, `diff`, or `pull` found nothing to refuse | yes (dry run, `diff`, `pull`: nothing runs) | yes |
-| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in the verdict's `executed_sql` | not applicable |
+| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in the verdict's `executed_sql`; unknown when the verdict's `code` is `commit-outcome-unknown` — the failed step's `COMMIT` may have landed, so inspect the catalog before retrying | not applicable |
 | 2 | Refused: no online-safe path, and the verdict names the typed `reason` (and `class`) automation switches on | no | not applicable |
 | 3 | Committed through the accepted-blocking passthrough — the operator explicitly accepted a blocking form, and the engine ran it under bounded budgets without vouching for online safety | yes | no |
 
-Three rules follow from the table, and one note for embedders:
+A usage error exits 1 and writes the usage and the error to stderr; stdout
+carries only the command's output, including under `--json`.
+
+Four rules follow from the table, and one note for embedders:
 
 - **Gate on non-zero.** `pg-sprite migrate … || exit 1` is fail-closed for
   every code above. Allow 3 explicitly only where a maintenance-window
@@ -280,11 +283,20 @@ Three rules follow from the table, and one note for embedders:
   attempt that exceeded its statement budget did run — PostgreSQL cancelled
   it and transactional DDL rolled it back — and still exits 2, because the
   refusal is a routing answer (the change needs a different strategy).
+- **A lost `COMMIT` is exit 1, not 0, 2, or 3.** When the connection drops or
+  the caller's context ends while a bounded attempt's `COMMIT` is in flight,
+  the change may or may not have landed. Exit 0 and 3 would claim it did and
+  exit 2 would claim it did not; the failed exit says only that the engine
+  cannot vouch for the run, and the verdict's `code` (`commit-outcome-unknown`)
+  and detail tell the operator to inspect the catalog.
 - **Library callers get the same facts typed, not as a status.** An
   orchestrator that imports `pkg/executor` branches on the verdict's
   `outcome`, `errors.As` to the executor's typed errors, and
   `executor.OutcomeCode` — the exit code is the CLI's rendering of those
-  facts, not a surface the library exposes. The typed contract is in
+  facts, not a surface the library exposes. Check
+  `errors.As(err, new(*executor.CommitOutcomeUnknownError))` or `OutcomeCode`
+  before testing for context errors: a context cancelled during `COMMIT`
+  stays in the error chain, but the outcome is unknown, not a cancellation. The typed contract is in
   [docs/execution-model.md](docs/execution-model.md#how-a-failure-is-reported).
 
 Exit 3 comes from exactly one invocation shape: `migrate --accept-blocking

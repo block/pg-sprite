@@ -119,6 +119,7 @@ type MigrateCmd struct {
 	FreeDisk          byteSize      `help:"Free space on the volume the table lives on, for a statement the planner routes to copy-and-swap; the preflight refuses the run when the shadow table and its indexes would not fit (binary units: B, KiB, MiB, GiB, TiB). Unset means no space and refuses." name:"free-disk" placeholder:"SIZE"`
 	KeepOld           bool          `help:"After a copy-and-swap, keep the retained source table under its _old name for a rollback window you end by hand, instead of dropping it before the run reports done." name:"keep-old"`
 	Quiesced          bool          `help:"Declare that nothing writes the table for the length of a copy-and-swap. The run then fences writes instead of streaming them through a replication slot, and needs no logical decoding from the server; a write that reaches the fence fails." name:"quiesced"`
+	Restart           string        `help:"Start a copy-and-swap over instead of resuming the leftover of an earlier run: the leftover shadow table, checkpoint row, and write fence or replication slot are discarded under the run's lock, then the statement runs from the beginning. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly. A leftover whose swap already committed is not discarded; run the statement without this flag to finish it. Cannot be combined with --force, --accept-blocking, or --dry-run." placeholder:"SCHEMA.TABLE"`
 	DryRun            bool          `help:"Classify and route the statement, print the plan, and execute nothing."`
 	JSON              bool          `help:"Emit the verdict (or dry-run plan) as JSON."`
 }
@@ -136,7 +137,10 @@ type MigrateCmd struct {
 // the command line actually carried, which is the only place "explicitly
 // supplied" is observable — the value alone cannot tell a typed default
 // from an inherited one. The copy-and-swap policy flags govern a run, so
-// they have no meaning on a dry run either.
+// they have no meaning on a dry run either. --restart acknowledges
+// discarding a copy-and-swap leftover, so it has no meaning on a dry run
+// or alongside the acknowledgements that steer a statement away from
+// copy-and-swap.
 func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 	if err := c.validateInput(); err != nil {
 		return err
@@ -152,6 +156,15 @@ func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 	}
 	if c.Force != "" && c.AcceptBlocking != "" {
 		return errors.New("--accept-blocking cannot be combined with --force: each acknowledges a different decision, and a statement reaches one")
+	}
+	if c.DryRun && c.Restart != "" {
+		return errors.New("--restart cannot be combined with --dry-run: the dry run executes nothing, so there is no leftover to discard")
+	}
+	if c.Restart != "" && c.Force != "" {
+		return errors.New("--restart cannot be combined with --force: a forced run bypasses copy-and-swap, so there is no leftover to discard")
+	}
+	if c.Restart != "" && c.AcceptBlocking != "" {
+		return errors.New("--restart cannot be combined with --accept-blocking: an accepted blocking statement is not a copy-and-swap, so there is no leftover to discard")
 	}
 	if c.AcceptBlocking != "" && !flagSupplied(kctx, "statement-timeout") {
 		return errors.New("--accept-blocking requires --statement-timeout on the same command line: it is the outage bound you accept after the lock is granted, and the default is not an acknowledgement")
@@ -178,7 +191,7 @@ func flagSupplied(kctx *kong.Context, name string) bool {
 }
 
 // Run implements the migrate subcommand.
-func (c *MigrateCmd) Run() error { return c.run(context.Background(), os.Stdout) }
+func (c *MigrateCmd) Run(ctx context.Context) error { return c.run(ctx, os.Stdout) }
 
 // PullCmd exports every table in one schema as a desired-state schema file.
 type PullCmd struct {
@@ -189,7 +202,7 @@ type PullCmd struct {
 }
 
 // Run implements the pull subcommand.
-func (c *PullCmd) Run() error { return c.run(context.Background(), os.Stdout) }
+func (c *PullCmd) Run(ctx context.Context) error { return c.run(ctx, os.Stdout) }
 
 // DiffCmd derives statements from a desired-state schema (declarative
 // front-end): introspect the live table, materialize the desired state on a
@@ -216,7 +229,7 @@ func (c *DiffCmd) Validate() error {
 }
 
 // Run implements the diff subcommand.
-func (c *DiffCmd) Run() error { return c.run(context.Background(), os.Stdout) }
+func (c *DiffCmd) Run(ctx context.Context) error { return c.run(ctx, os.Stdout) }
 
 // FmtCmd canonicalizes a schema file. It is offline — no database flags.
 type FmtCmd struct {
@@ -273,4 +286,4 @@ type StatusCmd struct {
 }
 
 // Run implements the status subcommand.
-func (c *StatusCmd) Run() error { return c.run(context.Background(), os.Stdout) }
+func (c *StatusCmd) Run(ctx context.Context) error { return c.run(ctx, os.Stdout) }

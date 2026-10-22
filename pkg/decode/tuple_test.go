@@ -36,11 +36,11 @@ func TestDecodeColumnsDistinguishesNullFromAnUnchangedToastMarker(t *testing.T) 
 
 	columns, err := decodeColumns(rel, tuple(textColumn("7"), &pglogrepl.TupleDataColumn{DataType: pglogrepl.TupleDataTypeNull}))
 	require.NoError(t, err)
-	assert.Equal(t, []Column{{Name: "id", Value: "7", Present: true}, {Name: "note", Value: nil, Present: true}}, columns)
+	assert.Equal(t, []Column{PresentColumn("id", "7"), PresentColumn("note", nil)}, columns)
 
 	columns, err = decodeColumns(rel, tuple(textColumn("7"), &pglogrepl.TupleDataColumn{DataType: pglogrepl.TupleDataTypeToast}))
 	require.NoError(t, err)
-	assert.Equal(t, []Column{{Name: "id", Value: "7", Present: true}, {Name: "note", Value: nil, Present: false}}, columns)
+	assert.Equal(t, []Column{PresentColumn("id", "7"), AbsentColumn("note")}, columns)
 }
 
 // The stream asks for text, so binary tuple data is something the server

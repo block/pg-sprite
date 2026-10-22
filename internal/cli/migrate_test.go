@@ -139,6 +139,50 @@ func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
 	}
 }
 
+// --restart acknowledges discarding a copy-and-swap leftover, so it wires
+// into the engine policy as the typed acknowledgement and is refused by the
+// grammar wherever no copy-and-swap can run: a dry run executes nothing,
+// and --force or --accept-blocking steer the statement away from the
+// copy-and-swap backend.
+func TestRestartFlagGrammarAndWiring(t *testing.T) {
+	t.Run("wires the acknowledgement into the copy-and-swap policy", func(t *testing.T) {
+		got := parseMigrate(t, "--restart", "public.t").options(nil).CopySwap
+		assert.Equal(t, "public.t", got.Restart)
+	})
+
+	t.Run("defaults to no acknowledgement", func(t *testing.T) {
+		assert.Empty(t, parseMigrate(t).options(nil).CopySwap.Restart)
+	})
+
+	parse := func(args ...string) error {
+		c := New("test")
+		k, err := kong.New(c, kong.Vars{"version": "test"})
+		require.NoError(t, err)
+		_, err = k.Parse(append([]string{
+			"migrate",
+			"--url", "postgres://user@localhost:5432/app",
+			"--alter", "ALTER TABLE t ALTER COLUMN c TYPE bigint",
+			"--restart", "public.t",
+		}, args...))
+		return err
+	}
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"dry run", []string{"--dry-run"}, "--restart cannot be combined with --dry-run"},
+		{"force", []string{"--force", "public.t"}, "--restart cannot be combined with --force"},
+		{"accept blocking", []string{"--accept-blocking", "public.t", "--statement-timeout", "10s"}, "--restart cannot be combined with --accept-blocking"},
+	} {
+		t.Run("rejects "+tc.name, func(t *testing.T) {
+			err := parse(tc.args...)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tc.want)
+		})
+	}
+}
+
 // The disk-headroom refusal names the flag that supplies the measurement
 // only when no measurement was supplied: the library's wording says the
 // space was not measured, and this front door owns the spelling of how to

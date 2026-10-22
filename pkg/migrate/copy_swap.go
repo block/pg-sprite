@@ -64,6 +64,19 @@ type CopySwapOptions struct {
 	// needs no logical decoding from the server; a write that reaches the
 	// fence fails. False runs the live path: slot, stream, and catch-up.
 	Quiesced bool
+
+	// Restart, when set, is the operator's acknowledgement that the run on
+	// the table is to start over: whatever an earlier run left — its
+	// checkpoint row, its shadow, its write fence or replication slot —
+	// is discarded under the run's own lock session before a fresh shadow
+	// is built (schemachange.RunOptions.Restart). It must name the
+	// resolved target table as SCHEMA.TABLE, the same way Options.Force
+	// does, so the acknowledgement cannot be left on a script by accident.
+	// A leftover whose swap already committed is not discarded: the
+	// change is past the point of starting over, and the run is refused
+	// so it can be finished without the acknowledgement. Empty resumes a
+	// leftover, as every run does.
+	Restart string
 }
 
 // environment is what the operator declared about the run's surroundings,
@@ -103,6 +116,7 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	runner, err := schemachange.NewRunner(opts.CopySwap.Connection, store, schemachange.RunOptions{
 		KeepOld:     opts.CopySwap.KeepOld,
 		ReplaceDone: true,
+		Restart:     opts.CopySwap.Restart != "",
 		AfterCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
 			logger.Debug("copy-and-swap checkpoint saved", "phase", cp.Phase.String())
 			return nil
@@ -206,26 +220,28 @@ func copySwapRunVerdict(st statement.Statement, quiesced bool, err error) (verdi
 // same source and diverges again; and a data fault from the server — a
 // value the new type will not hold, a constraint the copied rows break —
 // where the next run copies the same rows and meets the same fault. Both
-// have to be abandoned, and the detail says how. Every other stop is
-// resumed by running the statement again. Either way the detail names the
-// hold the stopped run keeps on the source, since that is what the
-// operator is paying for in the meantime: the write fence of a quiesced
-// run, or the replication slot of a live run, which pins WAL on the server
-// until it is dropped.
+// have to be started over, and the detail says how: the restart
+// acknowledgement (CopySwapOptions.Restart, `--restart SCHEMA.TABLE` on
+// the CLI) discards what the stopped run left and runs the change from
+// the start. Every other stop is resumed by running the statement again.
+// Either way the detail names the hold the stopped run keeps on the
+// source, since that is what the operator is paying for in the meantime:
+// the write fence of a quiesced run, or the replication slot of a live
+// run, which pins WAL on the server until it is dropped.
 func copySwapStoppedRemedy(quiesced bool, err error) string {
 	hold := "its replication slot stays and pins WAL on the server"
-	release := "drop the replication slot"
+	release := "drops the replication slot"
 	if quiesced {
 		hold = "the source stays fenced against writes"
-		release = "take the write fence off the source"
+		release = "takes the write fence off the source"
 	}
-	abandon := "abandon the run — drop the shadow, " + release + ", and delete the checkpoint row — then correct the data or the statement and run it again"
+	startOver := "correct the data or the statement, then start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, " + release + ", deletes the checkpoint row, and runs the change from the start"
 	var divergence *checksum.DivergenceError
 	if errors.As(err, &divergence) {
-		return "the shadow did not match the source, so running the same statement again would verify the same copy and stop here again; " + abandon
+		return "the shadow did not match the source, so running the same statement again would verify the same copy and stop here again; " + startOver
 	}
 	if isDataFault(err) {
-		return "the server rejected the rows as the statement would shape them, so running the same statement again would copy the same rows and stop here again; " + abandon
+		return "the server rejected the rows as the statement would shape them, so running the same statement again would copy the same rows and stop here again; " + startOver
 	}
 	return "any checkpoint row it saved remains and " + hold + " until the same statement is run again, which resumes from the row"
 }

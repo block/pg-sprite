@@ -27,6 +27,9 @@ func (c *MigrateCmd) validateInput() error {
 		if c.AcceptBlocking != "" {
 			return errors.New("--accept-blocking cannot be combined with --desired")
 		}
+		if c.Restart != "" {
+			return errors.New("--restart cannot be combined with --desired")
+		}
 	}
 	return nil
 }

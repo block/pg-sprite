@@ -144,6 +144,13 @@ const (
 	// caller has that answer; a swap the catalog shows rolled back is a
 	// run back before its cutover, and the caller writes the row there.
 	CauseResumeCutover RefusalCause = "resume-row-cutover"
+	// CauseRestartSwapCommitted means a Run asked to start over
+	// (RunOptions.Restart) met a cutover row whose swap the catalog shows
+	// committed (LK-4): the shadow already bears the source's name, so
+	// there is nothing to discard and the change is past the point of
+	// starting over. The row is left as found for a Run without the
+	// restart to finish.
+	CauseRestartSwapCommitted RefusalCause = "restart-swap-committed"
 	// CauseResumeRowMismatch means the checkpoint row handed to a resume
 	// does not describe the proven target and built shadow (ST-2): it is
 	// keyed on another table, names another shadow or slot, or carries the
@@ -168,9 +175,10 @@ const (
 	// swap has not committed — it is in copying, catching_up, reconciling,
 	// verifying, or a cutover whose swap rolled back — so the shadow it
 	// names should be there, and the run can neither continue on it nor
-	// start over while the row stands. Nothing is written: the row, and
-	// the slot a live row names, are left for the operator to drop and
-	// delete; ErrShadowNotFound is wrapped for errors.Is.
+	// start over on its own while the row stands. Nothing is written: the
+	// row, and the slot a live row names, are left for the operator to
+	// drop and delete, or for a restart (RunOptions.Restart) to discard;
+	// ErrShadowNotFound is wrapped for errors.Is.
 	CauseResumeShadowGone RefusalCause = "resume-shadow-gone"
 	// CauseResumeSlotForeign means the slot wearing the row's derived name
 	// is not this route's (ST-3): it is a physical slot, or a logical slot
@@ -236,6 +244,7 @@ func RefusalCauses() []RefusalCause {
 		CauseOutcomeAmbiguous,
 		CauseResumeTerminal,
 		CauseResumeCutover,
+		CauseRestartSwapCommitted,
 		CauseResumeRowMismatch,
 		CauseResumeRowDecoding,
 		CauseShadowUnrecorded,
@@ -271,7 +280,7 @@ func (c RefusalCause) Invariant() string {
 		return "CO-1"
 	case CauseDrainDeferred:
 		return "CO-6"
-	case CauseOutcomeAmbiguous, CauseResumeCutover:
+	case CauseOutcomeAmbiguous, CauseResumeCutover, CauseRestartSwapCommitted:
 		return "LK-4"
 	case CauseResumeTerminal, CauseResumeSlotHeld:
 		return "ST-4"
@@ -305,7 +314,8 @@ func (c RefusalCause) Class() refusal.Class {
 		CauseShadowOwner, CauseForeignRelation, CauseIdentityHandoff, CauseDrainDeferred,
 		CauseRelationReplaced, CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid,
 		CauseNameTaken, CauseOutcomeAmbiguous, CauseCutoverUnfenced, CauseShadowUnrecorded,
-		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld:
+		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld,
+		CauseRestartSwapCommitted:
 		return refusal.ClassEnvironmental
 	case CauseStatementConversion:
 		return refusal.ClassCapabilityBoundary

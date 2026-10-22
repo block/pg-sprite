@@ -33,7 +33,7 @@ func TestRequeuePutsTheBatchBack(t *testing.T) {
 
 	again := b.Drain(position(t, 100))
 	assert.Equal(t, []int64{5, 7, 8, 9}, keys(again.Entries))
-	assert.Equal(t, []decode.Column{{Name: "label", Value: "a", Present: true}}, again.Entries[0].Columns)
+	assert.Equal(t, []decode.Column{decode.PresentColumn("label", "a")}, again.Entries[0].Columns)
 }
 
 // The stream owner adds nothing between a Drain and its Requeue, so a
@@ -51,7 +51,7 @@ func TestRequeueRefusesAHeldKey(t *testing.T) {
 	require.ErrorIs(t, err, ErrInvariantViolation)
 	assert.Contains(t, err.Error(), "(CO-5): requeue key 6")
 	assert.Equal(t, 1, b.Len(), "key 5 was not put back either")
-	assert.Equal(t, []decode.Column{{Name: "label", Value: "c", Present: true}}, entry(t, b, 6).Columns)
+	assert.Equal(t, []decode.Column{decode.PresentColumn("label", "c")}, entry(t, b, 6).Columns)
 }
 
 func TestRequeueOfAnEmptyBatchIsANoOp(t *testing.T) {

@@ -98,8 +98,8 @@ func (b *Buffer) addInsert(ev decode.ChangeEvent) error {
 		return fmt.Errorf("%w (CO-5): buffer key %d: insert over a buffered image", ErrInvariantViolation, ev.Key)
 	}
 	for _, c := range ev.Columns {
-		if !c.Present {
-			return fmt.Errorf("%w (CO-8): buffer key %d: insert omits column %s", ErrInvariantViolation, ev.Key, c.Name)
+		if !c.Present() {
+			return fmt.Errorf("%w (CO-8): buffer key %d: insert omits column %s", ErrInvariantViolation, ev.Key, c.Name())
 		}
 	}
 	b.markOldKeyReused(ev.Key, nil)
