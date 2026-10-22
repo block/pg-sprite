@@ -3,6 +3,7 @@ package migrate
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/plan"
@@ -10,6 +11,7 @@ import (
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -45,8 +47,19 @@ func Gate(st statement.Statement) (verdict.Verdict, bool) {
 // forms carry no safer idiom: suggesting the statement the user submitted
 // would confuse a human once and send a resubmitting automation into a loop.
 func indexAdvice(st statement.Statement) (detail, saferIdiom string) {
+	// Cascade comes first: PostgreSQL rejects DROP INDEX CONCURRENTLY ...
+	// CASCADE, so that form is not the safe concurrent idiom.
+	if st.Cascades() {
+		return "DROP INDEX ... CASCADE also drops the objects that depend on the index, which can lock and change " +
+			"tables other than the index's own; DROP INDEX CONCURRENTLY does not accept CASCADE — " +
+			"drop each dependent object explicitly, then the index, or resubmit without CASCADE; " +
+			"PostgreSQL then refuses the drop if anything depends on the index", ""
+	}
+	if st.Concurrent() && st.Kind() == statement.KindDropIndex && st.IndexTarget() != statement.IndexTargetSingleRelation {
+		return "DROP INDEX CONCURRENTLY drops exactly one index; submit one statement per index and run each directly against the database", ""
+	}
 	if st.Concurrent() {
-		return "this is already the safe concurrent idiom; pg-sprite does not drive this maintenance form yet — run it directly against the database", ""
+		return "this is already the safe concurrent idiom; pg-sprite does not drive this maintenance form — run it directly against the database", ""
 	}
 	switch st.Kind() {
 	case statement.KindDropIndex:
@@ -91,25 +104,37 @@ func partitionedParentVerdict(st statement.Statement, partitionErr *preflight.Un
 
 // rewriteRequiredVerdict is the refusal for a statement whose submitted
 // form blocks but for which the planner could not construct the safer
-// native sequence — a multi-operation statement, or a pattern it cannot
-// build. Running the submitted form would falsify the plan's own reason.
-func rewriteRequiredVerdict(st statement.Statement) verdict.Verdict {
+// native sequence. Running the submitted form would falsify the plan's own
+// reason. The verdict carries the plan report's guidance, and its detail
+// states the steps that guidance names, so the two surfaces give the same
+// advice.
+func rewriteRequiredVerdict(st statement.Statement, rs router.Statement) (verdict.Verdict, error) {
+	guidance, err := plan.RewriteRequiredGuidance(rs)
+	if err != nil {
+		return verdict.Verdict{}, fmt.Errorf("derive the manual path for rewrite-required %s: %w", qualified(st), err)
+	}
 	return verdict.Verdict{
 		Statement: st.SQL(),
 		Table:     qualified(st),
-		Detail: "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not " +
-			"construct one for this statement; submit each operation as its own single-operation statement " +
-			"so the engine can build its safer form (a dry-run classification shows each operation's route)",
-	}.WithRefusal(rewriteRequiredRefusal())
+		Detail:    "the submitted form blocks and must run as a safer native sequence, but pg-sprite could not construct one for this statement; " + manualPath(guidance),
+		Guidance:  guidance,
+	}.WithRefusal(rewriteRequiredRefusal()), nil
 }
 
-// backendUnavailableVerdict is the refusal for a change that routes to an
-// execution strategy this build does not implement.
+// manualPath states the steps a rewrite-required statement's guidance
+// names, in the wording the suggest report and dry run use, ending in the
+// guidance code an operator can look up.
+func manualPath(g suggest.Guidance) string {
+	return suggest.ManualPath(g) + " (guidance " + string(g) + ")"
+}
+
+// backendUnavailableVerdict is the refusal for a change whose backend has no
+// carrying path for it in this build.
 func backendUnavailableVerdict(st statement.Statement, rs router.Statement) verdict.Verdict {
 	return verdict.Verdict{
 		Statement: st.SQL(),
 		Table:     qualified(st),
-		Detail: fmt.Sprintf("the change requires the %s strategy, which this build does not implement yet: "+
+		Detail: fmt.Sprintf("the change requires the %s strategy, which does not carry this operation yet: "+
 			"PostgreSQL would rewrite the table under ACCESS EXCLUSIVE for the whole operation", rs.Backend),
 	}.WithRefusal(backendUnavailableRefusal())
 }
@@ -124,10 +149,26 @@ func routeRefusalVerdict(st statement.Statement, rs router.Statement) verdict.Ve
 		Detail:    "the planner knows no safe path for this statement",
 	}.WithRefusal(plan.RouteRefusal())
 	for _, d := range rs.Decisions {
-		if d.Route == planner.RouteRefuse {
-			v.Detail = fmt.Sprintf("the planner knows no safe path for %s", d.Operation)
-			break
+		if d.Route != planner.RouteRefuse {
+			continue
 		}
+		v.Detail = fmt.Sprintf("the planner knows no safe path for %s", d.Operation)
+		if d.Reason == planner.ReasonReplicaIdentity {
+			v.Detail = fmt.Sprintf("%s drops what the table's replica identity index keys on, "+
+				"which makes UPDATE and DELETE fail while a publication publishes them; "+
+				"point REPLICA IDENTITY at another unique index first (or DEFAULT, if a usable primary key remains after the drop), then re-plan", d.Operation)
+		}
+		if d.Reason == planner.ReasonDependentView {
+			v.DependentViews = d.DependentViews
+			v.Detail = fmt.Sprintf("%s changes a column read by %s, and PostgreSQL refuses to retype or drop a column while a view reads it; "+
+				"drop or redefine those views first, then re-plan", d.Operation, strings.Join(d.DependentViews, ", "))
+		}
+		if d.Reason == planner.ReasonCascadingDrop {
+			v.Detail = fmt.Sprintf("%s uses CASCADE, which also drops the objects that depend on it, such as views or other tables' foreign keys, "+
+				"outside this statement's table; drop each dependent object explicitly, then resubmit without CASCADE, "+
+				"and PostgreSQL then refuses the drop if anything still depends on it", d.Operation)
+		}
+		break
 	}
 	return v
 }
@@ -215,8 +256,10 @@ func budgetVerdict(st statement.Statement, budgetErr *executor.BudgetError, forc
 // failure the failed step and the committed prefix whose state remains.
 // It is the machine-readable twin of the returned error — automation
 // branches on Code and ExecutedSQL instead of parsing stderr prose. A
-// single bounded attempt (the submitted form, forced or not) rolls back on
-// failure, so it carries no step and an empty committed prefix.
+// single bounded attempt (the submitted form, forced or not) that fails
+// before its COMMIT rolls back, so it carries no step and an empty committed
+// prefix; one whose COMMIT did not return success may have landed, and the
+// verdict says the outcome is unknown instead.
 func failureVerdict(st statement.Statement, err error,
 	rep executor.SequenceReport, forced bool) verdict.Verdict {
 	v := verdict.Verdict{
@@ -227,14 +270,31 @@ func failureVerdict(st statement.Statement, err error,
 		Forced:    forced,
 		Detail:    "execution failed; nothing committed — a started bounded attempt rolls back",
 	}
+	unknown := errors.As(err, new(*executor.CommitOutcomeUnknownError))
 	var stepErr *executor.SequenceStepError
 	if !errors.As(err, &stepErr) {
+		if unknown {
+			v.Detail = fmt.Sprintf("outcome unknown: the COMMIT did not return success, "+
+				"so whether the change committed cannot be established from the client — inspect the catalog for %s before retrying",
+				v.Table)
+		}
 		return v
 	}
 	v.FailedStep = stepErr.Step
 	v.FailedStepSQL = stepErr.SQL
 	for _, s := range rep.Steps {
 		v.ExecutedSQL = append(v.ExecutedSQL, s.SQL)
+	}
+	if unknown {
+		// The failed step's COMMIT may have landed, so the planner's "a retry
+		// resumes from the failed step" contract cannot be assumed: the
+		// committed prefix is the steps before it, and the step itself is
+		// unknown until the catalog says otherwise.
+		v.Detail = fmt.Sprintf("sequence step %d of %d: outcome unknown — the step's COMMIT did not return success, "+
+			"so whether the step committed cannot be established from the client; "+
+			"the %d earlier steps committed and remain — inspect the catalog for %s before retrying, and do not assume a retry resumes from this step",
+			stepErr.Step, stepErr.Total, len(v.ExecutedSQL), v.Table)
+		return v
 	}
 	if len(v.ExecutedSQL) > 0 {
 		v.Detail = fmt.Sprintf("sequence step %d of %d failed; the %d committed steps' state remains — the planner sequence's partial-failure contract says how a retry resumes",
@@ -248,8 +308,9 @@ func failureVerdict(st statement.Statement, err error,
 
 // execRefusal maps an execution failure to its refusal verdict, when the
 // failure belongs to the refusal contract rather than the operational-error
-// exit: a static admission refusal (decided before anything executed), or a
-// budget cancellation of a non-substituted attempt. An *InvalidIndexError
+// exit: a static admission refusal (decided before anything executed), a
+// replica identity re-check that stopped a drop before anything committed,
+// or a budget cancellation of a non-substituted attempt. An *InvalidIndexError
 // is never a refusal, even when a budget cancellation is buried inside it —
 // invalid-index debris is the one outcome that needs an operator, and its
 // typed error carries the recovery guidance a budget verdict would conceal.
@@ -260,6 +321,9 @@ func execRefusal(st statement.Statement, err error,
 	}
 	if r, ok := admissionRefusal(err); ok {
 		return admissionRefusalVerdict(st, err, r, forced), true
+	}
+	if replicaIdentityRecheckRefused(err) {
+		return admissionRefusalVerdict(st, err, verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), forced), true
 	}
 	var invalidErr *executor.InvalidIndexError
 	if errors.As(err, &invalidErr) {
@@ -274,6 +338,23 @@ func execRefusal(st statement.Statement, err error,
 		return budgetVerdict(st, budgetErr, forced, online), true
 	}
 	return verdict.Verdict{}, false
+}
+
+// replicaIdentityRecheckRefused reports whether the executor's replica
+// identity re-check, read again under the table's lock, stopped a native
+// drop before anything of the run committed: the drop never ran, so the
+// run is refused like the same drop caught at plan time. Past a
+// sequence's first step the earlier steps have committed, and the failure
+// verdict reports them.
+func replicaIdentityRecheckRefused(err error) bool {
+	if !errors.Is(err, executor.ErrReplicaIdentityDrop) {
+		return false
+	}
+	var stepErr *executor.SequenceStepError
+	if !errors.As(err, &stepErr) {
+		return true
+	}
+	return stepErr.Step == 1
 }
 
 // onlineIdiomPlan reports whether the plan proved every operation an online

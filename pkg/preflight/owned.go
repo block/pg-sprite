@@ -37,31 +37,38 @@ func LookupOwnedRelationNames(ctx context.Context, pool *pgxpool.Pool, schema, t
 	// primary-key, unique, and exclusion constraints build an index on the
 	// table itself. The sequence arm's deptype pair is the definition of
 	// column ownership — 'a' for serial and OWNED BY, 'i' for identity.
+	//
+	// INV: CO-9 — every function, operator, relation, and type is
+	// pg_catalog-qualified, so a planted overload on the session's
+	// search_path cannot hide an owned name from the verification.
 	const q = `
 		WITH target AS (
-			SELECT c.oid, c.relkind::text AS relkind
-			FROM pg_class c
-			JOIN pg_namespace n ON n.oid = c.relnamespace
-			WHERE n.nspname = $1
-			  AND c.relname = $2
+			SELECT c.oid, c.relkind::pg_catalog.text AS relkind
+			FROM pg_catalog.pg_class c
+			JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+			WHERE n.nspname OPERATOR(pg_catalog.=) $1
+			  AND c.relname OPERATOR(pg_catalog.=) $2
 		)
 		SELECT t.relkind, ARRAY(
 			SELECT i.relname
-			FROM pg_constraint c
-			JOIN pg_class i ON i.oid = c.conindid
-			WHERE c.conrelid = t.oid
-			  AND c.contype IN ('p', 'u', 'x')
+			FROM pg_catalog.pg_constraint c
+			JOIN pg_catalog.pg_class i ON i.oid OPERATOR(pg_catalog.=) c.conindid
+			WHERE c.conrelid OPERATOR(pg_catalog.=) t.oid
+			  AND (c.contype OPERATOR(pg_catalog.=) 'p'
+			    OR c.contype OPERATOR(pg_catalog.=) 'u'
+			    OR c.contype OPERATOR(pg_catalog.=) 'x')
 			ORDER BY i.relname
 		), ARRAY(
 			SELECT s.relname
-			FROM pg_depend d
-			JOIN pg_class s ON s.oid = d.objid
-			WHERE d.refclassid = 'pg_class'::regclass
-			  AND d.refobjid = t.oid
-			  AND d.refobjsubid > 0
-			  AND d.classid = 'pg_class'::regclass
-			  AND d.deptype IN ('a', 'i')
-			  AND s.relkind = 'S'
+			FROM pg_catalog.pg_depend d
+			JOIN pg_catalog.pg_class s ON s.oid OPERATOR(pg_catalog.=) d.objid
+			WHERE d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+			  AND d.refobjid OPERATOR(pg_catalog.=) t.oid
+			  AND d.refobjsubid OPERATOR(pg_catalog.>) 0
+			  AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+			  AND (d.deptype OPERATOR(pg_catalog.=) 'a'
+			    OR d.deptype OPERATOR(pg_catalog.=) 'i')
+			  AND s.relkind OPERATOR(pg_catalog.=) 'S'
 			ORDER BY s.relname
 		)
 		FROM target t`

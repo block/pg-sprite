@@ -10,6 +10,8 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/block/pg-sprite/pkg/dbconn"
 )
 
 // buildMinConns is the pool size a concurrent build needs: the build
@@ -99,8 +101,12 @@ func (b ConcurrentBudget) validate() error {
 // inside a transaction block, which also rules out SET LOCAL, so the
 // overrides are session-level: the returned release resets them before the
 // session goes back to the pool and discards the session when the reset
-// cannot be proven.
-func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b ConcurrentBudget) (*pgxpool.Conn, func(), error) {
+// cannot be proven. When searchPathSchema is set, the session's search_path
+// is pinned to that schema then public the same way, so the statement's
+// unqualified references (an index expression's function, an operator
+// class) resolve exactly as the diff printed them and as a native attempt
+// resolves them, never via the session's ambient search_path.
+func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b ConcurrentBudget, searchPathSchema string) (*pgxpool.Conn, func(), error) {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return nil, nil, fmt.Errorf("acquire session: %w", err)
@@ -115,6 +121,13 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 		conn.Release()
 		return nil, nil, err
 	}
+	var priorPath string
+	if searchPathSchema != "" {
+		if err := conn.QueryRow(ctx, "SELECT pg_catalog.current_setting('search_path')").Scan(&priorPath); err != nil {
+			conn.Release()
+			return nil, nil, fmt.Errorf("read session search_path: %w", err)
+		}
+	}
 
 	// INV: LK-2 — the CONCURRENTLY exception policy: no per-lock timeout
 	// (a lock_timeout would cancel the statement's snapshot waits and leave
@@ -127,8 +140,11 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 		statementTimeout = 0
 	}
 	budgets := "SET lock_timeout = 0; SET statement_timeout = " + strconv.FormatInt(statementTimeout, 10)
+	if searchPathSchema != "" {
+		budgets += "; " + dbconn.SessionSearchPath(searchPathSchema, "public")
+	}
 	if _, err := conn.Exec(ctx, budgets); err != nil {
-		// The two SETs may have partially applied — PostgreSQL runs a
+		// The SETs may have partially applied — PostgreSQL runs a
 		// simple-query batch statement by statement — so the session must
 		// not return to the pool: releasing it would hand lock_timeout = 0
 		// to an unsuspecting borrower. Hijacking detaches it from the pool
@@ -155,7 +171,11 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 		// then reuses.
 		restore := "SET lock_timeout = " + strconv.FormatInt(priorLock, 10) +
 			"; SET statement_timeout = " + strconv.FormatInt(priorStatement, 10)
-		if _, err := conn.Exec(cleanupCtx, restore); err == nil {
+		_, err := conn.Exec(cleanupCtx, restore)
+		if err == nil {
+			err = restoreSearchPath(cleanupCtx, conn, searchPathSchema, priorPath)
+		}
+		if err == nil {
 			conn.Release()
 			return
 		}
@@ -167,6 +187,20 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 	return conn, release, nil
 }
 
+// restoreSearchPath puts back the search_path acquireBudgetedSession read
+// before pinning it, by value for the same reason the bounds are; nothing
+// was pinned when searchPathSchema is empty.
+func restoreSearchPath(ctx context.Context, conn *pgxpool.Conn, searchPathSchema, prior string) error {
+	if searchPathSchema == "" {
+		return nil
+	}
+	sql, path := dbconn.RestoreSessionSearchPath(prior)
+	if _, err := conn.Exec(ctx, sql, path); err != nil {
+		return fmt.Errorf("restore session search_path: %w", err)
+	}
+	return nil
+}
+
 // sessionBudgets reads the execution bounds in force on conn, in the
 // milliseconds a bare integer SET writes.
 //
@@ -175,9 +209,10 @@ func acquireBudgetedSession(ctx context.Context, pool *pgxpool.Pool, b Concurren
 // for 500 — which a caller that means to write the value straight back
 // would have to parse.
 func sessionBudgets(ctx context.Context, conn *pgxpool.Conn) (lockMS, statementMS int64, err error) {
+	// INV: CO-9 — every relation and operator is pg_catalog-qualified.
 	const query = `SELECT
-		(SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name = 'lock_timeout'),
-		(SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name = 'statement_timeout')`
+		(SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name OPERATOR(pg_catalog.=) 'lock_timeout'),
+		(SELECT setting::bigint FROM pg_catalog.pg_settings WHERE name OPERATOR(pg_catalog.=) 'statement_timeout')`
 	if err := conn.QueryRow(ctx, query).Scan(&lockMS, &statementMS); err != nil {
 		return 0, 0, fmt.Errorf("read session budgets: %w", err)
 	}

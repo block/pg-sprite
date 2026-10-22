@@ -84,20 +84,24 @@ func CheckCreatePrivilegesAs(ctx context.Context, pool *pgxpool.Pool, schema, ow
 	// "schema missing" into a false exists column instead of an absent
 	// row, and COALESCE keeps the privilege probes NULL-safe on that
 	// branch.
+	//
+	// INV: CO-9 — every function, operator, relation, and type is
+	// pg_catalog-qualified, so a planted overload on the session's
+	// search_path cannot answer a privilege probe true.
 	const q = `
 		SELECT s.nspname,
 		       n.nspname IS NOT NULL,
-		       current_user::text,
-		       current_database()::text,
-		       current_setting('server_version_num')::int,
-		       CASE WHEN $2 = '' THEN true ELSE EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $2) END,
-		       CASE WHEN $2 = '' OR $2 = current_user THEN true
-		            ELSE COALESCE(pg_has_role(current_user, (SELECT oid FROM pg_roles WHERE rolname = $2), 'MEMBER'), false) END,
-		       has_database_privilege(current_user, current_database(), 'CONNECT'),
-		       COALESCE(has_schema_privilege(CASE WHEN $2 = '' THEN current_user::regrole::oid ELSE (SELECT oid FROM pg_roles WHERE rolname = $2) END, n.oid, 'USAGE'), false),
-		       COALESCE(has_schema_privilege(CASE WHEN $2 = '' THEN current_user::regrole::oid ELSE (SELECT oid FROM pg_roles WHERE rolname = $2) END, n.oid, 'CREATE'), false)
-		FROM (SELECT CASE WHEN $1 = '' THEN current_schema() ELSE $1 END AS nspname) s
-		LEFT JOIN pg_namespace n ON n.nspname = s.nspname`
+		       current_user::pg_catalog.text,
+		       pg_catalog.current_database()::pg_catalog.text,
+		       pg_catalog.current_setting('server_version_num')::int,
+		       CASE WHEN $2 OPERATOR(pg_catalog.=) '' THEN true ELSE EXISTS (SELECT 1 FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) $2) END,
+		       CASE WHEN $2 OPERATOR(pg_catalog.=) '' OR $2 OPERATOR(pg_catalog.=) current_user THEN true
+		            ELSE COALESCE(pg_catalog.pg_has_role(current_user, (SELECT oid FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) $2), 'MEMBER'), false) END,
+		       pg_catalog.has_database_privilege(current_user, pg_catalog.current_database(), 'CONNECT'),
+		       COALESCE(pg_catalog.has_schema_privilege(CASE WHEN $2 OPERATOR(pg_catalog.=) '' THEN current_user::pg_catalog.regrole::pg_catalog.oid ELSE (SELECT oid FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) $2) END, n.oid, 'USAGE'), false),
+		       COALESCE(pg_catalog.has_schema_privilege(CASE WHEN $2 OPERATOR(pg_catalog.=) '' THEN current_user::pg_catalog.regrole::pg_catalog.oid ELSE (SELECT oid FROM pg_catalog.pg_roles WHERE rolname OPERATOR(pg_catalog.=) $2) END, n.oid, 'CREATE'), false)
+		FROM (SELECT CASE WHEN $1 OPERATOR(pg_catalog.=) '' THEN pg_catalog.current_schema() ELSE $1 END AS nspname) s
+		LEFT JOIN pg_catalog.pg_namespace n ON n.nspname OPERATOR(pg_catalog.=) s.nspname`
 	var targetSchema *string
 	var schemaExists, ownerExists, ownerMember, canConnect, schemaUsage, schemaCreate bool
 	var versionNum int

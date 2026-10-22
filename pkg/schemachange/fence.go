@@ -46,8 +46,47 @@ $pgsprite$`
 // writeFenceLockSQL serializes two engines creating the fence function
 // for the first time in one database, on the engine's advisory key for
 // the function, so neither meets the catalog's duplicate-key failure for
-// a CREATE the other has in flight.
-const writeFenceLockSQL = "SELECT pg_advisory_xact_lock($1, hashtext(quote_ident($2) || '.' || quote_ident($3)))"
+// a CREATE the other has in flight. Every function and operator is
+// qualified (INV: CO-9), so a planted overload in a searched schema cannot
+// change the key even if the transaction's catalog-only search_path were
+// not set.
+const writeFenceLockSQL = "SELECT pg_catalog.pg_advisory_xact_lock($1, pg_catalog.hashtext(" +
+	"pg_catalog.quote_ident($2) OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) pg_catalog.quote_ident($3)))"
+
+// writeFenceTriggerType is pg_trigger.tgtype for the fence as installed: a
+// statement-level BEFORE trigger on INSERT (4), DELETE (8), UPDATE (16), and
+// TRUNCATE (32), the BEFORE bit being 2 and the row-level bit unset.
+const writeFenceTriggerType = 2 + 4 + 8 + 16 + 32
+
+// triggerEnabledAlways is pg_trigger.tgenabled for a trigger that fires in
+// every session, whatever its session_replication_role.
+const triggerEnabledAlways = "A"
+
+// writeFenceStateSQL reads the enablement of the engine's fence on one
+// relation: the row exists only for a trigger of the fence's name, calling
+// the fence's function in the engine's schema, of the shape the install
+// gives it — a statement-level BEFORE trigger on every write statement
+// (tgtype), with no WHEN condition (tgqual), no UPDATE OF column list
+// (tgattr), no arguments (tgnargs), and not deferrable. A trigger of the
+// same name and function whose shape differs fires for fewer statements
+// than the fence, so it yields no row and the swap refuses it as a fence
+// that is gone. Every catalog name is qualified, so the read does not
+// depend on the session's search_path (CO-9).
+const writeFenceStateSQL = `
+SELECT tg.tgenabled::pg_catalog.text
+FROM pg_catalog.pg_trigger tg
+JOIN pg_catalog.pg_proc p ON p.oid OPERATOR(pg_catalog.=) tg.tgfoid
+JOIN pg_catalog.pg_namespace pn ON pn.oid OPERATOR(pg_catalog.=) p.pronamespace
+WHERE tg.tgrelid OPERATOR(pg_catalog.=) $1::pg_catalog.oid
+  AND tg.tgname::pg_catalog.text OPERATOR(pg_catalog.=) $2::pg_catalog.text
+  AND p.proname::pg_catalog.text OPERATOR(pg_catalog.=) $2::pg_catalog.text
+  AND pn.nspname::pg_catalog.text OPERATOR(pg_catalog.=) $3::pg_catalog.text
+  AND tg.tgtype::pg_catalog.int4 OPERATOR(pg_catalog.=) $4::pg_catalog.int4
+  AND tg.tgqual IS NULL
+  AND tg.tgattr::pg_catalog.text OPERATOR(pg_catalog.=) ''
+  AND tg.tgnargs::pg_catalog.int4 OPERATOR(pg_catalog.=) 0
+  AND NOT tg.tgdeferrable
+  AND NOT tg.tgisinternal`
 
 // installWriteFence puts the write fence on the source, in one bounded
 // transaction as the engine role and only while the caller holds the
@@ -55,10 +94,14 @@ const writeFenceLockSQL = "SELECT pg_advisory_xact_lock($1, hashtext(quote_ident
 // UPDATE, DELETE, and TRUNCATE, so it fires once per statement and costs
 // the run nothing per row; installing it waits, under lock_timeout, for
 // any write already in flight to finish, which is the point at which the
-// table is quiesced. The install is idempotent, so a resumed run installs
-// over the fence the stopped run left. The trigger is created as the
-// engine role, not the owner: the function lives in the engine's schema,
-// and the owner needs no access to that schema for the trigger to fire.
+// table is quiesced. The trigger is enabled ALWAYS, so it also fires for a
+// session running under session_replication_role = replica, which skips
+// every ordinary trigger. The install is idempotent, so a resumed run
+// installs over the fence the stopped run left, and a fence that run left
+// disabled, or enabled for origin sessions only, comes back enabled
+// ALWAYS. The trigger is created as the engine role, not the owner: the
+// function lives in the engine's schema, and the owner needs no access to
+// that schema for the trigger to fire.
 func installWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, opts Options) error {
 	if err := requireTableLock(lock, target.Schema(), target.Table()); err != nil {
 		return err
@@ -76,6 +119,9 @@ func installWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tab
 		_ = tx.Rollback(context.WithoutCancel(ctx))
 	}()
 	if err := setBudgets(ctx, tx, opts); err != nil {
+		return err
+	}
+	if err := pinCatalogSearchPath(ctx, tx); err != nil {
 		return err
 	}
 	if err := confirmTableLock(ctx, tx, lock); err != nil {
@@ -98,8 +144,43 @@ func installWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tab
 	if _, err := tx.Exec(ctx, create); err != nil {
 		return fmt.Errorf("install write fence on %s.%s: %w", target.Schema(), target.Table(), err)
 	}
+	// INV: CO-1 — a session in replica role fires no ORIGIN trigger, so the
+	// fence must be ALWAYS to refuse its writes too.
+	enable := "ALTER TABLE " + source + " ENABLE ALWAYS TRIGGER " + pgx.Identifier{WriteFenceTrigger}.Sanitize()
+	if _, err := tx.Exec(ctx, enable); err != nil {
+		return fmt.Errorf("enable write fence always on %s.%s: %w", target.Schema(), target.Table(), err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("commit write fence install: %w", err)
+	}
+	return nil
+}
+
+// confirmWriteFence refuses the swap of a quiesced proof unless the source
+// still carries the engine's fence, of the shape the install gave it and
+// enabled ALWAYS. It runs under the swap's ACCESS EXCLUSIVE lock, so the
+// trigger cannot be disabled, dropped, or replaced between this read and
+// the rename. The fence is what makes the proof's quiescence true rather
+// than assumed; a source whose fence was disabled, dropped, or replaced by
+// a trigger that fires for fewer statements since the pass may have taken
+// writes the pass never saw, and the run stops there for a fresh install
+// and a fresh pass.
+func confirmWriteFence(ctx context.Context, tx pgx.Tx, built BuiltShadow) error {
+	schema, table := built.Schema(), built.SourceTable()
+	var enabled string
+	err := tx.QueryRow(ctx, writeFenceStateSQL, built.SourceOID(), WriteFenceTrigger, preflight.EngineSchema, writeFenceTriggerType).Scan(&enabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// INV: CO-1
+		return refuse(CauseCutoverUnfenced, nil, "source %s.%s carries no %s trigger of the fence's shape calling %s.%s, so the quiesced proof no longer holds",
+			schema, table, WriteFenceTrigger, preflight.EngineSchema, WriteFenceTrigger)
+	}
+	if err != nil {
+		return fmt.Errorf("read write fence on %s.%s: %w", schema, table, err)
+	}
+	if enabled != triggerEnabledAlways {
+		// INV: CO-1
+		return refuse(CauseCutoverUnfenced, nil, "the write fence on %s.%s has tgenabled %q, not %q, so a write could pass it",
+			schema, table, enabled, triggerEnabledAlways)
 	}
 	return nil
 }
@@ -111,7 +192,10 @@ func installWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Tab
 // bounded transaction and only while the caller holds the table lock, so
 // it cannot race a run on the same table, and it refuses anything under
 // the source's name that is not a plain table owned by the proof's owner
-// (ST-5). A source without the fence is left as it is.
+// (ST-5). A source without the fence is left as it is. The answer does not
+// depend on the pool's session search_path: the drop's transaction searches the
+// catalog alone, so a caller-built pool with another schema ahead of it
+// gets the same verdict.
 func DropWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, opts Options) error {
 	if err := opts.validate(); err != nil {
 		return err
@@ -180,6 +264,9 @@ func dropWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableL
 	if err := setBudgets(ctx, tx, opts); err != nil {
 		return err
 	}
+	if err := pinCatalogSearchPath(ctx, tx); err != nil {
+		return err
+	}
 	if err := confirmTableLock(ctx, tx, lock); err != nil {
 		return err
 	}
@@ -196,6 +283,23 @@ func dropWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableL
 	return nil
 }
 
+// pinCatalogSearchPath scopes a fence transaction's search_path to
+// pg_catalog alone. The transaction runs on the caller's pool, under
+// whatever session search_path that pool was built with, and not every
+// read in it is this package's own: the table lock confirmation reads
+// pg_locks through pkg/dbconn. With the catalog the only searched schema,
+// no planted relation, function, or operator can answer any of them
+// (CO-9). The fence's own statements name every object by schema, so
+// they need no path; the pin and their qualification are two layers for
+// the same guarantee, and neither is the redundant one.
+func pinCatalogSearchPath(ctx context.Context, tx pgx.Tx) error {
+	// INV: CO-9
+	if _, err := tx.Exec(ctx, dbconn.LocalSearchPath("pg_catalog")); err != nil {
+		return fmt.Errorf("set write fence search_path: %w", err)
+	}
+	return nil
+}
+
 // checkSource confirms that the source's name is borne by a plain table
 // owned by the proof's owner. Nothing under the name is ErrSourceNotFound;
 // another kind of relation, or a table of another owner, is refused as a
@@ -203,11 +307,14 @@ func dropWriteFence(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableL
 func checkSource(ctx context.Context, tx pgx.Tx, target preflight.CopySwapTarget) error {
 	schema, table := target.Schema(), target.Table()
 	var relkind, owner string
+	// INV: CO-9 — every catalog name is qualified, so the read does not
+	// depend on the transaction's search_path and a planted overload in a
+	// searched schema cannot answer it.
 	err := tx.QueryRow(ctx, `
-		SELECT c.relkind::text, pg_get_userbyid(c.relowner)
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = $2`, schema, table).Scan(&relkind, &owner)
+		SELECT c.relkind::pg_catalog.text, pg_catalog.pg_get_userbyid(c.relowner)
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`, schema, table).Scan(&relkind, &owner)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return fmt.Errorf("%w: %s.%s", ErrSourceNotFound, schema, table)
 	}

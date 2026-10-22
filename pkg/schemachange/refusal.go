@@ -85,6 +85,13 @@ const (
 	// the stream — and no drain to apply those changes under the swap lock
 	// (CO-1).
 	CauseCutoverUndrained RefusalCause = "cutover-undrained"
+	// CauseCutoverUnfenced means the swap of a quiesced proof found the
+	// source without the engine's write fence enabled ALWAYS under the
+	// swap lock (CO-1): the trigger was disabled, dropped, or replaced by
+	// one of another shape since it was installed, so a write may have
+	// reached the source after the pass that proved the shadow equal to
+	// it.
+	CauseCutoverUnfenced RefusalCause = "cutover-unfenced"
 	// CauseDrainDeferred means the shadow refused a batch the swap's drain
 	// had to apply under the swap lock (CO-6): a unique-key move the
 	// changes since the live pass cannot be ordered into the shadow. No
@@ -97,11 +104,12 @@ const (
 	CauseRelationReplaced RefusalCause = "cutover-relation-replaced"
 	// CauseSchemaDrift means the source's or the shadow's introspected model
 	// no longer matches the fingerprint the build recorded (ST-5): a
-	// column, constraint, or index was added, dropped, or changed since.
+	// column, constraint, index, storage parameter, or column-owned
+	// sequence declaration was added, dropped, or changed since.
 	CauseSchemaDrift RefusalCause = "cutover-schema-drift"
 	// CauseFidelityDrift means the source's or the shadow's metadata — owner,
-	// grants, policies, comment, storage parameters, replica identity,
-	// statistics targets, unvalidated checks, or identity sequence options —
+	// grants, policies, comment, replica identity, statistics targets,
+	// unvalidated checks, or identity columns and their sequences —
 	// no longer matches the snapshot the build recorded (ST-5).
 	CauseFidelityDrift RefusalCause = "cutover-fidelity-drift"
 	// CauseIndexInvalid means a shadow index has pg_index.indisvalid false
@@ -155,6 +163,15 @@ const (
 	// target (ST-2). The row is the only record of which statement a shadow
 	// embodies; without one the shadow is dropped and the run started over.
 	CauseShadowUnrecorded RefusalCause = "shadow-unrecorded"
+	// CauseResumeShadowGone means the checkpoint row handed to a resume
+	// records a shadow under which no relation stands (ST-2): the row's
+	// swap has not committed — it is in copying, catching_up, reconciling,
+	// verifying, or a cutover whose swap rolled back — so the shadow it
+	// names should be there, and the run can neither continue on it nor
+	// start over while the row stands. Nothing is written: the row, and
+	// the slot a live row names, are left for the operator to drop and
+	// delete; ErrShadowNotFound is wrapped for errors.Is.
+	CauseResumeShadowGone RefusalCause = "resume-shadow-gone"
 	// CauseResumeSlotForeign means the slot wearing the row's derived name
 	// is not this route's (ST-3): it is a physical slot, or a logical slot
 	// of another database. It is neither decoded from nor replaced; an
@@ -208,6 +225,7 @@ func RefusalCauses() []RefusalCause {
 		CauseIdentityHandoff,
 		CauseCutoverUnverified,
 		CauseCutoverUndrained,
+		CauseCutoverUnfenced,
 		CauseDrainDeferred,
 		CauseRelationReplaced,
 		CauseSchemaDrift,
@@ -221,6 +239,7 @@ func RefusalCauses() []RefusalCause {
 		CauseResumeRowMismatch,
 		CauseResumeRowDecoding,
 		CauseShadowUnrecorded,
+		CauseResumeShadowGone,
 		CauseResumeSlotForeign,
 		CauseResumeSlotHeld,
 		CauseCopyShadowMismatch,
@@ -248,7 +267,7 @@ func (c RefusalCause) Invariant() string {
 	case CauseShadowOwner, CauseForeignRelation, CauseGrantsDiffer, CauseIdentityHandoff,
 		CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid, CauseNameTaken:
 		return "ST-5"
-	case CauseCutoverUnverified, CauseCutoverUndrained:
+	case CauseCutoverUnverified, CauseCutoverUndrained, CauseCutoverUnfenced:
 		return "CO-1"
 	case CauseDrainDeferred:
 		return "CO-6"
@@ -256,7 +275,7 @@ func (c RefusalCause) Invariant() string {
 		return "LK-4"
 	case CauseResumeTerminal, CauseResumeSlotHeld:
 		return "ST-4"
-	case CauseResumeRowMismatch, CauseShadowUnrecorded:
+	case CauseResumeRowMismatch, CauseShadowUnrecorded, CauseResumeShadowGone:
 		return "ST-2"
 	case CauseResumeSlotForeign, CauseResumeRowDecoding:
 		return "ST-3"
@@ -285,8 +304,8 @@ func (c RefusalCause) Class() refusal.Class {
 	case CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed, CauseSourceShape,
 		CauseShadowOwner, CauseForeignRelation, CauseIdentityHandoff, CauseDrainDeferred,
 		CauseRelationReplaced, CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid,
-		CauseNameTaken, CauseOutcomeAmbiguous, CauseShadowUnrecorded, CauseResumeSlotForeign,
-		CauseResumeSlotHeld:
+		CauseNameTaken, CauseOutcomeAmbiguous, CauseCutoverUnfenced, CauseShadowUnrecorded,
+		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld:
 		return refusal.ClassEnvironmental
 	case CauseStatementConversion:
 		return refusal.ClassCapabilityBoundary

@@ -21,9 +21,10 @@ var (
 	// the lock bound it is meant to outlast.
 	ErrInvalidBlockingBudget = errors.New("invalid accepted-blocking budget")
 	// ErrUnsupportedAcceptedBlocking means the statement is not one of the
-	// single-relation blocking index forms this executor admits, or the
-	// server will not run it inside the engine-owned transaction. Retrying
-	// the same statement reproduces it; the outcome is permanent.
+	// single-relation blocking index forms this executor admits, the server
+	// will not run it inside the engine-owned transaction, or it drops a
+	// replica identity index. Retrying the same statement reproduces it;
+	// the outcome is permanent.
 	ErrUnsupportedAcceptedBlocking = errors.New("statement is not an accepted blocking index statement")
 )
 
@@ -114,8 +115,8 @@ func executeAcceptedBlocking(ctx context.Context, pool *pgxpool.Pool, sql string
 	if err != nil {
 		return rep, fmt.Errorf("%w: %w", ErrUnsupportedAcceptedBlocking, err)
 	}
-	if !acceptedBlockingShape(st) {
-		return rep, ErrUnsupportedAcceptedBlocking
+	if reason := acceptedBlockingIneligibility(st); reason != "" {
+		return rep, fmt.Errorf("%w: %s", ErrUnsupportedAcceptedBlocking, reason)
 	}
 	rep = BlockingReport{SQL: sql, LockTimeout: b.LockTimeout, StatementTimeout: b.StatementTimeout}
 	start := clock.Now()
@@ -149,6 +150,12 @@ func executeAcceptedBlocking(ctx context.Context, pool *pgxpool.Pool, sql string
 			return rep, acceptedBlockingLockError(ctx, err, b)
 		}
 	}
+	if st.Kind() == statement.KindDropIndex {
+		if err := refuseReplicaIdentityDrop(ctx, tx, st.IndexRelation()); err != nil {
+			rep.Duration = clock.Now().Sub(start)
+			return rep, err
+		}
+	}
 	if _, err := tx.Exec(ctx, sql); err != nil {
 		rep.Duration = clock.Now().Sub(start)
 		return rep, acceptedBlockingStatementError(ctx, err, b)
@@ -161,18 +168,74 @@ func executeAcceptedBlocking(ctx context.Context, pool *pgxpool.Pool, sql string
 	return rep, nil
 }
 
-func acceptedBlockingShape(st statement.Statement) bool {
+// refuseReplicaIdentityDrop refuses a DROP INDEX that would drop a replica
+// identity index: the named index itself, or one attached under it on a
+// partition. PostgreSQL keeps REPLICA IDENTITY USING INDEX when the index
+// goes, so the table is left with no usable identity and every UPDATE and
+// DELETE on it fails while a publication publishes them. It runs under the
+// table's ACCESS EXCLUSIVE lock, which ALTER TABLE ... REPLICA IDENTITY also
+// needs, so the answer cannot change before the DROP runs. The index is
+// counted on its own as well as through pg_partition_tree, which lists
+// nothing for an index outside a partition tree. A name that resolves to
+// nothing has no identity to protect; the DROP reports it.
+func refuseReplicaIdentityDrop(ctx context.Context, tx pgx.Tx, rel statement.IndexRelation) error {
+	name := pgx.Identifier{rel.Name}
+	if rel.Schema != "" {
+		name = pgx.Identifier{rel.Schema, rel.Name}
+	}
+	var identity string
+	err := tx.QueryRow(ctx, `
+		SELECT COALESCE(string_agg(format('%s on %s', i.indexrelid::regclass, i.indrelid::regclass), ', '
+		                           ORDER BY i.indexrelid::regclass::text), '')
+		FROM (SELECT to_regclass($1)::oid AS relid
+		      UNION
+		      SELECT relid FROM pg_partition_tree(to_regclass($1))) tree
+		JOIN pg_index i ON i.indexrelid = tree.relid AND i.indisreplident
+		JOIN pg_class c ON c.oid = i.indrelid AND c.relreplident = 'i'`, name.Sanitize()).Scan(&identity)
+	if err != nil {
+		return fmt.Errorf("check whether %s is a replica identity index: %w", name.Sanitize(), err)
+	}
+	if identity != "" {
+		return fmt.Errorf("%w: dropping %s drops the replica identity index %s, which makes UPDATE and DELETE fail "+
+			"while a publication publishes them; point REPLICA IDENTITY at another unique index first (or DEFAULT, if a usable primary key remains after the drop)",
+			ErrUnsupportedAcceptedBlocking, name.Sanitize(), identity)
+	}
+	return nil
+}
+
+// acceptedBlockingIneligibility returns why a statement is outside the
+// accepted-blocking shape, or "" when it is eligible.
+func acceptedBlockingIneligibility(st statement.Statement) string {
 	if st.Concurrent() {
-		return false
+		return "the concurrent form cannot run inside the engine-owned transaction; run it directly against the database"
 	}
 	switch st.Kind() {
 	case statement.KindCreateIndex:
-		return true
+		return ""
 	case statement.KindDropIndex, statement.KindReindex:
-		return st.IndexTarget() == statement.IndexTargetSingleRelation
+		// INV: AB-3 — only a statement whose whole scope is the one
+		// acknowledged table runs here; a DROP INDEX ... CASCADE also drops
+		// dependent objects on other tables and parses as another target.
+		return indexScopeIneligibility(st)
 	default:
-		return false
+		return "it is not an index statement"
 	}
+}
+
+// indexScopeIneligibility names why a DROP INDEX or REINDEX statement's scope
+// is wider than the one acknowledged table, or returns "" when it is not.
+func indexScopeIneligibility(st statement.Statement) string {
+	if st.IndexTarget() == statement.IndexTargetSingleRelation {
+		return ""
+	}
+	if st.Cascades() {
+		return "a cascading drop also drops the objects that depend on the index, which the acknowledged table's lock does not cover; " +
+			"resubmit without CASCADE, and PostgreSQL then refuses the drop if anything depends on the index"
+	}
+	if st.Kind() == statement.KindDropIndex {
+		return "it names several indexes; submit one DROP INDEX per index"
+	}
+	return "its scope is wider than one relation; name one index or table"
 }
 
 // acceptedBlockingLockError maps a failed table-lock request. The DDL has

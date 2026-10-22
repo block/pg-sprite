@@ -100,7 +100,8 @@ func (o CatchupOptions) validate() error {
 
 // Status is one consistent snapshot of a catch-up as of the end of its last
 // completed cycle: the stream's positions and what the buffer and the
-// flushes have done with the changes, all recorded together.
+// flushes have done with the changes, all recorded together, and whether a
+// Pause holds the flushes now.
 type Status struct {
 	// Delivered is the stream's delivered position: every transaction that
 	// committed at or below it has been added to the buffer or discarded.
@@ -120,7 +121,10 @@ type Status struct {
 	// Deferred is the number of entries the last drain left waiting for an
 	// in-flight chunk, or for a batch a constraint refused (ErrBatchDeferred).
 	Deferred int
-	// Held is the number of images buffered with a completion pending.
+	// Held is the number of images buffered until the stream passes a read
+	// the flush made: a completion read for a moved image, or a presence
+	// check that found an unmoved image's shadow row absent. A nonzero value
+	// is normal for the cycle or two a hold lasts.
 	Held int
 	// Applied is the number of images and delete markers committed flushes
 	// have written to the shadow.
@@ -135,6 +139,13 @@ type Status struct {
 	// BatchesDeferred is the number of batches a constraint refused even
 	// whole-row, requeued for a later drain (CO-6).
 	BatchesDeferred uint64
+	// FlushesHeld is set while a Pause holds the flushes off the shadow,
+	// from Pause's return until its resume, and not while a cycle's own
+	// flush runs. Unlike the fields above it is not a cycle's record: it
+	// moves the moment the hold is taken or given back. Under the hold Lag
+	// grows and Applied stands still on purpose, so a caller watching for
+	// a stalled catch-up reads FlushesHeld first.
+	FlushesHeld bool
 }
 
 // Lag is how far the confirmed position trails the server's write position
@@ -152,13 +163,17 @@ func (s Status) Lag() uint64 {
 // drained Batch through the Flusher, and confirms to the server what the
 // shadow durably holds. One Catchup serves one stream for the lifetime of
 // Run; the stream, the flusher, and the buffer are used from Run's goroutine
-// alone, and Status and Work are safe to call from any other.
+// alone, and Status, Work, and Pause are safe to call from any other.
 type Catchup struct {
 	stream    *decode.Stream
 	flusher   *Flusher
 	positions PositionSource
 	buffer    *Buffer
 	opts      CatchupOptions
+	// flushes is the flush gate: its one token is held by the cycle while
+	// it flushes and by a Pause until its resume, so a Pause returns only
+	// once no flush is in flight and a cycle under a Pause skips its flush.
+	flushes chan struct{}
 
 	mu     sync.Mutex
 	status Status
@@ -188,6 +203,7 @@ func NewCatchup(stream *decode.Stream, flusher *Flusher, positions PositionSourc
 		positions: positions,
 		buffer:    NewBuffer(),
 		opts:      opts,
+		flushes:   newFlushGate(),
 		status:    Status{Delivered: stream.Delivered(), Confirmed: stream.Confirmed()},
 	}, nil
 }
@@ -206,19 +222,22 @@ func (c *Catchup) Confirmed() decode.LSN {
 	return c.Status().Confirmed
 }
 
-// Run consumes the stream in cycles until ctx ends or the stream, the
-// buffer, or a flush fails. Each cycle gathers changes until MaxChanges
-// are buffered or Interval has passed, reads the copier's Position after
-// the last Add — so a discarded uncut key's change is one the copier's
-// read will see (CO-4) — drains, flushes the batch, puts a refused batch
-// back (ErrBatchDeferred) or holds the images the flush completed but did
-// not write, and then confirms the lowest of the stream's delivered
-// position and the buffer's oldest pending position: everything below it
-// is in the shadow or was discarded as uncut, so a stream reopened from
-// it misses nothing (ST-4). An empty cycle on a quiet table still confirms,
-// so the slot releases WAL while nothing changes. The cycle ends by reading
-// the server's write position on pool, so Status.Lag measures the WAL the
-// catch-up has yet to work through, not how far the walsender has decoded.
+// Run consumes the stream in cycles until ctx ends or the stream, the buffer,
+// or a flush fails. Each cycle gathers changes until MaxChanges are buffered
+// or Interval has passed, reads the copier's Position after the last Add — so
+// a discarded uncut key's change is one the copier's read will see (CO-4) —
+// drains, flushes the batch, puts a refused batch back (ErrBatchDeferred) or
+// holds the images the flush did not write — those it completed and those
+// whose shadow row it found absent — and then confirms the lowest of the
+// stream's delivered position and the buffer's oldest pending position:
+// everything below it is in the shadow or was discarded as uncut, so a stream
+// reopened from it misses nothing (ST-4). An empty cycle on a quiet table
+// still confirms, so the slot releases WAL while nothing changes. The cycle
+// ends by reading the server's write position on pool, so Status.Lag measures
+// the WAL the catch-up has yet to work through, not how far the walsender has
+// decoded. A cycle under a Pause gathers and confirms but neither drains nor
+// flushes, so the stream is read and answered for as long as the hold lasts
+// and the buffer holds what arrives for the cycle after the resume.
 //
 // Run never returns nil: a catch-up has no end of its own, so its owner
 // stops it by ending ctx once the shadow is close enough to cut over, and
@@ -296,28 +315,9 @@ func (c *Catchup) cycle(ctx context.Context, pool *pgxpool.Pool) error {
 		return err
 	}
 	c.buffer.Release(c.stream.Delivered())
-	// INV: CO-4 — the position is read after the last Add of this cycle.
-	pos := c.positions.Position()
-	batch := c.buffer.Drain(pos)
-	result, err := c.flusher.Flush(ctx, pool, batch)
-	outcome := cycleOutcome{batch: batch, result: result}
-	switch {
-	case errors.Is(err, ErrBatchDeferred) && copyLanded(pos):
-		// INV: CO-6 — with every key landed and nothing in flight, the
-		// shadow plus this batch is the source; a constraint that still
-		// refuses it is one the source does not have.
-		return fmt.Errorf("catch-up on %s.%s cannot converge, the copy has landed every key and no chunk is left to resolve the refusal: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
-	case errors.Is(err, ErrBatchDeferred):
-		if err := c.buffer.Requeue(batch); err != nil {
-			return err
-		}
-		outcome.deferred = true
-	case err != nil:
+	outcome, err := c.apply(ctx, pool)
+	if err != nil {
 		return err
-	default:
-		if err := c.buffer.Hold(result.Held); err != nil {
-			return err
-		}
 	}
 	// The confirmation reads the buffer after Requeue or Hold has put the
 	// unapplied entries back; read before them, it would see an emptier
@@ -331,6 +331,42 @@ func (c *Catchup) cycle(ctx context.Context, pool *pgxpool.Pool) error {
 	}
 	c.record(outcome, walEnd)
 	return c.checkSlot(ctx, pool)
+}
+
+// apply is the cycle's drain and flush, behind the flush gate: under a
+// Pause it does neither, and the buffer keeps every entry for the first
+// cycle after the resume. A flushed batch's refusal is requeued, or ends
+// the catch-up when no chunk is left to resolve it, and the images a flush
+// completed but did not write are held.
+func (c *Catchup) apply(ctx context.Context, pool *pgxpool.Pool) (cycleOutcome, error) {
+	if !c.tryFlushes() {
+		return cycleOutcome{paused: true}, nil
+	}
+	defer c.releaseFlushes()
+	// INV: CO-4 — the position is read after the last Add of this cycle.
+	pos := c.positions.Position()
+	batch := c.buffer.Drain(pos)
+	result, err := c.flusher.Flush(ctx, pool, batch)
+	outcome := cycleOutcome{batch: batch, result: result}
+	switch {
+	case errors.Is(err, ErrBatchDeferred) && copyLanded(pos):
+		// INV: CO-6 — with every key landed and nothing in flight, the
+		// shadow plus this batch is the source; a constraint that still
+		// refuses it is one the source does not have.
+		return cycleOutcome{}, fmt.Errorf("catch-up on %s.%s cannot converge, the copy has landed every key and no chunk is left to resolve the refusal: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
+	case errors.Is(err, ErrBatchDeferred):
+		if err := c.buffer.Requeue(batch); err != nil {
+			return cycleOutcome{}, err
+		}
+		outcome.deferred = true
+	case err != nil:
+		return cycleOutcome{}, err
+	default:
+		if err := c.buffer.Hold(result.Held); err != nil {
+			return cycleOutcome{}, err
+		}
+	}
+	return outcome, nil
 }
 
 // checkSlot reads the stream's slot from the catalog after the cycle has
@@ -369,6 +405,9 @@ type cycleOutcome struct {
 	// deferred is set when the flush refused the batch and it was requeued;
 	// result is then empty.
 	deferred bool
+	// paused is set when a Pause held the flushes, so the cycle neither
+	// drained nor flushed; batch and result are then empty.
+	paused bool
 }
 
 // gather adds changes to the buffer until MaxChanges have been added or
@@ -444,15 +483,21 @@ func (c *Catchup) measureWALEnd(ctx context.Context, pool *pgxpool.Pool) (decode
 // flush did with the batch, what the buffer holds, and the positions the
 // cycle confirmed and measured. A requeued batch's entries are back in the
 // buffer, waiting as the drain's deferred ones do, so they count as
-// deferred; a committed flush's images and deletes count as applied.
+// deferred; a committed flush's images and deletes count as applied. A
+// paused cycle drained nothing, so the last drain's count of deferred
+// entries stands and only the buffer and the positions move.
 func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.status.Discarded += uint64(outcome.batch.Discarded)
-	if outcome.deferred {
+	switch {
+	case outcome.paused:
+		// Nothing was drained or flushed, so the flush counters stand.
+	case outcome.deferred:
+		c.status.Discarded += uint64(outcome.batch.Discarded)
 		c.status.Deferred = outcome.batch.Deferred + len(outcome.batch.Entries)
 		c.status.BatchesDeferred++
-	} else {
+	default:
+		c.status.Discarded += uint64(outcome.batch.Discarded)
 		c.status.Deferred = outcome.batch.Deferred
 		c.status.Applied += uint64(outcome.result.Images + outcome.result.Deletes)
 		if outcome.result.Fallback {

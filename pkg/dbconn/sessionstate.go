@@ -32,7 +32,20 @@ const sessionEndpointRemedy = "connect through a session-mode endpoint instead o
 // hold, in the milliseconds PostgreSQL reads a bare integer as.
 type sessionBound struct {
 	name string
-	ms   int64
+	// requested is the duration the caller asked for; ms is that duration as
+	// the server counts it, which truncates anything under a millisecond to 0.
+	requested time.Duration
+	ms        int64
+}
+
+// applied renders the bound the pool sent the server: the whole milliseconds
+// it set, or, for a request that truncated to 0, the duration asked for, since
+// "0" would read as the very unbounded value the check refuses.
+func (b sessionBound) applied() string {
+	if b.ms == 0 {
+		return b.requested.String()
+	}
+	return describeTimeout(b.ms)
 }
 
 // sessionBounds lists the timeouts the pool applies and then relies on for
@@ -41,8 +54,8 @@ type sessionBound struct {
 // order is fixed so a failure names the same setting every time.
 func sessionBounds(lock, statement time.Duration) []sessionBound {
 	return []sessionBound{
-		{name: "lock_timeout", ms: lock.Milliseconds()},
-		{name: "statement_timeout", ms: statement.Milliseconds()},
+		{name: "lock_timeout", requested: lock, ms: lock.Milliseconds()},
+		{name: "statement_timeout", requested: statement, ms: statement.Milliseconds()},
 	}
 }
 
@@ -72,10 +85,13 @@ func verifySessionSettings(ctx context.Context, pool *pgxpool.Pool, want []sessi
 		if err != nil {
 			return fmt.Errorf("read session %s: %w", bound.name, err)
 		}
-		if got != bound.ms {
+		// The server holding 0 is never a bound, even when 0 is what the
+		// requested duration truncated to: a sub-millisecond request would
+		// otherwise read back as exactly what was sent.
+		if got != bound.ms || got == 0 {
 			return fmt.Errorf("%w: %s is %s, not the %s this pool set; %s",
 				ErrSessionSettingsDiscarded, bound.name,
-				describeTimeout(got), describeTimeout(bound.ms), sessionEndpointRemedy)
+				describeTimeout(got), bound.applied(), sessionEndpointRemedy)
 		}
 	}
 	return nil

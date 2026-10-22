@@ -148,7 +148,7 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 		return RowSecurityReport{}, err
 	}
 	// Materialize the declaration before blocking application reads and writes.
-	wanted, err := schemadiff.IntrospectDesiredWithRowSecurityTx(ctx, tx, desired)
+	wanted, err := schemadiff.IntrospectDesiredWithRowSecurityTx(ctx, tx, schema, desired)
 	if err != nil {
 		return RowSecurityReport{}, fmt.Errorf("inspect desired row security for %s: %w", target, classifyRowSecurityDesiredError(err))
 	}
@@ -223,7 +223,7 @@ func executeRowSecurity(ctx context.Context, pool *pgxpool.Pool, schema string, 
 
 func admitRowSecurityTable(schema string, live, wanted schemadiff.Model) error {
 	// Render refuses unsupported shapes even when two models happen to match.
-	table := live
+	table := withoutExportOnlyRefusals(live)
 	table.RowSecurity = schemadiff.RowSecurity{}
 	if _, err := schemadiff.Render(table); err != nil {
 		return fmt.Errorf("row security target: %w", err)
@@ -237,4 +237,23 @@ func admitRowSecurityTable(schema string, live, wanted schemadiff.Model) error {
 		return fmt.Errorf("mixed table and row security changes: %w", schemadiff.ErrUnsupportedChange)
 	}
 	return nil
+}
+
+// withoutExportOnlyRefusals returns live without the facts that only an
+// export of the table refuses. A policy change builds nothing from the
+// table's rendering, so neither hazard those facts guard applies: a
+// rebuilt table might have no TOAST table to hold its toast.* parameters,
+// and the serial shorthand cannot state a sequence declared away from its
+// defaults. A serial's declaration is not compared by the diff either, so
+// clearing it changes nothing else.
+func withoutExportOnlyRefusals(live schemadiff.Model) schemadiff.Model {
+	table := live
+	table.ToastMayNotRebuild = false
+	table.Columns = slices.Clone(live.Columns)
+	for i, c := range table.Columns {
+		if c.SequenceDefault && c.Identity == schemadiff.IdentityNone {
+			table.Columns[i].Sequence = nil
+		}
+	}
+	return table
 }

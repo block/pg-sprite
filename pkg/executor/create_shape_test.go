@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/refusal"
 	"github.com/block/pg-sprite/pkg/statement"
 )
 
@@ -135,4 +136,31 @@ func TestCreateShapeCauseDescriptionsAreDistinct(t *testing.T) {
 		seen[description] = cause
 	}
 	assert.NotEmpty(t, executor.CreateShapeCause("unknown").Description())
+}
+
+// Every create-shape cause routes to the class docs/refusal-classes.md
+// decides for it: the shapes outside the absence proof, the statement kind
+// the create path does not run, and a declared foreign key are a capability
+// boundary; IF NOT EXISTS, a duplicate name, and CONCURRENTLY are by design;
+// disagreeing parse boundaries are an invariant violation; every answer is
+// a member of refusal.Classes(), and an unknown cause has no class.
+func TestEveryCreateShapeCauseNamesItsClass(t *testing.T) {
+	want := map[executor.CreateShapeCause]refusal.Class{
+		executor.CreateShapePartitionOf:        refusal.ClassCapabilityBoundary,
+		executor.CreateShapeInherits:           refusal.ClassCapabilityBoundary,
+		executor.CreateShapeLike:               refusal.ClassCapabilityBoundary,
+		executor.CreateShapeOfType:             refusal.ClassCapabilityBoundary,
+		executor.CreateShapeForeignKey:         refusal.ClassCapabilityBoundary,
+		executor.CreateShapeUnsupportedKind:    refusal.ClassCapabilityBoundary,
+		executor.CreateShapeIfNotExists:        refusal.ClassByDesign,
+		executor.CreateShapeConcurrently:       refusal.ClassByDesign,
+		executor.CreateShapeDuplicateName:      refusal.ClassByDesign,
+		executor.CreateShapeMultipleOperations: refusal.ClassInvariantViolation,
+	}
+	assert.Len(t, executor.CreateShapeCauses(), len(want), "every registered cause has an expected class")
+	for _, cause := range executor.CreateShapeCauses() {
+		assert.Equal(t, want[cause], cause.Class(), "cause %q", cause)
+		assert.Contains(t, refusal.Classes(), cause.Class(), "cause %q answers a class refusal.Classes() does not list", cause)
+	}
+	assert.Empty(t, executor.CreateShapeCause("not-a-cause").Class())
 }
