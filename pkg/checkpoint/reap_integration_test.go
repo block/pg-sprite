@@ -144,6 +144,27 @@ func TestReapOrphanSlotsDropsOrphansAndKeepsSlotsALiveRowNames(t *testing.T) {
 	assert.Equal(t, checkpoint.Reaped{}, reaped, "a clean database has nothing to reap")
 }
 
+// A row a newer engine of the same format left in a phase this engine
+// does not know may still be a live run decoding from its slot: terminal
+// is done or failed by name, so the reaper reports the slot as live and
+// leaves it rather than drop the newer engine's slot (ST-3).
+func TestReapOrphanSlotsKeepsASlotARowInAnUnknownPhaseNames(t *testing.T) {
+	d := newReapDatabase(t, newReapServer(t))
+	require.NoError(t, d.store.Ensure(t.Context()))
+	_, live := d.slotFor(t, "orders")
+	d.claim(t, "orders", live.Name(), checkpoint.PhaseCopying)
+	_, err := d.pool.Exec(t.Context(), `
+		UPDATE pgsprite.pgsprite_checkpoint
+		SET phase = 'settling'
+		WHERE slot_name = $1`, live.Name())
+	require.NoError(t, err)
+
+	reaped, err := d.store.ReapOrphanSlots(t.Context(), d.cfg)
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.Reaped{Live: []string{live.Name()}}, reaped)
+	assert.True(t, slotExists(t, d.pool, live.Name()))
+}
+
 // A slot a stream holds is somebody's right now, row or no row: the reaper
 // reports it as active and leaves it, rather than wait out the holder and
 // drop a slot it may be about to claim. A slot of another database on the
