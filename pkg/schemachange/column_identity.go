@@ -15,10 +15,11 @@ type columnPosition struct {
 
 // readColumnPositions lists a relation's live columns in attribute order.
 func readColumnPositions(ctx context.Context, tx pgx.Tx, oid uint32) ([]columnPosition, error) {
+	// INV: CO-9
 	rows, err := tx.Query(ctx, `
 		SELECT a.attname, a.attnum::int
-		FROM pg_attribute a
-		WHERE a.attrelid = $1 AND a.attnum > 0 AND NOT a.attisdropped
+		FROM pg_catalog.pg_attribute a
+		WHERE a.attrelid OPERATOR(pg_catalog.=) $1 AND a.attnum OPERATOR(pg_catalog.>) 0 AND NOT a.attisdropped
 		ORDER BY a.attnum`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("read column positions: %w", err)

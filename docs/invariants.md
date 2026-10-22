@@ -444,7 +444,11 @@ catalog implicitly do not change an answer), `pkg/schemachange` (the dependent r
 shadow's and source's indexes and extended statistics the cutover gate pairs, and the taken
 relation and constraint names — qualify every function, relation, type, and operator; planted
 `generate_series`, `unnest`, `array_to_string`, `to_jsonb`, and `||` overloads on a path that
-lists the source schema do not change the indexes or statistics read), `pkg/migrate`
+lists the source schema do not change the indexes or statistics read; the reads that run under
+a path pg-sprite did not set — the cutover's backend reads on the caller's pool and the write
+fence function's `format` in the writer's session — are qualified too, pinned by
+`TestCutoverBackendReadsResolveToTheRealCatalog` and
+`TestWriteFenceRefusalIgnoresAWritersShadowingSearchPath`), `pkg/migrate`
 (`resolveTarget`, the unqualified-target resolve, and `lockedTable`, the accept-blocking
 acknowledgement's locked-table lookup, qualify every function, relation, type, and operator;
 `to_regclass` still resolves the bare name on the session's path, which is the caller's intent;
