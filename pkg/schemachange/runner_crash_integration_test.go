@@ -368,12 +368,23 @@ func TestRunnerResumesMidCopyFromThePeriodicSave(t *testing.T) {
 	// resume. A shadow row above the watermark that disagrees with the
 	// source stands for whatever the stopped copy left there, and is
 	// cleared by the resumed copy before it lands that key space again.
-	// The other worker runs ahead of the pinned chunk, so the key may
-	// already be in the shadow: the stray value overwrites it rather than
-	// colliding with it.
+	// The other worker runs ahead of the pinned chunk, so the stopped copy
+	// may or may not have landed the key. The source's row is landed first
+	// if it is not already there, so every run plants the stray value over
+	// a landed row, the shape a fast server produces, and the read-back
+	// fails if the plant does not change it.
 	f.assertWriteFenced(t, "orders")
 	shadow := pgx.Identifier{f.schema, row.ShadowTable}.Sanitize()
-	f.exec(t, "INSERT INTO "+shadow+" (id, qty) VALUES (1500, 999) ON CONFLICT (id) DO UPDATE SET qty = EXCLUDED.qty")
+	f.exec(t, `
+		INSERT INTO `+shadow+` (id, qty)
+		SELECT id, qty
+		FROM %s.orders
+		WHERE id = 1500
+		ON CONFLICT (id) DO NOTHING`)
+	f.exec(t, `
+		UPDATE `+shadow+`
+		SET qty = 999
+		WHERE id = 1500`)
 	var strayQty int
 	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT qty FROM "+shadow+" WHERE id = 1500").Scan(&strayQty))
 	require.Equal(t, 999, strayQty, "the shadow holds the stray value above the watermark before the resume")
