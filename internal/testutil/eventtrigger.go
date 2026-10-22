@@ -101,16 +101,26 @@ func InstallEventTrigger(t *testing.T, pool *pgxpool.Pool, event TriggerEvent, s
 // with no access to schema, the way another test's DDL meets the trigger
 // schema.name, and fails the installing test when the trigger's body
 // breaks it. The statement runs in a transaction that is rolled back, so
-// the pooled connection keeps neither the role nor the temporary table.
+// the pooled connection keeps neither the role, its membership, nor the
+// temporary table. The session is granted membership first: a role that
+// created the throwaway role without being superuser holds only ADMIN on
+// it from PostgreSQL 16, and SET ROLE needs the SET option. Membership
+// runs from the session to the role, so the role gains no access. The
+// grantee is named, not written CURRENT_USER: Supabase's utility hook
+// crashes the backend on a GRANT to CURRENT_USER.
 func requireHarmlessToOtherRoles(t *testing.T, pool *pgxpool.Pool, schema, name string) {
 	t.Helper()
-	role := NewRole(t, pool, "NOLOGIN")
+	role := pgx.Identifier{NewRole(t, pool, "NOLOGIN")}.Sanitize()
 	tx, err := pool.Begin(t.Context())
 	require.NoError(t, err)
 	defer func() {
 		assert.NoError(t, tx.Rollback(context.WithoutCancel(t.Context())))
 	}()
-	_, err = tx.Exec(t.Context(), "SET LOCAL ROLE "+pgx.Identifier{role}.Sanitize())
+	var session string
+	require.NoError(t, tx.QueryRow(t.Context(), "SELECT current_user").Scan(&session))
+	_, err = tx.Exec(t.Context(), "GRANT "+role+" TO "+pgx.Identifier{session}.Sanitize())
+	require.NoError(t, err)
+	_, err = tx.Exec(t.Context(), "SET LOCAL ROLE "+role)
 	require.NoError(t, err)
 	_, err = tx.Exec(t.Context(), `
 		CREATE TEMP TABLE pgsprite_event_trigger_probe (
