@@ -912,7 +912,8 @@ attempt to reuse — and drops a slot the server created but did not describe us
 sessions of one database on one cluster, by `IDENTIFY_SYSTEM` against `pg_control_system()`,
 before any slot command or `START_REPLICATION`; `DropSlot` waits for a holder under the
 caller's context alone, reports a cut-off wait as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
-drops only a publication of the shape `CreateSlot` makes, and is idempotent; `InspectSlot`
+drops only a publication of the shape `CreateSlot` makes, and is idempotent; `ReplaceSlot`
+drops the slot as `DropSlot` does and creates a fresh one, leaving the publication in place; `InspectSlot`
 reads retained WAL on a primary and reports it unknown on a server in recovery rather than
 fail the read; `SlotStatus.WithinLagCeiling` judges a slot against a ceiling in bytes —
 lost before any measure, unknown never read as nothing retained, over the ceiling a typed
@@ -1027,7 +1028,9 @@ transaction of its own that the source and the shadow are still the relations th
 recorded (`cutover-relation-replaced` otherwise, before anything is written), writes the row to
 `checkpoint.PhaseReconciling` naming the derived slot and publication — so a reconcile that
 dies restarts as a reconcile, and the slot it is about to make is owned by the row from the
-moment it exists (ST-3) — drops whatever bears the derived slot name, creates a fresh slot, and
+moment it exists (ST-3) — replaces whatever slot bears the derived name with a fresh one through
+`decode.ReplaceSlot`, keeping the publication in place, since the source's writers look it up as
+they run and one dropped under them fails the write, and
 — when the watermark says anything landed — runs one `checksum` pass at or below the watermark
 under the `recopy` policy (D14), recopying only the chunks the gap touched without a reread,
 since the source is live and the new slot carries every write that lands after the recopy,
@@ -1037,7 +1040,8 @@ rebuilt and the watermark never moves (recovers-from-a-dropped-slot,
 restarts-from-an-interrupted-reconcile, with-nothing-landed-skips-the-pass,
 reads-an-intact-slot-as-clean, refuses-a-row-it-cannot-act-on,
 quiesced-target-has-no-reconcile-mode, under-a-steady-insert-stream,
-refuses-a-row-whose-swap-committed, refuses-replaced-relations-before-its-marker,
+keeps-the-publication, refuses-a-row-whose-swap-committed,
+refuses-replaced-relations-before-its-marker,
 leaves-the-slot-it-created-owned-by-the-row, resumes-in-copying-below-a-partial-watermark,
 refuses-a-row-of-another-source-shape, stops-when-the-lock-is-lost-while-the-drop-waits,
 refuses-a-foreign-slot-of-the-name, refuses-the-slot-while-another-backend-holds-it,
