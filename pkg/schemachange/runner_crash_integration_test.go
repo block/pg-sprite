@@ -365,12 +365,29 @@ func TestRunnerResumesMidCopyFromThePeriodicSave(t *testing.T) {
 
 	// While nothing runs the source stays fenced: a writer that reaches it
 	// is refused, so no change can slip in between the stop and the
-	// resume. A stray row in the shadow above the watermark — the chunk
-	// that was in flight at the stop — is cleared by the resumed copy
-	// before it lands that key space again.
+	// resume. A shadow row above the watermark that disagrees with the
+	// source stands for whatever the stopped copy left there, and is
+	// cleared by the resumed copy before it lands that key space again.
+	// The other worker runs ahead of the pinned chunk, so the stopped copy
+	// may or may not have landed the key. The source's row is landed first
+	// if it is not already there, so every run plants the stray value over
+	// a landed row, the shape a fast server produces, and the read-back
+	// fails if the plant does not change it.
 	f.assertWriteFenced(t, "orders")
 	shadow := pgx.Identifier{f.schema, row.ShadowTable}.Sanitize()
-	f.exec(t, "INSERT INTO "+shadow+" (id, qty) VALUES (1500, 999)")
+	f.exec(t, `
+		INSERT INTO `+shadow+` (id, qty)
+		SELECT id, qty
+		FROM %s.orders
+		WHERE id = 1500
+		ON CONFLICT (id) DO NOTHING`)
+	f.exec(t, `
+		UPDATE `+shadow+`
+		SET qty = 999
+		WHERE id = 1500`)
+	var strayQty int
+	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT qty FROM "+shadow+" WHERE id = 1500").Scan(&strayQty))
+	require.Equal(t, 999, strayQty, "the shadow holds the stray value above the watermark before the resume")
 
 	second := &stopAfter{}
 	f.assertResumedToDone(t, alter, schemachange.RunOptions{AfterCheckpoint: second.hook})
@@ -471,5 +488,5 @@ func TestRunnerStopsOnAShadowThatDiffersFromTheSource(t *testing.T) {
 	assert.Zero(t, result, "a run that stopped hands back no result")
 	assert.Equal(t, checkpoint.PhaseVerifying, f.inspectRow(t, "orders").Phase, "the row stays where the pass found the difference")
 	assert.Equal(t, sourceOID, f.relationOID(t, "orders"), "nothing was swapped")
-	assert.True(t, f.hasFence(t, "orders"), "the source stays fenced for the operator to abandon the run")
+	assert.True(t, f.hasFence(t, "orders"), "the source stays fenced for the operator to start the run over")
 }

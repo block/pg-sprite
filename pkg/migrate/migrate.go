@@ -169,6 +169,9 @@ func (o Options) validate() error {
 	if o.Force != "" && o.AcceptBlocking != "" {
 		return errors.New("migrate: Options.Force and Options.AcceptBlocking are mutually exclusive; a statement reaches one routing decision and one acknowledgement names it")
 	}
+	if o.CopySwap.Restart != "" && (o.Force != "" || o.AcceptBlocking != "") {
+		return errors.New("migrate: Options.CopySwap.Restart acknowledges a copy-and-swap run starting over, which Options.Force and Options.AcceptBlocking both route away from; name one acknowledgement")
+	}
 	return nil
 }
 
@@ -204,6 +207,14 @@ func (o Options) retry() executor.RetryPolicy {
 // [verdict.OutcomeExecutedViaCopyAndSwap]; a failure on that path leaves a
 // checkpoint row the next Run over the same statement resumes from.
 //
+// A bare table name resolves on the pool's own search_path, so two pools
+// with different paths can address different tables from the same
+// statement text. Run's own catalog reads — the resolve and the
+// accept-blocking lookup — are pg_catalog-qualified whatever that path
+// lists; a pool from dbconn.NewPool also drops a shadowing pg_catalog
+// entry on every session, which the engine's other reads rely on (CO-9,
+// docs/schemabot-integration.md).
+//
 // Run does not close the pool; one pool serves any number of calls.
 func Run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts Options) (verdict.Verdict, error) {
 	return run(ctx, pool, st, opts, nil, nil)
@@ -237,6 +248,11 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 			return verdict.Verdict{}, err
 		}
 	}
+	if opts.CopySwap.Restart != "" {
+		if err := checkRestartAck(st, opts.CopySwap.Restart); err != nil {
+			return verdict.Verdict{}, err
+		}
+	}
 
 	facts, err := LiveFacts(ctx, pool, st)
 	if err != nil {
@@ -254,6 +270,13 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 	rs := routed.Statements[0]
 	logger.Debug("statement routed",
 		"route", string(classified.Route), "disposition", string(rs.Disposition))
+
+	if opts.CopySwap.Restart != "" {
+		if err := checkRestartRoute(st, rs); err != nil {
+			return verdict.Verdict{}, err
+		}
+		auditRestart(opts.audit(), st)
+	}
 
 	switch rs.Disposition {
 	case router.DispositionExecute:
@@ -319,11 +342,16 @@ func resolveTarget(ctx context.Context, pool *pgxpool.Pool, st statement.Stateme
 	if err := statement.CheckNoComments(st.SQL()); err != nil {
 		return statement.Statement{}, err
 	}
+	// INV: CO-9 — every function, operator, and relation is
+	// pg_catalog-qualified, so a planted overload on the session's
+	// search_path cannot resolve the name to another relation's schema.
+	// to_regclass itself still resolves the bare name on that path: that
+	// is the caller's intent this function exists to honor.
 	const q = `
 		SELECT n.nspname
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE c.oid = to_regclass(quote_ident($1))`
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE c.oid OPERATOR(pg_catalog.=) pg_catalog.to_regclass(pg_catalog.quote_ident($1))`
 	var schema string
 	err := pool.QueryRow(ctx, q, st.Table()).Scan(&schema)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -333,11 +361,19 @@ func resolveTarget(ctx context.Context, pool *pgxpool.Pool, st statement.Stateme
 	if err != nil {
 		return statement.Statement{}, fmt.Errorf("resolve %s against search_path: %w", st.Table(), err)
 	}
+	logger.Debug("unqualified table resolved", "table", st.Table(), "schema", schema)
+	return qualifyStatement(st, schema)
+}
+
+// qualifyStatement re-emits an unqualified st with its table in schema, as
+// the deparser renders it. Run executes, and reports, the statement in this
+// form, so a dry run that reports the apply's verdict qualifies it the same
+// way.
+func qualifyStatement(st statement.Statement, schema string) (statement.Statement, error) {
 	sql, err := statement.Qualify(st.SQL(), schema)
 	if err != nil {
 		return statement.Statement{}, fmt.Errorf("qualify %s as %s.%s: %w", st.Table(), schema, st.Table(), err)
 	}
-	logger.Debug("unqualified table resolved", "table", st.Table(), "schema", schema)
 	return statement.ParseOne(sql)
 }
 

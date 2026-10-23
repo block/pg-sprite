@@ -287,6 +287,9 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 	if err := retry.validate(); err != nil {
 		return rep, err
 	}
+	// INV: ST-6 — every step's shape and target is admitted before the first
+	// step runs, so a refusal decided from a step's shape leaves nothing
+	// committed.
 	admitted, err := admitSequence(pt.Schema(), pt.Table(), steps)
 	if err != nil {
 		return rep, err
@@ -426,6 +429,13 @@ func sequenceHasConcurrentBuild(steps []sequenceStep) bool {
 // message, not the chain — the whole point is that neither failure is a
 // *BudgetError.
 func corroborateValidateCancel(ctx context.Context, err error, b ValidateBudget, elapsed time.Duration) error {
+	// INV: LK-4 — a COMMIT that ended with the caller's context may have
+	// landed, so it stays an unknown outcome rather than a cancellation the
+	// client can call clean.
+	var commitUnknown *CommitOutcomeUnknownError
+	if errors.As(err, &commitUnknown) {
+		return err
+	}
 	var budgetErr *BudgetError
 	serverCancelled := errors.As(err, &budgetErr) && budgetErr.Cause == CauseStatement
 	if serverCancelled && elapsed >= b.Overall {
@@ -447,12 +457,33 @@ func corroborateValidateCancel(ctx context.Context, err error, b ValidateBudget,
 // targets the preflighted table, before anything executes. A refusal names
 // the offending step by 1-based position.
 func admitSequence(schema, table string, steps []string) ([]sequenceStep, error) {
+	return admitSteps(steps, func(sql string) (sequenceStep, error) {
+		return admitStep(schema, table, sql)
+	})
+}
+
+// AdmitSequenceShape runs the statement-shape half of the sequence
+// executor's admission over steps — every step re-parsed and classified —
+// without the preflight-dependent target check, so a caller holding no
+// preflight proof (a dry run) learns the shape refusals RunSequence would
+// return before it executes anything. The refusals and their step-position
+// wrapping are exactly those of RunSequence's admission. Every step must be
+// schema-qualified: a concurrent index build is refused otherwise, because
+// the executor proves its target by schema.
+func AdmitSequenceShape(steps []string) error {
+	_, err := admitSteps(steps, admitStepShape)
+	return err
+}
+
+// admitSteps applies admit to every step in order, stopping at the first
+// refusal, which it names by 1-based position.
+func admitSteps(steps []string, admit func(sql string) (sequenceStep, error)) ([]sequenceStep, error) {
 	if len(steps) == 0 {
 		return nil, ErrEmptySequence
 	}
 	admitted := make([]sequenceStep, 0, len(steps))
 	for i, sql := range steps {
-		step, err := admitStep(schema, table, sql)
+		step, err := admit(sql)
 		if err != nil {
 			return nil, fmt.Errorf("sequence step %d of %d: %w", i+1, len(steps), err)
 		}
@@ -462,19 +493,36 @@ func admitSequence(schema, table string, steps []string) ([]sequenceStep, error)
 }
 
 // admitStep classifies one step by its parsed shape, then verifies its
-// target. Only two statement kinds are admissible: a CREATE INDEX
-// CONCURRENTLY (delegated to the concurrent build executor) and an ALTER
-// TABLE, split into the long-running VALIDATE CONSTRAINT class and the
-// brief class everything else runs under. Anything else — including every
-// other CONCURRENTLY form — is refused typed. Shape comes before the
-// target check so an unsupported statement is reported as the shape
-// refusal it is, not as a target mismatch.
+// target. Shape comes before the target check so an unsupported statement
+// is reported as the shape refusal it is, not as a target mismatch (see
+// admitStepShape for the admissible shapes).
 func admitStep(schema, table, sql string) (sequenceStep, error) {
+	step, err := admitStepShape(sql)
+	if err != nil {
+		return sequenceStep{}, err
+	}
+	st := step.st
+	// INV: ST-7 — every step runs only against the table the preflight
+	// proof verified; checked here for the whole sequence so a mixed-target
+	// sequence is refused before its first step executes, and re-checked by
+	// the brief runner per statement.
+	if st.Table() == "" || st.Schema() != schema || st.Table() != table {
+		return sequenceStep{}, fmt.Errorf("%w: ST-7: step targets %q but preflight verified %q",
+			ErrInvariantViolation, qualifiedName(st.Schema(), st.Table()), qualifiedName(schema, table))
+	}
+	return step, nil
+}
+
+// admitStepShape classifies one step by its parsed shape. Only two statement
+// kinds are admissible: a CREATE INDEX CONCURRENTLY (delegated to the
+// concurrent build executor) and an ALTER TABLE, split into the long-running
+// VALIDATE CONSTRAINT class and the brief class everything else runs under.
+// Anything else — including every other CONCURRENTLY form — is refused typed.
+func admitStepShape(sql string) (sequenceStep, error) {
 	st, err := statement.ParseOne(sql)
 	if err != nil {
 		return sequenceStep{}, err
 	}
-	var step sequenceStep
 	switch st.Kind() {
 	case statement.KindCreateIndex:
 		if !st.Concurrent() {
@@ -490,23 +538,12 @@ func admitStep(schema, table, sql string) (sequenceStep, error) {
 		if _, err := admitConcurrentIndexBuild(sql); err != nil {
 			return sequenceStep{}, err
 		}
-		step = sequenceStep{st: st, kind: StepConcurrentIndexBuild}
+		return sequenceStep{st: st, kind: StepConcurrentIndexBuild}, nil
 	case statement.KindAlterTable:
-		if step, err = admitAlterTableStep(st, sql); err != nil {
-			return sequenceStep{}, err
-		}
+		return admitAlterTableStep(st, sql)
 	default:
 		return sequenceStep{}, fmt.Errorf("statement kind %q: %w", st.Kind(), ErrUnsupportedSequenceStep)
 	}
-	// INV: ST-7 — every step runs only against the table the preflight
-	// proof verified; checked here for the whole sequence so a mixed-target
-	// sequence is refused before its first step executes, and re-checked by
-	// the brief runner per statement.
-	if st.Table() == "" || st.Schema() != schema || st.Table() != table {
-		return sequenceStep{}, fmt.Errorf("%w: ST-7: step targets %q but preflight verified %q",
-			ErrInvariantViolation, qualifiedName(st.Schema(), st.Table()), qualifiedName(schema, table))
-	}
-	return step, nil
 }
 
 // admitAlterTableStep splits ALTER TABLE steps into their execution

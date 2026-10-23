@@ -16,9 +16,10 @@ and the closed vocabularies below (caveats, guidance codes, and the embedded pla
 reasons and execution contracts): adding a value to any of them is a contract change and
 bumps `format_version`, even if no field is added or renamed.
 
-The current version is **2**: version 2 added `name-constraint-then-validate` and
-`unique-index-then-constraint` to the
-Guidance vocabulary.
+The current version is **3**: version 3 added `expand-contract-column` and
+`coordinated-table-rename` to the Guidance vocabulary and admitted `app-breaking-rename`
+as a suggestion `reason`; version 2 added `name-constraint-then-validate` and
+`unique-index-then-constraint` to the Guidance vocabulary.
 
 ### Relationship to the plan and lint reports
 
@@ -49,7 +50,8 @@ one that says the sequence must not run inside your transaction.
 
 Every suggestion carries **exactly one** of `recommended` and `guidance`: a constructed
 rewrite, or the typed manual path when the planner cannot construct one. Silence is not an
-outcome — every statement `lint` flags `blocking-idiom` appears here.
+outcome — every statement `lint` flags `blocking-idiom` or `app-breaking-rename` appears
+here.
 
 | Field | Type | Presence | Meaning |
 |---|---|---|---|
@@ -58,11 +60,11 @@ outcome — every statement `lint` flags `blocking-idiom` appears here.
 | `column` | int | always | 1-based source column of the statement's first token. |
 | `original` | string | always | The statement's **verbatim source text** (without the trailing semicolon), so it can be found in the source by exact match. |
 | `operation` | string | always | Operator-facing label of the risky operation. Display only — never branch on it. |
-| `reason` | string | always | The classifier's typed cause, drawn from the plan report's Reasons vocabulary; always `safer-idiom` under this version. |
+| `reason` | string | always | The classifier's typed cause, drawn from the plan report's Reasons vocabulary: `safer-idiom` for a statement with a safer native form, `app-breaking-rename` for a column or table rename the engine refuses to run as written. |
 | `recommended` | array | when constructible | The ordered safer SQL to run instead. A safer form of the submitted statement, not a semantic equivalent — it converges on the same declared end state with different locking, transactionality, and failure modes, which `caveats` names. |
 | `execution` | string | with `recommended` | The typed execution contract for `recommended`, drawn from the plan report's Execution contracts vocabulary (`autocommit-each-step`: each step in its own implicit transaction, never inside an enclosing transaction block; a failed step leaves partial state the runner must detect and recover). Present exactly when `recommended` is. |
 | `caveats` | array | with `recommended` | The typed conditions under which the recommendation differs from the original (see Caveats). Never empty when present — a rewrite with no trade would be the same statement. |
-| `guidance` | string | when not constructible | The typed manual path (see Guidance). The submitted form still blocks; this names what to do about it. |
+| `guidance` | string | when not constructible | The typed manual path (see Guidance). The submitted form still blocks the table, or still breaks the running application; this names what to do about it. |
 
 ## Caveats (`caveats`)
 
@@ -149,6 +151,26 @@ key's `INCLUDE`, `NULLS NOT DISTINCT`, `WITH (...)`, and tablespace, then attach
 `ALTER TABLE … ADD CONSTRAINT … USING INDEX`, keeping any `DEFERRABLE` and `INITIALLY
 DEFERRED` — the same sequence the constructed rewrite emits.
 
+### `expand-contract-column`
+
+**Emitted for:** `ALTER TABLE … RENAME COLUMN`.
+
+PostgreSQL runs the rename as a metadata-only catalog flip, but a rename cannot land
+atomically across running application instances — code still referencing the old name
+breaks the instant it commits, so `migrate` refuses it unless `--force` names the table.
+There is no safer SQL to substitute: the safe path is a sequence the application follows.
+Add the new column, dual-write and backfill it, switch reads to it, then drop the old
+column as its own reviewed change.
+
+### `coordinated-table-rename`
+
+**Emitted for:** `ALTER TABLE … RENAME TO`.
+
+The same catalog flip with the same application-side break, at table scope. No safer SQL
+exists; coordinate the rename with the application deploy that adopts the new name — a
+compatibility view under the old name, or a deploy that switches names in the same window
+— and run the rename with `--force` naming the table once that coordination is in place.
+
 ## The rewrite table: operation → safer form → caveats
 
 This is the specification of the advice — which safer native idiom each risky-as-written
@@ -177,7 +199,7 @@ A constructed rewrite (`pg-sprite suggest --json` over
 
 ```json
 {
-  "format_version": 2,
+  "format_version": 3,
   "suggestions": [
     {
       "statement": 1,
@@ -198,7 +220,7 @@ A guidance suggestion (`ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d 
 
 ```json
 {
-  "format_version": 2,
+  "format_version": 3,
   "suggestions": [
     {
       "statement": 1,

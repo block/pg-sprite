@@ -187,6 +187,9 @@ func (r DesiredResult) refused(ref verdict.Refusal, detail string) DesiredResult
 // submitted form blind. A destructive or force-worthy change belongs on
 // the imperative front door where the operator states it explicitly.
 //
+// Every planned statement runs back through [Run], so Run's note on the
+// pool's search_path applies to the pool passed here.
+//
 // RunDesired does not close the pool; one pool serves any number of calls.
 func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opts Options) (DesiredResult, error) {
 	if err := opts.validate(); err != nil {
@@ -257,7 +260,7 @@ func RunDesired(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, opt
 			what := stoppedBeforeVerdict
 			if v.Outcome != "" {
 				result.Verdicts = append(result.Verdicts, v)
-				what = "failed"
+				what = failedWhat(v.Code)
 			}
 			result.Detail = committedPrefixDetail(i, len(report.Statements), what)
 			return result, fmt.Errorf("planned statement %d: %w", i+1, runErr)
@@ -421,16 +424,32 @@ func runCreate(ctx context.Context, pool *pgxpool.Pool, req DesiredRequest, repo
 	}
 	result.Verdicts = append(result.Verdicts, failed)
 	result.Outcome = verdict.OutcomeFailed
-	result.Detail = committedPrefixDetail(stepErr.Step-1, len(report.Statements), "failed")
+	result.Detail = committedPrefixDetail(stepErr.Step-1, len(report.Statements), failedWhat(failed.Code))
 	return result, fmt.Errorf("planned statement %d: %w", stepErr.Step, execErr)
+}
+
+// failedWhat is the committed-prefix wording for a statement that ended in a
+// failed verdict with the given outcome code. A statement whose COMMIT may
+// have landed did not demonstrably fail, so the aggregate says its outcome is
+// unknown rather than that it failed.
+func failedWhat(code string) string {
+	if code == string(executor.CodeCommitOutcomeUnknown) {
+		return "has an unknown commit outcome — inspect the catalog before retrying"
+	}
+	return "failed"
 }
 
 // createFailureDetail states what the failed create step left behind. A
 // bounded attempt that fails rolls back, so nothing remains — except when
 // the CREATE TABLE committed and its owned-name verification then failed
 // or could not complete: the table stands, and the detail says so rather
-// than claiming a rollback.
+// than claiming a rollback. A step whose COMMIT did not return success may
+// have landed, so it is reported as unknown, never as rolled back.
 func createFailureDetail(err error) string {
+	if errors.As(err, new(*executor.CommitOutcomeUnknownError)) {
+		return "the step's COMMIT did not return success, so whether it committed cannot be established from the client; " +
+			"inspect the catalog for what the step creates before retrying; Code names the outcome"
+	}
 	var mismatch *executor.CreateNameMismatchError
 	if errors.As(err, &mismatch) {
 		return fmt.Sprintf("the step's CREATE TABLE committed and was not rolled back: %v; Code names the outcome", mismatch)
@@ -538,6 +557,9 @@ func planRefusal(report plan.Report) (verdict.Refusal, string) {
 		case router.DispositionExecute:
 			continue
 		case router.DispositionRewriteRequired:
+			// A desired-state plan derives a renamed column as a drop and an
+			// add and never emits a rename, so the rewrite-required statement
+			// here is always one that blocks the table.
 			return rewriteRequiredRefusal(), detail("blocks and has no safer native sequence")
 		case router.DispositionUnavailable:
 			return backendUnavailableRefusal(), detail("routes to an execution strategy that does not carry this operation yet")

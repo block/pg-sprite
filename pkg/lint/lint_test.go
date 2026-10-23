@@ -104,9 +104,10 @@ func TestCheckFlagsUnsupportedAsError(t *testing.T) {
 }
 
 // A column or table rename is metadata-only for PostgreSQL but breaks
-// running application code the instant it commits; the finding steers to
-// a safe sequence without blocking execution. Index renames stay clean —
-// SQL never references an index by name.
+// running application code the instant it commits; the engine refuses it
+// unless the override names the table, so the finding is an error, the
+// severity that means "the engine would refuse this". Index renames stay
+// clean — SQL never references an index by name.
 func TestCheckFlagsRenamesAsAppBreaking(t *testing.T) {
 	report, err := lint.Check(`
 		ALTER TABLE t RENAME COLUMN a TO b;
@@ -118,12 +119,12 @@ func TestCheckFlagsRenamesAsAppBreaking(t *testing.T) {
 	for i, f := range report.Findings {
 		assert.Equal(t, i+1, f.Statement)
 		assert.Equal(t, lint.CodeAppBreakingRename, f.Code)
-		assert.Equal(t, lint.SeverityWarning, f.Severity)
+		assert.Equal(t, lint.SeverityError, f.Severity)
 		assert.Equal(t, planner.ReasonAppBreakingRename, f.Reason)
 		assert.Empty(t, f.Suggestion)
 	}
-	assert.Equal(t, 0, report.Errors)
-	assert.Equal(t, 2, report.Warnings)
+	assert.Equal(t, 2, report.Errors)
+	assert.Equal(t, 0, report.Warnings)
 }
 
 // Destructive findings come from the classifier's destructive flag, so
@@ -196,7 +197,7 @@ func TestReportJSONShape(t *testing.T) {
 	suggestion, err := json.Marshal(report.Findings[0].Suggestion)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 5,
+		"format_version": 6,
 		"postgres_versions": "14-18",
 		"findings": [
 			{
@@ -223,7 +224,7 @@ func TestReportJSONCleanFindingsAreEmptyArray(t *testing.T) {
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 5,
+		"format_version": 6,
 		"postgres_versions": "14-18",
 		"findings": [],
 		"errors": 0,

@@ -95,6 +95,7 @@ func (c *MigrateCmd) options(logger *slog.Logger) migrate.Options {
 			FreeDiskBytes: int64(c.FreeDisk),
 			KeepOld:       c.KeepOld,
 			Quiesced:      c.Quiesced,
+			Restart:       c.Restart,
 		},
 	}
 }

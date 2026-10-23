@@ -327,7 +327,14 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 // inside the CREATE's own transaction — is a defect to surface, not to
 // repair. The executor never issues ALTER ... OWNER TO.
 func verifyCreateOwner(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentTarget, expected string) error {
-	const q = `SELECT r.rolname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_roles r ON r.oid=c.relowner WHERE n.nspname=$1 AND c.relname=$2`
+	// INV: CO-9 — every relation and operator is pg_catalog-qualified, so a
+	// decoy on the session's search_path cannot name the expected owner.
+	const q = `
+		SELECT r.rolname
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		JOIN pg_catalog.pg_roles r ON r.oid OPERATOR(pg_catalog.=) c.relowner
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) $2`
 	var actual string
 	if err := pool.QueryRow(ctx, q, at.Schema(), at.Table()).Scan(&actual); err != nil {
 		return fmt.Errorf("%w: %s: %w", ErrCreateOwnerUnverified, qualifiedName(at.Schema(), at.Table()), err)

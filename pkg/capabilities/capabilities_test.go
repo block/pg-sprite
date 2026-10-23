@@ -77,7 +77,11 @@ func TestValidateRules(t *testing.T) {
 		"No names owner":             func(r *Row) { r.OnlineSafetyProblem = false },
 		"Yes omits owner":            func(r *Row) { r.OwningToolClass = "owner" },
 		"refusal reason iff refused": func(r *Row) { r.FrontDoors.Diff = DoorRefused },
-		"known refusal reason":       func(r *Row) { r.FrontDoors.Diff = DoorRefused; r.RefusalReason = "unknown" },
+		"T1 migrate not refused": func(r *Row) {
+			r.FrontDoors.Migrate = DoorRefused
+			r.RefusalReason = verdict.ReasonRewriteRequired
+		},
+		"known refusal reason": func(r *Row) { r.FrontDoors.Diff = DoorRefused; r.RefusalReason = "unknown" },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {

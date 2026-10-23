@@ -164,6 +164,30 @@ func TestAdmitSequenceNamesTheOffendingStep(t *testing.T) {
 	assert.False(t, errors.As(err, &stepErr), "an admission refusal is not a step failure: nothing executed")
 }
 
+// AdmitSequenceShape is the target-free half of admission: it refuses the
+// same shapes RunSequence refuses, names the offending step, and does not
+// mind which table a step targets — that proof needs a preflight.
+func TestAdmitSequenceShapeRefusesWhatAdmissionRefuses(t *testing.T) {
+	steps := []string{
+		`ALTER TABLE s.t ADD CONSTRAINT c CHECK (v > 0) NOT VALID`,
+		`ALTER TABLE s.t DETACH PARTITION p CONCURRENTLY`,
+	}
+	err := AdmitSequenceShape(steps)
+	require.ErrorIs(t, err, ErrUnsupportedSequenceStep)
+	assert.ErrorContains(t, err, "sequence step 2 of 2")
+}
+
+func TestAdmitSequenceShapeAdmitsAnyTarget(t *testing.T) {
+	require.NoError(t, AdmitSequenceShape([]string{
+		`ALTER TABLE a.one ADD COLUMN x int`,
+		`ALTER TABLE b.two DROP CONSTRAINT c`,
+	}))
+}
+
+func TestAdmitSequenceShapeRefusesAnEmptySequence(t *testing.T) {
+	require.ErrorIs(t, AdmitSequenceShape(nil), ErrEmptySequence)
+}
+
 func TestAdmitSequenceSurfacesParseFailures(t *testing.T) {
 	_, err := admitSequence("s", "t", []string{`ALTER TABLE s.t THIS IS NOT SQL`})
 	require.Error(t, err)
@@ -226,6 +250,13 @@ func TestCorroborateValidateCancel(t *testing.T) {
 	t.Run("a lock verdict is not a cancellation in either context", func(t *testing.T) {
 		assert.Same(t, lockBudget, corroborateValidateCancel(live, lockBudget, budget, time.Minute))
 		assert.Same(t, lockBudget, corroborateValidateCancel(ended, lockBudget, budget, time.Minute))
+	})
+	t.Run("a commit that ended with the caller's context stays an unknown outcome", func(t *testing.T) {
+		unknown := &CommitOutcomeUnknownError{Err: fmt.Errorf("commit optimistic attempt: %w", context.Canceled)}
+		err := corroborateValidateCancel(ended, unknown, budget, time.Minute)
+		assert.Same(t, unknown, err)
+		assert.NotErrorIs(t, err, ErrCancelledByCaller)
+		assert.Equal(t, CodeCommitOutcomeUnknown, OutcomeCode(err))
 	})
 	t.Run("any other failure passes through", func(t *testing.T) {
 		boom := errors.New("connection reset")

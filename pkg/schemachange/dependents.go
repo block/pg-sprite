@@ -142,39 +142,54 @@ type indexEntry struct {
 // shadow LIKE built. The NULLS NOT DISTINCT flag is read through the row's
 // JSON rendering so the query parses on servers whose pg_index lacks it.
 func readIndexes(ctx context.Context, tx pgx.Tx, oid uint32) ([]indexEntry, error) {
+	// INV: CO-9 — every function, relation, operator, and type is
+	// pg_catalog-qualified, so a planted overload such as
+	// generate_series(integer, smallint) cannot outrank the catalog's and
+	// change an index's key list on the build's or the gate's search_path.
 	rows, err := tx.Query(ctx, `
 		SELECT ic.relname, i.indisvalid, am.amname, i.indisunique, i.indisprimary,
-		       COALESCE((to_jsonb(i) ->> 'indnullsnotdistinct')::bool, false),
-		       ARRAY(SELECT pg_get_indexdef(i.indexrelid, k, true)
-		             FROM generate_series(1, i.indnkeyatts) k),
-		       ARRAY(SELECT pg_get_indexdef(i.indexrelid, k, true)
-		             FROM generate_series(i.indnkeyatts + 1, i.indnatts) k),
-		       ARRAY(SELECT oc.opcnamespace::regnamespace::text || '.' || oc.opcname
-		             FROM unnest(i.indclass::oid[]) WITH ORDINALITY u(o, k)
-		             JOIN pg_opclass oc ON oc.oid = u.o
+		       COALESCE((pg_catalog.to_jsonb(i) OPERATOR(pg_catalog.->>) 'indnullsnotdistinct')::pg_catalog.bool, false),
+		       ARRAY(SELECT pg_catalog.pg_get_indexdef(i.indexrelid, k, true)
+		             FROM pg_catalog.generate_series(1, i.indnkeyatts) k),
+		       ARRAY(SELECT pg_catalog.pg_get_indexdef(i.indexrelid, k, true)
+		             FROM pg_catalog.generate_series(i.indnkeyatts OPERATOR(pg_catalog.+) 1, i.indnatts) k),
+		       ARRAY(SELECT oc.opcnamespace::pg_catalog.regnamespace::pg_catalog.text
+		                    OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) oc.opcname
+		             FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) WITH ORDINALITY u(o, k)
+		             JOIN pg_catalog.pg_opclass oc ON oc.oid OPERATOR(pg_catalog.=) u.o
 		             ORDER BY k),
-		       ARRAY(SELECT COALESCE(co.collnamespace::regnamespace::text || '.' || co.collname, '')
-		             FROM unnest(i.indcollation::oid[]) WITH ORDINALITY u(o, k)
-		             LEFT JOIN pg_collation co ON co.oid = u.o
+		       ARRAY(SELECT COALESCE(co.collnamespace::pg_catalog.regnamespace::pg_catalog.text
+		                    OPERATOR(pg_catalog.||) '.' OPERATOR(pg_catalog.||) co.collname, '')
+		             FROM pg_catalog.unnest(i.indcollation::pg_catalog.oid[]) WITH ORDINALITY u(o, k)
+		             LEFT JOIN pg_catalog.pg_collation co ON co.oid OPERATOR(pg_catalog.=) u.o
 		             ORDER BY k),
 		       ARRAY(SELECT oc.opcdefault
-		             FROM unnest(i.indclass::oid[]) WITH ORDINALITY u(o, k)
-		             JOIN pg_opclass oc ON oc.oid = u.o
+		             FROM pg_catalog.unnest(i.indclass::pg_catalog.oid[]) WITH ORDINALITY u(o, k)
+		             JOIN pg_catalog.pg_opclass oc ON oc.oid OPERATOR(pg_catalog.=) u.o
 		             ORDER BY k),
-		       ARRAY(SELECT u.o = COALESCE(a.attcollation, u.o)
-		             FROM unnest(i.indcollation::oid[], i.indkey::int2[]) WITH ORDINALITY u(o, n, k)
-		             LEFT JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = u.n AND u.n > 0
-		             WHERE u.k <= i.indnkeyatts
+		       ARRAY(SELECT u.o OPERATOR(pg_catalog.=) COALESCE(a.attcollation, u.o)
+		             FROM ROWS FROM (pg_catalog.unnest(i.indcollation::pg_catalog.oid[]),
+		                             pg_catalog.unnest(i.indkey::pg_catalog.int2[]))
+		                  WITH ORDINALITY u(o, n, k)
+		             LEFT JOIN pg_catalog.pg_attribute a
+		                    ON a.attrelid OPERATOR(pg_catalog.=) i.indrelid
+		                   AND a.attnum OPERATOR(pg_catalog.=) u.n
+		                   AND u.n OPERATOR(pg_catalog.>) 0
+		             WHERE u.k OPERATOR(pg_catalog.<=) i.indnkeyatts
 		             ORDER BY k),
-		       ARRAY(SELECT u.o FROM unnest(i.indoption::int2[]) WITH ORDINALITY u(o, k) ORDER BY k),
-		       COALESCE(pg_get_expr(i.indpred, i.indrelid), ''),
-		       COALESCE(pg_get_constraintdef(con.oid), '')
-		FROM pg_index i
-		JOIN pg_class ic ON ic.oid = i.indexrelid
-		JOIN pg_am am ON am.oid = ic.relam
-		LEFT JOIN pg_constraint con
-		       ON con.conindid = i.indexrelid AND con.conrelid = i.indrelid AND con.contype IN ('p', 'u', 'x')
-		WHERE i.indrelid = $1
+		       ARRAY(SELECT u.o
+		             FROM pg_catalog.unnest(i.indoption::pg_catalog.int2[]) WITH ORDINALITY u(o, k)
+		             ORDER BY k),
+		       COALESCE(pg_catalog.pg_get_expr(i.indpred, i.indrelid), ''),
+		       COALESCE(pg_catalog.pg_get_constraintdef(con.oid), '')
+		FROM pg_catalog.pg_index i
+		JOIN pg_catalog.pg_class ic ON ic.oid OPERATOR(pg_catalog.=) i.indexrelid
+		JOIN pg_catalog.pg_am am ON am.oid OPERATOR(pg_catalog.=) ic.relam
+		LEFT JOIN pg_catalog.pg_constraint con
+		       ON con.conindid OPERATOR(pg_catalog.=) i.indexrelid
+		      AND con.conrelid OPERATOR(pg_catalog.=) i.indrelid
+		      AND con.contype OPERATOR(pg_catalog.=) ANY (ARRAY['p', 'u', 'x']::pg_catalog."char"[])
+		WHERE i.indrelid OPERATOR(pg_catalog.=) $1
 		ORDER BY ic.relname`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("read indexes: %w", err)
@@ -240,12 +255,14 @@ func invalidIndexes(indexes []indexEntry) []string {
 // inputs: the sorted statistics kinds and the server's name-free column
 // list decide the definition.
 func readStatistics(ctx context.Context, tx pgx.Tx, oid uint32) ([]dependent, error) {
+	// INV: CO-9 — pg_catalog-qualified like every dependent read.
 	rows, err := tx.Query(ctx, `
 		SELECT s.stxname,
-		       array_to_string(ARRAY(SELECT k FROM unnest(s.stxkind) k ORDER BY k), ','),
-		       pg_get_statisticsobjdef_columns(s.oid)
-		FROM pg_statistic_ext s
-		WHERE s.stxrelid = $1
+		       pg_catalog.array_to_string(
+		           ARRAY(SELECT k FROM pg_catalog.unnest(s.stxkind) k ORDER BY k), ','),
+		       pg_catalog.pg_get_statisticsobjdef_columns(s.oid)
+		FROM pg_catalog.pg_statistic_ext s
+		WHERE s.stxrelid OPERATOR(pg_catalog.=) $1
 		ORDER BY s.stxname`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("read extended statistics: %w", err)
@@ -289,16 +306,17 @@ func oldNames(schema, table string, dependents []string) []string {
 // takenNames returns, of the candidate names, those already worn by a
 // relation or an extended-statistics object in the schema.
 func takenNames(ctx context.Context, tx pgx.Tx, schema string, candidates []string) ([]string, error) {
+	// INV: CO-9 — pg_catalog-qualified like every dependent read.
 	rows, err := tx.Query(ctx, `
 		SELECT c.relname
-		FROM pg_class c
-		JOIN pg_namespace n ON n.oid = c.relnamespace
-		WHERE n.nspname = $1 AND c.relname = ANY ($2)
+		FROM pg_catalog.pg_class c
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) c.relnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND c.relname OPERATOR(pg_catalog.=) ANY ($2)
 		UNION
 		SELECT s.stxname
-		FROM pg_statistic_ext s
-		JOIN pg_namespace n ON n.oid = s.stxnamespace
-		WHERE n.nspname = $1 AND s.stxname = ANY ($2)
+		FROM pg_catalog.pg_statistic_ext s
+		JOIN pg_catalog.pg_namespace n ON n.oid OPERATOR(pg_catalog.=) s.stxnamespace
+		WHERE n.nspname OPERATOR(pg_catalog.=) $1 AND s.stxname OPERATOR(pg_catalog.=) ANY ($2)
 		ORDER BY 1`, schema, candidates)
 	if err != nil {
 		return nil, fmt.Errorf("check derived names in schema %s: %w", schema, err)
@@ -331,11 +349,16 @@ func constraintNamesTaken(ctx context.Context, tx pgx.Tx, shadowOID uint32, inde
 		targets = append(targets, pair.SourceName)
 		paired = append(paired, pair.ShadowName)
 	}
+	// INV: CO-9 — pg_catalog-qualified like every dependent read.
 	rows, err := tx.Query(ctx, `
 		SELECT con.conname
-		FROM pg_constraint con
-		LEFT JOIN pg_class ic ON ic.oid = con.conindid AND ic.relname = ANY ($3)
-		WHERE con.conrelid = $1 AND con.conname = ANY ($2) AND ic.oid IS NULL
+		FROM pg_catalog.pg_constraint con
+		LEFT JOIN pg_catalog.pg_class ic
+		       ON ic.oid OPERATOR(pg_catalog.=) con.conindid
+		      AND ic.relname OPERATOR(pg_catalog.=) ANY ($3)
+		WHERE con.conrelid OPERATOR(pg_catalog.=) $1
+		  AND con.conname OPERATOR(pg_catalog.=) ANY ($2)
+		  AND ic.oid IS NULL
 		ORDER BY con.conname`, shadowOID, targets, paired)
 	if err != nil {
 		return nil, fmt.Errorf("check shadow constraint names: %w", err)

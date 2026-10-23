@@ -139,6 +139,12 @@ func Validate(rows []Row) error {
 		if row.OnlineSafetyProblem && row.OwningToolClass != "" {
 			return fmt.Errorf("%s: Yes row cannot name owning_tool_class", prefix)
 		}
+		// A T1 row has no capability refusal class, so the front door that
+		// runs the operation cannot refuse it: a refused operation belongs
+		// on the tier whose class tells the consumer what to do.
+		if row.Tier == TierOne && row.FrontDoors.Migrate == DoorRefused {
+			return fmt.Errorf("%s: a T1 row cannot have migrate refused", prefix)
+		}
 		refused := row.FrontDoors.Migrate == DoorRefused || row.FrontDoors.Diff == DoorRefused
 		if refused != (row.RefusalReason != "") {
 			return fmt.Errorf("%s: refusal_reason must be present iff a front door is refused", prefix)

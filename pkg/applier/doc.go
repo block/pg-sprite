@@ -4,24 +4,29 @@
 // unchanged-TOAST marker is never mistaken for a value (CO-5, CO-8) — and
 // Drain judges every key against the copier's Position: landed keys flush,
 // uncut keys are discarded, in-flight keys wait for their chunk (CO-4). A
-// Flusher applies the drained Batch in one guarded transaction under the
-// table lock: it first reads a completion for every moved marker-bearing
-// image the batch names, from the old key's shadow row or from the source
-// when the old key was reused, and hands each back as a HeldImage with the
-// WAL position of the read — the row read can be newer than the stream, so
-// the buffer holds the image (Hold) until the stream has passed the read
-// (Release) and flushes it then — then writes column-wise, every delete
-// before any image: a delete, an upsert of a whole image, or an UPDATE of
-// only the columns an image carries. On a unique or exclusion violation it
-// falls back to deleting every key in the batch and inserting every
-// surviving whole row (CO-6, CO-8). A batch a constraint still refuses comes
-// back as ErrBatchDeferred for the caller to Requeue. Catchup owns the loop:
-// it reads the stream into the buffer, releases held images as the stream
-// passes their reads, drains against the copier's Position read after the
-// last Add, flushes, requeues a deferred batch or holds its images, and
-// confirms the lesser of the delivered position and the oldest pending
-// change (ST-4); it is the tracker's WorkSource for a catch-up step
-// (changes_applied, changes_buffered, lag_bytes). Pause holds its flushes
-// for a caller that needs the shadow still — a live repair — while the
-// loop goes on reading and confirming the stream.
+// Flusher applies the drained Batch in one guarded transaction under the table
+// lock: it first reads a completion for every moved marker-bearing image the
+// batch names, from the old key's shadow row or from the source when the old
+// key was reused, and hands each back as a HeldImage with the WAL position of
+// the read — the row read can be newer than the stream, so the buffer holds
+// the image (Hold) until the stream has passed the read (Release) and flushes
+// it then. It next checks, in one statement that also reads the WAL position,
+// that the shadow holds the row of every marker-bearing image that did not
+// move, and holds an image whose row is absent the same way, with nothing
+// written: the stream has yet to deliver the DELETE that explains the absence,
+// and an image still absent once the stream has passed the check is refused
+// (CO-8). It then writes column-wise, every delete before any image: a delete,
+// an upsert of a whole image, or an UPDATE of only the columns an image
+// carries. On a unique or exclusion violation it falls back to deleting every
+// key in the batch and inserting every surviving whole row (CO-6, CO-8). A
+// batch a constraint still refuses comes back as ErrBatchDeferred for the
+// caller to Requeue. Catchup owns the loop: it reads the stream into the
+// buffer, releases held images as the stream passes their reads, drains
+// against the copier's Position read after the last Add, flushes, requeues a
+// deferred batch or holds its images, and confirms the lesser of the delivered
+// position and the oldest pending change (ST-4); it is the tracker's
+// WorkSource for a catch-up step (changes_applied, changes_buffered,
+// lag_bytes). Pause holds its flushes for a caller that needs the shadow
+// still — a live repair — while the loop goes on reading and confirming the
+// stream.
 package applier

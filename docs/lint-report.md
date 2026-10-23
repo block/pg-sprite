@@ -15,7 +15,9 @@ and the closed vocabularies below (codes, severities, and the embedded planner r
 adding a value to any of them is a contract change and bumps `format_version`, even if no
 field is added or renamed.
 
-The current version is **5**: version 5 added the `cascading-drop` reason to the embedded
+The current version is **6**: version 6 raised `app-breaking-rename` from `warning` to
+`error`, because the engine now refuses a column or table rename unless `--force` names the
+table. Version 5 added the `cascading-drop` reason to the embedded
 Reasons vocabulary. Version 4 added the `dependent-view` reason. Version 3 added the
 `concurrent-in-transaction` code. Version 2 added the `replica-identity` reason. The linter
 never reports `replica-identity` or `dependent-view`, because each is judged from live facts
@@ -86,7 +88,7 @@ codes make the conservatism visible instead of burying it:
 | `blocking-idiom` | warning | `CREATE INDEX i ON t (c)` | The submitted form blocks readers or writers and a safer native form exists; `suggestion` carries it when the linter can construct one. |
 | `table-rewrite` | warning | `ALTER TABLE t ALTER COLUMN c TYPE jsonb USING c::jsonb` | The operation provably rewrites the table — only the engine's copy-and-swap path can run it online. |
 | `possible-table-rewrite` | warning | `ALTER TABLE t ALTER COLUMN c TYPE bigint` | The linter cannot verify the operation against live column facts, so the engine would fail closed to the rewrite path — but the change may be a free relabel a live database would prove. |
-| `app-breaking-rename` | warning | `ALTER TABLE t RENAME COLUMN email TO email_address` | PostgreSQL runs a column or table rename as a metadata-only catalog flip, but a rename cannot land atomically across running application instances — code still referencing the old name breaks the instant it commits. For a column, expand/contract instead: add the new column, dual-write and backfill, switch reads, then drop the old column as its own reviewed change. For a table, coordinate the rename with the application deploy that adopts the new name. Index renames are not flagged — SQL never references an index by name. |
+| `app-breaking-rename` | error | `ALTER TABLE t RENAME COLUMN email TO email_address` | PostgreSQL runs a column or table rename as a metadata-only catalog flip, but a rename cannot land atomically across running application instances — code still referencing the old name breaks the instant it commits. `migrate` refuses the statement as written (`rewrite-required`) and runs it only when `--force` names the table. For a column, expand/contract instead: add the new column, dual-write and backfill, switch reads, then drop the old column as its own reviewed change. For a table, coordinate the rename with the application deploy that adopts the new name. Index renames are not flagged: ordinary SQL names tables and columns, not indexes. Renaming an index that backs a `UNIQUE` or primary-key constraint also renames the constraint, which `ON CONFLICT ON CONSTRAINT` names; that case is not flagged either. |
 | `destructive` | warning | `ALTER TABLE t DROP COLUMN legacy` | The operation discards live structure (a column, constraint, or index drop) and cannot be undone by re-running the schema. |
 | `concurrent-in-transaction` | error | `BEGIN; CREATE INDEX CONCURRENTLY i ON t (c); COMMIT` | A `CONCURRENTLY` operation sits inside a transaction block the script opens with `BEGIN` or `START TRANSACTION`. PostgreSQL refuses every `CONCURRENTLY` form inside a block, so the script fails at that statement and the block rolls back. Run the statement outside the block. A savepoint, or a `COMMIT AND CHAIN` that opens the next block at once, leaves the script inside its block. |
 

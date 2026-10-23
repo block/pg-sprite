@@ -74,6 +74,30 @@ func TestFromRoutedDerivesGuidanceForRewriteRequired(t *testing.T) {
 	assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, st.Guidance)
 }
 
+// A rename is refused as rewrite-required and the plan names the manual path
+// the application can follow: expand-and-contract for a column, a
+// coordinated deploy for a table.
+func TestFromRoutedDerivesGuidanceForAppBreakingRename(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sql  string
+		want suggest.Guidance
+	}{
+		"rename column": {"ALTER TABLE users RENAME COLUMN name TO full_name", suggest.GuidanceExpandContractColumn},
+		"rename table":  {"ALTER TABLE users RENAME TO accounts", suggest.GuidanceCoordinatedTableRename},
+	} {
+		t.Run(name, func(t *testing.T) {
+			routed := router.Route([]planner.Plan{classifyCanonical(t, tc.sql)})
+			require.Len(t, routed.Statements, 1)
+			require.Equal(t, router.DispositionRewriteRequired, routed.Statements[0].Disposition,
+				"a rename breaks running application instances, so it never executes as submitted")
+
+			st, err := plan.FromRouted(routed.Statements[0])
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, st.Guidance)
+		})
+	}
+}
+
 // A compound rewrite-required statement advises splitting first: no safer
 // sequence can be constructed for a multi-operation statement, so the
 // manual path starts with one statement per operation.
@@ -510,7 +534,7 @@ func TestReportJSONShape(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, fmt.Sprintf(`{
-		"format_version": 11,
+		"format_version": 12,
 		"source": "diff",
 		"schema": "public",
 		"table": "t",
@@ -568,7 +592,7 @@ func TestReportJSONOmitsUnsetOptionalFields(t *testing.T) {
 	raw, err := json.Marshal(r)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 11,
+		"format_version": 12,
 		"source": "alter",
 		"disposition": "execute",
 		"fingerprint": "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",

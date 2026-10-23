@@ -145,6 +145,36 @@ func TestAdviseInlineConstraintGetsAddColumnThenConstraintGuidance(t *testing.T)
 	assert.Equal(t, suggest.GuidanceAddColumnThenConstraint, s.Guidance)
 }
 
+// A rename is a brief catalog change with no safer SQL form — the danger is
+// to the application, not the database — so the suggestion carries no
+// rewrite and names the rollout the application can follow instead.
+func TestAdviseRenameGetsApplicationRolloutGuidance(t *testing.T) {
+	for name, tc := range map[string]struct {
+		sql  string
+		want suggest.Guidance
+	}{
+		"rename column": {"ALTER TABLE users RENAME COLUMN name TO full_name", suggest.GuidanceExpandContractColumn},
+		"rename table":  {"ALTER TABLE users RENAME TO accounts", suggest.GuidanceCoordinatedTableRename},
+	} {
+		t.Run(name, func(t *testing.T) {
+			report, err := suggest.Advise(tc.sql)
+			require.NoError(t, err)
+			require.Len(t, report.Suggestions, 1)
+			s := report.Suggestions[0]
+			assert.Equal(t, planner.ReasonAppBreakingRename, s.Reason)
+			assert.Empty(t, s.Recommended, "no SQL rewrite makes a rename safe for the application")
+			assert.Equal(t, tc.want, s.Guidance)
+		})
+	}
+}
+
+// An index rename is invisible to applications, so it draws no suggestion.
+func TestAdviseIndexRenameIsSilent(t *testing.T) {
+	report, err := suggest.Advise("ALTER INDEX users_email_idx RENAME TO users_email_key")
+	require.NoError(t, err)
+	assert.Empty(t, report.Suggestions)
+}
+
 // An unnamed CHECK or FOREIGN KEY gets the NOT VALID → VALIDATE rewrite
 // constructed under the name the server would choose first, which the
 // VALIDATE step needs: the advice is runnable SQL, not a manual path.
@@ -307,6 +337,8 @@ func TestAdviseEverySaferIdiomPathIsMapped(t *testing.T) {
 		"ALTER TABLE t ATTACH PARTITION p FOR VALUES FROM (1) TO (10)",
 		"ALTER TABLE t ADD COLUMN email text UNIQUE",
 		"ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d int",
+		"ALTER TABLE t RENAME COLUMN a TO b",
+		"ALTER TABLE t RENAME TO t2",
 	} {
 		report, err := suggest.Advise(sql)
 		require.NoError(t, err, "statement: %s", sql)
@@ -351,7 +383,7 @@ func TestReportJSONShape(t *testing.T) {
 	recommended, err := json.Marshal(report.Suggestions[0].Recommended)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 2,
+		"format_version": 3,
 		"suggestions": [
 			{
 				"statement": 1,
@@ -382,7 +414,7 @@ func TestReportJSONGuidanceShape(t *testing.T) {
 	operation, err := json.Marshal(report.Suggestions[0].Operation)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 2,
+		"format_version": 3,
 		"suggestions": [
 			{
 				"statement": 1,
@@ -403,7 +435,7 @@ func TestReportJSONCleanSuggestionsAreEmptyArray(t *testing.T) {
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 2,
+		"format_version": 3,
 		"suggestions": []
 	}`, string(raw))
 }

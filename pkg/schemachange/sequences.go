@@ -27,15 +27,22 @@ type OwnedSequence struct {
 // readOwnedSequences lists the sequences the table's columns own through
 // the auto (deptype 'a') pg_depend edge OWNED BY records, in column order.
 func readOwnedSequences(ctx context.Context, tx pgx.Tx, oid uint32) ([]OwnedSequence, error) {
+	// INV: CO-9 — every relation, operator, and type is pg_catalog-qualified,
+	// so the answer does not depend on which search_path the transaction
+	// holds when the read runs.
 	rows, err := tx.Query(ctx, `
 		SELECT a.attname, sn.nspname, s.relname
-		FROM pg_attribute a
-		JOIN pg_depend d
-		  ON d.refclassid = 'pg_class'::regclass AND d.refobjid = a.attrelid AND d.refobjsubid = a.attnum
-		 AND d.classid = 'pg_class'::regclass AND d.deptype = 'a'
-		JOIN pg_class s ON s.oid = d.objid AND s.relkind = 'S'
-		JOIN pg_namespace sn ON sn.oid = s.relnamespace
-		WHERE a.attrelid = $1 AND NOT a.attisdropped
+		FROM pg_catalog.pg_attribute a
+		JOIN pg_catalog.pg_depend d
+		  ON d.refclassid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		 AND d.refobjid OPERATOR(pg_catalog.=) a.attrelid
+		 AND d.refobjsubid OPERATOR(pg_catalog.=) a.attnum
+		 AND d.classid OPERATOR(pg_catalog.=) 'pg_catalog.pg_class'::pg_catalog.regclass
+		 AND d.deptype OPERATOR(pg_catalog.=) 'a'
+		JOIN pg_catalog.pg_class s
+		  ON s.oid OPERATOR(pg_catalog.=) d.objid AND s.relkind OPERATOR(pg_catalog.=) 'S'
+		JOIN pg_catalog.pg_namespace sn ON sn.oid OPERATOR(pg_catalog.=) s.relnamespace
+		WHERE a.attrelid OPERATOR(pg_catalog.=) $1 AND NOT a.attisdropped
 		ORDER BY a.attnum, sn.nspname, s.relname`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("read owned sequences: %w", err)

@@ -19,9 +19,10 @@ import (
 // FormatVersion identifies the report contract
 // (docs/suggest-report.md). A consumer must reject a report whose version
 // it does not understand instead of guessing at the field semantics.
-// Version 2 added name-constraint-then-validate and
-// unique-index-then-constraint to the Guidance vocabulary.
-const FormatVersion = 2
+// Version 3 added expand-contract-column and coordinated-table-rename to
+// the Guidance vocabulary; version 2 added name-constraint-then-validate
+// and unique-index-then-constraint.
+const FormatVersion = 3
 
 // Caveat is a typed condition attached to a recommendation; automation
 // branches on it, never on prose. The caveats are independent — no caveat
@@ -120,6 +121,20 @@ const (
 	// the classifier can mark safer-idiom, so a parser shape that yields
 	// no rewrite becomes advice rather than a failed report.
 	GuidanceUniqueIndexThenConstraint Guidance = "unique-index-then-constraint"
+	// GuidanceExpandContractColumn: a RENAME COLUMN. PostgreSQL flips the
+	// name in the catalog, but running application instances that still
+	// query the old name break the instant it commits. Expand and
+	// contract instead: add the new column, dual-write and backfill,
+	// switch reads, then drop the old column as its own reviewed change.
+	// No sequence can be constructed from the statement alone, because
+	// the dual-write and the read switch live in the application.
+	GuidanceExpandContractColumn Guidance = "expand-contract-column"
+	// GuidanceCoordinatedTableRename: a RENAME TO on a table. The same
+	// catalog flip breaks every running instance that still queries the
+	// old table name. Coordinate the rename with the application deploy
+	// that adopts the new name, or expand and contract through a view
+	// that keeps the old name readable until every instance has moved.
+	GuidanceCoordinatedTableRename Guidance = "coordinated-table-rename"
 )
 
 // Guidances returns the closed set of Guidance values. It is part of the
@@ -134,6 +149,8 @@ func Guidances() []Guidance {
 		GuidanceNotNullScaffold,
 		GuidanceNameConstraintThenValidate,
 		GuidanceUniqueIndexThenConstraint,
+		GuidanceExpandContractColumn,
+		GuidanceCoordinatedTableRename,
 	}
 }
 
@@ -158,6 +175,11 @@ func ManualPath(g Guidance) string {
 		return "build the index first with CREATE UNIQUE INDEX CONCURRENTLY on the same columns, with the statement's " +
 			"INCLUDE, NULLS NOT DISTINCT, WITH (...), and TABLESPACE, then attach it with ADD CONSTRAINT ... USING INDEX, " +
 			"keeping any DEFERRABLE and INITIALLY DEFERRED"
+	case GuidanceExpandContractColumn:
+		return "add the new column, dual-write and backfill it, switch reads to it, then drop the old column as its own reviewed change"
+	case GuidanceCoordinatedTableRename:
+		return "coordinate the rename with the application deploy that adopts the new name, or keep the old name readable " +
+			"through a view until every instance has moved"
 	}
 	return string(g)
 }
@@ -238,7 +260,9 @@ func Advise(sql string) (Report, error) {
 }
 
 // adviseStatement produces the suggestions for one statement: one per
-// safer-idiom decision. The operation list and decision list are
+// decision whose submitted form is not executable as submitted — a
+// safer-idiom decision, or an app-breaking rename, which only ever gets
+// guidance. The operation list and decision list are
 // index-aligned by the planner's contract (one decision per operation, in
 // order); a mismatch is a contract violation and fails closed.
 func adviseStatement(classifier *planner.ScriptClassifier, index int, stmt statement.SourceStatement) ([]Suggestion, error) {
@@ -255,7 +279,7 @@ func adviseStatement(classifier *planner.ScriptClassifier, index int, stmt state
 	}
 	var suggestions []Suggestion
 	for i, d := range plan.Decisions {
-		if d.Reason != planner.ReasonSaferIdiom {
+		if d.ExecutableAsSubmitted() {
 			continue
 		}
 		s := Suggestion{
@@ -310,20 +334,25 @@ func rewriteCaveats(op statement.Op) ([]Caveat, error) {
 	return nil, fmt.Errorf("no caveat mapping for rewritten operation %q", op.Describe())
 }
 
-// ManualGuidance maps a safer-idiom operation without a constructed
-// rewrite to the typed manual path; multi says the operation arrived in a
-// multi-operation statement, which always advises splitting first. The
-// plan report derives its rewrite-required guidance through this same
-// function so the two surfaces can never disagree. A safer-idiom decision
-// this table does not know is a contract violation — when the planner
-// learns a new non-constructible pattern, its guidance must be recorded
-// here before the advice ships — so it fails closed rather than staying
-// silent about a statement lint flags.
+// ManualGuidance maps an operation whose submitted form is not executable
+// as submitted and has no constructed rewrite — a safer-idiom operation,
+// or a rename — to the typed manual path; multi says the operation arrived
+// in a multi-operation statement, which always advises splitting first.
+// The plan report derives its rewrite-required guidance through this same
+// function so the two surfaces can never disagree. A decision this table
+// does not know is a contract violation — when the planner learns a new
+// non-constructible pattern, its guidance must be recorded here before the
+// advice ships — so it fails closed rather than staying silent about a
+// statement lint flags.
 func ManualGuidance(op statement.Op, multi bool) (Guidance, error) {
 	if multi {
 		return GuidanceSplitStatement, nil
 	}
 	switch op.Kind {
+	case statement.OpRenameColumn:
+		return GuidanceExpandContractColumn, nil
+	case statement.OpRenameTable:
+		return GuidanceCoordinatedTableRename, nil
 	case statement.OpAddColumn:
 		return GuidanceAddColumnThenConstraint, nil
 	case statement.OpAttachPartition:

@@ -105,10 +105,6 @@ var noRewriteCases = map[string][]noRewriteCase{
 	"plain-tables-their-indexes": {
 		{name: "create index", setup: noRewriteFixture, statement: "CREATE INDEX t_qty_idx ON %[1]s.t (qty)"},
 	},
-	"rename-column-rename-table": {
-		{name: "rename column", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t RENAME COLUMN note TO remark"},
-		{name: "rename table", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t RENAME TO t2"},
-	},
 	"set-default-drop-default-drop-not-null": {
 		{name: "set default", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN qty SET DEFAULT 1"},
 		{name: "drop default", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN note DROP DEFAULT"},

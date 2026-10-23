@@ -128,14 +128,16 @@ rows:
   - id: rename-column-rename-table
     area: "column_changes"
     operation: "`RENAME COLUMN` / `RENAME TABLE`"
-    tier: "t1"
-    status_mark: "✅"
-    engine_path: "native_as_is"
+    tier: "t3"
+    status_mark: "❌"
+    engine_path: "none"
     online_safety_problem: true
+    online_safety_detail: "the hazard is to the application, and no SQL exists for `migrate` to substitute"
     front_doors:
-      migrate: supported
-      diff: supported
-    reason_notes: "Metadata-only for PostgreSQL but **app-breaking** across deployed instances; executed with a typed reason so lint/plan consumers can steer away"
+      migrate: refused
+      diff: not_applicable
+    refusal_reason: not-native-safe-rewrite-required
+    reason_notes: "Metadata-only for PostgreSQL but **app-breaking** across deployed instances: code still using the old name breaks the instant the rename commits, and no safer SQL exists to substitute. Without `--force`, `migrate` refuses it as `rewrite-required`, class `by-design`, with the `expand-contract-column` or `coordinated-table-rename` guidance (and `lint` reports it at error severity). `--force SCHEMA.TABLE` runs the rename as submitted under bounded budgets and records the override; above `--max-table-size` the forced rename is refused as `not-native-safe-table-too-large`. A desired file cannot express a rename — `diff` shows a renamed column as a drop and an add"
   - id: set-tablespace
     area: "column_changes"
     operation: "`SET TABLESPACE`"
@@ -314,7 +316,7 @@ rows:
       migrate: refused
       diff: not_applicable
     refusal_reason: unsupported-statement
-    reason_notes: "`CONCURRENTLY` is the idiom and the blocking form is rewritten to it (`--dry-run` and `suggest` show the rewrite), but without `--force` `migrate` refuses both forms before anything executes: a cancelled concurrent detach leaves a detach-pending partition state the executor does not yet own recovering. `--force SCHEMA.TABLE` runs a plain `DETACH PARTITION` as submitted under bounded budgets, taking the blocking lock; `DETACH ... CONCURRENTLY` stays refused under `--force`. `migrate --dry-run` of either form reports the rewrite as a safer sequence to run and exits 0 while the real run refuses and exits 2, so the dry-run exit code is not a submit gate for a detach. A desired schema cannot express a detach, so `diff` never produces one"
+    reason_notes: "`CONCURRENTLY` is the idiom and the blocking form is rewritten to it (`suggest` shows the rewrite), but without `--force` `migrate` refuses both forms before anything executes: a cancelled concurrent detach leaves a detach-pending partition state the executor does not yet own recovering. `--force SCHEMA.TABLE` runs a plain `DETACH PARTITION` as submitted under bounded budgets, taking the blocking lock; `DETACH ... CONCURRENTLY` stays refused under `--force`. `migrate --dry-run` of either form ends in the same `unsupported-statement` refusal and exit code 2 as the real run. A desired schema cannot express a detach, so `diff` never produces one"
   - id: partitioned-parents-in-the-declarative-model
     area: "partitioned_tables"
     operation: "Partitioned parents in the **declarative model**"

@@ -137,15 +137,9 @@ func (s *Slot) Close(ctx context.Context) error {
 // judges a slot, so a slot with no row is one the reaper may drop only once
 // the run's claim has ended: an orphan, never a slot mid-claim.
 func CreateSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, target preflight.CopySwapTarget) (*Slot, error) {
-	if target.Table() == "" {
-		return nil, fmt.Errorf("%w: ST-3: zero copy-and-swap target", ErrInvariantViolation)
-	}
-	if !target.DecodesWAL() {
-		return nil, fmt.Errorf("%w: ST-3: the target's environment was not verified for a run that decodes WAL", ErrInvariantViolation)
-	}
-	name := target.DecodingName()
-	if !slotNamePattern.MatchString(name) {
-		return nil, fmt.Errorf("%w: ST-3: derived name %q is not an engine slot name", ErrInvariantViolation, name)
+	name, err := decodingName(target)
+	if err != nil {
+		return nil, err
 	}
 	if err := ensurePublication(ctx, pool, name, target); err != nil {
 		return nil, err
@@ -182,6 +176,47 @@ func CreateSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, targ
 			fmt.Errorf("%w: ST-3: slot %s was created without an exported snapshot", ErrInvariantViolation, name))
 	}
 	return &Slot{name: name, consistentPoint: consistentPoint, snapshotName: result.SnapshotName, conn: conn}, nil
+}
+
+// ReplaceSlot drops the engine's slot of the target's derived name, if one
+// is there, and creates a fresh one as CreateSlot does, keeping the
+// publication of the name in place between the two. The slot is dropped as
+// DropSlot drops it — waiting out a holder under ctx alone, refusing a
+// foreign slot of the name as a *ForeignStateError — and the publication is
+// then verified as CreateSlot verifies it, so a publication that is not the
+// route's own is refused rather than adopted.
+//
+// The publication stays because the source stays live: a write to the
+// target table looks up the publications that publish it while it runs,
+// and a publication dropped in that window fails the write with an
+// internal error. A caller that replaces a lost slot under live traffic
+// must not take the publication away from that traffic. The caller holds
+// the engine's lock on the slot's name, as for CreateSlot.
+func ReplaceSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, target preflight.CopySwapTarget) (*Slot, error) {
+	name, err := decodingName(target)
+	if err != nil {
+		return nil, err
+	}
+	if err := dropSlot(ctx, cfg, pool, name, true); err != nil {
+		return nil, err
+	}
+	return CreateSlot(ctx, cfg, pool, target)
+}
+
+// decodingName is the target's derived slot and publication name, refused
+// before anything is created or dropped for a target that cannot have one.
+func decodingName(target preflight.CopySwapTarget) (string, error) {
+	if target.Table() == "" {
+		return "", fmt.Errorf("%w: ST-3: zero copy-and-swap target", ErrInvariantViolation)
+	}
+	if !target.DecodesWAL() {
+		return "", fmt.Errorf("%w: ST-3: the target's environment was not verified for a run that decodes WAL", ErrInvariantViolation)
+	}
+	name := target.DecodingName()
+	if !slotNamePattern.MatchString(name) {
+		return "", fmt.Errorf("%w: ST-3: derived name %q is not an engine slot name", ErrInvariantViolation, name)
+	}
+	return name, nil
 }
 
 // dropUnusableSlot drops a slot the server has just created but described

@@ -10,11 +10,11 @@ import (
 )
 
 func col(name string, value any) decode.Column {
-	return decode.Column{Name: name, Value: value, Present: true}
+	return decode.PresentColumn(name, value)
 }
 
 // marker is pgoutput's unchanged-TOAST column: present in the tuple, no value.
-func marker(name string) decode.Column { return decode.Column{Name: name, Present: false} }
+func marker(name string) decode.Column { return decode.AbsentColumn(name) }
 
 func insert(lsn decode.LSN, key int64, cols ...decode.Column) decode.ChangeEvent {
 	return decode.ChangeEvent{Kind: decode.Insert, LSN: lsn, Delivered: lsn, Key: key, Columns: cols}
@@ -91,8 +91,8 @@ func TestBufferCopiesEventColumns(t *testing.T) {
 	b := NewBuffer()
 	cols := []decode.Column{col("label", "a")}
 	require.NoError(t, b.Add(insert(10, 1, cols...)))
-	cols[0].Value = "mutated"
-	assert.Equal(t, "a", entry(t, b, 1).Columns[0].Value)
+	cols[0] = col("label", "mutated")
+	assert.Equal(t, []decode.Column{col("label", "a")}, entry(t, b, 1).Columns)
 }
 
 // A key-moving UPDATE is two entries: a delete marker at the old key and an

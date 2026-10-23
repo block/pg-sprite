@@ -264,10 +264,10 @@ func awaitWALSenderReply(t *testing.T, stream fixtureStream, slot *decode.Slot) 
 
 // column is one present text column of a decoded change.
 func column(name, value string) decode.Column {
-	return decode.Column{Name: name, Value: value, Present: true}
+	return decode.PresentColumn(name, value)
 }
 
 // absentColumn is a column pgoutput omitted as an unchanged TOAST value.
 func absentColumn(name string) decode.Column {
-	return decode.Column{Name: name, Present: false}
+	return decode.AbsentColumn(name)
 }

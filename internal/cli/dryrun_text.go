@@ -126,7 +126,7 @@ func writeRefusal(w *stickyWriter, ps plan.Statement) []string {
 	case router.DispositionExecute:
 		return nil
 	case router.DispositionRewriteRequired:
-		w.diag("error", "rewrite-required", "refused — blocks as written and no online replacement could be constructed; rewrite the change as separate online steps and dry-run each one")
+		w.diag("error", "rewrite-required", rewriteRequiredRefusalText(ps))
 		return []string{"rewrite-required"}
 	case router.DispositionUnavailable:
 		w.diag("error", "backend-unavailable", fmt.Sprintf("refused — needs the %s backend (an online shadow-table copy with a cutover), which does not carry this operation yet", ps.Backend))
@@ -148,6 +148,24 @@ func writeRefusal(w *stickyWriter, ps plan.Statement) []string {
 	// a code this build does not know has no anchor to link.
 	w.diag("error", "unknown-disposition", fmt.Sprintf("refused — unrecognized disposition %q; treat the statement as not executable", ps.Disposition))
 	return nil
+}
+
+// rewriteRequiredRefusalText names why a rewrite-required statement will
+// not run as written, from the first decision the router could not execute
+// as submitted: a rename breaks the application instances still using the
+// old name; every other such decision blocks the table and has no online
+// replacement the planner could construct.
+func rewriteRequiredRefusalText(ps plan.Statement) string {
+	for _, d := range ps.Decisions {
+		if d.ExecutableAsSubmitted() {
+			continue
+		}
+		if d.Reason == planner.ReasonAppBreakingRename {
+			return "refused — breaks every running application instance that still uses the old name the moment it commits; roll the rename out as separate steps the application can follow, or run it as written with --force naming the table, which stays under the --max-table-size guard"
+		}
+		break
+	}
+	return "refused — blocks as written and no online replacement could be constructed; rewrite the change as separate online steps and dry-run each one"
 }
 
 // writeExecutionNotes renders how an executable statement will run and
@@ -196,14 +214,15 @@ func writeRefusalClass(w *stickyWriter, ps plan.Statement) {
 }
 
 // decisionSeverity maps one operation's classification to its diagnostic
-// severity: note when the submitted form is safe to run, warning when it is
-// unsafe or app-breaking as written, and note on a refused statement, where
-// the leading error diagnostic already carries the severity.
+// severity: note when the submitted form is safe to run, warning when an
+// executable statement's submitted form is unsafe as written, and note on
+// a refused statement — an app-breaking rename among them — where the
+// leading error diagnostic already carries the severity.
 func decisionSeverity(ps plan.Statement, d planner.Decision) string {
 	if ps.Disposition != router.DispositionExecute {
 		return "note"
 	}
-	if d.Reason == planner.ReasonSaferIdiom || d.Reason == planner.ReasonAppBreakingRename {
+	if d.Reason == planner.ReasonSaferIdiom {
 		return "warning"
 	}
 	return "note"

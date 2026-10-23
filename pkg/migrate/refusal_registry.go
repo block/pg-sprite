@@ -25,10 +25,20 @@ import (
 // so each site's classification is a total function and siteRefusals()
 // enumerates them for the registry's completeness test.
 
-// rewriteRequiredRefusal: the planner cannot construct the safer sequence
-// the submitted form needs.
+// rewriteRequiredRefusal: the submitted form blocks the table and the
+// planner cannot construct the safer sequence it needs.
 func rewriteRequiredRefusal() verdict.Refusal {
 	return verdict.CapabilityBoundary(verdict.ReasonRewriteRequired)
+}
+
+// appBreakingRenameRefusal: a column or table rename breaks every running
+// application instance that still uses the old name, and no SQL exists
+// for pg-sprite to substitute — the safe sequence lives in the
+// application. The deliberate path is the guidance's rollout and then
+// the submitted statement under --force, so the refusal is by design,
+// not a capability the engine will gain.
+func appBreakingRenameRefusal() verdict.Refusal {
+	return verdict.ByDesign(verdict.ReasonRewriteRequired)
 }
 
 // backendUnavailableRefusal: the plan routes to an execution strategy that
@@ -87,6 +97,7 @@ type siteRefusal struct {
 func siteRefusals() []siteRefusal {
 	return []siteRefusal{
 		{"rewrite-required", rewriteRequiredRefusal()},
+		{"app-breaking-rename", appBreakingRenameRefusal()},
 		{"backend-unavailable", backendUnavailableRefusal()},
 		{"table-too-large", tableTooLargeRefusal()},
 		{"insufficient-privileges", insufficientPrivilegesRefusal()},

@@ -23,19 +23,19 @@ func decodeColumns(rel *relation, tuple *pglogrepl.TupleData) ([]Column, error) 
 	}
 	columns := make([]Column, len(rel.columns))
 	for i, c := range tuple.Columns {
-		col := Column{Name: rel.columns[i].Name}
+		name := rel.columns[i].Name
 		switch c.DataType {
 		case pglogrepl.TupleDataTypeText:
-			col.Value, col.Present = string(c.Data), true
+			columns[i] = PresentColumn(name, string(c.Data))
 		case pglogrepl.TupleDataTypeNull:
-			col.Present = true
+			columns[i] = PresentColumn(name, nil)
 		case pglogrepl.TupleDataTypeToast:
 			// INV: CO-8 — the marker is carried as absence, never as a value.
+			columns[i] = AbsentColumn(name)
 		default:
 			return nil, fmt.Errorf("%w: CO-8: column %s arrived as tuple data type %q, the stream asked for text",
-				ErrInvariantViolation, col.Name, c.DataType)
+				ErrInvariantViolation, name, c.DataType)
 		}
-		columns[i] = col
 	}
 	return columns, nil
 }

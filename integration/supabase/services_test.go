@@ -80,11 +80,18 @@ func newTable(t *testing.T, pool *pgxpool.Pool, name string) string {
 
 func change(t *testing.T, pool *pgxpool.Pool, sql string) verdict.Verdict {
 	t.Helper()
+	return changeWith(t, pool, sql, migrate.DefaultOptions())
+}
+
+// changeWith runs the statement under the given options and requires it to
+// execute; a forced run passes the table acknowledgement in opts.Force.
+func changeWith(t *testing.T, pool *pgxpool.Pool, sql string, opts migrate.Options) verdict.Verdict {
+	t.Helper()
 	st, err := statement.ParseOne(sql)
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	v, err := migrate.Run(ctx, pool, st, migrate.DefaultOptions())
+	v, err := migrate.Run(ctx, pool, st, opts)
 	require.NoError(t, err)
 	require.Equal(t, verdict.OutcomeExecuted, v.Outcome)
 	return v

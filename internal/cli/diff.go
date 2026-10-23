@@ -188,6 +188,8 @@ func annotate(ps plan.Statement) string {
 	case router.DispositionUnavailable:
 		s += ": needs the " + string(ps.Backend) + " backend, which does not carry this operation yet"
 	case router.DispositionRewriteRequired:
+		// diff derives a renamed column as a drop and an add and never
+		// emits a rename, so a rewrite-required statement here blocks.
 		s += ": blocks as submitted and no online rewrite was constructed — the engine will not run it"
 	case router.DispositionRefuse:
 		s += ": refused — the engine will not run it"

@@ -35,6 +35,6 @@ func TestParseLSN(t *testing.T) {
 	}
 }
 func TestPresentColumns(t *testing.T) {
-	e := ChangeEvent{Columns: []Column{{Name: "blob", Present: false}, {Name: "label", Value: "x", Present: true}}}
-	assert.Equal(t, []Column{{Name: "label", Value: "x", Present: true}}, e.PresentColumns())
+	e := ChangeEvent{Columns: []Column{AbsentColumn("blob"), PresentColumn("label", "x")}}
+	assert.Equal(t, []Column{PresentColumn("label", "x")}, e.PresentColumns())
 }

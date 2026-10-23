@@ -37,7 +37,7 @@ var ErrSlotActive = errors.New("replication slot is held by another process")
 // place too, since the whole name is then in dispute. A name outside the
 // engine's shape is an invariant violation.
 func DropSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name string) error {
-	return dropSlot(ctx, cfg, pool, name, true)
+	return dropSlotAndPublication(ctx, cfg, pool, name, true)
 }
 
 // DropIdleSlot is DropSlot for a caller that must not wait out a holder: the
@@ -48,11 +48,22 @@ func DropSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name s
 // read before it, so a slot that becomes held between a caller's read and
 // the drop is still left alone. Everything else is as for DropSlot.
 func DropIdleSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name string) error {
-	return dropSlot(ctx, cfg, pool, name, false)
+	return dropSlotAndPublication(ctx, cfg, pool, name, false)
 }
 
-// dropSlot is the drop behind DropSlot and DropIdleSlot; wait says whether
-// the server is to wait for a holder or refuse with ErrSlotActive.
+// dropSlotAndPublication is the drop behind DropSlot and DropIdleSlot: the
+// slot, then the publication of the name. A slot drop that fails or is
+// refused leaves the publication in place.
+func dropSlotAndPublication(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name string, wait bool) error {
+	if err := dropSlot(ctx, cfg, pool, name, wait); err != nil {
+		return err
+	}
+	return dropOwnPublication(ctx, pool, name)
+}
+
+// dropSlot drops the engine's slot of the name and nothing else; wait says
+// whether the server is to wait for a holder or refuse with ErrSlotActive.
+// A slot already absent is success.
 func dropSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name string, wait bool) error {
 	if !slotNamePattern.MatchString(name) {
 		return fmt.Errorf("%w: ST-3: %q is not an engine slot name", ErrInvariantViolation, name)
@@ -64,15 +75,13 @@ func dropSlot(ctx context.Context, cfg dbconn.Config, pool *pgxpool.Pool, name s
 	if found && !own {
 		return foreignSlot(name)
 	}
-	if found {
-		if err := dropReplicationSlot(ctx, cfg, pool, name, wait); err != nil {
-			return err
-		}
-		if err := confirmSlotGone(ctx, pool, name); err != nil {
-			return err
-		}
+	if !found {
+		return nil
 	}
-	return dropOwnPublication(ctx, pool, name)
+	if err := dropReplicationSlot(ctx, cfg, pool, name, wait); err != nil {
+		return err
+	}
+	return confirmSlotGone(ctx, pool, name)
 }
 
 // slotIsOwn reports whether the named slot exists and, if so, whether it is

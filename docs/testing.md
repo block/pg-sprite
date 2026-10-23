@@ -101,9 +101,12 @@ corpus is shared across phases and **never shrinks to make a phase land**.
 
 #### Test harness
 
-`internal/testutil` provides a fixed workload table with identity and unique keys,
-numeric and TOAST-able values, and timestamps. Its seeded load generator runs inserts,
-updates, deletes, and transactional unique-key swaps while a copy is active. The
+`internal/testutil` provides a workload table with identity and unique keys,
+numeric and TOAST-able values, and timestamps. Its shape is fixed except for what
+`WorkloadShape` varies, such as an `integer` identity key for a test that retypes the
+key. Its seeded load generator runs inserts, updates, deletes, and transactional
+unique-key swaps while a copy is active, and `Snapshot` reads what it has committed so
+far without stopping it, so a test can prove a write landed inside a phase. The
 convergence oracle implements TM-5 with a typed symmetric difference computed in a
 single read-only `REPEATABLE READ` snapshot, so both directions and both row counts
 describe the same instant. It can ignore columns that a test deliberately excludes,
@@ -209,7 +212,18 @@ the trigger's function alive until every transaction that may still hold
 the trigger in its event-trigger cache has ended, where an inline drop
 would fail another package's in-flight DDL with `cache lookup failed for
 function`. A harness test fails the build on an inline
-`CREATE EVENT TRIGGER` elsewhere in the suite.
+`CREATE EVENT TRIGGER` elsewhere in the suite. A trigger's body runs for
+every other test's DDL too, as whatever role issues it, so it finds its
+schema's objects by name in the catalogs and never resolves a
+schema-qualified name in an expression its guard evaluates; otherwise an
+unrelated test fails with `permission denied for schema`.
+`InstallEventTrigger` holds each DDL trigger to this when it is installed,
+by running a probe statement as a role without access to the schema.
+A trigger that injects a fault must also confine it to its own schema's
+objects — matching the `schema_name` or `object_identity` that
+`pg_event_trigger_ddl_commands()` reports, not statement text alone —
+or another package's DDL on the shared database is refused or loses its
+connection.
 
 The privilege-ladder tests additionally create throwaway **cluster-level
 roles** (`NewRole`), so the role behind an external `PG_DSN` needs

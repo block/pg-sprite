@@ -25,10 +25,11 @@ const backendExitPoll = 50 * time.Millisecond
 // lost attempt can be followed to its end on the server.
 func readSwapBackend(ctx context.Context, tx pgx.Tx) (swapBackend, error) {
 	var backend swapBackend
+	// INV: CO-9
 	err := tx.QueryRow(ctx, `
 		SELECT pid, backend_start
-		FROM pg_stat_activity
-		WHERE pid = pg_backend_pid()`).Scan(&backend.pid, &backend.started)
+		FROM pg_catalog.pg_stat_activity
+		WHERE pid OPERATOR(pg_catalog.=) pg_catalog.pg_backend_pid()`).Scan(&backend.pid, &backend.started)
 	if err != nil {
 		return swapBackend{}, fmt.Errorf("read cutover backend: %w", err)
 	}
@@ -67,10 +68,11 @@ func awaitBackendExit(ctx context.Context, pool *pgxpool.Pool, backend swapBacke
 // started at the same time — is still registered with the server.
 func backendPresent(ctx context.Context, pool *pgxpool.Pool, backend swapBackend) (bool, error) {
 	var present bool
+	// INV: CO-9
 	err := pool.QueryRow(ctx, `
 		SELECT EXISTS (
-			SELECT 1 FROM pg_stat_activity
-			WHERE pid = $1 AND backend_start = $2)`, backend.pid, backend.started).Scan(&present)
+			SELECT 1 FROM pg_catalog.pg_stat_activity
+			WHERE pid OPERATOR(pg_catalog.=) $1 AND backend_start OPERATOR(pg_catalog.=) $2)`, backend.pid, backend.started).Scan(&present)
 	if err != nil {
 		return false, fmt.Errorf("look up backend %d of the lost cutover attempt: %w", backend.pid, err)
 	}
