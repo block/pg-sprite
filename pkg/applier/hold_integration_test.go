@@ -46,7 +46,7 @@ func deleteEvent(lsn decode.LSN, key int64) decode.ChangeEvent {
 // owner does after every flush.
 func (f flushFixture) flushAll(t *testing.T, p prepared, buffer *applier.Buffer) applier.Result {
 	t.Helper()
-	result, err := p.flush.Flush(t.Context(), f.pool, buffer.Drain(everyKeyLanded()))
+	result, err := p.flush.Flush(t.Context(), f.pool, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 	require.NoError(t, err)
 	require.NoError(t, buffer.Hold(result.Held))
 	return result

@@ -126,6 +126,12 @@ type Status struct {
 	// check that found an unmoved image's shadow row absent. A nonzero value
 	// is normal for the cycle or two a hold lasts.
 	Held int
+	// Invisible is the number of entries the last drain left waiting for
+	// the source to show their transaction visible: a commit the stream
+	// delivered that the server was still flushing or waiting on a
+	// synchronous standby for. A nonzero value is normal for a cycle;
+	// one that persists means the source's commits are not completing.
+	Invisible int
 	// Applied is the number of images and delete markers committed flushes
 	// have written to the shadow.
 	Applied uint64
@@ -224,9 +230,11 @@ func (c *Catchup) Confirmed() decode.LSN {
 
 // Run consumes the stream in cycles until ctx ends or the stream, the buffer,
 // or a flush fails. Each cycle gathers changes until MaxChanges are buffered
-// or Interval has passed, reads the copier's Position after the last Add — so
-// a discarded uncut key's change is one the copier's read will see (CO-4) —
-// drains, flushes the batch, puts a refused batch back (ErrBatchDeferred) or
+// or Interval has passed, takes the source's snapshot and then reads the
+// copier's Position after the last Add — so a discarded uncut key's change
+// is one the copier's read will see, and a change whose commit the source
+// has not yet made visible waits for a later cycle (CO-4) — drains, flushes
+// the batch, puts a refused batch back (ErrBatchDeferred) or
 // holds the images the flush did not write — those it completed and those
 // whose shadow row it found absent — and then confirms the lowest of the
 // stream's delivered position and the buffer's oldest pending position:
@@ -343,9 +351,15 @@ func (c *Catchup) apply(ctx context.Context, pool *pgxpool.Pool) (cycleOutcome, 
 		return cycleOutcome{paused: true}, nil
 	}
 	defer c.releaseFlushes()
-	// INV: CO-4 — the position is read after the last Add of this cycle.
+	// INV: CO-4 — the snapshot is taken, and then the position read, after
+	// the last Add of this cycle: a transaction the snapshot shows visible
+	// is visible to every chunk read the copier makes after the position.
+	snap, err := c.snapshot(ctx, pool)
+	if err != nil {
+		return cycleOutcome{}, err
+	}
 	pos := c.positions.Position()
-	batch := c.buffer.Drain(pos)
+	batch := c.buffer.Drain(pos, snap)
 	result, err := c.flusher.Flush(ctx, pool, batch)
 	outcome := cycleOutcome{batch: batch, result: result}
 	switch {
@@ -367,6 +381,20 @@ func (c *Catchup) apply(ctx context.Context, pool *pgxpool.Pool) (cycleOutcome, 
 		}
 	}
 	return outcome, nil
+}
+
+// snapshot takes the source's snapshot on pool for this cycle's drain, and
+// skips the round trip when the buffer holds nothing to judge: the zero
+// Snapshot then judges nothing.
+func (c *Catchup) snapshot(ctx context.Context, pool *pgxpool.Pool) (Snapshot, error) {
+	if c.buffer.Len() == 0 {
+		return Snapshot{}, nil
+	}
+	snap, err := ReadSnapshot(ctx, pool)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("catch-up on %s.%s: %w", c.flusher.target.Schema(), c.flusher.target.Table(), err)
+	}
+	return snap, nil
 }
 
 // checkSlot reads the stream's slot from the catalog after the cycle has
@@ -495,10 +523,12 @@ func (c *Catchup) record(outcome cycleOutcome, walEnd decode.LSN) {
 	case outcome.deferred:
 		c.status.Discarded += uint64(outcome.batch.Discarded)
 		c.status.Deferred = outcome.batch.Deferred + len(outcome.batch.Entries)
+		c.status.Invisible = outcome.batch.Invisible
 		c.status.BatchesDeferred++
 	default:
 		c.status.Discarded += uint64(outcome.batch.Discarded)
 		c.status.Deferred = outcome.batch.Deferred
+		c.status.Invisible = outcome.batch.Invisible
 		c.status.Applied += uint64(outcome.result.Images + outcome.result.Deletes)
 		if outcome.result.Fallback {
 			c.status.Fallbacks++
