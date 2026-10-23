@@ -26,7 +26,9 @@ import (
 // pool alone; a library caller that builds Options by hand wires it, the
 // CLI always does. It is a sentinel so an embedder can tell the missing
 // wiring apart from an operational failure with [errors.Is]; nothing has
-// been executed when it is returned.
+// been executed when it is returned. A connection that is set but reaches
+// another database is the other wiring error,
+// [CopySwapConnectionMismatchError].
 var ErrCopySwapConnectionRequired = errors.New(
 	"Options.CopySwap.Connection must name the database the pool was dialed with; the copy-and-swap route opens dedicated sessions from it")
 
@@ -46,7 +48,10 @@ var ErrCopySwapConnectionRequired = errors.New(
 // the operator ends it.
 type CopySwapOptions struct {
 	// Connection is the database the pool handed to Run was dialed with.
-	// The route's dedicated sessions are opened from it.
+	// The route's dedicated sessions are opened from it. Before the
+	// preflight the route proves the two reach one database on one
+	// cluster, and stops with a CopySwapConnectionMismatchError when they
+	// do not.
 	Connection dbconn.Config
 
 	// FreeDiskBytes is the free space the operator reports on the volume
@@ -101,6 +106,9 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	opts Options, logger *slog.Logger) (verdict.Verdict, error) {
 	if opts.CopySwap.Connection.URL == "" {
 		return verdict.Verdict{}, fmt.Errorf("migrate: %w", ErrCopySwapConnectionRequired)
+	}
+	if err := checkCopySwapConnection(ctx, pool, opts.CopySwap.Connection); err != nil {
+		return verdict.Verdict{}, fmt.Errorf("migrate: %w", err)
 	}
 	target, err := preflight.CheckCopySwap(ctx, pool, st.Schema(), st.Table(), opts.CopySwap.environment())
 	if err != nil {
