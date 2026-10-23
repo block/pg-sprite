@@ -218,6 +218,7 @@ causes above: the verdict's `cause` is the shadow cause unchanged and its `class
 | `copy-frontier-broken` | The `Runner`'s re-mint of the copier cause of the same name ([CO-4](invariants.md#co-4--the-copyapply-ordering-invariants)), and the `Runner`'s own refusal of a copy that returned without error at a watermark short of the key space; the copier table below says what it means | `invariant-violation` | The copier table below. |
 | `copy-chunks-in-flight` | The `Runner`'s re-mint of the copier cause of the same name ([LK-3](invariants.md#lk-3--pending-work-is-claimed-exactly-once-and-wait-means-finished)); the copier table below says what it means | `invariant-violation` | The copier table below. |
 | `copy-chunk-unknown` | The `Runner`'s re-mint of the copier cause of the same name ([ST-6](invariants.md#st-6--preflight-before-the-first-write)); the copier table below says what it means | `invariant-violation` | The copier table below. |
+| `copy-conversion-drift` | The `Runner`'s re-mint of the copier cause of the same name ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)); the copier table below says what it means | `environmental` | The copier table below. |
 
 Not every error a shadow operation returns is a refusal. `BuildShadow` applies the gated
 statement to the empty shadow, and a statement the server itself rejects there — an index
@@ -243,13 +244,13 @@ or `resume-row-cutover`; one that does has a dispatch bug to fix, not a retry to
 `resume-row-mismatch`, and `resume-row-decoding` can surface: a caller that hands it a
 `done` row, a row written for another shadow, or a row that the other kind of run made.
 
-The four `copy-*` causes are the shadow-cause face of the copier's refusals: the `Runner`
+The five `copy-*` causes are the shadow-cause face of the copier's refusals: the `Runner`
 re-mints every `copier.RefusalCause` as a shadow cause (the table in the next section maps
 them) so a caller of `Runner.Run` reads one vocabulary whether the refusal came from a shadow
 operation or from the copy. The copier's lock, proof, and relation refusals map onto the
-`shadow-lock-*`, `shadow-proof-empty`, and `cutover-relation-replaced` rows above; the four
-`copy-*` rows name the ledger and frontier faults that have no shadow-operation counterpart,
-and are described once, in the copier table. The same literal in both vocabularies means the
+`shadow-lock-*`, `shadow-proof-empty`, and `cutover-relation-replaced` rows above; the five
+`copy-*` rows name the ledger, frontier, and conversion-resolution faults that have no
+shadow-operation counterpart, and are described once, in the copier table. The same literal in both vocabularies means the
 same fault, so a log line that carries only the string is unambiguous.
 
 Only the copier, the shadow operations, and the `Runner` carry typed causes today. The
@@ -288,6 +289,7 @@ same way.
 | `copy-frontier-broken` | The copier's own accounting of the key space broke: a chunk was cut with its lower bound above its upper, a claimed chunk does not start at the cut frontier, or the copy returned without error at a watermark short of the key space ([CO-4](invariants.md#co-4--the-copyapply-ordering-invariants)) | `invariant-violation` | The chunker produced a sequence it cannot have produced; report it, since the watermark it would have saved cannot be trusted. | `copy-frontier-broken` |
 | `copy-chunks-in-flight` | The copy's ledger and its workers disagree about what landed: a worker landed a chunk the ledger had not in flight, or the copy stopped without error with chunks still in flight ([LK-3](invariants.md#lk-3--pending-work-is-claimed-exactly-once-and-wait-means-finished)) | `invariant-violation` | The ledger is the only record of what the watermark covers; a disagreement means the watermark cannot be trusted either way. | `copy-chunks-in-flight` |
 | `copy-chunk-unknown` | A chunk no chunker cut — a zero `Chunk`, or one built with `NewChunk` — was fed back to the chunker as if it had been copied ([ST-6](invariants.md#st-6--preflight-before-the-first-write)) | `invariant-violation` | The caller marked work the chunker never handed out; the chunker's frontier is the only authority on what was cut. | `copy-chunk-unknown` |
+| `copy-conversion-drift` | The functions, operators, types, or collations under a name the shadow's `USING` conversion expressions spell, in `pg_catalog`, the source schema, or `public`, are no longer the ones the shadow build digested into the proof's conversion fingerprint: one was created, replaced, or dropped since the build ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)) | `environmental` | Something other than the engine changed the catalog the expressions resolve in, so a chunk copied now could run a different conversion than the build did; the refusal lands before that chunk is written. An operator who meant the change starts the run over, which builds a shadow against the new catalog; one who did not undoes it, and the resume compares the same fingerprint again. A shadow that converts columns without a fingerprint, or carries one while converting none, is refused as `copy-shadow-mismatch` before any connection opens. | `copy-conversion-drift` |
 
 Not every error the copier returns is a refusal. A chunk `INSERT` the shadow itself rejects —
 a `CHECK` the gated statement added that the source's rows violate (SQLSTATE `23514`), a value

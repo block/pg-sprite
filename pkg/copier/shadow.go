@@ -32,6 +32,11 @@ type Shadow interface {
 	// selects in the column's place; a column absent from the map is
 	// copied bare. The map is empty when the statement carried no USING.
 	Conversions() map[string]string
+	// ConversionFingerprint is the digest of the catalog entries the
+	// conversion expressions resolve among, read when the shadow was built
+	// or inspected. Every guarded write recomputes it and refuses when it
+	// differs (CO-9). It is empty exactly when Conversions is.
+	ConversionFingerprint() string
 }
 
 // checkShadow refuses a shadow proof that does not describe a copy into the
@@ -39,9 +44,10 @@ type Shadow interface {
 // table, a shadow that is the source itself by name or by relation, a proof
 // without the OIDs the per-chunk relation check compares against, or a
 // column list that cannot carry the primary key, or a conversion for a
-// column the copy does not carry or with no expression to select. The
-// source and the shadow must be two relations because the copy reads one
-// and the resume clear deletes from the other.
+// column the copy does not carry or with no expression to select, or a
+// conversion fingerprint present without conversions or missing with them.
+// The source and the shadow must be two relations because the copy reads
+// one and the resume clear deletes from the other.
 func checkShadow(target preflight.CopySwapTarget, shadow Shadow) error {
 	// INV: ST-6
 	if shadow == nil {
@@ -78,6 +84,18 @@ func checkShadow(target preflight.CopySwapTarget, shadow Shadow) error {
 		if expr == "" {
 			return refuse(CauseShadowMismatch, nil, "shadow proof for %s.%s converts column %s with an empty expression", target.Schema(), target.Table(), column)
 		}
+	}
+	// The per-chunk resolution check compares against the build's
+	// fingerprint; a copy that evaluates expressions without one has
+	// nothing to compare, and one that evaluates none has nothing to
+	// fingerprint.
+	converts := len(shadow.Conversions()) > 0
+	fingerprinted := shadow.ConversionFingerprint() != ""
+	if converts && !fingerprinted {
+		return refuse(CauseShadowMismatch, nil, "shadow proof for %s.%s converts columns but carries no conversion fingerprint", target.Schema(), target.Table())
+	}
+	if !converts && fingerprinted {
+		return refuse(CauseShadowMismatch, nil, "shadow proof for %s.%s carries a conversion fingerprint but converts no column", target.Schema(), target.Table())
 	}
 	return nil
 }

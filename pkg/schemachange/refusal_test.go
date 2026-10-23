@@ -55,6 +55,7 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 		CauseCopyShadowMismatch:   "ST-6",
 		CauseCopyFrontierBroken:   "CO-4",
 		CauseCopyChunksInFlight:   "LK-3",
+		CauseCopyConversionDrift:  "CO-9",
 		CauseCopyChunkUnknown:     "ST-6",
 	}
 	assert.Len(t, RefusalCauses(), len(want), "every registered cause has an expected invariant")
@@ -110,6 +111,7 @@ func TestEveryRefusalCauseNamesItsClass(t *testing.T) {
 		CauseCopyShadowMismatch:   refusal.ClassInvariantViolation,
 		CauseCopyFrontierBroken:   refusal.ClassInvariantViolation,
 		CauseCopyChunksInFlight:   refusal.ClassInvariantViolation,
+		CauseCopyConversionDrift:  refusal.ClassEnvironmental,
 		CauseCopyChunkUnknown:     refusal.ClassInvariantViolation,
 	}
 	assert.Len(t, RefusalCauses(), len(want), "every registered cause has an expected class")
