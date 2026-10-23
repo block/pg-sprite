@@ -537,7 +537,12 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   the refusal reason as a typed field but its `detail` is display-only prose: an orchestrator
   that wants the typed guidance or cause must obtain the plan report first (dry-run for the
   imperative front door, `diff --json` for the declarative one), then apply, and treat the
-  verdict's `detail` as presentation until the verdict carries typed guidance too.
+  verdict's `detail` as presentation until the verdict carries typed guidance too. The
+  imperative dry run can itself end in a refusal verdict instead of a report (an unsupported
+  statement kind, or routed steps the executor refuses from their shape alone, such as an
+  unnamed index build or a `DETACH PARTITION`): it exits 2 and carries no `format_version`
+  or `fingerprint`, so branch on the exit code and on `format_version` before reading a
+  report.
 - **A rename refusal is an operator decision, not a retry.** `RENAME COLUMN` and `RENAME TO`
   refuse as `not-native-safe-rewrite-required` with class `by-design` and `guidance`
   `expand-contract-column` (a column) or `coordinated-table-rename` (a table). Retrying, or

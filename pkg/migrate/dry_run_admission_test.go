@@ -23,7 +23,7 @@ func parseStatement(t *testing.T, sql string) statement.Statement {
 func TestAdmitRoutedStepsRefusesConcurrentDetach(t *testing.T) {
 	st := parseStatement(t, "ALTER TABLE billing.invoices DETACH PARTITION billing.invoices_2024")
 
-	v, refused, err := AdmitRoutedSteps(st, []string{
+	v, refused, err := AdmitRoutedSteps(st, "billing", []string{
 		"ALTER TABLE billing.invoices DETACH PARTITION billing.invoices_2024 CONCURRENTLY",
 	})
 
@@ -40,19 +40,32 @@ func TestAdmitRoutedStepsRefusesConcurrentDetach(t *testing.T) {
 func TestAdmitRoutedStepsRefusesUnnamedIndexBuild(t *testing.T) {
 	st := parseStatement(t, "CREATE INDEX ON invoices (amount)")
 
-	v, refused, err := AdmitRoutedSteps(st, []string{"CREATE INDEX CONCURRENTLY ON invoices (amount)"})
+	v, refused, err := AdmitRoutedSteps(st, "billing", []string{"CREATE INDEX CONCURRENTLY ON invoices (amount)"})
 
 	require.NoError(t, err)
 	require.True(t, refused)
 	assert.Equal(t, verdict.ReasonUnsupportedStatement, v.Reason)
-	assert.Equal(t, "public.invoices", v.Table, "an unqualified target is reported in the schema the dry run plans against")
+	assert.Equal(t, "billing.invoices", v.Table, "an unqualified target is reported in the schema it resolved to")
+	assert.Equal(t, "CREATE INDEX ON billing.invoices USING btree (amount)", v.Statement,
+		"the statement is the apply's: qualified and re-emitted by the deparser")
+}
+
+// An unqualified statement cannot be admitted, or its refusal reported,
+// without the schema its table resolved to.
+func TestAdmitRoutedStepsNeedsTheResolvedSchemaForAnUnqualifiedTarget(t *testing.T) {
+	st := parseStatement(t, "CREATE INDEX ON invoices (amount)")
+
+	_, refused, err := AdmitRoutedSteps(st, "", []string{"CREATE INDEX CONCURRENTLY ON invoices (amount)"})
+
+	require.ErrorIs(t, err, errAdmissionSchemaUnknown)
+	assert.False(t, refused)
 }
 
 // IF NOT EXISTS is a permanent design refusal, so it keeps its by-design class.
 func TestAdmitRoutedStepsKeepsTheIfNotExistsClass(t *testing.T) {
 	st := parseStatement(t, "CREATE INDEX IF NOT EXISTS invoices_amount_idx ON billing.invoices (amount)")
 
-	v, refused, err := AdmitRoutedSteps(st, []string{
+	v, refused, err := AdmitRoutedSteps(st, "billing", []string{
 		"CREATE INDEX CONCURRENTLY IF NOT EXISTS invoices_amount_idx ON billing.invoices (amount)",
 	})
 
@@ -67,7 +80,7 @@ func TestAdmitRoutedStepsKeepsTheIfNotExistsClass(t *testing.T) {
 func TestAdmitRoutedStepsAdmitsNamedIndexBuildOnUnqualifiedTable(t *testing.T) {
 	st := parseStatement(t, "CREATE INDEX invoices_amount_idx ON invoices (amount)")
 
-	_, refused, err := AdmitRoutedSteps(st, []string{
+	_, refused, err := AdmitRoutedSteps(st, "billing", []string{
 		"CREATE INDEX CONCURRENTLY invoices_amount_idx ON invoices (amount)",
 	})
 
@@ -78,7 +91,7 @@ func TestAdmitRoutedStepsAdmitsNamedIndexBuildOnUnqualifiedTable(t *testing.T) {
 func TestAdmitRoutedStepsAdmitsAnOrdinaryAlter(t *testing.T) {
 	st := parseStatement(t, "ALTER TABLE billing.invoices ADD COLUMN note text")
 
-	_, refused, err := AdmitRoutedSteps(st, []string{"ALTER TABLE billing.invoices ADD COLUMN note text"})
+	_, refused, err := AdmitRoutedSteps(st, "billing", []string{"ALTER TABLE billing.invoices ADD COLUMN note text"})
 
 	require.NoError(t, err)
 	assert.False(t, refused)
@@ -89,7 +102,7 @@ func TestAdmitRoutedStepsAdmitsAnOrdinaryAlter(t *testing.T) {
 func TestAdmitRoutedStepsReturnsNonRefusalFailuresAsErrors(t *testing.T) {
 	st := parseStatement(t, "ALTER TABLE billing.invoices ADD COLUMN note text")
 
-	_, refused, err := AdmitRoutedSteps(st, nil)
+	_, refused, err := AdmitRoutedSteps(st, "billing", nil)
 
 	require.Error(t, err)
 	assert.False(t, refused)

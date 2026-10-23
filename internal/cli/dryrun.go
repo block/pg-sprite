@@ -21,9 +21,10 @@ import (
 // plan and never executes anything. The statement-type gate runs first,
 // exactly as it does on apply, so a gated kind dry-runs to the same refusal
 // verdict (and refusal exit code) the apply would end in; so does the
-// executor's shape admission of the routed steps, once they are known. The
-// checks that need the apply's live facts — the size guard and the privilege
-// preflight — are not run. Introspecting the
+// executor's shape admission of the routed steps, once they are known, when
+// no earlier apply check refuses first. The checks that need the apply's
+// live facts — the size guard and the privilege preflight, which the apply
+// runs before admission — are not run. Introspecting the
 // target table sharpens type-change classification; a missing table means
 // zero facts and a strictly more conservative plan.
 func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
@@ -89,8 +90,8 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 			return err
 		}
 	}
-	// INV: ST-6 — a refusal the apply decides from the routed steps' shape
-	// alone is knowable now, so the dry run ends in that same refusal
+	// A refusal the apply decides from the routed steps' shape alone is
+	// knowable now, so the dry run ends in that same refusal
 	// verdict instead of an executable plan. The checks that need live
 	// facts (size guard, privileges) stay the apply's; a missing target
 	// table is reported as such, since the apply stops there first.
@@ -105,7 +106,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 			if ps.Route != planner.RouteNative {
 				continue
 			}
-			v, refused, admitErr := migrate.AdmitRoutedSteps(st, ps.ExecSQL)
+			v, refused, admitErr := migrate.AdmitRoutedSteps(st, report.Schema, ps.ExecSQL)
 			if admitErr != nil {
 				return admitErr
 			}

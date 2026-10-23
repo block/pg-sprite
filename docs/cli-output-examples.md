@@ -40,7 +40,10 @@ a verdict, not a plan report — and exit 2. So do statements whose routed
 steps the executor refuses from their shape alone before running anything
 (an unnamed or `IF NOT EXISTS` index build, `DETACH PARTITION`). The dry run
 does not evaluate the apply's size guard or privilege preflight; those need
-live facts the dry run does not gather. The JSON report schema is
+live facts the dry run does not gather, and the apply runs them first. So a
+shape refusal on `--dry-run` is the apply's verdict when no earlier apply
+check refuses first: a role without the grant dry-runs to the shape refusal
+and applies to `insufficient-privileges`, both exit 2. The JSON report schema is
 [plan-report.md](plan-report.md).
 
 - [Exit codes](#exit-codes)

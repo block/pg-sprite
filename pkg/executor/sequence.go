@@ -287,6 +287,9 @@ func runSequence(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflight
 	if err := retry.validate(); err != nil {
 		return rep, err
 	}
+	// INV: ST-6 — every step's shape and target is admitted before the first
+	// step runs, so a refusal decided from a step's shape leaves nothing
+	// committed.
 	admitted, err := admitSequence(pt.Schema(), pt.Table(), steps)
 	if err != nil {
 		return rep, err

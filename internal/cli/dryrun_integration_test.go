@@ -496,3 +496,49 @@ func TestMigrateDryRunAdmitsNamedCreateIndexOnUnqualifiedTable(t *testing.T) {
 	require.Len(t, report.Statements, 1)
 	assert.Len(t, report.Statements[0].ExecSQL, 1)
 }
+
+// An unqualified table resolves on the session's search_path. A table of the
+// same name in public is a different relation, so a refusal that named
+// public would point at the wrong table: the dry run must name the table the
+// apply resolves, and carry the apply's whole verdict, statement included.
+func TestMigrateDryRunAdmissionRefusalOnSearchPathTableMatchesApply(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	table := testutil.NewPublicTable(t, pool, "(id int PRIMARY KEY, c int)")
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %s.%s (
+			id int PRIMARY KEY,
+			c int
+		)`, schema, table))
+	require.NoError(t, err)
+
+	u, err := neturl.Parse(url)
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("options", "-csearch_path="+schema+",public")
+	u.RawQuery = q.Encode()
+
+	dryRun, applied := admissionRefusalVerdicts(t, u.String(), fmt.Sprintf("CREATE INDEX ON %s (c)", table))
+
+	require.Equal(t, schema+"."+table, applied.Table)
+	assert.Equal(t, applied, dryRun)
+}
+
+// A statement admission would refuse, aimed at a table that does not exist,
+// still dry-runs to the missing-table report: the apply stops at the missing
+// table before it reaches admission.
+func TestMigrateDryRunReportsMissingTableBeforeAdmission(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+
+	report := dryRunPlan(t, url, fmt.Sprintf("CREATE INDEX ON %s.absent (c)", schema))
+
+	require.NotNil(t, report.TableExists)
+	assert.False(t, *report.TableExists)
+}
