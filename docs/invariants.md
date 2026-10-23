@@ -1103,7 +1103,12 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
-require is minted by the last. *Planned enforcement:* wiring those checks into the route, and
+require is minted by the last; for the native route's sequences, `pkg/executor`
+`admitSequence`, which `RunSequence` calls to admit every step's shape and target before the
+first step runs. `migrate --dry-run` reports the same shape refusals through
+`migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second
+enforcement; the size guard and privilege preflight need live facts and stay the apply's.
+*Planned enforcement:* wiring those checks into the route, and
 all other execution paths in preflight. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 
