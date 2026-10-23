@@ -20,7 +20,11 @@ import (
 // submitted statement feeds the classifier directly. It prints the routed
 // plan and never executes anything. The statement-type gate runs first,
 // exactly as it does on apply, so a gated kind dry-runs to the same refusal
-// verdict (and refusal exit code) the apply would end in. Introspecting the
+// verdict (and refusal exit code) the apply would end in; so does the
+// executor's shape admission of the routed steps, once they are known, when
+// no earlier apply check refuses first. The checks that need the apply's
+// live facts — the size guard and the privilege preflight, which the apply
+// runs before admission — are not run. Introspecting the
 // target table sharpens type-change classification; a missing table means
 // zero facts and a strictly more conservative plan.
 func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
@@ -84,6 +88,31 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 		}
 		if err = plan.RefuseUnsupportedPartitionedParent(&report, causes); err != nil {
 			return err
+		}
+	}
+	// A refusal the apply decides from the routed steps' shape alone is
+	// knowable now, so the dry run ends in that same refusal
+	// verdict instead of an executable plan. The checks that need live
+	// facts (size guard, privileges) stay the apply's; a missing target
+	// table is reported as such, since the apply stops there first.
+	if !tableMissing(report) {
+		for _, ps := range report.Statements {
+			if ps.Disposition != router.DispositionExecute {
+				continue
+			}
+			// Only the native route's steps run through the sequence
+			// executor; a copy-and-swap statement has none, since the
+			// engine builds its shadow from the statement itself.
+			if ps.Route != planner.RouteNative {
+				continue
+			}
+			v, refused, admitErr := migrate.AdmitRoutedSteps(st, report.Schema, ps.ExecSQL)
+			if admitErr != nil {
+				return admitErr
+			}
+			if refused {
+				return c.emit(out, v)
+			}
 		}
 	}
 	report.Fingerprint = plan.Fingerprint(report.Statements)

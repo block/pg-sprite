@@ -559,7 +559,12 @@ at every stage; `pkg/checkpoint` `Store.Save` and `Store.Delete` require the
 same session for the checkpoint's target, run under its `Bind` context, and confirm the lock
 from the write's own transaction before the upsert or the delete (nil-session, wrong-table,
 and rival-backend tests), so a run whose lock went to another engine cannot stamp its stale
-checkpoint over the newer engine's row.
+checkpoint over the newer engine's row; `pkg/migrate` `Run` and `RunDesired` prove, before the
+preflight and before the lock session opens, that `CopySwapOptions.Connection` reaches the
+pool's database (the cluster's system identifier and `current_database()` on both sides), and
+stop with `CopySwapConnectionMismatchError` otherwise, since an advisory lock taken in another
+database does not exclude a run in this one (another-database, another-cluster, unreachable,
+and unidentifiable tests).
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
@@ -1098,7 +1103,12 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
-require is minted by the last. *Planned enforcement:* wiring those checks into the route, and
+require is minted by the last; for the native route's sequences, `pkg/executor`
+`admitSequence`, which `RunSequence` calls to admit every step's shape and target before the
+first step runs. `migrate --dry-run` reports the same shape refusals through
+`migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second
+enforcement; the size guard and privilege preflight need live facts and stay the apply's.
+*Planned enforcement:* wiring those checks into the route, and
 all other execution paths in preflight. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 

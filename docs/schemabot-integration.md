@@ -432,7 +432,23 @@ pool was dialed with (the route opens dedicated sessions — the table lock, the
 the replication stream — so the pool alone does not suffice; a statement that routes to
 copy-and-swap with the connection unset is a caller wiring error: `Run` returns
 `migrate.ErrCopySwapConnectionRequired` with no verdict, before the preflight, so match it with
-`errors.Is` and fix the wiring rather than routing it as an outcome), the free space on the table's
+`errors.Is` and fix the wiring rather than routing it as an outcome; the connection must also
+reach the pool's database, because the table lock is an advisory lock taken on a session
+opened from it, and an advisory lock excludes only runs in the database it was taken in. A
+connection that is set but reaches another database than the pool — another database of the
+cluster, or a database of the same name on another cluster — is the other wiring error,
+`*migrate.CopySwapConnectionMismatchError`, returned the same way after the route has compared
+both sides' `pg_control_system()` system identifier and `current_database()`, so the run stops
+before it takes its lock or writes its checkpoint row. Match it with `errors.As` and do not
+retry it: like `ErrCopySwapConnectionRequired` it is an error with no verdict, and no retry
+corrects the wiring. Its message names both databases and both clusters' system identifiers,
+a stable fingerprint of each server, so an adapter that posts results to a shared surface
+logs the typed fields and shows a fixed line. The comparison cannot tell a cluster from a
+physical copy of it — a standby, or a server restored from a base backup or a snapshot keeps
+the source's system identifier — and a run wired across such a pair stops later instead, as
+the environmental `shadow-lock-unconfirmed` refusal, when its first working transaction
+finds no lock to confirm. The check reads `pg_control_system()`, which PostgreSQL grants to
+`PUBLIC`; a server that withholds it stops the route with an ordinary error), the free space on the table's
 volume for the preflight's disk-headroom check, whether to keep the retained source under
 its `_old` name, and whether the table is quiesced for the run — the fenced path that needs
 no logical decoding — or live. Three further fields let the adapter size and watch the run:
@@ -576,7 +592,12 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   the refusal reason as a typed field but its `detail` is display-only prose: an orchestrator
   that wants the typed guidance or cause must obtain the plan report first (dry-run for the
   imperative front door, `diff --json` for the declarative one), then apply, and treat the
-  verdict's `detail` as presentation until the verdict carries typed guidance too.
+  verdict's `detail` as presentation until the verdict carries typed guidance too. The
+  imperative dry run can itself end in a refusal verdict instead of a report (an unsupported
+  statement kind, or routed steps the executor refuses from their shape alone, such as an
+  unnamed index build or a `DETACH PARTITION`): it exits 2 and carries no `format_version`
+  or `fingerprint`, so branch on the exit code and on `format_version` before reading a
+  report.
 - **A rename refusal is an operator decision, not a retry.** `RENAME COLUMN` and `RENAME TO`
   refuse as `not-native-safe-rewrite-required` with class `by-design` and `guidance`
   `expand-contract-column` (a column) or `coordinated-table-rename` (a table). Retrying, or
