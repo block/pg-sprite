@@ -834,7 +834,7 @@ func TestMigrateForcedRewriteRefusedByStatementBudget(t *testing.T) {
 			SELECT FROM pg_catalog.pg_event_trigger_ddl_commands()
 			WHERE object_identity OPERATOR(pg_catalog.=) '%s.t'
 		) THEN
-			PERFORM pg_catalog.pg_sleep(60);
+			PERFORM pg_catalog.pg_sleep(10);
 		END IF;`, schema))
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))

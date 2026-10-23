@@ -80,7 +80,10 @@ pg-delta's snapshot + roundtrip pairing.
 ### TM-3 — Fault injection is real, and asserts durable state
 
 Contention tests hold a real `ACCESS EXCLUSIVE` lock from a second
-connection; cancellation tests use context deadlines. After any injected
+connection; cancellation tests use context deadlines. A statement-budget
+overrun is forced with a `ddl_command_end` event trigger that sleeps inside
+the statement, never with a table large enough to be slow: a fixed row
+count is a bet on how fast the server is. After any injected
 failure the test asserts the **durable state** (no wedged schema-change record,
 no leaked shadow objects/slots/triggers) and the ability to proceed — not
 merely the returned error type. *Binds:* Phase 3 onward; full
