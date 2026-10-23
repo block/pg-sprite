@@ -83,10 +83,25 @@ type CopySwapOptions struct {
 	// Copier sizes the copy: its workers, the chunk sizes and the chunk
 	// time they are throttled toward, the budgets of each chunk
 	// transaction, and the progress tracker the copier reports to while it
-	// runs. Zero values take the copier's defaults. The copier validates
-	// it when the copy starts, after the shadow is built and the row
-	// saved, so a value it refuses stops the run in copying and the next
-	// run resumes from the row once the value is corrected.
+	// runs. Zero values take the copier's defaults. A value the copier
+	// would refuse is a wiring error refused before the preflight, like a
+	// negative CheckpointInterval.
+	//
+	// Copier.Tracker is the one source of rows copied; OnCheckpoint
+	// carries a key position, not a count. The host builds the tracker and
+	// calls its Start before Run, since Start and StartStep drop the
+	// tracker's work source and so, called while the copy runs, stop the
+	// counters. The copier is the work source from the copy's first chunk
+	// until just before the copy returns: the tracker reports no work
+	// before the copy, after it, or through the verification pass and a
+	// live run's catch-up, whose phases reach the host through
+	// OnCheckpoint alone; the verdict's detail reports the rows the
+	// verification pass covered. Rows copied counts this run's rows only,
+	// and rows total is the source's catalog estimate, zero for a table
+	// never analyzed, so a host treats a zero total as unknown and a ratio
+	// over one as possible. A tracker serves one run: two runs handed one
+	// tracker each make it their source, and the first to finish drops the
+	// source the other still reports to.
 	Copier copier.Options
 
 	// CheckpointInterval is how often a copy in progress saves its landed
@@ -100,12 +115,28 @@ type CopySwapOptions struct {
 	// after every successful save of the checkpoint row with the row as
 	// saved — the phase it entered, the watermark the copy has landed, the
 	// position a live run has applied through — so a host can record where
-	// a run that may last hours stands. The phase saves call it on the
-	// goroutine that called Run; the periodic watermark saves call it on
-	// the copy's saving goroutine, every CheckpointInterval rather than as
-	// the copy lands rows, so it must be safe to call from either. An
-	// error it returns stops the run there, as a failed verdict with the
-	// row as that save left it, and the next run resumes from the row.
+	// a run that may last hours stands. Two saves are not shown: a live
+	// run that reconciles a lost slot writes its reconciling marker and
+	// the resumed row straight to the store, and the hook is handed the
+	// row the reconcile leaves once. The row is the row as written, so its
+	// UpdatedAt is zero; a host that wants a save time uses its own clock.
+	// Its ShadowProof bytes are shared with the run, so a hook that keeps
+	// the row treats it as read-only. The slot, publication, and applied
+	// position it carries are PostgreSQL's; an adapter that forwards the
+	// row to an engine-neutral record maps them into generic metadata.
+	//
+	// The hook runs on the run's own goroutines and holds the run up while
+	// it runs: the phase saves call it on the goroutine that called Run,
+	// with the table's lock session held and, for a quiesced run, the
+	// source fenced against writes; the periodic watermark saves call it
+	// on the copy's saving goroutine, every CheckpointInterval rather than
+	// as the copy lands rows, and a slow call there delays the next save.
+	// It must be safe to call from either goroutine and should return
+	// promptly. An error it returns stops the run there, as a failed
+	// verdict with the row as that save left it, and the next run resumes
+	// from the row — except at the done save, after which there is nothing
+	// left to stop: the verdict is executed and its detail names the
+	// error.
 	OnCheckpoint func(ctx context.Context, cp checkpoint.Checkpoint) error
 }
 
@@ -178,18 +209,18 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 // copySwapOutcome folds what the Runner returned into Run's contract. A
 // run whose row reached done is executed, whatever error rides alongside:
 // the Runner returns its Result with an error only when the change is
-// complete and recorded and the release of its lock session failed, and
-// a session left behind is a cleanup fault, not a failed change, so the
-// verdict says what the engine tables say and names the session in its
-// detail for the operator to find. Any other error is folded by
-// copySwapRunVerdict.
+// complete and recorded and what came after failed — the host's
+// OnCheckpoint handed the done row, or the release of the lock session —
+// and neither is a failed change, so the verdict says what the engine
+// tables say and names the error in its detail for the operator to find.
+// Any other error is folded by copySwapRunVerdict.
 func copySwapOutcome(st statement.Statement, quiesced bool, result schemachange.Result, err error) (verdict.Verdict, error) {
 	if err != nil && result.Checkpoint.Phase != checkpoint.PhaseDone {
 		return copySwapRunVerdict(st, quiesced, err)
 	}
 	detail := copySwapDetail(result, quiesced)
 	if err != nil {
-		detail += "; the run's lock session was not released: " + err.Error()
+		detail += "; the change is complete and its done row saved, but the run then returned: " + err.Error()
 	}
 	return verdict.Verdict{
 		Outcome:   verdict.OutcomeExecutedViaCopyAndSwap,

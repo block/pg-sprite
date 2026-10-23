@@ -184,11 +184,12 @@ func TestCopySwapRunVerdict(t *testing.T) {
 }
 
 // The Runner returns its Result together with an error in exactly one
-// case: the change is complete and its done row saved, and the release of
-// the lock session failed afterwards. That is an executed change with a
-// cleanup fault, not a failed run, so the fold reports the outcome and
-// names the fault in the detail; an error with a row short of done is the
-// failure it looks like.
+// case: the change is complete and its done row saved, and what came
+// after failed — the host's hook handed the done row, or the release of
+// the lock session. That is an executed change with a fault after it, not
+// a failed run, so the fold reports the outcome and names the fault in
+// the detail; an error with a row short of done is the failure it looks
+// like.
 func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 	st := parseCopySwapStatement(t)
 	releaseErr := errors.New("release table lock: connection closed")
@@ -204,7 +205,7 @@ func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 		assert.Empty(t, v.Code)
 		assert.Contains(t, v.Detail, "verified 7 rows in 1 chunks")
-		assert.Contains(t, v.Detail, "lock session was not released: release table lock: connection closed")
+		assert.Contains(t, v.Detail, "the run then returned: release table lock: connection closed")
 	})
 
 	t.Run("a done row without an error carries no release wording", func(t *testing.T) {
@@ -212,7 +213,7 @@ func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 		v, err := copySwapOutcome(st, false, done, nil)
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
-		assert.NotContains(t, v.Detail, "lock session")
+		assert.NotContains(t, v.Detail, "the run then returned")
 	})
 
 	t.Run("an error with the zero result is a failure", func(t *testing.T) {
