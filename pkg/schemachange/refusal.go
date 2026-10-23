@@ -197,6 +197,13 @@ const (
 	// itself, lacks the relation OIDs, or its copy columns do not carry the
 	// primary key. It re-mints the copier's copy-shadow-mismatch.
 	CauseCopyShadowMismatch RefusalCause = "copy-shadow-mismatch"
+	// CauseCopyConversionDrift means the catalog entries the conversion
+	// expressions resolve among changed under the copy (CO-9): a function,
+	// operator, type, or collation under a name an expression spells was
+	// created, replaced, or dropped in a schema on the copy's search_path
+	// after the shadow build. It re-mints the copier's
+	// copy-conversion-drift.
+	CauseCopyConversionDrift RefusalCause = "copy-conversion-drift"
 	// CauseCopyFrontierBroken means the copier's own accounting of the key
 	// space broke (CO-4): a chunk was cut or claimed out of order, or the
 	// copy returned without error at a watermark short of the key space.
@@ -252,6 +259,7 @@ func RefusalCauses() []RefusalCause {
 		CauseResumeSlotForeign,
 		CauseResumeSlotHeld,
 		CauseCopyShadowMismatch,
+		CauseCopyConversionDrift,
 		CauseCopyFrontierBroken,
 		CauseCopyChunksInFlight,
 		CauseCopyChunkUnknown,
@@ -269,6 +277,8 @@ func (c RefusalCause) Invariant() string {
 		return "ST-6"
 	case CauseCopyFrontierBroken:
 		return "CO-4"
+	case CauseCopyConversionDrift:
+		return "CO-9"
 	case CauseCopyChunksInFlight:
 		return "LK-3"
 	case CauseStatementTarget, CauseStatementConversion:
@@ -315,7 +325,7 @@ func (c RefusalCause) Class() refusal.Class {
 		CauseRelationReplaced, CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid,
 		CauseNameTaken, CauseOutcomeAmbiguous, CauseCutoverUnfenced, CauseShadowUnrecorded,
 		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld,
-		CauseRestartSwapCommitted:
+		CauseRestartSwapCommitted, CauseCopyConversionDrift:
 		return refusal.ClassEnvironmental
 	case CauseStatementConversion:
 		return refusal.ClassCapabilityBoundary

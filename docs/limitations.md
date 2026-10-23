@@ -51,6 +51,13 @@ A wrapper function is your assertion, not the server's: declaring it `IMMUTABLE`
 admits it, and the server never checks the body. It must exist, in the source schema or
 `public`, before the shadow build, since the expression resolves on that path in the build,
 the copy, the recopy, and every flush ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)).
+The build records a fingerprint of what the expression's names resolved to — the functions,
+operators, types, and collations by name across that path, bodies included — and the copy,
+the verifier, and the catch-up recompute it inside each of their transactions; a function or
+operator created, replaced, or dropped on that path after the build refuses the run as
+`copy-conversion-drift` before the changed resolution lands a row, and a run resumed over
+such a change is refused as `resume-row-mismatch`. Make the change before the build, or
+abandon the run with `--restart` and build again over the new catalog.
 
 Two casts the server does call immutable still have more than one text rendering: a
 `float4` or `float8` to `text` follows `extra_float_digits`, and a `bytea` to `text`

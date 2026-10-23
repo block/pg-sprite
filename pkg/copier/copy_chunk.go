@@ -76,7 +76,9 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 // transaction. The shadow is locked in shadowMode — the mode the write that
 // follows holds, or the fence's — before the table lock is confirmed, so a
 // transaction that confirmed it already holds the lock a resumed run's fence
-// waits on (CO-4).
+// waits on (CO-4). Last, for a copy that evaluates conversion expressions,
+// it confirms that the catalog they resolve in is still the one the build
+// saw (CO-9).
 func (c *Copier) guard(ctx context.Context, tx pgx.Tx, shadowMode lockMode) error {
 	if err := setCopySession(ctx, tx, c.target, c.searchPath, c.opts); err != nil {
 		return err
@@ -87,7 +89,34 @@ func (c *Copier) guard(ctx context.Context, tx pgx.Tx, shadowMode lockMode) erro
 	if err := c.confirmLock(ctx, tx); err != nil {
 		return err
 	}
-	return c.confirmRelations(ctx, tx)
+	if err := c.confirmRelations(ctx, tx); err != nil {
+		return err
+	}
+	return c.confirmResolution(ctx, tx)
+}
+
+// confirmResolution refuses to write when the functions, operators, types,
+// or collations the conversion expressions resolve among are no longer the
+// ones the shadow build digested: the copy statement resolves the
+// expressions' unqualified names afresh in every chunk, so an object
+// created, replaced, or dropped under one of those names since the build
+// could make this chunk evaluate them differently from the gated statement
+// without any statement failing. The fingerprint is read in the chunk's
+// own transaction, so it digests the catalog the chunk's statement would
+// resolve in. A copy without conversions has nothing to confirm.
+func (c *Copier) confirmResolution(ctx context.Context, tx pgx.Tx) error {
+	if len(c.shadow.Conversions()) == 0 {
+		return nil
+	}
+	found, err := chunksql.ResolutionFingerprint(ctx, tx, c.shadow.Schema(), c.shadow.Conversions())
+	if err != nil {
+		return err
+	}
+	// INV: CO-9
+	if found != c.shadow.ConversionFingerprint() {
+		return refuse(CauseConversionDrift, nil, "the objects the conversion expressions for %s.%s resolve among have changed since the shadow %s was built: fingerprint %s, proof carries %s", c.shadow.Schema(), c.shadow.SourceTable(), c.shadow.ShadowTable(), found, c.shadow.ConversionFingerprint())
+	}
+	return nil
 }
 
 // setCopySession bounds the transaction, pins the output settings a

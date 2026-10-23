@@ -471,12 +471,29 @@ catalog stays first): the expression ran under that path when the
 statement built the shadow, and an unqualified name in it must resolve in the copy, the
 recopy, the digest's source side, and the flush's converted write as it did then, while the
 digest's and the flush's `pg_catalog.` qualification keeps their own functions pinned whatever
-follows the catalog. That path is resolved afresh in every chunk and every flush, so the
-widened copy trusts the source schema and `public` not to gain, during the run, a function or
-operator that fits an unqualified name in the expression better than the one the build
-resolved; nothing records what the build resolved, and a copy a concurrent `CREATE FUNCTION`
-redirected reads as divergence at verification, not before. The copier's cuts and
-measurements, and every conversion-free copy, pass, and flush, keep the catalog alone. In
+follows the catalog. That path is resolved afresh in every chunk and every flush, so a
+function, operator, type, or collation created, replaced, or dropped in the source schema or
+`public` during the run under a name an expression spells could change what a later chunk
+runs without any chunk failing. The shadow build therefore records, in the same transaction
+the statement ran in, a *conversion fingerprint* (`pkg/internal/chunksql`
+`ResolutionFingerprint`, carried as `BuiltShadow.ConversionFingerprint` and
+`Proof.ConversionFingerprint`): a digest of every catalog entry under a name the expressions
+spell, in every schema the path would look in — a function's signature, kind, volatility,
+language, and body; an operator's operand and result types and its function; a type's
+category, input and output functions, base type, element, and collation; a collation's
+provider, determinism, locale, and version — rendered from the catalog alone, never through a
+deparser. Every guarded transaction of the copier, the verifier, and the applier recomputes it
+before it writes and refuses when it differs (`copy-conversion-drift` from the copier,
+`ErrInvariantViolation` from the other two); a resume re-derives it through `InspectShadow`
+and compares it as part of the proof. The digest is wider than resolution — an overload added
+under a spelled name that the server would never pick, or a replaced body the server would
+still pick, refuses too, since either is a catalog the build did not see — and narrower than
+everything a resolution touches: an implicit cast from `pg_cast`, an enum type's labels, and
+a domain's constraints are under no name the expression spells and are not digested. A proof
+that converts columns always carries a fingerprint and a proof that converts none never does;
+a `Shadow` that breaks either pairing is refused before a connection opens (ST-6). The
+copier's cuts and measurements, and every conversion-free copy, pass, and flush, keep the
+catalog alone. In
 `pkg/schemachange`, the identity and owned-sequence handoff reads (`readIdentityColumns`,
 `readOwnedSequences`, `verifyIdentityDefaults`, `readIdentityTypes`), the identity `setval`, and
 the `format` call that renders the shadow's identity default qualify every function, relation,

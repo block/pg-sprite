@@ -99,6 +99,7 @@ type BuiltShadow struct {
 	shadowFidelity         FidelitySnapshot
 	copyColumns            []string
 	conversions            map[string]string
+	conversionFingerprint  string
 }
 
 // Schema is the schema holding both the source and the shadow.
@@ -157,6 +158,16 @@ func (b BuiltShadow) CopyColumns() []string { return append([]string(nil), b.cop
 // clause, so the proof carries it from the statement; a column the change
 // retyped and then dropped has no entry, since the copy does not carry it.
 func (b BuiltShadow) Conversions() map[string]string { return maps.Clone(b.conversions) }
+
+// ConversionFingerprint is the digest of the catalog entries the
+// conversion expressions resolve among, read in the build's transaction
+// after the gated statement ran: every function, operator, type, and
+// collation under a name an expression spells, in every schema on the
+// path the copy resolves them in. Every guarded write recomputes it and
+// refuses when it differs, so an object created, replaced, or dropped
+// under one of those names after the build cannot change what a later
+// chunk lands (CO-9). It is empty exactly when Conversions is.
+func (b BuiltShadow) ConversionFingerprint() string { return b.conversionFingerprint }
 
 // BuildShadow creates the copy-and-swap shadow for the proven target and
 // applies the gated ALTER TABLE to it, all in one bounded transaction under
@@ -296,10 +307,18 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err != nil {
 		return BuiltShadow{}, err
 	}
+	// The fingerprint is read after the statement ran, in the transaction
+	// that ran it: the catalog it digests is the one the statement's own
+	// resolution of the expressions saw.
+	carried := carryConversions(sourceModel, sourcePositions, shadowPositions, conversions)
+	resolution, err := chunksql.ResolutionFingerprint(ctx, tx, target.Schema(), carried.conversions)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return BuiltShadow{}, fmt.Errorf("commit shadow build: %w", err)
 	}
-	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, sourcePositions, shadowPositions, identities, fidelity, shadowFidelity, conversions)
+	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity, shadowFidelity, carried, resolution)
 }
 
 // newBuiltShadow assembles the proof from what a build or an inspection read
@@ -308,7 +327,7 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 // the same catalog state always yields the same proof, and the conversions
 // are kept for the copy columns only, so the same statement over the same
 // catalog state does too.
-func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, shadowOID uint32, sourceModel, targetModel schemadiff.Model, sourcePositions, shadowPositions []columnPosition, identities []IdentityColumn, fidelity, shadowFidelity FidelitySnapshot, conversions map[string]string) (BuiltShadow, error) {
+func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, shadowOID uint32, sourceModel, targetModel schemadiff.Model, identities []IdentityColumn, fidelity, shadowFidelity FidelitySnapshot, carried carriedConversions, resolution string) (BuiltShadow, error) {
 	sourceFingerprint, err := fingerprint(sourceModel)
 	if err != nil {
 		return BuiltShadow{}, err
@@ -317,22 +336,39 @@ func newBuiltShadow(target preflight.CopySwapTarget, shadow string, sourceOID, s
 	if err != nil {
 		return BuiltShadow{}, err
 	}
-	columns := copyColumns(sourceModel, sameColumns(sourcePositions, shadowPositions))
 	return BuiltShadow{
-		target:            target,
-		schema:            target.Schema(),
-		source:            target.Table(),
-		shadow:            shadow,
-		sourceOID:         sourceOID,
-		shadowOID:         shadowOID,
-		sourceFingerprint: sourceFingerprint,
-		targetFingerprint: targetFingerprint,
-		identities:        handoffIdentities(identities, targetModel),
-		fidelity:          fidelity,
-		shadowFidelity:    shadowFidelity,
-		copyColumns:       columns,
-		conversions:       copyConversions(conversions, columns),
+		target:                target,
+		schema:                target.Schema(),
+		source:                target.Table(),
+		shadow:                shadow,
+		sourceOID:             sourceOID,
+		shadowOID:             shadowOID,
+		sourceFingerprint:     sourceFingerprint,
+		targetFingerprint:     targetFingerprint,
+		identities:            handoffIdentities(identities, targetModel),
+		fidelity:              fidelity,
+		shadowFidelity:        shadowFidelity,
+		copyColumns:           carried.columns,
+		conversions:           carried.conversions,
+		conversionFingerprint: resolution,
 	}, nil
+}
+
+// carriedConversions is what the copy moves: the columns the shadow kept
+// and, of those, the ones it retypes through a USING expression.
+type carriedConversions struct {
+	columns     []string
+	conversions map[string]string
+}
+
+// carryConversions derives, from the two tables' columns and the gated
+// statement's conversions, the copy columns and the conversions the copy
+// carries. A build and an inspection of the same shadow derive the same
+// value, which is what lets the fingerprint over the conversions be read
+// inside either transaction and compared across them.
+func carryConversions(source schemadiff.Model, sourcePositions, shadowPositions []columnPosition, conversions map[string]string) carriedConversions {
+	columns := copyColumns(source, sameColumns(sourcePositions, shadowPositions))
+	return carriedConversions{columns: columns, conversions: copyConversions(conversions, columns)}
 }
 
 // columnConversions reads the USING expressions out of the gated statement

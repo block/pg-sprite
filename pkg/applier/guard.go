@@ -43,7 +43,9 @@ func (f *Flusher) begin(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error)
 // are still the relations the proofs describe.
 // Holding even ACCESS SHARE keeps a DROP or rename from completing until
 // the transaction ends, so the identity check stays true for every
-// statement after it.
+// statement after it. Last, for a copy that evaluates conversion
+// expressions, it confirms that the catalog they resolve in is still the
+// one the build saw (CO-9).
 func (f *Flusher) guard(ctx context.Context, tx pgx.Tx) error {
 	if err := setFlushSession(ctx, tx, f.target.OwnerRole(), f.searchPath, f.opts); err != nil {
 		return err
@@ -54,7 +56,32 @@ func (f *Flusher) guard(ctx context.Context, tx pgx.Tx) error {
 	if err := f.confirmLock(ctx, tx); err != nil {
 		return err
 	}
-	return f.confirmRelations(ctx, tx)
+	if err := f.confirmRelations(ctx, tx); err != nil {
+		return err
+	}
+	return f.confirmResolution(ctx, tx)
+}
+
+// confirmResolution refuses to flush when the functions, operators, types,
+// or collations the conversion expressions resolve among are no longer the
+// ones the shadow build digested: the flush evaluates the expressions over
+// each streamed row afresh, so an object created, replaced, or dropped
+// under one of their names since the build would land a row the gated
+// statement would have converted differently. A copy without conversions
+// has nothing to confirm.
+func (f *Flusher) confirmResolution(ctx context.Context, tx pgx.Tx) error {
+	if len(f.shadow.Conversions()) == 0 {
+		return nil
+	}
+	found, err := chunksql.ResolutionFingerprint(ctx, tx, f.shadow.Schema(), f.shadow.Conversions())
+	if err != nil {
+		return err
+	}
+	// INV: CO-9
+	if found != f.shadow.ConversionFingerprint() {
+		return fmt.Errorf("%w (CO-9): the objects the conversion expressions for %s.%s resolve among have changed since the shadow %s was built: fingerprint %s, proof carries %s", ErrInvariantViolation, f.shadow.Schema(), f.shadow.SourceTable(), f.shadow.ShadowTable(), found, f.shadow.ConversionFingerprint())
+	}
+	return nil
 }
 
 // setFlushSession bounds the transaction, pins the output settings under
@@ -230,6 +257,18 @@ func checkShadow(target preflight.CopySwapTarget, shadow copier.Shadow) error {
 		if expr == "" {
 			return fmt.Errorf("%w (ST-6): shadow proof for %s.%s converts column %s with an empty expression", ErrInvariantViolation, target.Schema(), target.Table(), column)
 		}
+	}
+	// Every flush evaluates the expressions and compares the catalog they
+	// resolve in against the build's fingerprint; a proof with expressions
+	// and no fingerprint has nothing to compare, and one with a fingerprint
+	// and no expressions nothing to fingerprint.
+	converts := len(shadow.Conversions()) > 0
+	fingerprinted := shadow.ConversionFingerprint() != ""
+	if converts && !fingerprinted {
+		return fmt.Errorf("%w (ST-6): shadow proof for %s.%s converts columns but carries no conversion fingerprint", ErrInvariantViolation, target.Schema(), target.Table())
+	}
+	if !converts && fingerprinted {
+		return fmt.Errorf("%w (ST-6): shadow proof for %s.%s carries a conversion fingerprint but converts no column", ErrInvariantViolation, target.Schema(), target.Table())
 	}
 	return nil
 }
