@@ -176,7 +176,11 @@ func gather(ctx context.Context, stream *decode.Stream, marker decode.LSN, buffe
 // change it gathered.
 func flushAll(ctx context.Context, tx pgx.Tx, flusher *applier.Flusher, buffer *applier.Buffer, watermark copier.Watermark) error {
 	landed := copier.Position{Watermark: watermark, Cut: watermark}
-	result, err := flushBatch(ctx, tx, flusher, buffer.Drain(landed))
+	// Every writer of the source finished, and its commit became visible,
+	// before the swap's lock was granted, so no gathered change can be
+	// invisible here.
+	visible := applier.AllVisible()
+	result, err := flushBatch(ctx, tx, flusher, buffer.Drain(landed, visible))
 	if err != nil {
 		return err
 	}
@@ -185,7 +189,7 @@ func flushAll(ctx context.Context, tx pgx.Tx, flusher *applier.Flusher, buffer *
 			return err
 		}
 		buffer.Release(decode.LSN(math.MaxUint64))
-		again, err := flushBatch(ctx, tx, flusher, buffer.Drain(landed))
+		again, err := flushBatch(ctx, tx, flusher, buffer.Drain(landed, visible))
 		if err != nil {
 			return err
 		}
