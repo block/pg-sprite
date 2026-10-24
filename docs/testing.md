@@ -444,10 +444,12 @@ pg-schema-diff, pg-delta, migra, Atlas, SchemaHero, and Bytebase found no
 peer testing physical replicas, poolers as live intermediaries, failover, or
 cloud-managed PostgreSQL. The pooler is now covered here: a pooled
 connection string is what a hosted platform hands an operator by default, so
-`StartPostgresBehindPgBouncer` runs a real PgBouncer in both pool modes as
-part of the default suite, and returns its URL only once a login through it
-has run a statement on the server behind it
-([sessionstate_integration_test.go](../pkg/dbconn/sessionstate_integration_test.go)).
+`StartPostgresBehindPgBouncer` runs a real PgBouncer in each pool mode —
+session (accepted), transaction and statement (both refused with
+`ErrNoSessionAffinity`) — as part of the default suite, and returns its URL
+only once a login through it has run a statement on the server behind it
+([sessionstate_integration_test.go](../pkg/dbconn/sessionstate_integration_test.go),
+[table_lock_pooler_integration_test.go](../pkg/dbconn/table_lock_pooler_integration_test.go)).
 Replicas, failover, and cloud-managed PostgreSQL remain environment-gate
 territory (see above). The patterns worth carrying, tied to the phase whose
 implementation makes them meaningful:

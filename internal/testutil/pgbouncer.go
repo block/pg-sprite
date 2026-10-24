@@ -27,6 +27,10 @@ const (
 	// SessionPooling gives a client connection its own backend for the
 	// connection's lifetime, which is all a session-scoped lock needs.
 	SessionPooling PoolMode = "session"
+	// StatementPooling returns the backend to the pooler's own pool after
+	// every statement and refuses a transaction that spans more than one,
+	// so a client connection keeps neither a session nor a transaction.
+	StatementPooling PoolMode = "statement"
 )
 
 // pgBouncerImage is pinned: the pooling behaviour under test is the whole

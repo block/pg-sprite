@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/stretchr/testify/assert"
@@ -48,6 +49,29 @@ func TestNewPoolRefusesAConnectionThatDiscardsSessionTimeouts(t *testing.T) {
 	require.ErrorIs(t, err, dbconn.ErrNoSessionAffinity)
 	assert.Contains(t, err.Error(), "session-mode endpoint",
 		"the refusal must name what to change")
+}
+
+// A statement-mode pooler returns the backend to its pool after every
+// statement and refuses any transaction that spans more than one, so the
+// engine has neither a session for its bounds and locks nor a transaction for
+// a chunk copy, a guarded write, or the cutover. The affinity proof's own
+// transaction is the first thing to hit the refusal, and the pool reports it
+// as the typed no-session-affinity refusal, naming what to change, so a
+// caller routes it like the transaction-mode case above.
+func TestNewPoolRefusesStatementPooling(t *testing.T) {
+	pooledURL := testutil.StartPostgresBehindPgBouncer(t, testutil.StatementPooling)
+
+	_, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: pooledURL})
+
+	require.ErrorIs(t, err, dbconn.ErrNoSessionAffinity)
+	assert.Contains(t, err.Error(), "session-mode endpoint",
+		"the refusal must name what to change")
+	// The pooler's own refusal stays in the chain, so the detail names it.
+	// PgBouncer reports it as protocol_violation and closes the connection.
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, "08P01", pgErr.Code)
+	assert.Equal(t, "FATAL", pgErr.Severity)
 }
 
 // The refusal is keyed on whether the session keeps the settings, not on
