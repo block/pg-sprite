@@ -37,7 +37,10 @@ import (
 // the cascading-drop planner reason. Version 12 routes an app-breaking
 // rename to the rewrite-required disposition and added the
 // expand-contract-column and coordinated-table-rename guidance codes.
-const FormatVersion = 12
+// Version 13 classifies the rename of an index that backs a constraint as
+// app-breaking-rename and added the coordinated-constraint-rename guidance
+// code.
+const FormatVersion = 13
 
 // Source identifies which front door derived the plan.
 type Source string

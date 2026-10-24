@@ -1160,7 +1160,6 @@ func TestMigrateGateRefusesWithoutDatabase(t *testing.T) {
 		{"drop index concurrently", "DROP INDEX CONCURRENTLY i", verdict.ReasonIndexStatement, ""},
 		{"reindex concurrently", "REINDEX TABLE CONCURRENTLY t", verdict.ReasonIndexStatement, ""},
 		{"alter index", "ALTER INDEX i SET (fillfactor = 90)", verdict.ReasonUnsupportedStatement, ""},
-		{"alter index rename", "ALTER INDEX i RENAME TO j", verdict.ReasonUnsupportedStatement, ""},
 		{"create table", "CREATE TABLE t (id int)", verdict.ReasonUnsupportedStatement, "pg-sprite diff --desired schema.sql"},
 	}
 	for _, tt := range tests {

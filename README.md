@@ -100,7 +100,9 @@ refusal — never a silently wrong or incomplete result:
   statement alone, so `migrate` refuses them as `rewrite-required` with the
   expand-and-contract (column) or coordinated-deploy (table) path as typed
   guidance; `--force SCHEMA.TABLE` runs the submitted rename for the operator
-  who has coordinated the deploy.
+  who has coordinated the deploy. `ALTER INDEX ... RENAME TO` runs for a plain
+  index, but is refused, with no `--force` override, for an index that backs a
+  primary-key, unique, or exclusion constraint, since it renames the constraint.
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.

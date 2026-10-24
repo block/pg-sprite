@@ -71,7 +71,6 @@ routed to provisioning and never to the data change runner.
 | `unsupported-statement` | Grants, roles, row-level-security policies, publications, subscriptions | `no-online-safety-problem` | `provisioning` |
 | `unsupported-statement` | `DROP TABLE`, views, functions, triggers, extensions, standalone sequences, and other catalog work the matrix marks ⚪ | `no-online-safety-problem` | `direct-operator` |
 | `unsupported-statement` | Imperative `CREATE TABLE`; the detail already points to `diff` | `no-online-safety-problem` | `declarative-front-door` |
-| `unsupported-statement` | `ALTER INDEX ... RENAME TO` (`statement.KindRenameIndex`); the front door does not yet resolve the index's owning table or whether it backs a constraint | `capability-boundary` | — |
 | `unsupported-statement` | An admitted `ALTER TABLE` operation for which the planner has no route (`routeRefusalVerdict`) | `capability-boundary` | — |
 | `unsupported-statement` | Imperative admission sentinel `ErrUnsupportedSequenceStep` or `ErrUnnamedIndex`; create admission sentinel `ErrUnsupportedCreateStep` | `capability-boundary` | — |
 | `unsupported-statement` | Imperative or create admission sentinel `ErrIfNotExistsUnsupported`; create admission sentinel `ErrDuplicateCreateName` (the sentinel forms of the `if-not-exists` and `duplicate-name` causes below) | `by-design` | — |
@@ -340,7 +339,7 @@ For example, an `UPDATE` backfill changes only by additive fields:
   "outcome": "refused",
   "reason": "unsupported-statement",
   "statement": "UPDATE accounts SET normalized_name = lower(name)",
-  "detail": "only ALTER TABLE and CREATE INDEX statements are supported by the imperative front door"
+  "detail": "only ALTER TABLE, CREATE INDEX, and ALTER INDEX ... RENAME TO statements are supported by the imperative front door"
 }
 ```
 
@@ -351,7 +350,7 @@ For example, an `UPDATE` backfill changes only by additive fields:
   "class": "no-online-safety-problem",
   "owner": "data-change-runner",
   "statement": "UPDATE accounts SET normalized_name = lower(name)",
-  "detail": "only ALTER TABLE and CREATE INDEX statements are supported by the imperative front door"
+  "detail": "only ALTER TABLE, CREATE INDEX, and ALTER INDEX ... RENAME TO statements are supported by the imperative front door"
 }
 ```
 

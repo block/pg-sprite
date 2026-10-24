@@ -36,6 +36,12 @@ type Facts struct {
 	// qualification.
 	Schema string
 
+	// Table is the table the facts describe: the statement's target, or,
+	// for an ALTER INDEX ... RENAME TO, which names no table, the table
+	// that owns the renamed index; empty for a statement without a single
+	// table target.
+	Table string
+
 	// TableExists mirrors the introspection outcome for a plan report:
 	// true when the table was found, false when it was looked up and
 	// missing, nil when the statement has no single table target to
@@ -53,6 +59,9 @@ type Facts struct {
 // so the safer sequence names the constraint as the server would.
 func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	st statement.Statement) (Facts, error) {
+	if st.Kind() == statement.KindRenameIndex {
+		return renamedIndexFacts(ctx, pool, st)
+	}
 	if st.Table() == "" {
 		return Facts{Schema: st.Schema()}, nil
 	}
@@ -64,7 +73,7 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	switch {
 	case errors.Is(err, schemadiff.ErrTableNotFound):
 		exists := false
-		return Facts{Schema: schema, TableExists: &exists}, nil
+		return Facts{Schema: schema, Table: st.Table(), TableExists: &exists}, nil
 	case err != nil:
 		return Facts{}, err
 	}
@@ -105,6 +114,7 @@ func LiveFacts(ctx context.Context, pool *pgxpool.Pool,
 	exists := true
 	return Facts{
 		Schema:      schema,
+		Table:       st.Table(),
 		Classifier:  classifier,
 		Target:      targetFacts,
 		TableExists: &exists,

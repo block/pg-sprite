@@ -61,7 +61,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema = facts.Schema
-	report.Table = st.Table()
+	report.Table = facts.Table
 	report.TableExists = facts.TableExists
 	if report.ServerVersion, err = dbconn.ServerVersion(ctx, pool); err != nil {
 		return err
