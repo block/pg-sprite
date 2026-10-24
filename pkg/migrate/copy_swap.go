@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
@@ -277,10 +276,12 @@ func classifyCopySwapPreflight(err error) (verdict.Refusal, string, error) {
 // copySwapRunVerdict folds an error out of the Runner into Run's contract.
 // A shadow refusal is a refused verdict carrying the shadow's own cause: the
 // run never started, or stopped at a fact about the table that a retry
-// cannot change. Every other error is a failure with the error alongside;
-// the checkpoint row stays at its last save, and the detail says what a
-// rerun does with it, which depends on the error and on which hold the
-// run keeps on the source while it is stopped.
+// cannot change. Every other error is a failure with the error alongside,
+// and the detail says what a rerun does: for a run the Runner abandoned on
+// a data fault, nothing remains and the rerun starts from the beginning;
+// for every other stop the checkpoint row stays at its last save, and what
+// the rerun does with it depends on the error and on which hold the run
+// keeps on the source while it is stopped.
 func copySwapRunVerdict(st statement.Statement, quiesced bool, err error) (verdict.Verdict, error) {
 	if cause := schemachange.RefusalCauseOf(err); cause != "" {
 		r, ok := shadowRefusal(cause)
@@ -300,68 +301,53 @@ func copySwapRunVerdict(st statement.Statement, quiesced bool, err error) (verdi
 }
 
 // copySwapStoppedRemedy says what the operator does with a stopped run.
-// Two kinds of stop a rerun cannot clear: a divergence, where the row
-// stands in verifying and the next run verifies the same copy against the
-// same source and diverges again; and a data fault from the server — a
-// value the new type will not hold, a constraint the copied rows break —
-// where the next run copies the same rows and meets the same fault. Both
-// have to be started over, and the detail says how: the restart
-// acknowledgement (CopySwapOptions.Restart, `--restart SCHEMA.TABLE` on
-// the CLI) discards what the stopped run left and runs the change from
-// the start. Every other stop is resumed by running the statement again.
-// Either way the detail names the hold the stopped run keeps on the
-// source, since that is what the operator is paying for in the meantime:
-// the write fence of a quiesced run, or the replication slot of a live
-// run, which pins WAL on the server until it is dropped.
+// A data fault from the server — a value the new type will not hold, a
+// constraint the rows break — is one the Runner has already acted on: the
+// next run would meet the same rows, so the Runner abandoned this one
+// (*schemachange.AbandonedError), and nothing remains to resume or to
+// start over; the detail says what was discarded and that the corrected
+// statement runs from the beginning. Two kinds of stop a rerun cannot
+// clear remain for the operator: a divergence, where the row stands in
+// verifying and the next run verifies the same copy against the same
+// source and diverges again; and a data fault whose abandon did not finish,
+// where the row still stands as far as the discard got. Both have to be
+// started over, and the detail says how: the restart acknowledgement
+// (CopySwapOptions.Restart, `--restart SCHEMA.TABLE` on the CLI) discards
+// what the stopped run left and runs the change from the start. Every
+// other stop is resumed by running the statement again. In each case the
+// detail names the hold the run keeps or kept on the source, since that is
+// what the operator is paying for in the meantime: the write fence of a
+// quiesced run, or the replication slot of a live run, which pins WAL on
+// the server until it is dropped.
 func copySwapStoppedRemedy(quiesced bool, err error) string {
 	hold := "its replication slot stays and pins WAL on the server"
 	release := "drops the replication slot"
+	released := "its replication slot is dropped"
 	if quiesced {
 		hold = "the source stays fenced against writes"
 		release = "takes the write fence off the source"
+		released = "the write fence is off the source"
+	}
+	var abandoned *schemachange.AbandonedError
+	if errors.As(err, &abandoned) {
+		return "the server rejected the rows as the statement would shape them, so the run was abandoned: the shadow is dropped, " + released + ", and the checkpoint row is deleted; correct the data or the statement, then run it again, which starts from the beginning"
 	}
 	startOver := "correct the data or the statement, then start the run over with the restart acknowledgement (--restart SCHEMA.TABLE), which drops the shadow, " + release + ", deletes the checkpoint row, and runs the change from the start"
 	var divergence *checksum.DivergenceError
 	if errors.As(err, &divergence) {
 		return "the shadow did not match the source, so running the same statement again would verify the same copy and stop here again; " + startOver
 	}
-	if isDataFault(err) {
-		return "the server rejected the rows as the statement would shape them, so running the same statement again would copy the same rows and stop here again; " + startOver
+	if schemachange.IsDataFault(err) {
+		return "the server rejected the rows as the statement would shape them and the run could not be abandoned, so running the same statement again would copy the same rows and stop here again; " + startOver
 	}
 	return "any checkpoint row it saved remains and " + hold + " until the same statement is run again, which resumes from the row"
 }
 
-// SQLSTATE classes of the faults the data itself raises when it is copied
-// into the shadow's shape: a value the new type will not hold (22, data
-// exception: a string too long, a number out of range, a cast that fails)
-// and a constraint the copied rows break (23, integrity constraint
-// violation: NOT NULL, a check, a unique key). The class is the first two
-// characters of the five-character code.
-const (
-	sqlstateClassDataException       = "22"
-	sqlstateClassIntegrityConstraint = "23"
-)
-
-// isDataFault reports whether err is the server rejecting the data under
-// the statement's new shape — a fault a rerun meets again on the same rows,
-// as opposed to a lost connection, a cancelled context, or a lock the run
-// could take next time.
-func isDataFault(err error) bool {
-	var pgErr *pgconn.PgError
-	if !errors.As(err, &pgErr) || len(pgErr.Code) < 2 {
-		return false
-	}
-	switch pgErr.Code[:2] {
-	case sqlstateClassDataException, sqlstateClassIntegrityConstraint:
-		return true
-	default:
-		return false
-	}
-}
-
 // copySwapFailureCode names the executor outcome code for an error out of
-// the Runner. The Runner's errors are not the executor's, so the two
-// conditions the codes already name are matched on their own sentinels; the
+// the Runner. The Runner's errors are not the executor's, so the
+// conditions the codes already name are matched on their own sentinels and
+// predicates — a data fault whether or not its abandon finished, since the
+// code names what the operator corrects, not what was left behind; the
 // rest is an execution failure.
 func copySwapFailureCode(err error) executor.Code {
 	switch {
@@ -369,6 +355,8 @@ func copySwapFailureCode(err error) executor.Code {
 		return executor.CodeCancelledByCaller
 	case errors.Is(err, schemachange.ErrInvariantViolation):
 		return executor.CodeInvariantViolation
+	case schemachange.IsDataFault(err):
+		return executor.CodeDataFault
 	default:
 		return executor.OutcomeCode(err)
 	}

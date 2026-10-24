@@ -358,6 +358,7 @@ concurrently is.
 | `adopted-index-drift` | yes | The index a planned `ADD CONSTRAINT ... USING INDEX` takes over was dropped, replaced under the same name, or left invalid after planning, read again under the table's lock; nothing was attached. Re-plan against the index as it stands |
 | `validated-constraint-drift` | yes | The constraint a planned `VALIDATE CONSTRAINT` validates was dropped or replaced under the same name after planning, read again under the validation's `SHARE UPDATE EXCLUSIVE` lock; nothing was validated. Re-plan against the constraint as it stands |
 | `table-not-found` | yes | The statement's qualified table does not exist |
+| `data-fault` | yes | The server rejected the table's rows as the statement would shape them (SQLSTATE class 22 or 23); the copy-and-swap run abandoned itself, so correct the data or the statement and run it again from the beginning |
 | `invariant-violation` | yes | A breach of the invariant registry; never a retry candidate |
 | `execution-failed` | no | Fallback for a failure outside the typed set — an operational error to investigate, not a refusal to branch on |
 
