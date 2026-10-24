@@ -25,7 +25,13 @@ import (
 // code.
 func dryRunPlan(t *testing.T, url, alter string) plan.Report {
 	t.Helper()
-	cmd := newMigrateCmd(url, alter)
+	return dryRunPlanOf(t, newMigrateCmd(url, alter))
+}
+
+// dryRunPlanOf is dryRunPlan for a command the caller configured, such as
+// one carrying --allow-destructive.
+func dryRunPlanOf(t *testing.T, cmd *MigrateCmd) plan.Report {
+	t.Helper()
 	cmd.DryRun = true
 	cmd.JSON = true
 	var out strings.Builder
@@ -239,6 +245,8 @@ func TestMigrateDryRunInlineConstraintIsRewriteRequired(t *testing.T) {
 // destructive whether a human submits it directly (the riskier door) or the
 // diff derives it from a reviewed desired-state file. Destructive is derived
 // from the classifier's decisions, so the agreement holds by construction.
+// The imperative dry run reports the plan only under --allow-destructive;
+// without it the dry run ends in the apply's destructive-change refusal.
 func TestDryRunAndDiffAgreeOnDestructive(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -249,7 +257,9 @@ func TestDryRunAndDiffAgreeOnDestructive(t *testing.T) {
 		"CREATE TABLE %s.t (id int PRIMARY KEY, doomed text)", schema))
 	require.NoError(t, err)
 
-	alterReport := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN doomed", schema))
+	alter := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN doomed", schema))
+	alter.AllowDestructive = schema + ".t"
+	alterReport := dryRunPlanOf(t, alter)
 	require.Len(t, alterReport.Statements, 1)
 	alterSt := alterReport.Statements[0]
 	assert.True(t, alterSt.Destructive, "the submitted DROP COLUMN must be marked destructive")

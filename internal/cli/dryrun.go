@@ -21,7 +21,8 @@ import (
 // plan and never executes anything. The statement-type gate runs first,
 // exactly as it does on apply, so a gated kind dry-runs to the same refusal
 // verdict (and refusal exit code) the apply would end in; so does the
-// executor's shape admission of the routed steps, once they are known, when
+// destructive-change gate, unless --allow-destructive names the table, and
+// the executor's shape admission of the routed steps, once they are known, when
 // no earlier apply check refuses first. The checks that need the apply's
 // live facts — the size guard and the privilege preflight, which the apply
 // runs before admission — are not run. Introspecting the
@@ -62,6 +63,17 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	routed := router.Route([]planner.Plan{classified})
 	logger.Debug("statement routed",
 		"route", string(classified.Route), "disposition", string(routed.Disposition))
+	// The apply refuses a destructive statement before any route runs it,
+	// so without the acknowledgement the dry run ends in that same refusal
+	// verdict; with it, the plan below is the one the acknowledged apply
+	// takes.
+	v, refused, err := migrate.AdmitDestructive(st, facts.Schema, routed.Statements[0], c.AllowDestructive)
+	if err != nil {
+		return err
+	}
+	if refused {
+		return c.emit(out, v)
+	}
 
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema = facts.Schema

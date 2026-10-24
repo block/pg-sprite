@@ -28,6 +28,10 @@ type noRewriteCase struct {
 	// having executed nothing.
 	minMajor       int
 	belowMinReason verdict.Reason
+	// destructive marks a statement that discards live data or structure,
+	// which runs only under the destructive acknowledgement; the row's
+	// claim is about the rewrite, so the case acknowledges the loss.
+	destructive bool
 }
 
 // noRewriteFixture is the table most cases start from: rows in it, so a
@@ -93,13 +97,14 @@ var noRewriteCases = map[string][]noRewriteCase{
 		},
 	},
 	"drop-column": {
-		{name: "drop column", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t DROP COLUMN note"},
+		{name: "drop column", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t DROP COLUMN note", destructive: true},
 	},
 	"drop-constraint": {
 		{
-			name:      "drop check",
-			setup:     append(slices.Clone(noRewriteFixture), "ALTER TABLE %[1]s.t ADD CONSTRAINT t_qty_check CHECK (qty > 0)"),
-			statement: "ALTER TABLE %[1]s.t DROP CONSTRAINT t_qty_check",
+			name:        "drop check",
+			setup:       append(slices.Clone(noRewriteFixture), "ALTER TABLE %[1]s.t ADD CONSTRAINT t_qty_check CHECK (qty > 0)"),
+			statement:   "ALTER TABLE %[1]s.t DROP CONSTRAINT t_qty_check",
+			destructive: true,
 		},
 	},
 	"plain-tables-their-indexes": {
@@ -108,7 +113,7 @@ var noRewriteCases = map[string][]noRewriteCase{
 	"set-default-drop-default-drop-not-null": {
 		{name: "set default", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN qty SET DEFAULT 1"},
 		{name: "drop default", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN note DROP DEFAULT"},
-		{name: "drop not null", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN email DROP NOT NULL"},
+		{name: "drop not null", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN email DROP NOT NULL", destructive: true},
 	},
 	"add-check-add-foreign-key-imperative": {
 		{name: "add check", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ADD CONSTRAINT t_qty_check CHECK (qty > 0)"},
@@ -210,7 +215,11 @@ func TestNativeRowsRunWithoutARewrite(t *testing.T) {
 				before := heapFilenodes(t, pool, schema)
 
 				sql := fmt.Sprintf(tc.statement, schema)
-				v, err := migrate.Run(t.Context(), pool, parseOne(t, sql), runOptions())
+				opts := runOptions()
+				if tc.destructive {
+					opts.AllowDestructive = schema + ".t"
+				}
+				v, err := migrate.Run(t.Context(), pool, parseOne(t, sql), opts)
 				require.NoError(t, err)
 				switch {
 				case major < tc.minMajor:

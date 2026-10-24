@@ -605,6 +605,24 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   the change out as the guidance names or, after coordinating the application deploy, runs
   the rename with `--force SCHEMA.TABLE`. A rewrite-required refusal of class
   `capability-boundary` is the other case: a blocking form the planner cannot rewrite yet.
+- **Data loss needs the operator's acknowledgement, passed through.** `migrate.Run` refuses a
+  statement that drops a column, a constraint, or a `NOT NULL` with
+  `destructive-change`, class `by-design`, unless `Options.AllowDestructive` names the
+  resolved schema-qualified table (RF-10) — the same acknowledgement the CLI takes as
+  `--allow-destructive SCHEMA.TABLE`. SchemaBot already asks for this decision: map its
+  unsafe acknowledgement (`--allow-unsafe` on a plan whose change `IsUnsafe` for data loss)
+  to `Options.AllowDestructive` for that statement's table, and never set it for a change
+  the operator did not acknowledge. The refusal maps to `engine.ExecutionModeBlocked` until
+  then; on `migrate --alter` the reason always means the acknowledgement would lift it, and
+  a statement that drops a column and adds it back carries `guidance`
+  `alter-column-type-in-place`, the in-place retype that keeps the values. A mismatched
+  acknowledgement is `migrate.ErrAllowDestructiveMismatch` with a zero verdict and nothing
+  executed. An acknowledged run's verdict carries `allowed_destructive: true`, the
+  machine-readable audit record to store beside the operator's consent. The acknowledgement
+  covers only the loss: a statement that also needs `Force` still needs it. `RunDesired`
+  rejects `AllowDestructive` (`ErrAllowDestructiveNotSupported`) and keeps refusing a
+  destructive plan whole, so a declarative drop the operator approves runs as its own
+  imperative statement.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
   apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement
@@ -672,7 +690,9 @@ anywhere else, with `--dry-run`, with `--desired`, or alongside the other two
 acknowledgements (`--force`, `--accept-blocking`): each names a different decision about a
 different path, and a command carrying two of them is a contradiction, not a combination. An
 acknowledgement that names another table than the statement's resolved target is the same
-error.
+error. `--allow-destructive` is not one of them: it acknowledges the statement's data loss,
+and a restart runs the same statement again, so a destructive copy-and-swap restarts with
+both.
 
 Through the library, the verbs are `migrate.Run` with `CopySwapOptions.Restart` set to the
 acknowledgement, and `schemachange.RunOptions.Restart` on the `Runner` directly; the

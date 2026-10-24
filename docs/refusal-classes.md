@@ -84,7 +84,7 @@ routed to provisioning and never to the data change runner.
 | `not-native-safe-rewrite-required` | The submitted form blocks the table and the planner cannot construct the required safer sequence | `capability-boundary` | — |
 | `not-native-safe-rewrite-required` | A `RENAME COLUMN` or `RENAME TO` (`app-breaking-rename`): no SQL exists to substitute, and the deliberate path is the `guidance` rollout and then the statement under `--force` | `by-design` | — |
 | `backend-unavailable` | The plan routes to copy-and-swap for an operation the engine does not carry yet | `capability-boundary` | — |
-| `destructive-change` | Desired-state execution will not infer permission to discard live structure | `by-design` | — |
+| `destructive-change` | Neither front door infers permission to discard live data or structure: desired-state admission refuses a destructive plan whole, and `migrate --alter` refuses a statement that drops a column, constraint, or `NOT NULL` until `--allow-destructive` names the table (RF-10) | `by-design` | — |
 | `plan-fingerprint-mismatch` | The recomputed plan is not the reviewed plan | `environmental` | — |
 | `create-collision` | A target or claimed name is occupied at apply time by a relation or a standalone type | `environmental` | — |
 | `declarative-foreign-key` | A desired-state plan adds or drops a foreign key, or creates a table that declares one; desired-state execution does not run foreign-key changes yet | `capability-boundary` | — |

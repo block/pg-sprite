@@ -128,9 +128,12 @@ the phased build plan should be traceable back to one of these.
   goes straight into the classifier). Both feed the identical executor.
 - **Dry-run first.** `diff`/`--dry-run` prints the exact statements and their classification
   (native vs copy-and-swap) **without executing** — the natural review and CI hook.
-- **Destructive diffs are gated; renames are never guessed.** Dropping a column/constraint
-  requires explicit confirmation; a missing-plus-new column pair is a drop+add unless a rename
-  is stated explicitly. Intent is required, not inferred.
+- **Destructive changes are gated; renames are never guessed.** Dropping a column, a
+  constraint, or a `NOT NULL` requires explicit confirmation on both front doors: the
+  imperative `migrate --alter` refuses the statement unless `--allow-destructive` names the
+  table, and desired-state execution refuses a destructive plan whole. A missing-plus-new
+  column pair is a drop+add unless a rename is stated explicitly. Intent is required, not
+  inferred.
 
 ## PostgreSQL / Aurora-specific
 

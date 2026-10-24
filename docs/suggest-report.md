@@ -16,7 +16,8 @@ and the closed vocabularies below (caveats, guidance codes, and the embedded pla
 reasons and execution contracts): adding a value to any of them is a contract change and
 bumps `format_version`, even if no field is added or renamed.
 
-The current version is **3**: version 3 added `expand-contract-column` and
+The current version is **4**: version 4 added `alter-column-type-in-place` to the
+Guidance vocabulary; version 3 added `expand-contract-column` and
 `coordinated-table-rename` to the Guidance vocabulary and admitted `app-breaking-rename`
 as a suggestion `reason`; version 2 added `name-constraint-then-validate` and
 `unique-index-then-constraint` to the Guidance vocabulary.
@@ -171,6 +172,18 @@ exists; coordinate the rename with the application deploy that adopts the new na
 compatibility view under the old name, or a deploy that switches names in the same window
 — and run the rename with `--force` naming the table once that coordination is in place.
 
+### `alter-column-type-in-place`
+
+**Emitted for:** never by a suggestion. A `pg-sprite migrate` refusal verdict with reason
+`destructive-change` carries it when one `ALTER TABLE` drops a column and adds a column
+of the same name back (`DROP COLUMN qty, ADD COLUMN qty bigint`).
+
+The drop discards every value the column holds and the re-added column starts empty,
+which is rarely what a change of type means. To keep the values, change the column in
+place: `ALTER TABLE ... ALTER COLUMN qty TYPE bigint USING qty::bigint` converts each
+value instead. If discarding the values is the intent, rerun the statement with
+`--allow-destructive` naming the table.
+
 ## The rewrite table: operation → safer form → caveats
 
 This is the specification of the advice — which safer native idiom each risky-as-written
@@ -199,7 +212,7 @@ A constructed rewrite (`pg-sprite suggest --json` over
 
 ```json
 {
-  "format_version": 3,
+  "format_version": 4,
   "suggestions": [
     {
       "statement": 1,
@@ -220,7 +233,7 @@ A guidance suggestion (`ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d 
 
 ```json
 {
-  "format_version": 3,
+  "format_version": 4,
   "suggestions": [
     {
       "statement": 1,

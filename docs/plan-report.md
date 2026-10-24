@@ -25,7 +25,7 @@ kinds, guidance, causes, classes, owners) and the fingerprint serialization are 
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **12**: version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
+The current version is **13**: version 13 added the `alter-column-type-in-place` guidance code (carried by a `destructive-change` refusal verdict, never by a report statement); version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
 and on refused statements, each drawn from a closed vocabulary (see Classes and Owners);
@@ -193,6 +193,7 @@ code's full manual path; this contract embeds it, so a new guidance code bumps t
 | `unique-index-then-constraint` | Build the unique index with CREATE UNIQUE INDEX CONCURRENTLY, then attach it with ADD CONSTRAINT … USING INDEX. |
 | `expand-contract-column` | Add the new column, dual-write and backfill it, switch reads, then drop the old column as its own change — instead of renaming the column under running application code. |
 | `coordinated-table-rename` | Coordinate the table rename with the application deploy that adopts the new name, then run it with `--force` naming the table. |
+| `alter-column-type-in-place` | Never on a report statement: a `migrate` refusal verdict with reason `destructive-change` carries it when one ALTER TABLE drops a column and adds it back under the same name. Change the column in place with ALTER COLUMN ... TYPE ... USING ..., which keeps its values. |
 
 ### Causes (`cause`, greenfield create-shape refusals only)
 
@@ -314,7 +315,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 12,
+  "format_version": 13,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -357,7 +358,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 12,
+  "format_version": 13,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -424,7 +425,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 12,
+  "format_version": 13,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

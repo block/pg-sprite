@@ -62,8 +62,10 @@ func budgetExceededRefusal() verdict.Refusal {
 	return verdict.Environmental(verdict.ReasonBudgetExceeded)
 }
 
-// destructiveChangeRefusal: desired-state execution never infers permission
-// to discard live structure; the deliberate path is the imperative statement.
+// destructiveChangeRefusal: neither front door infers permission to discard
+// live data or structure. Desired-state admission refuses a destructive plan
+// whole; the imperative gate refuses a destructive statement unless the
+// destructive acknowledgement names its table.
 func destructiveChangeRefusal() verdict.Refusal {
 	return plan.DestructiveChangeRefusal()
 }

@@ -1318,6 +1318,34 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `pkg/migrate` (`acceptBlocking` builds the outcome from the gate's own verdict),
   `TestRunAcceptBlockingExecutesEligibleRefusals`. *Source:*
   [lock-budgeted passthrough](lock-budgeted-passthrough.md#verdict-reports-and-exit-code).
+- **RF-10** — No statement that discards data, and no statement that would leave the table
+  unreadable or unwritable beyond the engine's lock budget, runs without a loud, typed
+  acknowledgement naming the table. A destructive statement — one whose plan drops a column,
+  a constraint, or a `NOT NULL` — is refused with `destructive-change` (class `by-design`)
+  before any route runs it (native, safer sequence, forced, or copy-and-swap) and in a dry
+  run, unless `--allow-destructive` (`Options.AllowDestructive`) names the resolved
+  schema-qualified table; a mismatched acknowledgement is a typed usage error and nothing
+  executes. The acknowledgement covers only the data loss: the statement still meets every
+  other gate, and an acknowledged run is audited at warn level and carries
+  `allowed_destructive: true` on its verdict. The declarative path takes no acknowledgement
+  and refuses a destructive plan whole. A planner refusal runs nothing and keeps its own
+  reason. A `DROP INDEX` stays with the statement-kind gate and `--accept-blocking`, which
+  the destructive acknowledgement does not reach. Outage-risk statements are covered by
+  RF-5 and AB-1..AB-5 (`--force`, `--accept-blocking`) and by the LK-2 budgets.
+  *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
+  `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
+  run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
+  (`ErrAllowDestructiveNotSupported`), `pkg/planner` (`destructiveOp`),
+  `TestRunRefusesAnUnacknowledgedDropColumn`, `TestRunRefusesAnUnacknowledgedDropConstraint`,
+  `TestRunRefusesAnUnacknowledgedDropNotNull`, `TestRunExecutesAnAcknowledgedDropColumn`,
+  `TestRunRejectsAMismatchedDestructiveAcknowledgement`,
+  `TestRunRefusesAnUnacknowledgedDropColumnRoutedToCopyAndSwap`,
+  `TestRunNeedsBothForceAndTheDestructiveAcknowledgement`,
+  `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`, `TestAdmitDestructive`,
+  `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
+  `demo/tour.sh` (`refused_destructive`). *Source:*
+  [design principles](design-principles.md#declarative-review-first-workflow),
+  SchemaBot's `--allow-unsafe` acknowledgement for destructive plans.
 
 ## Orchestration / control-plane (OC)
 
@@ -1405,6 +1433,7 @@ about **how we write and review the code**.
 | LK-3 | 4–6 | cancellation/claim race test |
 | LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |
 | AB-1, AB-2 | accepted-blocking rollout step 2 | exact session bounds + lock exhaustion leaves catalog unchanged |
+| RF-10 | imperative destructive gate | unacknowledged drop column / constraint / NOT NULL refused with durable state intact, acknowledged runs carry the verdict field, mismatch executes nothing, copy-and-swap and forced routes gated, DROP INDEX untouched, dry run ends in the same refusal, demo refusal smoke |
 | AB-3, AB-4, AB-5, RF-9 | accepted-blocking rollout step 4 | catalog-resolved acknowledgement, mismatch executes nothing, ineligible refusals untouched, grammar rejects `--force`/`--dry-run`/missing budget, accepted verdict identity and exit 3, demo exit-code smoke |
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |
 | ST-1, ST-2, ST-3, ST-4 | 8 | kill/resume, cross-version refuse, orphan-slot reap, failover reconcile |
