@@ -587,8 +587,9 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   `ACCESS EXCLUSIVE` and blocks reads too, so the policy's risk framing does not transfer.
 - **Recommended call sequence: dry-run, then apply.** The typed manual path for a
   rewrite-required refusal (`guidance`), the create path's typed shape refusal
-  (`statements[].cause`, `format_version` 3 and later), the plan `fingerprint`, and `table_exists` all
-  live on the [plan report](plan-report.md) — the dry run's output. The run verdict carries
+  (`statements[].cause`, `format_version` 3 and later), the invalid-index advisories the diff
+  declines to act on (`advisories[]`, `format_version` 13 and later), the plan `fingerprint`, and
+  `table_exists` all live on the [plan report](plan-report.md) — the dry run's output. The run verdict carries
   the refusal reason as a typed field but its `detail` is display-only prose: an orchestrator
   that wants the typed guidance or cause must obtain the plan report first (dry-run for the
   imperative front door, `diff --json` for the declarative one), then apply, and treat the

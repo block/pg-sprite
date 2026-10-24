@@ -126,7 +126,8 @@ refusal — never a silently wrong or incomplete result:
   with the desired definition: it plans as one online `VALIDATE CONSTRAINT`, and
   refuses with `validated-constraint-drift` if the constraint changed after planning.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
-  build's leftover is reported with a typed state, and the proven removal
+  build's leftover is reported with a typed state (and named by `diff` as a
+  typed plan advisory), and the proven removal
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
   the caller must not rebuild) is library-only; from the CLI the
   [runbook](docs/invalid-index-recovery.md) applies.

@@ -275,6 +275,121 @@ func TestDiffTextNoChanges(t *testing.T) {
 `, out.String())
 }
 
+// An empty plan over a table carrying an invalid index the diff declined to
+// drop must not read as converged: the advisory renders as a warning coded
+// with its typed kind, the docs entry points at the runbook, and the plan
+// line says what the table carries instead of claiming a match.
+func TestDiffTextEmptyPlanWithAdvisoryIsNotConverged(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+	report.Disposition = router.DispositionExecute
+	exists := true
+	report.TableExists = &exists
+	report.Advisories = []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexUndeclared, Index: "users_email_idx_ccnew"},
+	}
+
+	var out strings.Builder
+	require.NoError(t, writeDiffText(&out, palette{}, report))
+	text := out.String()
+	assert.True(t, strings.HasPrefix(text, "warning[invalid-index-undeclared]:\n  index \"users_email_idx_ccnew\" is an unfinished concurrent build"),
+		"the advisory leads with its typed kind as the rule code: %s", text)
+	assert.Contains(t, text, "docs:\n  "+invalidIndexRunbookURL+"\n")
+	assert.Contains(t, text, "plan:\n  public.users (PostgreSQL 16.10) — no changes to run; the live table carries 1 unfinished index build the plan leaves alone\n")
+	assert.NotContains(t, text, "matches the desired schema")
+	assert.NotContains(t, text, "apply:", "nothing to run, so no apply pointer")
+}
+
+// A rebuild advisory rides alongside the create it explains: the statement
+// renders as usual, and the warning after it says the create completes
+// only through the proven-removal path. The plan stays executable — the
+// warning changes neither the counts nor the apply pointer.
+func TestDiffTextRebuildAdvisoryFollowsStatements(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+	report.Disposition = router.DispositionExecute
+	exists := true
+	report.TableExists = &exists
+	sql := `CREATE UNIQUE INDEX "users_email_key" ON "public"."users" USING btree ("email")`
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         sql,
+		Kind:        schemadiff.ChangeCreateIndex,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		Decisions: []planner.Decision{{
+			Operation: "create index",
+			Route:     planner.RouteNative,
+			Reason:    planner.ReasonSaferIdiom,
+		}},
+		ExecSQL:   []string{`CREATE UNIQUE INDEX CONCURRENTLY "users_email_key" ON "public"."users" USING btree ("email")`},
+		Execution: planner.ExecutionAutocommit,
+	})
+	report.Advisories = []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexRebuild, Index: "users_email_key"},
+	}
+
+	var out strings.Builder
+	require.NoError(t, writeDiffText(&out, palette{}, report))
+	text := out.String()
+	statementAt := strings.Index(text, "statement 1:\n  "+sql+";\n")
+	advisoryAt := strings.Index(text, "warning[invalid-index-rebuild]:\n  index \"users_email_key\" is an unfinished concurrent build")
+	planAt := strings.Index(text, "plan:\n  public.users (PostgreSQL 16.10) — 1 statement, 1 step to run, 0 refused\n")
+	require.NotEqual(t, -1, statementAt, text)
+	require.NotEqual(t, -1, advisoryAt, text)
+	require.NotEqual(t, -1, planAt, text)
+	assert.Less(t, statementAt, advisoryAt, "the advisory follows the statements it explains")
+	assert.Less(t, advisoryAt, planAt, "the advisory precedes the plan summary")
+	assert.Contains(t, text, "docs:\n  "+invalidIndexRunbookURL+"\n")
+	assert.Contains(t, text, "apply:", "the plan is still executable")
+}
+
+// The --sql script carries advisories as comment lines only, and an empty
+// plan with an advisory does not claim the table matches.
+func TestPlanTextCommentsAdvisories(t *testing.T) {
+	report := plan.NewReport(plan.SourceDiff)
+	report.Schema, report.Table, report.ServerVersion = "public", "users", "16.10"
+	report.Disposition = router.DispositionExecute
+	exists := true
+	report.TableExists = &exists
+	report.Advisories = []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexUndeclared, Index: "users_email_idx_ccnew"},
+	}
+
+	var out strings.Builder
+	require.NoError(t, writePlanText(&out, report))
+	text := out.String()
+	assert.Equal(t, "-- no changes to run; the live table carries an unfinished index build the plan leaves alone\n"+
+		"-- invalid-index-undeclared: index \"users_email_idx_ccnew\" "+schemadiff.AdvisoryInvalidIndexUndeclared.Description()+"\n", text)
+
+	sql := `CREATE INDEX "users_email_idx" ON "public"."users" USING btree ("email")`
+	report.Statements = append(report.Statements, plan.Statement{
+		SQL:         sql,
+		Kind:        schemadiff.ChangeCreateIndex,
+		Route:       planner.RouteNative,
+		Backend:     router.BackendNative,
+		Disposition: router.DispositionExecute,
+		ExecSQL:     []string{sql},
+		Execution:   planner.ExecutionAutocommit,
+		Decisions: []planner.Decision{{
+			Operation: "create index",
+			Route:     planner.RouteNative,
+			Reason:    planner.ReasonMetadataOnly,
+		}},
+	})
+	report.Advisories[0] = schemadiff.Advisory{Kind: schemadiff.AdvisoryInvalidIndexRebuild, Index: "users_email_idx"}
+	out.Reset()
+	require.NoError(t, writePlanText(&out, report))
+	text = out.String()
+	assert.True(t, strings.HasSuffix(text, sql+";\n-- invalid-index-rebuild: index \"users_email_idx\" "+schemadiff.AdvisoryInvalidIndexRebuild.Description()+"\n"), text)
+	for line := range strings.SplitSeq(strings.TrimSpace(text), "\n") {
+		if strings.HasPrefix(line, "--") {
+			continue
+		}
+		assert.Equal(t, sql+";", line, "the only bare statement is the planned create")
+	}
+}
+
 // A plan containing a statement this build cannot execute renders the same
 // leading error diagnostic as the dry run, counts it refused, and drops the
 // apply pointer — there is nothing migrate would run.

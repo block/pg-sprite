@@ -21,11 +21,12 @@ both shapes.)
 Every report carries `format_version`. A consumer that does not recognize the version must
 **reject the report** — never guess at field semantics. The version covers more than the
 field shape: the closed vocabularies below (sources, routes, backends, dispositions,
-kinds, guidance, causes, classes, owners) and the fingerprint serialization are all pinned to it. Adding a vocabulary value or
+kinds, guidance, causes, classes, owners, advisory kinds) and the fingerprint serialization are all pinned to it. Adding a vocabulary value or
 changing the fingerprint definition is a contract change and bumps `format_version`, even if
 no field is added or renamed.
 
-The current version is **12**: version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
+The current version is **13**: version 13 added the report-level `advisories` field and its
+closed kind vocabulary — the invalid indexes a `diff` observed and declined to drop; version 12 added the `expand-contract-column` and `coordinated-table-rename` guidance codes and made `app-breaking-rename` decisions yield the `rewrite-required` disposition; version 11 added the `cascading-drop` reason; version 10 added the `dependent-view` reason and the `dependent_views` decision field; version 9 added the `validate-constraint` and `validate-foreign-key` kinds; version 8 added the `replica-identity` reason; version 7 added the `set-generated-expression` kind; version 6 added the `add-foreign-key` and `drop-foreign-key`
 kinds, the `foreign-key` cause, and the `declarative-foreign-key` reason; version 5 added `blocking_passthrough_eligible` to every refused
 statement; version 4 added the `class` and `owner` fields on the report
 and on refused statements, each drawn from a closed vocabulary (see Classes and Owners);
@@ -66,6 +67,14 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `owner` | string | `no-online-safety-problem` refusals only | Who owns the aggregate work pg-sprite has no online-safety reason to run (see Owners). Present exactly when `class` is `no-online-safety-problem`. |
 | `fingerprint` | string | always | The plan's stable identity (see Fingerprint). |
 | `statements` | array | always | The ordered plan; `[]` (never `null`) means nothing to do. |
+| `advisories` | array | `diff` source, existing table, when non-empty | Typed observations the diff made about the live table that produced no statement (see Advisory fields): the invalid indexes it saw and declined to drop. Advisory only — the statements and the `destructive` gate are unaffected, and nothing in it executes. Read it alongside `statements`: an empty plan with an advisory present means there is nothing to run **and** the table is not clean. Absent when there is nothing to report. Explanatory: excluded from the fingerprint. |
+
+## Advisory fields
+
+| Field | Type | Presence | Meaning |
+|---|---|---|---|
+| `kind` | string | always | What the diff observed and what completes the plan (see Advisory kinds). Automation branches on this, never on prose. |
+| `index` | string | always | The live index the observation is about. A catalog identifier — clamp and escape it before rendering into a shared surface. |
 
 ## Statement fields
 
@@ -270,6 +279,19 @@ bumps `format_version`. Present exactly when `class` is `no-online-safety-proble
 | `validate-foreign-key` | Validates a live foreign key left `NOT VALID` whose definition otherwise matches the desired one. Always refused for execution (`declarative-foreign-key`). |
 | `create-index` | Creates an index. |
 
+### Advisory kinds (`advisories[].kind`, diff source only)
+
+Both kinds describe an invalid index on a plain table — a concurrent build that did not
+finish, abandoned or still running — which the diff never drops: a `DROP INDEX` by name
+cannot tell the two apart ([OC-2, LK-5](invariants.md)). A partitioned parent's invalid
+index means unattached partition indexes, not an unfinished build, and is never advised. A
+consumer that meets a kind it does not recognize must surface it, never discard it.
+
+| Value | Meaning |
+|---|---|
+| `invalid-index-rebuild` | The desired schema names the index (same or redefined definition), so the plan carries its `create-index`. That create cannot run as-is against the occupied name; the plan completes only through the proven-removal path — `executor.RebuildAbandonedIndex` or the [invalid-index runbook](invalid-index-recovery.md) — which drops the entry after proving it abandoned. |
+| `invalid-index-undeclared` | The desired schema does not name the index. The diff plans no drop for it, so no statement touches it: an empty plan is not evidence the table is clean. Clear an abandoned entry per the [runbook](invalid-index-recovery.md), or wait for a build still running to finish. |
+
 ## Fingerprint
 
 `fingerprint` is the plan's stable identity: `sha256:` plus the hex digest over what would
@@ -283,8 +305,10 @@ The serialization is exact and pinned by test: for each statement in plan order,
 canonical `sql`, `route`, `backend`, and `disposition`, then each `exec_sql` entry — every
 field followed by a unit separator (`0x1F`) — and close each statement with a record
 separator (`0x1E`). Explanatory fields (`decisions`, `kind`, `destructive`, `reason`, `cause`,
-`guidance`) are excluded: a reworded reason does not change identity, but a rerouted,
-resequenced, or rewritten plan does. An empty plan has a defined identity (the digest of no input).
+`guidance`, and the report-level `advisories`) are excluded: a reworded reason does not
+change identity, but a rerouted, resequenced, or rewritten plan does. An empty plan has a
+defined identity (the digest of no input) — with or without advisories, since nothing in
+an advisory executes.
 
 For a table that does not exist yet, `exec_sql` is the plain canonical build that the
 greenfield create path runs. It never substitutes `CONCURRENTLY` for an index on a table
@@ -314,7 +338,7 @@ in `pkg/plan` — if the code drifts from this page, CI fails.
 
 ```json
 {
-  "format_version": 12,
+  "format_version": 13,
   "source": "alter",
   "schema": "app",
   "table": "orders",
@@ -357,7 +381,7 @@ A desired state that drops an index and adds a column with a constant default:
 
 ```json
 {
-  "format_version": 12,
+  "format_version": 13,
   "source": "diff",
   "schema": "app",
   "table": "orders",
@@ -424,7 +448,7 @@ A desired state for a table that does not exist yet, whose `CREATE TABLE` carrie
 
 ```json
 {
-  "format_version": 12,
+  "format_version": 13,
   "source": "diff",
   "schema": "app",
   "table": "gadgets",

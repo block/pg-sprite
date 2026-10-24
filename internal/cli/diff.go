@@ -13,6 +13,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -103,13 +104,22 @@ func writeJSON(out io.Writer, report plan.Report) error {
 // The header points at migrate as the executing front door: running this
 // script directly bypasses the gate that refuses blocking statements. A
 // greenfield statement the create path refuses by shape is annotated with
-// the plan's typed cause — the executor's own explanation.
+// the plan's typed cause — the executor's own explanation. The plan's
+// advisories — invalid indexes the diff declined to drop — are comment
+// lines too, so a script over a table carrying debris says so and an empty
+// plan does not claim the table converged.
 func writePlanText(out io.Writer, report plan.Report) error {
 	if len(report.Statements) == 0 {
-		if _, err := fmt.Fprintln(out, "-- no changes: live table matches the desired schema"); err != nil {
+		if len(report.Advisories) == 0 {
+			if _, err := fmt.Fprintln(out, "-- no changes: live table matches the desired schema"); err != nil {
+				return fmt.Errorf("write plan: %w", err)
+			}
+			return nil
+		}
+		if _, err := fmt.Fprintln(out, "-- no changes to run; the live table carries an unfinished index build the plan leaves alone"); err != nil {
 			return fmt.Errorf("write plan: %w", err)
 		}
-		return nil
+		return writeAdvisoryText(out, report.Advisories)
 	}
 	if _, err := fmt.Fprintln(out, "-- plan derived by pg-sprite diff; execute statements via pg-sprite migrate,"); err != nil {
 		return fmt.Errorf("write plan: %w", err)
@@ -125,6 +135,18 @@ func writePlanText(out io.Writer, report plan.Report) error {
 	for _, ps := range report.Statements {
 		if err := writeChangeText(out, ps); err != nil {
 			return err
+		}
+	}
+	return writeAdvisoryText(out, report.Advisories)
+}
+
+// writeAdvisoryText emits each plan advisory as an SQL comment: the typed
+// kind, the index, and the kind's description. Comments only — an advisory
+// is never a statement to run.
+func writeAdvisoryText(out io.Writer, advisories []schemadiff.Advisory) error {
+	for _, a := range advisories {
+		if _, err := fmt.Fprintln(out, sqlDiagnosticComment(fmt.Sprintf("%s: index %q %s", a.Kind, a.Index, a.Kind.Description()))); err != nil {
+			return fmt.Errorf("write plan: %w", err)
 		}
 	}
 	return nil

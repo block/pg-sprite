@@ -72,7 +72,7 @@ dry_run() {
         else
             assert_eq "dry-run refusal exit of [$sql]" 2 "$status"
         fi
-        assert_eq "plan format_version of [$sql]" 12 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "plan format_version of [$sql]" 13 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "disposition of [$sql]" "$disposition" "$(jq -r '.disposition' <<<"$out")"
         assert_eq "route of [$sql]" "$route" "$(jq -r '.statements[0].route' <<<"$out")"
         assert_eq "reason of [$sql]" "$reason" "$(jq -r '.statements[0].decisions[0].reason' <<<"$out")"
@@ -200,12 +200,39 @@ diff_plan() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff exit of [$desired]" 0 "$status"
-        assert_eq "diff format_version of [$desired]" 12 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 13 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
         case "$(jq -r '.statements[0].sql' <<<"$out")" in
         *"$fragment"*) ;;
         *) fail "first statement of [$desired]: expected it to contain '$fragment'" ;;
         esac
+    else
+        "$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public || echo "(exit $?)"
+    fi
+}
+
+# diff_advisory desired_file statement_count advisory_kind
+#
+# A desired file for the seeded table that carries an invalid index (the
+# leftover of the failed unique build in seed.sql). The diff never drops an
+# unfinished build, so the plan carries an advisory naming it instead
+# (plan.Report.Advisories, schemadiff.AdvisoryKinds()): the rebuild kind when
+# the desired file names the index, the undeclared kind when it does not —
+# in which case the plan has zero statements but is not silent about the
+# leftover. The advisory sits outside the statements and the fingerprint, so
+# the exit code stays 0.
+diff_advisory() {
+    local desired="$1" count="$2" kind="$3" out status=0
+    step "diff --desired $desired (expect advisory)"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
+        assert_eq "diff exit of [$desired]" 0 "$status"
+        assert_eq "diff format_version of [$desired]" 13 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
+        assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
+        assert_eq "advisory count of [$desired]" 1 "$(jq -r '.advisories | length' <<<"$out")"
+        assert_eq "advisory kind of [$desired]" "$kind" "$(jq -r '.advisories[0].kind' <<<"$out")"
+        assert_eq "advisory index of [$desired]" contacts_email_key "$(jq -r '.advisories[0].index' <<<"$out")"
     else
         "$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public || echo "(exit $?)"
     fi
@@ -228,7 +255,7 @@ diff_refused() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff refusal exit of [$desired]" 2 "$status"
-        assert_eq "diff format_version of [$desired]" 12 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 13 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "diff disposition of [$desired]" refuse "$(jq -r '.disposition' <<<"$out")"
         assert_eq "diff reason of [$desired]" unsupported-statement "$(jq -r '.statements[0].reason' <<<"$out")"
         assert_eq "diff class of [$desired]" "$class" "$(jq -r '.statements[0].class' <<<"$out")"
@@ -250,12 +277,18 @@ run_pull() {
         "$PGS" pull --url "$PG_DSN" --schema public --out "$out_dir" >/dev/null || status=$?
         assert_eq "pull exit" 0 "$status"
         file_count=$(find "$out_dir" -maxdepth 1 -type f -name '*.sql' | wc -l | tr -d ' ')
-        # One file per table in demo/seed.sql (orders, users).
-        assert_eq "pulled file count" 2 "$file_count"
+        # One file per table in demo/seed.sql (contacts, orders, users).
+        assert_eq "pulled file count" 3 "$file_count"
     else
         "$PGS" pull --url "$PG_DSN" --schema public --out "$out_dir" || echo "(exit $?)"
     fi
 
+    # Every exported file re-diffs to zero statements — except the one table
+    # carrying an invalid index (contacts, seeded that way): pull renders the
+    # index like any other, so its baseline re-diffs to exactly one
+    # create-index, and the plan's rebuild advisory names the entry. That
+    # lone create is the signal that a just-exported table carries an
+    # unfinished build (docs/pull.md).
     for desired in "$out_dir"/*.sql; do
         step "zero-diff proof: $desired"
         status=0
@@ -263,9 +296,19 @@ run_pull() {
             out=$("$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" --json) || status=$?
             assert_eq "diff exit of [$desired]" 0 "$status"
             # Plan report contract version (plan.FormatVersion), same pin as diff_plan.
-            assert_eq "diff format_version of [$desired]" 12 "$(jq -r '.format_version' <<<"$out")"
+            assert_eq "diff format_version of [$desired]" 13 "$(jq -r '.format_version' <<<"$out")"
             assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
-            assert_eq "zero diff of [$desired]" 0 "$(jq -r '.statements | length' <<<"$out")"
+            case "$(basename "$desired")" in
+            contacts.sql)
+                assert_eq "rebuild diff of [$desired]" 1 "$(jq -r '.statements | length' <<<"$out")"
+                assert_eq "rebuild kind of [$desired]" create-index "$(jq -r '.statements[0].kind' <<<"$out")"
+                assert_eq "advisory kind of [$desired]" invalid-index-rebuild "$(jq -r '.advisories[0].kind' <<<"$out")"
+                ;;
+            *)
+                assert_eq "zero diff of [$desired]" 0 "$(jq -r '.statements | length' <<<"$out")"
+                assert_eq "no advisories of [$desired]" 0 "$(jq -r '.advisories | length' <<<"$out")"
+                ;;
+            esac
         else
             "$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" || echo "(exit $?)"
         fi
@@ -315,6 +358,8 @@ run_diff() {
     heading "Declarative front door: routed convergence plans (read-only)"
     diff_plan desired/users_v2.sql 2 "ADD COLUMN bio"
     diff_plan desired/widgets_v1.sql 2 "CREATE TABLE"
+    diff_advisory desired/contacts_rebuild.sql 1 invalid-index-rebuild
+    diff_advisory desired/contacts_no_index.sql 0 invalid-index-undeclared
     diff_refused desired/gadgets_if_not_exists.sql if-not-exists
 }
 

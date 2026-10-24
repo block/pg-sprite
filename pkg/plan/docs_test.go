@@ -156,6 +156,9 @@ func TestDocListsEveryVocabularyValue(t *testing.T) {
 	for _, k := range schemadiff.ChangeKinds() {
 		values = append(values, string(k))
 	}
+	for _, k := range schemadiff.AdvisoryKinds() {
+		values = append(values, string(k))
+	}
 	for _, g := range suggest.Guidances() {
 		values = append(values, string(g))
 	}

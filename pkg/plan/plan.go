@@ -37,7 +37,9 @@ import (
 // the cascading-drop planner reason. Version 12 routes an app-breaking
 // rename to the rewrite-required disposition and added the
 // expand-contract-column and coordinated-table-rename guidance codes.
-const FormatVersion = 12
+// Version 13 added the report-level advisories field and its closed kind
+// vocabulary for the invalid indexes a diff observes and declines to drop.
+const FormatVersion = 13
 
 // Source identifies which front door derived the plan.
 type Source string
@@ -184,6 +186,15 @@ type Report struct {
 	Fingerprint string `json:"fingerprint"`
 	// Statements is the ordered plan; empty means there is nothing to do.
 	Statements []Statement `json:"statements"`
+	// Advisories are the typed observations the diff made about the live
+	// table that produced no statement (schemadiff.Advisory): the invalid
+	// indexes it saw and declined to drop. Present only on a diff-source
+	// plan whose table exists, and only when there is something to report.
+	// Advisory, not executable — the change list and the destructive gate
+	// are unaffected, and an empty Statements with an advisory present
+	// means the table is not clean even though there is nothing to run.
+	// Explanatory, so excluded from the fingerprint.
+	Advisories []schemadiff.Advisory `json:"advisories,omitempty"`
 }
 
 // RefuseUnsupportedPartitionedParent marks statements as refused when

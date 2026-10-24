@@ -717,7 +717,8 @@ the proof's lock, every drop, and the requested build share **one** overall budg
 recovery over k quarantined entries costs at most the budget, not (k+1) budgets.
 The declarative diff leans on this proof without performing it: when desired names an index
 whose live entry is an unfinished build, `diff` plans the `create-index` alone and never a
-drop, knowing the create cannot run as-is against the occupied name. The plan completes only
+drop, knowing the create cannot run as-is against the occupied name, and says so with an
+`invalid-index-rebuild` advisory on the plan report. The plan completes only
 through this invariant's proven removal — `RebuildAbandonedIndex`, or `DropAbandonedIndex`
 when the name must be cleared without completing the plan — or through an operator
 following the runbook; a plain `CREATE INDEX` on the occupied name fails as a duplicate
@@ -1345,15 +1346,19 @@ a plain table is an unfinished concurrent build — abandoned, or still running 
 never emits a `DROP INDEX` for it, whatever the desired file says about its name: a drop by
 name cannot tell the two apart, and dropping under a running build is the cleanup this
 invariant forbids. That keeps the cleanup half. It gives up the other half when the desired
-file no longer names the index at all: the observation is discarded and the plan is empty,
-so a desired state that removes an index the build never delivered reads as already
-converged. The trade is preferred to the alternatives — a name-based drop, or a fabricated
-change — because the plan stays executable and never destroys a build it cannot see; the
-leftover surfaces at the next `pull` (see [pull.md](pull.md)) and clears per the
-[invalid-index runbook](invalid-index-recovery.md). OC-1 reaches the same conclusion from
-the other side: the diff cannot confirm the entry is abandoned, so it must not round the
-uncertainty into a destructive change. *Enforced:* `pkg/schemadiff` never-drops-invalid
-tests against real debris on a real database.
+file no longer names the index at all: no statement is planned, so a desired state that
+removes an index the build never delivered converges to zero statements. The observation is
+not discarded, though — the plan report carries it as an `invalid-index-undeclared`
+advisory (see [plan-report.md](plan-report.md#advisory-kinds-advisorieskind-diff-source-only)), outside the statements and
+the fingerprint, so the empty plan says "no changes to run; the table carries an unfinished
+build" rather than "converged". The trade is preferred to the alternatives — a name-based
+drop, or a fabricated change — because the plan stays executable and never destroys a build
+it cannot see; the leftover also surfaces at the next `pull` (see [pull.md](pull.md)) and
+clears per the [invalid-index runbook](invalid-index-recovery.md). OC-1 reaches the same
+conclusion from the other side: the diff cannot confirm the entry is abandoned, so it must
+not round the uncertainty into a destructive change. *Enforced:* `pkg/schemadiff`
+never-drops-invalid tests against real debris on a real database; `pkg/diffplan` proves the
+empty plan carries the advisory and the unchanged fingerprint.
 
 ### OC-3 — Control requests are durable operator intent
 
