@@ -97,13 +97,16 @@ func ConversionNamesOf(expr string) (ConversionNames, error) {
 
 // operatorNames is the operator names an A_Expr node resolves: its own
 // name for every kind but the BETWEEN family, which the server rewrites
-// into the `>=` and `<=` of the operand's type and never resolves as the
-// keyword the grammar records.
+// into comparisons of the operand's type and never resolves as the keyword
+// the grammar records. Its transformAExprBetween rewrites BETWEEN and
+// BETWEEN SYMMETRIC into `>=` and `<=`, and NOT BETWEEN and NOT BETWEEN
+// SYMMETRIC into `<` and `>`.
 func operatorNames(expr *pganalyze.A_Expr) []QualifiedName {
 	switch expr.GetKind() {
-	case pganalyze.A_Expr_Kind_AEXPR_BETWEEN, pganalyze.A_Expr_Kind_AEXPR_NOT_BETWEEN,
-		pganalyze.A_Expr_Kind_AEXPR_BETWEEN_SYM, pganalyze.A_Expr_Kind_AEXPR_NOT_BETWEEN_SYM:
+	case pganalyze.A_Expr_Kind_AEXPR_BETWEEN, pganalyze.A_Expr_Kind_AEXPR_BETWEEN_SYM:
 		return []QualifiedName{{Name: ">="}, {Name: "<="}}
+	case pganalyze.A_Expr_Kind_AEXPR_NOT_BETWEEN, pganalyze.A_Expr_Kind_AEXPR_NOT_BETWEEN_SYM:
+		return []QualifiedName{{Name: "<"}, {Name: ">"}}
 	default:
 		return []QualifiedName{qualifiedName(expr.GetName())}
 	}

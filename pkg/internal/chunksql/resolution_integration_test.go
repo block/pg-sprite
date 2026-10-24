@@ -1,6 +1,7 @@
 package chunksql
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -151,4 +152,213 @@ func TestResolutionFingerprintIsIndependentOfTheSessionSearchPath(t *testing.T) 
 	inSchemaFirst, err := ResolutionFingerprint(t.Context(), tx, f.schema, conversions)
 	require.NoError(t, err)
 	assert.Equal(t, before, inSchemaFirst)
+}
+
+// A conversion that calls a function by name is pinned to what that
+// function does, not to the text of its body alone: replacing a
+// SQL-standard body, flipping STRICT, attaching a SET clause, or changing a
+// default argument changes every later chunk's result while leaving prosrc
+// as it was, so each changes the fingerprint.
+func TestResolutionFingerprintChangesWhenACalledFunctionChangesWithoutItsSourceText(t *testing.T) {
+	cases := []struct {
+		name   string
+		create string
+		change string
+	}{
+		{
+			name: "sql-standard body replaced",
+			create: `
+				CREATE FUNCTION %s.to_cents(text) RETURNS integer
+					LANGUAGE sql IMMUTABLE
+					BEGIN ATOMIC SELECT ($1::numeric * 100)::integer; END`,
+			change: `
+				CREATE OR REPLACE FUNCTION %s.to_cents(text) RETURNS integer
+					LANGUAGE sql IMMUTABLE
+					BEGIN ATOMIC SELECT ($1::numeric * 1000)::integer; END`,
+		},
+		{
+			name: "strictness flipped",
+			create: `
+				CREATE FUNCTION %s.to_cents(text) RETURNS integer
+					LANGUAGE sql IMMUTABLE
+					AS 'SELECT COALESCE(($1::numeric * 100)::integer, -1)'`,
+			change: `ALTER FUNCTION %s.to_cents(text) STRICT`,
+		},
+		{
+			name: "function-local search_path attached",
+			create: `
+				CREATE FUNCTION %s.to_cents(text) RETURNS integer
+					LANGUAGE sql IMMUTABLE
+					AS 'SELECT ($1::numeric * 100)::integer'`,
+			change: `ALTER FUNCTION %s.to_cents(text) SET search_path = pg_catalog`,
+		},
+		{
+			name: "default argument changed",
+			create: `
+				CREATE FUNCTION %s.to_cents(text, integer DEFAULT 100) RETURNS integer
+					LANGUAGE sql IMMUTABLE
+					AS 'SELECT ($1::numeric * $2)::integer'`,
+			change: `
+				CREATE OR REPLACE FUNCTION %s.to_cents(text, integer DEFAULT 1000) RETURNS integer
+					LANGUAGE sql IMMUTABLE
+					AS 'SELECT ($1::numeric * $2)::integer'`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResolutionFixture(t)
+			f.exec(t, tc.create)
+			conversions := map[string]string{"price": "to_cents(price)"}
+			before := f.fingerprint(t, conversions)
+
+			f.exec(t, tc.change)
+			assert.NotEqual(t, before, f.fingerprint(t, conversions))
+		})
+	}
+}
+
+// Each arm of the digest and each schema on the path is pinned by a change
+// that only that arm or that schema can see: a function's volatility, an
+// operator's function body in either form, its strictness and settings,
+// and the function the operator points at, a type, a
+// collation, and a function found in public rather than the source schema.
+func TestResolutionFingerprintSeesEachArmAndEachPathSchema(t *testing.T) {
+	cases := []struct {
+		name    string
+		setup   []string
+		expr    string
+		change  []string
+		cleanup string
+	}{
+		{
+			name: "function volatility",
+			setup: []string{`
+				CREATE FUNCTION %s.to_cents(text) RETURNS integer
+					LANGUAGE sql IMMUTABLE AS 'SELECT 100'`},
+			expr:   "to_cents(price)",
+			change: []string{`ALTER FUNCTION %s.to_cents(text) VOLATILE`},
+		},
+		{
+			name: "operator's function body",
+			setup: []string{
+				`CREATE FUNCTION %s.addf(text, text) RETURNS text
+					LANGUAGE sql IMMUTABLE AS 'SELECT $1 || $2'`,
+				`CREATE OPERATOR %s.* (LEFTARG = text, RIGHTARG = text, FUNCTION = %s.addf)`,
+			},
+			expr: "price OPERATOR(%s.*) 'x'",
+			change: []string{`
+				CREATE OR REPLACE FUNCTION %s.addf(text, text) RETURNS text
+					LANGUAGE sql IMMUTABLE AS 'SELECT $2'`},
+		},
+		{
+			name: "operator's function flipped to strict",
+			setup: []string{
+				`CREATE FUNCTION %s.addf(text, text) RETURNS text
+					LANGUAGE sql IMMUTABLE AS 'SELECT COALESCE($1, '''') || $2'`,
+				`CREATE OPERATOR %s.* (LEFTARG = text, RIGHTARG = text, FUNCTION = %s.addf)`,
+			},
+			expr:   "price OPERATOR(%s.*) 'x'",
+			change: []string{`ALTER FUNCTION %s.addf(text, text) STRICT`},
+		},
+		{
+			name: "operator's function given a search_path",
+			setup: []string{
+				`CREATE FUNCTION %s.addf(text, text) RETURNS text
+					LANGUAGE sql IMMUTABLE AS 'SELECT $1 || $2'`,
+				`CREATE OPERATOR %s.* (LEFTARG = text, RIGHTARG = text, FUNCTION = %s.addf)`,
+			},
+			expr:   "price OPERATOR(%s.*) 'x'",
+			change: []string{`ALTER FUNCTION %s.addf(text, text) SET search_path = pg_catalog`},
+		},
+		{
+			name: "operator's function SQL-standard body replaced",
+			setup: []string{
+				`CREATE FUNCTION %s.addf(text, text) RETURNS text
+					LANGUAGE sql IMMUTABLE
+					BEGIN ATOMIC SELECT $1 || $2; END`,
+				`CREATE OPERATOR %s.* (LEFTARG = text, RIGHTARG = text, FUNCTION = %s.addf)`,
+			},
+			expr: "price OPERATOR(%s.*) 'x'",
+			change: []string{`
+				CREATE OR REPLACE FUNCTION %s.addf(text, text) RETURNS text
+					LANGUAGE sql IMMUTABLE
+					BEGIN ATOMIC SELECT $2; END`},
+		},
+		{
+			name: "operator repointed at another function",
+			setup: []string{
+				`CREATE FUNCTION %s.addf(text, text) RETURNS text
+					LANGUAGE sql IMMUTABLE AS 'SELECT $1 || $2'`,
+				`CREATE FUNCTION %s.addg(text, text) RETURNS text
+					LANGUAGE sql IMMUTABLE AS 'SELECT $1 || $2'`,
+				`CREATE OPERATOR %s.* (LEFTARG = text, RIGHTARG = text, FUNCTION = %s.addf)`,
+			},
+			expr: "price OPERATOR(%s.*) 'x'",
+			change: []string{
+				`DROP OPERATOR %s.* (text, text)`,
+				`CREATE OPERATOR %s.* (LEFTARG = text, RIGHTARG = text, FUNCTION = %s.addg)`,
+			},
+		},
+		{
+			name:   "type redefined",
+			setup:  []string{`CREATE DOMAIN %s.dd AS text`},
+			expr:   "price::dd",
+			change: []string{`DROP DOMAIN %s.dd`, `CREATE DOMAIN %s.dd AS varchar(3)`},
+		},
+		{
+			// libc's C and POSIX locales exist on every server, whatever
+			// ICU support it was built with.
+			name:   "collation redefined",
+			setup:  []string{`CREATE COLLATION %s.cc (provider = libc, locale = 'C')`},
+			expr:   `price COLLATE %s.cc`,
+			change: []string{`DROP COLLATION %s.cc`, `CREATE COLLATION %s.cc (provider = libc, locale = 'POSIX')`},
+		},
+		{
+			name: "function in public",
+			setup: []string{`
+				CREATE FUNCTION public.to_cents_zz(text) RETURNS integer
+					LANGUAGE sql IMMUTABLE AS 'SELECT 100'`},
+			expr: "to_cents_zz(price)",
+			change: []string{`
+				CREATE OR REPLACE FUNCTION public.to_cents_zz(text) RETURNS integer
+					LANGUAGE sql IMMUTABLE AS 'SELECT 200'`},
+			cleanup: `DROP FUNCTION IF EXISTS public.to_cents_zz(text)`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newResolutionFixture(t)
+			if tc.cleanup != "" {
+				t.Cleanup(func() {
+					_, err := f.pool.Exec(context.WithoutCancel(t.Context()), tc.cleanup)
+					require.NoError(t, err)
+				})
+			}
+			for _, s := range tc.setup {
+				f.exec(t, s)
+			}
+			conversions := map[string]string{"price": strings.ReplaceAll(tc.expr, "%s", f.schema)}
+			before := f.fingerprint(t, conversions)
+			for _, s := range tc.change {
+				f.exec(t, s)
+			}
+			assert.NotEqual(t, before, f.fingerprint(t, conversions))
+		})
+	}
+}
+
+// Every column's conversion is digested, whichever column sorts first: the
+// function only the second column calls changes the fingerprint.
+func TestResolutionFingerprintDigestsEveryConvertedColumn(t *testing.T) {
+	f := newResolutionFixture(t)
+	f.exec(t, `
+		CREATE FUNCTION %s.to_cents(text) RETURNS integer
+			LANGUAGE sql IMMUTABLE AS 'SELECT 100'`)
+	conversions := map[string]string{"a_price": "price::integer", "b_price": "to_cents(price)"}
+	before := f.fingerprint(t, conversions)
+
+	f.exec(t, `
+		CREATE OR REPLACE FUNCTION %s.to_cents(text) RETURNS integer
+			LANGUAGE sql IMMUTABLE AS 'SELECT 200'`)
+	assert.NotEqual(t, before, f.fingerprint(t, conversions))
 }

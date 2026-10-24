@@ -28,7 +28,10 @@ type querier interface {
 // the shadow build can change what a later chunk runs without any chunk
 // failing. The fingerprint is a digest of every catalog entry under a name
 // an expression spells, in every schema the path would look in: the
-// signature the server resolves a call by and the definition it then runs.
+// signature the server resolves a call by and the definition it then runs,
+// which for a function is its body in either form (prosrc or a SQL-standard
+// prosqlbody), its strictness, its own SET settings, and its argument
+// defaults, since each of them changes what a call returns.
 // The shadow build records it in the proof, and each guarded transaction
 // recomputes it and refuses to write when it differs (CO-9).
 //
@@ -40,9 +43,10 @@ type querier interface {
 // changes it too, and a changed function body under a name an expression
 // calls changes it although resolution did not, since either is a catalog
 // the build did not see. It is also narrower than everything a resolution
-// touches: an implicit cast the server picks from pg_cast, the labels of
-// an enum type, and the constraints of a domain are not under a name the
-// expression spells and are not digested.
+// touches: an implicit cast the server picks from pg_cast, the function
+// behind a cast the expression performs, the functions a called function
+// calls in turn, the labels of an enum type, and the constraints of a
+// domain are not under a name the expression spells and are not digested.
 //
 // The result is empty when conversions is empty, so a proof for a copy
 // that evaluates no expression carries no fingerprint; a copy that does
@@ -146,7 +150,10 @@ const resolutionSQL = `
 	       COALESCE(p.proallargtypes::pg_catalog.text, ''),
 	       COALESCE(p.proargmodes::pg_catalog.text, ''),
 	       p.pronargdefaults, p.provariadic, p.prokind, p.proretset, p.prorettype,
-	       p.provolatile, p.prolang,
+	       p.provolatile, p.prolang, p.proisstrict,
+	       COALESCE(p.proconfig::pg_catalog.text, ''),
+	       COALESCE(p.proargdefaults::pg_catalog.text, ''),
+	       COALESCE(p.prosqlbody::pg_catalog.text, ''),
 	       COALESCE(p.prosrc, ''), COALESCE(p.probin, ''))
 	  FROM ROWS FROM (pg_catalog.unnest($1::pg_catalog.text[]), pg_catalog.unnest($2::pg_catalog.text[])) AS c(nspname, name)
 	  JOIN pg_catalog.pg_namespace n ON n.nspname OPERATOR(pg_catalog.=) c.nspname
@@ -157,7 +164,8 @@ const resolutionSQL = `
 	       o.oprkind, o.oprleft, o.oprright, o.oprresult, o.oprcode::pg_catalog.oid,
 	       COALESCE(f.proargtypes::pg_catalog.text, ''),
 	       COALESCE(f.prorettype::pg_catalog.text, ''), COALESCE(f.provolatile::pg_catalog.text, ''),
-	       COALESCE(f.prolang::pg_catalog.text, ''),
+	       COALESCE(f.prolang::pg_catalog.text, ''), COALESCE(f.proisstrict::pg_catalog.text, ''),
+	       COALESCE(f.proconfig::pg_catalog.text, ''), COALESCE(f.prosqlbody::pg_catalog.text, ''),
 	       COALESCE(f.prosrc, ''), COALESCE(f.probin, ''))
 	  FROM ROWS FROM (pg_catalog.unnest($3::pg_catalog.text[]), pg_catalog.unnest($4::pg_catalog.text[])) AS c(nspname, name)
 	  JOIN pg_catalog.pg_namespace n ON n.nspname OPERATOR(pg_catalog.=) c.nspname

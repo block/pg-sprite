@@ -479,17 +479,28 @@ the statement ran in, a *conversion fingerprint* (`pkg/internal/chunksql`
 `ResolutionFingerprint`, carried as `BuiltShadow.ConversionFingerprint` and
 `Proof.ConversionFingerprint`): a digest of every catalog entry under a name the expressions
 spell, in every schema the path would look in — a function's signature, kind, volatility,
-language, and body; an operator's operand and result types and its function; a type's
-category, input and output functions, base type, element, and collation; a collation's
-provider, determinism, locale, and version — rendered from the catalog alone, never through a
-deparser. Every guarded transaction of the copier, the verifier, and the applier recomputes it
-before it writes and refuses when it differs (`copy-conversion-drift` from the copier,
-`ErrInvariantViolation` from the other two); a resume re-derives it through `InspectShadow`
-and compares it as part of the proof. The digest is wider than resolution — an overload added
+language, strictness, own `SET` settings, argument defaults, and body in either form (`prosrc`
+or a SQL-standard `prosqlbody`); an operator's operand and result types and its function, with
+that function's strictness, settings, and body; a type's category, input and output functions,
+base type, element, and collation; a collation's provider, determinism, locale, and version —
+rendered from the catalog alone, never through a deparser. Every guarded transaction of the
+copier, the verifier, and the applier recomputes it before it reads or writes and refuses when
+it differs (`copy-conversion-drift` from the copier, `ErrInvariantViolation` from the other
+two). The check and the statements that evaluate the expressions are separate statements, so
+the copier's chunk, the applier's flush, and the verifier's repair recompute it once more after
+their writes and before they commit: under `READ COMMITTED`, the server default, that read sees
+every change a write could have resolved, and the write rolls back. Under a stricter isolation
+level it reads the transaction's first snapshot, and a change made and undone again between the
+two reads is seen by neither; in both cases the verifier's recomputation of the source side is
+what catches rows the change reached. A resume re-derives the fingerprint through
+`InspectShadow` and compares it as part of the proof, and a proof that differs from the row's
+in its conversion fingerprint alone is refused as `copy-conversion-drift`, which undoing the
+change cures. The digest is wider than resolution — an overload added
 under a spelled name that the server would never pick, or a replaced body the server would
 still pick, refuses too, since either is a catalog the build did not see — and narrower than
-everything a resolution touches: an implicit cast from `pg_cast`, an enum type's labels, and
-a domain's constraints are under no name the expression spells and are not digested. A proof
+everything a resolution touches: an implicit cast from `pg_cast`, the function behind a cast
+the expression performs, the functions a called function calls in turn, an enum type's labels,
+and a domain's constraints are under no name the expression spells and are not digested. A proof
 that converts columns always carries a fingerprint and a proof that converts none never does;
 a `Shadow` that breaks either pairing is refused before a connection opens (ST-6). The
 copier's cuts and measurements, and every conversion-free copy, pass, and flush, keep the

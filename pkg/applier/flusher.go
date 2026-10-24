@@ -225,6 +225,12 @@ func (f *Flusher) flush(ctx context.Context, pool *pgxpool.Pool, batch Batch) (R
 	if err != nil {
 		return Result{}, err
 	}
+	// The guard confirmed the conversions' resolution before the writes;
+	// confirming it again after them, before the commit, rolls the batch
+	// back when a catalog change committed in between (CO-9).
+	if err := f.confirmResolution(ctx, tx); err != nil {
+		return Result{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return Result{}, fmt.Errorf("commit flush into %s.%s: %w", f.shadow.Schema(), f.shadow.ShadowTable(), err)
 	}

@@ -41,7 +41,10 @@ const (
 
 // copyChunk copies one chunk in its own guarded transaction: it inserts the
 // chunk's live rows into the shadow without overwriting any row already
-// there and returns the number of rows the insert added.
+// there and returns the number of rows the insert added. A copy that
+// evaluates conversion expressions confirms their resolution once more
+// after the insert and before the commit (CO-9), so a catalog change that
+// committed between the guard's check and the insert rolls the chunk back.
 func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk) (int64, error) {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -59,6 +62,9 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 	tag, err := tx.Exec(ctx, c.sql, chunk.Lower(), chunk.Upper())
 	if err != nil {
 		return 0, fmt.Errorf("copy chunk [%d, %d] of %s.%s into %s: %w", chunk.Lower(), chunk.Upper(), c.shadow.Schema(), c.shadow.SourceTable(), c.shadow.ShadowTable(), err)
+	}
+	if err := c.confirmResolution(ctx, tx); err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit chunk [%d, %d] of %s.%s: %w", chunk.Lower(), chunk.Upper(), c.target.Schema(), c.target.Table(), err)
@@ -102,8 +108,16 @@ func (c *Copier) guard(ctx context.Context, tx pgx.Tx, shadowMode lockMode) erro
 // created, replaced, or dropped under one of those names since the build
 // could make this chunk evaluate them differently from the gated statement
 // without any statement failing. The fingerprint is read in the chunk's
-// own transaction, so it digests the catalog the chunk's statement would
-// resolve in. A copy without conversions has nothing to confirm.
+// own transaction, but by a statement of its own, so a change committed
+// after the read and before the insert would still reach the insert: the
+// guard's read narrows that window, and the read copyChunk repeats after
+// the insert rolls back a chunk that resolved through a change, since
+// under READ COMMITTED (the server default) that read sees every change
+// the insert could have resolved. A change made and undone again between
+// the two reads is seen by neither, and under a stricter isolation level
+// the repeat reads the transaction's first snapshot; in both cases the
+// verifier's recomputation of the source side is what catches a chunk the
+// change reached. A copy without conversions has nothing to confirm.
 func (c *Copier) confirmResolution(ctx context.Context, tx pgx.Tx) error {
 	if len(c.shadow.Conversions()) == 0 {
 		return nil

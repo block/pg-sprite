@@ -52,12 +52,21 @@ admits it, and the server never checks the body. It must exist, in the source sc
 `public`, before the shadow build, since the expression resolves on that path in the build,
 the copy, the recopy, and every flush ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)).
 The build records a fingerprint of what the expression's names resolved to — the functions,
-operators, types, and collations by name across that path, bodies included — and the copy,
-the verifier, and the catch-up recompute it inside each of their transactions; a function or
-operator created, replaced, or dropped on that path after the build refuses the run as
-`copy-conversion-drift` before the changed resolution lands a row, and a run resumed over
-such a change is refused as `resume-row-mismatch`. Make the change before the build, or
-abandon the run with `--restart` and build again over the new catalog.
+operators, types, and collations by name across that path, with each function's body,
+strictness, `SET` settings, and argument defaults — and the copy, the verifier, and the
+catch-up recompute it inside each of their transactions, and once more after each write and
+before its commit. A function or operator created, replaced, or dropped on that path after the
+build refuses the run as `copy-conversion-drift`, and a run resumed over such a change is
+refused the same way until the change is undone. Under `READ COMMITTED`, the server default,
+a write that resolved through the change is rolled back by the second check. Two cases get
+past both checks: a stricter default isolation level, where the second check reads the
+transaction's first snapshot, and a change made and undone again between the two checks. In
+both, the verifier's comparison against the source is what catches the rows it reached. Make the change
+before the build, or abandon the run with `--restart` and build again over the new catalog.
+The fingerprint covers only the names the expression spells: the functions a wrapper calls in
+turn, and the function behind a cast the expression performs (`price::cents` through
+`CREATE CAST`), are not under a spelled name and are not pinned. Keeping those still for the
+length of the run is the wrapper author's responsibility.
 
 Two casts the server does call immutable still have more than one text rendering: a
 `float4` or `float8` to `text` follows `extra_float_digits`, and a `bytea` to `text`

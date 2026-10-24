@@ -85,6 +85,21 @@ func TestConversionNamesOf(t *testing.T) {
 			want: statement.ConversionNames{Operators: unqualified("<=", ">=")},
 		},
 		{
+			name: "BETWEEN SYMMETRIC is the same two comparisons, tried both ways round",
+			expr: `qty BETWEEN SYMMETRIC 10 AND 1`,
+			want: statement.ConversionNames{Operators: unqualified("<=", ">=")},
+		},
+		{
+			name: "NOT BETWEEN is the strict comparisons the server rewrites it to",
+			expr: `qty NOT BETWEEN 1 AND 10`,
+			want: statement.ConversionNames{Operators: unqualified("<", ">")},
+		},
+		{
+			name: "NOT BETWEEN SYMMETRIC is the same strict comparisons, tried both ways round",
+			expr: `qty NOT BETWEEN SYMMETRIC 10 AND 1`,
+			want: statement.ConversionNames{Operators: unqualified("<", ">")},
+		},
+		{
 			name: "COLLATE names the collation",
 			expr: `code COLLATE "C"`,
 			want: statement.ConversionNames{Collations: unqualified("C")},
