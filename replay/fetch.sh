@@ -55,8 +55,33 @@ fi
 
 mkdir -p "${PROJECT_DIR}/corpus"
 
+# corpus/.pin couples the corpus on disk to COMMIT: the resolved commit on
+# the first line, then one "<sha256>  <file>" per corpus file. A cached file
+# is trusted only when its digest matches that record, and a pin move
+# discards the whole cache — so the pin identifies the corpus, not just the
+# last thing typed into project.conf. replay.sh refuses a corpus whose
+# record disagrees with COMMIT (verify_corpus_pin in common.sh).
+PIN_FILE="${PROJECT_DIR}/corpus/.pin"
+pinned=""
+[ -s "$PIN_FILE" ] && pinned="$(head -n1 "$PIN_FILE")"
+if [ -n "$pinned" ] && [ "$pinned" != "$COMMIT" ]; then
+    echo "pin moved ${pinned:0:12} -> ${COMMIT:0:12}: discarding the cached corpus"
+    for f in "${FILES[@]}"; do
+        rm -f "${PROJECT_DIR}/corpus/$f"
+    done
+    rm -f "$PIN_FILE"
+    pinned=""
+fi
+
+# Digest recorded for a file at the current pin; fails when there is none.
+recorded_digest() {
+    [ -n "$pinned" ] || return 1
+    awk -v f="$1" '$2 == f {print $1; found=1} END {exit !found}' "$PIN_FILE"
+}
+
 for f in "${FILES[@]}"; do
-    if [ -s "${PROJECT_DIR}/corpus/$f" ]; then
+    if want="$(recorded_digest "$f")" \
+        && [ "$(file_sha256 "${PROJECT_DIR}/corpus/$f")" = "$want" ]; then
         echo "have  $f"
         continue
     fi
@@ -64,6 +89,13 @@ for f in "${FILES[@]}"; do
     curl -fsSL --retry 3 -o "${PROJECT_DIR}/corpus/$f.tmp" "${BASE_URL}/${f}"
     mv "${PROJECT_DIR}/corpus/$f.tmp" "${PROJECT_DIR}/corpus/$f"
 done
+
+{
+    echo "$COMMIT"
+    for f in "${FILES[@]}"; do
+        echo "$(file_sha256 "${PROJECT_DIR}/corpus/$f")  $f"
+    done
+} >"$PIN_FILE"
 
 echo
 echo "corpus complete: ${#FILES[@]} files at ${REPO_SLUG}@${COMMIT:0:12}"
