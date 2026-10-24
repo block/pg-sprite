@@ -2,6 +2,7 @@ package applier_test
 
 import (
 	"context"
+	"maps"
 	"strings"
 	"sync"
 	"testing"
@@ -58,7 +59,49 @@ func TestFlushRollsBackABatchWhoseWriteRanAfterTheConversionDrifted(t *testing.T
 	f.createPricedOrders(t, 50)
 	p := f.preparePriced(t, priceInCents)
 	f.exec(t, `UPDATE %s.orders SET price = '7.50' WHERE id = 5`)
+	pool := f.poolPlantingTimesZeroBeforeFirstInsert(t, nil)
 
+	result, err := p.flush.Flush(t.Context(), pool, batch(
+		image(5, col("price", "7.50"), col("note", "order 5")),
+	))
+
+	require.ErrorIs(t, err, applier.ErrInvariantViolation)
+	assert.Equal(t, applier.Result{}, result, "nothing was written")
+	price5, _ := f.text(t, p.shadow.ShadowTable(), "price", 5)
+	assert.Equal(t, "525", *price5, "the write that ran through the planted operator rolled back")
+}
+
+// The same drift under a pool whose sessions default to REPEATABLE READ:
+// there the repeated read would see the flush's first snapshot, taken
+// before the operator was planted, and the batch would commit zero cents.
+// The flush transaction pins READ COMMITTED whatever the session default,
+// so the repeated read still sees the operator and the batch rolls back.
+func TestFlushRollsBackADriftedBatchWhenSessionsDefaultToRepeatableRead(t *testing.T) {
+	f := newFlushFixture(t)
+	f.createPricedOrders(t, 50)
+	p := f.preparePriced(t, priceInCents)
+	f.exec(t, `UPDATE %s.orders SET price = '7.50' WHERE id = 5`)
+	pool := f.poolPlantingTimesZeroBeforeFirstInsert(t, map[string]string{"default_transaction_isolation": "repeatable read"})
+	var isolation string
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT current_setting('transaction_isolation')`).Scan(&isolation))
+	require.Equal(t, "repeatable read", isolation, "the pool's sessions default to REPEATABLE READ")
+
+	result, err := p.flush.Flush(t.Context(), pool, batch(
+		image(5, col("price", "7.50"), col("note", "order 5")),
+	))
+
+	require.ErrorIs(t, err, applier.ErrInvariantViolation)
+	assert.Equal(t, applier.Result{}, result, "nothing was written")
+	price5, _ := f.text(t, p.shadow.ShadowTable(), "price", 5)
+	assert.Equal(t, "525", *price5, "the write that ran through the planted operator rolled back")
+}
+
+// poolPlantingTimesZeroBeforeFirstInsert is a pool on the fixture's
+// database, with params laid over its sessions' settings, whose
+// connections plant a `numeric * integer` that answers zero on the
+// build's path — once, just before the first INSERT any of them sends.
+func (f flushFixture) poolPlantingTimesZeroBeforeFirstInsert(t *testing.T, params map[string]string) *pgxpool.Pool {
+	t.Helper()
 	plant := &beforeFirstInsert{hook: func() {
 		f.exec(t, `
 			CREATE FUNCTION %s.times_zero(numeric, integer) RETURNS numeric
@@ -69,18 +112,11 @@ func TestFlushRollsBackABatchWhoseWriteRanAfterTheConversionDrifted(t *testing.T
 	poolConfig, err := pgxpool.ParseConfig(f.cfg.URL)
 	require.NoError(t, err)
 	poolConfig.ConnConfig.Tracer = plant
+	maps.Copy(poolConfig.ConnConfig.RuntimeParams, params)
 	pool, err := pgxpool.NewWithConfig(t.Context(), poolConfig)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
-
-	result, err := p.flush.Flush(t.Context(), pool, batch(
-		image(5, col("price", "7.50"), col("note", "order 5")),
-	))
-
-	require.ErrorIs(t, err, applier.ErrInvariantViolation)
-	assert.Equal(t, applier.Result{}, result, "nothing was written")
-	price5, _ := f.text(t, p.shadow.ShadowTable(), "price", 5)
-	assert.Equal(t, "525", *price5, "the write that ran through the planted operator rolled back")
+	return pool
 }
 
 // beforeFirstInsert is a pgx query tracer that runs hook once, before the

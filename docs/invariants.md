@@ -464,8 +464,9 @@ transaction, and the verifier's cut runs inside its guarded transaction under th
 (decoy bigint `>=` operator test in both packages: under the session path every cut returns the
 same key and the second cut fails CO-4). The one widening is the copy statement of a shadow
 whose proof carries conversions — the `USING` expressions of an `ALTER COLUMN TYPE` — which
-the copier's chunk transaction, every guarded transaction of the verifier's pass, and every
-flush transaction of the applier's catch-up run under the shadow build's own path
+the copier's chunk transaction, every guarded transaction of the verifier's pass, every
+flush transaction of the applier's catch-up, and the drain the cutover flushes inside its swap
+transaction (`Flusher.FlushIn`) run under the shadow build's own path
 (`pg_catalog`, then the source schema, then `public`, built by `LocalSearchPath` so the
 catalog stays first): the expression ran under that path when the
 statement built the shadow, and an unqualified name in it must resolve in the copy, the
@@ -482,17 +483,21 @@ spell, in every schema the path would look in — a function's signature, kind, 
 language, strictness, own `SET` settings, argument defaults, and body in either form (`prosrc`
 or a SQL-standard `prosqlbody`); an operator's operand and result types and its function, with
 that function's strictness, settings, and body; a type's category, input and output functions,
-base type, element, and collation; a collation's provider, determinism, locale, and version —
+base type, element, and collation; a collation's whole catalog row but its oid and owner,
+locale and ICU rules included in whichever columns the server version keeps them —
 rendered from the catalog alone, never through a deparser. Every guarded transaction of the
-copier, the verifier, and the applier recomputes it before it reads or writes and refuses when
-it differs (`copy-conversion-drift` from the copier, `ErrInvariantViolation` from the other
-two). The check and the statements that evaluate the expressions are separate statements, so
-the copier's chunk, the applier's flush, and the verifier's repair recompute it once more after
-their writes and before they commit: under `READ COMMITTED`, the server default, that read sees
-every change a write could have resolved, and the write rolls back. Under a stricter isolation
-level it reads the transaction's first snapshot, and a change made and undone again between the
-two reads is seen by neither; in both cases the verifier's recomputation of the source side is
-what catches rows the change reached. A resume re-derives the fingerprint through
+copier, the verifier, and the applier, and the cutover's drain, recomputes it before it reads
+or writes and refuses when it differs (`copy-conversion-drift` from the copier,
+`ErrInvariantViolation` from the others). The check and the statements that evaluate the
+expressions are separate statements, so the copier's chunk, the applier's flush, the verifier's
+repair, and the drain recompute it once more after their writes and before they commit. Each
+of those write transactions is `READ COMMITTED` whatever the server or role configures as
+`default_transaction_isolation` — the copier, the flush, and the repair begin theirs so, and
+the cutover begins its swap transaction so — so that read takes a snapshot after the writes,
+sees every change a write could have resolved, and the write rolls back. A change made and
+undone again between the two reads is seen by neither; the verifier's recomputation of the
+source side is what catches rows such a change reached, except in the drain, which no pass
+follows. A resume re-derives the fingerprint through
 `InspectShadow` and compares it as part of the proof, and a proof that differs from the row's
 in its conversion fingerprint alone is refused as `copy-conversion-drift`, which undoing the
 change cures. The digest is wider than resolution — an overload added

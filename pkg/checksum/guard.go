@@ -27,6 +27,17 @@ func snapshotRead() pgx.TxOptions {
 	return pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}
 }
 
+// repairWrite is the transaction a recopy runs in: read-write and READ
+// COMMITTED whatever the server or role configures, so the resolution
+// check repeated after the copies reads a snapshot taken after them and
+// sees a catalog change they resolved through (CO-9). Nothing in a recopy
+// relies on one snapshot across its statements: each chunk's copy reads
+// the source as one statement, and the stream or the reread settles what
+// changed after it.
+func repairWrite() pgx.TxOptions {
+	return pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite}
+}
+
 // begin opens a transaction with the given options and guards it.
 func (v *Verifier) begin(ctx context.Context, pool *pgxpool.Pool, options pgx.TxOptions) (pgx.Tx, error) {
 	tx, err := pool.BeginTx(ctx, options)

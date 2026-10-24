@@ -4,6 +4,7 @@ import (
 	"math"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -61,6 +62,42 @@ func TestCheckRefusesWhenAConversionResolvesDifferentlyThanAtTheBuild(t *testing
 // operator, so the repair refuses and rolls back with the chunk as it was.
 func TestCheckRollsBackARepairWhoseRecopyRanAfterTheConversionDrifted(t *testing.T) {
 	f := newVerifierFixture(t)
+	f.assertRepairThroughADriftRollsBack(t, func(hook func()) *pgxpool.Pool {
+		return f.poolHookedBeforeStatement(t, "INSERT INTO", hook)
+	})
+}
+
+// The same drift under a pool whose sessions default to REPEATABLE READ:
+// there the repeated read would see the repair's first snapshot, taken
+// before the operator was planted, and the recopy would commit zero for
+// the chunk. The repair's transaction pins READ COMMITTED whatever the
+// session default, so the repeated read still sees the operator and the
+// repair rolls back.
+func TestCheckRollsBackADriftedRepairWhenSessionsDefaultToRepeatableRead(t *testing.T) {
+	f := newVerifierFixture(t)
+	f.assertRepairThroughADriftRollsBack(t, func(hook func()) *pgxpool.Pool {
+		pc, err := pgxpool.ParseConfig(f.cfg.URL)
+		require.NoError(t, err)
+		pc.ConnConfig.Tracer = &statementHook{prefix: "INSERT INTO", hook: hook}
+		pc.ConnConfig.RuntimeParams["default_transaction_isolation"] = "repeatable read"
+		pool, err := pgxpool.NewWithConfig(t.Context(), pc)
+		require.NoError(t, err)
+		t.Cleanup(pool.Close)
+		var isolation string
+		require.NoError(t, pool.QueryRow(t.Context(), `SELECT current_setting('transaction_isolation')`).Scan(&isolation))
+		require.Equal(t, "repeatable read", isolation, "the pool's sessions default to REPEATABLE READ")
+		return pool
+	})
+}
+
+// assertRepairThroughADriftRollsBack copies orders into a shadow that
+// converts qty through `qty::numeric * 1`, tampers with one shadow row,
+// and runs a repairing pass on the pool newPool returns, whose hook runs
+// just before the recopy's first INSERT is sent and plants a numeric *
+// integer that answers zero on the build's path. The pass must refuse as
+// an invariant violation with the chunk as it was before the repair.
+func (f verifierFixture) assertRepairThroughADriftRollsBack(t *testing.T, newPool func(hook func()) *pgxpool.Pool) {
+	t.Helper()
 	f.createOrders(t)
 	target := f.prove(t, "orders")
 	lock := f.lock(t, "orders")
@@ -70,7 +107,7 @@ func TestCheckRollsBackARepairWhoseRecopyRanAfterTheConversionDrifted(t *testing
 	f.copy(t, target, shadow, lock)
 	f.exec(t, "UPDATE "+f.shadowName(shadow)+" SET qty = 0 WHERE id = 1500")
 
-	pool := f.poolHookedBeforeStatement(t, "INSERT INTO", func() {
+	pool := newPool(func() {
 		f.exec(t, `
 			CREATE FUNCTION %s.times_zero(numeric, integer) RETURNS numeric
 				LANGUAGE sql IMMUTABLE

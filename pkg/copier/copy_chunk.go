@@ -45,8 +45,11 @@ const (
 // evaluates conversion expressions confirms their resolution once more
 // after the insert and before the commit (CO-9), so a catalog change that
 // committed between the guard's check and the insert rolls the chunk back.
+// The transaction is READ COMMITTED whatever the server or role
+// configures, so that repeated read takes a snapshot after the insert's;
+// the insert is one statement and relies on no snapshot beyond its own.
 func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk) (int64, error) {
-	tx, err := pool.Begin(ctx)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite})
 	if err != nil {
 		return 0, fmt.Errorf("begin copy of chunk [%d, %d]: %w", chunk.Lower(), chunk.Upper(), err)
 	}
@@ -112,12 +115,11 @@ func (c *Copier) guard(ctx context.Context, tx pgx.Tx, shadowMode lockMode) erro
 // after the read and before the insert would still reach the insert: the
 // guard's read narrows that window, and the read copyChunk repeats after
 // the insert rolls back a chunk that resolved through a change, since
-// under READ COMMITTED (the server default) that read sees every change
+// under READ COMMITTED, which copyChunk pins, that read sees every change
 // the insert could have resolved. A change made and undone again between
-// the two reads is seen by neither, and under a stricter isolation level
-// the repeat reads the transaction's first snapshot; in both cases the
-// verifier's recomputation of the source side is what catches a chunk the
-// change reached. A copy without conversions has nothing to confirm.
+// the two reads is seen by neither; the verifier's recomputation of the
+// source side is what catches a chunk such a change reached. A copy
+// without conversions has nothing to confirm.
 func (c *Copier) confirmResolution(ctx context.Context, tx pgx.Tx) error {
 	if len(c.shadow.Conversions()) == 0 {
 		return nil

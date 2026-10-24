@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -154,15 +155,60 @@ func TestCopierRefusesWhenANotBetweenComparisonIsPlantedOnThePath(t *testing.T) 
 // lands.
 func TestCopierRollsBackAChunkWhoseInsertRanAfterTheConversionDrifted(t *testing.T) {
 	f := newCopierFixture(t)
+	parked := newInsertPause()
+	pool := f.pausedPool(t, parked)
+
+	shadowRows, inserted, err := f.copyWithADriftPlantedAtTheFirstInsert(t, pool, parked)
+
+	require.ErrorIs(t, err, copier.ErrInvariantViolation)
+	assert.Equal(t, copier.CauseConversionDrift, copier.RefusalCauseOf(err))
+	assert.Zero(t, shadowRows, "the chunk whose insert ran through the planted operator rolled back")
+	assert.Zero(t, inserted)
+}
+
+// The same drift under a pool whose sessions default to REPEATABLE READ:
+// there the repeated read would see the transaction's first snapshot,
+// taken before the operator was planted, and the chunk would commit zero
+// cents. The chunk transaction pins READ COMMITTED whatever the session
+// default, so the repeated read still sees the operator and the chunk
+// rolls back.
+func TestCopierRollsBackADriftedChunkWhenSessionsDefaultToRepeatableRead(t *testing.T) {
+	f := newCopierFixture(t)
+	parked := newInsertPause()
+	poolConfig, err := pgxpool.ParseConfig(f.cfg.URL)
+	require.NoError(t, err)
+	poolConfig.ConnConfig.Tracer = parked
+	poolConfig.ConnConfig.RuntimeParams["default_transaction_isolation"] = "repeatable read"
+	pool, err := pgxpool.NewWithConfig(t.Context(), poolConfig)
+	require.NoError(t, err)
+	t.Cleanup(pool.Close)
+	var isolation string
+	require.NoError(t, pool.QueryRow(t.Context(), `SELECT current_setting('transaction_isolation')`).Scan(&isolation))
+	require.Equal(t, "repeatable read", isolation, "the pool's sessions default to REPEATABLE READ")
+
+	shadowRows, inserted, err := f.copyWithADriftPlantedAtTheFirstInsert(t, pool, parked)
+
+	require.ErrorIs(t, err, copier.ErrInvariantViolation)
+	assert.Equal(t, copier.CauseConversionDrift, copier.RefusalCauseOf(err))
+	assert.Zero(t, shadowRows, "the chunk whose insert ran through the planted operator rolled back")
+	assert.Zero(t, inserted)
+}
+
+// copyWithADriftPlantedAtTheFirstInsert copies a priced orders table whose
+// shadow converts price to cents through `*`, on pool, whose connections
+// park at their first insert on parked: while the first chunk's insert is
+// parked after its guard passed, a `numeric * integer` that answers zero
+// is planted on the build's path, and the insert then resumes. It returns
+// the run's error, the rows the shadow holds afterwards, and the rows the
+// copier counts as inserted.
+func (f copierFixture) copyWithADriftPlantedAtTheFirstInsert(t *testing.T, pool *pgxpool.Pool, parked *statementPause) (int64, int64, error) {
+	t.Helper()
 	f.createPricedOrders(t, 100)
 	target := f.prove(t, "orders")
 	lock := f.lock(t, "orders")
 	shadow := f.buildWith(t, lock, target, `
 		ALTER TABLE %s
 			ALTER COLUMN price TYPE integer USING (price::numeric * 100)::integer`)
-
-	parked := newInsertPause()
-	pool := f.pausedPool(t, parked)
 	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{
 		Workers: 1,
 		Chunker: copier.ChunkerOptions{InitialRows: 100, MaxRows: 100},
@@ -189,10 +235,7 @@ func TestCopierRollsBackAChunkWhoseInsertRanAfterTheConversionDrifted(t *testing
 
 	const stopDeadline = 30 * time.Second
 	err = awaitRun(t, result, stopDeadline, "the copy")
-	require.ErrorIs(t, err, copier.ErrInvariantViolation)
-	assert.Equal(t, copier.CauseConversionDrift, copier.RefusalCauseOf(err))
-	assert.Zero(t, f.count(t, shadow.ShadowTable(), "true"), "the chunk whose insert ran through the planted operator rolled back")
-	assert.Zero(t, c.Position().RowsInserted)
+	return f.count(t, shadow.ShadowTable(), "true"), c.Position().RowsInserted, err
 }
 
 // A copy that converts nothing resolves no expression, so its proof

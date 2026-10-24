@@ -53,15 +53,16 @@ admits it, and the server never checks the body. It must exist, in the source sc
 the copy, the recopy, and every flush ([CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)).
 The build records a fingerprint of what the expression's names resolved to — the functions,
 operators, types, and collations by name across that path, with each function's body,
-strictness, `SET` settings, and argument defaults — and the copy, the verifier, and the
-catch-up recompute it inside each of their transactions, and once more after each write and
-before its commit. A function or operator created, replaced, or dropped on that path after the
-build refuses the run as `copy-conversion-drift`, and a run resumed over such a change is
-refused the same way until the change is undone. Under `READ COMMITTED`, the server default,
-a write that resolved through the change is rolled back by the second check. Two cases get
-past both checks: a stricter default isolation level, where the second check reads the
-transaction's first snapshot, and a change made and undone again between the two checks. In
-both, the verifier's comparison against the source is what catches the rows it reached. Make the change
+strictness, `SET` settings, and argument defaults, and each collation's locale — and the
+copy, the verifier, the catch-up, and the swap's final drain recompute it inside each of their
+transactions, and once more after each write and before its commit. A function or operator
+created, replaced, or dropped on that path after the build refuses the run as
+`copy-conversion-drift`, and a run resumed over such a change is refused the same way until
+the change is undone. Every one of those write transactions runs `READ COMMITTED`, whatever
+`default_transaction_isolation` the server or role sets, so a write that resolved through the
+change is rolled back by the second check. One case gets past both checks: a change made and
+undone again between them. The verifier's comparison against the source is what catches the
+rows it reached, except in the swap's final drain, which no comparison follows. Make the change
 before the build, or abandon the run with `--restart` and build again over the new catalog.
 The fingerprint covers only the names the expression spells: the functions a wrapper calls in
 turn, and the function behind a cast the expression performs (`price::cents` through

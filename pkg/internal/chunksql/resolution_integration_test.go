@@ -347,6 +347,62 @@ func TestResolutionFingerprintSeesEachArmAndEachPathSchema(t *testing.T) {
 	}
 }
 
+// An ICU collation keeps its locale in a column of its own —
+// colliculocale on 15 and 16, colllocale from 17 — not in collcollate, so
+// recreating `und` (the root locale) as `und-u-kn-true` (the root locale
+// with numeric ordering, which sorts `item9` before `item10`) changes how
+// `price COLLATE cc` compares while the provider, determinism, encoding,
+// and collation version all stay the same. The fingerprint digests the
+// whole row and changes. A server built without ICU cannot create the
+// collation, and the test is skipped there.
+func TestResolutionFingerprintChangesWhenAnICUCollationsLocaleChanges(t *testing.T) {
+	f := newResolutionFixture(t)
+	var icu bool
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT EXISTS (SELECT 1 FROM pg_collation WHERE collprovider = 'i')`).Scan(&icu))
+	if !icu {
+		t.Skip("the server was built without ICU")
+	}
+	f.exec(t, `CREATE COLLATION %s.cc (provider = icu, locale = 'und')`)
+	conversions := map[string]string{"price": "price COLLATE " + f.schema + ".cc"}
+	before := f.fingerprint(t, conversions)
+	versionBefore := f.collationVersion(t, "cc")
+
+	f.exec(t, `DROP COLLATION %s.cc`)
+	f.exec(t, `CREATE COLLATION %s.cc (provider = icu, locale = 'und-u-kn-true')`)
+
+	require.Equal(t, versionBefore, f.collationVersion(t, "cc"), "only the locale differs, not the version")
+	assert.NotEqual(t, before, f.fingerprint(t, conversions))
+}
+
+// collationVersion reads the version the server recorded for the fixture
+// schema's collation name, empty when it recorded none.
+func (f resolutionFixture) collationVersion(t *testing.T, name string) string {
+	t.Helper()
+	var version string
+	require.NoError(t, f.pool.QueryRow(t.Context(), `
+		SELECT coalesce(l.collversion, '')
+		FROM pg_collation l
+		JOIN pg_namespace n ON n.oid = l.collnamespace
+		WHERE n.nspname = $1 AND l.collname = $2`, f.schema, name).Scan(&version))
+	return version
+}
+
+// A collation dropped and recreated with the same definition is the same
+// collation to every expression that names it, although it has a new oid:
+// the fingerprint leaves the row's oid out and does not change, so a
+// resume over such a recreate still matches its proof.
+func TestResolutionFingerprintIsUnchangedByACollationRecreatedAsItWas(t *testing.T) {
+	f := newResolutionFixture(t)
+	f.exec(t, `CREATE COLLATION %s.cc (provider = libc, locale = 'C')`)
+	conversions := map[string]string{"price": "price COLLATE " + f.schema + ".cc"}
+	before := f.fingerprint(t, conversions)
+
+	f.exec(t, `DROP COLLATION %s.cc`)
+	f.exec(t, `CREATE COLLATION %s.cc (provider = libc, locale = 'C')`)
+
+	assert.Equal(t, before, f.fingerprint(t, conversions))
+}
+
 // Every column's conversion is digested, whichever column sorts first: the
 // function only the second column calls changes the fingerprint.
 func TestResolutionFingerprintDigestsEveryConvertedColumn(t *testing.T) {

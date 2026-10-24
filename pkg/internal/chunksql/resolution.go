@@ -143,7 +143,14 @@ func candidates(names []statement.QualifiedName, path []string) candidateSet {
 // which is why references to other objects are rendered as OIDs rather
 // than through regproc, regtype, or a deparsing function. Nullable columns
 // are coalesced so a NULL in one and a value in another never collapse to
-// the same line.
+// the same line. A collation is digested as its whole catalog row, as
+// jsonb, because the columns that carry its locale differ by server
+// version — collcollate and collctype alone on 14, colliculocale from 15,
+// collicurules from 16, colllocale from 17 — and a column added by a later
+// version is digested without this query changing. The row's own oid and
+// owner are left out, as no other arm digests them: neither changes what
+// an expression that names the collation evaluates to, so a collation
+// recreated as it was, or given to another owner, keeps the fingerprint.
 const resolutionSQL = `
 	SELECT pg_catalog.concat_ws(E'\t', 'function', c.nspname, c.name,
 	       p.proargtypes::pg_catalog.text,
@@ -183,9 +190,7 @@ const resolutionSQL = `
 	                           AND t.typname OPERATOR(pg_catalog.=) c.name
 	UNION ALL
 	SELECT pg_catalog.concat_ws(E'\t', 'collation', c.nspname, c.name,
-	       l.collprovider, l.collisdeterministic, l.collencoding,
-	       COALESCE(l.collcollate, ''), COALESCE(l.collctype, ''),
-	       COALESCE(l.collversion, ''))
+	       (pg_catalog.to_jsonb(l) OPERATOR(pg_catalog.-) ARRAY['oid', 'collowner']::pg_catalog.text[])::pg_catalog.text)
 	  FROM ROWS FROM (pg_catalog.unnest($7::pg_catalog.text[]), pg_catalog.unnest($8::pg_catalog.text[])) AS c(nspname, name)
 	  JOIN pg_catalog.pg_namespace n ON n.nspname OPERATOR(pg_catalog.=) c.nspname
 	  JOIN pg_catalog.pg_collation l ON l.collnamespace OPERATOR(pg_catalog.=) n.oid

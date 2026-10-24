@@ -21,9 +21,14 @@ import (
 // names a relation that does not exist.
 const sqlstateUndefinedTable = "42P01"
 
-// begin opens the flush's read-write transaction and guards it.
+// begin opens the flush's read-write transaction and guards it. The
+// transaction is READ COMMITTED whatever the server or role configures:
+// the resolution check the flush repeats after its writes must read a
+// snapshot taken after them to see a catalog change they resolved through
+// (CO-9), and nothing in a flush relies on one snapshot across its
+// statements.
 func (f *Flusher) begin(ctx context.Context, pool *pgxpool.Pool) (pgx.Tx, error) {
-	tx, err := pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadWrite})
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite})
 	if err != nil {
 		return nil, fmt.Errorf("begin flush into %s.%s: %w", f.shadow.Schema(), f.shadow.ShadowTable(), err)
 	}

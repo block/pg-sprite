@@ -86,7 +86,7 @@ func (v *Verifier) recopyAll(ctx context.Context, pool *pgxpool.Pool, mismatches
 // transaction. The recopy is the copier's own statement, not a copy of it,
 // so a repair puts back exactly what a copy would have.
 func (v *Verifier) recopy(ctx context.Context, pool *pgxpool.Pool, mismatches []Mismatch) ([]Repair, error) {
-	tx, err := v.begin(ctx, pool, pgx.TxOptions{AccessMode: pgx.ReadWrite})
+	tx, err := v.begin(ctx, pool, repairWrite())
 	if err != nil {
 		return nil, err
 	}
