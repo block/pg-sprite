@@ -26,6 +26,6 @@ behaviors worth knowing when reading the results:
 
 - `CREATE INDEX IF NOT EXISTS` is refused by design — a name-only no-op cannot prove
   the existing index is valid or even the requested one.
-- Buzz's unnamed `ADD FOREIGN KEY` is refused (`not-native-safe-rewrite-required`)
-  while the same constraint written with `CONSTRAINT <name>` executes via the safer
-  `NOT VALID` + `VALIDATE` sequence — the rewrite needs a name to reference.
+- Buzz's unnamed `ADD FOREIGN KEY` executes via the safer `NOT VALID` + `VALIDATE`
+  sequence: the `VALIDATE` step has to name the constraint, so pg-sprite states the
+  name PostgreSQL would choose (`<table>_<columns>_fkey`).

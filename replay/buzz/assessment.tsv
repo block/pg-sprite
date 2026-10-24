@@ -39,9 +39,9 @@
 0006 94-118 refuse:unsupported-statement:no-online-safety-problem:declarative-front-door
 0006 120-121 execute
 0006 122-124 execute
-# Unnamed ADD FOREIGN KEY: the safer NOT VALID + VALIDATE sequence needs a
-# constraint name to reference; the same constraint with CONSTRAINT <name> executes.
-0006 128-130 refuse:not-native-safe-rewrite-required:capability-boundary
+# Unnamed ADD FOREIGN KEY: executes as NOT VALID + VALIDATE under the name
+# PostgreSQL would choose (moderation_reports_community_id_action_id_fkey).
+0006 128-130 execute
 0007 12-12 psql
 0007 14-22 refuse:unsupported-statement:no-online-safety-problem:declarative-front-door
 0007 26-27 execute
