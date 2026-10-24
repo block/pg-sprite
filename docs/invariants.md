@@ -1195,13 +1195,36 @@ column's values. No later gate can catch a wrong list: CO-1's digest compares th
 both sides, so a name-matched list verifies clean, and the list itself is the guard. The copier,
 the checksum digest and its repair, and the live flusher all take their columns from
 `BuiltShadow.CopyColumns()`, and a resume re-derives the list from the catalog and compares it
-field for field against the checkpointed proof. *Enforced:* `pkg/schemachange`
-(`readColumnPositions` reads both relations' live attribute numbers inside the build's and the
-inspection's transaction; `sameColumns` keeps a column only when its live position equals its
-shadow attribute number; `copyColumns` takes only those). Tests:
+field for field against the checkpointed proof. A re-added column the copy cannot leave to
+its default — the primary key, the replacement of a source identity column, or a column that
+refuses NULL, by its own `NOT NULL` or a domain's, with no default of its own or on its type —
+is refused inside the build's transaction with `shadow-statement-readd`, so no shadow is
+committed for a statement whose copy could not run.
+*Enforced:* `pkg/schemachange` (`readColumnPositions` reads both relations' live attribute
+numbers inside the build's and the inspection's transaction; `sameColumns` keeps a column only
+when its live position equals its shadow attribute number; `copyColumns` takes only those;
+`readDomainFills` reads what each shadow column's domain contributes; `refuseUnfillableReadds`
+refuses the three re-adds before the build commits). Tests:
 `TestSameColumnsComparesLivePositionToShadowNumber`,
+`TestRefuseUnfillableReaddsAdmitsAColumnTheServerFills`,
+`TestRefuseUnfillableReaddsRefusesThePrimaryKey`,
+`TestRefuseUnfillableReaddsRefusesNotNullWithoutADefault`,
+`TestRefuseUnfillableReaddsRefusesAReplacedIdentityColumn`,
+`TestRefuseUnfillableReaddsIgnoresColumnsTheStatementKeptOrDropped`,
+`TestRefuseUnfillableReaddsAdmitsANotNullColumnWhoseDomainDefaultsIt`,
+`TestRefuseUnfillableReaddsRefusesAColumnWhoseDomainRefusesNull`,
 `TestBuildShadowLeavesAReaddedColumnOutOfTheCopyWhenTheSourceHasADroppedColumn`,
 `TestBuildShadowCopiesEveryColumnTheChangeKeeps`,
+`TestBuildShadowRefusesAReaddedNotNullColumnWithNoDefault`,
+`TestBuildShadowRefusesAReaddedPrimaryKey`,
+`TestBuildShadowRefusesAStatementThatReplacesAnIdentityColumn`,
+`TestBuildShadowDoesNotRefuseAPlainColumnReaddedAsAnIdentity`,
+`TestBuildShadowRefusesAReaddedColumnWhoseDomainRefusesNull`,
+`TestBuildShadowRefusesAReaddedColumnWhoseBaseDomainRefusesNull`,
+`TestBuildShadowRefusesAReaddedColumnWhoseDefaultIsOnlyOnTheBaseDomain`,
+`TestBuildShadowAdmitsDroppingAnIdentityColumnOutright`,
+`TestRunnerRefusesAnUnfillableReaddBeforeAnyRowOrFence`,
+`TestRunnerRunsAReaddedNotNullColumnWhoseDomainDefaultsIt`,
 `TestRunnerGivesAReaddedColumnItsDefaultNotTheDroppedValues`,
 `TestRunnerLiveRunGivesAReaddedColumnItsDefault`. *Source:* adversarial review of the
 re-added-column copy fix.
