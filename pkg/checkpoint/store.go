@@ -125,7 +125,10 @@ func NewStore(pool *pgxpool.Pool, opts Options) (*Store, error) {
 // existing row for the same target — but only when that row carries this
 // run's format version and fingerprints. A row that carries another's is
 // left untouched and the statement reports zero rows, which Save turns
-// into IncompatibleError (ST-1, ST-2).
+// into IncompatibleError (ST-1, ST-2). The existing row must also stand in
+// a phase this engine knows ($15 lists them): a row a newer engine of the
+// same format left in a phase this one has no name for is left untouched
+// the same way, and Save reports it on MismatchPhase.
 //
 // The shadow proof is write-once: a Save that carries none keeps the
 // row's (COALESCE), and a Save that carries a proof other than the row's
@@ -152,6 +155,7 @@ ON CONFLICT (schema_name, table_name) DO UPDATE SET
 WHERE ` + tableIdent + `.format_version = EXCLUDED.format_version
 	AND ` + tableIdent + `.source_fingerprint = EXCLUDED.source_fingerprint
 	AND ` + tableIdent + `.target_fingerprint = EXCLUDED.target_fingerprint
+	AND ` + tableIdent + `.phase = ANY($15)
 	AND (EXCLUDED.shadow_proof IS NULL
 		OR ` + tableIdent + `.shadow_proof IS NULL
 		OR ` + tableIdent + `.shadow_proof = EXCLUDED.shadow_proof)
@@ -162,11 +166,12 @@ WHERE ` + tableIdent + `.format_version = EXCLUDED.format_version
 // Save writes cp as the target's one row, atomically: a reader sees the
 // previous record or this one, never a mix (ST-1). It refuses, with
 // IncompatibleError, to write over a row that another statement or another
-// row format owns; a run that means to start fresh calls Delete first
-// (ST-2). The row's shadow proof is written once and then kept: a cp that
-// carries no proof leaves the row's in place, and a cp that carries a
-// different proof is refused with ErrInvariantViolation, because a
-// different shadow is a fresh start, which goes through Delete (ST-2).
+// row format owns, or one left in a phase this engine does not know; a run
+// that means to start fresh calls Delete first (ST-2). The row's shadow
+// proof is written once and then kept: a cp that carries no proof leaves
+// the row's in place, and a cp that carries a different proof is refused
+// with ErrInvariantViolation, because a different shadow is a fresh start,
+// which goes through Delete (ST-2).
 // The row's statement is kept the same way: written once, never cleared,
 // and a cp that carries another statement's text is refused.
 // The write runs under the target's table lock session and confirms, from
@@ -199,7 +204,7 @@ func (s *Store) Save(ctx context.Context, lock *dbconn.TableLockSession, cp Chec
 		cp.Schema, cp.Table, FormatVersion, cp.ShadowTable, cp.SlotName, cp.PublicationName,
 		watermarkColumn(cp.Watermark), cp.LastAppliedLSN.String(),
 		cp.SourceFingerprint, cp.TargetFingerprint, cp.Phase.String(), s.opts.Clock.Now(),
-		shadowProofColumn(cp.ShadowProof), statementColumn(cp.Statement))
+		shadowProofColumn(cp.ShadowProof), statementColumn(cp.Statement), knownPhases())
 	if err != nil {
 		return fmt.Errorf("save checkpoint for %s.%s: %w", cp.Schema, cp.Table, tableUnusable(err))
 	}

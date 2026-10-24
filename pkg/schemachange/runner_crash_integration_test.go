@@ -133,6 +133,25 @@ func TestRunnerResumesFromCutoverWhenTheSwapNeverRan(t *testing.T) {
 	assert.Equal(t, sourceOID, result.Swapped.OldOID)
 }
 
+// A hook error at the done save stops nothing: the swap has committed and
+// the done row has landed, so Run hands back the completed run's Result
+// beside the error, as it does when only the lock release fails, and a
+// caller reads the change as complete rather than as a stopped run.
+func TestRunnerReturnsTheResultWhenTheHookFailsAtDone(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	stop := &stopAfter{phase: checkpoint.PhaseDone}
+
+	result, err := f.run(t, "orders", alter, schemachange.RunOptions{AfterCheckpoint: stop.hook})
+	require.ErrorIs(t, err, errStopHere)
+	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
+	assert.Equal(t, 3, result.Verification.Chunks, "the Result is the completed run's")
+	assert.True(t, result.OldTableDropped)
+	assert.Equal(t, checkpoint.PhaseDone, f.inspectRow(t, "orders").Phase)
+	assert.False(t, f.hasColumn(t, "orders", "note"))
+}
+
 // A run that died after its swap committed, before the old table drop,
 // left a row in cutover and the shadow under the source's name. The
 // resumed run reads that from the catalog (LK-4), makes no verification
@@ -365,12 +384,29 @@ func TestRunnerResumesMidCopyFromThePeriodicSave(t *testing.T) {
 
 	// While nothing runs the source stays fenced: a writer that reaches it
 	// is refused, so no change can slip in between the stop and the
-	// resume. A stray row in the shadow above the watermark — the chunk
-	// that was in flight at the stop — is cleared by the resumed copy
-	// before it lands that key space again.
+	// resume. A shadow row above the watermark that disagrees with the
+	// source stands for whatever the stopped copy left there, and is
+	// cleared by the resumed copy before it lands that key space again.
+	// The other worker runs ahead of the pinned chunk, so the stopped copy
+	// may or may not have landed the key. The source's row is landed first
+	// if it is not already there, so every run plants the stray value over
+	// a landed row, the shape a fast server produces, and the read-back
+	// fails if the plant does not change it.
 	f.assertWriteFenced(t, "orders")
 	shadow := pgx.Identifier{f.schema, row.ShadowTable}.Sanitize()
-	f.exec(t, "INSERT INTO "+shadow+" (id, qty) VALUES (1500, 999)")
+	f.exec(t, `
+		INSERT INTO `+shadow+` (id, qty)
+		SELECT id, qty
+		FROM %s.orders
+		WHERE id = 1500
+		ON CONFLICT (id) DO NOTHING`)
+	f.exec(t, `
+		UPDATE `+shadow+`
+		SET qty = 999
+		WHERE id = 1500`)
+	var strayQty int
+	require.NoError(t, f.pool.QueryRow(t.Context(), "SELECT qty FROM "+shadow+" WHERE id = 1500").Scan(&strayQty))
+	require.Equal(t, 999, strayQty, "the shadow holds the stray value above the watermark before the resume")
 
 	second := &stopAfter{}
 	f.assertResumedToDone(t, alter, schemachange.RunOptions{AfterCheckpoint: second.hook})

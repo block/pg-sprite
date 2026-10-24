@@ -25,10 +25,11 @@ type ExtendedStatisticsTarget struct {
 // -1, or as NULL on servers whose catalog made the column nullable; both
 // read as "default" and are left out.
 func readExtendedStatisticsTargets(ctx context.Context, tx pgx.Tx, oid uint32) ([]ExtendedStatisticsTarget, error) {
+	// INV: CO-9
 	rows, err := tx.Query(ctx, `
 		SELECT s.stxname, s.stxstattarget::int
-		FROM pg_statistic_ext s
-		WHERE s.stxrelid = $1 AND COALESCE(s.stxstattarget, -1) <> -1
+		FROM pg_catalog.pg_statistic_ext s
+		WHERE s.stxrelid OPERATOR(pg_catalog.=) $1 AND COALESCE(s.stxstattarget, -1) OPERATOR(pg_catalog.<>) -1
 		ORDER BY s.stxname`, oid)
 	if err != nil {
 		return nil, fmt.Errorf("read extended statistics targets: %w", err)

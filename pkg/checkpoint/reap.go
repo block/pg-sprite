@@ -46,7 +46,10 @@ WHERE database = pg_catalog.current_database()
 ORDER BY slot_name`
 
 // liveRowSlotsSQL names, among the given slots, those a checkpoint row in a
-// non-terminal phase owns.
+// non-terminal phase owns. Terminal is judged by name, done or failed, and
+// every other phase counts as live: a row a newer engine left in a phase
+// this one does not know keeps its slot, since only that engine knows
+// whether the run behind it still decodes from it.
 const liveRowSlotsSQL = `
 SELECT slot_name
 FROM ` + tableIdent + `

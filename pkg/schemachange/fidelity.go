@@ -474,7 +474,11 @@ func granteeLabel(g Grant) string {
 // literal values (%L) are quoted by PostgreSQL itself rather than by hand.
 func formatSQL(ctx context.Context, tx pgx.Tx, template string, args ...string) (string, error) {
 	var sql string
-	if err := tx.QueryRow(ctx, `SELECT format($1, VARIADIC $2::text[])`, template, args).Scan(&sql); err != nil {
+	// INV: CO-9 — the function and its cast are pg_catalog-qualified. The
+	// shadow build calls this on a path that lists the source schema, where
+	// an exact format(text, text[]) outranks the catalog's variadic "any"
+	// form, and the text it returns is executed.
+	if err := tx.QueryRow(ctx, `SELECT pg_catalog.format($1, VARIADIC $2::pg_catalog.text[])`, template, args).Scan(&sql); err != nil {
 		return "", fmt.Errorf("format statement %q: %w", template, err)
 	}
 	return sql, nil

@@ -428,6 +428,40 @@ func TestReconcileRestartsFromAnInterruptedReconcile(t *testing.T) {
 	f.assertConverged(t, shadow)
 }
 
+// A reconcile replaces the slot and keeps the publication: the source is
+// live through it, and a write to the table looks the publication up while
+// it runs, so a publication dropped and created afresh under that write
+// fails it with an internal error. The same OID before and after is the
+// proof the publication was never dropped.
+func TestReconcileKeepsThePublication(t *testing.T) {
+	f := newReconcileFixture(t, 100)
+	slot, err := decode.CreateSlot(t.Context(), f.cfg, f.pool, f.target)
+	require.NoError(t, err)
+	require.NoError(t, slot.Close(t.Context()))
+	t.Cleanup(func() {
+		assert.NoError(t, decode.DropSlot(context.WithoutCancel(t.Context()), f.cfg, f.pool, slot.Name()))
+	})
+	shadow := f.buildShadow(t)
+	require.NoError(t, f.store.Save(t.Context(), f.lock, f.row(shadow, checkpoint.PhaseReconciling, copier.Watermark{}, slot.Name(), slot.ConsistentPoint())))
+
+	const publicationOID = `
+		SELECT oid
+		FROM pg_catalog.pg_publication
+		WHERE pubname = $1`
+	var before, after uint32
+	require.NoError(t, f.pool.QueryRow(t.Context(), publicationOID, slot.Name()).Scan(&before))
+
+	reconciler, err := schemachange.NewReconciler(f.cfg, f.lock, f.store, f.target, shadow, checksum.Options{})
+	require.NoError(t, err)
+	reconciled, err := reconciler.Reconcile(t.Context(), f.pool, f.load(t, shadow))
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, reconciled.Slot.Close(context.WithoutCancel(t.Context()))) })
+	assert.Greater(t, reconciled.Slot.ConsistentPoint(), slot.ConsistentPoint(), "the slot was replaced")
+
+	require.NoError(t, f.pool.QueryRow(t.Context(), publicationOID, slot.Name()).Scan(&after))
+	assert.Equal(t, before, after, "the publication was kept, not dropped and created again")
+}
+
 // A run that lost its slot before anything landed has nothing to repair:
 // the reconcile makes the slot and writes the row back to copying, and the
 // copier starts from the beginning under it.
