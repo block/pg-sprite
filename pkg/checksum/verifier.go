@@ -59,6 +59,12 @@ type Options struct {
 	// phase as well. The caller owns the tracker's steps; the verifier only
 	// fills the current step's counters.
 	Tracker *progress.Tracker
+	// RecopyAttempts is the number of times a pass under DivergenceRecopy
+	// compares and recopies before it stops on a recopy that keeps
+	// colliding with a unique value the source moves between chunks. Zero
+	// takes DefaultRecopyAttempts; one recopies once and never compares
+	// again.
+	RecopyAttempts int
 }
 
 func (o Options) withDefaults() Options {
@@ -70,6 +76,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.Clock == nil {
 		o.Clock = progress.WallClock{}
+	}
+	if o.RecopyAttempts == 0 {
+		o.RecopyAttempts = DefaultRecopyAttempts
 	}
 	return o
 }
@@ -84,6 +93,9 @@ func (o Options) validate() error {
 			// INV: LK-2
 			return fmt.Errorf("%w: %s %s is below PostgreSQL's one-millisecond resolution; use zero for the default", ErrInvalidOptions, timeout.name, timeout.value)
 		}
+	}
+	if o.RecopyAttempts < 1 {
+		return fmt.Errorf("%w: recopy attempts %d would recopy nothing; use zero for the default", ErrInvalidOptions, o.RecopyAttempts)
 	}
 	return nil
 }

@@ -14,7 +14,11 @@
 // and reads each again, assuming nothing else writes the shadow and the
 // source rows it recopies hold still until the rereads; or recopy, the
 // same recopy with no reread, for a source written while the pass runs
-// whose later writes a stream opened before the pass carries. CheckLive is
+// whose later writes a stream opened before the pass carries — a recopy
+// that collides with a shadow row because the source moved a unique value
+// from a chunk the comparison read equal into a differing chunk is rolled
+// back, and the pass compares again and recopies what that comparison
+// finds, a bounded number of times. CheckLive is
 // the pass for a source written while the catch-up applies the stream to
 // the shadow: a chunk that differs in the sweep is read again once the
 // catch-up has confirmed past the position it was read at, and the two
