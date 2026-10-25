@@ -90,7 +90,8 @@ type CopySwapOptions struct {
 	// transaction, and the progress tracker the copier reports to while it
 	// runs. Zero values take the copier's defaults. A value the copier
 	// would refuse is a wiring error refused before the preflight, like a
-	// negative CheckpointInterval.
+	// negative CheckpointInterval. The workers set the pool size the route
+	// admits: CopySwapMinConns(Copier).
 	//
 	// Copier.Tracker is the one source of rows copied; OnCheckpoint
 	// carries a key position, not a count. The host builds the tracker and
@@ -186,7 +187,10 @@ func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
 // remains so the next run resumes it; success is
 // verdict.OutcomeExecutedViaCopyAndSwap. An option set the Runner refuses
 // is a caller wiring error like the missing connection: a plain error, no
-// verdict, before the preflight reads anything.
+// verdict, before the preflight reads anything. A pool smaller than
+// CopySwapMinConns is a failed verdict with the pool-too-small code and an
+// error wrapping executor.ErrPoolTooSmall, also before the preflight, so
+// nothing is created.
 func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	opts Options, logger *slog.Logger) (verdict.Verdict, error) {
 	if opts.CopySwap.Connection.URL == "" {
@@ -202,6 +206,9 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	}
 	if err := checkCopySwapConnection(ctx, pool, opts.CopySwap.Connection); err != nil {
 		return verdict.Verdict{}, fmt.Errorf("migrate: %w", err)
+	}
+	if err := checkCopySwapPool(pool, opts.CopySwap); err != nil {
+		return copySwapPoolVerdict(st, err), fmt.Errorf("migrate: %w", err)
 	}
 	target, err := preflight.CheckCopySwap(ctx, pool, st.Schema(), st.Table(), opts.CopySwap.environment())
 	if err != nil {

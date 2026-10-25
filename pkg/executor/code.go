@@ -133,8 +133,9 @@ const (
 	// CodeUnsupportedCreateStep: a desired statement is not a shape the
 	// create path can run.
 	CodeUnsupportedCreateStep Code = "unsupported-create-step"
-	// CodePoolTooSmall: the pool cannot hold the build session and the
-	// verdict connection at once.
+	// CodePoolTooSmall: the pool cannot hold every session the operation
+	// needs at once — the build session and the verdict connection, or a
+	// copy-and-swap run's copy workers and the two connections beside them.
 	CodePoolTooSmall Code = "pool-too-small"
 	// CodeReplicaIdentityDrop: a native drop would remove what a replica
 	// identity index is built on, read again under the table's lock;

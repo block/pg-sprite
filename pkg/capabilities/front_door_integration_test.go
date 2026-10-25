@@ -10,6 +10,7 @@ import (
 
 	"github.com/block/pg-sprite/internal/testutil"
 	"github.com/block/pg-sprite/pkg/capabilities"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -215,7 +216,7 @@ func TestMigrateSupportedRowsExecute(t *testing.T) {
 	}
 
 	url := testutil.StartPostgres(t)
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url, MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})})
 	require.NoError(t, err)
 	defer pool.Close()
 	major, err := dbconn.ServerMajor(t.Context(), pool)
