@@ -16,12 +16,18 @@ func walData(walStart LSN, message []byte) pglogrepl.XLogData {
 	return pglogrepl.XLogData{WALStart: pglogrepl.LSN(walStart), ServerWALEnd: pglogrepl.LSN(walStart), WALData: message}
 }
 
-// beginMessage encodes a pgoutput BEGIN: final LSN, commit time, xid.
+// beginMessage encodes a pgoutput BEGIN of transaction 1: final LSN, commit
+// time, xid.
 func beginMessage(finalLSN LSN) []byte {
+	return beginMessageOf(finalLSN, 1)
+}
+
+// beginMessageOf encodes a pgoutput BEGIN of the given transaction.
+func beginMessageOf(finalLSN LSN, xid uint32) []byte {
 	b := []byte{byte(pglogrepl.MessageTypeBegin)}
 	b = binary.BigEndian.AppendUint64(b, uint64(finalLSN))
 	b = binary.BigEndian.AppendUint64(b, 0)
-	return binary.BigEndian.AppendUint32(b, 1)
+	return binary.BigEndian.AppendUint32(b, xid)
 }
 
 // commitMessage encodes a pgoutput COMMIT: flags, commit LSN, end LSN,
@@ -126,6 +132,20 @@ func TestStreamStampsAChangeWithTheDeliveredPositionItArrivedWith(t *testing.T) 
 	assert.Equal(t, LSN(180), d.Change.Delivered)
 	assert.Equal(t, LSN(170), d.Change.LSN, "the change's own position is where it was written")
 	assert.EqualValues(t, 101, d.Change.Key)
+}
+
+// A change is stamped with the transaction its BEGIN announced, so a
+// consumer can ask a later snapshot whether that transaction is visible yet.
+func TestStreamStampsAChangeWithItsTransaction(t *testing.T) {
+	s := &Stream{delivered: 180, relation: keyOnlyRelation(7)}
+	_, _, err := s.handleWALData(walData(160, beginMessageOf(190, 4242)))
+	require.NoError(t, err)
+
+	d, yielded, err := s.handleWALData(walData(170, insertMessage(7, "101")))
+
+	require.NoError(t, err)
+	require.True(t, yielded)
+	assert.EqualValues(t, 4242, d.Change.Xid)
 }
 
 // A row change the server sent outside BEGIN … COMMIT is refused rather

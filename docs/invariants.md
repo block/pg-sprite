@@ -237,20 +237,27 @@ after the buffer's last `Add`, so a key the copier cuts in between is in flight 
 chunk, a deferred batch stays buffered until the next pass, and the confirmed position never
 passes a change still buffered, held, or deferred (convergence tests under mixed load, key
 moves, hot-row contention, unchanged-TOAST updates, and unique-key swaps; a refused batch
-requeued while its chunk is in flight and flushed once the chunk lands). *Open:* a source
-transaction whose commit the walsender has already sent while its backend is still in a
-synchronous-commit wait is not yet visible to a snapshot taken after the stream delivered it, so
-an uncut key's change can be discarded ahead of a chunk read that does not see it; the drain
-has no rule for that window yet. The same window reaches a moved image whose unchanged-TOAST
-markers the flush completes from the source: an image `CompleteFirst` names whose old key's
-shadow row is absent or was reused, so its completion is read from the source row under `Key`.
-Inside the window that read does not see the delivered move. When it finds no row, the flush
-writes a delete at `Key` (`Result.Skipped`) with no stream gate, and the shadow ends up without
-a row the source holds; when the same invisible commit also removed another row from `Key`, the
-read finds that row and completes the image with its stale marker values. Nothing completes the
-image again. The checksum (CO-1) finds the differing row when the loss lands before the pass
-settles its chunk, and under `abort` refuses the cutover while `repair` recopies the chunk; a
-loss between the pass and the swap has no later comparison. Also open: a primary-key move or a
+requeued while its chunk is in flight and flushed once the chunk lands). The server writes a
+transaction's commit to the WAL — and waits out any synchronous standby — before it marks the
+transaction visible to new snapshots, and the walsender decodes the commit as soon as it is
+flushed, so the stream can deliver a change whose transaction no snapshot shows yet; a chunk
+read or a completion read from the source taken in that window does not see it, and a drain
+that discarded an uncut key's change, or flushed a moved image completed from a source row that
+does not yet show the move, would lose it. The drain judges that window as it judges an
+in-flight chunk: every `ChangeEvent` carries its transaction's xid, each buffered `Entry`
+carries the xid of the latest event merged into it (a key move stamps both halves, a delete its
+marker, the flush's replacement marker the image it replaced), and `Drain` takes the source's
+`pg_current_snapshot()` — read on the pool before the `Position`, and only when the buffer holds
+anything — beside the position: an entry whose xid the snapshot does not show as committed is
+treated as in flight, kept buffered and counted in `Batch.Invisible` (its paired entries
+deferred with it under the three-way rule), and judged again next cycle, when visibility, which
+is monotone, has caught up; the zero `Snapshot` shows nothing visible, so a drain with no
+snapshot keeps everything. The swap's drain (`flushAll`) drains against `AllVisible`, since a
+writer holds its locks until its commit is visible and the swap's `ACCESS EXCLUSIVE` lock waited
+them all out (sync-commit test: a writer under `synchronous_commit = on` against a standby that
+never answers has its UPDATE delivered and left buffered with `Invisible` one and nothing
+applied, the confirmed position below the delivered one, until the backend is cancelled, after
+which the change lands and the catch-up converges). Also open: a primary-key move or a
 unique-value swap that straddles a chunk the copier is reading collides, on the copier's own
 insert of the moved row, with the stale shadow row the flush has not yet deleted (SQLSTATE
 `23505`); the catch-up's half of the exchange is correct and the resolution is the copier's, so
@@ -263,8 +270,10 @@ with the DELETE not yet delivered, is held until the stream passes the flush's c
 catch-up converges, while the same image for a row the source still holds and the shadow lost
 fails closed once the stream has passed it (CO-8); a
 key-moving UPDATE that straddles the watermark (`UPDATE t SET id = 5000 WHERE id = 5`, watermark
-1000) asserts key 5 is deleted from the shadow. *Source:* this doc set (Spirit's model
-translated).
+1000) asserts key 5 is deleted from the shadow; an UPDATE committed under `synchronous_commit =
+on` against a standby that never acknowledges asserts the delivered change stays buffered, with
+nothing applied and the slot unconfirmed past it, until the commit is visible, and lands then.
+*Source:* this doc set (Spirit's model translated).
 
 ### CO-5 — The change buffer is disjoint and current at flush time
 

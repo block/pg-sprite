@@ -13,7 +13,7 @@ import (
 // back as a flush would: completed with value, read at readLSN.
 func held(t *testing.T, b *Buffer, readLSN decode.LSN, value string) HeldImage {
 	t.Helper()
-	batch := b.Drain(position(t, 100))
+	batch := b.Drain(position(t, 100), AllVisible())
 	require.Len(t, batch.CompleteFirst(), 1, "exactly one image to complete")
 	return HeldImage{
 		Entry:     batch.CompleteFirst()[0],
@@ -40,7 +40,7 @@ func TestHoldKeepsTheImageUntilTheStreamPassesTheRead(t *testing.T) {
 	oldest, ok := b.OldestPending()
 	require.True(t, ok)
 	assert.Equal(t, decode.LSN(10), oldest, "the confirmed position may not pass the held image")
-	batch := b.Drain(position(t, 100))
+	batch := b.Drain(position(t, 100), AllVisible())
 	assert.Empty(t, batch.Entries, "a held image is not flushed")
 	assert.Equal(t, 1, batch.Held)
 	assert.Equal(t, 0, batch.Deferred)
@@ -50,7 +50,7 @@ func TestHoldKeepsTheImageUntilTheStreamPassesTheRead(t *testing.T) {
 	assert.True(t, entry(t, b, 8).HasMarker())
 	assert.Equal(t, 1, b.Release(500))
 	assert.Equal(t, 0, b.Held())
-	batch = b.Drain(position(t, 100))
+	batch = b.Drain(position(t, 100), AllVisible())
 	require.Equal(t, []int64{8}, keys(batch.Entries))
 	assert.Equal(t, 0, batch.Held)
 	assert.Equal(t, []decode.Column{
@@ -67,7 +67,7 @@ func TestReleaseTakesOnlyTheCompletionsTheStreamHasPassed(t *testing.T) {
 	b := NewBuffer()
 	require.NoError(t, b.Add(keyMove(10, 1, 2, marker("blob"))))
 	require.NoError(t, b.Add(keyMove(20, 3, 4, marker("blob"))))
-	batch := b.Drain(position(t, 100))
+	batch := b.Drain(position(t, 100), AllVisible())
 	first := batch.CompleteFirst()
 	require.Len(t, first, 2)
 	require.NoError(t, b.Hold([]HeldImage{
@@ -80,7 +80,7 @@ func TestReleaseTakesOnlyTheCompletionsTheStreamHasPassed(t *testing.T) {
 	assert.Equal(t, 1, b.Held())
 	assert.False(t, entry(t, b, 2).HasMarker())
 	assert.True(t, entry(t, b, 4).HasMarker())
-	batch = b.Drain(position(t, 100))
+	batch = b.Drain(position(t, 100), AllVisible())
 	assert.Equal(t, []int64{2}, keys(batch.Entries))
 	assert.Equal(t, 1, batch.Held)
 }
@@ -109,7 +109,7 @@ func TestHoldRefusesAKeyTheBufferHolds(t *testing.T) {
 func TestReleaseFillsOnlyTheMarkersAnUpdateLeft(t *testing.T) {
 	b := NewBuffer()
 	require.NoError(t, b.Add(keyMove(10, 7, 8, col("label", "a"), marker("blob"), marker("doc"))))
-	batch := b.Drain(position(t, 100))
+	batch := b.Drain(position(t, 100), AllVisible())
 	require.NoError(t, b.Hold([]HeldImage{{
 		Entry:     batch.CompleteFirst()[0],
 		Completed: []decode.Column{col("blob", "read blob"), col("doc", "read doc")},
@@ -154,7 +154,7 @@ func TestAnEventThatReplacesTheHeldKeyDropsTheCompletion(t *testing.T) {
 		assert.True(t, moved.HasMarker(), "the dropped completion is not carried on")
 		require.NotNil(t, moved.OldKey)
 		assert.Equal(t, int64(7), *moved.OldKey, "the row's shadow row is still under the key it started at")
-		batch := b.Drain(position(t, 100))
+		batch := b.Drain(position(t, 100), AllVisible())
 		assert.Equal(t, []int64{8, 9}, keys(batch.Entries))
 		assert.Equal(t, []int64{9}, keys(batch.CompleteFirst()))
 	})
@@ -176,7 +176,7 @@ func TestReuseOfTheOldKeyDropsAShadowCompletion(t *testing.T) {
 	moved := entry(t, b, 8)
 	assert.True(t, moved.OldKeyReused)
 	assert.True(t, moved.HasMarker())
-	batch := b.Drain(position(t, 100))
+	batch := b.Drain(position(t, 100), AllVisible())
 	assert.Equal(t, []int64{7, 8}, keys(batch.Entries))
 	assert.Equal(t, []int64{8}, keys(batch.CompleteFirst()))
 }
@@ -214,7 +214,7 @@ func TestHoldKeepsACompletionInTheFormOfTheRowItWasReadFrom(t *testing.T) {
 	b := NewBuffer()
 	require.NoError(t, b.Add(keyMove(10, 1, 2, marker("blob"))))
 	require.NoError(t, b.Add(keyMove(20, 3, 4, marker("blob"))))
-	batch := b.Drain(position(t, 100))
+	batch := b.Drain(position(t, 100), AllVisible())
 	first := batch.CompleteFirst()
 	require.Len(t, first, 2)
 	require.NoError(t, b.Hold([]HeldImage{
