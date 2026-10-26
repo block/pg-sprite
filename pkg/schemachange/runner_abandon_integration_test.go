@@ -1,10 +1,12 @@
 package schemachange_test
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"testing"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -61,6 +63,51 @@ func TestRunnerAbandonsAQuiescedRunOnADataFault(t *testing.T) {
 	require.NoError(t, err, "a corrected statement runs plain, with nothing to acknowledge")
 	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
 	assert.Equal(t, sourceOID, result.Swapped.OldOID, "the source the abandoned run fenced is the one swapped out")
+	assert.Equal(t, "character varying(4)", f.columnType(t, "orders", "sku"))
+	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
+}
+
+// A data fault whose abandon fails leaves the run held, not abandoned: a
+// view another session builds on the shadow while the run copies makes the
+// discard's drop of the shadow (never CASCADE) fail, so the error is the
+// fault joined with the discard's failure — still a data fault by its
+// SQLSTATE, but no AbandonedError — and the row, the fence, and the shadow
+// all stand. Once the view is gone, the restart acknowledgement finishes
+// the discard and runs a corrected statement to done.
+func TestRunnerHoldsADataFaultWhoseAbandonFails(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	shadow := schemachange.ShadowName(f.schema, "orders")
+	pinShadow := func(ctx context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase != checkpoint.PhaseCopying {
+			return nil
+		}
+		_, err := f.pool.Exec(ctx, fmt.Sprintf(`
+			CREATE VIEW %s AS
+			SELECT id
+			FROM %s`,
+			pgx.Identifier{f.schema, "orders_shadow_reader"}.Sanitize(),
+			pgx.Identifier{f.schema, shadow}.Sanitize()))
+		return err
+	}
+
+	_, err := f.run(t, "orders", `ALTER TABLE %s.orders ALTER COLUMN sku TYPE varchar(2)`, schemachange.RunOptions{AfterCheckpoint: pinShadow})
+	var abandoned *schemachange.AbandonedError
+	assert.False(t, errors.As(err, &abandoned), "a discard that failed is not an abandonment")
+	assert.True(t, schemachange.IsDataFault(err), "the error still reads as the fault")
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr)
+	assert.Equal(t, stringTooLong, pgErr.Code, "the fault's SQLSTATE is the first the error yields")
+	assert.ErrorContains(t, err, "abandon run on "+f.schema+".orders")
+
+	assert.Equal(t, checkpoint.PhaseCopying, f.inspectRow(t, "orders").Phase, "the row stands")
+	assert.True(t, f.hasFence(t, "orders"), "the fence stands")
+	assert.True(t, f.relationExists(t, shadow), "the shadow stands")
+
+	f.exec(t, `DROP VIEW %s.orders_shadow_reader`)
+	result, err := f.run(t, "orders", `ALTER TABLE %s.orders ALTER COLUMN sku TYPE varchar(4)`, schemachange.RunOptions{Restart: true})
+	require.NoError(t, err, "the restart finishes the discard and runs the corrected statement")
+	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
 	assert.Equal(t, "character varying(4)", f.columnType(t, "orders", "sku"))
 	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
 }
