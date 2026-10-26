@@ -24,7 +24,9 @@ import (
 // before it: the shape re-check, the re-gated checklist, and the drain's
 // completion reads are only as fresh as the lock under a snapshot taken
 // after it, and a REPEATABLE READ snapshot is taken by the first
-// statement, before the lock is granted.
+// statement, before the lock is granted. The drain's post-write
+// resolution check also needs a fresh snapshot to see a catalog change
+// its writes resolved through (CO-9).
 func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, requireFence bool, opts Options) (SwappedTable, swapBackend, error) {
 	built := ready.built
 	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite})

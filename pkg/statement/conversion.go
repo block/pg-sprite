@@ -131,36 +131,11 @@ func selectOf(expr *pganalyze.Node) *pganalyze.Node {
 // CASE, a function call, or an operator's operand is found the same way as
 // one at the top.
 func foreignColumnReference(expr *pganalyze.Node, column string) (string, bool) {
-	return messageForeignColumnReference(expr.ProtoReflect(), column)
-}
-
-func messageForeignColumnReference(msg protoreflect.Message, column string) (string, bool) {
-	if ref, ok := msg.Interface().(*pganalyze.ColumnRef); ok {
-		return columnRefSpelling(ref, column)
-	}
 	var foreign string
 	found := false
-	msg.Range(func(field protoreflect.FieldDescriptor, value protoreflect.Value) bool {
-		if field.Kind() != protoreflect.MessageKind {
-			return true
-		}
-		switch {
-		case field.IsMap():
-			if field.MapValue().Kind() == protoreflect.MessageKind {
-				value.Map().Range(func(_ protoreflect.MapKey, item protoreflect.Value) bool {
-					foreign, found = messageForeignColumnReference(item.Message(), column)
-					return !found
-				})
-			}
-		case field.IsList():
-			list := value.List()
-			for i := 0; i < list.Len(); i++ {
-				if foreign, found = messageForeignColumnReference(list.Get(i).Message(), column); found {
-					break
-				}
-			}
-		default:
-			foreign, found = messageForeignColumnReference(value.Message(), column)
+	walkMessages(expr.ProtoReflect(), func(msg protoreflect.Message) bool {
+		if ref, ok := msg.Interface().(*pganalyze.ColumnRef); ok {
+			foreign, found = columnRefSpelling(ref, column)
 		}
 		return !found
 	})

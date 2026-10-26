@@ -407,6 +407,14 @@ storage parameters and its columns' sequence declarations. A copy-and-swap run i
 `MismatchFormat` with `Stored.FormatVersion == 2`: finish it with the release that started
 it, or, once no run is in flight, `Store.Delete(Stored)` and start over.
 
+The release that adds the shadow proof's `conversion_fingerprint` keeps the row format, but a
+copy-and-swap run whose statement retypes a column with `USING` and that is in flight across
+the upgrade cannot resume on the new engine: the row's proof carries no fingerprint, the
+resume re-derives one, and the proofs differ, so the resume is refused as
+`resume-row-mismatch`. Finish such a run with the release that started it, or abandon it with
+a restart (`--restart`, `RunOptions.Restart`), which drops the shadow and copies the table
+again. Runs whose statement has no `USING` conversion resume unaffected.
+
 `ErrTableBehind` wraps the server's own `42703` undefined-column error, so an adapter that
 logs the chain sees both the engine's classification and the server's words. `ErrTableNewer`
 comes from `Ensure`'s read of the table's shape, before any statement could fail, so it

@@ -72,8 +72,9 @@ func (r *Runner) drainInto(ctx context.Context, tx pgx.Tx, target preflight.Copy
 	if err := flushAll(ctx, tx, flusher, buffer, watermark); err != nil {
 		return err
 	}
-	// The flush leaves the search_path on the catalog; the swap's own
-	// statements resolve names under the target schema.
+	// The flush leaves the search_path on its own path — the catalog alone
+	// unless the shadow converts columns; the swap's own statements resolve
+	// names under the target schema.
 	return setSearchPath(ctx, tx, built.Schema())
 }
 
