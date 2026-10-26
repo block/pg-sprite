@@ -18,9 +18,16 @@ import (
 // which the caller resolves by following the backend returned here to its
 // exit and then inspecting the catalog. The backend is zero when the
 // attempt ended before its transaction ran a statement.
+//
+// The transaction is READ COMMITTED whatever the server or role
+// configures, so every statement after the lock reads what committed
+// before it: the shape re-check, the re-gated checklist, and the drain's
+// completion reads are only as fresh as the lock under a snapshot taken
+// after it, and a REPEATABLE READ snapshot is taken by the first
+// statement, before the lock is granted.
 func swapOnce(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, ready CutoverReady, drain DrainFunc, requireFence bool, opts Options) (SwappedTable, swapBackend, error) {
 	built := ready.built
-	tx, err := pool.Begin(ctx)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite})
 	if err != nil {
 		return SwappedTable{}, swapBackend{}, fmt.Errorf("begin cutover: %w", err)
 	}
