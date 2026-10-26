@@ -115,14 +115,14 @@ func TestFlushIgnoresTheSessionSearchPath(t *testing.T) {
 	require.NoError(t, buffer.Add(deleteEvent(2, 3)))
 	require.NoError(t, buffer.Add(moveEvent(3, 2, 10, col("slot", "B"), marker("doc"), col("note", "seat 2"))))
 
-	result, err := p.flush.Flush(t.Context(), shadowing, buffer.Drain(everyKeyLanded()))
+	result, err := p.flush.Flush(t.Context(), shadowing, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 	require.NoError(t, err)
 	require.NoError(t, buffer.Hold(result.Held))
 	assert.Equal(t, applier.Result{Images: 1, Deletes: 2, Held: result.Held}, result)
 	require.Len(t, result.Held, 1)
 	assert.False(t, result.Held[0].FromSource, "the completion read found the old key's row through the catalog's =")
 	require.Equal(t, 1, buffer.Release(passed(result.Held)))
-	result, err = p.flush.Flush(t.Context(), shadowing, buffer.Drain(everyKeyLanded()))
+	result, err = p.flush.Flush(t.Context(), shadowing, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 	require.NoError(t, err)
 
 	assert.Equal(t, applier.Result{Images: 1}, result)
@@ -161,7 +161,7 @@ func TestFlushCompletesFloatsExactlyWhateverTheConnectionRenders(t *testing.T) {
 	buffer := applier.NewBuffer()
 	require.NoError(t, buffer.Add(moveEvent(1, 1, 10, col("value", "0.30000000000000004"), marker("samples"), col("note", "n"))))
 
-	result, err := p.flush.Flush(t.Context(), pool, buffer.Drain(everyKeyLanded()))
+	result, err := p.flush.Flush(t.Context(), pool, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 	require.NoError(t, err)
 	require.NoError(t, buffer.Hold(result.Held))
 	require.Len(t, result.Held, 1)
@@ -171,7 +171,7 @@ func TestFlushCompletesFloatsExactlyWhateverTheConnectionRenders(t *testing.T) {
 	assert.Contains(t, samples, "0.30000000000000004", "the completion carries every digit")
 	assert.NotContains(t, samples, "0.3,", "and never the rounded form")
 	require.Equal(t, 1, buffer.Release(passed(result.Held)))
-	_, err = p.flush.Flush(t.Context(), pool, buffer.Drain(everyKeyLanded()))
+	_, err = p.flush.Flush(t.Context(), pool, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 	require.NoError(t, err)
 
 	f.assertConverged(t, p.shadow)

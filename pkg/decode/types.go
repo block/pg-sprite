@@ -71,9 +71,17 @@ type ChangeEvent struct {
 	// the change is unapplied: a stream reopened from it replays the
 	// change's transaction.
 	Delivered LSN
-	Key       int64
-	OldKey    *int64
-	Columns   []Column
+	// Xid is the transaction the change belongs to, as the server numbers
+	// transactions. The server sends a transaction once its commit is in
+	// the WAL, which is before the committing backend has made it visible
+	// to snapshots — a backend waiting for synchronous replication sits
+	// between the two for as long as the wait lasts — so a reader that
+	// takes a snapshot after the change arrived checks Xid against that
+	// snapshot before it trusts a read to see the change.
+	Xid     uint32
+	Key     int64
+	OldKey  *int64
+	Columns []Column
 }
 
 // PresentColumns returns only values present in the decoded row image.

@@ -156,21 +156,19 @@ func (r *Reconciler) reconcile(ctx context.Context, pool *pgxpool.Pool, cp check
 	return Reconciled{Slot: slot, Checkpoint: resumed, Outcome: outcome}, nil
 }
 
-// claimSlot writes the row that names the slot, drops whatever bears the
-// name, and creates the fresh slot, all under the engine's lock on the
+// claimSlot writes the row that names the slot and replaces whatever slot
+// bears the name with a fresh one, all under the engine's lock on the
 // slot's name, so the reaper never reads the row's old phase and drops a
-// slot the committed row owns (ST-3). The new slot's connection is the
-// caller's to close.
+// slot the committed row owns (ST-3). The publication stays in place: the
+// source is live through a reconcile, and its writers look the publication
+// up as they run. The new slot's connection is the caller's to close.
 func (r *Reconciler) claimSlot(ctx context.Context, pool *pgxpool.Pool, marked checkpoint.Checkpoint) (*decode.Slot, error) {
 	var slot *decode.Slot
 	err := r.store.WithSlotLock(ctx, r.cfg, marked.SlotName, func(ctx context.Context) error {
 		if err := r.store.Save(ctx, r.lock, marked); err != nil {
 			return err
 		}
-		if err := decode.DropSlot(ctx, r.cfg, pool, marked.SlotName); err != nil {
-			return err
-		}
-		created, err := decode.CreateSlot(ctx, r.cfg, pool, r.target)
+		created, err := decode.ReplaceSlot(ctx, r.cfg, pool, r.target)
 		if err != nil {
 			return err
 		}

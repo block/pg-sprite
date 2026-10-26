@@ -166,20 +166,20 @@ reads it through wrapping. Every one of these refusals is fail-closed under
 `ErrInvariantViolation` ([SAFETY.md](../SAFETY.md#rules-inside-the-core)): the sentinel is the
 mechanism that stops the operation, and the cause is what tells the importer which way to
 react. Only the causes that mean the caller handed the engine an incoherent input, or that the
-engine's own write did not take, are `invariant-violation`; one, `shadow-statement-conversion`,
-is a `capability-boundary`, since it describes a statement the engine declines to carry rather
-than a fault; the rest describe a lock, a proof, or a relation whose state moved under the
-operation, and the importer retries, re-plans, or cleans up. `RefusalCause.Class()` answers
-the `class` column below as a `refusal.Class` (`pkg/refusal`, the core's declaration of the
-classes the cause tables in this document use), so an importer triages on the class without
-reading the cause's text, and a periphery adapter converts it to `verdict.Class` with a plain
-conversion, since the verdict declares its tokens from the same constants. The class is
-triage, not the action: an `environmental` cause such as `cutover-outcome-ambiguous` or
-`shadow-foreign-relation` is resolved by an operator reading the catalog, as its *Why* says,
-and no class licenses an automatic retry on its own. The imperative front door carries
-these causes on a verdict under the same `copy-and-swap-refused` reason as the preflight
-causes above: the verdict's `cause` is the shadow cause unchanged and its `class` is
-`RefusalCause.Class()` converted by token (`pkg/migrate/copy_swap_refusal.go`).
+engine's own write did not take, are `invariant-violation`; two, `shadow-statement-conversion`
+and `shadow-statement-readd`, are `capability-boundary`, since each describes a statement the
+engine declines to carry rather than a fault; the rest describe a lock, a proof, or a relation
+whose state moved under the operation, and the importer retries, re-plans, or cleans up.
+`RefusalCause.Class()` answers the `class` column below as a `refusal.Class` (`pkg/refusal`,
+the core's declaration of the classes the cause tables in this document use), so an importer
+triages on the class without reading the cause's text, and a periphery adapter converts it to
+`verdict.Class` with a plain conversion, since the verdict declares its tokens from the same
+constants. The class is triage, not the action: an `environmental` cause such as
+`cutover-outcome-ambiguous` or `shadow-foreign-relation` is resolved by an operator reading the
+catalog, as its *Why* says, and no class licenses an automatic retry on its own. The imperative
+front door carries these causes on a verdict under the same `copy-and-swap-refused` reason as
+the preflight causes above: the verdict's `cause` is the shadow cause unchanged and its `class`
+is `RefusalCause.Class()` converted by token (`pkg/migrate/copy_swap_refusal.go`).
 
 | `RefusalCause` | What the refusal says | `class` | Why |
 | --- | --- | --- | --- |
@@ -195,6 +195,7 @@ causes above: the verdict's `cause` is the shadow cause unchanged and its `class
 | `shadow-foreign-relation` | The relation wearing the shadow's name is not a plain table owned by the source's owner ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | The engine did not build it and will not touch it; an operator removes or renames the relation. |
 | `shadow-grants-differ` | The shadow's grants still differ from the source's after the build synchronised them ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `invariant-violation` | The build wrote the grants under the table lock and read back something else; that is the engine's write, not the environment. |
 | `shadow-identity-handoff` | A source identity column the change kept on the shadow does not carry `DEFAULT nextval(<source sequence>)` there, or the shadow declares an identity of its own ([ST-5](invariants.md#st-5--the-swap-is-gated-on-a-fidelity-checklist-not-just-the-checksum)) | `environmental` | The change itself, or a later edit to the shadow, replaced the handoff; change the statement or drop the shadow and rebuild. |
+| `shadow-statement-readd` | The gated statement drops a column and adds one under the same name that the copy cannot fill: the primary key, whose values the copy's chunk ranges and watermark are expressed in; a source identity column, whose sequence is handed only to the same column kept on the shadow; or a column that refuses NULL — by its own `NOT NULL` or a domain's, including a domain its type is built on — with no default of its own, no default on its type, no generation expression, and no identity, so the first chunk would have no value to give it ([ST-11](invariants.md#st-11--the-shadow-takes-a-columns-values-only-from-the-same-source-column)) | `capability-boundary` | A re-added column is a new column that takes its default, never the dropped column's values, and these three have no default to take or are the key the copy is driven by. The build refuses inside its own transaction, after the statement has run on the empty shadow and its column positions have been read, so nothing is committed and no checkpoint row is written. Re-plan the statement rather than retry it; the remedy depends on the column. A primary key is refused whatever the new column declares — a default does not lift it — so change the key in place with `ALTER COLUMN TYPE`. A source identity column is refused whatever the new column declares too: drop it in one schema change and add the new column in the next. For any other column, give the re-added column a default (its own, or its domain's). A nullable, defaulted, or generated re-add builds and runs; a re-add declared as an identity or `serial` builds but stops at the swap (`cutover-swap-mismatch`), as any new identity or sequence-owned column added through copy-and-swap does. The message names the column and the remedy; the cause carries no column. |
 | `cutover-unverified` | The cutover gate was handed an empty built-shadow or verified-shadow proof, two proofs naming different relations or different relation OIDs (a shadow rebuilt under the same name after the checksum ran), or a verified watermark that does not cover the whole key space ([CO-1](invariants.md#co-1--the-checksum-gate-is-non-skippable)) | `invariant-violation` | Only the copier and verifier mint those proofs for the same table; a caller that reaches the gate without them skipped the checksum, which no retry corrects. |
 | `cutover-undrained` | The cutover was handed a verified-shadow proof a live pass minted — the shadow equal to the source as of a position the stream had reached, with every change since still in the stream — and no drain to apply those changes under the swap lock ([CO-1](invariants.md#co-1--the-checksum-gate-is-non-skippable)) | `invariant-violation` | Pass a `DrainFunc` that applies the stream through the final position under the swap lock, or stop the stream and re-verify with a quiesced `Check`; the proof is sound, the hand-off to the swap is not. |
 | `cutover-drain-deferred` | The shadow refused a batch the swap's drain had to apply under the swap lock: a unique-key move among the changes committed since the live verification pass that cannot be ordered into the shadow, with no copy left to change the outcome ([CO-6](invariants.md#co-6--unique-secondary-key-moves-must-converge-postgresql-specific-gap)) | `environmental` | The swap transaction is rolled back and the source stays live; the row is left in `cutover` with the position the drain reopened from, so a resume drains the same changes again once the rows the move touched have settled. A move the shadow cannot ever order is re-planned. |

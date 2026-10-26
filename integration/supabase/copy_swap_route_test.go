@@ -15,9 +15,11 @@ import (
 
 // copySwapOptions is the engine policy for a statement the router runs
 // through the copy-and-swap backend, declared quiesced and with no free disk
-// reported: the route's preflight then refuses before any of its sessions
-// open, which is the fail-closed shape these probes rely on to leave the
-// fixture untouched. Quiesced keeps the probe independent of the fixture
+// reported: the route's preflight then refuses before its lock session, copy
+// workers, or replication stream open, which is the fail-closed shape these
+// probes rely on to leave the fixture untouched. The only session opened
+// from the connection is the read-only one that proves it reaches the
+// pool's database. Quiesced keeps the probe independent of the fixture
 // role's replication access.
 func copySwapOptions() migrate.Options {
 	opts := migrate.DefaultOptions()

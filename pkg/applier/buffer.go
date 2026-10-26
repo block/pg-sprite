@@ -103,7 +103,7 @@ func (b *Buffer) addInsert(ev decode.ChangeEvent) error {
 		}
 	}
 	b.markOldKeyReused(ev.Key, nil)
-	b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: firstLSN(ev.Delivered, cur)})
+	b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: firstLSN(ev.Delivered, cur), Xid: ev.Xid})
 	return nil
 }
 
@@ -117,13 +117,14 @@ func (b *Buffer) addUpdate(ev decode.ChangeEvent) error {
 	cur, ok := b.entries[ev.Key]
 	if !ok {
 		b.markOldKeyReused(ev.Key, nil)
-		b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: ev.Delivered})
+		b.put(&Entry{Key: ev.Key, Kind: Image, Columns: cloneColumns(ev.Columns), FirstLSN: ev.Delivered, Xid: ev.Xid})
 		return nil
 	}
 	if cur.Kind == DeleteMarker {
 		return fmt.Errorf("%w (CO-5): buffer key %d: update over a buffered delete", ErrInvariantViolation, ev.Key)
 	}
 	cur.overlay(ev.Columns)
+	cur.Xid = ev.Xid
 	return nil
 }
 
@@ -152,7 +153,7 @@ func (b *Buffer) addKeyMove(ev decode.ChangeEvent) error {
 		return fmt.Errorf("%w (CO-5): buffer key %d: key move from %d, which is buffered deleted", ErrInvariantViolation, ev.Key, oldKey)
 	}
 	b.markOldKeyReused(ev.Key, from)
-	moved := &Entry{Key: ev.Key, Kind: Image, OldKey: &oldKey, FirstLSN: firstLSN(ev.Delivered, cur, from)}
+	moved := &Entry{Key: ev.Key, Kind: Image, OldKey: &oldKey, FirstLSN: firstLSN(ev.Delivered, cur, from), Xid: ev.Xid}
 	if from != nil {
 		moved.Columns = cloneColumns(from.Columns)
 		moved.overlay(ev.Columns)
@@ -165,14 +166,14 @@ func (b *Buffer) addKeyMove(ev decode.ChangeEvent) error {
 		moved.Columns = cloneColumns(ev.Columns)
 	}
 	b.put(moved)
-	b.put(&Entry{Key: oldKey, Kind: DeleteMarker, FirstLSN: firstLSN(ev.Delivered, from)})
+	b.put(&Entry{Key: oldKey, Kind: DeleteMarker, FirstLSN: firstLSN(ev.Delivered, from), Xid: ev.Xid})
 	return nil
 }
 
 // addDelete replaces whatever the key held with a delete marker: the newest
 // fact about the key is that its row is gone (CO-5).
 func (b *Buffer) addDelete(ev decode.ChangeEvent) {
-	b.put(&Entry{Key: ev.Key, Kind: DeleteMarker, FirstLSN: firstLSN(ev.Delivered, b.entries[ev.Key])})
+	b.put(&Entry{Key: ev.Key, Kind: DeleteMarker, FirstLSN: firstLSN(ev.Delivered, b.entries[ev.Key]), Xid: ev.Xid})
 }
 
 // markOldKeyReused records that key now holds a row other than the one each
