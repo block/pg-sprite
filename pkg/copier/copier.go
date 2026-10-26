@@ -68,6 +68,19 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
+// Validate refuses options that cannot bound a copy, with the defaults
+// applied as NewCopier applies them: the copier's own fields with
+// ErrInvalidOptions and its Chunker's with ErrInvalidChunkerOptions.
+// NewCopier runs the same check when the copy starts; Validate lets a
+// caller that holds the options long before then refuse them up front,
+// before anything is built or fenced (ST-6).
+func (o Options) Validate() error {
+	if err := o.withDefaults().validate(); err != nil {
+		return err
+	}
+	return o.Chunker.withDefaults().validate()
+}
+
 // validate runs after withDefaults, so every field is set.
 func (o Options) validate() error {
 	if o.Workers < 1 {

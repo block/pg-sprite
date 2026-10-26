@@ -568,7 +568,12 @@ at every stage; `pkg/checkpoint` `Store.Save` and `Store.Delete` require the
 same session for the checkpoint's target, run under its `Bind` context, and confirm the lock
 from the write's own transaction before the upsert or the delete (nil-session, wrong-table,
 and rival-backend tests), so a run whose lock went to another engine cannot stamp its stale
-checkpoint over the newer engine's row.
+checkpoint over the newer engine's row; `pkg/migrate` `Run` and `RunDesired` prove, before the
+preflight and before the lock session opens, that `CopySwapOptions.Connection` reaches the
+pool's database (the cluster's system identifier and `current_database()` on both sides), and
+stop with `CopySwapConnectionMismatchError` otherwise, since an advisory lock taken in another
+database does not exclude a run in this one (another-database, another-cluster, unreachable,
+and unidentifiable tests).
 *Source:* Spirit `pkg/dbconn/metadatalock.go` (stated pool invariants). This resolves the
 mutual-exclusion gap called out in the validation review.
 
@@ -921,7 +926,8 @@ attempt to reuse — and drops a slot the server created but did not describe us
 sessions of one database on one cluster, by `IDENTIFY_SYSTEM` against `pg_control_system()`,
 before any slot command or `START_REPLICATION`; `DropSlot` waits for a holder under the
 caller's context alone, reports a cut-off wait as an error and never as a drop, reports a drop only once the catalog no longer shows the slot,
-drops only a publication of the shape `CreateSlot` makes, and is idempotent; `InspectSlot`
+drops only a publication of the shape `CreateSlot` makes, and is idempotent; `ReplaceSlot`
+drops the slot as `DropSlot` does and creates a fresh one, leaving the publication in place; `InspectSlot`
 reads retained WAL on a primary and reports it unknown on a server in recovery rather than
 fail the read; `SlotStatus.WithinLagCeiling` judges a slot against a ceiling in bytes —
 lost before any measure, unknown never read as nothing retained, over the ceiling a typed
@@ -1036,7 +1042,9 @@ transaction of its own that the source and the shadow are still the relations th
 recorded (`cutover-relation-replaced` otherwise, before anything is written), writes the row to
 `checkpoint.PhaseReconciling` naming the derived slot and publication — so a reconcile that
 dies restarts as a reconcile, and the slot it is about to make is owned by the row from the
-moment it exists (ST-3) — drops whatever bears the derived slot name, creates a fresh slot, and
+moment it exists (ST-3) — replaces whatever slot bears the derived name with a fresh one through
+`decode.ReplaceSlot`, keeping the publication in place, since the source's writers look it up as
+they run and one dropped under them fails the write, and
 — when the watermark says anything landed — runs one `checksum` pass at or below the watermark
 under the `recopy` policy (D14), recopying only the chunks the gap touched without a reread,
 since the source is live and the new slot carries every write that lands after the recopy,
@@ -1046,7 +1054,8 @@ rebuilt and the watermark never moves (recovers-from-a-dropped-slot,
 restarts-from-an-interrupted-reconcile, with-nothing-landed-skips-the-pass,
 reads-an-intact-slot-as-clean, refuses-a-row-it-cannot-act-on,
 quiesced-target-has-no-reconcile-mode, under-a-steady-insert-stream,
-refuses-a-row-whose-swap-committed, refuses-replaced-relations-before-its-marker,
+keeps-the-publication, refuses-a-row-whose-swap-committed,
+refuses-replaced-relations-before-its-marker,
 leaves-the-slot-it-created-owned-by-the-row, resumes-in-copying-below-a-partial-watermark,
 refuses-a-row-of-another-source-shape, stops-when-the-lock-is-lost-while-the-drop-waits,
 refuses-a-foreign-slot-of-the-name, refuses-the-slot-while-another-backend-holds-it,
@@ -1103,7 +1112,12 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
-require is minted by the last. *Planned enforcement:* wiring those checks into the route, and
+require is minted by the last; for the native route's sequences, `pkg/executor`
+`admitSequence`, which `RunSequence` calls to admit every step's shape and target before the
+first step runs. `migrate --dry-run` reports the same shape refusals through
+`migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second
+enforcement; the size guard and privilege preflight need live facts and stay the apply's.
+*Planned enforcement:* wiring those checks into the route, and
 all other execution paths in preflight. *Source:*
 [design-principles](design-principles.md#correctness-and-safety).
 
@@ -1190,13 +1204,36 @@ column's values. No later gate can catch a wrong list: CO-1's digest compares th
 both sides, so a name-matched list verifies clean, and the list itself is the guard. The copier,
 the checksum digest and its repair, and the live flusher all take their columns from
 `BuiltShadow.CopyColumns()`, and a resume re-derives the list from the catalog and compares it
-field for field against the checkpointed proof. *Enforced:* `pkg/schemachange`
-(`readColumnPositions` reads both relations' live attribute numbers inside the build's and the
-inspection's transaction; `sameColumns` keeps a column only when its live position equals its
-shadow attribute number; `copyColumns` takes only those). Tests:
+field for field against the checkpointed proof. A re-added column the copy cannot leave to
+its default — the primary key, the replacement of a source identity column, or a column that
+refuses NULL, by its own `NOT NULL` or a domain's, with no default of its own or on its type —
+is refused inside the build's transaction with `shadow-statement-readd`, so no shadow is
+committed for a statement whose copy could not run.
+*Enforced:* `pkg/schemachange` (`readColumnPositions` reads both relations' live attribute
+numbers inside the build's and the inspection's transaction; `sameColumns` keeps a column only
+when its live position equals its shadow attribute number; `copyColumns` takes only those;
+`readDomainFills` reads what each shadow column's domain contributes; `refuseUnfillableReadds`
+refuses the three re-adds before the build commits). Tests:
 `TestSameColumnsComparesLivePositionToShadowNumber`,
+`TestRefuseUnfillableReaddsAdmitsAColumnTheServerFills`,
+`TestRefuseUnfillableReaddsRefusesThePrimaryKey`,
+`TestRefuseUnfillableReaddsRefusesNotNullWithoutADefault`,
+`TestRefuseUnfillableReaddsRefusesAReplacedIdentityColumn`,
+`TestRefuseUnfillableReaddsIgnoresColumnsTheStatementKeptOrDropped`,
+`TestRefuseUnfillableReaddsAdmitsANotNullColumnWhoseDomainDefaultsIt`,
+`TestRefuseUnfillableReaddsRefusesAColumnWhoseDomainRefusesNull`,
 `TestBuildShadowLeavesAReaddedColumnOutOfTheCopyWhenTheSourceHasADroppedColumn`,
 `TestBuildShadowCopiesEveryColumnTheChangeKeeps`,
+`TestBuildShadowRefusesAReaddedNotNullColumnWithNoDefault`,
+`TestBuildShadowRefusesAReaddedPrimaryKey`,
+`TestBuildShadowRefusesAStatementThatReplacesAnIdentityColumn`,
+`TestBuildShadowDoesNotRefuseAPlainColumnReaddedAsAnIdentity`,
+`TestBuildShadowRefusesAReaddedColumnWhoseDomainRefusesNull`,
+`TestBuildShadowRefusesAReaddedColumnWhoseBaseDomainRefusesNull`,
+`TestBuildShadowRefusesAReaddedColumnWhoseDefaultIsOnlyOnTheBaseDomain`,
+`TestBuildShadowAdmitsDroppingAnIdentityColumnOutright`,
+`TestRunnerRefusesAnUnfillableReaddBeforeAnyRowOrFence`,
+`TestRunnerRunsAReaddedNotNullColumnWhoseDomainDefaultsIt`,
 `TestRunnerGivesAReaddedColumnItsDefaultNotTheDroppedValues`,
 `TestRunnerLiveRunGivesAReaddedColumnItsDefault`. *Source:* adversarial review of the
 re-added-column copy fix.
