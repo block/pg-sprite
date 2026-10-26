@@ -77,13 +77,13 @@ func TestParseOneKinds(t *testing.T) {
 			name: "alter index rename names the index, not a table",
 			sql:  "ALTER INDEX i RENAME TO j",
 			want: Statement{kind: KindRenameIndex, indexTarget: IndexTargetSingleRelation,
-				indexRelation: IndexRelation{Name: "i", Kind: IndexRelationIndex}},
+				indexRelation: IndexRelation{Name: "i", Kind: IndexRelationIndex}, renamedTo: "j"},
 		},
 		{
 			name: "alter index rename schema-qualified keeps the index's schema",
 			sql:  "ALTER INDEX app.users_email_idx RENAME TO users_email_key",
 			want: Statement{kind: KindRenameIndex, indexTarget: IndexTargetSingleRelation,
-				indexRelation: IndexRelation{Schema: "app", Name: "users_email_idx", Kind: IndexRelationIndex}},
+				indexRelation: IndexRelation{Schema: "app", Name: "users_email_idx", Kind: IndexRelationIndex}, renamedTo: "users_email_key"},
 		},
 		{
 			name: "alter sequence set schema is not a table target",

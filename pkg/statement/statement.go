@@ -98,6 +98,7 @@ type Statement struct {
 	concurrent    bool
 	indexTarget   IndexTarget
 	indexRelation IndexRelation
+	renamedTo     string
 	cascades      bool
 	buildsIndex   bool
 }
@@ -199,6 +200,11 @@ func (s Statement) IndexTarget() IndexTarget { return s.indexTarget }
 // such as DROP INDEX ... CASCADE (see Cascades()).
 func (s Statement) IndexRelation() IndexRelation { return s.indexRelation }
 
+// RenamedTo returns the name an ALTER INDEX ... RENAME TO gives its index,
+// as the grammar spelled it; empty for every other statement. The renamed
+// index keeps its schema, so the name is never qualified.
+func (s Statement) RenamedTo() string { return s.renamedTo }
+
 // Cascades reports whether a DROP INDEX used CASCADE, which also drops the
 // objects that depend on the index. It is always false for other statements.
 func (s Statement) Cascades() bool { return s.cascades }
@@ -285,6 +291,7 @@ func ParseOne(sql string) (Statement, error) {
 			st.kind = KindRenameIndex
 			st.indexTarget = IndexTargetSingleRelation
 			st.indexRelation = reindexedRelation(ren.GetRelation(), IndexRelationIndex)
+			st.renamedTo = ren.GetNewname()
 			return st, nil
 		}
 		if ren.GetRenameType() != pganalyze.ObjectType_OBJECT_TABLE &&
