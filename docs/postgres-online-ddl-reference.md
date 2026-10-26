@@ -209,7 +209,7 @@ uniformly "No" — included for consistency with the other tables.
 | `DROP INDEX CONCURRENTLY` | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | PG 9.2+ |
 | `REINDEX INDEX` | ACCESS EXCLUSIVE | No (rebuilds index) | No | ➖ Use `CONCURRENTLY` | |
 | `REINDEX INDEX CONCURRENTLY` | SHARE UPDATE EXCLUSIVE | No (rebuilds index) | Yes | ❌ No | PG 12+ |
-| `ALTER INDEX ... RENAME` | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | |
+| `ALTER INDEX ... RENAME` | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | Renaming an index that backs a primary-key, unique, or exclusion constraint also renames the constraint. On a table name, `ALTER INDEX ... RENAME` renames the table |
 
 ## Constraint operations
 

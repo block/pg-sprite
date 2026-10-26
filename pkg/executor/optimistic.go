@@ -285,7 +285,7 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 		}
 	}
 	return executeWithLockRetryObserved(ctx, retry, func(ctx context.Context) error {
-		return executeBoundedAttemptAs(ctx, pool, st, b, pt.Schema(), "", before)
+		return executeBoundedAttemptAs(ctx, pool, st, b, pt.Schema(), "", before, nil)
 	}, sleepContext, func(attempt int) {
 		if tracker != nil {
 			tracker.SetAttempt(attempt)
@@ -304,8 +304,10 @@ func executeNative(ctx context.Context, pool *pgxpool.Pool, pt preflight.Preflig
 // It runs as role when one is set, and runs before, when set, inside the
 // attempt's transaction under its budgets and ahead of the statement. An
 // error from before ends the attempt with nothing submitted; a lock it waits on past lock_timeout is a lock budget
-// failure like the statement's own.
-func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPathSchema, role string, before func(context.Context, pgx.Tx) error) error {
+// failure like the statement's own. It runs after, when set, in the same
+// transaction once the statement has run and before the commit, so an
+// error from after rolls the statement back.
+func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, b Budget, searchPathSchema, role string, before, after func(context.Context, pgx.Tx) error) error {
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("begin optimistic attempt: %w", err)
@@ -350,6 +352,14 @@ func executeBoundedAttemptAs(ctx context.Context, pool *pgxpool.Pool, st stateme
 			return budgetErr
 		}
 		return fmt.Errorf("optimistic attempt: %w", err)
+	}
+	if after != nil {
+		if err := after(ctx, tx); err != nil {
+			if budgetErr := asBudgetError(err, b); budgetErr != nil {
+				return budgetErr
+			}
+			return err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		// INV: LK-4 — a COMMIT that did not return success may still have

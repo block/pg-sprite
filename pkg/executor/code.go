@@ -150,6 +150,12 @@ const (
 	// again under the table's lock; nothing was validated. Re-plan against
 	// the constraint as it stands.
 	CodeValidatedConstraintDrift Code = "validated-constraint-drift"
+	// CodeRenamedIndexDrift: the relation an ALTER INDEX ... RENAME TO
+	// names is no longer a plain index on the preflighted table, read
+	// again under the table's lock — gone, not an index, on another table,
+	// or now backing a constraint; nothing was renamed. Re-plan against the
+	// catalog as it stands.
+	CodeRenamedIndexDrift Code = "renamed-index-drift"
 	// CodeTableNotFound: the statement's qualified table does not exist.
 	CodeTableNotFound Code = "table-not-found"
 	// CodeInvariantViolation: a breach of the invariant registry; never a
@@ -205,6 +211,7 @@ func Codes() []Code {
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
 		CodeValidatedConstraintDrift,
+		CodeRenamedIndexDrift,
 		CodeTableNotFound,
 		CodeInvariantViolation,
 		CodeExecutionFailed,
@@ -246,6 +253,7 @@ func (c Code) Permanent() bool {
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
 		CodeValidatedConstraintDrift,
+		CodeRenamedIndexDrift,
 		CodeTableNotFound,
 		CodeInvariantViolation:
 		return true
@@ -353,6 +361,8 @@ func sentinelCode(err error) Code {
 		return CodeAdoptedIndexDrift
 	case errors.Is(err, ErrValidatedConstraintDrift):
 		return CodeValidatedConstraintDrift
+	case errors.Is(err, ErrRenamedIndexDrift):
+		return CodeRenamedIndexDrift
 	case errors.Is(err, ErrTableNotFound):
 		return CodeTableNotFound
 	default:

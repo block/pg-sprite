@@ -75,6 +75,13 @@ var noRewriteCases = map[string][]noRewriteCase{
 			statement: "ALTER TABLE %[1]s.t ADD CONSTRAINT t_email_key UNIQUE USING INDEX t_email_key",
 		},
 	},
+	"alter-index-rename": {
+		{
+			name:      "plain index",
+			setup:     append(slices.Clone(noRewriteFixture), "CREATE INDEX t_email_idx ON %[1]s.t (email)"),
+			statement: "ALTER INDEX %[1]s.t_email_idx RENAME TO t_contact_email_idx",
+		},
+	},
 	"alter-column-type-binary-coercible-proven-against-live-column-facts": {
 		{name: "widen varchar", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN email TYPE varchar(100)"},
 		{name: "varchar to text", setup: noRewriteFixture, statement: "ALTER TABLE %[1]s.t ALTER COLUMN email TYPE text"},

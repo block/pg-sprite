@@ -65,7 +65,7 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 
 	report := plan.NewReport(plan.SourceAlter)
 	report.Schema = facts.Schema
-	report.Table = st.Table()
+	report.Table = facts.Table
 	report.TableExists = facts.TableExists
 	if report.ServerVersion, err = dbconn.ServerVersion(ctx, pool); err != nil {
 		return err
@@ -94,8 +94,10 @@ func (c *MigrateCmd) runDryRun(ctx context.Context, out io.Writer) error {
 	// knowable now, so the dry run ends in that same refusal
 	// verdict instead of an executable plan. The checks that need live
 	// facts (size guard, privileges) stay the apply's; a missing target
-	// table is reported as such, since the apply stops there first.
-	if !tableMissing(report) {
+	// table is reported as such, since the apply stops there first. An
+	// index rename is run by its own executor, not the sequence executor,
+	// so the sequence admission does not apply to it.
+	if !tableMissing(report) && st.Kind() != statement.KindRenameIndex {
 		for _, ps := range report.Statements {
 			if ps.Disposition != router.DispositionExecute {
 				continue
