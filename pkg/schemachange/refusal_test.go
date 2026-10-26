@@ -33,6 +33,7 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 		CauseForeignRelation:      "ST-5",
 		CauseGrantsDiffer:         "ST-5",
 		CauseIdentityHandoff:      "ST-5",
+		CauseStatementReadd:       "ST-11",
 		CauseSchemaDrift:          "ST-5",
 		CauseFidelityDrift:        "ST-5",
 		CauseIndexInvalid:         "ST-5",
@@ -68,8 +69,8 @@ func TestEveryRefusalCauseNamesItsInvariant(t *testing.T) {
 // Every cause routes to the class docs/refusal-classes.md decides for it.
 // Lock, shape, ownership, drift, name, slot, and ambiguous-outcome causes
 // are environmental, since the state they describe moved under the run and
-// may not next time; the one statement the engine declines to carry is a
-// capability boundary; a proof, row, statement pairing, or catalog the
+// may not next time; a statement the engine declines to carry as written is
+// a capability boundary; a proof, row, statement pairing, or catalog the
 // caller or the engine's own write got wrong is an invariant violation,
 // since no retry changes it; every answer is a member of refusal.Classes(),
 // so the closed set lists what the causes hand out. An unknown cause has no
@@ -88,6 +89,7 @@ func TestEveryRefusalCauseNamesItsClass(t *testing.T) {
 		CauseForeignRelation:      refusal.ClassEnvironmental,
 		CauseGrantsDiffer:         refusal.ClassInvariantViolation,
 		CauseIdentityHandoff:      refusal.ClassEnvironmental,
+		CauseStatementReadd:       refusal.ClassCapabilityBoundary,
 		CauseCutoverUnverified:    refusal.ClassInvariantViolation,
 		CauseCutoverUndrained:     refusal.ClassInvariantViolation,
 		CauseCutoverUnfenced:      refusal.ClassEnvironmental,

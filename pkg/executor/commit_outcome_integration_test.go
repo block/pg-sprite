@@ -86,10 +86,26 @@ func TestExecuteNativeTypesAServerAnsweredCommitErrorAsOutcomeUnknown(t *testing
 		CREATE CONSTRAINT TRIGGER refuse_commit AFTER INSERT ON %[1]s.commit_probe
 			DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION %[1]s.refuse_commit()`, schema))
 	require.NoError(t, err)
+	// Event triggers fire for every DDL in the database, so the refusal is
+	// queued only for this test's table; any other ALTER TABLE commits.
 	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, "queue_commit_refusal", fmt.Sprintf(`
-		IF TG_TAG = 'ALTER TABLE' THEN
-			INSERT INTO %s.commit_probe VALUES (1);
+		IF TG_TAG = 'ALTER TABLE'
+			AND EXISTS (
+				SELECT FROM pg_catalog.pg_event_trigger_ddl_commands()
+				WHERE object_identity OPERATOR(pg_catalog.=) '%[1]s.t'
+			) THEN
+			INSERT INTO %[1]s.commit_probe VALUES (1);
 		END IF;`, schema))
+
+	// Another test's ALTER TABLE, on a table in a schema of its own, runs
+	// against the same database while the trigger is installed and commits.
+	elsewhere := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.t (
+			id int PRIMARY KEY
+		);
+		ALTER TABLE %[1]s.t ADD COLUMN c int`, elsewhere))
+	require.NoError(t, err, "the refusal is queued only for this test's table")
 
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ADD COLUMN c int", schema))
 	err = executor.ExecuteNative(t.Context(), pool, pt, st, budget, executor.DefaultRetryPolicy())

@@ -80,7 +80,10 @@ pg-delta's snapshot + roundtrip pairing.
 ### TM-3 — Fault injection is real, and asserts durable state
 
 Contention tests hold a real `ACCESS EXCLUSIVE` lock from a second
-connection; cancellation tests use context deadlines. After any injected
+connection; cancellation tests use context deadlines. A statement-budget
+overrun is forced with a `ddl_command_end` event trigger that sleeps inside
+the statement, never with a table large enough to be slow: a fixed row
+count is a bet on how fast the server is. After any injected
 failure the test asserts the **durable state** (no wedged schema-change record,
 no leaked shadow objects/slots/triggers) and the ability to proceed — not
 merely the returned error type. *Binds:* Phase 3 onward; full
@@ -219,6 +222,11 @@ schema-qualified name in an expression its guard evaluates; otherwise an
 unrelated test fails with `permission denied for schema`.
 `InstallEventTrigger` holds each DDL trigger to this when it is installed,
 by running a probe statement as a role without access to the schema.
+A trigger that injects a fault must also confine it to its own schema's
+objects — matching the `schema_name` or `object_identity` that
+`pg_event_trigger_ddl_commands()` reports, not statement text alone —
+or another package's DDL on the shared database is refused or loses its
+connection.
 
 The privilege-ladder tests additionally create throwaway **cluster-level
 roles** (`NewRole`), so the role behind an external `PG_DSN` needs

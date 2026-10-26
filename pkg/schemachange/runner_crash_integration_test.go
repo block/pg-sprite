@@ -133,6 +133,25 @@ func TestRunnerResumesFromCutoverWhenTheSwapNeverRan(t *testing.T) {
 	assert.Equal(t, sourceOID, result.Swapped.OldOID)
 }
 
+// A hook error at the done save stops nothing: the swap has committed and
+// the done row has landed, so Run hands back the completed run's Result
+// beside the error, as it does when only the lock release fails, and a
+// caller reads the change as complete rather than as a stopped run.
+func TestRunnerReturnsTheResultWhenTheHookFailsAtDone(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE %s.orders DROP COLUMN note`
+	stop := &stopAfter{phase: checkpoint.PhaseDone}
+
+	result, err := f.run(t, "orders", alter, schemachange.RunOptions{AfterCheckpoint: stop.hook})
+	require.ErrorIs(t, err, errStopHere)
+	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
+	assert.Equal(t, 3, result.Verification.Chunks, "the Result is the completed run's")
+	assert.True(t, result.OldTableDropped)
+	assert.Equal(t, checkpoint.PhaseDone, f.inspectRow(t, "orders").Phase)
+	assert.False(t, f.hasColumn(t, "orders", "note"))
+}
+
 // A run that died after its swap committed, before the old table drop,
 // left a row in cutover and the shadow under the source's name. The
 // resumed run reads that from the catalog (LK-4), makes no verification

@@ -139,16 +139,25 @@ func TestExecuteNativeCancelsRewriteAndLeavesTableUnchanged(t *testing.T) {
 	pool, schema := newPool(t)
 	_, err := pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
 	require.NoError(t, err)
-	// Enough rows that a full table rewrite cannot finish inside a
-	// millisecond-scale statement budget.
 	_, err = pool.Exec(t.Context(), fmt.Sprintf(
-		"INSERT INTO %s.t SELECT g, repeat('x', 100) FROM generate_series(1, 300000) g", schema))
+		"INSERT INTO %s.t SELECT g, repeat('x', 100) FROM generate_series(1, 3) g", schema))
 	require.NoError(t, err)
+	// The rewrite is made to outlast the budget by a trigger that sleeps
+	// inside the statement, not by a table large enough to be slow: a fixed
+	// row count is a bet on how fast the server is. Event triggers fire for
+	// every DDL in the database, so the sleep runs only for this test's table.
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, "outlast_budget", fmt.Sprintf(`
+		IF EXISTS (
+			SELECT FROM pg_catalog.pg_event_trigger_ddl_commands()
+			WHERE object_identity OPERATOR(pg_catalog.=) '%s.t'
+		) THEN
+			PERFORM pg_catalog.pg_sleep(10);
+		END IF;`, schema))
 	pt := mustPreflight(t, pool, schema, "t")
 
 	// int -> bigint forces a full table rewrite under ACCESS EXCLUSIVE.
 	st := mustParse(t, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
-	tight := executor.Budget{LockTimeout: budget.LockTimeout, StatementTimeout: 50 * time.Millisecond}
+	tight := executor.Budget{LockTimeout: budget.LockTimeout, StatementTimeout: 500 * time.Millisecond}
 	err = executor.ExecuteNative(t.Context(), pool, pt, st, tight, executor.DefaultRetryPolicy())
 
 	var budgetErr *executor.BudgetError
@@ -160,7 +169,7 @@ func TestExecuteNativeCancelsRewriteAndLeavesTableUnchanged(t *testing.T) {
 	var count int
 	require.NoError(t, pool.QueryRow(t.Context(),
 		fmt.Sprintf("SELECT count(*) FROM %s.t", schema)).Scan(&count))
-	assert.Equal(t, 300000, count)
+	assert.Equal(t, 3, count)
 }
 
 func TestExecuteNativeSurfacesOperationalErrors(t *testing.T) {

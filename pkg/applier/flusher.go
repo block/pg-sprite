@@ -301,7 +301,7 @@ func (f *Flusher) completeMoved(ctx context.Context, tx pgx.Tx, batch Batch, res
 			continue
 		}
 		result.Skipped = append(result.Skipped, e.Key)
-		replace[e.Key] = &Entry{Key: e.Key, Kind: DeleteMarker, FirstLSN: e.FirstLSN}
+		replace[e.Key] = &Entry{Key: e.Key, Kind: DeleteMarker, FirstLSN: e.FirstLSN, Xid: e.Xid}
 	}
 	entries := make([]Entry, 0, len(batch.Entries))
 	for _, e := range batch.Entries {

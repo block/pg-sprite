@@ -10,6 +10,7 @@ import (
 	"github.com/block/pg-sprite/pkg/applier"
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/checksum"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/schemachange"
 )
@@ -39,6 +40,28 @@ func TestNewRunnerRefusesOptionsARunCouldNotHonour(t *testing.T) {
 			_, err := schemachange.NewRunner(dbconn.Config{}, store, opts)
 			require.Error(t, err)
 			assert.ErrorIs(t, err, schemachange.ErrInvalidOptions)
+		})
+	}
+}
+
+// The copier's options are refused at construction too, rather than when
+// the copy starts, after the shadow is built and the source fenced or its
+// slot made. The error carries the copier's own sentinel beside the
+// Runner's, so a caller can match either.
+func TestNewRunnerRefusesCopierOptionsTheCopyWould(t *testing.T) {
+	store := &checkpoint.Store{}
+	for name, tc := range map[string]struct {
+		opts     copier.Options
+		sentinel error
+	}{
+		"negative copier workers":  {copier.Options{Workers: -1}, copier.ErrInvalidOptions},
+		"chunk floor over ceiling": {copier.Options{Chunker: copier.ChunkerOptions{MinRows: 50, MaxRows: 10}}, copier.ErrInvalidChunkerOptions},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := schemachange.NewRunner(dbconn.Config{}, store, schemachange.RunOptions{Copier: tc.opts})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, schemachange.ErrInvalidOptions)
+			assert.ErrorIs(t, err, tc.sentinel)
 		})
 	}
 }
