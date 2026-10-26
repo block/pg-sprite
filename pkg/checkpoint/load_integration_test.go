@@ -59,6 +59,38 @@ func TestLoadReportsAnotherFormatVersionAsIncompatible(t *testing.T) {
 	assert.Equal(t, fmt.Sprint(checkpoint.FormatVersion), incompatible.Want)
 }
 
+// A row left in a phase this engine does not know — what a newer engine of
+// the same row format leaves behind for an older one — is the typed
+// mismatch from Load and from Inspect, never ErrInvariantViolation; the
+// identity it carries is the one Delete accepts, so the fresh start after
+// a downgrade is the same deliberate step as after a format change.
+func TestLoadReportsAnUnknownPhaseAsIncompatible(t *testing.T) {
+	f := newStoreFixture(t)
+	f.ensure(t)
+	lock := f.ordersLock(t)
+	require.NoError(t, f.store.Save(t.Context(), lock, ordersCheckpoint()))
+	_, err := f.pool.Exec(t.Context(), "UPDATE pgsprite.pgsprite_checkpoint SET phase = 'settling'")
+	require.NoError(t, err)
+
+	_, err = f.store.Load(t.Context(), "app", "orders", ordersCheckpoint().Fingerprints())
+	var incompatible *checkpoint.IncompatibleError
+	require.ErrorAs(t, err, &incompatible)
+	assert.Equal(t, checkpoint.MismatchPhase, incompatible.Mismatch)
+	assert.Equal(t, "settling", incompatible.Have)
+	assert.Equal(t, "copying, catching_up, reconciling, verifying, cutover, done, failed", incompatible.Want)
+	assert.Equal(t, ordersCheckpoint().Identity(), incompatible.Stored)
+	assert.NotErrorIs(t, err, checkpoint.ErrInvariantViolation)
+
+	_, err = f.store.Inspect(t.Context(), "app", "orders")
+	require.ErrorAs(t, err, &incompatible)
+	assert.Equal(t, checkpoint.MismatchPhase, incompatible.Mismatch)
+	assert.NotErrorIs(t, err, checkpoint.ErrInvariantViolation)
+
+	require.NoError(t, f.store.Delete(t.Context(), lock, "app", "orders", incompatible.Stored))
+	_, err = f.store.Load(t.Context(), "app", "orders", ordersCheckpoint().Fingerprints())
+	assert.ErrorIs(t, err, checkpoint.ErrNotFound)
+}
+
 // A backend terminated from outside the session — what a failover looks
 // like from the client — is a transient read error: Load retries on a fresh
 // connection and returns the row, and the blip is never mistaken for a

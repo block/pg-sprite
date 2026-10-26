@@ -352,7 +352,11 @@ func rowProof(cp checkpoint.Checkpoint) (Proof, error) {
 // the shadow's, and the proof the row carries must equal the proof the
 // inspection re-derived, field for field. Both proofs are compared in
 // their JSON encoding after a decode, since the row's came back as the
-// server renders JSON and the inspection's has not been through it.
+// server renders JSON and the inspection's has not been through it. Two
+// proofs that differ only in their conversion fingerprint describe the same
+// shadow over a catalog that has changed under its conversions, and are
+// refused as the copy's own copy-conversion-drift, which undoing the change
+// cures, rather than as a row that does not describe the shadow.
 func checkRowDescribes(cp checkpoint.Checkpoint, rowProof Proof, built BuiltShadow) error {
 	if cp.ShadowTable != built.ShadowTable() {
 		return refuse(CauseResumeRowMismatch, nil, "checkpoint row for %s.%s names shadow %s, the shadow under the derived name is %s", cp.Schema, cp.Table, cp.ShadowTable, built.ShadowTable())
@@ -364,10 +368,33 @@ func checkRowDescribes(cp checkpoint.Checkpoint, rowProof Proof, built BuiltShad
 	if err != nil {
 		return err
 	}
-	if !same {
-		return refuse(CauseResumeRowMismatch, nil, "checkpoint row for %s.%s carries a shadow proof other than the one the shadow under its name re-derives", cp.Schema, cp.Table)
+	if same {
+		return nil
 	}
-	return nil
+	drifted, err := onlyConversionsDrifted(rowProof, built.Proof())
+	if err != nil {
+		return err
+	}
+	if drifted {
+		// INV: CO-9
+		return refuse(CauseCopyConversionDrift, nil, "the objects the conversion expressions for %s.%s resolve among have changed since the shadow %s was built: fingerprint %s, proof carries %s", cp.Schema, cp.Table, built.ShadowTable(), built.Proof().ConversionFingerprint, rowProof.ConversionFingerprint)
+	}
+	return refuse(CauseResumeRowMismatch, nil, "checkpoint row for %s.%s carries a shadow proof other than the one the shadow under its name re-derives", cp.Schema, cp.Table)
+}
+
+// onlyConversionsDrifted reports whether the row's proof and the
+// re-derived one differ in their conversion fingerprint alone, with the
+// row's carrying one: the shadow is the one the build made, and the
+// catalog its conversion expressions resolve in has changed since, which
+// is the copy's own drift and is cured by undoing the change. A row
+// without a fingerprint was not written with one, so its difference is
+// the row's, not the catalog's.
+func onlyConversionsDrifted(row, derived Proof) (bool, error) {
+	if row.ConversionFingerprint == "" {
+		return false, nil
+	}
+	derived.ConversionFingerprint = row.ConversionFingerprint
+	return sameProof(row, derived)
 }
 
 // sameProof compares two proofs by their canonical JSON encoding.

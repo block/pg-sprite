@@ -28,6 +28,8 @@ func copierCause(cause copier.RefusalCause) RefusalCause {
 		return CauseLockUnconfirmed
 	case copier.CauseRelationReplaced:
 		return CauseRelationReplaced
+	case copier.CauseConversionDrift:
+		return CauseCopyConversionDrift
 	case copier.CauseFrontierBroken:
 		return CauseCopyFrontierBroken
 	case copier.CauseChunksInFlight:

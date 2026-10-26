@@ -86,6 +86,11 @@ const (
 	// MismatchTarget means the row was written for a different statement:
 	// its after-schema model differs from the current one.
 	MismatchTarget
+	// MismatchPhase means the row stands in a phase this engine does not
+	// know: a newer engine of the same row format wrote it, since the phase
+	// set only grows within a format. Have is the stored phase name and
+	// Want the names this engine knows.
+	MismatchPhase
 )
 
 // String returns the stable mismatch name.
@@ -97,17 +102,20 @@ func (m Mismatch) String() string {
 		return "source_fingerprint"
 	case MismatchTarget:
 		return "target_fingerprint"
+	case MismatchPhase:
+		return "phase"
 	default:
 		return fmt.Sprintf("Mismatch(%d)", m)
 	}
 }
 
 // IncompatibleError reports a stored row the current run must not resume
-// from or write over: it belongs to another row format or another statement
-// (ST-2). Mismatch names the first disagreeing field, Have is its stored
-// value and Want the current run's; Stored is the whole identity of the row
-// as it was read, which a caller hands back to Delete so that a fresh start
-// removes exactly the row it was shown and no later one.
+// from or write over: it belongs to another row format or another
+// statement, or stands in a phase only a newer engine knows (ST-2).
+// Mismatch names the first disagreeing field, Have is its stored value and
+// Want the current run's; Stored is the whole identity of the row as it was
+// read, which a caller hands back to Delete so that a fresh start removes
+// exactly the row it was shown and no later one.
 type IncompatibleError struct {
 	Schema   string
 	Table    string

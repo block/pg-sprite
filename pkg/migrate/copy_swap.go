@@ -5,12 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/checksum"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -26,7 +28,9 @@ import (
 // pool alone; a library caller that builds Options by hand wires it, the
 // CLI always does. It is a sentinel so an embedder can tell the missing
 // wiring apart from an operational failure with [errors.Is]; nothing has
-// been executed when it is returned.
+// been executed when it is returned. A connection that is set but reaches
+// another database is the other wiring error,
+// [CopySwapConnectionMismatchError].
 var ErrCopySwapConnectionRequired = errors.New(
 	"Options.CopySwap.Connection must name the database the pool was dialed with; the copy-and-swap route opens dedicated sessions from it")
 
@@ -46,7 +50,10 @@ var ErrCopySwapConnectionRequired = errors.New(
 // the operator ends it.
 type CopySwapOptions struct {
 	// Connection is the database the pool handed to Run was dialed with.
-	// The route's dedicated sessions are opened from it.
+	// The route's dedicated sessions are opened from it. Before the
+	// preflight the route proves the two reach one database on one
+	// cluster, and stops with a CopySwapConnectionMismatchError when they
+	// do not.
 	Connection dbconn.Config
 
 	// FreeDiskBytes is the free space the operator reports on the volume
@@ -77,6 +84,87 @@ type CopySwapOptions struct {
 	// so it can be finished without the acknowledgement. Empty resumes a
 	// leftover, as every run does.
 	Restart string
+
+	// Copier sizes the copy: its workers, the chunk sizes and the chunk
+	// time they are throttled toward, the budgets of each chunk
+	// transaction, and the progress tracker the copier reports to while it
+	// runs. Zero values take the copier's defaults. A value the copier
+	// would refuse is a wiring error refused before the preflight, like a
+	// negative CheckpointInterval.
+	//
+	// Copier.Tracker is the one source of rows copied; OnCheckpoint
+	// carries a key position, not a count. The host builds the tracker and
+	// calls its Start before Run, since Start and StartStep drop the
+	// tracker's work source and so, called while the copy runs, stop the
+	// counters. The copier is the work source from the copy's first chunk
+	// until just before the copy returns: the tracker reports no work
+	// before the copy, after it, or through the verification pass and a
+	// live run's catch-up, whose phases reach the host through
+	// OnCheckpoint alone; the verdict's detail reports the rows the
+	// verification pass covered. Rows copied counts this run's rows only,
+	// and rows total is the source's catalog estimate, zero for a table
+	// never analyzed, so a host treats a zero total as unknown and a ratio
+	// over one as possible. A tracker serves one run: two runs handed one
+	// tracker each make it their source, and the first to finish drops the
+	// source the other still reports to.
+	Copier copier.Options
+
+	// CheckpointInterval is how often a copy in progress saves its landed
+	// watermark to the checkpoint row, which is how far a run that stops
+	// mid-copy resumes from, and how often OnCheckpoint hears from the
+	// copy. Zero means the Runner's default; a negative value is refused
+	// before anything is read.
+	CheckpointInterval time.Duration
+
+	// OnCheckpoint, when set, is the run's progress signal: it is called
+	// after every successful save of the checkpoint row with the row as
+	// saved — the phase it entered, the watermark the copy has landed, the
+	// position a live run has applied through — so a host can record where
+	// a run that may last hours stands. Two saves are not shown: a live
+	// run that reconciles a lost slot writes its reconciling marker and
+	// the resumed row straight to the store, and the hook is handed the
+	// row the reconcile leaves once. The row is the row as written, so its
+	// UpdatedAt is zero; a host that wants a save time uses its own clock.
+	// Its ShadowProof bytes are shared with the run, so a hook that keeps
+	// the row treats it as read-only. The slot, publication, and applied
+	// position it carries are PostgreSQL's; an adapter that forwards the
+	// row to an engine-neutral record maps them into generic metadata.
+	//
+	// The hook runs on the run's own goroutines and holds the run up while
+	// it runs: the phase saves call it on the goroutine that called Run,
+	// with the table's lock session held and, for a quiesced run, the
+	// source fenced against writes; the periodic watermark saves call it
+	// on the copy's saving goroutine, every CheckpointInterval rather than
+	// as the copy lands rows, and a slow call there delays the next save.
+	// It must be safe to call from either goroutine and should return
+	// promptly. An error it returns stops the run there, as a failed
+	// verdict with the row as that save left it, and the next run resumes
+	// from the row — except at the done save, after which there is nothing
+	// left to stop: the verdict is executed and its detail names the
+	// error.
+	OnCheckpoint func(ctx context.Context, cp checkpoint.Checkpoint) error
+}
+
+// runOptions is the Runner's policy for the route: the operator's two
+// choices, the host's sizing and progress hook, and the one setting the
+// route fixes — a done row from an earlier run is replaced, since a second
+// change on the table is the next statement, not a rollback window.
+func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions {
+	return schemachange.RunOptions{
+		Copier:             o.Copier,
+		KeepOld:            o.KeepOld,
+		ReplaceDone:        true,
+		Restart:            o.Restart != "",
+		CheckpointInterval: o.CheckpointInterval,
+		AfterCheckpoint: func(ctx context.Context, cp checkpoint.Checkpoint) error {
+			logger.Debug("copy-and-swap checkpoint saved",
+				"schema", cp.Schema, "table", cp.Table, "phase", cp.Phase.String())
+			if o.OnCheckpoint == nil {
+				return nil
+			}
+			return o.OnCheckpoint(ctx, cp)
+		},
+	}
 }
 
 // environment is what the operator declared about the run's surroundings,
@@ -96,11 +184,24 @@ func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
 // the route's own cause and a nil error; a run that stops is a failed
 // verdict together with the error, and the checkpoint row it stopped at
 // remains so the next run resumes it; success is
-// verdict.OutcomeExecutedViaCopyAndSwap.
+// verdict.OutcomeExecutedViaCopyAndSwap. An option set the Runner refuses
+// is a caller wiring error like the missing connection: a plain error, no
+// verdict, before the preflight reads anything.
 func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement,
 	opts Options, logger *slog.Logger) (verdict.Verdict, error) {
 	if opts.CopySwap.Connection.URL == "" {
 		return verdict.Verdict{}, fmt.Errorf("migrate: %w", ErrCopySwapConnectionRequired)
+	}
+	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
+	if err != nil {
+		return verdict.Verdict{}, err
+	}
+	runner, err := schemachange.NewRunner(opts.CopySwap.Connection, store, opts.CopySwap.runOptions(logger))
+	if err != nil {
+		return verdict.Verdict{}, fmt.Errorf("migrate: copy-and-swap options: %w", err)
+	}
+	if err := checkCopySwapConnection(ctx, pool, opts.CopySwap.Connection); err != nil {
+		return verdict.Verdict{}, fmt.Errorf("migrate: %w", err)
 	}
 	target, err := preflight.CheckCopySwap(ctx, pool, st.Schema(), st.Table(), opts.CopySwap.environment())
 	if err != nil {
@@ -109,22 +210,6 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	logger.Debug("copy-and-swap preflight passed",
 		"decodes_wal", target.DecodesWAL(), "keep_old", opts.CopySwap.KeepOld)
 
-	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
-	if err != nil {
-		return verdict.Verdict{}, err
-	}
-	runner, err := schemachange.NewRunner(opts.CopySwap.Connection, store, schemachange.RunOptions{
-		KeepOld:     opts.CopySwap.KeepOld,
-		ReplaceDone: true,
-		Restart:     opts.CopySwap.Restart != "",
-		AfterCheckpoint: func(_ context.Context, cp checkpoint.Checkpoint) error {
-			logger.Debug("copy-and-swap checkpoint saved", "phase", cp.Phase.String())
-			return nil
-		},
-	})
-	if err != nil {
-		return verdict.Verdict{}, err
-	}
 	result, err := runner.Run(ctx, pool, target, st)
 	return copySwapOutcome(st, opts.CopySwap.Quiesced, result, err)
 }
@@ -132,18 +217,18 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 // copySwapOutcome folds what the Runner returned into Run's contract. A
 // run whose row reached done is executed, whatever error rides alongside:
 // the Runner returns its Result with an error only when the change is
-// complete and recorded and the release of its lock session failed, and
-// a session left behind is a cleanup fault, not a failed change, so the
-// verdict says what the engine tables say and names the session in its
-// detail for the operator to find. Any other error is folded by
-// copySwapRunVerdict.
+// complete and recorded and what came after failed — the host's
+// OnCheckpoint handed the done row, or the release of the lock session —
+// and neither is a failed change, so the verdict says what the engine
+// tables say and names the error in its detail for the operator to find.
+// Any other error is folded by copySwapRunVerdict.
 func copySwapOutcome(st statement.Statement, quiesced bool, result schemachange.Result, err error) (verdict.Verdict, error) {
 	if err != nil && result.Checkpoint.Phase != checkpoint.PhaseDone {
 		return copySwapRunVerdict(st, quiesced, err)
 	}
 	detail := copySwapDetail(result, quiesced)
 	if err != nil {
-		detail += "; the run's lock session was not released: " + err.Error()
+		detail += "; the change is complete and its done row saved, but the run then returned: " + err.Error()
 	}
 	return verdict.Verdict{
 		Outcome:   verdict.OutcomeExecutedViaCopyAndSwap,

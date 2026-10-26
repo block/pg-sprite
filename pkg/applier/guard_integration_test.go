@@ -21,6 +21,7 @@ type fakeShadow struct {
 	sourceOID, shadowOID   uint32
 	columns                []string
 	conversions            map[string]string
+	fingerprint            string
 }
 
 func (s fakeShadow) Schema() string                 { return s.schema }
@@ -30,6 +31,7 @@ func (s fakeShadow) SourceOID() uint32              { return s.sourceOID }
 func (s fakeShadow) ShadowOID() uint32              { return s.shadowOID }
 func (s fakeShadow) CopyColumns() []string          { return s.columns }
 func (s fakeShadow) Conversions() map[string]string { return s.conversions }
+func (s fakeShadow) ConversionFingerprint() string  { return s.fingerprint }
 
 // Every way a shadow proof can fail to describe the proven target is
 // refused before a connection is opened (ST-6), and a good shadow still
@@ -60,6 +62,8 @@ func TestNewFlusherRefusesAShadowThatIsNotTheTargets(t *testing.T) {
 		"converted primary key":            {withConversions(good, "id", "id::bigint"), "shadow proof for " + f.schema + ".orders converts the primary key id"},
 		"converted column not copied":      {withConversions(good, "note", "note::text"), "shadow proof for " + f.schema + ".orders converts column note, which the copy does not carry"},
 		"empty conversion":                 {withConversions(good, "qty", ""), "shadow proof for " + f.schema + ".orders converts column qty with an empty expression"},
+		"conversion without fingerprint":   {withConversions(good, "qty", "qty * 2"), "shadow proof for " + f.schema + ".orders converts columns but carries no conversion fingerprint"},
+		"fingerprint without conversion":   {withFingerprint(good, "sha256:00"), "shadow proof for " + f.schema + ".orders carries a conversion fingerprint but converts no column"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -94,6 +98,10 @@ func withConversions(s fakeShadow, column, expr string) fakeShadow {
 	s.conversions = map[string]string{column: expr}
 	return s
 }
+func withFingerprint(s fakeShadow, fingerprint string) fakeShadow {
+	s.fingerprint = fingerprint
+	return s
+}
 
 // The flush resolves every unqualified operator in the catalog, whatever
 // the session's search_path says (CO-9): a schema-local `=` that never
@@ -115,14 +123,14 @@ func TestFlushIgnoresTheSessionSearchPath(t *testing.T) {
 	require.NoError(t, buffer.Add(deleteEvent(2, 3)))
 	require.NoError(t, buffer.Add(moveEvent(3, 2, 10, col("slot", "B"), marker("doc"), col("note", "seat 2"))))
 
-	result, err := p.flush.Flush(t.Context(), shadowing, buffer.Drain(everyKeyLanded()))
+	result, err := p.flush.Flush(t.Context(), shadowing, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 	require.NoError(t, err)
 	require.NoError(t, buffer.Hold(result.Held))
 	assert.Equal(t, applier.Result{Images: 1, Deletes: 2, Held: result.Held}, result)
 	require.Len(t, result.Held, 1)
 	assert.False(t, result.Held[0].FromSource, "the completion read found the old key's row through the catalog's =")
 	require.Equal(t, 1, buffer.Release(passed(result.Held)))
-	result, err = p.flush.Flush(t.Context(), shadowing, buffer.Drain(everyKeyLanded()))
+	result, err = p.flush.Flush(t.Context(), shadowing, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 	require.NoError(t, err)
 
 	assert.Equal(t, applier.Result{Images: 1}, result)
@@ -161,7 +169,7 @@ func TestFlushCompletesFloatsExactlyWhateverTheConnectionRenders(t *testing.T) {
 	buffer := applier.NewBuffer()
 	require.NoError(t, buffer.Add(moveEvent(1, 1, 10, col("value", "0.30000000000000004"), marker("samples"), col("note", "n"))))
 
-	result, err := p.flush.Flush(t.Context(), pool, buffer.Drain(everyKeyLanded()))
+	result, err := p.flush.Flush(t.Context(), pool, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 	require.NoError(t, err)
 	require.NoError(t, buffer.Hold(result.Held))
 	require.Len(t, result.Held, 1)
@@ -171,7 +179,7 @@ func TestFlushCompletesFloatsExactlyWhateverTheConnectionRenders(t *testing.T) {
 	assert.Contains(t, samples, "0.30000000000000004", "the completion carries every digit")
 	assert.NotContains(t, samples, "0.3,", "and never the rounded form")
 	require.Equal(t, 1, buffer.Release(passed(result.Held)))
-	_, err = p.flush.Flush(t.Context(), pool, buffer.Drain(everyKeyLanded()))
+	_, err = p.flush.Flush(t.Context(), pool, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 	require.NoError(t, err)
 
 	f.assertConverged(t, p.shadow)

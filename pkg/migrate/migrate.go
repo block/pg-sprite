@@ -364,11 +364,19 @@ func resolveTarget(ctx context.Context, pool *pgxpool.Pool, st statement.Stateme
 	if err != nil {
 		return statement.Statement{}, fmt.Errorf("resolve %s against search_path: %w", st.Table(), err)
 	}
+	logger.Debug("unqualified table resolved", "table", st.Table(), "schema", schema)
+	return qualifyStatement(st, schema)
+}
+
+// qualifyStatement re-emits an unqualified st with its table in schema, as
+// the deparser renders it. Run executes, and reports, the statement in this
+// form, so a dry run that reports the apply's verdict qualifies it the same
+// way.
+func qualifyStatement(st statement.Statement, schema string) (statement.Statement, error) {
 	sql, err := statement.Qualify(st.SQL(), schema)
 	if err != nil {
 		return statement.Statement{}, fmt.Errorf("qualify %s as %s.%s: %w", st.Table(), schema, st.Table(), err)
 	}
-	logger.Debug("unqualified table resolved", "table", st.Table(), "schema", schema)
 	return statement.ParseOne(sql)
 }
 

@@ -37,24 +37,29 @@ type Proof struct {
 	// Conversions are the USING expressions the copier converts retyped
 	// copy columns with, by column; absent when the change retypes none.
 	Conversions map[string]string `json:"conversions,omitempty"`
+	// ConversionFingerprint is the digest of the catalog entries the
+	// conversion expressions resolve among, as the build read them; absent
+	// exactly when Conversions is.
+	ConversionFingerprint string `json:"conversion_fingerprint,omitempty"`
 }
 
 // Proof returns the plain view of the built shadow: each field is what the
 // accessor of the same name returns.
 func (b BuiltShadow) Proof() Proof {
 	return Proof{
-		Schema:            b.schema,
-		SourceTable:       b.source,
-		ShadowTable:       b.shadow,
-		SourceOID:         b.sourceOID,
-		ShadowOID:         b.shadowOID,
-		SourceFingerprint: b.sourceFingerprint,
-		TargetFingerprint: b.targetFingerprint,
-		IdentityColumns:   b.IdentityColumns(),
-		Fidelity:          b.fidelity,
-		ShadowFidelity:    b.shadowFidelity,
-		CopyColumns:       b.CopyColumns(),
-		Conversions:       b.Conversions(),
+		Schema:                b.schema,
+		SourceTable:           b.source,
+		ShadowTable:           b.shadow,
+		SourceOID:             b.sourceOID,
+		ShadowOID:             b.shadowOID,
+		SourceFingerprint:     b.sourceFingerprint,
+		TargetFingerprint:     b.targetFingerprint,
+		IdentityColumns:       b.IdentityColumns(),
+		Fidelity:              b.fidelity,
+		ShadowFidelity:        b.shadowFidelity,
+		CopyColumns:           b.CopyColumns(),
+		Conversions:           b.Conversions(),
+		ConversionFingerprint: b.conversionFingerprint,
 	}
 }
 

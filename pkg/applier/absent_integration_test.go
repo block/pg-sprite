@@ -109,7 +109,7 @@ func TestHeldAbsentImageWaitsForTheStreamToPassTheCheck(t *testing.T) {
 	assert.GreaterOrEqual(t, result.Held[0].ReadLSN, deleteDone, "the check reads a position at or past the DELETE's commit")
 	assert.Equal(t, 0, buffer.Release(deleteDone-1), "the stream has not delivered the DELETE")
 	assert.Equal(t, 1, buffer.Held())
-	next := buffer.Drain(everyKeyLanded())
+	next := buffer.Drain(everyKeyLanded(), applier.AllVisible())
 	assert.Empty(t, next.Entries, "the held image is not flushed before the stream passes the check")
 	assert.Equal(t, 1, next.Held)
 }
@@ -159,7 +159,7 @@ func TestFlushRefusesAnAbsentRowOnceTheStreamHasPassedTheCheck(t *testing.T) {
 
 	require.Len(t, result.Held, 1)
 	assert.Equal(t, 1, buffer.Release(passed(result.Held)), "the stream passed the check and nothing replaced the image")
-	_, err := p.flush.Flush(t.Context(), f.pool, buffer.Drain(everyKeyLanded()))
+	_, err := p.flush.Flush(t.Context(), f.pool, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 
 	require.ErrorIs(t, err, applier.ErrInvariantViolation)
 	assert.ErrorContains(t, err, "(CO-8): flush key 2")
@@ -187,7 +187,7 @@ func TestFlushRefusesAHeldImageAnUpdateFilledInWhenTheRowIsStillAbsent(t *testin
 	require.Len(t, result.Held, 1)
 	require.NoError(t, buffer.Add(updateEvent(2, 2, col("slot", "Q"), col("doc", "a new document"), col("note", "seat 2"))))
 	assert.Equal(t, 1, buffer.Release(passed(result.Held)), "an UPDATE keeps the held image pending")
-	_, err := p.flush.Flush(t.Context(), f.pool, buffer.Drain(everyKeyLanded()))
+	_, err := p.flush.Flush(t.Context(), f.pool, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 
 	require.ErrorIs(t, err, applier.ErrInvariantViolation)
 	assert.ErrorContains(t, err, "(CO-8): flush key 2")
@@ -212,12 +212,12 @@ func TestFlushInRefusesALostRowOnTheSecondPassOfTheSwapDrain(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tx.Rollback(context.WithoutCancel(t.Context())) })
 
-	first, err := p.flush.FlushIn(t.Context(), tx, buffer.Drain(everyKeyLanded()))
+	first, err := p.flush.FlushIn(t.Context(), tx, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 	require.NoError(t, err)
 	require.Len(t, first.Held, 1)
 	require.NoError(t, buffer.Hold(first.Held))
 	assert.Equal(t, 1, buffer.Release(math.MaxUint64))
-	_, err = p.flush.FlushIn(t.Context(), tx, buffer.Drain(everyKeyLanded()))
+	_, err = p.flush.FlushIn(t.Context(), tx, buffer.Drain(everyKeyLanded(), applier.AllVisible()))
 
 	require.ErrorIs(t, err, applier.ErrInvariantViolation)
 	assert.ErrorContains(t, err, "(CO-8): flush key 2")

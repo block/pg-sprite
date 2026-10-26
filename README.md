@@ -67,7 +67,9 @@ refusal — never a silently wrong or incomplete result:
   `ALTER COLUMN TYPE` today; the other rewrite-class operations (volatile-default
   `ADD COLUMN`, `GENERATED … STORED`, `SET TABLESPACE`) refuse rather than fall
   through to a blocking rewrite, and the route's preflight refuses table shapes
-  and environments it cannot run against.
+  and environments it cannot run against. The shadow build also refuses a
+  statement the copy cannot carry: a `USING` expression it cannot reproduce,
+  or a dropped-and-re-added column it cannot fill.
 - **Row security** is included in exports when present, with reviewable before/after differences. The
   [atomic executor](docs/atomic-row-security.md) applies RLS-only changes to existing tables
   through `migrate --desired` or the Go API. Only the Go API supports binding execution to

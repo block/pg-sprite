@@ -76,6 +76,57 @@ func TestInspectShadowRederivesTheConversionsOfTheStatement(t *testing.T) {
 	assert.Equal(t, built, inspected)
 }
 
+// The proof pins what the USING expressions resolve to — the catalog
+// entries under every function, operator, type, and collation name they
+// spell, on the build's search_path — as a fingerprint, and inspection
+// re-derives it from the catalog it finds. Unchanged, the two agree, and
+// the resume accepts the shadow; after an operator is planted in the
+// source schema under a name the expression spells, inspection yields a
+// different fingerprint, so the resume's proof comparison sees a shadow
+// the build did not describe rather than copying through the new
+// operator. A change that converts nothing carries no fingerprint.
+func TestInspectShadowRederivesTheConversionFingerprint(t *testing.T) {
+	f := newShadowFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.orders (
+			id bigint PRIMARY KEY,
+			price text NOT NULL,
+			note varchar(20)
+		)`)
+	lock := f.lock(t, "orders")
+	target := f.prove(t, "orders")
+	alter := f.alter(t, `
+		ALTER TABLE %s.orders
+			ALTER COLUMN price TYPE integer USING (price::numeric * 100)::integer`)
+	built, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
+	require.NoError(t, err)
+	require.NotEmpty(t, built.ConversionFingerprint(), "a conversion is pinned")
+	assert.Equal(t, built.ConversionFingerprint(), built.Proof().ConversionFingerprint)
+
+	same, err := schemachange.InspectShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
+	require.NoError(t, err)
+	assert.Equal(t, built, same, "an unchanged catalog re-derives the build's fingerprint")
+
+	f.exec(t, `
+		CREATE FUNCTION %s.times_zero(numeric, integer) RETURNS numeric
+			LANGUAGE sql IMMUTABLE
+			AS 'SELECT 0'`)
+	f.exec(t, `CREATE OPERATOR %s.* (LEFTARG = numeric, RIGHTARG = integer, FUNCTION = %s.times_zero)`)
+
+	drifted, err := schemachange.InspectShadow(t.Context(), f.pool, lock, target, alter, schemachange.Options{})
+	require.NoError(t, err)
+	assert.NotEqual(t, built.ConversionFingerprint(), drifted.ConversionFingerprint(), "the planted operator is under a name the expression spells")
+	assert.NotEqual(t, built.Proof(), drifted.Proof(), "the resume's comparison sees the drift")
+
+	require.NoError(t, schemachange.DropShadow(t.Context(), f.pool, lock, target, schemachange.Options{}))
+	plain, err := schemachange.BuildShadow(t.Context(), f.pool, lock, target, f.alter(t, `
+		ALTER TABLE %s.orders
+			ALTER COLUMN note TYPE text`), schemachange.Options{})
+	require.NoError(t, err)
+	assert.Empty(t, plain.Conversions())
+	assert.Empty(t, plain.ConversionFingerprint(), "nothing to pin")
+}
+
 // A change that drops one of the source's identity columns leaves the
 // shadow with nothing to hand that sequence to. The proof carries only the
 // identity column the shadow kept, and inspection re-derives the same

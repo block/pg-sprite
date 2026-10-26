@@ -77,6 +77,12 @@ func (s copySwapShape) PKColumn() string { return s.pkColumn }
 // PKType returns the primary-key type.
 func (s copySwapShape) PKType() PKType { return s.pkType }
 
+// OID returns the catalog OID of the target table at the time the shape was
+// proven. A table dropped and recreated under its name is another table with
+// another OID, which is how a consumer that is handed the table by name —
+// the stream's relation messages — tells it from the one proven here.
+func (s copySwapShape) OID() uint32 { return s.oid }
+
 // OwnerRole returns the catalog-resolved owner of the target table: the role
 // the shadow builder runs SET LOCAL ROLE to so that the shadow table and its
 // dependents are created owner-correct, and whose SET-usable membership the
