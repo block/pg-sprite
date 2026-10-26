@@ -146,6 +146,12 @@ func gateRefusal(kind statement.Kind, concurrent bool, target statement.IndexTar
 		return verdict.NoOnlineSafetyProblem(verdict.ReasonUnsupportedStatement, verdict.OwnerProvisioning), true
 	case statement.KindCatalogWork:
 		return verdict.NoOnlineSafetyProblem(verdict.ReasonUnsupportedStatement, verdict.OwnerDirectOperator), true
+	case statement.KindRenameIndex:
+		// An index rename is a route the engine means to take: it needs
+		// the index's owning table resolved from the catalog and whether
+		// the index backs a constraint, which the front door does not read
+		// yet.
+		return verdict.CapabilityBoundary(verdict.ReasonUnsupportedStatement), true
 	default:
 		// KindOther: a statement the parse boundary does not name. The
 		// engine may learn to route it; nobody else is named to run it.
