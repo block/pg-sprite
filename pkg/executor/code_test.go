@@ -214,6 +214,7 @@ func TestCodePermanentClassifiesEveryCode(t *testing.T) {
 		executor.CodeValidatedConstraintDrift:        true,
 		executor.CodeRenamedIndexDrift:               true,
 		executor.CodeTableNotFound:                   true,
+		executor.CodeDataFault:                       true,
 		executor.CodeInvariantViolation:              true,
 		executor.CodeExecutionFailed:                 false,
 	}
