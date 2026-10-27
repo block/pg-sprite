@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/json"
 	"fmt"
+	neturl "net/url"
 	"strings"
 	"testing"
 
@@ -121,6 +122,54 @@ func TestMigrateDryRunReportsTheDestructiveRefusal(t *testing.T) {
 	assert.Equal(t, plan.SourceAlter, report.Source)
 
 	assert.True(t, noteColumnExists(t, pool, schema), "a dry run executes nothing")
+}
+
+// An unqualified table is acknowledged by the schema the session's
+// search_path resolves it to. Two schemas hold an orders table, and the
+// search_path puts the second one first: naming the other schema's orders
+// is a usage error from the dry run and the apply alike, with neither
+// table changed, and naming the resolved one drops the column from that
+// table only.
+func TestMigrateAcknowledgesTheTableTheSearchPathResolves(t *testing.T) {
+	url, pool, other := newOrdersTable(t)
+	resolved := testutil.NewSchema(t, pool)
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %s.orders (
+			id   bigint PRIMARY KEY,
+			note text
+		)`, resolved))
+	require.NoError(t, err)
+	u, err := neturl.Parse(url)
+	require.NoError(t, err)
+	q := u.Query()
+	q.Set("options", "-csearch_path="+resolved+","+other)
+	u.RawQuery = q.Encode()
+	const alter = "ALTER TABLE orders DROP COLUMN note"
+
+	for _, dryRun := range []bool{true, false} {
+		cmd := newMigrateCmd(u.String(), alter)
+		cmd.DryRun = dryRun
+		cmd.AllowDestructive = other + ".orders"
+		var out strings.Builder
+		err := cmd.run(t.Context(), &out)
+		require.ErrorIs(t, err, migrate.ErrAllowDestructiveMismatch, "dry run %v", dryRun)
+		assert.Contains(t, err.Error(), resolved+".orders", "the error names the table the search_path resolves")
+		assert.Empty(t, out.String())
+	}
+	assert.True(t, noteColumnExists(t, pool, other), "the other schema's table is untouched")
+	assert.True(t, noteColumnExists(t, pool, resolved), "a mismatched acknowledgement executes nothing")
+
+	cmd := newMigrateCmd(u.String(), alter)
+	cmd.AllowDestructive = resolved + ".orders"
+	cmd.JSON = true
+	var out strings.Builder
+	require.NoError(t, cmd.run(t.Context(), &out))
+	var v verdict.Verdict
+	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
+	assert.Equal(t, verdict.OutcomeExecuted, v.Outcome)
+	assert.True(t, v.AllowedDestructive)
+	assert.False(t, noteColumnExists(t, pool, resolved), "the resolved table lost the column")
+	assert.True(t, noteColumnExists(t, pool, other), "the other schema's table kept it")
 }
 
 // A dry run checks the acknowledgement the way the apply does: one that
