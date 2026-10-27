@@ -445,7 +445,8 @@ proxy that hands the server connection to another client keeps the rewritten, st
 type; lookalike functions and operators planted in the target schema, each proven to answer the
 unqualified call on introspection's path, do not change the model), `pkg/preflight` (every proof read — the size guard, the
 privilege probes, the absence, owned-name, and schema constraint-name reads, the add-column
-rewrite probe, and the copy-and-swap shape and environment facts — qualifies every function,
+rewrite probe, the copy-and-swap shape and environment facts, and the table usage read
+(`TestReadTableUsageIgnoresTheSessionSearchPath`) — qualifies every function,
 relation, type, and operator, `IN` and `IS DISTINCT FROM`
 included since both resolve `=` through the path; planted `pg_total_relation_size(oid)`,
 `has_schema_privilege(name, name, text)`, `+`, and `=` overloads on a path that lists the
@@ -1388,6 +1389,34 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `demo/tour.sh` (`refused_destructive`). *Source:*
   [design principles](design-principles.md#declarative-review-first-workflow),
   SchemaBot's `--allow-unsafe` acknowledgement for destructive plans.
+- **RF-11** — A table is judged idle only when the connected server's statistics prove no use
+  inside the window: no other session holds a lock on it, both last-scan times are recorded
+  as before the window or absent, the server is not in recovery and tracks counts — for the
+  reading session and under every saved per-role and per-database setting — the
+  database's statistics were not reset inside the window, and counting provably began before
+  it. Every statistic is read from one snapshot, so a reset during the read cannot pair an
+  old reset time with cleared scan times. A partitioned table is judged across every leaf
+  partition at every level: a lock on the table or any partition, or a scan of any leaf
+  inside the window, is use (the leaf with the most recent scan of either kind named); it is
+  idle only when it has a leaf and every leaf would be idle on its own, so a partitioned
+  table with no leaf, a foreign-table leaf, or a leaf with no scan and no reset time is
+  `unknown` unless another relation shows use. Every other case is `recent` or `unknown`,
+  never idle; write counters, which carry no time, never decide. The evidence
+  describes that one server alone — reads served by replicas are not in it — so idle is
+  evidence for a drop safeguard, never permission on its own. *Enforced:* `pkg/preflight`
+  (`TableUsage.Judge`, over the evidence `ReadTableUsage` reads in one bounded read-only
+  transaction that locks no table or partition, `pg_catalog`-qualified per CO-9). No caller
+  consumes the verdict yet. *Test obligation:* each branch decided at its window edge in
+  `table_usage_verdict_test.go` and the partition aggregation in
+  `table_usage_partitions_test.go`; a just-scanned table recent, a lock holder recent and
+  named, PostgreSQL 14/15 unknown, and a database or single-table reset not idle against
+  real PostgreSQL in `table_usage_integration_test.go`; a scanned partition or grandchild
+  recent and named, a lock on one partition recent, a partitioned table with no partition or
+  with a foreign partition unknown, and inheritance children not followed in
+  `table_usage_partitions_integration_test.go`; a partitioned table idle since a reset in
+  `table_usage_idle_integration_test.go`; a reset between the read's statistics reads not
+  seen, and a role's saved `track_counts = off` unknown, in
+  `table_usage_coverage_integration_test.go`. *Source:* [table usage](table-usage.md).
 
 ## Orchestration / control-plane (OC)
 
@@ -1486,4 +1515,5 @@ about **how we write and review the code**.
 | ST-10 | 8 | older-table evolve, newer-table refuse with no DDL, dropped-column and foreign-table shape reads, behind-table typed reads and writes |
 | ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
 | ST-12 | 2 (declarative model) | a table altered behind the run after its last commit fails as not converged with every verdict executed |
+| RF-11 | table usage primitive (ahead of any drop path) | per-branch window-edge and partition-aggregation unit tests; recent, lock-holder, version, reset, and partitioned-table integration tests on 14 → 18 |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |
