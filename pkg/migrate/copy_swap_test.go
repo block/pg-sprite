@@ -112,6 +112,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "start the run over")
 		assert.Contains(t, v.Detail, "drops the replication slot", "a live run's hold is its slot")
 		assert.NotContains(t, v.Detail, "resumes")
+		assert.False(t, v.Quiesced, "a live run never took the table offline for writes")
 	})
 
 	t.Run("a quiesced divergence names the fence as the hold to release", func(t *testing.T) {
@@ -119,6 +120,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		v, _ := copySwapRunVerdict(st, true, divergence)
 		assert.Contains(t, v.Detail, "takes the write fence off the source")
 		assert.NotContains(t, v.Detail, "replication slot")
+		assert.True(t, v.Quiesced, "the failed verdict says the run took the table offline for writes")
 	})
 
 	t.Run("a value the new type will not hold is an abandoned run coded as a data fault", func(t *testing.T) {
@@ -239,6 +241,15 @@ func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 		assert.NotContains(t, v.Detail, "the run then returned")
+		assert.False(t, v.Quiesced, "a live run's verdict does not claim the table was offline")
+	})
+
+	t.Run("a quiesced done row is marked quiesced", func(t *testing.T) {
+		done := schemachange.Result{Checkpoint: checkpoint.Checkpoint{Phase: checkpoint.PhaseDone}}
+		v, err := copySwapOutcome(st, true, done, nil)
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+		assert.True(t, v.Quiesced, "the executed verdict says the table was offline for writes while the run held it")
 	})
 
 	t.Run("an error with the zero result is a failure", func(t *testing.T) {

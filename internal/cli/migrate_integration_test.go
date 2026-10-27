@@ -304,6 +304,7 @@ func TestMigrateRunsTypeRewriteViaCopyAndSwap(t *testing.T) {
 	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 	assert.Equal(t, schema+".t", v.Table)
 	assert.False(t, v.Forced, "the copy-and-swap route is the planned path, not an override")
+	assert.True(t, v.Quiesced, "the JSON verdict says the table was offline for writes while the run held it")
 
 	var typ string
 	require.NoError(t, pool.QueryRow(t.Context(),

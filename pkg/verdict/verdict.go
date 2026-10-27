@@ -534,6 +534,12 @@ type Verdict struct {
 	Table string `json:"table,omitempty"`
 	// Detail is the human explanation: why refused, or what committed.
 	Detail string `json:"detail,omitempty"`
+	// Quiesced is true on an executed or failed copy-and-swap verdict
+	// whose run was quiesced: the table was offline for writes while the
+	// run held it, every write refused with SQLSTATE 55006 by the write
+	// fence. On a failed verdict, Detail says whether the fence still
+	// stands. False for every other verdict, including a live run's.
+	Quiesced bool `json:"quiesced,omitempty"`
 	// SaferIdiom is a native alternative to the refused statement, when one
 	// exists (e.g. CREATE INDEX CONCURRENTLY, ADD CONSTRAINT ... NOT VALID).
 	SaferIdiom string `json:"safer_idiom,omitempty"`
@@ -644,6 +650,9 @@ func (v Verdict) String() string {
 	}
 	if v.Forced {
 		b.WriteString("\n  forced:    the submitted form ran as-is (force acknowledged)")
+	}
+	if v.Quiesced {
+		b.WriteString("\n  quiesced:  the table was offline for writes while the run held it (writes refused 55006)")
 	}
 	if v.FailedStep > 0 {
 		fmt.Fprintf(&b, "\n  failed at: step %d: %s", v.FailedStep, v.FailedStepSQL)

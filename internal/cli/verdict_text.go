@@ -48,6 +48,9 @@ func writeVerdictText(out io.Writer, pal palette, v verdict.Verdict) error {
 	if v.Forced {
 		fmt.Fprintf(&b, "\n  %s    the submitted form ran as-is (force acknowledged)", pal.bold("forced:"))
 	}
+	if v.Quiesced {
+		fmt.Fprintf(&b, "\n  %s  the table was offline for writes while the run held it (writes refused 55006)", pal.bold("quiesced:"))
+	}
 	if v.FailedStep > 0 {
 		fmt.Fprintf(&b, "\n  %s step %d: %s", pal.bold("failed at:"), v.FailedStep, v.FailedStepSQL)
 	}

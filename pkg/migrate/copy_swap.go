@@ -234,6 +234,7 @@ func copySwapOutcome(st statement.Statement, quiesced bool, result schemachange.
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Detail:    detail,
+		Quiesced:  quiesced,
 	}, nil
 }
 
@@ -297,6 +298,7 @@ func copySwapRunVerdict(st statement.Statement, quiesced bool, err error) (verdi
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Detail:    "the copy-and-swap run stopped: " + err.Error() + "; " + copySwapStoppedRemedy(quiesced, err),
+		Quiesced:  quiesced,
 	}, err
 }
 
