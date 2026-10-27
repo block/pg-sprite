@@ -80,12 +80,13 @@ free space on its own volume over SQL, so you pass it with `--free-disk` (binary
 
 - **Self-managed PostgreSQL:** run `df -h` on the volume holding the data directory.
 - **Amazon RDS for PostgreSQL:** read the instance's `FreeStorageSpace` metric in CloudWatch.
-- **Aurora PostgreSQL:** you do not need to measure anything. The cluster volume grows
-  automatically, so the shadow cannot fill it. Pass any value of at least twice the table's
-  size.
+- **Aurora PostgreSQL:** the cluster volume grows on demand, but only up to a maximum. Read the
+  cluster's `AuroraVolumeBytesLeftTotal` metric in CloudWatch, the space left before that
+  maximum, and pass the lower of it and any storage quota you set.
 
-We would like to remove this flag, by reading the free space where the platform exposes it and
-skipping the check where storage grows on its own. Until then it stays required.
+Never pass a made-up large value: the check is the only thing between the copy and a full
+volume. We would like to remove this flag by reading the free space where the platform exposes
+it. Until then it stays required.
 
 ## Run it
 
@@ -128,7 +129,7 @@ name for a rollback window; you drop it yourself when the window ends.
 | Stop a running change | Press Ctrl-C, or send `SIGTERM`, once. The run saves where its copy reached and exits. The table keeps its fence (quiesced) or its replication slot (live) until you resume or start over. |
 | Resume it | Run the same command again. It continues from where it stopped; nothing is copied twice. |
 | Start over | Run the same command with `--restart SCHEMA.TABLE`, naming the table exactly. pg-sprite discards the shadow, the fence or slot, and the saved progress, then runs from the beginning. |
-| Recover from bad data | Nothing to discard: when the server rejects a row under the new type or a constraint, the run abandons itself and reports `code: data-fault`. Fix the data or the statement and run it again. |
+| Recover from bad data | When the server rejects a row under the new type or a constraint, the run reports `code: data-fault` and tries to abandon itself. Follow the verdict's detail: if it says the run was abandoned, nothing is left behind, so fix the data or the statement and run it again. If it says the run could not be abandoned, the shadow and the fence or slot remain, so fix the data or the statement and run it with `--restart SCHEMA.TABLE`. |
 
 ```sh
 pg-sprite migrate --free-disk 50GiB --quiesced --restart public.order_archive \
