@@ -54,6 +54,16 @@ func TestJudgePartitionedRecentNamesTheMostRecentlyScannedLeaf(t *testing.T) {
 	requirePartitionVerdict(t, u, UsageRecent, UsageReasonSeqScanInWindow, "events_2026")
 }
 
+// The leaf named is the one scanned most recently by either kind of scan:
+// an index scan of one leaf a minute ago beats a sequential scan of
+// another two hours ago.
+func TestJudgePartitionedNamesTheNewestScanOfEitherKind(t *testing.T) {
+	u := idlePartitionedUsage()
+	u.leaves[0].lastSeqScan = at(judgeWindow - 2*time.Hour)
+	u.leaves[2].lastIdxScan = at(judgeWindow - time.Minute)
+	requirePartitionVerdict(t, u, UsageRecent, UsageReasonIndexScanInWindow, "events_default")
+}
+
 // An index scan inside the window on any leaf, the default partition
 // included, is use of the table.
 func TestJudgePartitionedIndexScanOnTheDefaultPartitionIsRecent(t *testing.T) {

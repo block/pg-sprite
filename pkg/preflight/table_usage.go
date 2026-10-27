@@ -76,8 +76,11 @@ type TableUsage struct {
 	serverVersionNum int
 	inRecovery       bool
 	trackCounts      bool
-	readAt           time.Time
-	statsReset       *time.Time
+	// trackCountsOffBySetting is whether an ALTER ROLE or ALTER DATABASE
+	// setting turns track_counts off for some role or for this database.
+	trackCountsOffBySetting bool
+	readAt                  time.Time
+	statsReset              *time.Time
 	// leaves are the relations that hold the table's rows and statistics:
 	// the table itself when it is an ordinary table, its leaf partitions
 	// when it is partitioned. Sorted by schema, then name.
@@ -125,8 +128,18 @@ func (u TableUsage) ScanTimesRecorded() bool {
 func (u TableUsage) InRecovery() bool { return u.inRecovery }
 
 // TrackCounts reports whether track_counts was on for the reading session.
-// With it off the server collects no table statistics at all.
+// It is that session's value only: it reflects the server's configuration
+// and the reading role's settings, not another session's. With it off the
+// server collects no table statistics at all.
 func (u TableUsage) TrackCounts() bool { return u.trackCounts }
+
+// TrackCountsOffBySetting reports whether a saved per-role or per-database
+// setting (ALTER ROLE … SET or ALTER DATABASE … SET, in pg_db_role_setting)
+// turns track_counts off for some role, in this database or in all of
+// them, or for this database. Scans in sessions it applies to are not
+// counted. A session that turns it off with SET or a connection option
+// leaves no trace any reader can see.
+func (u TableUsage) TrackCountsOffBySetting() bool { return u.trackCountsOffBySetting }
 
 // ReadAt returns the server's now() for the read's transaction: every
 // window is measured back from this, never from the client's clock.
@@ -199,9 +212,11 @@ func derefTime(t *time.Time) (time.Time, bool) {
 
 // ReadTableUsage reads how recently schema.table (search_path when schema
 // is empty) was used on the server the pool is connected to, in one
-// read-only transaction bounded by its own lock and statement timeouts. It
-// reads the server's version, whether it is in recovery, the reading
-// session's track_counts, the server's now(), the database's statistics
+// read-only transaction bounded by its own lock and statement timeouts,
+// with every statistic from one snapshot. It reads the server's version,
+// whether it is in recovery, the reading session's track_counts and
+// whether a saved setting turns it off for another role or the database,
+// the server's now(), the database's statistics
 // reset time, the scan and write counters (and, on PostgreSQL 16 and later,
 // the last scan times) of the table or, when it is partitioned, of every
 // leaf partition at every level, and the sessions other than its own
@@ -232,8 +247,14 @@ func ReadTableUsage(ctx context.Context, pool *pgxpool.Pool, schema, table strin
 	if _, err := tx.Exec(ctx, budgets); err != nil {
 		return TableUsage{}, fmt.Errorf("set table usage read budgets: %w", err)
 	}
+	if err := pinUsageStatsSnapshot(ctx, tx); err != nil {
+		return TableUsage{}, err
+	}
 	u := TableUsage{schema: schema, table: table}
 	if err := readUsageServerFacts(ctx, tx, &u); err != nil {
+		return TableUsage{}, err
+	}
+	if err := readUsageTrackCountsSettings(ctx, tx, &u); err != nil {
 		return TableUsage{}, err
 	}
 	tree, err := readUsageRelations(ctx, tx, &u)

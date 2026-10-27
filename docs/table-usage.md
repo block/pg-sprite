@@ -32,6 +32,11 @@ The other limits, each covered below:
   find their rows; inserts are seen only while their transaction holds its lock.
 - **A failover changes which history you see.** After a standby is promoted, its
   statistics are the reads it served as a standby, not what the old primary served.
+- **Scans are counted only by sessions that count them.** `track_counts` can be turned
+  off per role, per database, or per session. A saved per-role or per-database setting
+  that turns it off makes the answer **unknown**; a session that turns it off with `SET`
+  or a connection option, or a past period with it off server-wide, leaves no trace, and
+  its scans are not seen.
 - **A partitioned table is judged by its partitions.** The parent keeps no statistics, so
   every leaf partition is read and the most recently used one decides; a partitioned table
   with no partition is **unknown**, never idle.
@@ -45,6 +50,9 @@ replicas, which this check cannot see — while staying trivially reversible.
 
 `ReadTableUsage(ctx, pool, schema, table)` runs one read-only transaction under its own
 `lock_timeout` and `statement_timeout`, takes no lock on the table or any of its partitions,
+reads every statistic from one snapshot (`stats_fetch_consistency = snapshot` on
+PostgreSQL 15 and later; PostgreSQL 14 reads its statistics once per transaction) so a
+reset that lands during the read cannot pair an old reset time with scan times it cleared,
 and qualifies every catalog name with `pg_catalog` (invariant [CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog)).
 It reads, all from the server the pool is connected to:
 
@@ -52,7 +60,8 @@ It reads, all from the server the pool is connected to:
 | --- | --- | --- |
 | Server version | `server_version_num` | Decides whether scan times exist. |
 | In recovery | `pg_is_in_recovery()` | A standby's statistics describe that standby only. |
-| Counting on | `track_counts` | With it off the server collects no table statistics. |
+| Counting on | `track_counts` | The reading session's value. With it off the server collects no table statistics. |
+| Counting off by setting | `pg_db_role_setting` | Whether a saved `ALTER ROLE … SET` or `ALTER DATABASE … SET` turns `track_counts` off for some role (in this database or in all of them) or for this database. A value set with `SET` inside another session is visible to no reader. |
 | Read time | `now()` | The server's clock, never the client's; every window is measured back from it. |
 | Database reset time | `pg_stat_database.stats_reset` | When the current database's statistics were last reset; empty when never reset or discarded by crash recovery. |
 | Last sequential scan | `pg_stat_all_tables.last_seq_scan` | PostgreSQL 16+ only; the end time of the transaction that scanned. |
@@ -138,21 +147,22 @@ ordinary table's verdict names none):
 | --- | --- | --- | --- | --- |
 | 1 | Another session holds a lock on the table or any of its partitions | `recent` | `lock-held` | — (each `LockHolder` names its relation) |
 | 2 | The server records no scan times (PostgreSQL 14, 15) | `unknown` | `scan-times-not-recorded` | — |
-| 3 | The latest sequential scan across the leaves is inside the window | `recent` | `seq-scan-in-window` | the leaf scanned most recently |
-| 4 | The latest index scan across the leaves is inside the window | `recent` | `index-scan-in-window` | the leaf scanned most recently |
+| 3 | The latest scan of either kind across the leaves is inside the window and is a sequential scan | `recent` | `seq-scan-in-window` | the leaf scanned most recently |
+| 4 | The latest scan of either kind across the leaves is inside the window and is an index scan | `recent` | `index-scan-in-window` | the leaf scanned most recently |
 | 5 | The server is in recovery | `unknown` | `in-recovery` | — |
-| 6 | `track_counts` is off | `unknown` | `counts-not-tracked` | — |
-| 7 | The database's statistics were reset inside the window | `unknown` | `stats-reset-in-window` | — |
-| 8 | A partitioned table has no leaf partition | `unknown` | `no-partitions` | — |
-| 9 | A leaf partition is a foreign table | `unknown` | `foreign-partition` | that partition |
-| 10 | Some leaf has no scan of either kind recorded and the server reports no reset time | `unknown` | `stats-start-unknown` | the first such leaf |
-| 11 | Otherwise | `idle` | `no-scan-in-window` | — |
+| 6 | `track_counts` is off for the reading session | `unknown` | `counts-not-tracked` | — |
+| 7 | A saved per-role or per-database setting turns `track_counts` off | `unknown` | `counts-not-tracked-by-setting` | — |
+| 8 | The database's statistics were reset inside the window | `unknown` | `stats-reset-in-window` | — |
+| 9 | A partitioned table has no leaf partition | `unknown` | `no-partitions` | — |
+| 10 | A leaf partition is a foreign table | `unknown` | `foreign-partition` | that partition |
+| 11 | Some leaf has no scan of either kind recorded and the server reports no reset time | `unknown` | `stats-start-unknown` | the first such leaf |
+| 12 | Otherwise | `idle` | `no-scan-in-window` | — |
 
 An instant exactly at the window's start counts as inside it, so every edge falls toward
 "not idle". Evidence of use (rows 1, 3, 4) wins over anything that would make the answer
 unknown: a scan a standby served an hour ago is still a scan, and a partition scanned an
 hour ago makes the table recent however little the other partitions say. Server-level
-reasons (rows 2, 5–7) come before any one partition's reason (rows 8–10).
+reasons (rows 2, 5–8) come before any one partition's reason (rows 9–11).
 
 **The partition rule:** a partitioned table is idle only if it has at least one leaf
 partition, every leaf partition would be idle on its own, and no other session holds a
@@ -160,7 +170,7 @@ lock on the table or any partition. The most recently used partition decides a r
 answer and is named, and any partition that could not be shown idle on its own makes the
 table unknown unless another relation shows use.
 
-Row 10 exists because "never scanned" is only meaningful if counting began before the
+Row 11 exists because "never scanned" is only meaningful if counting began before the
 window. A recorded scan time is itself proof that counting began at least that early for
 that relation; with no scan time at all, only the reset time could say, and a database that
 has never been reset — or whose statistics crash recovery discarded — reports none. Each
@@ -201,6 +211,12 @@ Restated plainly, because these are the ways an idle answer can be wrong:
   old primary's reads are gone with it.
 - **A recent transaction not yet published**, within the delay described above.
 - **Inserts from short transactions**, as above.
+- **Scans by sessions that do not count them.** Only a superuser, or a role granted `SET`
+  on `track_counts`, can change it, but such a session can turn it off for itself with
+  `SET` or a connection option, and its scans then leave no statistics. No other session
+  can see that value. Nor can a reader see an earlier period when it was off server-wide:
+  turning it back on does not move the reset time. An idle answer assumes every session
+  that could have used the table counted its scans.
 - **Queries on a partitioned table that touch no partition**: a query whose conditions the
   planner prunes to no partition at all scans nothing, so nothing records it.
 - **Uses that did not happen inside the window**: a view or function that references the

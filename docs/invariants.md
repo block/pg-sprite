@@ -1321,14 +1321,17 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   [lock-budgeted passthrough](lock-budgeted-passthrough.md#verdict-reports-and-exit-code).
 - **RF-11** — A table is judged idle only when the connected server's statistics prove no use
   inside the window: no other session holds a lock on it, both last-scan times are recorded
-  as before the window or absent, the server is not in recovery and tracks counts, the
+  as before the window or absent, the server is not in recovery and tracks counts — for the
+  reading session and under every saved per-role and per-database setting — the
   database's statistics were not reset inside the window, and counting provably began before
-  it. A partitioned table is judged across every leaf partition at every level: a lock on the
-  table or any partition, or a scan of any leaf inside the window, is use (the most recently
-  scanned leaf named); it is idle only when it has a leaf and every leaf would be idle on its
-  own, so a partitioned table with no leaf, a foreign-table leaf, or a leaf with no scan and
-  no reset time is `unknown` unless another relation shows use. Every other case is `recent`
-  or `unknown`, never idle; write counters, which carry no time, never decide. The evidence
+  it. Every statistic is read from one snapshot, so a reset during the read cannot pair an
+  old reset time with cleared scan times. A partitioned table is judged across every leaf
+  partition at every level: a lock on the table or any partition, or a scan of any leaf
+  inside the window, is use (the leaf with the most recent scan of either kind named); it is
+  idle only when it has a leaf and every leaf would be idle on its own, so a partitioned
+  table with no leaf, a foreign-table leaf, or a leaf with no scan and no reset time is
+  `unknown` unless another relation shows use. Every other case is `recent` or `unknown`,
+  never idle; write counters, which carry no time, never decide. The evidence
   describes that one server alone — reads served by replicas are not in it — so idle is
   evidence for a drop safeguard, never permission on its own. *Enforced:* `pkg/preflight`
   (`TableUsage.Judge`, over the evidence `ReadTableUsage` reads in one bounded read-only
@@ -1341,7 +1344,9 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   recent and named, a lock on one partition recent, a partitioned table with no partition or
   with a foreign partition unknown, and inheritance children not followed in
   `table_usage_partitions_integration_test.go`; a partitioned table idle since a reset in
-  `table_usage_idle_integration_test.go`. *Source:* [table usage](table-usage.md).
+  `table_usage_idle_integration_test.go`; a reset between the read's statistics reads not
+  seen, and a role's saved `track_counts = off` unknown, in
+  `table_usage_coverage_integration_test.go`. *Source:* [table usage](table-usage.md).
 
 ## Orchestration / control-plane (OC)
 

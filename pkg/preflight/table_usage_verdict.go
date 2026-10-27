@@ -32,7 +32,11 @@ type UsageOutcome string
 
 const (
 	// UsageIdle means the server's statistics prove no scan of the table
-	// inside the window and no session held a lock on it when read.
+	// inside the window and no session held a lock on it when read. It is
+	// bounded evidence, not permission: it assumes every session that could
+	// have scanned the table counted its scans, which no reader can check
+	// for a session that turned track_counts off with SET or a connection
+	// option.
 	UsageIdle UsageOutcome = "idle"
 	// UsageRecent means the server's statistics show a scan inside the
 	// window, or a session held a lock on the table when read.
@@ -48,11 +52,11 @@ type UsageReason string
 const (
 	// UsageReasonLockHeld means another session held a lock on the table.
 	UsageReasonLockHeld UsageReason = "lock-held"
-	// UsageReasonSeqScanInWindow means the last sequential scan is inside the
-	// window.
+	// UsageReasonSeqScanInWindow means the most recent scan inside the window,
+	// of either kind, is a sequential scan.
 	UsageReasonSeqScanInWindow UsageReason = "seq-scan-in-window"
-	// UsageReasonIndexScanInWindow means the last index scan is inside the
-	// window.
+	// UsageReasonIndexScanInWindow means the most recent scan inside the
+	// window, of either kind, is an index scan.
 	UsageReasonIndexScanInWindow UsageReason = "index-scan-in-window"
 	// UsageReasonScanTimesNotRecorded means the server (PostgreSQL 14 or 15)
 	// does not record when a table was last scanned.
@@ -63,6 +67,10 @@ const (
 	// UsageReasonCountsNotTracked means track_counts is off for the reading
 	// session, so the server may be collecting no table statistics.
 	UsageReasonCountsNotTracked UsageReason = "counts-not-tracked"
+	// UsageReasonCountsNotTrackedBySetting means a saved per-role or
+	// per-database setting turns track_counts off for some role or for this
+	// database, so scans in the sessions it applies to are not counted.
+	UsageReasonCountsNotTrackedBySetting UsageReason = "counts-not-tracked-by-setting"
 	// UsageReasonStatsResetInWindow means the database's statistics were reset
 	// inside the window, so a scan before the reset left no trace.
 	UsageReasonStatsResetInWindow UsageReason = "stats-reset-in-window"
@@ -230,17 +238,17 @@ func (u TableUsage) judge(windowStart time.Time) (UsageOutcome, UsageReason, int
 	if !u.ScanTimesRecorded() {
 		return UsageUnknown, UsageReasonScanTimesNotRecorded, noLeaf
 	}
-	if insideWindow(latestScan(u.leaves, PartitionUsage.seqScanTime), windowStart) {
-		return UsageRecent, UsageReasonSeqScanInWindow, latestLeaf(u.leaves, PartitionUsage.seqScanTime)
-	}
-	if insideWindow(latestScan(u.leaves, PartitionUsage.idxScanTime), windowStart) {
-		return UsageRecent, UsageReasonIndexScanInWindow, latestLeaf(u.leaves, PartitionUsage.idxScanTime)
+	if reason, leaf, ok := u.latestScanInWindow(windowStart); ok {
+		return UsageRecent, reason, leaf
 	}
 	if u.inRecovery {
 		return UsageUnknown, UsageReasonInRecovery, noLeaf
 	}
 	if !u.trackCounts {
 		return UsageUnknown, UsageReasonCountsNotTracked, noLeaf
+	}
+	if u.trackCountsOffBySetting {
+		return UsageUnknown, UsageReasonCountsNotTrackedBySetting, noLeaf
 	}
 	// A reset clears the scan times of what it resets, and a single-table
 	// reset leaves the table's index scan times standing while it moves
@@ -261,6 +269,29 @@ func (u TableUsage) judge(windowStart time.Time) (UsageOutcome, UsageReason, int
 		return UsageUnknown, UsageReasonStatsStartUnknown, i
 	}
 	return UsageIdle, UsageReasonNoScanInWindow, noLeaf
+}
+
+// latestScanInWindow returns the reason and leaf of the most recent scan,
+// of either kind, when it is inside the window; ok is false when neither
+// kind's latest scan is. A sequential and an index scan at the same
+// instant answer sequential.
+func (u TableUsage) latestScanInWindow(windowStart time.Time) (reason UsageReason, leaf int, ok bool) {
+	seqLeaf := latestLeaf(u.leaves, PartitionUsage.seqScanTime)
+	idxLeaf := latestLeaf(u.leaves, PartitionUsage.idxScanTime)
+	seq := latestScan(u.leaves, PartitionUsage.seqScanTime)
+	idx := latestScan(u.leaves, PartitionUsage.idxScanTime)
+	seqInside := insideWindow(seq, windowStart)
+	idxInside := insideWindow(idx, windowStart)
+	switch {
+	case seqInside && idxInside && idx.After(*seq):
+		return UsageReasonIndexScanInWindow, idxLeaf, true
+	case seqInside:
+		return UsageReasonSeqScanInWindow, seqLeaf, true
+	case idxInside:
+		return UsageReasonIndexScanInWindow, idxLeaf, true
+	default:
+		return "", noLeaf, false
+	}
 }
 
 // insideWindow reports whether a recorded instant is at or after the

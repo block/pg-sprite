@@ -124,6 +124,28 @@ func TestJudgeUnknownWhenCountsAreNotTracked(t *testing.T) {
 	requireVerdict(t, u, UsageUnknown, UsageReasonCountsNotTracked)
 }
 
+// A saved setting that turns track_counts off for some other role means
+// that role's scans are not counted, so old scan times prove nothing; a
+// scan inside the window is still use.
+func TestJudgeUnknownWhenASettingTurnsCountsOff(t *testing.T) {
+	u := idleUsage()
+	u.trackCountsOffBySetting = true
+	requireVerdict(t, u, UsageUnknown, UsageReasonCountsNotTrackedBySetting)
+	u.leaves[0].lastSeqScan = at(time.Hour)
+	requireVerdict(t, u, UsageRecent, UsageReasonSeqScanInWindow)
+}
+
+// When both kinds of scan are inside the window, the newer one decides
+// the reason, whichever kind it is.
+func TestJudgeTheNewerScanKindDecides(t *testing.T) {
+	u := idleUsage()
+	u.leaves[0].lastSeqScan = at(time.Hour)
+	u.leaves[0].lastIdxScan = at(2 * time.Hour)
+	requireVerdict(t, u, UsageRecent, UsageReasonIndexScanInWindow)
+	u.leaves[0].lastSeqScan = at(3 * time.Hour)
+	requireVerdict(t, u, UsageRecent, UsageReasonSeqScanInWindow)
+}
+
 // A reset at the window's first instant is inside it; one a microsecond
 // earlier is not.
 func TestJudgeStatsResetAtTheWindowEdge(t *testing.T) {
