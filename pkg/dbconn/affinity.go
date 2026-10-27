@@ -136,9 +136,18 @@ func probeAcrossPinnedBackend(ctx context.Context, conn AdvisoryLockHolder, pinn
 	}
 	defer second.Release()
 
+	// A statement before the BEGIN takes the second connection's backend
+	// first, so the BEGIN never waits for one. A session-mode pooler keeps
+	// the backend a client's first statement got until the client
+	// disconnects, so on a supported endpoint a pool with no backend to
+	// spare times out here, as an untyped error, rather than on the BEGIN,
+	// where the same SQLSTATE would read as a refused transaction block.
+	if _, err := second.Exec(ctx, "SELECT 1"); err != nil {
+		return false, false, fmt.Errorf("run the session affinity probe's first statement on its second connection: %w", err)
+	}
 	tx, err := second.Begin(ctx)
 	if isTransactionBlockRefusal(err) {
-		return false, false, fmt.Errorf("%w: the endpoint refused a transaction block, so it hands out a backend per statement: %w",
+		return false, false, fmt.Errorf("%w: the endpoint refused a transaction block on a connection that had just run a statement, so it keeps no backend across statements: %w",
 			ErrNoSessionAffinity, err)
 	}
 	if err != nil {
@@ -176,21 +185,21 @@ func probeAcrossPinnedBackend(ctx context.Context, conn AdvisoryLockHolder, pinn
 const sqlstateProtocolViolation = "08P01"
 
 // isTransactionBlockRefusal reports whether err, returned by BEGIN on an
-// already-established connection, is the endpoint refusing a transaction
-// block.
+// already-established connection that has just run a statement, is the
+// endpoint refusing a transaction block.
 //
 // The SQLSTATE alone is not specific: PgBouncer reports most of its own
-// failures as protocol_violation, and PostgreSQL uses it for a malformed
-// protocol message. The step narrows it. The connection is already logged
-// in, so no dial, login, or client-limit refusal can surface here; a dropped
-// network connection carries no SQLSTATE and stays untyped; and the BEGIN
-// pgx sends is well formed, so the server has nothing to call malformed.
-// What remains besides the statement-mode refusal is a pooler's own wait
-// timeout (query_wait_timeout) firing during this one round trip. Its default
-// is far longer than the proof's bound, and a pooler that cannot hand the
-// probe a backend within it has not given the probe a transaction either, so
-// classing that as no affinity still fails closed; only the remedy would
-// point at the wrong setting.
+// failures as protocol_violation, including its wait for a backend
+// (query_wait_timeout), with the same FATAL severity as the statement-mode
+// refusal and only the message to tell them apart. The step narrows it
+// without reading the message. The connection is already logged in, so no
+// dial, login, or client-limit refusal can surface here; a dropped network
+// connection carries no SQLSTATE and stays untyped; the BEGIN pgx sends is
+// well formed, so the server has nothing to call malformed; and the
+// statement before the BEGIN has already taken the connection's backend, so
+// a session-mode pooler has nothing left to wait for. A wait timeout here can
+// only come from a pooler that gave the backend back after that statement,
+// in statement or transaction mode, and neither keeps a session.
 func isTransactionBlockRefusal(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == sqlstateProtocolViolation

@@ -1,9 +1,11 @@
 package dbconn_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -72,6 +74,53 @@ func TestNewPoolRefusesStatementPooling(t *testing.T) {
 	require.ErrorAs(t, err, &pgErr)
 	assert.Equal(t, "08P01", pgErr.Code)
 	assert.Equal(t, "FATAL", pgErr.Severity)
+}
+
+// A session-mode pooler with no backend to spare makes a client wait, and
+// PgBouncer ends the wait with the same FATAL protocol_violation it uses to
+// refuse a transaction block in statement mode. The pool here has two
+// backends: another client holds one, the connection under proof takes the
+// other, and the proof's second connection waits for a third until
+// query_wait_timeout fires. The pinner is a plain pool, so nothing has run
+// on its connection before the proof does. That is a supported endpoint
+// short of capacity, not one without session affinity, so the proof fails
+// with the pooler's error and not with the typed refusal that would tell the
+// operator to change the endpoint.
+func TestProveSessionAffinityDoesNotReadAnExhaustedSessionPoolAsNoAffinity(t *testing.T) {
+	pooledURL := testutil.StartPostgresBehindPgBouncerWith(t, testutil.SessionPooling, map[string]string{
+		"DEFAULT_POOL_SIZE":  "2",
+		"QUERY_WAIT_TIMEOUT": "2",
+	})
+	// Session mode keeps the backend a client's first statement got until
+	// the client disconnects, so each of these holds one of the two.
+	connectAndPinBackend(t, pooledURL)
+	conn := connectAndPinBackend(t, pooledURL)
+	pinnerCfg, err := pgxpool.ParseConfig(pooledURL)
+	require.NoError(t, err)
+	pinnerCfg.MaxConns = 1
+	pinner, err := pgxpool.NewWithConfig(t.Context(), pinnerCfg)
+	require.NoError(t, err)
+	t.Cleanup(pinner.Close)
+
+	err = dbconn.ProveSessionAffinity(t.Context(), conn, pinner, 0)
+
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, dbconn.ErrNoSessionAffinity)
+	var pgErr *pgconn.PgError
+	require.ErrorAs(t, err, &pgErr, "the pooler's own error stays in the chain")
+	assert.Equal(t, "08P01", pgErr.Code)
+}
+
+// connectAndPinBackend opens a client connection to url and runs one
+// statement on it, so a session-mode pooler binds it a backend.
+func connectAndPinBackend(t *testing.T, url string) *pgx.Conn {
+	t.Helper()
+	conn, err := pgx.Connect(t.Context(), url)
+	require.NoError(t, err)
+	t.Cleanup(func() { assert.NoError(t, conn.Close(context.WithoutCancel(t.Context()))) })
+	_, err = conn.Exec(t.Context(), "SELECT 1")
+	require.NoError(t, err)
+	return conn
 }
 
 // The refusal is keyed on whether the session keeps the settings, not on

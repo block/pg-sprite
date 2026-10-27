@@ -3,6 +3,7 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"testing"
 	"time"
@@ -60,6 +61,15 @@ const (
 // an external PG_DSN cannot substitute for it.
 func StartPostgresBehindPgBouncer(t *testing.T, mode PoolMode) (pooledURL string) {
 	t.Helper()
+	return StartPostgresBehindPgBouncerWith(t, mode, nil)
+}
+
+// StartPostgresBehindPgBouncerWith is StartPostgresBehindPgBouncer with
+// PgBouncer settings overridden, keyed by the image's environment names
+// (DEFAULT_POOL_SIZE, QUERY_WAIT_TIMEOUT, …), for a test about how the
+// pooler behaves when it is short of backends.
+func StartPostgresBehindPgBouncerWith(t *testing.T, mode PoolMode, settings map[string]string) (pooledURL string) {
+	t.Helper()
 	if os.Getenv("SKIP_INTEGRATION") != "" {
 		t.Skip("SKIP_INTEGRATION set; skipping test that needs a database")
 	}
@@ -105,35 +115,38 @@ func StartPostgresBehindPgBouncer(t *testing.T, mode PoolMode) (pooledURL string
 		}
 	})
 
+	env := map[string]string{
+		"DB_HOST":     alias,
+		"DB_PORT":     "5432",
+		"DB_USER":     user,
+		"DB_PASSWORD": password,
+		"DB_NAME":     database,
+		"POOL_MODE":   string(mode),
+		"LISTEN_PORT": pgBouncerPort,
+		"AUTH_TYPE":   "scram-sha-256",
+		// Transaction pooling breaks prepared statements unless the
+		// pooler tracks them itself, and pgx prepares by default.
+		// Tracking them keeps the fixture about session binding
+		// rather than about protocol support.
+		"MAX_PREPARED_STATEMENTS": "100",
+		// More than one server connection, so the pooler has a
+		// backend to rebind to rather than trivially reusing one.
+		"DEFAULT_POOL_SIZE": "5",
+		"MAX_CLIENT_CONN":   "50",
+		// PgBouncer rejects a startup parameter it does not know how
+		// to track, and pg-sprite sends its session timeouts that
+		// way. A deployment behind a pooler configures these for the
+		// same reason, so the fixture does too.
+		"IGNORE_STARTUP_PARAMETERS": "lock_timeout,statement_timeout,extra_float_digits",
+	}
+	maps.Copy(env, settings)
+
 	pooler, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
 			Image:        pgBouncerImage,
 			ExposedPorts: []string{pgBouncerPort + "/tcp"},
-			Env: map[string]string{
-				"DB_HOST":     alias,
-				"DB_PORT":     "5432",
-				"DB_USER":     user,
-				"DB_PASSWORD": password,
-				"DB_NAME":     database,
-				"POOL_MODE":   string(mode),
-				"LISTEN_PORT": pgBouncerPort,
-				"AUTH_TYPE":   "scram-sha-256",
-				// Transaction pooling breaks prepared statements unless the
-				// pooler tracks them itself, and pgx prepares by default.
-				// Tracking them keeps the fixture about session binding
-				// rather than about protocol support.
-				"MAX_PREPARED_STATEMENTS": "100",
-				// More than one server connection, so the pooler has a
-				// backend to rebind to rather than trivially reusing one.
-				"DEFAULT_POOL_SIZE": "5",
-				"MAX_CLIENT_CONN":   "50",
-				// PgBouncer rejects a startup parameter it does not know how
-				// to track, and pg-sprite sends its session timeouts that
-				// way. A deployment behind a pooler configures these for the
-				// same reason, so the fixture does too.
-				"IGNORE_STARTUP_PARAMETERS": "lock_timeout,statement_timeout,extra_float_digits",
-			},
-			Networks: []string{net.Name},
+			Env:          env,
+			Networks:     []string{net.Name},
 			// A bound port only says the process is listening: PgBouncer
 			// accepts a client before it can serve one, and holds or drops a
 			// login that arrives before it has a server behind it. This wait
