@@ -12,6 +12,7 @@ it does not fold, and what the approach requires from the database.
 - [The problem](#the-problem)
 - [A worked example](#a-worked-example)
 - [How pg-sprite avoids reimplementing the rules](#how-pg-sprite-avoids-reimplementing-the-rules)
+  - [Compared with Spirit](#compared-with-spirit)
 - [What the catalog does not fold](#what-the-catalog-does-not-fold)
 - [What the approach requires](#what-the-approach-requires)
 
@@ -141,10 +142,35 @@ which a resumed copy checks before it continues, comes from the same rolled-back
 schema, not from editing the DDL in Go
 ([copy-and-swap D1](copy-and-swap-design.md#d1--no-durable-scratch-database)).
 
+### Compared with Spirit
+
 Engines that diff offline take the other route. Spirit, for MySQL, runs a
 [normalization layer](https://github.com/block/spirit/blob/main/pkg/statement/README.md#normalization)
 over parsed `CREATE TABLE` statements that approximates what MySQL does when it stores a table,
-so it can diff without a server. pg-sprite carries no such layer and relies on the round trip.
+so it can interpret the desired file without running it on a server. pg-sprite carries no such
+layer and relies on the round trip.
+
+Spirit reads the live table with `SHOW CREATE TABLE`, then parses and normalizes that text the
+same way it does the desired file. Because `SHOW CREATE TABLE` prints what MySQL stored, the text
+is already in MySQL's form and the normalizers find almost nothing to change on that side. The
+real work happens on the desired file, where a person wrote `BOOL`, an inline `UNIQUE`, an
+unnamed index, and so on.
+
+```text
+current:  SHOW CREATE TABLE  →  parse + normalize  →  (little to change)  ─┐
+                                                                            ├─ Diff
+desired:  schema file        →  parse + normalize  →  (real rewriting)    ─┘
+```
+
+Both tools connect to read the live table; they differ in how they interpret the desired file:
+
+| | Spirit | pg-sprite |
+| --- | --- | --- |
+| Current table | read-only `SHOW CREATE TABLE` | read-only catalog query |
+| Desired file | interpreted in Go by the normalizers, no server | run as DDL in a rolled-back scratch schema, then read with the same catalog query |
+| What the connection needs | read access | a writable primary and the database-level `CREATE` privilege |
+| Works on a read replica | yes | no |
+| Spellings not modeled | can show as false changes until the normalizers learn them | none: PostgreSQL did the rewriting |
 
 ## What the catalog does not fold
 
