@@ -103,7 +103,7 @@ func TestCheckRecopyStopsWhenEveryAttemptCollides(t *testing.T) {
 	pool := f.hookedPool(t, func(_ context.Context, _ *pgx.Conn, sql string) {
 		mu.Lock()
 		defer mu.Unlock()
-		if sql == "begin read write" {
+		if sql == "begin isolation level read committed read write" {
 			armed = true
 			return
 		}

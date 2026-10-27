@@ -96,7 +96,7 @@ func TestCheckRepairRefusesAReplacedShadowBeforeWriting(t *testing.T) {
 	target, lock, shadow := f.prepare(t)
 	f.exec(t, "UPDATE "+f.shadowName(shadow)+" SET qty = 0 WHERE id = 1500")
 	name := f.shadowName(shadow)
-	pool := f.poolHookedBeforeStatement(t, "begin read write", func() {
+	pool := f.poolHookedBeforeStatement(t, "begin isolation level read committed read write", func() {
 		f.exec(t, "ALTER TABLE "+name+" RENAME TO displaced")
 		f.exec(t, "CREATE TABLE "+name+" (LIKE %s.displaced INCLUDING ALL)")
 	})

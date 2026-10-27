@@ -339,7 +339,7 @@ the slot under the row (decoding target):
 | `*decode.SlotLagExceededError` (decoding target) | The slot retained more WAL than `CatchupOptions.SlotLagCeiling` while the capture ran; the run stopped with the slot in place under the row | Retry `Run` once the source's write rate allows: the stream reopens at the row's position and drains the backlog. Abandoning the run (`DropShadow`, `decode.DropSlot`, `Store.Delete`) releases the WAL |
 | `ErrCutoverRolledBack` / `ErrLockRetriesExhausted` | The swap did not commit; the source is still live and the row is in `cutover` | Retry `Run`: the row is answered by `InspectSwapped`, which sends the run back through verify and gate to a fresh swap attempt |
 | `ErrTableLockLost` (`shadow-lock-lost`) | The lock session dropped mid-run; whatever was in flight was cancelled with it | Retry `Run` once the database is reachable; the row says where to continue |
-| An error wrapped `after the checkpoint in phase …` | The row saved; `AfterCheckpoint` returned an error after it | The row and the run are consistent; retry `Run` when the hook's cause is cleared. A hook that fails at the first save leaves the shadow, since the row records it |
+| An error wrapped `after the checkpoint in phase …` | The row saved; `AfterCheckpoint` returned an error after it | The row and the run are consistent; retry `Run` when the hook's cause is cleared. A hook that fails at the first save leaves the shadow, since the row records it. A hook that fails at the done save stopped nothing: `Run` returns the completed `Result` beside the error, with `Result.Checkpoint.Phase` in `PhaseDone`, and a retry would start a new change |
 | `context.Canceled` / `DeadlineExceeded` | The caller stopped the run; a cancelled copy saves what its committed chunks landed before returning | Retry `Run`; the copy continues from the saved watermark |
 
 A refusal from either read leaves the row and the slot as they were. A `Reconcile` that fails
@@ -407,6 +407,14 @@ storage parameters and its columns' sequence declarations. A copy-and-swap run i
 `MismatchFormat` with `Stored.FormatVersion == 2`: finish it with the release that started
 it, or, once no run is in flight, `Store.Delete(Stored)` and start over.
 
+The release that adds the shadow proof's `conversion_fingerprint` keeps the row format, but a
+copy-and-swap run whose statement retypes a column with `USING` and that is in flight across
+the upgrade cannot resume on the new engine: the row's proof carries no fingerprint, the
+resume re-derives one, and the proofs differ, so the resume is refused as
+`resume-row-mismatch`. Finish such a run with the release that started it, or abandon it with
+a restart (`--restart`, `RunOptions.Restart`), which drops the shadow and copies the table
+again. Runs whose statement has no `USING` conversion resume unaffected.
+
 `ErrTableBehind` wraps the server's own `42703` undefined-column error, so an adapter that
 logs the chain sees both the engine's classification and the server's words. `ErrTableNewer`
 comes from `Ensure`'s read of the table's shape, before any statement could fail, so it
@@ -423,7 +431,7 @@ backend ends in exactly one of three verdicts:
 
 | Verdict | What it means | Orchestrator action |
 | --- | --- | --- |
-| `outcome: executed-via-copy-and-swap` | The shadow was built, filled, verified, and swapped in under the source's name; `detail` says how many rows and chunks the verification pass covered, whether the retained source was dropped or kept under its `_old` name, whether the run first reconciled a lost slot, and — for a quiesced run — that the source's writes were fenced for the run's length, since exit 0 otherwise reads as online-safe. A run whose done row is saved is this outcome even when the release of its lock session failed afterwards; the detail then names the release error. The error is nil | Done. Exit 0 at the CLI; the outcome token is distinct from `executed-natively` so an adapter can tell the two paths apart in its record |
+| `outcome: executed-via-copy-and-swap` | The shadow was built, filled, verified, and swapped in under the source's name; `detail` says how many rows and chunks the verification pass covered, whether the retained source was dropped or kept under its `_old` name, whether the run first reconciled a lost slot, and — for a quiesced run — that the source's writes were fenced for the run's length, since exit 0 otherwise reads as online-safe. A run whose done row is saved is this outcome even when what came after failed — `OnCheckpoint` handed the done row, or the release of the lock session; the detail then names that error. The error is nil | Done. Exit 0 at the CLI; the outcome token is distinct from `executed-natively` so an adapter can tell the two paths apart in its record |
 | `outcome: refused`, `reason: copy-and-swap-refused` | The route's own gates declined: the preflight found a table shape or an environment it will not run against, or a shadow operation refused mid-run to keep an invariant. `cause` is the route's token unchanged — a `copy-and-swap-…` cause from the preflight, a `shadow-…`, `cutover-…`, `resume-…`, or `copy-…` cause from the shadow operations — and `class` is its routing class. The error is nil | Route on `cause` with the two tables above and [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause). A preflight refusal touched nothing. A refusal raised after the row was saved — a `cutover-…` or `resume-…` cause — leaves the row, the shadow, and the run's hold on the source in place: the write fence of a quiesced run, or the replication slot of a live run, which pins WAL until it is dropped; the cause says whether the next run clears it or the run is abandoned first. A missing privilege is not this reason: it is the same `insufficient-privileges` refusal the native route reports, with the exact `GRANT` in `detail` |
 | `outcome: failed`, with `code` | The run stopped on an error that is not a refusal; the error is returned alongside the verdict. `code` is `cancelled-by-caller` when the caller's context ended, `invariant-violation` when the engine caught a breach of its own contract, and `execution-failed` for everything else — a divergence, an unsettled chunk, a rolled-back swap, a lost lock session, exhausted lock retries, a slot past its lag ceiling | The checkpoint row remains at its last save with the run's hold on the source — the fence or the slot — and `detail` says what to do with it: a divergence (`*checksum.DivergenceError`) is wedged in `verifying`, and a data fault — a `*pgconn.PgError` in SQLSTATE class `22` or `23`, a value the new type will not hold or a constraint the copied rows break — would stop the same way on every resume, so for both the detail says to correct the data or the statement and then start the run over with the restart acknowledgement (`--restart SCHEMA.TABLE`; `CopySwapOptions.Restart`), which drops the shadow, takes the fence off the source or drops the slot, deletes the row, and runs the change from the start; every other stop says that running the same statement again resumes from the row. The `Run` outcome table above is the finer map. Match the wrapped error with `errors.Is`/`errors.As` for the finer routing — the verdict's `code` is the coarse class |
 
@@ -451,12 +459,51 @@ finds no lock to confirm. The check reads `pg_control_system()`, which PostgreSQ
 `PUBLIC`; a server that withholds it stops the route with an ordinary error), the free space on the table's
 volume for the preflight's disk-headroom check, whether to keep the retained source under
 its `_old` name, and whether the table is quiesced for the run — the fenced path that needs
-no logical decoding — or live. The native route's budget, retry policy, and size ceiling do not govern
+no logical decoding — or live. Three further fields let the adapter size and watch the run:
+`Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
+throttled toward — with zero values taking the copier's defaults; `CheckpointInterval` is how often
+a copy in progress saves its landed watermark (zero takes the Runner's default); and `OnCheckpoint` is
+the run's phase signal. A `Copier` value the copier would refuse and a negative interval are
+wiring errors refused before the preflight, like the missing connection: an error with no
+verdict, matched with `errors.Is(err, schemachange.ErrInvalidOptions)` (a refused `Copier`
+value also matches `copier.ErrInvalidOptions` or `copier.ErrInvalidChunkerOptions`). The native route's budget, retry policy, and size ceiling do not govern
 this route: the Runner's sessions carry `pkg/dbconn`'s bounded `lock_timeout` and
 `statement_timeout`, the cutover runs its own bounded lock retry, and the size ceiling guards
 the native route's blind bounded attempt, which this route never makes. A statement routed to copy-and-swap and run with `--force`
 does not take this route at all: `--force` keeps its one meaning, the submitted form run
 natively as a bounded blind attempt, and the audit record says so.
+
+Rows copied come from `Copier.Tracker` (`*progress.Tracker`), not from the hook, whose rows
+carry a key position. The adapter builds one tracker per run and calls its `Start` before
+`Run`: `Start` and `StartStep` drop the tracker's work source, so either called while the
+copy runs stops the counters, and two runs sharing one tracker each register as its source,
+the first to finish dropping the source the other still reports to. The copier is the work
+source from the copy's first chunk until just before the copy returns, so progress counters
+are for the copy alone: before it, after it, and through the verification pass and a live
+run's catch-up the tracker reports no work, and those phases reach the adapter only as
+`OnCheckpoint` rows. `rows_copied` counts this run's rows, rising monotonically, and
+`rows_total` is the source's catalog estimate at the copy's start — `0` for a table `ANALYZE`
+has never visited, and possibly below `rows_copied` once the table has grown or on a resumed
+run — so a display treats `0` as unknown and a ratio over one as possible. The verdict's
+`detail` reports the rows the verification pass covered once the run ends.
+
+`OnCheckpoint` is called after every successful save of the checkpoint row with the row as
+written: `UpdatedAt` is zero (use the adapter's own clock for a save time), the
+`ShadowProof` bytes are shared with the run (treat a retained row as read-only), and the
+slot name, publication name, and applied LSN are PostgreSQL's, to be mapped into generic
+metadata before the row reaches an engine-neutral record. A live run that reconciles a lost
+slot writes its `reconciling` marker and the resumed row straight to the store, and the hook
+sees only the row the reconcile leaves. The hook runs on the run's goroutines and holds the
+run up while it runs — on the goroutine that called `Run` for the phase saves, with the
+table's lock session held and, for a quiesced run, the source fenced, and on the copy's
+saving goroutine for the periodic watermark saves, where a slow call delays the next save —
+so it must be safe to call from either and should return promptly. An error the hook returns
+stops the run at that save as a `failed` verdict with the `after the checkpoint in phase …`
+error of the `Run` outcome table above and the row as that save left it; the next `Run` over
+the same statement resumes from the row. The done save is the exception: the swap has
+committed and the row is done, so the verdict is `executed-via-copy-and-swap` with the hook's
+error named in `detail` and a nil error, and running the statement again would start a new
+change.
 
 Divergence policy is not a knob on this seam: the front door runs the verification pass under
 `DivergenceAbort` (CO-3), and a divergence is a `failed` verdict whose remedy is the
@@ -481,7 +528,7 @@ each asks for a different action. Whether the pass wrote the shadow is part of t
 | --- | --- | --- | --- |
 | `Outcome` with `VerifiedShadow` minted (`Live()` true) | Every chunk was equal or settled against the catch-up's confirmed position; the shadow equals the source as of those positions and every change since is in the stream | Hand the proof to `GateCutover`; `Cutover` requires a `DrainFunc` that applies the stream through the final position under the swap lock, and refuses the proof without one (`cutover-undrained`) | No |
 | `*UnresolvedError`, no repairs | A chunk could not be settled: the catch-up did not confirm past the read within the wait (`lagging`), or the chunk changed on every reread (`hot`). Not a finding about the data | Run the pass again — after the catch-up has confirmed further, or when the source is quieter; `Outcome.Report.Unsettled` counts the chunks that did not settle | No |
-| `*DivergenceError` (policy `abort`) | At least one chunk held still on both sides across a confirmed position and still differed; the stream delivered everything and the shadow does not match. `Report.Unsettled` may also be non-zero | Stop and report; a divergence under the stream is a defect, or the known synchronous-commit window recorded in [CO-4's *Open* note](invariants.md#co-4--the-copyapply-ordering-invariants), and either way not a retry: a second pass reads the same shadow and stops the same way, so start the run over (the `*checksum.DivergenceError` row above). A chunk that settled is not compared again, so a loss that lands in that window after the pass has settled its chunk is not caught | No |
+| `*DivergenceError` (policy `abort`) | At least one chunk held still on both sides across a confirmed position and still differed; the stream delivered everything and the shadow does not match. `Report.Unsettled` may also be non-zero | Stop and report; a divergence under the stream is a defect in the copy/apply ordering [CO-4](invariants.md#co-4--the-copyapply-ordering-invariants) enforces, not a retry: a second pass reads the same shadow and stops the same way, so start the run over (the `*checksum.DivergenceError` row above) | No |
 | `*UnresolvedError` with `Outcome.Repairs` listed (policy `repair`) | Every confirmed divergence was recopied and read back clean, but another chunk did not settle | The repairs are committed; run the pass again as above. No proof was minted (CO-2) | Yes — the listed repairs |
 | `*RepairError` (policy `repair`) | A repaired chunk was a confirmed divergence again after its recopy | Stop and report; the recopy committed and is listed in `Outcome.Repairs`, and something other than the stream is writing the shadow | Yes — the listed repairs |
 

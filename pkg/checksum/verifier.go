@@ -209,6 +209,19 @@ func checkShadow(target preflight.CopySwapTarget, shadow copier.Shadow) error {
 			return fmt.Errorf("%w (ST-6): shadow proof for %s.%s converts column %s with an empty expression", ErrInvariantViolation, target.Schema(), target.Table(), column)
 		}
 	}
+	// The digest's source side and the recopy evaluate the expressions, and
+	// each pass compares the catalog they resolve in against the build's
+	// fingerprint; a proof with expressions and no fingerprint has nothing
+	// to compare, and one with a fingerprint and no expressions nothing to
+	// fingerprint.
+	converts := len(shadow.Conversions()) > 0
+	fingerprinted := shadow.ConversionFingerprint() != ""
+	if converts && !fingerprinted {
+		return fmt.Errorf("%w (ST-6): shadow proof for %s.%s converts columns but carries no conversion fingerprint", ErrInvariantViolation, target.Schema(), target.Table())
+	}
+	if !converts && fingerprinted {
+		return fmt.Errorf("%w (ST-6): shadow proof for %s.%s carries a conversion fingerprint but converts no column", ErrInvariantViolation, target.Schema(), target.Table())
+	}
 	return nil
 }
 

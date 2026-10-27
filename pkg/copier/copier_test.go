@@ -77,3 +77,19 @@ func TestCopierOptionsRefuseUnboundedValues(t *testing.T) {
 		})
 	}
 }
+
+// Validate is the check NewCopier makes, available before any copy: zero
+// options take the defaults and pass, a copier field NewCopier would
+// refuse is refused with ErrInvalidOptions, and a chunk size NewChunker
+// would refuse with ErrInvalidChunkerOptions.
+func TestCopierOptionsValidateAsTheCopyWould(t *testing.T) {
+	require.NoError(t, Options{}.Validate())
+
+	err := Options{Workers: -1}.Validate()
+	assert.ErrorIs(t, err, ErrInvalidOptions)
+	assert.NotErrorIs(t, err, ErrInvalidChunkerOptions)
+
+	err = Options{Chunker: ChunkerOptions{MinRows: 50, MaxRows: 10}}.Validate()
+	assert.ErrorIs(t, err, ErrInvalidChunkerOptions)
+	assert.NotErrorIs(t, err, ErrInvalidOptions)
+}

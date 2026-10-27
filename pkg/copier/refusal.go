@@ -49,6 +49,14 @@ const (
 	// resolves, resolves to another OID, or the key column the proof says
 	// is a primary key answered a boundary query with NULL.
 	CauseRelationReplaced RefusalCause = "copy-relation-replaced"
+	// CauseConversionDrift means the catalog entries the conversion
+	// expressions resolve among are no longer the ones the shadow build
+	// saw (CO-9): a function, operator, type, or collation under a name an
+	// expression spells was created, replaced, or dropped in a schema on
+	// the copy's search_path, so a chunk written now could evaluate the
+	// expressions differently from the gated statement. The chunk is not
+	// written; the caller drops the shadow and starts the change over.
+	CauseConversionDrift RefusalCause = "copy-conversion-drift"
 	// CauseFrontierBroken means the copier's own accounting of the key
 	// space broke (CO-4): a chunk was cut with its lower bound above its
 	// upper, a claimed chunk does not start at the cut frontier, or the
@@ -77,6 +85,7 @@ func RefusalCauses() []RefusalCause {
 		CauseLockHeldElsewhere,
 		CauseLockUnconfirmed,
 		CauseRelationReplaced,
+		CauseConversionDrift,
 		CauseFrontierBroken,
 		CauseChunksInFlight,
 		CauseChunkUnknown,
@@ -91,6 +100,8 @@ func (c RefusalCause) Invariant() string {
 		return "ST-6"
 	case CauseLockUnproven, CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed:
 		return "LK-1"
+	case CauseConversionDrift:
+		return "CO-9"
 	case CauseFrontierBroken:
 		return "CO-4"
 	case CauseChunksInFlight:
@@ -102,18 +113,19 @@ func (c RefusalCause) Invariant() string {
 
 // Class is the routing class of the cause, from docs/refusal-classes.md:
 // what kind of boundary the importer is looking at. A lock the session lost
-// or that the server shows held elsewhere or by nobody, and a relation that
-// is no longer the one proved, are environmental — state outside the copier
-// moved under it. Every other cause is an invariant violation: a proof,
-// shadow, or chunk the caller handed in that cannot have come from this
-// engine, or a ledger that disagrees with its workers; nothing on the
-// server changes that, so the importer reports it. The class is a triage
-// decision; the cause's row in the document decides what the importer does
-// next, and no class licenses an automatic retry on its own. An unknown
-// cause has no class.
+// or that the server shows held elsewhere or by nobody, a relation that is
+// no longer the one proved, and a catalog the conversion expressions no
+// longer resolve in as the build did, are environmental — state outside
+// the copier moved under it. Every other cause is an invariant violation:
+// a proof, shadow, or chunk the caller handed in that cannot have come
+// from this engine, or a ledger that disagrees with its workers; nothing
+// on the server changes that, so the importer reports it. The class is a
+// triage decision; the cause's row in the document decides what the
+// importer does next, and no class licenses an automatic retry on its own.
+// An unknown cause has no class.
 func (c RefusalCause) Class() refusal.Class {
 	switch c {
-	case CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed, CauseRelationReplaced:
+	case CauseLockLost, CauseLockHeldElsewhere, CauseLockUnconfirmed, CauseRelationReplaced, CauseConversionDrift:
 		return refusal.ClassEnvironmental
 	case CauseProofEmpty, CauseShadowMismatch, CauseLockUnproven, CauseFrontierBroken,
 		CauseChunksInFlight, CauseChunkUnknown:
