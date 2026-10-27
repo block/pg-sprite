@@ -329,18 +329,56 @@ lock on the slot's name (`checkpoint.Store.WithSlotLock`, transaction-scoped on 
 dialled outside the pool and proven to be on the pool's cluster and database, so the claim's own work on the pool never waits on the seat the lock
 sits in), which the reaper holds from its last read of the row to its drop, so a slot with no
 row is an orphan and never a slot mid-claim. Preflight checks for a free slot under
-`max_replication_slots` and two free senders under `max_wal_senders`, since the slot's connection
-holds its exported snapshot while the copy imports it and the stream decodes on a second one.
+`max_replication_slots` and two free senders under `max_wal_senders`. A run holds at most one
+sender at a time: the slot is created on a replication connection that closes as soon as the
+checkpoint row naming the slot commits, and the stream later decodes on a connection of its
+own. The slot is created with an exported snapshot, but nothing imports it — the copy and the
+stream meet at the slot's consistent point, which the row records as the applied position —
+so the second free sender is a margin, not something the run uses.
 Slot lag has a hard byte ceiling, default 1 GiB; crossing it aborts
-fail closed. At startup a reaper drops orphan `pgsprite_*` slots that belong to the current
-database (`pg_replication_slots.database = current_database()`), are inactive
-(`active_pid IS NULL`), and whose checkpoint row is absent or terminal; slots of other databases
-are never inspected, let alone dropped. An operator who needs to reclaim a slot by hand runs
-the same pass through `checkpoint.Store.ReapOrphanSlots`; failing that, PostgreSQL's own
+fail closed. The reaper, `checkpoint.Store.ReapOrphanSlots`, drops orphan `pgsprite_*` slots
+that belong to the current database (`pg_replication_slots.database = current_database()`), are
+inactive (`active_pid IS NULL`), and whose checkpoint row is absent or terminal; slots of other
+databases are never inspected, let alone dropped. Nothing runs it at startup in this build: it
+is a library call an operator or orchestrator makes to reclaim orphans; failing that, PostgreSQL's own
 `SELECT pg_drop_replication_slot('<name>')` on the slot's database drops the slot (the
 publication of the same name is dropped separately with `DROP PUBLICATION`), after confirming
 no checkpoint row in a non-terminal phase still names it. Slot inspection treats
 `pg_replication_slots.wal_status = 'lost'` as lost state.
+
+A host reaps with the connection config its runs use, on the database they run in. The pass is
+safe to run at any time, including while a schema change is in flight: it keeps every slot a
+live row names or a process holds, and waits on the slot's lock for a run that is claiming one.
+
+```go
+// reapOrphans drops the engine's orphan slots in the database cfg names.
+func reapOrphans(ctx context.Context, cfg dbconn.Config) error {
+	pool, err := dbconn.NewPool(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
+	if err != nil {
+		return err
+	}
+	reaped, err := store.ReapOrphanSlots(ctx, cfg)
+	if errors.Is(err, checkpoint.ErrTableMissing) {
+		return nil // no schema change has run in this database, so it has no engine slots
+	}
+	if err != nil {
+		return fmt.Errorf("reap orphan slots: %w", err)
+	}
+	slog.Info("reaped orphan slots",
+		"dropped", reaped.Dropped, "live", reaped.Live,
+		"active", reaped.Active, "foreign", reaped.Foreign)
+	return nil
+}
+```
+
+`Dropped` are the orphans it removed with their publications; `Live` and `Active` are kept and
+left for a later pass; `Foreign` names wear the `pgsprite_` prefix without the engine's shape
+and are never dropped.
 
 **Why.** A slot is durable cluster state that can retain unbounded WAL unless ownership and a
 hard limit are explicit — and because it is cluster state, ownership must be established per
@@ -477,10 +515,13 @@ leave a cyclic exchange that touches a TOASTed row with no converging path at al
 
 ### D14 — Make divergence policy explicit
 
-**Decision.** The CLI accepts `--on-divergence=abort|repair` and defaults to `abort`; the parser a
-setting goes through (`ParseDivergencePolicy`) refuses `recopy`. After slot loss, resume
-internally selects `recopy` — the repair without its reread — for one pass at or below the
-watermark, and the next pass under the caller's policy is the proof.
+**Decision.** A run verifies under `abort`, and no flag or option selects another policy:
+`Runner.Run` passes `DivergenceAbort` to its one pass, quiesced or live. `repair` is a
+`pkg/checksum` policy a library caller of `Check` or `CheckLive` can choose, and the parser a
+setting goes through (`ParseDivergencePolicy`) accepts `abort` and `repair` and refuses
+`recopy`; no CLI flag reaches it yet. After slot loss, resume internally selects `recopy` — the
+repair without its reread — for one pass at or below the watermark, and the run's next pass,
+under `abort`, is the proof.
 
 **Why.** Ordinary divergence indicates a correctness defect; slot-loss reconciliation is the one
 mode where known missing changes require repair. The mode must not be inferred from wiring.

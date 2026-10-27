@@ -589,7 +589,7 @@ matrix is part of the "decisions, not options" philosophy.
 ### What "Aurora-aware" actually means here
 
 Aurora-specific handling (throttle on replication **slot** lag — reader replica-lag throttling is
-deferred, [D12](copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag); RDS CA bundle for TLS, `pg_terminate_backend` to bound the cutover lock, awareness of
+deferred, [D12](copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag); RDS CA bundle for TLS, `lock_timeout` with bounded retry to bound the cutover lock — the cutover never terminates other sessions; `dbconn.TerminateBlockers` is there for a library caller that chooses to evict the backends blocking a waiting session — awareness of
 the writer/reader split) — **not** a claim that every Aurora edition/topology above is
 covered. The unsupported rows are explicit non-goals for v1.
 
