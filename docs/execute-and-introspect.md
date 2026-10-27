@@ -69,6 +69,26 @@ users_pkey      | CREATE UNIQUE INDEX users_pkey ON public.users USING btree (id
 users_id_seq | owned by column id of table users
 ```
 
+To read the same on your own server, for any table:
+
+```sql
+SELECT a.attname, format_type(a.atttypid, a.atttypmod), a.attnotnull, pg_get_expr(d.adbin, d.adrelid)
+FROM pg_attribute a
+LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
+WHERE a.attrelid = 'users'::regclass AND a.attnum > 0 AND NOT a.attisdropped
+ORDER BY a.attnum;
+
+SELECT conname, pg_get_constraintdef(oid)
+FROM pg_constraint
+WHERE conrelid = 'users'::regclass
+ORDER BY conname;
+
+SELECT indexrelid::regclass, pg_get_indexdef(indexrelid)
+FROM pg_index
+WHERE indrelid = 'users'::regclass
+ORDER BY indexrelid::regclass::text;
+```
+
 Every line differs from what was written:
 
 | Written | Stored |
@@ -196,16 +216,19 @@ stores it. [`pg-sprite pull`](pull.md) exports a live table in that form.
   pg-sprite: error: create scratch schema: ERROR: cannot execute CREATE SCHEMA in a read-only transaction (SQLSTATE 25006)
   ```
 
-  The live table is never written; only the scratch schema is.
+  pg-sprite itself writes only the scratch schema, never the live table.
 - **Bounded waits.** The session runs under `lock_timeout` and `statement_timeout` (`diff`
   defaults to 3 s and 30 s; `--lock-timeout` and `--statement-timeout` change them). Building the
   scratch table does not lock the live table it is compared with. When the desired file has
   foreign keys, each referenced table is copied empty into the scratch schema, which takes the
   `ACCESS SHARE` lock a plain `SELECT` takes on it.
-- **Nothing persists.** The transaction is always rolled back, on success and on failure. Side
-  effects that PostgreSQL ties to the transaction go with it: a `NOTIFY` sent by an event trigger
-  that fires on the scratch DDL is never delivered, because PostgreSQL delivers notifications only
-  when the transaction commits.
+- **Transactional effects do not persist.** The transaction is always rolled back, on success and
+  on failure. Everything PostgreSQL ties to the transaction goes with it, including rows an
+  existing event trigger writes when it fires on the scratch DDL, and a `NOTIFY` it sends, which
+  PostgreSQL delivers only when the transaction commits. Nontransactional effects of such a
+  trigger are not undone: `nextval()` on an existing sequence still advances it, and a write over
+  `dblink` or to a file still lands. pg-sprite runs no such code itself; check the database's
+  event triggers (`\dy` in psql) if they matter.
 - **A result that holds for the server it ran on.** The model is whatever that server's
   decompiler printed, with that database's defaults (collation, extensions, and functions on the
   `search_path`). A diff computed against one server is not a promise about another server or
