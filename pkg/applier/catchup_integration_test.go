@@ -49,7 +49,14 @@ const walSenderTimeout = "wal_sender_timeout=2s"
 
 func newCatchupFixture(t *testing.T, rows int) catchupFixture {
 	t.Helper()
-	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=logical", walSenderTimeout)
+	return newCatchupFixtureWithSettings(t, rows)
+}
+
+// newCatchupFixtureWithSettings starts the fixture's server with extra
+// settings beyond the ones every catch-up test needs.
+func newCatchupFixtureWithSettings(t *testing.T, rows int, settings ...string) catchupFixture {
+	t.Helper()
+	serverURL := testutil.StartPostgresWithSettings(t, append([]string{"wal_level=logical", walSenderTimeout}, settings...)...)
 	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL), MaxConns: 16}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)

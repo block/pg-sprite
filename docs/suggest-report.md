@@ -16,8 +16,8 @@ and the closed vocabularies below (caveats, guidance codes, and the embedded pla
 reasons and execution contracts): adding a value to any of them is a contract change and
 bumps `format_version`, even if no field is added or renamed.
 
-The current version is **4**: version 4 added `alter-column-type-in-place` to the
-Guidance vocabulary; version 3 added `expand-contract-column` and
+The current version is **5**: version 5 added `alter-column-type-in-place` to the
+Guidance vocabulary; version 4 added `coordinated-constraint-rename`; version 3 added `expand-contract-column` and
 `coordinated-table-rename` to the Guidance vocabulary and admitted `app-breaking-rename`
 as a suggestion `reason`; version 2 added `name-constraint-then-validate` and
 `unique-index-then-constraint` to the Guidance vocabulary.
@@ -172,6 +172,17 @@ exists; coordinate the rename with the application deploy that adopts the new na
 compatibility view under the old name, or a deploy that switches names in the same window
 — and run the rename with `--force` naming the table once that coordination is in place.
 
+### `coordinated-constraint-rename`
+
+**Emitted for:** `ALTER INDEX … RENAME TO` on an index that backs a primary-key, unique,
+or exclusion constraint, by a live plan (`migrate`, `migrate --dry-run`).
+
+Renaming such an index renames its constraint too, and `INSERT … ON CONFLICT ON
+CONSTRAINT <name>` and error handling that match the constraint's name break the instant
+it commits. Coordinate the rename with the application deploy that stops naming the old
+constraint. Offline `suggest` and `lint` cannot tell such an index from a plain one, so
+they never emit this code.
+
 ### `alter-column-type-in-place`
 
 **Emitted for:** never by a suggestion. A `pg-sprite migrate` refusal verdict with reason
@@ -212,7 +223,7 @@ A constructed rewrite (`pg-sprite suggest --json` over
 
 ```json
 {
-  "format_version": 4,
+  "format_version": 5,
   "suggestions": [
     {
       "statement": 1,
@@ -233,7 +244,7 @@ A guidance suggestion (`ALTER TABLE t ALTER COLUMN c SET NOT NULL, ADD COLUMN d 
 
 ```json
 {
-  "format_version": 4,
+  "format_version": 5,
   "suggestions": [
     {
       "statement": 1,

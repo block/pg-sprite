@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -47,6 +48,48 @@ func dryRunPlanOf(t *testing.T, cmd *MigrateCmd) plan.Report {
 		require.ErrorIs(t, err, verdict.ErrRefused)
 	}
 	return report
+}
+
+// An index rename names no table, so its dry run reports the table that
+// owns the index and plans from the live fact of whether the index backs a
+// constraint: a plain index is executable, and the index behind a unique
+// constraint is rewrite-required with the coordination guidance, exiting
+// with the refusal code. Nothing is renamed either way.
+func TestMigrateDryRunPlansAnIndexRenameFromTheConstraintItBacks(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.users (
+			id     int PRIMARY KEY,
+			email  text NOT NULL,
+			handle text NOT NULL,
+			CONSTRAINT users_handle_key UNIQUE (handle)
+		);
+		CREATE INDEX users_email_idx ON %[1]s.users (email)`, schema))
+	require.NoError(t, err)
+
+	plain := dryRunPlan(t, url, fmt.Sprintf("ALTER INDEX %s.users_email_idx RENAME TO users_contact_email_idx", schema))
+	assert.Equal(t, router.DispositionExecute, plain.Disposition)
+	assert.Equal(t, schema, plain.Schema)
+	assert.Equal(t, "users", plain.Table, "the report names the index's owning table")
+	require.Len(t, plain.Statements, 1)
+	assert.Equal(t, planner.ReasonMetadataOnly, plain.Statements[0].Decisions[0].Reason)
+
+	backing := dryRunPlan(t, url, fmt.Sprintf("ALTER INDEX %s.users_handle_key RENAME TO users_username_key", schema))
+	assert.Equal(t, router.DispositionRewriteRequired, backing.Disposition)
+	assert.Equal(t, "users", backing.Table)
+	require.Len(t, backing.Statements, 1)
+	assert.Equal(t, planner.ReasonAppBreakingRename, backing.Statements[0].Decisions[0].Reason)
+	assert.Equal(t, suggest.GuidanceCoordinatedConstraintRename, backing.Statements[0].Guidance)
+
+	var names int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_class WHERE relnamespace = $1::regnamespace AND relname IN ('users_email_idx', 'users_handle_key')`,
+		schema).Scan(&names))
+	assert.Equal(t, 2, names, "dry-run must not rename anything")
 }
 
 // A rewrite-requiring type change dry-runs to the copy-and-swap backend as

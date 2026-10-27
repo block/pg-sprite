@@ -18,6 +18,7 @@ import (
 type pathShadow struct {
 	schema      string
 	conversions map[string]string
+	fingerprint string
 }
 
 func (s pathShadow) Schema() string                 { return s.schema }
@@ -27,6 +28,7 @@ func (s pathShadow) SourceOID() uint32              { return 1 }
 func (s pathShadow) ShadowOID() uint32              { return 2 }
 func (s pathShadow) CopyColumns() []string          { return []string{"id", "qty"} }
 func (s pathShadow) Conversions() map[string]string { return s.conversions }
+func (s pathShadow) ConversionFingerprint() string  { return s.fingerprint }
 
 // The path every flush sets is decided by whether the shadow proof carries
 // conversions, and by nothing else: without them the catalog alone, so a
@@ -51,7 +53,7 @@ func TestNewFlusherWidensTheSearchPathOnlyForConversions(t *testing.T) {
 
 	bare, err := NewFlusher(target, pathShadow{schema: schema}, lock, Options{})
 	require.NoError(t, err)
-	converted, err := NewFlusher(target, pathShadow{schema: schema, conversions: map[string]string{"qty": "qty::integer"}}, lock, Options{})
+	converted, err := NewFlusher(target, pathShadow{schema: schema, conversions: map[string]string{"qty": "qty::integer"}, fingerprint: "sha256:00"}, lock, Options{})
 	require.NoError(t, err)
 
 	assert.Equal(t, dbconn.LocalSearchPath("pg_catalog"), bare.searchPath, "a conversion-free flush keeps the catalog alone")

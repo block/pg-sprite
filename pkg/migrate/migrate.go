@@ -260,6 +260,9 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 		}
 		return v, nil
 	}
+	if st.Kind() == statement.KindRenameIndex {
+		return renameIndex(ctx, pool, st, opts, logger)
+	}
 	st, err := resolveTarget(ctx, pool, st, logger)
 	if err != nil {
 		return verdict.Verdict{}, err

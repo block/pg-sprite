@@ -54,6 +54,17 @@ var migrateClaims = map[string]migrateClaim{
 			`ALTER TABLE %[1]s.accounts ADD COLUMN tier int NOT NULL DEFAULT 0`,
 		},
 	},
+	// A plain index renames as a catalog change on the index alone; the
+	// statement names no table, so migrate resolves the index's owner.
+	"alter-index-rename": {
+		setup: `
+			CREATE TABLE %[1]s.accounts (
+				id bigint PRIMARY KEY,
+				email text NOT NULL
+			);
+			CREATE INDEX accounts_email_idx ON %[1]s.accounts (email)`,
+		statements: []string{`ALTER INDEX %[1]s.accounts_email_idx RENAME TO accounts_contact_email_idx`},
+	},
 	"drop-column": {
 		setup: `
 			CREATE TABLE %[1]s.accounts (

@@ -116,12 +116,13 @@ func siteRefusals() []siteRefusal {
 
 // gateRefusal classifies the statement-type gate's refusal of a kind the
 // imperative front door does not admit. ok is false for the admitted kinds
-// (ALTER TABLE, CREATE INDEX). concurrent distinguishes the already-safe
-// maintenance forms — which pg-sprite need not wrap — from the plain forms
+// (ALTER TABLE, CREATE INDEX, ALTER INDEX ... RENAME TO). concurrent
+// distinguishes the already-safe maintenance forms — which pg-sprite need
+// not wrap — from the plain forms
 // it refuses in favor of their concurrent idiom.
 func gateRefusal(kind statement.Kind, concurrent bool, target statement.IndexTarget) (verdict.Refusal, bool) {
 	switch kind {
-	case statement.KindAlterTable, statement.KindCreateIndex:
+	case statement.KindAlterTable, statement.KindCreateIndex, statement.KindRenameIndex:
 		return verdict.Refusal{}, false
 	case statement.KindDropIndex, statement.KindReindex:
 		// A concurrent form is the safe idiom to run directly only when

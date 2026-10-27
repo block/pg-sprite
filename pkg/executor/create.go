@@ -284,7 +284,7 @@ func executeCreate(ctx context.Context, pool *pgxpool.Pool, at preflight.AbsentT
 			if cr.SetsRole() {
 				owner = cr.Owner()
 			}
-			return executeBoundedAttemptAs(ctx, pool, step, b, at.Schema(), owner, nil)
+			return executeBoundedAttemptAs(ctx, pool, step, b, at.Schema(), owner, nil, nil)
 		}, sleepContext, func(attempt int) {
 			if tracker != nil {
 				tracker.SetAttempt(attempt)

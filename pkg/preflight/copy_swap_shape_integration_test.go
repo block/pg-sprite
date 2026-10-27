@@ -54,7 +54,8 @@ func (f copySwapShapeFixture) check(t *testing.T, table string) (preflight.CopyS
 
 // A plain table with one bigint primary key and DEFAULT replica identity is
 // the shape v1 supports; the proof carries the resolved schema, the key
-// column and type, and the catalog owner.
+// column and type, the catalog owner, and the table's catalog OID — the
+// identity a consumer handed the table by name checks it against.
 func TestCheckCopySwapShapeAcceptsSingleIntegerKey(t *testing.T) {
 	f := newCopySwapShapeFixture(t)
 	f.exec(t, `
@@ -70,6 +71,10 @@ func TestCheckCopySwapShapeAcceptsSingleIntegerKey(t *testing.T) {
 	assert.Equal(t, "id", target.PKColumn())
 	assert.Equal(t, preflight.PKBigint, target.PKType())
 	assert.NotEmpty(t, target.OwnerRole())
+
+	var oid uint32
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT $1::regclass::oid`, f.schema+".orders").Scan(&oid))
+	assert.Equal(t, oid, target.OID())
 }
 
 // REPLICA IDENTITY FULL is the other supported identity: every decoded
