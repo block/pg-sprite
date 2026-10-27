@@ -37,9 +37,9 @@ verify_corpus_pin
 # Pre-flight: the manifest must tile the corpus. Every substantive line of
 # every non-baseline corpus file must be claimed by exactly one range, in
 # order — a statement no row claims would be silently unassessed, and the
-# tier counts are the deliverable. Blank and comment-only lines may sit
-# between ranges; the baseline is excluded because the harness applies it
-# wholesale.
+# tier counts are the deliverable. Blank lines and `--` comment lines may sit
+# between ranges (a `/* */` comment must be claimed); the baseline is
+# excluded because the harness applies it wholesale.
 python3 "${REPLAY_DIR}/coverage.py" "$MANIFEST" "${PROJECT_DIR}/corpus" "$BASELINE" "${FILES[@]}" \
     || die "manifest does not tile the corpus"
 
@@ -185,6 +185,17 @@ record_engine_error() {
     [ -n "$msg" ] && fail_details+=("$1 $2: $msg")
 }
 
+# A refused step executed nothing, so apply the corpus statement via psql to
+# keep the database at the corpus's state. A failed apply diverges the run
+# and is recorded as a failure, so the report says why the run exits non-zero.
+advance_refused() {
+    local migration="$1" range="$2" sql="$3"
+    printf '%s\n' "$sql" | psql_apply && return 0
+    diverged="$migration $range"
+    fail_details+=("$migration $range: psql could not apply the refused statement; state diverged here")
+    return 1
+}
+
 while read -r migration range expected extra; do
     case "$migration" in ''|\#*) continue ;; esac
     parse_row "$migration" "$range" "$expected" "$extra"
@@ -247,7 +258,7 @@ print("\t".join(str(v.get(k, "")) for k in ("outcome", "reason", "class", "owner
             # have committed a prefix that must not be blindly re-applied,
             # which diverges the run.
             if [ "$status" -eq 2 ]; then
-                printf '%s\n' "$sql" | psql_apply || diverged="$migration $range"
+                advance_refused "$migration" "$range" "$sql"
             elif [ "$status" -ne 0 ]; then
                 diverged="$migration $range"
             fi
@@ -270,10 +281,24 @@ print("\t".join(str(v.get(k, "")) for k in ("outcome", "reason", "class", "owner
             invariant-violation) count_invariant_violation=$((count_invariant_violation + 1)) ;;
             esac
         fi
+        # A refusal (exit 2) executed nothing, so the corpus statement itself
+        # must still land for the remaining history to replay against true
+        # state. Advance only on a true refusal — mirroring the execute
+        # branch, an exit-1 failed execution may have committed a prefix
+        # that must not be blindly re-applied, which diverges the run; an
+        # exit-0 execution advanced the state itself (a mismatch, but the
+        # world is still the corpus's). The advance runs before the row is
+        # judged so a failed one cannot leave the row reading PASS.
+        advanced=1
+        if [ "$status" -eq 2 ]; then
+            advance_refused "$migration" "$range" "$sql" || advanced=0
+        elif [ "$status" -ne 0 ]; then
+            diverged="$migration $range"
+        fi
         # Owner is asserted on every row: RF-7 makes it present exactly when
         # the class is no-online-safety-problem, so the pin (or its absence)
         # is well-defined without a separate column.
-        if [ "$status" -eq 2 ] && [ "$outcome" = "refused" ] \
+        if [ "$advanced" -eq 1 ] && [ "$status" -eq 2 ] && [ "$outcome" = "refused" ] \
             && [ "$reason" = "$want_reason" ] && [ "$actual_class" = "$want_class" ] \
             && [ "$owner" = "$want_owner" ]; then
             rows+=("$migration|$range|$expected|$actual|PASS|$label")
@@ -281,18 +306,6 @@ print("\t".join(str(v.get(k, "")) for k in ("outcome", "reason", "class", "owner
             rows+=("$migration|$range|$expected|$actual (exit $status)|FAIL|$label")
             failures=$((failures + 1))
             record_engine_error "$migration" "$range"
-        fi
-        # A refusal (exit 2) executed nothing, so the corpus statement itself
-        # must still land for the remaining history to replay against true
-        # state. Advance only on a true refusal — mirroring the execute
-        # branch, an exit-1 failed execution may have committed a prefix
-        # that must not be blindly re-applied, which diverges the run; an
-        # exit-0 execution advanced the state itself (a mismatch, but the
-        # world is still the corpus's).
-        if [ "$status" -eq 2 ]; then
-            printf '%s\n' "$sql" | psql_apply || diverged="$migration $range"
-        elif [ "$status" -ne 0 ]; then
-            diverged="$migration $range"
         fi
         ;;
     *)
@@ -372,7 +385,11 @@ summary_line "${summary_labels[6]}" "$count_psql"
 summary_line "${summary_labels[7]}" "$failures"
 if [ "$count_unassessable" -gt 0 ]; then
     summary_line "${summary_labels[8]}" "$count_unassessable"
-    echo "  state diverged at ${diverged}; later rows are SKIP, not evidence"
+fi
+# Said even when the divergence is on the last row, where nothing is SKIP but
+# the run still exits non-zero because of it.
+if [ -n "$diverged" ]; then
+    echo "  state diverged at ${diverged}; any later rows are SKIP, not evidence"
 fi
 
 if [ "$failures" -gt 0 ] || [ -n "$diverged" ]; then

@@ -37,6 +37,13 @@ verify_corpus_pin() {
         [ "$got" = "$want" ] \
             || die "corpus/$f does not match what fetch.sh fetched (edited locally?) — run ./fetch.sh ${PROJECT}"
     done
+    # A file outside FILES (left by an older pin, or added by hand) could share
+    # a migration prefix and make replay.sh pick the wrong one.
+    for f in "${PROJECT_DIR}/corpus/"*.sql; do
+        [ -e "$f" ] || continue
+        printf '%s\n' "${FILES[@]}" | grep -qxF "$(basename "$f")" \
+            || die "corpus/$(basename "$f") is not in project.conf FILES — delete it or run ./fetch.sh ${PROJECT} after a pin move"
+    done
 }
 
 # The project name doubles as the directory, container suffix, and the

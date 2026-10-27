@@ -4,10 +4,11 @@
 Usage: coverage.py MANIFEST CORPUS_DIR BASELINE FILE...
 
 Every substantive line of every non-baseline corpus file must be claimed by
-exactly one manifest range, in order. Blank and comment-only lines may sit
-between ranges; the baseline is excluded because the harness applies it
-wholesale. Exits 1 and prints each gap to stderr when the manifest does not
-tile the corpus.
+exactly one manifest range, in order. Blank lines and `--` comment lines may
+sit between ranges; any other line, including a `/* ... */` comment, must be
+claimed by a row (fail-closed: it is never silently skipped). The baseline is
+excluded because the harness applies it wholesale. Exits 1 and prints each
+gap to stderr when the manifest does not tile the corpus.
 """
 
 import os

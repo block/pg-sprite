@@ -132,12 +132,14 @@ statement runs:
 - **Pin interlock.** `fetch.sh` records the resolved commit and a per-file sha256
   digest in `corpus/.pin`; a cached file is reused only when its digest matches, and
   a pin move discards the whole cache. `replay.sh` refuses to run when the record
-  disagrees with `COMMIT` or any file differs from its fetched digest — a stale or
-  locally edited corpus fails loudly instead of replaying under today's label.
-- **Coverage.** The manifest must tile the corpus: every substantive (non-blank,
-  non-comment) line of every non-baseline corpus file must be claimed by exactly one
-  range, in order, with no overlaps. A statement no row claims would otherwise be
-  silently unassessed — and the tier counts are the deliverable.
+  disagrees with `COMMIT`, any file differs from its fetched digest, or `corpus/`
+  holds a `.sql` file outside `FILES` — a stale or locally edited corpus fails loudly
+  instead of replaying under today's label.
+- **Coverage.** The manifest must tile the corpus: every substantive line (anything
+  but a blank line or a `--` comment line; a `/* */` comment counts) of every
+  non-baseline corpus file must be claimed by exactly one range, in order, with no
+  overlaps. A statement no row claims would otherwise be silently unassessed — and
+  the tier counts are the deliverable.
 
 The replay exits non-zero on any verdict mismatch and ends with a per-statement
 results table plus a bucket summary (executed / refusals split by class,

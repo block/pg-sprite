@@ -66,10 +66,9 @@ pinned=""
 [ -s "$PIN_FILE" ] && pinned="$(head -n1 "$PIN_FILE")"
 if [ -n "$pinned" ] && [ "$pinned" != "$COMMIT" ]; then
     echo "pin moved ${pinned:0:12} -> ${COMMIT:0:12}: discarding the cached corpus"
-    for f in "${FILES[@]}"; do
-        rm -f "${PROJECT_DIR}/corpus/$f"
-    done
-    rm -f "$PIN_FILE"
+    # Every cached file, not just today's FILES: a file renamed across the
+    # pin would otherwise survive under its old name.
+    rm -f "${PROJECT_DIR}/corpus/"*.sql "${PROJECT_DIR}/corpus/"*.sql.tmp "$PIN_FILE"
     pinned=""
 fi
 
