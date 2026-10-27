@@ -82,7 +82,19 @@ three whatever the database or role is configured with.
 pg-sprite keeps state on each connection's PostgreSQL session: the execution bounds
 (`lock_timeout`, `statement_timeout`) every statement runs under, and the per-table
 advisory lock that keeps a second run off the same table. Each of its connections must
-therefore stay on one session for its whole life.
+therefore stay on one session for its whole life. This is **session affinity**: every
+statement sent on a connection runs on the same PostgreSQL backend, so a setting or lock
+taken by one statement is still there for the next.
+
+A direct connection always has it. A transaction-mode or statement-mode pooler does not:
+it may hand the connection's next transaction to a different backend, one another client
+may have just used, so pg-sprite's timeouts could silently vanish and two runs could both
+believe they hold the same table lock. pg-sprite checks rather than assumes. When it opens
+its pool it reads back the timeouts it set, and on the pool and again on the table lock's
+own connection it takes a throwaway advisory lock, then confirms from a second connection
+that the first still holds it and that the second cannot take it. A connection that drops
+the timeouts is refused with `ErrSessionSettingsDiscarded`, and one that fails the lock
+check with `ErrNoSessionAffinity`, before any schema change runs.
 
 This constrains only pg-sprite's own connection. The application keeps whatever pooling
 it uses — a client-side pool, or a server-side pooler in session, transaction, or
