@@ -346,6 +346,40 @@ publication of the same name is dropped separately with `DROP PUBLICATION`), aft
 no checkpoint row in a non-terminal phase still names it. Slot inspection treats
 `pg_replication_slots.wal_status = 'lost'` as lost state.
 
+A host reaps with the connection config its runs use, on the database they run in. The pass is
+safe to run at any time, including while a schema change is in flight: it keeps every slot a
+live row names or a process holds, and waits on the slot's lock for a run that is claiming one.
+
+```go
+// reapOrphans drops the engine's orphan slots in the database cfg names.
+func reapOrphans(ctx context.Context, cfg dbconn.Config) error {
+	pool, err := dbconn.NewPool(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	store, err := checkpoint.NewStore(pool, checkpoint.Options{})
+	if err != nil {
+		return err
+	}
+	reaped, err := store.ReapOrphanSlots(ctx, cfg)
+	if errors.Is(err, checkpoint.ErrTableMissing) {
+		return nil // no schema change has run in this database, so it has no engine slots
+	}
+	if err != nil {
+		return fmt.Errorf("reap orphan slots: %w", err)
+	}
+	slog.Info("reaped orphan slots",
+		"dropped", reaped.Dropped, "live", reaped.Live,
+		"active", reaped.Active, "foreign", reaped.Foreign)
+	return nil
+}
+```
+
+`Dropped` are the orphans it removed with their publications; `Live` and `Active` are kept and
+left for a later pass; `Foreign` names wear the `pgsprite_` prefix without the engine's shape
+and are never dropped.
+
 **Why.** A slot is durable cluster state that can retain unbounded WAL unless ownership and a
 hard limit are explicit — and because it is cluster state, ownership must be established per
 database, or a reaper in one database would push another's in-flight change into ST-4 slot loss.
