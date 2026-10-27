@@ -70,6 +70,12 @@ refusal — never a silently wrong or incomplete result:
   and environments it cannot run against. The shadow build also refuses a
   statement the copy cannot carry: a `USING` expression it cannot reproduce,
   or a dropped-and-re-added column it cannot fill.
+- **Connection poolers**: point pg-sprite directly at the primary; the
+  application keeps whatever pooling it uses. pg-sprite's own connection
+  through a pooler is unsupported, except Supabase's Supavisor session
+  endpoint for native schema changes, and a transaction-mode pooler is
+  refused with `ErrNoSessionAffinity`
+  ([connections and poolers](docs/limitations.md#connections-and-poolers)).
 - **Row security** is included in exports when present, with reviewable before/after differences. The
   [atomic executor](docs/atomic-row-security.md) applies RLS-only changes to existing tables
   through `migrate --desired` or the Go API. Only the Go API supports binding execution to

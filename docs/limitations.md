@@ -77,6 +77,30 @@ follows `bytea_output`. The copy, the verifier, and the catch-up each pin both s
 (`3` and `hex`) in their own sessions, so such a conversion lands the same text from all
 three whatever the database or role is configured with.
 
+## Connections and poolers
+
+pg-sprite keeps state on each connection's PostgreSQL session: the execution bounds
+(`lock_timeout`, `statement_timeout`) every statement runs under, and the per-table
+advisory lock that keeps a second run off the same table. Each of its connections must
+therefore stay on one session for its whole life.
+
+This constrains only pg-sprite's own connection. The application keeps whatever pooling
+it uses — a client-side pool, or a server-side pooler in session, transaction, or
+statement mode — and copy-and-swap reads the application's writes from the WAL through
+logical decoding, whichever pooler carried them.
+
+| pg-sprite connects through | Support |
+| --- | --- |
+| A direct connection to the primary | Supported, and the recommended deployment. Every schema change path, copy-and-swap included, is tested this way. |
+| Supabase's Supavisor session endpoint | Supported for the native schema changes listed in [supabase.md](supabase.md#what-works-today). Copy-and-swap through it is unsupported. |
+| PgBouncer, or any other server-side pooler, in session mode | Unsupported. Connect directly to the primary. |
+| Any pooler in transaction mode | Unsupported, and refused before any work runs: opening the pool fails with `ErrNoSessionAffinity`, whose message names the remedy. |
+| Any pooler in statement mode | Unsupported. Connect directly to the primary. |
+
+The application's pooler and pg-sprite share the server's `max_connections`, which has
+to cover the application's backends plus pg-sprite's pool, its dedicated sessions, and,
+for copy-and-swap, its replication connections.
+
 ## Declarative model boundaries
 
 The declarative front door (desired-state files, `diff`, and schema export)
