@@ -115,31 +115,49 @@ func TestDrainKeyMoveStraddlingTheFrontier(t *testing.T) {
 	assert.Equal(t, 0, b.Len())
 }
 
-// The two halves of a move travel together once neither is uncut: a landed
-// image waits for the in-flight old key, and a landed old key waits for the
-// in-flight image. Neither flushes alone.
-func TestDrainKeyMovePairWaitsTogether(t *testing.T) {
-	cases := map[string]struct {
-		from, to int64
-	}{
-		"old key in flight, image landed": {from: 15, to: 25},
-		"old key landed, image in flight": {from: 25, to: 15},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			b := NewBuffer()
-			require.NoError(t, b.Add(keyMove(10, tc.from, tc.to, col("label", "a"), marker("doc"))))
+// A landed image waits for its in-flight old key: the flush must not copy
+// the old key's row while the image still needs it for completion, so
+// neither half flushes alone, and both flush once the chunk lands.
+func TestDrainKeyMovePairWaitsForTheOldKey(t *testing.T) {
+	b := NewBuffer()
+	require.NoError(t, b.Add(keyMove(10, 15, 25, col("label", "a"), marker("doc"))))
 
-			batch := b.Drain(position(t, 30, [2]int64{11, 20}), AllVisible())
-			assert.Empty(t, batch.Entries)
-			assert.Equal(t, 0, batch.Discarded)
-			assert.Equal(t, 2, batch.Deferred)
-			assert.Equal(t, 2, b.Len())
+	batch := b.Drain(position(t, 30, [2]int64{11, 20}), AllVisible())
+	assert.Empty(t, batch.Entries)
+	assert.Equal(t, 0, batch.Discarded)
+	assert.Equal(t, 2, batch.Deferred)
+	assert.Equal(t, 2, b.Len())
 
-			batch = b.Drain(position(t, 30), AllVisible())
-			assert.Equal(t, sortedPair(tc.from, tc.to), keys(batch.Entries), "both halves flush in one batch once the chunk lands")
-		})
-	}
+	batch = b.Drain(position(t, 30), AllVisible())
+	assert.Equal(t, []int64{15, 25}, keys(batch.Entries), "both halves flush in one batch once the chunk lands")
+}
+
+// A landed old key does not wait for its in-flight image: the delete at the
+// old key flushes now, so the shadow row holding the moved row's unique
+// values is gone before the chunk's insert of the row under its new key
+// runs again — holding it back would wait on a chunk that is waiting on it
+// (CO-4). The image stays buffered, marker intact, until its own chunk
+// lands, and is then named for completion, which the flush reads from the
+// source row under its key once the old key's shadow row is absent.
+func TestDrainLandedOldKeyFlushesAheadOfItsInFlightImage(t *testing.T) {
+	b := NewBuffer()
+	require.NoError(t, b.Add(keyMove(10, 25, 15, col("label", "a"), marker("doc"))))
+
+	batch := b.Drain(position(t, 30, [2]int64{11, 20}), AllVisible())
+	assert.Equal(t, []int64{25}, keys(batch.Entries), "the delete marker at the landed old key flushes alone")
+	assert.Equal(t, DeleteMarker, batch.Entries[0].Kind)
+	assert.Empty(t, batch.CompleteFirst(), "nothing in this batch needs the old key's row")
+	assert.Equal(t, 0, batch.Discarded)
+	assert.Equal(t, 1, batch.Deferred, "the image at 15 waits for its own chunk")
+	assert.Equal(t, 1, b.Len())
+	image := entry(t, b, 15)
+	assert.Equal(t, Image, image.Kind)
+	assert.True(t, image.HasMarker(), "the deferred image keeps its marker for a later completion")
+
+	batch = b.Drain(position(t, 30), AllVisible())
+	assert.Equal(t, []int64{15}, keys(batch.Entries), "the image flushes once its chunk lands")
+	assert.Equal(t, []int64{15}, keys(batch.CompleteFirst()), "and is named for completion")
+	assert.Equal(t, 0, b.Len())
 }
 
 // An uncut half is discarded on its own and does not hold the other back: a
@@ -177,18 +195,39 @@ func TestDrainKeyMoveUncutHalfIsJudgedAlone(t *testing.T) {
 }
 
 // A deferral spreads through a shared old key: two images that both left key
-// 25 wait when either of them is in flight, even though 25 itself has landed.
+// 25 wait when the entry at 25 does, and an invisible image holds it. An
+// image in flight for its chunk alone does not: the landed entry at 25 and
+// the other image flush, and only the in-flight image waits.
 func TestDrainDeferralSpreadsThroughSharedOldKey(t *testing.T) {
-	b := NewBuffer()
-	require.NoError(t, b.Add(keyMove(10, 25, 15, col("label", "first"))))
-	require.NoError(t, b.Add(insert(20, 25, col("label", "reinserted"))))
-	require.NoError(t, b.Add(keyMove(30, 25, 28, col("label", "second"))))
+	t.Run("one image invisible", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(inTx(keyMove(10, 25, 15, col("label", "first")), 600)))
+		require.NoError(t, b.Add(inTx(insert(20, 25, col("label", "reinserted")), 650)))
+		require.NoError(t, b.Add(inTx(keyMove(30, 25, 28, col("label", "second")), 700)))
+		require.NoError(t, b.Add(inTx(insert(40, 25, col("label", "reinserted again")), 710)))
 
-	batch := b.Drain(position(t, 30, [2]int64{11, 20}), AllVisible())
-	assert.Empty(t, batch.Entries, "15 is in flight, so 25 waits, so 28 waits")
-	assert.Equal(t, 0, batch.Discarded)
-	assert.Equal(t, 3, batch.Deferred)
-	assert.Equal(t, 3, b.Len())
+		// 710 has committed and 700 is still in progress: the entry at 25 is
+		// visible on its own, and only the image at 28 is not.
+		snap := Snapshot{read: true, xmin: 700, xmax: 711, inProgress: map[uint64]struct{}{700: {}}}
+		batch := b.Drain(position(t, 30), snap)
+		assert.Empty(t, batch.Entries, "28 is invisible, so 25 waits, so 15 waits")
+		assert.Equal(t, 0, batch.Discarded)
+		assert.Equal(t, 1, batch.Invisible)
+		assert.Equal(t, 2, batch.Deferred)
+		assert.Equal(t, 3, b.Len())
+	})
+	t.Run("one image in flight", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(keyMove(10, 25, 15, col("label", "first"))))
+		require.NoError(t, b.Add(insert(20, 25, col("label", "reinserted"))))
+		require.NoError(t, b.Add(keyMove(30, 25, 28, col("label", "second"))))
+
+		batch := b.Drain(position(t, 30, [2]int64{11, 20}), AllVisible())
+		assert.Equal(t, []int64{25, 28}, keys(batch.Entries), "15 is in flight for its chunk; 25 and 28 are landed and flush")
+		assert.Equal(t, 0, batch.Discarded)
+		assert.Equal(t, 1, batch.Deferred)
+		assert.Equal(t, 1, b.Len())
+	})
 }
 
 // The spread is transitive however long the chain. Four rows each move onto
@@ -418,11 +457,4 @@ func TestDrainAgainstTheZeroSnapshotKeepsEverything(t *testing.T) {
 	assert.Equal(t, 0, batch.Discarded)
 	assert.Equal(t, 2, batch.Invisible)
 	assert.Equal(t, 2, b.Len())
-}
-
-func sortedPair(a, b int64) []int64 {
-	if a < b {
-		return []int64{a, b}
-	}
-	return []int64{b, a}
 }

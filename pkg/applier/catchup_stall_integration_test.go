@@ -97,6 +97,48 @@ func TestCatchupRequeuesADeferredBatchAndConverges(t *testing.T) {
 	f.assertConverged(t, run.shadow)
 }
 
+// Row 7 moves to key 1000, keeping its unique value, while the chunk that
+// holds key 1000 is in flight. The delete under the landed key 7 flushes
+// ahead of the image: the copier's insert of the row under key 1000 would
+// collide with the shadow row under key 7 for as long as that row stood,
+// so holding the delete back for the image's chunk would wait on a chunk
+// that is waiting on it. Once the chunk lands the image flushes alone,
+// completes its unchanged blob from the source row since the shadow row
+// under key 7 is gone, and the shadow converges (CO-4, D13).
+func TestCatchupFlushesALandedOldKeyAheadOfItsInFlightImage(t *testing.T) {
+	f := newCatchupFixture(t, 20)
+	chunk, err := copier.NewChunk(21, math.MaxInt64)
+	require.NoError(t, err)
+	inFlight := allLanded()
+	inFlight.InFlight = []copier.Chunk{chunk}
+	positions := &switchPosition{pos: inFlight}
+	run := startCatchupWith(t, f, catchupSetup{positions: positions})
+
+	q := f.table.Qualified()
+	_, err = f.pool.Exec(t.Context(), `UPDATE `+q+` SET id = 1000 WHERE id = 7`)
+	require.NoError(t, err)
+
+	run.awaitStatus(t, "delete the row under key 7 while key 1000's chunk is in flight", func(s applier.Status) bool {
+		return s.Applied == 1 && s.Deferred == 1
+	})
+	shadowTable := pgx.Identifier{f.table.Schema, run.shadow.ShadowTable()}.Sanitize()
+	var sevens int
+	require.NoError(t, f.pool.QueryRow(t.Context(), `SELECT count(*) FROM `+shadowTable+` WHERE id = 7`).Scan(&sevens))
+	assert.Zero(t, sevens, "the shadow row under the old key is gone before the image's chunk lands")
+	deferred := run.status(t)
+	assert.Equal(t, 1, deferred.Buffered, "the image waits for its chunk")
+	assert.Zero(t, deferred.BatchesDeferred, "the delete flushed, it was not refused")
+
+	positions.set(allLanded())
+	end := f.currentWALLSN(t)
+	run.awaitStatus(t, "flush the image once its chunk has landed", func(s applier.Status) bool {
+		return s.Confirmed >= end && s.Buffered == 0
+	})
+	assert.Equal(t, uint64(2), run.status(t).Applied, "the delete and then the image")
+	run.stop(t)
+	f.assertConverged(t, run.shadow)
+}
+
 // The schema change narrows a uniquely indexed column, and after the copy
 // has landed every key a write gives one row a value that is distinct on
 // the source and collides in the shadow's type. Nothing is in flight, so no
