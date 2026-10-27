@@ -121,7 +121,8 @@ semantics exactly — type-alias resolution (`varchar` is `character varying`, `
 `integer`), default-expression normalization, implicit constraint and index naming, identity
 and sequence wiring, and every place those rules shift across server versions 14 → 18. Each
 divergence is a wrong diff, and a wrong diff becomes wrong DDL against someone's production
-table.
+table. [execute-and-introspect.md](execute-and-introspect.md) shows these rules on a real table,
+the spellings PostgreSQL does not fold, and what the approach requires from the database.
 
 pg-sprite refuses to maintain that reimplementation. Instead it **executes and introspects**:
 hand the DDL to the one authority that cannot disagree with PostgreSQL — PostgreSQL — and read
