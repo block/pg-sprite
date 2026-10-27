@@ -17,14 +17,14 @@ import (
 
 // copySwapRunOptions are runOptions with the copy-and-swap route wired the
 // way the CLI wires it: the route's own connection, free disk the shadow
-// will fit in, and the quiesced declaration so the test server needs no
-// logical decoding.
-func copySwapRunOptions(serverURL string) migrate.Options {
+// will fit in, and the quiesced acknowledgement for table (SCHEMA.TABLE) so
+// the test server needs no logical decoding.
+func copySwapRunOptions(serverURL, table string) migrate.Options {
 	opts := runOptions()
 	opts.CopySwap = migrate.CopySwapOptions{
 		Connection:    dbconn.Config{URL: serverURL},
 		FreeDiskBytes: testutil.UnlimitedDisk,
-		Quiesced:      true,
+		Quiesced:      table,
 	}
 	return opts
 }
@@ -62,7 +62,7 @@ func TestRunDesiredCopyAndSwap(t *testing.T) {
 		// instant, then a retype the router sends through copy-and-swap.
 		// With no free disk declared the route's preflight refuses the
 		// retype; admission reads that before the ADD COLUMN runs.
-		opts := copySwapRunOptions(serverURL)
+		opts := copySwapRunOptions(serverURL, schema+".t")
 		opts.CopySwap.FreeDiskBytes = 0
 		res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
 			Schema: schema,
@@ -114,7 +114,7 @@ func TestRunDesiredCopyAndSwap(t *testing.T) {
 				body     varchar(10)
 			)`),
 		}
-		res, err := migrate.RunDesired(t.Context(), pool, req, copySwapRunOptions(serverURL))
+		res, err := migrate.RunDesired(t.Context(), pool, req, copySwapRunOptions(serverURL, schema+".t"))
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
 		require.Len(t, res.Plan.Statements, 2, "one retype per column")
@@ -130,7 +130,7 @@ func TestRunDesiredCopyAndSwap(t *testing.T) {
 
 		// The convergence oracle: a second run derives an empty plan and
 		// runs nothing.
-		res, err = migrate.RunDesired(t.Context(), pool, req, copySwapRunOptions(serverURL))
+		res, err = migrate.RunDesired(t.Context(), pool, req, copySwapRunOptions(serverURL, schema+".t"))
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
 		assert.Empty(t, res.Plan.Statements, "the converged table plans no statements")

@@ -19,11 +19,14 @@ import (
 // workers, or replication stream open, which is the fail-closed shape these
 // probes rely on to leave the fixture untouched. The only session opened
 // from the connection is the read-only one that proves it reaches the
-// pool's database. Quiesced keeps the probe independent of the fixture
-// role's replication access.
-func copySwapOptions() migrate.Options {
+// pool's database. Quiesced, acknowledged for st's table, keeps the probe
+// independent of the fixture role's replication access.
+func copySwapOptions(st statement.Statement) migrate.Options {
 	opts := migrate.DefaultOptions()
-	opts.CopySwap = migrate.CopySwapOptions{Connection: dbconn.Config{URL: directURL}, Quiesced: true}
+	opts.CopySwap = migrate.CopySwapOptions{
+		Connection: dbconn.Config{URL: directURL},
+		Quiesced:   st.Schema() + "." + st.Table(),
+	}
 	return opts
 }
 
@@ -37,7 +40,7 @@ func refuseCarriedCopySwap(t *testing.T, pool *pgxpool.Pool, table, sql string, 
 	before := snapshot(t, pool, table)
 	st, err := statement.ParseOne(sql)
 	require.NoError(t, err)
-	v, err := migrate.Run(t.Context(), pool, st, copySwapOptions())
+	v, err := migrate.Run(t.Context(), pool, st, copySwapOptions(st))
 	require.NoError(t, err)
 	require.Equal(t, verdict.OutcomeRefused, v.Outcome)
 	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, v.Reason)

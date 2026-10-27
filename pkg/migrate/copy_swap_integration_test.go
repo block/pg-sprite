@@ -74,14 +74,15 @@ func (f copySwapFixture) createOrders(t *testing.T) {
 		FROM generate_series(1, 2500) g`)
 }
 
-// options is a quiesced copy-and-swap policy over the fixture's database
-// with room on disk, the shape every test here starts from.
+// options is a copy-and-swap policy over the fixture's database with room
+// on disk, quiesced for the orders table, the shape every test here starts
+// from.
 func (f copySwapFixture) options() Options {
 	opts := DefaultOptions()
 	opts.CopySwap = CopySwapOptions{
 		Connection:    f.cfg,
 		FreeDiskBytes: testutil.UnlimitedDisk,
-		Quiesced:      true,
+		Quiesced:      f.schema + ".orders",
 	}
 	return opts
 }

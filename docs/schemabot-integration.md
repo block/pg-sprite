@@ -459,7 +459,11 @@ finds no lock to confirm. The check reads `pg_control_system()`, which PostgreSQ
 `PUBLIC`; a server that withholds it stops the route with an ordinary error), the free space on the table's
 volume for the preflight's disk-headroom check, whether to keep the retained source under
 its `_old` name, and whether the table is quiesced for the run — the fenced path that needs
-no logical decoding — or live. Three further fields let the adapter size and watch the run:
+no logical decoding but refuses every write to the table with `55006` until the swap — or
+live. `Quiesced` is a typed acknowledgement, not a switch: it must name the resolved target
+as `SCHEMA.TABLE`, the same way `Restart` does, or `Run` returns an error before anything
+executes, and an acknowledged run records a warn-level audit naming the table before the
+fence goes on. Three further fields let the adapter size and watch the run:
 `Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
 throttled toward — with zero values taking the copier's defaults; `CheckpointInterval` is how often
 a copy in progress saves its landed watermark (zero takes the Runner's default); and `OnCheckpoint` is
@@ -654,7 +658,7 @@ CLI and through `migrate.Run`, plus one the Runner performs on its own; an orche
 
 | Operator need | What to do | What pg-sprite does |
 | --- | --- | --- |
-| **Start** a change | `pg-sprite migrate --url … 'ALTER TABLE s.t …'` (with `--free-disk`, and `--quiesced` when the table takes no writes) | Routes the statement; on the copy-and-swap backend it takes the table's lock session, writes the checkpoint row, builds and fills the shadow, verifies, swaps, and prints one verdict |
+| **Start** a change | `pg-sprite migrate --url … 'ALTER TABLE s.t …'` (with `--free-disk`, and `--quiesced SCHEMA.TABLE` to take the table offline for writes instead of streaming them) | Routes the statement; on the copy-and-swap backend it takes the table's lock session, writes the checkpoint row, builds and fills the shadow, verifies, swaps, and prints one verdict |
 | **Stop** a running change | Send `SIGINT` (Ctrl-C) or `SIGTERM` once | The run's context is cancelled and the run unwinds through its own stop path: a copy in flight saves the watermark its committed chunks reached, the table lock session is released, the row stays at its last save with the run's hold on the source — the write fence of a quiesced run, or the replication slot of a live run, which retains WAL until the run is finished or discarded — and the verdict is `failed` with `code: cancelled-by-caller` (exit 1). A second `SIGINT`/`SIGTERM` ends the process at once with exit 130, before the stop path completes; the row then records whatever the last save landed, and the lock session is released by the server when its connection drops |
 | **Resume** a stopped change | Run the same statement again | The checkpoint row says where to continue: a stopped copy continues from its watermark, a run past its copy verifies again, a `cutover` row is answered by the catalog (a committed swap finishes from the old-table drop; a rolled-back swap goes back through verify and gate). Nothing is copied twice. A different statement on the same table is refused (`resume-row-mismatch`) |
 | **Start over** — discard a stopped change and run it from the beginning | Run the same statement with `--restart SCHEMA.TABLE`, where the value names the resolved target exactly | Under the run's own table lock session, discards what the stopped run left in the order a later restart could meet idempotently — the shadow, then the hold on the source (`DropWriteFence` for a quiesced row, `decode.DropSlot` for a live row), then the checkpoint row — and runs the change fresh. A leftover shadow that no row records is discarded the same way. The decision is written to the audit log before anything is discarded |
