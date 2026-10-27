@@ -132,9 +132,21 @@ guarded transaction (delete every chunk's shadow rows, then the copy statement f
 and read again, with the committed repairs reported alongside any refusal, and under `recopy`
 the same recopy commits with no reread — the policy for a source that is written while the
 pass runs, where a fresh read would refuse a chunk the recopy itself made right; the stream
-carries that write, and the next pass, not this one, is the proof (no-policy,
+carries that write, and the next pass, not this one, is the proof. The compare and the recopy
+are separate statements against that live source, so a source that moves a unique value from
+a row in a chunk the compare read equal to a row in a differing chunk, between the two, makes
+the recopy's insert collide with the shadow row the compare left alone (SQLSTATE `23505` or
+`23P01`); under `recopy` the one transaction rolls back and the pass compares again, so both
+chunks now differ and the next recopy, cut from that comparison, lands — up to
+`Options.RecopyAttempts` recopies, every collision counted in `Outcome.Collisions`, the last
+collision's error ending the pass as the server raised it; under `repair` the collision is the
+pass's error, since a repair assumes the source rows it recopies hold still (no-policy,
 abort-leaves-shadow-alone, repairs-every-chunk, moved-unique-value,
-later-repair-fails, and recopy-tolerates-a-source-write-inside-the-pass tests). Under the
+later-repair-fails, recopy-tolerates-a-source-write-inside-the-pass,
+recopy-retries-a-unique-value-moved-during-the-recopy,
+recopy-stops-when-every-attempt-collides,
+recopy-ends-clean-when-the-comparison-after-a-collision-finds-nothing, and
+repair-does-not-retry-a-collision tests). Under the
 stream (`CheckLive` under `repair`) the one recopy transaction is kept apart from the stream's
 own writes: the pass holds the catch-up's flushes off the shadow in Go before the transaction
 asks for `SHARE MODE` and gives them back only after it commits, on every path
@@ -1093,13 +1105,21 @@ refuses-replaced-relations-before-its-marker,
 leaves-the-slot-it-created-owned-by-the-row, resumes-in-copying-below-a-partial-watermark,
 refuses-a-row-of-another-source-shape, stops-when-the-lock-is-lost-while-the-drop-waits,
 refuses-a-foreign-slot-of-the-name, refuses-the-slot-while-another-backend-holds-it,
-reads-a-slot-the-server-reports-lost-as-reconcile tests). *Known limit:* the recopy pass
-compares a chunk and recopies it in separate statements against a live source, so a source
-that moves a unique or primary-key value from one row to another between the two can make the
-recopy fail with a unique violation; the pass ends in error with the row still in
-`reconciling` and the shadow unchanged, and the next attempt restarts the reconcile — closed,
-never a shadow with a row the source lacks (a retry that survives the move is a tracked
-follow-up). *Source:*
+reads-a-slot-the-server-reports-lost-as-reconcile, and
+survives-a-unique-value-moved-during-its-recopy tests). The recopy pass compares a chunk and
+recopies it in separate statements against a live source, so a source that moves a unique
+value from a row in a chunk the compare read equal to a row in a differing chunk, between the
+two, makes the recopy collide with a shadow row the compare left alone; the one recopy
+transaction rolls back, the pass compares again, and the recopy cut from that comparison
+covers both chunks and lands (CO-3). A source that moves a value into the differing chunks
+before every recopy exhausts the pass's bounded attempts; the pass then ends in the last
+collision's error with the row still in `reconciling` and the shadow unchanged, and the next
+attempt restarts the reconcile — closed, never a shadow with a row the source lacks. *Known
+limit:* on resume the reconcile runs before the copier clears the shadow rows above a partial
+watermark, and the pass compares only through that watermark, so a unique value the source
+moves out of a shadow row above it into a differing chunk collides on every attempt of every
+reconcile until the source moves it back; the run stays in `reconciling`, closed, and
+`--restart` (`CopySwapOptions.Restart`) starts it over. *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum
