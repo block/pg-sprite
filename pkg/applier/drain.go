@@ -22,14 +22,21 @@ type Batch struct {
 	// the copier's own read of those chunks will see the change.
 	Discarded int
 	// Deferred counts the entries still buffered because their keys are
-	// inside an in-flight chunk, or travel with one that is. This is the
-	// number a stalled catch-up is waiting on the copier for.
+	// inside an in-flight chunk, or travel with one that is or with one
+	// that is invisible. This is the number a stalled catch-up is waiting
+	// on the copier for.
 	Deferred int
 	// Held counts the entries still buffered because a flush held them (see
 	// Buffer.Hold) — with a completion, or because their shadow row was
 	// absent: they wait for the stream to pass the position of the flush's
 	// read, not for the copier.
 	Held int
+	// Invisible counts the entries still buffered because the snapshot the
+	// drain judged them against did not show their transaction visible yet
+	// (see Snapshot). They wait for a later drain's snapshot, not for the
+	// copier; an entry deferred only because it travels with one of them
+	// counts as Deferred.
+	Invisible int
 }
 
 // OldestFirstLSN returns the earliest FirstLSN among the batch's entries, and
@@ -78,32 +85,43 @@ func (b Batch) CompleteFirst() []Entry {
 	return first
 }
 
-// Drain decides every buffered entry against one snapshot of the copier's
-// position. Each key is judged on its own (CO-4): an uncut key's entry is
-// discarded, because the copier's own read of that chunk will see the change;
-// a landed key's entry is flushed; an in-flight key's entry stays buffered
-// until a later Drain finds its chunk landed. Discarding is sound only when
-// the copier reads an uncut key's chunk after the buffered change is visible,
-// so pos must be read after the last Add: the caller adds every event it
-// holds, then reads the copier's Position, then drains. Discarded and flushed
-// entries leave the buffer; a flush that then fails is not re-buffered — the
-// stream replays from its last confirmed position, which stays below
-// OldestPending and the batch's OldestFirstLSN until the flush commits, and
-// rebuilds them.
+// Drain decides every buffered entry against one reading of the copier's
+// position and one snapshot of the source. Each key is judged on its own
+// (CO-4): an uncut key's entry is discarded, because the copier's own read
+// of that chunk will see the change; a landed key's entry is flushed; an
+// in-flight key's entry stays buffered until a later Drain finds its chunk
+// landed. Discarding is sound only when the copier reads an uncut key's
+// chunk after the buffered change is visible, so the caller adds every
+// event it holds, then takes snap, then reads the copier's Position, then
+// drains: a transaction snap shows visible is visible to every read the
+// copier or a flush makes after it. An entry whose transaction snap does
+// not show visible yet stays buffered whatever its key's state — discarded,
+// the copier's read could miss it; flushed, a completion read could — and
+// is judged again by the next Drain. Discarded and flushed entries leave the
+// buffer; a flush that then fails is not re-buffered — the stream replays
+// from its last confirmed position, which stays below OldestPending and the
+// batch's OldestFirstLSN until the flush commits, and rebuilds them.
 //
 // An image that moved from an old key, and the entry still buffered at that
-// old key, travel together once neither is uncut: if either is in flight both
-// wait, otherwise both flush. The flush completes the image's unchanged-TOAST
-// markers before it deletes anything (D13), and that reading must not race the
-// deletion or copy of the old key's row; Batch.CompleteFirst names the images
-// it applies to. An image whose completion is pending (Buffer.Hold) stays
-// buffered whatever its key's state, until Release lets the completion in
-// or an event drops it.
-func (b *Buffer) Drain(pos copier.Position) Batch {
+// old key, travel together once neither is uncut: if either is in flight or
+// invisible both wait, otherwise both flush. The flush completes the image's
+// unchanged-TOAST markers before it deletes anything (D13), and that reading
+// must not race the deletion or copy of the old key's row; Batch.CompleteFirst
+// names the images it applies to. An image whose completion is pending
+// (Buffer.Hold) stays buffered whatever its key's state, until Release lets
+// the completion in or an event drops it.
+func (b *Buffer) Drain(pos copier.Position, snap Snapshot) Batch {
 	// INV: CO-4
 	state := make(map[int64]copier.KeyState, len(b.entries))
-	for key := range b.entries {
+	invisible := make(map[int64]struct{})
+	for key, e := range b.entries {
 		state[key] = pos.Classify(key)
+		if !snap.Visible(e.Xid) {
+			// An invisible entry waits as an in-flight one does, and so
+			// does anything that travels with it.
+			state[key] = copier.KeyInFlight
+			invisible[key] = struct{}{}
+		}
 	}
 	b.deferPairs(state)
 	var batch Batch
@@ -111,6 +129,11 @@ func (b *Buffer) Drain(pos copier.Position) Batch {
 	for key, e := range b.entries {
 		if _, pending := b.pending[key]; pending {
 			batch.Held++
+			b.trackOldest(e.FirstLSN)
+			continue
+		}
+		if _, waits := invisible[key]; waits {
+			batch.Invisible++
 			b.trackOldest(e.FirstLSN)
 			continue
 		}

@@ -69,6 +69,16 @@ type Entry struct {
 	// would be lost on replay. It is not the event's own LSN, which can lie
 	// below a position already confirmed.
 	FirstLSN decode.LSN
+	// Xid is the transaction of the latest event merged into this entry
+	// (decode.ChangeEvent.Xid). Drain judges the entry only once a snapshot
+	// of the source shows that transaction visible: a commit the stream
+	// has delivered can still be invisible to readers while the server
+	// waits on WAL flush or synchronous replication, and a copier read or
+	// flush read taken in that window would not see it. The latest
+	// transaction suffices because transactions that write the same key
+	// are serialized by the row's lock, which is released only after the
+	// earlier one became visible.
+	Xid uint32
 }
 
 // HasMarker reports whether the image still carries a column no buffered

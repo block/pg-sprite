@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/internal/chunksql"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemadiff"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -127,10 +128,19 @@ func inspectShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLo
 	if err != nil {
 		return BuiltShadow{}, err
 	}
+	// Read in the inspection's own transaction, so a catalog that moved
+	// under a spelled name since the build makes a Proof that differs from
+	// the checkpoint's, and the resume refuses as it would for any other
+	// drift.
+	carried := carryConversions(sourceModel, sourcePositions, shadowPositions, conversions)
+	resolution, err := chunksql.ResolutionFingerprint(ctx, tx, target.Schema(), carried.conversions)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return BuiltShadow{}, fmt.Errorf("commit shadow inspection: %w", err)
 	}
-	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, sourcePositions, shadowPositions, identities, fidelity, shadowFidelity, conversions)
+	return newBuiltShadow(target, shadow, oid, shadowOID, sourceModel, targetModel, identities, fidelity, shadowFidelity, carried, resolution)
 }
 
 // resolveShadow returns the OID of the relation wearing the shadow's name,

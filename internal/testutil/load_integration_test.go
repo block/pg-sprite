@@ -27,6 +27,7 @@ func TestLoadGenerator(t *testing.T) {
 	runDeadline := time.NewTimer(2 * time.Second)
 	defer runDeadline.Stop()
 	<-runDeadline.C
+	running := generator.Snapshot()
 	summary, err := generator.Stop()
 	require.NoError(t, err)
 	assert.Positive(t, summary.Inserts)
@@ -34,7 +35,12 @@ func TestLoadGenerator(t *testing.T) {
 	assert.Positive(t, summary.Deletes)
 	assert.Positive(t, summary.UniqueMoves)
 	committed := summary.Inserts + summary.Updates + summary.Deletes + summary.UniqueMoves
+	assert.Equal(t, committed, summary.Committed())
 	assert.Less(t, summary.Races, committed, "a run should commit far more than it aborts on expected races")
+	assert.Positive(t, running.Committed(), "a snapshot of the running load reports what it had committed")
+	assert.LessOrEqual(t, running.Committed(), summary.Committed(), "the load only adds to what a snapshot reported")
+	require.LessOrEqual(t, len(running.InsertedIDs), len(summary.InsertedIDs))
+	assert.Equal(t, running.InsertedIDs, summary.InsertedIDs[:len(running.InsertedIDs)], "a snapshot's inserted ids are the start of the final list")
 	var count, distinct int
 	require.NoError(t, pool.QueryRow(t.Context(), `SELECT count(*),count(DISTINCT uniq) FROM `+table.Qualified()).Scan(&count, &distinct))
 	assert.Equal(t, 200+summary.Inserts-summary.Deletes, count)

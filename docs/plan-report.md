@@ -8,6 +8,14 @@ behavior required of a consumer. The Go source of truth is `pkg/plan`; tests in 
 `pkg/planner`, `pkg/router`, and `pkg/schemadiff` pin everything documented here, including
 the examples at the end of this page.
 
+`migrate --dry-run --json` emits a refusal verdict instead of a report when the apply would
+refuse the statement before planning it, or refuse its routed steps from their shape alone:
+an unsupported statement kind, an unnamed or `IF NOT EXISTS` index build, a `DETACH
+PARTITION`. That verdict exits 2 and carries no `format_version`, `fingerprint`, or
+`exec_sql`; a consumer branches on the exit code and on whether `format_version` is present
+before reading the output as a report. ([CLI output examples](cli-output-examples.md) shows
+both shapes.)
+
 ## Versioning: `format_version`
 
 Every report carries `format_version`. A consumer that does not recognize the version must

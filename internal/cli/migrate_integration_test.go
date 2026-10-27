@@ -808,21 +808,38 @@ func TestMigrateForceRunsBlockingCreateIndex(t *testing.T) {
 // A forced blind attempt that runs past its statement budget is cancelled
 // and refused with the typed cause — the statement-budget refusal contract
 // end to end — and the refusal still records the override.
+//
+// --statement-timeout is the session's statement_timeout, so it also bounds
+// the reads the engine makes before it executes anything. The budget is
+// therefore one those reads clear with room to spare on a loaded server,
+// and the ALTER is made to outlast it by an event trigger that sleeps
+// inside the statement, rather than by a table large enough that a rewrite
+// takes longer than the budget, which a slow read could beat to it.
 func TestMigrateForcedRewriteRefusedByStatementBudget(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
-	defer pool.Close()
+	t.Cleanup(pool.Close)
 	schema := testutil.NewSchema(t, pool)
-	_, err = pool.Exec(t.Context(), fmt.Sprintf("CREATE TABLE %s.t (id int PRIMARY KEY, v text)", schema))
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %s.t (
+			id int PRIMARY KEY,
+			v  text
+		)`, schema))
 	require.NoError(t, err)
-	_, err = pool.Exec(t.Context(), fmt.Sprintf(
-		"INSERT INTO %s.t SELECT g, repeat('x', 100) FROM generate_series(1, 300000) g", schema))
-	require.NoError(t, err)
+	// Event triggers fire for every DDL in the database, so the sleep runs
+	// only for this test's table.
+	testutil.InstallEventTrigger(t, pool, testutil.DDLCommandEnd, schema, "outlast_budget", fmt.Sprintf(`
+		IF EXISTS (
+			SELECT FROM pg_catalog.pg_event_trigger_ddl_commands()
+			WHERE object_identity OPERATOR(pg_catalog.=) '%s.t'
+		) THEN
+			PERFORM pg_catalog.pg_sleep(10);
+		END IF;`, schema))
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
 	cmd.Force = schema + ".t"
-	cmd.StatementTimeout = 50 * time.Millisecond
+	cmd.StatementTimeout = 3 * time.Second
 	cmd.JSON = true
 	var out strings.Builder
 	err = cmd.run(t.Context(), &out)
@@ -1160,6 +1177,7 @@ func TestMigrateGateRefusesWithoutDatabase(t *testing.T) {
 		{"drop index concurrently", "DROP INDEX CONCURRENTLY i", verdict.ReasonIndexStatement, ""},
 		{"reindex concurrently", "REINDEX TABLE CONCURRENTLY t", verdict.ReasonIndexStatement, ""},
 		{"alter index", "ALTER INDEX i SET (fillfactor = 90)", verdict.ReasonUnsupportedStatement, ""},
+		{"alter index rename", "ALTER INDEX i RENAME TO j", verdict.ReasonUnsupportedStatement, ""},
 		{"create table", "CREATE TABLE t (id int)", verdict.ReasonUnsupportedStatement, "pg-sprite diff --desired schema.sql"},
 	}
 	for _, tt := range tests {
