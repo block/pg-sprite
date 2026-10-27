@@ -144,7 +144,9 @@ pass's error, since a repair assumes the source rows it recopies hold still (no-
 abort-leaves-shadow-alone, repairs-every-chunk, moved-unique-value,
 later-repair-fails, recopy-tolerates-a-source-write-inside-the-pass,
 recopy-retries-a-unique-value-moved-during-the-recopy,
-recopy-stops-when-every-attempt-collides, and repair-does-not-retry-a-collision tests). Under the
+recopy-stops-when-every-attempt-collides,
+recopy-ends-clean-when-the-comparison-after-a-collision-finds-nothing, and
+repair-does-not-retry-a-collision tests). Under the
 stream (`CheckLive` under `repair`) the one recopy transaction is kept apart from the stream's
 own writes: the pass holds the catch-up's flushes off the shadow in Go before the transaction
 asks for `SHARE MODE` and gives them back only after it commits, on every path
@@ -1111,7 +1113,12 @@ transaction rolls back, the pass compares again, and the recopy cut from that co
 covers both chunks and lands (CO-3). A source that moves a value into the differing chunks
 before every recopy exhausts the pass's bounded attempts; the pass then ends in the last
 collision's error with the row still in `reconciling` and the shadow unchanged, and the next
-attempt restarts the reconcile — closed, never a shadow with a row the source lacks. *Source:*
+attempt restarts the reconcile — closed, never a shadow with a row the source lacks. *Known
+limit:* on resume the reconcile runs before the copier clears the shadow rows above a partial
+watermark, and the pass compares only through that watermark, so a unique value the source
+moves out of a shadow row above it into a differing chunk collides on every attempt of every
+reconcile until the source moves it back; the run stays in `reconciling`, closed, and
+`--restart` (`CopySwapOptions.Restart`) starts it over. *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum

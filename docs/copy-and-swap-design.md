@@ -511,8 +511,13 @@ chunks now differ, and the recopy cut from that comparison lands. The pass recop
 between attempts, no backoff), counts every collision in `Outcome.Collisions`, reports the
 comparison the last recopy was cut from as `Outcome.Report`, and ends in the last collision's
 error, as the server raised it, when every attempt collides — the row then stays in
-`reconciling` and the next attempt restarts the reconcile. Under `repair` the collision is the
-pass's error: a repair assumes the source rows it recopies hold still.
+`reconciling` and the next attempt restarts the reconcile. Comparing again clears a collision
+only when the colliding shadow row is inside the comparison. A reconcile on resume compares
+through the row's watermark and runs before the copier clears the shadow above it, so a value
+the source moves out of a shadow row above a partial watermark collides on every attempt of
+every reconcile until the source moves it back; the run stays in `reconciling`, and `--restart`
+starts it over (ST-4 *Known limit*). Under `repair` the collision is the pass's error: a repair
+assumes the source rows it recopies hold still.
 
 ### D15 — Capture changes with pgoutput
 

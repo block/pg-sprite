@@ -49,9 +49,13 @@ func collided(err error) bool {
 // chunk, and the row's chunk now differs from the source: the next
 // comparison finds it, and the next recopy deletes both chunks before it
 // puts either back. The comparison is the wait between attempts; there is
-// no other. The Outcome returned carries the comparison the committed
-// recopy acted on, the repairs it committed, and the attempts that
-// collided, with the error when the last one did; a recopy that fails for
+// no other. Comparing again clears a collision only when the colliding row
+// lies inside the comparison: a shadow row above the watermark the pass
+// reads through is never compared, so a collision with one repeats on
+// every attempt and the pass ends in its error. The Outcome returned
+// carries the comparison the committed recopy acted on, the repairs it
+// committed, and the attempts that collided, with the error when the last
+// one did; a recopy that fails for
 // any other reason ends the pass with that error, as a first attempt's
 // would.
 func (v *Verifier) recopyUntilClear(ctx context.Context, pool *pgxpool.Pool, through copier.Watermark, report Report) (Outcome, error) {
@@ -67,7 +71,7 @@ func (v *Verifier) recopyUntilClear(ctx context.Context, pool *pgxpool.Pool, thr
 		}
 		outcome.Collisions++
 		if attempt == v.opts.RecopyAttempts {
-			return outcome, fmt.Errorf("recopy of %d chunks of %s.%s collided with a shadow row on each of %d attempts; the source kept moving a unique value between chunks: %w", len(outcome.Report.Mismatches), v.target.Schema(), v.target.Table(), attempt, err)
+			return outcome, fmt.Errorf("recopy of %d chunks of %s.%s collided with a shadow row holding one of their unique values on each of %d attempts: %w", len(outcome.Report.Mismatches), v.target.Schema(), v.target.Table(), attempt, err)
 		}
 		compared, err := v.verify(ctx, pool, through)
 		if err != nil {

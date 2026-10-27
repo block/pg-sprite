@@ -132,6 +132,57 @@ func TestCheckRecopyStopsWhenEveryAttemptCollides(t *testing.T) {
 	assertNoProofs(t, outcome)
 }
 
+// A recopy that collides and is followed by a comparison that finds
+// nothing differing ends the pass clean: the source moved the unique
+// value into the differing chunk before the recopy, which collided and
+// rolled back, and then put back every row the first comparison found
+// different before the pass compared again. The second comparison is the
+// pass's proof — it read the whole table and found the shadow equal — so
+// the pass mints both proofs, recopies nothing, and still counts the
+// collision.
+func TestCheckRecopyEndsCleanWhenTheComparisonAfterACollisionFindsNothing(t *testing.T) {
+	f := newVerifierFixture(t)
+	target, lock, shadow := f.prepareUnique(t)
+	f.exec(t, "UPDATE %s.orders SET qty = -1500 WHERE id = 1500")
+	orders := pgx.Identifier{f.schema, "orders"}.Sanitize()
+	var mu sync.Mutex
+	var moved, settled bool
+	pool := f.hookedPool(t, func(_ context.Context, _ *pgx.Conn, sql string) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case !moved && strings.HasPrefix(sql, "DELETE FROM"):
+			moved = true
+			f.moveUniqueValue(t, 100, 1600)
+		case moved && !settled && sql == "rollback":
+			// The recopy collided and rolled back: the source puts every
+			// row back as the shadow holds it before the next comparison.
+			settled = true
+			f.exec(t, "UPDATE "+orders+" SET qty = 1600 WHERE id = 1600")
+			f.exec(t, "UPDATE "+orders+" SET qty = 100 WHERE id = 100")
+			f.exec(t, "UPDATE "+orders+" SET qty = 1500 WHERE id = 1500")
+		}
+	})
+
+	outcome, err := f.check(t, pool, target, shadow, lock, copier.NewWatermark(math.MaxInt64), checksum.DivergenceRecopy)
+	require.NoError(t, err)
+	mu.Lock()
+	require.True(t, settled, "the recopy collided and the source settled before the next comparison")
+	mu.Unlock()
+	assert.Equal(t, 1, outcome.Collisions)
+	assert.Empty(t, outcome.Repairs, "the recopy that collided rolled back and no other ran")
+	assert.Empty(t, outcome.Report.Mismatches, "the report is the clean comparison after the collision")
+	assert.True(t, outcome.Clean())
+	clean, minted := outcome.CleanWatermark()
+	require.True(t, minted)
+	assert.Equal(t, copier.NewWatermark(math.MaxInt64), clean.Watermark())
+	verified, minted := outcome.VerifiedShadow()
+	require.True(t, minted)
+	assert.Equal(t, shadow.ShadowTable(), verified.Shadow())
+	qty, _ := f.shadowRow(t, shadow, 1500)
+	assert.Equal(t, int64(1500), qty, "the shadow was never written")
+}
+
 // Under DivergenceRepair the same move is not retried: a repair pass
 // assumes the source rows it recopies hold still, so the collision is the
 // pass's error as the server raised it and nothing is counted or recopied.
