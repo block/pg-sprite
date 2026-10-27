@@ -57,12 +57,14 @@ re-introspected, re-classified, re-routed, and re-preflighted at execution time,
 the loop wrongly admits still cannot make the core exceed a lock budget or skip a preflight.
 **One admission check has no core backstop: the destructive guard.** The core has no concept
 of destructiveness — `pkg/executor` and `pkg/preflight` never check it — so refusing a
-destructive desired-state plan rests entirely on `RunDesired`'s admission gate and on the
-classifier's `Destructive` derivation in `pkg/planner`, and its failure mode is data loss (a
-falsely-admitted `DROP COLUMN` commits), not a refusal or a bounded failed attempt. Those two
-sites are the exception to the periphery posture: treat `destructiveOp` and the desired-state
-admission gate with the core's review bar — spec-first, test-first, small diffs — even though
-their packages stay periphery for everything else they do.
+destructive desired-state plan rests entirely on `RunDesired`'s admission gate, refusing an
+unacknowledged destructive imperative statement rests entirely on `Run`'s destructive gate
+(RF-10), and both rest on the classifier's `Destructive` derivation in `pkg/planner`. Their
+failure mode is data loss (a falsely-admitted `DROP COLUMN` commits), not a refusal or a
+bounded failed attempt. Those three sites are the exception to the periphery posture: treat
+`destructiveOp`, the desired-state admission gate, and the imperative destructive gate with
+the core's review bar — spec-first, test-first, small diffs — even though their packages stay
+periphery for everything else they do.
 
 ## Rules inside the core
 
