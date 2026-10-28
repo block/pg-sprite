@@ -14,6 +14,7 @@ it does not fold, and what the approach requires from the database.
 - [How pg-sprite avoids reimplementing the rules](#how-pg-sprite-avoids-reimplementing-the-rules)
   - [Compared with Spirit](#compared-with-spirit)
 - [What the catalog does not fold](#what-the-catalog-does-not-fold)
+  - [Why `--desired` and `--alter` treat the drop differently](#why---desired-and---alter-treat-the-drop-differently)
 - [What the approach requires](#what-the-approach-requires)
 
 ## The problem
@@ -215,12 +216,34 @@ ALTER TABLE public.accounts ADD CONSTRAINT accounts_email_uniq UNIQUE (email);
 | --- | --- | --- | --- |
 | `DEFAULT now()` vs `DEFAULT CURRENT_TIMESTAMP` | `now()` vs `CURRENT_TIMESTAMP` | a `SET DEFAULT` | converges: the next `diff` is empty |
 | `DEFAULT 1 + 1` vs `DEFAULT 2` | `(1 + 1)` vs `2`; the server does not evaluate the expression | a `SET DEFAULT` | converges |
-| a named `CONSTRAINT accounts_email_uniq UNIQUE` vs an unnamed `UNIQUE` | `accounts_email_uniq` vs `accounts_email_key` | a destructive `DROP CONSTRAINT` of the old name and an `ADD CONSTRAINT` under the new one; constraints are matched by name, so a rename is a drop and an add | `migrate --desired` refuses the whole plan with reason `destructive-change`; running the statements with `migrate --alter` converges |
+| a named `CONSTRAINT accounts_email_uniq UNIQUE` vs an unnamed `UNIQUE` | `accounts_email_uniq` vs `accounts_email_key` | a destructive `DROP CONSTRAINT` of the old name and an `ADD CONSTRAINT` under the new one; constraints are matched by name, so a rename is a drop and an add | `migrate --desired` refuses the whole plan with reason `destructive-change`; running the drop with `migrate --alter --allow-destructive public.accounts`, then the add, converges ([why the two differ](#why---desired-and---alter-treat-the-drop-differently)) |
 | `name text COLLATE "C"` vs `name text` | collation `"C"` vs the type's default | refused: `unsupported schema change: column "name" collation change ("" vs "pg_catalog.\"C\"")` | does not converge through pg-sprite; a collation change rewrites the column and rebuilds its indexes, which the diff does not derive |
 
 The same table written with `int8`, `TEXT`, `TIMESTAMP WITH TIME ZONE`, `current_timestamp`,
 `DEFAULT (2)`, table-level `PRIMARY KEY (id)` and `UNIQUE (email)`, and `COLLATE "default"`
 reports no changes against the live table: those differences the catalog does fold.
+
+### Why `--desired` and `--alter` treat the drop differently
+
+Both front doors refuse to discard live data or structure without being told to; they differ in
+who wrote the drop.
+
+- **`migrate --desired`: pg-sprite derived the drop.** The diff produced
+  `DROP CONSTRAINT accounts_email_key` and `ADD CONSTRAINT accounts_email_uniq`. A desired file
+  cannot say whether that is a rename or the deliberate removal of a guarantee, so pg-sprite does
+  not infer that the loss is intended. Any destructive statement refuses the whole plan,
+  including the harmless `ADD`, and there is no acknowledgement to lift it: `--allow-destructive`
+  cannot be combined with `--desired`.
+- **`migrate --alter`: the operator wrote the drop.** The intent is explicit, but the drop is still
+  refused with `destructive-change` until `--allow-destructive public.accounts` names the table.
+  The `ADD` is not destructive and runs without it.
+
+```text
+--desired   diff derives DROP + ADD    → destructive statement in the plan → whole plan refused, no override
+--alter     operator writes the DROP   → refused unless --allow-destructive public.accounts
+            operator writes the ADD    → runs (the safer UNIQUE sequence)
+            rerun diff                 → no changes: converged
+```
 
 When a reported difference was not meant as a change, write the desired file the way the server
 stores it. [`pg-sprite pull`](pull.md) exports a live table in that form.
