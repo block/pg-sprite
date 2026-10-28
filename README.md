@@ -250,7 +250,7 @@ ever commits a change — every other command is read-only or fully offline.
 
 | Command | Live database | What the connection is used for |
 |---|---|---|
-| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets |
+| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets. A change routed to copy-and-swap also takes `--free-disk`, and optionally `--quiesced` (fence writes instead of streaming them) and `--restart SCHEMA.TABLE` (start a stopped run over); see [running a copy-and-swap](docs/copy-and-swap.md) |
 | `migrate --dry-run` | required | The same introspection as a real run — server version, target resolution, table facts — so the printed plan reflects the actual target; executes nothing |
 | `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
 | [`pull`](docs/pull.md) | required | Introspect each supported table in a schema and create one desired-state file per table; existing files are never overwritten, and a zero-change `diff` verifies the baseline |

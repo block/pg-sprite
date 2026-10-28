@@ -391,6 +391,11 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --free
 }
 ```
 
+With `--quiesced`, the run fences writes to the table instead of streaming them through a
+replication slot, needs no logical decoding, and `detail` says the table was quiesced. When
+to choose it, and an example of its output, are in
+[copy-and-swap.md](copy-and-swap.md#live-or-quiesced).
+
 ### Refused: the engine does not carry the operation yet (`backend-unavailable`) — exit 2
 
 Other rewrite-class operations also route to copy-and-swap, but the engine
