@@ -1404,7 +1404,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   reason. A `DROP INDEX` — unique or not — is gate-refused first; when `--accept-blocking`
   accepts that refusal, the drop still runs only if `--allow-destructive` names the same
   owning table, and otherwise it is refused with `destructive-change` before anything
-  executes, the detail listing the checks that catch an index the application still uses.
+  executes, the detail listing the checks that catch an index the application still uses and
+  the verdict's `index_usage` carrying the connected server's live evidence for the index.
   Accepting the lock is not accepting the loss. Outage-risk statements are covered by
   RF-5 and AB-1..AB-5 (`--force`, `--accept-blocking`) and by the LK-2 budgets.
   *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
@@ -1417,7 +1418,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestRunRefusesAnUnacknowledgedDropColumnRoutedToCopyAndSwap`,
   `TestRunNeedsBothForceAndTheDestructiveAcknowledgement`,
   `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`,
-  `TestRunAcceptBlockingNeedsTheDestructiveAcknowledgementToDropAnIndex`, `TestAdmitDestructive`,
+  `TestRunAcceptBlockingNeedsTheDestructiveAcknowledgementToDropAnIndex`,
+  `TestReadIndexUsageCountsEachIndexsOwnScans`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
   [design principles](design-principles.md#declarative-review-first-workflow)

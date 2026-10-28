@@ -425,3 +425,34 @@ func TestStringIncludesAttemptsWhenSet(t *testing.T) {
 	v.Attempts = 0
 	assert.NotContains(t, v.String(), "attempts")
 }
+
+// index_usage is part of the verdict contract an orchestrator reads: a zero
+// scan count is present, not omitted, because 0 is the evidence the
+// operator is asked to confirm, while the times the server did not record
+// are absent rather than a zero time.
+func TestIndexUsageJSONKeepsAZeroCountAndOmitsUnrecordedTimes(t *testing.T) {
+	readAt := time.Date(2026, 10, 28, 9, 30, 0, 0, time.UTC)
+	v := Verdict{
+		Statement:  "DROP INDEX app.orders_created_idx",
+		Table:      "app.orders",
+		IndexUsage: &IndexUsage{ReadAt: readAt, Unique: true, TrackCounts: true},
+	}.WithRefusal(ByDesign(ReasonDestructiveChange))
+
+	js, err := v.JSON()
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(js), &got))
+	assert.Equal(t, map[string]any{
+		"idx_scan":     float64(0),
+		"read_at":      "2026-10-28T09:30:00Z",
+		"unique":       true,
+		"track_counts": true,
+	}, got["index_usage"])
+
+	lastScan := readAt.Add(-time.Hour)
+	v.IndexUsage.IdxScans = 42
+	v.IndexUsage.LastIdxScan = &lastScan
+	v.IndexUsage.TrackCounts = false
+	assert.Contains(t, v.String(),
+		"usage:     42 index scans on this server (replicas not counted), last 2026-10-28T08:30:00Z, unique, track_counts off")
+}

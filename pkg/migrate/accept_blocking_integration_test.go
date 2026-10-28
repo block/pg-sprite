@@ -249,6 +249,13 @@ func TestRunAcceptBlockingNeedsTheDestructiveAcknowledgementToDropAnIndex(t *tes
 		assert.False(t, v.AllowedDestructive)
 		assert.Contains(t, v.Detail, "idx_scan")
 		assert.Contains(t, v.Detail, "--allow-destructive "+schema+".orders")
+		// The refusal carries this server's live evidence for the index it
+		// refused to drop: a fresh, non-unique index nothing has scanned.
+		require.NotNil(t, v.IndexUsage)
+		assert.EqualValues(t, 0, v.IndexUsage.IdxScans)
+		assert.False(t, v.IndexUsage.Unique)
+		assert.True(t, v.IndexUsage.TrackCounts)
+		assert.False(t, v.IndexUsage.ReadAt.IsZero())
 		assert.True(t, indexExists(t, pool, schema, "orders_created_idx"), "the refused drop must execute nothing")
 	})
 

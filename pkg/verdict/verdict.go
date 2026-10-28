@@ -581,6 +581,50 @@ type Verdict struct {
 	// StatisticsRefresh reports the ANALYZE a committed type change owes
 	// the planner; nil when the statement retyped no column.
 	StatisticsRefresh *StatisticsRefresh `json:"statistics_refresh,omitempty"`
+	// IndexUsage is the live usage evidence of the index a destructive-change
+	// refusal of an accepted DROP INDEX would have dropped; nil for every
+	// other verdict.
+	IndexUsage *IndexUsage `json:"index_usage,omitempty"`
+}
+
+// IndexUsage is how the server pg-sprite is connected to has seen an index
+// used, read when a DROP INDEX is refused for want of the destructive
+// acknowledgement. It describes that one server only: every replica keeps
+// its own counters, so an index this server never scans may still serve a
+// replica's reads.
+type IndexUsage struct {
+	// IdxScans is the cumulative count of scans of the index since
+	// StatsReset.
+	IdxScans int64 `json:"idx_scan"`
+	// LastIdxScan is when the server last recorded a scan; absent when it
+	// recorded none, and always on PostgreSQL 14 and 15.
+	LastIdxScan *time.Time `json:"last_idx_scan,omitempty"`
+	// StatsReset is when counting began; absent when the server reports no
+	// reset, so the start of the window is unknown.
+	StatsReset *time.Time `json:"stats_reset,omitempty"`
+	// ReadAt is the server's clock when the evidence was read.
+	ReadAt time.Time `json:"read_at"`
+	// Unique reports whether the index enforces uniqueness, a guarantee the
+	// drop would also discard.
+	Unique bool `json:"unique"`
+	// TrackCounts is false when the server was counting no scans, so a zero
+	// IdxScans proves nothing.
+	TrackCounts bool `json:"track_counts"`
+}
+
+// Summary renders the evidence on one line for the verdict's text form.
+func (u IndexUsage) Summary() string {
+	s := fmt.Sprintf("%d index scans on this server (replicas not counted)", u.IdxScans)
+	if u.LastIdxScan != nil {
+		s += ", last " + u.LastIdxScan.UTC().Format(time.RFC3339)
+	}
+	if u.Unique {
+		s += ", unique"
+	}
+	if !u.TrackCounts {
+		s += ", track_counts off"
+	}
+	return s
 }
 
 // StatisticsRefresh is the outcome of re-analyzing a table after a
@@ -653,6 +697,9 @@ func (v Verdict) String() string {
 	}
 	if v.Forced {
 		b.WriteString("\n  forced:    the submitted form ran as-is (force acknowledged)")
+	}
+	if v.IndexUsage != nil {
+		fmt.Fprintf(&b, "\n  usage:     %s", v.IndexUsage.Summary())
 	}
 	if v.AllowedDestructive {
 		b.WriteString("\n  allowed:   the statement's data loss was acknowledged (allow-destructive)")

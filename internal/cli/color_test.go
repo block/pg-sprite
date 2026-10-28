@@ -186,6 +186,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		LockTimeout:         "3s",
 		StatementTimeout:    "10m",
 		StatisticsRefresh:   &verdict.StatisticsRefresh{Columns: []string{"c"}, Pending: `ANALYZE "t"`},
+		IndexUsage:          &verdict.IndexUsage{IdxScans: 7, Unique: true, TrackCounts: true},
 	}
 	rv := reflect.ValueOf(v)
 	for i := range rv.NumField() {

@@ -142,7 +142,12 @@ A `DROP INDEX` needs both acknowledgements, each naming the owning table: `--acc
 accepts the lock, and `--allow-destructive` accepts losing the index (RF-10). The second is
 checked after the owning table resolves and before anything executes; without it the drop is
 refused with `destructive-change`, and the detail lists the checks that catch an index the
-application still uses. `REINDEX INDEX` and `REINDEX TABLE` discard nothing and need only
+application still uses. The refusal also carries `index_usage`, the connected server's live
+evidence for the index (`preflight.ReadIndexUsage`, keyed on the index OID the owning-table
+lookup resolved): its `idx_scan` since `stats_reset`, `last_idx_scan` on PostgreSQL 16 and
+later, whether it is unique, and whether `track_counts` was on. It is one server's view —
+replicas keep their own counters — so it is evidence for the operator, not a gate. The read
+takes no lock; if it fails, nothing executes and the error is returned. `REINDEX INDEX` and `REINDEX TABLE` discard nothing and need only
 `--accept-blocking`.
 
 The value names the table whose lock the operator accepts, because that is the relation the
