@@ -216,7 +216,7 @@ ALTER TABLE public.accounts ADD CONSTRAINT accounts_email_uniq UNIQUE (email);
 | --- | --- | --- | --- |
 | `DEFAULT now()` vs `DEFAULT CURRENT_TIMESTAMP` | `now()` vs `CURRENT_TIMESTAMP` | a `SET DEFAULT` | converges: the next `diff` is empty |
 | `DEFAULT 1 + 1` vs `DEFAULT 2` | `(1 + 1)` vs `2`; the server does not evaluate the expression | a `SET DEFAULT` | converges |
-| a named `CONSTRAINT accounts_email_uniq UNIQUE` vs an unnamed `UNIQUE` | `accounts_email_uniq` vs `accounts_email_key` | a destructive `DROP CONSTRAINT` of the old name and an `ADD CONSTRAINT` under the new one; constraints are matched by name, so a rename is a drop and an add | `migrate --desired` refuses the whole plan with reason `destructive-change`; running the drop with `migrate --alter --allow-destructive public.accounts`, then the add, converges ([why the two differ](#why---desired-and---alter-treat-the-drop-differently)) |
+| a named `CONSTRAINT accounts_email_uniq UNIQUE` vs an unnamed `UNIQUE` | `accounts_email_uniq` vs `accounts_email_key` | a destructive `DROP CONSTRAINT` of the old name and an `ADD CONSTRAINT` under the new one; constraints are matched by name, so a rename is a drop and an add | `migrate --desired` refuses the whole plan with reason `destructive-change`; running the add with `migrate --alter`, then the drop with `migrate --alter --allow-destructive public.accounts`, then `migrate --desired` for the rest, converges ([why the two differ, and the commands](#why---desired-and---alter-treat-the-drop-differently)) |
 | `name text COLLATE "C"` vs `name text` | collation `"C"` vs the type's default | refused: `unsupported schema change: column "name" collation change ("" vs "pg_catalog.\"C\"")` | does not converge through pg-sprite; a collation change rewrites the column and rebuilds its indexes, which the diff does not derive |
 
 The same table written with `int8`, `TEXT`, `TIMESTAMP WITH TIME ZONE`, `current_timestamp`,
@@ -240,10 +240,32 @@ who wrote the drop.
 
 ```text
 --desired   diff derives DROP + ADD    → destructive statement in the plan → whole plan refused, no override
---alter     operator writes the DROP   → refused unless --allow-destructive public.accounts
-            operator writes the ADD    → runs (the safer UNIQUE sequence)
-            rerun diff                 → no changes: converged
+--alter     operator writes the ADD    → runs (the safer UNIQUE sequence)
+            operator writes the DROP   → refused unless --allow-destructive public.accounts
+--desired   rerun for the rest         → the two SET DEFAULTs run; a fresh plan is empty: converged
 ```
+
+To converge the example, run the `ADD` before the `DROP`:
+
+```sh
+pg-sprite migrate --alter 'ALTER TABLE public.accounts ADD CONSTRAINT accounts_email_uniq UNIQUE (email)'
+pg-sprite migrate --alter 'ALTER TABLE public.accounts DROP CONSTRAINT accounts_email_key' \
+  --allow-destructive public.accounts
+pg-sprite migrate --desired accounts.sql
+```
+
+The order matters. While both constraints stand, both enforce uniqueness on `email`, so the
+column is never left unenforced. Dropping first would leave a window in which concurrent writes
+can insert duplicates, and the `ADD` would then fail on them. The `ADD` runs as the safer
+sequence the plan shows: `CREATE UNIQUE INDEX CONCURRENTLY`, then `ADD CONSTRAINT … UNIQUE USING
+INDEX`. If it fails, `accounts_email_key` still enforces uniqueness and nothing is lost. A failed
+concurrent build can leave an invalid index under the new name; the
+[invalid-index runbook](invalid-index-recovery.md) says how to clear it before you run the `ADD`
+again.
+
+The refusal of a desired plan is not permission to run its statements one by one. An
+orchestrator should not turn a refused plan into acknowledged `--alter` statements on its own;
+running the drop is a separate decision an operator makes.
 
 When a reported difference was not meant as a change, write the desired file the way the server
 stores it. [`pg-sprite pull`](pull.md) exports a live table in that form.
