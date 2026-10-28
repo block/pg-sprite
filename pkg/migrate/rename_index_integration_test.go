@@ -127,3 +127,18 @@ func TestRenameIndexRejectsTheForceAcknowledgement(t *testing.T) {
 	require.ErrorIs(t, err, migrate.ErrIndexRenameAcknowledgement)
 	assert.True(t, relationNamed(t, pool, schema, "users_email_idx"), "nothing must have executed")
 }
+
+// --block-writes names a table whose writes a copy-and-swap blocks, and an
+// index rename never runs through copy-and-swap: even naming the index's
+// own table, the acknowledgement has nothing to apply to, so it is a usage
+// error and nothing executes.
+func TestRenameIndexRejectsTheBlockWritesAcknowledgement(t *testing.T) {
+	pool, schema, _ := renameIndexFixture(t)
+	sql := fmt.Sprintf(`ALTER INDEX %s.users_email_idx RENAME TO users_contact_email_idx`, schema)
+	opts := runOptions()
+	opts.CopySwap.BlockWrites = schema + ".users"
+
+	_, err := migrate.Run(t.Context(), pool, parseOne(t, sql), opts)
+	require.ErrorIs(t, err, migrate.ErrIndexRenameAcknowledgement)
+	assert.True(t, relationNamed(t, pool, schema, "users_email_idx"), "nothing must have executed")
+}

@@ -274,7 +274,7 @@ func TestMigrateRenameColumnRefusedUnlessForced(t *testing.T) {
 // A type rewrite routes to the copy-and-swap backend and runs end to end
 // from this front door: the shadow table takes the new type, every row is
 // carried, the retained source is dropped, and the one verdict says so.
-// --quiesced keeps the run to the write fence, so the test server needs no
+// --block-writes keeps the run to the write fence, so the test server needs no
 // logical decoding.
 func TestMigrateRunsTypeRewriteViaCopyAndSwap(t *testing.T) {
 	url := testutil.StartPostgres(t)

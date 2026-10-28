@@ -18,8 +18,8 @@ import (
 // --restart from the front door: a relation under the shadow's name that
 // no checkpoint row records is refused by a plain run, and discarded by a
 // run that carries the acknowledgement — which then carries the change to
-// its copy-and-swap verdict on a shadow of its own. --quiesced keeps the
-// run to the write fence, so the test server needs no logical decoding.
+// its copy-and-swap verdict on a shadow of its own. --block-writes keeps
+// the run to the write fence, so the test server needs no logical decoding.
 func TestMigrateRestartDiscardsALeftoverAndRunsTheChange(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})

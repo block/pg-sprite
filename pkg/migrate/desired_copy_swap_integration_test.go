@@ -17,7 +17,7 @@ import (
 
 // copySwapRunOptions are runOptions with the copy-and-swap route wired the
 // way the CLI wires it: the route's own connection, free disk the shadow
-// will fit in, and the quiesced acknowledgement for table (SCHEMA.TABLE) so
+// will fit in, and the block-writes acknowledgement for table (SCHEMA.TABLE) so
 // the test server needs no logical decoding.
 func copySwapRunOptions(serverURL, table string) migrate.Options {
 	opts := runOptions()
@@ -88,6 +88,47 @@ func TestRunDesiredCopyAndSwap(t *testing.T) {
 			 WHERE table_schema = $1 AND table_name = 't'`, schema).Scan(&columns))
 		assert.Equal(t, 2, columns, "the native ADD COLUMN ahead of the refused retype did not commit")
 		assert.Equal(t, "integer", columnType(t, schema, "owner_id"))
+	})
+
+	t.Run("a block-writes acknowledgement naming another table runs nothing", func(t *testing.T) {
+		schema := testutil.NewSchema(t, pool)
+		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+			CREATE TABLE %s.t (
+				id       int PRIMARY KEY,
+				owner_id int NOT NULL
+			)`, schema))
+		require.NoError(t, err)
+
+		// The same plan as above, a native ADD COLUMN ahead of a retype the
+		// router sends through copy-and-swap, with every gate open except
+		// the acknowledgement, which names another table. Each planned
+		// statement checks it before anything runs, so the first one, the
+		// native ADD COLUMN, already stops the plan: neither statement runs
+		// and no table's writes are blocked.
+		opts := copySwapRunOptions(serverURL, schema+".other")
+		res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+			Schema: schema,
+			Desired: parseDesired(t, `CREATE TABLE t (
+				id       int PRIMARY KEY,
+				owner_id bigint NOT NULL,
+				note     text
+			)`),
+		}, opts)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "block-writes acknowledgement")
+		assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
+		assert.Empty(t, res.Verdicts, "no statement reached a verdict")
+		require.Len(t, res.Plan.Statements, 2, "the plan carried the native statement and the retype")
+		assert.Equal(t, router.BackendCopyAndSwap, res.Plan.Statements[1].Backend)
+
+		var columns int
+		require.NoError(t, pool.QueryRow(t.Context(),
+			`SELECT count(*) FROM information_schema.columns
+			 WHERE table_schema = $1 AND table_name = 't'`, schema).Scan(&columns))
+		assert.Equal(t, 2, columns, "the native ADD COLUMN did not commit")
+		assert.Equal(t, "integer", columnType(t, schema, "owner_id"), "the retype did not run")
+		_, err = pool.Exec(t.Context(), fmt.Sprintf(`INSERT INTO %s.t (id, owner_id) VALUES (1, 1)`, schema))
+		assert.NoError(t, err, "the table still takes writes")
 	})
 
 	t.Run("two retypes of one table converge and re-run as a no-op", func(t *testing.T) {
