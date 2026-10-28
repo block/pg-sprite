@@ -1339,7 +1339,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   intent is explicit. The rename-overlap pattern Spirit refuses (one `ALTER` that renames a
   column and reuses or retypes it) is unrepresentable: PostgreSQL parses a rename as its own
   statement and the front door admits one statement (`TestClassifyRejectsARename*`). *Source:*
-  [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options), Spirit.
+  [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options),
+  [make mistakes hard to commit](design-principles.md#make-mistakes-hard-to-commit), Spirit.
 - **RF-5** — The dangerous literal never runs silently: risky statements with a safer native
   idiom get the idiom (reported) or a recommendation; running as-submitted requires a loud,
   typed, audited acknowledgement: `--force` on the routes it governs, or `--accept-blocking`
@@ -1414,7 +1415,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
-  [design principles](design-principles.md#declarative-review-first-workflow),
+  [design principles](design-principles.md#declarative-review-first-workflow)
+  ([make mistakes hard to commit](design-principles.md#make-mistakes-hard-to-commit)),
   SchemaBot's `--allow-unsafe` acknowledgement for destructive plans.
 - **RF-11** — A table is judged idle only when the connected server's statistics prove no use
   inside the window: no other session holds a lock on it, both last-scan times are recorded
