@@ -16,7 +16,7 @@ The tour walks five sections, each runnable on its own via
 | `diff`    | The declarative front door: a routed convergence plan for an existing table, for a missing one, and a typed create-shape refusal (exit code 2) for a missing table declared `IF NOT EXISTS` | no                  |
 | `pull`    | Existing-database onboarding: export one desired file per demo table, then prove each produces a zero-change `diff` | no                  |
 | `offline` | `lint` (gates on error findings), `suggest` (advises), `fmt` (canonicalizes) — no database                           | no                  |
-| `exec`    | Real executions: a native add, the concurrent index substitution, the four-step `SET NOT NULL` sequence, a genuine type rewrite run through copy-and-swap (`executed-via-copy-and-swap`, exit code 0), a structured refusal (exit code 2) for a rewrite the copy-and-swap engine does not carry yet, and the `--accept-blocking` passthrough: the plain `DROP INDEX` refused, refused again with a mismatched acknowledgement (exit code 1, nothing runs), then committed without online safety (exit code 3) along with a `REINDEX TABLE`, and a `DROP COLUMN` refused as `destructive-change` (exit code 2) until `--allow-destructive` names the table | yes (seeded tables) |
+| `exec`    | Real executions: a native add, the concurrent index substitution, the four-step `SET NOT NULL` sequence, a genuine type rewrite run through copy-and-swap (`executed-via-copy-and-swap`, exit code 0), a data fault — a narrowing one seeded row will not fit, reported as a `failed` verdict coded `data-fault` (exit code 1) after the run abandons itself — proven to leave nothing behind by a second copy-and-swap on the same table, a structured refusal (exit code 2) for a rewrite the copy-and-swap engine does not carry yet, and the `--accept-blocking` passthrough: the plain `DROP INDEX` refused, refused again with a mismatched acknowledgement (exit code 1, nothing runs), then committed without online safety (exit code 3) along with a `REINDEX TABLE`, and a `DROP COLUMN` refused as `destructive-change` (exit code 2) until `--allow-destructive` names the table | yes (seeded tables) |
 
 `make demo` reseeds [seed.sql](seed.sql) first, so every run starts from the
 same state and the tour is rerunnable. The compose database is left running
@@ -36,7 +36,8 @@ reasons, and classes, the `allowed_destructive` audit field, the substituted `ex
 distinguishing fragment, so a regression that drops `CONCURRENTLY` or
 collapses the `SET NOT NULL` sequence turns the job red), statement counts —
 and on exit codes (`0` success, `2` refusal, `3` accepted-blocking commit,
-`1` lint gate and mismatched acknowledgement). The `pull`
+`1` lint gate, mismatched acknowledgement, and the data-fault `failed`
+verdict). The `pull`
 step has no JSON mode, so check mode asserts only its exit code and exported
 file count, then uses each `diff --json` report to assert zero statements. It never
 asserts on human-facing prose, which is free to change. CI runs
