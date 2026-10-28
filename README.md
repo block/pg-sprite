@@ -71,6 +71,12 @@ refusal — never a silently wrong or incomplete result:
   and environments it cannot run against. The shadow build also refuses a
   statement the copy cannot carry: a `USING` expression it cannot reproduce,
   or a dropped-and-re-added column it cannot fill.
+- **Connection poolers**: point pg-sprite directly at the primary; the
+  application keeps whatever pooling it uses. pg-sprite's own connection
+  through a pooler is unsupported, except Supabase's Supavisor session
+  endpoint for native schema changes. Startup checks usually refuse a
+  transaction-mode pooler, but passing them does not make it supported
+  ([connections and poolers](docs/limitations.md#connections-and-poolers)).
 - **Row security** is included in exports when present, with reviewable before/after differences. The
   [atomic executor](docs/atomic-row-security.md) applies RLS-only changes to existing tables
   through `migrate --desired` or the Go API. Only the Go API supports binding execution to
@@ -244,7 +250,7 @@ ever commits a change — every other command is read-only or fully offline.
 
 | Command | Live database | What the connection is used for |
 |---|---|---|
-| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets |
+| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets. A change routed to copy-and-swap also takes `--free-disk`, and optionally `--quiesced` (fence writes instead of streaming them) and `--restart SCHEMA.TABLE` (start a stopped run over); see [running a copy-and-swap](docs/copy-and-swap.md) |
 | `migrate --dry-run` | required | The same introspection as a real run — server version, target resolution, table facts — so the printed plan reflects the actual target; executes nothing |
 | `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
 | [`pull`](docs/pull.md) | required | Introspect each supported table in a schema and create one desired-state file per table; existing files are never overwritten, and a zero-change `diff` verifies the baseline |

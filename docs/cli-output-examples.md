@@ -376,7 +376,8 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-
 Without `--dry-run` the run needs `--free-disk` (the preflight refuses with
 `copy-and-swap-refused` / cause `copy-and-swap-disk-headroom` when the shadow
 and its indexes would not fit the declared space) and either logical
-decoding on the server or `--quiesced`. The verdict's outcome is distinct
+decoding on the server or `--block-writes SCHEMA.TABLE`, which names the table
+whose writes it blocks until the swap. The verdict's outcome is distinct
 from `executed-natively`, and `detail` says what the verification pass
 covered and what became of the retained source:
 
@@ -389,6 +390,11 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --free
   "detail": "verified 1000 rows in 2 chunks; the retained source is dropped"
 }
 ```
+
+With `--quiesced`, the run fences writes to the table instead of streaming them through a
+replication slot, needs no logical decoding, and `detail` says the table was quiesced. When
+to choose it, and an example of its output, are in
+[copy-and-swap.md](copy-and-swap.md#live-or-quiesced).
 
 ### Refused: the engine does not carry the operation yet (`backend-unavailable`) — exit 2
 

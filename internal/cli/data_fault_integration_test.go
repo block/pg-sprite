@@ -39,15 +39,15 @@ const stringTooLong = "22001"
 // a run; only the planted row, twice as wide, breaks it.
 const dataFaultLabelWidth = 32
 
-// A data fault on the front door, quiesced: the copy meets one row the
+// A data fault on the front door, with the table's writes blocked: the copy meets one row the
 // narrowed type will not hold, part-way through the table, and the run is
 // abandoned. The process reports it the way automation reads it — a
 // failed verdict on stdout coded data-fault and an operational error, so
 // the exit code is 1, not the refusal's 2 — and the server is left as the
 // run found it: no shadow, no write fence, no checkpoint row, the source
-// its original shape and taking writes. --quiesced keeps the run to the
+// its original shape and taking writes. --block-writes keeps the run to the
 // write fence, so the test server needs no logical decoding.
-func TestMigrateReportsAQuiescedDataFaultAndLeavesNothingBehind(t *testing.T) {
+func TestMigrateReportsABlockWritesDataFaultAndLeavesNothingBehind(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
 	require.NoError(t, err)
@@ -57,7 +57,7 @@ func TestMigrateReportsAQuiescedDataFaultAndLeavesNothingBehind(t *testing.T) {
 
 	cmd := newMigrateCmd(url, dataFaultAlter(table))
 	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
-	cmd.Quiesced = true
+	cmd.BlockWrites = table.Schema + "." + table.Table
 	cmd.JSON = true
 	var out strings.Builder
 	err = cmd.run(t.Context(), &out)

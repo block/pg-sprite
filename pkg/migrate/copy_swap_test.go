@@ -92,7 +92,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 
 	t.Run("a shadow refusal is refused with its cause under the class it declares", func(t *testing.T) {
 		refusal := &schemachange.RefusalError{Cause: schemachange.CauseNameTaken, Detail: "a relation wears the shadow's name"}
-		v, err := copySwapRunVerdict(st, false, fmt.Errorf("run billing.orders: %w", refusal))
+		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("run billing.orders: %w", refusal))
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
 		assert.Equal(t, verdict.ReasonCopyAndSwapRefused, v.Reason)
@@ -104,7 +104,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 	t.Run("a divergence is a failure whose remedy is to start the run over", func(t *testing.T) {
 		divergence := &checksum.DivergenceError{Report: checksum.Report{Chunks: 3, Mismatches: []checksum.Mismatch{{}}}}
 		runErr := fmt.Errorf("run billing.orders: %w", divergence)
-		v, err := copySwapRunVerdict(st, false, runErr)
+		v, err := copySwapRunVerdict(st, holdSlot, runErr)
 		assert.ErrorIs(t, err, runErr)
 		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
 		assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
@@ -112,13 +112,15 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		assert.Contains(t, v.Detail, "start the run over")
 		assert.Contains(t, v.Detail, "drops the replication slot", "a live run's hold is its slot")
 		assert.NotContains(t, v.Detail, "resumes")
+		assert.False(t, v.WritesBlocked, "a live run never took the table offline for writes")
 	})
 
 	t.Run("a quiesced divergence names the fence as the hold to release", func(t *testing.T) {
 		divergence := &checksum.DivergenceError{Report: checksum.Report{Chunks: 1, Mismatches: []checksum.Mismatch{{}}}}
-		v, _ := copySwapRunVerdict(st, true, divergence)
+		v, _ := copySwapRunVerdict(st, holdFence, divergence)
 		assert.Contains(t, v.Detail, "takes the write fence off the source")
 		assert.NotContains(t, v.Detail, "replication slot")
+		assert.True(t, v.WritesBlocked, "the failed verdict says the run took the table offline for writes")
 	})
 
 	t.Run("a value the new type will not hold is an abandoned run coded as a data fault", func(t *testing.T) {
@@ -130,7 +132,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		// --restart to discard.
 		tooLong := &pgconn.PgError{Code: "22001", Message: "value too long for type character varying(10)"}
 		runErr := &schemachange.AbandonedError{Schema: "billing", Table: "orders", Fault: fmt.Errorf("copy chunk: %w", tooLong)}
-		v, err := copySwapRunVerdict(st, true, runErr)
+		v, err := copySwapRunVerdict(st, holdFence, runErr)
 		assert.ErrorIs(t, err, runErr)
 		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
 		assert.Equal(t, string(executor.CodeDataFault), v.Code)
@@ -146,7 +148,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		// default fills from NULL on the first chunk.
 		notNull := &pgconn.PgError{Code: "23502", Message: "null value in column violates not-null constraint"}
 		runErr := &schemachange.AbandonedError{Schema: "billing", Table: "orders", Fault: fmt.Errorf("copy chunk: %w", notNull)}
-		v, _ := copySwapRunVerdict(st, false, runErr)
+		v, _ := copySwapRunVerdict(st, holdSlot, runErr)
 		assert.Equal(t, string(executor.CodeDataFault), v.Code)
 		assert.Contains(t, v.Detail, "the run was abandoned")
 		assert.Contains(t, v.Detail, "its replication slot is dropped", "a live run's hold was its slot")
@@ -160,7 +162,7 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		// names the fault, since that is what the operator corrects.
 		tooLong := &pgconn.PgError{Code: "22001", Message: "value too long for type character varying(10)"}
 		runErr := errors.Join(fmt.Errorf("copy chunk: %w", tooLong), errors.New("abandon run on billing.orders: drop shadow: connection reset"))
-		v, err := copySwapRunVerdict(st, true, runErr)
+		v, err := copySwapRunVerdict(st, holdFence, runErr)
 		assert.ErrorIs(t, err, runErr)
 		assert.Equal(t, string(executor.CodeDataFault), v.Code)
 		assert.Contains(t, v.Detail, "could not be abandoned")
@@ -173,13 +175,13 @@ func TestCopySwapRunVerdict(t *testing.T) {
 		// 57P01 admin_shutdown: the server went away under the copy; the
 		// rows are not at fault and the next run carries on from the row.
 		shutdown := &pgconn.PgError{Code: "57P01", Message: "terminating connection due to administrator command"}
-		v, _ := copySwapRunVerdict(st, false, fmt.Errorf("copy chunk: %w", shutdown))
+		v, _ := copySwapRunVerdict(st, holdSlot, fmt.Errorf("copy chunk: %w", shutdown))
 		assert.Contains(t, v.Detail, "resumes from the row")
 		assert.NotContains(t, v.Detail, "abandon")
 	})
 
 	t.Run("a stop a rerun clears says the slot stays until it resumes", func(t *testing.T) {
-		v, err := copySwapRunVerdict(st, false, fmt.Errorf("copy: %w", context.Canceled))
+		v, err := copySwapRunVerdict(st, holdSlot, fmt.Errorf("copy: %w", context.Canceled))
 		require.Error(t, err)
 		assert.Contains(t, v.Detail, "replication slot stays")
 		assert.Contains(t, v.Detail, "resumes from the row")
@@ -187,23 +189,32 @@ func TestCopySwapRunVerdict(t *testing.T) {
 	})
 
 	t.Run("a quiesced stop a rerun clears says the fence stays until it resumes", func(t *testing.T) {
-		v, _ := copySwapRunVerdict(st, true, fmt.Errorf("copy: %w", context.Canceled))
+		v, _ := copySwapRunVerdict(st, holdFence, fmt.Errorf("copy: %w", context.Canceled))
 		assert.Contains(t, v.Detail, "fenced against writes")
 		assert.Contains(t, v.Detail, "resumes from the row")
 	})
 
+	t.Run("a blocked-writes run stopped before its fence names no hold and resumes nothing", func(t *testing.T) {
+		v, _ := copySwapRunVerdict(st, holdNone, fmt.Errorf("acquire table lock: %w", context.Canceled))
+		assert.False(t, v.WritesBlocked, "the table kept taking writes")
+		assert.Contains(t, v.Detail, "kept taking writes")
+		assert.Contains(t, v.Detail, "starts from the beginning")
+		assert.NotContains(t, v.Detail, "fenced against writes")
+		assert.NotContains(t, v.Detail, "resumes from the row")
+	})
+
 	t.Run("a cancelled run is coded as cancelled by the caller", func(t *testing.T) {
-		v, _ := copySwapRunVerdict(st, false, fmt.Errorf("copy: %w", context.Canceled))
+		v, _ := copySwapRunVerdict(st, holdSlot, fmt.Errorf("copy: %w", context.Canceled))
 		assert.Equal(t, string(executor.CodeCancelledByCaller), v.Code)
 	})
 
 	t.Run("a breach of the shadow's invariants is coded as an invariant violation", func(t *testing.T) {
-		v, _ := copySwapRunVerdict(st, false, fmt.Errorf("gate: %w", schemachange.ErrInvariantViolation))
+		v, _ := copySwapRunVerdict(st, holdSlot, fmt.Errorf("gate: %w", schemachange.ErrInvariantViolation))
 		assert.Equal(t, string(executor.CodeInvariantViolation), v.Code)
 	})
 
 	t.Run("a rolled-back swap is an execution failure", func(t *testing.T) {
-		v, _ := copySwapRunVerdict(st, false, schemachange.ErrCutoverRolledBack)
+		v, _ := copySwapRunVerdict(st, holdSlot, schemachange.ErrCutoverRolledBack)
 		assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
 	})
 }
@@ -225,7 +236,7 @@ func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 			Verification:    checksum.Report{Rows: 7, Chunks: 1},
 			OldTableDropped: true,
 		}
-		v, err := copySwapOutcome(st, false, done, releaseErr)
+		v, err := copySwapOutcome(st, holdSlot, done, releaseErr)
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 		assert.Empty(t, v.Code)
@@ -235,14 +246,23 @@ func TestCopySwapOutcomeTreatsADoneRowAsExecuted(t *testing.T) {
 
 	t.Run("a done row without an error carries no release wording", func(t *testing.T) {
 		done := schemachange.Result{Checkpoint: checkpoint.Checkpoint{Phase: checkpoint.PhaseDone}}
-		v, err := copySwapOutcome(st, false, done, nil)
+		v, err := copySwapOutcome(st, holdSlot, done, nil)
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 		assert.NotContains(t, v.Detail, "the run then returned")
+		assert.False(t, v.WritesBlocked, "a live run's verdict does not claim the table was offline")
+	})
+
+	t.Run("a block-writes done row is marked writes-blocked", func(t *testing.T) {
+		done := schemachange.Result{Checkpoint: checkpoint.Checkpoint{Phase: checkpoint.PhaseDone}}
+		v, err := copySwapOutcome(st, holdFence, done, nil)
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+		assert.True(t, v.WritesBlocked, "the executed verdict says the table was offline for writes while the run held it")
 	})
 
 	t.Run("an error with the zero result is a failure", func(t *testing.T) {
-		v, err := copySwapOutcome(st, false, schemachange.Result{}, releaseErr)
+		v, err := copySwapOutcome(st, holdSlot, schemachange.Result{}, releaseErr)
 		assert.ErrorIs(t, err, releaseErr)
 		assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
 	})
@@ -311,5 +331,5 @@ func TestCopySwapDetail(t *testing.T) {
 		OldTableDropped: true,
 	}, true)
 	assert.Equal(t, "verified 4 rows in 1 chunks; the retained source is dropped; "+
-		"the table was quiesced: writes were fenced for the length of the run", quiesced)
+		"writes to the table were blocked for the length of the run", quiesced)
 }

@@ -77,14 +77,15 @@ func (f destructiveFixture) run(t *testing.T, sql string, opts migrate.Options) 
 // table is the acknowledgement that names the fixture's orders table.
 func (f destructiveFixture) table() string { return f.schema + ".orders" }
 
-// copySwapOptions is a quiesced copy-and-swap policy over the fixture's
-// database with room on disk, so a statement routed to that backend can run.
+// copySwapOptions is a copy-and-swap policy that blocks the orders table's
+// writes, over the fixture's database with room on disk, so a statement
+// routed to that backend can run.
 func (f destructiveFixture) copySwapOptions() migrate.Options {
 	opts := runOptions()
 	opts.CopySwap = migrate.CopySwapOptions{
 		Connection:    f.cfg,
 		FreeDiskBytes: testutil.UnlimitedDisk,
-		Quiesced:      true,
+		BlockWrites:   f.table(),
 	}
 	return opts
 }

@@ -569,9 +569,15 @@ Migrations serialize per table via a **session-scoped advisory lock** — the an
   shadowed by a decoy.
 - The endpoint must give the client a **stable server session**: before the lock attempt the
   same session-affinity proof the pool runs (`ProveSessionAffinity`) runs on the lock's
-  connection, and a transaction-mode pooler is refused with `ErrNoSessionAffinity`. Behind
-  such a pooler two clients can share one backend and both "hold" the lock, so nothing is
-  taken there.
+  connection, and a transaction-mode or statement-mode pooler is refused with
+  `ErrNoSessionAffinity`. Behind such a pooler two clients can share one backend and both
+  "hold" the lock, so nothing is taken there. A statement-mode pooler refuses the proof's
+  own transaction (PgBouncer closes the connection with SQLSTATE `08P01`); the proof reads
+  that refusal on its `BEGIN` as no affinity, keeping the pooler's error as the cause. The
+  second connection runs a statement before the `BEGIN`, so a session-mode pooler with no
+  backend to spare, which ends its wait with the same `08P01`, fails on that statement
+  instead and stays an untyped error rather than a false refusal. Only a
+  direct connection or a session-mode endpoint is supported.
 - A held lock is **never waited for**: contention is reported immediately as a typed
   `TableLockHeldError` naming the holder (backend PID, `application_name`, connect time) and the
   caller refuses. Because contention refuses rather than queues, a caller that needs locks on
@@ -588,7 +594,8 @@ Migrations serialize per table via a **session-scoped advisory lock** — the an
   A release that finds the lock already gone reports `ErrInvariantViolation`.
 
 *Enforced today:* `pkg/dbconn` `AcquireTableLock` (`TableLock` proof carried by
-`TableLockSession`; affinity refusal, two-instance refusal, keepalive-loss, and `Bind`
+`TableLockSession`; affinity refusal behind transaction-mode and statement-mode PgBouncer,
+two-instance refusal, keepalive-loss, and `Bind`
 cancellation tests); `pkg/schemachange` shadow build, drop, and inspect each require the
 session for the proven table, run under its `Bind` context, and confirm from their own
 transaction that the session's backend holds the lock before the first write (nil-session,
@@ -1332,7 +1339,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   intent is explicit. The rename-overlap pattern Spirit refuses (one `ALTER` that renames a
   column and reuses or retypes it) is unrepresentable: PostgreSQL parses a rename as its own
   statement and the front door admits one statement (`TestClassifyRejectsARename*`). *Source:*
-  [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options), Spirit.
+  [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options),
+  [make mistakes hard to commit](design-principles.md#make-mistakes-hard-to-commit), Spirit.
 - **RF-5** — The dangerous literal never runs silently: risky statements with a safer native
   idiom get the idiom (reported) or a recommendation; running as-submitted requires a loud,
   typed, audited acknowledgement: `--force` on the routes it governs, or `--accept-blocking`
@@ -1407,7 +1415,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
-  [design principles](design-principles.md#declarative-review-first-workflow),
+  [design principles](design-principles.md#declarative-review-first-workflow)
+  ([make mistakes hard to commit](design-principles.md#make-mistakes-hard-to-commit)),
   SchemaBot's `--allow-unsafe` acknowledgement for destructive plans.
 - **RF-11** — A table is judged idle only when the connected server's statistics prove no use
   inside the window: no other session holds a lock on it, both last-scan times are recorded

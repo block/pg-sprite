@@ -262,7 +262,6 @@ func TestMigrateSupportedRowsExecute(t *testing.T) {
 				opts.CopySwap = migrate.CopySwapOptions{
 					Connection:    dbconn.Config{URL: url},
 					FreeDiskBytes: testutil.UnlimitedDisk,
-					Quiesced:      true,
 				}
 				executed = verdict.OutcomeExecutedViaCopyAndSwap
 			}
@@ -270,6 +269,9 @@ func TestMigrateSupportedRowsExecute(t *testing.T) {
 				sql = fmt.Sprintf(sql, schema)
 				st, err := statement.ParseOne(sql)
 				require.NoError(t, err)
+				if claim.copyAndSwap {
+					opts.CopySwap.BlockWrites = st.Schema() + "." + st.Table()
+				}
 				v, err := migrate.Run(t.Context(), pool, st, opts)
 				require.NoError(t, err, sql)
 				assert.Equal(t, executed, v.Outcome,

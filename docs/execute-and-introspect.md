@@ -12,7 +12,9 @@ it does not fold, and what the approach requires from the database.
 - [The problem](#the-problem)
 - [A worked example](#a-worked-example)
 - [How pg-sprite avoids reimplementing the rules](#how-pg-sprite-avoids-reimplementing-the-rules)
+  - [Compared with Spirit](#compared-with-spirit)
 - [What the catalog does not fold](#what-the-catalog-does-not-fold)
+  - [Why `--desired` and `--alter` treat the drop differently](#why---desired-and---alter-treat-the-drop-differently)
 - [What the approach requires](#what-the-approach-requires)
 
 ## The problem
@@ -141,10 +143,35 @@ which a resumed copy checks before it continues, comes from the same rolled-back
 schema, not from editing the DDL in Go
 ([copy-and-swap D1](copy-and-swap-design.md#d1--no-durable-scratch-database)).
 
+### Compared with Spirit
+
 Engines that diff offline take the other route. Spirit, for MySQL, runs a
 [normalization layer](https://github.com/block/spirit/blob/main/pkg/statement/README.md#normalization)
 over parsed `CREATE TABLE` statements that approximates what MySQL does when it stores a table,
-so it can diff without a server. pg-sprite carries no such layer and relies on the round trip.
+so it can interpret the desired file without running it on a server. pg-sprite carries no such
+layer and relies on the round trip.
+
+Spirit reads the live table with `SHOW CREATE TABLE`, then parses and normalizes that text the
+same way it does the desired file. Because `SHOW CREATE TABLE` prints what MySQL stored, the text
+is already in MySQL's form and the normalizers find almost nothing to change on that side. The
+real work happens on the desired file, where a person wrote `BOOL`, an inline `UNIQUE`, an
+unnamed index, and so on.
+
+```text
+current:  SHOW CREATE TABLE  →  parse + normalize  →  (little to change)  ─┐
+                                                                            ├─ Diff
+desired:  schema file        →  parse + normalize  →  (real rewriting)    ─┘
+```
+
+Both tools connect to read the live table; they differ in how they interpret the desired file:
+
+| | Spirit | pg-sprite |
+| --- | --- | --- |
+| Current table | read-only `SHOW CREATE TABLE` | read-only catalog query |
+| Desired file | interpreted in Go by the normalizers, no server | run as DDL in a rolled-back scratch schema, then read with the same catalog query |
+| What the connection needs | read access | a writable primary and the database-level `CREATE` privilege |
+| Works on a read replica | yes | no |
+| Spellings not modeled | can show as false changes until the normalizers learn them | none: PostgreSQL did the rewriting |
 
 ## What the catalog does not fold
 
@@ -189,12 +216,56 @@ ALTER TABLE public.accounts ADD CONSTRAINT accounts_email_uniq UNIQUE (email);
 | --- | --- | --- | --- |
 | `DEFAULT now()` vs `DEFAULT CURRENT_TIMESTAMP` | `now()` vs `CURRENT_TIMESTAMP` | a `SET DEFAULT` | converges: the next `diff` is empty |
 | `DEFAULT 1 + 1` vs `DEFAULT 2` | `(1 + 1)` vs `2`; the server does not evaluate the expression | a `SET DEFAULT` | converges |
-| a named `CONSTRAINT accounts_email_uniq UNIQUE` vs an unnamed `UNIQUE` | `accounts_email_uniq` vs `accounts_email_key` | a destructive `DROP CONSTRAINT` of the old name and an `ADD CONSTRAINT` under the new one; constraints are matched by name, so a rename is a drop and an add | `migrate --desired` refuses the whole plan with reason `destructive-change`; running the statements with `migrate --alter` converges |
+| a named `CONSTRAINT accounts_email_uniq UNIQUE` vs an unnamed `UNIQUE` | `accounts_email_uniq` vs `accounts_email_key` | a destructive `DROP CONSTRAINT` of the old name and an `ADD CONSTRAINT` under the new one; constraints are matched by name, so a rename is a drop and an add | `migrate --desired` refuses the whole plan with reason `destructive-change`; running the add with `migrate --alter`, then the drop with `migrate --alter --allow-destructive public.accounts`, then `migrate --desired` for the rest, converges ([why the two differ, and the commands](#why---desired-and---alter-treat-the-drop-differently)) |
 | `name text COLLATE "C"` vs `name text` | collation `"C"` vs the type's default | refused: `unsupported schema change: column "name" collation change ("" vs "pg_catalog.\"C\"")` | does not converge through pg-sprite; a collation change rewrites the column and rebuilds its indexes, which the diff does not derive |
 
 The same table written with `int8`, `TEXT`, `TIMESTAMP WITH TIME ZONE`, `current_timestamp`,
 `DEFAULT (2)`, table-level `PRIMARY KEY (id)` and `UNIQUE (email)`, and `COLLATE "default"`
 reports no changes against the live table: those differences the catalog does fold.
+
+### Why `--desired` and `--alter` treat the drop differently
+
+Both front doors refuse to discard live data or structure without being told to; they differ in
+who wrote the drop.
+
+- **`migrate --desired`: pg-sprite derived the drop.** The diff produced
+  `DROP CONSTRAINT accounts_email_key` and `ADD CONSTRAINT accounts_email_uniq`. A desired file
+  cannot say whether that is a rename or the deliberate removal of a guarantee, so pg-sprite does
+  not infer that the loss is intended. Any destructive statement refuses the whole plan,
+  including the harmless `ADD`, and there is no acknowledgement to lift it: `--allow-destructive`
+  cannot be combined with `--desired`.
+- **`migrate --alter`: the operator wrote the drop.** The intent is explicit, but the drop is still
+  refused with `destructive-change` until `--allow-destructive public.accounts` names the table.
+  The `ADD` is not destructive and runs without it.
+
+```text
+--desired   diff derives DROP + ADD    → destructive statement in the plan → whole plan refused, no override
+--alter     operator writes the ADD    → runs (the safer UNIQUE sequence)
+            operator writes the DROP   → refused unless --allow-destructive public.accounts
+--desired   rerun for the rest         → the two SET DEFAULTs run; a fresh plan is empty: converged
+```
+
+To converge the example, run the `ADD` before the `DROP`:
+
+```sh
+pg-sprite migrate --alter 'ALTER TABLE public.accounts ADD CONSTRAINT accounts_email_uniq UNIQUE (email)'
+pg-sprite migrate --alter 'ALTER TABLE public.accounts DROP CONSTRAINT accounts_email_key' \
+  --allow-destructive public.accounts
+pg-sprite migrate --desired accounts.sql
+```
+
+The order matters. While both constraints stand, both enforce uniqueness on `email`, so the
+column is never left unenforced. Dropping first would leave a window in which concurrent writes
+can insert duplicates, and the `ADD` would then fail on them. The `ADD` runs as the safer
+sequence the plan shows: `CREATE UNIQUE INDEX CONCURRENTLY`, then `ADD CONSTRAINT … UNIQUE USING
+INDEX`. If it fails, `accounts_email_key` still enforces uniqueness and nothing is lost. A failed
+concurrent build can leave an invalid index under the new name; the
+[invalid-index runbook](invalid-index-recovery.md) says how to clear it before you run the `ADD`
+again.
+
+The refusal of a desired plan is not permission to run its statements one by one. An
+orchestrator should not turn a refused plan into acknowledged `--alter` statements on its own;
+running the drop is a separate decision an operator makes.
 
 When a reported difference was not meant as a change, write the desired file the way the server
 stores it. [`pg-sprite pull`](pull.md) exports a live table in that form.

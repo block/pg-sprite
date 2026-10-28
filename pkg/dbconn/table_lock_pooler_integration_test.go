@@ -26,6 +26,21 @@ func TestAcquireTableLockRefusesAConnectionWithoutSessionAffinity(t *testing.T) 
 	require.Nil(t, session)
 }
 
+// A statement-mode pooler keeps no session across statements, so a
+// session-scoped lock taken through it would be released, as far as the
+// client can tell, the moment the statement ends. The lock refuses the
+// endpoint with the same typed refusal as transaction mode, before taking
+// anything: the affinity proof's transaction is refused by the pooler first.
+func TestAcquireTableLockRefusesStatementPooling(t *testing.T) {
+	pooledURL := testutil.StartPostgresBehindPgBouncer(t, testutil.StatementPooling)
+	cfg := dbconn.Config{URL: pooledURL}
+
+	session, err := dbconn.AcquireTableLock(t.Context(), cfg, "app", "orders")
+	require.ErrorIs(t, err, dbconn.ErrNoSessionAffinity)
+	assert.Contains(t, err.Error(), "session-mode endpoint", "the refusal must name what to change")
+	require.Nil(t, session)
+}
+
 // A session-mode pooler keeps one backend per client connection, which is
 // the endpoint the refusal above tells an operator to move to, so the lock
 // must work through it.
