@@ -537,9 +537,11 @@ type Verdict struct {
 	Detail string `json:"detail,omitempty"`
 	// WritesBlocked is true on an executed or failed copy-and-swap verdict
 	// whose run blocked the table's writes (offline mode, --block-writes):
-	// every write was refused with SQLSTATE 55006 by the write fence while
-	// the run held the table. On a failed verdict, Detail says whether the
-	// fence still stands. False for every other verdict, including a live
+	// the write fence went on, and every write that reached it was refused
+	// with SQLSTATE 55006. On a failed verdict it is set only when the fence
+	// went on, and Detail says whether it still stands; a blocked-writes run
+	// that stopped before its fence went on reports false, since the table
+	// kept taking writes. False for every other verdict, including a live
 	// run's.
 	WritesBlocked bool `json:"writes_blocked,omitempty"`
 	// SaferIdiom is a native alternative to the refused statement, when one

@@ -213,12 +213,16 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	logger.Debug("copy-and-swap preflight passed",
 		"decodes_wal", target.DecodesWAL(), "keep_old", opts.CopySwap.KeepOld)
 
-	quiesced := opts.CopySwap.BlockWrites != ""
-	if quiesced {
+	hold := holdSlot
+	if opts.CopySwap.BlockWrites != "" {
+		hold = holdFence
 		auditBlockWrites(opts.audit(), st)
 	}
 	result, err := runner.Run(ctx, pool, target, st)
-	return copySwapOutcome(st, quiesced, result, err)
+	if hold == holdFence && err != nil && result.Checkpoint.Phase != checkpoint.PhaseDone {
+		hold, err = fenceAfterStop(ctx, store, st, err)
+	}
+	return copySwapOutcome(st, hold, result, err)
 }
 
 // copySwapOutcome folds what the Runner returned into Run's contract. A
@@ -229,11 +233,11 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 // and neither is a failed change, so the verdict says what the engine
 // tables say and names the error in its detail for the operator to find.
 // Any other error is folded by copySwapRunVerdict.
-func copySwapOutcome(st statement.Statement, quiesced bool, result schemachange.Result, err error) (verdict.Verdict, error) {
+func copySwapOutcome(st statement.Statement, hold sourceHold, result schemachange.Result, err error) (verdict.Verdict, error) {
 	if err != nil && result.Checkpoint.Phase != checkpoint.PhaseDone {
-		return copySwapRunVerdict(st, quiesced, err)
+		return copySwapRunVerdict(st, hold, err)
 	}
-	detail := copySwapDetail(result, quiesced)
+	detail := copySwapDetail(result, hold == holdFence)
 	if err != nil {
 		detail += "; the change is complete and its done row saved, but the run then returned: " + err.Error()
 	}
@@ -242,7 +246,7 @@ func copySwapOutcome(st statement.Statement, quiesced bool, result schemachange.
 		Statement:     st.SQL(),
 		Table:         qualified(st),
 		Detail:        detail,
-		WritesBlocked: quiesced,
+		WritesBlocked: hold == holdFence,
 	}, nil
 }
 
@@ -291,7 +295,7 @@ func classifyCopySwapPreflight(err error) (verdict.Refusal, string, error) {
 // for every other stop the checkpoint row stays at its last save, and what
 // the rerun does with it depends on the error and on which hold the run
 // keeps on the source while it is stopped.
-func copySwapRunVerdict(st statement.Statement, quiesced bool, err error) (verdict.Verdict, error) {
+func copySwapRunVerdict(st statement.Statement, hold sourceHold, err error) (verdict.Verdict, error) {
 	if cause := schemachange.RefusalCauseOf(err); cause != "" {
 		r, ok := shadowRefusal(cause)
 		if !ok {
@@ -305,8 +309,8 @@ func copySwapRunVerdict(st statement.Statement, quiesced bool, err error) (verdi
 		Code:          string(copySwapFailureCode(err)),
 		Statement:     st.SQL(),
 		Table:         qualified(st),
-		Detail:        "the copy-and-swap run stopped: " + err.Error() + "; " + copySwapStoppedRemedy(quiesced, err),
-		WritesBlocked: quiesced,
+		Detail:        "the copy-and-swap run stopped: " + err.Error() + "; " + copySwapStoppedRemedy(hold, err),
+		WritesBlocked: hold == holdFence,
 	}, err
 }
 
@@ -327,14 +331,19 @@ func copySwapRunVerdict(st statement.Statement, quiesced bool, err error) (verdi
 // other stop is resumed by running the statement again. In each case the
 // detail names the hold the run keeps or kept on the source, since that is
 // what the operator is paying for in the meantime: the write fence of a
-// quiesced run, or the replication slot of a live run, which pins WAL on
-// the server until it is dropped.
-func copySwapStoppedRemedy(quiesced bool, err error) string {
-	hold := "its replication slot stays and pins WAL on the server"
+// run that blocked writes, or the replication slot of a live run, which
+// pins WAL on the server until it is dropped. A blocked-writes run that
+// stopped before its fence went on left neither, and saved no row to
+// resume from, so the detail says the table kept taking writes.
+func copySwapStoppedRemedy(hold sourceHold, err error) string {
+	if hold == holdNone {
+		return "the run stopped before it fenced the source, so the table kept taking writes and no checkpoint row was saved; running the same statement again starts from the beginning"
+	}
+	kept := "its replication slot stays and pins WAL on the server"
 	release := "drops the replication slot"
 	released := "its replication slot is dropped"
-	if quiesced {
-		hold = "the source stays fenced against writes"
+	if hold == holdFence {
+		kept = "the source stays fenced against writes"
 		release = "takes the write fence off the source"
 		released = "the write fence is off the source"
 	}
@@ -350,7 +359,7 @@ func copySwapStoppedRemedy(quiesced bool, err error) string {
 	if schemachange.IsDataFault(err) {
 		return "the server rejected the rows as the statement would shape them and the run could not be abandoned, so running the same statement again would copy the same rows and stop here again; " + startOver
 	}
-	return "any checkpoint row it saved remains and " + hold + " until the same statement is run again, which resumes from the row"
+	return "any checkpoint row it saved remains and " + kept + " until the same statement is run again, which resumes from the row"
 }
 
 // copySwapFailureCode names the executor outcome code for an error out of

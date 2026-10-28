@@ -34,6 +34,7 @@ func TestRunAbandonsACopyAndSwapRunOnADataFault(t *testing.T) {
 	assert.Equal(t, f.schema+".orders", v.Table)
 	assert.Contains(t, v.Detail, "the run was abandoned")
 	assert.Contains(t, v.Detail, "the write fence is off the source")
+	assert.True(t, v.WritesBlocked, "the copy the run abandoned ran behind its fence")
 	assert.NotContains(t, v.Detail, "--restart", "nothing remains for a restart to discard")
 
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "the shadow is dropped")
