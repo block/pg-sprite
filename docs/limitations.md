@@ -96,6 +96,11 @@ that the first still holds it and that the second cannot take it. A connection t
 the timeouts is refused with `ErrSessionSettingsDiscarded`, and one that fails the lock
 check with `ErrNoSessionAffinity`, before any schema change runs.
 
+These checks guard against session loss they can observe; they cannot prove its absence.
+An idle transaction-mode pooler with spare backends can keep a connection on one backend
+for the length of the checks and move it later, so a clean start does not make a pooler
+path safe. Connect directly to the primary.
+
 This constrains only pg-sprite's own connection. The application keeps whatever pooling
 it uses — a client-side pool, or a server-side pooler in session, transaction, or
 statement mode — and copy-and-swap reads the application's writes from the WAL through
@@ -106,8 +111,8 @@ logical decoding, whichever pooler carried them.
 | A direct connection to the primary | Supported, and the recommended deployment. Every schema change path, copy-and-swap included, is tested this way. |
 | Supabase's Supavisor session endpoint | Supported for the native schema changes listed in [supabase.md](supabase.md#what-works-today). Copy-and-swap through it is unsupported. |
 | PgBouncer, or any other server-side pooler, in session mode | Unsupported. Connect directly to the primary. |
-| Any pooler in transaction mode | Unsupported, and refused before any work runs: opening the pool fails with `ErrNoSessionAffinity`, whose message names the remedy. |
-| Any pooler in statement mode | Unsupported. Connect directly to the primary. |
+| Any pooler in transaction mode | Unsupported. Connect directly to the primary. The startup checks usually refuse it before any work runs, with `ErrSessionSettingsDiscarded` when the pooler drops the timeouts or `ErrNoSessionAffinity` when it moves the connection; the tests pin `ErrNoSessionAffinity` for PgBouncer and Supavisor in transaction mode. A pooler that passes the checks is still unsupported. |
+| Any pooler in statement mode | Unsupported. Connect directly to the primary. Opening the pool refuses it with `ErrNoSessionAffinity`: the pooler rejects the check's transaction, which the tests pin for PgBouncer in statement mode. |
 
 The application's pooler and pg-sprite share the server's `max_connections`, which has
 to cover the application's backends plus pg-sprite's pool, its dedicated sessions, and,
