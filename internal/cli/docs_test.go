@@ -100,6 +100,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 		verdict.ByDesign(verdict.ReasonIndexStatement).WithSite(verdict.RefusalSiteIndexSingleRelation),
 		3*time.Second, 10*time.Minute)
 	require.NoError(t, err)
+	acceptedBlocking.AllowedDestructive = true
 	rewriteRequired := alterReport(t, "ALTER TABLE users ADD COLUMN nickname text UNIQUE",
 		"public", "users", usersFacts())
 	copyAndSwapRouted := alterReport(t, "ALTER TABLE users ALTER COLUMN id TYPE text",

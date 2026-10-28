@@ -203,28 +203,52 @@ execute_refused() {
     fi
 }
 
-# execute_accepted table sql
+# execute_accepted table allowed_destructive sql
 #
 # Runs a gate-refused blocking index statement under the --accept-blocking
-# acknowledgement and requires the without-online-safety verdict: its own
+# acknowledgement plus --allow-destructive (which a DROP INDEX needs and a
+# REINDEX ignores), and requires the without-online-safety verdict: its own
 # exit code 3 (never 0, which stays exclusive to online-safe execution),
-# the passthrough marker, and the table the acknowledgement named. The
-# statement budget is spelled on the command line because the flag refuses
-# to inherit the default as the accepted outage bound.
+# the passthrough marker, whether the verdict records an acknowledged loss,
+# and the table the acknowledgements named. The statement budget is spelled
+# on the command line because the flag refuses to inherit the default as
+# the accepted outage bound.
 execute_accepted() {
-    local table="$1" sql="$2" out status=0
-    step "execute (accept blocking on $table): $sql"
+    local table="$1" allowed="$2" sql="$3" out status=0
+    step "execute (accept blocking and the loss on $table): $sql"
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" migrate --url "$PG_DSN" --json --alter "$sql" \
-            --accept-blocking "$table" --statement-timeout 30s) || status=$?
+            --accept-blocking "$table" --allow-destructive "$table" --statement-timeout 30s) || status=$?
         assert_eq "accepted exit of [$sql]" 3 "$status"
         assert_eq "outcome of [$sql]" "executed-without-online-safety" "$(jq -r '.outcome' <<<"$out")"
         assert_eq "blocking_passthrough of [$sql]" true "$(jq -r '.blocking_passthrough' <<<"$out")"
+        assert_eq "allowed_destructive of [$sql]" "$allowed" "$(jq -r '.allowed_destructive // false' <<<"$out")"
         assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
         assert_eq "statement_timeout of [$sql]" 30s "$(jq -r '.statement_timeout' <<<"$out")"
     else
-        "$PGS" migrate --url "$PG_DSN" --alter "$sql" --accept-blocking "$table" --statement-timeout 30s \
+        "$PGS" migrate --url "$PG_DSN" --alter "$sql" --accept-blocking "$table" --allow-destructive "$table" \
+            --statement-timeout 30s \
             || echo "(exit $? — expected 3: committed without an online-safety guarantee)"
+    fi
+}
+
+# execute_accepted_needs_loss table sql
+#
+# The same DROP INDEX under --accept-blocking alone: accepting the lock is
+# not accepting the loss, so it is refused (exit 2, destructive-change) and
+# nothing runs.
+execute_accepted_needs_loss() {
+    local table="$1" sql="$2" out status=0
+    step "execute (accept blocking only on $table): $sql"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" migrate --url "$PG_DSN" --json --alter "$sql" \
+            --accept-blocking "$table" --statement-timeout 30s) || status=$?
+        assert_eq "refusal exit of [$sql]" 2 "$status"
+        assert_eq "reason of [$sql]" "destructive-change" "$(jq -r '.reason' <<<"$out")"
+        assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
+    else
+        "$PGS" migrate --url "$PG_DSN" --alter "$sql" --accept-blocking "$table" --statement-timeout 30s \
+            || echo "(refused, exit $? — expected 2: a dropped index also needs --allow-destructive)"
     fi
 }
 
@@ -486,8 +510,9 @@ run_exec() {
     # runs first so the index is still there to drop afterwards.
     execute_refused         index-statement "DROP INDEX orders_total_idx"
     execute_accept_mismatch public.users    "DROP INDEX orders_total_idx"
-    execute_accepted        public.orders   "DROP INDEX orders_total_idx"
-    execute_accepted        public.orders   "REINDEX TABLE orders"
+    execute_accepted_needs_loss public.orders "DROP INDEX orders_total_idx"
+    execute_accepted        public.orders true  "DROP INDEX orders_total_idx"
+    execute_accepted        public.orders false "REINDEX TABLE orders"
     # A drop discards the column's values, so it is refused until the
     # acknowledgement names the table, then runs natively.
     refused_destructive                     "ALTER TABLE users DROP COLUMN status"

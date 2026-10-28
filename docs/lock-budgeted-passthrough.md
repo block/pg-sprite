@@ -133,9 +133,17 @@ a bare boolean:
 pg-sprite migrate \
   --alter 'DROP INDEX app.orders_created_at_idx' \
   --accept-blocking app.orders \
+  --allow-destructive app.orders \
   --lock-timeout 3s \
   --statement-timeout 10m
 ```
+
+A `DROP INDEX` needs both acknowledgements, each naming the owning table: `--accept-blocking`
+accepts the lock, and `--allow-destructive` accepts losing the index (RF-10). The second is
+checked after the owning table resolves and before anything executes; without it the drop is
+refused with `destructive-change`, and the detail lists the checks that catch an index the
+application still uses. `REINDEX INDEX` and `REINDEX TABLE` discard nothing and need only
+`--accept-blocking`.
 
 The value names the table whose lock the operator accepts, because that is the relation the
 blocking form makes unavailable: a plain `DROP INDEX` takes `ACCESS EXCLUSIVE` on the index's
