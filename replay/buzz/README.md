@@ -21,11 +21,13 @@ authoritative. See the [refusal class contract](../../docs/refusal-classes.md).
 
 ## Boundary facts the curation surfaced
 
-Curating the manifest against real verdicts (not predictions) established two
+Curating the manifest against real verdicts (not predictions) established three
 behaviors worth knowing when reading the results:
 
 - `CREATE INDEX IF NOT EXISTS` is refused by design — a name-only no-op cannot prove
   the existing index is valid or even the requested one.
-- Buzz's unnamed `ADD FOREIGN KEY` is refused (`not-native-safe-rewrite-required`)
-  while the same constraint written with `CONSTRAINT <name>` executes via the safer
-  `NOT VALID` + `VALIDATE` sequence — the rewrite needs a name to reference.
+- Buzz's unnamed `ADD FOREIGN KEY` executes via the safer `NOT VALID` + `VALIDATE`
+  sequence, under the name the server would have chosen.
+- Every `DROP COLUMN`, `DROP CONSTRAINT`, and `DROP NOT NULL` is refused by design
+  (`destructive-change`): the replay never passes `--allow-destructive`, so it pins
+  the refusal and advances the history through psql.

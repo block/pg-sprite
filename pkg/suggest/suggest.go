@@ -19,11 +19,11 @@ import (
 // FormatVersion identifies the report contract
 // (docs/suggest-report.md). A consumer must reject a report whose version
 // it does not understand instead of guessing at the field semantics.
-// Version 4 added coordinated-constraint-rename to the Guidance
-// vocabulary; version 3 added expand-contract-column and
-// coordinated-table-rename; version 2 added name-constraint-then-validate
-// and unique-index-then-constraint.
-const FormatVersion = 4
+// Version 5 added alter-column-type-in-place to the Guidance vocabulary;
+// version 4 added coordinated-constraint-rename; version 3 added
+// expand-contract-column and coordinated-table-rename; version 2 added
+// name-constraint-then-validate and unique-index-then-constraint.
+const FormatVersion = 5
 
 // Caveat is a typed condition attached to a recommendation; automation
 // branches on it, never on prose. The caveats are independent — no caveat
@@ -143,6 +143,15 @@ const (
 	// constraint break the instant it commits. Coordinate the rename
 	// with the application deploy that adopts the new constraint name.
 	GuidanceCoordinatedConstraintRename Guidance = "coordinated-constraint-rename"
+	// GuidanceAlterColumnTypeInPlace: one ALTER TABLE that drops a column
+	// and adds a column of the same name. The drop discards every value
+	// the column holds and the re-added column starts empty, which is
+	// rarely what a change of type means. Change the column in place with
+	// ALTER COLUMN ... TYPE ... USING ..., which converts the values
+	// instead of discarding them. Carried by a destructive-change refusal,
+	// never by a suggestion: the advisory surface covers blocking idioms,
+	// and this statement is refused for its data loss.
+	GuidanceAlterColumnTypeInPlace Guidance = "alter-column-type-in-place"
 )
 
 // Guidances returns the closed set of Guidance values. It is part of the
@@ -160,6 +169,7 @@ func Guidances() []Guidance {
 		GuidanceExpandContractColumn,
 		GuidanceCoordinatedTableRename,
 		GuidanceCoordinatedConstraintRename,
+		GuidanceAlterColumnTypeInPlace,
 	}
 }
 
@@ -192,6 +202,9 @@ func ManualPath(g Guidance) string {
 	case GuidanceCoordinatedConstraintRename:
 		return "the index backs a constraint, and renaming it renames the constraint: coordinate the rename with the " +
 			"application deploy that stops naming the old constraint (ON CONFLICT ON CONSTRAINT, error handling)"
+	case GuidanceAlterColumnTypeInPlace:
+		return "change the column in place with ALTER TABLE ... ALTER COLUMN ... TYPE ... USING ..., which converts its values; " +
+			"dropping and re-adding it discards every value it holds"
 	}
 	return string(g)
 }

@@ -131,8 +131,9 @@ Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are 
 has minted its `CopySwapShape`; the environment check is what mints the `CopySwapTarget`
 every writing step requires: `wal_level = logical` (`rds.logical_replication = 1` on Aurora/RDS, a
 static parameter requiring a reboot), one free slot under `max_replication_slots`, and two free
-senders under `max_wal_senders` — the slot's connection holds its exported snapshot while the
-copy imports it, and the stream decodes on a connection of its own. Both apply only to a run
+senders under `max_wal_senders` — the run creates the slot on one replication connection,
+closes it once the checkpoint row naming the slot commits, and later decodes on a connection of
+its own, so it holds one sender at a time and the second is headroom. Both apply only to a run
 that decodes WAL; a quiesced run skips them. The same check compares the free disk the
 caller measured on the database volume — PostgreSQL has no function that reports it —
 against the shadow copy's headroom, and

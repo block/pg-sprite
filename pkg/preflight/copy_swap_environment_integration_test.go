@@ -141,11 +141,10 @@ func TestCheckCopySwapEnvironmentRequiresAFreeReplicationSlot(t *testing.T) {
 	require.NoError(t, f.check(t, decoding))
 }
 
-// A logical cluster with a free slot but max_wal_senders = 1 can accept the
-// replication connection that creates the slot and holds its snapshot, but
-// not the second one that decodes while the copy imports that snapshot, so
-// capacity is refused on the sender side alone — before anything is
-// created, rather than after the slot exists and the copy has begun.
+// A logical cluster with a free slot but max_wal_senders = 1 is below the
+// two free senders the route requires, so capacity is refused on the sender
+// side alone — before anything is created, rather than after the slot
+// exists and the copy has begun.
 func TestCheckCopySwapEnvironmentRequiresAFreeWALSender(t *testing.T) {
 	f := newCopySwapEnvironmentFixture(t, testutil.StartPostgresWithSettings(t,
 		"wal_level=logical", "max_replication_slots=1", "max_wal_senders=1"))
