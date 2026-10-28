@@ -78,6 +78,47 @@ follows `bytea_output`. The copy, the verifier, and the catch-up each pin both s
 (`3` and `hex`) in their own sessions, so such a conversion lands the same text from all
 three whatever the database or role is configured with.
 
+## Connections and poolers
+
+pg-sprite keeps state on each connection's PostgreSQL session: the execution bounds
+(`lock_timeout`, `statement_timeout`) every statement runs under, and the per-table
+advisory lock that keeps a second run off the same table. Each of its connections must
+therefore stay on one session for its whole life. This is **session affinity**: every
+statement sent on a connection runs on the same PostgreSQL backend, so a setting or lock
+taken by one statement is still there for the next.
+
+A direct connection always has it. A transaction-mode or statement-mode pooler does not:
+it may hand the connection's next transaction to a different backend, one another client
+may have just used, so pg-sprite's timeouts could silently vanish and two runs could both
+believe they hold the same table lock. pg-sprite checks rather than assumes. When it opens
+its pool it reads back the timeouts it set, and on the pool and again on the table lock's
+own connection it takes a throwaway advisory lock, then confirms from a second connection
+that the first still holds it and that the second cannot take it. A connection that drops
+the timeouts is refused with `ErrSessionSettingsDiscarded`, and one that fails the lock
+check with `ErrNoSessionAffinity`, before any schema change runs.
+
+These checks guard against session loss they can observe; they cannot prove its absence.
+An idle transaction-mode pooler with spare backends can keep a connection on one backend
+for the length of the checks and move it later, so a clean start does not make a pooler
+path safe. Connect directly to the primary.
+
+This constrains only pg-sprite's own connection. The application keeps whatever pooling
+it uses — a client-side pool, or a server-side pooler in session, transaction, or
+statement mode — and copy-and-swap reads the application's writes from the WAL through
+logical decoding, whichever pooler carried them.
+
+| pg-sprite connects through | Support |
+| --- | --- |
+| A direct connection to the primary | Supported, and the recommended deployment. Every schema change path, copy-and-swap included, is tested this way. |
+| Supabase's Supavisor session endpoint | Supported for the native schema changes listed in [supabase.md](supabase.md#what-works-today). Copy-and-swap through it is unsupported. |
+| PgBouncer, or any other server-side pooler, in session mode | Unsupported. Connect directly to the primary. |
+| Any pooler in transaction mode | Unsupported. Connect directly to the primary. The startup checks usually refuse it before any work runs, with `ErrSessionSettingsDiscarded` when the pooler drops the timeouts or `ErrNoSessionAffinity` when it moves the connection; the tests pin `ErrNoSessionAffinity` for PgBouncer and Supavisor in transaction mode. A pooler that passes the checks is still unsupported. |
+| Any pooler in statement mode | Unsupported. Connect directly to the primary. Opening the pool refuses it with `ErrNoSessionAffinity`: the pooler rejects the check's transaction, which the tests pin for PgBouncer in statement mode. |
+
+The application's pooler and pg-sprite share the server's `max_connections`, which has
+to cover the application's backends plus pg-sprite's pool, its dedicated sessions, and,
+for copy-and-swap, its replication connections.
+
 ## Declarative model boundaries
 
 The declarative front door (desired-state files, `diff`, and schema export)
