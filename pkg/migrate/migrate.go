@@ -277,6 +277,11 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 			return verdict.Verdict{}, err
 		}
 	}
+	if opts.CopySwap.BlockWrites != "" {
+		if err := checkBlockWritesAck(st, opts.CopySwap.BlockWrites); err != nil {
+			return verdict.Verdict{}, err
+		}
+	}
 	if opts.AllowDestructive != "" {
 		if err := checkAllowDestructiveAck(qualified(st), opts.AllowDestructive); err != nil {
 			return verdict.Verdict{}, err
