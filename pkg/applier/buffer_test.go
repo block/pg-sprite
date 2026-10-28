@@ -167,7 +167,7 @@ func TestBufferReusedOldKeyIsNotACompletionSource(t *testing.T) {
 	t.Run("chain, after the old key's marker was discarded", func(t *testing.T) {
 		b := NewBuffer()
 		require.NoError(t, b.Add(keyMove(10, 50, 15, col("label", "r"), marker("doc"))))
-		_ = b.Drain(position(t, 30, [2]int64{11, 20}))
+		_ = b.Drain(position(t, 30, [2]int64{11, 20}), AllVisible())
 		require.NoError(t, b.Add(insert(20, 50, col("label", "s"), col("doc", "S-doc"))))
 		require.NoError(t, b.Add(keyMove(30, 15, 25, col("label", "r"), marker("doc"))))
 		got := entry(t, b, 25)
@@ -178,7 +178,7 @@ func TestBufferReusedOldKeyIsNotACompletionSource(t *testing.T) {
 	t.Run("reuse seen as an update of a key the buffer does not hold", func(t *testing.T) {
 		b := NewBuffer()
 		require.NoError(t, b.Add(keyMove(10, 50, 25, col("label", "r"), marker("doc"))))
-		_ = b.Drain(position(t, 30, [2]int64{21, 30}))
+		_ = b.Drain(position(t, 30, [2]int64{21, 30}), AllVisible())
 		require.NoError(t, b.Add(update(20, 50, col("label", "s2"))))
 		assert.True(t, entry(t, b, 25).OldKeyReused, "a live row at 50 is not R")
 	})
@@ -212,7 +212,7 @@ func TestBufferReuseIndexFollowsTheEntries(t *testing.T) {
 	t.Run("image drained, then the old key reused", func(t *testing.T) {
 		b := NewBuffer()
 		require.NoError(t, b.Add(keyMove(10, 50, 25, col("label", "r"), marker("doc"))))
-		batch := b.Drain(position(t, 6000))
+		batch := b.Drain(position(t, 6000), AllVisible())
 		require.Equal(t, []int64{25, 50}, keys(batch.Entries))
 		require.NoError(t, b.Add(insert(20, 50, col("label", "s"), col("doc", "S-doc"))))
 		assert.Equal(t, 1, b.Len())
@@ -387,6 +387,32 @@ func TestBufferKeysEveryEventKindOnItsDeliveredPosition(t *testing.T) {
 			}
 		})
 	}
+}
+
+// An entry carries the transaction of the latest event merged into it: an
+// overlaying UPDATE replaces it, a key move stamps both halves with the
+// move's, and a DELETE stamps the marker with its own.
+func TestBufferEntryCarriesItsLatestTransaction(t *testing.T) {
+	t.Run("overlay", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(inTx(update(10, 1, col("label", "a")), 600)))
+		assert.Equal(t, uint32(600), entry(t, b, 1).Xid)
+		require.NoError(t, b.Add(inTx(update(20, 1, col("label", "b")), 700)))
+		assert.Equal(t, uint32(700), entry(t, b, 1).Xid)
+	})
+	t.Run("key move", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(inTx(update(10, 1, col("label", "a")), 600)))
+		require.NoError(t, b.Add(inTx(keyMove(20, 1, 2, col("label", "b")), 700)))
+		assert.Equal(t, uint32(700), entry(t, b, 1).Xid, "the marker at the old key")
+		assert.Equal(t, uint32(700), entry(t, b, 2).Xid, "the moved image")
+	})
+	t.Run("delete", func(t *testing.T) {
+		b := NewBuffer()
+		require.NoError(t, b.Add(inTx(update(10, 1, col("label", "a")), 600)))
+		require.NoError(t, b.Add(inTx(del(20, 1), 700)))
+		assert.Equal(t, uint32(700), entry(t, b, 1).Xid)
+	})
 }
 
 func TestEntryKindStrings(t *testing.T) {

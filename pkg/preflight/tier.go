@@ -7,7 +7,8 @@ import (
 )
 
 // RequiredTier derives the engine-role tier a routed change's exec SQL
-// needs: an in-place ALTER TABLE step is owner-gated (TierAlterInPlace),
+// needs: an in-place ALTER TABLE step, and an ALTER INDEX ... RENAME TO on
+// the table's index, is owner-gated (TierAlterInPlace),
 // and any step that builds a new index — every CREATE INDEX, and the ALTER
 // TABLE shapes that build one as a side effect — additionally needs CREATE
 // on the schema (TierIndexBuild), so the requirement is the most demanding
@@ -45,6 +46,10 @@ func RequiredTier(execSQL []string) (Tier, error) {
 			if st.BuildsIndex() {
 				tier = TierIndexBuild
 			}
+		case statement.KindRenameIndex:
+			// Renaming an index needs ownership of it, and an index is
+			// owned by its table's owner: the in-place rung.
+			altersTable = true
 		default:
 			return 0, fmt.Errorf("derive privilege tier for step %q: kind %s is not a shape the engine executes",
 				sql, st.Kind())

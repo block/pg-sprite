@@ -151,8 +151,25 @@ const (
 	// again under the table's lock; nothing was validated. Re-plan against
 	// the constraint as it stands.
 	CodeValidatedConstraintDrift Code = "validated-constraint-drift"
+	// CodeRenamedIndexDrift: the relation an ALTER INDEX ... RENAME TO
+	// names is no longer a plain index on the preflighted table, read
+	// again under the table's lock — gone, not an index, on another table,
+	// or now backing a constraint; nothing was renamed. Re-plan against the
+	// catalog as it stands.
+	CodeRenamedIndexDrift Code = "renamed-index-drift"
 	// CodeTableNotFound: the statement's qualified table does not exist.
 	CodeTableNotFound Code = "table-not-found"
+	// CodeDataFault: the server rejected the table's rows as the statement
+	// would shape them (SQLSTATE class 22, a value the new type will not
+	// hold; class 23, a constraint the rows break). The code names the
+	// fault, not what was left behind: any rerun meets the same rows, so
+	// the copy-and-swap run tries to abandon itself — shadow, hold on the
+	// source, and checkpoint row discarded — and returns
+	// *schemachange.AbandonedError only when that finished. Correct the
+	// data or the statement, then run it again from the beginning; when
+	// the abandon did not finish, start it over with the restart
+	// acknowledgement, as the verdict's detail says.
+	CodeDataFault Code = "data-fault"
 	// CodeInvariantViolation: a breach of the invariant registry; never a
 	// retry candidate.
 	CodeInvariantViolation Code = "invariant-violation"
@@ -206,7 +223,9 @@ func Codes() []Code {
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
 		CodeValidatedConstraintDrift,
+		CodeRenamedIndexDrift,
 		CodeTableNotFound,
+		CodeDataFault,
 		CodeInvariantViolation,
 		CodeExecutionFailed,
 	}
@@ -247,7 +266,9 @@ func (c Code) Permanent() bool {
 		CodeReplicaIdentityDrop,
 		CodeAdoptedIndexDrift,
 		CodeValidatedConstraintDrift,
+		CodeRenamedIndexDrift,
 		CodeTableNotFound,
+		CodeDataFault,
 		CodeInvariantViolation:
 		return true
 	}
@@ -354,6 +375,8 @@ func sentinelCode(err error) Code {
 		return CodeAdoptedIndexDrift
 	case errors.Is(err, ErrValidatedConstraintDrift):
 		return CodeValidatedConstraintDrift
+	case errors.Is(err, ErrRenamedIndexDrift):
+		return CodeRenamedIndexDrift
 	case errors.Is(err, ErrTableNotFound):
 		return CodeTableNotFound
 	default:

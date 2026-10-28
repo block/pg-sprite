@@ -95,7 +95,7 @@ func TestCopyAndSwapRefusesAConnectionOnAnotherDatabase(t *testing.T) {
 	schema := d.createOrders(t)
 	st := parseOne(t, fmt.Sprintf("ALTER TABLE %s.orders ALTER COLUMN id TYPE bigint", schema))
 
-	opts := copySwapRunOptions(d.otherURL)
+	opts := copySwapRunOptions(d.otherURL, schema+".orders")
 	v, err := migrate.Run(t.Context(), d.pool, st, opts)
 	var mismatch *migrate.CopySwapConnectionMismatchError
 	require.ErrorAs(t, err, &mismatch)
@@ -106,7 +106,7 @@ func TestCopyAndSwapRefusesAConnectionOnAnotherDatabase(t *testing.T) {
 	assert.False(t, hasEngineSchema(t, d.poolURL), "no checkpoint row was written in the pool's database")
 	assert.False(t, hasEngineSchema(t, d.otherURL), "nothing was written through the connection either")
 
-	v, err = migrate.Run(t.Context(), d.pool, st, copySwapRunOptions(d.poolURL))
+	v, err = migrate.Run(t.Context(), d.pool, st, copySwapRunOptions(d.poolURL, schema+".orders"))
 	require.NoError(t, err)
 	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 	assert.Equal(t, "bigint", d.columnType(t, schema))
@@ -128,7 +128,7 @@ func TestRunDesiredRefusesAConnectionOnAnotherDatabase(t *testing.T) {
 			qty  integer NOT NULL,
 			note text
 		)`),
-	}, copySwapRunOptions(d.otherURL))
+	}, copySwapRunOptions(d.otherURL, schema+".orders"))
 	var mismatch *migrate.CopySwapConnectionMismatchError
 	require.ErrorAs(t, err, &mismatch)
 	assert.Equal(t, mismatch.PoolCluster, mismatch.ConnectionCluster, "both databases are on the test server")
@@ -164,7 +164,7 @@ func TestCopyAndSwapRefusesADatabaseOfTheSameNameOnAnotherCluster(t *testing.T) 
 
 	v, err := migrate.Run(t.Context(), d.pool,
 		parseOne(t, fmt.Sprintf("ALTER TABLE %s.orders ALTER COLUMN id TYPE bigint", schema)),
-		copySwapRunOptions(sameName))
+		copySwapRunOptions(sameName, schema+".orders"))
 	var mismatch *migrate.CopySwapConnectionMismatchError
 	require.ErrorAs(t, err, &mismatch)
 	assert.Zero(t, v, "nothing was executed, so there is no verdict")
@@ -185,7 +185,7 @@ func TestCopyAndSwapStopsWhenTheConnectionCannotBeOpened(t *testing.T) {
 	schema := d.createOrders(t)
 	missing := withDatabase(t, d.poolURL, "no_such_database")
 
-	assertStopsBeforeAnyStatement(t, d, d.pool, schema, copySwapRunOptions(missing))
+	assertStopsBeforeAnyStatement(t, d, d.pool, schema, copySwapRunOptions(missing, schema+".orders"))
 }
 
 // The identity is read with pg_control_system(), which the server grants to
@@ -235,14 +235,14 @@ func TestCopyAndSwapStopsWhenEitherSideCannotBeIdentified(t *testing.T) {
 	roleURL := withUser(t, d.poolURL, role, "unidentified")
 
 	t.Run("the connection", func(t *testing.T) {
-		assertStopsBeforeAnyStatement(t, d, d.pool, schema, copySwapRunOptions(roleURL))
+		assertStopsBeforeAnyStatement(t, d, d.pool, schema, copySwapRunOptions(roleURL, schema+".orders"))
 	})
 
 	t.Run("the pool", func(t *testing.T) {
 		rolePool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: roleURL})
 		require.NoError(t, err)
 		t.Cleanup(rolePool.Close)
-		assertStopsBeforeAnyStatement(t, d, rolePool, schema, copySwapRunOptions(d.poolURL))
+		assertStopsBeforeAnyStatement(t, d, rolePool, schema, copySwapRunOptions(d.poolURL, schema+".orders"))
 	})
 }
 

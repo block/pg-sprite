@@ -83,6 +83,9 @@ type Stream struct {
 	// until the first change arrives.
 	relation      *relation
 	inTransaction bool
+	// xid is the transaction being yielded, from its BEGIN; every change
+	// inside it is stamped with it.
+	xid uint32
 	// failed is the error that ended the stream, returned from then on.
 	failed error
 }
@@ -345,6 +348,7 @@ func (s *Stream) handleWALData(xld pglogrepl.XLogData) (Delivery, bool, error) {
 				ErrInvariantViolation, s.slotName, LSN(xld.WALStart))
 		}
 		s.inTransaction = true
+		s.xid = msg.Xid
 		return Delivery{}, false, nil
 	case *pglogrepl.CommitMessage:
 		if !s.inTransaction {
@@ -377,12 +381,14 @@ func (s *Stream) handleWALData(xld pglogrepl.XLogData) (Delivery, bool, error) {
 }
 
 // deliverChange stamps a decoded change with the delivered position it
-// arrives with and wraps it as a delivery; a decoding error yields nothing.
+// arrives with and the transaction it belongs to, and wraps it as a
+// delivery; a decoding error yields nothing.
 func (s *Stream) deliverChange(ev *ChangeEvent, err error) (Delivery, bool, error) {
 	if err != nil {
 		return Delivery{}, false, err
 	}
 	ev.Delivered = s.delivered
+	ev.Xid = s.xid
 	return Delivery{Change: ev, Delivered: s.delivered}, true, nil
 }
 

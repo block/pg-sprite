@@ -209,7 +209,7 @@ uniformly "No" — included for consistency with the other tables.
 | `DROP INDEX CONCURRENTLY` | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | PG 9.2+ |
 | `REINDEX INDEX` | ACCESS EXCLUSIVE | No (rebuilds index) | No | ➖ Use `CONCURRENTLY` | |
 | `REINDEX INDEX CONCURRENTLY` | SHARE UPDATE EXCLUSIVE | No (rebuilds index) | Yes | ❌ No | PG 12+ |
-| `ALTER INDEX ... RENAME` | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | |
+| `ALTER INDEX ... RENAME` | SHARE UPDATE EXCLUSIVE | No | Yes | ❌ No | Renaming an index that backs a primary-key, unique, or exclusion constraint also renames the constraint. On a table name, `ALTER INDEX ... RENAME` renames the table |
 
 ## Constraint operations
 
@@ -300,10 +300,11 @@ plan classified from zero facts must not read as green. The exit code answers
 *should this proceed*; the report answers *why not* — exit 2 covers every
 refusal cause (no safe path, backend unavailable, target facts, missing
 table), so automation that needs the cause reads the typed `reason` and
-disposition from the `--json` report. A destructive-but-executable change
-(`DROP COLUMN`, `DROP TABLE`) is **not** a refusal: it warns and exits 0. A
-gate that must stop drops checks `.statements[].destructive` in the JSON
-report. A real run adds the two codes that need something to have executed —
+disposition from the `--json` report. A destructive change (`DROP COLUMN`,
+`DROP CONSTRAINT`, `DROP NOT NULL`) is one of those refusals: `migrate` and its
+dry run refuse it with `destructive-change` (exit 2) until `--allow-destructive`
+names the table, and the acknowledged plan still marks it
+`.statements[].destructive` in the JSON report. A real run adds the two codes that need something to have executed —
 **1** when execution failed (a dry run exits 1 only for an operational error
 such as an unreachable database, because it executes nothing) and **3** when
 the operator explicitly accepted a blocking form and it committed without an
@@ -578,7 +579,7 @@ an unclassified statement is never executed.
 
 | Verdict | Lock | Scan / rewrite | Dry-run exit |
 |---|---|---|---|
-| warning — does not change the routing decision | per the routing decision | per the routing decision | unchanged by this code |
+| warning on a plan `--allow-destructive` acknowledged; without it `migrate` refuses the statement as `destructive-change` | per the routing decision | per the routing decision | 2 unless acknowledged |
 
 The change discards live data or structure: `DROP COLUMN`, `DROP TABLE`,
 truncating conversions, a dropped constraint or index, or `DROP NOT NULL`
@@ -586,7 +587,10 @@ truncating conversions, a dropped constraint or index, or `DROP NOT NULL`
 `DROP DEFAULT` is deliberately not destructive — a default guarantees nothing
 about existing rows and is recreated by a metadata-only statement). Emitted
 alongside the routing decision as a warning so destructive intent is always
-visible in review.
+visible in review. `migrate --alter` runs such a statement only when
+`--allow-destructive SCHEMA.TABLE` names the table; without it the apply and the
+dry run end in a `destructive-change` refusal verdict instead of a plan, and
+`migrate --desired` refuses a destructive plan whole.
 
 ### `concurrent-in-transaction`
 

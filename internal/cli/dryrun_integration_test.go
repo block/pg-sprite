@@ -15,6 +15,7 @@ import (
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/suggest"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
@@ -25,7 +26,13 @@ import (
 // code.
 func dryRunPlan(t *testing.T, url, alter string) plan.Report {
 	t.Helper()
-	cmd := newMigrateCmd(url, alter)
+	return dryRunPlanOf(t, newMigrateCmd(url, alter))
+}
+
+// dryRunPlanOf is dryRunPlan for a command the caller configured, such as
+// one carrying --allow-destructive.
+func dryRunPlanOf(t *testing.T, cmd *MigrateCmd) plan.Report {
+	t.Helper()
 	cmd.DryRun = true
 	cmd.JSON = true
 	var out strings.Builder
@@ -41,6 +48,48 @@ func dryRunPlan(t *testing.T, url, alter string) plan.Report {
 		require.ErrorIs(t, err, verdict.ErrRefused)
 	}
 	return report
+}
+
+// An index rename names no table, so its dry run reports the table that
+// owns the index and plans from the live fact of whether the index backs a
+// constraint: a plain index is executable, and the index behind a unique
+// constraint is rewrite-required with the coordination guidance, exiting
+// with the refusal code. Nothing is renamed either way.
+func TestMigrateDryRunPlansAnIndexRenameFromTheConstraintItBacks(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.users (
+			id     int PRIMARY KEY,
+			email  text NOT NULL,
+			handle text NOT NULL,
+			CONSTRAINT users_handle_key UNIQUE (handle)
+		);
+		CREATE INDEX users_email_idx ON %[1]s.users (email)`, schema))
+	require.NoError(t, err)
+
+	plain := dryRunPlan(t, url, fmt.Sprintf("ALTER INDEX %s.users_email_idx RENAME TO users_contact_email_idx", schema))
+	assert.Equal(t, router.DispositionExecute, plain.Disposition)
+	assert.Equal(t, schema, plain.Schema)
+	assert.Equal(t, "users", plain.Table, "the report names the index's owning table")
+	require.Len(t, plain.Statements, 1)
+	assert.Equal(t, planner.ReasonMetadataOnly, plain.Statements[0].Decisions[0].Reason)
+
+	backing := dryRunPlan(t, url, fmt.Sprintf("ALTER INDEX %s.users_handle_key RENAME TO users_username_key", schema))
+	assert.Equal(t, router.DispositionRewriteRequired, backing.Disposition)
+	assert.Equal(t, "users", backing.Table)
+	require.Len(t, backing.Statements, 1)
+	assert.Equal(t, planner.ReasonAppBreakingRename, backing.Statements[0].Decisions[0].Reason)
+	assert.Equal(t, suggest.GuidanceCoordinatedConstraintRename, backing.Statements[0].Guidance)
+
+	var names int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM pg_class WHERE relnamespace = $1::regnamespace AND relname IN ('users_email_idx', 'users_handle_key')`,
+		schema).Scan(&names))
+	assert.Equal(t, 2, names, "dry-run must not rename anything")
 }
 
 // A rewrite-requiring type change dry-runs to the copy-and-swap backend as
@@ -239,6 +288,8 @@ func TestMigrateDryRunInlineConstraintIsRewriteRequired(t *testing.T) {
 // destructive whether a human submits it directly (the riskier door) or the
 // diff derives it from a reviewed desired-state file. Destructive is derived
 // from the classifier's decisions, so the agreement holds by construction.
+// The imperative dry run reports the plan only under --allow-destructive;
+// without it the dry run ends in the apply's destructive-change refusal.
 func TestDryRunAndDiffAgreeOnDestructive(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -249,7 +300,9 @@ func TestDryRunAndDiffAgreeOnDestructive(t *testing.T) {
 		"CREATE TABLE %s.t (id int PRIMARY KEY, doomed text)", schema))
 	require.NoError(t, err)
 
-	alterReport := dryRunPlan(t, url, fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN doomed", schema))
+	alter := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t DROP COLUMN doomed", schema))
+	alter.AllowDestructive = schema + ".t"
+	alterReport := dryRunPlanOf(t, alter)
 	require.Len(t, alterReport.Statements, 1)
 	alterSt := alterReport.Statements[0]
 	assert.True(t, alterSt.Destructive, "the submitted DROP COLUMN must be marked destructive")

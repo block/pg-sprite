@@ -1,6 +1,7 @@
 package migrate
 
 import (
+	"errors"
 	"fmt"
 	"net/url"
 	"testing"
@@ -9,10 +10,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/executor"
-	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -57,20 +58,18 @@ func (f copySwapFixture) relations(t *testing.T) []string {
 	return names
 }
 
-// assertNoEngineState asserts that the route wrote nothing of its own: the
-// engine schema that holds the checkpoint table does not exist, so there
-// is no checkpoint row, and the database has no replication slot.
-func (f copySwapFixture) assertNoEngineState(t *testing.T) {
+// assertNoCheckpointRow asserts that the route saved no checkpoint row for
+// table in the fixture's schema. It reads the row, not the engine schema:
+// the suite can run against one shared database, where other tests have
+// already created the checkpoint table. A run that blocks writes takes no
+// replication slot, so the row is the only engine state it could leave.
+func (f copySwapFixture) assertNoCheckpointRow(t *testing.T, table string) {
 	t.Helper()
-	var engineSchema bool
-	require.NoError(t, f.pool.QueryRow(t.Context(),
-		`SELECT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1)`,
-		preflight.EngineSchema).Scan(&engineSchema))
-	assert.False(t, engineSchema, "no checkpoint table, so no checkpoint row")
-	var slots int
-	require.NoError(t, f.pool.QueryRow(t.Context(),
-		`SELECT count(*) FROM pg_catalog.pg_replication_slots WHERE database = current_database()`).Scan(&slots))
-	assert.Zero(t, slots, "no replication slot")
+	store, err := checkpoint.NewStore(f.pool, checkpoint.Options{})
+	require.NoError(t, err)
+	_, err = store.Inspect(t.Context(), f.schema, table)
+	assert.True(t, errors.Is(err, checkpoint.ErrNotFound) || errors.Is(err, checkpoint.ErrTableMissing),
+		"no checkpoint row was saved for %s.%s: %v", f.schema, table, err)
 }
 
 // The copier's four default workers each hold a pool connection while they
@@ -79,7 +78,7 @@ func (f copySwapFixture) assertNoEngineState(t *testing.T) {
 // would leave the catch-up queued behind the copy, so Run refuses it
 // before anything is read or written: a failed verdict with the
 // pool-too-small code, an error matching executor.ErrPoolTooSmall, and no
-// shadow, checkpoint row, or slot left behind.
+// shadow or checkpoint row left behind.
 func TestCopyAndSwapRefusesAPoolSmallerThanItsWorkersAndTwo(t *testing.T) {
 	f := newCopySwapFixture(t)
 	f.createOrders(t)
@@ -96,7 +95,7 @@ func TestCopyAndSwapRefusesAPoolSmallerThanItsWorkersAndTwo(t *testing.T) {
 	assert.Equal(t, "integer", f.columnType(t, "orders", "qty"), "the source is untouched")
 	assert.Equal(t, []string{"orders", "orders_id_seq", "orders_pkey", "orders_qty_idx"}, f.relations(t),
 		"no shadow table was built")
-	f.assertNoEngineState(t)
+	f.assertNoCheckpointRow(t, "orders")
 }
 
 // Six connections hold the four workers and the two reserved sessions, so
@@ -135,7 +134,9 @@ func TestRunDesiredRefusesAPoolSmallerThanCopyAndSwapNeeds(t *testing.T) {
 		)`)
 	require.NoError(t, err)
 
-	res, err := RunDesired(t.Context(), small, DesiredRequest{Schema: f.schema, Desired: desired}, f.options())
+	opts := f.options()
+	opts.CopySwap.BlockWrites = f.schema + ".t"
+	res, err := RunDesired(t.Context(), small, DesiredRequest{Schema: f.schema, Desired: desired}, opts)
 	require.ErrorIs(t, err, executor.ErrPoolTooSmall)
 	assert.Equal(t, verdict.OutcomeFailed, res.Outcome)
 	assert.Empty(t, res.Verdicts, "no statement was attempted")
@@ -143,5 +144,5 @@ func TestRunDesiredRefusesAPoolSmallerThanCopyAndSwapNeeds(t *testing.T) {
 	assert.False(t, f.hasColumn(t, "t", "note"), "the native statement ahead of the retype did not run")
 	assert.Equal(t, "integer", f.columnType(t, "t", "owner_id"), "the source is untouched")
 	assert.Equal(t, []string{"t", "t_pkey"}, f.relations(t), "no shadow table was built")
-	f.assertNoEngineState(t)
+	f.assertNoCheckpointRow(t, "t")
 }

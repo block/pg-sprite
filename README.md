@@ -40,7 +40,8 @@ advisory `suggest` command are implemented. `pg-sprite migrate --alter '…'` cl
 routes the statement, then executes the routed SQL — the planner's safer native sequence by
 default when the submitted form blocks (reported in the verdict's `executed_sql`), a bounded
 optimistic native attempt otherwise. A gated `--force` runs the submitted form as-is under the
-same budgets. Changes without an available backend get a structured refusal (exit code 2).
+same budgets, and a statement that discards data runs only when `--allow-destructive` names
+its table. Changes without an available backend get a structured refusal (exit code 2).
 Desired-state execution — converging a live table onto a `CREATE TABLE` file, including
 creating the table when it does not exist yet — is available through `migrate --desired schema.sql` and
 `migrate.RunDesired` in [`pkg/migrate`](pkg/migrate/desired.go).
@@ -70,6 +71,12 @@ refusal — never a silently wrong or incomplete result:
   and environments it cannot run against. The shadow build also refuses a
   statement the copy cannot carry: a `USING` expression it cannot reproduce,
   or a dropped-and-re-added column it cannot fill.
+- **Connection poolers**: point pg-sprite directly at the primary; the
+  application keeps whatever pooling it uses. pg-sprite's own connection
+  through a pooler is unsupported, except Supabase's Supavisor session
+  endpoint for native schema changes. Startup checks usually refuse a
+  transaction-mode pooler, but passing them does not make it supported
+  ([connections and poolers](docs/limitations.md#connections-and-poolers)).
 - **Row security** is included in exports when present, with reviewable before/after differences. The
   [atomic executor](docs/atomic-row-security.md) applies RLS-only changes to existing tables
   through `migrate --desired` or the Go API. Only the Go API supports binding execution to
@@ -102,7 +109,9 @@ refusal — never a silently wrong or incomplete result:
   statement alone, so `migrate` refuses them as `rewrite-required` with the
   expand-and-contract (column) or coordinated-deploy (table) path as typed
   guidance; `--force SCHEMA.TABLE` runs the submitted rename for the operator
-  who has coordinated the deploy.
+  who has coordinated the deploy. `ALTER INDEX ... RENAME TO` runs for a plain
+  index, but is refused, with no `--force` override, for an index that backs a
+  primary-key, unique, or exclusion constraint, since it renames the constraint.
 - **Unlogged tables and explicit column collations** are outside the
   declarative model: converging either is a table (or column) rewrite, so
   export and diff refuse rather than plan one.
@@ -117,6 +126,13 @@ refusal — never a silently wrong or incomplete result:
   `REPLICA IDENTITY` first, then re-plan.
 - **Retyping or dropping a column a view reads is refused** — PostgreSQL would
   refuse it anyway; the plan names the views to drop or redefine first.
+- **Destructive statements need a typed acknowledgement** — `migrate --alter`
+  refuses a statement that drops a column, a constraint, or a `NOT NULL` with
+  `destructive-change` (exit 2) on every route and in `--dry-run`, unless
+  `--allow-destructive SCHEMA.TABLE` names the table; the acknowledged run is
+  audited and its verdict carries `allowed_destructive: true`. A drop that
+  adds the same column back gets the guidance to change its type in place,
+  which keeps its values.
 - **Destructive desired-state plans are refused as a whole** — `migrate --desired`
   creates missing tables and converges supported changes, but never infers permission
   to discard live structure. A new primary key or unique constraint over a live
@@ -195,10 +211,10 @@ the machine-readable shape is in
 **Refuse: no safe path exists, so nothing runs.** A rewrite the copy-and-swap
 backend does not carry yet (a volatile column default, for one) refuses; the
 dry run exits 2 so CI can gate on it without parsing JSON (the full four-code ladder is under
-[Exit codes](#exit-codes)). The exit-code gate stops refusals only —
-a destructive-but-executable change (`DROP COLUMN`) warns and exits 0, so a
-gate that must stop drops checks `.statements[].destructive` in the
-`--json` report. Watch it in
+[Exit codes](#exit-codes)). A destructive change (`DROP COLUMN`) is refused
+the same way, exit 2 with reason `destructive-change`, until
+`--allow-destructive SCHEMA.TABLE` names the table; the acknowledged dry run
+still marks it `.statements[].destructive` in the `--json` report. Watch it in
 [docs/demos/refuse.gif](docs/demos/refuse.gif); the machine-readable shape
 is in [docs/cli-output-examples.md](docs/cli-output-examples.md).
 
@@ -208,7 +224,7 @@ findings exit non-zero, warnings alone pass. Watch it in
 [docs/demos/lint.gif](docs/demos/lint.gif); the machine-readable shape is
 in [docs/cli-output-examples.md](docs/cli-output-examples.md).
 
-More shapes — every disposition as JSON, destructive warnings, and exit
+More shapes — every disposition as JSON, destructive refusals, and exit
 codes — are in [docs/cli-output-examples.md](docs/cli-output-examples.md).
 
 ## Install
@@ -239,7 +255,7 @@ read-only or fully offline.
 
 | Command | Live database | What the connection is used for |
 |---|---|---|
-| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets |
+| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets. A change routed to copy-and-swap also takes `--free-disk`, and optionally `--quiesced` (fence writes instead of streaming them) and `--restart SCHEMA.TABLE` (start a stopped run over); see [running a copy-and-swap](docs/copy-and-swap.md) |
 | `migrate --dry-run` | required | The same introspection as a real run — server version, target resolution, table facts — so the printed plan reflects the actual target; executes nothing |
 | `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
 | [`pull`](docs/pull.md) | required | Introspect each supported table in a schema and create one desired-state file per table; existing files are never overwritten, and a zero-change `diff` verifies the baseline |
@@ -268,7 +284,7 @@ vouch for it as online-safe.
 | Exit | Meaning | Anything committed? | Online-safe? |
 |---|---|---|---|
 | 0 | Executed through an online-safe path; or a dry run, `diff`, or `pull` found nothing to refuse | yes (dry run, `diff`, `pull`: nothing runs) | yes |
-| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in the verdict's `executed_sql`; unknown when the verdict's `code` is `commit-outcome-unknown` — the failed step's `COMMIT` may have landed, so inspect the catalog before retrying | not applicable |
+| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` or `--allow-destructive` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in the verdict's `executed_sql`; unknown when the verdict's `code` is `commit-outcome-unknown` — the failed step's `COMMIT` may have landed, so inspect the catalog before retrying | not applicable |
 | 2 | Refused: no online-safe path, and the verdict names the typed `reason` (and `class`) automation switches on | no | not applicable |
 | 3 | Committed through the accepted-blocking passthrough — the operator explicitly accepted a blocking form, and the engine ran it under bounded budgets without vouching for online safety | yes | no |
 

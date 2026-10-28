@@ -58,6 +58,7 @@ func TestCopierCausesRemintAsTheNamedShadowCause(t *testing.T) {
 		copier.CauseLockHeldElsewhere: CauseLockHeldElsewhere,
 		copier.CauseLockUnconfirmed:   CauseLockUnconfirmed,
 		copier.CauseRelationReplaced:  CauseRelationReplaced,
+		copier.CauseConversionDrift:   CauseCopyConversionDrift,
 		copier.CauseFrontierBroken:    CauseCopyFrontierBroken,
 		copier.CauseChunksInFlight:    CauseCopyChunksInFlight,
 		copier.CauseChunkUnknown:      CauseCopyChunkUnknown,

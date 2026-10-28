@@ -32,6 +32,11 @@ type migrateClaim struct {
 	// fixture server has no logical decoding) and its executed outcome is
 	// the route's own token.
 	copyAndSwap bool
+	// destructive marks a row whose statements discard live data or
+	// structure: migrate runs them only under the destructive
+	// acknowledgement, which the run names for the fixture's accounts
+	// table, the table every such row's statements change.
+	destructive bool
 }
 
 // migrateClaims maps every capability row whose imperative `migrate` door is
@@ -50,13 +55,25 @@ var migrateClaims = map[string]migrateClaim{
 			`ALTER TABLE %[1]s.accounts ADD COLUMN tier int NOT NULL DEFAULT 0`,
 		},
 	},
+	// A plain index renames as a catalog change on the index alone; the
+	// statement names no table, so migrate resolves the index's owner.
+	"alter-index-rename": {
+		setup: `
+			CREATE TABLE %[1]s.accounts (
+				id bigint PRIMARY KEY,
+				email text NOT NULL
+			);
+			CREATE INDEX accounts_email_idx ON %[1]s.accounts (email)`,
+		statements: []string{`ALTER INDEX %[1]s.accounts_email_idx RENAME TO accounts_contact_email_idx`},
+	},
 	"drop-column": {
 		setup: `
 			CREATE TABLE %[1]s.accounts (
 				id bigint PRIMARY KEY,
 				legacy_id int
 			)`,
-		statements: []string{`ALTER TABLE %[1]s.accounts DROP COLUMN legacy_id`},
+		statements:  []string{`ALTER TABLE %[1]s.accounts DROP COLUMN legacy_id`},
+		destructive: true,
 	},
 	"alter-column-type-binary-coercible-proven-against-live-column-facts": {
 		setup: `
@@ -102,6 +119,7 @@ var migrateClaims = map[string]migrateClaim{
 			`ALTER TABLE %[1]s.accounts ALTER COLUMN nickname DROP DEFAULT`,
 			`ALTER TABLE %[1]s.accounts ALTER COLUMN nickname DROP NOT NULL`,
 		},
+		destructive: true,
 	},
 	"set-not-null": {
 		setup: `
@@ -170,7 +188,8 @@ var migrateClaims = map[string]migrateClaim{
 				balance int,
 				CONSTRAINT balance_nonnegative CHECK (balance >= 0)
 			)`,
-		statements: []string{`ALTER TABLE %[1]s.accounts DROP CONSTRAINT balance_nonnegative`},
+		statements:  []string{`ALTER TABLE %[1]s.accounts DROP CONSTRAINT balance_nonnegative`},
+		destructive: true,
 	},
 	"create-unique-index-on-a-plain-table-including-partial-expression-covering-include-gin-gist-brin": {
 		setup: `
@@ -236,12 +255,14 @@ func TestMigrateSupportedRowsExecute(t *testing.T) {
 			require.NoError(t, err)
 
 			opts := migrate.DefaultOptions()
+			if claim.destructive {
+				opts.AllowDestructive = schema + ".accounts"
+			}
 			executed := verdict.OutcomeExecuted
 			if claim.copyAndSwap {
 				opts.CopySwap = migrate.CopySwapOptions{
 					Connection:    dbconn.Config{URL: url},
 					FreeDiskBytes: testutil.UnlimitedDisk,
-					Quiesced:      true,
 				}
 				executed = verdict.OutcomeExecutedViaCopyAndSwap
 			}
@@ -249,6 +270,9 @@ func TestMigrateSupportedRowsExecute(t *testing.T) {
 				sql = fmt.Sprintf(sql, schema)
 				st, err := statement.ParseOne(sql)
 				require.NoError(t, err)
+				if claim.copyAndSwap {
+					opts.CopySwap.BlockWrites = st.Schema() + "." + st.Table()
+				}
 				v, err := migrate.Run(t.Context(), pool, st, opts)
 				require.NoError(t, err, sql)
 				assert.Equal(t, executed, v.Outcome,

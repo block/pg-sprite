@@ -13,8 +13,8 @@ import (
 
 // copySwapReservedConns is how many pool connections the copy-and-swap
 // route keeps beside its copy workers: one for the catch-up's flushes and
-// one for the checkpoint saves and progress reads. A quiesced run has no
-// catch-up, but is held to the same size so one pool serves either run.
+// one for the checkpoint saves and progress reads. A run that blocks writes
+// has no catch-up, but is held to the same size so one pool serves either run.
 const copySwapReservedConns = 2
 
 // CopySwapMinConns is the smallest pool the copy-and-swap route admits for
