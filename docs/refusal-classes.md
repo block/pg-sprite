@@ -71,7 +71,6 @@ routed to provisioning and never to the data change runner.
 | `unsupported-statement` | Grants, roles, row-level-security policies, publications, subscriptions | `no-online-safety-problem` | `provisioning` |
 | `unsupported-statement` | `DROP TABLE`, views, functions, triggers, extensions, standalone sequences, and other catalog work the matrix marks ⚪ | `no-online-safety-problem` | `direct-operator` |
 | `unsupported-statement` | Imperative `CREATE TABLE`; the detail already points to `diff` | `no-online-safety-problem` | `declarative-front-door` |
-| `unsupported-statement` | `ALTER INDEX ... RENAME TO` (`statement.KindRenameIndex`); the front door does not yet resolve the index's owning table or whether it backs a constraint | `capability-boundary` | — |
 | `unsupported-statement` | An admitted `ALTER TABLE` operation for which the planner has no route (`routeRefusalVerdict`) | `capability-boundary` | — |
 | `unsupported-statement` | Imperative admission sentinel `ErrUnsupportedSequenceStep` or `ErrUnnamedIndex`; create admission sentinel `ErrUnsupportedCreateStep` | `capability-boundary` | — |
 | `unsupported-statement` | Imperative or create admission sentinel `ErrIfNotExistsUnsupported`; create admission sentinel `ErrDuplicateCreateName` (the sentinel forms of the `if-not-exists` and `duplicate-name` causes below) | `by-design` | — |
@@ -85,7 +84,7 @@ routed to provisioning and never to the data change runner.
 | `not-native-safe-rewrite-required` | The submitted form blocks the table and the planner cannot construct the required safer sequence | `capability-boundary` | — |
 | `not-native-safe-rewrite-required` | A `RENAME COLUMN` or `RENAME TO` (`app-breaking-rename`): no SQL exists to substitute, and the deliberate path is the `guidance` rollout and then the statement under `--force` | `by-design` | — |
 | `backend-unavailable` | The plan routes to copy-and-swap for an operation the engine does not carry yet | `capability-boundary` | — |
-| `destructive-change` | Desired-state execution will not infer permission to discard live structure | `by-design` | — |
+| `destructive-change` | Neither front door infers permission to discard live data or structure: desired-state admission refuses a destructive plan whole, and `migrate --alter` refuses a statement that drops a column, constraint, or `NOT NULL` until `--allow-destructive` names the table (RF-10) | `by-design` | — |
 | `plan-fingerprint-mismatch` | The recomputed plan is not the reviewed plan | `environmental` | — |
 | `create-collision` | A target or claimed name is occupied at apply time by a relation or a standalone type | `environmental` | — |
 | `declarative-foreign-key` | A desired-state plan adds or drops a foreign key, or creates a table that declares one; desired-state execution does not run foreign-key changes yet | `capability-boundary` | — |
@@ -343,7 +342,7 @@ For example, an `UPDATE` backfill changes only by additive fields:
   "outcome": "refused",
   "reason": "unsupported-statement",
   "statement": "UPDATE accounts SET normalized_name = lower(name)",
-  "detail": "only ALTER TABLE and CREATE INDEX statements are supported by the imperative front door"
+  "detail": "only ALTER TABLE, CREATE INDEX, and ALTER INDEX ... RENAME TO statements are supported by the imperative front door"
 }
 ```
 
@@ -354,7 +353,7 @@ For example, an `UPDATE` backfill changes only by additive fields:
   "class": "no-online-safety-problem",
   "owner": "data-change-runner",
   "statement": "UPDATE accounts SET normalized_name = lower(name)",
-  "detail": "only ALTER TABLE and CREATE INDEX statements are supported by the imperative front door"
+  "detail": "only ALTER TABLE, CREATE INDEX, and ALTER INDEX ... RENAME TO statements are supported by the imperative front door"
 }
 ```
 

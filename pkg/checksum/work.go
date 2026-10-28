@@ -13,7 +13,10 @@ import (
 // counters reset to zero when a pass starts.
 //
 //   - chunks_compared is the number of chunks the comparison has digested
-//     on both sides; a digest counts when its transaction commits.
+//     on both sides; a digest counts when its transaction commits. Under
+//     DivergenceRecopy a recopy that collided is followed by another
+//     comparison, whose chunks count here too, so the figure can pass the
+//     number of chunks through the watermark.
 //   - rows_hashed is the number of source rows those digests covered.
 //   - chunks_mismatched is the number of chunks the comparison found
 //     differing.

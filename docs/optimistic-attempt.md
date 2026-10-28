@@ -4,8 +4,8 @@
 under budgets that bound the cost of being wrong.** This page is the deep treatment of
 that design: the full entry-to-exit map every statement walks, which routes are
 size-checked and which are exempt, why a bounded "gamble" is the right design on
-PostgreSQL specifically, what other schema-change tools do instead, and how the guard's
-role evolves once the copy-and-swap engine lands. The two front doors themselves are
+PostgreSQL specifically, what other schema-change tools do instead, and how the guard
+relates to the copy-and-swap engine. The two front doors themselves are
 introduced in
 [high-level-design.md](high-level-design.md#two-migration-front-doors-optimistic-vs-classified);
 what a mid-sequence failure leaves behind is
@@ -59,9 +59,10 @@ pg-sprite executes a PostgreSQL schema change through an escalation ladder:
    budget of hard downtime under `ACCESS EXCLUSIVE`
    ([why the cost scales with size](#why-does-a-wrong-guess-cost-differently-on-small-vs-large-tables)).
 
-The ladder is **permanent design, not a stopgap**: when the copy-and-swap engine lands
-(Phase 5), it adds a rung below the attempt rather than replacing it, and the same size
-refusal becomes a routing signal into the copy engine instead of a dead end
+The ladder is **permanent design, not a stopgap**: the copy-and-swap engine is a rung
+beside the attempt, not a replacement for it. It runs the shapes the planner proves are
+rewrites; a size or budget refusal on the attempt is still a terminal refusal, not yet a
+routing signal into the copy engine
 ([details](#is-the-gamble-temporary-until-copy-and-swap-exists)).
 
 ## The full map: entry to exit for every change type
@@ -70,7 +71,8 @@ Every DDL statement enters through one gate and leaves through a typed exit. Fou
 lanes cover every change type: **A** — planner-proven online work (what MySQL would
 call in-place with long work), **B** — the bounded attempt, whose success means the
 change was effectively *instant* (catalog-only), **C** — proven table rewrites, which
-route to copy-and-swap (refused today, executed once the Phase 5 engine lands), and
+route to copy-and-swap (executed when the engine carries the operation, refused
+`backend-unavailable` when it does not yet — [capabilities.md](capabilities.md) says which), and
 **F** — the operator's forced override, which rejoins lane B. The walkthrough below
 narrates each gate; the [exit inventory](#exit-inventory) catalogs the endings.
 
@@ -103,26 +105,26 @@ narrates each gate; the [exit inventory](#exit-inventory) catalogs the endings.
 └────────────┬─────────────┘ └──────────┬──────────┘ └────────────┬─────────────┘
              │                          │                         │
              ▼                          ▼                         ▼
-   size guard: EXEMPT          size guard: table          typed plan refusal —
-   (NoSizeLimit — long         over the limit?            "routes to copy-and-swap,
-   work on large tables            │        │             not implemented"
-   is the purpose)              no │        │ yes                 │
-             │                     │        ▼                     ▼
-             ▼                     │   EXIT 4: SizeError    EXIT 5: typed
-   partition + tier gates          │   refused BEFORE       refusal (terminal
-   (typed refusal on fail)         │   any DDL — no         today)
-             │                     │   lock taken                 ┆
-             ▼                     ▼                      ┌ ─ ─ ─ ─▼─ ─ ─ ─ ─ ┐
-   sequence executor:      partition + tier gates           copy-and-swap
-   each brief step under   (typed refusal on fail)        │ engine — Phase 5,  │
-   its budgets; the long           │                        planned: shadow
-   build under one                 ▼                      │ table + backfill + │
-   overall deadline        BOUNDED ATTEMPT                  checksum + cutover
-        │                  SET LOCAL lock_timeout         └ ─ ─ ─ ─┬─ ─ ─ ─ ─ ┘
-        │                  + statement_timeout                     ▼
-        ▼                          │                       future EXIT 6:
-   EXIT 1: success          ┌──────┼───────────┐           online rewrite
-   (online build            │      │           │           succeeds
+   size guard: EXEMPT          size guard: table          engine carries it?
+   (NoSizeLimit — long         over the limit?               yes │       │ no
+   work on large tables            │        │                    │       ▼
+   is the purpose)              no │        │ yes                │  EXIT 5: typed
+             │                     │        ▼                    │  refusal backend-
+             ▼                     │   EXIT 4: SizeError         │  unavailable
+   partition + tier gates          │   refused BEFORE            ▼
+   (typed refusal on fail)         │   any DDL — no       copy-and-swap preflight
+             │                     │   lock taken         (slot, disk, shape);
+             ▼                     ▼                      size guard: EXEMPT
+   sequence executor:      partition + tier gates                │
+   each brief step under   (typed refusal on fail)               ▼
+   its budgets; the long           │                      shadow table + chunked
+   build under one                 ▼                      copy + checksum +
+   overall deadline        BOUNDED ATTEMPT                cutover
+        │                  SET LOCAL lock_timeout                │
+        │                  + statement_timeout                   ▼
+        ▼                          │                      EXIT 6: success —
+   EXIT 1: success          ┌──────┼───────────┐          online rewrite
+   (online build            │      │           │          (copy-and-swap)
    completed) — or          ▼      ▼           ▼
    typed refusal        55P03   completes   57014
    (invalid-index       lock    in budget   statement budget:
@@ -136,9 +138,9 @@ narrates each gate; the [exit inventory](#exit-inventory) catalogs the endings.
                        budget-     data-only  budget-exceeded,
                        exceeded,   (instant)  cause: statement-
                        cause:                 budget (terminal
-                       lock-budget            today; future: the
-                       (contended             routing signal into
-                       table;                 the copy engine)
+                       lock-budget            today; not routed
+                       (contended             into the copy
+                       table;                 engine)
                        nothing
                        executed)
 ```
@@ -177,9 +179,10 @@ What happens to one statement, in order:
    - **Lane B** for the unproven residue: PostgreSQL gives no upfront answer to
      "instant or rewrite?", so the only way to find out is a bounded attempt.
    - **Lane C** for shapes *proven* to rewrite the table (volatile default, `TYPE`
-     with `USING`, …) or not yet supported ([capabilities.md](capabilities.md)): the
-     walk ends at plan time with a typed refusal — today's terminal exit, tomorrow's
-     on-ramp to copy-and-swap.
+     with `USING`, …): the statement runs through copy-and-swap — a shadow table,
+     a chunked copy, a checksum, and a cutover — when the engine carries the
+     operation, and the walk ends at plan time with a typed `backend-unavailable`
+     refusal when it does not yet ([capabilities.md](capabilities.md)).
    - **Lane F**, the operator's force acknowledgement (`Options.Force`, the CLI's
      `--force`), overrides the routing but not the guards: it re-enters lane B as one
      blind bounded attempt, audited and recorded in the verdict's `Forced` field.
@@ -240,7 +243,7 @@ failed sequence.
 | 3b | Statement ran past `statement_timeout` | `reason: not-native-safe-budget-exceeded`, `cause: statement-budget` (SQLSTATE `57014`; executor code `budget-statement-exceeded`) | No — rolled back cleanly |
 | 4 | Table exceeds the size limit | `reason: not-native-safe-table-too-large` (a typed `*preflight.SizeError` underneath) | No — refused before any DDL, no lock taken |
 | 5 | Shape routes to an unimplemented strategy, or is refused by a plan/partition/tier gate | Typed plan refusal | No |
-| 6 *(future)* | Copy-and-swap rewrite completes online | Success verdict (Phase 5) | Yes — shadow table + cutover |
+| 6 | Copy-and-swap rewrite completes online | `outcome: executed-via-copy-and-swap` | Yes — shadow table + cutover |
 | 7 | Sequence stopped mid-flight (step failed, external cancellation) | `outcome: failed` + executor `code`, exit code 1 | **Partially** — the committed prefix remains ([execution-model.md](execution-model.md)) |
 
 Which field is the contract depends on the layer. `outcome` and `reason` (plus
@@ -256,7 +259,7 @@ Per refusal, the operational move an orchestrator makes
 | Refusal | What an orchestrator does |
 |---|---|
 | `not-native-safe-budget-exceeded`, `cause: lock-budget` | Transient — the engine's own bounded retries are already exhausted; retry off-peak, same plan |
-| `not-native-safe-budget-exceeded`, `cause: statement-budget` | Terminal today; the future copy-and-swap on-ramp |
+| `not-native-safe-budget-exceeded`, `cause: statement-budget` | Terminal today; not yet routed into copy-and-swap |
 | `not-native-safe-table-too-large` | Policy — an operator raises the threshold deliberately |
 | `insufficient-privileges` | Operator action — `detail` names the exact `GRANT` |
 | `destructive-change`, `plan-fingerprint-mismatch`, `backend-unavailable` | Human decision — never auto-retried |
@@ -321,7 +324,7 @@ against `sizeGuardApplies`):
 | `partition-parent-lock` | **Yes** — same |
 | `online-idiom` | No — the submitted form is already the safe native shape |
 | `safer-idiom` | No — the planner substituted its own sequence (without a constructible rewrite the statement does not execute at all: `rewrite-required`) |
-| `volatile-default` | n/a — routes to copy-and-swap, not executed today |
+| `volatile-default` | n/a — routes to copy-and-swap, which the size guard does not cover |
 | `generated-stored` | n/a — same |
 | `type-rewrite` | n/a — same |
 | `relocation` | n/a — same |
@@ -430,21 +433,22 @@ copy-based tools' "always copy" model is the maximally expensive answer to
 uncertainty; pg-sprite's design is to pay the cheap probe first, and PostgreSQL's
 transactional DDL makes the failed probe genuinely free.
 
-**What changes when copy-and-swap lands (Phase 5):** the *meaning* of a refused
-attempt. Today, when the size guard (or the budget) refuses, that's a dead end — the
-caller sees a terminal refusal because there is no next rung. With a copy engine, the
-same refusal becomes a routing signal: "this shape couldn't be proven or cheaply
-attempted, so fall through to copy-and-swap." The ladder becomes
-proof → bounded attempt → copy, instead of proof → bounded attempt → refuse.
+**What copy-and-swap changes today:** the shapes the planner *proves* are rewrites
+(lane C) now have an online path. The router sends them to the copy-and-swap backend,
+which runs them through a shadow table when the engine carries the operation and
+refuses them `backend-unavailable` when it does not yet
+([capabilities.md](capabilities.md) says which); the size guard does not apply there.
 
-The planner is already built for this: the route/disposition model has copy-and-swap
-routes whose disposition is "routes to an execution strategy this build does not
-implement" ([capabilities.md](capabilities.md) lists the rewrite shapes that route
-there). The slot exists; the engine behind it doesn't yet. So the size guard doesn't
-get deleted later either: it stops being a hard ceiling and becomes the threshold
-that decides *which engine* runs.
+**What has not changed yet:** the *meaning* of a refused attempt. When the size guard
+or the budget refuses a lane B attempt, that is still a dead end — the caller sees a
+terminal refusal, because nothing routes the refused statement on to the copy engine.
+Making that refusal a routing signal ("this shape couldn't be proven or cheaply
+attempted, so fall through to copy-and-swap") would turn the ladder into
+proof → bounded attempt → copy, instead of proof → bounded attempt → refuse. If it
+lands, the size guard is not deleted either: it stops being a hard ceiling and becomes
+the threshold that decides *which engine* runs.
 
-One nuance: even then, "route to copy" isn't automatically "safe to proceed" —
+One nuance: "route to copy" isn't automatically "safe to proceed" —
 copy-and-swap on a multi-TB table has its own cost (disk headroom, replication lag,
 cutover risk). The routing moves the decision to an engine that is online *by
 construction* rather than online *by luck*.

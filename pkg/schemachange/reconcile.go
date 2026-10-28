@@ -89,7 +89,11 @@ func NewReconciler(cfg dbconn.Config, lock *dbconn.TableLockSession, store *chec
 //     slot never delivered are, and is not read again. The source keeps
 //     taking writes throughout; a write that lands in a chunk after its
 //     recopy is behind the new slot's consistent point and replays when
-//     the stream reopens, so the pass has nothing to prove about it.
+//     the stream reopens, so the pass has nothing to prove about it. A
+//     unique value the source moves from a chunk the pass read equal into
+//     a differing chunk, between the comparison and the recopy, makes the
+//     recopy collide with the shadow row still holding it; the pass then
+//     compares again and recopies both chunks, a bounded number of times.
 //  6. The row is saved out of PhaseReconciling: PhaseCatchingUp when the
 //     watermark is complete, PhaseCopying when the copier still has keys
 //     to land, with the new slot's consistent point as the last applied

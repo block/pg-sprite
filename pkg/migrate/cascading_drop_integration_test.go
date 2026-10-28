@@ -87,7 +87,7 @@ func TestRunRefusesACascadingDrop(t *testing.T) {
 
 	t.Run("a drop without CASCADE on a column nothing depends on", func(t *testing.T) {
 		schema := seed(t)
-		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TABLE %s.users DROP COLUMN note", schema)), runOptions())
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TABLE %s.users DROP COLUMN note", schema)), destructiveOptions(schema+".users"))
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, "detail: %s", v.Detail)
 		assert.False(t, columnExists(t, pool, schema, "users", "note"))

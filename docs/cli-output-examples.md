@@ -24,9 +24,10 @@ the dry run exits 0 when every statement is executable and 2 when any would be
 refused — including a target table that does not exist, so a typo'd name cannot
 gate green — as defined with the
 [diagnostic codes](postgres-online-ddl-reference.md#dry-run-diagnostic-codes);
-CI can gate on the exit code without parsing JSON. The gate is refusals only: a
-destructive-but-executable change (`DROP COLUMN`) warns and exits 0 — a gate
-that must stop drops checks `.statements[].destructive` in the JSON report.
+CI can gate on the exit code without parsing JSON. A destructive change (`DROP
+COLUMN`, `DROP CONSTRAINT`, `DROP NOT NULL`) is one of those refusals until
+`--allow-destructive` names the table; the acknowledged plan still marks it
+`.statements[].destructive` in the JSON report.
 Exit 2 covers every refusal cause; the exit code answers *should this
 proceed*, the report's typed `reason` and disposition answer *why not*. The contract is
 `migrate`'s: `lint` exits 1 when a script has error-severity findings
@@ -36,7 +37,8 @@ greenfield case (the plan creates the table), not a refusal, unlike the
 dry run. Statement kinds `migrate` does not support (`DROP INDEX`,
 `REINDEX`, `CREATE TABLE`, and anything that is not `ALTER TABLE` or
 `CREATE INDEX`) emit the same refusal verdict on `--dry-run` as on apply —
-a verdict, not a plan report — and exit 2. So do statements whose routed
+a verdict, not a plan report — and exit 2. So does an unacknowledged
+destructive statement, and so do statements whose routed
 steps the executor refuses from their shape alone before running anything
 (an unnamed or `IF NOT EXISTS` index build, `DETACH PARTITION`). The dry run
 does not evaluate the apply's size guard or privilege preflight; those need
@@ -57,7 +59,7 @@ and applies to `insufficient-privileges`, both exit 2. The JSON report schema is
   - [Routed to copy-and-swap (`type-rewrite`) — exit 0](#routed-to-copy-and-swap-type-rewrite--exit-0)
   - [Refused: the engine does not carry the operation yet (`backend-unavailable`) — exit 2](#refused-the-engine-does-not-carry-the-operation-yet-backend-unavailable--exit-2)
   - [Refused: target facts forbid the plan (`unsupported-partitioned-parent`) — exit 2](#refused-target-facts-forbid-the-plan-unsupported-partitioned-parent--exit-2)
-  - [Executable but destructive (`destructive`) — exit 0](#executable-but-destructive-destructive--exit-0)
+  - [Refused until acknowledged: a destructive change (`destructive-change`) — exit 2](#refused-until-acknowledged-a-destructive-change-destructive-change--exit-2)
 - [Lint](#lint)
   - [Blocking idioms flagged (`blocking-idiom`) — exit 0](#blocking-idioms-flagged-blocking-idiom--exit-0)
 - [Pull](#pull)
@@ -78,7 +80,7 @@ canonical statement of the ladder; a wording fix lands there first.
 | Exit | Meaning | Anything committed? | Online-safe? |
 |---|---|---|---|
 | 0 | Executed through an online-safe path; or a dry run, `diff`, or `pull` found nothing to refuse | yes (dry run, `diff`, `pull`: nothing runs) | yes |
-| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in `executed_sql`; unknown when `code` is `commit-outcome-unknown` — the failed step's `COMMIT` may have landed, so inspect the catalog before retrying | not applicable |
+| 1 | Failed: a PostgreSQL error after execution started (rolled back), or an operational or usage error before it — bad flags, an unreachable database, a mismatched `--force` or `--allow-destructive` acknowledgement | no; a safer sequence that stopped mid-flight keeps its committed prefix, named in `executed_sql`; unknown when `code` is `commit-outcome-unknown` — the failed step's `COMMIT` may have landed, so inspect the catalog before retrying | not applicable |
 | 2 | Refused: no online-safe path; the verdict names the typed `reason` and `class` | no | not applicable |
 | 3 | Committed through the accepted-blocking passthrough, under bounded budgets, without an online-safety guarantee | yes | no |
 
@@ -110,7 +112,7 @@ is a one-line summary; the linked reference entry is authoritative.
 | [`unsupported-partitioned-parent`](postgres-online-ddl-reference.md#unsupported-partitioned-parent) | The routed plan builds an index concurrently but the target is a partitioned parent, where PostgreSQL cannot `CREATE INDEX CONCURRENTLY`. Refused. |
 | [`unsupported-statement`](postgres-online-ddl-reference.md#unsupported-statement) | The planner knows no safe path for the statement (for example `SET UNLOGGED`, `CLUSTER ON`). Refused — the same typed reason the run path's refusal verdict carries. |
 | [`table-not-found`](postgres-online-ddl-reference.md#table-not-found) | The target table does not exist, so classification fell back to zero facts; running without `--dry-run` would fail. The dry run exits 2 and the report carries `table_exists: false`. |
-| [`destructive`](postgres-online-ddl-reference.md#destructive) | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL` (dropping a `DEFAULT` is not destructive). A warning alongside the routing decision, not a refusal; `DROP TABLE` never reaches classification, it refuses as `unsupported-statement`. |
+| [`destructive`](postgres-online-ddl-reference.md#destructive) | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL` (dropping a `DEFAULT` is not destructive). A warning alongside the routing decision on a plan `--allow-destructive` acknowledged; without it `migrate` refuses the statement as `destructive-change`; `DROP TABLE` never reaches classification, it refuses as `unsupported-statement`. |
 | [`blocking-idiom`](lint-report.md#codes-code) | Lint-only code: the submitted form blocks readers or writers and a safer native form exists; the finding's `suggestion` carries the safer SQL when the linter can construct it. |
 
 ## Refusal reasons
@@ -129,7 +131,7 @@ in `detail`. The set is closed and pinned by test (`verdict.Reasons()`).
 | `not-native-safe-budget-exceeded` | The optimistic attempt exceeded its lock or statement budget and was cancelled; the verdict's `cause` narrows which budget fired. The same `cause` field carries the partitioned-parent shape under `unsupported-partitioned-parent`; both are refusal causes, unrelated to the plan statement's create-shape `cause`. |
 | `not-native-safe-rewrite-required` | The submitted form blocks and must run as a safer native sequence, but none could be constructed. |
 | `backend-unavailable` | The change routes to copy-and-swap for an operation the engine does not carry yet (a volatile column default, a stored generated column, a relocation, an added column whose type rewrites); a type rewrite of an existing column (`ALTER COLUMN TYPE`) executes through the route instead. |
-| `destructive-change` | The desired-state plan discards live structure — a dropped column, constraint, index, or `NOT NULL` — and desired-state execution runs no destructive statement; run the drop deliberately instead ([execution model](execution-model.md)). |
+| `destructive-change` | The change discards live data or structure — a dropped column, constraint, index, or `NOT NULL`. `migrate --alter` runs it only when `--allow-destructive` names the table, and a refused statement that drops a column and adds it back carries the `alter-column-type-in-place` guidance; desired-state execution runs no destructive statement, so run the drop deliberately through `migrate --alter` instead ([execution model](execution-model.md)). |
 | `plan-fingerprint-mismatch` | The plan recomputed at execution time does not carry the pinned fingerprint: the plan a reviewer approved is not the plan that would execute, so nothing runs ([execution model](execution-model.md)). |
 | `declarative-foreign-key` | The desired-state plan adds or drops a foreign key, or creates a table that declares one. Desired-state execution does not run foreign-key changes yet; the plan still shows the statement, and `migrate --alter` runs `ADD FOREIGN KEY` through the online `NOT VALID` + `VALIDATE` sequence. |
 | `copy-and-swap-refused` | The change routes to copy-and-swap and the route's own gates declined it: the preflight found a table shape or an environment it cannot run against, or a shadow operation refused mid-run to keep an invariant. The verdict's `cause` carries the route's own refusal token (`copy-and-swap-…` from the preflight, `shadow-…` from the shadow operations) and `class` its routing class; [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause) lists every cause. |
@@ -158,7 +160,7 @@ itself.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN note text' --dry-run --json
 {
-  "format_version": 12,
+  "format_version": 14,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -199,7 +201,7 @@ plans the safer online sequence instead: the decision carries it in
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email)' --dry-run --json
 {
-  "format_version": 12,
+  "format_version": 14,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -301,7 +303,7 @@ column first, then build the constraint as a separate, named
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN nickname text UNIQUE' --dry-run --json
 {
-  "format_version": 12,
+  "format_version": 14,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -343,7 +345,7 @@ no native SQL to show.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-run --json
 {
-  "format_version": 12,
+  "format_version": 14,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -397,7 +399,7 @@ column, a relocation — so the plan is `unavailable` and nothing executes.
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT clock_timestamp()' --dry-run --json
 {
-  "format_version": 12,
+  "format_version": 14,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -434,7 +436,7 @@ The refusal cause is the report-level `reason`.
 ```console
 $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)' --dry-run --json
 {
-  "format_version": 12,
+  "format_version": 14,
   "source": "alter",
   "schema": "public",
   "table": "events",
@@ -466,15 +468,40 @@ $ pg-sprite migrate --alter 'CREATE INDEX events_created_idx ON events (created)
 }
 ```
 
-### Executable but destructive (`destructive`) — exit 0
+### Refused until acknowledged: a destructive change (`destructive-change`) — exit 2
 
-A `DROP COLUMN` routes to execute — the destructive flag is surfaced for
-the reviewer or orchestrator to gate on; `migrate` itself does not block it.
+A `DROP COLUMN` discards every value the column holds, so `migrate` refuses it
+before any route runs it — and the dry run ends in that same refusal verdict,
+not a plan report — until `--allow-destructive` names the table. The verdict's
+`reason` and `class` are the ones desired-state execution uses for a
+destructive plan; on `migrate --alter` that reason always means the
+acknowledgement would lift it. `DROP CONSTRAINT` and `ALTER COLUMN ... DROP NOT
+NULL` are refused the same way. A statement that drops a column and adds it back
+under the same name also carries `"guidance": "alter-column-type-in-place"`:
+change the column with `ALTER COLUMN ... TYPE ... USING ...` to keep its values.
 
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --json
 {
-  "format_version": 12,
+  "outcome": "refused",
+  "reason": "destructive-change",
+  "class": "by-design",
+  "statement": "ALTER TABLE public.users DROP email",
+  "table": "public.users",
+  "detail": "the statement discards live data or structure (DROP COLUMN email); pg-sprite runs no destructive statement unless the destructive acknowledgement names its table — review what is lost, then rerun with --allow-destructive public.users"
+}
+```
+
+With the acknowledgement the dry run reports the plan the acknowledged apply
+takes — still flagged `destructive` for a reviewer or orchestrator to gate on —
+and exits 0; the apply's verdict then carries `"allowed_destructive": true`,
+the machine-readable audit record, and the run logs one warning naming the
+table. A mismatched acknowledgement executes nothing and exits 1.
+
+```console
+$ pg-sprite migrate --alter 'ALTER TABLE users DROP COLUMN email' --dry-run --allow-destructive public.users --json
+{
+  "format_version": 14,
   "source": "alter",
   "schema": "public",
   "table": "users",
@@ -601,7 +628,7 @@ CREATE TABLE users (
 ```console
 $ pg-sprite diff --desired /tmp/users.sql --json
 {
-  "format_version": 12,
+  "format_version": 14,
   "source": "diff",
   "schema": "public",
   "table": "users",

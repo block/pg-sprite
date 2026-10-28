@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/lint"
+	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -75,7 +76,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 12, "the doc publishes twelve captured --json outputs")
+	require.Len(t, blocks, 13, "the doc publishes thirteen captured --json outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
@@ -132,6 +133,18 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 
 	destructive := alterReport(t, "ALTER TABLE users DROP COLUMN email",
 		"public", "users", usersFacts())
+	// Without the acknowledgement the dry run ends in the apply's refusal
+	// verdict instead of the plan report above.
+	dropEmail, err := statement.ParseOne("ALTER TABLE users DROP COLUMN email")
+	require.NoError(t, err)
+	dropEmailCanonical, err := statement.Canonical(dropEmail.SQL())
+	require.NoError(t, err)
+	dropEmailClassified, err := planner.Classify(dropEmailCanonical, usersFacts())
+	require.NoError(t, err)
+	destructiveRefused, refused, err := migrate.AdmitDestructive(dropEmail, "public",
+		router.Route([]planner.Plan{dropEmailClassified}).Statements[0], "")
+	require.NoError(t, err)
+	require.True(t, refused)
 
 	lintReport, err := lint.Check("CREATE INDEX users_email_idx ON users (email);\n" +
 		"ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);\n")
@@ -156,7 +169,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	diff.Fingerprint = plan.Fingerprint(diff.Statements)
 
 	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, rewriteRequired,
-		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitioned, destructive,
+		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitioned, destructiveRefused, destructive,
 		lintReport, diff}
 	for i, w := range want {
 		marshaled, err := json.Marshal(w)
