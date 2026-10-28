@@ -113,12 +113,13 @@ type MigrateCmd struct {
 	ValidateTimeout   time.Duration `help:"Overall bound (statement_timeout) for one VALIDATE CONSTRAINT step; expect large tables to need a generous value." default:"30m"`
 	Force             string        `help:"Run the submitted form as-is, overriding a safer-sequence substitution or a rewrite-required/backend-unavailable refusal. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly. The forced run is still parsed, preflighted, size-guarded, and budget-bounded; planner refusals (no known safe path) and unsupported statement kinds cannot be forced." placeholder:"SCHEMA.TABLE"`
 	AcceptBlocking    string        `help:"Run one refused blocking index statement as-is, without online safety: a plain single-relation DROP INDEX (not CASCADE), REINDEX INDEX, or REINDEX TABLE. The value is the typed acknowledgement: it must name the schema-qualified table whose lock you accept (the index's owning table) exactly. The statement runs in an engine-owned transaction under --lock-timeout and an explicitly supplied --statement-timeout, which must be longer than --lock-timeout; an exhausted lock budget refuses (exit 2), a cancelled or failed statement fails (exit 1), a commit exits 3. Every other refusal stands. Cannot be combined with --force or --dry-run." placeholder:"SCHEMA.TABLE"`
+	AllowDestructive  string        `help:"Run a statement that discards live data or structure: DROP COLUMN, DROP CONSTRAINT, or ALTER COLUMN ... DROP NOT NULL. Without it such a statement is refused (exit 2, reason destructive-change) before anything runs, on every route it could take. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly. It acknowledges only the loss: the statement is still classified, routed, preflighted, size-guarded, and budget-bounded, and a statement that also needs --force needs both. With --dry-run the plan is reported as the acknowledged run would take it. Cannot be combined with --accept-blocking or --desired." name:"allow-destructive" placeholder:"SCHEMA.TABLE"`
 	LockAttempts      int           `help:"Maximum bounded attempts when native DDL exceeds lock_timeout; 1 disables retry." default:"3"`
 	LockBackoff       time.Duration `help:"Initial exponential backoff between lock-timeout attempts." default:"100ms"`
 	LockBackoffMax    time.Duration `help:"Maximum exponential backoff between lock-timeout attempts." default:"1s"`
 	FreeDisk          byteSize      `help:"Free space on the volume the table lives on, for a statement the planner routes to copy-and-swap; the preflight refuses the run when the shadow table and its indexes would not fit (binary units: B, KiB, MiB, GiB, TiB). Unset means no space and refuses." name:"free-disk" placeholder:"SIZE"`
 	KeepOld           bool          `help:"After a copy-and-swap, keep the retained source table under its _old name for a rollback window you end by hand, instead of dropping it before the run reports done." name:"keep-old"`
-	Quiesced          bool          `help:"Declare that nothing writes the table for the length of a copy-and-swap. The run then fences writes instead of streaming them through a replication slot, and needs no logical decoding from the server; a write that reaches the fence fails." name:"quiesced"`
+	BlockWrites       string        `help:"Offline mode: block the table's writes for the length of a copy-and-swap: the run fences writes instead of streaming them through a replication slot, and needs no logical decoding from the server, but every write that reaches the fence fails with SQLSTATE 55006 until the swap. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly." name:"block-writes" placeholder:"SCHEMA.TABLE"`
 	Restart           string        `help:"Start a copy-and-swap over instead of resuming the leftover of an earlier run: the leftover shadow table, checkpoint row, and write fence or replication slot are discarded under the run's lock, then the statement runs from the beginning. The value is the typed acknowledgement: it must name the resolved schema-qualified target table exactly. A leftover whose swap already committed is not discarded; run the statement without this flag to finish it. Cannot be combined with --force, --accept-blocking, or --dry-run." placeholder:"SCHEMA.TABLE"`
 	DryRun            bool          `help:"Classify and route the statement, print the plan, and execute nothing."`
 	JSON              bool          `help:"Emit the verdict (or dry-run plan) as JSON."`
@@ -140,7 +141,12 @@ type MigrateCmd struct {
 // they have no meaning on a dry run either. --restart acknowledges
 // discarding a copy-and-swap leftover, so it has no meaning on a dry run
 // or alongside the acknowledgements that steer a statement away from
-// copy-and-swap.
+// copy-and-swap. --allow-destructive acknowledges data loss, a different
+// risk from the one --force accepts, so the two combine; a dry run with it
+// reports the plan the acknowledged run would take, and a restart re-runs
+// the same statement, so both combine too. It cannot ride with
+// --accept-blocking, a separate policy path the statement-kind gate takes
+// before the destructive gate is reached.
 func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 	if err := c.validateInput(); err != nil {
 		return err
@@ -153,6 +159,9 @@ func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 	}
 	if c.DryRun && c.AcceptBlocking != "" {
 		return errors.New("--accept-blocking cannot be combined with --dry-run: the dry run reports the refusal as it stands")
+	}
+	if c.AllowDestructive != "" && c.AcceptBlocking != "" {
+		return errors.New("--allow-destructive cannot be combined with --accept-blocking: accepted blocking is a separate policy path for refused index statements, which the destructive acknowledgement does not govern")
 	}
 	if c.Force != "" && c.AcceptBlocking != "" {
 		return errors.New("--accept-blocking cannot be combined with --force: each acknowledges a different decision, and a statement reaches one")
@@ -170,7 +179,7 @@ func (c *MigrateCmd) Validate(kctx *kong.Context) error {
 		return errors.New("--accept-blocking requires --statement-timeout on the same command line: it is the outage bound you accept after the lock is granted, and the default is not an acknowledgement")
 	}
 	if c.DryRun {
-		for _, name := range []string{"free-disk", "keep-old", "quiesced"} {
+		for _, name := range []string{"free-disk", "keep-old", "block-writes"} {
 			if flagSupplied(kctx, name) {
 				return fmt.Errorf("--%s cannot be combined with --dry-run: the dry run executes nothing, so a copy-and-swap policy has nothing to govern", name)
 			}

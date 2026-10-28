@@ -191,7 +191,9 @@ The engine accepts a change two ways, both feeding the **same** planner pipeline
 Declarative did the harder front-end work (introspect + diff + ordering); both front-ends now
 share classify → route, with imperative input handing the user's statement to the *same*
 classifier. Schemas can therefore live as reviewed, version-controlled files and CI can compute
-"what would change". Destructive-diff confirmation and explicit rename intent are planned. The
+"what would change". Destructive changes need an explicit acknowledgement on the imperative
+front door (`--allow-destructive`) and are refused whole on the declarative one; explicit
+rename intent is planned. The
 diff algorithm and its safety rules are detailed in the
 [low-level design](low-level-design.md#declarative-mode-desired-state-schema-diff).
 

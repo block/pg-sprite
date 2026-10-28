@@ -29,7 +29,26 @@ command -v python3 >/dev/null 2>&1 || die "python3 is required to parse verdicts
 [ -x "$PGS" ] || die "pg-sprite binary not found at $PGS — run make build first"
 [ -s "$MANIFEST" ] || die "missing $MANIFEST"
 
+# The corpus on disk must be exactly what fetch.sh fetched at the pinned
+# commit — a stale cache from an older pin, or a locally edited file, would
+# replay the wrong world under today's label.
+verify_corpus_pin
+
+# Pre-flight: the manifest must tile the corpus. Every substantive line of
+# every non-baseline corpus file must be claimed by exactly one range, in
+# order — a statement no row claims would be silently unassessed, and the
+# tier counts are the deliverable. Blank lines and `--` comment lines may sit
+# between ranges (a `/* */` comment must be claimed); the baseline is
+# excluded because the harness applies it wholesale.
+python3 "${REPLAY_DIR}/coverage.py" "$MANIFEST" "${PROJECT_DIR}/corpus" "$BASELINE" "${FILES[@]}" \
+    || die "manifest does not tile the corpus"
+
 DSN="$("${REPLAY_DIR}/harness.sh" "$PROJECT" dsn)"
+
+# pg-sprite's stderr for the current step, kept so a FAIL row can show the
+# engine's own explanation instead of an unparseable-JSON shrug.
+ERRFILE="$(mktemp)"
+trap 'rm -f "$ERRFILE"' EXIT
 
 # One replay step's SQL, extracted from the pinned corpus by line range.
 extract() {
@@ -146,7 +165,36 @@ count_no_online_safety_problem=0
 count_by_design=0
 count_environmental=0
 count_invariant_violation=0
+count_unassessable=0
 declare -a capability_boundary_reasons=()
+declare -a fail_details=()
+
+# Set to "<migration> <range>" at the first step after which the database no
+# longer matches the corpus's true state: a psql step that failed to apply,
+# or an exit-1 engine failure that may have committed a prefix and must not
+# be blindly re-applied. Later rows are unassessable — verdicts against a
+# diverged world are not evidence — so they are labelled and kept out of
+# the bucket summary instead of counted.
+diverged=""
+
+# Record the engine's first stderr line against a FAIL row so the results
+# explain the mismatch instead of shrugging.
+record_engine_error() {
+    local msg
+    msg="$(head -n1 "$ERRFILE")"
+    [ -n "$msg" ] && fail_details+=("$1 $2: $msg")
+}
+
+# A refused step executed nothing, so apply the corpus statement via psql to
+# keep the database at the corpus's state. A failed apply diverges the run
+# and is recorded as a failure, so the report says why the run exits non-zero.
+advance_refused() {
+    local migration="$1" range="$2" sql="$3"
+    printf '%s\n' "$sql" | psql_apply && return 0
+    diverged="$migration $range"
+    fail_details+=("$migration $range: psql could not apply the refused statement; state diverged here")
+    return 1
+}
 
 while read -r migration range expected extra; do
     case "$migration" in ''|\#*) continue ;; esac
@@ -159,18 +207,27 @@ while read -r migration range expected extra; do
     [ -n "$sql" ] || die "empty extraction: $migration $range"
     label="$(preview "$sql")"
 
+    if [ -n "$diverged" ]; then
+        rows+=("$migration|$range|$expected|unassessable (diverged at $diverged)|SKIP|$label")
+        count_unassessable=$((count_unassessable + 1))
+        continue
+    fi
+
     if [ "$expected" = "psql" ]; then
         if printf '%s\n' "$sql" | psql_apply; then
             rows+=("$migration|$range|psql|applied|PASS|$label")
             count_psql=$((count_psql + 1))
         else
+            # --single-transaction rolled the step back whole, so the content
+            # the rest of the corpus assumes is missing: diverged.
             rows+=("$migration|$range|psql|apply-error|FAIL|$label")
             failures=$((failures + 1))
+            diverged="$migration $range"
         fi
         continue
     fi
 
-    out="$("$PGS" migrate --url "$DSN" --json --alter "$sql" 2>/dev/null)"
+    out="$("$PGS" migrate --url "$DSN" --json --alter "$sql" 2>"$ERRFILE")"
     status=$?
     verdict_fields="$(printf '%s' "$out" | python3 -c '
 import json, sys
@@ -195,12 +252,15 @@ print("\t".join(str(v.get(k, "")) for k in ("outcome", "reason", "class", "owner
         else
             rows+=("$migration|$range|execute|$actual (exit $status)|FAIL|$label")
             failures=$((failures + 1))
+            record_engine_error "$migration" "$range"
             # Advance state via psql so later steps stay meaningful, but only
             # when pg-sprite refused (nothing ran); a failed execution may
-            # have committed a prefix and needs manual inspection instead.
+            # have committed a prefix that must not be blindly re-applied,
+            # which diverges the run.
             if [ "$status" -eq 2 ]; then
-                printf '%s\n' "$sql" | psql_apply \
-                    || die "advance after unexpected refusal failed: $migration $range"
+                advance_refused "$migration" "$range" "$sql"
+            elif [ "$status" -ne 0 ]; then
+                diverged="$migration $range"
             fi
         fi
         ;;
@@ -221,25 +281,31 @@ print("\t".join(str(v.get(k, "")) for k in ("outcome", "reason", "class", "owner
             invariant-violation) count_invariant_violation=$((count_invariant_violation + 1)) ;;
             esac
         fi
+        # A refusal (exit 2) executed nothing, so the corpus statement itself
+        # must still land for the remaining history to replay against true
+        # state. Advance only on a true refusal — mirroring the execute
+        # branch, an exit-1 failed execution may have committed a prefix
+        # that must not be blindly re-applied, which diverges the run; an
+        # exit-0 execution advanced the state itself (a mismatch, but the
+        # world is still the corpus's). The advance runs before the row is
+        # judged so a failed one cannot leave the row reading PASS.
+        advanced=1
+        if [ "$status" -eq 2 ]; then
+            advance_refused "$migration" "$range" "$sql" || advanced=0
+        elif [ "$status" -ne 0 ]; then
+            diverged="$migration $range"
+        fi
         # Owner is asserted on every row: RF-7 makes it present exactly when
         # the class is no-online-safety-problem, so the pin (or its absence)
         # is well-defined without a separate column.
-        if [ "$status" -eq 2 ] && [ "$outcome" = "refused" ] \
+        if [ "$advanced" -eq 1 ] && [ "$status" -eq 2 ] && [ "$outcome" = "refused" ] \
             && [ "$reason" = "$want_reason" ] && [ "$actual_class" = "$want_class" ] \
             && [ "$owner" = "$want_owner" ]; then
             rows+=("$migration|$range|$expected|$actual|PASS|$label")
         else
             rows+=("$migration|$range|$expected|$actual (exit $status)|FAIL|$label")
             failures=$((failures + 1))
-        fi
-        # A refusal (exit 2) executed nothing, so the corpus statement itself
-        # must still land for the remaining history to replay against true
-        # state. Advance only on a true refusal — mirroring the execute
-        # branch, an exit-1 failed execution may have committed a prefix
-        # that must not be blindly re-applied.
-        if [ "$status" -eq 2 ]; then
-            printf '%s\n' "$sql" | psql_apply \
-                || die "psql advance failed: $migration $range"
+            record_engine_error "$migration" "$range"
         fi
         ;;
     *)
@@ -268,6 +334,14 @@ for row in "${rows[@]}"; do
         "$expected_width" "$e" "$actual_width" "$a" "$res" "$l"
 done
 
+if [ "${#fail_details[@]}" -gt 0 ]; then
+    echo
+    echo "== failure detail (engine stderr)"
+    for d in "${fail_details[@]}"; do
+        echo "  $d"
+    done
+fi
+
 echo
 # The buckets tally engine verdicts, so they are a finding about the workload
 # only when every verdict matched its pin; otherwise say what they are.
@@ -288,6 +362,7 @@ summary_labels=(
     "refusal: INVARIANT VIOLATION (REPORT PG-SPRITE DEFECT)"
     "out-of-scope content, psql only (T3)"
     "mismatches"
+    "unassessable (state diverged)"
 )
 label_width=0
 for l in "${summary_labels[@]}"; do
@@ -308,7 +383,17 @@ summary_line "${summary_labels[4]}" "$count_environmental"
 summary_line "${summary_labels[5]}" "$count_invariant_violation"
 summary_line "${summary_labels[6]}" "$count_psql"
 summary_line "${summary_labels[7]}" "$failures"
+if [ "$count_unassessable" -gt 0 ]; then
+    summary_line "${summary_labels[8]}" "$count_unassessable"
+fi
+# Said even when the divergence is on the last row, where nothing is SKIP but
+# the run still exits non-zero because of it.
+if [ -n "$diverged" ]; then
+    echo "  state diverged at ${diverged}; any later rows are SKIP, not evidence"
+fi
 
-[ "$failures" -eq 0 ] || exit 1
+if [ "$failures" -gt 0 ] || [ -n "$diverged" ]; then
+    exit 1
+fi
 echo
 echo "replay complete: every assessed statement matched its expected verdict"

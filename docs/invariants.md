@@ -132,9 +132,21 @@ guarded transaction (delete every chunk's shadow rows, then the copy statement f
 and read again, with the committed repairs reported alongside any refusal, and under `recopy`
 the same recopy commits with no reread — the policy for a source that is written while the
 pass runs, where a fresh read would refuse a chunk the recopy itself made right; the stream
-carries that write, and the next pass, not this one, is the proof (no-policy,
+carries that write, and the next pass, not this one, is the proof. The compare and the recopy
+are separate statements against that live source, so a source that moves a unique value from
+a row in a chunk the compare read equal to a row in a differing chunk, between the two, makes
+the recopy's insert collide with the shadow row the compare left alone (SQLSTATE `23505` or
+`23P01`); under `recopy` the one transaction rolls back and the pass compares again, so both
+chunks now differ and the next recopy, cut from that comparison, lands — up to
+`Options.RecopyAttempts` recopies, every collision counted in `Outcome.Collisions`, the last
+collision's error ending the pass as the server raised it; under `repair` the collision is the
+pass's error, since a repair assumes the source rows it recopies hold still (no-policy,
 abort-leaves-shadow-alone, repairs-every-chunk, moved-unique-value,
-later-repair-fails, and recopy-tolerates-a-source-write-inside-the-pass tests). Under the
+later-repair-fails, recopy-tolerates-a-source-write-inside-the-pass,
+recopy-retries-a-unique-value-moved-during-the-recopy,
+recopy-stops-when-every-attempt-collides,
+recopy-ends-clean-when-the-comparison-after-a-collision-finds-nothing, and
+repair-does-not-retry-a-collision tests). Under the
 stream (`CheckLive` under `repair`) the one recopy transaction is kept apart from the stream's
 own writes: the pass holds the catch-up's flushes off the shadow in Go before the transaction
 asks for `SHARE MODE` and gives them back only after it commits, on every path
@@ -445,7 +457,8 @@ proxy that hands the server connection to another client keeps the rewritten, st
 type; lookalike functions and operators planted in the target schema, each proven to answer the
 unqualified call on introspection's path, do not change the model), `pkg/preflight` (every proof read — the size guard, the
 privilege probes, the absence, owned-name, and schema constraint-name reads, the add-column
-rewrite probe, and the copy-and-swap shape and environment facts — qualifies every function,
+rewrite probe, the copy-and-swap shape and environment facts, and the table usage read
+(`TestReadTableUsageIgnoresTheSessionSearchPath`) — qualifies every function,
 relation, type, and operator, `IN` and `IS DISTINCT FROM`
 included since both resolve `=` through the path; planted `pg_total_relation_size(oid)`,
 `has_schema_privilege(name, name, text)`, `+`, and `=` overloads on a path that lists the
@@ -556,9 +569,15 @@ Migrations serialize per table via a **session-scoped advisory lock** — the an
   shadowed by a decoy.
 - The endpoint must give the client a **stable server session**: before the lock attempt the
   same session-affinity proof the pool runs (`ProveSessionAffinity`) runs on the lock's
-  connection, and a transaction-mode pooler is refused with `ErrNoSessionAffinity`. Behind
-  such a pooler two clients can share one backend and both "hold" the lock, so nothing is
-  taken there.
+  connection, and a transaction-mode or statement-mode pooler is refused with
+  `ErrNoSessionAffinity`. Behind such a pooler two clients can share one backend and both
+  "hold" the lock, so nothing is taken there. A statement-mode pooler refuses the proof's
+  own transaction (PgBouncer closes the connection with SQLSTATE `08P01`); the proof reads
+  that refusal on its `BEGIN` as no affinity, keeping the pooler's error as the cause. The
+  second connection runs a statement before the `BEGIN`, so a session-mode pooler with no
+  backend to spare, which ends its wait with the same `08P01`, fails on that statement
+  instead and stays an untyped error rather than a false refusal. Only a
+  direct connection or a session-mode endpoint is supported.
 - A held lock is **never waited for**: contention is reported immediately as a typed
   `TableLockHeldError` naming the holder (backend PID, `application_name`, connect time) and the
   caller refuses. Because contention refuses rather than queues, a caller that needs locks on
@@ -575,7 +594,8 @@ Migrations serialize per table via a **session-scoped advisory lock** — the an
   A release that finds the lock already gone reports `ErrInvariantViolation`.
 
 *Enforced today:* `pkg/dbconn` `AcquireTableLock` (`TableLock` proof carried by
-`TableLockSession`; affinity refusal, two-instance refusal, keepalive-loss, and `Bind`
+`TableLockSession`; affinity refusal behind transaction-mode and statement-mode PgBouncer,
+two-instance refusal, keepalive-loss, and `Bind`
 cancellation tests); `pkg/schemachange` shadow build, drop, and inspect each require the
 session for the proven table, run under its `Bind` context, and confirm from their own
 transaction that the session's backend holds the lock before the first write (nil-session,
@@ -1092,13 +1112,21 @@ refuses-replaced-relations-before-its-marker,
 leaves-the-slot-it-created-owned-by-the-row, resumes-in-copying-below-a-partial-watermark,
 refuses-a-row-of-another-source-shape, stops-when-the-lock-is-lost-while-the-drop-waits,
 refuses-a-foreign-slot-of-the-name, refuses-the-slot-while-another-backend-holds-it,
-reads-a-slot-the-server-reports-lost-as-reconcile tests). *Known limit:* the recopy pass
-compares a chunk and recopies it in separate statements against a live source, so a source
-that moves a unique or primary-key value from one row to another between the two can make the
-recopy fail with a unique violation; the pass ends in error with the row still in
-`reconciling` and the shadow unchanged, and the next attempt restarts the reconcile — closed,
-never a shadow with a row the source lacks (a retry that survives the move is a tracked
-follow-up). *Source:*
+reads-a-slot-the-server-reports-lost-as-reconcile, and
+survives-a-unique-value-moved-during-its-recopy tests). The recopy pass compares a chunk and
+recopies it in separate statements against a live source, so a source that moves a unique
+value from a row in a chunk the compare read equal to a row in a differing chunk, between the
+two, makes the recopy collide with a shadow row the compare left alone; the one recopy
+transaction rolls back, the pass compares again, and the recopy cut from that comparison
+covers both chunks and lands (CO-3). A source that moves a value into the differing chunks
+before every recopy exhausts the pass's bounded attempts; the pass then ends in the last
+collision's error with the row still in `reconciling` and the shadow unchanged, and the next
+attempt restarts the reconcile — closed, never a shadow with a row the source lacks. *Known
+limit:* on resume the reconcile runs before the copier clears the shadow rows above a partial
+watermark, and the pass compares only through that watermark, so a unique value the source
+moves out of a shadow row above it into a differing chunk collides on every attempt of every
+reconcile until the source moves it back; the run stays in `reconciling`, closed, and
+`--restart` (`CopySwapOptions.Restart`) starts it over. *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum
@@ -1311,7 +1339,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   intent is explicit. The rename-overlap pattern Spirit refuses (one `ALTER` that renames a
   column and reuses or retypes it) is unrepresentable: PostgreSQL parses a rename as its own
   statement and the front door admits one statement (`TestClassifyRejectsARename*`). *Source:*
-  [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options), Spirit.
+  [low-level-design § declarative safety rules](low-level-design.md#safety-rules-inherited-philosophy-surprise-free-decisions-not-options),
+  [make mistakes hard to commit](design-principles.md#make-mistakes-hard-to-commit), Spirit.
 - **RF-5** — The dangerous literal never runs silently: risky statements with a safer native
   idiom get the idiom (reported) or a recommendation; running as-submitted requires a loud,
   typed, audited acknowledgement: `--force` on the routes it governs, or `--accept-blocking`
@@ -1360,6 +1389,63 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `pkg/migrate` (`acceptBlocking` builds the outcome from the gate's own verdict),
   `TestRunAcceptBlockingExecutesEligibleRefusals`. *Source:*
   [lock-budgeted passthrough](lock-budgeted-passthrough.md#verdict-reports-and-exit-code).
+- **RF-10** — No statement that discards data, and no statement that would leave the table
+  unreadable or unwritable beyond the engine's lock budget, runs without a loud, typed
+  acknowledgement naming the table. A destructive statement — one whose plan drops a column,
+  a constraint, or a `NOT NULL` — is refused with `destructive-change` (class `by-design`)
+  before any route runs it (native, safer sequence, forced, or copy-and-swap) and in a dry
+  run, unless `--allow-destructive` (`Options.AllowDestructive`) names the resolved
+  schema-qualified table; a mismatched acknowledgement is a typed usage error and nothing
+  executes. The acknowledgement covers only the data loss: the statement still meets every
+  other gate, and an acknowledged run is audited at warn level and carries
+  `allowed_destructive: true` on its verdict. The declarative path takes no acknowledgement
+  and refuses a destructive plan whole. A planner refusal runs nothing and keeps its own
+  reason. A `DROP INDEX` stays with the statement-kind gate and `--accept-blocking`, which
+  the destructive acknowledgement does not reach. Outage-risk statements are covered by
+  RF-5 and AB-1..AB-5 (`--force`, `--accept-blocking`) and by the LK-2 budgets.
+  *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
+  `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
+  run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
+  (`ErrAllowDestructiveNotSupported`), `pkg/planner` (`destructiveOp`),
+  `TestRunRefusesAnUnacknowledgedDropColumn`, `TestRunRefusesAnUnacknowledgedDropConstraint`,
+  `TestRunRefusesAnUnacknowledgedDropNotNull`, `TestRunExecutesAnAcknowledgedDropColumn`,
+  `TestRunRejectsAMismatchedDestructiveAcknowledgement`,
+  `TestRunRefusesAnUnacknowledgedDropColumnRoutedToCopyAndSwap`,
+  `TestRunNeedsBothForceAndTheDestructiveAcknowledgement`,
+  `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`, `TestAdmitDestructive`,
+  `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
+  `demo/tour.sh` (`refused_destructive`). *Source:*
+  [design principles](design-principles.md#declarative-review-first-workflow)
+  ([make mistakes hard to commit](design-principles.md#make-mistakes-hard-to-commit)),
+  SchemaBot's `--allow-unsafe` acknowledgement for destructive plans.
+- **RF-11** — A table is judged idle only when the connected server's statistics prove no use
+  inside the window: no other session holds a lock on it, both last-scan times are recorded
+  as before the window or absent, the server is not in recovery and tracks counts — for the
+  reading session and under every saved per-role and per-database setting — the
+  database's statistics were not reset inside the window, and counting provably began before
+  it. Every statistic is read from one snapshot, so a reset during the read cannot pair an
+  old reset time with cleared scan times. A partitioned table is judged across every leaf
+  partition at every level: a lock on the table or any partition, or a scan of any leaf
+  inside the window, is use (the leaf with the most recent scan of either kind named); it is
+  idle only when it has a leaf and every leaf would be idle on its own, so a partitioned
+  table with no leaf, a foreign-table leaf, or a leaf with no scan and no reset time is
+  `unknown` unless another relation shows use. Every other case is `recent` or `unknown`,
+  never idle; write counters, which carry no time, never decide. The evidence
+  describes that one server alone — reads served by replicas are not in it — so idle is
+  evidence for a drop safeguard, never permission on its own. *Enforced:* `pkg/preflight`
+  (`TableUsage.Judge`, over the evidence `ReadTableUsage` reads in one bounded read-only
+  transaction that locks no table or partition, `pg_catalog`-qualified per CO-9). No caller
+  consumes the verdict yet. *Test obligation:* each branch decided at its window edge in
+  `table_usage_verdict_test.go` and the partition aggregation in
+  `table_usage_partitions_test.go`; a just-scanned table recent, a lock holder recent and
+  named, PostgreSQL 14/15 unknown, and a database or single-table reset not idle against
+  real PostgreSQL in `table_usage_integration_test.go`; a scanned partition or grandchild
+  recent and named, a lock on one partition recent, a partitioned table with no partition or
+  with a foreign partition unknown, and inheritance children not followed in
+  `table_usage_partitions_integration_test.go`; a partitioned table idle since a reset in
+  `table_usage_idle_integration_test.go`; a reset between the read's statistics reads not
+  seen, and a role's saved `track_counts = off` unknown, in
+  `table_usage_coverage_integration_test.go`. *Source:* [table usage](table-usage.md).
 
 ## Orchestration / control-plane (OC)
 
@@ -1447,6 +1533,7 @@ about **how we write and review the code**.
 | LK-3 | 4–6 | cancellation/claim race test |
 | LK-5 | 3 (native recovery) | stale-observation fail-closed tests, never-drops-valid, not-droppable skip, shared-budget test |
 | AB-1, AB-2 | accepted-blocking rollout step 2 | exact session bounds + lock exhaustion leaves catalog unchanged |
+| RF-10 | imperative destructive gate | unacknowledged drop column / constraint / NOT NULL refused with durable state intact, acknowledged runs carry the verdict field, mismatch executes nothing, copy-and-swap and forced routes gated, DROP INDEX untouched, dry run ends in the same refusal, demo refusal smoke |
 | AB-3, AB-4, AB-5, RF-9 | accepted-blocking rollout step 4 | catalog-resolved acknowledgement, mismatch executes nothing, ineligible refusals untouched, grammar rejects `--force`/`--dry-run`/missing budget, accepted verdict identity and exit 3, demo exit-code smoke |
 | LK-4, ST-5 | 7 | dropped-connection cutover, fidelity checklist |
 | ST-1, ST-2, ST-3, ST-4 | 8 | kill/resume, cross-version refuse, orphan-slot reap, failover reconcile |
@@ -1457,4 +1544,5 @@ about **how we write and review the code**.
 | ST-10 | 8 | older-table evolve, newer-table refuse with no DDL, dropped-column and foreign-table shape reads, behind-table typed reads and writes |
 | ST-11 | 5 onward | re-added column takes its default on the quiesced and live paths, gap-numbered source, build and resume derive the same list |
 | ST-12 | 2 (declarative model) | a table altered behind the run after its last commit fails as not converged with every verdict executed |
+| RF-11 | table usage primitive (ahead of any drop path) | per-branch window-edge and partition-aggregation unit tests; recent, lock-holder, version, reset, and partitioned-table integration tests on 14 → 18 |
 | OC-1..OC-6 | shape APIs from 2; bind at 11 | engine-contract tests |

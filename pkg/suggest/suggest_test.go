@@ -383,7 +383,7 @@ func TestReportJSONShape(t *testing.T) {
 	recommended, err := json.Marshal(report.Suggestions[0].Recommended)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 4,
+		"format_version": 5,
 		"suggestions": [
 			{
 				"statement": 1,
@@ -414,7 +414,7 @@ func TestReportJSONGuidanceShape(t *testing.T) {
 	operation, err := json.Marshal(report.Suggestions[0].Operation)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 4,
+		"format_version": 5,
 		"suggestions": [
 			{
 				"statement": 1,
@@ -435,7 +435,7 @@ func TestReportJSONCleanSuggestionsAreEmptyArray(t *testing.T) {
 	raw, err := json.Marshal(report)
 	require.NoError(t, err)
 	assert.JSONEq(t, `{
-		"format_version": 4,
+		"format_version": 5,
 		"suggestions": []
 	}`, string(raw))
 }

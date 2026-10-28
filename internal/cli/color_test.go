@@ -181,6 +181,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		DependentViews:      []string{`"public"."v"`},
 		ExecutedSQL:         []string{`ALTER TABLE "t" ADD CONSTRAINT "c" CHECK (x > 0) NOT VALID`},
 		Forced:              true,
+		AllowedDestructive:  true,
 		BlockingPassthrough: true,
 		WritesBlocked:       true,
 		LockTimeout:         "3s",

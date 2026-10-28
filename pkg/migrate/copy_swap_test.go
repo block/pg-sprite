@@ -322,5 +322,5 @@ func TestCopySwapDetail(t *testing.T) {
 		OldTableDropped: true,
 	}, true)
 	assert.Equal(t, "verified 4 rows in 1 chunks; the retained source is dropped; "+
-		"the table was quiesced: writes were fenced for the length of the run", quiesced)
+		"writes to the table were blocked for the length of the run", quiesced)
 }

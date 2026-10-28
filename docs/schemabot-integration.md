@@ -458,8 +458,12 @@ the environmental `shadow-lock-unconfirmed` refusal, when its first working tran
 finds no lock to confirm. The check reads `pg_control_system()`, which PostgreSQL grants to
 `PUBLIC`; a server that withholds it stops the route with an ordinary error), the free space on the table's
 volume for the preflight's disk-headroom check, whether to keep the retained source under
-its `_old` name, and whether the table is quiesced for the run — the fenced path that needs
-no logical decoding — or live. Three further fields let the adapter size and watch the run:
+its `_old` name, and whether the run blocks the table's writes — offline mode, the fenced path
+(a quiesced target, in the engine's terms) that needs no logical decoding but refuses every
+write to the table with `55006` until the swap — or is live. `BlockWrites` is a typed acknowledgement, not a switch: it must name the resolved target
+as `SCHEMA.TABLE`, the same way `Restart` does, or `Run` returns an error before anything
+executes, and an acknowledged run records a warn-level audit naming the table before the
+fence goes on. Three further fields let the adapter size and watch the run:
 `Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
 throttled toward — with zero values taking the copier's defaults; `CheckpointInterval` is how often
 a copy in progress saves its landed watermark (zero takes the Runner's default); and `OnCheckpoint` is
@@ -613,6 +617,24 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   the change out as the guidance names or, after coordinating the application deploy, runs
   the rename with `--force SCHEMA.TABLE`. A rewrite-required refusal of class
   `capability-boundary` is the other case: a blocking form the planner cannot rewrite yet.
+- **Data loss needs the operator's acknowledgement, passed through.** `migrate.Run` refuses a
+  statement that drops a column, a constraint, or a `NOT NULL` with
+  `destructive-change`, class `by-design`, unless `Options.AllowDestructive` names the
+  resolved schema-qualified table (RF-10) — the same acknowledgement the CLI takes as
+  `--allow-destructive SCHEMA.TABLE`. SchemaBot already asks for this decision: map its
+  unsafe acknowledgement (`--allow-unsafe` on a plan whose change `IsUnsafe` for data loss)
+  to `Options.AllowDestructive` for that statement's table, and never set it for a change
+  the operator did not acknowledge. The refusal maps to `engine.ExecutionModeBlocked` until
+  then; on `migrate --alter` the reason always means the acknowledgement would lift it, and
+  a statement that drops a column and adds it back carries `guidance`
+  `alter-column-type-in-place`, the in-place retype that keeps the values. A mismatched
+  acknowledgement is `migrate.ErrAllowDestructiveMismatch` with a zero verdict and nothing
+  executed. An acknowledged run's verdict carries `allowed_destructive: true`, the
+  machine-readable audit record to store beside the operator's consent. The acknowledgement
+  covers only the loss: a statement that also needs `Force` still needs it. `RunDesired`
+  rejects `AllowDestructive` (`ErrAllowDestructiveNotSupported`) and keeps refusing a
+  destructive plan whole, so a declarative drop the operator approves runs as its own
+  imperative statement.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
   apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement
@@ -654,9 +676,9 @@ CLI and through `migrate.Run`, plus one the Runner performs on its own; an orche
 
 | Operator need | What to do | What pg-sprite does |
 | --- | --- | --- |
-| **Start** a change | `pg-sprite migrate --url … 'ALTER TABLE s.t …'` (with `--free-disk`, and `--quiesced` when the table takes no writes) | Routes the statement; on the copy-and-swap backend it takes the table's lock session, writes the checkpoint row, builds and fills the shadow, verifies, swaps, and prints one verdict |
+| **Start** a change | `pg-sprite migrate --url … 'ALTER TABLE s.t …'` (with `--free-disk`, and `--block-writes SCHEMA.TABLE` to take the table offline for writes instead of streaming them) | Routes the statement; on the copy-and-swap backend it takes the table's lock session, writes the checkpoint row, builds and fills the shadow, verifies, swaps, and prints one verdict |
 | **Stop** a running change | Send `SIGINT` (Ctrl-C) or `SIGTERM` once | The run's context is cancelled and the run unwinds through its own stop path: a copy in flight saves the watermark its committed chunks reached, the table lock session is released, the row stays at its last save with the run's hold on the source — the write fence of a quiesced run, or the replication slot of a live run, which retains WAL until the run is finished or discarded — and the verdict is `failed` with `code: cancelled-by-caller` (exit 1). A second `SIGINT`/`SIGTERM` ends the process at once with exit 130, before the stop path completes; the row then records whatever the last save landed, and the lock session is released by the server when its connection drops |
-| **Resume** a stopped change | Run the same statement again | The checkpoint row says where to continue: a stopped copy continues from its watermark, a run past its copy verifies again, a `cutover` row is answered by the catalog (a committed swap finishes from the old-table drop; a rolled-back swap goes back through verify and gate). Nothing is copied twice. A different statement on the same table is refused (`resume-row-mismatch`) |
+| **Resume** a stopped change | Run the same statement again, with the same `--block-writes SCHEMA.TABLE` if the stopped run blocked writes | The checkpoint row says where to continue: a stopped copy continues from its watermark, a run past its copy verifies again, a `cutover` row is answered by the catalog (a committed swap finishes from the old-table drop; a rolled-back swap goes back through verify and gate). Nothing is copied twice. A different statement on the same table is refused (`resume-row-mismatch`). A stopped run that blocked writes resumes only with the acknowledgement, and a stopped live run only without it; a run of the other kind is refused (`resume-row-decoding`) and leaves the stopped run's hold as it is |
 | **Start over** — discard a stopped change and run it from the beginning | Run the same statement with `--restart SCHEMA.TABLE`, where the value names the resolved target exactly | Under the run's own table lock session, discards what the stopped run left in the order a later restart could meet idempotently — the shadow, then the hold on the source (`DropWriteFence` for a quiesced row, `decode.DropSlot` for a live row), then the checkpoint row — and runs the change fresh. A leftover shadow that no row records is discarded the same way. The decision is written to the audit log before anything is discarded |
 | **Abandon** a change the data refuses | Nothing — the Runner does it | A run whose fill or swap stops on a data fault (a `*pgconn.PgError` in SQLSTATE class `22` or `23`: a value the new type will not hold, a constraint the copied rows break) would stop the same way on every resume, so the Runner discards it the way `--restart` would — shadow, hold on the source, checkpoint row — under the lock session it still holds, and returns `*schemachange.AbandonedError` wrapping the server's error. The verdict is `failed` with `code: data-fault` and nothing is left on the source. Correct the data or the statement, then run it again; the run starts from the beginning |
 
@@ -683,7 +705,9 @@ anywhere else, with `--dry-run`, with `--desired`, or alongside the other two
 acknowledgements (`--force`, `--accept-blocking`): each names a different decision about a
 different path, and a command carrying two of them is a contradiction, not a combination. An
 acknowledgement that names another table than the statement's resolved target is the same
-error.
+error. `--allow-destructive` is not one of them: it acknowledges the statement's data loss,
+and a restart runs the same statement again, so a destructive copy-and-swap restarts with
+both.
 
 Through the library, the verbs are `migrate.Run` with `CopySwapOptions.Restart` set to the
 acknowledgement, and `schemachange.RunOptions.Restart` on the `Runner` directly; the
