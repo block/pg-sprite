@@ -1406,7 +1406,10 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
   run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
-  (`ErrAllowDestructiveNotSupported`), `pkg/planner` (`destructiveOp`),
+  (`ErrAllowDestructiveNotSupported`), `pkg/planner` (`destructiveOp`, which decides every
+  shape in `statement.OpKinds()` explicitly and treats an unclassified one as destructive;
+  `TestEveryOpKindIsClassifiedForDestructiveness`,
+  `TestAnUnclassifiedOpKindIsTreatedAsDestructive`),
   `TestRunRefusesAnUnacknowledgedDropColumn`, `TestRunRefusesAnUnacknowledgedDropConstraint`,
   `TestRunRefusesAnUnacknowledgedDropNotNull`, `TestRunExecutesAnAcknowledgedDropColumn`,
   `TestRunRejectsAMismatchedDestructiveAcknowledgement`,

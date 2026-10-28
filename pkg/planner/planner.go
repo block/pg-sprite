@@ -558,25 +558,6 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 	return d
 }
 
-// destructiveOp reports whether an operation shape discards live
-// structure. A drop is destructive regardless of how it routes: a dropped
-// column discards data, a dropped constraint discards a guarantee the
-// schema was providing — and dropping NOT NULL discards exactly the same
-// guarantee its constraint form would, so it is marked identically — and a
-// dropped index discards a structure that is expensive to rebuild (and,
-// for a unique index, the uniqueness guarantee). Dropping a DEFAULT is
-// deliberately not destructive: a default guarantees nothing about
-// existing rows and is recreated by a metadata-only statement.
-func destructiveOp(kind statement.OpKind) bool {
-	switch kind {
-	case statement.OpDropColumn, statement.OpDropConstraint, statement.OpDropIndex,
-		statement.OpDropNotNull:
-		return true
-	default:
-		return false
-	}
-}
-
 // concurrentlyDecision routes an operation that is online in its
 // CONCURRENTLY form: already concurrent is the idiom; otherwise native with
 // the concurrent rewrite as the safer sequence. The rewrite trades the
