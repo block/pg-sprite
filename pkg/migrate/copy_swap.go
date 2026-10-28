@@ -230,11 +230,11 @@ func copySwapOutcome(st statement.Statement, quiesced bool, result schemachange.
 		detail += "; the change is complete and its done row saved, but the run then returned: " + err.Error()
 	}
 	return verdict.Verdict{
-		Outcome:   verdict.OutcomeExecutedViaCopyAndSwap,
-		Statement: st.SQL(),
-		Table:     qualified(st),
-		Detail:    detail,
-		Quiesced:  quiesced,
+		Outcome:       verdict.OutcomeExecutedViaCopyAndSwap,
+		Statement:     st.SQL(),
+		Table:         qualified(st),
+		Detail:        detail,
+		WritesBlocked: quiesced,
 	}, nil
 }
 
@@ -293,12 +293,12 @@ func copySwapRunVerdict(st statement.Statement, quiesced bool, err error) (verdi
 		return refusedVerdict(st, r, err.Error()), nil
 	}
 	return verdict.Verdict{
-		Outcome:   verdict.OutcomeFailed,
-		Code:      string(copySwapFailureCode(err)),
-		Statement: st.SQL(),
-		Table:     qualified(st),
-		Detail:    "the copy-and-swap run stopped: " + err.Error() + "; " + copySwapStoppedRemedy(quiesced, err),
-		Quiesced:  quiesced,
+		Outcome:       verdict.OutcomeFailed,
+		Code:          string(copySwapFailureCode(err)),
+		Statement:     st.SQL(),
+		Table:         qualified(st),
+		Detail:        "the copy-and-swap run stopped: " + err.Error() + "; " + copySwapStoppedRemedy(quiesced, err),
+		WritesBlocked: quiesced,
 	}, err
 }
 

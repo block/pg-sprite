@@ -182,7 +182,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		ExecutedSQL:         []string{`ALTER TABLE "t" ADD CONSTRAINT "c" CHECK (x > 0) NOT VALID`},
 		Forced:              true,
 		BlockingPassthrough: true,
-		Quiesced:            true,
+		WritesBlocked:       true,
 		LockTimeout:         "3s",
 		StatementTimeout:    "10m",
 		StatisticsRefresh:   &verdict.StatisticsRefresh{Columns: []string{"c"}, Pending: `ANALYZE "t"`},
