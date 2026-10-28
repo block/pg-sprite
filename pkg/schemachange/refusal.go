@@ -82,6 +82,14 @@ const (
 	// the replacement of a source identity column whose sequence the
 	// handoff cannot carry to it.
 	CauseStatementReadd RefusalCause = "shadow-statement-readd"
+	// CauseStatementNewColumn means the gated statement leaves the shadow
+	// with a column the copy cannot fill, or without the column the copy
+	// is keyed on (ST-11): a new column — added beside the other changes,
+	// not re-added under a dropped column's name — that refuses NULL with
+	// no default of its own or its domain's for the copied rows to take, or
+	// a primary key dropped outright or replaced under a new name, so that
+	// no chunk range or streamed change can name it on the shadow.
+	CauseStatementNewColumn RefusalCause = "shadow-statement-new-column"
 	// CauseStatementNewSequence means the gated statement gives the shadow
 	// an identity or sequence-owned column the source does not have — an
 	// added identity or serial column, or a kept column made an identity
@@ -257,6 +265,7 @@ func RefusalCauses() []RefusalCause {
 		CauseGrantsDiffer,
 		CauseIdentityHandoff,
 		CauseStatementReadd,
+		CauseStatementNewColumn,
 		CauseStatementNewSequence,
 		CauseCutoverUnverified,
 		CauseCutoverUndrained,
@@ -303,7 +312,7 @@ func (c RefusalCause) Invariant() string {
 		return "LK-3"
 	case CauseStatementTarget, CauseStatementConversion:
 		return "ST-7"
-	case CauseStatementReadd:
+	case CauseStatementReadd, CauseStatementNewColumn:
 		return "ST-11"
 	case CauseShadowOwner, CauseForeignRelation, CauseGrantsDiffer, CauseIdentityHandoff,
 		CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid, CauseNameTaken:
@@ -330,8 +339,8 @@ func (c RefusalCause) Invariant() string {
 // a lock, a proof, a relation, a slot, or a row whose state moved under the
 // operation is environmental — state outside the engine stopped a
 // supportable change. A statement the engine declines to carry as written
-// — a conversion the copy cannot reproduce, a re-added column it cannot
-// fill, a new identity or sequence the swap cannot carry — is a capability
+// — a conversion the copy cannot reproduce, a re-added or new column it
+// cannot fill, a new identity or sequence the swap cannot carry — is a capability
 // boundary. Every other cause is an invariant violation: an
 // input the caller handed in that cannot have come from this engine, or a
 // write of the engine's own that the catalog does not show; nothing on the
@@ -351,7 +360,7 @@ func (c RefusalCause) Class() refusal.Class {
 		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld,
 		CauseRestartSwapCommitted, CauseCopyConversionDrift:
 		return refusal.ClassEnvironmental
-	case CauseStatementConversion, CauseStatementReadd, CauseStatementNewSequence:
+	case CauseStatementConversion, CauseStatementReadd, CauseStatementNewColumn, CauseStatementNewSequence:
 		return refusal.ClassCapabilityBoundary
 	case CauseLockUnproven, CauseProofEmpty, CauseStatementTarget, CauseGrantsDiffer,
 		CauseCutoverUnverified, CauseCutoverUndrained, CauseSwapMismatch, CauseResumeTerminal,
