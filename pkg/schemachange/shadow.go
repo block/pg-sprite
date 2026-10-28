@@ -307,6 +307,17 @@ func buildShadow(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLock
 	if err := refuseUnfillableReadds(target.Schema(), target.Table(), target.PKColumn(), sourcePositions, shadowPositions, targetModel, shadowDomains, identities); err != nil {
 		return BuiltShadow{}, err
 	}
+	// A sequence the statement minted on the shadow has no place in the
+	// swap's handoff, which carries the source's sequences and identity
+	// columns alone; it is refused here, before a copy would run to the
+	// swap only to stop there.
+	owned, err := readSequenceOwnedColumns(ctx, tx, shadowOID)
+	if err != nil {
+		return BuiltShadow{}, err
+	}
+	if err := refuseNewSequenceColumns(target.Schema(), target.Table(), owned); err != nil {
+		return BuiltShadow{}, err
+	}
 	// The handoff is proven on the shadow the statement left, not the one
 	// the defaults were applied to: the proof records exactly what an
 	// inspection of this shadow would accept.

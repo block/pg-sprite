@@ -21,7 +21,7 @@ rows:
       migrate: refused
       diff: refused
     refusal_reason: backend-unavailable
-    reason_notes: "Table rewrite; routes to copy-and-swap, which does not carry a volatile default yet (the shadow fill would have to evaluate the default per row and the stream would have to agree)"
+    reason_notes: "Table rewrite; routes to copy-and-swap, which does not carry a volatile default yet (the shadow fill would have to evaluate the default per row and the stream would have to agree). An identity or `serial` column is further refused at the shadow build itself with `shadow-statement-new-sequence`, as a sequence the swap cannot carry to the live table — the engine's guard for library callers that reach the build without this route check — see [limitations.md](limitations.md)"
   - id: add-column-of-a-domain-with-constraints
     area: "column_changes"
     operation: "`ADD COLUMN` of a domain type with a `CHECK` or `NOT NULL`, with or without a default"
