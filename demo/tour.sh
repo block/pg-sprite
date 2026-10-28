@@ -246,6 +246,7 @@ execute_accepted_needs_loss() {
         assert_eq "refusal exit of [$sql]" 2 "$status"
         assert_eq "reason of [$sql]" "destructive-change" "$(jq -r '.reason' <<<"$out")"
         assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
+        assert_eq "index_usage.idx_scan is a number in [$sql]" number "$(jq -r '.index_usage.idx_scan | type' <<<"$out")"
     else
         "$PGS" migrate --url "$PG_DSN" --alter "$sql" --accept-blocking "$table" --statement-timeout 30s \
             || echo "(refused, exit $? — expected 2: a dropped index also needs --allow-destructive)"

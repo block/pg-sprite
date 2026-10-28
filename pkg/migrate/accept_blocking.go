@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/block/pg-sprite/pkg/executor"
+	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/statement"
 	"github.com/block/pg-sprite/pkg/verdict"
 )
@@ -82,7 +83,11 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 	dropsIndex := st.Kind() == statement.KindDropIndex
 	if dropsIndex {
 		if opts.AllowDestructive == "" {
-			return dropIndexDestructiveVerdict(st, table), nil
+			usage, err := preflight.ReadIndexUsage(ctx, pool, locked.relationOID)
+			if err != nil {
+				return verdict.Verdict{}, fmt.Errorf("read usage of the index to drop on %s: %w; nothing was executed", table, err)
+			}
+			return dropIndexDestructiveVerdict(st, table, usage), nil
 		}
 		auditAllowDestructive(opts.audit(), st, table)
 	}
@@ -154,10 +159,12 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 }
 
 // acceptedTable is the table an accepted statement locks, as the catalog
-// resolved it, with the relkind of that table.
+// resolved it, with the relkind of that table and the OID of the relation
+// the statement names (the index, or the table itself).
 type acceptedTable struct {
 	schema, name string
 	relkind      string
+	relationOID  uint32
 }
 
 // qualified renders the table as the acknowledgement must spell it.
@@ -198,7 +205,7 @@ func lockedTable(ctx context.Context, pool *pgxpool.Pool, rel statement.IndexRel
 	// against. to_regclass itself still resolves the bare name on that path,
 	// exactly as the statement will.
 	const q = `
-		SELECT c.relkind::pg_catalog.text,
+		SELECT c.oid, c.relkind::pg_catalog.text,
 		       COALESCE(tn.nspname, n.nspname),
 		       COALESCE(t.relname, c.relname),
 		       COALESCE(t.relkind, c.relkind)::pg_catalog.text
@@ -211,7 +218,7 @@ func lockedTable(ctx context.Context, pool *pgxpool.Pool, rel statement.IndexRel
 	name := regclassName(rel)
 	var relkind string
 	var table acceptedTable
-	err := pool.QueryRow(ctx, q, name).Scan(&relkind, &table.schema, &table.name, &table.relkind)
+	err := pool.QueryRow(ctx, q, name).Scan(&table.relationOID, &relkind, &table.schema, &table.name, &table.relkind)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return acceptedTable{}, fmt.Errorf("%w: %s is not visible on the session search_path; nothing was executed",
 			ErrAcceptBlockingRelationNotFound, name)
