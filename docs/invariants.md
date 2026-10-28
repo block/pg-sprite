@@ -1279,14 +1279,21 @@ field for field against the checkpointed proof. A re-added column the copy canno
 its default — the primary key, the replacement of a source identity column, or a column that
 refuses NULL, by its own `NOT NULL` or a domain's, with no default of its own or on its type —
 is refused inside the build's transaction with `shadow-statement-readd`, so no shadow is
-committed for a statement whose copy could not run. A column re-added as an identity or
-`serial` is fillable by the server, so it passes this check and is refused by ST-6's
+committed for a statement whose copy could not run. The same holds for every column the copy
+list leaves out, not only a re-add: a new column that refuses NULL with nothing the server
+fills it from, and the source's primary key absent from the kept columns — dropped outright or
+replaced by a key under a new name, which no chunk range, watermark, or streamed change could
+be expressed in on the shadow — are refused in the same transaction with
+`shadow-statement-new-column`. A column re-added or added as an identity or `serial` is
+fillable by the server, so it passes both checks and is refused by ST-6's
 `shadow-statement-new-sequence` instead.
 *Enforced:* `pkg/schemachange` (`readColumnPositions` reads both relations' live attribute
 numbers inside the build's and the inspection's transaction; `sameColumns` keeps a column only
 when its live position equals its shadow attribute number; `copyColumns` takes only those;
 `readDomainFills` reads what each shadow column's domain contributes; `refuseUnfillableReadds`
-refuses the three re-adds before the build commits). Tests:
+refuses the three re-adds before the build commits; `refuseUnfillableNewColumns` then refuses a
+shadow without the primary key among its kept columns, and any other left-out column that
+refuses NULL with nothing to fill it). Tests:
 `TestSameColumnsComparesLivePositionToShadowNumber`,
 `TestRefuseUnfillableReaddsAdmitsAColumnTheServerFills`,
 `TestRefuseUnfillableReaddsRefusesThePrimaryKey`,
@@ -1295,6 +1302,17 @@ refuses the three re-adds before the build commits). Tests:
 `TestRefuseUnfillableReaddsIgnoresColumnsTheStatementKeptOrDropped`,
 `TestRefuseUnfillableReaddsAdmitsANotNullColumnWhoseDomainDefaultsIt`,
 `TestRefuseUnfillableReaddsRefusesAColumnWhoseDomainRefusesNull`,
+`TestRefuseUnfillableNewColumnsAdmitsAColumnTheServerFills`,
+`TestRefuseUnfillableNewColumnsRefusesNotNullWithoutADefault`,
+`TestRefuseUnfillableNewColumnsRefusesAShadowWithoutThePrimaryKey`,
+`TestRefuseUnfillableNewColumnsIgnoresColumnsTheStatementKeptOrDropped`,
+`TestRefuseUnfillableNewColumnsAdmitsANotNullColumnWhoseDomainDefaultsIt`,
+`TestRefuseUnfillableNewColumnsRefusesAColumnWhoseDomainRefusesNull`,
+`TestBuildShadowRefusesANewNotNullColumnWithNoDefault`,
+`TestBuildShadowRefusesANewColumnWhoseDomainRefusesNull`,
+`TestBuildShadowRefusesAStatementThatReplacesThePrimaryKey`,
+`TestBuildShadowAdmitsANewColumnTheServerFills`,
+`TestRunnerRefusesAnUnfillableNewColumnBeforeAnyRowOrFence`,
 `TestBuildShadowLeavesAReaddedColumnOutOfTheCopyWhenTheSourceHasADroppedColumn`,
 `TestBuildShadowCopiesEveryColumnTheChangeKeeps`,
 `TestBuildShadowRefusesAReaddedNotNullColumnWithNoDefault`,
