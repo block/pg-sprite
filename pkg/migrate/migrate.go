@@ -256,8 +256,8 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 			return verdict.Verdict{}, err
 		}
 	}
-	if opts.CopySwap.Quiesced != "" {
-		if err := checkQuiescedAck(st, opts.CopySwap.Quiesced); err != nil {
+	if opts.CopySwap.BlockWrites != "" {
+		if err := checkBlockWritesAck(st, opts.CopySwap.BlockWrites); err != nil {
 			return verdict.Verdict{}, err
 		}
 	}

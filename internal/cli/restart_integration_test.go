@@ -42,7 +42,7 @@ func TestMigrateRestartDiscardsALeftoverAndRunsTheChange(t *testing.T) {
 	alter := fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema)
 	plain := newMigrateCmd(url, alter)
 	plain.FreeDisk = byteSize(testutil.UnlimitedDisk)
-	plain.Quiesced = schema + ".t"
+	plain.BlockWrites = schema + ".t"
 	plain.JSON = true
 	var refusedOut strings.Builder
 	require.ErrorIs(t, plain.run(t.Context(), &refusedOut), verdict.ErrRefused, "a refusal verdict exits with the refusal code")
@@ -53,7 +53,7 @@ func TestMigrateRestartDiscardsALeftoverAndRunsTheChange(t *testing.T) {
 
 	restart := newMigrateCmd(url, alter)
 	restart.FreeDisk = byteSize(testutil.UnlimitedDisk)
-	restart.Quiesced = schema + ".t"
+	restart.BlockWrites = schema + ".t"
 	restart.JSON = true
 	restart.Restart = schema + ".t"
 	var out strings.Builder
@@ -100,7 +100,7 @@ func TestMigrateRestartAckMismatchExecutesNothing(t *testing.T) {
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
 	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
-	cmd.Quiesced = schema + ".t"
+	cmd.BlockWrites = schema + ".t"
 	cmd.Restart = "wrong.table"
 	var out strings.Builder
 	err = cmd.run(t.Context(), &out)

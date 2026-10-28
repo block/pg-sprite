@@ -90,8 +90,8 @@ func renameIndex(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 		return verdict.Verdict{}, fmt.Errorf("%w: an index rename never runs through copy-and-swap; nothing was executed",
 			ErrIndexRenameAcknowledgement)
 	}
-	if opts.CopySwap.Quiesced != "" {
-		return verdict.Verdict{}, fmt.Errorf("%w: quiesced names a table to fence, and an index rename never runs through copy-and-swap; nothing was executed",
+	if opts.CopySwap.BlockWrites != "" {
+		return verdict.Verdict{}, fmt.Errorf("%w: block-writes names a table to fence, and an index rename never runs through copy-and-swap; nothing was executed",
 			ErrIndexRenameAcknowledgement)
 	}
 	facts, err := LiveFacts(ctx, pool, st)

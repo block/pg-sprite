@@ -259,7 +259,7 @@ func TestMigrateSupportedRowsExecute(t *testing.T) {
 				st, err := statement.ParseOne(sql)
 				require.NoError(t, err)
 				if claim.copyAndSwap {
-					opts.CopySwap.Quiesced = st.Schema() + "." + st.Table()
+					opts.CopySwap.BlockWrites = st.Schema() + "." + st.Table()
 				}
 				v, err := migrate.Run(t.Context(), pool, st, opts)
 				require.NoError(t, err, sql)

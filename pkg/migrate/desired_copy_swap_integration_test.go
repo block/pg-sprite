@@ -24,7 +24,7 @@ func copySwapRunOptions(serverURL, table string) migrate.Options {
 	opts.CopySwap = migrate.CopySwapOptions{
 		Connection:    dbconn.Config{URL: serverURL},
 		FreeDiskBytes: testutil.UnlimitedDisk,
-		Quiesced:      table,
+		BlockWrites:   table,
 	}
 	return opts
 }

@@ -82,7 +82,7 @@ func (f copySwapFixture) options() Options {
 	opts.CopySwap = CopySwapOptions{
 		Connection:    f.cfg,
 		FreeDiskBytes: testutil.UnlimitedDisk,
-		Quiesced:      f.schema + ".orders",
+		BlockWrites:   f.schema + ".orders",
 	}
 	return opts
 }

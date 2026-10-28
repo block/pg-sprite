@@ -374,8 +374,8 @@ $ pg-sprite migrate --alter 'ALTER TABLE users ALTER COLUMN id TYPE text' --dry-
 Without `--dry-run` the run needs `--free-disk` (the preflight refuses with
 `copy-and-swap-refused` / cause `copy-and-swap-disk-headroom` when the shadow
 and its indexes would not fit the declared space) and either logical
-decoding on the server or `--quiesced SCHEMA.TABLE`, which names the table it
-takes offline for writes until the swap. The verdict's outcome is distinct
+decoding on the server or `--block-writes SCHEMA.TABLE`, which names the table
+whose writes it blocks until the swap. The verdict's outcome is distinct
 from `executed-natively`, and `detail` says what the verification pass
 covered and what became of the retained source:
 

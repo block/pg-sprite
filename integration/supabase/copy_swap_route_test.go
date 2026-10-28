@@ -19,13 +19,13 @@ import (
 // workers, or replication stream open, which is the fail-closed shape these
 // probes rely on to leave the fixture untouched. The only session opened
 // from the connection is the read-only one that proves it reaches the
-// pool's database. Quiesced, acknowledged for st's table, keeps the probe
+// pool's database. BlockWrites, acknowledged for st's table, keeps the probe
 // independent of the fixture role's replication access.
 func copySwapOptions(st statement.Statement) migrate.Options {
 	opts := migrate.DefaultOptions()
 	opts.CopySwap = migrate.CopySwapOptions{
-		Connection: dbconn.Config{URL: directURL},
-		Quiesced:   st.Schema() + "." + st.Table(),
+		Connection:  dbconn.Config{URL: directURL},
+		BlockWrites: st.Schema() + "." + st.Table(),
 	}
 	return opts
 }

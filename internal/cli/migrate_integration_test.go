@@ -294,7 +294,7 @@ func TestMigrateRunsTypeRewriteViaCopyAndSwap(t *testing.T) {
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
 	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
-	cmd.Quiesced = schema + ".t"
+	cmd.BlockWrites = schema + ".t"
 	cmd.JSON = true
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
@@ -334,7 +334,7 @@ func TestMigrateCopyAndSwapRefusesWithoutFreeDisk(t *testing.T) {
 	require.NoError(t, err)
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
-	cmd.Quiesced = schema + ".t"
+	cmd.BlockWrites = schema + ".t"
 	cmd.JSON = true
 	var out strings.Builder
 	err = cmd.run(t.Context(), &out)

@@ -65,7 +65,7 @@ type CopySwapOptions struct {
 	// drops it before the run reports done.
 	KeepOld bool
 
-	// Quiesced, when set, declares that nothing writes the table while the
+	// BlockWrites, when set, declares that nothing writes the table while the
 	// run lasts. The run then takes the write fence instead of a
 	// replication slot and needs no logical decoding from the server; every
 	// write that reaches the fence fails, so the table is offline for
@@ -73,7 +73,7 @@ type CopySwapOptions struct {
 	// SCHEMA.TABLE, the same way Restart does, so the declaration cannot be
 	// left on a script and fence another table by accident. Empty runs the
 	// live path: slot, stream, and catch-up.
-	Quiesced string
+	BlockWrites string
 
 	// Restart, when set, is the operator's acknowledgement that the run on
 	// the table is to start over: whatever an earlier run left — its
@@ -175,7 +175,7 @@ func (o CopySwapOptions) runOptions(logger *slog.Logger) schemachange.RunOptions
 // needs none of the server's logical-decoding facilities.
 func (o CopySwapOptions) environment() preflight.CopySwapEnvironment {
 	return preflight.CopySwapEnvironment{
-		LogicalDecoding: o.Quiesced == "",
+		LogicalDecoding: o.BlockWrites == "",
 		FreeDiskBytes:   o.FreeDiskBytes,
 	}
 }
@@ -213,9 +213,9 @@ func copyAndSwap(ctx context.Context, pool *pgxpool.Pool, st statement.Statement
 	logger.Debug("copy-and-swap preflight passed",
 		"decodes_wal", target.DecodesWAL(), "keep_old", opts.CopySwap.KeepOld)
 
-	quiesced := opts.CopySwap.Quiesced != ""
+	quiesced := opts.CopySwap.BlockWrites != ""
 	if quiesced {
-		auditQuiesced(opts.audit(), st)
+		auditBlockWrites(opts.audit(), st)
 	}
 	result, err := runner.Run(ctx, pool, target, st)
 	return copySwapOutcome(st, quiesced, result, err)
@@ -399,7 +399,7 @@ func copySwapDetail(result schemachange.Result, quiesced bool) string {
 		s += "; the run reconciled a lost replication slot before catching up"
 	}
 	if quiesced {
-		s += "; the table was quiesced: writes were fenced for the length of the run"
+		s += "; writes to the table were blocked for the length of the run"
 	}
 	return s
 }

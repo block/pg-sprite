@@ -106,26 +106,25 @@ func TestAcceptBlockingFlagGrammar(t *testing.T) {
 // executes nothing for them to govern.
 func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
 	t.Run("wires connection, free space, and choices", func(t *testing.T) {
-		c := parseMigrate(t, "--free-disk", "20GiB", "--keep-old", "--quiesced", "app.orders")
+		c := parseMigrate(t, "--free-disk", "20GiB", "--keep-old", "--block-writes", "app.orders")
 		got := c.options(nil).CopySwap
 		assert.Equal(t, c.Config(), got.Connection)
 		assert.Equal(t, int64(20<<30), got.FreeDiskBytes)
 		assert.True(t, got.KeepOld)
-		assert.Equal(t, "app.orders", got.Quiesced)
+		assert.Equal(t, "app.orders", got.BlockWrites)
 	})
 
 	t.Run("defaults to no free space and the live path", func(t *testing.T) {
 		got := parseMigrate(t).options(nil).CopySwap
 		assert.Zero(t, got.FreeDiskBytes)
 		assert.False(t, got.KeepOld)
-		assert.Empty(t, got.Quiesced)
+		assert.Empty(t, got.BlockWrites)
 	})
 
-	// Taking a table offline for writes needs the table named: a bare
-	// --quiesced, as a script written for the old boolean flag passes it,
-	// is a parse error rather than a fence on whatever table the statement
-	// names.
-	t.Run("rejects --quiesced without the table", func(t *testing.T) {
+	// Blocking a table's writes needs the table named: a bare
+	// --block-writes is a parse error rather than a fence on whatever table
+	// the statement names.
+	t.Run("rejects --block-writes without the table", func(t *testing.T) {
 		c := New("test")
 		k, err := kong.New(c, kong.Vars{"version": "test"})
 		require.NoError(t, err)
@@ -133,13 +132,13 @@ func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
 			"migrate",
 			"--url", "postgres://user@localhost:5432/app",
 			"--alter", "ALTER TABLE t ALTER COLUMN c TYPE bigint",
-			"--quiesced",
+			"--block-writes",
 		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "--quiesced")
+		assert.Contains(t, err.Error(), "--block-writes")
 	})
 
-	for _, flag := range []string{"--free-disk=1GiB", "--keep-old", "--quiesced=public.t"} {
+	for _, flag := range []string{"--free-disk=1GiB", "--keep-old", "--block-writes=public.t"} {
 		t.Run("rejects "+flag+" with --dry-run", func(t *testing.T) {
 			c := New("test")
 			k, err := kong.New(c, kong.Vars{"version": "test"})
