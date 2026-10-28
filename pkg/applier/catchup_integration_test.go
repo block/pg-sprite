@@ -127,6 +127,9 @@ type catchupSetup struct {
 	// keys. The copy then runs to completion before the catch-up starts, so
 	// the shadow holds every row, and the test moves the position by hand.
 	positions applier.PositionSource
+	// copierClock, when set, is the copier's clock, which it reads as each
+	// chunk attempt starts and as each one commits.
+	copierClock progress.Clock
 }
 
 func startCatchup(t *testing.T, f catchupFixture, opts applier.CatchupOptions) *catchupRun {
@@ -178,6 +181,7 @@ func startCatchupWith(t *testing.T, f catchupFixture, setup catchupSetup) *catch
 	c, err := copier.NewCopier(f.target, shadow, lock, copier.Watermark{}, copier.Options{
 		Workers: 2,
 		Chunker: copier.ChunkerOptions{InitialRows: 50, MaxRows: 50},
+		Clock:   setup.copierClock,
 	})
 	require.NoError(t, err)
 	run := &catchupRun{f: f, shadow: shadow, lock: lock, copier: c, done: make(chan error, 1)}
