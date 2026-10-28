@@ -535,6 +535,15 @@ type Verdict struct {
 	Table string `json:"table,omitempty"`
 	// Detail is the human explanation: why refused, or what committed.
 	Detail string `json:"detail,omitempty"`
+	// WritesBlocked is true on an executed or failed copy-and-swap verdict
+	// whose run blocked the table's writes (offline mode, --block-writes):
+	// the write fence went on, and every write that reached it was refused
+	// with SQLSTATE 55006. On a failed verdict it is set only when the fence
+	// went on, and Detail says whether it still stands; a blocked-writes run
+	// that stopped before its fence went on reports false, since the table
+	// kept taking writes. False for every other verdict, including a live
+	// run's.
+	WritesBlocked bool `json:"writes_blocked,omitempty"`
 	// SaferIdiom is a native alternative to the refused statement, when one
 	// exists (e.g. CREATE INDEX CONCURRENTLY, ADD CONSTRAINT ... NOT VALID).
 	SaferIdiom string `json:"safer_idiom,omitempty"`
@@ -653,6 +662,9 @@ func (v Verdict) String() string {
 	}
 	if v.Forced {
 		b.WriteString("\n  forced:    the submitted form ran as-is (force acknowledged)")
+	}
+	if v.WritesBlocked {
+		b.WriteString("\n  blocked:   writes to the table were refused (55006) while the run held it")
 	}
 	if v.AllowedDestructive {
 		b.WriteString("\n  allowed:   the statement's data loss was acknowledged (allow-destructive)")
