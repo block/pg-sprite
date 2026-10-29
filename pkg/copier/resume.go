@@ -7,8 +7,33 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/preflight"
 )
+
+// ClearAbove removes every shadow row whose key lies above from, as a
+// resumed Run does before it cuts its first chunk, and nothing else. It is
+// for a caller that compares the shadow against the source through from
+// before any copier resumes — reconcile mode (ST-4) — since a shadow row
+// above the watermark is outside such a comparison yet still holds its
+// values: a unique value the source has since moved out of it into a chunk
+// the comparison finds differing would make every recopy of that chunk
+// collide with it, and no comparison through from can clear the collision.
+// With the shadow clear above from, the rows the comparison reads are the
+// only rows the shadow has, and the copier that resumes from the same
+// watermark lands the rest. ClearAbove refuses what NewCopier refuses and
+// bounds each batch as a chunk transaction is bounded; it runs under the
+// lock session's Bind context, so a lost lock cancels the batch in flight
+// (LK-1). A complete watermark has nothing above it and clears nothing.
+func ClearAbove(ctx context.Context, pool *pgxpool.Pool, target preflight.CopySwapTarget, shadow Shadow, lock *dbconn.TableLockSession, from Watermark, opts Options) error {
+	c, err := NewCopier(target, shadow, lock, from, opts)
+	if err != nil {
+		return err
+	}
+	ctx, unbind := c.lock.Bind(ctx)
+	defer unbind()
+	return c.clearAbove(ctx, pool, from)
+}
 
 // clearAbove removes every shadow row whose key lies above the resume
 // watermark before the resumed copy cuts its first chunk. The earlier run's

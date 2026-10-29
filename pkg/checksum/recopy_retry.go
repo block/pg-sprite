@@ -52,7 +52,9 @@ func collided(err error) bool {
 // no other. Comparing again clears a collision only when the colliding row
 // lies inside the comparison: a shadow row above the watermark the pass
 // reads through is never compared, so a collision with one repeats on
-// every attempt and the pass ends in its error. The Outcome returned
+// every attempt and the pass ends in its error — which is why a caller
+// that compares through a partial watermark clears the shadow above it
+// first (copier.ClearAbove). The Outcome returned
 // carries the comparison the committed recopy acted on, the repairs it
 // committed, and the attempts that collided, with the error when the last
 // one did; a recopy that fails for

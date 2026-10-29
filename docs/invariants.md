@@ -1098,7 +1098,9 @@ dies restarts as a reconcile, and the slot it is about to make is owned by the r
 moment it exists (ST-3) — replaces whatever slot bears the derived name with a fresh one through
 `decode.ReplaceSlot`, keeping the publication in place, since the source's writers look it up as
 they run and one dropped under them fails the write, and
-— when the watermark says anything landed — runs one `checksum` pass at or below the watermark
+— when the watermark says anything landed — clears the shadow above the watermark through
+`copier.ClearAbove`, as the copier that resumes from it would first (CO-4), so no shadow row
+lies outside the pass that follows, then runs one `checksum` pass at or below the watermark
 under the `recopy` policy (D14), recopying only the chunks the gap touched without a reread,
 since the source is live and the new slot carries every write that lands after the recopy,
 then writes the row back to `copying` or `catching_up` by the watermark with the new slot's
@@ -1112,8 +1114,9 @@ refuses-replaced-relations-before-its-marker,
 leaves-the-slot-it-created-owned-by-the-row, resumes-in-copying-below-a-partial-watermark,
 refuses-a-row-of-another-source-shape, stops-when-the-lock-is-lost-while-the-drop-waits,
 refuses-a-foreign-slot-of-the-name, refuses-the-slot-while-another-backend-holds-it,
-reads-a-slot-the-server-reports-lost-as-reconcile, and
-survives-a-unique-value-moved-during-its-recopy tests). The recopy pass compares a chunk and
+reads-a-slot-the-server-reports-lost-as-reconcile,
+survives-a-unique-value-moved-during-its-recopy, and
+clears-the-shadow-above-a-partial-watermark-before-its-recopy tests). The recopy pass compares a chunk and
 recopies it in separate statements against a live source, so a source that moves a unique
 value from a row in a chunk the compare read equal to a row in a differing chunk, between the
 two, makes the recopy collide with a shadow row the compare left alone; the one recopy
@@ -1121,12 +1124,11 @@ transaction rolls back, the pass compares again, and the recopy cut from that co
 covers both chunks and lands (CO-3). A source that moves a value into the differing chunks
 before every recopy exhausts the pass's bounded attempts; the pass then ends in the last
 collision's error with the row still in `reconciling` and the shadow unchanged, and the next
-attempt restarts the reconcile — closed, never a shadow with a row the source lacks. *Known
-limit:* on resume the reconcile runs before the copier clears the shadow rows above a partial
-watermark, and the pass compares only through that watermark, so a unique value the source
-moves out of a shadow row above it into a differing chunk collides on every attempt of every
-reconcile until the source moves it back; the run stays in `reconciling`, closed, and
-`--restart` (`CopySwapOptions.Restart`) starts it over. *Source:*
+attempt restarts the reconcile — closed, never a shadow with a row the source lacks. The
+pass compares only through the watermark, which is why the reconcile clears the shadow above
+a partial watermark before it: a unique value the source moved out of a shadow row above the
+watermark into a differing chunk below it would otherwise collide with a row no comparison
+can reach, on every attempt of every reconcile, until the source moved it back. *Source:*
 [low-level-design § failover](low-level-design.md#failover-during-migration-what-survives-and-what-doesnt).
 
 ### ST-5 — The swap is gated on a fidelity checklist, not just the checksum
