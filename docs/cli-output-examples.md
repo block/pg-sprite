@@ -302,7 +302,10 @@ adds it `NOT VALID`, which commits, and then fails to validate it because a
 row has an upper-case email. The verdict on stdout names the failed step and
 the committed prefix that remains (`executed_sql`); the PostgreSQL error,
 with its SQLSTATE, goes to stderr. The constraint now exists `NOT VALID`, so
-fix the rows and then run the failed step (`failed_step_sql`) to finish:
+fix the rows and then run the failed step (`failed_step_sql`) to finish. Do
+not rerun the original `ADD CONSTRAINT`: the constraint already exists, so it
+fails with `duplicate_object` (see the
+[retry paths](execution-model.md#the-committed-prefix)):
 
 ```console
 $ pg-sprite migrate --alter 'ALTER TABLE users ADD CONSTRAINT users_email_lower CHECK (email = lower(email))' --json
