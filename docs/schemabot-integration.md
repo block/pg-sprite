@@ -463,7 +463,9 @@ its `_old` name, and whether the run blocks the table's writes — offline mode,
 write to the table with `55006` until the swap — or is live. `BlockWrites` is a typed acknowledgement, not a switch: it must name the resolved target
 as `SCHEMA.TABLE`, the same way `Restart` does, or `Run` returns an error before anything
 executes, and an acknowledged run records a warn-level audit naming the table before the
-fence goes on. Three further fields let the adapter size and watch the run:
+fence goes on. `RunDesired` rejects `BlockWrites` (`ErrBlockWritesNotSupported`): the derived
+plan, not the operator, would decide how many fenced copies run, so a value left on the
+adapter's configuration cannot take the table offline for a later plan. Three further fields let the adapter size and watch the run:
 `Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
 throttled toward — with zero values taking the copier's defaults; `CheckpointInterval` is how often
 a copy in progress saves its landed watermark (zero takes the Runner's default); and `OnCheckpoint` is

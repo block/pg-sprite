@@ -138,6 +138,16 @@ func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
 		assert.Contains(t, err.Error(), "--block-writes")
 	})
 
+	// The declarative front door never takes a table offline for writes:
+	// the derived plan, not the operator, would decide how many fenced
+	// copies run, so the acknowledgement is a usage error there.
+	t.Run("rejects --block-writes with --desired", func(t *testing.T) {
+		c := &MigrateCmd{Desired: "orders.sql", BlockWrites: "public.orders"}
+		err := c.validateInput()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "--block-writes cannot be combined with --desired")
+	})
+
 	for _, flag := range []string{"--free-disk=1GiB", "--keep-old", "--block-writes=public.t"} {
 		t.Run("rejects "+flag+" with --dry-run", func(t *testing.T) {
 			c := New("test")

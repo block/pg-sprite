@@ -33,6 +33,9 @@ func (c *MigrateCmd) validateInput() error {
 		if c.AllowDestructive != "" {
 			return errors.New("--allow-destructive cannot be combined with --desired: desired-state execution refuses a destructive plan whole")
 		}
+		if c.BlockWrites != "" {
+			return errors.New("--block-writes cannot be combined with --desired: the plan, not the operator, decides how many copies would block the table's writes; run each statement with migrate --alter --block-writes instead")
+		}
 	}
 	return nil
 }

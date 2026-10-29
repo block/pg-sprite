@@ -40,7 +40,9 @@ logical decoding enabled.
 `--block-writes` is your declaration that nothing needs to write the table. Its value must name
 the table the statement changes, exactly as `SCHEMA.TABLE`; a value naming any other table
 stops the run before anything executes, so a flag left in a script cannot take the next
-table offline. pg-sprite does not take the declaration on trust: the fence refuses any write
+table offline. It applies to `migrate --alter` only: `migrate --desired` rejects it, because
+there the derived plan, not you, decides how many statements take a copy and so how long
+writes fail. Run each statement with `migrate --alter --block-writes` instead. pg-sprite does not take the declaration on trust: the fence refuses any write
 that does arrive, so nothing is lost, but the application sees errors for the whole run.
 The fence and why it also covers replication apply workers are described in
 [engine-role.md](engine-role.md#the-write-fence).
