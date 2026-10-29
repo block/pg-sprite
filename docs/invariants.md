@@ -269,12 +269,20 @@ writer holds its locks until its commit is visible and the swap's `ACCESS EXCLUS
 them all out (sync-commit test: a writer under `synchronous_commit = on` against a standby that
 never answers has its UPDATE delivered and left buffered with `Invisible` one and nothing
 applied, the confirmed position below the delivered one, until the backend is cancelled, after
-which the change lands and the catch-up converges). Also open: a primary-key move or a
-unique-value swap that straddles a chunk the copier is reading collides, on the copier's own
-insert of the moved row, with the stale shadow row the flush has not yet deleted (SQLSTATE
-`23505`); the catch-up's half of the exchange is correct and the resolution is the copier's, so
-the convergence tests for key moves and unique-key swaps start their load after the copy has
-landed. *Test obligation:* a
+which the change lands and the catch-up converges). *Enforced* for the copier's side
+of a unique value that moves between rows while its chunk is in flight: the chunk's insert
+collides (SQLSTATE `23505`, or `23P01` for an exclusion constraint) with the shadow row that
+still holds the value — a landed row the flush has yet to rewrite, or a row of the same chunk
+the copier itself read before the swap — and the copier runs the chunk again after a bounded
+wait (`copier.Options.CollisionAttempts` × `CollisionBackoff`, linear), counting each
+collision, until the flush has moved the value and the chunk lands or the attempts run out and
+the server's error is returned with no cause of its own (a copier integration test holds a
+colliding row across several attempts and removes it; a catch-up convergence test runs
+unique-key swaps throughout the copy). *Open:* a primary-key move whose row carries a unique
+secondary value, from a landed key to a key in flight: the drain's pair rule defers the old
+key's delete until the chunk lands, and the chunk cannot land while the old key's row holds the
+value, so the two wait on each other until the copier's attempts run out; the convergence test
+for key moves starts its load after the copy has landed. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 marker-bearing UPDATE for a key whose row the source then deleted before its chunk was read,
