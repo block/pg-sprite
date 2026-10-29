@@ -308,11 +308,24 @@ func stopped(ctx context.Context, schema, table string, err error) error {
 	if ctx.Err() == nil {
 		return err
 	}
-	stop := fmt.Errorf("catch-up on %s.%s stopped: %w", schema, table, context.Cause(ctx))
+	stop := fmt.Errorf("catch-up on %s.%s stopped: %w", schema, table, endedWith(ctx))
 	if errors.Is(err, ctx.Err()) {
 		return stop
 	}
 	return fmt.Errorf("%w; the cycle it stopped in failed: %w", stop, err)
+}
+
+// endedWith is why an ended ctx ended. A caller that cancelled with a cause
+// of its own (context.WithCancelCause) gets that cause wrapped together
+// with ctx.Err(), so the error reads as the cause and as a cancellation
+// (errors.Is(err, context.Canceled)) alike; a caller that cancelled
+// plainly, or whose deadline passed, gets ctx.Err() as it stands.
+func endedWith(ctx context.Context) error {
+	cause := context.Cause(ctx)
+	if errors.Is(cause, ctx.Err()) {
+		return cause
+	}
+	return fmt.Errorf("%w (%w)", cause, ctx.Err())
 }
 
 // cycle is one gather, drain, flush, and confirm. Its status is recorded

@@ -94,12 +94,35 @@ func TestStoppedKeepsACycleErrorThatIsNotTheStop(t *testing.T) {
 	receive := fmt.Errorf("receive from slot: %w", context.Canceled)
 	err := stopped(ctx, "s", "t", receive)
 	assert.ErrorIs(t, err, cause)
-	assert.EqualError(t, err, "catch-up on s.t stopped: owner is ready to cut over", "the receive error is the stop itself")
+	assert.ErrorIs(t, err, context.Canceled, "a stop with the owner's own cause is still a cancellation")
+	assert.EqualError(t, err, "catch-up on s.t stopped: owner is ready to cut over (context canceled)", "the receive error is the stop itself")
 
 	err = stopped(ctx, "s", "t", breach)
 	assert.ErrorIs(t, err, cause, "the stop is still reported")
 	assert.ErrorIs(t, err, ErrInvariantViolation, "the breach travels with it")
 	assert.ErrorIs(t, err, breach)
+}
+
+// An ended ctx is reported by its cause; a cause the owner chose is wrapped
+// with ctx.Err() so the error is also the cancellation it is, while a plain
+// cancel or a passed deadline is reported as it stands, not doubled.
+func TestEndedWithKeepsACancellationReadableAsOne(t *testing.T) {
+	plain, cancel := context.WithCancel(t.Context())
+	cancel()
+	assert.Equal(t, context.Canceled, endedWith(plain))
+
+	expired, cancelExpired := context.WithDeadline(t.Context(), time.Unix(0, 0))
+	defer cancelExpired()
+	<-expired.Done()
+	assert.Equal(t, context.DeadlineExceeded, endedWith(expired))
+
+	caused, cancelCaused := context.WithCancelCause(t.Context())
+	cause := errors.New("owner is ready to cut over")
+	cancelCaused(cause)
+	err := endedWith(caused)
+	assert.ErrorIs(t, err, cause)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.EqualError(t, err, "owner is ready to cut over (context canceled)")
 }
 
 // The copy has landed when its cut frontier is complete and no claimed
