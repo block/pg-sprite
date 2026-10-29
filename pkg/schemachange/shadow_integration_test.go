@@ -472,9 +472,10 @@ func TestBuildShadowExcludesDroppedColumnFromCopyColumns(t *testing.T) {
 }
 
 // A statement that drops an identity column and adds a different column
-// under the same name leaves the shadow with a column that carries no
-// handoff default. The build refuses it rather than record a handoff its
-// own inspection would reject, and the failed transaction leaves no shadow.
+// under the same name replaces a column whose sequence the handoff carries
+// only to the same column on the shadow. The build refuses it as a re-add
+// the copy cannot fill, before the handoff is looked at, and the failed
+// transaction leaves no shadow.
 func TestBuildShadowRefusesAStatementThatReplacesAnIdentityColumn(t *testing.T) {
 	f := newShadowFixture(t)
 	f.exec(t, `
@@ -491,7 +492,7 @@ func TestBuildShadowRefusesAStatementThatReplacesAnIdentityColumn(t *testing.T) 
 			ALTER COLUMN qty TYPE bigint`)
 
 	assert.ErrorIs(t, err, schemachange.ErrInvariantViolation)
-	assert.Equal(t, schemachange.CauseIdentityHandoff, schemachange.RefusalCauseOf(err))
+	assert.Equal(t, schemachange.CauseStatementReadd, schemachange.RefusalCauseOf(err))
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "widgets")), "a refused build creates nothing")
 }
 

@@ -55,6 +55,7 @@ type fakeShadow struct {
 	sourceOID, shadowOID   uint32
 	columns                []string
 	conversions            map[string]string
+	fingerprint            string
 }
 
 func (s fakeShadow) Schema() string                 { return s.schema }
@@ -64,6 +65,7 @@ func (s fakeShadow) SourceOID() uint32              { return s.sourceOID }
 func (s fakeShadow) ShadowOID() uint32              { return s.shadowOID }
 func (s fakeShadow) CopyColumns() []string          { return s.columns }
 func (s fakeShadow) Conversions() map[string]string { return s.conversions }
+func (s fakeShadow) ConversionFingerprint() string  { return s.fingerprint }
 
 // The digest statement is the D7 contract in one string: every copy column
 // cast to the shadow's type inside a record, SHA-256-hashed per row from
@@ -166,6 +168,8 @@ func TestNewVerifierRefusesAShadowThatIsNotTheTargets(t *testing.T) {
 		"conversion of the primary key":    {withConversions(good, "id", "id % 100"), "shadow proof for " + f.schema + ".orders converts the primary key id"},
 		"conversion of an uncopied column": {withConversions(good, "note", "note::text"), "shadow proof for " + f.schema + ".orders converts column note, which the copy does not carry"},
 		"conversion with no expression":    {withConversions(good, "qty", ""), "shadow proof for " + f.schema + ".orders converts column qty with an empty expression"},
+		"conversion without fingerprint":   {withConversions(good, "qty", "qty * 2"), "shadow proof for " + f.schema + ".orders converts columns but carries no conversion fingerprint"},
+		"fingerprint without conversion":   {withFingerprint(good, "sha256:00"), "shadow proof for " + f.schema + ".orders carries a conversion fingerprint but converts no column"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -193,5 +197,9 @@ func withOIDs(s fakeShadow, source, shadow uint32) fakeShadow {
 func withColumns(s fakeShadow, columns ...string) fakeShadow { s.columns = columns; return s }
 func withConversions(s fakeShadow, column, expr string) fakeShadow {
 	s.conversions = map[string]string{column: expr}
+	return s
+}
+func withFingerprint(s fakeShadow, fingerprint string) fakeShadow {
+	s.fingerprint = fingerprint
 	return s
 }

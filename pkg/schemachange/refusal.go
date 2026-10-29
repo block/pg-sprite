@@ -74,6 +74,14 @@ const (
 	// (ST-5): at build, the gated statement altered the column; at
 	// inspection, the shadow was altered since the build.
 	CauseIdentityHandoff RefusalCause = "shadow-identity-handoff"
+	// CauseStatementReadd means the gated statement drops a column and
+	// adds one under the same name that the copy cannot fill (ST-11): the
+	// re-added column is a new column the copy leaves out, and it is the
+	// primary key every chunk is keyed on, a column that refuses NULL with
+	// no default of its own or its domain's for the copied rows to take, or
+	// the replacement of a source identity column whose sequence the
+	// handoff cannot carry to it.
+	CauseStatementReadd RefusalCause = "shadow-statement-readd"
 	// CauseCutoverUnverified means the cutover gate was handed no usable
 	// data-equality proof (CO-1): the built-shadow proof or the verified
 	// shadow proof is empty, the two name different relations, or the
@@ -197,6 +205,15 @@ const (
 	// itself, lacks the relation OIDs, or its copy columns do not carry the
 	// primary key. It re-mints the copier's copy-shadow-mismatch.
 	CauseCopyShadowMismatch RefusalCause = "copy-shadow-mismatch"
+	// CauseCopyConversionDrift means the catalog entries the conversion
+	// expressions resolve among changed under the copy (CO-9): a function,
+	// operator, type, or collation under a name an expression spells was
+	// created, replaced, or dropped in a schema on the copy's search_path
+	// after the shadow build. It re-mints the copier's
+	// copy-conversion-drift, and a resume mints it for a row whose proof
+	// differs from the one the inspection re-derives in its conversion
+	// fingerprint alone.
+	CauseCopyConversionDrift RefusalCause = "copy-conversion-drift"
 	// CauseCopyFrontierBroken means the copier's own accounting of the key
 	// space broke (CO-4): a chunk was cut or claimed out of order, or the
 	// copy returned without error at a watermark short of the key space.
@@ -231,6 +248,7 @@ func RefusalCauses() []RefusalCause {
 		CauseForeignRelation,
 		CauseGrantsDiffer,
 		CauseIdentityHandoff,
+		CauseStatementReadd,
 		CauseCutoverUnverified,
 		CauseCutoverUndrained,
 		CauseCutoverUnfenced,
@@ -252,6 +270,7 @@ func RefusalCauses() []RefusalCause {
 		CauseResumeSlotForeign,
 		CauseResumeSlotHeld,
 		CauseCopyShadowMismatch,
+		CauseCopyConversionDrift,
 		CauseCopyFrontierBroken,
 		CauseCopyChunksInFlight,
 		CauseCopyChunkUnknown,
@@ -269,10 +288,14 @@ func (c RefusalCause) Invariant() string {
 		return "ST-6"
 	case CauseCopyFrontierBroken:
 		return "CO-4"
+	case CauseCopyConversionDrift:
+		return "CO-9"
 	case CauseCopyChunksInFlight:
 		return "LK-3"
 	case CauseStatementTarget, CauseStatementConversion:
 		return "ST-7"
+	case CauseStatementReadd:
+		return "ST-11"
 	case CauseShadowOwner, CauseForeignRelation, CauseGrantsDiffer, CauseIdentityHandoff,
 		CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid, CauseNameTaken:
 		return "ST-5"
@@ -298,7 +321,8 @@ func (c RefusalCause) Invariant() string {
 // a lock, a proof, a relation, a slot, or a row whose state moved under the
 // operation is environmental — state outside the engine stopped a
 // supportable change. A statement the engine declines to carry as written
-// is a capability boundary. Every other cause is an invariant violation: an
+// — a conversion the copy cannot reproduce, a re-added column it cannot
+// fill — is a capability boundary. Every other cause is an invariant violation: an
 // input the caller handed in that cannot have come from this engine, or a
 // write of the engine's own that the catalog does not show; nothing on the
 // server changes that, so the importer reports it. The class is a triage
@@ -315,9 +339,9 @@ func (c RefusalCause) Class() refusal.Class {
 		CauseRelationReplaced, CauseSchemaDrift, CauseFidelityDrift, CauseIndexInvalid,
 		CauseNameTaken, CauseOutcomeAmbiguous, CauseCutoverUnfenced, CauseShadowUnrecorded,
 		CauseResumeShadowGone, CauseResumeSlotForeign, CauseResumeSlotHeld,
-		CauseRestartSwapCommitted:
+		CauseRestartSwapCommitted, CauseCopyConversionDrift:
 		return refusal.ClassEnvironmental
-	case CauseStatementConversion:
+	case CauseStatementConversion, CauseStatementReadd:
 		return refusal.ClassCapabilityBoundary
 	case CauseLockUnproven, CauseProofEmpty, CauseStatementTarget, CauseGrantsDiffer,
 		CauseCutoverUnverified, CauseCutoverUndrained, CauseSwapMismatch, CauseResumeTerminal,

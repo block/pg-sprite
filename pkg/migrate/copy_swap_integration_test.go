@@ -1,10 +1,15 @@
 package migrate
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -12,7 +17,10 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/checkpoint"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/preflight"
 	"github.com/block/pg-sprite/pkg/schemachange"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -66,14 +74,15 @@ func (f copySwapFixture) createOrders(t *testing.T) {
 		FROM generate_series(1, 2500) g`)
 }
 
-// options is a quiesced copy-and-swap policy over the fixture's database
-// with room on disk, the shape every test here starts from.
+// options is a copy-and-swap policy over the fixture's database with room
+// on disk, quiesced for the orders table, the shape every test here starts
+// from.
 func (f copySwapFixture) options() Options {
 	opts := DefaultOptions()
 	opts.CopySwap = CopySwapOptions{
 		Connection:    f.cfg,
 		FreeDiskBytes: testutil.UnlimitedDisk,
-		Quiesced:      true,
+		BlockWrites:   f.schema + ".orders",
 	}
 	return opts
 }
@@ -219,4 +228,251 @@ func TestCopyAndSwapRefusesWithoutDiskHeadroom(t *testing.T) {
 	assert.Equal(t, verdict.Cause(preflight.CopySwapCauseDiskHeadroom), v.Cause)
 	assert.True(t, f.hasColumn(t, "orders", "note"), "nothing was executed")
 	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "no shadow was built")
+}
+
+// progressLog is an OnCheckpoint hook that records every row it is shown,
+// from whichever goroutine the save ran on, and stops the run at the first
+// save in stopAt when that is set.
+type progressLog struct {
+	stopAt checkpoint.Phase
+	mu     sync.Mutex
+	rows   []checkpoint.Checkpoint
+}
+
+// errHostStopped is what the hook stops a run with.
+var errHostStopped = errors.New("the host is draining")
+
+func (l *progressLog) hook(_ context.Context, cp checkpoint.Checkpoint) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.rows = append(l.rows, cp)
+	if cp.Phase == l.stopAt {
+		return errHostStopped
+	}
+	return nil
+}
+
+// phases is the sequence of phases the hook was shown, with consecutive
+// repeats collapsed: the copy saves its watermark in copying as often as
+// the interval fires, and how many times depends on the clock.
+func (l *progressLog) phases() []checkpoint.Phase {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var out []checkpoint.Phase
+	for _, cp := range l.rows {
+		if len(out) == 0 || out[len(out)-1] != cp.Phase {
+			out = append(out, cp.Phase)
+		}
+	}
+	return out
+}
+
+// lastIn returns the last row the hook was shown in phase.
+func (l *progressLog) lastIn(t *testing.T, phase checkpoint.Phase) checkpoint.Checkpoint {
+	t.Helper()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, row := range slices.Backward(l.rows) {
+		if row.Phase == phase {
+			return row
+		}
+	}
+	require.FailNowf(t, "phase never saved", "the hook saw no save in %s", phase)
+	return checkpoint.Checkpoint{}
+}
+
+// inspectRow reads the table's checkpoint row the way a host would between
+// two runs, without the run's lock.
+func (f copySwapFixture) inspectRow(t *testing.T) checkpoint.Checkpoint {
+	t.Helper()
+	store, err := checkpoint.NewStore(f.pool, checkpoint.Options{})
+	require.NoError(t, err)
+	cp, err := store.Inspect(t.Context(), f.schema, "orders")
+	require.NoError(t, err)
+	return cp
+}
+
+// The seam's progress hook is shown every save of the row, in the order
+// the run makes them, so a host that records what it is shown has the
+// run's whole course: copying from the fresh row through the complete
+// watermark, then verifying, cutover, and done, each naming the table.
+func TestCopyAndSwapReportsEverySaveToTheHost(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	progress := &progressLog{}
+	opts := f.options()
+	opts.CopySwap.OnCheckpoint = progress.hook
+
+	v, err := f.run(t, `ALTER TABLE {schema}.orders DROP COLUMN note`, opts)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+
+	assert.Equal(t, []checkpoint.Phase{
+		checkpoint.PhaseCopying,
+		checkpoint.PhaseVerifying,
+		checkpoint.PhaseCutover,
+		checkpoint.PhaseDone,
+	}, progress.phases())
+	for _, cp := range progress.rows {
+		assert.Equal(t, f.schema, cp.Schema)
+		assert.Equal(t, "orders", cp.Table)
+	}
+	assert.False(t, progress.rows[0].Watermark.Valid(), "the fresh row has nothing landed")
+	assert.True(t, progress.lastIn(t, checkpoint.PhaseCopying).Watermark.Complete(),
+		"the copy's last save in copying carries the complete watermark")
+}
+
+// A host that returns an error from the hook stops the run at that save:
+// the verdict is a failure whose detail says the same statement resumes
+// it, the row stands at the phase the host stopped in, and the next run
+// picks up from there — saving only the phases that remained — to the same
+// executed verdict a run that was never stopped reports.
+func TestCopyAndSwapStopsWhereTheHostSaysAndResumes(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE {schema}.orders DROP COLUMN note`
+	stop := &progressLog{stopAt: checkpoint.PhaseVerifying}
+	opts := f.options()
+	opts.CopySwap.OnCheckpoint = stop.hook
+
+	v, err := f.run(t, alter, opts)
+	require.ErrorIs(t, err, errHostStopped)
+	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+	assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
+	assert.Contains(t, v.Detail, "resumes from the row")
+	assert.True(t, v.WritesBlocked, "the stopped run left its fence on the source")
+	assert.Equal(t, checkpoint.PhaseVerifying, f.inspectRow(t).Phase, "the row stands where the host stopped")
+	assert.True(t, f.hasColumn(t, "orders", "note"), "the source is untouched while the run is stopped")
+
+	resumed := &progressLog{}
+	opts.CopySwap.OnCheckpoint = resumed.hook
+	v, err = f.run(t, alter, opts)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+	assert.Equal(t, []checkpoint.Phase{checkpoint.PhaseCutover, checkpoint.PhaseDone}, resumed.phases(),
+		"the resumed run saves only the phases the stopped run had left")
+	assert.False(t, f.hasColumn(t, "orders", "note"))
+	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
+}
+
+// An option set the Runner refuses is a caller's wiring error, reported
+// before the preflight reads anything: no verdict, the Runner's own error
+// to match on, and the table untouched. The volume reports no free space,
+// which the preflight would refuse as disk-headroom, so the wiring error
+// coming back instead shows the preflight never ran.
+func TestCopyAndSwapRefusesANegativeIntervalBeforeReading(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	opts := f.options()
+	opts.CopySwap.CheckpointInterval = -time.Second
+	opts.CopySwap.FreeDiskBytes = 0
+
+	v, err := f.run(t, `ALTER TABLE {schema}.orders DROP COLUMN note`, opts)
+	require.ErrorIs(t, err, schemachange.ErrInvalidOptions)
+	assert.Zero(t, v)
+	assert.True(t, f.hasColumn(t, "orders", "note"))
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "no shadow was built")
+}
+
+// Copier options the copier would refuse — here a negative worker count —
+// are the same kind of wiring error, refused before the shadow is built
+// and the source fenced, rather than once the copy starts with the source
+// refusing its writes until the value is corrected (ST-6).
+func TestCopyAndSwapRefusesInvalidCopierOptionsBeforeFencingTheSource(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	opts := f.options()
+	opts.CopySwap.Copier = copier.Options{Workers: -1}
+
+	v, err := f.run(t, `ALTER TABLE {schema}.orders DROP COLUMN note`, opts)
+	require.ErrorIs(t, err, schemachange.ErrInvalidOptions)
+	assert.ErrorIs(t, err, copier.ErrInvalidOptions)
+	assert.Zero(t, v)
+	assert.False(t, f.relationExists(t, schemachange.ShadowName(f.schema, "orders")), "no shadow was built")
+	f.exec(t, `
+		INSERT INTO {schema}.orders (qty, note)
+		VALUES (1, 'written after the refusal')`)
+	assert.EqualValues(t, 2501, f.rowCount(t, "orders"), "the source still takes writes")
+}
+
+// A host that stops the run at the done save has stopped nothing: the
+// swap has committed and the row is done, so the verdict is the executed
+// one with a nil error, not a failure whose rerun would start the change
+// again on a table that already has it.
+func TestCopyAndSwapReportsAnExecutedChangeWhenTheHostStopsAtTheDoneSave(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	stop := &progressLog{stopAt: checkpoint.PhaseDone}
+	opts := f.options()
+	opts.CopySwap.OnCheckpoint = stop.hook
+
+	v, err := f.run(t, `ALTER TABLE {schema}.orders DROP COLUMN note`, opts)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+	assert.Empty(t, v.Code)
+	assert.Equal(t, checkpoint.PhaseDone, stop.lastIn(t, checkpoint.PhaseDone).Phase, "the host was shown the done row")
+	assert.Equal(t, checkpoint.PhaseDone, f.inspectRow(t).Phase)
+	assert.False(t, f.hasColumn(t, "orders", "note"), "the change is complete")
+	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
+}
+
+// midCopy reports whether cp is a save the copy made while it was still
+// running: in copying, with a landed watermark short of the key space.
+// The fresh row has nothing landed and the copy's last save carries the
+// complete watermark, so neither is one.
+func midCopy(cp checkpoint.Checkpoint) bool {
+	if cp.Phase != checkpoint.PhaseCopying {
+		return false
+	}
+	return cp.Watermark.Valid() && !cp.Watermark.Complete()
+}
+
+// A copy that outlasts the checkpoint interval saves its landed watermark
+// while it runs, and the host is shown those saves from the copy's saving
+// goroutine. The copy is sized to one worker and ten-row chunks, so its
+// 250 chunks outlast a one-millisecond interval many times over. A hook
+// error on such a save stops the copy there: the row stands at the
+// watermark the host was shown, and the next run resumes from it to the
+// executed verdict with every row.
+func TestCopyAndSwapStopsAtAPeriodicSaveOfTheCopy(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE {schema}.orders DROP COLUMN note`
+	var (
+		mu      sync.Mutex
+		stopped checkpoint.Checkpoint
+	)
+	opts := f.options()
+	opts.CopySwap.CheckpointInterval = time.Millisecond
+	opts.CopySwap.Copier = copier.Options{
+		Workers: 1,
+		Chunker: copier.ChunkerOptions{InitialRows: 10, MinRows: 10, MaxRows: 10},
+	}
+	opts.CopySwap.OnCheckpoint = func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if !midCopy(cp) {
+			return nil
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		stopped = cp
+		return errHostStopped
+	}
+
+	v, err := f.run(t, alter, opts)
+	require.ErrorIs(t, err, errHostStopped, "a save landed while the copy was still running")
+	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+	mu.Lock()
+	shown := stopped
+	mu.Unlock()
+	row := f.inspectRow(t)
+	assert.Equal(t, checkpoint.PhaseCopying, row.Phase)
+	assert.Equal(t, shown.Watermark, row.Watermark, "the row stands at the save the host stopped at")
+	assert.True(t, f.hasColumn(t, "orders", "note"), "the source is untouched while the run is stopped")
+
+	opts.CopySwap.OnCheckpoint = nil
+	v, err = f.run(t, alter, opts)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+	assert.False(t, f.hasColumn(t, "orders", "note"))
+	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
 }

@@ -27,7 +27,10 @@
 0002 29-29 execute
 0003 12-12 execute
 0004 21-21 refuse:unsupported-partitioned-parent:capability-boundary
-0005 25-25 execute
+# A drop discards data, so migrate refuses it until --allow-destructive names
+# the table (RF-10); the replay never acknowledges, so every drop pins the
+# by-design destructive-change refusal and advances through psql.
+0005 25-25 refuse:destructive-change:by-design
 0005 26-30 refuse:backend-unavailable:capability-boundary
 0005 33-33 refuse:unsupported-partitioned-parent:capability-boundary
 0006 15-50 refuse:unsupported-statement:no-online-safety-problem:declarative-front-door
@@ -112,10 +115,12 @@
 0029 253-261 refuse:unsupported-statement:no-online-safety-problem:declarative-front-door
 0029 263-575 psql
 0030 5-5 psql
-0030 7-22 refuse:not-native-safe-rewrite-required:capability-boundary
+# The multi-operation ALTER drops two constraints; the destructive gate refuses
+# it before the rewrite-required routing is reached.
+0030 7-22 refuse:destructive-change:by-design
 0030 27-29 execute
-0030 31-31 execute
-0030 32-32 execute
+0030 31-31 refuse:destructive-change:by-design
+0030 32-32 refuse:destructive-change:by-design
 0030 33-34 execute
 0030 38-48 psql
 0031 3-3 psql

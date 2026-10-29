@@ -80,7 +80,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only; flagged **destructive** in the plan report. Refused with `replica-identity` when a replica identity index the drop reaches keys on the column: the table's own, or one on a partition or inheritance child below it unless the statement says `ONLY`. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, on a table the drop reaches. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop the views that read the column"
+    reason_notes: "Metadata-only; flagged **destructive** in the plan report. `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table (`migrate --desired` refuses a destructive plan whole); dropping a column and adding it back in one statement is refused with the `alter-column-type-in-place` guidance. Refused with `replica-identity` when a replica identity index the drop reaches keys on the column: the table's own, or one on a partition or inheritance child below it unless the statement says `ONLY`. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, on a table the drop reaches. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop the views that read the column"
   - id: alter-column-type-binary-coercible-proven-against-live-column-facts
     area: "column_changes"
     operation: "`ALTER COLUMN TYPE`, binary-coercible (proven against live column facts)"
@@ -102,7 +102,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Table rewrite; runs through copy-and-swap: the changed shape is built as a shadow table, filled in chunks (a `USING` expression is applied per row), verified, and swapped in under the source's name. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, before the route runs. The route's preflight still refuses table shapes and environments it cannot run against (`copy-and-swap-refused`), and a `USING` expression is admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (`shadow-statement-conversion`) — see [limitations.md](limitations.md)"
+    reason_notes: "Table rewrite; runs through copy-and-swap: the changed shape is built as a shadow table, filled in chunks (a `USING` expression is applied per row), verified, and swapped in under the source's name. Refused with `dependent-view`, naming the views, when a view or materialized view reads the column, before the route runs. The route's preflight still refuses table shapes and environments it cannot run against (`copy-and-swap-refused`), and a `USING` expression is admitted only when the copy can reproduce it: immutable, naming only the retyped column, not the primary key (`shadow-statement-conversion`). A statement that also drops a column and adds one of the same name is refused when the copy cannot fill the new column — the primary key, a source identity column, or a column that refuses NULL with no default of its own or its domain's (`shadow-statement-readd`) — see [limitations.md](limitations.md)"
   - id: set-default-drop-default-drop-not-null
     area: "column_changes"
     operation: "`SET DEFAULT` / `DROP DEFAULT` / `DROP NOT NULL`"
@@ -113,7 +113,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only"
+    reason_notes: "Metadata-only. `DROP NOT NULL` is flagged **destructive**: `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table"
   - id: set-not-null
     area: "column_changes"
     operation: "`SET NOT NULL`"
@@ -218,7 +218,7 @@ rows:
     front_doors:
       migrate: supported
       diff: supported
-    reason_notes: "Metadata-only; flagged **destructive**. Refused with `replica-identity` when the constraint owns the table's replica identity index, or the index a partition's is attached under. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop other tables' foreign keys on the constraint"
+    reason_notes: "Metadata-only; flagged **destructive**. `migrate` refuses it with `destructive-change` unless `--allow-destructive` names the table. Refused with `replica-identity` when the constraint owns the table's replica identity index, or the index a partition's is attached under. Refused with `cascading-drop` when the statement says `CASCADE`, which would also drop other tables' foreign keys on the constraint"
   - id: create-unique-index-on-a-plain-table-including-partial-expression-covering-include-gin-gist-brin
     area: "indexes"
     operation: "`CREATE [UNIQUE] INDEX` on a plain table — including partial, expression, covering (`INCLUDE`), GIN/GiST/BRIN"
@@ -256,6 +256,17 @@ rows:
       diff: not_applicable
     refusal_reason: index-statement
     reason_notes: "`migrate` never runs this statement online-safely: the plain form is refused and names `REINDEX ... CONCURRENTLY`, and the concurrent form is refused as already safe — run it directly against the database. A plain `REINDEX INDEX` or `REINDEX TABLE` can be run as-is under bounded budgets with `--accept-blocking SCHEMA.TABLE` (exit 3, never 0). `REINDEX SCHEMA`, `DATABASE`, and `SYSTEM` stay refused. A desired schema cannot express a reindex, so `diff` never produces one"
+  - id: alter-index-rename
+    area: "indexes"
+    operation: "`ALTER INDEX ... RENAME TO`"
+    tier: "t1"
+    status_mark: "✅"
+    engine_path: "native_as_is"
+    online_safety_problem: true
+    front_doors:
+      migrate: supported
+      diff: not_applicable
+    reason_notes: "Metadata-only: application SQL names tables and columns, not indexes. `migrate` resolves the index's owning table from the catalog, preflights and privilege-checks that table, and runs the rename under the brief budgets after locking the table in `SHARE UPDATE EXCLUSIVE` and re-checking that the name is still a plain index of it, then confirms before the commit that the index now carrying the new name is the one it checked, since the rename locks only the index and another session can move the name meanwhile (else the permanent `renamed-index-drift` code, nothing renamed — `ALTER INDEX ... RENAME` would also rename a table). An index that backs a primary-key, unique, or exclusion constraint renames the constraint, which `ON CONFLICT ON CONSTRAINT` names, so it is refused as `rewrite-required` (`app-breaking-rename`, guidance `coordinated-constraint-rename`); `--force` does not apply to an index rename. Offline `lint` cannot tell the two kinds of index apart and reports neither. A desired file cannot express a rename"
   - id: index-build-on-a-partitioned-parent
     area: "indexes"
     operation: "Index build on a **partitioned parent**"

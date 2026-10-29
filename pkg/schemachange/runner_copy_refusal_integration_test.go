@@ -59,8 +59,9 @@ func TestRunnerSurfacesAReplacedShadowAsARelationRefusal(t *testing.T) {
 // A CHECK the gated statement adds that the source's rows violate is the
 // shadow rejecting a chunk INSERT: the server's error, SQLSTATE 23514,
 // reachable with errors.As and carrying no refusal cause in either
-// vocabulary. The Runner passes it through unchanged, and the row stays in
-// copying.
+// vocabulary. The Runner passes it through unchanged, wrapped in an
+// AbandonedError: a data fault meets the same rows on every resume, so the
+// run is discarded and no row stands.
 func TestRunnerPassesARowTheShadowRejectsThroughUnchanged(t *testing.T) {
 	f := newRunnerFixture(t)
 	f.createOrders(t)
@@ -73,5 +74,51 @@ func TestRunnerPassesARowTheShadowRejectsThroughUnchanged(t *testing.T) {
 	assert.NotErrorIs(t, err, schemachange.ErrInvariantViolation)
 	assert.Empty(t, schemachange.RefusalCauseOf(err), "a row the shadow rejects is not a refusal")
 	assert.Empty(t, copier.RefusalCauseOf(err))
-	assert.Equal(t, checkpoint.PhaseCopying, f.inspectRow(t, "orders").Phase)
+	var abandoned *schemachange.AbandonedError
+	assert.ErrorAs(t, err, &abandoned)
+	_, err = f.store.Inspect(t.Context(), f.schema, "orders")
+	assert.ErrorIs(t, err, checkpoint.ErrNotFound, "the abandoned run leaves no row")
+}
+
+// A copy stopped by a catalog change under a name its USING expression
+// spells — here an integer * integer planted in the source schema once the
+// row is in copying — is refused as the same environmental drift when it is
+// rerun while the change is still in place: the shadow under the row's name
+// is the one the build made, and the proof the resume re-derives differs
+// from the row's in its conversion fingerprint alone. Undoing the change
+// makes the fingerprints agree again, and the same rerun completes.
+func TestRunnerResumeOverUnresolvedConversionDriftIsRefusedAsDrift(t *testing.T) {
+	f := newRunnerFixture(t)
+	f.createOrders(t)
+	const alter = `
+		ALTER TABLE %s.orders
+			DROP COLUMN note,
+			ALTER COLUMN qty TYPE bigint USING (qty * 1)::bigint`
+	var once sync.Once
+	plant := func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if cp.Phase != checkpoint.PhaseCopying {
+			return nil
+		}
+		once.Do(func() {
+			f.exec(t, `
+				CREATE FUNCTION %s.times_zero(integer, integer) RETURNS integer
+					LANGUAGE sql IMMUTABLE
+					AS 'SELECT 0'`)
+			f.exec(t, `CREATE OPERATOR %s.* (LEFTARG = integer, RIGHTARG = integer, FUNCTION = %s.times_zero)`)
+		})
+		return nil
+	}
+	_, err := f.run(t, "orders", alter, schemachange.RunOptions{AfterCheckpoint: plant})
+	require.Equal(t, schemachange.CauseCopyConversionDrift, schemachange.RefusalCauseOf(err))
+
+	_, err = f.run(t, "orders", alter, schemachange.RunOptions{})
+	require.ErrorIs(t, err, schemachange.ErrInvariantViolation)
+	assert.Equal(t, schemachange.CauseCopyConversionDrift, schemachange.RefusalCauseOf(err))
+	assert.Equal(t, checkpoint.PhaseCopying, f.inspectRow(t, "orders").Phase, "the refused resume wrote nothing")
+
+	f.exec(t, `DROP OPERATOR %s.* (integer, integer)`)
+	f.exec(t, `DROP FUNCTION %s.times_zero(integer, integer)`)
+	result, err := f.run(t, "orders", alter, schemachange.RunOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, checkpoint.PhaseDone, result.Checkpoint.Phase)
 }

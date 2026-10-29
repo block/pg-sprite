@@ -408,6 +408,7 @@ same package cover the rest of it.
 | CLI `diff`, `fmt`, and classified `migrate --dry-run`, including applying text output and re-diffing to empty (`TestDiffTextPlanIsExecutableSQL`) | [diff integration](../internal/cli/diff_integration_test.go), [fmt](../internal/cli/diff_test.go), [dry-run integration](../internal/cli/dryrun_integration_test.go) |
 | Library front door (`diffplan.Plan`): ordered routed plan, missing-table, no-op, copy-and-swap refusal, never-writes, deterministic fingerprint | [diffplan unit](../pkg/diffplan/diffplan_test.go), [diffplan integration](../pkg/diffplan/diffplan_integration_test.go) |
 | Bounded optimistic native attempt and table preflight | [pkg/executor](../pkg/executor/optimistic_integration_test.go), [pkg/preflight](../pkg/preflight/preflight_integration_test.go) |
+| Table usage evidence (`ReadTableUsage`, `Judge`): window edges, recent scans and lock holders, PostgreSQL 14/15 unknown, resets never idle, one statistics snapshot per read, `track_counts` turned off by a saved setting, partitioned tables judged across every leaf partition | [pkg/preflight](../pkg/preflight/table_usage_integration_test.go), [coverage](../pkg/preflight/table_usage_coverage_integration_test.go), [partitions](../pkg/preflight/table_usage_partitions_integration_test.go), [verdict (unit)](../pkg/preflight/table_usage_verdict_test.go), [partition aggregation (unit)](../pkg/preflight/table_usage_partitions_test.go) |
 | Safer-sequence runner: autocommit steps, committed-prefix semantics on a mid-sequence failure | [pkg/executor](../pkg/executor/sequence_integration_test.go) |
 | Concurrent index build: caller-owned session, invalid-index detection into a typed state, and the proven recovery (`RebuildAbandonedIndex`, `DropAbandonedIndex`) | [pkg/executor](../pkg/executor/recover_integration_test.go) |
 | Greenfield `CREATE TABLE` path: shape refusals, claimed-name collisions, post-commit name verification | [pkg/executor](../pkg/executor/create_integration_test.go) |
@@ -444,10 +445,12 @@ pg-schema-diff, pg-delta, migra, Atlas, SchemaHero, and Bytebase found no
 peer testing physical replicas, poolers as live intermediaries, failover, or
 cloud-managed PostgreSQL. The pooler is now covered here: a pooled
 connection string is what a hosted platform hands an operator by default, so
-`StartPostgresBehindPgBouncer` runs a real PgBouncer in both pool modes as
-part of the default suite, and returns its URL only once a login through it
-has run a statement on the server behind it
-([sessionstate_integration_test.go](../pkg/dbconn/sessionstate_integration_test.go)).
+`StartPostgresBehindPgBouncer` runs a real PgBouncer in each pool mode —
+session (accepted), transaction and statement (both refused with
+`ErrNoSessionAffinity`) — as part of the default suite, and returns its URL
+only once a login through it has run a statement on the server behind it
+([sessionstate_integration_test.go](../pkg/dbconn/sessionstate_integration_test.go),
+[table_lock_pooler_integration_test.go](../pkg/dbconn/table_lock_pooler_integration_test.go)).
 Replicas, failover, and cloud-managed PostgreSQL remain environment-gate
 territory (see above). The patterns worth carrying, tied to the phase whose
 implementation makes them meaningful:

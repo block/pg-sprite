@@ -15,9 +15,10 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-// Gate is the statement-type gate: ALTER TABLE and CREATE INDEX proceed to
-// classification (a blocking CREATE INDEX is substituted with its
-// concurrent build, a submitted concurrent build is driven directly); the
+// Gate is the statement-type gate: ALTER TABLE, CREATE INDEX, and ALTER
+// INDEX ... RENAME TO proceed to classification (a blocking CREATE INDEX
+// is substituted with its concurrent build, a submitted concurrent build
+// is driven directly); the
 // index-maintenance forms the executor cannot drive yet are pointed at
 // their concurrent idiom, everything else is unsupported. Refused
 // statements are never executed. Gate needs no database, so a caller can
@@ -37,7 +38,7 @@ func Gate(st statement.Statement) (verdict.Verdict, bool) {
 		v.Detail = "migrate changes an existing table; to converge a table onto a desired-state CREATE TABLE, " +
 			"use the declarative front door — diff the desired schema against the live database"
 	default:
-		v.Detail = "only ALTER TABLE and CREATE INDEX statements are supported by the imperative front door"
+		v.Detail = "only ALTER TABLE, CREATE INDEX, and ALTER INDEX ... RENAME TO statements are supported by the imperative front door"
 	}
 	return v, true
 }

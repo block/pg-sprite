@@ -78,6 +78,32 @@ func TestStreamStopsWhenTheSourceIsRenamed(t *testing.T) {
 	require.ErrorIs(t, nextError(t, stream), decode.ErrInvariantViolation)
 }
 
+// A source dropped and recreated under its own name, column for column, is
+// another table: pgoutput describes it under a new OID, which is not the
+// OID the target was proven for, so its first change stops the stream
+// rather than arriving as the target's. Dropping the table also drops it
+// from the publication, so the recreated table is published again before
+// the change — with the same name and shape, the names and the publication
+// alone would let it through.
+func TestStreamStopsWhenTheSourceIsRecreated(t *testing.T) {
+	f := newSlotFixture(t)
+	slot := f.createSlot(t)
+	stream := f.openStream(t, slot.ConsistentPoint())
+
+	f.exec(t, `DROP TABLE %s.ledger`)
+	f.exec(t, `
+		CREATE TABLE %s.ledger (
+			id bigint PRIMARY KEY,
+			note text
+		)`)
+	f.exec(t, `ALTER PUBLICATION `+slot.Name()+` ADD TABLE %s.ledger`)
+	f.exec(t, `INSERT INTO %s.ledger (id, note) VALUES (101, 'recreated')`)
+
+	err := nextError(t, stream)
+	require.ErrorIs(t, err, decode.ErrInvariantViolation)
+	assert.NotErrorIs(t, err, decode.ErrSourceShapeChanged)
+}
+
 // A source whose key is no longer part of the replica identity cannot
 // carry its key in an old tuple, so the stream stops at its description.
 func TestStreamStopsWhenTheKeyLeavesTheReplicaIdentity(t *testing.T) {

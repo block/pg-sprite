@@ -36,6 +36,10 @@ const (
 	KindDataChange
 	KindProvisioning
 	KindCatalogWork
+	// KindRenameIndex is ALTER INDEX ... RENAME TO. It names an index, not
+	// a table, so it carries the index as its IndexRelation and no table
+	// target.
+	KindRenameIndex
 )
 
 // Kinds returns the closed set of statement kinds, KindOther first. The
@@ -52,6 +56,7 @@ func Kinds() []Kind {
 		KindDataChange,
 		KindProvisioning,
 		KindCatalogWork,
+		KindRenameIndex,
 	}
 }
 
@@ -74,6 +79,8 @@ func (k Kind) String() string {
 		return "provisioning"
 	case KindCatalogWork:
 		return "catalog work"
+	case KindRenameIndex:
+		return "ALTER INDEX RENAME"
 	default:
 		return "other"
 	}
@@ -91,6 +98,7 @@ type Statement struct {
 	concurrent    bool
 	indexTarget   IndexTarget
 	indexRelation IndexRelation
+	renamedTo     string
 	cascades      bool
 	buildsIndex   bool
 }
@@ -107,8 +115,8 @@ type IndexTarget int
 const (
 	// IndexTargetNone is carried by statements outside index maintenance.
 	IndexTargetNone IndexTarget = iota
-	// IndexTargetSingleRelation covers one DROP INDEX (without CASCADE) and
-	// REINDEX INDEX or TABLE.
+	// IndexTargetSingleRelation covers one DROP INDEX (without CASCADE),
+	// REINDEX INDEX or TABLE, and ALTER INDEX ... RENAME TO.
 	IndexTargetSingleRelation
 	// IndexTargetOther covers the DROP and REINDEX scopes that do not stay
 	// within one relation: several indexes in one DROP INDEX, DROP INDEX with
@@ -144,8 +152,8 @@ const (
 	// IndexRelationNone is carried by statements that name no single
 	// maintained relation.
 	IndexRelationNone IndexRelationKind = iota
-	// IndexRelationIndex means the statement names an index: DROP INDEX
-	// and REINDEX INDEX.
+	// IndexRelationIndex means the statement names an index: DROP INDEX,
+	// REINDEX INDEX, and ALTER INDEX ... RENAME TO.
 	IndexRelationIndex
 	// IndexRelationTable means the statement names a table: REINDEX TABLE.
 	IndexRelationTable
@@ -191,6 +199,11 @@ func (s Statement) IndexTarget() IndexTarget { return s.indexTarget }
 // IndexTargetOther statement that names one index but whose scope is wider,
 // such as DROP INDEX ... CASCADE (see Cascades()).
 func (s Statement) IndexRelation() IndexRelation { return s.indexRelation }
+
+// RenamedTo returns the name an ALTER INDEX ... RENAME TO gives its index,
+// as the grammar spelled it; empty for every other statement. The renamed
+// index keeps its schema, so the name is never qualified.
+func (s Statement) RenamedTo() string { return s.renamedTo }
 
 // Cascades reports whether a DROP INDEX used CASCADE, which also drops the
 // objects that depend on the index. It is always false for other statements.
@@ -270,9 +283,17 @@ func ParseOne(sql string) (Statement, error) {
 		// renames are KindAlterTable: RENAME TO carries OBJECT_TABLE as the
 		// rename type, RENAME COLUMN carries it as the relation type, and
 		// RENAME CONSTRAINT carries the table-specific OBJECT_TABCONSTRAINT.
-		// ALTER INDEX/VIEW ... RENAME carry their own object types and stay
-		// KindOther.
+		// ALTER INDEX ... RENAME TO carries OBJECT_INDEX and is
+		// KindRenameIndex; ALTER VIEW and the other relation renames carry
+		// their own object types and stay KindOther.
 		ren := node.GetRenameStmt()
+		if ren.GetRenameType() == pganalyze.ObjectType_OBJECT_INDEX {
+			st.kind = KindRenameIndex
+			st.indexTarget = IndexTargetSingleRelation
+			st.indexRelation = reindexedRelation(ren.GetRelation(), IndexRelationIndex)
+			st.renamedTo = ren.GetNewname()
+			return st, nil
+		}
 		if ren.GetRenameType() != pganalyze.ObjectType_OBJECT_TABLE &&
 			ren.GetRenameType() != pganalyze.ObjectType_OBJECT_TABCONSTRAINT &&
 			ren.GetRelationType() != pganalyze.ObjectType_OBJECT_TABLE {
@@ -398,7 +419,7 @@ func droppedIndex(object *pganalyze.Node) IndexRelation {
 }
 
 // reindexedRelation names the index or table a REINDEX INDEX or REINDEX
-// TABLE rebuilds.
+// TABLE rebuilds, or the index an ALTER INDEX ... RENAME TO renames.
 func reindexedRelation(rel *pganalyze.RangeVar, kind IndexRelationKind) IndexRelation {
 	return IndexRelation{Schema: rel.GetSchemaname(), Name: rel.GetRelname(), Kind: kind}
 }

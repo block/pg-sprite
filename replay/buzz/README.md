@@ -21,7 +21,7 @@ authoritative. See the [refusal class contract](../../docs/refusal-classes.md).
 
 ## Boundary facts the curation surfaced
 
-Curating the manifest against real verdicts (not predictions) established two
+Curating the manifest against real verdicts (not predictions) established three
 behaviors worth knowing when reading the results:
 
 - `CREATE INDEX IF NOT EXISTS` is refused by design — a name-only no-op cannot prove
@@ -29,3 +29,6 @@ behaviors worth knowing when reading the results:
 - Buzz's unnamed `ADD FOREIGN KEY` executes via the safer `NOT VALID` + `VALIDATE`
   sequence: the `VALIDATE` step has to name the constraint, so pg-sprite states the
   name PostgreSQL would choose (`<table>_<columns>_fkey`).
+- Every `DROP COLUMN`, `DROP CONSTRAINT`, and `DROP NOT NULL` is refused by design
+  (`destructive-change`): the replay never passes `--allow-destructive`, so it pins
+  the refusal and advances the history through psql.

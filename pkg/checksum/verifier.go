@@ -59,6 +59,12 @@ type Options struct {
 	// phase as well. The caller owns the tracker's steps; the verifier only
 	// fills the current step's counters.
 	Tracker *progress.Tracker
+	// RecopyAttempts is the number of times a pass under DivergenceRecopy
+	// compares and recopies before it stops on a recopy that keeps
+	// colliding with a unique value the source moves between chunks. Zero
+	// takes DefaultRecopyAttempts; one recopies once and never compares
+	// again.
+	RecopyAttempts int
 }
 
 func (o Options) withDefaults() Options {
@@ -70,6 +76,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.Clock == nil {
 		o.Clock = progress.WallClock{}
+	}
+	if o.RecopyAttempts == 0 {
+		o.RecopyAttempts = DefaultRecopyAttempts
 	}
 	return o
 }
@@ -84,6 +93,9 @@ func (o Options) validate() error {
 			// INV: LK-2
 			return fmt.Errorf("%w: %s %s is below PostgreSQL's one-millisecond resolution; use zero for the default", ErrInvalidOptions, timeout.name, timeout.value)
 		}
+	}
+	if o.RecopyAttempts < 1 {
+		return fmt.Errorf("%w: recopy attempts %d would recopy nothing; use zero for the default", ErrInvalidOptions, o.RecopyAttempts)
 	}
 	return nil
 }
@@ -196,6 +208,19 @@ func checkShadow(target preflight.CopySwapTarget, shadow copier.Shadow) error {
 		if expr == "" {
 			return fmt.Errorf("%w (ST-6): shadow proof for %s.%s converts column %s with an empty expression", ErrInvariantViolation, target.Schema(), target.Table(), column)
 		}
+	}
+	// The digest's source side and the recopy evaluate the expressions, and
+	// each pass compares the catalog they resolve in against the build's
+	// fingerprint; a proof with expressions and no fingerprint has nothing
+	// to compare, and one with a fingerprint and no expressions nothing to
+	// fingerprint.
+	converts := len(shadow.Conversions()) > 0
+	fingerprinted := shadow.ConversionFingerprint() != ""
+	if converts && !fingerprinted {
+		return fmt.Errorf("%w (ST-6): shadow proof for %s.%s converts columns but carries no conversion fingerprint", ErrInvariantViolation, target.Schema(), target.Table())
+	}
+	if !converts && fingerprinted {
+		return fmt.Errorf("%w (ST-6): shadow proof for %s.%s carries a conversion fingerprint but converts no column", ErrInvariantViolation, target.Schema(), target.Table())
 	}
 	return nil
 }

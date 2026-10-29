@@ -97,20 +97,27 @@ type RunOptions struct {
 	// CheckpointInterval, not as the copy lands rows. An error it returns
 	// stops the run there, with the row as the last save left it, so a
 	// test can stop a run at any transition and resume it (TM-3 fault
-	// hook).
+	// hook) — except at the done save, which stops nothing: the change is
+	// complete and recorded, and Run returns its Result beside the error.
 	AfterCheckpoint func(ctx context.Context, cp checkpoint.Checkpoint) error
 }
 
-// validate refuses options a run could not honour. The copier's and the
-// verifier's options are validated where they are consumed, by their own
-// constructors; the shadow and cutover options here, since every phase
-// uses them.
+// validate refuses options a run could not honour: the shadow and cutover
+// options, since every phase uses them, and the copier's, since a value
+// the copier refuses would otherwise stop the run only once the shadow is
+// built and the source fenced or its slot made (ST-6). A copier refusal
+// wraps both ErrInvalidOptions and the copier's own sentinel. The
+// verifier's options are validated where they are consumed, by its
+// constructor.
 func (o RunOptions) validate() error {
 	if err := o.Shadow.validate(); err != nil {
 		return err
 	}
 	if err := o.Cutover.validate(); err != nil {
 		return err
+	}
+	if err := o.Copier.Validate(); err != nil {
+		return fmt.Errorf("%w: copier: %w", ErrInvalidOptions, err)
 	}
 	if o.CheckpointInterval < 0 {
 		return fmt.Errorf("%w: checkpoint interval %s is negative; use zero for the default", ErrInvalidOptions, o.CheckpointInterval)
@@ -322,12 +329,21 @@ func NewRunner(cfg dbconn.Config, store *checkpoint.Store, opts RunOptions) (*Ru
 // with DropWriteFence or drops the slot with decode.DropSlot, and deletes
 // the row, or runs the statement again with RunOptions.Restart, which
 // does those steps under the run's own lock; no Run without the restart
-// goes back to the copy. Every error is
+// goes back to the copy. A run that stopped on a data fault (IsDataFault)
+// — the server rejecting the rows as the statement would shape them, in
+// the copy, the stream's apply, or the swap's drain — is the one stop the Runner does not leave to resume,
+// since every resume would meet the same rows: it is discarded whole
+// under this run's lock session, as RunOptions.Restart would discard it,
+// and the error returned is an *AbandonedError carrying the fault; the
+// next Run of the statement starts from the beginning. A cutover row is
+// still answered by the catalog first, and one whose swap committed is
+// refused as restart-swap-committed rather than discarded. Every error is
 // returned as the step returned it, with a lost table lock reported as
 // shadow-lock-lost, and with the zero Result — except when the run is
-// complete and its done row saved and only the release of the lock
-// session failed afterwards: the change is then done and recorded, so the
-// Result is returned as it stands with the release error alongside, and
+// complete and its done row saved and only what came after failed:
+// AfterCheckpoint handed the done row, or the release of the lock
+// session. The change is then done and recorded, so the Result is
+// returned as it stands with that error alongside, and
 // Result.Checkpoint.Phase in PhaseDone is how a caller tells that case
 // from a stopped run.
 func (r *Runner) Run(ctx context.Context, pool *pgxpool.Pool, target preflight.CopySwapTarget, st statement.Statement) (result Result, err error) {
@@ -351,10 +367,14 @@ func (r *Runner) Run(ctx context.Context, pool *pgxpool.Pool, target preflight.C
 		}
 	}()
 	result, err = r.run(ctx, pool, lock, target, st)
-	if err != nil {
-		return Result{}, lockLossCause(lock, fmt.Errorf("run %s.%s: %w", target.Schema(), target.Table(), err))
+	if err == nil {
+		return result, nil
 	}
-	return result, nil
+	err = lockLossCause(lock, fmt.Errorf("run %s.%s: %w", target.Schema(), target.Table(), err))
+	if result.Checkpoint.Phase != checkpoint.PhaseDone {
+		return Result{}, err
+	}
+	return result, err
 }
 
 func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.TableLockSession, target preflight.CopySwapTarget, st statement.Statement) (Result, error) {
@@ -370,7 +390,7 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 		report, err := r.swap(ctx, pool, lock, target, &state)
 		result.Verification = report
 		if err != nil {
-			return Result{}, err
+			return Result{}, r.abandonOnDataFault(ctx, pool, lock, target, &state, err)
 		}
 	}
 	result.Reconciled = state.reconciled
@@ -395,13 +415,19 @@ func (r *Runner) run(ctx context.Context, pool *pgxpool.Pool, lock *dbconn.Table
 		}
 	}
 	result.OldTableDropped = state.oldTableGone
-	if err := r.save(ctx, lock, &state, checkpoint.PhaseDone); err != nil {
+	// save moves the state's row to done only once the store's write has
+	// landed, so the state's phase, not the error, says whether the change
+	// is recorded: an error with the row done is AfterCheckpoint's, and
+	// the change it reports on is complete, so the Result stands beside
+	// it.
+	err = r.save(ctx, lock, &state, checkpoint.PhaseDone)
+	if state.cp.Phase != checkpoint.PhaseDone {
 		return Result{}, err
 	}
 	// The row as saved is the row the run leaves; reading it back could
 	// only fail a change that is complete and recorded.
 	result.Checkpoint = state.cp
-	return result, nil
+	return result, err
 }
 
 // settleOldTable finishes with the retained source after the swap: drops

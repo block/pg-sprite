@@ -105,11 +105,12 @@ const (
 	// that has no carrying path for the operation in this build (a
 	// copy-and-swap rewrite the shadow-table engine does not carry yet).
 	ReasonBackendUnavailable Reason = "backend-unavailable"
-	// ReasonDestructiveChange: the desired-state plan discards live
-	// structure — a dropped column, constraint, index, or NOT NULL — and
-	// desired-state execution runs no destructive statement without an
-	// explicit path for it. The imperative front door remains the way to
-	// run a reviewed destructive statement deliberately.
+	// ReasonDestructiveChange: the change discards live data or structure —
+	// a dropped column, constraint, index, or NOT NULL. The imperative
+	// front door runs such a statement only when the destructive
+	// acknowledgement names its table; desired-state execution refuses a
+	// destructive plan whole and has no acknowledgement for it, so the
+	// imperative statement is the way to run a reviewed destructive change.
 	ReasonDestructiveChange Reason = "destructive-change"
 	// ReasonPlanFingerprintMismatch: the plan recomputed at execution time
 	// does not carry the fingerprint the caller pinned, so the plan a
@@ -534,14 +535,25 @@ type Verdict struct {
 	Table string `json:"table,omitempty"`
 	// Detail is the human explanation: why refused, or what committed.
 	Detail string `json:"detail,omitempty"`
+	// WritesBlocked is true on an executed or failed copy-and-swap verdict
+	// whose run blocked the table's writes (offline mode, --block-writes):
+	// the write fence went on, and every write that reached it was refused
+	// with SQLSTATE 55006. On a failed verdict it is set only when the fence
+	// went on, and Detail says whether it still stands; a blocked-writes run
+	// that stopped before its fence went on reports false, since the table
+	// kept taking writes. False for every other verdict, including a live
+	// run's.
+	WritesBlocked bool `json:"writes_blocked,omitempty"`
 	// SaferIdiom is a native alternative to the refused statement, when one
 	// exists (e.g. CREATE INDEX CONCURRENTLY, ADD CONSTRAINT ... NOT VALID).
 	SaferIdiom string `json:"safer_idiom,omitempty"`
 	// Guidance is the typed manual path for a rewrite-required refusal,
 	// drawn from the suggest contract's Guidance vocabulary
 	// (docs/suggest-report.md), the same value the plan report's statement
-	// carries. Detail states the steps for a human; Guidance is the key an
-	// automated caller branches on. Empty for every other verdict.
+	// carries, or for a destructive-change refusal whose statement drops a
+	// column and adds it back under the same name. Detail states the steps
+	// for a human; Guidance is the key an automated caller branches on.
+	// Empty for every other verdict.
 	Guidance suggest.Guidance `json:"guidance,omitempty"`
 	// DependentViews names the views and materialized views that read the
 	// column a refused statement retypes or drops, each schema-qualified
@@ -563,6 +575,12 @@ type Verdict struct {
 	// strategy refusal. It is the machine-readable audit record of the
 	// override.
 	Forced bool `json:"forced,omitempty"`
+	// AllowedDestructive reports that --allow-destructive acknowledged the
+	// data the statement discards: a statement the destructive-change gate
+	// would refuse went on through the engine's other gates instead. It is
+	// the machine-readable audit record of the acknowledgement, set on
+	// every verdict the acknowledged statement ends in.
+	AllowedDestructive bool `json:"allowed_destructive,omitempty"`
 	// BlockingPassthrough marks execution of an operator-accepted refusal.
 	BlockingPassthrough bool `json:"blocking_passthrough,omitempty"`
 	// LockTimeout is the explicit lock-acquisition budget.
@@ -644,6 +662,12 @@ func (v Verdict) String() string {
 	}
 	if v.Forced {
 		b.WriteString("\n  forced:    the submitted form ran as-is (force acknowledged)")
+	}
+	if v.WritesBlocked {
+		b.WriteString("\n  blocked:   writes to the table were refused (55006) while the run held it")
+	}
+	if v.AllowedDestructive {
+		b.WriteString("\n  allowed:   the statement's data loss was acknowledged (allow-destructive)")
 	}
 	if v.FailedStep > 0 {
 		fmt.Fprintf(&b, "\n  failed at: step %d: %s", v.FailedStep, v.FailedStepSQL)

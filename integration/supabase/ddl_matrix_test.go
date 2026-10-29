@@ -111,6 +111,10 @@ type nativeDDLCase struct {
 	// app-breaking rename) so the matrix proves what the forced run
 	// preserves, not that the statement executes unasked.
 	forced bool
+	// destructive acknowledges a statement that discards data, which
+	// migrate refuses without the acknowledgement, so the matrix proves
+	// what the acknowledged run preserves.
+	destructive bool
 }
 
 // Adding a constant default fills existing rows without replacing the table.
@@ -157,8 +161,9 @@ func TestDropColumnDefaultSucceeds(t *testing.T) {
 // Relaxing nullability removes NOT NULL without changing existing data.
 func TestDropNotNullSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
-		name: "drop_not_null",
-		ddl:  "ALTER TABLE %s ALTER COLUMN body DROP NOT NULL",
+		name:        "drop_not_null",
+		ddl:         "ALTER TABLE %s ALTER COLUMN body DROP NOT NULL",
+		destructive: true,
 		proof: `SELECT attnotnull::text
 			FROM pg_attribute
 			WHERE attrelid='%s'::regclass
@@ -278,8 +283,9 @@ func TestRenameColumnForcedSucceeds(t *testing.T) {
 // The explicit DROP COLUMN statement removes the column; this is not desired-plan consent.
 func TestDropColumnStatementSucceeds(t *testing.T) {
 	runNativeDDL(t, nativeDDLCase{
-		name: "drop_column",
-		ddl:  "ALTER TABLE %s DROP COLUMN note",
+		name:        "drop_column",
+		ddl:         "ALTER TABLE %s DROP COLUMN note",
+		destructive: true,
 		proof: `SELECT count(*)::text
 			FROM pg_attribute
 			WHERE attrelid='%s'::regclass
@@ -302,6 +308,9 @@ func runNativeDDL(t *testing.T, tc nativeDDLCase) {
 	opts := migrate.DefaultOptions()
 	if tc.forced {
 		opts.Force = "public." + name
+	}
+	if tc.destructive {
+		opts.AllowDestructive = "public." + name
 	}
 	changeWith(t, pool, fmt.Sprintf(tc.ddl, table), opts)
 	var got string
