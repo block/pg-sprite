@@ -859,7 +859,8 @@ would without the flag — including a `DROP INDEX ... CASCADE`, whose refusal s
 ineligible one because its scope exceeds the acknowledged table — and a statement the gate
 admits runs its normal path. The
 acknowledgement is not `--force`: the two cannot be combined, and a dry run reports the
-refusal as it stands rather than the accepted execution. The front door requires the
+refusal as it stands rather than the accepted execution. It accepts the lock only: an
+accepted `DROP INDEX` also needs the destructive acknowledgement (RF-10). The front door requires the
 statement budget to be stated on the same command line, because the accepted outage bound is
 a decision, not a default. *Enforced:* `migrate.AcceptedRefusal`, `MigrateCmd.Validate`,
 `migrate.gateRefusal` (the refusal site), `TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
@@ -1408,8 +1409,11 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   other gate, and an acknowledged run is audited at warn level and carries
   `allowed_destructive: true` on its verdict. The declarative path takes no acknowledgement
   and refuses a destructive plan whole. A planner refusal runs nothing and keeps its own
-  reason. A `DROP INDEX` stays with the statement-kind gate and `--accept-blocking`, which
-  the destructive acknowledgement does not reach. Outage-risk statements are covered by
+  reason. A `DROP INDEX` — unique or not — is gate-refused first; when `--accept-blocking`
+  accepts that refusal, the drop still runs only if `--allow-destructive` names the same
+  owning table, and otherwise it is refused with `destructive-change` before anything
+  executes, the detail listing the checks that catch an index the application still uses.
+  Accepting the lock is not accepting the loss. Outage-risk statements are covered by
   RF-5 and AB-1..AB-5 (`--force`, `--accept-blocking`) and by the LK-2 budgets.
   *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
@@ -1423,7 +1427,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestRunRejectsAMismatchedDestructiveAcknowledgement`,
   `TestRunRefusesAnUnacknowledgedDropColumnRoutedToCopyAndSwap`,
   `TestRunNeedsBothForceAndTheDestructiveAcknowledgement`,
-  `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`, `TestAdmitDestructive`,
+  `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`,
+  `TestRunAcceptBlockingNeedsTheDestructiveAcknowledgementToDropAnIndex`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
   [design principles](design-principles.md#declarative-review-first-workflow)

@@ -10,9 +10,9 @@ import (
 
 // --allow-destructive acknowledges data loss, a risk none of the other
 // acknowledgements covers, so the grammar combines it with --force,
-// --dry-run, and --restart, and refuses it beside --accept-blocking, the
-// separate policy path for refused index statements, and beside --desired,
-// which refuses destructive plans whole.
+// --dry-run, --restart, and --accept-blocking (an accepted DROP INDEX
+// needs both), and refuses it beside --desired, which refuses destructive
+// plans whole.
 func TestAllowDestructiveFlagGrammar(t *testing.T) {
 	parse := func(args ...string) error {
 		c := New("test")
@@ -43,10 +43,8 @@ func TestAllowDestructiveFlagGrammar(t *testing.T) {
 		require.NoError(t, parse("--restart", "public.orders"))
 	})
 
-	t.Run("rejects --accept-blocking", func(t *testing.T) {
-		err := parse("--accept-blocking", "public.orders", "--statement-timeout", "10m")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "--allow-destructive cannot be combined with --accept-blocking")
+	t.Run("combines with --accept-blocking", func(t *testing.T) {
+		require.NoError(t, parse("--accept-blocking", "public.orders", "--statement-timeout", "10m"))
 	})
 
 	t.Run("rejects --desired", func(t *testing.T) {

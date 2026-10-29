@@ -82,19 +82,19 @@ type Options struct {
 	// from the catalog — exactly; empty means every refusal stands.
 	// Ineligible refusals stand regardless. Force and AcceptBlocking are
 	// mutually exclusive: a statement reaches one routing decision, and
-	// one acknowledgement names it.
+	// one acknowledgement names it. An accepted DROP INDEX also needs
+	// AllowDestructive: accepting the lock is not accepting the loss.
 	AcceptBlocking string
 
 	// AllowDestructive is the typed acknowledgement that the statement may
-	// discard live data or structure: a dropped column, constraint, or NOT
-	// NULL. Without it such a statement is refused before anything runs,
-	// with reason destructive-change, on every route it could take. It must
-	// name the resolved schema-qualified target table exactly; empty means
+	// discard live data or structure: a dropped column, constraint, NOT
+	// NULL, or index. Without it such a statement is refused before
+	// anything runs, with reason destructive-change, on every route it
+	// could take. It must name the resolved schema-qualified target table
+	// exactly — for a DROP INDEX, the index's owning table; empty means
 	// destructive statements are refused. It acknowledges only the loss:
 	// the statement still meets every other gate, so a statement that also
-	// needs Force needs both. It cannot be combined with AcceptBlocking,
-	// whose statements the statement-kind gate refuses before this one, and
-	// [RunDesired] rejects it.
+	// needs Force or AcceptBlocking needs both. [RunDesired] rejects it.
 	AllowDestructive string
 
 	// MaxTableSizeBytes is the threshold above which a blind bounded
@@ -182,9 +182,6 @@ func (o Options) validate() error {
 	if o.Force != "" && o.AcceptBlocking != "" {
 		return errors.New("migrate: Options.Force and Options.AcceptBlocking are mutually exclusive; a statement reaches one routing decision and one acknowledgement names it")
 	}
-	if o.AllowDestructive != "" && o.AcceptBlocking != "" {
-		return errors.New("migrate: Options.AllowDestructive and Options.AcceptBlocking are mutually exclusive; accepted blocking is a separate policy path the destructive acknowledgement does not govern")
-	}
 	if o.CopySwap.Restart != "" && (o.Force != "" || o.AcceptBlocking != "") {
 		return errors.New("migrate: Options.CopySwap.Restart acknowledges a copy-and-swap run starting over, which Options.Force and Options.AcceptBlocking both route away from; name one acknowledgement")
 	}
@@ -224,9 +221,10 @@ func (o Options) retry() executor.RetryPolicy {
 // checkpoint row the next Run over the same statement resumes from.
 //
 // A statement that discards live data or structure — a dropped column,
-// constraint, or NOT NULL — is refused with reason destructive-change
-// before any route runs it, unless Options.AllowDestructive names its
-// table; an acknowledged run's verdict carries AllowedDestructive.
+// constraint, NOT NULL, or (on the accepted blocking path) index — is
+// refused with reason destructive-change before any route runs it, unless
+// Options.AllowDestructive names its table; an acknowledged run's verdict
+// carries AllowedDestructive.
 //
 // A bare table name resolves on the pool's own search_path, so two pools
 // with different paths can address different tables from the same
@@ -319,7 +317,7 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 			return destructiveChangeVerdict(st, destructive)
 		}
 		allowedDestructive = true
-		auditAllowDestructive(opts.audit(), st)
+		auditAllowDestructive(opts.audit(), st, qualified(st))
 	}
 	if opts.CopySwap.Restart != "" {
 		auditRestart(opts.audit(), st)

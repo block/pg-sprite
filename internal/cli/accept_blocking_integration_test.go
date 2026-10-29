@@ -15,8 +15,9 @@ import (
 	"github.com/block/pg-sprite/pkg/verdict"
 )
 
-// --accept-blocking turns the gate refusal of a plain DROP INDEX into a
-// bounded blocking execution: the command dials, runs the statement as
+// --accept-blocking, with --allow-destructive for the dropped index, turns
+// the gate refusal of a plain DROP INDEX into a bounded blocking execution:
+// the command dials, runs the statement as
 // submitted, prints the without-online-safety verdict, and returns the
 // sentinel the entry point maps to its own exit code — never the refusal's
 // and never the plain success's.
@@ -36,6 +37,7 @@ func TestMigrateAcceptBlockingRunsDropIndex(t *testing.T) {
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("DROP INDEX %s.users_email_idx", schema))
 	cmd.AcceptBlocking = schema + ".users"
+	cmd.AllowDestructive = schema + ".users"
 	cmd.JSON = true
 	var out strings.Builder
 	err = cmd.run(t.Context(), &out)
@@ -46,6 +48,7 @@ func TestMigrateAcceptBlockingRunsDropIndex(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(out.String()), &v))
 	assert.Equal(t, verdict.OutcomeExecutedWithoutOnlineSafety, v.Outcome)
 	assert.True(t, v.BlockingPassthrough)
+	assert.True(t, v.AllowedDestructive)
 	assert.Equal(t, schema+".users", v.Table)
 	assert.Equal(t, verdict.ReasonIndexStatement, v.Reason)
 	assert.Equal(t, "3s", v.LockTimeout)

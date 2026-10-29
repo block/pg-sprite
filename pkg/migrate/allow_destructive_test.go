@@ -26,21 +26,6 @@ func routeOne(t *testing.T, sql string) (statement.Statement, router.Statement) 
 	return st, router.Route([]planner.Plan{classified}).Statements[0]
 }
 
-// The destructive acknowledgement and accepted blocking are separate
-// policy paths; both at once is rejected before any database work.
-func TestRunRejectsAllowDestructiveWithAcceptBlocking(t *testing.T) {
-	st, err := statement.ParseOne("DROP INDEX app.orders_created_idx")
-	require.NoError(t, err)
-	opts := DefaultOptions()
-	opts.AllowDestructive = "app.orders"
-	opts.AcceptBlocking = "app.orders"
-
-	v, err := Run(t.Context(), nil, st, opts)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "AllowDestructive")
-	assert.Equal(t, verdict.Verdict{}, v)
-}
-
 // Desired-state execution refuses a destructive plan whole, so the
 // acknowledgement has nothing to acknowledge there and is rejected as a
 // typed sentinel before any database work.

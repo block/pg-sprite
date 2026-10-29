@@ -264,7 +264,10 @@ An operator-accepted blocking refusal has a distinct marked outcome and exit
 takes the schema-qualified table whose lock the operator accepts, must match
 the index's owning table exactly (a mismatch executes nothing and exits 1),
 and requires an explicit `--statement-timeout`; it cannot be combined with
-`--force` or `--dry-run`. The text rendering marks the outcome as a warning:
+`--force` or `--dry-run`. A `DROP INDEX` also discards the index, so it needs
+`--allow-destructive` naming the same table; without it the drop is refused
+with `destructive-change` (exit 2) and nothing runs. The text rendering marks
+the outcome as a warning:
 
 ```text
 executed without online safety (accepted blocking refusal)
@@ -273,10 +276,11 @@ executed without online safety (accepted blocking refusal)
   statement: DROP INDEX public.users_email_idx
   safer:     DROP INDEX CONCURRENTLY
   budgets:   lock 3s, statement 10m
+  allowed:   the statement's data loss was acknowledged (allow-destructive)
 ```
 
 ```console
-$ pg-sprite migrate --alter 'DROP INDEX public.users_email_idx' --accept-blocking public.users --lock-timeout 3s --statement-timeout 10m --json
+$ pg-sprite migrate --alter 'DROP INDEX public.users_email_idx' --accept-blocking public.users --allow-destructive public.users --lock-timeout 3s --statement-timeout 10m --json
 {
   "outcome": "executed-without-online-safety",
   "reason": "index-statement",
@@ -284,6 +288,7 @@ $ pg-sprite migrate --alter 'DROP INDEX public.users_email_idx' --accept-blockin
   "statement": "DROP INDEX public.users_email_idx",
   "table": "public.users",
   "safer_idiom": "DROP INDEX CONCURRENTLY",
+  "allowed_destructive": true,
   "blocking_passthrough": true,
   "lock_timeout": "3s",
   "statement_timeout": "10m"
