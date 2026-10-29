@@ -12,15 +12,15 @@ and how to stop, resume, and start over. The design is in
 
 ## Contents
 
-- [Live or quiesced](#live-or-quiesced)
+- [Live or offline](#live-or-offline)
 - [What each run needs](#what-each-run-needs)
 - [Free disk space](#free-disk-space)
 - [Run it](#run-it)
 - [Stop, resume, and start over](#stop-resume-and-start-over)
 
-## Live or quiesced
+## Live or offline
 
-| | Live (default) | Quiesced (`--quiesced`) |
+| | Live (default) | Offline (`--block-writes SCHEMA.TABLE`) |
 | --- | --- | --- |
 | Application writes during the run | Keep working. pg-sprite reads them from the WAL through a logical replication slot and replays them onto the shadow. | Refused. pg-sprite fences the table with a trigger, and every write fails with SQLSTATE `55006` until the swap commits. |
 | Server requirements | `wal_level = logical`, a free replication slot, and two free WAL senders | None beyond the copy itself |
@@ -30,17 +30,20 @@ and how to stop, resume, and start over. The design is in
 **Choose live** for a table the application writes to in normal operation, on a server with
 logical decoding enabled.
 
-**Choose quiesced** when writes to the table are already stopped or can be stopped for the run:
+**Choose offline** when writes to the table are already stopped or can be stopped for the run:
 
 - archive, history, or reference tables nothing writes to;
 - a maintenance window, or a feature flag that pauses the table's writer;
 - a server without logical decoding. On Aurora and RDS that needs
   `rds.logical_replication = 1`, a parameter that takes a reboot.
 
-`--quiesced` is your declaration that nothing writes the table. pg-sprite does not take it on
-trust: the fence refuses any write that does arrive, so nothing is lost, but the application
-sees errors for the whole run. The fence and why it also covers replication apply workers are
-described in [engine-role.md](engine-role.md#the-write-fence).
+`--block-writes` is your declaration that nothing needs to write the table. Its value must name
+the table the statement changes, exactly as `SCHEMA.TABLE`; a value naming any other table
+stops the run before anything executes, so a flag left in a script cannot take the next
+table offline. pg-sprite does not take the declaration on trust: the fence refuses any write
+that does arrive, so nothing is lost, but the application sees errors for the whole run.
+The fence and why it also covers replication apply workers are described in
+[engine-role.md](engine-role.md#the-write-fence).
 
 ## What each run needs
 
@@ -69,7 +72,8 @@ $ pg-sprite migrate --free-disk 1GiB --json \
 }
 ```
 
-Either enable logical decoding, or run with `--quiesced` if the table can take no writes.
+Either enable logical decoding, or run with `--block-writes SCHEMA.TABLE` if the table can go
+without writes for the run.
 
 ## Free disk space
 
@@ -101,8 +105,8 @@ pg-sprite migrate --dry-run \
 pg-sprite migrate --free-disk 50GiB \
   --alter 'ALTER TABLE public.orders ALTER COLUMN amount TYPE numeric(12,2)'
 
-# Quiesced: nothing writes the table for the length of the run
-pg-sprite migrate --free-disk 50GiB --quiesced \
+# Offline: the table's writes are blocked for the length of the run
+pg-sprite migrate --free-disk 50GiB --block-writes public.order_archive \
   --alter 'ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)'
 ```
 
@@ -115,7 +119,7 @@ A successful run prints one verdict, `executed-via-copy-and-swap`, and exits 0. 
   "outcome": "executed-via-copy-and-swap",
   "statement": "ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)",
   "table": "public.order_archive",
-  "detail": "verified 5000 rows in 3 chunks; the retained source is dropped; the table was quiesced: writes were fenced for the length of the run"
+  "detail": "verified 5000 rows in 3 chunks; the retained source is dropped; writes to the table were blocked for the length of the run"
 }
 ```
 
@@ -126,13 +130,13 @@ name for a rollback window; you drop it yourself when the window ends.
 
 | You want to | Do this |
 | --- | --- |
-| Stop a running change | Press Ctrl-C, or send `SIGTERM`, once. The run saves where its copy reached and exits. The table keeps its fence (quiesced) or its replication slot (live) until you resume or start over. |
-| Resume it | Run the same command again. It continues from where it stopped; nothing is copied twice. |
+| Stop a running change | Press Ctrl-C, or send `SIGTERM`, once. The run saves where its copy reached and exits. The table keeps its fence (offline) or its replication slot (live) until you resume or start over. |
+| Resume it | Run the same command again, including `--block-writes SCHEMA.TABLE` if the run blocked writes. It continues from where it stopped; nothing is copied twice. |
 | Start over | Run the same command with `--restart SCHEMA.TABLE`, naming the table exactly. pg-sprite discards the shadow, the fence or slot, and the saved progress, then runs from the beginning. |
 | Recover from bad data | When the server rejects a row under the new type or a constraint, the run reports `code: data-fault` and tries to abandon itself. Follow the verdict's detail: if it says the run was abandoned, nothing is left behind, so fix the data or the statement and run it again. If it says the run could not be abandoned, the shadow and the fence or slot remain, so fix the data or the statement and run it with `--restart SCHEMA.TABLE`. |
 
 ```sh
-pg-sprite migrate --free-disk 50GiB --quiesced --restart public.order_archive \
+pg-sprite migrate --free-disk 50GiB --block-writes public.order_archive --restart public.order_archive \
   --alter 'ALTER TABLE public.order_archive ALTER COLUMN amount TYPE numeric(12,2)'
 ```
 
