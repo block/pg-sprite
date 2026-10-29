@@ -24,6 +24,12 @@ the phased build plan should be traceable back to one of these.
 - **Safety over speed.** The consequences of a bug are data loss in production systems, so a
   feature must be *safe* and *safe-by-default* before it is fast. Speed work (parallelism,
   watermark optimization) only lands on top of a proven-correct path.
+- <a id="make-mistakes-hard-to-commit"></a>**Make mistakes hard to commit.** An action that is
+  hard to undo needs explicit, specific intent: a typed acknowledgement naming its target, never
+  one inferred from an absence or granted broadly. When the engine cannot tell intent from
+  accident, it refuses. This is why a desired file that no longer lists a column refuses
+  rather than drops it, and why the destructive acknowledgement names one table and exists only
+  where the operator wrote the statement.
 - **Decisions, not options.** Prefer sensible defaults over configuration knobs; non-default
   options are poorly tested and a source of surprise. The engine should make the right call
   for the user rather than expose another flag.
@@ -128,9 +134,12 @@ the phased build plan should be traceable back to one of these.
   goes straight into the classifier). Both feed the identical executor.
 - **Dry-run first.** `diff`/`--dry-run` prints the exact statements and their classification
   (native vs copy-and-swap) **without executing** — the natural review and CI hook.
-- **Destructive diffs are gated; renames are never guessed.** Dropping a column/constraint
-  requires explicit confirmation; a missing-plus-new column pair is a drop+add unless a rename
-  is stated explicitly. Intent is required, not inferred.
+- **Destructive changes are gated; renames are never guessed.** Dropping a column, a
+  constraint, or a `NOT NULL` requires explicit confirmation on both front doors: the
+  imperative `migrate --alter` refuses the statement unless `--allow-destructive` names the
+  table, and desired-state execution refuses a destructive plan whole. A missing-plus-new
+  column pair is a drop+add unless a rename is stated explicitly. Intent is required, not
+  inferred.
 
 ## PostgreSQL / Aurora-specific
 

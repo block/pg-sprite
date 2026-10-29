@@ -101,7 +101,11 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 		// default as app-breaking; the view gate is what this case proves
 		// does not fire.
 		forced bool
-		check  func(t *testing.T, schema string)
+		// destructive acknowledges the dropped column's data loss, which
+		// migrate refuses by default; the view gate is what this case
+		// proves does not fire.
+		destructive bool
+		check       func(t *testing.T, schema string)
 	}{
 		{
 			name:      "renaming the column the views read",
@@ -112,8 +116,9 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 			},
 		},
 		{
-			name:      "dropping a column no view reads",
-			statement: "ALTER TABLE %s.users DROP COLUMN note",
+			name:        "dropping a column no view reads",
+			statement:   "ALTER TABLE %s.users DROP COLUMN note",
+			destructive: true,
 			check: func(t *testing.T, schema string) {
 				assert.False(t, columnExists(t, pool, schema, "users", "note"))
 			},
@@ -124,6 +129,9 @@ func TestRunRefusesChangingAColumnAViewReads(t *testing.T) {
 			opts := runOptions()
 			if tc.forced {
 				opts.Force = schema + ".users"
+			}
+			if tc.destructive {
+				opts.AllowDestructive = schema + ".users"
 			}
 			v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(tc.statement, schema)), opts)
 			require.NoError(t, err)
@@ -172,7 +180,7 @@ func TestRunRefusesChangingAColumnAChildsViewReads(t *testing.T) {
 
 	t.Run("dropping under ONLY", func(t *testing.T) {
 		schema := seed(t)
-		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TABLE ONLY %s.users DROP COLUMN email", schema)), runOptions())
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TABLE ONLY %s.users DROP COLUMN email", schema)), destructiveOptions(schema+".users"))
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, "detail: %s", v.Detail)
 		assert.False(t, columnExists(t, pool, schema, "users", "email"))
@@ -204,7 +212,7 @@ func TestRunDropsAColumnAChildDeclaresWhileAViewReadsTheChildsCopy(t *testing.T)
 
 	t.Run("the drop runs", func(t *testing.T) {
 		schema := seed(t)
-		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TABLE %s.users DROP COLUMN email", schema)), runOptions())
+		v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf("ALTER TABLE %s.users DROP COLUMN email", schema)), destructiveOptions(schema+".users"))
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, "detail: %s", v.Detail)
 		assert.False(t, columnExists(t, pool, schema, "users", "email"))

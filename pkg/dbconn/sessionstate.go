@@ -23,10 +23,12 @@ var ErrNoSessionAffinity = errors.New("the connection does not keep one PostgreS
 
 // sessionEndpointRemedy names what an operator does about a connection that
 // cannot hold session state. Transaction pooling is the cause in practice,
-// and every hosted platform that defaults to it also offers a session-mode
-// endpoint — usually the same host on a different port.
-const sessionEndpointRemedy = "connect through a session-mode endpoint instead of a transaction-mode pooler " +
-	"(on hosted PostgreSQL this is usually the same host on a different port), or run the pooler in session pool mode"
+// statement pooling the stricter variant, and every hosted platform that
+// defaults to either also offers a session-mode endpoint — usually the same
+// host on a different port.
+const sessionEndpointRemedy = "connect directly or through a session-mode endpoint " +
+	"(on hosted PostgreSQL this is usually the same host on a different port), or run the pooler in session pool mode; " +
+	"transaction and statement pooling are not supported"
 
 // sessionBound is one execution bound the pool asks a server session to
 // hold, in the milliseconds PostgreSQL reads a bare integer as.

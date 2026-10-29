@@ -196,7 +196,7 @@ func TestRunDispatch(t *testing.T) {
 				ALTER TABLE %s.t
 					ALTER COLUMN id TYPE bigint,
 					ALTER COLUMN v SET NOT NULL,
-					ADD CONSTRAINT t_qty_positive CHECK (qty > 0)`, schema)), copySwapRunOptions(url))
+					ADD CONSTRAINT t_qty_positive CHECK (qty > 0)`, schema)), copySwapRunOptions(url, schema+".t"))
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 

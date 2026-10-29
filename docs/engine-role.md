@@ -95,9 +95,10 @@ not every start.
 
 ### The write fence
 
-A quiesced copy-and-swap run (`pkg/schemachange.Runner`) does not take the caller's word that
-nothing writes the table: it installs a statement-level `BEFORE INSERT OR UPDATE OR DELETE OR
-TRUNCATE` trigger, `pgsprite_write_fence`, on the source before its first checkpoint save, and
+A copy-and-swap run that blocks writes (`--block-writes`; a quiesced target to
+`pkg/schemachange.Runner`) does not take the caller's word that nothing writes the table: it
+installs a statement-level `BEFORE INSERT OR UPDATE OR DELETE OR TRUNCATE` trigger,
+`pgsprite_write_fence`, on the source before its first checkpoint save, and
 every write the trigger sees is refused with SQLSTATE `55006` (`object_in_use`) and a message
 naming the table. The trigger is enabled `ALWAYS`, so it fires for a session running under
 `session_replication_role = replica` as well. The writers that run in that role are the apply
@@ -131,9 +132,10 @@ Two cluster-level *facts* — settings, not grants — accompany Tier 3 and are 
 has minted its `CopySwapShape`; the environment check is what mints the `CopySwapTarget`
 every writing step requires: `wal_level = logical` (`rds.logical_replication = 1` on Aurora/RDS, a
 static parameter requiring a reboot), one free slot under `max_replication_slots`, and two free
-senders under `max_wal_senders` — the slot's connection holds its exported snapshot while the
-copy imports it, and the stream decodes on a connection of its own. Both apply only to a run
-that decodes WAL; a quiesced run skips them. The same check compares the free disk the
+senders under `max_wal_senders` — the run creates the slot on one replication connection,
+closes it once the checkpoint row naming the slot commits, and later decodes on a connection of
+its own, so it holds one sender at a time and the second is headroom. Both apply only to a run
+that decodes WAL; a run that blocks writes skips them. The same check compares the free disk the
 caller measured on the database volume — PostgreSQL has no function that reports it —
 against the shadow copy's headroom, and
 refuses an unmeasured volume rather than assuming it is large enough. The figure is the

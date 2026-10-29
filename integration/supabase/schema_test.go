@@ -100,7 +100,7 @@ func TestTextRewriteLeavesSchemaUnchanged(t *testing.T) {
 	execSQL(t, pool, "INSERT INTO "+table+" VALUES (1,'00000000-0000-0000-0000-000000000001','123')")
 	st, err := statement.ParseOne("ALTER TABLE " + table + " ALTER COLUMN body TYPE integer USING body::integer")
 	require.NoError(t, err)
-	v, err := migrate.Run(t.Context(), pool, st, copySwapOptions())
+	v, err := migrate.Run(t.Context(), pool, st, copySwapOptions(st))
 	require.NoError(t, err)
 	require.Equal(t, verdict.OutcomeRefused, v.Outcome)
 	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, v.Reason)

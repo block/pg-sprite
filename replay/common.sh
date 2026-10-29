@@ -4,6 +4,48 @@
 
 die() { echo "$*" >&2; exit 1; }
 
+# sha256 of a file, portable across sha256sum (Linux) and shasum (macOS).
+# Fails (non-zero, no output) when the file is missing.
+file_sha256() {
+    [ -f "$1" ] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    else
+        shasum -a 256 "$1" | awk '{print $1}'
+    fi
+}
+
+# verify_corpus_pin: refuse to proceed unless corpus/.pin (written by
+# fetch.sh) records exactly the commit project.conf pins, with every corpus
+# file matching its fetched digest. This is the interlock that makes the pin
+# a guarantee rather than a label: an assessment must never apply to a
+# corpus it was not written against, and a cached file from an older pin —
+# or a locally edited one — must fail loudly, not replay under today's label.
+verify_corpus_pin() {
+    local pin="${PROJECT_DIR}/corpus/.pin"
+    [ -s "$pin" ] || die "corpus has no pin record — run ./fetch.sh ${PROJECT} first"
+    local fetched
+    fetched="$(head -n1 "$pin")"
+    [ "$fetched" = "$COMMIT" ] \
+        || die "corpus was fetched at ${fetched:0:12} but project.conf pins ${COMMIT:0:12} — run ./fetch.sh ${PROJECT}"
+    local f want got
+    for f in "${FILES[@]}"; do
+        want="$(awk -v f="$f" '$2 == f {print $1}' "$pin")"
+        [ -n "$want" ] || die "corpus/.pin records no digest for $f — run ./fetch.sh ${PROJECT}"
+        got="$(file_sha256 "${PROJECT_DIR}/corpus/$f")" \
+            || die "missing corpus/$f — run ./fetch.sh ${PROJECT}"
+        [ "$got" = "$want" ] \
+            || die "corpus/$f does not match what fetch.sh fetched (edited locally?) — run ./fetch.sh ${PROJECT}"
+    done
+    # A file outside FILES (left by an older pin, or added by hand) could share
+    # a migration prefix and make replay.sh pick the wrong one.
+    for f in "${PROJECT_DIR}/corpus/"*.sql; do
+        [ -e "$f" ] || continue
+        printf '%s\n' "${FILES[@]}" | grep -qxF "$(basename "$f")" \
+            || die "corpus/$(basename "$f") is not in project.conf FILES — delete it or run ./fetch.sh ${PROJECT} after a pin move"
+    done
+}
+
 # The project name doubles as the directory, container suffix, and the
 # database/user/password inside the throwaway container, so it must be usable
 # in all of those. Identifier quoting keeps hyphens safe in SQL; this bounds

@@ -30,6 +30,9 @@ func (c *MigrateCmd) validateInput() error {
 		if c.Restart != "" {
 			return errors.New("--restart cannot be combined with --desired")
 		}
+		if c.AllowDestructive != "" {
+			return errors.New("--allow-destructive cannot be combined with --desired: desired-state execution refuses a destructive plan whole")
+		}
 	}
 	return nil
 }

@@ -73,6 +73,12 @@ via psql — on an empty database it has no online-safety problem for pg-sprite 
 solve); adjust `BASELINE` in `project.conf` if your history starts differently, or
 set it empty to start from an empty database.
 
+Set expectations on the curation itself: the scaffolding is one command, but the
+manifest is hand-written line ranges over the corpus, iterated against observed
+verdicts until green — budget a few hours per thousand lines of history, and the
+same again after every pin bump (ranges are line numbers, so they are re-derived
+against the new pin).
+
 ## Make targets and scripts
 
 From the repository root (`REPLAY_PROJECT` defaults to `buzz`):
@@ -120,11 +126,31 @@ curated column, to drive the bucket summary. Pinning `environmental` or
 
 Ranges are coupled to the pin in `project.conf` by design: an assessment must never
 silently apply to a corpus it was not written against, so bumping the pin means
-re-curating the manifest. The replay exits non-zero on any verdict mismatch and ends
-with a per-statement results table plus a bucket summary (executed / refusals split
-by class, capability-boundary ones broken down by reason / psql-only / mismatches).
-When any row mismatched, the summary header says so — the buckets count what the
-engine emitted, and they are a finding about the workload only on a clean run.
+re-curating the manifest. Two pre-flight checks enforce that coupling before any
+statement runs:
+
+- **Pin interlock.** `fetch.sh` records the resolved commit and a per-file sha256
+  digest in `corpus/.pin`; a cached file is reused only when its digest matches, and
+  a pin move discards the whole cache. `replay.sh` refuses to run when the record
+  disagrees with `COMMIT`, any file differs from its fetched digest, or `corpus/`
+  holds a `.sql` file outside `FILES` — a stale or locally edited corpus fails loudly
+  instead of replaying under today's label.
+- **Coverage.** The manifest must tile the corpus: every substantive line (anything
+  but a blank line or a `--` comment line; a `/* */` comment counts) of every
+  non-baseline corpus file must be claimed by exactly one range, in order, with no
+  overlaps. A statement no row claims would otherwise be silently unassessed — and
+  the tier counts are the deliverable.
+
+The replay exits non-zero on any verdict mismatch and ends with a per-statement
+results table plus a bucket summary (executed / refusals split by class,
+capability-boundary ones broken down by reason / psql-only / mismatches). When any
+row mismatched, the summary header says so — the buckets count what the engine
+emitted, and they are a finding about the workload only on a clean run. FAIL rows
+carry the engine's own stderr in a failure-detail section. If the database ever
+diverges from the corpus's true state — a psql step that failed to apply, or an
+exit-1 engine failure that may have committed a prefix and cannot be blindly
+re-applied — every later row is labelled `unassessable` and kept out of the bucket
+summary rather than counted as evidence against a wrong world.
 
 Nothing in CI runs `make replay`: it fetches a corpus from GitHub and needs a
 container, so it is an operator-run assessment, not a merge gate. The exit code is for
@@ -146,4 +172,5 @@ replaying.
 - Not a second demo — [demo/](../demo/) tours the CLI; this replays someone else's
   history.
 - Not a vendored copy of any project — each `corpus/` is gitignored and re-fetched;
-  the pin in `project.conf` records exactly which commit the assessment ran against.
+  the pin in `project.conf` records exactly which commit the assessment ran against,
+  and the `corpus/.pin` interlock makes the record binding.

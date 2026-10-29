@@ -270,11 +270,13 @@ live schema (introspected)  ─┘                          │
 
 ### Safety rules (inherited philosophy: surprise-free, decisions-not-options)
 
-- **Destructive-diff confirmation is planned.** The future flag will gate dropping a column,
-  constraint, or index — anything that loses data or a guarantee (a unique index discards the
-  same uniqueness guarantee as a unique constraint) — never inferred silently from "it's
-  missing in the desired file"; no such confirmation flag exists today (destructive statements
-  are flagged in the plan output).
+- **Destructive changes need confirmation.** Dropping a column, constraint, or index —
+  anything that loses data or a guarantee (a unique index discards the same uniqueness
+  guarantee as a unique constraint) — is never inferred silently from "it's missing in the
+  desired file": desired-state execution refuses a destructive plan whole, and the imperative
+  front door runs a dropped column, constraint, or `NOT NULL` only when
+  `--allow-destructive SCHEMA.TABLE` names the table (RF-10); destructive statements are
+  flagged in the plan output either way.
 - **Unsupported constructs are refused, never guessed.** The desired file admits one
   unqualified `CREATE TABLE` plus `CREATE INDEX` statements on it; each rule is a typed error.
   Foreign keys are planned but never executed: the scratch build first creates an empty
@@ -587,7 +589,7 @@ matrix is part of the "decisions, not options" philosophy.
 ### What "Aurora-aware" actually means here
 
 Aurora-specific handling (throttle on replication **slot** lag — reader replica-lag throttling is
-deferred, [D12](copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag); RDS CA bundle for TLS, `pg_terminate_backend` to bound the cutover lock, awareness of
+deferred, [D12](copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag); RDS CA bundle for TLS, `lock_timeout` with bounded retry to bound the cutover lock — the cutover never terminates other sessions; `dbconn.TerminateBlockers` is there for a library caller that chooses to evict the backends blocking a waiting session — awareness of
 the writer/reader split) — **not** a claim that every Aurora edition/topology above is
 covered. The unsupported rows are explicit non-goals for v1.
 

@@ -41,10 +41,15 @@ files="$(curl -fsSL "${api}/contents/${migrations_path}?ref=${sha}" \
 [ -n "$files" ] || die "no .sql files at ${slug}@${sha:0:12}:${migrations_path}"
 baseline="$(printf '%s\n' "$files" | head -1)"
 
-# Each project gets its own host port so harnesses can coexist; pick one past
-# the highest port any existing project claims.
+# Each project gets its own host port so harnesses can coexist: start past
+# the highest port any existing project claims, then skip anything already
+# listening on the host so the claimed port is actually free.
 port="$(awk -F= '/^PORT=/ {gsub(/[^0-9]/,"",$2); if ($2+0 > max) max=$2+0} END {print (max ? max+1 : 5439)}' \
     "${REPLAY_DIR}"/*/project.conf 2>/dev/null || echo 5439)"
+port_in_use() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
+while port_in_use "$port"; do
+    port=$((port + 1))
+done
 
 mkdir -p "$project_dir"
 
