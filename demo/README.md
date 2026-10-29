@@ -12,11 +12,11 @@ The tour walks five sections, each runnable on its own via
 
 | Section   | What it shows                                                                                                       | Writes?             |
 | --------- | ------------------------------------------------------------------------------------------------------------------- | ------------------- |
-| `dryrun`  | One statement per planner route, reason, and disposition: metadata-only, fast-default, binary-coercible, the safer idioms, a rewrite-required suggestion, type-rewrite, volatile-default, an app-breaking rename (refused as rewrite-required), destructive, relocation, and a refusal | no                  |
+| `dryrun`  | One statement per planner route, reason, and disposition: metadata-only, fast-default, binary-coercible, the safer idioms, a rewrite-required suggestion, type-rewrite, volatile-default, an app-breaking rename (refused as rewrite-required), a destructive drop (planned under `--allow-destructive`, refused as `destructive-change` without it), relocation, and a refusal | no                  |
 | `diff`    | The declarative front door: a routed convergence plan for an existing table, for a missing one, the plan advisories for a table carrying an invalid index (the rebuild the desired file names, and the leftover it does not), and a typed create-shape refusal (exit code 2) for a missing table declared `IF NOT EXISTS` | no                  |
 | `pull`    | Existing-database onboarding: export one desired file per demo table, then prove each produces a zero-change `diff` — except the table seeded with an invalid index, whose baseline re-diffs to its one rebuild | no                  |
 | `offline` | `lint` (gates on error findings), `suggest` (advises), `fmt` (canonicalizes) — no database                           | no                  |
-| `exec`    | Real executions: a native add, the concurrent index substitution, the four-step `SET NOT NULL` sequence, a genuine type rewrite run through copy-and-swap (`executed-via-copy-and-swap`, exit code 0), a structured refusal (exit code 2) for a rewrite the copy-and-swap engine does not carry yet, and the `--accept-blocking` passthrough: the plain `DROP INDEX` refused, refused again with a mismatched acknowledgement (exit code 1, nothing runs), then committed without online safety (exit code 3) along with a `REINDEX TABLE` | yes (seeded tables) |
+| `exec`    | Real executions: a native add, the concurrent index substitution, the four-step `SET NOT NULL` sequence, a genuine type rewrite run through copy-and-swap (`executed-via-copy-and-swap`, exit code 0), a structured refusal (exit code 2) for a rewrite the copy-and-swap engine does not carry yet, and the `--accept-blocking` passthrough: the plain `DROP INDEX` refused, refused again with a mismatched acknowledgement (exit code 1, nothing runs), then committed without online safety (exit code 3) along with a `REINDEX TABLE`, and a `DROP COLUMN` refused as `destructive-change` (exit code 2) until `--allow-destructive` names the table | yes (seeded tables) |
 
 `make demo` reseeds [seed.sql](seed.sql) first, so every run starts from the
 same state and the tour is rerunnable. The compose database is left running
@@ -31,8 +31,8 @@ make demo-check   # same tour, asserting on --json fields and exit codes; needs 
 ```
 
 `CHECK=1` makes the tour assert on the typed JSON contract — plan report
-routes/reasons/destructive flags and `format_version`, verdict outcomes and
-reasons, the substituted `executed_sql` shape (step count plus a
+routes/reasons/destructive flags and `format_version`, verdict outcomes,
+reasons, and classes, the `allowed_destructive` audit field, the substituted `executed_sql` shape (step count plus a
 distinguishing fragment, so a regression that drops `CONCURRENTLY` or
 collapses the `SET NOT NULL` sequence turns the job red), statement counts —
 and on exit codes (`0` success, `2` refusal, `3` accepted-blocking commit,

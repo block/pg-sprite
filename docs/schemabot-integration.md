@@ -320,7 +320,7 @@ that tests the sentinel first would send an operator-dropped shadow or a held sl
 | `shadow-statement-target` (from `Runner`, on resume) | The statement `Run` was given names another table than the proven target, caught before the row's statement is compared with it | Configuration: the statement and the target disagree; retrying cannot succeed |
 | `resume-row-decoding` (from `Runner`) | The row was written by the other kind of run: a target proven without logical decoding was handed a row that names a slot or publication, or is in `catching_up` or `reconciling`, and has no slot to continue it with; a target proven for decoding was handed a row that names no slot, whose source was fenced, not captured | Run the row under the kind of `CopySwapTarget` proof that made it; the proof, not the caller, chooses the route |
 | `shadow-unrecorded` (from `Runner`) | A relation bears the target's derived shadow name and no row records a run for the target | `DropShadow` the leftover and run again, or run again with `RunOptions.Restart`, which drops it under the run's lock first; a relation the engine did not make is an operator's to rename |
-| `resume-shadow-gone` (from `Runner`) | The row's swap has not committed (any phase from `copying` to a `cutover` whose swap rolled back) and it records a shadow under which no relation stands; `ErrShadowNotFound` is reachable through the refusal, and nothing was written | Run the statement again with a restart (`--restart`, `RunOptions.Restart`), which discards the row, its slot or fence, and starts over. By hand, quiesced row: `Store.Delete` the row and run again; the next run builds a fresh shadow, and the source stays fenced until `DropWriteFence` or that run's swap. Live row (it names a slot): `decode.DropSlot` the row's slot, then `Store.Delete` the row, and run again; the slot retains WAL until it is dropped, and a run started while it stands fails creating its own. A live source has no fence |
+| `resume-shadow-gone` (from `Runner`) | The row's swap has not committed (any phase from `copying` to a `cutover` whose swap rolled back) and it records a shadow under which no relation stands; `ErrShadowNotFound` is reachable through the refusal, and nothing was written | Run the statement again with a restart (`--restart`, `RunOptions.Restart`), which discards the row, its slot or fence, and starts over. By hand, a row of a run that blocked writes: `Store.Delete` the row and run again; the next run builds a fresh shadow, and the source stays fenced until `DropWriteFence` or that run's swap. Live row (it names a slot): `decode.DropSlot` the row's slot, then `Store.Delete` the row, and run again; the slot retains WAL until it is dropped, and a run started while it stands fails creating its own. A live source has no fence |
 | `resume-slot-foreign` | The slot of the derived name is physical or another database's; the engine may neither decode from it nor drop it | Operator action on the slot; retrying cannot succeed while it is there |
 | `resume-slot-held` | The engine's own slot is held by another backend — a previous run still draining, or a tool reading it | Wait and inspect again; a holder that never lets go is an operator action |
 | `cutover-relation-replaced` (from `Reconcile`) | The source or the shadow is no longer the relation the build recorded, read before the reconcile wrote anything | Stop; the table under the names is not the one this run proved — operator action |
@@ -407,6 +407,14 @@ storage parameters and its columns' sequence declarations. A copy-and-swap run i
 `MismatchFormat` with `Stored.FormatVersion == 2`: finish it with the release that started
 it, or, once no run is in flight, `Store.Delete(Stored)` and start over.
 
+The release that adds the shadow proof's `conversion_fingerprint` keeps the row format, but a
+copy-and-swap run whose statement retypes a column with `USING` and that is in flight across
+the upgrade cannot resume on the new engine: the row's proof carries no fingerprint, the
+resume re-derives one, and the proofs differ, so the resume is refused as
+`resume-row-mismatch`. Finish such a run with the release that started it, or abandon it with
+a restart (`--restart`, `RunOptions.Restart`), which drops the shadow and copies the table
+again. Runs whose statement has no `USING` conversion resume unaffected.
+
 `ErrTableBehind` wraps the server's own `42703` undefined-column error, so an adapter that
 logs the chain sees both the engine's classification and the server's words. `ErrTableNewer`
 comes from `Ensure`'s read of the table's shape, before any statement could fail, so it
@@ -423,9 +431,9 @@ backend ends in exactly one of three verdicts:
 
 | Verdict | What it means | Orchestrator action |
 | --- | --- | --- |
-| `outcome: executed-via-copy-and-swap` | The shadow was built, filled, verified, and swapped in under the source's name; `detail` says how many rows and chunks the verification pass covered, whether the retained source was dropped or kept under its `_old` name, whether the run first reconciled a lost slot, and — for a quiesced run — that the source's writes were fenced for the run's length, since exit 0 otherwise reads as online-safe. A run whose done row is saved is this outcome even when what came after failed — `OnCheckpoint` handed the done row, or the release of the lock session; the detail then names that error. The error is nil | Done. Exit 0 at the CLI; the outcome token is distinct from `executed-natively` so an adapter can tell the two paths apart in its record |
-| `outcome: refused`, `reason: copy-and-swap-refused` | The route's own gates declined: the preflight found a table shape or an environment it will not run against, or a shadow operation refused mid-run to keep an invariant. `cause` is the route's token unchanged — a `copy-and-swap-…` cause from the preflight, a `shadow-…`, `cutover-…`, `resume-…`, or `copy-…` cause from the shadow operations — and `class` is its routing class. The error is nil | Route on `cause` with the two tables above and [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause). A preflight refusal touched nothing. A refusal raised after the row was saved — a `cutover-…` or `resume-…` cause — leaves the row, the shadow, and the run's hold on the source in place: the write fence of a quiesced run, or the replication slot of a live run, which pins WAL until it is dropped; the cause says whether the next run clears it or the run is abandoned first. A missing privilege is not this reason: it is the same `insufficient-privileges` refusal the native route reports, with the exact `GRANT` in `detail` |
-| `outcome: failed`, with `code` | The run stopped on an error that is not a refusal; the error is returned alongside the verdict. `code` is `cancelled-by-caller` when the caller's context ended, `invariant-violation` when the engine caught a breach of its own contract, and `execution-failed` for everything else — a divergence, an unsettled chunk, a rolled-back swap, a lost lock session, exhausted lock retries, a slot past its lag ceiling | The checkpoint row remains at its last save with the run's hold on the source — the fence or the slot — and `detail` says what to do with it: a divergence (`*checksum.DivergenceError`) is wedged in `verifying`, and a data fault — a `*pgconn.PgError` in SQLSTATE class `22` or `23`, a value the new type will not hold or a constraint the copied rows break — would stop the same way on every resume, so for both the detail says to correct the data or the statement and then start the run over with the restart acknowledgement (`--restart SCHEMA.TABLE`; `CopySwapOptions.Restart`), which drops the shadow, takes the fence off the source or drops the slot, deletes the row, and runs the change from the start; every other stop says that running the same statement again resumes from the row. The `Run` outcome table above is the finer map. Match the wrapped error with `errors.Is`/`errors.As` for the finer routing — the verdict's `code` is the coarse class |
+| `outcome: executed-via-copy-and-swap` | The shadow was built, filled, verified, and swapped in under the source's name; `detail` says how many rows and chunks the verification pass covered, whether the retained source was dropped or kept under its `_old` name, whether the run first reconciled a lost slot, and — for a run that blocked writes (`--block-writes`) — that the source's writes were fenced for the run's length, since exit 0 otherwise reads as online-safe; `writes_blocked: true` says the same for a machine, on this outcome and on a failed run whose fence went on: one that left its fence standing, or that was abandoned after the fence went on. A blocked-writes run that stopped before its fence went on, for example at a table lock another session holds, reports `false`, since the table kept taking writes; its detail says so and that running the statement again starts from the beginning. A run whose done row is saved is this outcome even when what came after failed — `OnCheckpoint` handed the done row, or the release of the lock session; the detail then names that error. The error is nil | Done. Exit 0 at the CLI; the outcome token is distinct from `executed-natively` so an adapter can tell the two paths apart in its record |
+| `outcome: refused`, `reason: copy-and-swap-refused` | The route's own gates declined: the preflight found a table shape or an environment it will not run against, or a shadow operation refused mid-run to keep an invariant. `cause` is the route's token unchanged — a `copy-and-swap-…` cause from the preflight, a `shadow-…`, `cutover-…`, `resume-…`, or `copy-…` cause from the shadow operations — and `class` is its routing class. The error is nil | Route on `cause` with the two tables above and [refusal-classes.md](refusal-classes.md#copy-and-swap-refused-keyed-on-copyswaprefusalcause). A preflight refusal touched nothing. A refusal raised after the row was saved — a `cutover-…` or `resume-…` cause — leaves the row, the shadow, and the run's hold on the source in place: the write fence of a run that blocked writes, or the replication slot of a live run, which pins WAL until it is dropped; the cause says whether the next run clears it or the run is abandoned first. A missing privilege is not this reason: it is the same `insufficient-privileges` refusal the native route reports, with the exact `GRANT` in `detail` |
+| `outcome: failed`, with `code` | The run stopped on an error that is not a refusal; the error is returned alongside the verdict. `code` is `cancelled-by-caller` when the caller's context ended, `invariant-violation` when the engine caught a breach of its own contract, `data-fault` when the server rejected the rows as the statement would shape them — a `*pgconn.PgError` in SQLSTATE class `22` or `23`: a value the new type will not hold, a constraint the copied rows break — and `execution-failed` for everything else — a divergence, an unsettled chunk, a rolled-back swap, a lost lock session, exhausted lock retries, a slot past its lag ceiling | `detail` says what the stop left and what to do with it. A data fault would stop the same way on every resume, so the Runner abandons the run itself before returning (`*schemachange.AbandonedError`): the shadow is dropped, the fence is taken off the source or the slot is dropped, and the checkpoint row is deleted — nothing is held; correct the data or the statement, then run it again without any acknowledgement, and the run starts from the beginning. Every other stop leaves the checkpoint row at its last save with the run's hold on the source — the fence or the slot: a divergence (`*checksum.DivergenceError`) is wedged in `verifying`, and a data fault whose abandon itself failed (the detail says the run "could not be abandoned") is held the same way; for both the detail says to correct the data or the statement and then start the run over with the restart acknowledgement (`--restart SCHEMA.TABLE`; `CopySwapOptions.Restart`), which drops the shadow, takes the fence off the source or drops the slot, deletes the row, and runs the change from the start. Any other stop says that running the same statement again resumes from the row. The `Run` outcome table above is the finer map. Match the wrapped error with `errors.Is`/`errors.As` for the finer routing — the verdict's `code` is the coarse class |
 
 The adapter supplies the route's policy on `migrate.Options.CopySwap`: the connection the
 pool was dialed with (the route opens dedicated sessions — the table lock, the copy workers,
@@ -450,8 +458,12 @@ the environmental `shadow-lock-unconfirmed` refusal, when its first working tran
 finds no lock to confirm. The check reads `pg_control_system()`, which PostgreSQL grants to
 `PUBLIC`; a server that withholds it stops the route with an ordinary error), the free space on the table's
 volume for the preflight's disk-headroom check, whether to keep the retained source under
-its `_old` name, and whether the table is quiesced for the run — the fenced path that needs
-no logical decoding — or live. Three further fields let the adapter size and watch the run:
+its `_old` name, and whether the run blocks the table's writes — offline mode, the fenced path
+(a quiesced target, in the engine's terms) that needs no logical decoding but refuses every
+write to the table with `55006` until the swap — or is live. `BlockWrites` is a typed acknowledgement, not a switch: it must name the resolved target
+as `SCHEMA.TABLE`, the same way `Restart` does, or `Run` returns an error before anything
+executes, and an acknowledged run records a warn-level audit naming the table before the
+fence goes on. Three further fields let the adapter size and watch the run:
 `Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
 throttled toward — with zero values taking the copier's defaults; `CheckpointInterval` is how often
 a copy in progress saves its landed watermark (zero takes the Runner's default); and `OnCheckpoint` is
@@ -487,7 +499,7 @@ metadata before the row reaches an engine-neutral record. A live run that reconc
 slot writes its `reconciling` marker and the resumed row straight to the store, and the hook
 sees only the row the reconcile leaves. The hook runs on the run's goroutines and holds the
 run up while it runs — on the goroutine that called `Run` for the phase saves, with the
-table's lock session held and, for a quiesced run, the source fenced, and on the copy's
+table's lock session held and, for a run that blocks writes, the source fenced, and on the copy's
 saving goroutine for the periodic watermark saves, where a slow call delays the next save —
 so it must be safe to call from either and should return promptly. An error the hook returns
 stops the run at that save as a `failed` verdict with the `after the checkpoint in phase …`
@@ -520,7 +532,7 @@ each asks for a different action. Whether the pass wrote the shadow is part of t
 | --- | --- | --- | --- |
 | `Outcome` with `VerifiedShadow` minted (`Live()` true) | Every chunk was equal or settled against the catch-up's confirmed position; the shadow equals the source as of those positions and every change since is in the stream | Hand the proof to `GateCutover`; `Cutover` requires a `DrainFunc` that applies the stream through the final position under the swap lock, and refuses the proof without one (`cutover-undrained`) | No |
 | `*UnresolvedError`, no repairs | A chunk could not be settled: the catch-up did not confirm past the read within the wait (`lagging`), or the chunk changed on every reread (`hot`). Not a finding about the data | Run the pass again — after the catch-up has confirmed further, or when the source is quieter; `Outcome.Report.Unsettled` counts the chunks that did not settle | No |
-| `*DivergenceError` (policy `abort`) | At least one chunk held still on both sides across a confirmed position and still differed; the stream delivered everything and the shadow does not match. `Report.Unsettled` may also be non-zero | Stop and report; a divergence under the stream is a defect, or the known synchronous-commit window recorded in [CO-4's *Open* note](invariants.md#co-4--the-copyapply-ordering-invariants), and either way not a retry: a second pass reads the same shadow and stops the same way, so start the run over (the `*checksum.DivergenceError` row above). A chunk that settled is not compared again, so a loss that lands in that window after the pass has settled its chunk is not caught | No |
+| `*DivergenceError` (policy `abort`) | At least one chunk held still on both sides across a confirmed position and still differed; the stream delivered everything and the shadow does not match. `Report.Unsettled` may also be non-zero | Stop and report; a divergence under the stream is a defect in the copy/apply ordering [CO-4](invariants.md#co-4--the-copyapply-ordering-invariants) enforces, not a retry: a second pass reads the same shadow and stops the same way, so start the run over (the `*checksum.DivergenceError` row above) | No |
 | `*UnresolvedError` with `Outcome.Repairs` listed (policy `repair`) | Every confirmed divergence was recopied and read back clean, but another chunk did not settle | The repairs are committed; run the pass again as above. No proof was minted (CO-2) | Yes — the listed repairs |
 | `*RepairError` (policy `repair`) | A repaired chunk was a confirmed divergence again after its recopy | Stop and report; the recopy committed and is listed in `Outcome.Repairs`, and something other than the stream is writing the shadow | Yes — the listed repairs |
 
@@ -588,7 +600,7 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
 - **Recommended call sequence: dry-run, then apply.** The typed manual path for a
   rewrite-required refusal (`guidance`), the create path's typed shape refusal
   (`statements[].cause`, `format_version` 3 and later), the invalid-index advisories the diff
-  declines to act on (`advisories[]`, `format_version` 13 and later), the plan `fingerprint`, and
+  declines to act on (`advisories[]`, `format_version` 15 and later), the plan `fingerprint`, and
   `table_exists` all live on the [plan report](plan-report.md) — the dry run's output. The run verdict carries
   the refusal reason as a typed field but its `detail` is display-only prose: an orchestrator
   that wants the typed guidance or cause must obtain the plan report first (dry-run for the
@@ -606,6 +618,24 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   the change out as the guidance names or, after coordinating the application deploy, runs
   the rename with `--force SCHEMA.TABLE`. A rewrite-required refusal of class
   `capability-boundary` is the other case: a blocking form the planner cannot rewrite yet.
+- **Data loss needs the operator's acknowledgement, passed through.** `migrate.Run` refuses a
+  statement that drops a column, a constraint, or a `NOT NULL` with
+  `destructive-change`, class `by-design`, unless `Options.AllowDestructive` names the
+  resolved schema-qualified table (RF-10) — the same acknowledgement the CLI takes as
+  `--allow-destructive SCHEMA.TABLE`. SchemaBot already asks for this decision: map its
+  unsafe acknowledgement (`--allow-unsafe` on a plan whose change `IsUnsafe` for data loss)
+  to `Options.AllowDestructive` for that statement's table, and never set it for a change
+  the operator did not acknowledge. The refusal maps to `engine.ExecutionModeBlocked` until
+  then; on `migrate --alter` the reason always means the acknowledgement would lift it, and
+  a statement that drops a column and adds it back carries `guidance`
+  `alter-column-type-in-place`, the in-place retype that keeps the values. A mismatched
+  acknowledgement is `migrate.ErrAllowDestructiveMismatch` with a zero verdict and nothing
+  executed. An acknowledged run's verdict carries `allowed_destructive: true`, the
+  machine-readable audit record to store beside the operator's consent. The acknowledgement
+  covers only the loss: a statement that also needs `Force` still needs it. `RunDesired`
+  rejects `AllowDestructive` (`ErrAllowDestructiveNotSupported`) and keeps refusing a
+  destructive plan whole, so a declarative drop the operator approves runs as its own
+  imperative statement.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
   apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement
@@ -641,25 +671,28 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
 ## Stopping, resuming, and starting over
 
 A copy-and-swap run is one process holding one table lock session, and its whole lifecycle
-is driven by running the same statement again. The same four verbs apply at the CLI and
-through `migrate.Run`; an orchestrator's `Stop`/`Cancel` map onto them without any
-cross-process control channel.
+is driven by running the same statement again. The same four operator verbs apply at the
+CLI and through `migrate.Run`, plus one the Runner performs on its own; an orchestrator's
+`Stop`/`Cancel` map onto them without any cross-process control channel.
 
 | Operator need | What to do | What pg-sprite does |
 | --- | --- | --- |
-| **Start** a change | `pg-sprite migrate --url … 'ALTER TABLE s.t …'` (with `--free-disk`, and `--quiesced` when the table takes no writes) | Routes the statement; on the copy-and-swap backend it takes the table's lock session, writes the checkpoint row, builds and fills the shadow, verifies, swaps, and prints one verdict |
-| **Stop** a running change | Send `SIGINT` (Ctrl-C) or `SIGTERM` once | The run's context is cancelled and the run unwinds through its own stop path: a copy in flight saves the watermark its committed chunks reached, the table lock session is released, the row stays at its last save with the run's hold on the source — the write fence of a quiesced run, or the replication slot of a live run, which retains WAL until the run is finished or discarded — and the verdict is `failed` with `code: cancelled-by-caller` (exit 1). A second `SIGINT`/`SIGTERM` ends the process at once with exit 130, before the stop path completes; the row then records whatever the last save landed, and the lock session is released by the server when its connection drops |
-| **Resume** a stopped change | Run the same statement again | The checkpoint row says where to continue: a stopped copy continues from its watermark, a run past its copy verifies again, a `cutover` row is answered by the catalog (a committed swap finishes from the old-table drop; a rolled-back swap goes back through verify and gate). Nothing is copied twice. A different statement on the same table is refused (`resume-row-mismatch`) |
-| **Start over** — discard a stopped change and run it from the beginning | Run the same statement with `--restart SCHEMA.TABLE`, where the value names the resolved target exactly | Under the run's own table lock session, discards what the stopped run left in the order a later restart could meet idempotently — the shadow, then the hold on the source (`DropWriteFence` for a quiesced row, `decode.DropSlot` for a live row), then the checkpoint row — and runs the change fresh. A leftover shadow that no row records is discarded the same way. The decision is written to the audit log before anything is discarded |
+| **Start** a change | `pg-sprite migrate --url … 'ALTER TABLE s.t …'` (with `--free-disk`, and `--block-writes SCHEMA.TABLE` to take the table offline for writes instead of streaming them) | Routes the statement; on the copy-and-swap backend it takes the table's lock session, writes the checkpoint row, builds and fills the shadow, verifies, swaps, and prints one verdict |
+| **Stop** a running change | Send `SIGINT` (Ctrl-C) or `SIGTERM` once | The run's context is cancelled and the run unwinds through its own stop path: a copy in flight saves the watermark its committed chunks reached, the table lock session is released, the row stays at its last save with the run's hold on the source — the write fence of a run that blocked writes, or the replication slot of a live run, which retains WAL until the run is finished or discarded — and the verdict is `failed` with `code: cancelled-by-caller` (exit 1). A second `SIGINT`/`SIGTERM` ends the process at once with exit 130, before the stop path completes; the row then records whatever the last save landed, and the lock session is released by the server when its connection drops |
+| **Resume** a stopped change | Run the same statement again, with the same `--block-writes SCHEMA.TABLE` if the stopped run blocked writes | The checkpoint row says where to continue: a stopped copy continues from its watermark, a run past its copy verifies again, a `cutover` row is answered by the catalog (a committed swap finishes from the old-table drop; a rolled-back swap goes back through verify and gate). Nothing is copied twice. A different statement on the same table is refused (`resume-row-mismatch`). A stopped run that blocked writes resumes only with the acknowledgement, and a stopped live run only without it; a run of the other kind is refused (`resume-row-decoding`) and leaves the stopped run's hold as it is |
+| **Start over** — discard a stopped change and run it from the beginning | Run the same statement with `--restart SCHEMA.TABLE`, where the value names the resolved target exactly | Under the run's own table lock session, discards what the stopped run left in the order a later restart could meet idempotently — the shadow, then the hold on the source (`DropWriteFence` for a blocked-writes row, `decode.DropSlot` for a live row), then the checkpoint row — and runs the change fresh. A leftover shadow that no row records is discarded the same way. The decision is written to the audit log before anything is discarded |
+| **Abandon** a change the data refuses | Nothing — the Runner does it | A run whose fill or swap stops on a data fault (a `*pgconn.PgError` in SQLSTATE class `22` or `23`: a value the new type will not hold, a constraint the copied rows break) would stop the same way on every resume, so the Runner discards it the way `--restart` would — shadow, hold on the source, checkpoint row — under the lock session it still holds, and returns `*schemachange.AbandonedError` wrapping the server's error. The verdict is `failed` with `code: data-fault` and nothing is left on the source. Correct the data or the statement, then run it again; the run starts from the beginning |
 
 **When to start over rather than resume.** Most stops resume: a cancellation, a lost lock
-session, a rolled-back swap, a slot past its lag ceiling, an unsettled hot chunk. Two do not,
-and the `failed` verdict's `detail` says so: a divergence (`*checksum.DivergenceError`) —
-the shadow differs from the source and every resume reads the same shadow and stops the same
-way — and a data fault (a `*pgconn.PgError` in SQLSTATE class `22` or `23`: a value the new
-type will not hold, a constraint the copied rows break). For both, correct the data or the
-statement, then run it with `--restart`; the corrected run builds its shadow from the source
-as it now is.
+session, a rolled-back swap, a slot past its lag ceiling, an unsettled hot chunk. A data
+fault is abandoned by the Runner itself, so there is nothing to resume or to start over: the
+next run of the corrected statement is a fresh run. Two stops hold the source and do not
+resume, and the `failed` verdict's `detail` says so: a divergence
+(`*checksum.DivergenceError`) — the shadow differs from the source and every resume reads the
+same shadow and stops the same way — and a data fault whose abandon itself failed (the detail
+says the run "could not be abandoned" and names the discard error). For both, correct the
+data or the statement, then run it with `--restart`; the corrected run builds its shadow from
+the source as it now is.
 
 **What a restart will not discard.** A `cutover` row whose swap the catalog shows committed
 is refused with `restart-swap-committed` and left as found: the shadow already bears the
@@ -673,7 +706,9 @@ anywhere else, with `--dry-run`, with `--desired`, or alongside the other two
 acknowledgements (`--force`, `--accept-blocking`): each names a different decision about a
 different path, and a command carrying two of them is a contradiction, not a combination. An
 acknowledgement that names another table than the statement's resolved target is the same
-error.
+error. `--allow-destructive` is not one of them: it acknowledges the statement's data loss,
+and a restart runs the same statement again, so a destructive copy-and-swap restarts with
+both.
 
 Through the library, the verbs are `migrate.Run` with `CopySwapOptions.Restart` set to the
 acknowledgement, and `schemachange.RunOptions.Restart` on the `Runner` directly; the

@@ -27,6 +27,17 @@ func snapshotRead() pgx.TxOptions {
 	return pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly}
 }
 
+// repairWrite is the transaction a recopy runs in: read-write and READ
+// COMMITTED whatever the server or role configures, so the resolution
+// check repeated after the copies reads a snapshot taken after them and
+// sees a catalog change they resolved through (CO-9). Nothing in a recopy
+// relies on one snapshot across its statements: each chunk's copy reads
+// the source as one statement, and the stream or the reread settles what
+// changed after it.
+func repairWrite() pgx.TxOptions {
+	return pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite}
+}
+
 // begin opens a transaction with the given options and guards it.
 func (v *Verifier) begin(ctx context.Context, pool *pgxpool.Pool, options pgx.TxOptions) (pgx.Tx, error) {
 	tx, err := pool.BeginTx(ctx, options)
@@ -49,7 +60,9 @@ func (v *Verifier) begin(ctx context.Context, pool *pgxpool.Pool, options pgx.Tx
 // that the source and shadow are still the relations the proofs describe.
 // Holding even ACCESS SHARE keeps a DROP or rename from completing until the
 // transaction ends, so the identity check stays true for every statement
-// after it.
+// after it. Last, for a copy that evaluates conversion expressions, it
+// confirms that the catalog they resolve in is still the one the build saw
+// (CO-9).
 func (v *Verifier) guard(ctx context.Context, tx pgx.Tx) error {
 	if err := setVerifySession(ctx, tx, v.target.OwnerRole(), v.searchPath, v.opts); err != nil {
 		return err
@@ -60,7 +73,33 @@ func (v *Verifier) guard(ctx context.Context, tx pgx.Tx) error {
 	if err := v.confirmLock(ctx, tx); err != nil {
 		return err
 	}
-	return v.confirmRelations(ctx, tx)
+	if err := v.confirmRelations(ctx, tx); err != nil {
+		return err
+	}
+	return v.confirmResolution(ctx, tx)
+}
+
+// confirmResolution refuses to read or repair when the functions,
+// operators, types, or collations the conversion expressions resolve among
+// are no longer the ones the shadow build digested: the digest's source
+// side and the recopy evaluate the expressions afresh, so an object
+// created, replaced, or dropped under one of their names since the build
+// would make this pass compare the shadow against, or recopy it from, a
+// rendering the gated statement never produced. A copy without conversions
+// has nothing to confirm.
+func (v *Verifier) confirmResolution(ctx context.Context, tx pgx.Tx) error {
+	if len(v.shadow.Conversions()) == 0 {
+		return nil
+	}
+	found, err := chunksql.ResolutionFingerprint(ctx, tx, v.shadow.Schema(), v.shadow.Conversions())
+	if err != nil {
+		return err
+	}
+	// INV: CO-9
+	if found != v.shadow.ConversionFingerprint() {
+		return fmt.Errorf("%w (CO-9): the objects the conversion expressions for %s.%s resolve among have changed since the shadow %s was built: fingerprint %s, proof carries %s", ErrInvariantViolation, v.shadow.Schema(), v.shadow.SourceTable(), v.shadow.ShadowTable(), found, v.shadow.ConversionFingerprint())
+	}
+	return nil
 }
 
 // setVerifySession bounds the transaction, pins the output settings under

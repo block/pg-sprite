@@ -113,7 +113,7 @@ func TestRunRefusesDroppingTheReplicaIdentity(t *testing.T) {
 		assert.False(t, indexExists(t, pool, schema, "accounts_note_key"))
 
 		v, err = migrate.Run(t.Context(), pool,
-			parseOne(t, fmt.Sprintf("ALTER TABLE %s.accounts DROP COLUMN note", schema)), runOptions())
+			parseOne(t, fmt.Sprintf("ALTER TABLE %s.accounts DROP COLUMN note", schema)), destructiveOptions(schema+".accounts"))
 		require.NoError(t, err)
 		assert.Equal(t, verdict.OutcomeExecuted, v.Outcome, "%s", v.Detail)
 		assert.False(t, columnExists(t, pool, schema, "accounts", "note"))

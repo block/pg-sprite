@@ -90,8 +90,10 @@ func ForeignKeyChangeRefusal() verdict.Refusal {
 	return verdict.CapabilityBoundary(verdict.ReasonDeclarativeForeignKey)
 }
 
-// DestructiveChangeRefusal classifies desired-state admission of a plan that
-// would discard live structure; the operator must choose an explicit statement.
+// DestructiveChangeRefusal classifies a change that would discard live data
+// or structure: desired-state admission of a destructive plan, and an
+// imperative destructive statement without the destructive acknowledgement.
+// Both front doors share it, so they report one contract.
 func DestructiveChangeRefusal() verdict.Refusal {
 	return verdict.ByDesign(verdict.ReasonDestructiveChange)
 }

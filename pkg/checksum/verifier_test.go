@@ -24,19 +24,23 @@ func TestVerifierOptionsDefaults(t *testing.T) {
 	assert.Equal(t, dbconn.DefaultLockTimeout, opts.LockTimeout)
 	assert.Equal(t, dbconn.DefaultStatementTimeout, opts.StatementTimeout)
 	assert.Equal(t, progress.WallClock{}, opts.Clock)
+	assert.Equal(t, DefaultRecopyAttempts, opts.RecopyAttempts)
 	require.NoError(t, opts.validate())
 
-	given := Options{LockTimeout: time.Second, StatementTimeout: time.Minute}.withDefaults()
+	given := Options{LockTimeout: time.Second, StatementTimeout: time.Minute, RecopyAttempts: 1}.withDefaults()
 	assert.Equal(t, time.Second, given.LockTimeout)
 	assert.Equal(t, time.Minute, given.StatementTimeout)
+	assert.Equal(t, 1, given.RecopyAttempts)
 }
 
 // A timeout the server would read as disabled is refused rather than
-// defaulted (LK-2).
+// defaulted (LK-2), and so is a recopy attempt count that would recopy
+// nothing.
 func TestVerifierOptionsRefuseUnboundedValues(t *testing.T) {
 	cases := map[string]Options{
 		"lock timeout below a millisecond":      {LockTimeout: 500 * time.Microsecond},
 		"statement timeout below a millisecond": {StatementTimeout: time.Nanosecond},
+		"negative recopy attempts":              {RecopyAttempts: -1},
 	}
 	for name, opts := range cases {
 		t.Run(name, func(t *testing.T) {

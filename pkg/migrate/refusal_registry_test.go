@@ -112,7 +112,8 @@ func TestRefusalRegistryIsComplete(t *testing.T) {
 	require.ElementsMatch(t, []string{
 		"gate:ALTER TABLE/concurrent=false", "gate:ALTER TABLE/concurrent=true",
 		"gate:CREATE INDEX/concurrent=false", "gate:CREATE INDEX/concurrent=true",
-	}, admitted, "only the two admitted kinds may leave the gate unclassified")
+		"gate:ALTER INDEX RENAME/concurrent=false", "gate:ALTER INDEX RENAME/concurrent=true",
+	}, admitted, "only the admitted kinds may leave the gate unclassified")
 	for _, sentinel := range []string{
 		"create-shape:" + string(executor.CreateShapeIfNotExists),
 		"partition:" + string(preflight.PartitionCauseIndexAdoption),

@@ -123,14 +123,15 @@ const (
 	// ReasonAppBreakingRename: PostgreSQL executes the rename as a brief
 	// metadata-only catalog flip, but it cannot land atomically across
 	// running application instances — code still referencing the old
-	// column or table name starts erroring the instant it commits. For a
-	// column the safe sequence is expand/contract: add the new column,
-	// dual-write and backfill, switch reads, then drop the old column as
-	// its own reviewed change. For a table, coordinate the rename with
-	// the application deploy that adopts the new name. Neither sequence
-	// can be constructed from the statement, so the rename is
-	// rewrite-required: the engine runs the submitted form only under the
-	// acknowledged override.
+	// column, table, or constraint name starts erroring the instant it
+	// commits. For a column the safe sequence is expand/contract: add the
+	// new column, dual-write and backfill, switch reads, then drop the old
+	// column as its own reviewed change. For a table, coordinate the
+	// rename with the application deploy that adopts the new name. For an
+	// index that backs a constraint, the rename renames the constraint,
+	// so coordinate it with the deploy that adopts the new constraint
+	// name. No sequence can be constructed from the statement, so the
+	// rename is rewrite-required.
 	ReasonAppBreakingRename Reason = "app-breaking-rename"
 	// ReasonVolatileDefault: ADD COLUMN whose default PostgreSQL computes
 	// for every row, rewriting the table — proven by the server, or assumed
@@ -335,6 +336,11 @@ type Facts struct {
 	// the server's first choice, and if the table already uses that name
 	// its NOT VALID step fails before anything is added.
 	ConstraintNames map[string]bool
+	// RenamedIndexConstraint is the name of the primary-key, unique, or
+	// exclusion constraint the index an ALTER INDEX ... RENAME TO renames
+	// backs, which the rename renames with it; empty when the index backs
+	// none, or when the fact was not read, as in an offline lint.
+	RenamedIndexConstraint string
 }
 
 // FactsFrom extracts the facts a live introspection model provides: the
@@ -481,7 +487,7 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 
 	case statement.OpDropColumn, statement.OpSetDefault, statement.OpDropDefault,
 		statement.OpDropNotNull,
-		statement.OpRenameIndex, statement.OpSetColumnOptions, statement.OpSetRelOptions,
+		statement.OpSetColumnOptions, statement.OpSetRelOptions,
 		statement.OpSetSchema, statement.OpDropConstraint:
 		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
 
@@ -492,15 +498,22 @@ func classifyOp(op statement.Op, st statement.Statement, facts Facts, sql string
 		// submitted form is not executable as submitted, so the router
 		// marks the statement rewrite-required and the typed guidance
 		// names the safe sequence; the acknowledged override is the one
-		// way to run the rename itself. Index renames stay metadata-only
-		// above: ordinary SQL names tables and columns, not indexes. An
-		// index that backs a constraint is the exception — renaming it
-		// renames the constraint, which ON CONFLICT ON CONSTRAINT names —
-		// and is not told apart here. That exception is latent: migrate's
-		// imperative front door admits only ALTER TABLE and CREATE INDEX,
-		// so ALTER INDEX ... RENAME TO is refused there as
-		// unsupported-statement before it reaches this classification.
+		// way to run the rename itself.
 		d.Route, d.Reason = RouteNative, ReasonAppBreakingRename
+
+	case statement.OpRenameIndex:
+		// Ordinary SQL names tables and columns, not indexes, so an index
+		// rename is metadata-only. An index that backs a primary-key,
+		// unique, or exclusion constraint is the exception: renaming it
+		// renames the constraint, which ON CONFLICT ON CONSTRAINT and
+		// error handling name, so it breaks the application like a column
+		// rename does. Without the live fact — an offline lint — the
+		// rename classifies as metadata-only, and the executor re-checks
+		// the constraint under the table's lock before it runs.
+		d.Route, d.Reason = RouteNative, ReasonMetadataOnly
+		if facts.RenamedIndexConstraint != "" {
+			d.Reason = ReasonAppBreakingRename
+		}
 
 	case statement.OpAlterColumnType:
 		d.Route, d.Reason, d.Unverified = classifyTypeChange(op, facts)

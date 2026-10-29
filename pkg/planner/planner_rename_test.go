@@ -80,3 +80,24 @@ func TestClassifyRunsAPrimaryKeyRenameNative(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, planner.RouteRefuse, drop.Route)
 }
+
+// An index rename is metadata-only unless the live fact says the index backs
+// a constraint: then the rename renames the constraint, which application SQL
+// names, and it is an app-breaking rename. Without the fact (an offline lint)
+// it stays metadata-only.
+func TestClassifyIndexRenameByTheConstraintItBacks(t *testing.T) {
+	const sql = "ALTER INDEX users_handle_key RENAME TO users_username_key"
+
+	plain, err := planner.Classify(sql, planner.Facts{})
+	require.NoError(t, err)
+	require.Len(t, plain.Decisions, 1)
+	assert.Equal(t, planner.ReasonMetadataOnly, plain.Decisions[0].Reason)
+	assert.True(t, plain.Decisions[0].ExecutableAsSubmitted())
+
+	backing, err := planner.Classify(sql, planner.Facts{RenamedIndexConstraint: "users_handle_key"})
+	require.NoError(t, err)
+	require.Len(t, backing.Decisions, 1)
+	assert.Equal(t, planner.RouteNative, backing.Route)
+	assert.Equal(t, planner.ReasonAppBreakingRename, backing.Decisions[0].Reason)
+	assert.False(t, backing.Decisions[0].ExecutableAsSubmitted())
+}

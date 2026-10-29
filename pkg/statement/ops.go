@@ -43,6 +43,38 @@ const (
 	OpReindex
 )
 
+// OpKinds returns the closed set of operation shapes, OpUnrecognized first.
+// A registry keyed on the operation shape walks it to prove every shape is
+// classified, so a shape added here cannot go unclassified.
+func OpKinds() []OpKind {
+	return []OpKind{
+		OpUnrecognized,
+		OpCreateTable,
+		OpAddColumn,
+		OpDropColumn,
+		OpAlterColumnType,
+		OpSetDefault,
+		OpDropDefault,
+		OpSetNotNull,
+		OpDropNotNull,
+		OpSetColumnOptions,
+		OpRenameColumn,
+		OpRenameTable,
+		OpRenameIndex,
+		OpSetSchema,
+		OpSetTablespace,
+		OpSetRelOptions,
+		OpAddConstraint,
+		OpValidateConstraint,
+		OpDropConstraint,
+		OpAttachPartition,
+		OpDetachPartition,
+		OpCreateIndex,
+		OpDropIndex,
+		OpReindex,
+	}
+}
+
 // DefaultKind classifies the DEFAULT expression shape of an added column.
 // The shape alone cannot settle whether PostgreSQL rewrites the table: a
 // constant still rewrites every row when the column's type is a domain with

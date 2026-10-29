@@ -37,9 +37,14 @@ import (
 // the cascading-drop planner reason. Version 12 routes an app-breaking
 // rename to the rewrite-required disposition and added the
 // expand-contract-column and coordinated-table-rename guidance codes.
-// Version 13 added the report-level advisories field and its closed kind
-// vocabulary for the invalid indexes a diff observes and declines to drop.
-const FormatVersion = 13
+// Version 13 classifies the rename of an index that backs a constraint as
+// app-breaking-rename and added the coordinated-constraint-rename guidance
+// code. Version 14 added the alter-column-type-in-place guidance code, which
+// a destructive-change refusal verdict carries; no report emits it, but the
+// report embeds the whole guidance vocabulary. Version 15 added the
+// report-level advisories field and its closed kind vocabulary for the
+// invalid indexes a diff observes and declines to drop.
+const FormatVersion = 15
 
 // Source identifies which front door derived the plan.
 type Source string

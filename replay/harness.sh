@@ -25,8 +25,11 @@ require_baseline() {
 }
 
 wait_ready() {
+    # Probe over TCP (-h localhost): the image entrypoint's temporary init
+    # server answers the unix socket before the real server is listening,
+    # so a socket probe can pass during the init-time restart window.
     for _ in $(seq 1 60); do
-        if docker exec "$CONTAINER" pg_isready -U "$DB_NAME" -d postgres >/dev/null 2>&1; then
+        if docker exec "$CONTAINER" pg_isready -h localhost -U "$DB_NAME" -d postgres >/dev/null 2>&1; then
             return 0
         fi
         sleep 1
