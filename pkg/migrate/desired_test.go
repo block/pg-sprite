@@ -39,6 +39,18 @@ func TestRunDesiredRejectsForce(t *testing.T) {
 	assert.Equal(t, DesiredResult{}, res)
 }
 
+// Desired-state execution never takes a table offline for writes: the
+// derived plan, not the operator, would decide how many fenced copies run,
+// so the acknowledgement is rejected as a typed sentinel before any
+// database work, even when it names the right table.
+func TestRunDesiredRejectsBlockWrites(t *testing.T) {
+	opts := DefaultOptions()
+	opts.CopySwap.BlockWrites = "public.t"
+	res, err := RunDesired(t.Context(), nil, DesiredRequest{Schema: "public"}, opts)
+	require.ErrorIs(t, err, ErrBlockWritesNotSupported)
+	assert.Equal(t, DesiredResult{}, res)
+}
+
 // A greenfield create-shape refusal explains itself through the typed
 // cause the executor stamped on the statement; a refusal without one
 // falls back to the generic wording rather than inventing a cause.
