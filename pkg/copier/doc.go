@@ -3,11 +3,11 @@
 // that tile the whole int64 range, so every key belongs to exactly one chunk
 // (CO-4) and each copy statement stays bounded (LK-3). A Copier copies those
 // chunks with several workers — one guarded, never-overwriting insert per
-// chunk, run again after a bounded wait when it collides with a shadow row
-// the catch-up has yet to rewrite — first clearing the shadow above the
-// watermark when it resumes, and
-// reports a Position whose Classify is the applier's rule for a captured key:
-// uncut, in flight, or landed. A column the Shadow proof names in
+// chunk; a chunk that collides with a shadow row the catch-up has yet to
+// rewrite commits around the rows held off and copies those alone, after
+// bounded waits, once the row is gone — first clearing the shadow above the
+// watermark when it resumes, and reports a Position whose Classify is the
+// applier's rule for a captured key: uncut, in flight, or landed. A column the Shadow proof names in
 // Conversions is copied through that USING expression; the copier does not
 // decide whether the statement behind the proof may run — the router's
 // availability check is that gate, and a caller that drives the copier

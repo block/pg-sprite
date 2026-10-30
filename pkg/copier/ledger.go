@@ -25,13 +25,26 @@ type ledger struct {
 	// landed holds chunks that committed above the watermark and wait for
 	// the chunks below them.
 	landed []Chunk
-	rows   int64
+	// partial holds, for an in-flight chunk that has committed part of
+	// itself, the rows it has landed so far and the keys it has yet to land.
+	partial map[Chunk]partialChunk
+	// rows counts every row a committed pass inserted, the partial chunks'
+	// included.
+	rows int64
+}
+
+// partialChunk is what an in-flight chunk has committed so far and what it
+// still owes: pending is never empty, since a chunk with nothing pending
+// lands.
+type partialChunk struct {
+	rows    int64
+	pending []int64
 }
 
 // newLedger resumes bookkeeping after from: every key at or below it counts
 // as landed, and the first chunk to extend the watermark starts just above it.
 func newLedger(from Watermark) *ledger {
-	l := &ledger{cut: from, watermark: from}
+	l := &ledger{cut: from, watermark: from, partial: make(map[Chunk]partialChunk)}
 	l.next, l.complete = startAfter(from)
 	return l
 }
@@ -64,18 +77,40 @@ func (l *ledger) startsAtFrontier(chunk Chunk) bool {
 	return chunk.lower == l.cut.Value()+1
 }
 
-// land records that a claimed chunk committed rows rows and advances the
-// watermark over every landed chunk now contiguous with it. It reports false
-// when the chunk was not in flight. A chunk whose transaction did not commit
-// is never landed: it stays in flight, so the applier keeps deferring for its
-// keys and the watermark cannot pass it.
+// settle records that a claimed chunk has committed rows rows in all so far
+// and still owes the rows under pending, which must be non-empty and
+// ascending. The chunk stays in flight — the watermark cannot pass it, and a
+// resumed run clears and re-copies it — but a Position now classifies its
+// keys outside pending as landed, so the applier writes them while the
+// copier waits for the rows holding the pending keys' values to be
+// rewritten (CO-4). It reports false, recording nothing, for a chunk that
+// is not in flight, and for an empty pending: a chunk owing nothing lands.
+func (l *ledger) settle(chunk Chunk, rows int64, pending []int64) bool {
+	if !slices.Contains(l.inFlight, chunk) {
+		return false
+	}
+	if len(pending) == 0 {
+		return false
+	}
+	l.rows += rows - l.partial[chunk].rows
+	l.partial[chunk] = partialChunk{rows: rows, pending: slices.Clone(pending)}
+	return true
+}
+
+// land records that a claimed chunk committed rows rows in all — the rows
+// of every settled pass included — and advances the watermark over every
+// landed chunk now contiguous with it. It reports false when the chunk was
+// not in flight. A chunk whose transaction did not commit is never landed:
+// it stays in flight, so the applier keeps deferring for its keys and the
+// watermark cannot pass it.
 func (l *ledger) land(chunk Chunk, rows int64) bool {
 	i := slices.Index(l.inFlight, chunk)
 	if i < 0 {
 		return false
 	}
 	l.inFlight = slices.Delete(l.inFlight, i, i+1)
-	l.rows += rows
+	l.rows += rows - l.partial[chunk].rows
+	delete(l.partial, chunk)
 	l.landed = append(l.landed, chunk)
 	l.advance()
 	return true
@@ -102,13 +137,20 @@ func (l *ledger) advance() {
 	}
 }
 
-// position snapshots the ledger. The in-flight chunks are copied so the
-// caller can read them without the copier's lock.
+// position snapshots the ledger. The in-flight chunks and the pending keys
+// are copied so the caller can read them without the copier's lock; the
+// pending entries follow the in-flight order, so they are ascending too.
 func (l *ledger) position() Position {
-	return Position{
+	pos := Position{
 		Watermark:    l.watermark,
 		Cut:          l.cut,
 		InFlight:     slices.Clone(l.inFlight),
 		RowsInserted: l.rows,
 	}
+	for _, chunk := range l.inFlight {
+		if partial, ok := l.partial[chunk]; ok {
+			pos.Pending = append(pos.Pending, PendingKeys{Chunk: chunk, Keys: slices.Clone(partial.pending)})
+		}
+	}
+	return pos
 }

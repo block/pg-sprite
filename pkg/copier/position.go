@@ -1,5 +1,7 @@
 package copier
 
+import "slices"
+
 // KeyState is where a primary key stands relative to the copy: the CO-4
 // discard rule the applier judges every captured change by.
 type KeyState int
@@ -10,13 +12,16 @@ const (
 	// read will see the change.
 	KeyUncut KeyState = iota
 	// KeyInFlight lies in a chunk a worker is reading now, or in a chunk
-	// whose transaction did not commit before the run failed. A change for
-	// it must wait for the chunk to land: applied earlier, a stale copy could
+	// whose transaction did not commit before the run failed, or is one of
+	// the keys an in-flight chunk has committed everything but. A change for
+	// it must wait for the key to land: applied earlier, a stale copy could
 	// resurrect a deleted row or the applier could read a shadow row that is
 	// not there yet. A resumed run re-copies such a chunk.
 	KeyInFlight
 	// KeyLanded lies in a chunk whose transaction committed (or that a
-	// resumed run had already copied). A change for it applies immediately.
+	// resumed run had already copied), or outside the pending keys of an
+	// in-flight chunk that has committed everything else. A change for it
+	// applies immediately.
 	KeyLanded
 )
 
@@ -48,14 +53,29 @@ type Position struct {
 	// empty once Run has returned nil; after a failed Run it lists the chunks
 	// whose transactions did not commit, so their keys never read as landed.
 	InFlight []Chunk
+	// Pending lists, in the order of InFlight, the in-flight chunks that have
+	// committed every row but a few, with the keys still to copy. Such a
+	// chunk stays in InFlight until its keys empty, so the watermark cannot
+	// pass it, while its keys outside Keys classify as landed.
+	Pending []PendingKeys
 	// RowsInserted counts rows the copier inserted into the shadow, excluding
 	// rows the applier had already written (the insert never overwrites).
 	RowsInserted int64
 }
 
+// PendingKeys names the keys an in-flight chunk still has to copy after a
+// collision made the copier commit the rest of the chunk around them.
+type PendingKeys struct {
+	Chunk Chunk
+	// Keys are the ascending source keys whose shadow slot another row held
+	// when the chunk was read.
+	Keys []int64
+}
+
 // Classify reports where key stands in this snapshot. A key above the cut
 // frontier is uncut whatever the watermark says; a key at or below it is in
-// flight when a claimed chunk covers it and landed otherwise.
+// flight when a claimed chunk covers it — unless the chunk has committed
+// around a few pending keys, when only those are — and landed otherwise.
 func (p Position) Classify(key int64) KeyState {
 	// INV: CO-4
 	if !p.Cut.Valid() || key > p.Cut.Value() {
@@ -63,8 +83,24 @@ func (p Position) Classify(key int64) KeyState {
 	}
 	for _, chunk := range p.InFlight {
 		if chunk.lower <= key && key <= chunk.upper {
-			return KeyInFlight
+			return p.classifyWithin(chunk, key)
 		}
 	}
 	return KeyLanded
+}
+
+// classifyWithin reports where a key inside an in-flight chunk stands: in
+// flight, unless the chunk has committed everything but its pending keys and
+// this key is not one of them.
+func (p Position) classifyWithin(chunk Chunk, key int64) KeyState {
+	for _, pending := range p.Pending {
+		if pending.Chunk != chunk {
+			continue
+		}
+		if _, held := slices.BinarySearch(pending.Keys, key); held {
+			return KeyInFlight
+		}
+		return KeyLanded
+	}
+	return KeyInFlight
 }

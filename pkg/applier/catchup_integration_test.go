@@ -482,6 +482,43 @@ func TestCatchupConvergesUnderUniqueKeyMovesDuringTheCopy(t *testing.T) {
 	f.assertConverged(t, run.shadow)
 }
 
+// Primary keys move to fresh identity values from before the copy claims
+// its first chunk, faster than the copier's collision backoff: every move
+// lands in the last chunk, [max, +∞), under a uniq value a landed row still
+// holds in the shadow until the next drain flushes its delete. The chunk's
+// first attempt collides; the attempts after it commit the rows the shadow
+// admits and run again only for the rows it refused, so a move that
+// arrives between attempts cannot send the whole chunk back to the start,
+// the chunk lands within the bound, and the shadow converges (CO-4).
+//
+// The moves run many times faster than the backoff but well below the
+// rate at which the copier lands collided chunks, so the copy gains on the
+// frontier the moves push upward and finishes; a load that mints keys
+// faster than the copier lands them keeps the last chunk open for ever.
+func TestCatchupConvergesUnderKeyMovesFasterThanTheCollisionBackoff(t *testing.T) {
+	f := newCatchupFixture(t, 1500)
+	run := startCatchup(t, f, applier.CatchupOptions{})
+	load := testutil.StartLoad(t, f.pool, f.table, testutil.LoadSpec{
+		Seed: 7, Workers: 2, RatePerSecond: 30,
+		Mix: testutil.Mix{KeyMove: 1},
+	})
+
+	run.awaitStatus(t, "discard changes to keys the copier has not claimed", func(s applier.Status) bool {
+		return s.Discarded > 0
+	})
+	run.copy(t)
+	assert.Positive(t, run.copier.Collisions(), "the moves must have reached the last chunk's slots for the copy to prove anything")
+	t.Logf("chunk passes the copier counted after a collision: %d", run.copier.Collisions())
+	run.awaitStatus(t, "apply moved images and the deletes under their old keys", func(s applier.Status) bool {
+		return s.Applied > 0
+	})
+	summary := run.quiesce(t, load)
+	assert.Positive(t, summary.KeyMoves)
+
+	run.stop(t)
+	f.assertConverged(t, run.shadow)
+}
+
 // A second Run on the same catch-up is refused: its stream is single-use.
 func TestCatchupRunsOnce(t *testing.T) {
 	f := newCatchupFixture(t, 10)

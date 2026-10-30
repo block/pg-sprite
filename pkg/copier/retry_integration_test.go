@@ -59,14 +59,16 @@ func (f copierFixture) holdSlotAtFirstChunk(t *testing.T, shadow schemachange.Bu
 }
 
 // A chunk whose insert collides with a shadow row on the unique slot index
-// is run again after a wait, and lands once the colliding row is gone: here
-// a shadow row under another key holds slot 15, as it would after a source
-// change moved the slot from the row the copier read to a landed key the
-// applier has yet to flush the move's other half for (CO-4). Each attempt is
-// its own snapshot, so the attempt after the row's removal copies the chunk
-// as the source has it, every row lands, and the committed attempt alone
-// counts as inserted.
-func TestCopierRetriesAChunkThatCollidesUntilTheRowIsGone(t *testing.T) {
+// commits around the colliding row and lands the rest once that row is
+// gone: here a shadow row under another key holds slot 15, as it would
+// after a source change moved the slot from the row the copier read to a
+// landed key the applier has yet to flush the move's other half for (CO-4).
+// After the first collision the shadow holds every row of the chunk but
+// key 15, the chunk stays in flight with key 15 pending — so a captured
+// change for key 15 still waits while one for key 16 applies — and the pass
+// after the row's removal copies key 15 alone, so every row lands and each
+// row counts as inserted once.
+func TestCopierCommitsAroundACollisionAndLandsTheRestWhenTheRowIsGone(t *testing.T) {
 	f := newCopierFixture(t)
 	const rows = 300
 	target, lock, shadow := f.prepareSeats(t, rows)
@@ -85,29 +87,38 @@ func TestCopierRetriesAChunkThatCollidesUntilTheRowIsGone(t *testing.T) {
 	wg.Go(func() { results <- c.Run(t.Context(), f.pool) })
 	t.Cleanup(wg.Wait)
 
-	const collisionDeadline = 15 * time.Second
-	require.Eventually(t, func() bool { return c.Collisions() >= 1 }, collisionDeadline, 10*time.Millisecond,
-		"the first chunk, carrying key 15, should collide on the slot the shadow row holds")
+	const settleDeadline = 15 * time.Second
+	require.Eventually(t, func() bool { return len(c.Position().Pending) == 1 }, settleDeadline, 10*time.Millisecond,
+		"the first chunk, carrying key 15, should collide on the slot the shadow row holds and commit around it")
 	placed(t)
 	pos := c.Position()
-	require.Len(t, pos.InFlight, 1, "the colliding chunk stays in flight between attempts")
-	assert.Equal(t, int64(math.MinInt64), pos.InFlight[0].Lower())
-	assert.False(t, pos.Watermark.Valid(), "nothing has landed while the first chunk collides")
+	require.Len(t, pos.InFlight, 1, "the colliding chunk stays in flight while key 15 is pending")
+	first := pos.InFlight[0]
+	assert.Equal(t, int64(math.MinInt64), first.Lower())
+	assert.Equal(t, []copier.PendingKeys{{Chunk: first, Keys: []int64{15}}}, pos.Pending)
+	assert.Equal(t, copier.KeyInFlight, pos.Classify(15), "the held-off key still waits")
+	assert.Equal(t, copier.KeyLanded, pos.Classify(16), "the rest of the chunk has landed")
+	assert.False(t, pos.Watermark.Valid(), "the watermark waits for the pending key")
+	assert.Equal(t, first.Rows()-1, f.count(t, shadow.ShadowTable(), fmt.Sprintf("id <= %d", first.Upper())), "every row of the chunk but key 15 is in the shadow")
+	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "id = 15"))
 	f.exec(t, "DELETE FROM "+shadowName+" WHERE id = 2000")
 
 	const stopDeadline = 30 * time.Second
 	require.NoError(t, awaitRun(t, results, stopDeadline, "copy after the colliding row's removal"))
 	f.assertConverged(t, shadow)
-	assert.Equal(t, int64(rows), c.Position().RowsInserted, "only the committed attempt's rows count as inserted")
+	assert.Equal(t, int64(rows), c.Position().RowsInserted, "each row counts as inserted once across the passes")
 	assert.Equal(t, copier.NewWatermark(math.MaxInt64), c.Position().Watermark)
-	assert.GreaterOrEqual(t, c.Collisions(), int64(1))
+	assert.Empty(t, c.Position().Pending)
+	assert.GreaterOrEqual(t, c.Collisions(), int64(2), "the strict insert and the pass that held key 15 off each count")
 }
 
-// A collision no attempt outlasts stops the copy with the server's own
+// A collision no pass outlasts stops the copy with the server's own
 // refusal: the error is the unique violation wrapped, not a refusal class of
-// the copier's and not a transient dbconn would retry, every attempt is
-// counted, and the chunk stays in flight with nothing landed, so a caller
-// that checkpoints Position records no key as copied.
+// the copier's and not a transient dbconn would retry, every pass is
+// counted, and the chunk stays in flight with its pending key, so a caller
+// that checkpoints Position records no key of it as copied and a resumed
+// run re-copies the chunk; the rows committed around the pending key stay
+// in the shadow, where the resume clear removes them.
 func TestCopierStopsWhenACollisionOutlastsEveryAttempt(t *testing.T) {
 	f := newCopierFixture(t)
 	target, lock, shadow := f.prepareSeats(t, 300)
@@ -136,8 +147,11 @@ func TestCopierStopsWhenACollisionOutlastsEveryAttempt(t *testing.T) {
 
 	pos := c.Position()
 	require.Len(t, pos.InFlight, 1, "the exhausted chunk never landed")
-	assert.Equal(t, int64(math.MinInt64), pos.InFlight[0].Lower())
+	first := pos.InFlight[0]
+	assert.Equal(t, int64(math.MinInt64), first.Lower())
+	assert.Equal(t, []copier.PendingKeys{{Chunk: first, Keys: []int64{15}}}, pos.Pending, "the held-off key is still pending")
 	assert.False(t, pos.Watermark.Valid(), "nothing landed")
-	assert.Equal(t, int64(0), pos.RowsInserted)
-	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "id <= 300"), "no attempt's rows survive its rollback")
+	assert.Equal(t, first.Rows()-1, pos.RowsInserted, "the rows committed around the pending key count as inserted")
+	assert.Equal(t, int64(0), f.count(t, shadow.ShadowTable(), "id = 15"), "the pending key's row never reached the shadow")
+	assert.Equal(t, first.Rows()-1, f.count(t, shadow.ShadowTable(), "id <= 300"), "the rest of the chunk stays in the shadow for the resume clear to remove")
 }
