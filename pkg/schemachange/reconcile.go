@@ -10,6 +10,7 @@ import (
 
 	"github.com/block/pg-sprite/pkg/checkpoint"
 	"github.com/block/pg-sprite/pkg/checksum"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/decode"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -18,7 +19,8 @@ import (
 // Reconciler is reconcile mode (ST-4): the recovery for a run whose
 // replication slot is gone or lost, keeping the shadow and the copier's
 // watermark and replacing only what the slot carried. One Reconciler
-// serves one built shadow; its verifier is built up front so a reconcile
+// serves one built shadow; its verifier is built up front, and the options
+// its clear of the shadow runs under are validated then, so a reconcile
 // never starts with options that cannot run a pass.
 type Reconciler struct {
 	cfg      dbconn.Config
@@ -27,6 +29,10 @@ type Reconciler struct {
 	target   preflight.CopySwapTarget
 	shadow   BuiltShadow
 	verifier *checksum.Verifier
+	// clear bounds the clear of the shadow above a partial watermark as
+	// the pass's options bound the pass: the same timeouts, the pass's
+	// chunk size as the batch size.
+	clear copier.Options
 }
 
 // Reconciled is what a completed reconcile hands back: the slot change
@@ -66,7 +72,23 @@ func NewReconciler(cfg dbconn.Config, lock *dbconn.TableLockSession, store *chec
 	if err != nil {
 		return nil, err
 	}
-	return &Reconciler{cfg: cfg, lock: lock, store: store, target: target, shadow: shadow, verifier: verifier}, nil
+	clear := clearOptions(opts)
+	if err := clear.Validate(); err != nil {
+		return nil, err
+	}
+	return &Reconciler{cfg: cfg, lock: lock, store: store, target: target, shadow: shadow, verifier: verifier, clear: clear}, nil
+}
+
+// clearOptions bounds the reconcile's clear of the shadow as its pass is
+// bounded. The copier's worker count has no bearing on a clear, which
+// runs one batch at a time, and is left to its default.
+func clearOptions(opts checksum.Options) copier.Options {
+	return copier.Options{
+		LockTimeout:      opts.LockTimeout,
+		StatementTimeout: opts.StatementTimeout,
+		Chunker:          opts.Chunker,
+		Clock:            opts.Clock,
+	}
 }
 
 // Reconcile recovers from slot loss for the run cp records, in an order a
@@ -83,18 +105,26 @@ func NewReconciler(cfg dbconn.Config, lock *dbconn.TableLockSession, store *chec
 //     success, a half-made one from an earlier attempt goes too.
 //  4. A new slot is created under the same name. Every change committed
 //     after its consistent point replays when the stream is reopened.
-//  5. When anything has landed, one recopy pass runs through the row's
-//     watermark under checksum.DivergenceRecopy: every chunk that differs
-//     is recopied from the source, which is where the changes the lost
-//     slot never delivered are, and is not read again. The source keeps
-//     taking writes throughout; a write that lands in a chunk after its
-//     recopy is behind the new slot's consistent point and replays when
-//     the stream reopens, so the pass has nothing to prove about it. A
-//     unique value the source moves from a chunk the pass read equal into
-//     a differing chunk, between the comparison and the recopy, makes the
-//     recopy collide with the shadow row still holding it; the pass then
-//     compares again and recopies both chunks, a bounded number of times.
-//  6. The row is saved out of PhaseReconciling: PhaseCatchingUp when the
+//  5. When anything has landed, the shadow is cleared above the row's
+//     watermark, as the copier that resumes from it would clear it first
+//     (CO-4): the rows the earlier run's unlanded chunks committed there
+//     lie outside the pass that follows, and one still holding a unique
+//     value the source has since moved into a chunk the pass recopies
+//     would collide with every recopy of it, with no comparison through
+//     the watermark able to clear the collision. A complete watermark has
+//     nothing above it.
+//  6. Then one recopy pass runs through the row's watermark under
+//     checksum.DivergenceRecopy: every chunk that differs is recopied
+//     from the source, which is where the changes the lost slot never
+//     delivered are, and is not read again. The source keeps taking
+//     writes throughout; a write that lands in a chunk after its recopy is
+//     behind the new slot's consistent point and replays when the stream
+//     reopens, so the pass has nothing to prove about it. A unique value
+//     the source moves from a chunk the pass read equal into a differing
+//     chunk, between the comparison and the recopy, makes the recopy
+//     collide with the shadow row still holding it; the pass then compares
+//     again and recopies both chunks, a bounded number of times.
+//  7. The row is saved out of PhaseReconciling: PhaseCatchingUp when the
 //     watermark is complete, PhaseCopying when the copier still has keys
 //     to land, with the new slot's consistent point as the last applied
 //     position.
@@ -216,12 +246,18 @@ func (r *Reconciler) confirmShadowRelations(ctx context.Context, pool *pgxpool.P
 	return nil
 }
 
-// recopy runs the recopy pass through the row's watermark, or no pass
-// when nothing has landed: a shadow with no rows has nothing the lost
-// slot could have left stale.
+// recopy clears the shadow above the row's watermark and runs the recopy
+// pass through it, or does neither when nothing has landed: with no
+// watermark there is no pass, so no row above one to collide with, and
+// whatever the earlier run committed is the resumed copier's to clear.
 func (r *Reconciler) recopy(ctx context.Context, pool *pgxpool.Pool, cp checkpoint.Checkpoint) (checksum.Outcome, error) {
 	if !cp.Watermark.Valid() {
 		return checksum.Outcome{}, nil
+	}
+	// INV: CO-4 — every shadow row the pass does not compare is removed
+	// before the pass, so none can hold a value a recopy puts back.
+	if err := copier.ClearAbove(ctx, pool, r.target, r.shadow, r.lock, cp.Watermark, r.clear); err != nil {
+		return checksum.Outcome{}, err
 	}
 	// INV: CO-3 — the policy is stated: reconcile mode recopies.
 	return r.verifier.Check(ctx, pool, cp.Watermark, checksum.DivergenceRecopy)
