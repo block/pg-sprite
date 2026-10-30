@@ -447,8 +447,11 @@ func TestRunnerRecordsTheWorkACancelledCopyLanded(t *testing.T) {
 	st := f.alter(t, alter)
 	shadow := schemachange.ShadowName(f.schema, "orders")
 
-	runCtx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+	// The owner cancels with a cause of its own, as an embedder does; the
+	// run must still read as the cancellation it is.
+	runCtx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	ownerStop := errors.New("owner is ready to cut over")
 	results := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Go(func() {
@@ -461,11 +464,12 @@ func TestRunnerRecordsTheWorkACancelledCopyLanded(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return f.relationExists(t, shadow) && f.rowCount(t, shadow) == landedBelowPin
 	}, landDeadline, 20*time.Millisecond, "every chunk below the pinned one should land")
-	cancel()
+	cancel(ownerStop)
 	const cancelPropagation = 5 * time.Second
 	select {
 	case err := <-results:
-		require.ErrorIs(t, err, context.Canceled)
+		require.ErrorIs(t, err, context.Canceled, "a cancel with the owner's own cause is still a cancellation")
+		require.ErrorIs(t, err, ownerStop, "and carries the owner's cause")
 	case <-time.After(cancelPropagation):
 		t.Fatalf("run did not return within %s of being cancelled", cancelPropagation)
 	}

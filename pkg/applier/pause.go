@@ -61,7 +61,7 @@ func (c *Catchup) holdFlushes(ctx context.Context) error {
 	case <-c.flushes:
 		return nil
 	case <-ctx.Done():
-		return fmt.Errorf("pause the catch-up on %s.%s: %w", c.flusher.target.Schema(), c.flusher.target.Table(), context.Cause(ctx))
+		return fmt.Errorf("pause the catch-up on %s.%s: %w", c.flusher.target.Schema(), c.flusher.target.Table(), endedWith(ctx))
 	}
 }
 
