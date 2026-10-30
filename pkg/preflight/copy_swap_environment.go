@@ -19,19 +19,18 @@ const (
 	// neither share nor drop it.
 	CopySwapCauseSlotCollision CopySwapRefusalCause = "copy-and-swap-slot-collision"
 	// CopySwapCauseSlotHeadroom means the cluster has no free replication
-	// slot, or fewer free WAL senders than the route's two replication
-	// connections need: one holds the slot's exported snapshot while the
-	// copy imports it, one decodes.
+	// slot, or fewer free WAL senders than copySwapWALSenders.
 	CopySwapCauseSlotHeadroom CopySwapRefusalCause = "copy-and-swap-slot-headroom"
 	// CopySwapCauseDiskHeadroom means the volume's free space is below the
 	// headroom the shadow copy needs, or was not measured at all.
 	CopySwapCauseDiskHeadroom CopySwapRefusalCause = "copy-and-swap-disk-headroom"
 )
 
-// copySwapWALSenders is how many WAL senders a run that decodes WAL holds
-// at once: the slot's own connection keeps its exported snapshot alive while
-// the copy imports it, and the stream decodes on a connection of its own
-// from the moment the slot exists.
+// copySwapWALSenders is how many free WAL senders a run that decodes WAL
+// requires before it starts. The run holds one at a time — the slot is
+// created on a replication connection that closes once the checkpoint row
+// naming it commits, and the stream later decodes on a connection of its
+// own — so the second is headroom, not a sender the run uses.
 const copySwapWALSenders = 2
 
 // copySwapDiskHeadroomFactor is the multiple of the source's total size
@@ -176,7 +175,7 @@ func refuseCopySwapEnvironment(f copySwapEnvironmentFacts, env CopySwapEnvironme
 			return &CopySwapEnvironmentError{
 				Cause:   CopySwapCauseSlotHeadroom,
 				Setting: CopySwapSettingMaxWALSenders,
-				Detail: fmt.Sprintf("%d of max_wal_senders = %d are in use; %d free WAL senders are required: one holds the slot's snapshot while the copy imports it, one decodes",
+				Detail: fmt.Sprintf("%d of max_wal_senders = %d are in use; %d free WAL senders are required: the run holds one at a time, first to create the slot and later to decode its stream, and the second is headroom",
 					f.usedWALSenders, f.maxWALSenders, copySwapWALSenders),
 			}
 		}

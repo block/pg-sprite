@@ -71,6 +71,21 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 		return verdict.Verdict{}, fmt.Errorf("%w: %s locks %q, got %q; nothing was executed",
 			ErrAcceptBlockingMismatch, st.Kind(), table, opts.AcceptBlocking)
 	}
+	if opts.AllowDestructive != "" {
+		if err := checkAllowDestructiveAck(table, opts.AllowDestructive); err != nil {
+			return verdict.Verdict{}, err
+		}
+	}
+	// INV: RF-10 — accepting the lock is not accepting the loss: a dropped
+	// index runs only when the destructive acknowledgement also names its
+	// table.
+	dropsIndex := st.Kind() == statement.KindDropIndex
+	if dropsIndex {
+		if opts.AllowDestructive == "" {
+			return dropIndexDestructiveVerdict(st, table), nil
+		}
+		auditAllowDestructive(opts.audit(), st, table)
+	}
 	budget := executor.BlockingBudget{
 		LockTimeout:      opts.Budget.Brief.LockTimeout,
 		StatementTimeout: opts.Budget.Brief.StatementTimeout,
@@ -131,6 +146,7 @@ func acceptBlocking(ctx context.Context, pool *pgxpool.Pool, st statement.Statem
 		return verdict.Verdict{}, fmt.Errorf("%w: %w", executor.ErrInvariantViolation, err)
 	}
 	v.Table = table
+	v.AllowedDestructive = dropsIndex
 	v.Detail = fmt.Sprintf("the operator accepted the blocking form: it ran as-is under budgets (lock %s, statement %s) "+
 		"with no online-safety guarantee; %s was locked for the statement's duration",
 		budget.LockTimeout, budget.StatementTimeout, table)

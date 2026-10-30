@@ -12,7 +12,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/lint"
+	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/planner"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -75,7 +77,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 12, "the doc publishes twelve captured --json outputs")
+	require.Len(t, blocks, 14, "the doc publishes fourteen captured --json outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
@@ -99,10 +101,27 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 		verdict.ByDesign(verdict.ReasonIndexStatement).WithSite(verdict.RefusalSiteIndexSingleRelation),
 		3*time.Second, 10*time.Minute)
 	require.NoError(t, err)
+	acceptedBlocking.AllowedDestructive = true
 	rewriteRequired := alterReport(t, "ALTER TABLE users ADD COLUMN nickname text UNIQUE",
 		"public", "users", usersFacts())
 	copyAndSwapRouted := alterReport(t, "ALTER TABLE users ALTER COLUMN id TYPE text",
 		"public", "users", usersFacts())
+	// The failed verdict is captured from a run: a CHECK whose NOT VALID
+	// step commits and whose VALIDATE step then meets a violating row. Its
+	// detail is the migrate package's rendering of a mid-sequence failure.
+	failedSequence := verdict.Verdict{
+		Outcome:       verdict.OutcomeFailed,
+		Code:          string(executor.CodeExecutionFailed),
+		FailedStep:    2,
+		FailedStepSQL: `ALTER TABLE "public"."users" VALIDATE CONSTRAINT "users_email_lower"`,
+		Statement:     "ALTER TABLE public.users ADD CONSTRAINT users_email_lower CHECK (email = lower(email))",
+		Table:         "public.users",
+		Detail: "sequence step 2 of 2 failed; the 1 committed steps' state remains — " +
+			"the planner sequence's partial-failure contract says how a retry resumes",
+		ExecutedSQL: []string{
+			"ALTER TABLE public.users ADD CONSTRAINT users_email_lower CHECK (email = lower(email)) NOT VALID",
+		},
+	}
 	// The executed verdict is captured from a run; its detail is the
 	// verdict's own rendering of the verification pass and the retained
 	// source's fate, which the migrate package's tests pin.
@@ -132,6 +151,18 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 
 	destructive := alterReport(t, "ALTER TABLE users DROP COLUMN email",
 		"public", "users", usersFacts())
+	// Without the acknowledgement the dry run ends in the apply's refusal
+	// verdict instead of the plan report above.
+	dropEmail, err := statement.ParseOne("ALTER TABLE users DROP COLUMN email")
+	require.NoError(t, err)
+	dropEmailCanonical, err := statement.Canonical(dropEmail.SQL())
+	require.NoError(t, err)
+	dropEmailClassified, err := planner.Classify(dropEmailCanonical, usersFacts())
+	require.NoError(t, err)
+	destructiveRefused, refused, err := migrate.AdmitDestructive(dropEmail, "public",
+		router.Route([]planner.Plan{dropEmailClassified}).Statements[0], "")
+	require.NoError(t, err)
+	require.True(t, refused)
 
 	lintReport, err := lint.Check("CREATE INDEX users_email_idx ON users (email);\n" +
 		"ALTER TABLE users ADD CONSTRAINT users_email_key UNIQUE (email);\n")
@@ -155,8 +186,8 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	}
 	diff.Fingerprint = plan.Fingerprint(diff.Statements)
 
-	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, rewriteRequired,
-		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitioned, destructive,
+	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, failedSequence, rewriteRequired,
+		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitioned, destructiveRefused, destructive,
 		lintReport, diff}
 	for i, w := range want {
 		marshaled, err := json.Marshal(w)

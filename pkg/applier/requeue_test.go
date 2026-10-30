@@ -18,7 +18,7 @@ func TestRequeuePutsTheBatchBack(t *testing.T) {
 	require.NoError(t, b.Add(update(10, 5, col("label", "a"))))
 	require.NoError(t, b.Add(keyMove(20, 7, 8, marker("blob"))))
 	require.NoError(t, b.Add(del(30, 9)))
-	batch := b.Drain(position(t, 100))
+	batch := b.Drain(position(t, 100), AllVisible())
 	require.Equal(t, []int64{5, 7, 8, 9}, keys(batch.Entries))
 	require.Equal(t, 0, b.Len())
 
@@ -31,7 +31,7 @@ func TestRequeuePutsTheBatchBack(t *testing.T) {
 	require.NoError(t, b.Add(insert(40, 7, col("label", "other"), col("blob", "x"))))
 	assert.True(t, entry(t, b, 8).OldKeyReused, "the requeued image is indexed under its old key again")
 
-	again := b.Drain(position(t, 100))
+	again := b.Drain(position(t, 100), AllVisible())
 	assert.Equal(t, []int64{5, 7, 8, 9}, keys(again.Entries))
 	assert.Equal(t, []decode.Column{decode.PresentColumn("label", "a")}, again.Entries[0].Columns)
 }
@@ -43,7 +43,7 @@ func TestRequeueRefusesAHeldKey(t *testing.T) {
 	b := NewBuffer()
 	require.NoError(t, b.Add(update(10, 5, col("label", "a"))))
 	require.NoError(t, b.Add(update(11, 6, col("label", "b"))))
-	batch := b.Drain(position(t, 100))
+	batch := b.Drain(position(t, 100), AllVisible())
 	require.NoError(t, b.Add(update(12, 6, col("label", "c"))))
 
 	err := b.Requeue(batch)

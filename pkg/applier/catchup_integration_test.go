@@ -49,7 +49,14 @@ const walSenderTimeout = "wal_sender_timeout=2s"
 
 func newCatchupFixture(t *testing.T, rows int) catchupFixture {
 	t.Helper()
-	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=logical", walSenderTimeout)
+	return newCatchupFixtureWithSettings(t, rows)
+}
+
+// newCatchupFixtureWithSettings starts the fixture's server with extra
+// settings beyond the ones every catch-up test needs.
+func newCatchupFixtureWithSettings(t *testing.T, rows int, settings ...string) catchupFixture {
+	t.Helper()
+	serverURL := testutil.StartPostgresWithSettings(t, append([]string{"wal_level=logical", walSenderTimeout}, settings...)...)
 	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL), MaxConns: 16}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
@@ -120,6 +127,9 @@ type catchupSetup struct {
 	// keys. The copy then runs to completion before the catch-up starts, so
 	// the shadow holds every row, and the test moves the position by hand.
 	positions applier.PositionSource
+	// copierClock, when set, is the copier's clock, which it reads as each
+	// chunk attempt starts and as each one commits.
+	copierClock progress.Clock
 }
 
 func startCatchup(t *testing.T, f catchupFixture, opts applier.CatchupOptions) *catchupRun {
@@ -171,6 +181,7 @@ func startCatchupWith(t *testing.T, f catchupFixture, setup catchupSetup) *catch
 	c, err := copier.NewCopier(f.target, shadow, lock, copier.Watermark{}, copier.Options{
 		Workers: 2,
 		Chunker: copier.ChunkerOptions{InitialRows: 50, MaxRows: 50},
+		Clock:   setup.copierClock,
 	})
 	require.NoError(t, err)
 	run := &catchupRun{f: f, shadow: shadow, lock: lock, copier: c, done: make(chan error, 1)}
@@ -341,9 +352,10 @@ func TestCatchupConvergesUnderMixedLoad(t *testing.T) {
 // travels together through the drain, and the flush completes the image's
 // unchanged blob from the old key's row before it deletes that row (CO-4,
 // D13). The workload starts after the copy has landed every key: the moved
-// row keeps its unique key, so mid copy the copier's own insert of the row
-// under its new key collides with the stale row the flush has not deleted
-// yet, which is the copier's race to resolve, not the catch-up's.
+// row keeps its unique key, so a move from a landed key to a key in flight
+// collides on the copier's insert with the row still under the old key, and
+// the pair rule defers that key's delete until the chunk lands — the two
+// would wait on each other until the copier's collision attempts ran out.
 func TestCatchupConvergesUnderKeyMoves(t *testing.T) {
 	f := newCatchupFixture(t, 1500)
 	run := startCatchup(t, f, applier.CatchupOptions{})
@@ -434,6 +446,38 @@ func TestCatchupConvergesUnderUniqueKeyMoves(t *testing.T) {
 
 	run.awaitStatus(t, "fall back to whole-row writes for a unique key swap", func(s applier.Status) bool {
 		return s.Fallbacks > 0
+	})
+	summary := run.quiesce(t, load)
+	assert.Positive(t, summary.UniqueMoves)
+
+	run.stop(t)
+	f.assertConverged(t, run.shadow)
+}
+
+// Unique key swaps run from before the copy claims its first chunk until
+// after it has landed every key, so a swap can straddle a chunk the copier
+// is reading: one row's new unique key is in a chunk in flight while the
+// other row, already landed, has had its half of the swap flushed — or the
+// chunk read both rows before the swap and the flush has since given a
+// landed row the value the chunk carries. Either way the chunk's insert
+// collides with a shadow row the applier still has to rewrite, the copier
+// runs the chunk again once the flush has committed, and the shadow
+// converges (CO-4).
+func TestCatchupConvergesUnderUniqueKeyMovesDuringTheCopy(t *testing.T) {
+	f := newCatchupFixture(t, 1500)
+	run := startCatchup(t, f, applier.CatchupOptions{})
+	load := testutil.StartLoad(t, f.pool, f.table, testutil.LoadSpec{
+		Seed: 6, Workers: 2, RatePerSecond: 40,
+		Mix: testutil.Mix{UniqueMove: 1},
+	})
+
+	run.awaitStatus(t, "discard changes to keys the copier has not claimed", func(s applier.Status) bool {
+		return s.Discarded > 0
+	})
+	run.copy(t)
+	t.Logf("chunk attempts the copier ran again after a collision: %d", run.copier.Collisions())
+	run.awaitStatus(t, "apply unique key swaps to landed keys", func(s applier.Status) bool {
+		return s.Applied > 0
 	})
 	summary := run.quiesce(t, load)
 	assert.Positive(t, summary.UniqueMoves)

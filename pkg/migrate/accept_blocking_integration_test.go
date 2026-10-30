@@ -19,10 +19,13 @@ import (
 
 // acceptBlockingOptions is the runnable policy with the acknowledgement
 // set and the brief budgets tightened so a contended or slow statement
-// resolves in well under a second.
+// resolves in well under a second. The destructive acknowledgement names
+// the same table, because an accepted DROP INDEX needs both; it changes
+// nothing for a REINDEX, which discards nothing.
 func acceptBlockingOptions(table string) migrate.Options {
 	opts := runOptions()
 	opts.AcceptBlocking = table
+	opts.AllowDestructive = table
 	opts.Budget.Brief = executor.Budget{LockTimeout: 100 * time.Millisecond, StatementTimeout: 5 * time.Second}
 	return opts
 }
@@ -80,6 +83,7 @@ func TestRunAcceptBlockingExecutesEligibleRefusals(t *testing.T) {
 			acceptBlockingOptions(schema+".orders"))
 		require.NoError(t, err)
 		assertAccepted(t, v, schema)
+		assert.True(t, v.AllowedDestructive, "a dropped index is a destructive change the verdict records")
 		assert.False(t, indexExists(t, pool, schema, "orders_created_idx"), "the accepted DROP INDEX must have committed")
 	})
 
@@ -91,6 +95,7 @@ func TestRunAcceptBlockingExecutesEligibleRefusals(t *testing.T) {
 			acceptBlockingOptions(schema+".orders"))
 		require.NoError(t, err)
 		assertAccepted(t, v, schema)
+		assert.False(t, v.AllowedDestructive, "a REINDEX discards nothing")
 		assert.True(t, indexExists(t, pool, schema, "orders_created_idx"), "REINDEX keeps the index")
 	})
 
@@ -102,6 +107,25 @@ func TestRunAcceptBlockingExecutesEligibleRefusals(t *testing.T) {
 			acceptBlockingOptions(schema+".orders"))
 		require.NoError(t, err)
 		assertAccepted(t, v, schema)
+	})
+
+	// A REINDEX discards nothing, so the blocking acknowledgement alone
+	// runs it; only a dropped index needs the destructive one too.
+	t.Run("REINDEX needs only the blocking acknowledgement", func(t *testing.T) {
+		for _, sql := range []string{
+			"REINDEX INDEX %s.orders_created_idx",
+			"REINDEX TABLE %s.orders",
+		} {
+			schema := seed(t)
+			opts := acceptBlockingOptions(schema + ".orders")
+			opts.AllowDestructive = ""
+
+			v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(sql, schema)), opts)
+			require.NoError(t, err, sql)
+			assertAccepted(t, v, schema)
+			assert.False(t, v.AllowedDestructive, "%s records no acknowledged loss", sql)
+			assert.True(t, indexExists(t, pool, schema, "orders_created_idx"), "REINDEX keeps the index")
+		}
 	})
 
 	t.Run("REINDEX TABLE of a materialized view acknowledges the view", func(t *testing.T) {
@@ -204,6 +228,58 @@ func TestRunAcceptBlockingRejectsFalseAcknowledgements(t *testing.T) {
 		require.ErrorIs(t, err, migrate.ErrAcceptBlockingWrongRelationKind)
 		assert.NotErrorIs(t, err, migrate.ErrAcceptBlockingRelationNotFound)
 		assert.Equal(t, verdict.Verdict{}, v)
+	})
+}
+
+// Accepting the lock is not accepting the loss. A DROP INDEX under
+// --accept-blocking alone is refused as a destructive change before
+// anything runs, with the checks that catch an index the application still
+// uses; a destructive acknowledgement naming another table is a usage
+// error. The index here is a plain, non-unique one: the gate covers every
+// index drop, not only the unique ones that also carry a guarantee.
+func TestRunAcceptBlockingNeedsTheDestructiveAcknowledgementToDropAnIndex(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %[1]s.orders (
+			id int PRIMARY KEY,
+			created_at timestamptz
+		);
+		CREATE TABLE %[1]s.customers (id int PRIMARY KEY);
+		CREATE INDEX orders_created_idx ON %[1]s.orders (created_at)`, schema))
+	require.NoError(t, err)
+	drop := parseOne(t, fmt.Sprintf("DROP INDEX %s.orders_created_idx", schema))
+
+	t.Run("refused without the destructive acknowledgement", func(t *testing.T) {
+		opts := acceptBlockingOptions(schema + ".orders")
+		opts.AllowDestructive = ""
+
+		v, err := migrate.Run(t.Context(), pool, drop, opts)
+
+		require.NoError(t, err)
+		assert.Equal(t, verdict.OutcomeRefused, v.Outcome)
+		assert.Equal(t, verdict.ReasonDestructiveChange, v.Reason)
+		assert.Equal(t, verdict.ClassByDesign, v.Class)
+		assert.Equal(t, schema+".orders", v.Table, "the refusal names the owning table the acknowledgement must spell")
+		assert.False(t, v.BlockingPassthrough)
+		assert.False(t, v.AllowedDestructive)
+		assert.Contains(t, v.Detail, "idx_scan")
+		assert.Contains(t, v.Detail, "--allow-destructive "+schema+".orders")
+		assert.True(t, indexExists(t, pool, schema, "orders_created_idx"), "the refused drop must execute nothing")
+	})
+
+	t.Run("a destructive acknowledgement naming another table executes nothing", func(t *testing.T) {
+		opts := acceptBlockingOptions(schema + ".orders")
+		opts.AllowDestructive = schema + ".customers"
+
+		v, err := migrate.Run(t.Context(), pool, drop, opts)
+
+		require.ErrorIs(t, err, migrate.ErrAllowDestructiveMismatch)
+		assert.Equal(t, verdict.Verdict{}, v)
+		assert.True(t, indexExists(t, pool, schema, "orders_created_idx"))
 	})
 }
 

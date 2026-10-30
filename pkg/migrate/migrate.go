@@ -82,8 +82,20 @@ type Options struct {
 	// from the catalog — exactly; empty means every refusal stands.
 	// Ineligible refusals stand regardless. Force and AcceptBlocking are
 	// mutually exclusive: a statement reaches one routing decision, and
-	// one acknowledgement names it.
+	// one acknowledgement names it. An accepted DROP INDEX also needs
+	// AllowDestructive: accepting the lock is not accepting the loss.
 	AcceptBlocking string
+
+	// AllowDestructive is the typed acknowledgement that the statement may
+	// discard live data or structure: a dropped column, constraint, NOT
+	// NULL, or index. Without it such a statement is refused before
+	// anything runs, with reason destructive-change, on every route it
+	// could take. It must name the resolved schema-qualified target table
+	// exactly — for a DROP INDEX, the index's owning table; empty means
+	// destructive statements are refused. It acknowledges only the loss:
+	// the statement still meets every other gate, so a statement that also
+	// needs Force or AcceptBlocking needs both. [RunDesired] rejects it.
+	AllowDestructive string
 
 	// MaxTableSizeBytes is the threshold above which a blind bounded
 	// attempt of the submitted form is refused, measured as the table's
@@ -124,8 +136,9 @@ type Options struct {
 // the same budgets, size guard, and retry policy the CLI's flag defaults
 // wire. These are defaults to tune, not a recommendation — a large table
 // needs a more generous concurrent-build and validate bound, a hot table a
-// tighter lock budget. Force, Logger, and Audit stay zero: overriding
-// safety and receiving diagnostics are always deliberate choices.
+// tighter lock budget. Force, AllowDestructive, Logger, and Audit stay
+// zero: overriding safety and receiving diagnostics are always deliberate
+// choices.
 func DefaultOptions() Options {
 	return Options{
 		MaxTableSizeBytes: 1 << 30,
@@ -207,6 +220,12 @@ func (o Options) retry() executor.RetryPolicy {
 // [verdict.OutcomeExecutedViaCopyAndSwap]; a failure on that path leaves a
 // checkpoint row the next Run over the same statement resumes from.
 //
+// A statement that discards live data or structure — a dropped column,
+// constraint, NOT NULL, or (on the accepted blocking path) index — is
+// refused with reason destructive-change before any route runs it, unless
+// Options.AllowDestructive names its table; an acknowledged run's verdict
+// carries AllowedDestructive.
+//
 // A bare table name resolves on the pool's own search_path, so two pools
 // with different paths can address different tables from the same
 // statement text. Run's own catalog reads — the resolve and the
@@ -239,6 +258,9 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 		}
 		return v, nil
 	}
+	if st.Kind() == statement.KindRenameIndex {
+		return renameIndex(ctx, pool, st, opts, logger)
+	}
 	st, err := resolveTarget(ctx, pool, st, logger)
 	if err != nil {
 		return verdict.Verdict{}, err
@@ -250,6 +272,16 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 	}
 	if opts.CopySwap.Restart != "" {
 		if err := checkRestartAck(st, opts.CopySwap.Restart); err != nil {
+			return verdict.Verdict{}, err
+		}
+	}
+	if opts.CopySwap.BlockWrites != "" {
+		if err := checkBlockWritesAck(st, opts.CopySwap.BlockWrites); err != nil {
+			return verdict.Verdict{}, err
+		}
+	}
+	if opts.AllowDestructive != "" {
+		if err := checkAllowDestructiveAck(qualified(st), opts.AllowDestructive); err != nil {
 			return verdict.Verdict{}, err
 		}
 	}
@@ -275,9 +307,34 @@ func run(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, opts O
 		if err := checkRestartRoute(st, rs); err != nil {
 			return verdict.Verdict{}, err
 		}
+	}
+	// INV: RF-10 — a statement that discards live data or structure is
+	// refused before any route runs it, unless the acknowledgement names
+	// its table; every disposition below is reached only past this gate.
+	allowedDestructive := false
+	if destructive := destructiveOperations(rs); len(destructive) > 0 {
+		if opts.AllowDestructive == "" {
+			return destructiveChangeVerdict(st, destructive)
+		}
+		allowedDestructive = true
+		auditAllowDestructive(opts.audit(), st, qualified(st))
+	}
+	if opts.CopySwap.Restart != "" {
 		auditRestart(opts.audit(), st)
 	}
 
+	v, err := dispatch(ctx, pool, st, canonical, rs, opts, adopts, validates, logger)
+	if allowedDestructive && v.Outcome != "" {
+		v.AllowedDestructive = true
+	}
+	return v, err
+}
+
+// dispatch runs a routed statement that is past the front door's
+// acknowledgement gates down the path its disposition names.
+func dispatch(ctx context.Context, pool *pgxpool.Pool, st statement.Statement, canonical string,
+	rs router.Statement, opts Options, adopts *schemadiff.IndexAdoption, validates *schemadiff.ConstraintValidation,
+	logger *slog.Logger) (verdict.Verdict, error) {
 	switch rs.Disposition {
 	case router.DispositionExecute:
 		if rs.Backend == router.BackendCopyAndSwap {

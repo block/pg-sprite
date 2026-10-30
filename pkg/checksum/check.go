@@ -17,14 +17,22 @@ import (
 // fresh (CO-2). Check returns an Outcome with its error too, so what a
 // failed pass compared and wrote to the shadow is never lost.
 type Outcome struct {
-	// Report is the comparison the pass made before any repair. It is the
-	// zero Report when no comparison ran.
+	// Report is the comparison the pass acted on: the one before the
+	// repair, or under DivergenceRecopy the last one made, which is the
+	// comparison the committed recopy — or the recopy that stopped the
+	// pass — was cut from. It is the zero Report when no comparison ran.
 	Report Report
 	// Repairs lists the chunks the pass recopied and committed under
 	// DivergenceRepair or DivergenceRecopy, in ascending key order, whether
 	// or not every one then read equal. It is empty under DivergenceAbort
 	// and for a clean pass.
 	Repairs []Repair
+	// Collisions is the number of recopies under DivergenceRecopy the
+	// server refused because a shadow row still held one of their values
+	// under a unique index or an exclusion constraint, each followed by
+	// another comparison and recopy or by the pass stopping. It is zero
+	// under every other policy.
+	Collisions int
 
 	clean    CleanWatermark
 	verified VerifiedShadow
@@ -71,7 +79,15 @@ func (o Outcome) VerifiedShadow() (VerifiedShadow, bool) {
 // it runs, and every write committed after the new slot's consistent point
 // replays when the stream reopens, so a recopied chunk a write lands in
 // afterwards converges under the applier as any copied chunk does, and a
-// fresh read now would refuse what the stream is about to settle.
+// fresh read now would refuse what the stream is about to settle. One
+// write the recopy cannot absorb is a unique value the source moved from a
+// row in a chunk the comparison read equal to a row in a differing chunk
+// after the comparison read the equal one: the recopy's insert collides
+// with the shadow row still holding the value. The pass then compares
+// again — the equal chunk now differs too — and recopies what it finds,
+// up to Options.RecopyAttempts times, counting each collision in the
+// Outcome; a recopy that collides on the last attempt ends the pass with
+// the server's error.
 //
 // While it runs, through the repair phase as well, the verifier is the
 // tracker's work source (Options.Tracker). A Check that overlaps a pass
@@ -103,11 +119,11 @@ func (v *Verifier) Check(ctx context.Context, pool *pgxpool.Pool, through copier
 		}
 		return Outcome{Report: report, Repairs: repairs}, nil
 	case DivergenceRecopy:
-		repairs, err := v.recopyAll(ctx, pool, report.Mismatches)
+		outcome, err := v.recopyUntilClear(ctx, pool, through, report)
 		if err != nil {
-			return Outcome{Report: report, Repairs: repairs}, v.verifyError(err)
+			return outcome, v.verifyError(err)
 		}
-		return Outcome{Report: report, Repairs: repairs}, nil
+		return outcome, nil
 	default:
 		return Outcome{Report: report}, fmt.Errorf("%w (CO-3): divergence policy %q passed validation", ErrInvariantViolation, string(policy))
 	}

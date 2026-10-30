@@ -86,7 +86,7 @@ func (v *Verifier) recopyAll(ctx context.Context, pool *pgxpool.Pool, mismatches
 // transaction. The recopy is the copier's own statement, not a copy of it,
 // so a repair puts back exactly what a copy would have.
 func (v *Verifier) recopy(ctx context.Context, pool *pgxpool.Pool, mismatches []Mismatch) ([]Repair, error) {
-	tx, err := v.begin(ctx, pool, pgx.TxOptions{AccessMode: pgx.ReadWrite})
+	tx, err := v.begin(ctx, pool, repairWrite())
 	if err != nil {
 		return nil, err
 	}
@@ -108,7 +108,10 @@ func (v *Verifier) recopy(ctx context.Context, pool *pgxpool.Pool, mismatches []
 }
 
 // recopyIn runs the recopy's statements in tx: every chunk's delete, then
-// every chunk's copy. It commits nothing; the caller does.
+// every chunk's copy, then the guard's resolution check once more, so a
+// catalog change that committed between the guard and the copies fails the
+// repair before its caller commits it (CO-9). It commits nothing; the
+// caller does.
 func (v *Verifier) recopyIn(ctx context.Context, tx pgx.Tx, mismatches []Mismatch) ([]Repair, error) {
 	repairs := make([]Repair, 0, len(mismatches))
 	for _, mismatch := range mismatches {
@@ -126,6 +129,9 @@ func (v *Verifier) recopyIn(ctx context.Context, tx pgx.Tx, mismatches []Mismatc
 			return nil, fmt.Errorf("recopy chunk [%d, %d] of %s.%s into %s: %w", chunk.Lower(), chunk.Upper(), v.shadow.Schema(), v.shadow.SourceTable(), v.shadow.ShadowTable(), err)
 		}
 		repairs[i].Inserted = inserted.RowsAffected()
+	}
+	if err := v.confirmResolution(ctx, tx); err != nil {
+		return nil, err
 	}
 	return repairs, nil
 }

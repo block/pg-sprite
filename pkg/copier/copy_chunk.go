@@ -41,9 +41,15 @@ const (
 
 // copyChunk copies one chunk in its own guarded transaction: it inserts the
 // chunk's live rows into the shadow without overwriting any row already
-// there and returns the number of rows the insert added.
+// there and returns the number of rows the insert added. A copy that
+// evaluates conversion expressions confirms their resolution once more
+// after the insert and before the commit (CO-9), so a catalog change that
+// committed between the guard's check and the insert rolls the chunk back.
+// The transaction is READ COMMITTED whatever the server or role
+// configures, so that repeated read takes a snapshot after the insert's;
+// the insert is one statement and relies on no snapshot beyond its own.
 func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk) (int64, error) {
-	tx, err := pool.Begin(ctx)
+	tx, err := pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted, AccessMode: pgx.ReadWrite})
 	if err != nil {
 		return 0, fmt.Errorf("begin copy of chunk [%d, %d]: %w", chunk.Lower(), chunk.Upper(), err)
 	}
@@ -59,6 +65,9 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 	tag, err := tx.Exec(ctx, c.sql, chunk.Lower(), chunk.Upper())
 	if err != nil {
 		return 0, fmt.Errorf("copy chunk [%d, %d] of %s.%s into %s: %w", chunk.Lower(), chunk.Upper(), c.shadow.Schema(), c.shadow.SourceTable(), c.shadow.ShadowTable(), err)
+	}
+	if err := c.confirmResolution(ctx, tx); err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("commit chunk [%d, %d] of %s.%s: %w", chunk.Lower(), chunk.Upper(), c.target.Schema(), c.target.Table(), err)
@@ -76,7 +85,9 @@ func (c *Copier) copyChunk(ctx context.Context, pool *pgxpool.Pool, chunk Chunk)
 // transaction. The shadow is locked in shadowMode — the mode the write that
 // follows holds, or the fence's — before the table lock is confirmed, so a
 // transaction that confirmed it already holds the lock a resumed run's fence
-// waits on (CO-4).
+// waits on (CO-4). Last, for a copy that evaluates conversion expressions,
+// it confirms that the catalog they resolve in is still the one the build
+// saw (CO-9).
 func (c *Copier) guard(ctx context.Context, tx pgx.Tx, shadowMode lockMode) error {
 	if err := setCopySession(ctx, tx, c.target, c.searchPath, c.opts); err != nil {
 		return err
@@ -87,7 +98,41 @@ func (c *Copier) guard(ctx context.Context, tx pgx.Tx, shadowMode lockMode) erro
 	if err := c.confirmLock(ctx, tx); err != nil {
 		return err
 	}
-	return c.confirmRelations(ctx, tx)
+	if err := c.confirmRelations(ctx, tx); err != nil {
+		return err
+	}
+	return c.confirmResolution(ctx, tx)
+}
+
+// confirmResolution refuses to write when the functions, operators, types,
+// or collations the conversion expressions resolve among are no longer the
+// ones the shadow build digested: the copy statement resolves the
+// expressions' unqualified names afresh in every chunk, so an object
+// created, replaced, or dropped under one of those names since the build
+// could make this chunk evaluate them differently from the gated statement
+// without any statement failing. The fingerprint is read in the chunk's
+// own transaction, but by a statement of its own, so a change committed
+// after the read and before the insert would still reach the insert: the
+// guard's read narrows that window, and the read copyChunk repeats after
+// the insert rolls back a chunk that resolved through a change, since
+// under READ COMMITTED, which copyChunk pins, that read sees every change
+// the insert could have resolved. A change made and undone again between
+// the two reads is seen by neither; the verifier's recomputation of the
+// source side is what catches a chunk such a change reached. A copy
+// without conversions has nothing to confirm.
+func (c *Copier) confirmResolution(ctx context.Context, tx pgx.Tx) error {
+	if len(c.shadow.Conversions()) == 0 {
+		return nil
+	}
+	found, err := chunksql.ResolutionFingerprint(ctx, tx, c.shadow.Schema(), c.shadow.Conversions())
+	if err != nil {
+		return err
+	}
+	// INV: CO-9
+	if found != c.shadow.ConversionFingerprint() {
+		return refuse(CauseConversionDrift, nil, "the objects the conversion expressions for %s.%s resolve among have changed since the shadow %s was built: fingerprint %s, proof carries %s", c.shadow.Schema(), c.shadow.SourceTable(), c.shadow.ShadowTable(), found, c.shadow.ConversionFingerprint())
+	}
+	return nil
 }
 
 // setCopySession bounds the transaction, pins the output settings a

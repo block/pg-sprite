@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,8 +22,9 @@ const DefaultWorkers = 4
 
 var (
 	// ErrInvalidOptions reports copier options that cannot bound the copy: a
-	// negative worker count, or a timeout below PostgreSQL's one-millisecond
-	// resolution, which the server would read as no timeout at all.
+	// negative worker count, a timeout below PostgreSQL's one-millisecond
+	// resolution, which the server would read as no timeout at all, a
+	// collision attempt count below one, or a negative collision backoff.
 	ErrInvalidOptions = errors.New("invalid copier options")
 	// ErrAlreadyRun reports a second Run on the same Copier; a Copier drives
 	// one copy and is then only a record of where it stopped.
@@ -31,7 +33,8 @@ var (
 
 // Options bounds the copy. Zero values take the defaults: DefaultWorkers
 // workers, the dbconn session timeouts for every chunk transaction, the
-// ChunkerOptions defaults, and the wall clock.
+// ChunkerOptions defaults, DefaultCollisionAttempts attempts spaced by
+// DefaultCollisionBackoff, and the wall clock.
 type Options struct {
 	// Workers is the number of chunk transactions in flight at once. The
 	// pool's connection limit bounds it from above.
@@ -42,6 +45,15 @@ type Options struct {
 	StatementTimeout time.Duration
 	// Chunker sizes the chunks.
 	Chunker ChunkerOptions
+	// CollisionAttempts is the number of times a chunk whose insert the
+	// server refused on a unique index or an exclusion constraint is run
+	// before the copy stops with that refusal. Each attempt reads the source
+	// afresh, so a value a source change moved between keys lands once the
+	// applier has flushed the move's other half into the shadow.
+	CollisionAttempts int
+	// CollisionBackoff is the wait before a collided chunk's second attempt;
+	// each later wait is one backoff longer.
+	CollisionBackoff time.Duration
 	// Clock times each chunk for the chunker's chunk-time throttling
 	// feedback (docs/copy-and-swap-design.md#d12--throttle-by-chunk-time-and-slot-lag).
 	Clock progress.Clock
@@ -61,6 +73,12 @@ func (o Options) withDefaults() Options {
 	}
 	if o.StatementTimeout == 0 {
 		o.StatementTimeout = dbconn.DefaultStatementTimeout
+	}
+	if o.CollisionAttempts == 0 {
+		o.CollisionAttempts = DefaultCollisionAttempts
+	}
+	if o.CollisionBackoff == 0 {
+		o.CollisionBackoff = DefaultCollisionBackoff
 	}
 	if o.Clock == nil {
 		o.Clock = progress.WallClock{}
@@ -94,6 +112,12 @@ func (o Options) validate() error {
 			// INV: LK-2
 			return fmt.Errorf("%w: %s %s is below PostgreSQL's one-millisecond resolution; use zero for the default", ErrInvalidOptions, timeout.name, timeout.value)
 		}
+	}
+	if o.CollisionAttempts < 1 {
+		return fmt.Errorf("%w: collision attempts %d is below one; use zero for the default", ErrInvalidOptions, o.CollisionAttempts)
+	}
+	if o.CollisionBackoff < 0 {
+		return fmt.Errorf("%w: collision backoff %s is negative; use zero for the default", ErrInvalidOptions, o.CollisionBackoff)
 	}
 	return nil
 }
@@ -130,6 +154,9 @@ type Copier struct {
 	// rowsTotal is the source's catalog row count read once at the start of
 	// Run.
 	rowsTotal uint64
+	// collisions counts chunk attempts the server refused on a unique index
+	// or an exclusion constraint; Collisions reads it from any goroutine.
+	collisions atomic.Int64
 }
 
 // NewCopier prepares a copy of target into shadow that resumes after from
@@ -217,6 +244,14 @@ func (c *Copier) Position() Position {
 // Copier from Position().Watermark clears the shadow above the watermark
 // and continues, so a caller can back off and resume behind a busy table.
 //
+// A chunk whose insert the server refuses on a unique index or an
+// exclusion constraint (SQLSTATE 23505 or 23P01) is run again after a wait,
+// up to Options.CollisionAttempts times: the value it collided on was moved
+// between keys by a source change the applier has yet to flush, and a later
+// attempt's snapshot sees the shadow after that flush. A collision no
+// attempt outlasts returns the server's error wrapped, the chunk in flight,
+// and Collisions counts every refused attempt.
+//
 // Cancellation reaches the server as a closed connection, so a statement
 // that was running keeps running until it finishes or hits the transaction's
 // statement_timeout, and only then is its transaction rolled back; the
@@ -285,12 +320,14 @@ func (c *Copier) finish(cause error) error {
 	return nil
 }
 
-// work is one worker's loop: claim a chunk, copy it in its own transaction,
-// land it, and tell the chunker how long it took. It returns nil when the
-// chunker has no chunk left and the first error otherwise; a cancelled
-// context ends the loop with the context's error, which Run resolves to
-// the cancellation's cause. A chunk whose copy failed is left in flight: it
-// did not land, so its keys must not read as landed.
+// work is one worker's loop: claim a chunk, copy it in its own transaction
+// (again, after a wait, when the insert collided with a shadow row the
+// applier has yet to clear), land it, and tell the chunker how long the
+// committed attempt took. It returns nil when the chunker has no chunk left
+// and the first error otherwise; a cancelled context ends the loop with the
+// context's error, which Run resolves to the cancellation's cause. A chunk
+// whose copy failed is left in flight: it did not land, so its keys must
+// not read as landed.
 func (c *Copier) work(ctx context.Context, pool *pgxpool.Pool) error {
 	for ctx.Err() == nil {
 		chunk, ok, err := c.claim(ctx, pool)
@@ -300,15 +337,14 @@ func (c *Copier) work(ctx context.Context, pool *pgxpool.Pool) error {
 		if !ok {
 			return nil
 		}
-		started := c.opts.Clock.Now()
-		inserted, err := c.copyChunk(ctx, pool, chunk)
+		inserted, took, err := c.copyUntilClear(ctx, pool, chunk)
 		if err != nil {
 			return err
 		}
 		if err := c.land(chunk, inserted); err != nil {
 			return err
 		}
-		if err := c.chunker.Feedback(chunk, c.opts.Clock.Now().Sub(started)); err != nil {
+		if err := c.chunker.Feedback(chunk, took); err != nil {
 			return err
 		}
 	}

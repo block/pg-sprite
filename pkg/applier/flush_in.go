@@ -7,7 +7,6 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/internal/chunksql"
 )
 
@@ -18,19 +17,30 @@ import (
 // and images column-wise, with the whole-row fallback (CO-6) — after the
 // same guards: the source and shadow are held in ACCESS SHARE, the lock
 // session's backend is confirmed to hold the table from this connection,
-// and both relations are confirmed to be the ones the proofs describe.
-// The caller's transaction already carries its budgets and role, so none
-// are set here; the flush pins the output settings Flush pins,
-// chunksql.Rendering, so a completion or conversion renders a value as the
-// copy did, and puts the catalog alone on the search_path (CO-9). It
-// restores the caller's extra_float_digits and bytea_output before it
-// returns, and leaves the search_path on the catalog for the caller to set
-// back as its own statements need.
+// both relations are confirmed to be the ones the proofs describe, and,
+// for a copy that evaluates conversion expressions, the catalog they
+// resolve in is confirmed to be the one the build saw, before the writes
+// and again after them (CO-9). The caller's transaction already carries
+// its budgets and role, so none are set here; the flush pins the output
+// settings Flush pins, chunksql.Rendering, so a completion or conversion
+// renders a value as the copy did, and sets the search_path every flush
+// runs under — the catalog alone, or the build's path for a copy with
+// conversions, so their expressions resolve as the gated statement's did
+// (CO-9). It restores the caller's extra_float_digits and bytea_output
+// before it returns and leaves the search_path on the flush's path for the
+// caller to set back as its own statements need.
+//
+// The second resolution check is what refuses a write that resolved
+// through a catalog change committed after the first; it sees that change
+// only when the caller's transaction is READ COMMITTED, where each
+// statement takes a new snapshot.
 //
 // A batch the shadow refuses even whole-row is ErrBatchDeferred, and the
 // server has aborted tx: the caller rolls it back. Any other failure
-// leaves tx as the failed statement left it, aborted. An empty batch
-// touches nothing, not even the session settings.
+// leaves tx aborted, or — for a resolution that drifted after the writes,
+// ErrInvariantViolation — open with writes the caller must not commit;
+// either way the caller rolls it back. An empty batch touches nothing, not
+// even the session settings.
 func (f *Flusher) FlushIn(ctx context.Context, tx pgx.Tx, batch Batch) (Result, error) {
 	if len(batch.Entries) == 0 {
 		return Result{}, nil
@@ -48,7 +58,7 @@ func (f *Flusher) FlushIn(ctx context.Context, tx pgx.Tx, batch Batch) (Result, 
 }
 
 func (f *Flusher) flushIn(ctx context.Context, tx pgx.Tx, batch Batch) (Result, error) {
-	digits, byteaOutput, err := pinFlushSettings(ctx, tx)
+	digits, byteaOutput, err := pinFlushSettings(ctx, tx, f.searchPath)
 	if err != nil {
 		return Result{}, err
 	}
@@ -61,8 +71,17 @@ func (f *Flusher) flushIn(ctx context.Context, tx pgx.Tx, batch Batch) (Result, 
 	if err := f.confirmRelations(ctx, tx); err != nil {
 		return Result{}, err
 	}
+	if err := f.confirmResolution(ctx, tx); err != nil {
+		return Result{}, err
+	}
 	result, err := f.apply(ctx, tx, batch)
 	if err != nil {
+		return Result{}, err
+	}
+	// As in flush: a catalog change committed between the first check and
+	// the writes is seen by this one, and the caller rolls the batch back
+	// with its transaction (CO-9).
+	if err := f.confirmResolution(ctx, tx); err != nil {
 		return Result{}, err
 	}
 	if _, err := tx.Exec(ctx, "SET LOCAL extra_float_digits = "+strconv.Itoa(digits)); err != nil {
@@ -75,11 +94,12 @@ func (f *Flusher) flushIn(ctx context.Context, tx pgx.Tx, batch Batch) (Result, 
 }
 
 // pinFlushSettings sets the session settings a flush depends on inside the
-// caller's transaction — the output settings of chunksql.Rendering and the
-// search_path — and returns the extra_float_digits and bytea_output it
-// found, so the caller's own values can be put back once the flush has
-// written. extra_float_digits is an integer on every supported server.
-func pinFlushSettings(ctx context.Context, tx pgx.Tx) (int, string, error) {
+// caller's transaction — the output settings of chunksql.Rendering and
+// searchPath, the path statement the Flusher runs every flush under — and
+// returns the extra_float_digits and bytea_output it found, so the caller's
+// own values can be put back once the flush has written.
+// extra_float_digits is an integer on every supported server.
+func pinFlushSettings(ctx context.Context, tx pgx.Tx, searchPath string) (int, string, error) {
 	var text, byteaOutput string
 	if err := tx.QueryRow(ctx, `SELECT pg_catalog.current_setting('extra_float_digits'), pg_catalog.current_setting('bytea_output')`).Scan(&text, &byteaOutput); err != nil {
 		return 0, "", fmt.Errorf("read extra_float_digits and bytea_output before the flush: %w", err)
@@ -88,7 +108,8 @@ func pinFlushSettings(ctx context.Context, tx pgx.Tx) (int, string, error) {
 	if err != nil {
 		return 0, "", fmt.Errorf("read extra_float_digits before the flush: %q is not an integer: %w", text, err)
 	}
-	if _, err := tx.Exec(ctx, chunksql.Rendering+"; "+dbconn.LocalSearchPath("pg_catalog")); err != nil {
+	// INV: CO-9
+	if _, err := tx.Exec(ctx, chunksql.Rendering+"; "+searchPath); err != nil {
 		return 0, "", fmt.Errorf("set flush settings: %w", err)
 	}
 	return digits, byteaOutput, nil

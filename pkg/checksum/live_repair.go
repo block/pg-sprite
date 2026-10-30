@@ -58,7 +58,7 @@ func (v *Verifier) recopyFenced(ctx context.Context, pool *pgxpool.Pool, mismatc
 		return nil, 0, fmt.Errorf("hold the catch-up's flushes off shadow %s.%s for repair: %w", v.shadow.Schema(), v.shadow.ShadowTable(), err)
 	}
 	defer resume()
-	tx, err := v.begin(ctx, pool, pgx.TxOptions{AccessMode: pgx.ReadWrite})
+	tx, err := v.begin(ctx, pool, repairWrite())
 	if err != nil {
 		return nil, 0, err
 	}

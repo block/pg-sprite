@@ -81,6 +81,7 @@ func (c *MigrateCmd) options(logger *slog.Logger) migrate.Options {
 	return migrate.Options{
 		Force:             c.Force,
 		AcceptBlocking:    c.AcceptBlocking,
+		AllowDestructive:  c.AllowDestructive,
 		MaxTableSizeBytes: int64(c.MaxTableSize),
 		Budget: executor.SequenceBudget{
 			Brief:      executor.Budget{LockTimeout: c.LockTimeout, StatementTimeout: c.StatementTimeout},
@@ -94,7 +95,7 @@ func (c *MigrateCmd) options(logger *slog.Logger) migrate.Options {
 			Connection:    c.Config(),
 			FreeDiskBytes: int64(c.FreeDisk),
 			KeepOld:       c.KeepOld,
-			Quiesced:      c.Quiesced,
+			BlockWrites:   c.BlockWrites,
 			Restart:       c.Restart,
 		},
 	}

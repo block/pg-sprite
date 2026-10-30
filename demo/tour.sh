@@ -51,12 +51,14 @@ assert_eq() {
     fi
 }
 
-# dry_run route reason destructive disposition sql
+# dry_run route reason destructive disposition sql [allow_destructive_table]
 #
 # Demo mode prints the routed plan. Check mode asserts the statement's
 # route, first decision reason, destructive flag, and the report's
 # disposition from the JSON plan report. Dry-run never writes, so these
-# rows can rerun in any order.
+# rows can rerun in any order. A destructive statement dry-runs to a plan
+# only under --allow-destructive, so its row names the table to
+# acknowledge; refused_destructive covers the unacknowledged form.
 #
 # Exit code: an execute-disposition plan exits 0; any plan that would not
 # execute (rewrite-required, unavailable, refuse) exits with the refusal
@@ -64,21 +66,73 @@ assert_eq() {
 # contract is pinned exactly.
 dry_run() {
     local route="$1" reason="$2" destructive="$3" disposition="$4" sql="$5" out status=0
+    local ack=()
+    if [ -n "${6:-}" ]; then
+        ack=(--allow-destructive "$6")
+    fi
     step "$sql"
     if [ "$CHECK" = 1 ]; then
-        out=$("$PGS" migrate --url "$PG_DSN" --dry-run --json --alter "$sql") || status=$?
+        out=$("$PGS" migrate --url "$PG_DSN" --dry-run --json --alter "$sql" ${ack[@]+"${ack[@]}"}) || status=$?
         if [ "$disposition" = execute ]; then
             assert_eq "dry-run exit of [$sql]" 0 "$status"
         else
             assert_eq "dry-run refusal exit of [$sql]" 2 "$status"
         fi
-        assert_eq "plan format_version of [$sql]" 12 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "plan format_version of [$sql]" 14 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "disposition of [$sql]" "$disposition" "$(jq -r '.disposition' <<<"$out")"
         assert_eq "route of [$sql]" "$route" "$(jq -r '.statements[0].route' <<<"$out")"
         assert_eq "reason of [$sql]" "$reason" "$(jq -r '.statements[0].decisions[0].reason' <<<"$out")"
         assert_eq "destructive of [$sql]" "$destructive" "$(jq -r '.statements[0].destructive' <<<"$out")"
     else
-        "$PGS" migrate --url "$PG_DSN" --dry-run --alter "$sql" || echo "(exit $?)"
+        "$PGS" migrate --url "$PG_DSN" --dry-run --alter "$sql" ${ack[@]+"${ack[@]}"} || echo "(exit $?)"
+    fi
+}
+
+# refused_destructive sql
+#
+# A statement that discards data runs only when --allow-destructive names
+# its table. Without it, the dry run and the apply both end in the
+# destructive-change verdict (class by-design) and the refusal exit code 2;
+# the dry run prints that verdict, not a plan report, so it carries no
+# format_version. Nothing runs either way, so the row can rerun.
+refused_destructive() {
+    local sql="$1" out status=0
+    step "refuse (destructive, unacknowledged): $sql"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" migrate --url "$PG_DSN" --dry-run --json --alter "$sql") || status=$?
+        assert_eq "destructive dry-run exit of [$sql]" 2 "$status"
+        assert_eq "destructive dry-run outcome of [$sql]" refused "$(jq -r '.outcome' <<<"$out")"
+        assert_eq "destructive dry-run reason of [$sql]" destructive-change "$(jq -r '.reason' <<<"$out")"
+        assert_eq "destructive dry-run class of [$sql]" by-design "$(jq -r '.class' <<<"$out")"
+        assert_eq "destructive dry-run format_version of [$sql]" null "$(jq -r '.format_version' <<<"$out")"
+        status=0
+        out=$("$PGS" migrate --url "$PG_DSN" --json --alter "$sql") || status=$?
+        assert_eq "destructive exit of [$sql]" 2 "$status"
+        assert_eq "destructive outcome of [$sql]" refused "$(jq -r '.outcome' <<<"$out")"
+        assert_eq "destructive reason of [$sql]" destructive-change "$(jq -r '.reason' <<<"$out")"
+        assert_eq "destructive class of [$sql]" by-design "$(jq -r '.class' <<<"$out")"
+    else
+        "$PGS" migrate --url "$PG_DSN" --alter "$sql"             || echo "(refused, exit $? — expected: a destructive statement needs --allow-destructive naming its table)"
+    fi
+}
+
+# execute_destructive table sql
+#
+# Runs a statement that discards data under the --allow-destructive
+# acknowledgement and requires the executed-natively verdict with exit 0
+# and the allowed_destructive audit field, for the table the
+# acknowledgement named.
+execute_destructive() {
+    local table="$1" sql="$2" out status=0
+    step "execute (allow destructive on $table): $sql"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" migrate --url "$PG_DSN" --json --alter "$sql" --allow-destructive "$table" 2>/dev/null) || status=$?
+        assert_eq "acknowledged destructive exit of [$sql]" 0 "$status"
+        assert_eq "outcome of [$sql]" executed-natively "$(jq -r '.outcome' <<<"$out")"
+        assert_eq "allowed_destructive of [$sql]" true "$(jq -r '.allowed_destructive' <<<"$out")"
+        assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
+    else
+        "$PGS" migrate --url "$PG_DSN" --alter "$sql" --allow-destructive "$table"
     fi
 }
 
@@ -149,28 +203,52 @@ execute_refused() {
     fi
 }
 
-# execute_accepted table sql
+# execute_accepted table allowed_destructive sql
 #
 # Runs a gate-refused blocking index statement under the --accept-blocking
-# acknowledgement and requires the without-online-safety verdict: its own
+# acknowledgement plus --allow-destructive (which a DROP INDEX needs and a
+# REINDEX ignores), and requires the without-online-safety verdict: its own
 # exit code 3 (never 0, which stays exclusive to online-safe execution),
-# the passthrough marker, and the table the acknowledgement named. The
-# statement budget is spelled on the command line because the flag refuses
-# to inherit the default as the accepted outage bound.
+# the passthrough marker, whether the verdict records an acknowledged loss,
+# and the table the acknowledgements named. The statement budget is spelled
+# on the command line because the flag refuses to inherit the default as
+# the accepted outage bound.
 execute_accepted() {
-    local table="$1" sql="$2" out status=0
-    step "execute (accept blocking on $table): $sql"
+    local table="$1" allowed="$2" sql="$3" out status=0
+    step "execute (accept blocking and the loss on $table): $sql"
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" migrate --url "$PG_DSN" --json --alter "$sql" \
-            --accept-blocking "$table" --statement-timeout 30s) || status=$?
+            --accept-blocking "$table" --allow-destructive "$table" --statement-timeout 30s) || status=$?
         assert_eq "accepted exit of [$sql]" 3 "$status"
         assert_eq "outcome of [$sql]" "executed-without-online-safety" "$(jq -r '.outcome' <<<"$out")"
         assert_eq "blocking_passthrough of [$sql]" true "$(jq -r '.blocking_passthrough' <<<"$out")"
+        assert_eq "allowed_destructive of [$sql]" "$allowed" "$(jq -r '.allowed_destructive // false' <<<"$out")"
         assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
         assert_eq "statement_timeout of [$sql]" 30s "$(jq -r '.statement_timeout' <<<"$out")"
     else
-        "$PGS" migrate --url "$PG_DSN" --alter "$sql" --accept-blocking "$table" --statement-timeout 30s \
+        "$PGS" migrate --url "$PG_DSN" --alter "$sql" --accept-blocking "$table" --allow-destructive "$table" \
+            --statement-timeout 30s \
             || echo "(exit $? — expected 3: committed without an online-safety guarantee)"
+    fi
+}
+
+# execute_accepted_needs_loss table sql
+#
+# The same DROP INDEX under --accept-blocking alone: accepting the lock is
+# not accepting the loss, so it is refused (exit 2, destructive-change) and
+# nothing runs.
+execute_accepted_needs_loss() {
+    local table="$1" sql="$2" out status=0
+    step "execute (accept blocking only on $table): $sql"
+    if [ "$CHECK" = 1 ]; then
+        out=$("$PGS" migrate --url "$PG_DSN" --json --alter "$sql" \
+            --accept-blocking "$table" --statement-timeout 30s) || status=$?
+        assert_eq "refusal exit of [$sql]" 2 "$status"
+        assert_eq "reason of [$sql]" "destructive-change" "$(jq -r '.reason' <<<"$out")"
+        assert_eq "table of [$sql]" "$table" "$(jq -r '.table' <<<"$out")"
+    else
+        "$PGS" migrate --url "$PG_DSN" --alter "$sql" --accept-blocking "$table" --statement-timeout 30s \
+            || echo "(refused, exit $? — expected 2: a dropped index also needs --allow-destructive)"
     fi
 }
 
@@ -200,7 +278,7 @@ diff_plan() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff exit of [$desired]" 0 "$status"
-        assert_eq "diff format_version of [$desired]" 12 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 14 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "statement count of [$desired]" "$count" "$(jq -r '.statements | length' <<<"$out")"
         case "$(jq -r '.statements[0].sql' <<<"$out")" in
         *"$fragment"*) ;;
@@ -228,7 +306,7 @@ diff_refused() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" diff --url "$PG_DSN" --desired "$desired" --schema public --json) || status=$?
         assert_eq "diff refusal exit of [$desired]" 2 "$status"
-        assert_eq "diff format_version of [$desired]" 12 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "diff format_version of [$desired]" 14 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "diff disposition of [$desired]" refuse "$(jq -r '.disposition' <<<"$out")"
         assert_eq "diff reason of [$desired]" unsupported-statement "$(jq -r '.statements[0].reason' <<<"$out")"
         assert_eq "diff class of [$desired]" "$class" "$(jq -r '.statements[0].class' <<<"$out")"
@@ -263,7 +341,7 @@ run_pull() {
             out=$("$PGS" diff --url "$PG_DSN" --schema public --desired "$desired" --json) || status=$?
             assert_eq "diff exit of [$desired]" 0 "$status"
             # Plan report contract version (plan.FormatVersion), same pin as diff_plan.
-            assert_eq "diff format_version of [$desired]" 12 "$(jq -r '.format_version' <<<"$out")"
+            assert_eq "diff format_version of [$desired]" 14 "$(jq -r '.format_version' <<<"$out")"
             assert_eq "diff disposition of [$desired]" execute "$(jq -r '.disposition' <<<"$out")"
             assert_eq "zero diff of [$desired]" 0 "$(jq -r '.statements | length' <<<"$out")"
         else
@@ -289,9 +367,10 @@ run_dryrun() {
     dry_run native         fast-default           false execute     "ALTER TABLE users ADD COLUMN joined timestamptz DEFAULT now()"
     dry_run copy-and-swap  volatile-default       false unavailable "ALTER TABLE users ADD COLUMN started timestamptz DEFAULT clock_timestamp()"
     dry_run native         app-breaking-rename    false rewrite-required "ALTER TABLE users RENAME COLUMN name TO full_name"
-    dry_run native         metadata-only          true  execute     "ALTER TABLE users DROP COLUMN status"
+    dry_run native         metadata-only          true  execute     "ALTER TABLE users DROP COLUMN status" public.users
     dry_run copy-and-swap  relocation             false unavailable "ALTER TABLE users SET TABLESPACE pg_default"
     dry_run refuse         unsupported-operation  false refuse      "ALTER TABLE users ENABLE ROW LEVEL SECURITY"
+    refused_destructive "ALTER TABLE users DROP COLUMN status"
 }
 
 review_rls() {
@@ -359,7 +438,7 @@ run_offline() {
     if [ "$CHECK" = 1 ]; then
         out=$("$PGS" suggest --json risky.sql) || status=$?
         assert_eq "suggest exit" 0 "$status"
-        assert_eq "suggest format_version" 3 "$(jq -r '.format_version' <<<"$out")"
+        assert_eq "suggest format_version" 5 "$(jq -r '.format_version' <<<"$out")"
         assert_eq "suggest count" 2 "$(jq -r '.suggestions | length' <<<"$out")"
     else
         "$PGS" suggest risky.sql || echo "(exit $?)"
@@ -431,8 +510,13 @@ run_exec() {
     # runs first so the index is still there to drop afterwards.
     execute_refused         index-statement "DROP INDEX orders_total_idx"
     execute_accept_mismatch public.users    "DROP INDEX orders_total_idx"
-    execute_accepted        public.orders   "DROP INDEX orders_total_idx"
-    execute_accepted        public.orders   "REINDEX TABLE orders"
+    execute_accepted_needs_loss public.orders "DROP INDEX orders_total_idx"
+    execute_accepted        public.orders true  "DROP INDEX orders_total_idx"
+    execute_accepted        public.orders false "REINDEX TABLE orders"
+    # A drop discards the column's values, so it is refused until the
+    # acknowledgement names the table, then runs natively.
+    refused_destructive                     "ALTER TABLE users DROP COLUMN status"
+    execute_destructive     public.users    "ALTER TABLE users DROP COLUMN status"
 }
 
 case "$section" in
