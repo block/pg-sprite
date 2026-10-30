@@ -30,6 +30,12 @@ var (
 	// where REINDEX TABLE needs a table — so there is no lock to
 	// acknowledge. Nothing has executed.
 	ErrAcceptBlockingWrongRelationKind = errors.New("the accepted statement names a relation of the wrong kind")
+	// ErrAcceptBlockingNotSupported is returned by [RunDesired] when
+	// Options.AcceptBlocking is set: the operator accepts one blocking
+	// statement they wrote, and desired-state execution runs statements the
+	// plan derived.
+	ErrAcceptBlockingNotSupported = errors.New(
+		"the accept-blocking acknowledgement applies to the imperative front door only; desired-state execution runs no blocking statement it was not told to")
 )
 
 // AcceptedRefusal returns the refusal's in-process proof when the
