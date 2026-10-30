@@ -639,6 +639,13 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   rejects `AllowDestructive` (`ErrAllowDestructiveNotSupported`) and keeps refusing a
   destructive plan whole, so a declarative drop the operator approves runs as its own
   imperative statement.
+- **`RunDesired` takes no acknowledgement.** Each of `Force`, `AcceptBlocking`,
+  `AllowDestructive`, `CopySwap.Restart`, and `CopySwap.BlockWrites` accepts a loss for one
+  statement the operator wrote, and a desired-state run executes statements the plan derived.
+  Setting any of them returns its own sentinel before any database work:
+  `ErrForceNotSupported`, `ErrAcceptBlockingNotSupported`, `ErrAllowDestructiveNotSupported`,
+  `ErrRestartNotSupported`, or `ErrBlockWritesNotSupported`. An adapter that reuses one
+  `Options` value for both front doors clears them before calling `RunDesired`.
 - **Plan-time verdicts are advisory; the executor re-resolves.** The stored verdict exists so
   operators learn about engine limitations at plan time, but it is estimate-based and stale by
   apply time. SchemaBot's own engines re-evaluate the refusal/policy predicate per statement

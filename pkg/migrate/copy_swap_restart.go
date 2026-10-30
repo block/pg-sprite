@@ -1,12 +1,20 @@
 package migrate
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 
 	"github.com/block/pg-sprite/pkg/router"
 	"github.com/block/pg-sprite/pkg/statement"
 )
+
+// ErrRestartNotSupported is returned by [RunDesired] when
+// Options.CopySwap.Restart is set: rerunning a desired schema resumes a
+// stopped copy-and-swap, and discarding its progress is a decision about
+// one statement the operator names on the imperative front door.
+var ErrRestartNotSupported = errors.New(
+	"the restart acknowledgement applies to the imperative front door only; desired-state execution resumes a stopped copy-and-swap")
 
 // checkRestartAck confirms that the restart acknowledgement names the
 // resolved target table, exactly as the force acknowledgement must: a
