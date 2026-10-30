@@ -348,14 +348,10 @@ func TestCatchupConvergesUnderMixedLoad(t *testing.T) {
 }
 
 // A row's primary key moves to a fresh identity value, so the change is an
-// image under a new key paired with a delete under the old one. The pair
-// travels together through the drain, and the flush completes the image's
-// unchanged blob from the old key's row before it deletes that row (CO-4,
-// D13). The workload starts after the copy has landed every key: the moved
-// row keeps its unique key, so a move from a landed key to a key in flight
-// collides on the copier's insert with the row still under the old key, and
-// the pair rule defers that key's delete until the chunk lands — the two
-// would wait on each other until the copier's collision attempts ran out.
+// image under a new key paired with a delete under the old one. With the
+// copy landed, both halves are landed: the pair flushes together, and the
+// flush completes the image's unchanged blob from the old key's row before
+// it deletes that row (CO-4, D13).
 func TestCatchupConvergesUnderKeyMoves(t *testing.T) {
 	f := newCatchupFixture(t, 1500)
 	run := startCatchup(t, f, applier.CatchupOptions{})
