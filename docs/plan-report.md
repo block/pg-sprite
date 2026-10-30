@@ -67,7 +67,7 @@ consumer rendering either into a shared surface must clamp and escape them.
 | `owner` | string | `no-online-safety-problem` refusals only | Who owns the aggregate work pg-sprite has no online-safety reason to run (see Owners). Present exactly when `class` is `no-online-safety-problem`. |
 | `fingerprint` | string | always | The plan's stable identity (see Fingerprint). |
 | `statements` | array | always | The ordered plan; `[]` (never `null`) means nothing to do. |
-| `advisories` | array | `diff` source, existing table, when non-empty | Typed observations the diff made about the live table that produced no statement (see Advisory fields): the invalid indexes it saw and declined to drop. Advisory only — the statements and the `destructive` gate are unaffected, and nothing in it executes. Read it alongside `statements`: an empty plan with an advisory present means there is nothing to run **and** the table is not clean. Absent when there is nothing to report. Explanatory: excluded from the fingerprint. |
+| `advisories` | array | `diff` source, existing table, when non-empty | Typed observations the diff made about the live table that produced no statement (see Advisory fields): the invalid indexes it saw and declined to drop. Advisory only — the statements and the `destructive` gate are unaffected, and nothing in it executes. Read it alongside `statements`: an empty plan with an advisory present means there is nothing to run **and** the table is not clean. Absent when there is nothing to report. Also absent for a desired file that declares row security: that review path collects no advisories, so there an absent field does not mean the table has no invalid index. Explanatory: excluded from the fingerprint. |
 
 ## Advisory fields
 

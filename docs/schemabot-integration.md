@@ -600,7 +600,8 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
 - **Recommended call sequence: dry-run, then apply.** The typed manual path for a
   rewrite-required refusal (`guidance`), the create path's typed shape refusal
   (`statements[].cause`, `format_version` 3 and later), the invalid-index advisories the diff
-  declines to act on (`advisories[]`, `format_version` 15 and later), the plan `fingerprint`, and
+  declines to act on (`advisories[]`, `format_version` 15 and later; not collected for a desired
+  file that declares row security, so absence there proves nothing), the plan `fingerprint`, and
   `table_exists` all live on the [plan report](plan-report.md) — the dry run's output. The run verdict carries
   the refusal reason as a typed field but its `detail` is display-only prose: an orchestrator
   that wants the typed guidance or cause must obtain the plan report first (dry-run for the
