@@ -2,8 +2,10 @@
 
 **pg-sprite requires that every connection it opens stays on one PostgreSQL server session
 for as long as the connection is open.** That holds for a direct connection and for a pooler
-in session mode. It does not hold behind a transaction-mode or statement-mode pooler, and
-pg-sprite refuses to run there before it executes anything. This page explains what depends
+in session mode. It does not hold behind a transaction-mode or statement-mode pooler, so pg-sprite must
+be pointed at a direct or session-mode endpoint. It checks before it executes anything and
+refuses an endpoint the check catches, but a check that passes is evidence, not
+certification (see [How pg-sprite proves it](#how-pg-sprite-proves-it)). This page explains what depends
 on session affinity, how pg-sprite proves it, what it refuses, and how to connect.
 
 ## Table of contents
@@ -91,13 +93,14 @@ for every chunk copy, guarded write, checkpoint save and cutover.
 
 Reading back `lock_timeout` is not enough on its own: an idle transaction-mode pooler may hand
 the same backend back twice and report the settings healthily. So after the read-back,
-`NewPool` forces the rebind a pooler would eventually make, and checks for it:
+`NewPool` tries to force the rebind a pooler would eventually make, and checks for it:
 
 ```diagram
  conn  (one of the pool's connections)      second connection (throwaway pool of 1)
  ────                                       ─────────────────────────────────────
  t1  pg_try_advisory_lock(random key) → true
- t2                                         BEGIN   (pins a backend for the whole tx)
+ t2                                         SELECT 1 (takes a backend first)
+                                            BEGIN   (pins it for the whole tx)
  t3                                         pg_try_advisory_lock(same key)
                                               healthy: false (conn's session holds it)
  t4  does pg_locks show my own backend
@@ -110,12 +113,17 @@ the same backend back twice and report the settings healthily. So after the read
 
 - **Direct connection or session-mode pooler:** `conn` is one session throughout, so every
   reading is the healthy one, and there are no false positives to trade off.
-- **Transaction-mode pooler:** the open transaction at t2 takes the backend `conn` used at t1,
-  so `conn`'s next statement lands elsewhere. At least one reading fails: the second
-  connection takes a lock `conn` "holds", `conn` is no longer the holder in `pg_locks`, or
-  `conn` can't release what it took. `NewPool` returns `ErrNoSessionAffinity` with the remedy.
-- **Statement-mode pooler:** the pooler refuses the `BEGIN` at t2, and `NewPool` fails before
-  any work runs.
+- **Transaction-mode pooler:** the proof tries to expose the rebind. The open transaction at
+  t2 is meant to take the backend `conn` used at t1, so that `conn`'s next statement lands
+  elsewhere; when it does, at least one reading fails: the second connection takes a lock
+  `conn` "holds", `conn` is no longer the holder in `pg_locks`, or `conn` can't release what it
+  took. `NewPool` then returns `ErrNoSessionAffinity` with the remedy. A pooler with spare
+  backends can hand the second connection a different backend, and then every reading is
+  the healthy one: **a passing proof does not make a transaction-mode endpoint safe.** Point
+  pg-sprite at a direct or session-mode endpoint whether or not the proof passes.
+- **Statement-mode pooler:** the second connection has just run `SELECT 1`, so a pooler that
+  refuses the `BEGIN` at t2 keeps no backend across statements. `NewPool` returns
+  `ErrNoSessionAffinity` before any work runs.
 - The key is freshly random on every call, so concurrent proofs never contend and a probe lock
   stranded on a pooled backend can't block anything later.
 - The proof needs **one spare connection** to the server, or pooler, beyond the pool's own.
@@ -129,13 +137,14 @@ The same proof runs on the table lock's dedicated connection before the lock is 
 |---|---|
 | Direct connection to PostgreSQL (including Aurora/RDS writer endpoints) | Passes |
 | PgBouncer, or another pooler, in **session** mode | Passes. The proof needs one spare server connection in the pooler's pool. |
-| PgBouncer in **transaction** mode | Refused with `ErrNoSessionAffinity` |
-| PgBouncer in **statement** mode | Refused before any work runs: PgBouncer rejects the proof's `BEGIN` |
+| PgBouncer in **transaction** mode | Not supported. Usually refused with `ErrNoSessionAffinity`, or with `ErrSessionSettingsDiscarded` when the pooler rejects or drops the timeout startup parameters. A proof that passes does not make it supported. |
+| PgBouncer in **statement** mode | Not supported. Refused with `ErrNoSessionAffinity` (PgBouncer rejects the proof's `BEGIN`), or with `ErrSessionSettingsDiscarded` as above. |
 | Supabase Supavisor session endpoint | Passes ([supabase.md](supabase.md)) |
-| Supabase Supavisor transaction endpoint | Refused with `ErrNoSessionAffinity`, even with named prepared statements disabled ([supabase.md](supabase.md)) |
+| Supabase Supavisor transaction endpoint | Not supported. Refused with `ErrNoSessionAffinity` in testing, even with named prepared statements disabled ([supabase.md](supabase.md)) |
 
-The transaction-mode and session-mode PgBouncer results are tested against a real PgBouncer
-([testing.md](testing.md)).
+The session-, transaction- and statement-mode PgBouncer results are tested against a real
+PgBouncer ([testing.md](testing.md)). Both refusals name the same remedy: connect through a
+direct or session-mode endpoint.
 
 ## How to connect
 
