@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/pkg/applier"
+	"github.com/block/pg-sprite/pkg/copier"
 )
 
 // sqlstateInFailedTransaction is what the server raises for any statement
@@ -50,6 +51,52 @@ func TestFlushInWritesOnlyWhenTheCallerCommits(t *testing.T) {
 	require.NoError(t, tx.Commit(t.Context()))
 	f.assertConverged(t, p.shadow)
 	assert.Equal(t, int64(100), f.count(t, p.shadow.ShadowTable()))
+}
+
+// A bytea converted to text lands the same text from the swap's drain as
+// from the copy, whatever bytea_output the caller's transaction carries:
+// the server renders the bytes \x01ff as \x01ff under hex and as \001\377
+// under escape, and the drain is the last write before the swap, with no
+// verifier after it. The caller's own bytea_output is put back afterwards.
+func TestFlushInConvertsAByteaToTextAsTheCopyDoes(t *testing.T) {
+	f := newFlushFixture(t)
+	f.exec(t, `
+		CREATE TABLE %s.blobs (
+			id bigint PRIMARY KEY,
+			body bytea,
+			note text
+		)`)
+	f.exec(t, `INSERT INTO %s.blobs VALUES (1, '\x01ff'::bytea, 'n'), (2, '\x01ff'::bytea, 'n')`)
+	target := f.prove(t, "blobs")
+	lock := f.lock(t, "blobs")
+	shadow := f.build(t, lock, target, `
+		ALTER TABLE %s
+			ALTER COLUMN body TYPE text USING body::text`)
+	require.Equal(t, map[string]string{"body": "body::text"}, shadow.Conversions())
+	c, err := copier.NewCopier(target, shadow, lock, copier.Watermark{}, copier.Options{Workers: 1})
+	require.NoError(t, err)
+	require.NoError(t, c.Run(t.Context(), f.poolWithRuntimeParam(t, "bytea_output", "escape")))
+	copied, _ := f.text(t, shadow.ShadowTable(), "body", 1)
+	flush, err := applier.NewFlusher(target, shadow, lock, applier.Options{})
+	require.NoError(t, err)
+	tx, err := f.pool.BeginTx(t.Context(), pgx.TxOptions{AccessMode: pgx.ReadWrite})
+	require.NoError(t, err)
+	_, err = tx.Exec(t.Context(), `SET LOCAL bytea_output = 'escape'`)
+	require.NoError(t, err)
+
+	result, err := flush.FlushIn(t.Context(), tx, batch(image(2, col("body", `\x01ff`), col("note", "n"))))
+
+	require.NoError(t, err)
+	assert.Equal(t, applier.Result{Images: 1}, result)
+	var output string
+	require.NoError(t, tx.QueryRow(t.Context(), `SELECT current_setting('bytea_output')`).Scan(&output))
+	assert.Equal(t, "escape", output, "the caller's bytea_output is put back after the flush")
+	require.NoError(t, tx.Commit(t.Context()))
+	drained, _ := f.text(t, shadow.ShadowTable(), "body", 2)
+	require.NotNil(t, copied)
+	require.NotNil(t, drained)
+	assert.Equal(t, `\x01ff`, *copied, "the copy renders hex whatever its pool is configured with")
+	assert.Equal(t, *copied, *drained, "the same source value converted by the copy and by the drain")
 }
 
 // A batch the shadow refuses even whole-row is deferred and leaves the
