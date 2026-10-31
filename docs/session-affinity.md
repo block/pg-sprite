@@ -46,8 +46,8 @@ it. What varies is how many client connections share a backend, and for how long
 |---|---|---|
 | Direct | 1 : 1 for the connection's whole life | Yes |
 | Session-mode pooler | 1 : 1 while the client stays connected; the backend is handed to the next client after it disconnects | Yes |
-| Transaction-mode pooler | bound for one transaction, then any free backend | No |
-| Statement-mode pooler | bound for one statement, then any free backend | No |
+| Transaction-mode pooler | Bound to a backend only for the length of one transaction; the next transaction can run on any free backend | No |
+| Statement-mode pooler | Bound to a backend only for the length of one statement; the next statement can run on any free backend | No |
 
 ```diagram
  direct / session mode                    transaction mode
