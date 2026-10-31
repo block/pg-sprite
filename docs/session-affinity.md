@@ -12,6 +12,8 @@ on session affinity, how pg-sprite proves it, what it refuses, and how to connec
 
 - [Is it mandatory?](#is-it-mandatory)
 - [What depends on one session](#what-depends-on-one-session)
+  - [Connection, session and backend](#connection-session-and-backend)
+  - [What pg-sprite keeps in the session](#what-pg-sprite-keeps-in-the-session)
 - [What breaks without it](#what-breaks-without-it)
 - [How pg-sprite proves it](#how-pg-sprite-proves-it)
 - [Which endpoints pass](#which-endpoints-pass)
@@ -33,8 +35,34 @@ affinity again on its own connection.
 
 ## What depends on one session
 
-Each item below is state PostgreSQL keeps **per server session**, not per client connection.
-If the connection's next statement lands on a different backend, the state is not there.
+### Connection, session and backend
+
+PostgreSQL starts one **backend** process for each connection it accepts, and that backend
+*is* the **session**: everything set with `SET`, every session-level lock, and every
+prepared statement lives in its memory until the connection closes. `pg_backend_pid()` names
+it. What varies is how many client connections share a backend, and for how long:
+
+| Path | Client connection → backend | Session state survives across transactions? |
+|---|---|---|
+| Direct | 1 : 1 for the connection's whole life | Yes |
+| Session-mode pooler | 1 : 1 while the client stays connected; the backend is handed to the next client after it disconnects | Yes |
+| Transaction-mode pooler | bound for one transaction, then any free backend | No |
+| Statement-mode pooler | bound for one statement, then any free backend | No |
+
+```diagram
+ direct / session mode                    transaction mode
+ ─────────────────────                    ────────────────
+ client conn ─────────▶ backend A         client conn ─ tx 1 ─▶ backend A
+   tx 1  runs on A                                    ─ tx 2 ─▶ backend B
+   tx 2  runs on A                                    ─ tx 3 ─▶ backend A, after
+   (A keeps the SETs and locks)                                another client used it
+```
+
+### What pg-sprite keeps in the session
+
+So "the connection" pg-sprite holds is only as stable as the backend behind it. Each item
+below is state PostgreSQL keeps **per backend**, not per client connection: if the
+connection's next statement lands on a different backend, the state is not there.
 
 | Session state | What pg-sprite uses it for | Invariant |
 |---|---|---|
