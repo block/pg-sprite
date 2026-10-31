@@ -232,13 +232,24 @@ func LookupTableLockHolder(ctx context.Context, conn AdvisoryLockHolder, schema,
 	return lookupTableLockHolder(ctx, conn, TableLockKey{ClassID: TableLockClassID, ObjID: objID})
 }
 
+// lookupTableLockHolder reads the holder of key from pg_locks on conn's
+// connection, scoped to conn's own database. pg_locks is cluster-wide and
+// an advisory lock is per database, so the same key may be granted in
+// several databases of one server at once; only the grant in the database
+// conn is connected to is the lock on this table.
 func lookupTableLockHolder(ctx context.Context, conn AdvisoryLockHolder, key TableLockKey) (holder TableLockHolder, found bool, err error) {
 	ref := pairAdvisoryLock(key)
+	// INV: LK-1 — the database predicate is what makes a confirmation from
+	// a working connection mean "held in the database this transaction
+	// writes to": without it, a lock session dialled into another database
+	// of the same server would confirm the lock it holds there.
 	const query = `SELECT l.pid, COALESCE(a.application_name, ''), a.backend_start, COALESCE(a.state, '')
 		  FROM pg_catalog.pg_locks l
 		  LEFT JOIN pg_catalog.pg_stat_activity a ON a.pid = l.pid
 		 WHERE l.locktype = 'advisory'
 		   AND l.granted
+		   AND l.database = (SELECT d.oid FROM pg_catalog.pg_database d
+		                      WHERE d.datname = pg_catalog.current_database())
 		   AND l.objsubid = $1
 		   AND l.classid::bigint = $2
 		   AND l.objid::bigint = $3

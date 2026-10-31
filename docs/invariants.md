@@ -604,7 +604,11 @@ Migrations serialize per table via a **session-scoped advisory lock** — the an
 *Enforced today:* `pkg/dbconn` `AcquireTableLock` (`TableLock` proof carried by
 `TableLockSession`; affinity refusal behind transaction-mode and statement-mode PgBouncer,
 two-instance refusal, keepalive-loss, and `Bind`
-cancellation tests); `pkg/schemachange` shadow build, drop, and inspect each require the
+cancellation tests), and `TableLockSession.Confirm` and `LookupTableLockHolder` read
+`pg_locks` scoped to the connection's own database, so a lock the session holds in another
+database of the same server — where it excludes nothing on this database's table — confirms
+as `ErrTableLockNotHeld` and is not reported as the table's holder (same-key-in-another-database
+test); `pkg/schemachange` shadow build, drop, and inspect each require the
 session for the proven table, run under its `Bind` context, and confirm from their own
 transaction that the session's backend holds the lock before the first write (nil-session,
 wrong-table, reported-loss, gone-session, rival-backend, mid-build-loss, and mid-drop-loss
