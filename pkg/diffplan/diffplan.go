@@ -48,7 +48,9 @@ type Request struct {
 // desired schema against the live database: introspect the live table,
 // derive the changes (the full qualified desired schema when the table does
 // not exist yet), classify each change with live-column facts, route the
-// set, and stamp the report with the server version and fingerprint.
+// set, attach the diff's advisories (the invalid indexes it observed and
+// declined to drop), and stamp the report with the server version and
+// fingerprint.
 //
 // Plan needs more than a read-only connection: desired state is realized by
 // executing the desired DDL in a scratch schema inside a transaction that
@@ -97,6 +99,10 @@ func Plan(ctx context.Context, pool *pgxpool.Pool, req Request) (plan.Report, er
 		if changes, err = schemadiff.Diff(req.Schema, live, desired); err != nil {
 			return plan.Report{}, err
 		}
+		// The diff never drops an unfinished index build; the report
+		// carries each one it saw so an empty or non-destructive plan does
+		// not read as a clean table.
+		report.Advisories = schemadiff.Advisories(live, desired)
 		if facts.AddColumnProofs, err = addColumnProofs(ctx, pool, req.Schema, ds.Table(), changes); err != nil {
 			return plan.Report{}, err
 		}

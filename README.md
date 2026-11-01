@@ -132,7 +132,10 @@ refusal — never a silently wrong or incomplete result:
   `--allow-destructive SCHEMA.TABLE` names the table; the acknowledged run is
   audited and its verdict carries `allowed_destructive: true`. A drop that
   adds the same column back gets the guidance to change its type in place,
-  which keeps its values.
+  which keeps its values. A `DROP INDEX` run under `--accept-blocking` needs
+  `--allow-destructive` too: accepting the lock is not accepting the loss,
+  and the refusal lists the checks (`idx_scan` on every replica, foreign
+  keys, uniqueness) that catch an index the application still uses.
 - **Destructive desired-state plans are refused as a whole** — `migrate --desired`
   creates missing tables and converges supported changes, but never infers permission
   to discard live structure. A new primary key or unique constraint over a live
@@ -142,7 +145,8 @@ refusal — never a silently wrong or incomplete result:
   with the desired definition: it plans as one online `VALIDATE CONSTRAINT`, and
   refuses with `validated-constraint-drift` if the constraint changed after planning.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
-  build's leftover is reported with a typed state, and the proven removal
+  build's leftover is reported with a typed state (and named by `diff` as a
+  typed plan advisory), and the proven removal
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
   the caller must not rebuild) is library-only; from the CLI the
   [runbook](docs/invalid-index-recovery.md) applies.
@@ -150,7 +154,8 @@ refusal — never a silently wrong or incomplete result:
   `migrate --accept-blocking SCHEMA.TABLE` runs an otherwise-refused plain
   `DROP INDEX` (not `CASCADE`), `REINDEX INDEX`, or `REINDEX TABLE`
   deliberately under the engine's bounded lock and statement budgets, with
-  the verdict marked `executed-without-online-safety` (exit 3). Every other
+  the verdict marked `executed-without-online-safety` (exit 3). A `DROP INDEX`
+  also needs `--allow-destructive` naming the same table. Every other
   refusal — including a blocking index build on a partitioned parent — still
   exits 2. Design:
   [docs/lock-budgeted-passthrough.md](docs/lock-budgeted-passthrough.md).
@@ -255,7 +260,7 @@ read-only or fully offline.
 
 | Command | Live database | What the connection is used for |
 |---|---|---|
-| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets. A change routed to copy-and-swap also takes `--free-disk`, and optionally `--quiesced` (fence writes instead of streaming them) and `--restart SCHEMA.TABLE` (start a stopped run over); see [running a copy-and-swap](docs/copy-and-swap.md) |
+| `migrate` | required | Resolve the target table, preflight it (privileges, partitioning, size and catalog facts), classify and route the change, then **execute** the routed SQL under bounded budgets. A change routed to copy-and-swap also takes `--free-disk`, and optionally `--block-writes SCHEMA.TABLE` (block the table's writes instead of streaming them, offline mode) and `--restart SCHEMA.TABLE` (start a stopped run over); see [running a copy-and-swap](docs/copy-and-swap.md) |
 | `migrate --dry-run` | required | The same introspection as a real run — server version, target resolution, table facts — so the printed plan reflects the actual target; executes nothing |
 | `diff` | required | Introspect the live table (read-only) and materialize the desired-state file on a scratch schema inside a transaction that is always rolled back; prints the plan, changes nothing |
 | [`pull`](docs/pull.md) | required | Introspect each supported table in a schema and create one desired-state file per table; existing files are never overwritten, and a zero-change `diff` verifies the baseline |

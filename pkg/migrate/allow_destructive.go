@@ -128,12 +128,29 @@ func AdmitDestructive(st statement.Statement, schema string, rs router.Statement
 	return v, true, nil
 }
 
-// auditAllowDestructive records the acknowledged data loss before anything
-// executes. The record is warn-level and unconditional, as the force audit
-// is, and the verdict's AllowedDestructive field is its machine-readable
-// twin.
-func auditAllowDestructive(audit *slog.Logger, st statement.Statement) {
+// dropIndexDestructiveVerdict is the refusal for an accepted blocking DROP
+// INDEX without the destructive acknowledgement. Every index drop counts,
+// not only a unique one: the common mistake is dropping an index the
+// application still reads through, so the detail lists the checks that
+// catch it before naming the acknowledgement. table is the index's owning
+// table, resolved from the catalog.
+func dropIndexDestructiveVerdict(st statement.Statement, table string) verdict.Verdict {
+	detail := "DROP INDEX discards an index that queries, foreign-key checks, or a uniqueness guarantee may " +
+		"still rely on, and undoing it is a full index build; before dropping, confirm that " +
+		"pg_stat_user_indexes.idx_scan for the index is 0 on the primary and on every replica (each instance " +
+		"keeps its own counters) over a window since stats_reset that covers the application's full cycle, " +
+		"that no foreign key's referencing columns rely on it, and, for a unique index, that nothing still " +
+		"needs the uniqueness it enforces — then rerun with --allow-destructive " + table
+	v := verdict.Verdict{Statement: st.SQL(), Table: table, Detail: detail}
+	return v.WithRefusal(destructiveChangeRefusal())
+}
+
+// auditAllowDestructive records the acknowledged data loss on table before
+// anything executes. The record is warn-level and unconditional, as the
+// force audit is, and the verdict's AllowedDestructive field is its
+// machine-readable twin.
+func auditAllowDestructive(audit *slog.Logger, st statement.Statement, table string) {
 	audit.Warn("destructive change acknowledged; the statement will discard live data or structure",
-		"table", qualified(st),
+		"table", table,
 		"kind", st.Kind().String())
 }

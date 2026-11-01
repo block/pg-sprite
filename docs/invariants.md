@@ -269,12 +269,20 @@ writer holds its locks until its commit is visible and the swap's `ACCESS EXCLUS
 them all out (sync-commit test: a writer under `synchronous_commit = on` against a standby that
 never answers has its UPDATE delivered and left buffered with `Invisible` one and nothing
 applied, the confirmed position below the delivered one, until the backend is cancelled, after
-which the change lands and the catch-up converges). Also open: a primary-key move or a
-unique-value swap that straddles a chunk the copier is reading collides, on the copier's own
-insert of the moved row, with the stale shadow row the flush has not yet deleted (SQLSTATE
-`23505`); the catch-up's half of the exchange is correct and the resolution is the copier's, so
-the convergence tests for key moves and unique-key swaps start their load after the copy has
-landed. *Test obligation:* a
+which the change lands and the catch-up converges). *Enforced* for the copier's side
+of a unique value that moves between rows while its chunk is in flight: the chunk's insert
+collides (SQLSTATE `23505`, or `23P01` for an exclusion constraint) with the shadow row that
+still holds the value — a landed row the flush has yet to rewrite, or a row of the same chunk
+the copier itself read before the swap — and the copier runs the chunk again after a bounded
+wait (`copier.Options.CollisionAttempts` × `CollisionBackoff`, linear), counting each
+collision, until the flush has moved the value and the chunk lands or the attempts run out and
+the server's error is returned with no cause of its own (a copier integration test holds a
+colliding row across several attempts and removes it; a catch-up convergence test runs
+unique-key swaps throughout the copy). *Open:* a primary-key move whose row carries a unique
+secondary value, from a landed key to a key in flight: the drain's pair rule defers the old
+key's delete until the chunk lands, and the chunk cannot land while the old key's row holds the
+value, so the two wait on each other until the copier's attempts run out; the convergence test
+for key moves starts its load after the copy has landed. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 marker-bearing UPDATE for a key whose row the source then deleted before its chunk was read,
@@ -779,7 +787,8 @@ the proof's lock, every drop, and the requested build share **one** overall budg
 recovery over k quarantined entries costs at most the budget, not (k+1) budgets.
 The declarative diff leans on this proof without performing it: when desired names an index
 whose live entry is an unfinished build, `diff` plans the `create-index` alone and never a
-drop, knowing the create cannot run as-is against the occupied name. The plan completes only
+drop, knowing the create cannot run as-is against the occupied name, and says so with an
+`invalid-index-rebuild` advisory on the plan report. The plan completes only
 through this invariant's proven removal — `RebuildAbandonedIndex`, or `DropAbandonedIndex`
 when the name must be cleared without completing the plan — or through an operator
 following the runbook; a plain `CREATE INDEX` on the occupied name fails as a duplicate
@@ -851,7 +860,8 @@ would without the flag — including a `DROP INDEX ... CASCADE`, whose refusal s
 ineligible one because its scope exceeds the acknowledged table — and a statement the gate
 admits runs its normal path. The
 acknowledgement is not `--force`: the two cannot be combined, and a dry run reports the
-refusal as it stands rather than the accepted execution. The front door requires the
+refusal as it stands rather than the accepted execution. It accepts the lock only: an
+accepted `DROP INDEX` also needs the destructive acknowledgement (RF-10). The front door requires the
 statement budget to be stated on the same command line, because the accepted outage bound is
 a decision, not a default. *Enforced:* `migrate.AcceptedRefusal`, `MigrateCmd.Validate`,
 `migrate.gateRefusal` (the refusal site), `TestAcceptedRefusal`, `TestAcceptBlockingFlagGrammar`,
@@ -1400,19 +1410,26 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   other gate, and an acknowledged run is audited at warn level and carries
   `allowed_destructive: true` on its verdict. The declarative path takes no acknowledgement
   and refuses a destructive plan whole. A planner refusal runs nothing and keeps its own
-  reason. A `DROP INDEX` stays with the statement-kind gate and `--accept-blocking`, which
-  the destructive acknowledgement does not reach. Outage-risk statements are covered by
+  reason. A `DROP INDEX` — unique or not — is gate-refused first; when `--accept-blocking`
+  accepts that refusal, the drop still runs only if `--allow-destructive` names the same
+  owning table, and otherwise it is refused with `destructive-change` before anything
+  executes, the detail listing the checks that catch an index the application still uses.
+  Accepting the lock is not accepting the loss. Outage-risk statements are covered by
   RF-5 and AB-1..AB-5 (`--force`, `--accept-blocking`) and by the LK-2 budgets.
   *Enforced:* `pkg/migrate` (`run`'s destructive gate through `destructiveOperations` and
   `destructiveChangeVerdict`, `checkAllowDestructiveAck`, `AdmitDestructive` for the dry
   run, `auditAllowDestructive`; `ErrAllowDestructiveMismatch`), `RunDesired`'s admission
-  (`ErrAllowDestructiveNotSupported`), `pkg/planner` (`destructiveOp`),
+  (`ErrAllowDestructiveNotSupported`), `pkg/planner` (`destructiveOp`, which decides every
+  shape in `statement.OpKinds()` explicitly and treats an unclassified one as destructive;
+  `TestEveryOpKindIsClassifiedForDestructiveness`,
+  `TestAnUnclassifiedOpKindIsTreatedAsDestructive`),
   `TestRunRefusesAnUnacknowledgedDropColumn`, `TestRunRefusesAnUnacknowledgedDropConstraint`,
   `TestRunRefusesAnUnacknowledgedDropNotNull`, `TestRunExecutesAnAcknowledgedDropColumn`,
   `TestRunRejectsAMismatchedDestructiveAcknowledgement`,
   `TestRunRefusesAnUnacknowledgedDropColumnRoutedToCopyAndSwap`,
   `TestRunNeedsBothForceAndTheDestructiveAcknowledgement`,
-  `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`, `TestAdmitDestructive`,
+  `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`,
+  `TestRunAcceptBlockingNeedsTheDestructiveAcknowledgementToDropAnIndex`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
   [design principles](design-principles.md#declarative-review-first-workflow)
@@ -1473,15 +1490,19 @@ a plain table is an unfinished concurrent build — abandoned, or still running 
 never emits a `DROP INDEX` for it, whatever the desired file says about its name: a drop by
 name cannot tell the two apart, and dropping under a running build is the cleanup this
 invariant forbids. That keeps the cleanup half. It gives up the other half when the desired
-file no longer names the index at all: the observation is discarded and the plan is empty,
-so a desired state that removes an index the build never delivered reads as already
-converged. The trade is preferred to the alternatives — a name-based drop, or a fabricated
-change — because the plan stays executable and never destroys a build it cannot see; the
-leftover surfaces at the next `pull` (see [pull.md](pull.md)) and clears per the
-[invalid-index runbook](invalid-index-recovery.md). OC-1 reaches the same conclusion from
-the other side: the diff cannot confirm the entry is abandoned, so it must not round the
-uncertainty into a destructive change. *Enforced:* `pkg/schemadiff` never-drops-invalid
-tests against real debris on a real database.
+file no longer names the index at all: no statement is planned, so a desired state that
+removes an index the build never delivered converges to zero statements. The observation is
+not discarded, though — the plan report carries it as an `invalid-index-undeclared`
+advisory (see [plan-report.md](plan-report.md#advisory-kinds-advisorieskind-diff-source-only)), outside the statements and
+the fingerprint, so the empty plan says "no changes to run; the table carries an unfinished
+build" rather than "converged". The trade is preferred to the alternatives — a name-based
+drop, or a fabricated change — because the plan stays executable and never destroys a build
+it cannot see; the leftover also surfaces at the next `pull` (see [pull.md](pull.md)) and
+clears per the [invalid-index runbook](invalid-index-recovery.md). OC-1 reaches the same
+conclusion from the other side: the diff cannot confirm the entry is abandoned, so it must
+not round the uncertainty into a destructive change. *Enforced:* `pkg/schemadiff`
+never-drops-invalid tests against real debris on a real database; `pkg/diffplan` proves the
+empty plan carries the advisory and the unchanged fingerprint.
 
 ### OC-3 — Control requests are durable operator intent
 
