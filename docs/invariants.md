@@ -517,8 +517,11 @@ base type, element, and collation; a collation's whole catalog row but its oid a
 locale and ICU rules included in whichever columns the server version keeps them —
 rendered from the catalog alone, never through a deparser. Every guarded transaction of the
 copier, the verifier, and the applier, and the cutover's drain, recomputes it before it reads
-or writes and refuses when it differs (`copy-conversion-drift` from the copier,
-`ErrInvariantViolation` from the others). The check and the statements that evaluate the
+or writes and refuses when it differs: each wraps the one `chunksql.ErrConversionDrift`
+sentinel — the copier as its `copy-conversion-drift`, the verifier and the applier as
+`ErrInvariantViolation` — and `Runner.Run` re-mints all three as the shadow cause
+`copy-conversion-drift`, so a run stopped by a changed catalog reads the same cause whether
+a chunk, a verifying read, or a catch-up flush noticed it. The check and the statements that evaluate the
 expressions are separate statements, so the copier's chunk, the applier's flush, the verifier's
 repair, and the drain recompute it once more after their writes and before they commit. Each
 of those write transactions is `READ COMMITTED` whatever the server or role configures as
