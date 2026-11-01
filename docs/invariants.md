@@ -460,7 +460,10 @@ The connection-layer guarantee is per session: it rewrites an explicit `pg_catal
 not the implicit `pg_temp` search ahead of it (pg-sprite creates no temporary objects), and a
 proxy that hands the server connection to another client keeps the rewritten, stricter path.
 *Enforced:* `pkg/dbconn` (session hook, the path builders, and the test that keeps them the only
-`search_path` writers under `pkg/`), `pg_catalog.` qualification in `pkg/executor`,
+`search_path` writers under `pkg/`; `TerminateBlockers`, which runs on whatever pool the caller
+passes, qualifies every function it calls — a planted `pg_terminate_backend(integer)` on a
+shadowing `<schema>, pg_catalog` path is never consulted and the blocker exits,
+`TestTerminateBlockersIgnoresTheCallersShadowingSearchPath`), `pg_catalog.` qualification in `pkg/executor`,
 `pkg/progress`, `pkg/schemadiff` (introspection qualifies every relation, function, operator, and
 type; lookalike functions and operators planted in the target schema, each proven to answer the
 unqualified call on introspection's path, do not change the model), `pkg/preflight` (every proof read — the size guard, the
