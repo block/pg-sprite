@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/suggest"
@@ -38,7 +39,7 @@ type destructiveFixture struct {
 // discard, and rows whose values a drop would lose.
 func newDestructiveFixture(t *testing.T) destructiveFixture {
 	t.Helper()
-	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t), MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)

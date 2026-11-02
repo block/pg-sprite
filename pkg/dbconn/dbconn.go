@@ -75,7 +75,14 @@ type Config struct {
 	// session-scoped locks die with their session, and lifetime/idle
 	// recycling would silently release the lock. The lock helper owns a bare
 	// dedicated connection exempt from pool recycling.
-	MaxConns              int32
+	MaxConns int32
+	// MaxConnsFloor raises the pool's default size to at least this many
+	// connections, for a caller that knows how many sessions its work holds
+	// at once. It applies only to the default: when MaxConns is zero and the
+	// URL carries no pool_max_conns. A size the caller or the URL sets is
+	// kept as given, even below the floor, so the work that needs more
+	// connections refuses the pool rather than overriding the operator.
+	MaxConnsFloor         int32
 	MinConns              int32
 	MaxConnLifetime       time.Duration
 	MaxConnLifetimeJitter time.Duration
@@ -293,8 +300,8 @@ func buildPoolConfig(cfg Config) (*pgxpool.Config, error) {
 		return nil, err
 	}
 
-	if cfg.MaxConns > 0 {
-		pc.MaxConns = cfg.MaxConns
+	if err := sizePool(pc, cfg); err != nil {
+		return nil, err
 	}
 	if cfg.MinConns > 0 {
 		pc.MinConns = cfg.MinConns

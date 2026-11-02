@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -36,7 +37,7 @@ func copySwapRunOptions(serverURL, table string) migrate.Options {
 // first left behind — and converges.
 func TestRunDesiredCopyAndSwap(t *testing.T) {
 	serverURL := testutil.StartPostgres(t)
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL, MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})})
 	require.NoError(t, err)
 	defer pool.Close()
 
