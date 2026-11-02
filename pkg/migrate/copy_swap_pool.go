@@ -2,6 +2,7 @@ package migrate
 
 import (
 	"fmt"
+	"math"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -24,10 +25,15 @@ const copySwapReservedConns = 2
 // leaves a live run's catch-up flushes waiting behind the copy while the
 // slot's lag grows. A host that builds its own pool sizes it with this
 // (dbconn.Config.MaxConnsFloor); Run and RunDesired refuse a smaller one.
+// A worker count no pool size can hold answers math.MaxInt32 rather than
+// wrapping to a number every pool would pass.
 func CopySwapMinConns(o copier.Options) int32 {
 	workers := o.Workers
 	if workers == 0 {
 		workers = copier.DefaultWorkers
+	}
+	if workers > math.MaxInt32-copySwapReservedConns {
+		return math.MaxInt32
 	}
 	return int32(workers) + copySwapReservedConns
 }
@@ -46,7 +52,8 @@ func checkCopySwapPool(pool *pgxpool.Pool, opts CopySwapOptions) error {
 }
 
 // copySwapPoolVerdict is Run's failed verdict for a pool the route refused
-// before it read or wrote anything.
+// before it read or wrote anything. The detail names the remedy as a
+// concept; how a front door sizes its pool is the front door's to spell.
 func copySwapPoolVerdict(st statement.Statement, err error) verdict.Verdict {
 	return verdict.Verdict{
 		Outcome:   verdict.OutcomeFailed,
@@ -54,6 +61,6 @@ func copySwapPoolVerdict(st statement.Statement, err error) verdict.Verdict {
 		Statement: st.SQL(),
 		Table:     qualified(st),
 		Detail: "the copy-and-swap route refused the pool: " + err.Error() +
-			"; nothing was created. Raise pool_max_conns in the connection URL (or dbconn.Config.MaxConns), or run fewer copy workers",
+			"; nothing was created. Give the pool more connections, or copy with fewer workers",
 	}
 }

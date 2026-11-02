@@ -98,6 +98,45 @@ func TestCopyAndSwapRefusesAPoolSmallerThanItsWorkersAndTwo(t *testing.T) {
 	f.assertNoCheckpointRow(t, "orders")
 }
 
+// The pool check comes before the preflight. With no disk headroom the
+// preflight would refuse the same statement with its own cause, so a run on
+// a pool of five that answers pool-too-small, not the disk refusal, shows
+// which check ran first.
+func TestCopyAndSwapRefusesASmallPoolBeforeThePreflight(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	small := f.poolOfSize(t, 5)
+	st, err := statement.ParseOne(f.inSchema(`ALTER TABLE {schema}.orders ALTER COLUMN qty TYPE bigint`))
+	require.NoError(t, err)
+	opts := f.options()
+	opts.CopySwap.FreeDiskBytes = 1
+
+	v, err := Run(t.Context(), small, st, opts)
+	require.ErrorIs(t, err, executor.ErrPoolTooSmall)
+	assert.Equal(t, string(executor.CodePoolTooSmall), v.Code)
+	assert.Empty(t, v.Cause, "the preflight's disk refusal was never reached")
+}
+
+// The size follows the copy's own worker count, not the default: two
+// workers need a pool of four, so a pool of three is refused and a pool of
+// four runs the change.
+func TestCopyAndSwapSizesThePoolForItsConfiguredWorkers(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	st, err := statement.ParseOne(f.inSchema(`ALTER TABLE {schema}.orders ALTER COLUMN qty TYPE bigint`))
+	require.NoError(t, err)
+	opts := f.options()
+	opts.CopySwap.Copier = copier.Options{Workers: 2}
+
+	_, err = Run(t.Context(), f.poolOfSize(t, 3), st, opts)
+	require.ErrorIs(t, err, executor.ErrPoolTooSmall)
+
+	v, err := Run(t.Context(), f.poolOfSize(t, 4), st, opts)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+	assert.Equal(t, "bigint", f.columnType(t, "orders", "qty"))
+}
+
 // Six connections hold the four workers and the two reserved sessions, so
 // the same statement on a pool of six is admitted and runs to the swap.
 func TestCopyAndSwapAdmitsAPoolOfItsWorkersAndTwo(t *testing.T) {

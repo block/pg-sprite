@@ -1183,7 +1183,9 @@ IDENTITY`, and the dependents RF-2 names), and `CheckCopySwapEnvironment`
 (`wal_level`, the derived slot name's availability, slot and WAL-sender headroom,
 caller-measured disk headroom against the shadow copy's requirement), chained by type —
 each check accepts only the previous one's proof and the `CopySwapTarget` the writing steps
-require is minted by the last; for the native route's sequences, `pkg/executor`
+require is minted by the last, and before them `pkg/migrate` `checkCopySwapPool`, which
+`Run` and desired-state admission call to refuse a pool below `CopySwapMinConns`; for the
+native route's sequences, `pkg/executor`
 `admitSequence`, which `RunSequence` calls to admit every step's shape and target before the
 first step runs. `migrate --dry-run` reports the same shape refusals through
 `migrate.AdmitRoutedSteps`, a read-only surface of that admission rather than a second

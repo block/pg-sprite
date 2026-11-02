@@ -1,6 +1,7 @@
 package migrate_test
 
 import (
+	"math"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,4 +17,6 @@ func TestCopySwapMinConnsIsTheWorkersAndTwo(t *testing.T) {
 	assert.Equal(t, int32(6), migrate.CopySwapMinConns(copier.Options{}))
 	assert.Equal(t, int32(3), migrate.CopySwapMinConns(copier.Options{Workers: 1}))
 	assert.Equal(t, int32(10), migrate.CopySwapMinConns(copier.Options{Workers: 8}))
+	assert.Equal(t, int32(math.MaxInt32), migrate.CopySwapMinConns(copier.Options{Workers: math.MaxInt32}),
+		"a worker count no pool can hold is not wrapped to one every pool passes")
 }

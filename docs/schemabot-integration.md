@@ -370,7 +370,11 @@ the pool besides; an importer running many tables from one process sizes for bot
   grows, so the front doors (`migrate.Run` and `migrate.RunDesired`) refuse a pool below
   `migrate.CopySwapMinConns(Copier)` — the workers plus one connection for the catch-up's
   flushes and one for the checkpoint saves and progress reads, six with the default
-  workers — before the preflight, so nothing is created. A host that builds its pool with
+  workers — before the preflight, so nothing is created. The check also runs when a stopped
+  run resumes or is restarted, so a run stopped before the pool was shrunk is refused, and
+  keeps its slot or fence and its checkpoint row, until the pool is raised again. The floor
+  is per run: a host running several copy-and-swap runs at once from one pool sizes it for
+  all of them. A host that builds its pool with
   `pkg/dbconn` sizes it with `dbconn.Config.MaxConnsFloor`, which raises only the default
   size and keeps a `pool_max_conns` the URL sets.
 

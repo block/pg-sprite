@@ -60,14 +60,19 @@ func TestSizePoolKeepsTheURLsPoolMaxConns(t *testing.T) {
 }
 
 // Config.MaxConns is the library caller's choice and wins over the URL and
-// the floor alike.
+// the floor alike, kept below the floor whether or not the URL names a size.
 func TestSizePoolAppliesMaxConns(t *testing.T) {
-	const url = "postgres://engine@localhost:5432/app?pool_max_conns=10"
-	pc, err := pgxpool.ParseConfig(url)
-	require.NoError(t, err)
+	for _, url := range []string{
+		"postgres://engine@localhost:5432/app?pool_max_conns=10",
+		testURL,
+	} {
+		t.Run(url, func(t *testing.T) {
+			pc := hostDefaultPool(t, url, 4)
 
-	require.NoError(t, sizePool(pc, Config{URL: url, MaxConns: 3, MaxConnsFloor: 6}))
-	assert.Equal(t, int32(3), pc.MaxConns)
+			require.NoError(t, sizePool(pc, Config{URL: url, MaxConns: 3, MaxConnsFloor: 6}))
+			assert.Equal(t, int32(3), pc.MaxConns)
+		})
+	}
 }
 
 // buildPoolConfig wires the floor through: with a floor above whatever this
