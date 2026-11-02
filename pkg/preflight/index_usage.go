@@ -106,6 +106,16 @@ var errIndexUsageIndexNotPresent = errors.New("the index no longer exists")
 // a leaf index, so its scans are unknown rather than zero.
 var errIndexUsageStatisticsMissing = errors.New("the server reports no statistics for the index")
 
+// checkLeafStatisticsListed fails closed when the statistics view lists
+// fewer rows than there are leaf indexes: an unlisted leaf's scans are
+// unknown, and counting them as zero would make a used index look idle.
+func checkLeafStatisticsListed(leaves, statsRows int) error {
+	if statsRows != leaves {
+		return fmt.Errorf("%w (%d of %d leaf indexes listed)", errIndexUsageStatisticsMissing, statsRows, leaves)
+	}
+	return nil
+}
+
 // ReadIndexUsage reads the usage evidence of the index with the given OID
 // on the server the pool is connected to, in one read-only transaction
 // bounded by its own lock and statement timeouts, with every statistic from
@@ -149,9 +159,8 @@ func ReadIndexUsage(ctx context.Context, pool *pgxpool.Pool, indexOID uint32) (I
 	if err != nil {
 		return IndexUsage{}, fmt.Errorf("read index usage %d: %w", indexOID, err)
 	}
-	if statsRows != leaves {
-		return IndexUsage{}, fmt.Errorf("read index usage %d: %w (%d of %d leaf indexes listed)",
-			indexOID, errIndexUsageStatisticsMissing, statsRows, leaves)
+	if err := checkLeafStatisticsListed(leaves, statsRows); err != nil {
+		return IndexUsage{}, fmt.Errorf("read index usage %d: %w", indexOID, err)
 	}
 	if u.Partitioned {
 		u.Partitions = leaves

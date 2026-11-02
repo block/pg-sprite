@@ -1432,7 +1432,8 @@ Each refusal is a preflight **error with a stated reason** — never a warning, 
   `TestRunAllowDestructiveDoesNotLiftADropIndexRefusal`,
   `TestRunAcceptBlockingNeedsTheDestructiveAcknowledgementToDropAnIndex`,
   `TestReadIndexUsageCountsEachIndexsOwnScans`,
-  `TestReadIndexUsageSumsAPartitionedIndexsLeafIndexes`, `TestAdmitDestructive`,
+  `TestReadIndexUsageSumsAPartitionedIndexsLeafIndexes`,
+  `TestCheckLeafStatisticsListedRefusesAnUnlistedLeaf`, `TestAdmitDestructive`,
   `TestMigrateDryRunReportsTheDestructiveRefusal`, `TestAllowDestructiveFlagGrammar`,
   `demo/tour.sh` (`refused_destructive`). *Source:*
   [design principles](design-principles.md#declarative-review-first-workflow)
