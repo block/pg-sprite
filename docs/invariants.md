@@ -227,20 +227,19 @@ takes it afterwards fails the confirmation (parked-before-insert and parked-befo
 tests). The applier's flush holds only `ACCESS SHARE` on the shadow until its first write, so a
 flush transaction of an earlier run parked between confirming the table lock and that write is
 not one the copier's fence — or the verifier's repair fence — waits on; that gap is open.
-`pkg/applier` `Buffer.Drain` — every
-buffered key is judged against one `Position` snapshot: landed flushes, uncut is discarded,
-in-flight stays buffered until a later drain finds its chunk landed, and a key-moving UPDATE's
-two entries are judged per key, except that once neither is uncut the image waits for its old
-key's entry — an old key in flight, or invisible, holds its image back so the flush never
-deletes or copies the old key's row while the chunk that will copy it is still landing — while a
-landed old key's entry flushes ahead of an image in flight for its chunk (an invisible image
-still holds its old key's entry back): the delete must not wait for the image's chunk, because
-when the moved row carries a unique value the chunk cannot land while the old key's shadow row
-holds it, and the image, once its chunk lands, completes from the source row instead (three-way
-rule, discard-all before the first claim, deferred entry keeps merging,
-straddling move, pair waits for the old key, landed old key flushes ahead of its in-flight image,
-uncut half judged alone, deferral spreading through a shared old key and along a chain of
-pairs); `Drain`
+`pkg/applier` `Buffer.Drain` judges
+every buffered key against one `Position` snapshot: landed flushes, uncut is discarded, and
+in-flight stays buffered until a later drain finds its chunk landed. A key-moving UPDATE's two
+entries are judged per key, and once neither is uncut a pair rule applies. **The image waits
+for an old key in flight or invisible**, so the flush never deletes or copies the old key's
+row while the chunk that will copy it is still landing. **A landed old key's delete flushes
+ahead of an image in flight for its chunk**, because a moved row carrying a unique value cannot
+land while the old key's shadow row holds that value; once its chunk lands, the image completes
+from the source row. An invisible image still holds its old key's entry back. (Drain unit
+tests: three-way rule, discard-all before the first claim, deferred entry keeps merging,
+straddling move, pair waits for the old key, landed old key flushes ahead of its in-flight
+image, uncut half judged alone, deferral spreading through a shared old key and along a chain
+of pairs.) `Drain`
 judges against a `Position` read after the last `Add`, and returns a `Batch` whose `Deferred`
 count is what a catch-up is waiting on the copier for and whose `CompleteFirst` names, as
 copies of its `Entries`, the moved, marker-bearing images the flush must complete — from the old
@@ -294,7 +293,11 @@ a catch-up test holds the new key's chunk in flight by hand, asserts the old key
 is deleted while it is, and converges once the chunk lands). The chunk-level retry remains
 bounded: a chunk whose key range keeps receiving unique values from landed rows faster than one
 move per catch-up cycle collides on every attempt with a different row, and the copy stops with
-the server's error once the attempts run out. *Test obligation:* a
+the server's error once the attempts run out. In practice this is a sustained-rate bound: a
+load of key moves or unique-value swaps running through the copy at a few dozen a second can
+exhaust the attempts, most often on the last chunk, where every key move lands. Such a load
+during the copy is not supported until the copier commits a collided chunk around the rows
+that collided and retries only those. *Test obligation:* a
 marker-bearing UPDATE for a key inside an in-flight chunk asserts the flush waits for the chunk
 and the row is then completed from the copied shadow row, never an absent-row abort; a
 marker-bearing UPDATE for a key whose row the source then deleted before its chunk was read,
