@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -140,10 +142,21 @@ func TestCopySwapFlagsWireIntoEnginePolicy(t *testing.T) {
 
 	// The declarative front door never takes a table offline for writes:
 	// the derived plan, not the operator, would decide how many fenced
-	// copies run, so the acknowledgement is a usage error there.
+	// copies run, so the acknowledgement is a usage error there. It is
+	// decided at parse, before the command parses the desired file or dials
+	// the server: the file below is not SQL and nothing listens on the port.
 	t.Run("rejects --block-writes with --desired", func(t *testing.T) {
-		c := &MigrateCmd{Desired: "orders.sql", BlockWrites: "public.orders"}
-		err := c.validateInput()
+		desired := filepath.Join(t.TempDir(), "orders.sql")
+		require.NoError(t, os.WriteFile(desired, []byte("this is not SQL"), 0o600))
+		c := New("test")
+		k, err := kong.New(c, kong.Vars{"version": "test"})
+		require.NoError(t, err)
+		_, err = k.Parse([]string{
+			"migrate",
+			"--url", "postgres://user@127.0.0.1:1/app",
+			"--desired", desired,
+			"--block-writes", "public.orders",
+		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "--block-writes cannot be combined with --desired")
 	})

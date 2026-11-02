@@ -476,7 +476,9 @@ as `SCHEMA.TABLE`, the same way `Restart` does, or `Run` returns an error before
 executes, and an acknowledged run records a warn-level audit naming the table before the
 fence goes on. `RunDesired` rejects `BlockWrites` (`ErrBlockWritesNotSupported`): the derived
 plan, not the operator, would decide how many fenced copies run, so a value left on the
-adapter's configuration cannot take the table offline for a later plan. Three further fields let the adapter size and watch the run:
+adapter's configuration cannot take the table offline for a later plan. An adapter that builds
+one `Options` for both front doors passes `RunDesired` a copy with `CopySwap.BlockWrites`
+cleared. Three further fields let the adapter size and watch the run:
 `Copier` (`copier.Options`) sizes the copy — workers, chunk sizes, the chunk time they are
 throttled toward — with zero values taking the copier's defaults; `CheckpointInterval` is how often
 a copy in progress saves its landed watermark (zero takes the Runner's default); and `OnCheckpoint` is
