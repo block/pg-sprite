@@ -37,7 +37,7 @@ type copySwapFixture struct {
 
 func newCopySwapFixture(t *testing.T) copySwapFixture {
 	t.Helper()
-	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t), MaxConnsFloor: CopySwapMinConns(copier.Options{})}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)

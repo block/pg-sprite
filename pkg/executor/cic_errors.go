@@ -118,7 +118,9 @@ var (
 	// failed build would resolve indeterminate, and a pool one connection
 	// short would not fail but wait on itself for as long as the caller's
 	// context allows. Like an unbounded budget, an unusable pool is
-	// refused by construction.
+	// refused by construction. The copy-and-swap front door
+	// (pkg/migrate) wraps it too, for a pool that cannot hold the copy's
+	// workers beside the catch-up's flushes and the checkpoint saves.
 	ErrPoolTooSmall = errors.New("the pool cannot hold every session the operation needs at once")
 	// ErrCallerOwnedNeedsCancellableContext is returned when caller-owned
 	// mode has no cancellation signal to bound the statement.

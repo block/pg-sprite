@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -33,7 +34,7 @@ func newTwoDatabases(t *testing.T) twoDatabases {
 	t.Helper()
 	serverURL := testutil.StartPostgres(t)
 	poolURL := testutil.NewDatabase(t, serverURL)
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: poolURL})
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: poolURL, MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	return twoDatabases{pool: pool, poolURL: poolURL, otherURL: testutil.NewDatabase(t, serverURL)}
