@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 	"testing"
 	"time"
 
@@ -495,9 +496,17 @@ func TestCatchupConvergesUnderUniqueKeyMovesDuringTheCopy(t *testing.T) {
 // rate at which the copier lands collided chunks, so the copy gains on the
 // frontier the moves push upward and finishes; a load that mints keys
 // faster than the copier lands them keeps the last chunk open for ever.
+//
+// Whether a random move hits a landed key before the copy reaches the last
+// chunk depends on timing, so the test makes one such move itself, on the
+// first landing, and holds the flushes until the copier has collided on
+// it: the collision happens on every run. The load keeps moving keys
+// throughout, and the flushes resume as soon as the collision is seen.
 func TestCatchupConvergesUnderKeyMovesFasterThanTheCollisionBackoff(t *testing.T) {
 	f := newCatchupFixture(t, 1500)
-	run := startCatchup(t, f, applier.CatchupOptions{})
+	move := &keyMoveOnLanding{t: t, f: f}
+	run := startCatchupWith(t, f, catchupSetup{copierClock: move})
+	move.shadow = pgx.Identifier{f.table.Schema, run.shadow.ShadowTable()}.Sanitize()
 	load := testutil.StartLoad(t, f.pool, f.table, testutil.LoadSpec{
 		Seed: 7, Workers: 2, RatePerSecond: 30,
 		Mix: testutil.Mix{KeyMove: 1},
@@ -506,8 +515,29 @@ func TestCatchupConvergesUnderKeyMovesFasterThanTheCollisionBackoff(t *testing.T
 	run.awaitStatus(t, "discard changes to keys the copier has not claimed", func(s applier.Status) bool {
 		return s.Discarded > 0
 	})
-	run.copy(t)
-	assert.Positive(t, run.copier.Collisions(), "the moves must have reached the last chunk's slots for the copy to prove anything")
+	resume, err := run.catchup.Pause(t.Context())
+	require.NoError(t, err)
+	t.Cleanup(resume)
+
+	copied := make(chan error, 1)
+	var wg sync.WaitGroup
+	wg.Go(func() { copied <- run.copier.Run(t.Context(), f.pool) })
+	t.Cleanup(wg.Wait)
+
+	const collisionDeadline = 15 * time.Second
+	require.Eventually(t, func() bool { return run.copier.Collisions() >= 1 }, collisionDeadline, 10*time.Millisecond,
+		"the last chunk should collide on the uniq value the moved landed key still holds in the shadow")
+	require.NoError(t, move.result())
+
+	resume()
+	const copyDeadline = 30 * time.Second
+	select {
+	case err := <-copied:
+		require.NoError(t, err, "the copy lands every chunk while the moves keep arriving")
+	case <-time.After(copyDeadline):
+		require.FailNow(t, "the copy did not finish after the flushes resumed")
+	}
+	assert.Equal(t, copier.NewWatermark(math.MaxInt64), run.copier.Position().Cut, "every key is landed")
 	t.Logf("chunk passes the copier counted after a collision: %d", run.copier.Collisions())
 	run.awaitStatus(t, "apply moved images and the deletes under their old keys", func(s applier.Status) bool {
 		return s.Applied > 0

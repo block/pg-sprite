@@ -1,6 +1,7 @@
 package applier_test
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"sync"
@@ -68,6 +69,67 @@ func TestCatchupConvergesWhenTheCopierCollidesWithAnUnflushedMove(t *testing.T) 
 
 	run.stop(t)
 	f.assertConverged(t, run.shadow)
+}
+
+// keyMoveOnLanding is the copier's clock. On the first reading after the
+// shadow holds a key the source still has, it gives that key a fresh
+// primary key from the identity sequence, as the workload's key move does,
+// once: the moved row lands in the last chunk carrying a uniq value the
+// landed row's shadow copy still holds until a flush deletes it. The key is
+// picked from the shadow rather than named up front because a concurrent
+// workload may already have moved any given key. Every reading returns the
+// wall clock.
+type keyMoveOnLanding struct {
+	t *testing.T
+	f catchupFixture
+	// shadow is the quoted shadow table, set before the copier runs.
+	shadow string
+
+	mu    sync.Mutex
+	moved bool
+	err   error
+}
+
+func (m *keyMoveOnLanding) Now() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.moved && m.err == nil {
+		m.moved, m.err = m.tryMove()
+	}
+	return time.Now()
+}
+
+func (m *keyMoveOnLanding) tryMove() (bool, error) {
+	ctx := m.t.Context()
+	source := m.f.table.Qualified()
+	q := fmt.Sprintf(`
+		UPDATE %[1]s
+		SET id = nextval(pg_get_serial_sequence($1, 'id'))
+		WHERE id = (
+			SELECT s.id
+			FROM %[2]s s
+			JOIN %[1]s src ON src.id = s.id
+			ORDER BY s.id
+			LIMIT 1
+		)`, source, m.shadow)
+	tag, err := m.f.pool.Exec(ctx, q, source)
+	if err != nil {
+		return false, fmt.Errorf("move a landed key: %w", err)
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
+// result reports whether the move was committed.
+func (m *keyMoveOnLanding) result() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.err != nil {
+		return m.err
+	}
+	if !m.moved {
+		return errors.New("no key landed while the copier ran, so no key was moved")
+	}
+	return nil
 }
 
 // moveOnLanding is the copier's clock. On the first reading after the shadow
