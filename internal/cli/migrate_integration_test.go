@@ -274,7 +274,7 @@ func TestMigrateRenameColumnRefusedUnlessForced(t *testing.T) {
 // A type rewrite routes to the copy-and-swap backend and runs end to end
 // from this front door: the shadow table takes the new type, every row is
 // carried, the retained source is dropped, and the one verdict says so.
-// --quiesced keeps the run to the write fence, so the test server needs no
+// --block-writes keeps the run to the write fence, so the test server needs no
 // logical decoding.
 func TestMigrateRunsTypeRewriteViaCopyAndSwap(t *testing.T) {
 	url := testutil.StartPostgres(t)
@@ -294,7 +294,7 @@ func TestMigrateRunsTypeRewriteViaCopyAndSwap(t *testing.T) {
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
 	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
-	cmd.Quiesced = true
+	cmd.BlockWrites = schema + ".t"
 	cmd.JSON = true
 	var out strings.Builder
 	require.NoError(t, cmd.run(t.Context(), &out))
@@ -304,6 +304,7 @@ func TestMigrateRunsTypeRewriteViaCopyAndSwap(t *testing.T) {
 	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 	assert.Equal(t, schema+".t", v.Table)
 	assert.False(t, v.Forced, "the copy-and-swap route is the planned path, not an override")
+	assert.True(t, v.WritesBlocked, "the JSON verdict says the table was offline for writes while the run held it")
 
 	var typ string
 	require.NoError(t, pool.QueryRow(t.Context(),
@@ -334,7 +335,7 @@ func TestMigrateCopyAndSwapRefusesWithoutFreeDisk(t *testing.T) {
 	require.NoError(t, err)
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
-	cmd.Quiesced = true
+	cmd.BlockWrites = schema + ".t"
 	cmd.JSON = true
 	var out strings.Builder
 	err = cmd.run(t.Context(), &out)

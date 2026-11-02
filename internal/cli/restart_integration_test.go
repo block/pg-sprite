@@ -18,8 +18,8 @@ import (
 // --restart from the front door: a relation under the shadow's name that
 // no checkpoint row records is refused by a plain run, and discarded by a
 // run that carries the acknowledgement — which then carries the change to
-// its copy-and-swap verdict on a shadow of its own. --quiesced keeps the
-// run to the write fence, so the test server needs no logical decoding.
+// its copy-and-swap verdict on a shadow of its own. --block-writes keeps
+// the run to the write fence, so the test server needs no logical decoding.
 func TestMigrateRestartDiscardsALeftoverAndRunsTheChange(t *testing.T) {
 	url := testutil.StartPostgres(t)
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
@@ -42,7 +42,7 @@ func TestMigrateRestartDiscardsALeftoverAndRunsTheChange(t *testing.T) {
 	alter := fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema)
 	plain := newMigrateCmd(url, alter)
 	plain.FreeDisk = byteSize(testutil.UnlimitedDisk)
-	plain.Quiesced = true
+	plain.BlockWrites = schema + ".t"
 	plain.JSON = true
 	var refusedOut strings.Builder
 	require.ErrorIs(t, plain.run(t.Context(), &refusedOut), verdict.ErrRefused, "a refusal verdict exits with the refusal code")
@@ -53,7 +53,7 @@ func TestMigrateRestartDiscardsALeftoverAndRunsTheChange(t *testing.T) {
 
 	restart := newMigrateCmd(url, alter)
 	restart.FreeDisk = byteSize(testutil.UnlimitedDisk)
-	restart.Quiesced = true
+	restart.BlockWrites = schema + ".t"
 	restart.JSON = true
 	restart.Restart = schema + ".t"
 	var out strings.Builder
@@ -100,7 +100,7 @@ func TestMigrateRestartAckMismatchExecutesNothing(t *testing.T) {
 
 	cmd := newMigrateCmd(url, fmt.Sprintf("ALTER TABLE %s.t ALTER COLUMN id TYPE bigint", schema))
 	cmd.FreeDisk = byteSize(testutil.UnlimitedDisk)
-	cmd.Quiesced = true
+	cmd.BlockWrites = schema + ".t"
 	cmd.Restart = "wrong.table"
 	var out strings.Builder
 	err = cmd.run(t.Context(), &out)

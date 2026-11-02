@@ -37,7 +37,7 @@ type copySwapFixture struct {
 
 func newCopySwapFixture(t *testing.T) copySwapFixture {
 	t.Helper()
-	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t), MaxConnsFloor: CopySwapMinConns(copier.Options{})}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
@@ -74,14 +74,15 @@ func (f copySwapFixture) createOrders(t *testing.T) {
 		FROM generate_series(1, 2500) g`)
 }
 
-// options is a quiesced copy-and-swap policy over the fixture's database
-// with room on disk, the shape every test here starts from.
+// options is a copy-and-swap policy over the fixture's database with room
+// on disk, quiesced for the orders table, the shape every test here starts
+// from.
 func (f copySwapFixture) options() Options {
 	opts := DefaultOptions()
 	opts.CopySwap = CopySwapOptions{
 		Connection:    f.cfg,
 		FreeDiskBytes: testutil.UnlimitedDisk,
-		Quiesced:      true,
+		BlockWrites:   f.schema + ".orders",
 	}
 	return opts
 }
@@ -339,6 +340,7 @@ func TestCopyAndSwapStopsWhereTheHostSaysAndResumes(t *testing.T) {
 	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
 	assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
 	assert.Contains(t, v.Detail, "resumes from the row")
+	assert.True(t, v.WritesBlocked, "the stopped run left its fence on the source")
 	assert.Equal(t, checkpoint.PhaseVerifying, f.inspectRow(t).Phase, "the row stands where the host stopped")
 	assert.True(t, f.hasColumn(t, "orders", "note"), "the source is untouched while the run is stopped")
 

@@ -6,7 +6,13 @@ import (
 
 	"github.com/block/pg-sprite/pkg/plan"
 	"github.com/block/pg-sprite/pkg/router"
+	"github.com/block/pg-sprite/pkg/schemadiff"
 )
+
+// invalidIndexRunbookURL is where an advisory about an unfinished index
+// build sends the operator: the runbook that proves an entry abandoned
+// before removing it.
+const invalidIndexRunbookURL = "https://github.com/block/pg-sprite/blob/main/docs/invalid-index-recovery.md"
 
 // writeDiffText renders the derived convergence plan in the same
 // compiler-diagnostic grammar as the dry-run report: one labeled entry per
@@ -22,7 +28,10 @@ import (
 // greenfield statement the create path refused by shape carries the typed
 // cause on the plan, and the renderer prints its description as a trailing
 // note on the refused statement — the executor's explanation, which the
-// typed reason alone does not carry.
+// typed reason alone does not carry. The plan's advisories — the invalid
+// indexes the diff observed and declined to drop — render as warnings after
+// the statements, with the typed kind as the rule code, so an empty plan
+// over a table carrying debris never reads as converged.
 func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
 	w := &stickyWriter{out: out, pal: pal}
 	if tableMissing(report) {
@@ -33,8 +42,14 @@ func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
 		}
 	}
 	if len(report.Statements) == 0 {
+		writeAdvisoryDiagnostics(w, report.Advisories)
 		w.entry("plan:")
-		w.printf("  %s — no changes; the live table matches the desired schema\n", targetText(report))
+		if len(report.Advisories) == 0 {
+			w.printf("  %s — no changes; the live table matches the desired schema\n", targetText(report))
+		} else {
+			w.printf("  %s — no changes to run; the live table carries %s the plan leaves alone\n",
+				targetText(report), countNoun(len(report.Advisories), "unfinished index build"))
+		}
 		return w.err
 	}
 	steps, refused := 0, 0
@@ -46,6 +61,7 @@ func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
 			w.diag("note", "", "the create path refuses this statement: "+ps.Cause.Description())
 		}
 	}
+	writeAdvisoryDiagnostics(w, report.Advisories)
 	w.entry("plan:")
 	w.printf("  %s — %s, %s to run, %d refused\n", targetText(report),
 		countNoun(len(report.Statements), "statement"), countNoun(steps, "step"), refused)
@@ -63,6 +79,21 @@ func writeDiffText(out io.Writer, pal palette, report plan.Report) error {
 		w.printf("  blocking forms and substitutes safer online sequences\n")
 	}
 	return w.err
+}
+
+// writeAdvisoryDiagnostics renders each plan advisory as a warning whose
+// rule code is the typed kind, followed by one docs pointer at the runbook.
+// A warning, not an error: the plan stays executable and the diff's exit
+// code is unchanged — the operator is being told what the plan will not do.
+func writeAdvisoryDiagnostics(w *stickyWriter, advisories []schemadiff.Advisory) {
+	if len(advisories) == 0 {
+		return
+	}
+	for _, a := range advisories {
+		w.diag("warning", string(a.Kind), fmt.Sprintf("index %q %s", a.Index, a.Kind.Description()))
+	}
+	w.entry("docs:")
+	w.printf("  %s\n", invalidIndexRunbookURL)
 }
 
 // diffRefused reports whether the derived plan contains any statement

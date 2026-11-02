@@ -62,14 +62,15 @@ func Insert(schema, source, shadow, key string, columns []string, conversions ma
 // at hex rather than escape. The server classifies a float or bytea cast
 // to text as immutable, so a conversion such as `value::text` passes the
 // shadow build's probe although its result follows these settings; the
-// chunk copy, the verifier's recopy and digest, and the catch-up's flush
-// each evaluate it in a session of their own, and a database or role
-// configured differently from the copier's pool would otherwise land one
-// rendering from the copy and another from the flush, which the digest then
-// reads as divergence and the repair recopies forever. The flush's marker
-// completions read a value as text and bind it back, so they need the same
-// pin whether or not the proof carries conversions. SET LOCAL cannot take
-// bind parameters; both values are constants.
+// chunk copy, the verifier's recopy and digest, the catch-up's flush, and
+// the swap's drain each evaluate it in a session of their own, and a
+// database or role configured differently from the copier's pool would
+// otherwise land one rendering from the copy and another from the flush,
+// which the digest then reads as divergence and the repair recopies
+// forever. The flush's marker completions read a value as text and bind it
+// back, so they need the same pin whether or not the proof carries
+// conversions. SET LOCAL cannot take bind parameters; both values are
+// constants.
 const Rendering = "SET LOCAL extra_float_digits = 3; SET LOCAL bytea_output = 'hex'"
 
 // SearchPath is the transaction-local path statement, built by dbconn, for

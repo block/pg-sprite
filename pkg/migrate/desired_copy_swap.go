@@ -17,7 +17,7 @@ import (
 // the router sends in part through the copy-and-swap backend. The router
 // decides the route from the statement alone; whether the route can run is
 // a fact about the table and the server — a primary key, no foreign keys or
-// triggers or dependent views, logical decoding or a quiesced declaration,
+// triggers or dependent views, logical decoding or a block-writes acknowledgement,
 // disk for the shadow — that only the route's preflight reads. Read it
 // here, before any statement runs, so a plan the preflight would refuse is
 // refused whole and the native statements planned ahead of the retype do
@@ -32,8 +32,9 @@ import (
 // Two shapes, as RunDesired's: a refusal is the refused result with a nil
 // error; a stop — the route's connection not wired, which is
 // ErrCopySwapConnectionRequired, wired to another database than the pool,
-// which is a CopySwapConnectionMismatchError, or a preflight that could
-// not finish — is a failed result carrying the plan and no verdict, with
+// which is a CopySwapConnectionMismatchError, a pool smaller than
+// CopySwapMinConns, which wraps executor.ErrPoolTooSmall, or a preflight
+// that could not finish — is a failed result carrying the plan and no verdict, with
 // its error. Nothing has executed in either case and the detail says so.
 func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, opts Options) (DesiredResult, bool, error) {
 	first, routed := firstCopySwapStatement(report)
@@ -57,6 +58,9 @@ func admitCopySwap(ctx context.Context, pool *pgxpool.Pool, report plan.Report, 
 			return stopped("the route's connection reaches another database than the pool", err)
 		}
 		return stopped("the route's connection could not be checked against the pool", err)
+	}
+	if err := checkCopySwapPool(pool, opts.CopySwap); err != nil {
+		return stopped("the pool is too small for the route", err)
 	}
 	_, err := preflight.CheckCopySwap(ctx, pool, report.Schema, report.Table, opts.CopySwap.environment())
 	if err == nil {
