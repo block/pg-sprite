@@ -106,7 +106,7 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 				return opts
 			},
 		},
-		// The test server has no logical decoding, so without blocked
+		// The test server runs with wal_level=replica, so without blocked
 		// writes the route has no way to carry the table's changes.
 		"copy-and-swap with the table's writes blocked": {
 			sql: `ALTER TABLE {schema}.orders ALTER COLUMN qty TYPE bigint`,
@@ -126,7 +126,10 @@ func irreversibleScenarios() map[string]irreversibleScenario {
 // the engine wrote no checkpoint, and the table still takes writes. A new
 // registry entry fails here until it has a scenario.
 func TestIrreversibleOperationsAreGated(t *testing.T) {
-	serverURL := testutil.StartPostgres(t)
+	// A server of its own pinned to wal_level=replica: the block-writes
+	// entry is refused only where the route cannot stream, and a shared
+	// server (PG_DSN, a hosted fixture) may run with logical decoding on.
+	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=replica")
 	cfg := dbconn.Config{URL: testutil.NewDatabase(t, serverURL)}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
