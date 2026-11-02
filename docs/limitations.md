@@ -74,9 +74,9 @@ length of the run is the wrapper author's responsibility.
 
 Two casts the server does call immutable still have more than one text rendering: a
 `float4` or `float8` to `text` follows `extra_float_digits`, and a `bytea` to `text`
-follows `bytea_output`. The copy, the verifier, and the catch-up each pin both settings
-(`3` and `hex`) in their own sessions, so such a conversion lands the same text from all
-three whatever the database or role is configured with.
+follows `bytea_output`. The copy, the verifier, the catch-up, and the swap's final drain
+each pin both settings (`3` and `hex`) in their own transactions, so such a conversion lands
+the same text from all of them whatever the database or role is configured with.
 
 ## Connections and poolers
 
