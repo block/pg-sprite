@@ -476,3 +476,48 @@ func TestCopyAndSwapStopsAtAPeriodicSaveOfTheCopy(t *testing.T) {
 	assert.False(t, f.hasColumn(t, "orders", "note"))
 	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
 }
+
+// A caller that cancels with a cause of its own (context.WithCancelCause)
+// has still cancelled: the verdict is coded cancelled-by-caller, exactly
+// as for a plain cancel, and the error carries both the caller's cause and
+// the cancellation. The cancel lands at a periodic save mid-copy, where
+// the copy is the one reporting why it stopped; the row stands in the
+// copying phase and the next run carries the change to the executed
+// verdict.
+func TestCopyAndSwapCancelledWithACauseIsCancelledByTheCaller(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE {schema}.orders DROP COLUMN note`
+	ownerStop := errors.New("owner is ready to cut over")
+	runCtx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	opts := f.options()
+	opts.CopySwap.CheckpointInterval = time.Millisecond
+	opts.CopySwap.Copier = copier.Options{
+		Workers: 1,
+		Chunker: copier.ChunkerOptions{InitialRows: 10, MinRows: 10, MaxRows: 10},
+	}
+	opts.CopySwap.OnCheckpoint = func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if midCopy(cp) {
+			cancel(ownerStop)
+		}
+		return nil
+	}
+	st, err := statement.ParseOne(f.inSchema(alter))
+	require.NoError(t, err)
+
+	v, err := copyAndSwap(runCtx, f.pool, st, opts, slog.New(slog.DiscardHandler))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled, "a cancel with a cause still reads as a cancel")
+	assert.ErrorIs(t, err, ownerStop, "and still names the caller's cause")
+	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+	assert.Equal(t, string(executor.CodeCancelledByCaller), v.Code)
+	assert.Equal(t, checkpoint.PhaseCopying, f.inspectRow(t).Phase)
+	assert.True(t, f.hasColumn(t, "orders", "note"), "the source is untouched while the run is stopped")
+
+	opts.CopySwap.OnCheckpoint = nil
+	v, err = f.run(t, alter, opts)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
+	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
+}

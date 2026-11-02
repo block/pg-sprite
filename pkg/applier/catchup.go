@@ -249,10 +249,13 @@ func (c *Catchup) Confirmed() decode.LSN {
 //
 // Run never returns nil: a catch-up has no end of its own, so its owner
 // stops it by ending ctx once the shadow is close enough to cut over, and
-// Run returns the cause ctx ended with, wrapped, once the stream reports
-// it. A stopped catch-up leaves the stream failed and the slot at the last
-// confirmed position, which is where the next stream resumes. A cycle
-// error that is not the stop itself travels with the stop, so a caller
+// Run returns the stop, wrapped, once the stream reports it. The stop
+// answers errors.Is for ctx.Err() (context.Canceled or
+// context.DeadlineExceeded), and also for the cause when ctx was cancelled
+// with one (context.WithCancelCause). A stopped catch-up leaves the stream
+// failed and the slot at the last confirmed position, which is where the
+// next stream resumes. A cycle error that is not the stop itself travels
+// with the stop, so a caller
 // checks the failure sentinels — ErrInvariantViolation, ErrTableLockLost,
 // ErrBatchDeferred — before it reads the stop as clean. The whole run is
 // bound to the table lock session, so losing the lock ends the cycle in
@@ -308,11 +311,31 @@ func stopped(ctx context.Context, schema, table string, err error) error {
 	if ctx.Err() == nil {
 		return err
 	}
-	stop := fmt.Errorf("catch-up on %s.%s stopped: %w", schema, table, context.Cause(ctx))
+	stop := fmt.Errorf("catch-up on %s.%s stopped: %w", schema, table, endedWith(ctx))
 	if errors.Is(err, ctx.Err()) {
 		return stop
 	}
 	return fmt.Errorf("%w; the cycle it stopped in failed: %w", stop, err)
+}
+
+// endedWith is why an ended ctx ended. A caller that cancelled with a cause
+// of its own (context.WithCancelCause) gets that cause wrapped together
+// with ctx.Err(), so the error reads as the cause and as a cancellation
+// (errors.Is(err, context.Canceled)) alike; a caller that cancelled
+// plainly, or whose deadline passed, gets ctx.Err() as it stands, and so
+// does a cause that already wraps it.
+//
+// It reads only that ctx ended, whoever ended it: a cancellation with a
+// cause always reads as a stop. An owner that cancels a context it derived
+// for this package because something failed must report that failure
+// itself, as the table lock session's loss and the runner's capture and
+// save failures are; otherwise the failure reads as the caller's stop.
+func endedWith(ctx context.Context) error {
+	cause := context.Cause(ctx)
+	if errors.Is(cause, ctx.Err()) {
+		return cause
+	}
+	return fmt.Errorf("%w (%w)", cause, ctx.Err())
 }
 
 // cycle is one gather, drain, flush, and confirm. Its status is recorded
