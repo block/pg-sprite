@@ -135,7 +135,8 @@ refusal — never a silently wrong or incomplete result:
   which keeps its values. A `DROP INDEX` run under `--accept-blocking` needs
   `--allow-destructive` too: accepting the lock is not accepting the loss,
   and the refusal lists the checks (`idx_scan` on every replica, foreign
-  keys, uniqueness) that catch an index the application still uses.
+  keys, uniqueness) that catch an index the application still uses, with
+  the connected server's own scan count for the index in `index_usage`.
 - **Destructive desired-state plans are refused as a whole** — `migrate --desired`
   creates missing tables and converges supported changes, but never infers permission
   to discard live structure. A new primary key or unique constraint over a live

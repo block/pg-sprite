@@ -645,7 +645,13 @@ and PostgreSQL `lock_timeout`). Contract points for the PostgreSQL adapter:
   executed. An acknowledged run's verdict carries `allowed_destructive: true`, the
   machine-readable audit record to store beside the operator's consent. The acknowledgement
   covers only the loss: a statement that also needs `Force` still needs it, and a `DROP INDEX`
-  run with `Options.AcceptBlocking` needs both, each naming the index's owning table.
+  run with `Options.AcceptBlocking` needs both, each naming the index's owning table; its
+  refusal carries `index_usage` (the writer's `idx_scan`, summed over the leaf indexes of a
+  partitioned index with `partitions` counting them, `stats_reset`, `last_idx_scan`,
+  uniqueness, `track_counts`, `track_counts_off_by_setting`; times in UTC) to show the
+  operator before asking for that consent. If that read fails, `Run` returns the error with a
+  zero verdict and nothing executed rather than the refusal: route it as a retryable
+  failure, like a connection fault, not as a refusal.
   `RunDesired`
   rejects `AllowDestructive` (`ErrAllowDestructiveNotSupported`) and keeps refusing a
   destructive plan whole, so a declarative drop the operator approves runs as its own
