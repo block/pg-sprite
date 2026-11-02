@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/statement"
@@ -42,7 +43,7 @@ func fixture(t *testing.T) *pgxpool.Pool {
 
 func connect(t *testing.T, url string) *pgxpool.Pool {
 	t.Helper()
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url, MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})})
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 	return pool

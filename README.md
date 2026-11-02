@@ -135,7 +135,8 @@ refusal — never a silently wrong or incomplete result:
   which keeps its values. A `DROP INDEX` run under `--accept-blocking` needs
   `--allow-destructive` too: accepting the lock is not accepting the loss,
   and the refusal lists the checks (`idx_scan` on every replica, foreign
-  keys, uniqueness) that catch an index the application still uses.
+  keys, uniqueness) that catch an index the application still uses, with
+  the connected server's own scan count for the index in `index_usage`.
 - **Destructive desired-state plans are refused as a whole** — `migrate --desired`
   creates missing tables and converges supported changes, but never infers permission
   to discard live structure. A new primary key or unique constraint over a live
@@ -145,7 +146,8 @@ refusal — never a silently wrong or incomplete result:
   with the desired definition: it plans as one online `VALIDATE CONSTRAINT`, and
   refuses with `validated-constraint-drift` if the constraint changed after planning.
 - **Invalid-index recovery has no CLI verb yet** — a failed concurrent index
-  build's leftover is reported with a typed state, and the proven removal
+  build's leftover is reported with a typed state (and named by `diff` as a
+  typed plan advisory), and the proven removal
   (`executor.RebuildAbandonedIndex`, or `executor.DropAbandonedIndex` when
   the caller must not rebuild) is library-only; from the CLI the
   [runbook](docs/invalid-index-recovery.md) applies.
@@ -249,8 +251,13 @@ Half the CLI works offline on DDL text alone; the other half connects to a
 live database (`--url` / `PGSPRITE_URL`, always under bounded `lock_timeout`
 and `statement_timeout`; a `search_path` that lists `pg_catalog` after a user
 schema has that entry removed so the schema no longer shadows the catalog, and
-every other entry is left as configured). Only `migrate` without `--dry-run`
-ever commits a change — every other command is read-only or fully offline.
+every other entry is left as configured). The connection pool holds at least
+six connections unless the URL sets `pool_max_conns`: a copy-and-swap run's
+four copy workers, its catch-up, and its checkpoint saves each need one. A
+`pool_max_conns` in the URL is kept as given, and a copy-and-swap run refuses a
+pool below six before it creates anything (`code: pool-too-small`). Only
+`migrate` without `--dry-run` ever commits a change — every other command is
+read-only or fully offline.
 
 | Command | Live database | What the connection is used for |
 |---|---|---|

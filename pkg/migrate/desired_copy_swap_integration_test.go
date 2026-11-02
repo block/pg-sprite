@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/block/pg-sprite/internal/testutil"
+	"github.com/block/pg-sprite/pkg/copier"
 	"github.com/block/pg-sprite/pkg/dbconn"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/preflight"
@@ -43,7 +44,7 @@ func desiredCopySwapOptions(serverURL string) migrate.Options {
 // first left behind — and converges.
 func TestRunDesiredCopyAndSwap(t *testing.T) {
 	serverURL := testutil.StartPostgresWithSettings(t, "wal_level=logical", "wal_sender_timeout=2s")
-	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL})
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL, MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})})
 	require.NoError(t, err)
 	defer pool.Close()
 
@@ -142,4 +143,44 @@ func TestRunDesiredCopyAndSwap(t *testing.T) {
 		assert.Equal(t, verdict.OutcomeExecuted, res.Outcome)
 		assert.Empty(t, res.Plan.Statements, "the converged table plans no statements")
 	})
+}
+
+// Desired-state execution takes no block-writes acknowledgement, so a plan
+// that reaches a copy always needs the live path. On a server without
+// logical decoding (the default wal_level = replica) the plan below, a
+// native ADD COLUMN ahead of a retype routed to copy-and-swap, is refused
+// whole at admission: the route's preflight refuses the server as an
+// environmental condition, and neither statement runs.
+func TestRunDesiredRefusesACopyOnAServerWithoutLogicalDecoding(t *testing.T) {
+	serverURL := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: serverURL, MaxConnsFloor: migrate.CopySwapMinConns(copier.Options{})})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+		CREATE TABLE %s.t (
+			id       int PRIMARY KEY,
+			owner_id int NOT NULL
+		)`, schema))
+	require.NoError(t, err)
+
+	res, err := migrate.RunDesired(t.Context(), pool, migrate.DesiredRequest{
+		Schema: schema,
+		Desired: parseDesired(t, `CREATE TABLE t (
+			id       int PRIMARY KEY,
+			owner_id bigint NOT NULL,
+			note     text
+		)`),
+	}, desiredCopySwapOptions(serverURL))
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeRefused, res.Outcome)
+	assert.Equal(t, verdict.ReasonCopyAndSwapRefused, res.Reason)
+	assert.Equal(t, verdict.ClassEnvironmental, res.Class, "logical decoding is a server setting, not a capability boundary")
+	assert.Empty(t, res.Verdicts, "no statement was attempted")
+
+	var columns int
+	require.NoError(t, pool.QueryRow(t.Context(),
+		`SELECT count(*) FROM information_schema.columns
+		 WHERE table_schema = $1 AND table_name = 't'`, schema).Scan(&columns))
+	assert.Equal(t, 2, columns, "the native ADD COLUMN did not commit")
 }

@@ -256,7 +256,10 @@ func (c *Copier) Position() Position {
 // that was running keeps running until it finishes or hits the transaction's
 // statement_timeout, and only then is its transaction rolled back; the
 // server-side end of a cancelled chunk is bounded by that timeout, not by
-// Run's return.
+// Run's return. A Run stopped by ctx returns an error that answers
+// errors.Is for ctx.Err() (context.Canceled or context.DeadlineExceeded),
+// and also for the cause when ctx was cancelled with one
+// (context.WithCancelCause).
 func (c *Copier) Run(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := c.start(); err != nil {
 		return err
@@ -271,20 +274,54 @@ func (c *Copier) Run(ctx context.Context, pool *pgxpool.Pool) error {
 	if err := c.clearAbove(ctx, pool, c.Position().Watermark); err != nil {
 		return c.finish(err)
 	}
-	ctx, stop := context.WithCancelCause(ctx)
+	workers, stop := context.WithCancelCause(ctx)
 	defer stop(nil)
 
 	var wg sync.WaitGroup
 	for range c.opts.Workers {
 		wg.Go(func() {
-			if err := c.work(ctx, pool); err != nil {
+			if err := c.work(workers, pool); err != nil {
 				stop(err)
 			}
 		})
 	}
 	wg.Wait()
 	// INV: LK-3
-	return c.finish(context.Cause(ctx))
+	return c.finish(stopReason(ctx, workers))
+}
+
+// stopReason is why the workers stopped: the first worker's error, or the
+// caller's ending of ctx. A worker's error stands as it is, even when the
+// caller cancelled after it, since that error is what stopped the copy.
+func stopReason(ctx, workers context.Context) error {
+	cause := context.Cause(workers)
+	if ctx.Err() == nil {
+		return cause
+	}
+	if !errors.Is(cause, context.Cause(ctx)) {
+		return cause
+	}
+	return endedWith(ctx)
+}
+
+// endedWith is why an ended ctx ended. A caller that cancelled with a cause
+// of its own (context.WithCancelCause) gets that cause wrapped together
+// with ctx.Err(), so the error reads as the cause and as a cancellation
+// (errors.Is(err, context.Canceled)) alike; a caller that cancelled
+// plainly, or whose deadline passed, gets ctx.Err() as it stands, and so
+// does a cause that already wraps it.
+//
+// It reads only that ctx ended, whoever ended it: a cancellation with a
+// cause always reads as a stop. An owner that cancels a context it derived
+// for this package because something failed must report that failure
+// itself, as the table lock session's loss and the runner's capture and
+// save failures are; otherwise the failure reads as the caller's stop.
+func endedWith(ctx context.Context) error {
+	cause := context.Cause(ctx)
+	if errors.Is(cause, ctx.Err()) {
+		return cause
+	}
+	return fmt.Errorf("%w (%w)", cause, ctx.Err())
 }
 
 func (c *Copier) start() error {
