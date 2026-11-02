@@ -552,10 +552,16 @@ policy reads under it) qualifies the same way, so a lookalike in the source sche
 drop a role's grant, hand a column grant to `PUBLIC`, change a comment, or change a policy's
 roles (`TestBuildShadowFidelityReadsIgnoreImpostorCatalogNames`). The scratch build's own
 reads beside introspection — the stand-in index read and the foreign-key binding proof in
-`pkg/schemadiff` — qualify every relation and operator too. *Test obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with
-decoy catalog relations and functions in the schema) yields the same answer as the default
-path, per read site and per pooled session; and on a path pg-sprite builds that lists a user
-schema, a lookalike planted there that answers the unqualified call does not change the read.
+`pkg/schemadiff` — qualify every relation and operator too; both compare oid with oid and
+oid with a bound parameter, so no planted overload can change their answers and no
+shadowing-path probe can tell them from unqualified reads. Their qualification is held by
+its text instead (`TestDesiredForeignKeyReadsQualifyEveryRelationAndOperator`), and their
+answers under the build's own path by `TestDesiredForeignKeyScratchReads`.
+*Test obligation:* a shadowing `search_path` (`<schema>, pg_catalog` with decoy catalog
+relations and functions in the schema) yields the same answer as the default path, per read
+site and per pooled session; on a path pg-sprite builds that lists a user schema, a
+lookalike planted there that answers the unqualified call does not change the read; and a
+read whose comparisons admit no overload is held to its qualification by a source guard.
 
 ## Locking and concurrency (LK)
 

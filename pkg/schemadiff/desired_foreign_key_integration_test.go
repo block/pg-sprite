@@ -22,9 +22,10 @@ import (
 // comparison with an untyped literal or parameter takes the unknown side as
 // the known side's type and finds the catalog's exact operator. The subtests
 // therefore hold the two reads to their answers under the build's own path:
-// the proof refuses a foreign key that escaped the scratch schema, and a build
-// whose foreign key binds to a stand-in completes with the stand-in's copied
-// index name free for the file to use.
+// the proof refuses the foreign keys that escaped the scratch schema and
+// names them in name order, a build whose foreign key binds to a stand-in
+// completes with the stand-in's copied index name free for the file to use,
+// and the stand-ins of two referenced tables take distinct index names.
 func TestDesiredForeignKeyScratchReads(t *testing.T) {
 	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: testutil.StartPostgres(t)})
 	require.NoError(t, err)
@@ -34,16 +35,29 @@ func TestDesiredForeignKeyScratchReads(t *testing.T) {
 		t.Helper()
 		schema := testutil.NewSchema(t, pool)
 		_, err := pool.Exec(t.Context(), fmt.Sprintf(`
-			CREATE TABLE %[1]s.customers (id bigint PRIMARY KEY)`, schema))
-		require.NoError(t, err, "create the referenced table")
+			CREATE TABLE %[1]s.customers (id bigint PRIMARY KEY);
+			CREATE TABLE %[1]s.stores (id bigint PRIMARY KEY)`, schema))
+		require.NoError(t, err, "create the referenced tables")
 		return schema
+	}
+
+	foreignKeysOf := func(desired Model) []string {
+		var foreignKeys []string
+		for _, c := range desired.Constraints {
+			if c.ForeignKey {
+				foreignKeys = append(foreignKeys, c.Name+": "+c.Def)
+			}
+		}
+		return foreignKeys
 	}
 
 	// A foreign key bound to the live referenced table is exactly what the
 	// proof exists to refuse; the parse boundary never admits one, so the
 	// proof is driven directly with a scratch transaction shaped as the
-	// build's: a fresh scratch schema leading the build's search_path.
-	t.Run("the binding proof refuses a foreign key bound outside the scratch schema", func(t *testing.T) {
+	// build's: a fresh scratch schema leading the build's search_path. The
+	// two escaped keys are declared out of name order, so the refusal lists
+	// them in the read's order, not the declaration's.
+	t.Run("the binding proof refuses the foreign keys bound outside the scratch schema", func(t *testing.T) {
 		schema := newFixture(t)
 		tx, err := pool.Begin(t.Context())
 		require.NoError(t, err)
@@ -58,14 +72,16 @@ func TestDesiredForeignKeyScratchReads(t *testing.T) {
 		_, err = tx.Exec(t.Context(), fmt.Sprintf(`
 			CREATE TABLE %[1]s.orders (
 				id bigint PRIMARY KEY,
+				store_id bigint CONSTRAINT orders_store_fk REFERENCES %[2]s.stores (id),
 				customer_id bigint CONSTRAINT orders_customer_fk REFERENCES %[2]s.customers (id),
 				CONSTRAINT orders_id_check CHECK (id > 0)
 			)`, pgx.Identifier{scratch}.Sanitize(), pgx.Identifier{schema}.Sanitize()))
-		require.NoError(t, err, "bind a scratch foreign key to the live referenced table")
+		require.NoError(t, err, "bind two scratch foreign keys to the live referenced tables")
 
 		err = confirmForeignKeysBindScratch(t.Context(), tx, scratch, "orders")
 		require.ErrorIs(t, err, dbconn.ErrInvariantViolation)
-		assert.ErrorContains(t, err, `["orders_customer_fk"]`, "the escaped foreign key is named, and the primary key and check constraint are not")
+		assert.ErrorContains(t, err, `["orders_customer_fk" "orders_store_fk"]`,
+			"both escaped foreign keys are named in name order; the primary key and check constraint are not")
 	})
 
 	// LIKE names the stand-in's copied primary key index customers_pkey, the
@@ -85,16 +101,33 @@ func TestDesiredForeignKeyScratchReads(t *testing.T) {
 		desired, err := IntrospectDesired(t.Context(), pool, schema, desiredFile)
 		require.NoError(t, err)
 
-		var foreignKeys, indexes []string
-		for _, c := range desired.Constraints {
-			if c.ForeignKey {
-				foreignKeys = append(foreignKeys, c.Name+": "+c.Def)
-			}
-		}
+		var indexes []string
 		for _, i := range desired.Indexes {
 			indexes = append(indexes, i.Name)
 		}
-		assert.Equal(t, []string{"orders_customer_fk: FOREIGN KEY (customer_id) REFERENCES customers(id)"}, foreignKeys)
+		assert.Equal(t, []string{"orders_customer_fk: FOREIGN KEY (customer_id) REFERENCES customers(id)"}, foreignKeysOf(desired))
 		assert.Contains(t, indexes, "customers_pkey", "the file's index takes the name the stand-in's copied primary key index was renamed away from")
+	})
+
+	// Each stand-in's indexes are numbered on from the previous stand-in's,
+	// so the second referenced table's copied primary key index cannot take
+	// the name the first one's already holds. A build that renames both from
+	// zero fails on the second stand-in with a duplicate relation name.
+	t.Run("the stand-ins of two referenced tables take distinct index names", func(t *testing.T) {
+		schema := newFixture(t)
+		desiredFile, err := statement.ParseDesired(`
+			CREATE TABLE orders (
+				id bigint PRIMARY KEY,
+				customer_id bigint CONSTRAINT orders_customer_fk REFERENCES customers (id),
+				store_id bigint CONSTRAINT orders_store_fk REFERENCES stores (id)
+			)`)
+		require.NoError(t, err)
+		desired, err := IntrospectDesired(t.Context(), pool, schema, desiredFile)
+		require.NoError(t, err)
+
+		assert.ElementsMatch(t, []string{
+			"orders_customer_fk: FOREIGN KEY (customer_id) REFERENCES customers(id)",
+			"orders_store_fk: FOREIGN KEY (store_id) REFERENCES stores(id)",
+		}, foreignKeysOf(desired))
 	})
 }
