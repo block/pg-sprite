@@ -37,7 +37,7 @@ type copySwapFixture struct {
 
 func newCopySwapFixture(t *testing.T) copySwapFixture {
 	t.Helper()
-	cfg := dbconn.Config{URL: testutil.StartPostgres(t)}
+	cfg := dbconn.Config{URL: testutil.StartPostgres(t), MaxConnsFloor: CopySwapMinConns(copier.Options{})}
 	pool, err := dbconn.NewPool(t.Context(), cfg)
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
@@ -74,14 +74,15 @@ func (f copySwapFixture) createOrders(t *testing.T) {
 		FROM generate_series(1, 2500) g`)
 }
 
-// options is a quiesced copy-and-swap policy over the fixture's database
-// with room on disk, the shape every test here starts from.
+// options is a copy-and-swap policy over the fixture's database with room
+// on disk, quiesced for the orders table, the shape every test here starts
+// from.
 func (f copySwapFixture) options() Options {
 	opts := DefaultOptions()
 	opts.CopySwap = CopySwapOptions{
 		Connection:    f.cfg,
 		FreeDiskBytes: testutil.UnlimitedDisk,
-		Quiesced:      true,
+		BlockWrites:   f.schema + ".orders",
 	}
 	return opts
 }
@@ -339,6 +340,7 @@ func TestCopyAndSwapStopsWhereTheHostSaysAndResumes(t *testing.T) {
 	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
 	assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
 	assert.Contains(t, v.Detail, "resumes from the row")
+	assert.True(t, v.WritesBlocked, "the stopped run left its fence on the source")
 	assert.Equal(t, checkpoint.PhaseVerifying, f.inspectRow(t).Phase, "the row stands where the host stopped")
 	assert.True(t, f.hasColumn(t, "orders", "note"), "the source is untouched while the run is stopped")
 
@@ -472,5 +474,50 @@ func TestCopyAndSwapStopsAtAPeriodicSaveOfTheCopy(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 	assert.False(t, f.hasColumn(t, "orders", "note"))
+	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
+}
+
+// A caller that cancels with a cause of its own (context.WithCancelCause)
+// has still cancelled: the verdict is coded cancelled-by-caller, exactly
+// as for a plain cancel, and the error carries both the caller's cause and
+// the cancellation. The cancel lands at a periodic save mid-copy, where
+// the copy is the one reporting why it stopped; the row stands in the
+// copying phase and the next run carries the change to the executed
+// verdict.
+func TestCopyAndSwapCancelledWithACauseIsCancelledByTheCaller(t *testing.T) {
+	f := newCopySwapFixture(t)
+	f.createOrders(t)
+	const alter = `ALTER TABLE {schema}.orders DROP COLUMN note`
+	ownerStop := errors.New("owner is ready to cut over")
+	runCtx, cancel := context.WithCancelCause(t.Context())
+	defer cancel(nil)
+	opts := f.options()
+	opts.CopySwap.CheckpointInterval = time.Millisecond
+	opts.CopySwap.Copier = copier.Options{
+		Workers: 1,
+		Chunker: copier.ChunkerOptions{InitialRows: 10, MinRows: 10, MaxRows: 10},
+	}
+	opts.CopySwap.OnCheckpoint = func(_ context.Context, cp checkpoint.Checkpoint) error {
+		if midCopy(cp) {
+			cancel(ownerStop)
+		}
+		return nil
+	}
+	st, err := statement.ParseOne(f.inSchema(alter))
+	require.NoError(t, err)
+
+	v, err := copyAndSwap(runCtx, f.pool, st, opts, slog.New(slog.DiscardHandler))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled, "a cancel with a cause still reads as a cancel")
+	assert.ErrorIs(t, err, ownerStop, "and still names the caller's cause")
+	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
+	assert.Equal(t, string(executor.CodeCancelledByCaller), v.Code)
+	assert.Equal(t, checkpoint.PhaseCopying, f.inspectRow(t).Phase)
+	assert.True(t, f.hasColumn(t, "orders", "note"), "the source is untouched while the run is stopped")
+
+	opts.CopySwap.OnCheckpoint = nil
+	v, err = f.run(t, alter, opts)
+	require.NoError(t, err)
+	assert.Equal(t, verdict.OutcomeExecutedViaCopyAndSwap, v.Outcome)
 	assert.EqualValues(t, 2500, f.rowCount(t, "orders"))
 }

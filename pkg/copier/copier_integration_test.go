@@ -2,6 +2,7 @@ package copier_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strconv"
@@ -333,8 +334,12 @@ func TestCopierCancellationKeepsTheCancelledChunkInFlight(t *testing.T) {
 		Clock:       pin.clock,
 	})
 	require.NoError(t, err)
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
+	// The owner cancels with a cause of its own, as an embedder does; the
+	// copy must still read as the cancellation it is.
+	ctx, cancelWith := context.WithCancelCause(t.Context())
+	defer cancelWith(nil)
+	ownerStop := errors.New("owner is ready to cut over")
+	cancel := func() { cancelWith(ownerStop) }
 	results := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Go(func() { results <- c.Run(ctx, f.pool) })
@@ -355,7 +360,8 @@ func TestCopierCancellationKeepsTheCancelledChunkInFlight(t *testing.T) {
 	const stopDeadline = 15 * time.Second
 	select {
 	case err := <-results:
-		assert.ErrorIs(t, err, context.Canceled)
+		assert.ErrorIs(t, err, context.Canceled, "a cancel with the owner's own cause is still a cancellation")
+		assert.ErrorIs(t, err, ownerStop, "and carries the owner's cause")
 	case <-time.After(stopDeadline):
 		t.Fatalf("copy did not stop within %s of cancellation", stopDeadline)
 	}

@@ -2,6 +2,7 @@ package applier
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -30,4 +31,23 @@ func TestCatchupPauseTakesAFreeGateOnAnEndedContext(t *testing.T) {
 		require.True(t, c.tryFlushes(), "the resume gave the gate back")
 		c.releaseFlushes()
 	}
+}
+
+// A Pause that waits behind a flush in flight and whose context is cancelled
+// with a cause takes no hold and returns an error that carries the cause
+// and still reads as a cancellation, so a live repair stopped this way is
+// reported as the caller's stop.
+func TestCatchupPauseCancelledWithACauseReadsAsCancelled(t *testing.T) {
+	c := &Catchup{flushes: newFlushGate(), flusher: &Flusher{}}
+	require.True(t, c.tryFlushes(), "a flush in flight holds the gate")
+	ctx, cancel := context.WithCancelCause(t.Context())
+	ownerStop := errors.New("owner is ready to cut over")
+	cancel(ownerStop)
+
+	_, err := c.Pause(ctx)
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ownerStop, "the owner's cause is carried")
+	assert.ErrorIs(t, err, context.Canceled, "a cancel with a cause is still a cancellation")
+	assert.False(t, c.Status().FlushesHeld)
 }
