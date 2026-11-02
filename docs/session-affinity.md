@@ -12,6 +12,8 @@ on session affinity, how pg-sprite proves it, what it refuses, and how to connec
 
 - [Is it mandatory?](#is-it-mandatory)
 - [What depends on one session](#what-depends-on-one-session)
+  - [Connection, session and backend](#connection-session-and-backend)
+  - [What pg-sprite keeps in the session](#what-pg-sprite-keeps-in-the-session)
 - [What breaks without it](#what-breaks-without-it)
 - [How pg-sprite proves it](#how-pg-sprite-proves-it)
 - [Which endpoints pass](#which-endpoints-pass)
@@ -33,12 +35,41 @@ affinity again on its own connection.
 
 ## What depends on one session
 
-Each item below is state PostgreSQL keeps **per server session**, not per client connection.
-If the connection's next statement lands on a different backend, the state is not there.
+### Connection, session and backend
+
+PostgreSQL starts one server process, a **backend**, for each connection it accepts. (On this
+page "backend" always means that process, not pg-sprite's execution backend, such as native
+or copy-and-swap.) The backend *is* the **session**: it owns everything set with `SET`, every
+session-level lock, and every prepared statement. Each lasts until it is released or reset
+(`RESET`, `DISCARD ALL`) or the connection closes, and a `SET` inside a transaction that
+rolls back is undone with it. `pg_backend_pid()` names the backend. What varies is how many
+client connections share a backend, and for how long:
+
+| Path | Client connection → server backend | Session state survives across transactions? |
+|---|---|---|
+| Direct | 1 : 1 for the connection's whole life | Yes |
+| Session-mode pooler | 1 : 1 while the client stays connected; after it disconnects, the pooler resets the backend's session state (PgBouncer's `server_reset_query`, `DISCARD ALL` by default) and hands it to the next client | Yes |
+| Transaction-mode pooler | Bound to a backend only for the length of one transaction; the next transaction can run on any free backend | No |
+| Statement-mode pooler | Bound to a backend only for the length of one statement; the next statement can run on any free backend | No |
+
+```diagram
+ direct / session mode                    transaction mode
+ ─────────────────────                    ────────────────
+ client conn ─────────▶ backend A         client conn ─ tx 1 ─▶ backend A
+   tx 1  runs on A                                    ─ tx 2 ─▶ backend B
+   tx 2  runs on A                                    ─ tx 3 ─▶ backend A, after
+   (A keeps the SETs and locks)                                another client used it
+```
+
+### What pg-sprite keeps in the session
+
+So "the connection" pg-sprite holds is only as stable as the backend behind it. Each item
+below is state PostgreSQL keeps **per backend**, not per client connection: if the
+connection's next statement lands on a different backend, the state is not there.
 
 | Session state | What pg-sprite uses it for | Invariant |
 |---|---|---|
-| `lock_timeout` and `statement_timeout`, sent as startup parameters and read back by `NewPool` | Bound every lock wait and every statement, so a queued `ALTER` can never sit at the head of the lock queue and block every reader and writer of the table | [LK-2](invariants.md#lk-2--exactly-one-access-exclusive-window-and-every-strong-lock-is-bounded) |
+| `lock_timeout` and `statement_timeout`, sent as startup parameters, set again with `SET` on every new connection, and read back by `NewPool` | Bound every lock wait and every statement, so a queued `ALTER` can never sit at the head of the lock queue and block every reader and writer of the table | [LK-2](invariants.md#lk-2--exactly-one-access-exclusive-window-and-every-strong-lock-is-bounded) |
 | A session-level advisory lock on a dedicated connection (`pg_try_advisory_lock(0x70677370, hashtext(…))`) | Make sure at most one pg-sprite run works on a table at a time | [LK-1](invariants.md#lk-1--at-most-one-migration-runs-per-table) |
 | A catalog-first `search_path`, set once per physical connection | Stop a user schema from shadowing `pg_class`, `hashtext` and other catalog names in the engine's unqualified reads | [CO-9](invariants.md#co-9--decision-reads-resolve-to-the-real-catalog) |
 
@@ -48,6 +79,8 @@ session itself has to be stable.
 
 ## What breaks without it
 
+This follows the transaction-mode row of the
+[table above](#connection-session-and-backend), with pg-sprite's session state attached.
 Behind a **transaction-mode** pooler, the client connection is bound to a backend only for the
 length of one transaction. Between transactions the pooler can hand the next statement to any
 backend. Example: one pg-sprite connection whose session state landed on backend A, followed
@@ -68,10 +101,10 @@ by an `ALTER` in its next transaction:
                                                                       forever)
 ```
 
-(pg-sprite sends its timeouts as startup parameters. A transaction-mode PgBouncer rejects
-startup parameters it doesn't track, or is configured to drop them; `NewPool` reads the
-values back and refuses a connection that doesn't carry them, with
-`ErrSessionSettingsDiscarded`. The proof below covers the case where the settings did land,
+(pg-sprite sends its timeouts as startup parameters and sets them again with `SET` on every
+new connection, because a pooler in any mode may drop startup parameters it is configured to
+ignore. `NewPool` then reads the values back and refuses a connection that doesn't carry them,
+with `ErrSessionSettingsDiscarded`. The proof below covers the case where the settings did land,
 but only on one backend.)
 
 Three things went wrong, and none is visible to the client:
