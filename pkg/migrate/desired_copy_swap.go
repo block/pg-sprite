@@ -17,7 +17,7 @@ import (
 // the router sends in part through the copy-and-swap backend. The router
 // decides the route from the statement alone; whether the route can run is
 // a fact about the table and the server — a primary key, no foreign keys or
-// triggers or dependent views, logical decoding or a quiesced declaration,
+// triggers or dependent views, logical decoding or a block-writes acknowledgement,
 // disk for the shadow — that only the route's preflight reads. Read it
 // here, before any statement runs, so a plan the preflight would refuse is
 // refused whole and the native statements planned ahead of the retype do

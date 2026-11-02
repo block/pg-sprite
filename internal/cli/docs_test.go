@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/block/pg-sprite/pkg/executor"
 	"github.com/block/pg-sprite/pkg/lint"
 	"github.com/block/pg-sprite/pkg/migrate"
 	"github.com/block/pg-sprite/pkg/plan"
@@ -76,7 +77,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	raw, err := os.ReadFile(cliOutputExamplesDoc)
 	require.NoError(t, err)
 	blocks := regexp.MustCompile("(?s)```console\n\\$ pg-sprite [^\n]*--json\n(.*?)```").FindAllStringSubmatch(string(raw), -1)
-	require.Len(t, blocks, 13, "the doc publishes thirteen captured --json outputs")
+	require.Len(t, blocks, 14, "the doc publishes fourteen captured --json outputs")
 
 	metadataOnly := alterReport(t, "ALTER TABLE users ADD COLUMN note text",
 		"public", "users", usersFacts())
@@ -105,6 +106,22 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 		"public", "users", usersFacts())
 	copyAndSwapRouted := alterReport(t, "ALTER TABLE users ALTER COLUMN id TYPE text",
 		"public", "users", usersFacts())
+	// The failed verdict is captured from a run: a CHECK whose NOT VALID
+	// step commits and whose VALIDATE step then meets a violating row. Its
+	// detail is the migrate package's rendering of a mid-sequence failure.
+	failedSequence := verdict.Verdict{
+		Outcome:       verdict.OutcomeFailed,
+		Code:          string(executor.CodeExecutionFailed),
+		FailedStep:    2,
+		FailedStepSQL: `ALTER TABLE "public"."users" VALIDATE CONSTRAINT "users_email_lower"`,
+		Statement:     "ALTER TABLE public.users ADD CONSTRAINT users_email_lower CHECK (email = lower(email))",
+		Table:         "public.users",
+		Detail: "sequence step 2 of 2 failed; the 1 committed steps' state remains — " +
+			"the planner sequence's partial-failure contract says how a retry resumes",
+		ExecutedSQL: []string{
+			"ALTER TABLE public.users ADD CONSTRAINT users_email_lower CHECK (email = lower(email)) NOT VALID",
+		},
+	}
 	// The executed verdict is captured from a run; its detail is the
 	// verdict's own rendering of the verification pass and the retained
 	// source's fate, which the migrate package's tests pin.
@@ -169,7 +186,7 @@ func TestCLIOutputExamplesMatchPipelineOutput(t *testing.T) {
 	}
 	diff.Fingerprint = plan.Fingerprint(diff.Statements)
 
-	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, rewriteRequired,
+	want := []any{metadataOnly, saferIdiom, executed, acceptedBlocking, failedSequence, rewriteRequired,
 		copyAndSwapRouted, executedViaCopyAndSwap, backendUnavailable, partitioned, destructiveRefused, destructive,
 		lintReport, diff}
 	for i, w := range want {

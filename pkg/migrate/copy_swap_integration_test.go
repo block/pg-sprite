@@ -340,6 +340,7 @@ func TestCopyAndSwapStopsWhereTheHostSaysAndResumes(t *testing.T) {
 	assert.Equal(t, verdict.OutcomeFailed, v.Outcome)
 	assert.Equal(t, string(executor.CodeExecutionFailed), v.Code)
 	assert.Contains(t, v.Detail, "resumes from the row")
+	assert.True(t, v.WritesBlocked, "the stopped run left its fence on the source")
 	assert.Equal(t, checkpoint.PhaseVerifying, f.inspectRow(t).Phase, "the row stands where the host stopped")
 	assert.True(t, f.hasColumn(t, "orders", "note"), "the source is untouched while the run is stopped")
 

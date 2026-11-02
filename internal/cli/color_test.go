@@ -183,6 +183,7 @@ func fullVerdict(t *testing.T) verdict.Verdict {
 		Forced:              true,
 		AllowedDestructive:  true,
 		BlockingPassthrough: true,
+		WritesBlocked:       true,
 		LockTimeout:         "3s",
 		StatementTimeout:    "10m",
 		StatisticsRefresh:   &verdict.StatisticsRefresh{Columns: []string{"c"}, Pending: `ANALYZE "t"`},

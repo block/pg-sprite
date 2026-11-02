@@ -5,6 +5,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -234,6 +235,92 @@ func TestPlanNoChangesEmptyPlan(t *testing.T) {
 	require.NotNil(t, report.TableExists)
 	assert.True(t, *report.TableExists)
 	assert.Empty(t, report.Statements)
+}
+
+// seedAbandonedUniqueBuild creates schema.events with two rows sharing a
+// name and runs a unique concurrent build over them. The build fails on the
+// duplicates after creating its catalog entry, which leaves
+// events_name_key behind as an invalid index — the leftover of an
+// unfinished concurrent build.
+func seedAbandonedUniqueBuild(t *testing.T, pool *pgxpool.Pool, schema string) {
+	t.Helper()
+	_, err := pool.Exec(t.Context(), fmt.Sprintf(`
+CREATE TABLE %[1]s.events (
+    id   bigint PRIMARY KEY,
+    name text NOT NULL
+);
+INSERT INTO %[1]s.events VALUES (1, 'dup'), (2, 'dup');
+`, schema))
+	require.NoError(t, err)
+	_, err = pool.Exec(t.Context(), fmt.Sprintf(`
+CREATE UNIQUE INDEX CONCURRENTLY events_name_key ON %s.events (name)
+`, schema))
+	require.Error(t, err, "a unique build over duplicates must fail after creating its catalog entry")
+}
+
+// A desired schema that no longer names the leftover of a failed concurrent
+// build plans zero statements — the diff never drops an unfinished build —
+// and one invalid-index-undeclared advisory, so the empty plan does not
+// read as a clean table. The advisory is explanatory: the fingerprint is
+// the empty plan's.
+func TestPlanUndeclaredInvalidIndexReportsAdvisory(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	seedAbandonedUniqueBuild(t, pool, schema)
+
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{
+		Schema: schema,
+		Desired: parseDesired(t, `
+CREATE TABLE events (
+    id   bigint PRIMARY KEY,
+    name text NOT NULL
+);
+`),
+	})
+	require.NoError(t, err)
+	assert.Empty(t, report.Statements, "the diff never drops an unfinished build")
+	assert.Equal(t, router.DispositionExecute, report.Disposition)
+	assert.Equal(t, []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexUndeclared, Index: "events_name_key"},
+	}, report.Advisories)
+	assert.Equal(t, plan.Fingerprint(nil), report.Fingerprint, "an advisory is not part of the plan's identity")
+}
+
+// A desired schema that names the leftover of a failed concurrent build
+// plans its non-destructive create-index and an invalid-index-rebuild
+// advisory: the create cannot run as-is against the occupied name, and the
+// plan completes only through the proven-removal path. The advisory changes
+// neither the destructive gate nor the fingerprint.
+func TestPlanDeclaredInvalidIndexReportsRebuildAdvisory(t *testing.T) {
+	url := testutil.StartPostgres(t)
+	pool, err := dbconn.NewPool(t.Context(), dbconn.Config{URL: url})
+	require.NoError(t, err)
+	defer pool.Close()
+	schema := testutil.NewSchema(t, pool)
+	seedAbandonedUniqueBuild(t, pool, schema)
+
+	report, err := diffplan.Plan(t.Context(), pool, diffplan.Request{
+		Schema: schema,
+		Desired: parseDesired(t, `
+CREATE TABLE events (
+    id   bigint PRIMARY KEY,
+    name text NOT NULL
+);
+
+CREATE UNIQUE INDEX events_name_key ON events (name);
+`),
+	})
+	require.NoError(t, err)
+	require.Len(t, report.Statements, 1)
+	assert.Equal(t, schemadiff.ChangeCreateIndex, report.Statements[0].Kind)
+	assert.False(t, report.Statements[0].Destructive, "the advisory does not turn the create destructive")
+	assert.Equal(t, []schemadiff.Advisory{
+		{Kind: schemadiff.AdvisoryInvalidIndexRebuild, Index: "events_name_key"},
+	}, report.Advisories)
+	assert.Equal(t, plan.Fingerprint(report.Statements), report.Fingerprint)
 }
 
 // A table that does not exist yet plans as the full desired schema,

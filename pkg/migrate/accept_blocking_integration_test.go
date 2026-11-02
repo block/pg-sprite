@@ -109,6 +109,25 @@ func TestRunAcceptBlockingExecutesEligibleRefusals(t *testing.T) {
 		assertAccepted(t, v, schema)
 	})
 
+	// A REINDEX discards nothing, so the blocking acknowledgement alone
+	// runs it; only a dropped index needs the destructive one too.
+	t.Run("REINDEX needs only the blocking acknowledgement", func(t *testing.T) {
+		for _, sql := range []string{
+			"REINDEX INDEX %s.orders_created_idx",
+			"REINDEX TABLE %s.orders",
+		} {
+			schema := seed(t)
+			opts := acceptBlockingOptions(schema + ".orders")
+			opts.AllowDestructive = ""
+
+			v, err := migrate.Run(t.Context(), pool, parseOne(t, fmt.Sprintf(sql, schema)), opts)
+			require.NoError(t, err, sql)
+			assertAccepted(t, v, schema)
+			assert.False(t, v.AllowedDestructive, "%s records no acknowledged loss", sql)
+			assert.True(t, indexExists(t, pool, schema, "orders_created_idx"), "REINDEX keeps the index")
+		}
+	})
+
 	t.Run("REINDEX TABLE of a materialized view acknowledges the view", func(t *testing.T) {
 		// LOCK TABLE cannot name a materialized view, so this is the one
 		// target the engine does not lock before the statement; the
