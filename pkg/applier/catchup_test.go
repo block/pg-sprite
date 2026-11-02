@@ -123,6 +123,11 @@ func TestEndedWithKeepsACancellationReadableAsOne(t *testing.T) {
 	assert.ErrorIs(t, err, cause)
 	assert.ErrorIs(t, err, context.Canceled)
 	assert.EqualError(t, err, "owner is ready to cut over (context canceled)")
+
+	interrupted := fmt.Errorf("interrupted by signal: %w", context.Canceled)
+	wrapped, cancelWrapped := context.WithCancelCause(t.Context())
+	cancelWrapped(interrupted)
+	assert.Same(t, interrupted, endedWith(wrapped), "a cause that is already a cancellation is reported as it stands")
 }
 
 // The copy has landed when its cut frontier is complete and no claimed

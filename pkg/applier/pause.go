@@ -20,10 +20,12 @@ import (
 // that waits for the catch-up to confirm past its own work resumes first,
 // since the confirmation needs the flushes. Pause waits for a flush in
 // flight to commit or fail, or for ctx to end; a second Pause waits for the
-// first's resume; resume is safe to call more than once. Pause before Run
-// takes the hold at once, and a Run started under it flushes nothing until
-// resume. Status reports the hold as FlushesHeld from Pause's return until
-// the resume.
+// first's resume; resume is safe to call more than once. A Pause whose ctx
+// ends first takes no hold and returns an error that answers errors.Is for
+// ctx.Err(), and also for the cause when ctx was cancelled with one. Pause
+// before Run takes the hold at once, and a Run started under it flushes
+// nothing until resume. Status reports the hold as FlushesHeld from Pause's
+// return until the resume.
 func (c *Catchup) Pause(ctx context.Context) (resume func(), err error) {
 	if err := c.holdFlushes(ctx); err != nil {
 		return nil, err

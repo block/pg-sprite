@@ -3,6 +3,7 @@ package copier
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"testing"
 	"time"
@@ -130,4 +131,21 @@ func TestStopReasonKeepsACancellationReadableAsOne(t *testing.T) {
 		assert.ErrorIs(t, err, context.Canceled)
 		assert.EqualError(t, err, "owner is ready to cut over (context canceled)")
 	})
+}
+
+// A passed deadline is reported as context.DeadlineExceeded as it stands,
+// and a cause that already wraps the cancellation — the CLI's signal cause
+// is one — is returned as it stands rather than wrapped a second time.
+func TestEndedWithReportsADeadlineAndAWrappedCancellationAsTheyStand(t *testing.T) {
+	expired, cancelExpired := context.WithDeadline(t.Context(), time.Unix(0, 0))
+	defer cancelExpired()
+	<-expired.Done()
+	assert.Equal(t, context.DeadlineExceeded, endedWith(expired))
+
+	interrupted := fmt.Errorf("interrupted by signal: %w", context.Canceled)
+	caused, cancel := context.WithCancelCause(t.Context())
+	cancel(interrupted)
+	err := endedWith(caused)
+	assert.Same(t, interrupted, err, "a cause that is already a cancellation is reported as it stands")
+	assert.False(t, errors.Is(err, context.DeadlineExceeded))
 }
